@@ -1,0 +1,152 @@
+crates/codex-elves-core/tests/updater.rs
+  s_945e980b26cc67::t_6defcd9cf68233 25,56
+crates/codex-elves-core/tests/model_catalog.rs
+  s_945e980b26cc67::t_ba9faeea5f428d 5,73,132,183-187
+  s_945e980b26cc67::t_0cb0a6a94f1a3f 130-131,133-182,188-189
+  s_945e980b26cc67::t_ba3ad4cae34a19 96-97
+  s_945e980b26cc67::t_4e523d259e21bf 72
+crates/codex-elves-core/src/relay_config.rs
+  s_945e980b26cc67::t_455d8627f73598 1861
+  s_945e980b26cc67::t_fea2e8b85fee52 591-602
+  s_945e980b26cc67::t_25fbc1ba77a4e0 1744,1760,1835,1837
+  s_945e980b26cc67::t_4990547d0a47f9 1865-1873
+CONTRIBUTING.md
+  s_945e980b26cc67::t_6defcd9cf68233 9
+scripts/installer/windows/CodexElves.nsi
+  s_945e980b26cc67::t_ace7eac2c234b4 41,73
+crates/codex-elves-core/src/update.rs
+  s_945e980b26cc67::t_6defcd9cf68233 6,8
+crates/codex-elves-core/src/launcher.rs
+  s_945e980b26cc67::t_5a547ccc9ee3e4 342
+  s_945e980b26cc67::t_259adb47e03694 1040-1057
+  s_945e980b26cc67::t_bf148fe0b20ad9 1078-1100,1149-1166
+  s_945e980b26cc67::t_f8ff5605e71b8e 928,936-946
+  s_945e980b26cc67::t_487756c15b2f8e 81
+  s_945e980b26cc67::t_fea2e8b85fee52 929-935,1077
+crates/codex-elves-core/src/model_catalog.rs
+  s_945e980b26cc67::t_df4166d1f968f1 104-110,112-114,116-124
+  s_b0e164f19480fa::t_cce63d82dcf15f 111,115
+  s_945e980b26cc67::t_c8d4017dd06b93 67,103
+README_EN.md
+  s_945e980b26cc67::t_6defcd9cf68233 12-14,23
+  s_945e980b26cc67::t_487756c15b2f8e 122
+crates/codex-elves-core/src/settings.rs
+  s_945e980b26cc67::t_76d6d4575896f6 132
+  s_945e980b26cc67::t_fec201eea46246 135
+  s_945e980b26cc67::t_487756c15b2f8e 1088
+  s_945e980b26cc67::t_4605d6155b695c 58-63,88-91,110,123-124,130-131,133-134,320,333-334,367,380-381
+apps/codex-elves-manager/src-tauri/src/lib.rs
+  s_945e980b26cc67::t_c27c071dc16980 25,368-369,375
+  s_945e980b26cc67::t_c71ed56a027b11 4-5,8,19,43,46-57,86-88,346-356,358,361-367,371-374,418,422-424,430,434-436
+  s_945e980b26cc67::t_7559ef3f7de4d9 203-204,207-209,213-214,222
+  s_945e980b26cc67::t_3e30b7765ad398 248-303,306-307,309-337
+  s_945e980b26cc67::t_dfa1e7db1f241b 360
+  s_945e980b26cc67::t_477944a93353c0 69,304-305,308
+  s_945e980b26cc67::t_d812591da8ea3a 357,359,370
+  s_945e980b26cc67::t_561deaafdb0ff2 6,10,13,20-24,26-33,67-68,70,73-83
+crates/codex-elves-core/tests/protocol_proxy.rs
+  s_945e980b26cc67::t_ba3ad4cae34a19 1372-1376,1418
+  s_945e980b26cc67::t_c83cbe6c7339af 1428
+  s_945e980b26cc67::t_89bf72cb2680db 1309-1357,1396-1417,1476,1512-1517,1534
+  s_945e980b26cc67::t_e0e00b3455c802 1369-1370
+  s_945e980b26cc67::t_e4cff48311002b 1358-1368,1371,1377-1378,1430
+crates/codex-elves-core/tests/launcher.rs
+  s_945e980b26cc67::t_487756c15b2f8e 480,493,496,498,501,532,565,578,580,582,585,606,619,644,657,660,663,666,684,715,745,797,825,837,839,841,852,869,882,884,886,945-946,952,978,991,993,995-996,1022
+  s_945e980b26cc67::t_51f427f0f3a3cc 909,922-923
+crates/codex-elves-core/tests/bridge_routes.rs
+  s_945e980b26cc67::t_487756c15b2f8e 827,839-840
+apps/codex-elves-manager/package.json
+  s_945e980b26cc67::t_eaef6fc9888b65 3
+apps/codex-elves-manager/src-tauri/tauri.conf.json
+  s_945e980b26cc67::t_eaef6fc9888b65 4
+crates/codex-elves-core/src/protocol_proxy.rs
+  s_945e980b26cc67::t_487756c15b2f8e 12
+  s_945e980b26cc67::t_248da9cd61dbb0 662-672
+  s_945e980b26cc67::t_96a409f6e71f27 10
+  s_945e980b26cc67::t_c7b69e873f3782 312,316-321,468-469,472,475,488-508,521,556-557,587,598-599,636,735-747
+  s_945e980b26cc67::t_6c6e3512c2707b 526-528,530-534,541,545,549-550
+  s_945e980b26cc67::t_5cd9774b38f0c1 487,529,535-540,542-544,546-548
+  s_945e980b26cc67::t_d4cf2f76b199b8 683-689,698-705
+  s_945e980b26cc67::t_866a099faad5eb 127-155
+apps/codex-elves-manager/src/components/ProviderPresetSelector.tsx
+  s_945e980b26cc67::t_93d2481482b41a 13,24-25,43,49,52-54
+Cargo.toml
+  s_945e980b26cc67::t_eaef6fc9888b65 11
+  s_945e980b26cc67::t_6defcd9cf68233 14
+crates/codex-elves-core/tests/relay_config.rs
+  s_945e980b26cc67::t_487756c15b2f8e 188,256,263,285,304,310,1267,1275
+apps/codex-elves-manager/src/styles.css
+  s_6210ba0a6e3f62::t_24274433c6352b 484-487
+README.md
+  s_945e980b26cc67::t_6defcd9cf68233 12-14,23
+  s_945e980b26cc67::t_487756c15b2f8e 141
+apps/codex-elves-manager/src-tauri/tests/windows_subsystem.rs
+  s_945e980b26cc67::t_ce238b6f0886ad 34-44
+  s_945e980b26cc67::t_3278baa012e7ba 45
+  s_945e980b26cc67::t_fa369d0a5ff835 237-245
+crates/codex-elves-core/tests/cdp_bridge.rs
+  s_945e980b26cc67::t_487756c15b2f8e 45,48,75,81,86,95,105,117,128,135,148,158,170,181,200,211,224,236,248,295,306,316,326,344,357,374,384,414,426,450,521,566,687,697,756,767
+assets/inject/renderer-inject.js
+  s_945e980b26cc67::t_6defcd9cf68233 2101,2171
+  s_945e980b26cc67::t_487756c15b2f8e 2
+apps/codex-elves-manager/src-tauri/src/commands.rs
+  s_945e980b26cc67::t_197ca680efd4a6 1926-1930,1935
+  s_945e980b26cc67::t_f5fde53ed2078d 1826-1830,1835
+  s_945e980b26cc67::t_487756c15b2f8e 2043,2494
+apps/codex-elves-manager/src/App.tsx
+  s_945e980b26cc67::t_aae684faf4e7bb 4361,4363-4364
+  s_945e980b26cc67::t_81864c102141ec 3000-3009,3013-3028,3031-3036,3039-3041,3045-3046,3068
+  s_945e980b26cc67::t_c483eb0a2ec598 4474,4477,4526,4567-4568
+  s_945e980b26cc67::t_71b5476910ca1e 4359-4360,4362,4372,4385-4387
+  s_945e980b26cc67::t_ead40e1eb2bb9f 4309,4321-4322,4863,4875-4876
+  s_945e980b26cc67::t_487756c15b2f8e 191,567,830
+  s_945e980b26cc67::t_6defcd9cf68233 2293,2296,2300
+  s_945e980b26cc67::t_fec201eea46246 3029-3030
+  s_b9e9cfb20107ba::t_1eee622f444223 2222
+  s_945e980b26cc67::t_7642b9746bff81 3071
+  s_945e980b26cc67::t_61ee6dbc1d5cf7 149,161-162,521,533-534
+  s_945e980b26cc67::t_a15f6ec111c1fa 4402,4435-4436
+crates/codex-elves-core/src/ports.rs
+  s_945e980b26cc67::t_e32e102abacf35 122-126
+  s_945e980b26cc67::t_487756c15b2f8e 7-8,224,243,259
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "4a207d57cede998676dde1e394088b3296d4a8d5",
+  "prompts": {},
+  "sessions": {
+    "s_6210ba0a6e3f62": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eda4d-32d0-79a1-8d62-a44d625d519f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    },
+    "s_945e980b26cc67": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ed524-6416-7581-bf3a-3628dbd05629",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    },
+    "s_b0e164f19480fa": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eda6a-6a1d-7533-b82d-6f1d0dcde502",
+        "model": "gpt-5.4"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    },
+    "s_b9e9cfb20107ba": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eda4c-5d10-7183-a245-ba2868e73512",
+        "model": "gpt-5.4"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
