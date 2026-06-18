@@ -1,0 +1,28 @@
+.gitignore
+  h_41e06c727a5312 20,22
+crates/codex-plus-core/tests/cdp_bridge.rs
+  s_945e980b26cc67::t_f415e6c7a28c38 52-55
+assets/inject/renderer-inject.js
+  s_945e980b26cc67::t_f415e6c7a28c38 2101
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "e6f7532b82d83621b37169703c0eedca435c2499",
+  "prompts": {},
+  "humans": {
+    "h_41e06c727a5312": {
+      "author": "刘俊鑫 <673638712@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_945e980b26cc67": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ed524-6416-7581-bf3a-3628dbd05629",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
