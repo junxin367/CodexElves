@@ -172,8 +172,8 @@ Diagnostics must not include tokens or sensitive config values.
 3. Verification commands:
    - `cargo test -p codex-plus-core settings`
    - `cargo test -p codex-plus-core cdp_bridge -- --nocapture` if injection static tests live there
-   - `cargo check -p codex-plus-manager`
-   - `npm --prefix apps/codex-plus-manager run check`
+   - `cargo check -p codex-elves-manager`
+   - `npm --prefix apps/codex-elves-manager run check`
 
 ## Out of Scope
 

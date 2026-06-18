@@ -351,7 +351,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "codex-plus-core"
+name = "codex-elves-core"
 version = "1.2.14"
 dependencies = [
  "anyhow",
@@ -374,13 +374,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "codex-plus-data"
+name = "codex-elves-data"
 version = "1.2.14"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
- "codex-plus-core",
+ "codex-elves-core",
  "rusqlite",
  "serde",
  "serde_json",
@@ -390,13 +390,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "codex-plus-launcher"
+name = "codex-elves-launcher"
 version = "1.2.14"
 dependencies = [
  "anyhow",
  "async-trait",
- "codex-plus-core",
- "codex-plus-data",
+ "codex-elves-core",
+ "codex-elves-data",
  "directories",
  "serde_json",
  "tokio",
@@ -404,13 +404,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "codex-plus-manager"
+name = "codex-elves-manager"
 version = "1.2.14"
 dependencies = [
  "anyhow",
  "async-trait",
- "codex-plus-core",
- "codex-plus-data",
+ "codex-elves-core",
+ "codex-elves-data",
  "directories",
  "rusqlite",
  "serde",

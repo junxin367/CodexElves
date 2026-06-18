@@ -18,7 +18,7 @@
   const conversationViewMinWidth = 320;
   const conversationViewMaxAllowedWidth = 4000;
   const conversationViewDefaultWidth = 900;
-  const conversationViewLegacyWidthKey = "codexPlus.threadCenter.maxWidth";
+  const conversationViewLegacyWidthKey = "codexElves.threadCenter.maxWidth";
   const upstreamWorktreeDialogClass = "codex-upstream-worktree-dialog";
   const upstreamBranchOptionAttribute = "data-codex-upstream-branch-option";
   const upstreamBranchSelectionKey = "codexUpstreamBranchSelection";
@@ -36,8 +36,8 @@
   const chatsSortDbRefreshIntervalMs = 5000;
   const styleId = "codex-delete-style";
   const codexDeleteStyleVersion = "14";
-  const codexPlusMenuId = "codex-plus-menu";
-  const codexPlusMenuFloatingClass = "codex-plus-menu-floating";
+  const codexElvesMenuId = "codex-elves-menu";
+  const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
   const codexDeleteVersion = "7";
   const codexExportVersion = "1";
   const codexProjectMoveVersion = "1";
@@ -51,9 +51,9 @@
   const codexThreadServiceTierVersion = "1";
   const codexServiceTierBadgeClass = "codex-service-tier-badge";
   const codexServiceTierBadgeVersion = "3";
-  let codexPlusVersion = window.__CODEX_PLUS_VERSION__ || "unknown";
-  const codexPlusBuild = window.__CODEX_PLUS_BUILD__ || "unknown";
-  const codexPlusSettingsKey = "codexPlusSettings";
+  let codexElvesVersion = window.__CODEX_ELVES_VERSION__ || "unknown";
+  const codexElvesBuild = window.__CODEX_ELVES_BUILD__ || "unknown";
+  const codexElvesSettingsKey = "codexElvesSettings";
   const codexThreadScrollKey = "codexThreadScroll";
   const codexThreadServiceTierKey = "codexThreadServiceTierOverrides";
   const codexThreadServiceTierMaxEntries = 120;
@@ -71,7 +71,7 @@
   const codexThreadScrollListenerVersion = "4";
   const codexThreadScrollUserIntentVersion = "dispatcher:2";
   const codexForcePluginInstallRefreshIntervalMs = 1000;
-  const codexPlusImageOverlayId = "codex-plus-image-overlay";
+  const codexElvesImageOverlayId = "codex-elves-image-overlay";
   window.__codexProjectMoveRuntimeId = (window.__codexProjectMoveRuntimeId || 0) + 1;
   const codexProjectMoveRuntimeId = window.__codexProjectMoveRuntimeId;
   clearTimeout(window.__codexProjectMoveProjectionTimer);
@@ -86,21 +86,21 @@
   window.__codexThreadScrollSyncTimers = [];
   window.__codexThreadScrollRestoreRevision = (window.__codexThreadScrollRestoreRevision || 0) + 1;
 
-  function installCodexPlusImageOverlay() {
-    const config = window.__CODEX_PLUS_IMAGE_OVERLAY__ || {};
-    const existing = document.getElementById(codexPlusImageOverlayId);
+  function installCodexElvesImageOverlay() {
+    const config = window.__CODEX_ELVES_IMAGE_OVERLAY__ || {};
+    const existing = document.getElementById(codexElvesImageOverlayId);
     const source = config.dataUrl || "";
     if (!config.enabled || !source) {
-      if (window.__codexPlusImageOverlayBlobUrl) {
-        URL.revokeObjectURL(window.__codexPlusImageOverlayBlobUrl);
-        window.__codexPlusImageOverlayBlobUrl = "";
+      if (window.__codexElvesImageOverlayBlobUrl) {
+        URL.revokeObjectURL(window.__codexElvesImageOverlayBlobUrl);
+        window.__codexElvesImageOverlayBlobUrl = "";
       }
       if (existing) existing.remove();
       return;
     }
     const opacity = Math.min(1, Math.max(0.01, Number(config.opacity) || 0.35));
     const image = existing || document.createElement("img");
-    image.id = codexPlusImageOverlayId;
+    image.id = codexElvesImageOverlayId;
     image.src = source;
     image.alt = "";
     image.setAttribute("aria-hidden", "true");
@@ -117,22 +117,22 @@
       userSelect: "none",
     });
     if (!existing) document.documentElement.appendChild(image);
-    sendCodexPlusDiagnostic("image_overlay_installed", {
+    sendCodexElvesDiagnostic("image_overlay_installed", {
       opacity,
       sourceKind: source.startsWith("data:") ? "data-uri" : "unknown",
     });
   }
 
-  function scheduleCodexPlusImageOverlay() {
+  function scheduleCodexElvesImageOverlay() {
     if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", installCodexPlusImageOverlay, { once: true });
+      document.addEventListener("DOMContentLoaded", installCodexElvesImageOverlay, { once: true });
       return;
     }
-    installCodexPlusImageOverlay();
-    setTimeout(installCodexPlusImageOverlay, 250);
+    installCodexElvesImageOverlay();
+    setTimeout(installCodexElvesImageOverlay, 250);
   }
 
-  scheduleCodexPlusImageOverlay();
+  scheduleCodexElvesImageOverlay();
   window.__codexThreadScrollSyncRevision = (window.__codexThreadScrollSyncRevision || 0) + 1;
   window.__codexConversationTimelineNodeCounter = window.__codexConversationTimelineNodeCounter || 0;
   let upstreamBranchDefaultsCache = new Map();
@@ -141,15 +141,15 @@
   let upstreamBranchDefaultsInflight = new Map();
   const upstreamProjectContextTtlMs = 10 * 60 * 1000;
   const branchWorktreePathAttribute = "data-codex-branch-worktree-path";
-  ["__codexPlusHtmlCenteredThreadWidth", "__codexPlusViewportCenteredThreadWidth", "__codexPlusBoundedThreadCenter"].forEach((key) => {
+  ["__codexElvesHtmlCenteredThreadWidth", "__codexElvesViewportCenteredThreadWidth", "__codexElvesBoundedThreadCenter"].forEach((key) => {
     try {
       window[key]?.cleanup?.();
     } catch (_) {}
   });
   try {
-    window.__codexPlusConversationViewCleanup?.();
+    window.__codexElvesConversationViewCleanup?.();
   } catch (_) {}
-  window.__codexPlusConversationViewCleanup = null;
+  window.__codexElvesConversationViewCleanup = null;
   const selectors = {
     sidebarThread: "[data-app-action-sidebar-thread-id]",
     threadTitle: "[data-thread-title]",
@@ -439,7 +439,7 @@
       /* Dark theme overrides for delete-confirm and project-move dialogs.
          Triggered either by Codex applying a "dark" class / data-theme="dark"
          on its document root, or by the OS-level prefers-color-scheme hint.
-         Palette matches the existing Codex++ dark modal (.codex-plus-modal-content). */
+         Palette matches the existing CodexElves dark modal (.codex-elves-modal-content). */
       html.dark .codex-delete-confirm-overlay,
       html[data-theme="dark"] .codex-delete-confirm-overlay,
       :root[data-theme="dark"] .codex-delete-confirm-overlay {
@@ -558,13 +558,13 @@
           color: #9ca3af;
         }
       }
-      #${codexPlusMenuId}.${codexPlusMenuFloatingClass} {
+      #${codexElvesMenuId}.${codexElvesMenuFloatingClass} {
         position: fixed;
-        top: var(--codex-plus-menu-top, 0);
-        right: var(--codex-plus-menu-right, 140px);
+        top: var(--codex-elves-menu-top, 0);
+        right: var(--codex-elves-menu-right, 140px);
         left: auto;
         z-index: 2147483645;
-        height: var(--codex-plus-menu-height, 30px);
+        height: var(--codex-elves-menu-height, 30px);
         color: #d1d5db;
         font: 13px system-ui, sans-serif;
         text-align: right;
@@ -574,7 +574,7 @@
         pointer-events: auto;
         -webkit-app-region: no-drag;
       }
-      #${codexPlusMenuId} {
+      #${codexElvesMenuId} {
         display: inline-flex;
         align-items: center;
         height: 100%;
@@ -582,7 +582,7 @@
         pointer-events: auto;
         -webkit-app-region: no-drag;
       }
-      .codex-plus-trigger {
+      .codex-elves-trigger {
         display: inline-flex;
         align-items: center;
         justify-content: center;
@@ -598,7 +598,7 @@
         pointer-events: auto;
         -webkit-app-region: no-drag;
       }
-      .codex-plus-modal-overlay {
+      .codex-elves-modal-overlay {
         position: fixed;
         inset: 0;
         z-index: 2147483646;
@@ -609,7 +609,7 @@
         pointer-events: auto;
         -webkit-app-region: no-drag;
       }
-      .codex-plus-modal-content {
+      .codex-elves-modal-content {
         width: min(520px, calc(100vw - 48px));
         max-height: min(680px, calc(100vh - 40px));
         display: flex;
@@ -624,7 +624,7 @@
         pointer-events: auto;
         -webkit-app-region: no-drag;
       }
-      .codex-plus-modal-header {
+      .codex-elves-modal-header {
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -632,12 +632,12 @@
         flex: 0 0 auto;
         -webkit-app-region: no-drag;
       }
-      .codex-plus-modal-title { display: flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 650; }
-      .codex-plus-backend-indicator { width: 9px; height: 9px; border-radius: 999px; background: #a1a1aa; display: inline-block; }
-      .codex-plus-backend-indicator[data-status="ok"] { background: #34d399; box-shadow: 0 0 8px rgba(52,211,153,.75); }
-      .codex-plus-backend-indicator[data-status="failed"] { background: #ef4444; box-shadow: 0 0 8px rgba(239,68,68,.75); }
-      .codex-plus-backend-indicator[data-status="checking"] { background: #fbbf24; }
-      .codex-plus-modal-close {
+      .codex-elves-modal-title { display: flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 650; }
+      .codex-elves-backend-indicator { width: 9px; height: 9px; border-radius: 999px; background: #a1a1aa; display: inline-block; }
+      .codex-elves-backend-indicator[data-status="ok"] { background: #34d399; box-shadow: 0 0 8px rgba(52,211,153,.75); }
+      .codex-elves-backend-indicator[data-status="failed"] { background: #ef4444; box-shadow: 0 0 8px rgba(239,68,68,.75); }
+      .codex-elves-backend-indicator[data-status="checking"] { background: #fbbf24; }
+      .codex-elves-modal-close {
         border: 0;
         background: transparent;
         color: #d1d5db;
@@ -646,7 +646,7 @@
         pointer-events: auto;
         -webkit-app-region: no-drag;
       }
-      .codex-plus-modal-body {
+      .codex-elves-modal-body {
         flex: 1 1 auto;
         min-height: 0;
         overflow-y: auto;
@@ -656,16 +656,16 @@
         scrollbar-width: thin;
         scrollbar-color: rgba(255,255,255,.28) transparent;
       }
-      .codex-plus-modal-body::-webkit-scrollbar { width: 10px; }
-      .codex-plus-modal-body::-webkit-scrollbar-track { background: transparent; }
-      .codex-plus-modal-body::-webkit-scrollbar-thumb {
+      .codex-elves-modal-body::-webkit-scrollbar { width: 10px; }
+      .codex-elves-modal-body::-webkit-scrollbar-track { background: transparent; }
+      .codex-elves-modal-body::-webkit-scrollbar-thumb {
         border: 2px solid transparent;
         border-radius: 999px;
         background: rgba(255,255,255,.28);
         background-clip: padding-box;
       }
-      .codex-plus-modal-body::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.38); background-clip: padding-box; }
-      .codex-plus-row {
+      .codex-elves-modal-body::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.38); background-clip: padding-box; }
+      .codex-elves-row {
         display: flex;
         align-items: flex-start;
         justify-content: space-between;
@@ -673,11 +673,11 @@
         padding: 10px 0;
         border-top: 1px solid rgba(255,255,255,.1);
       }
-      .codex-plus-row:first-child { border-top: 0; }
-      .codex-plus-row-title { font-weight: 550; line-height: 1.35; }
-      .codex-plus-row-description { margin-top: 2px; color: #a1a1aa; font-size: 12px; line-height: 1.4; }
-      .codex-plus-model-compat-warning { margin-top: 6px; color: #fbbf24; font-size: 12px; line-height: 1.45; }
-      .codex-plus-toggle {
+      .codex-elves-row:first-child { border-top: 0; }
+      .codex-elves-row-title { font-weight: 550; line-height: 1.35; }
+      .codex-elves-row-description { margin-top: 2px; color: #a1a1aa; font-size: 12px; line-height: 1.4; }
+      .codex-elves-model-compat-warning { margin-top: 6px; color: #fbbf24; font-size: 12px; line-height: 1.45; }
+      .codex-elves-toggle {
         width: 42px;
         height: 24px;
         border: 0;
@@ -685,7 +685,7 @@
         background: #52525b;
         padding: 2px;
       }
-      .codex-plus-toggle span {
+      .codex-elves-toggle span {
         display: block;
         width: 20px;
         height: 20px;
@@ -693,20 +693,20 @@
         background: white;
         transition: transform .12s ease;
       }
-      .codex-plus-toggle,
-      .codex-plus-action-button,
-      .codex-plus-issue-button,
-      .codex-plus-backend-status {
+      .codex-elves-toggle,
+      .codex-elves-action-button,
+      .codex-elves-issue-button,
+      .codex-elves-backend-status {
         flex-shrink: 0;
         align-self: center;
       }
-      .codex-plus-toggle[data-enabled="true"] { background: #10a37f; }
-      .codex-plus-toggle[data-enabled="true"] span { transform: translateX(18px); }
-      .codex-plus-toggle[data-relay-unneeded="true"] { width: 72px; cursor: default; background: rgba(16,163,127,.16); color: #6ee7b7; }
-      .codex-plus-toggle[data-relay-unneeded="true"] span { display: none; }
-      .codex-plus-toggle[data-relay-unneeded="true"]::after { content: "无需开启"; font-size: 12px; font-weight: 650; line-height: 1; }
-      .codex-plus-width-control { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 176px; align-self: center; }
-      .codex-plus-width-input {
+      .codex-elves-toggle[data-enabled="true"] { background: #10a37f; }
+      .codex-elves-toggle[data-enabled="true"] span { transform: translateX(18px); }
+      .codex-elves-toggle[data-relay-unneeded="true"] { width: 72px; cursor: default; background: rgba(16,163,127,.16); color: #6ee7b7; }
+      .codex-elves-toggle[data-relay-unneeded="true"] span { display: none; }
+      .codex-elves-toggle[data-relay-unneeded="true"]::after { content: "无需开启"; font-size: 12px; font-weight: 650; line-height: 1; }
+      .codex-elves-width-control { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 176px; align-self: center; }
+      .codex-elves-width-input {
         width: 78px;
         height: 26px;
         box-sizing: border-box;
@@ -717,18 +717,18 @@
         font: 12px system-ui, sans-serif;
         padding: 0 8px;
       }
-      .codex-plus-width-input:disabled { opacity: .55; cursor: not-allowed; }
-      .codex-plus-service-tier-control { display: grid; gap: 6px; min-width: 316px; justify-items: end; align-self: center; }
-      .codex-plus-service-tier-status { color: #a1a1aa; font-size: 12px; line-height: 1.3; text-align: right; }
-      .codex-plus-service-tier-status[data-status="ok"] { color: #34d399; }
-      .codex-plus-service-tier-status[data-status="failed"] { color: #f87171; }
-      .codex-plus-service-tier-status[data-status="unsupported"] { color: #fbbf24; }
-      .codex-plus-service-tier-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
-      .codex-plus-service-tier-thread-actions { opacity: .88; align-items: center; }
-      .codex-plus-service-tier-thread-label { color: #a1a1aa; font: 12px/1.2 system-ui, sans-serif; white-space: nowrap; }
-      .codex-plus-service-tier-button { border: 1px solid rgba(255,255,255,.18); border-radius: 7px; background: #3f3f46; color: #f3f4f6; font: 12px system-ui, sans-serif; padding: 5px 8px; white-space: nowrap; }
-      .codex-plus-service-tier-button[data-active="true"] { border-color: #10a37f; background: rgba(16,163,127,.22); color: #6ee7b7; }
-      .codex-plus-service-tier-button:disabled { opacity: .55; cursor: not-allowed; }
+      .codex-elves-width-input:disabled { opacity: .55; cursor: not-allowed; }
+      .codex-elves-service-tier-control { display: grid; gap: 6px; min-width: 316px; justify-items: end; align-self: center; }
+      .codex-elves-service-tier-status { color: #a1a1aa; font-size: 12px; line-height: 1.3; text-align: right; }
+      .codex-elves-service-tier-status[data-status="ok"] { color: #34d399; }
+      .codex-elves-service-tier-status[data-status="failed"] { color: #f87171; }
+      .codex-elves-service-tier-status[data-status="unsupported"] { color: #fbbf24; }
+      .codex-elves-service-tier-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+      .codex-elves-service-tier-thread-actions { opacity: .88; align-items: center; }
+      .codex-elves-service-tier-thread-label { color: #a1a1aa; font: 12px/1.2 system-ui, sans-serif; white-space: nowrap; }
+      .codex-elves-service-tier-button { border: 1px solid rgba(255,255,255,.18); border-radius: 7px; background: #3f3f46; color: #f3f4f6; font: 12px system-ui, sans-serif; padding: 5px 8px; white-space: nowrap; }
+      .codex-elves-service-tier-button[data-active="true"] { border-color: #10a37f; background: rgba(16,163,127,.22); color: #6ee7b7; }
+      .codex-elves-service-tier-button:disabled { opacity: .55; cursor: not-allowed; }
       .${codexServiceTierBadgeClass} {
         display: inline-flex;
         align-items: center;
@@ -752,19 +752,19 @@
       .${codexServiceTierBadgeClass}[data-tier="failed"] { border-color: rgba(248,113,113,.42); background: rgba(248,113,113,.12); color: #fca5a5; }
       .${codexServiceTierBadgeClass}[data-tier="unsupported"] { border-color: rgba(251,191,36,.48); background: rgba(251,191,36,.13); color: #fbbf24; }
       .${codexServiceTierBadgeClass}[data-disabled="true"] { cursor: not-allowed; opacity: .78; }
-      .codex-plus-about { color: #a1a1aa; line-height: 1.5; }
-      .codex-plus-tabs { display: flex; gap: 8px; padding: 0 20px 6px; flex: 0 0 auto; }
-      .codex-plus-tab-button { border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: transparent; color: #d1d5db; font: 12px system-ui, sans-serif; padding: 5px 10px; }
-      .codex-plus-tab-button[data-active="true"] { background: #10a37f; color: white; border-color: #10a37f; }
-      .codex-plus-panel[hidden] { display: none; }
-      .codex-plus-action-button,
-      .codex-plus-issue-button { border: 1px solid rgba(255,255,255,.18); border-radius: 7px; background: #3f3f46; color: #f3f4f6; font: 12px system-ui, sans-serif; padding: 6px 8px; }
-      .codex-plus-worktree-actions {
+      .codex-elves-about { color: #a1a1aa; line-height: 1.5; }
+      .codex-elves-tabs { display: flex; gap: 8px; padding: 0 20px 6px; flex: 0 0 auto; }
+      .codex-elves-tab-button { border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: transparent; color: #d1d5db; font: 12px system-ui, sans-serif; padding: 5px 10px; }
+      .codex-elves-tab-button[data-active="true"] { background: #10a37f; color: white; border-color: #10a37f; }
+      .codex-elves-panel[hidden] { display: none; }
+      .codex-elves-action-button,
+      .codex-elves-issue-button { border: 1px solid rgba(255,255,255,.18); border-radius: 7px; background: #3f3f46; color: #f3f4f6; font: 12px system-ui, sans-serif; padding: 6px 8px; }
+      .codex-elves-worktree-actions {
         display: inline-flex;
         align-items: center;
         gap: 8px;
       }
-      .codex-plus-form-field {
+      .codex-elves-form-field {
         display: grid;
         gap: 4px;
         margin-top: 10px;
@@ -772,7 +772,7 @@
         font: 12px system-ui, sans-serif;
         text-align: left;
       }
-      .codex-plus-form-field input {
+      .codex-elves-form-field input {
         width: min(520px, 72vw);
         border: 1px solid rgba(255,255,255,.18);
         border-radius: 8px;
@@ -781,31 +781,31 @@
         padding: 8px 10px;
         font: 13px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       }
-      .codex-plus-form-message {
+      .codex-elves-form-message {
         min-height: 18px;
         margin-top: 10px;
         color: #a1a1aa;
         font: 12px system-ui, sans-serif;
         text-align: left;
       }
-      .codex-plus-form-message[data-status="ok"] { color: #34d399; }
-      .codex-plus-form-message[data-status="failed"] { color: #f87171; }
-      .codex-plus-form-message[data-status="loading"] { color: #fbbf24; }
-      .codex-plus-backend-status { display: grid; gap: 4px; min-width: 132px; justify-items: end; }
-      .codex-plus-backend-label { color: #a1a1aa; font-size: 12px; }
-      .codex-plus-backend-label[data-status="ok"] { color: #34d399; }
-      .codex-plus-backend-label[data-status="failed"] { color: #f87171; }
-      .codex-plus-backend-repair { border: 1px solid rgba(255,255,255,.18); border-radius: 7px; background: #3f3f46; color: #f3f4f6; font: 12px system-ui, sans-serif; padding: 6px 8px; }
-      .codex-plus-backend-repair[hidden] { display: none; }
-      .codex-plus-user-script-warning { margin-top: 4px; color: #fbbf24; font-size: 12px; }
-      .codex-plus-user-script-dirs { margin-top: 6px; color: #a1a1aa; font-size: 11px; line-height: 1.4; word-break: break-all; }
-      .codex-plus-user-script-list { margin-top: 8px; display: grid; gap: 6px; }
-      .codex-plus-user-script-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 1px solid rgba(255,255,255,.08); border-radius: 8px; padding: 6px 8px; }
-      .codex-plus-user-script-name { font-size: 12px; }
-      .codex-plus-user-script-meta { margin-top: 2px; color: #a1a1aa; font-size: 11px; }
-      .codex-plus-user-script-error { margin-top: 2px; color: #f87171; font-size: 11px; word-break: break-all; }
-      .codex-plus-user-script-actions { display: grid; justify-items: end; gap: 8px; min-width: 120px; }
-      .codex-plus-user-script-reload { border: 1px solid rgba(255,255,255,.18); border-radius: 7px; background: #3f3f46; color: #f3f4f6; font: 12px system-ui, sans-serif; padding: 6px 8px; }
+      .codex-elves-form-message[data-status="ok"] { color: #34d399; }
+      .codex-elves-form-message[data-status="failed"] { color: #f87171; }
+      .codex-elves-form-message[data-status="loading"] { color: #fbbf24; }
+      .codex-elves-backend-status { display: grid; gap: 4px; min-width: 132px; justify-items: end; }
+      .codex-elves-backend-label { color: #a1a1aa; font-size: 12px; }
+      .codex-elves-backend-label[data-status="ok"] { color: #34d399; }
+      .codex-elves-backend-label[data-status="failed"] { color: #f87171; }
+      .codex-elves-backend-repair { border: 1px solid rgba(255,255,255,.18); border-radius: 7px; background: #3f3f46; color: #f3f4f6; font: 12px system-ui, sans-serif; padding: 6px 8px; }
+      .codex-elves-backend-repair[hidden] { display: none; }
+      .codex-elves-user-script-warning { margin-top: 4px; color: #fbbf24; font-size: 12px; }
+      .codex-elves-user-script-dirs { margin-top: 6px; color: #a1a1aa; font-size: 11px; line-height: 1.4; word-break: break-all; }
+      .codex-elves-user-script-list { margin-top: 8px; display: grid; gap: 6px; }
+      .codex-elves-user-script-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 1px solid rgba(255,255,255,.08); border-radius: 8px; padding: 6px 8px; }
+      .codex-elves-user-script-name { font-size: 12px; }
+      .codex-elves-user-script-meta { margin-top: 2px; color: #a1a1aa; font-size: 11px; }
+      .codex-elves-user-script-error { margin-top: 2px; color: #f87171; font-size: 11px; word-break: break-all; }
+      .codex-elves-user-script-actions { display: grid; justify-items: end; gap: 8px; min-width: 120px; }
+      .codex-elves-user-script-reload { border: 1px solid rgba(255,255,255,.18); border-radius: 7px; background: #3f3f46; color: #f3f4f6; font: 12px system-ui, sans-serif; padding: 6px 8px; }
       .${timelineClass} {
         position: fixed;
         top: calc(72px + 12px);
@@ -884,11 +884,11 @@
     document.documentElement.appendChild(style);
   }
 
-  function defaultCodexPlusSettings() {
+  function defaultCodexElvesSettings() {
     return { pluginEntryUnlock: true, pluginMarketplaceUnlock: true, forcePluginInstall: true, modelWhitelistUnlock: true, sessionDelete: true, markdownExport: true, projectMove: true, conversationTimeline: true, threadIdBadge: false, conversationView: false, conversationViewMaxWidth: conversationViewDefaultWidth, threadScrollRestore: true, upstreamWorktreeCreate: true, nativeMenuPlacement: true, serviceTierControls: false };
   }
 
-  const codexPlusBackendSettingMap = {
+  const codexElvesBackendSettingMap = {
     pluginEntryUnlock: "codexAppPluginEntryUnlock",
     pluginMarketplaceUnlock: "codexAppPluginMarketplaceUnlock",
     forcePluginInstall: "codexAppForcePluginInstall",
@@ -906,19 +906,19 @@
     serviceTierControls: "codexAppServiceTierControls",
   };
 
-  function backendCodexPlusSettings() {
+  function backendCodexElvesSettings() {
     const settings = {};
-    Object.entries(codexPlusBackendSettingMap).forEach(([localKey, backendKey]) => {
-      if (typeof codexPlusBackendSettings[backendKey] === "boolean") {
-        settings[localKey] = codexPlusBackendSettings[backendKey];
+    Object.entries(codexElvesBackendSettingMap).forEach(([localKey, backendKey]) => {
+      if (typeof codexElvesBackendSettings[backendKey] === "boolean") {
+        settings[localKey] = codexElvesBackendSettings[backendKey];
       }
     });
     return settings;
   }
 
-  function codexPlusSettings() {
-    const relayPatchDisabled = codexPlusBackendSettings.launchMode === "relay";
-    if (codexPlusBackendSettings.enhancementsEnabled === false) {
+  function codexElvesSettings() {
+    const relayPatchDisabled = codexElvesBackendSettings.launchMode === "relay";
+    if (codexElvesBackendSettings.enhancementsEnabled === false) {
       return {
         pluginEntryUnlock: false,
         pluginMarketplaceUnlock: false,
@@ -939,7 +939,7 @@
       };
     }
     try {
-      const settings = { ...defaultCodexPlusSettings(), ...JSON.parse(localStorage.getItem(codexPlusSettingsKey) || "{}"), ...backendCodexPlusSettings() };
+      const settings = { ...defaultCodexElvesSettings(), ...JSON.parse(localStorage.getItem(codexElvesSettingsKey) || "{}"), ...backendCodexElvesSettings() };
       if (relayPatchDisabled) {
         settings.pluginEntryUnlock = false;
         settings.pluginMarketplaceUnlock = false;
@@ -947,7 +947,7 @@
       }
       return settings;
     } catch {
-      const settings = { ...defaultCodexPlusSettings(), ...backendCodexPlusSettings() };
+      const settings = { ...defaultCodexElvesSettings(), ...backendCodexElvesSettings() };
       if (relayPatchDisabled) {
         settings.pluginEntryUnlock = false;
         settings.pluginMarketplaceUnlock = false;
@@ -957,20 +957,20 @@
     }
   }
 
-  function setCodexPlusSetting(key, value) {
-    const backendKey = codexPlusBackendSettingMap[key];
+  function setCodexElvesSetting(key, value) {
+    const backendKey = codexElvesBackendSettingMap[key];
     if (backendKey) {
       setBackendSetting(backendKey, value);
       return;
     }
     let stored = {};
     try {
-      stored = JSON.parse(localStorage.getItem(codexPlusSettingsKey) || "{}");
+      stored = JSON.parse(localStorage.getItem(codexElvesSettingsKey) || "{}");
     } catch {
       stored = {};
     }
     const next = { ...stored, [key]: value };
-    localStorage.setItem(codexPlusSettingsKey, JSON.stringify(next));
+    localStorage.setItem(codexElvesSettingsKey, JSON.stringify(next));
     if (key === "threadScrollRestore" && !value) {
       clearTimeout(window.__codexThreadScrollSaveTimer);
       window.__codexThreadScrollSaveTimer = null;
@@ -990,7 +990,7 @@
         refreshCodexServiceTierControls();
       }
     }
-    renderCodexPlusMenu();
+    renderCodexElvesMenu();
     scan();
   }
 
@@ -1002,16 +1002,16 @@
   }
 
   function conversationViewWidth() {
-    const settingsWidth = normalizeConversationViewWidth(codexPlusSettings().conversationViewMaxWidth);
+    const settingsWidth = normalizeConversationViewWidth(codexElvesSettings().conversationViewMaxWidth);
     if (settingsWidth) return settingsWidth;
     const legacyWidth = normalizeConversationViewWidth(localStorage.getItem(conversationViewLegacyWidthKey));
     return legacyWidth || conversationViewDefaultWidth;
   }
 
   function refreshConversationViewControls() {
-    const enabled = !!codexPlusSettings().conversationView;
+    const enabled = !!codexElvesSettings().conversationView;
     const width = conversationViewWidth();
-    document.querySelectorAll("[data-codex-plus-conversation-view-width]").forEach((input) => {
+    document.querySelectorAll("[data-codex-elves-conversation-view-width]").forEach((input) => {
       input.value = String(width);
       input.disabled = !enabled;
     });
@@ -1020,19 +1020,19 @@
   function setConversationViewWidth(value) {
     const width = normalizeConversationViewWidth(value);
     if (!width) return;
-    setCodexPlusSetting("conversationViewMaxWidth", width);
+    setCodexElvesSetting("conversationViewMaxWidth", width);
   }
 
-  function renderCodexPlusMenu() {
-    document.querySelectorAll(".codex-plus-toggle[data-codex-plus-setting]").forEach((button) => {
-      const key = button.getAttribute("data-codex-plus-setting");
-      button.dataset.enabled = String(!!codexPlusSettings()[key]);
+  function renderCodexElvesMenu() {
+    document.querySelectorAll(".codex-elves-toggle[data-codex-elves-setting]").forEach((button) => {
+      const key = button.getAttribute("data-codex-elves-setting");
+      button.dataset.enabled = String(!!codexElvesSettings()[key]);
     });
     refreshConversationViewControls();
     refreshCodexServiceTierControls();
   }
 
-  let codexPlusBackendSettings = { providerSyncEnabled: false, enhancementsEnabled: true, launchMode: "patch", codexAppVersion: "" };
+  let codexElvesBackendSettings = { providerSyncEnabled: false, enhancementsEnabled: true, launchMode: "patch", codexAppVersion: "" };
   const codexPluginLegacyEntryUnlockBeforeVersion = "26.601.2237";
 
   function parseCodexVersionParts(version) {
@@ -1059,25 +1059,25 @@
   }
 
   function codexPluginUnlockStrategy() {
-    const version = String(codexPlusBackendSettings.codexAppVersion || "").trim();
+    const version = String(codexElvesBackendSettings.codexAppVersion || "").trim();
     const comparison = compareCodexVersions(version, codexPluginLegacyEntryUnlockBeforeVersion);
     if (comparison == null) return "unknown";
     return comparison < 0 ? "legacy" : "modern";
   }
 
   function logCodexPluginUnlockStrategy(strategy) {
-    const codexAppVersion = String(codexPlusBackendSettings.codexAppVersion || "").trim();
+    const codexAppVersion = String(codexElvesBackendSettings.codexAppVersion || "").trim();
     const signature = `${strategy}:${codexAppVersion || "unknown"}`;
     if (window.__codexPluginUnlockStrategyLogged === signature) return;
     window.__codexPluginUnlockStrategyLogged = signature;
-    sendCodexPlusDiagnostic("plugin_unlock_strategy_selected", {
+    sendCodexElvesDiagnostic("plugin_unlock_strategy_selected", {
       strategy,
       codexAppVersion,
       cutoff: codexPluginLegacyEntryUnlockBeforeVersion,
     });
   }
 
-  let codexPlusBackendSettingsLoaded = false;
+  let codexElvesBackendSettingsLoaded = false;
   let codexServiceTierState = {
     status: "loading",
     serviceTier: null,
@@ -1393,7 +1393,7 @@
   }
 
   function setCodexServiceTierControlMode(mode) {
-    if (codexPlusBackendStatus.status !== "ok") {
+    if (codexElvesBackendStatus.status !== "ok") {
       showToast("后端未连接，无法切换服务模式", null);
       refreshCodexServiceTierControls();
       return;
@@ -1429,7 +1429,7 @@
   }
 
   function syncCodexServiceTierEffectiveState() {
-    if (!codexPlusSettings().serviceTierControls) {
+    if (!codexElvesSettings().serviceTierControls) {
       codexServiceTierState = {
         ...codexServiceTierState,
         activeThreadId: "",
@@ -1468,8 +1468,8 @@
   }
 
   function codexServiceTierBadgeState() {
-    if (codexPlusBackendStatus.status === "checking") return { tier: "loading", label: "...", disabled: true, title: "服务模式：正在检查后端连接" };
-    if (codexPlusBackendStatus.status && codexPlusBackendStatus.status !== "ok") return { tier: "failed", label: "未连接", disabled: true, title: "服务模式：后端未连接，无法切换" };
+    if (codexElvesBackendStatus.status === "checking") return { tier: "loading", label: "...", disabled: true, title: "服务模式：正在检查后端连接" };
+    if (codexElvesBackendStatus.status && codexElvesBackendStatus.status !== "ok") return { tier: "failed", label: "未连接", disabled: true, title: "服务模式：后端未连接，无法切换" };
     if (codexServiceTierState.status === "loading") return { tier: "loading", label: "...", title: "服务模式：正在读取" };
     if (codexServiceTierState.status === "failed") return { tier: "failed", label: "?", title: "服务模式：读取失败" };
     const fastAvailability = codexServiceTierFastAvailability();
@@ -1502,9 +1502,9 @@
 
   function refreshCodexServiceTierControls() {
     syncCodexServiceTierEffectiveState();
-    const featureEnabled = !!codexPlusSettings().serviceTierControls;
-    const backendConnected = codexPlusBackendStatus.status === "ok";
-    const backendChecking = codexPlusBackendStatus.status === "checking";
+    const featureEnabled = !!codexElvesSettings().serviceTierControls;
+    const backendConnected = codexElvesBackendStatus.status === "ok";
+    const backendChecking = codexElvesBackendStatus.status === "checking";
     if (featureEnabled && backendConnected) codexServiceTierMaybeLoadModelCatalog();
     const fastAvailability = codexServiceTierFastAvailability();
     const fastDisabled = !featureEnabled || !backendConnected || codexServiceTierState.status === "loading" || !fastAvailability.supported;
@@ -1556,7 +1556,7 @@
   }
 
   async function loadCodexServiceTierState() {
-    if (!codexPlusSettings().serviceTierControls) {
+    if (!codexElvesSettings().serviceTierControls) {
       codexServiceTierState = { ...codexServiceTierState, status: "idle", message: "未启用" };
       refreshCodexServiceTierControls();
       return;
@@ -1577,7 +1577,7 @@
         status: "failed",
         message: "读取失败",
       };
-      sendCodexPlusDiagnostic("service_tier_read_failed", {
+      sendCodexElvesDiagnostic("service_tier_read_failed", {
         errorName: error?.name || "",
         errorMessage: error?.message || String(error),
       });
@@ -1587,7 +1587,7 @@
   }
 
   function setCodexThreadServiceTierMode(mode) {
-    if (codexPlusBackendStatus.status !== "ok") {
+    if (codexElvesBackendStatus.status !== "ok") {
       showToast("后端未连接，无法切换服务模式", null);
       refreshCodexServiceTierControls();
       return;
@@ -1610,7 +1610,7 @@
   }
 
   function toggleCodexServiceTierFromBadge() {
-    if (codexPlusBackendStatus.status !== "ok") {
+    if (codexElvesBackendStatus.status !== "ok") {
       showToast("后端未连接，无法切换服务模式", null);
       refreshCodexServiceTierControls();
       return;
@@ -1655,7 +1655,7 @@
   }
 
   function codexServiceTierOverrideForRequest(method, params, threadIdHint = "") {
-    if (!codexPlusSettings().serviceTierControls) return null;
+    if (!codexElvesSettings().serviceTierControls) return null;
     if (!codexServiceTierRequestMethods().has(method) || !params || typeof params !== "object") return null;
     const state = readThreadServiceTierState();
     const controlMode = normalizeCodexServiceTierControlMode(state.mode);
@@ -1696,7 +1696,7 @@
     if (Object.prototype.hasOwnProperty.call(nextParams, "service_tier") || override.fastBlocked) {
       nextParams.service_tier = override.serviceTier;
     }
-    sendCodexPlusDiagnostic("service_tier_request_override_applied", {
+    sendCodexElvesDiagnostic("service_tier_request_override_applied", {
       method,
       threadId: override.threadId || "",
       mode: override.mode,
@@ -1709,7 +1709,7 @@
   }
 
   function codexServiceTierRequestOverride(message) {
-    if (!codexPlusSettings().serviceTierControls) return message;
+    if (!codexElvesSettings().serviceTierControls) return message;
     if (!message || typeof message !== "object") return message;
     if (message.type === "send-cli-request-for-host") {
       const method = String(message.method || "");
@@ -1772,9 +1772,9 @@
           return dispatcher.__codexServiceTierOriginalDispatchMessage(nextType, nextPayload);
         };
         window.__codexServiceTierRequestOverrideInstalled = codexServiceTierRequestOverrideVersion;
-        sendCodexPlusDiagnostic("service_tier_dispatcher_patch_installed", {});
+        sendCodexElvesDiagnostic("service_tier_dispatcher_patch_installed", {});
       } catch (error) {
-        sendCodexPlusDiagnostic("service_tier_dispatcher_patch_failed", {
+        sendCodexElvesDiagnostic("service_tier_dispatcher_patch_failed", {
           errorName: error?.name || "",
           errorMessage: error?.message || String(error),
         });
@@ -1789,12 +1789,12 @@
       if (!settings || typeof settings !== "object" || (!("launchMode" in settings) && !("enhancementsEnabled" in settings) && !("providerSyncEnabled" in settings))) {
         throw new Error("invalid backend settings response");
       }
-      codexPlusBackendSettings = { ...codexPlusBackendSettings, ...settings };
-      codexPlusBackendSettingsLoaded = true;
-      refreshCodexPlusBackendToggles();
+      codexElvesBackendSettings = { ...codexElvesBackendSettings, ...settings };
+      codexElvesBackendSettingsLoaded = true;
+      refreshCodexElvesBackendToggles();
       return true;
     } catch (_) {
-      refreshCodexPlusBackendToggles();
+      refreshCodexElvesBackendToggles();
       return false;
     }
   }
@@ -1812,46 +1812,46 @@
   }
 
   async function setBackendSetting(key, value) {
-    codexPlusBackendSettings = { ...codexPlusBackendSettings, [key]: value };
-    refreshCodexPlusBackendToggles();
+    codexElvesBackendSettings = { ...codexElvesBackendSettings, [key]: value };
+    refreshCodexElvesBackendToggles();
     try {
       const settings = await postJson("/settings/set", { [key]: value });
-      codexPlusBackendSettings = { ...codexPlusBackendSettings, ...settings };
+      codexElvesBackendSettings = { ...codexElvesBackendSettings, ...settings };
     } finally {
-      refreshCodexPlusBackendToggles();
+      refreshCodexElvesBackendToggles();
     }
   }
 
-  function refreshCodexPlusBackendToggles() {
-    document.querySelectorAll(".codex-plus-toggle[data-codex-backend-setting]").forEach((button) => {
+  function refreshCodexElvesBackendToggles() {
+    document.querySelectorAll(".codex-elves-toggle[data-codex-backend-setting]").forEach((button) => {
       const key = button.getAttribute("data-codex-backend-setting");
-      button.dataset.enabled = String(!!codexPlusBackendSettings[key]);
+      button.dataset.enabled = String(!!codexElvesBackendSettings[key]);
     });
-    renderCodexPlusMenu();
+    renderCodexElvesMenu();
     scan();
   }
 
-  let codexPlusUserScripts = { enabled: true, builtin_dir: "", user_dir: "", scripts: [] };
-  let codexPlusBackendStatus = { status: "checking", message: "正在检查后端…" };
-  let codexPlusBackendCheckSeq = 0;
+  let codexElvesUserScripts = { enabled: true, builtin_dir: "", user_dir: "", scripts: [] };
+  let codexElvesBackendStatus = { status: "checking", message: "正在检查后端…" };
+  let codexElvesBackendCheckSeq = 0;
 
-  function setCodexPlusTriggerLabel(trigger) {
+  function setCodexElvesTriggerLabel(trigger) {
     if (!trigger) return;
-    let label = trigger.querySelector("[data-codex-plus-trigger-label]");
+    let label = trigger.querySelector("[data-codex-elves-trigger-label]");
     if (!label) {
       label = document.createElement("span");
-      label.dataset.codexPlusTriggerLabel = "true";
+      label.dataset.codexElvesTriggerLabel = "true";
       trigger.appendChild(label);
     }
-    label.textContent = `Codex++ ${codexPlusVersion}`;
+    label.textContent = `CodexElves ${codexElvesVersion}`;
   }
 
-  function ensureCodexPlusTriggerIndicator(trigger) {
+  function ensureCodexElvesTriggerIndicator(trigger) {
     if (!trigger) return null;
     let indicator = trigger.querySelector("[data-codex-backend-indicator]");
     if (!indicator) {
       indicator = document.createElement("span");
-      indicator.className = "codex-plus-backend-indicator";
+      indicator.className = "codex-elves-backend-indicator";
       indicator.dataset.codexBackendIndicator = "true";
       trigger.prepend(indicator);
     }
@@ -1859,18 +1859,18 @@
   }
 
   function renderBackendStatus() {
-    const status = codexPlusBackendStatus.status || "failed";
-    if (codexPlusBackendStatus.version) {
-      codexPlusVersion = codexPlusBackendStatus.version;
-      document.querySelectorAll("[data-codex-plus-version]").forEach((node) => {
-        node.textContent = `Codex++ ${codexPlusVersion}`;
+    const status = codexElvesBackendStatus.status || "failed";
+    if (codexElvesBackendStatus.version) {
+      codexElvesVersion = codexElvesBackendStatus.version;
+      document.querySelectorAll("[data-codex-elves-version]").forEach((node) => {
+        node.textContent = `CodexElves ${codexElvesVersion}`;
       });
-      document.querySelectorAll(`#${codexPlusMenuId} button`).forEach(setCodexPlusTriggerLabel);
+      document.querySelectorAll(`#${codexElvesMenuId} button`).forEach(setCodexElvesTriggerLabel);
     }
     const label = document.querySelector("[data-codex-backend-status]");
     if (label) {
       label.dataset.status = status;
-      label.textContent = codexPlusBackendStatus.message || (status === "ok" ? "后端已连接" : "未连接");
+      label.textContent = codexElvesBackendStatus.message || (status === "ok" ? "后端已连接" : "未连接");
     }
     document.querySelectorAll("[data-codex-backend-indicator]").forEach((indicator) => {
       indicator.dataset.status = status;
@@ -1889,12 +1889,12 @@
   }
 
   async function checkBackendStatus() {
-    const seq = ++codexPlusBackendCheckSeq;
+    const seq = ++codexElvesBackendCheckSeq;
     const nextStatus = await withBackendTimeout(postJson("/backend/status", {}));
-    if (seq !== codexPlusBackendCheckSeq) return;
-    codexPlusBackendStatus = nextStatus;
+    if (seq !== codexElvesBackendCheckSeq) return;
+    codexElvesBackendStatus = nextStatus;
     if (nextStatus?.status !== "ok") {
-      sendCodexPlusDiagnostic("backend_check_failed", {
+      sendCodexElvesDiagnostic("backend_check_failed", {
         status: nextStatus?.status || "unknown",
         message: nextStatus?.message || "",
         timeout: !!nextStatus?.timeout,
@@ -1904,12 +1904,12 @@
   }
 
   async function repairBackend() {
-    codexPlusBackendStatus = { status: "checking", message: "正在修复后端…" };
+    codexElvesBackendStatus = { status: "checking", message: "正在修复后端…" };
     renderBackendStatus();
     try {
-      codexPlusBackendStatus = await postJson("/backend/repair", {});
+      codexElvesBackendStatus = await postJson("/backend/repair", {});
     } catch (error) {
-      codexPlusBackendStatus = { status: "failed", message: "后端修复失败" };
+      codexElvesBackendStatus = { status: "failed", message: "后端修复失败" };
     }
     renderBackendStatus();
   }
@@ -1924,8 +1924,8 @@
   }
 
   function scheduleBackendHeartbeat() {
-    if (window.__codexPlusBackendHeartbeat) return;
-    window.__codexPlusBackendHeartbeat = setInterval(checkBackendStatus, 5000);
+    if (window.__codexElvesBackendHeartbeat) return;
+    window.__codexElvesBackendHeartbeat = setInterval(checkBackendStatus, 5000);
     checkBackendStatus();
   }
 
@@ -1935,23 +1935,23 @@
 
   function renderUserScripts() {
     const enabledToggle = document.querySelector("[data-codex-user-scripts-enabled]");
-    if (enabledToggle) enabledToggle.dataset.enabled = String(!!codexPlusUserScripts.enabled);
+    if (enabledToggle) enabledToggle.dataset.enabled = String(!!codexElvesUserScripts.enabled);
     const dirs = document.querySelector("[data-codex-user-script-dirs]");
-    if (dirs) dirs.textContent = `内置：${codexPlusUserScripts.builtin_dir || "未找到"}  用户：${codexPlusUserScripts.user_dir || "未找到"}`;
+    if (dirs) dirs.textContent = `内置：${codexElvesUserScripts.builtin_dir || "未找到"}  用户：${codexElvesUserScripts.user_dir || "未找到"}`;
     const list = document.querySelector("[data-codex-user-script-list]");
     if (!list) return;
-    if (!codexPlusUserScripts.scripts?.length) {
+    if (!codexElvesUserScripts.scripts?.length) {
       list.textContent = "未发现用户脚本。";
       return;
     }
-    list.innerHTML = codexPlusUserScripts.scripts.map((script) => `
-      <div class="codex-plus-user-script-item">
+    list.innerHTML = codexElvesUserScripts.scripts.map((script) => `
+      <div class="codex-elves-user-script-item">
         <div>
-          <div class="codex-plus-user-script-name">${escapeHtml(script.name || script.key)}</div>
-          <div class="codex-plus-user-script-meta">${script.source === "builtin" ? "内置" : "用户"} · ${userScriptStatusLabel(script.status)}</div>
-          ${script.error ? `<div class="codex-plus-user-script-error">${escapeHtml(script.error)}</div>` : ""}
+          <div class="codex-elves-user-script-name">${escapeHtml(script.name || script.key)}</div>
+          <div class="codex-elves-user-script-meta">${script.source === "builtin" ? "内置" : "用户"} · ${userScriptStatusLabel(script.status)}</div>
+          ${script.error ? `<div class="codex-elves-user-script-error">${escapeHtml(script.error)}</div>` : ""}
         </div>
-        <button type="button" class="codex-plus-toggle" data-codex-user-script-key="${escapeHtml(script.key)}" data-enabled="${String(!!script.enabled)}"><span></span></button>
+        <button type="button" class="codex-elves-toggle" data-codex-user-script-key="${escapeHtml(script.key)}" data-enabled="${String(!!script.enabled)}"><span></span></button>
       </div>
     `).join("");
   }
@@ -1959,171 +1959,171 @@
   async function loadUserScripts(path = "/user-scripts/list", payload = {}) {
     const result = await postJson(path, payload);
     if (result?.scripts) {
-      codexPlusUserScripts = result;
+      codexElvesUserScripts = result;
       renderUserScripts();
     }
   }
 
-  function selectCodexPlusTab(tab) {
-    document.querySelectorAll(".codex-plus-modal-content").forEach((modal) => {
-      modal.dataset.codexPlusActiveTab = tab;
+  function selectCodexElvesTab(tab) {
+    document.querySelectorAll(".codex-elves-modal-content").forEach((modal) => {
+      modal.dataset.codexElvesActiveTab = tab;
     });
-    document.querySelectorAll("[data-codex-plus-tab]").forEach((button) => {
-      button.dataset.active = String(button.getAttribute("data-codex-plus-tab") === tab);
+    document.querySelectorAll("[data-codex-elves-tab]").forEach((button) => {
+      button.dataset.active = String(button.getAttribute("data-codex-elves-tab") === tab);
     });
-    document.querySelectorAll("[data-codex-plus-panel]").forEach((panel) => {
-      panel.hidden = panel.getAttribute("data-codex-plus-panel") !== tab;
+    document.querySelectorAll("[data-codex-elves-panel]").forEach((panel) => {
+      panel.hidden = panel.getAttribute("data-codex-elves-panel") !== tab;
     });
     if (tab === "userScripts") loadUserScripts();
   }
 
-  function openCodexPlusModal() {
-    document.querySelectorAll(".codex-plus-modal-overlay").forEach((node) => node.remove());
-    document.querySelectorAll('[data-codex-plus-dialog="true"]').forEach((node) => node.remove());
+  function openCodexElvesModal() {
+    document.querySelectorAll(".codex-elves-modal-overlay").forEach((node) => node.remove());
+    document.querySelectorAll('[data-codex-elves-dialog="true"]').forEach((node) => node.remove());
     const overlay = document.createElement("div");
-    overlay.className = "codex-plus-modal-overlay";
+    overlay.className = "codex-elves-modal-overlay";
     overlay.innerHTML = `
-      <div class="codex-plus-modal-content" role="dialog" aria-modal="true" aria-label="Codex++">
-        <div class="codex-plus-modal-header">
-          <div class="codex-plus-modal-title"><span class="codex-plus-backend-indicator" data-codex-backend-indicator="true" data-status="checking"></span><span data-codex-plus-version="true">Codex++ ${codexPlusVersion}</span></div>
-          <button type="button" class="codex-plus-modal-close" aria-label="关闭">×</button>
+      <div class="codex-elves-modal-content" role="dialog" aria-modal="true" aria-label="CodexElves">
+        <div class="codex-elves-modal-header">
+          <div class="codex-elves-modal-title"><span class="codex-elves-backend-indicator" data-codex-backend-indicator="true" data-status="checking"></span><span data-codex-elves-version="true">CodexElves ${codexElvesVersion}</span></div>
+          <button type="button" class="codex-elves-modal-close" aria-label="关闭">×</button>
         </div>
-        <div class="codex-plus-tabs" role="tablist" aria-label="Codex++">
-          <button type="button" class="codex-plus-tab-button" data-codex-plus-tab="home" data-active="true">主页</button>
-          <button type="button" class="codex-plus-tab-button" data-codex-plus-tab="userScripts" data-active="false">用户脚本</button>
+        <div class="codex-elves-tabs" role="tablist" aria-label="CodexElves">
+          <button type="button" class="codex-elves-tab-button" data-codex-elves-tab="home" data-active="true">主页</button>
+          <button type="button" class="codex-elves-tab-button" data-codex-elves-tab="userScripts" data-active="false">用户脚本</button>
         </div>
-        <div class="codex-plus-modal-body">
-          <div class="codex-plus-panel" data-codex-plus-panel="home">
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">后端连接</div><div class="codex-plus-row-description">每 5 秒检查一次 launcher 后端状态；断开时可尝试修复后端运行。</div></div>
-              <div class="codex-plus-backend-status">
-                <div class="codex-plus-backend-label" data-codex-backend-status="true" data-status="checking">正在检查后端…</div>
-                <button type="button" class="codex-plus-backend-repair" data-codex-backend-repair="true" hidden>修复后端运行</button>
+        <div class="codex-elves-modal-body">
+          <div class="codex-elves-panel" data-codex-elves-panel="home">
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">后端连接</div><div class="codex-elves-row-description">每 5 秒检查一次 launcher 后端状态；断开时可尝试修复后端运行。</div></div>
+              <div class="codex-elves-backend-status">
+                <div class="codex-elves-backend-label" data-codex-backend-status="true" data-status="checking">正在检查后端…</div>
+                <button type="button" class="codex-elves-backend-repair" data-codex-backend-repair="true" hidden>修复后端运行</button>
               </div>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">页面功能增强</div><div class="codex-plus-row-description">关闭后停用删除、导出、移动、Timeline、插件相关和菜单位置增强。</div></div>
-              <button type="button" class="codex-plus-toggle" data-codex-backend-setting="enhancementsEnabled"><span></span></button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">页面功能增强</div><div class="codex-elves-row-description">关闭后停用删除、导出、移动、Timeline、插件相关和菜单位置增强。</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-backend-setting="enhancementsEnabled"><span></span></button>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">插件市场解锁</div><div class="codex-plus-row-description">${codexPlusBackendSettings.launchMode === "relay" ? "兼容增强模式下无需开启；ChatGPT 登录态会保留官方插件市场。" : "API Key 模式下扩展插件市场请求，尽量显示完整插件列表。"}</div></div>
-              <button type="button" class="codex-plus-toggle" data-codex-plus-setting="pluginMarketplaceUnlock" ${codexPlusBackendSettings.launchMode === "relay" ? 'disabled data-relay-unneeded="true"' : ""}><span></span></button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">插件市场解锁</div><div class="codex-elves-row-description">${codexElvesBackendSettings.launchMode === "relay" ? "兼容增强模式下无需开启；ChatGPT 登录态会保留官方插件市场。" : "API Key 模式下扩展插件市场请求，尽量显示完整插件列表。"}</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="pluginMarketplaceUnlock" ${codexElvesBackendSettings.launchMode === "relay" ? 'disabled data-relay-unneeded="true"' : ""}><span></span></button>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">强制解锁入口</div><div class="codex-plus-row-description">${codexPlusBackendSettings.launchMode === "relay" ? "兼容增强模式下无需开启；官方登录态会保留插件入口。" : "恢复 1.1.9 的入口解锁方式，强制显示并启用插件入口。"}</div></div>
-              <button type="button" class="codex-plus-toggle" data-codex-plus-setting="pluginEntryUnlock" ${codexPlusBackendSettings.launchMode === "relay" ? 'disabled data-relay-unneeded="true"' : ""}><span></span></button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">强制解锁入口</div><div class="codex-elves-row-description">${codexElvesBackendSettings.launchMode === "relay" ? "兼容增强模式下无需开启；官方登录态会保留插件入口。" : "恢复 1.1.9 的入口解锁方式，强制显示并启用插件入口。"}</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="pluginEntryUnlock" ${codexElvesBackendSettings.launchMode === "relay" ? 'disabled data-relay-unneeded="true"' : ""}><span></span></button>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">特殊插件强制安装</div><div class="codex-plus-row-description">${codexPlusBackendSettings.launchMode === "relay" ? "兼容增强模式下无需开启；不会改插件安装入口。" : "解除 App unavailable / 应用不可用导致的前端安装禁用。"}</div></div>
-              <button type="button" class="codex-plus-toggle" data-codex-plus-setting="forcePluginInstall" ${codexPlusBackendSettings.launchMode === "relay" ? 'disabled data-relay-unneeded="true"' : ""}><span></span></button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">特殊插件强制安装</div><div class="codex-elves-row-description">${codexElvesBackendSettings.launchMode === "relay" ? "兼容增强模式下无需开启；不会改插件安装入口。" : "解除 App unavailable / 应用不可用导致的前端安装禁用。"}</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="forcePluginInstall" ${codexElvesBackendSettings.launchMode === "relay" ? 'disabled data-relay-unneeded="true"' : ""}><span></span></button>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">模型白名单解锁</div><div class="codex-plus-row-description">从环境变量和 Codex config.toml 中的中转站 /v1/models 拉取模型，并补进模型选择列表。</div></div>
-              <button type="button" class="codex-plus-toggle" data-codex-plus-setting="modelWhitelistUnlock"><span></span></button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">模型白名单解锁</div><div class="codex-elves-row-description">从环境变量和 Codex config.toml 中的中转站 /v1/models 拉取模型，并补进模型选择列表。</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="modelWhitelistUnlock"><span></span></button>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">Fast 按钮</div><div class="codex-plus-row-description">显示服务模式切换按钮；Fast 仅支持 ${codexServiceTierFastModelListLabel()}，其他模型按 Standard 发送。</div></div>
-              <button type="button" class="codex-plus-toggle" data-codex-plus-setting="serviceTierControls"><span></span></button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">Fast 按钮</div><div class="codex-elves-row-description">显示服务模式切换按钮；Fast 仅支持 ${codexServiceTierFastModelListLabel()}，其他模型按 Standard 发送。</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="serviceTierControls"><span></span></button>
             </div>
-            <div class="codex-plus-row" data-codex-service-tier-controls="true">
-              <div><div class="codex-plus-row-title">服务模式</div><div class="codex-plus-row-description">继承使用 config.toml 的 service tier；全局模式覆盖全部 thread；自定义允许按 thread 覆盖。</div></div>
-              <div class="codex-plus-service-tier-control">
-                <div class="codex-plus-service-tier-status" data-codex-service-tier-status="true" data-status="loading">正在读取…</div>
-                <div class="codex-plus-service-tier-actions">
-                  <button type="button" class="codex-plus-service-tier-button" data-codex-service-tier-inherit="true">继承</button>
-                  <button type="button" class="codex-plus-service-tier-button" data-codex-service-tier-standard="true">全局 Standard</button>
-                  <button type="button" class="codex-plus-service-tier-button" data-codex-service-tier-fast="true">全局 Fast</button>
-                  <button type="button" class="codex-plus-service-tier-button" data-codex-service-tier-custom="true">自定义</button>
+            <div class="codex-elves-row" data-codex-service-tier-controls="true">
+              <div><div class="codex-elves-row-title">服务模式</div><div class="codex-elves-row-description">继承使用 config.toml 的 service tier；全局模式覆盖全部 thread；自定义允许按 thread 覆盖。</div></div>
+              <div class="codex-elves-service-tier-control">
+                <div class="codex-elves-service-tier-status" data-codex-service-tier-status="true" data-status="loading">正在读取…</div>
+                <div class="codex-elves-service-tier-actions">
+                  <button type="button" class="codex-elves-service-tier-button" data-codex-service-tier-inherit="true">继承</button>
+                  <button type="button" class="codex-elves-service-tier-button" data-codex-service-tier-standard="true">全局 Standard</button>
+                  <button type="button" class="codex-elves-service-tier-button" data-codex-service-tier-fast="true">全局 Fast</button>
+                  <button type="button" class="codex-elves-service-tier-button" data-codex-service-tier-custom="true">自定义</button>
                 </div>
-                <div class="codex-plus-service-tier-actions codex-plus-service-tier-thread-actions">
-                  <span class="codex-plus-service-tier-thread-label">当前 thread 覆盖</span>
-                  <button type="button" class="codex-plus-service-tier-button" data-codex-service-tier-thread-inherit="true" title="当前 thread 不单独覆盖，继承 config.toml">继承</button>
-                  <button type="button" class="codex-plus-service-tier-button" data-codex-service-tier-thread-standard="true" title="仅当前 thread 使用 Standard，并切到自定义模式">Standard</button>
-                  <button type="button" class="codex-plus-service-tier-button" data-codex-service-tier-thread-fast="true" title="仅当前 thread 使用 Fast，并切到自定义模式">Fast</button>
+                <div class="codex-elves-service-tier-actions codex-elves-service-tier-thread-actions">
+                  <span class="codex-elves-service-tier-thread-label">当前 thread 覆盖</span>
+                  <button type="button" class="codex-elves-service-tier-button" data-codex-service-tier-thread-inherit="true" title="当前 thread 不单独覆盖，继承 config.toml">继承</button>
+                  <button type="button" class="codex-elves-service-tier-button" data-codex-service-tier-thread-standard="true" title="仅当前 thread 使用 Standard，并切到自定义模式">Standard</button>
+                  <button type="button" class="codex-elves-service-tier-button" data-codex-service-tier-thread-fast="true" title="仅当前 thread 使用 Fast，并切到自定义模式">Fast</button>
                 </div>
               </div>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">会话删除</div><div class="codex-plus-row-description">在会话列表悬停显示删除按钮，并支持撤销。</div></div>
-              <button type="button" class="codex-plus-toggle" data-codex-plus-setting="sessionDelete"><span></span></button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">会话删除</div><div class="codex-elves-row-description">在会话列表悬停显示删除按钮，并支持撤销。</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="sessionDelete"><span></span></button>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">Markdown 导出</div><div class="codex-plus-row-description">在会话列表显示导出按钮，按本地 rollout 导出带时间戳的 Markdown。</div></div>
-              <button type="button" class="codex-plus-toggle" data-codex-plus-setting="markdownExport"><span></span></button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">Markdown 导出</div><div class="codex-elves-row-description">在会话列表显示导出按钮，按本地 rollout 导出带时间戳的 Markdown。</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="markdownExport"><span></span></button>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">会话项目移动</div><div class="codex-plus-row-description">在会话列表悬停显示移动按钮，可移动到普通对话或其他本地项目。</div></div>
-              <button type="button" class="codex-plus-toggle" data-codex-plus-setting="projectMove"><span></span></button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">会话项目移动</div><div class="codex-elves-row-description">在会话列表悬停显示移动按钮，可移动到普通对话或其他本地项目。</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="projectMove"><span></span></button>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">对话 Timeline</div><div class="codex-plus-row-description">在对话右侧显示用户提问时间线，悬停查看摘要，点击跳转。</div></div>
-              <button type="button" class="codex-plus-toggle" data-codex-plus-setting="conversationTimeline"><span></span></button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">对话 Timeline</div><div class="codex-elves-row-description">在对话右侧显示用户提问时间线，悬停查看摘要，点击跳转。</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="conversationTimeline"><span></span></button>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">会话 ID 标识</div><div class="codex-plus-row-description">在侧边栏会话标题前显示短 ID 和 UUIDv7 创建时间，方便定位历史会话。</div></div>
-              <button type="button" class="codex-plus-toggle" data-codex-plus-setting="threadIdBadge"><span></span></button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">会话 ID 标识</div><div class="codex-elves-row-description">在侧边栏会话标题前显示短 ID 和 UUIDv7 创建时间，方便定位历史会话。</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="threadIdBadge"><span></span></button>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">对话居中宽度</div><div class="codex-plus-row-description">开启后把主对话和输入框限制到固定最大宽度，适合大屏阅读。</div></div>
-              <div class="codex-plus-width-control">
-                <input class="codex-plus-width-input" data-codex-plus-conversation-view-width="true" min="${conversationViewMinWidth}" max="${conversationViewMaxAllowedWidth}" step="10" type="number" value="${conversationViewWidth()}">
-                <button type="button" class="codex-plus-toggle" data-codex-plus-setting="conversationView"><span></span></button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">对话居中宽度</div><div class="codex-elves-row-description">开启后把主对话和输入框限制到固定最大宽度，适合大屏阅读。</div></div>
+              <div class="codex-elves-width-control">
+                <input class="codex-elves-width-input" data-codex-elves-conversation-view-width="true" min="${conversationViewMinWidth}" max="${conversationViewMaxAllowedWidth}" step="10" type="number" value="${conversationViewWidth()}">
+                <button type="button" class="codex-elves-toggle" data-codex-elves-setting="conversationView"><span></span></button>
               </div>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">切换对话保留位置</div><div class="codex-plus-row-description">开启后在不同 thread 之间切换时恢复到上一次浏览位置，不再自动跳到底部。</div></div>
-              <button type="button" class="codex-plus-toggle" data-codex-plus-setting="threadScrollRestore"><span></span></button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">切换对话保留位置</div><div class="codex-elves-row-description">开启后在不同 thread 之间切换时恢复到上一次浏览位置，不再自动跳到底部。</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="threadScrollRestore"><span></span></button>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">Upstream worktree</div><div class="codex-plus-row-description">Create a Git worktree from a fresh upstream branch, equivalent to git worktree add -b branch path upstream/base.</div></div>
-              <div class="codex-plus-worktree-actions">
-                <button type="button" class="codex-plus-action-button" data-codex-upstream-worktree-open="true">创建</button>
-                <button type="button" class="codex-plus-toggle" data-codex-plus-setting="upstreamWorktreeCreate"><span></span></button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">Upstream worktree</div><div class="codex-elves-row-description">Create a Git worktree from a fresh upstream branch, equivalent to git worktree add -b branch path upstream/base.</div></div>
+              <div class="codex-elves-worktree-actions">
+                <button type="button" class="codex-elves-action-button" data-codex-upstream-worktree-open="true">创建</button>
+                <button type="button" class="codex-elves-toggle" data-codex-elves-setting="upstreamWorktreeCreate"><span></span></button>
               </div>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">历史会话修复</div><div class="codex-plus-row-description">切换官方登录、混合 API 或纯 API 后，让旧对话重新显示在当前模式下。</div></div>
-              <button type="button" class="codex-plus-toggle" data-codex-backend-setting="providerSyncEnabled"><span></span></button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">历史会话修复</div><div class="codex-elves-row-description">切换官方登录、混合 API 或纯 API 后，让旧对话重新显示在当前模式下。</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-backend-setting="providerSyncEnabled"><span></span></button>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">页面增强模式</div><div class="codex-plus-row-description">${codexPlusBackendSettings.launchMode === "relay" ? "兼容增强：保留会话删除、导出、项目移动、Timeline 和用户脚本，仅关闭插件入口相关增强。" : "完整增强：加载插件入口、强制安装、项目路径移动等全部页面能力。"}</div></div>
-              <button type="button" class="codex-plus-action-button" data-codex-open-manager="true">打开管理工具</button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">页面增强模式</div><div class="codex-elves-row-description">${codexElvesBackendSettings.launchMode === "relay" ? "兼容增强：保留会话删除、导出、项目移动、Timeline 和用户脚本，仅关闭插件入口相关增强。" : "完整增强：加载插件入口、强制安装、项目路径移动等全部页面能力。"}</div></div>
+              <button type="button" class="codex-elves-action-button" data-codex-open-manager="true">打开管理工具</button>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">原生菜单栏位置</div><div class="codex-plus-row-description">把 Codex++ 菜单插入顶部原生菜单栏；默认关闭以避免页面重渲染冲突。</div></div>
-              <button type="button" class="codex-plus-toggle" data-codex-plus-setting="nativeMenuPlacement"><span></span></button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">原生菜单栏位置</div><div class="codex-elves-row-description">把 CodexElves 菜单插入顶部原生菜单栏；默认关闭以避免页面重渲染冲突。</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="nativeMenuPlacement"><span></span></button>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">打开 DevTools</div><div class="codex-plus-row-description">打开当前 Codex 页面开发者工具，方便查看用户脚本报错。</div></div>
-              <button type="button" class="codex-plus-action-button" data-codex-open-devtools="true">打开 DevTools</button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">打开 DevTools</div><div class="codex-elves-row-description">打开当前 Codex 页面开发者工具，方便查看用户脚本报错。</div></div>
+              <button type="button" class="codex-elves-action-button" data-codex-open-devtools="true">打开 DevTools</button>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">关于 Codex++</div><div class="codex-plus-about">Codex++ 是通过外部 launcher 注入的增强菜单，不修改 Codex App 原始安装文件。<br>Build: <span data-codex-plus-build="true">${codexPlusBuild}</span><br>GitHub: <a href="https://github.com/BigPizzaV3/CodexPlusPlus" target="_blank" rel="noreferrer">https://github.com/BigPizzaV3/CodexPlusPlus</a></div></div>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">关于 CodexElves</div><div class="codex-elves-about">CodexElves 是通过外部 launcher 注入的增强菜单，不修改 Codex App 原始安装文件。<br>Build: <span data-codex-elves-build="true">${codexElvesBuild}</span><br>GitHub: <a href="https://github.com/BigPizzaV3/CodexElves" target="_blank" rel="noreferrer">https://github.com/BigPizzaV3/CodexElves</a></div></div>
             </div>
-            <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">提出问题</div><div class="codex-plus-row-description">打开 GitHub Issues 反馈问题或建议。</div></div>
-              <button type="button" class="codex-plus-issue-button" data-codex-plus-issue="true">提出问题</button>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">提出问题</div><div class="codex-elves-row-description">打开 GitHub Issues 反馈问题或建议。</div></div>
+              <button type="button" class="codex-elves-issue-button" data-codex-elves-issue="true">提出问题</button>
             </div>
           </div>
-          <div class="codex-plus-panel" data-codex-plus-panel="userScripts" hidden>
-            <div class="codex-plus-row" data-codex-user-scripts-section="true">
+          <div class="codex-elves-panel" data-codex-elves-panel="userScripts" hidden>
+            <div class="codex-elves-row" data-codex-user-scripts-section="true">
               <div>
-                <div class="codex-plus-row-title">用户脚本</div>
-                <div class="codex-plus-row-description">启用用户脚本：自动加载内置目录和用户配置目录中的 .js 文件。</div>
-                <div class="codex-plus-user-script-warning">禁用后需重载页面或重启 Codex++ 才能完全移除已执行效果。</div>
-                <div class="codex-plus-user-script-dirs" data-codex-user-script-dirs="true">正在读取脚本目录…</div>
-                <div class="codex-plus-user-script-list" data-codex-user-script-list="true">正在读取用户脚本…</div>
+                <div class="codex-elves-row-title">用户脚本</div>
+                <div class="codex-elves-row-description">启用用户脚本：自动加载内置目录和用户配置目录中的 .js 文件。</div>
+                <div class="codex-elves-user-script-warning">禁用后需重载页面或重启 CodexElves 才能完全移除已执行效果。</div>
+                <div class="codex-elves-user-script-dirs" data-codex-user-script-dirs="true">正在读取脚本目录…</div>
+                <div class="codex-elves-user-script-list" data-codex-user-script-list="true">正在读取用户脚本…</div>
               </div>
-              <div class="codex-plus-user-script-actions">
-                <button type="button" class="codex-plus-toggle" data-codex-user-scripts-enabled="true"><span></span></button>
-                <button type="button" class="codex-plus-user-script-reload" data-codex-user-scripts-reload="true">重新加载用户脚本</button>
+              <div class="codex-elves-user-script-actions">
+                <button type="button" class="codex-elves-toggle" data-codex-user-scripts-enabled="true"><span></span></button>
+                <button type="button" class="codex-elves-user-script-reload" data-codex-user-scripts-reload="true">重新加载用户脚本</button>
               </div>
             </div>
           </div>
         </div>
       </div>
     `;
-    const closeButton = overlay.querySelector(".codex-plus-modal-close");
+    const closeButton = overlay.querySelector(".codex-elves-modal-close");
     closeButton?.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -2131,12 +2131,12 @@
     }, true);
     overlay.addEventListener("input", (event) => {
       const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-      const widthInput = target?.closest("[data-codex-plus-conversation-view-width]");
+      const widthInput = target?.closest("[data-codex-elves-conversation-view-width]");
       if (widthInput) setConversationViewWidth(widthInput.value);
     }, true);
     overlay.addEventListener("change", (event) => {
       const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-      const widthInput = target?.closest("[data-codex-plus-conversation-view-width]");
+      const widthInput = target?.closest("[data-codex-elves-conversation-view-width]");
       if (widthInput) {
         const width = normalizeConversationViewWidth(widthInput.value);
         widthInput.value = String(width || conversationViewWidth());
@@ -2145,13 +2145,13 @@
     }, true);
     overlay.addEventListener("click", (event) => {
       const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-      if (event.target === overlay || target?.closest(".codex-plus-modal-close")) {
+      if (event.target === overlay || target?.closest(".codex-elves-modal-close")) {
         overlay.remove();
         return;
       }
-      const tabButton = target?.closest("[data-codex-plus-tab]");
+      const tabButton = target?.closest("[data-codex-elves-tab]");
       if (tabButton) {
-        selectCodexPlusTab(tabButton.getAttribute("data-codex-plus-tab"));
+        selectCodexElvesTab(tabButton.getAttribute("data-codex-elves-tab"));
         return;
       }
       if (target?.closest("[data-codex-open-devtools]")) {
@@ -2166,9 +2166,9 @@
         repairBackend();
         return;
       }
-      const issueButton = target?.closest("[data-codex-plus-issue]");
+      const issueButton = target?.closest("[data-codex-elves-issue]");
       if (issueButton) {
-        const issueUrl = "https://github.com/BigPizzaV3/CodexPlusPlus/issues";
+        const issueUrl = "https://github.com/BigPizzaV3/CodexElves/issues";
         window.open(issueUrl, "_blank");
         return;
       }
@@ -2215,38 +2215,38 @@
         return;
       }
       if (target?.closest("[data-codex-upstream-worktree-open]")) {
-        if (!codexPlusSettings().upstreamWorktreeCreate) {
+        if (!codexElvesSettings().upstreamWorktreeCreate) {
           showToast("Upstream worktree enhancement is disabled", null);
           return;
         }
         openUpstreamWorktreeDialog();
         return;
       }
-      const toggle = target?.closest("[data-codex-plus-setting]");
+      const toggle = target?.closest("[data-codex-elves-setting]");
       if (toggle) {
         if (toggle.disabled) return;
-        const key = toggle.getAttribute("data-codex-plus-setting");
-        setCodexPlusSetting(key, !codexPlusSettings()[key]);
+        const key = toggle.getAttribute("data-codex-elves-setting");
+        setCodexElvesSetting(key, !codexElvesSettings()[key]);
         return;
       }
       const backendToggle = target?.closest("[data-codex-backend-setting]");
       if (backendToggle) {
         const key = backendToggle.getAttribute("data-codex-backend-setting");
-        setBackendSetting(key, !codexPlusBackendSettings[key]);
+        setBackendSetting(key, !codexElvesBackendSettings[key]);
         return;
       }
     }, true);
     document.body.appendChild(overlay);
-    selectCodexPlusTab("home");
-    renderCodexPlusMenu();
-    refreshCodexPlusBackendToggles();
+    selectCodexElvesTab("home");
+    renderCodexElvesMenu();
+    refreshCodexElvesBackendToggles();
     renderBackendStatus();
     void loadCodexServiceTierState();
     loadUserScripts();
   }
 
   function findNativeMenuInsertionPoint() {
-    if (!codexPlusSettings().nativeMenuPlacement) return null;
+    if (!codexElvesSettings().nativeMenuPlacement) return null;
     const header = document.querySelector(selectors.appHeader);
     const isIconOnlyButton = (button) => String(button.className || "").includes("aspect-square");
     const menuBar = Array.from(header?.querySelectorAll?.(selectors.nativeMenuBar) || [])
@@ -2255,7 +2255,7 @@
         return !node.closest(".invisible") && rect.width > 0 && rect.height > 0;
       });
     if (menuBar) {
-      const buttons = Array.from(menuBar.querySelectorAll("button")).filter((button) => !button.closest(`#${codexPlusMenuId}`));
+      const buttons = Array.from(menuBar.querySelectorAll("button")).filter((button) => !button.closest(`#${codexElvesMenuId}`));
       if (buttons.length && buttons.every(isIconOnlyButton)) return null;
       const openLocationButton = buttons.find((button) => /^(打开位置|Open location)$/i.test(button.getAttribute("aria-label") || ""));
       const openLocationGroup = openLocationButton?.closest?.(".inline-flex.self-start.items-stretch.overflow-hidden.rounded-lg");
@@ -2269,7 +2269,7 @@
     }
     const contextSurface = header?.querySelector(selectors.headerContextMenuSurface);
     const buttons = Array.from(contextSurface?.querySelectorAll?.("button") || [])
-      .filter((button) => !button.closest(`#${codexPlusMenuId}`) && button.getBoundingClientRect().width > 0 && button.getBoundingClientRect().height > 0);
+      .filter((button) => !button.closest(`#${codexElvesMenuId}`) && button.getBoundingClientRect().width > 0 && button.getBoundingClientRect().height > 0);
     if (buttons.length && buttons.every(isIconOnlyButton)) return null;
     const nativeButton = buttons.find((button) => !button.parentElement?.classList?.contains("inline-flex")) || buttons[0];
     const parent = nativeButton?.parentElement;
@@ -2284,18 +2284,18 @@
     return { parent, before: nativeButton, nativeButtonClass: nativeButton.className || "" };
   }
 
-  function removeDuplicateCodexPlusMenus(keep) {
-    document.querySelectorAll(`#${codexPlusMenuId}, [data-codex-plus-menu="true"]`).forEach((node) => {
+  function removeDuplicateCodexElvesMenus(keep) {
+    document.querySelectorAll(`#${codexElvesMenuId}, [data-codex-elves-menu="true"]`).forEach((node) => {
       if (node !== keep) node.remove();
     });
     Array.from(document.querySelectorAll("button")).forEach((button) => {
-      if ((button.textContent || "").trim() === `Codex++ ${codexPlusVersion}` && !button.closest(`#${codexPlusMenuId}`)) {
+      if ((button.textContent || "").trim() === `CodexElves ${codexElvesVersion}` && !button.closest(`#${codexElvesMenuId}`)) {
         button.remove();
       }
     });
   }
 
-  function normalizeCodexPlusTriggerClassName(className) {
+  function normalizeCodexElvesTriggerClassName(className) {
     const classes = String(className || "").split(/\s+/).filter(Boolean);
     const incompatibleNativeGroupClasses = new Set(["gap-0", "rounded-l-none", "border-l-0", "pl-0.5", "pr-1.5"]);
     const hasIncompatibleNativeGroupClass = classes.some((name) => incompatibleNativeGroupClasses.has(name));
@@ -2308,22 +2308,22 @@
     return normalized.join(" ");
   }
 
-  function configureCodexPlusTrigger(menu, trigger, nativeButtonClass) {
+  function configureCodexElvesTrigger(menu, trigger, nativeButtonClass) {
     if (!trigger) return;
-    if (nativeButtonClass) trigger.className = normalizeCodexPlusTriggerClassName(nativeButtonClass);
-    if (!trigger.querySelector(".codex-plus-backend-indicator")) {
+    if (nativeButtonClass) trigger.className = normalizeCodexElvesTriggerClassName(nativeButtonClass);
+    if (!trigger.querySelector(".codex-elves-backend-indicator")) {
       const indicator = document.createElement("span");
-      indicator.className = "codex-plus-backend-indicator";
+      indicator.className = "codex-elves-backend-indicator";
       indicator.dataset.codexBackendIndicator = "true";
-      indicator.dataset.status = codexPlusBackendStatus.status || "checking";
+      indicator.dataset.status = codexElvesBackendStatus.status || "checking";
       trigger.prepend(indicator);
     }
-    if (trigger.dataset.codexPlusTriggerInstalled === "5") return;
-    trigger.dataset.codexPlusTriggerInstalled = "5";
+    if (trigger.dataset.codexElvesTriggerInstalled === "5") return;
+    trigger.dataset.codexElvesTriggerInstalled = "5";
     trigger.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      openCodexPlusModal();
+      openCodexElvesModal();
     }, true);
   }
 
@@ -2348,7 +2348,7 @@
   }
 
   function isHeaderToolbarButton(button, header, rect) {
-    if (!button || button.closest?.(`#${codexPlusMenuId}`)) return false;
+    if (!button || button.closest?.(`#${codexElvesMenuId}`)) return false;
     if (!(rect.width > 0 && rect.height > 0 && rect.left > window.innerWidth / 2)) return false;
     const buttonCluster = button.closest(".ms-auto.flex.shrink-0.items-center");
     if (buttonCluster && header?.contains(buttonCluster)) return true;
@@ -2357,8 +2357,8 @@
     return !!button.closest?.('[class*="ms-auto"][class*="shrink-0"][class*="items-center"]');
   }
 
-  function updateFloatingCodexPlusMenuPosition(menu) {
-    if (!menu?.classList?.contains(codexPlusMenuFloatingClass)) return;
+  function updateFloatingCodexElvesMenuPosition(menu) {
+    if (!menu?.classList?.contains(codexElvesMenuFloatingClass)) return;
     const header = document.querySelector(selectors.appHeader) || document.querySelector("header");
     if (!header) return;
     const toolbarButtons = Array.from(header.querySelectorAll("button"))
@@ -2370,70 +2370,70 @@
       const measuredGap = toolbarButtons[1] ? toolbarButtons[1].rect.left - toolbarButtons[0].rect.right : 0;
       const styles = anchor.button.parentElement ? getComputedStyle(anchor.button.parentElement) : null;
       const gap = Math.max(numericCssValue(styles?.columnGap || styles?.gap), measuredGap, 0);
-      setCssPropIfChanged(menu, "--codex-plus-menu-top", `${anchor.rect.top}px`);
-      setCssPropIfChanged(menu, "--codex-plus-menu-height", `${anchor.rect.height}px`);
-      setCssPropIfChanged(menu, "--codex-plus-menu-right", `${Math.max(0, window.innerWidth - anchor.rect.left + gap)}px`);
+      setCssPropIfChanged(menu, "--codex-elves-menu-top", `${anchor.rect.top}px`);
+      setCssPropIfChanged(menu, "--codex-elves-menu-height", `${anchor.rect.height}px`);
+      setCssPropIfChanged(menu, "--codex-elves-menu-right", `${Math.max(0, window.innerWidth - anchor.rect.left + gap)}px`);
       return;
     }
 
     const headerRect = header.getBoundingClientRect();
     if (headerRect.height) {
-      setCssPropIfChanged(menu, "--codex-plus-menu-top", `${headerRect.top}px`);
-      setCssPropIfChanged(menu, "--codex-plus-menu-height", `${headerRect.height}px`);
+      setCssPropIfChanged(menu, "--codex-elves-menu-top", `${headerRect.top}px`);
+      setCssPropIfChanged(menu, "--codex-elves-menu-height", `${headerRect.height}px`);
     }
-    menu.style.removeProperty("--codex-plus-menu-right");
+    menu.style.removeProperty("--codex-elves-menu-right");
   }
 
-  function installCodexPlusMenu() {
-    const existing = document.getElementById(codexPlusMenuId);
-    removeDuplicateCodexPlusMenus(existing);
+  function installCodexElvesMenu() {
+    const existing = document.getElementById(codexElvesMenuId);
+    removeDuplicateCodexElvesMenus(existing);
     let insertionPoint = findNativeMenuInsertionPoint();
-    if (existing && existing.dataset.codexPlusMenuVersion !== "6") {
+    if (existing && existing.dataset.codexElvesMenuVersion !== "6") {
       existing.remove();
       insertionPoint = findNativeMenuInsertionPoint();
     } else if (existing && insertionPoint && existing.parentElement === insertionPoint.parent) {
-      configureCodexPlusTrigger(existing, existing.querySelector("button"), insertionPoint.nativeButtonClass);
+      configureCodexElvesTrigger(existing, existing.querySelector("button"), insertionPoint.nativeButtonClass);
       const safeBefore = insertionPoint.before?.parentElement === insertionPoint.parent ? insertionPoint.before : null;
       if (existing.nextSibling !== safeBefore) insertionPoint.parent.insertBefore(existing, safeBefore);
-      removeDuplicateCodexPlusMenus(existing);
+      removeDuplicateCodexElvesMenus(existing);
       return;
     } else if (existing && insertionPoint) {
-      configureCodexPlusTrigger(existing, existing.querySelector("button"), insertionPoint.nativeButtonClass);
+      configureCodexElvesTrigger(existing, existing.querySelector("button"), insertionPoint.nativeButtonClass);
       existing.className = "";
       const safeBefore = insertionPoint.before?.parentElement === insertionPoint.parent ? insertionPoint.before : null;
       insertionPoint.parent.insertBefore(existing, safeBefore);
-      removeDuplicateCodexPlusMenus(existing);
+      removeDuplicateCodexElvesMenus(existing);
       return;
     } else if (existing) {
-      configureCodexPlusTrigger(existing, existing.querySelector("button"), headerIconTextButtonClass);
-      existing.className = codexPlusMenuFloatingClass;
+      configureCodexElvesTrigger(existing, existing.querySelector("button"), headerIconTextButtonClass);
+      existing.className = codexElvesMenuFloatingClass;
       document.documentElement.appendChild(existing);
-      updateFloatingCodexPlusMenuPosition(existing);
-      removeDuplicateCodexPlusMenus(existing);
+      updateFloatingCodexElvesMenuPosition(existing);
+      removeDuplicateCodexElvesMenus(existing);
       return;
     }
     const menu = document.createElement("div");
-    menu.id = codexPlusMenuId;
-    menu.dataset.codexPlusMenu = "true";
-    menu.dataset.codexPlusMenuVersion = "6";
+    menu.id = codexElvesMenuId;
+    menu.dataset.codexElvesMenu = "true";
+    menu.dataset.codexElvesMenuVersion = "6";
     const trigger = document.createElement("button");
     trigger.type = "button";
-    const indicator = ensureCodexPlusTriggerIndicator(trigger);
-    if (indicator) indicator.dataset.status = codexPlusBackendStatus.status || "checking";
-    setCodexPlusTriggerLabel(trigger);
+    const indicator = ensureCodexElvesTriggerIndicator(trigger);
+    if (indicator) indicator.dataset.status = codexElvesBackendStatus.status || "checking";
+    setCodexElvesTriggerLabel(trigger);
     const nativeButtonClass = insertionPoint?.nativeButtonClass || headerIconTextButtonClass;
-    configureCodexPlusTrigger(menu, trigger, nativeButtonClass);
+    configureCodexElvesTrigger(menu, trigger, nativeButtonClass);
     menu.appendChild(trigger);
     if (insertionPoint) {
       menu.className = "";
       const safeBefore = insertionPoint.before?.parentElement === insertionPoint.parent ? insertionPoint.before : null;
       insertionPoint.parent.insertBefore(menu, safeBefore);
     } else {
-      menu.className = codexPlusMenuFloatingClass;
+      menu.className = codexElvesMenuFloatingClass;
       document.documentElement.appendChild(menu);
-      updateFloatingCodexPlusMenuPosition(menu);
+      updateFloatingCodexElvesMenuPosition(menu);
     }
-    removeDuplicateCodexPlusMenus(menu);
+    removeDuplicateCodexElvesMenus(menu);
   }
 
   function patchPluginMarketplaceRequestParams(method, params) {
@@ -2445,7 +2445,7 @@
     const next = { ...params };
     const hadMarketplaceKinds = Object.prototype.hasOwnProperty.call(next, "marketplaceKinds");
     if (hadMarketplaceKinds) delete next.marketplaceKinds;
-    sendCodexPlusDiagnostic("plugin_marketplace_request_expanded", {
+    sendCodexElvesDiagnostic("plugin_marketplace_request_expanded", {
       hadMarketplaceKinds,
       cwdCount: Array.isArray(next.cwds) ? next.cwds.length : 0,
     });
@@ -2454,20 +2454,20 @@
 
   function pluginMarketplaceAliasForName(name) {
     if (name === "openai-bundled") return "";
-    if (name === "openai-curated") return "codex-plus-openai-curated";
-    if (name === "openai-primary-runtime") return "codex-plus-openai-primary-runtime";
+    if (name === "openai-curated") return "codex-elves-openai-curated";
+    if (name === "openai-primary-runtime") return "codex-elves-openai-primary-runtime";
     return "";
   }
 
   function displayNameForPluginMarketplaceName(name, fallback) {
-    if (name === "openai-bundled" || name === "codex-plus-openai-bundled") return "OpenAI插件1(Codex++)";
-    if (name === "openai-curated" || name === "codex-plus-openai-curated") return "OpenAI插件2(Codex++)";
-    if (name === "openai-primary-runtime" || name === "codex-plus-openai-primary-runtime") return "OpenAI插件3(Codex++)";
+    if (name === "openai-bundled" || name === "codex-elves-openai-bundled") return "OpenAI插件1(CodexElves)";
+    if (name === "openai-curated" || name === "codex-elves-openai-curated") return "OpenAI插件2(CodexElves)";
+    if (name === "openai-primary-runtime" || name === "codex-elves-openai-primary-runtime") return "OpenAI插件3(CodexElves)";
     return fallback;
   }
 
   function patchPluginMarketplaceObject(marketplace) {
-    if (!marketplace || typeof marketplace !== "object" || marketplace.__codexPlusMarketplaceUnlockPatched) return false;
+    if (!marketplace || typeof marketplace !== "object" || marketplace.__codexElvesMarketplaceUnlockPatched) return false;
     const alias = pluginMarketplaceAliasForName(marketplace.name);
     if (alias) marketplace.name = alias;
     const displayName = displayNameForPluginMarketplaceName(marketplace.name, marketplace.displayName || marketplace.title || marketplace.label || marketplace.name);
@@ -2486,14 +2486,14 @@
     } else {
       marketplace.interface = { displayName, name: displayName, title: displayName, label: displayName };
     }
-    marketplace.__codexPlusMarketplaceUnlockPatched = true;
+    marketplace.__codexElvesMarketplaceUnlockPatched = true;
     return true;
   }
 
   function restorePluginMarketplaceName(name) {
-    if (name === "codex-plus-openai-bundled") return "openai-bundled";
-    if (name === "codex-plus-openai-curated") return "openai-curated";
-    if (name === "codex-plus-openai-primary-runtime") return "openai-primary-runtime";
+    if (name === "codex-elves-openai-bundled") return "openai-bundled";
+    if (name === "codex-elves-openai-curated") return "openai-curated";
+    if (name === "codex-elves-openai-primary-runtime") return "openai-primary-runtime";
     return name;
   }
 
@@ -2531,7 +2531,7 @@
   function installPluginBuildFlavorFilterPatch() {
     if (window.__codexPluginBuildFlavorFilterPatch === codexPluginMarketplaceUnlockVersion) return;
     if (pluginPatchDisabledInRelayMode()) return;
-    if (!codexPlusSettings().pluginMarketplaceUnlock) return;
+    if (!codexElvesSettings().pluginMarketplaceUnlock) return;
     const originalFilter = Array.prototype.__codexPluginBuildFlavorOriginalFilter || Array.prototype.filter;
     if (!Array.prototype.__codexPluginBuildFlavorOriginalFilter) {
       Object.defineProperty(Array.prototype, "__codexPluginBuildFlavorOriginalFilter", {
@@ -2546,11 +2546,11 @@
     }
     const patchedFilter = function codexPluginBuildFlavorFilterPatch(callback, thisArg) {
       if (isCodexPluginBuildFlavorFilter(callback, this)) {
-        sendCodexPlusDiagnostic("plugin_build_flavor_filter_bypassed", { pluginCount: this.length });
+        sendCodexElvesDiagnostic("plugin_build_flavor_filter_bypassed", { pluginCount: this.length });
         return Array.from(this);
       }
       if (isCodexPluginMarketplaceHiddenFilter(callback, this)) {
-        sendCodexPlusDiagnostic("plugin_marketplace_hidden_filter_bypassed", { marketplaceCount: this.length });
+        sendCodexElvesDiagnostic("plugin_marketplace_hidden_filter_bypassed", { marketplaceCount: this.length });
         return Array.from(this);
       }
       return originalFilter.call(this, callback, thisArg);
@@ -2558,7 +2558,7 @@
     patchedFilter.__codexPluginBuildFlavorPatched = codexPluginMarketplaceUnlockVersion;
     Array.prototype.filter = patchedFilter;
     window.__codexPluginBuildFlavorFilterPatch = codexPluginMarketplaceUnlockVersion;
-    sendCodexPlusDiagnostic("plugin_build_flavor_filter_patch_installed", {});
+    sendCodexElvesDiagnostic("plugin_build_flavor_filter_patch_installed", {});
   }
 
   function restorePluginMarketplaceRequestParams(params, method = "") {
@@ -2598,7 +2598,7 @@
           }
           if (patchPluginMarketplaceObject(marketplace)) patchedCount += 1;
         });
-        sendCodexPlusDiagnostic("plugin_marketplace_response_debug", {
+        sendCodexElvesDiagnostic("plugin_marketplace_response_debug", {
           marketplaces: result.marketplaces.map((marketplace) => ({
             name: marketplace?.name || "",
             path: marketplace?.path || null,
@@ -2610,10 +2610,10 @@
         });
       }
       if (patchedCount > 0) {
-        sendCodexPlusDiagnostic("plugin_marketplace_response_expanded", { patchedCount });
+        sendCodexElvesDiagnostic("plugin_marketplace_response_expanded", { patchedCount });
       }
     } catch (error) {
-      sendCodexPlusDiagnostic("plugin_marketplace_response_patch_failed", {
+      sendCodexElvesDiagnostic("plugin_marketplace_response_patch_failed", {
         errorName: error?.name || "",
         errorMessage: error?.message || String(error),
       });
@@ -2630,7 +2630,7 @@
       const requestMethod = appServerModelRequestMethod(String(method || ""), params);
       const requestParams = patchPluginMarketplaceRequestParams(requestMethod, restorePluginMarketplaceRequestParams(params, requestMethod));
       if (requestMethod === "install-plugin") {
-        sendCodexPlusDiagnostic("plugin_install_request_debug", {
+        sendCodexElvesDiagnostic("plugin_install_request_debug", {
           method: String(method || ""),
           requestMethod,
           originalMarketplacePath: params?.marketplacePath || null,
@@ -2646,7 +2646,7 @@
         return patchPluginMarketplaceResult(requestMethod, result);
       } catch (error) {
         if (requestMethod === "install-plugin") {
-          sendCodexPlusDiagnostic("plugin_install_request_failed", {
+          sendCodexElvesDiagnostic("plugin_install_request_failed", {
             method: String(method || ""),
             requestMethod,
             requestMarketplacePath: requestParams?.marketplacePath || null,
@@ -2666,7 +2666,7 @@
   function installPluginMarketplaceRequestPatch() {
     if (window.__codexPluginMarketplaceUnlockInstalled === codexPluginMarketplaceUnlockVersion) return;
     if (pluginPatchDisabledInRelayMode()) return;
-    if (!codexPlusSettings().pluginMarketplaceUnlock) return;
+    if (!codexElvesSettings().pluginMarketplaceUnlock) return;
     const patch = async () => {
       try {
         const module = await loadCodexAppModule("app-server-manager-signals-");
@@ -2683,18 +2683,18 @@
         }
         if (patchedCount > 0) {
           window.__codexPluginMarketplaceUnlockInstalled = codexPluginMarketplaceUnlockVersion;
-          sendCodexPlusDiagnostic("plugin_marketplace_request_patch_installed", {
+          sendCodexElvesDiagnostic("plugin_marketplace_request_patch_installed", {
             candidateCount: candidates.length,
             patchedCount,
           });
         } else {
-          sendCodexPlusDiagnostic("plugin_marketplace_request_patch_not_found", {
+          sendCodexElvesDiagnostic("plugin_marketplace_request_patch_not_found", {
             exportCount: Object.keys(module || {}).length,
             candidateCount: candidates.length,
           });
         }
       } catch (error) {
-        sendCodexPlusDiagnostic("plugin_marketplace_request_patch_failed", {
+        sendCodexElvesDiagnostic("plugin_marketplace_request_patch_failed", {
           errorName: error?.name || "",
           errorMessage: error?.message || String(error),
         });
@@ -2752,7 +2752,7 @@
 
   function enablePluginEntry() {
     if (pluginPatchDisabledInRelayMode()) return;
-    if (!codexPlusSettings().pluginEntryUnlock) return;
+    if (!codexElvesSettings().pluginEntryUnlock) return;
     const pluginButton = pluginEntryButton();
     if (!pluginButton) return;
     const spoofed = spoofChatGPTAuthMethod(pluginButton);
@@ -2773,11 +2773,11 @@
         spoofChatGPTAuthMethod(pluginButton);
       }, true);
     }
-    sendCodexPlusDiagnostic("plugin_entry_unlock_applied", { spoofed });
+    sendCodexElvesDiagnostic("plugin_entry_unlock_applied", { spoofed });
   }
 
   function pluginPatchDisabledInRelayMode() {
-    return !codexPlusBackendSettingsLoaded || codexPlusBackendSettings.launchMode === "relay";
+    return !codexElvesBackendSettingsLoaded || codexElvesBackendSettings.launchMode === "relay";
   }
 
   function pluginInstallCandidates() {
@@ -2883,7 +2883,7 @@
 
   function unblockPluginInstallButtons() {
     if (pluginPatchDisabledInRelayMode()) return;
-    if (!codexPlusSettings().forcePluginInstall) return;
+    if (!codexElvesSettings().forcePluginInstall) return;
     pluginInstallCandidates().forEach((button) => {
       const text = installButtonLabel(button);
       if (!isInstallButtonLabel(text)) return;
@@ -2893,7 +2893,7 @@
   }
 
   function refreshForcePluginInstallUnlockLoop() {
-    const shouldRun = !pluginPatchDisabledInRelayMode() && codexPlusSettings().forcePluginInstall;
+    const shouldRun = !pluginPatchDisabledInRelayMode() && codexElvesSettings().forcePluginInstall;
     if (!shouldRun) {
       clearInterval(window.__codexForcePluginInstallRefreshTimer);
       window.__codexForcePluginInstallRefreshTimer = null;
@@ -2901,7 +2901,7 @@
     }
     if (window.__codexForcePluginInstallRefreshTimer) return;
     window.__codexForcePluginInstallRefreshTimer = setInterval(() => {
-      if (!codexPlusSettings().forcePluginInstall || pluginPatchDisabledInRelayMode()) {
+      if (!codexElvesSettings().forcePluginInstall || pluginPatchDisabledInRelayMode()) {
         clearInterval(window.__codexForcePluginInstallRefreshTimer);
         window.__codexForcePluginInstallRefreshTimer = null;
         return;
@@ -3073,7 +3073,7 @@
   }
 
   function refreshThreadIdBadges() {
-    if (!codexPlusSettings().threadIdBadge) {
+    if (!codexElvesSettings().threadIdBadge) {
       if (threadIdBadgeActive) {
         removeThreadIdBadges();
         threadIdBadgeActive = false;
@@ -3084,7 +3084,7 @@
     sessionRows().forEach(installThreadIdBadge);
   }
 
-  function codexPlusDiagnosticPayload(event, detail) {
+  function codexElvesDiagnosticPayload(event, detail) {
     return {
       event,
       detail: detail || {},
@@ -3096,11 +3096,11 @@
     };
   }
 
-  function sendCodexPlusDiagnostic(event, detail) {
-    const payload = codexPlusDiagnosticPayload(event, detail);
-    if (window.__CODEX_PLUS_TEST_SERVICE_TIER__) {
-      window.__codexPlusServiceTierTestDiagnostics = window.__codexPlusServiceTierTestDiagnostics || [];
-      window.__codexPlusServiceTierTestDiagnostics.push(payload);
+  function sendCodexElvesDiagnostic(event, detail) {
+    const payload = codexElvesDiagnosticPayload(event, detail);
+    if (window.__CODEX_ELVES_TEST_SERVICE_TIER__) {
+      window.__codexElvesServiceTierTestDiagnostics = window.__codexElvesServiceTierTestDiagnostics || [];
+      window.__codexElvesServiceTierTestDiagnostics.push(payload);
       return;
     }
     if (window.__codexSessionDeleteBridge) {
@@ -3121,9 +3121,9 @@
     }).catch(() => {});
   }
 
-  sendCodexPlusDiagnostic("script_loaded", {
-    version: codexPlusVersion,
-    build: codexPlusBuild,
+  sendCodexElvesDiagnostic("script_loaded", {
+    version: codexElvesVersion,
+    build: codexElvesBuild,
   });
 
   function locationThreadId() {
@@ -3342,7 +3342,7 @@
   function shouldBlockThreadScrollAutobottom(scroller, top) {
     const runtime = threadScrollRuntime();
     const lock = currentThreadScrollRestoreLock();
-    if (!lock || !codexPlusSettings().threadScrollRestore) return false;
+    if (!lock || !codexElvesSettings().threadScrollRestore) return false;
     const guardScroller = threadScrollGuardScroller(scroller);
     if (runtime.applyingRestore || !guardScroller) return false;
     const targetTop = threadScrollTargetTop(guardScroller, lock.targetTop);
@@ -3468,13 +3468,13 @@
     }
     runtime.activeScroller = scroller;
     runtime.scrollListenerUsesWindow = nextUsesWindow;
-    if (!scroller || !codexPlusSettings().threadScrollRestore) return;
+    if (!scroller || !codexElvesSettings().threadScrollRestore) return;
     const target = nextUsesWindow ? window : scroller;
     target.addEventListener("scroll", runtime.scrollListener, true);
   }
 
   function saveThreadScrollPositionNow(sessionId = threadScrollRuntime().activeSessionId, scroller = threadScrollRuntime().activeScroller) {
-    if (!codexPlusSettings().threadScrollRestore) return;
+    if (!codexElvesSettings().threadScrollRestore) return;
     const runtime = threadScrollRuntime();
     const key = validThreadScrollSessionKey(sessionId);
     if (!key || !scroller) return;
@@ -3495,7 +3495,7 @@
   }
 
   function scheduleThreadScrollSave() {
-    if (!codexPlusSettings().threadScrollRestore || window.__codexThreadScrollSaveTimer) return;
+    if (!codexElvesSettings().threadScrollRestore || window.__codexThreadScrollSaveTimer) return;
     window.__codexThreadScrollSaveTimer = setTimeout(() => {
       window.__codexThreadScrollSaveTimer = null;
       saveThreadScrollPositionNow();
@@ -3505,7 +3505,7 @@
   function restoreThreadScrollPosition(sessionId) {
     const runtime = threadScrollRuntime();
     const key = validThreadScrollSessionKey(sessionId);
-    if (!codexPlusSettings().threadScrollRestore || !key || runtime.activeSessionId !== key || userScrollIntentActive() || threadScrollRestoreCancelledForSession(key)) return;
+    if (!codexElvesSettings().threadScrollRestore || !key || runtime.activeSessionId !== key || userScrollIntentActive() || threadScrollRestoreCancelledForSession(key)) return;
     const lock = activeThreadScrollRestoreLock(key);
     const entry = lock || readThreadScrollEntries()[key];
     if (!entry) return;
@@ -3532,7 +3532,7 @@
   function scheduleThreadScrollRestore(sessionId) {
     clearThreadScrollRestoreTimers();
     const key = validThreadScrollSessionKey(sessionId);
-    if (!codexPlusSettings().threadScrollRestore || !key || userScrollIntentActive() || threadScrollRestoreCancelledForSession(key)) return;
+    if (!codexElvesSettings().threadScrollRestore || !key || userScrollIntentActive() || threadScrollRestoreCancelledForSession(key)) return;
     const entry = readThreadScrollEntries()[key];
     if (!entry) {
       clearThreadScrollRestoreLock();
@@ -3552,7 +3552,7 @@
     const currentRef = currentSessionRef();
     const nextSessionId = validThreadScrollSessionKey(currentRef.session_id);
     if (!nextSessionId) return;
-    if (!codexPlusSettings().threadScrollRestore) {
+    if (!codexElvesSettings().threadScrollRestore) {
       bindThreadScrollListener(null);
       clearThreadScrollRestoreTimers();
       clearThreadScrollRestoreLock();
@@ -3591,7 +3591,7 @@
   }
 
   function captureThreadScrollNavigation(targetSessionId) {
-    if (!codexPlusSettings().threadScrollRestore) return;
+    if (!codexElvesSettings().threadScrollRestore) return;
     const runtime = threadScrollRuntime();
     const targetKey = validThreadScrollSessionKey(targetSessionId);
     const sessionChanged = !!targetKey && targetKey !== runtime.activeSessionId;
@@ -3623,7 +3623,7 @@
   }
 
   function markThreadScrollUserIntent(event) {
-    if (!codexPlusSettings().threadScrollRestore || !eventTargetsActiveThreadScroller(event)) return;
+    if (!codexElvesSettings().threadScrollRestore || !eventTargetsActiveThreadScroller(event)) return;
     cancelThreadScrollRestoreForUserIntent();
   }
 
@@ -3674,19 +3674,19 @@
     document.removeEventListener("click", window.__codexThreadScrollClickNavigationHandler, true);
     document.removeEventListener("keydown", window.__codexThreadScrollKeyboardHandler, true);
     const navigationHandler = (event) => {
-      if (!codexPlusSettings().threadScrollRestore) return;
+      if (!codexElvesSettings().threadScrollRestore) return;
       const row = event.target?.closest?.(selectors.sidebarThread);
       if (!row) return;
       window.__codexThreadScrollHandlers?.captureNavigation?.(sessionRefFromRow(row).session_id);
     };
     const clickHandler = (event) => {
-      if (!codexPlusSettings().threadScrollRestore) return;
+      if (!codexElvesSettings().threadScrollRestore) return;
       const row = event.target?.closest?.(selectors.sidebarThread);
       if (!row) return;
       window.__codexThreadScrollHandlers?.captureNavigation?.(sessionRefFromRow(row).session_id);
     };
     const keyboardHandler = (event) => {
-      if (!codexPlusSettings().threadScrollRestore) return;
+      if (!codexElvesSettings().threadScrollRestore) return;
       if (event.key !== "Enter" && event.key !== " ") return;
       const row = event.target?.closest?.(selectors.sidebarThread);
       if (!row) return;
@@ -3759,7 +3759,7 @@
           return { status: "failed", message: "未连接" };
         }
       }
-      sendCodexPlusDiagnostic("bridge_missing_for_route", { path });
+      sendCodexElvesDiagnostic("bridge_missing_for_route", { path });
       return { status: "failed", message: "桥接不可用，请重启启动器" };
     }
     function bridgeWithBackendTimeout(path, payload) {
@@ -3784,17 +3784,17 @@
       if (path === "/backend/status" || path === "/backend/repair") {
         const result = await bridgeWithBackendTimeout(path, payload);
         if (result?.status === "ok") return result;
-        if (result?.timeout) sendCodexPlusDiagnostic("backend_bridge_timeout", { path });
+        if (result?.timeout) sendCodexElvesDiagnostic("backend_bridge_timeout", { path });
         const fallback = await fetchBackendStatusFromHelper(path, payload);
         if (fallback?.status === "ok") {
-          sendCodexPlusDiagnostic("backend_status_bridge_failed_http_fallback_ok", {
+          sendCodexElvesDiagnostic("backend_status_bridge_failed_http_fallback_ok", {
             path,
             httpStatus: 200,
             responseStatus: fallback.status || "",
           });
           return fallback;
         }
-        sendCodexPlusDiagnostic("backend_status_bridge_and_http_failed", {
+        sendCodexElvesDiagnostic("backend_status_bridge_and_http_failed", {
           path,
           errorName: "",
           errorMessage: "",
@@ -3803,7 +3803,7 @@
       }
       return await window.__codexSessionDeleteBridge(path, payload);
     } catch (error) {
-      sendCodexPlusDiagnostic("bridge_call_failed", {
+      sendCodexElvesDiagnostic("bridge_call_failed", {
         path,
         errorName: error?.name || "",
         errorMessage: error?.message || String(error),
@@ -3811,14 +3811,14 @@
       if (path === "/backend/status" || path === "/backend/repair") {
         const fallback = await fetchBackendStatusFromHelper(path, payload);
         if (fallback?.status === "ok") {
-          sendCodexPlusDiagnostic("backend_status_bridge_failed_http_fallback_ok", {
+          sendCodexElvesDiagnostic("backend_status_bridge_failed_http_fallback_ok", {
             path,
             httpStatus: 200,
             responseStatus: fallback.status || "",
           });
           return fallback;
         }
-        sendCodexPlusDiagnostic("backend_status_bridge_and_http_failed", {
+        sendCodexElvesDiagnostic("backend_status_bridge_and_http_failed", {
           path,
           errorName: error?.name || "",
           errorMessage: error?.message || String(error),
@@ -3911,13 +3911,13 @@
   let codexModelCatalogPromise = null;
   let codexModelWhitelistRefreshTimer = 0;
   let codexModelWhitelistRefreshUntil = 0;
-  const codexPlusModelListRequestIds = new Set();
+  const codexElvesModelListRequestIds = new Set();
 
-  if (window.__CODEX_PLUS_TEST_SERVICE_TIER__) {
-    window.__codexPlusServiceTierTest = {
+  if (window.__CODEX_ELVES_TEST_SERVICE_TIER__) {
+    window.__codexElvesServiceTierTest = {
       applyServiceTierOverride: (method, params, threadIdHint = "") => applyCodexServiceTierRequestOverride(method, params, threadIdHint),
       requestOverride: (message) => codexServiceTierRequestOverride(message),
-      diagnostics: () => [...(window.__codexPlusServiceTierTestDiagnostics || [])],
+      diagnostics: () => [...(window.__codexElvesServiceTierTestDiagnostics || [])],
       setModelCatalog: (catalog = {}) => {
         codexModelCatalog = {
           status: "ok",
@@ -3949,11 +3949,11 @@
     return;
   }
 
-  function codexPlusModelUnlockEnabled() {
-    return !!codexPlusSettings().modelWhitelistUnlock;
+  function codexElvesModelUnlockEnabled() {
+    return !!codexElvesSettings().modelWhitelistUnlock;
   }
 
-  function codexPlusModelNames() {
+  function codexElvesModelNames() {
     return uniqueValues([
       codexModelCatalog.default_model,
       codexModelCatalog.model,
@@ -3968,7 +3968,7 @@
       .then((result) => {
         codexModelCatalog = result && typeof result === "object" ? result : { status: "failed", model: "", default_model: "", model_provider: "", provider_name: "", models: [], sources: [], responses_api: { status: "unknown", message: "" } };
         codexModelCatalogLoadedAt = Date.now();
-        renderCodexPlusMenu();
+        renderCodexElvesMenu();
         scheduleCodexModelWhitelistRefresh();
         return codexModelCatalog;
       })
@@ -3987,7 +3987,7 @@
     return ["minimal", "low", "medium", "high", "xhigh"].map((reasoningEffort) => ({ reasoningEffort, description: `${reasoningEffort} effort` }));
   }
 
-  function codexPlusModelDescriptor(modelName) {
+  function codexElvesModelDescriptor(modelName) {
     return {
       model: modelName,
       id: modelName,
@@ -4014,7 +4014,7 @@
 
   function patchModelNameArray(models) {
     if (!stringArrayLooksPatchable(models)) return false;
-    const customModels = codexPlusModelNames();
+    const customModels = codexElvesModelNames();
     if (!customModels.length) return false;
     let changed = false;
     customModels.forEach((modelName) => {
@@ -4028,7 +4028,7 @@
 
   function patchModelArray(models, allowEmpty = false) {
     if (!modelArrayLooksPatchable(models, allowEmpty)) return false;
-    const customModels = codexPlusModelNames();
+    const customModels = codexElvesModelNames();
     if (!customModels.length) return false;
     let changed = false;
     const existing = new Map(models.map((item) => [item.model, item]));
@@ -4040,7 +4040,7 @@
     });
     customModels.forEach((modelName) => {
       if (!existing.has(modelName)) {
-        models.push(codexPlusModelDescriptor(modelName));
+        models.push(codexElvesModelDescriptor(modelName));
         changed = true;
       }
     });
@@ -4059,7 +4059,7 @@
     if (patchModelArray(value.result?.models)) changed = true;
     if (patchModelArray(value.message?.result?.data)) changed = true;
     if (patchModelArray(value.message?.result?.models)) changed = true;
-    const names = codexPlusModelNames();
+    const names = codexElvesModelNames();
     if (value.availableModels instanceof Set) {
       names.forEach((name) => {
         if (!value.availableModels.has(name)) {
@@ -4103,7 +4103,7 @@
       if (value.hidden_models.length !== before) changed = true;
     }
     if (value.defaultModel == null && names.length > 0) {
-      value.defaultModel = codexPlusModelDescriptor(names[0]);
+      value.defaultModel = codexElvesModelDescriptor(names[0]);
       changed = true;
     } else if (typeof value.defaultModel === "string" && names.includes(value.defaultModel) && value.model == null) {
       value.model = value.defaultModel;
@@ -4113,34 +4113,34 @@
   }
 
   async function patchModelJsonResponse(payload) {
-    if (!codexPlusModelUnlockEnabled()) return payload;
-    if (!codexPlusModelNames().length) await loadCodexModelCatalog();
+    if (!codexElvesModelUnlockEnabled()) return payload;
+    if (!codexElvesModelNames().length) await loadCodexModelCatalog();
     if (!payload || typeof payload !== "object") return payload;
     try {
       patchModelContainer(payload);
       patchObjectGraphForModels(payload, new WeakSet(), 0);
     } catch (error) {
-      window.__codexPlusModelPatchFailures = window.__codexPlusModelPatchFailures || [];
-      window.__codexPlusModelPatchFailures.push(String(error?.stack || error));
+      window.__codexElvesModelPatchFailures = window.__codexElvesModelPatchFailures || [];
+      window.__codexElvesModelPatchFailures.push(String(error?.stack || error));
     }
     return payload;
   }
 
   function installModelJsonResponsePatch() {
-    if (window.__codexPlusModelJsonResponsePatchInstalled === "1") return;
-    window.__codexPlusModelJsonResponsePatchInstalled = "1";
-    window.__codexPlusModelJsonResponseOriginals = window.__codexPlusModelJsonResponseOriginals || {};
-    const originals = window.__codexPlusModelJsonResponseOriginals;
+    if (window.__codexElvesModelJsonResponsePatchInstalled === "1") return;
+    window.__codexElvesModelJsonResponsePatchInstalled = "1";
+    window.__codexElvesModelJsonResponseOriginals = window.__codexElvesModelJsonResponseOriginals || {};
+    const originals = window.__codexElvesModelJsonResponseOriginals;
     originals.responseJson = originals.responseJson || Response.prototype.json;
     if (typeof originals.responseJson !== "function") return;
-    Response.prototype.json = async function codexPlusPatchedResponseJson(...args) {
+    Response.prototype.json = async function codexElvesPatchedResponseJson(...args) {
       const payload = await originals.responseJson.apply(this, args);
       return await patchModelJsonResponse(payload);
     };
   }
 
   function patchStatsigModelDynamicConfig(config) {
-    const names = codexPlusModelNames();
+    const names = codexElvesModelNames();
     const value = config?.value;
     if (!names.length || !value || typeof value !== "object") return config;
     const availableModels = Array.isArray(value.available_models) ? [...value.available_models] : [];
@@ -4176,13 +4176,13 @@
   function patchStatsigModelWhitelist() {
     statsigClients().forEach((client) => {
       if (typeof client.getDynamicConfig !== "function") return;
-      if (!client.__codexPlusModelWhitelistPatched) {
+      if (!client.__codexElvesModelWhitelistPatched) {
         const originalGetDynamicConfig = client.getDynamicConfig.bind(client);
         client.getDynamicConfig = (name, options) => {
           const result = originalGetDynamicConfig(name, options);
           return patchStatsigModelDynamicConfig(result);
         };
-        client.__codexPlusModelWhitelistPatched = true;
+        client.__codexElvesModelWhitelistPatched = true;
       }
       try {
         patchStatsigModelDynamicConfig(client.getDynamicConfig("107580212", { disableExposureLog: true }));
@@ -4227,7 +4227,7 @@
   }
 
   function shouldScheduleReactModelStatePatch(mutations) {
-    if (!codexPlusModelUnlockEnabled() || !codexPlusModelNames().length) return false;
+    if (!codexElvesModelUnlockEnabled() || !codexElvesModelNames().length) return false;
     if (!mutations) return false;
     const selector = "[role='menu'], [role='dialog'], [role='listbox'], [data-radix-popper-content-wrapper]";
     return mutations.some((mutation) => [...mutation.addedNodes].some((node) => {
@@ -4237,12 +4237,12 @@
   }
 
   function schedulePatchReactModelState() {
-    if (window.__codexPlusReactModelStatePatchPending) return;
-    window.__codexPlusReactModelStatePatchPending = true;
-    clearTimeout(window.__codexPlusReactModelStatePatchTimer);
-    window.__codexPlusReactModelStatePatchTimer = setTimeout(() => {
-      window.__codexPlusReactModelStatePatchPending = false;
-      window.__codexPlusReactModelStatePatchTimer = null;
+    if (window.__codexElvesReactModelStatePatchPending) return;
+    window.__codexElvesReactModelStatePatchPending = true;
+    clearTimeout(window.__codexElvesReactModelStatePatchTimer);
+    window.__codexElvesReactModelStatePatchTimer = setTimeout(() => {
+      window.__codexElvesReactModelStatePatchPending = false;
+      window.__codexElvesReactModelStatePatchTimer = null;
       patchReactModelState();
     }, 120);
   }
@@ -4260,21 +4260,21 @@
   }
 
   function patchAppServerModelMessages() {
-    if (window.__codexPlusModelMessagePatchInstalled) return;
-    window.__codexPlusModelMessagePatchInstalled = true;
+    if (window.__codexElvesModelMessagePatchInstalled) return;
+    window.__codexElvesModelMessagePatchInstalled = true;
     const originalDispatchEvent = window.dispatchEvent;
-    window.dispatchEvent = function patchedCodexPlusDispatchEvent(event) {
+    window.dispatchEvent = function patchedCodexElvesDispatchEvent(event) {
       try {
         const detail = event?.detail;
         const request = detail?.request;
         if (event?.type === "codex-message-from-view" && detail?.type === "mcp-request" && request?.method === "model/list") {
           request.params = { ...(request.params || {}), includeHidden: true };
-          if (request.id != null) codexPlusModelListRequestIds.add(String(request.id));
+          if (request.id != null) codexElvesModelListRequestIds.add(String(request.id));
         }
         if (event?.type === "message") patchMcpModelResponseData(event.data);
       } catch (error) {
-        window.__codexPlusModelPatchFailures = window.__codexPlusModelPatchFailures || [];
-        window.__codexPlusModelPatchFailures.push(String(error?.stack || error));
+        window.__codexElvesModelPatchFailures = window.__codexElvesModelPatchFailures || [];
+        window.__codexElvesModelPatchFailures.push(String(error?.stack || error));
       }
       return originalDispatchEvent.call(this, event);
     };
@@ -4283,8 +4283,8 @@
       try {
         patchMcpModelResponseData(event?.data);
       } catch (error) {
-        window.__codexPlusModelPatchFailures = window.__codexPlusModelPatchFailures || [];
-        window.__codexPlusModelPatchFailures.push(String(error?.stack || error));
+        window.__codexElvesModelPatchFailures = window.__codexElvesModelPatchFailures || [];
+        window.__codexElvesModelPatchFailures.push(String(error?.stack || error));
       }
     }, true);
   }
@@ -4293,8 +4293,8 @@
     if (data?.type !== "mcp-response") return false;
     const message = data.message || data.response;
     const requestId = message?.id != null ? String(message.id) : "";
-    if (codexPlusModelListRequestIds.size > 0 && !codexPlusModelListRequestIds.has(requestId)) return false;
-    codexPlusModelListRequestIds.delete(requestId);
+    if (codexElvesModelListRequestIds.size > 0 && !codexElvesModelListRequestIds.has(requestId)) return false;
+    codexElvesModelListRequestIds.delete(requestId);
     return patchModelContainer(data) || patchModelContainer(message) || patchModelContainer(message?.result) || patchModelContainer(message?.result?.data);
   }
 
@@ -4311,34 +4311,34 @@
       if (Array.isArray(result?.models)) patchModelArray(result.models, true);
       patchModelContainer(result);
       patchObjectGraphForModels(result, new WeakSet(), 0);
-      sendCodexPlusDiagnostic("model_app_server_result_patched", {
+      sendCodexElvesDiagnostic("model_app_server_result_patched", {
         method,
         modelCount: Array.isArray(result?.data) ? result.data.length : Array.isArray(result?.models) ? result.models.length : Array.isArray(result) ? result.length : null,
       });
     } catch (error) {
-      window.__codexPlusModelPatchFailures = window.__codexPlusModelPatchFailures || [];
-      window.__codexPlusModelPatchFailures.push(String(error?.stack || error));
+      window.__codexElvesModelPatchFailures = window.__codexElvesModelPatchFailures || [];
+      window.__codexElvesModelPatchFailures.push(String(error?.stack || error));
     }
     return result;
   }
 
   function patchAppServerModelRequestClient(client) {
     if (!client || typeof client.sendRequest !== "function") return false;
-    if (client.__codexPlusModelRequestPatch === codexAppServerModelRequestPatchVersion) return true;
-    const originalSendRequest = client.__codexPlusModelOriginalSendRequest || client.sendRequest.bind(client);
-    client.__codexPlusModelOriginalSendRequest = originalSendRequest;
-    client.sendRequest = async function codexPlusModelPatchedSendRequest(method, params, options) {
+    if (client.__codexElvesModelRequestPatch === codexAppServerModelRequestPatchVersion) return true;
+    const originalSendRequest = client.__codexElvesModelOriginalSendRequest || client.sendRequest.bind(client);
+    client.__codexElvesModelOriginalSendRequest = originalSendRequest;
+    client.sendRequest = async function codexElvesModelPatchedSendRequest(method, params, options) {
       const result = await originalSendRequest(method, params, options);
-      if (!codexPlusModelUnlockEnabled()) return result;
-      if (!codexPlusModelNames().length) await loadCodexModelCatalog();
+      if (!codexElvesModelUnlockEnabled()) return result;
+      if (!codexElvesModelNames().length) await loadCodexModelCatalog();
       return patchAppServerModelResult(appServerModelRequestMethod(String(method || ""), params), result);
     };
-    client.__codexPlusModelRequestPatch = codexAppServerModelRequestPatchVersion;
+    client.__codexElvesModelRequestPatch = codexAppServerModelRequestPatchVersion;
     return true;
   }
 
   function installAppServerModelRequestPatch() {
-    if (window.__codexPlusAppServerModelRequestPatchInstalled === codexAppServerModelRequestPatchVersion) return;
+    if (window.__codexElvesAppServerModelRequestPatchInstalled === codexAppServerModelRequestPatchVersion) return;
     const patch = async () => {
       try {
         const module = await loadCodexAppModule("app-server-manager-signals-");
@@ -4354,19 +4354,19 @@
           }
         }
         if (patchedCount > 0) {
-          window.__codexPlusAppServerModelRequestPatchInstalled = codexAppServerModelRequestPatchVersion;
-          sendCodexPlusDiagnostic("model_app_server_request_patch_installed", {
+          window.__codexElvesAppServerModelRequestPatchInstalled = codexAppServerModelRequestPatchVersion;
+          sendCodexElvesDiagnostic("model_app_server_request_patch_installed", {
             candidateCount: candidates.length,
             patchedCount,
           });
         } else {
-          sendCodexPlusDiagnostic("model_app_server_request_patch_not_found", {
+          sendCodexElvesDiagnostic("model_app_server_request_patch_not_found", {
             exportCount: Object.keys(module || {}).length,
             candidateCount: candidates.length,
           });
         }
       } catch (error) {
-        sendCodexPlusDiagnostic("model_app_server_request_patch_failed", {
+        sendCodexElvesDiagnostic("model_app_server_request_patch_failed", {
           errorName: error?.name || "",
           errorMessage: error?.message || String(error),
         });
@@ -4376,31 +4376,31 @@
   }
 
   function ensureCodexModelWhitelistInstalls() {
-    if (!codexPlusModelUnlockEnabled()) return;
+    if (!codexElvesModelUnlockEnabled()) return;
     installModelJsonResponsePatch();
     patchAppServerModelMessages();
     installAppServerModelRequestPatch();
   }
 
   function runCodexModelWhitelistRefreshPass() {
-    if (!codexPlusModelUnlockEnabled() || !codexPlusModelNames().length) return false;
+    if (!codexElvesModelUnlockEnabled() || !codexElvesModelNames().length) return false;
     let changed = false;
     try {
       patchStatsigModelWhitelist();
       if (patchReactModelState()) changed = true;
       installAppServerModelRequestPatch();
     } catch (error) {
-      window.__codexPlusModelPatchFailures = window.__codexPlusModelPatchFailures || [];
-      window.__codexPlusModelPatchFailures.push(String(error?.stack || error));
+      window.__codexElvesModelPatchFailures = window.__codexElvesModelPatchFailures || [];
+      window.__codexElvesModelPatchFailures.push(String(error?.stack || error));
     }
     return changed;
   }
 
   function scheduleCodexModelWhitelistRefresh(durationMs = 2500) {
-    if (!codexPlusModelUnlockEnabled()) return;
+    if (!codexElvesModelUnlockEnabled()) return;
     codexModelWhitelistRefreshUntil = Math.max(codexModelWhitelistRefreshUntil, Date.now() + durationMs);
     if (codexModelWhitelistRefreshTimer) return;
-    sendCodexPlusDiagnostic("model_whitelist_refresh_scheduled", { durationMs });
+    sendCodexElvesDiagnostic("model_whitelist_refresh_scheduled", { durationMs });
     const tick = () => {
       codexModelWhitelistRefreshTimer = 0;
       runCodexModelWhitelistRefreshPass();
@@ -4413,7 +4413,7 @@
 
   function patchCodexModelWhitelist() {
     ensureCodexModelWhitelistInstalls();
-    if (!codexPlusModelNames().length) {
+    if (!codexElvesModelNames().length) {
       loadCodexModelCatalog();
       return;
     }
@@ -4422,7 +4422,7 @@
 
   function refreshCodexModelWhitelistFromScan(mutations) {
     ensureCodexModelWhitelistInstalls();
-    if (!codexPlusModelNames().length) {
+    if (!codexElvesModelNames().length) {
       loadCodexModelCatalog();
       return;
     }
@@ -4990,7 +4990,7 @@
   }
 
   function applyProjectMoveProjection() {
-    if (!codexPlusSettings().projectMove) return;
+    if (!codexElvesSettings().projectMove) return;
     const projection = readProjectMoveProjection();
     const targetRowsById = new Map();
     const settledRefs = [];
@@ -5045,7 +5045,7 @@
   }
 
   function scheduleProjectMoveProjection() {
-    if (!codexPlusSettings().projectMove || window.__codexProjectMoveProjectionTimer) return;
+    if (!codexElvesSettings().projectMove || window.__codexProjectMoveProjectionTimer) return;
     window.__codexProjectMoveProjectionTimer = setTimeout(() => {
       if (window.__codexProjectMoveRuntimeId !== codexProjectMoveRuntimeId) return;
       window.__codexProjectMoveProjectionTimer = null;
@@ -5124,7 +5124,7 @@
   }
 
   async function applyChatsSortCorrection() {
-    if (!codexPlusSettings().projectMove || chatsSortInFlight) return;
+    if (!codexElvesSettings().projectMove || chatsSortInFlight) return;
     const rows = visibleChatsRows();
     if (rows.length < 2) return;
     const refs = rows.map(sessionRefFromRow).filter((ref) => ref.session_id);
@@ -5162,7 +5162,7 @@
   }
 
   function scheduleChatsSortCorrection(delay = chatsSortRefreshIntervalMs) {
-    if (!codexPlusSettings().projectMove || window.__codexProjectMoveChatsSortTimer) return;
+    if (!codexElvesSettings().projectMove || window.__codexProjectMoveChatsSortTimer) return;
     window.__codexProjectMoveChatsSortTimer = setTimeout(() => {
       if (window.__codexProjectMoveRuntimeId !== codexProjectMoveRuntimeId) return;
       window.__codexProjectMoveChatsSortTimer = null;
@@ -5170,7 +5170,7 @@
         window.__codexProjectMoveSortFailures = window.__codexProjectMoveSortFailures || [];
         window.__codexProjectMoveSortFailures.push(String(error?.stack || error));
       }).finally(() => {
-        if (codexPlusSettings().projectMove) scheduleChatsSortCorrection();
+        if (codexElvesSettings().projectMove) scheduleChatsSortCorrection();
       });
     }, delay);
   }
@@ -5758,7 +5758,7 @@
   }
 
   async function injectUpstreamBranchOptions() {
-    if (!codexPlusSettings().upstreamWorktreeCreate) {
+    if (!codexElvesSettings().upstreamWorktreeCreate) {
       removeUpstreamBranchOptions();
       return;
     }
@@ -5864,7 +5864,7 @@
       if (result?.status !== "ok") throw new Error(result?.message || "prepare failed");
       writePreparedUpstreamBranchSelection(selection, result);
     }).catch((error) => {
-      sendCodexPlusDiagnostic("upstream_branch_prepare_failed", {
+      sendCodexElvesDiagnostic("upstream_branch_prepare_failed", {
         label: selection.label || "",
         errorName: error?.name || "",
         errorMessage: error?.message || String(error),
@@ -5903,7 +5903,7 @@
     const selection = readUpstreamBranchSelection();
     const request = payload?.request;
     const sourceRef = upstreamQualifiedSourceRef(selection);
-    if (!codexPlusSettings().upstreamWorktreeCreate || !sourceRef) return payload;
+    if (!codexElvesSettings().upstreamWorktreeCreate || !sourceRef) return payload;
     if (!pendingWorktreeRequestMatchesSelection(request, selection)) return payload;
     if (request?.startingState?.type !== "branch") return payload;
     if (request.startingState.branchName === sourceRef) return payload;
@@ -5912,7 +5912,7 @@
       startingState: { ...request.startingState, branchName: sourceRef },
     };
     prepareUpstreamBranchSelection(selection);
-    sendCodexPlusDiagnostic("upstream_pending_worktree_override_applied", {
+    sendCodexElvesDiagnostic("upstream_pending_worktree_override_applied", {
       label: selection.label || "",
       sourceRef,
       sourceWorkspaceRoot: request.sourceWorkspaceRoot || "",
@@ -5940,7 +5940,7 @@
         }
         window.__codexUpstreamPendingWorktreeDispatcherPatch = patchVersion;
       } catch (error) {
-        sendCodexPlusDiagnostic("upstream_pending_worktree_patch_failed", {
+        sendCodexElvesDiagnostic("upstream_pending_worktree_patch_failed", {
           errorName: error?.name || "",
           errorMessage: error?.message || String(error),
         });
@@ -5993,13 +5993,13 @@
   }
 
   async function handleUpstreamWorktreeNativeCreate(event) {
-    if (!codexPlusSettings().upstreamWorktreeCreate) return false;
+    if (!codexElvesSettings().upstreamWorktreeCreate) return false;
     const target = event.target instanceof Element ? event.target : event.target?.parentElement;
     const trigger = target?.closest?.("[data-codex-worktree-create], [data-worktree-create]");
     if (!trigger) return false;
     const payload = upstreamWorktreePayloadFromSelection(trigger) || upstreamWorktreeNativePayloadFromElement(trigger);
     if (!payload) {
-      showToast("无法安全识别 Codex 原生 worktree 表单，请使用 Codex++ 菜单创建。", null);
+      showToast("无法安全识别 Codex 原生 worktree 表单，请使用 CodexElves 菜单创建。", null);
       return false;
     }
     event.preventDefault();
@@ -6087,12 +6087,12 @@
       <div class="codex-delete-confirm-content" role="dialog" aria-modal="true" aria-label="Create upstream worktree">
         <div class="codex-delete-confirm-title">Create from upstream</div>
         <div class="codex-delete-confirm-message">等价于 git worktree add -b branch path upstream/base。创建前会先 fetch 远端分支。</div>
-        <label class="codex-plus-form-field">仓库路径<input data-codex-upstream-worktree-field="repoPath" type="text" placeholder="/path/to/repo"></label>
-        <label class="codex-plus-form-field">新分支名<input data-codex-upstream-worktree-field="branchName" type="text" placeholder="feature/my-task"></label>
-        <label class="codex-plus-form-field">Worktree 路径<input data-codex-upstream-worktree-field="worktreePath" type="text" placeholder="/path/to/worktrees/my-task"></label>
-        <label class="codex-plus-form-field">Remote<input data-codex-upstream-worktree-field="remote" type="text" value="upstream"></label>
-        <label class="codex-plus-form-field">Base branch<input data-codex-upstream-worktree-field="baseBranch" type="text" value="main"></label>
-        <div class="codex-plus-form-message" data-codex-upstream-worktree-message>填写仓库路径后会自动读取 remote 和当前分支。</div>
+        <label class="codex-elves-form-field">仓库路径<input data-codex-upstream-worktree-field="repoPath" type="text" placeholder="/path/to/repo"></label>
+        <label class="codex-elves-form-field">新分支名<input data-codex-upstream-worktree-field="branchName" type="text" placeholder="feature/my-task"></label>
+        <label class="codex-elves-form-field">Worktree 路径<input data-codex-upstream-worktree-field="worktreePath" type="text" placeholder="/path/to/worktrees/my-task"></label>
+        <label class="codex-elves-form-field">Remote<input data-codex-upstream-worktree-field="remote" type="text" value="upstream"></label>
+        <label class="codex-elves-form-field">Base branch<input data-codex-upstream-worktree-field="baseBranch" type="text" value="main"></label>
+        <div class="codex-elves-form-message" data-codex-upstream-worktree-message>填写仓库路径后会自动读取 remote 和当前分支。</div>
         <div class="codex-delete-confirm-actions">
           <button type="button" data-codex-upstream-worktree-cancel="true">取消</button>
           <button type="button" data-codex-upstream-worktree-defaults="true">读取默认值</button>
@@ -6580,7 +6580,7 @@
   }
 
   function attachButton(row) {
-    const settings = codexPlusSettings();
+    const settings = codexElvesSettings();
     if (!settings.sessionDelete && !settings.markdownExport && !settings.projectMove) {
       removeActionGroups(row);
       row.dataset.codexDeleteRow = "false";
@@ -6743,7 +6743,7 @@
   }
 
   function attachArchivedPageDeleteButton(row) {
-    const settings = codexPlusSettings();
+    const settings = codexElvesSettings();
     row.querySelectorAll("[data-codex-archive-row-action]").forEach((button) => button.remove());
     row.dataset.codexArchiveDeleteRow = "false";
     if (!settings.sessionDelete && !settings.markdownExport) return;
@@ -6969,7 +6969,7 @@
   }
 
   function refreshConversationTimeline() {
-    if (!codexPlusSettings().conversationTimeline) {
+    if (!codexElvesSettings().conversationTimeline) {
       removeConversationTimeline();
       return;
     }
@@ -7217,7 +7217,7 @@
   }
 
   function installCodexServiceTierBadge() {
-    if (!codexPlusSettings().serviceTierControls) {
+    if (!codexElvesSettings().serviceTierControls) {
       removeCodexServiceTierBadges();
       return;
     }
@@ -7263,51 +7263,51 @@
       transform: el.style.transform || "",
       boxSizing: el.style.boxSizing || "",
     };
-    if (!("codexPlusConversationViewOriginalWidth" in el.dataset)) el.dataset.codexPlusConversationViewOriginalWidth = original.width;
-    if (!("codexPlusConversationViewOriginalMaxWidth" in el.dataset)) el.dataset.codexPlusConversationViewOriginalMaxWidth = original.maxWidth;
-    if (!("codexPlusConversationViewOriginalMarginLeft" in el.dataset)) el.dataset.codexPlusConversationViewOriginalMarginLeft = original.marginLeft;
-    if (!("codexPlusConversationViewOriginalMarginRight" in el.dataset)) el.dataset.codexPlusConversationViewOriginalMarginRight = original.marginRight;
-    if (!("codexPlusConversationViewOriginalLeft" in el.dataset)) el.dataset.codexPlusConversationViewOriginalLeft = original.left;
-    if (!("codexPlusConversationViewOriginalTransform" in el.dataset)) el.dataset.codexPlusConversationViewOriginalTransform = original.transform;
-    if (!("codexPlusConversationViewOriginalBoxSizing" in el.dataset)) el.dataset.codexPlusConversationViewOriginalBoxSizing = original.boxSizing;
+    if (!("codexElvesConversationViewOriginalWidth" in el.dataset)) el.dataset.codexElvesConversationViewOriginalWidth = original.width;
+    if (!("codexElvesConversationViewOriginalMaxWidth" in el.dataset)) el.dataset.codexElvesConversationViewOriginalMaxWidth = original.maxWidth;
+    if (!("codexElvesConversationViewOriginalMarginLeft" in el.dataset)) el.dataset.codexElvesConversationViewOriginalMarginLeft = original.marginLeft;
+    if (!("codexElvesConversationViewOriginalMarginRight" in el.dataset)) el.dataset.codexElvesConversationViewOriginalMarginRight = original.marginRight;
+    if (!("codexElvesConversationViewOriginalLeft" in el.dataset)) el.dataset.codexElvesConversationViewOriginalLeft = original.left;
+    if (!("codexElvesConversationViewOriginalTransform" in el.dataset)) el.dataset.codexElvesConversationViewOriginalTransform = original.transform;
+    if (!("codexElvesConversationViewOriginalBoxSizing" in el.dataset)) el.dataset.codexElvesConversationViewOriginalBoxSizing = original.boxSizing;
   }
 
   function conversationViewRestoreElement(el) {
     if (!el) return;
-    if ("codexPlusConversationViewOriginalWidth" in el.dataset) {
-      el.style.width = el.dataset.codexPlusConversationViewOriginalWidth;
-      delete el.dataset.codexPlusConversationViewOriginalWidth;
+    if ("codexElvesConversationViewOriginalWidth" in el.dataset) {
+      el.style.width = el.dataset.codexElvesConversationViewOriginalWidth;
+      delete el.dataset.codexElvesConversationViewOriginalWidth;
     }
-    if ("codexPlusConversationViewOriginalMaxWidth" in el.dataset) {
-      el.style.maxWidth = el.dataset.codexPlusConversationViewOriginalMaxWidth;
-      delete el.dataset.codexPlusConversationViewOriginalMaxWidth;
+    if ("codexElvesConversationViewOriginalMaxWidth" in el.dataset) {
+      el.style.maxWidth = el.dataset.codexElvesConversationViewOriginalMaxWidth;
+      delete el.dataset.codexElvesConversationViewOriginalMaxWidth;
     }
-    if ("codexPlusConversationViewOriginalMarginLeft" in el.dataset) {
-      el.style.marginLeft = el.dataset.codexPlusConversationViewOriginalMarginLeft;
-      delete el.dataset.codexPlusConversationViewOriginalMarginLeft;
+    if ("codexElvesConversationViewOriginalMarginLeft" in el.dataset) {
+      el.style.marginLeft = el.dataset.codexElvesConversationViewOriginalMarginLeft;
+      delete el.dataset.codexElvesConversationViewOriginalMarginLeft;
     }
-    if ("codexPlusConversationViewOriginalMarginRight" in el.dataset) {
-      el.style.marginRight = el.dataset.codexPlusConversationViewOriginalMarginRight;
-      delete el.dataset.codexPlusConversationViewOriginalMarginRight;
+    if ("codexElvesConversationViewOriginalMarginRight" in el.dataset) {
+      el.style.marginRight = el.dataset.codexElvesConversationViewOriginalMarginRight;
+      delete el.dataset.codexElvesConversationViewOriginalMarginRight;
     }
-    if ("codexPlusConversationViewOriginalLeft" in el.dataset) {
-      el.style.left = el.dataset.codexPlusConversationViewOriginalLeft;
-      delete el.dataset.codexPlusConversationViewOriginalLeft;
+    if ("codexElvesConversationViewOriginalLeft" in el.dataset) {
+      el.style.left = el.dataset.codexElvesConversationViewOriginalLeft;
+      delete el.dataset.codexElvesConversationViewOriginalLeft;
     }
-    if ("codexPlusConversationViewOriginalTransform" in el.dataset) {
-      el.style.transform = el.dataset.codexPlusConversationViewOriginalTransform;
-      delete el.dataset.codexPlusConversationViewOriginalTransform;
+    if ("codexElvesConversationViewOriginalTransform" in el.dataset) {
+      el.style.transform = el.dataset.codexElvesConversationViewOriginalTransform;
+      delete el.dataset.codexElvesConversationViewOriginalTransform;
     }
-    if ("codexPlusConversationViewOriginalBoxSizing" in el.dataset) {
-      el.style.boxSizing = el.dataset.codexPlusConversationViewOriginalBoxSizing;
-      delete el.dataset.codexPlusConversationViewOriginalBoxSizing;
+    if ("codexElvesConversationViewOriginalBoxSizing" in el.dataset) {
+      el.style.boxSizing = el.dataset.codexElvesConversationViewOriginalBoxSizing;
+      delete el.dataset.codexElvesConversationViewOriginalBoxSizing;
     }
   }
 
   function conversationViewResetOwnOffset(el) {
     if (!el) return;
-    const originalTransform = el.dataset.codexPlusConversationViewOriginalTransform || "";
-    const originalLeft = el.dataset.codexPlusConversationViewOriginalLeft || "";
+    const originalTransform = el.dataset.codexElvesConversationViewOriginalTransform || "";
+    const originalLeft = el.dataset.codexElvesConversationViewOriginalLeft || "";
     if (el.style.left !== originalLeft) el.style.left = originalLeft;
     if (el.style.transform !== originalTransform) el.style.transform = originalTransform;
     const transform = String(el.style.transform || "").trim();
@@ -7379,7 +7379,7 @@
   }
 
   function conversationViewAlignNow() {
-    if (!codexPlusSettings().conversationView) return;
+    if (!codexElvesSettings().conversationView) return;
     conversationViewResolveTargets();
     conversationViewAlignElement(conversationViewState.contentEl);
     conversationViewAlignElement(conversationViewState.composerEl);
@@ -7416,7 +7416,7 @@
     conversationViewState.composerEl = null;
   }
 
-  window.__codexPlusConversationViewCleanup = cleanupConversationView;
+  window.__codexElvesConversationViewCleanup = cleanupConversationView;
 
   function ensureConversationViewRuntime() {
     if (conversationViewState.ro && conversationViewState.mo && conversationViewState.pollId) return;
@@ -7435,7 +7435,7 @@
   }
 
   function refreshConversationView() {
-    if (!codexPlusSettings().conversationView) {
+    if (!codexElvesSettings().conversationView) {
       cleanupConversationView();
       return;
     }
@@ -7446,7 +7446,7 @@
   function scanLightweight() {
     installStyle();
     installCodexServiceTierDispatcherPatch();
-    installCodexPlusMenu();
+    installCodexElvesMenu();
     scheduleBackendHeartbeat();
     installDeleteButtonEventDelegation();
     updateThreadScrollHandlers();
@@ -7464,7 +7464,7 @@
       refreshForcePluginInstallUnlockLoop();
     } else {
       const pluginUnlockStrategy = codexPluginUnlockStrategy();
-      const settings = codexPlusSettings();
+      const settings = codexElvesSettings();
       logCodexPluginUnlockStrategy(pluginUnlockStrategy);
       if ((pluginUnlockStrategy === "legacy" || pluginUnlockStrategy === "unknown") && settings.pluginEntryUnlock) {
         enablePluginEntry();
@@ -7504,7 +7504,7 @@
   }
 
   function isExtensionUiNode(node) {
-    return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-plus-modal-overlay, .${projectMoveOverlayClass}, .${timelineClass}, .codex-conversation-timeline, .${codexServiceTierBadgeClass}, #codex-plus-menu`);
+    return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-elves-modal-overlay, .${projectMoveOverlayClass}, .${timelineClass}, .codex-conversation-timeline, .${codexServiceTierBadgeClass}, #codex-elves-menu`);
   }
 
   function scanRelevantSelector() {
@@ -7588,22 +7588,22 @@
   window.__codexProjectMoveReadProjection = readProjectMoveProjection;
   window.__codexProjectMoveTargets = projectMoveTargets;
   window.__codexProjectMoveSortChats = applyChatsSortCorrection;
-  window.removeEventListener("resize", window.__codexPlusResizeHandler);
-  let codexPlusResizeRafId = 0;
-  window.__codexPlusResizeHandler = () => {
-    cancelAnimationFrame(codexPlusResizeRafId);
-    codexPlusResizeRafId = requestAnimationFrame(() => {
+  window.removeEventListener("resize", window.__codexElvesResizeHandler);
+  let codexElvesResizeRafId = 0;
+  window.__codexElvesResizeHandler = () => {
+    cancelAnimationFrame(codexElvesResizeRafId);
+    codexElvesResizeRafId = requestAnimationFrame(() => {
       sessionRows().forEach((row) => {
         const group = actionGroupFromRow(row);
         if (group) delete group.dataset.codexActionLayoutStable;
       });
       syncActionGroupsLayout();
-      updateFloatingCodexPlusMenuPosition(document.getElementById(codexPlusMenuId));
+      updateFloatingCodexElvesMenuPosition(document.getElementById(codexElvesMenuId));
       runScanStep(refreshConversationTimeline);
       runScanStep(refreshConversationView);
     });
   };
-  window.addEventListener("resize", window.__codexPlusResizeHandler);
+  window.addEventListener("resize", window.__codexElvesResizeHandler);
   window.__codexSessionDeleteObserver?.disconnect();
   window.__codexSessionDeleteObserver = new MutationObserver(scheduleScan);
   window.__codexSessionDeleteObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });

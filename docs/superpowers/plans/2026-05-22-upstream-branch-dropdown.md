@@ -400,9 +400,9 @@ Expected: PASS.
 - [ ] **Step 3: Build and package**
 
 ```bash
-npm install --prefix "apps/codex-plus-manager"
-npm run --prefix "apps/codex-plus-manager" check
-npm run --prefix "apps/codex-plus-manager" vite:build
+npm install --prefix "apps/codex-elves-manager"
+npm run --prefix "apps/codex-elves-manager" check
+npm run --prefix "apps/codex-elves-manager" vite:build
 env -u CFLAGS -u CPPFLAGS -u LDFLAGS rustup run "1.95.0" cargo build --release
 bash "scripts/installer/macos/package-dmg.sh" "1.1.5-local-upstream-dropdown" "$(uname -m)"
 ```
@@ -433,7 +433,7 @@ python3 - <<'PY'
 from pathlib import Path
 import shutil
 root = Path('/Users/carson/.codex/worktrees/b4e7/CodexPlusPlus')
-for rel in ['apps/codex-plus-manager/node_modules', 'apps/codex-plus-manager/package-lock.json']:
+for rel in ['apps/codex-elves-manager/node_modules', 'apps/codex-elves-manager/package-lock.json']:
     path = root / rel
     if path.is_dir():
         shutil.rmtree(path)

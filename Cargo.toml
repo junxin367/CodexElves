@@ -1,17 +1,17 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/codex-plus-core",
-  "crates/codex-plus-data",
-  "apps/codex-plus-launcher",
-  "apps/codex-plus-manager/src-tauri",
+  "crates/codex-elves-core",
+  "crates/codex-elves-data",
+  "apps/codex-elves-launcher",
+  "apps/codex-elves-manager/src-tauri",
 ]
 
 [workspace.package]
 version = "1.2.14"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/BigPizzaV3/CodexPlusPlus"
+repository = "https://github.com/BigPizzaV3/CodexElves"
 
 [workspace.dependencies]
 anyhow = "1"

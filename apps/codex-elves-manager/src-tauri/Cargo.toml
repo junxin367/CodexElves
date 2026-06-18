@@ -1,0 +1,32 @@
+[package]
+name = "codex-elves-manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "codex_elves_manager_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "codex-elves-manager"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait = "0.1"
+codex-elves-core = { path = "../../../crates/codex-elves-core" }
+codex-elves-data = { path = "../../../crates/codex-elves-data" }
+directories.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = ["custom-protocol", "tray-icon"] }
+tauri-plugin-dialog = "2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+rusqlite.workspace = true
+tempfile.workspace = true

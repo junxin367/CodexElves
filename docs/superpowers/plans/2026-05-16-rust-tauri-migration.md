@@ -20,7 +20,7 @@ The design covers several subsystems: Rust workspace setup, data operations, CDP
 - Create `crates/codex-plus-core/`: shared launch, CDP, bridge, settings, logs, diagnostics, path resolution, install/update primitives.
 - Create `crates/codex-plus-data/`: SQLite, backup, markdown export, provider sync, and filesystem data operations.
 - Create `apps/codex-plus-launcher/`: no-window silent launcher binary used by the `Codex++` shortcut.
-- Create `apps/codex-plus-manager/`: Tauri management console used by `Codex++ 管理工具`.
+- Create `apps/codex-elves-manager/`: Tauri management console used by `Codex++ 管理工具`.
 - Move or copy runtime assets into `assets/`: icons, sponsor images, and `renderer-inject.js` source used by Rust packaging.
 - Create `tests/fixtures/`: shared SQLite, rollout, and settings fixtures for Rust integration tests.
 - Modify `README.md` and `README_EN.md`: replace Python usage with Rust/Tauri installation and two-entry behavior.
@@ -41,12 +41,12 @@ The design covers several subsystems: Rust workspace setup, data operations, CDP
 - Create: `crates/codex-plus-data/src/lib.rs`
 - Create: `apps/codex-plus-launcher/Cargo.toml`
 - Create: `apps/codex-plus-launcher/src/main.rs`
-- Create: `apps/codex-plus-manager/package.json`
-- Create: `apps/codex-plus-manager/src-tauri/Cargo.toml`
-- Create: `apps/codex-plus-manager/src-tauri/src/lib.rs`
-- Create: `apps/codex-plus-manager/src-tauri/src/main.rs`
-- Create: `apps/codex-plus-manager/src/main.tsx`
-- Create: `apps/codex-plus-manager/index.html`
+- Create: `apps/codex-elves-manager/package.json`
+- Create: `apps/codex-elves-manager/src-tauri/Cargo.toml`
+- Create: `apps/codex-elves-manager/src-tauri/src/lib.rs`
+- Create: `apps/codex-elves-manager/src-tauri/src/main.rs`
+- Create: `apps/codex-elves-manager/src/main.tsx`
+- Create: `apps/codex-elves-manager/index.html`
 
 - [ ] **Step 1: Write the workspace manifests**
 
@@ -59,7 +59,7 @@ members = [
   "crates/codex-plus-core",
   "crates/codex-plus-data",
   "apps/codex-plus-launcher",
-  "apps/codex-plus-manager/src-tauri",
+  "apps/codex-elves-manager/src-tauri",
 ]
 
 [workspace.package]
@@ -209,11 +209,11 @@ async fn main() -> Result<()> {
 
 - [ ] **Step 5: Add Tauri manager skeleton**
 
-Create `apps/codex-plus-manager/package.json`:
+Create `apps/codex-elves-manager/package.json`:
 
 ```json
 {
-  "name": "codex-plus-manager",
+  "name": "codex-elves-manager",
   "version": "1.0.8",
   "private": true,
   "type": "module",
@@ -232,7 +232,7 @@ Create `apps/codex-plus-manager/package.json`:
 }
 ```
 
-Create `apps/codex-plus-manager/index.html`:
+Create `apps/codex-elves-manager/index.html`:
 
 ```html
 <!doctype html>
@@ -249,7 +249,7 @@ Create `apps/codex-plus-manager/index.html`:
 </html>
 ```
 
-Create `apps/codex-plus-manager/src/main.tsx`:
+Create `apps/codex-elves-manager/src/main.tsx`:
 
 ```tsx
 const app = document.getElementById("app");
@@ -264,18 +264,18 @@ if (app) {
 }
 ```
 
-Create `apps/codex-plus-manager/src-tauri/Cargo.toml`:
+Create `apps/codex-elves-manager/src-tauri/Cargo.toml`:
 
 ```toml
 [package]
-name = "codex-plus-manager"
+name = "codex-elves-manager"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [lib]
-name = "codex_plus_manager_lib"
+name = "codex_elves_manager_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
@@ -289,7 +289,7 @@ serde_json.workspace = true
 tauri = { version = "2", features = [] }
 ```
 
-Create `apps/codex-plus-manager/src-tauri/src/lib.rs`:
+Create `apps/codex-elves-manager/src-tauri/src/lib.rs`:
 
 ```rust
 #[tauri::command]
@@ -305,11 +305,11 @@ pub fn run() {
 }
 ```
 
-Create `apps/codex-plus-manager/src-tauri/src/main.rs`:
+Create `apps/codex-elves-manager/src-tauri/src/main.rs`:
 
 ```rust
 fn main() {
-    codex_plus_manager_lib::run();
+    codex_elves_manager_lib::run();
 }
 ```
 
@@ -733,12 +733,12 @@ git commit -m "feat: port bridge route handling to Rust"
 ### Task 7: Tauri Management Console
 
 **Files:**
-- Create: `apps/codex-plus-manager/src/App.ts`
-- Create: `apps/codex-plus-manager/src/styles.css`
-- Modify: `apps/codex-plus-manager/src/main.tsx`
-- Modify: `apps/codex-plus-manager/src-tauri/src/lib.rs`
-- Create: `apps/codex-plus-manager/src-tauri/src/commands.rs`
-- Create: `apps/codex-plus-manager/src-tauri/src/install.rs`
+- Create: `apps/codex-elves-manager/src/App.ts`
+- Create: `apps/codex-elves-manager/src/styles.css`
+- Modify: `apps/codex-elves-manager/src/main.tsx`
+- Modify: `apps/codex-elves-manager/src-tauri/src/lib.rs`
+- Create: `apps/codex-elves-manager/src-tauri/src/commands.rs`
+- Create: `apps/codex-elves-manager/src-tauri/src/install.rs`
 
 - [ ] **Step 1: Implement Tauri commands**
 
@@ -804,7 +804,7 @@ Implement:
 - [ ] **Step 5: Build and smoke test**
 
 ```bash
-cd apps/codex-plus-manager
+cd apps/codex-elves-manager
 npm install
 npm run check
 npm run build
@@ -815,7 +815,7 @@ Expected: TypeScript check passes and Tauri build succeeds.
 - [ ] **Step 6: Commit management console**
 
 ```bash
-git add apps/codex-plus-manager crates/codex-plus-core
+git add apps/codex-elves-manager crates/codex-plus-core
 git commit -m "feat: add Tauri management console"
 ```
 
@@ -956,7 +956,7 @@ git commit -m "docs: document Rust Tauri entry points"
 
 ```bash
 cargo test --workspace --all-targets
-cd apps/codex-plus-manager
+cd apps/codex-elves-manager
 npm run check
 npm run build
 ```

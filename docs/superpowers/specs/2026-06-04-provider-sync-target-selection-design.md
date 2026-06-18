@@ -360,7 +360,7 @@ The returned payload continues to include `targetProvider`, update counts, skipp
 
 ## Frontend changes
 
-In `apps/codex-plus-manager/src/App.tsx`:
+In `apps/codex-elves-manager/src/App.tsx`:
 
 - Add types for provider sync target list and target options.
 - Load targets when the app initializes and when the sessions page or sync area refreshes.

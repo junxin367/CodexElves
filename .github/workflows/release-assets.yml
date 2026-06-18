@@ -28,11 +28,11 @@ jobs:
         run: choco install nsis -y
 
       - name: Install frontend dependencies
-        working-directory: apps/codex-plus-manager
+        working-directory: apps/codex-elves-manager
         run: npm install --package-lock=false
 
       - name: Build frontend
-        working-directory: apps/codex-plus-manager
+        working-directory: apps/codex-elves-manager
         run: npm run vite:build
 
       - name: Build binaries
@@ -42,8 +42,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist/windows/app | Out-Null
-          Copy-Item target/release/codex-plus-plus.exe dist/windows/app/
-          Copy-Item target/release/codex-plus-plus-manager.exe dist/windows/app/
+          Copy-Item target/release/codex-elves.exe dist/windows/app/
+          Copy-Item target/release/codex-elves-manager.exe dist/windows/app/
 
       - name: Build Windows installer
         shell: pwsh
@@ -54,7 +54,7 @@ jobs:
             $makensis = "makensis"
           }
           Push-Location scripts/installer/windows
-          & $makensis "/INPUTCHARSET" "UTF8" "/DVERSION=$version" CodexPlusPlus.nsi
+          & $makensis "/INPUTCHARSET" "UTF8" "/DVERSION=$version" CodexElves.nsi
           Pop-Location
 
       - name: Upload Windows installer
@@ -93,11 +93,11 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install frontend dependencies
-        working-directory: apps/codex-plus-manager
+        working-directory: apps/codex-elves-manager
         run: npm install --package-lock=false
 
       - name: Build frontend
-        working-directory: apps/codex-plus-manager
+        working-directory: apps/codex-elves-manager
         run: npm run vite:build
 
       - name: Build binaries
@@ -114,7 +114,7 @@ jobs:
           set -euo pipefail
           test -L "dist/macos/stage/Applications"
           test "$(readlink "dist/macos/stage/Applications")" = "/Applications"
-          for app in "dist/macos/stage/Codex++.app" "dist/macos/stage/Codex++ 管理工具.app"; do
+          for app in "dist/macos/stage/CodexElves.app" "dist/macos/stage/CodexElves 管理工具.app"; do
             test -f "$app/Contents/Info.plist"
             test -f "$app/Contents/PkgInfo"
             test -x "$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"

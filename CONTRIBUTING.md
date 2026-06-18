@@ -1,13 +1,13 @@
-# Contributing to CodexPlusPlus
+# Contributing to CodexElves
 
-Thank you for your interest in contributing to CodexPlusPlus!
+Thank you for your interest in contributing to CodexElves!
 
 ## Development Setup
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/BigPizzaV3/CodexPlusPlus.git
-   cd CodexPlusPlus
+   git clone https://github.com/BigPizzaV3/CodexElves.git
+   cd CodexElves
    ```
 
 2. **Install Rust toolchain**
@@ -30,10 +30,10 @@ Thank you for your interest in contributing to CodexPlusPlus!
 ## Project Structure
 
 ```
-CodexPlusPlus/
+CodexElves/
 ├── crates/
-│   ├── codex-plus-data/    # Data handling and provider sync
-│   └── codex-plus-core/    # Core Codex++ logic
+│   ├── codex-elves-data/    # Data handling and provider sync
+│   └── codex-elves-core/    # Core CodexElves logic
 └── README.md               # Project documentation
 ```
 

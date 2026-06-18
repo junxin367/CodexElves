@@ -1,0 +1,20 @@
+[package]
+name = "codex-elves-data"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+codex-elves-core = { path = "../codex-elves-core" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
