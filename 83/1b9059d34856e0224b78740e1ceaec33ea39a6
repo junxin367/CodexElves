@@ -1,0 +1,56 @@
+apps/codex-plus-manager/src/App.tsx
+  s_945e980b26cc67::t_6d037c65087b6e 461,1446
+.zeroone/requirement/remove-home-promotions/technical-design.md
+  s_945e980b26cc67::t_d93190375f56e1 1-109
+crates/codex-plus-core/tests/launcher.rs
+  s_945e980b26cc67::t_e934bd7b7eaa81 311-312
+crates/codex-plus-core/src/upstream_worktree/remote.rs
+  s_945e980b26cc67::t_c20eea60cd2414 13
+crates/codex-plus-core/tests/cdp_bridge.rs
+  s_945e980b26cc67::t_76c361191bd8f2 44,49,102,105-110
+.zeroone/requirement/remove-home-promotions/spec.md
+  s_945e980b26cc67::t_d93190375f56e1 1-73
+.zeroone/requirement/remove-home-promotions/source-prd.md
+  s_945e980b26cc67::t_2535079327d697 1,16,20,24-25,29,33,36-37,40,44-45,48,57-59,65,72,76-80,83
+  s_945e980b26cc67::t_31968323628d37 2-15,17-19,21-23,26-28,30-32,34-35,38-39,41-43,46-47,49-56,60-64,66-71,73-75,81-82
+crates/codex-plus-core/src/remote_ssh.rs
+  s_945e980b26cc67::t_644b1ddd597bca 26-27,184
+  s_945e980b26cc67::t_518654f34ff1c9 6,10,38,76,84,88,91,95,100,104,106,111,114,122,126,130,134,141,166,168,192,194,199-200
+crates/codex-plus-core/src/upstream_worktree/remote/tests.rs
+  s_945e980b26cc67::t_c20eea60cd2414 4
+  s_945e980b26cc67::t_1b98364e826101 81-85
+README_EN.md
+  s_945e980b26cc67::t_a26d3d73dbb75e 164
+.zeroone/requirement/remove-home-promotions/process-ledger.md
+  s_945e980b26cc67::t_d93190375f56e1 1-102
+.zeroone/requirement/remove-home-promotions/clarification.md
+  s_945e980b26cc67::t_d93190375f56e1 1-63
+apps/codex-plus-manager/src-tauri/src/lib.rs
+  s_945e980b26cc67::t_ab3474a670f0dc 37-40
+assets/inject/renderer-inject.js
+  s_945e980b26cc67::t_39944d797405da 860,874,905,7335,7403
+crates/codex-plus-core/tests/bridge_routes.rs
+  s_945e980b26cc67::t_b77d52959e3a14 263-288
+crates/codex-plus-core/src/assets.rs
+  s_945e980b26cc67::t_a404cec1e496ca 22
+crates/codex-plus-core/src/lib.rs
+  s_945e980b26cc67::t_ab3474a670f0dc 22
+README.md
+  s_945e980b26cc67::t_4b14d224fc501a 240
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "831b9059d34856e0224b78740e1ceaec33ea39a6",
+  "prompts": {},
+  "sessions": {
+    "s_945e980b26cc67": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ed524-6416-7581-bf3a-3628dbd05629",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
