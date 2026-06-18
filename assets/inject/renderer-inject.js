@@ -9,6 +9,7 @@
   const moreButtonClass = "codex-session-more-button";
   const moreMenuClass = "codex-session-more-menu";
   const actionTooltipClass = "codex-session-action-tooltip";
+  const threadIdBadgeClass = "codex-thread-id-badge";
   const timelineClass = "codex-conversation-timeline";
   const timelineTrackClass = "codex-conversation-timeline-track";
   const timelineMarkerClass = "codex-conversation-timeline-marker";
@@ -34,7 +35,7 @@
   const chatsSortRefreshIntervalMs = 1500;
   const chatsSortDbRefreshIntervalMs = 5000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "13";
+  const codexDeleteStyleVersion = "14";
   const codexPlusMenuId = "codex-plus-menu";
   const codexPlusMenuFloatingClass = "codex-plus-menu-floating";
   const codexDeleteVersion = "7";
@@ -46,6 +47,7 @@
   const codexConversationTimelineVersion = "2";
   const codexConversationViewVersion = "1";
   const codexThreadScrollVersion = "1";
+  const codexThreadIdBadgeVersion = "1";
   const codexThreadServiceTierVersion = "1";
   const codexServiceTierBadgeClass = "codex-service-tier-badge";
   const codexServiceTierBadgeVersion = "3";
@@ -159,6 +161,8 @@
     pluginNavButton: 'nav[role="navigation"] button.h-token-nav-row.w-full',
     pluginSvgPath: 'svg path[d^="M7.94562 14.0277"]',
   };
+  const headerContextButtonClass = "border-token-border user-select-none no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-lg border-token-border text-token-button-tertiary-foreground bg-token-bg-fog enabled:hover:bg-token-list-hover-background data-[state=open]:bg-token-list-hover-background border h-token-button-composer px-2 py-0 text-base leading-[18px]";
+  const headerIconTextButtonClass = "border-token-border no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-lg text-token-text-tertiary enabled:hover:bg-token-list-hover-background data-[state=open]:bg-token-list-hover-background border-transparent h-token-button-composer px-2 py-0 text-base leading-[18px]";
 
   function installStyle() {
     const existingStyle = document.getElementById(styleId);
@@ -244,6 +248,30 @@
       .codex-session-more-menu-icon {
         width: 16px;
         text-align: center;
+      }
+      .${threadIdBadgeClass} {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        max-width: 152px;
+        margin-right: 8px;
+        color: var(--text-secondary, var(--token-text-secondary, rgba(142,142,160,.95)));
+        font: 11px/1.1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        letter-spacing: .01em;
+        opacity: .9;
+        white-space: nowrap;
+        user-select: text;
+      }
+      ${selectors.sidebarThread} [data-codex-thread-id-badge-wrap="true"] {
+        display: inline-flex;
+        align-items: center;
+        min-width: 0;
+        max-width: 100%;
+      }
+      ${selectors.sidebarThread} [data-codex-thread-id-badge-wrap="true"] ${selectors.threadTitle},
+      ${selectors.sidebarThread} [data-codex-thread-id-badge-wrap="true"] .truncate.select-none,
+      ${selectors.sidebarThread} [data-codex-thread-id-badge-wrap="true"] .truncate.text-base {
+        min-width: 0;
       }
       .codex-archive-row-button {
         border: 1px solid #ef4444;
@@ -857,7 +885,7 @@
   }
 
   function defaultCodexPlusSettings() {
-    return { pluginEntryUnlock: true, pluginMarketplaceUnlock: true, forcePluginInstall: true, modelWhitelistUnlock: true, sessionDelete: true, markdownExport: true, projectMove: true, conversationTimeline: true, conversationView: false, conversationViewMaxWidth: conversationViewDefaultWidth, threadScrollRestore: true, upstreamWorktreeCreate: true, nativeMenuPlacement: true, serviceTierControls: false };
+    return { pluginEntryUnlock: true, pluginMarketplaceUnlock: true, forcePluginInstall: true, modelWhitelistUnlock: true, sessionDelete: true, markdownExport: true, projectMove: true, conversationTimeline: true, threadIdBadge: false, conversationView: false, conversationViewMaxWidth: conversationViewDefaultWidth, threadScrollRestore: true, upstreamWorktreeCreate: true, nativeMenuPlacement: true, serviceTierControls: false };
   }
 
   const codexPlusBackendSettingMap = {
@@ -869,6 +897,7 @@
     markdownExport: "codexAppMarkdownExport",
     projectMove: "codexAppProjectMove",
     conversationTimeline: "codexAppConversationTimeline",
+    threadIdBadge: "codexAppThreadIdBadge",
     conversationView: "codexAppConversationView",
     threadScrollRestore: "codexAppThreadScrollRestore",
 
@@ -899,6 +928,7 @@
         markdownExport: false,
         projectMove: false,
         conversationTimeline: false,
+        threadIdBadge: false,
         conversationView: false,
         conversationViewMaxWidth: conversationViewDefaultWidth,
         threadScrollRestore: false,
@@ -1830,6 +1860,13 @@
 
   function renderBackendStatus() {
     const status = codexPlusBackendStatus.status || "failed";
+    if (codexPlusBackendStatus.version) {
+      codexPlusVersion = codexPlusBackendStatus.version;
+      document.querySelectorAll("[data-codex-plus-version]").forEach((node) => {
+        node.textContent = `Codex++ ${codexPlusVersion}`;
+      });
+      document.querySelectorAll(`#${codexPlusMenuId} button`).forEach(setCodexPlusTriggerLabel);
+    }
     const label = document.querySelector("[data-codex-backend-status]");
     if (label) {
       label.dataset.status = status;
@@ -2021,6 +2058,10 @@
             <div class="codex-plus-row">
               <div><div class="codex-plus-row-title">对话 Timeline</div><div class="codex-plus-row-description">在对话右侧显示用户提问时间线，悬停查看摘要，点击跳转。</div></div>
               <button type="button" class="codex-plus-toggle" data-codex-plus-setting="conversationTimeline"><span></span></button>
+            </div>
+            <div class="codex-plus-row">
+              <div><div class="codex-plus-row-title">会话 ID 标识</div><div class="codex-plus-row-description">在侧边栏会话标题前显示短 ID 和 UUIDv7 创建时间，方便定位历史会话。</div></div>
+              <button type="button" class="codex-plus-toggle" data-codex-plus-setting="threadIdBadge"><span></span></button>
             </div>
             <div class="codex-plus-row">
               <div><div class="codex-plus-row-title">对话居中宽度</div><div class="codex-plus-row-description">开启后把主对话和输入框限制到固定最大宽度，适合大屏阅读。</div></div>
@@ -2223,17 +2264,39 @@
   function findNativeMenuInsertionPoint() {
     if (!codexPlusSettings().nativeMenuPlacement) return null;
     const header = document.querySelector(selectors.appHeader);
-    const menuBar = header?.querySelector(selectors.nativeMenuBar);
+    const isIconOnlyButton = (button) => String(button.className || "").includes("aspect-square");
+    const menuBar = Array.from(header?.querySelectorAll?.(selectors.nativeMenuBar) || [])
+      .find((node) => {
+        const rect = node.getBoundingClientRect();
+        return !node.closest(".invisible") && rect.width > 0 && rect.height > 0;
+      });
     if (menuBar) {
       const buttons = Array.from(menuBar.querySelectorAll("button")).filter((button) => !button.closest(`#${codexPlusMenuId}`));
+      if (buttons.length && buttons.every(isIconOnlyButton)) return null;
+      const openLocationButton = buttons.find((button) => /^(打开位置|Open location)$/i.test(button.getAttribute("aria-label") || ""));
+      const openLocationGroup = openLocationButton?.closest?.(".inline-flex.self-start.items-stretch.overflow-hidden.rounded-lg");
+      const openLocationIndex = buttons.indexOf(openLocationButton);
+      const nativeButtonClass = openLocationButton
+        ? buttons[openLocationIndex + 1]?.className || openLocationButton.className || ""
+        : buttons[buttons.length - 1]?.className || "";
+      if (openLocationGroup?.parentElement === menuBar) return { parent: menuBar, before: openLocationGroup, nativeButtonClass };
+      if (openLocationGroup?.parentElement?.parentElement === menuBar) return { parent: menuBar, before: openLocationGroup.parentElement, nativeButtonClass };
       return { parent: menuBar, before: buttons[buttons.length - 1]?.nextSibling || null, nativeButtonClass: buttons[buttons.length - 1]?.className || "" };
     }
     const contextSurface = header?.querySelector(selectors.headerContextMenuSurface);
     const buttons = Array.from(contextSurface?.querySelectorAll?.("button") || [])
       .filter((button) => !button.closest(`#${codexPlusMenuId}`) && button.getBoundingClientRect().width > 0 && button.getBoundingClientRect().height > 0);
+    if (buttons.length && buttons.every(isIconOnlyButton)) return null;
     const nativeButton = buttons.find((button) => !button.parentElement?.classList?.contains("inline-flex")) || buttons[0];
     const parent = nativeButton?.parentElement;
-    if (!parent) return null;
+    if (!parent) {
+      const emptyButtonGroup = Array.from(contextSurface?.querySelectorAll?.("div") || [])
+        .find((node) => {
+          const className = String(node.className || "");
+          return className.includes("items-center") && className.includes("gap-2");
+        });
+      return emptyButtonGroup ? { parent: emptyButtonGroup, before: emptyButtonGroup.firstChild, nativeButtonClass: headerIconTextButtonClass } : null;
+    }
     return { parent, before: nativeButton, nativeButtonClass: nativeButton.className || "" };
   }
 
@@ -2264,6 +2327,13 @@
   function configureCodexPlusTrigger(menu, trigger, nativeButtonClass) {
     if (!trigger) return;
     if (nativeButtonClass) trigger.className = normalizeCodexPlusTriggerClassName(nativeButtonClass);
+    if (!trigger.querySelector(".codex-plus-backend-indicator")) {
+      const indicator = document.createElement("span");
+      indicator.className = "codex-plus-backend-indicator";
+      indicator.dataset.codexBackendIndicator = "true";
+      indicator.dataset.status = codexPlusBackendStatus.status || "checking";
+      trigger.prepend(indicator);
+    }
     if (trigger.dataset.codexPlusTriggerInstalled === "5") return;
     trigger.dataset.codexPlusTriggerInstalled = "5";
     trigger.addEventListener("click", (event) => {
@@ -2339,6 +2409,8 @@
       insertionPoint = findNativeMenuInsertionPoint();
     } else if (existing && insertionPoint && existing.parentElement === insertionPoint.parent) {
       configureCodexPlusTrigger(existing, existing.querySelector("button"), insertionPoint.nativeButtonClass);
+      const safeBefore = insertionPoint.before?.parentElement === insertionPoint.parent ? insertionPoint.before : null;
+      if (existing.nextSibling !== safeBefore) insertionPoint.parent.insertBefore(existing, safeBefore);
       removeDuplicateCodexPlusMenus(existing);
       return;
     } else if (existing && insertionPoint) {
@@ -2346,6 +2418,13 @@
       existing.className = "";
       const safeBefore = insertionPoint.before?.parentElement === insertionPoint.parent ? insertionPoint.before : null;
       insertionPoint.parent.insertBefore(existing, safeBefore);
+      removeDuplicateCodexPlusMenus(existing);
+      return;
+    } else if (existing) {
+      configureCodexPlusTrigger(existing, existing.querySelector("button"), headerIconTextButtonClass);
+      existing.className = codexPlusMenuFloatingClass;
+      document.documentElement.appendChild(existing);
+      updateFloatingCodexPlusMenuPosition(existing);
       removeDuplicateCodexPlusMenus(existing);
       return;
     }
@@ -2358,7 +2437,7 @@
     const indicator = ensureCodexPlusTriggerIndicator(trigger);
     if (indicator) indicator.dataset.status = codexPlusBackendStatus.status || "checking";
     setCodexPlusTriggerLabel(trigger);
-    const nativeButtonClass = insertionPoint?.nativeButtonClass || "codex-plus-trigger";
+    const nativeButtonClass = insertionPoint?.nativeButtonClass || headerIconTextButtonClass;
     configureCodexPlusTrigger(menu, trigger, nativeButtonClass);
     menu.appendChild(trigger);
     if (insertionPoint) {
@@ -2849,6 +2928,7 @@
 
   let cachedSessionRows = [];
   let cachedSessionRowsAt = 0;
+  let threadIdBadgeActive = false;
 
   function sessionRows(forceRefresh = false) {
     const now = Date.now();
@@ -2911,6 +2991,113 @@
     const rawTitle = (titleNode?.textContent || (titleNode ? "" : (row.textContent || "Untitled session")));
     const title = (titleNode ? rawTitle : rawTitle.replace(/\s*(导出|删除|移动|移出项目)(\s*(导出|删除|移动|移出项目))*$/g, "")).trim().slice(0, 160);
     return { session_id: sessionId, title };
+  }
+
+  function threadIdBadgeTitleNode(row) {
+    return row.querySelector(`${selectors.threadTitle}, .truncate.select-none, .truncate.text-base`);
+  }
+
+  function padThreadIdBadgePart(value) {
+    return String(value).padStart(2, "0");
+  }
+
+  function threadIdBadgeCreatedAt(sessionId) {
+    const timestampMs = uuidV7TimestampMs(sessionId);
+    const minReasonableMs = Date.UTC(2020, 0, 1);
+    const maxReasonableMs = Date.now() + 366 * 24 * 60 * 60 * 1000;
+    if (!timestampMs || timestampMs < minReasonableMs || timestampMs > maxReasonableMs) return null;
+    return new Date(timestampMs);
+  }
+
+  function formatThreadIdBadgeCreatedAt(date) {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
+    return `${padThreadIdBadgePart(date.getMonth() + 1)}-${padThreadIdBadgePart(date.getDate())} ${padThreadIdBadgePart(date.getHours())}:${padThreadIdBadgePart(date.getMinutes())}`;
+  }
+
+  function threadIdBadgeMeta(sessionId) {
+    const id = projectMoveSessionKey(sessionId);
+    const compact = id.replaceAll("-", "");
+    const shortId = compact.slice(0, 8);
+    const createdAt = threadIdBadgeCreatedAt(sessionId);
+    const createdLabel = formatThreadIdBadgeCreatedAt(createdAt);
+    return {
+      id,
+      shortId,
+      createdAt,
+      label: shortId ? `[${shortId}${createdLabel ? ` ${createdLabel}` : ""}]` : "",
+    };
+  }
+
+  function wrapThreadTitleForBadge(row, titleNode) {
+    const parent = titleNode?.parentElement;
+    if (!parent) return null;
+    if (parent.dataset?.codexThreadIdBadgeWrap === "true") return parent;
+    const wrapper = document.createElement("span");
+    wrapper.dataset.codexThreadIdBadgeWrap = "true";
+    parent.insertBefore(wrapper, titleNode);
+    wrapper.appendChild(titleNode);
+    return wrapper;
+  }
+
+  function removeThreadIdBadges(root = document) {
+    root.querySelectorAll?.(`.${threadIdBadgeClass}`).forEach((badge) => badge.remove());
+    root.querySelectorAll?.('[data-codex-thread-id-badge-wrap="true"]').forEach((wrapper) => {
+      const parent = wrapper.parentElement;
+      if (!parent) return;
+      while (wrapper.firstChild) parent.insertBefore(wrapper.firstChild, wrapper);
+      wrapper.remove();
+    });
+    const rows = root.matches?.(selectors.sidebarThread) ? [root] : Array.from(root.querySelectorAll?.(selectors.sidebarThread) || []);
+    rows.forEach((row) => {
+      delete row.dataset.codexThreadIdBadge;
+      delete row.dataset.codexThreadIdBadgeVersion;
+    });
+  }
+
+  function installThreadIdBadge(row) {
+    const ref = sessionRefFromRow(row);
+    if (!ref.session_id) {
+      removeThreadIdBadges(row);
+      return;
+    }
+    const meta = threadIdBadgeMeta(ref.session_id);
+    const titleNode = threadIdBadgeTitleNode(row);
+    if (!meta.label || !titleNode) {
+      removeThreadIdBadges(row);
+      return;
+    }
+
+    const wrapper = wrapThreadTitleForBadge(row, titleNode);
+    if (!wrapper) return;
+
+    let badge = wrapper.querySelector(`.${threadIdBadgeClass}`);
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.className = threadIdBadgeClass;
+      wrapper.insertBefore(badge, titleNode);
+    }
+
+    badge.dataset.codexThreadIdBadgeVersion = codexThreadIdBadgeVersion;
+    if (badge.textContent !== meta.label) badge.textContent = meta.label;
+    const fullTitle = meta.createdAt
+      ? `${meta.label}\nSession ID: ${meta.id}\nCreated: ${meta.createdAt.toLocaleString()}`
+      : `${meta.label}\nSession ID: ${meta.id}`;
+    badge.setAttribute("title", fullTitle);
+    badge.setAttribute("aria-label", fullTitle);
+    row.dataset.codexThreadIdBadge = meta.label;
+    row.dataset.codexThreadIdBadgeVersion = codexThreadIdBadgeVersion;
+  }
+
+  function refreshThreadIdBadges() {
+    if (!codexPlusSettings().threadIdBadge) {
+      if (threadIdBadgeActive) {
+        removeThreadIdBadges();
+        threadIdBadgeActive = false;
+      }
+      return;
+    }
+    threadIdBadgeActive = true;
+    sessionRows().forEach(installThreadIdBadge);
   }
 
   function codexPlusDiagnosticPayload(event, detail) {
@@ -7305,6 +7492,7 @@
       unblockPluginInstallButtons();
       refreshForcePluginInstallUnlockLoop();
     }
+    refreshThreadIdBadges();
     sessionRows().forEach(tryAttachButton);
     updateDeleteButtonOffsets();
     scheduleProjectMoveProjection();

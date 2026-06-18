@@ -111,6 +111,7 @@ type BackendSettings = {
   codexAppMarkdownExport: boolean;
   codexAppProjectMove: boolean;
   codexAppConversationTimeline: boolean;
+  codexAppThreadIdBadge: boolean;
   codexAppConversationView: boolean;
   codexAppThreadScrollRestore: boolean;
   codexAppUpstreamWorktreeCreate: boolean;
@@ -491,6 +492,7 @@ const defaultSettings: BackendSettings = {
   codexAppMarkdownExport: true,
   codexAppProjectMove: true,
   codexAppConversationTimeline: true,
+  codexAppThreadIdBadge: false,
   codexAppConversationView: false,
   codexAppThreadScrollRestore: true,
   codexAppUpstreamWorktreeCreate: true,
@@ -1934,6 +1936,7 @@ function EnhanceScreen({
             <FeatureToggle title="Markdown 导出" detail="在会话列表显示导出按钮，导出带时间戳的 Markdown。" checked={form.codexAppMarkdownExport} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppMarkdownExport", value)} />
             <FeatureToggle title="会话项目移动" detail="把会话移动到普通对话或其他本地项目。" checked={form.codexAppProjectMove} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppProjectMove", value)} />
             <FeatureToggle title="对话 Timeline" detail="在对话右侧显示用户提问时间线，支持摘要和跳转。" checked={form.codexAppConversationTimeline} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppConversationTimeline", value)} />
+            <FeatureToggle title="会话 ID 标识" detail="在侧边栏会话标题前显示短 ID 和 UUIDv7 创建时间，方便定位历史会话。" checked={form.codexAppThreadIdBadge} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppThreadIdBadge", value)} />
             <FeatureToggle title="对话居中宽度" detail="把主对话和输入框限制到固定最大宽度，适合大屏阅读。" checked={form.codexAppConversationView} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppConversationView", value)} />
             <FeatureToggle title="切换对话保留位置" detail="切换 thread 时恢复上一次浏览位置。" checked={form.codexAppThreadScrollRestore} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppThreadScrollRestore", value)} />
             <FeatureToggle title="Upstream worktree" detail="从最新 upstream 分支创建 Git worktree。" checked={form.codexAppUpstreamWorktreeCreate} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppUpstreamWorktreeCreate", value)} />
@@ -2733,10 +2736,11 @@ function RelayProfileDetail({
 }) {
   const [draft, setDraft] = useState<RelayProfile>(profile);
   const isActive = !isNew && profile.id === form.activeRelayId;
+  const profileUsesLiveFiles = relayProfileUsesLiveFiles(profile);
   useEffect(() => {
     setDraft(
       deriveRelayProfileFromFiles(
-        isActive && relayFiles
+        isActive && profileUsesLiveFiles && relayFiles
           ? {
             ...profile,
             configContents: relayFiles.configContents,
@@ -2745,14 +2749,14 @@ function RelayProfileDetail({
           : profile,
       ),
     );
-  }, [profile.id, isActive, isNew, relayFiles?.configContents, relayFiles?.authContents]);
+  }, [profile.id, profileUsesLiveFiles, isActive, isNew, relayFiles?.configContents, relayFiles?.authContents]);
   const saveDraft = async () => {
     const normalizedDraft = deriveRelayProfileFromFiles(draft);
     const next = isNew
       ? addRelayProfile(form, normalizedDraft)
       : updateRelayProfile(form, profile.id, normalizedDraft);
     await onFormChange(next);
-    if (isActive) {
+    if (isActive && relayProfileUsesLiveFiles(normalizedDraft)) {
       await actions.saveRelayFile(
         "config",
         effectiveRelayConfigPreview(normalizedDraft, form, normalizedDraft),
@@ -4324,6 +4328,8 @@ function inputToCodexExtraArgs(value: string) {
 
 function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = emptyContextSelection()): RelayProfile {
   const legacyMixedApi = profile.relayMode === "mixedApi";
+  const relayMode = normalizeRelayMode(profile.relayMode);
+  const officialMixApiKey = profile.officialMixApiKey === true || legacyMixedApi;
   let normalized: RelayProfile = {
     ...profile,
     model: profile.model || "",
@@ -4331,11 +4337,11 @@ function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = 
     upstreamBaseUrl: profile.upstreamBaseUrl || profile.baseUrl || "",
     apiKey: profile.apiKey || "",
     protocol: profile.protocol === "chatCompletions" ? "chatCompletions" : "responses",
-    relayMode: normalizeRelayMode(profile.relayMode),
-    officialMixApiKey: profile.officialMixApiKey === true || legacyMixedApi,
+    relayMode,
+    officialMixApiKey,
     testModel: profile.testModel || "",
-    configContents: profile.configContents || "",
-    authContents: profile.authContents || "",
+    configContents: relayMode === "official" && !officialMixApiKey ? "" : profile.configContents || "",
+    authContents: relayMode === "official" && !officialMixApiKey ? buildOfficialRelayAuthJson(profile.authContents || "") : profile.authContents || "",
     useCommonConfig: profile.useCommonConfig !== false,
     contextSelection: profile.contextSelectionInitialized
       ? normalizeContextSelection(profile.contextSelection)
@@ -4346,7 +4352,7 @@ function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = 
     modelList: profile.modelList || "",
     userAgent: profile.userAgent || "",
   };
-  return deriveRelayProfileFromFiles(normalized);
+  return relayProfileUsesLiveFiles(normalized) ? deriveRelayProfileFromFiles(normalized) : normalized;
 }
 
 function activeRelayProfile(settings: BackendSettings): RelayProfile {
@@ -4763,6 +4769,10 @@ function relayProfileSwitchValidation(profile: RelayProfile): string | null {
   }
   if (profile.relayMode !== "official" || !authJsonHasOpenAiApiKey(profile.authContents)) return null;
   return "官方混合 API 不应在 auth.json 中保存 OPENAI_API_KEY。请清理此供应商的 auth.json 后再切换。";
+}
+
+function relayProfileUsesLiveFiles(profile: RelayProfile): boolean {
+  return profile.relayMode !== "official" || profile.officialMixApiKey;
 }
 
 function authJsonHasOpenAiApiKey(contents: string): boolean {
