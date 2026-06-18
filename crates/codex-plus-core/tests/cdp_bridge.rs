@@ -49,8 +49,10 @@ fn injection_script_prefixes_helper_url_without_sponsor_images() {
     assert!(!script.contains("window.__CODEX_PLUS_SPONSOR_IMAGES__"));
     assert!(script.contains("window.__CODEX_PLUS_VERSION__"));
     assert!(script.contains(codex_plus_core::version::VERSION));
-    assert!(script.contains("https://discord.gg/y96kX7A76v"));
-    assert!(script.contains("data-codex-plus-discord"));
+    assert!(!script.contains("https://discord.gg/y96kX7A76v"));
+    assert!(!script.contains("https://t.me/CodexPlusPlus"));
+    assert!(!script.contains("data-codex-plus-discord"));
+    assert!(!script.contains("data-codex-plus-telegram"));
 }
 
 #[test]
