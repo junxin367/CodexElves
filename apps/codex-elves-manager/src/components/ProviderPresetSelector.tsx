@@ -19,11 +19,18 @@ export type RelayProfile = {
   useCommonConfig: boolean;
   contextWindow: string;
   autoCompactLimit: string;
+  modelMappings: RelayModelMapping[];
   modelInsertMode: string;
   modelList: string;
   responsesModelList: string;
   chatCompletionsModelList: string;
   userAgent: string;
+};
+
+export type RelayModelMapping = {
+  requestModel: string;
+  protocol: RelayProtocol;
+  contextWindow: string;
 };
 
 export type PresetPatch = Partial<RelayProfile>;
@@ -41,6 +48,11 @@ const initialFor = (name: string): string => {
 
 export function createPresetPatch(preset: ProviderPreset): PresetPatch {
   const modelList = preset.modelList?.join("\n") ?? "";
+  const modelMappings = (preset.modelList ?? []).map((model) => ({
+    requestModel: model,
+    protocol: preset.protocol,
+    contextWindow: "",
+  }));
   return {
     name: preset.name,
     baseUrl: preset.baseUrl,
@@ -50,6 +62,7 @@ export function createPresetPatch(preset: ProviderPreset): PresetPatch {
     model: preset.model,
     testModel: preset.model,
     modelList,
+    modelMappings,
     responsesModelList: preset.protocol === "responses" ? modelList : "",
     chatCompletionsModelList: preset.protocol === "chatCompletions" ? modelList : "",
     relayMode: preset.category === "official" ? "official" : "pureApi",

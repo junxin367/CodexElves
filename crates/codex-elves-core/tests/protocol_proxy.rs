@@ -6,12 +6,47 @@ use codex_elves_core::protocol_proxy::{
     open_models_proxy_request, open_responses_proxy_request, responses_error_from_upstream,
     responses_to_chat_completions,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
+
+#[derive(Debug)]
+struct ParsedSseEvent {
+    event: String,
+    data: Value,
+}
+
+fn parse_response_sse_events(input: &str) -> Vec<ParsedSseEvent> {
+    input
+        .split("\n\n")
+        .filter_map(|block| {
+            let mut event = String::new();
+            let mut data_parts = Vec::new();
+            for line in block.lines() {
+                if let Some(value) = line.strip_prefix("event: ") {
+                    event = value.to_string();
+                } else if let Some(value) = line.strip_prefix("data: ") {
+                    data_parts.push(value);
+                }
+            }
+            if data_parts.is_empty() || data_parts == ["[DONE]"] {
+                return None;
+            }
+            let data = serde_json::from_str::<Value>(&data_parts.join("\n")).ok()?;
+            if event.is_empty() {
+                event = data
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+            }
+            Some(ParsedSseEvent { event, data })
+        })
+        .collect()
+}
 
 #[test]
 fn responses_request_converts_to_chat_completions() {
@@ -64,6 +99,47 @@ fn responses_request_converts_to_chat_completions() {
                 }
             ]
         })
+    );
+}
+
+#[test]
+fn responses_request_preserves_file_audio_and_unknown_content_parts() {
+    let converted = responses_to_chat_completions(json!({
+        "model": "gpt-5-mini",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "inspect these" },
+                    { "type": "input_file", "file_id": "file_doc", "filename": "doc.pdf" },
+                    { "type": "input_audio", "data": "UklGRg==", "format": "wav" },
+                    { "type": "unknown_part", "payload": { "a": 1 } }
+                ]
+            }
+        ]
+    }))
+    .unwrap();
+
+    let content = converted["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(
+        content[0],
+        json!({ "type": "text", "text": "inspect these" })
+    );
+    assert_eq!(
+        content[1],
+        json!({ "type": "file", "file": { "file_id": "file_doc", "filename": "doc.pdf" } })
+    );
+    assert_eq!(
+        content[2],
+        json!({ "type": "input_audio", "input_audio": { "data": "UklGRg==", "format": "wav" } })
+    );
+    assert_eq!(content[3]["type"], "text");
+    assert!(
+        content[3]["text"]
+            .as_str()
+            .unwrap()
+            .contains("unknown_part")
     );
 }
 
@@ -1064,6 +1140,32 @@ data: [DONE]
 }
 
 #[test]
+fn chat_sse_emits_sequence_numbers_and_incomplete_terminal_event() {
+    let converted = chat_sse_to_responses_sse(
+        r#"data: {"id":"chatcmpl_len","created":1710000000,"model":"gpt-5-mini","choices":[{"delta":{"content":"partial"},"finish_reason":"length"}]}
+
+data: [DONE]
+
+"#,
+    );
+
+    let events = parse_response_sse_events(&converted);
+    assert!(!events.is_empty());
+    for (index, event) in events.iter().enumerate() {
+        assert_eq!(event.data["sequence_number"], json!(index as u64));
+    }
+    let terminal = events.last().unwrap();
+    assert_eq!(terminal.event, "response.incomplete");
+    assert_eq!(terminal.data["type"], "response.incomplete");
+    assert_eq!(terminal.data["response"]["status"], "incomplete");
+    assert_eq!(
+        terminal.data["response"]["incomplete_details"]["reason"],
+        "max_output_tokens"
+    );
+    assert!(!converted.contains("event: response.completed"));
+}
+
+#[test]
 fn chat_sse_converts_reasoning_inline_think_tools_and_errors_like_ccs() {
     let reasoning = chat_sse_to_responses_sse(
         r#"data: {"id":"chatcmpl_reason","created":123,"model":"deepseek-reasoner","choices":[{"delta":{"reasoning_content":"Need context. "}}]}
@@ -1108,6 +1210,12 @@ data: [DONE]
     assert!(tool.contains("event: response.function_call_arguments.done"));
     assert!(tool.contains("\"type\":\"function_call\""));
     assert!(tool.contains("\"call_id\":\"call_1\""));
+    let tool_events = parse_response_sse_events(&tool);
+    let arguments_done = tool_events
+        .iter()
+        .find(|event| event.event == "response.function_call_arguments.done")
+        .unwrap();
+    assert_eq!(arguments_done.data["name"], "get_weather");
 
     let error = chat_sse_to_responses_sse(
         r#"event: error
@@ -1142,9 +1250,16 @@ data: [DONE]
     );
 
     assert!(converted.contains("response.custom_tool_call_input.delta"));
+    assert!(converted.contains("response.custom_tool_call_input.done"));
     assert_eq!(
         converted
             .matches("event: response.custom_tool_call_input.delta")
+            .count(),
+        1
+    );
+    assert_eq!(
+        converted
+            .matches("event: response.custom_tool_call_input.done")
             .count(),
         1
     );
@@ -1152,6 +1267,53 @@ data: [DONE]
     assert!(converted.contains("\"name\":\"exec\""));
     assert!(converted.contains("\"input\":\"ls -la\""));
     assert!(converted.contains("data: [DONE]"));
+
+    let events = parse_response_sse_events(&converted);
+    let done = events
+        .iter()
+        .find(|event| event.event == "response.custom_tool_call_input.done")
+        .unwrap();
+    assert_eq!(done.data["input"], "ls -la");
+}
+
+#[test]
+fn chat_sse_maps_refusal_delta_to_responses_refusal_events() {
+    let converted = chat_sse_to_responses_sse(
+        r#"data: {"id":"chatcmpl_refusal","created":1710000000,"model":"gpt-5-mini","choices":[{"delta":{"refusal":"No"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_refusal","created":1710000000,"model":"gpt-5-mini","choices":[{"delta":{"refusal":"pe"},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"#,
+    );
+
+    let events = parse_response_sse_events(&converted);
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event == "response.refusal.delta")
+    );
+    let refusal_done = events
+        .iter()
+        .find(|event| event.event == "response.refusal.done")
+        .unwrap();
+    assert_eq!(refusal_done.data["refusal"], "Nope");
+    let content_done = events
+        .iter()
+        .find(|event| {
+            event.event == "response.content_part.done" && event.data["part"]["type"] == "refusal"
+        })
+        .unwrap();
+    assert_eq!(content_done.data["part"]["refusal"], "Nope");
+    let completed = events
+        .iter()
+        .find(|event| event.event == "response.completed")
+        .unwrap();
+    assert_eq!(
+        completed.data["response"]["output"][0]["content"][0]["type"],
+        "refusal"
+    );
 }
 
 #[test]
@@ -1172,6 +1334,31 @@ fn chat_sse_converter_handles_partial_chunks_and_utf8_boundaries() {
 
     assert!(output.contains("\"delta\":\"你好\""));
     assert!(output.contains("event: response.completed"));
+}
+
+#[test]
+fn chat_sse_fails_on_invalid_json_or_unfinished_stream() {
+    let invalid = chat_sse_to_responses_sse("data: {bad json}\n\n");
+    let invalid_events = parse_response_sse_events(&invalid);
+    let failed = invalid_events
+        .iter()
+        .find(|event| event.event == "response.failed")
+        .unwrap();
+    assert_eq!(failed.data["response"]["error"]["type"], "invalid_sse_json");
+    assert!(!invalid.contains("event: response.completed"));
+
+    let unfinished = chat_sse_to_responses_sse(
+        r#"data: {"id":"chatcmpl_drop","created":1710000000,"model":"gpt-5-mini","choices":[{"delta":{"content":"hello"},"finish_reason":null}]}
+
+"#,
+    );
+    let unfinished_events = parse_response_sse_events(&unfinished);
+    let failed = unfinished_events
+        .iter()
+        .find(|event| event.event == "response.failed")
+        .unwrap();
+    assert_eq!(failed.data["response"]["error"]["type"], "stream_error");
+    assert!(!unfinished.contains("event: response.completed"));
 }
 
 #[test]
@@ -1404,8 +1591,18 @@ fn write_mixed_relay_settings(settings_dir: &Path, base_url: &str) {
             "protocol": "responses",
             "localProxyEnabled": true,
             "relayMode": "mixedApi",
-            "responsesModelList": "gpt-responses",
-            "chatCompletionsModelList": "gpt-chat"
+            "modelMappings": [
+                {
+                    "requestModel": "gpt-responses",
+                    "protocol": "responses",
+                    "contextWindow": "200000"
+                },
+                {
+                    "requestModel": "gpt-chat",
+                    "protocol": "chatCompletions",
+                    "contextWindow": "200000"
+                }
+            ]
         }],
         "activeRelayId": "mixed"
     });
@@ -1427,7 +1624,13 @@ fn write_chat_relay_settings(settings_dir: &Path, base_url: &str, user_agent: &s
             "protocol": "chatCompletions",
             "localProxyEnabled": true,
             "relayMode": "mixedApi",
-            "chatCompletionsModelList": "gpt-5.5",
+            "modelMappings": [
+                {
+                    "requestModel": "gpt-5.5",
+                    "protocol": "chatCompletions",
+                    "contextWindow": "200000"
+                }
+            ],
             "userAgent": user_agent
         }],
         "activeRelayId": "chat"

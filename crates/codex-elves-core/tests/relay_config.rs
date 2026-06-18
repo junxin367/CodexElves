@@ -13,7 +13,9 @@ use codex_elves_core::relay_config::{
     set_codex_goals_feature_in_home, strip_common_config_from_config,
     sync_live_config_context_entries, upsert_context_entry_in_common_config,
 };
-use codex_elves_core::settings::{RelayContextSelection, RelayMode, RelayProfile, RelayProtocol};
+use codex_elves_core::settings::{
+    RelayContextSelection, RelayMode, RelayModelMapping, RelayProfile, RelayProtocol,
+};
 
 #[test]
 fn codex_session_db_path_prefers_new_sqlite_directory_threads_db() {
@@ -918,7 +920,7 @@ enabled = true
 }
 
 #[test]
-fn apply_relay_profile_does_not_write_model_catalog_json_for_selected_models() {
+fn apply_relay_profile_writes_generated_model_catalog_json_for_selected_models() {
     let temp = tempfile::tempdir().unwrap();
     let profile = RelayProfile {
         id: "relay-a".to_string(),
@@ -926,6 +928,7 @@ fn apply_relay_profile_does_not_write_model_catalog_json_for_selected_models() {
         model: "qwen3-coder".to_string(),
         relay_mode: RelayMode::PureApi,
         config_contents: r#"model = "qwen3-coder"
+model_reasoning_effort = "xhigh"
 model_provider = "custom"
 
 [model_providers.custom]
@@ -938,7 +941,18 @@ experimental_bearer_token = "sk-new"
         .to_string(),
         auth_contents: r#"{"OPENAI_API_KEY":"sk-new"}"#.to_string(),
         model_insert_mode: Default::default(),
-        model_list: "deepseek-coder\nqwen3-coder".to_string(),
+        model_mappings: vec![
+            RelayModelMapping {
+                request_model: "deepseek-coder".to_string(),
+                protocol: RelayProtocol::ChatCompletions,
+                context_window: "128000".to_string(),
+            },
+            RelayModelMapping {
+                request_model: "qwen3-coder".to_string(),
+                protocol: RelayProtocol::Responses,
+                context_window: "200000".to_string(),
+            },
+        ],
         context_window: "200000".to_string(),
         auto_compact_limit: "160000".to_string(),
         ..RelayProfile::default()
@@ -947,14 +961,23 @@ experimental_bearer_token = "sk-new"
     apply_relay_profile_files_to_home_with_context(temp.path(), &profile, "").unwrap();
 
     let config = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
-    assert!(!config.contains("model_catalog_json"));
+    assert!(config.contains(r#"model_catalog_json = "codex-elves-model-catalog.json""#));
     assert!(config.contains("model_context_window = 200000"));
     assert!(config.contains("model_auto_compact_token_limit = 160000"));
-    assert!(!temp.path().join("model-catalogs").exists());
+    let catalog: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(temp.path().join("codex-elves-model-catalog.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(catalog["models"][0]["slug"], "deepseek-coder");
+    assert_eq!(catalog["models"][0]["context_window"], 128000);
+    assert_eq!(catalog["models"][0]["auto_compact_token_limit"], 160000);
+    assert_eq!(catalog["models"][0]["default_reasoning_level"], "xhigh");
+    assert_eq!(catalog["models"][1]["slug"], "qwen3-coder");
+    assert_eq!(catalog["models"][1]["context_window"], 200000);
 }
 
 #[test]
-fn apply_relay_profile_preserves_user_model_catalog_json() {
+fn apply_relay_profile_overwrites_user_model_catalog_json_with_generated_catalog() {
     let temp = tempfile::tempdir().unwrap();
     let profile = RelayProfile {
         id: "relay-a".to_string(),
@@ -973,21 +996,22 @@ experimental_bearer_token = "sk-new"
         .to_string(),
         auth_contents: r#"{"OPENAI_API_KEY":"sk-new"}"#.to_string(),
         model_insert_mode: Default::default(),
-        model_list: "deepseek-coder".to_string(),
+        model_mappings: vec![RelayModelMapping {
+            request_model: "deepseek-coder".to_string(),
+            protocol: RelayProtocol::Responses,
+            context_window: "64000".to_string(),
+        }],
         ..RelayProfile::default()
     };
 
     apply_relay_profile_files_to_home_with_context(temp.path(), &profile, "").unwrap();
 
     let config = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
-    assert!(config.contains(r#"model_catalog_json = "C:\\old\\catalog.json""#));
-    assert!(
-        !temp
-            .path()
-            .join("model-catalogs")
-            .join("relay-a.json")
-            .exists()
-    );
+    assert!(config.contains(r#"model_catalog_json = "codex-elves-model-catalog.json""#));
+    assert!(!config.contains(r#"C:\\old\\catalog.json"#));
+    let catalog =
+        std::fs::read_to_string(temp.path().join("codex-elves-model-catalog.json")).unwrap();
+    assert!(catalog.contains("deepseek-coder"));
 }
 
 #[test]

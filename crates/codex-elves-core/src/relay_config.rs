@@ -1,6 +1,6 @@
 use anyhow::Context;
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,6 +11,7 @@ use crate::settings::{RelayContextSelection, RelayProfile, RelayProtocol};
 const RELAY_PROVIDER: &str = "custom";
 const LEGACY_RELAY_PROVIDERS: &[&str] = &["CodexElves", "CodexPP"];
 const CHAT_UPSTREAM_BASE_URL_KEY: &str = "codex_elves_chat_base_url";
+const GENERATED_MODEL_CATALOG_FILENAME: &str = "codex-elves-model-catalog.json";
 const RESERVED_MODEL_PROVIDER_IDS: &[&str] = &[
     "amazon-bedrock",
     "openai",
@@ -360,12 +361,15 @@ pub fn apply_relay_profile_files_to_home_with_context(
     let config_with_common = merge_common_config_into_config(&profile_config, &selected_common)?;
     let config_with_common =
         preserve_unmanaged_live_context_entries(home, &config_with_common, common_config_contents)?;
+    let context_window = profile.context_window_for_active_model();
     let config_with_limits = apply_context_limits_to_config(
         &config_with_common,
-        &profile.context_window,
+        &context_window,
         &profile.auto_compact_limit,
     )?;
-    apply_relay_files_to_home(home, &config_with_limits, &profile.auth_contents)
+    let config_with_catalog =
+        apply_generated_model_catalog_to_config(home, &config_with_limits, profile)?;
+    apply_relay_files_to_home(home, &config_with_catalog, &profile.auth_contents)
 }
 
 pub fn apply_relay_profile_to_home_with_switch_rules(
@@ -396,16 +400,19 @@ pub fn apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard(
     let config_with_common = merge_common_config_into_config(&profile_config, &selected_common)?;
     let config_with_common =
         preserve_unmanaged_live_context_entries(home, &config_with_common, common_config_contents)?;
+    let context_window = profile.context_window_for_active_model();
     let config_with_limits = apply_context_limits_to_config(
         &config_with_common,
-        &profile.context_window,
+        &context_window,
         &profile.auto_compact_limit,
     )?;
+    let config_with_catalog =
+        apply_generated_model_catalog_to_config(home, &config_with_limits, profile)?;
 
     if profile.relay_mode == crate::settings::RelayMode::PureApi {
         apply_relay_files_to_home_with_computer_use_guard(
             home,
-            &config_with_limits,
+            &config_with_catalog,
             &profile.auth_contents,
             preserve_computer_use_guard,
         )
@@ -413,7 +420,7 @@ pub fn apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard(
         let auth_contents = official_profile_auth_for_switch(home, &profile.auth_contents)?;
         apply_relay_files_to_home_with_computer_use_guard(
             home,
-            &config_with_limits,
+            &config_with_catalog,
             &auth_contents,
             preserve_computer_use_guard,
         )
@@ -432,12 +439,15 @@ pub fn apply_relay_profile_config_to_home_with_context(
     };
     let profile_config = complete_relay_profile_config(profile)?;
     let config_with_common = merge_common_config_into_config(&profile_config, &selected_common)?;
+    let context_window = profile.context_window_for_active_model();
     let config_with_limits = apply_context_limits_to_config(
         &config_with_common,
-        &profile.context_window,
+        &context_window,
         &profile.auto_compact_limit,
     )?;
-    apply_relay_config_file_to_home(home, &config_with_limits)
+    let config_with_catalog =
+        apply_generated_model_catalog_to_config(home, &config_with_limits, profile)?;
+    apply_relay_config_file_to_home(home, &config_with_catalog)
 }
 
 pub fn apply_relay_config_file_to_home(
@@ -504,17 +514,18 @@ pub async fn test_relay_profile(
         anyhow::bail!("API Key 不能为空");
     }
 
-    let client = crate::http_client::proxied_client("CodexElves/RelayTest")?;
-    let endpoint = match profile.protocol {
-        RelayProtocol::Responses => format!("{base_url}/responses"),
-        RelayProtocol::ChatCompletions => format!("{base_url}/chat/completions"),
-    };
     let test_model = model.trim();
     if test_model.is_empty() {
         anyhow::bail!("测试模型不能为空");
     }
 
-    let payload = relay_profile_test_payload(profile.protocol, test_model);
+    let protocol = profile.protocol_for_model(test_model);
+    let client = crate::http_client::proxied_client("CodexElves/RelayTest")?;
+    let endpoint = match protocol {
+        RelayProtocol::Responses => format!("{base_url}/responses"),
+        RelayProtocol::ChatCompletions => format!("{base_url}/chat/completions"),
+    };
+    let payload = relay_profile_test_payload(protocol, test_model);
     let response = client
         .post(&endpoint)
         .bearer_auth(api_key)
@@ -529,7 +540,7 @@ pub async fn test_relay_profile(
     // 用户容易遗漏这个前缀，导致 /responses 或 /chat/completions 404。
     if http_status == 404 && !base_url.ends_with("/v1") {
         let v1_url = format!("{base_url}/v1");
-        let v1_endpoint = match profile.protocol {
+        let v1_endpoint = match protocol {
             RelayProtocol::Responses => format!("{v1_url}/responses"),
             RelayProtocol::ChatCompletions => format!("{v1_url}/chat/completions"),
         };
@@ -1376,6 +1387,111 @@ fn apply_context_limits_to_config(
     Ok(normalize_optional_toml(doc))
 }
 
+fn apply_generated_model_catalog_to_config(
+    home: &Path,
+    config_text: &str,
+    profile: &RelayProfile,
+) -> anyhow::Result<String> {
+    let rows = relay_profile_catalog_rows(profile);
+    let mut doc = parse_toml_document(config_text)?;
+    if rows.is_empty() {
+        doc.as_table_mut().remove("model_catalog_json");
+        return Ok(normalize_optional_toml(doc));
+    }
+
+    doc["model_catalog_json"] = toml_edit::value(GENERATED_MODEL_CATALOG_FILENAME);
+    let config_with_catalog = normalize_optional_toml(doc);
+    let catalog = generated_model_catalog_json(profile, &config_with_catalog, rows)?;
+    let path = home.join(GENERATED_MODEL_CATALOG_FILENAME);
+    std::fs::create_dir_all(home)?;
+    let bytes = serde_json::to_vec_pretty(&catalog)?;
+    crate::settings::atomic_write(&path, &bytes).context("写入模型目录失败")?;
+    Ok(config_with_catalog)
+}
+
+fn generated_model_catalog_json(
+    profile: &RelayProfile,
+    config_text: &str,
+    rows: Vec<(String, String)>,
+) -> anyhow::Result<Value> {
+    let reasoning_effort = catalog_reasoning_effort(config_text);
+    let auto_compact_limit =
+        parse_optional_positive_u64(&profile.auto_compact_limit, "压缩上下文大小")?;
+    let mut models = Vec::new();
+
+    for (model, context_window) in rows {
+        let mut entry = Map::new();
+        entry.insert("slug".to_string(), json!(model.clone()));
+        entry.insert("display_name".to_string(), json!(model));
+        entry.insert("visibility".to_string(), json!("list"));
+        entry.insert("supported_in_api".to_string(), json!(true));
+        entry.insert(
+            "default_reasoning_level".to_string(),
+            json!(reasoning_effort),
+        );
+        entry.insert(
+            "supported_reasoning_levels".to_string(),
+            json!([
+                { "effort": "minimal", "description": "Minimal reasoning" },
+                { "effort": "low", "description": "Low reasoning" },
+                { "effort": "medium", "description": "Medium reasoning" },
+                { "effort": "high", "description": "High reasoning" },
+                { "effort": "xhigh", "description": "Extra high reasoning" }
+            ]),
+        );
+
+        if let Some(value) = parse_optional_positive_u64(&context_window, "上下文大小")? {
+            entry.insert("context_window".to_string(), json!(value));
+            entry.insert("max_context_window".to_string(), json!(value));
+        }
+        if let Some(value) = auto_compact_limit {
+            entry.insert("auto_compact_token_limit".to_string(), json!(value));
+        }
+
+        models.push(Value::Object(entry));
+    }
+
+    Ok(json!({ "models": models }))
+}
+
+fn relay_profile_catalog_rows(profile: &RelayProfile) -> Vec<(String, String)> {
+    let mut seen = HashSet::new();
+    let mut rows = Vec::new();
+    if !profile.model_mappings.is_empty() {
+        for mapping in &profile.model_mappings {
+            let model = mapping.request_model.trim();
+            if model.is_empty() || !seen.insert(model.to_string()) {
+                continue;
+            }
+            rows.push((model.to_string(), mapping.context_window.trim().to_string()));
+        }
+        return rows;
+    }
+
+    for model in crate::model_catalog::relay_profile_model_ids_for_proxy(profile) {
+        let model = model.trim().to_string();
+        if model.is_empty() || !seen.insert(model.clone()) {
+            continue;
+        }
+        rows.push((model, String::new()));
+    }
+    rows
+}
+
+fn catalog_reasoning_effort(config_text: &str) -> String {
+    match root_key_string(config_text, "model_reasoning_effort")
+        .unwrap_or_default()
+        .trim()
+    {
+        "minimal" => "minimal".to_string(),
+        "low" => "low".to_string(),
+        "medium" => "medium".to_string(),
+        "high" => "high".to_string(),
+        "xhigh" => "xhigh".to_string(),
+        _ => "medium".to_string(),
+    }
+}
+
 fn toml_value_is_subset(target: &toml_edit::Value, source: &toml_edit::Value) -> bool {
     match (target, source) {
         (toml_edit::Value::String(target), toml_edit::Value::String(source)) => {
@@ -1858,7 +1974,6 @@ pub fn normalize_relay_profile_for_storage(profile: &mut RelayProfile) -> anyhow
         profile.base_url.clear();
         profile.upstream_base_url.clear();
         profile.api_key.clear();
-        profile.local_proxy_enabled = Some(false);
         profile.auth_contents = remove_openai_api_key_from_auth_contents(&profile.auth_contents)?;
         return Ok(());
     }

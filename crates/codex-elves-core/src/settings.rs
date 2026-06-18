@@ -38,6 +38,17 @@ impl Default for RelayContextSelection {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RelayModelMapping {
+    #[serde(default)]
+    pub request_model: String,
+    #[serde(default)]
+    pub protocol: RelayProtocol,
+    #[serde(default)]
+    pub context_window: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RelayProfile {
     pub id: String,
     pub name: String,
@@ -83,6 +94,8 @@ pub struct RelayProfile {
     pub auto_compact_limit: String,
     #[serde(rename = "modelInsertMode", default)]
     pub model_insert_mode: RelayModelInsertMode,
+    #[serde(rename = "modelMappings", default)]
+    pub model_mappings: Vec<RelayModelMapping>,
     #[serde(rename = "modelList", default)]
     pub model_list: String,
     #[serde(rename = "responsesModelList", default)]
@@ -119,6 +132,7 @@ impl Default for RelayProfile {
             context_window: String::new(),
             auto_compact_limit: String::new(),
             model_insert_mode: RelayModelInsertMode::Patch,
+            model_mappings: Vec::new(),
             model_list: String::new(),
             responses_model_list: String::new(),
             chat_completions_model_list: String::new(),
@@ -130,6 +144,33 @@ impl Default for RelayProfile {
 impl RelayProfile {
     pub fn local_proxy_enabled(&self) -> bool {
         self.local_proxy_enabled.unwrap_or(false)
+    }
+
+    pub fn context_window_for_active_model(&self) -> String {
+        let model = self.model.trim();
+        if !model.is_empty() && !self.model_mappings.is_empty() {
+            return self
+                .model_mappings
+                .iter()
+                .find(|mapping| mapping.request_model.trim() == model)
+                .map(|mapping| mapping.context_window.trim().to_string())
+                .unwrap_or_default();
+        }
+        self.context_window.trim().to_string()
+    }
+
+    pub fn protocol_for_model(&self, model: &str) -> RelayProtocol {
+        let model = model.trim();
+        if !model.is_empty() && !self.model_mappings.is_empty() {
+            if let Some(mapping) = self
+                .model_mappings
+                .iter()
+                .find(|mapping| mapping.request_model.trim() == model)
+            {
+                return mapping.protocol;
+            }
+        }
+        self.protocol
     }
 }
 
@@ -329,6 +370,7 @@ impl BackendSettings {
                 context_window: String::new(),
                 auto_compact_limit: String::new(),
                 model_insert_mode: RelayModelInsertMode::Patch,
+                model_mappings: Vec::new(),
                 model_list: String::new(),
                 responses_model_list: String::new(),
                 chat_completions_model_list: String::new(),
@@ -376,6 +418,7 @@ impl BackendSettings {
             context_window: String::new(),
             auto_compact_limit: String::new(),
             model_insert_mode: RelayModelInsertMode::Patch,
+            model_mappings: Vec::new(),
             model_list: String::new(),
             responses_model_list: String::new(),
             chat_completions_model_list: String::new(),
@@ -1005,6 +1048,7 @@ mod tests {
         assert!(profile.context_window.is_empty());
         assert!(profile.auto_compact_limit.is_empty());
         assert_eq!(profile.model_insert_mode, RelayModelInsertMode::Patch);
+        assert!(profile.model_mappings.is_empty());
         assert!(profile.model_list.is_empty());
     }
 
@@ -1024,6 +1068,10 @@ mod tests {
                 "contextWindow":"200000",
                 "autoCompactLimit":"160000",
                 "modelInsertMode":"patch",
+                "modelMappings":[
+                    {"requestModel":"qwen3-coder","protocol":"responses","contextWindow":"200000"},
+                    {"requestModel":"deepseek-coder","protocol":"chatCompletions","contextWindow":"128000"}
+                ],
                 "modelList":"qwen3-coder\ndeepseek-coder"
             }"#,
         )
@@ -1037,7 +1085,37 @@ mod tests {
         assert_eq!(profile.context_window, "200000");
         assert_eq!(profile.auto_compact_limit, "160000");
         assert_eq!(profile.model_insert_mode, RelayModelInsertMode::Patch);
+        assert_eq!(profile.model_mappings.len(), 2);
+        assert_eq!(profile.model_mappings[0].request_model, "qwen3-coder");
+        assert_eq!(profile.model_mappings[0].protocol, RelayProtocol::Responses);
+        assert_eq!(profile.model_mappings[0].context_window, "200000");
+        assert_eq!(
+            profile.model_mappings[1].protocol,
+            RelayProtocol::ChatCompletions
+        );
         assert_eq!(profile.model_list, "qwen3-coder\ndeepseek-coder");
+    }
+
+    #[test]
+    fn relay_profile_protocol_for_model_uses_model_mapping() {
+        let profile = RelayProfile {
+            protocol: RelayProtocol::Responses,
+            model_mappings: vec![RelayModelMapping {
+                request_model: "gpt-chat".to_string(),
+                protocol: RelayProtocol::ChatCompletions,
+                context_window: "200000".to_string(),
+            }],
+            ..RelayProfile::default()
+        };
+
+        assert_eq!(
+            profile.protocol_for_model("gpt-chat"),
+            RelayProtocol::ChatCompletions
+        );
+        assert_eq!(
+            profile.protocol_for_model("gpt-other"),
+            RelayProtocol::Responses
+        );
     }
 
     #[test]

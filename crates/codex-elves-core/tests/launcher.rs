@@ -918,6 +918,7 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
             context_window: String::new(),
             auto_compact_limit: String::new(),
             model_insert_mode: codex_elves_core::settings::RelayModelInsertMode::default(),
+            model_mappings: Vec::new(),
             model_list: String::new(),
             responses_model_list: String::new(),
             chat_completions_model_list: String::new(),

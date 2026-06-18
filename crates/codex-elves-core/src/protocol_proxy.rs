@@ -334,6 +334,7 @@ pub struct ChatSseToResponsesConverter {
     utf8_remainder: Vec<u8>,
     state: ChatSseState,
     failed: bool,
+    saw_done: bool,
 }
 
 impl Default for ChatSseToResponsesConverter {
@@ -343,6 +344,7 @@ impl Default for ChatSseToResponsesConverter {
             utf8_remainder: Vec::new(),
             state: ChatSseState::default(),
             failed: false,
+            saw_done: false,
         }
     }
 }
@@ -379,6 +381,21 @@ impl ChatSseToResponsesConverter {
 
         let mut output = String::new();
         if !self.failed {
+            if !self.buffer.trim().is_empty() && !self.state.completed {
+                let pending = std::mem::take(&mut self.buffer);
+                self.handle_block(&pending, &mut output);
+            }
+        }
+        if !self.failed && !self.state.completed {
+            if !self.saw_done && self.state.finish_reason.is_none() {
+                self.state.failed_into(
+                    &mut output,
+                    "upstream stream ended before a completion marker".to_string(),
+                    Some("stream_error".to_string()),
+                );
+                self.failed = true;
+                return output.into_bytes();
+            }
             self.state.finalize_into(&mut output);
         }
         output.into_bytes()
@@ -408,11 +425,18 @@ impl ChatSseToResponsesConverter {
         }
         let data = data_parts.join("\n");
         if data.trim() == "[DONE]" {
+            self.saw_done = true;
             self.state.finalize_into(output);
             return;
         }
 
         let Ok(chunk) = serde_json::from_str::<Value>(&data) else {
+            self.state.failed_into(
+                output,
+                "upstream stream sent invalid JSON data".to_string(),
+                Some("invalid_sse_json".to_string()),
+            );
+            self.failed = true;
             return;
         };
         if event_name.as_deref() == Some("error") || chunk.get("error").is_some() {
@@ -810,7 +834,13 @@ pub fn response_id_from_chat_id(id: Option<&str>) -> String {
     }
 }
 
-fn push_sse(output: &mut String, event: &str, data: Value) {
+fn push_sse(output: &mut String, event: &str, mut data: Value, next_sequence_number: &mut u64) {
+    if let Some(object) = data.as_object_mut() {
+        object
+            .entry("sequence_number".to_string())
+            .or_insert_with(|| json!(*next_sequence_number));
+        *next_sequence_number += 1;
+    }
     output.push_str("event: ");
     output.push_str(event);
     output.push_str("\ndata: ");
@@ -823,6 +853,7 @@ struct TextItemState {
     output_index: Option<u32>,
     item_id: String,
     text: String,
+    content_kind: OutputContentKind,
     added: bool,
     done: bool,
 }
@@ -834,6 +865,29 @@ struct ReasoningItemState {
     text: String,
     added: bool,
     done: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum OutputContentKind {
+    #[default]
+    OutputText,
+    Refusal,
+}
+
+impl OutputContentKind {
+    fn added_part(self) -> Value {
+        match self {
+            Self::OutputText => json!({ "type": "output_text", "text": "", "annotations": [] }),
+            Self::Refusal => json!({ "type": "refusal", "refusal": "" }),
+        }
+    }
+
+    fn done_part(self, text: &str) -> Value {
+        match self {
+            Self::OutputText => json!({ "type": "output_text", "text": text, "annotations": [] }),
+            Self::Refusal => json!({ "type": "refusal", "refusal": text }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -869,6 +923,7 @@ struct ChatSseState {
     model: String,
     created_at: u64,
     next_output_index: u32,
+    next_sequence_number: u64,
     text: TextItemState,
     reasoning: ReasoningItemState,
     inline_think: InlineThinkState,
@@ -889,6 +944,7 @@ impl Default for ChatSseState {
             model: String::new(),
             created_at: 0,
             next_output_index: 0,
+            next_sequence_number: 0,
             text: TextItemState::default(),
             reasoning: ReasoningItemState::default(),
             inline_think: InlineThinkState::default(),
@@ -948,6 +1004,12 @@ impl ChatSseState {
                 }
             }
 
+            if let Some(refusal) = delta.get("refusal").and_then(Value::as_str) {
+                if !refusal.is_empty() {
+                    self.push_refusal_delta_into(refusal, output);
+                }
+            }
+
             if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
                 self.flush_inline_think_at_boundary_into(output);
                 self.finalize_reasoning_into(output);
@@ -966,7 +1028,7 @@ impl ChatSseState {
         match self.inline_think.mode {
             InlineThinkMode::Text => {
                 self.finalize_reasoning_into(output);
-                self.push_text_delta_into(delta, output);
+                self.push_message_delta_into(delta, OutputContentKind::OutputText, output);
             }
             InlineThinkMode::Detecting => {
                 self.inline_think.buffer.push_str(delta);
@@ -980,7 +1042,7 @@ impl ChatSseState {
                         self.inline_think.mode = InlineThinkMode::Text;
                         let text = std::mem::take(&mut self.inline_think.buffer);
                         self.finalize_reasoning_into(output);
-                        self.push_text_delta_into(&text, output);
+                        self.push_message_delta_into(&text, OutputContentKind::OutputText, output);
                     }
                 }
             }
@@ -1002,7 +1064,7 @@ impl ChatSseState {
             self.finalize_reasoning_into(output);
         }
         if !answer.is_empty() {
-            self.push_text_delta_into(&answer, output);
+            self.push_message_delta_into(&answer, OutputContentKind::OutputText, output);
         }
     }
 
@@ -1014,7 +1076,7 @@ impl ChatSseState {
                 let text = std::mem::take(&mut self.inline_think.buffer);
                 if !text.is_empty() {
                     self.finalize_reasoning_into(output);
-                    self.push_text_delta_into(&text, output);
+                    self.push_message_delta_into(&text, OutputContentKind::OutputText, output);
                 }
             }
             InlineThinkMode::Reasoning => {
@@ -1026,7 +1088,11 @@ impl ChatSseState {
                         self.finalize_reasoning_into(output);
                     }
                     if !answer.is_empty() {
-                        self.push_text_delta_into(&answer, output);
+                        self.push_message_delta_into(
+                            &answer,
+                            OutputContentKind::OutputText,
+                            output,
+                        );
                     }
                     return;
                 }
@@ -1037,6 +1103,12 @@ impl ChatSseState {
                 }
             }
         }
+    }
+
+    fn push_refusal_delta_into(&mut self, delta: &str, output: &mut String) {
+        self.flush_inline_think_at_boundary_into(output);
+        self.finalize_reasoning_into(output);
+        self.push_message_delta_into(delta, OutputContentKind::Refusal, output);
     }
 
     fn ensure_response_started_into(&mut self, output: &mut String) {
@@ -1051,6 +1123,7 @@ impl ChatSseState {
                 "type": "response.created",
                 "response": self.base_response("in_progress", Vec::new())
             }),
+            &mut self.next_sequence_number,
         );
         push_sse(
             output,
@@ -1059,6 +1132,7 @@ impl ChatSseState {
                 "type": "response.in_progress",
                 "response": self.base_response("in_progress", Vec::new())
             }),
+            &mut self.next_sequence_number,
         );
     }
 
@@ -1084,6 +1158,7 @@ impl ChatSseState {
                         "summary": []
                     }
                 }),
+                &mut self.next_sequence_number,
             );
             push_sse(
                 output,
@@ -1095,6 +1170,7 @@ impl ChatSseState {
                     "summary_index": 0,
                     "part": { "type": "summary_text", "text": "" }
                 }),
+                &mut self.next_sequence_number,
             );
         }
 
@@ -1110,15 +1186,26 @@ impl ChatSseState {
                 "summary_index": 0,
                 "delta": delta
             }),
+            &mut self.next_sequence_number,
         );
     }
 
-    fn push_text_delta_into(&mut self, delta: &str, output: &mut String) {
+    fn push_message_delta_into(
+        &mut self,
+        delta: &str,
+        content_kind: OutputContentKind,
+        output: &mut String,
+    ) {
+        if self.text.added && !self.text.done && self.text.content_kind != content_kind {
+            self.finalize_text_into(output);
+            self.text = TextItemState::default();
+        }
         if !self.text.added {
             let output_index = self.next_output_index();
             let item_id = format!("{}_msg", self.response_id);
             self.text.output_index = Some(output_index);
             self.text.item_id = item_id.clone();
+            self.text.content_kind = content_kind;
             self.text.added = true;
             push_sse(
                 output,
@@ -1134,6 +1221,7 @@ impl ChatSseState {
                         "content": []
                     }
                 }),
+                &mut self.next_sequence_number,
             );
             push_sse(
                 output,
@@ -1143,23 +1231,31 @@ impl ChatSseState {
                     "item_id": self.text.item_id,
                     "output_index": output_index,
                     "content_index": 0,
-                    "part": { "type": "output_text", "text": "", "annotations": [] }
+                    "part": content_kind.added_part()
                 }),
+                &mut self.next_sequence_number,
             );
         }
 
         self.text.text.push_str(delta);
         let output_index = self.text.output_index.unwrap_or(0);
+        let (event, event_type) = match self.text.content_kind {
+            OutputContentKind::OutputText => {
+                ("response.output_text.delta", "response.output_text.delta")
+            }
+            OutputContentKind::Refusal => ("response.refusal.delta", "response.refusal.delta"),
+        };
         push_sse(
             output,
-            "response.output_text.delta",
+            event,
             json!({
-                "type": "response.output_text.delta",
+                "type": event_type,
                 "item_id": self.text.item_id,
                 "output_index": output_index,
                 "content_index": 0,
                 "delta": delta
             }),
+            &mut self.next_sequence_number,
         );
     }
 
@@ -1221,7 +1317,12 @@ impl ChatSseState {
             state.output_index = Some(assigned);
             state.item_id = format!("fc_{}", state.call_id);
             let added_item = tool_call_added_item(state, assigned, &self.tool_context);
-            push_sse(output, "response.output_item.added", added_item);
+            push_sse(
+                output,
+                "response.output_item.added",
+                added_item,
+                &mut self.next_sequence_number,
+            );
             if !pending_arguments.is_empty() {
                 push_tool_call_delta_sse(
                     output,
@@ -1229,6 +1330,7 @@ impl ChatSseState {
                     assigned,
                     &pending_arguments,
                     &self.tool_context,
+                    &mut self.next_sequence_number,
                 );
             }
         } else if !args_delta.is_empty() {
@@ -1254,6 +1356,7 @@ impl ChatSseState {
                     output_index,
                     &args_delta,
                     &self.tool_context,
+                    &mut self.next_sequence_number,
                 );
             }
         }
@@ -1275,13 +1378,19 @@ impl ChatSseState {
             response["incomplete_details"] = json!({ "reason": "max_output_tokens" });
         }
         copy_response_request_fields(&mut response, self.original_request.as_ref());
+        let terminal_event = if status == "incomplete" {
+            "response.incomplete"
+        } else {
+            "response.completed"
+        };
         push_sse(
             output,
-            "response.completed",
+            terminal_event,
             json!({
-                "type": "response.completed",
+                "type": terminal_event,
                 "response": response
             }),
+            &mut self.next_sequence_number,
         );
         output.push_str("data: [DONE]\n\n");
         self.completed = true;
@@ -1310,6 +1419,7 @@ impl ChatSseState {
                 "summary_index": 0,
                 "text": self.reasoning.text
             }),
+            &mut self.next_sequence_number,
         );
         push_sse(
             output,
@@ -1321,6 +1431,7 @@ impl ChatSseState {
                 "summary_index": 0,
                 "part": { "type": "summary_text", "text": self.reasoning.text }
             }),
+            &mut self.next_sequence_number,
         );
         push_sse(
             output,
@@ -1330,6 +1441,7 @@ impl ChatSseState {
                 "output_index": output_index,
                 "item": item
             }),
+            &mut self.next_sequence_number,
         );
     }
 
@@ -1343,20 +1455,32 @@ impl ChatSseState {
             "type": "message",
             "status": "completed",
             "role": "assistant",
-            "content": [{ "type": "output_text", "text": self.text.text, "annotations": [] }]
+            "content": [self.text.content_kind.done_part(&self.text.text)]
         });
         self.output_items.push((output_index, item.clone()));
         self.text.done = true;
+        let (done_event, done_type, done_value_key) = match self.text.content_kind {
+            OutputContentKind::OutputText => (
+                "response.output_text.done",
+                "response.output_text.done",
+                "text",
+            ),
+            OutputContentKind::Refusal => {
+                ("response.refusal.done", "response.refusal.done", "refusal")
+            }
+        };
+        let mut done_payload = json!({
+            "type": done_type,
+            "item_id": self.text.item_id,
+            "output_index": output_index,
+            "content_index": 0
+        });
+        done_payload[done_value_key] = json!(self.text.text);
         push_sse(
             output,
-            "response.output_text.done",
-            json!({
-                "type": "response.output_text.done",
-                "item_id": self.text.item_id,
-                "output_index": output_index,
-                "content_index": 0,
-                "text": self.text.text
-            }),
+            done_event,
+            done_payload,
+            &mut self.next_sequence_number,
         );
         push_sse(
             output,
@@ -1366,8 +1490,9 @@ impl ChatSseState {
                 "item_id": self.text.item_id,
                 "output_index": output_index,
                 "content_index": 0,
-                "part": { "type": "output_text", "text": self.text.text, "annotations": [] }
+                "part": self.text.content_kind.done_part(&self.text.text)
             }),
+            &mut self.next_sequence_number,
         );
         push_sse(
             output,
@@ -1377,6 +1502,7 @@ impl ChatSseState {
                 "output_index": output_index,
                 "item": item
             }),
+            &mut self.next_sequence_number,
         );
     }
 
@@ -1404,7 +1530,12 @@ impl ChatSseState {
                 state.output_index = Some(assigned);
                 state.item_id = format!("fc_{}", state.call_id);
                 let added_item = tool_call_added_item(state, assigned, &self.tool_context);
-                push_sse(output, "response.output_item.added", added_item);
+                push_sse(
+                    output,
+                    "response.output_item.added",
+                    added_item,
+                    &mut self.next_sequence_number,
+                );
             }
 
             let state = self.tools.get_mut(&key).expect("tool state exists");
@@ -1412,7 +1543,13 @@ impl ChatSseState {
             let item = tool_call_done_item(state, &self.tool_context);
             state.done = true;
             self.output_items.push((output_index, item.clone()));
-            push_tool_call_done_sse(output, state, output_index, &self.tool_context);
+            push_tool_call_done_sse(
+                output,
+                state,
+                output_index,
+                &self.tool_context,
+                &mut self.next_sequence_number,
+            );
             push_sse(
                 output,
                 "response.output_item.done",
@@ -1421,6 +1558,7 @@ impl ChatSseState {
                     "output_index": output_index,
                     "item": item
                 }),
+                &mut self.next_sequence_number,
             );
         }
     }
@@ -1440,6 +1578,7 @@ impl ChatSseState {
                 "type": "response.failed",
                 "response": response
             }),
+            &mut self.next_sequence_number,
         );
     }
 
@@ -2048,7 +2187,7 @@ fn responses_content_to_chat_content(_role: &str, content: &Value) -> Value {
                 }
             }
             "input_image" => {
-                if let Some(image_url) = part.get("image_url") {
+                if let Some(image_url) = part.get("image_url").filter(|value| !value.is_null()) {
                     let image_url = if image_url.is_object() {
                         image_url.clone()
                     } else {
@@ -2056,9 +2195,50 @@ fn responses_content_to_chat_content(_role: &str, content: &Value) -> Value {
                     };
                     chat_parts.push(json!({ "type": "image_url", "image_url": image_url }));
                     has_non_text_part = true;
+                } else if let Some(file_id) = part.get("file_id").and_then(Value::as_str) {
+                    let image_url = json!({ "file_id": file_id });
+                    chat_parts.push(json!({ "type": "image_url", "image_url": image_url }));
+                    has_non_text_part = true;
                 }
             }
-            _ => {}
+            "input_file" => {
+                let mut file = json!({});
+                copy_string_field(part, &mut file, "file_id");
+                copy_string_field(part, &mut file, "file_data");
+                copy_string_field(part, &mut file, "file_url");
+                copy_string_field(part, &mut file, "filename");
+                if file
+                    .as_object()
+                    .map(|object| object.is_empty())
+                    .unwrap_or(true)
+                {
+                    chat_parts.push(json!({ "type": "text", "text": canonical_json_string(part) }));
+                } else {
+                    chat_parts.push(json!({ "type": "file", "file": file }));
+                    has_non_text_part = true;
+                }
+            }
+            "input_audio" => {
+                let input_audio = part.get("input_audio").cloned().unwrap_or_else(|| {
+                    let mut audio = json!({});
+                    copy_string_field(part, &mut audio, "data");
+                    copy_string_field(part, &mut audio, "format");
+                    audio
+                });
+                if input_audio
+                    .as_object()
+                    .map(|object| object.is_empty())
+                    .unwrap_or(false)
+                {
+                    chat_parts.push(json!({ "type": "text", "text": canonical_json_string(part) }));
+                } else {
+                    chat_parts.push(json!({ "type": "input_audio", "input_audio": input_audio }));
+                    has_non_text_part = true;
+                }
+            }
+            _ => {
+                chat_parts.push(json!({ "type": "text", "text": canonical_json_string(part) }));
+            }
         }
     }
 
@@ -2073,6 +2253,14 @@ fn responses_content_to_chat_content(_role: &str, content: &Value) -> Value {
     }
 
     Value::Array(chat_parts)
+}
+
+fn copy_string_field(source: &Value, target: &mut Value, field: &str) {
+    if let Some(value) = source.get(field).and_then(Value::as_str) {
+        if !value.is_empty() {
+            target[field] = json!(value);
+        }
+    }
 }
 
 fn responses_history_function_name(item: &Value) -> String {
@@ -2880,6 +3068,7 @@ fn push_tool_call_delta_sse(
     output_index: u32,
     delta: &str,
     tool_context: &CodexToolContext,
+    next_sequence_number: &mut u64,
 ) {
     if tool_context.is_custom_tool_proxy(&state.name) {
         let _ = delta;
@@ -2893,6 +3082,7 @@ fn push_tool_call_delta_sse(
                 "output_index": output_index,
                 "delta": delta
             }),
+            next_sequence_number,
         );
     }
 }
@@ -2902,8 +3092,14 @@ fn push_tool_call_done_sse(
     state: &ToolCallState,
     output_index: u32,
     tool_context: &CodexToolContext,
+    next_sequence_number: &mut u64,
 ) {
     if tool_context.is_custom_tool_proxy(&state.name) {
+        let input = reconstruct_custom_tool_call_input_with_context(
+            tool_context,
+            &state.name,
+            &state.arguments,
+        );
         push_sse(
             output,
             "response.custom_tool_call_input.delta",
@@ -2912,24 +3108,35 @@ fn push_tool_call_done_sse(
                 "item_id": format!("ctc_{}", state.call_id),
                 "call_id": state.call_id,
                 "output_index": output_index,
-                "delta": reconstruct_custom_tool_call_input_with_context(
-                    tool_context,
-                    &state.name,
-                    &state.arguments
-                )
+                "delta": input.clone()
             }),
+            next_sequence_number,
+        );
+        push_sse(
+            output,
+            "response.custom_tool_call_input.done",
+            json!({
+                "type": "response.custom_tool_call_input.done",
+                "item_id": format!("ctc_{}", state.call_id),
+                "output_index": output_index,
+                "input": input
+            }),
+            next_sequence_number,
         );
         return;
     }
+    let (display_name, _namespace) = tool_context.openai_name_for_function_tool(&state.name);
     push_sse(
         output,
         "response.function_call_arguments.done",
         json!({
             "type": "response.function_call_arguments.done",
             "item_id": state.item_id,
+            "name": display_name,
             "output_index": output_index,
             "arguments": state.arguments
         }),
+        next_sequence_number,
     );
 }
 

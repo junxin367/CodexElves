@@ -9,7 +9,7 @@ use codex_elves_core::model_catalog::{
     read_codex_model_catalog, read_codex_model_catalog_from_home,
 };
 use codex_elves_core::settings::{
-    BackendSettings, RelayMode, RelayProfile, RelayProtocol, SettingsStore,
+    BackendSettings, RelayMode, RelayModelMapping, RelayProfile, RelayProtocol, SettingsStore,
 };
 use serde_json::json;
 
@@ -93,8 +93,23 @@ async fn model_catalog_uses_active_relay_profile_protocol_model_lists_for_displa
                     base_url: "https://example.test/v1".to_string(),
                     protocol: RelayProtocol::Responses,
                     relay_mode: RelayMode::MixedApi,
-                    responses_model_list: "qwen3-coder\ndeepseek-coder\nclaude-compatible"
-                        .to_string(),
+                    model_mappings: vec![
+                        RelayModelMapping {
+                            request_model: "qwen3-coder".to_string(),
+                            protocol: RelayProtocol::Responses,
+                            context_window: "200000".to_string(),
+                        },
+                        RelayModelMapping {
+                            request_model: "deepseek-coder".to_string(),
+                            protocol: RelayProtocol::Responses,
+                            context_window: String::new(),
+                        },
+                        RelayModelMapping {
+                            request_model: "claude-compatible".to_string(),
+                            protocol: RelayProtocol::Responses,
+                            context_window: String::new(),
+                        },
+                    ],
                     config_contents: "model = \"qwen3-coder\"\n".to_string(),
                     ..RelayProfile::default()
                 }],
@@ -153,8 +168,28 @@ async fn model_catalog_merges_responses_and_chat_model_lists_for_display() {
                     protocol: RelayProtocol::Responses,
                     local_proxy_enabled: Some(true),
                     relay_mode: RelayMode::MixedApi,
-                    responses_model_list: "gpt-responses\ngpt-shared".to_string(),
-                    chat_completions_model_list: "gpt-chat\ngpt-shared".to_string(),
+                    model_mappings: vec![
+                        RelayModelMapping {
+                            request_model: "gpt-responses".to_string(),
+                            protocol: RelayProtocol::Responses,
+                            context_window: String::new(),
+                        },
+                        RelayModelMapping {
+                            request_model: "gpt-shared".to_string(),
+                            protocol: RelayProtocol::Responses,
+                            context_window: String::new(),
+                        },
+                        RelayModelMapping {
+                            request_model: "gpt-chat".to_string(),
+                            protocol: RelayProtocol::ChatCompletions,
+                            context_window: String::new(),
+                        },
+                        RelayModelMapping {
+                            request_model: "gpt-shared".to_string(),
+                            protocol: RelayProtocol::ChatCompletions,
+                            context_window: String::new(),
+                        },
+                    ],
                     config_contents: "model = \"gpt-responses\"\n".to_string(),
                     ..RelayProfile::default()
                 }],

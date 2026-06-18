@@ -157,10 +157,17 @@ type RelayProfile = {
   contextSelectionInitialized: boolean;
   contextWindow: string;
   autoCompactLimit: string;
+  modelMappings: RelayModelMapping[];
   modelList: string;
   responsesModelList: string;
   chatCompletionsModelList: string;
   userAgent: string;
+};
+
+type RelayModelMapping = {
+  requestModel: string;
+  protocol: RelayProtocol;
+  contextWindow: string;
 };
 
 type RelayContextSelection = {
@@ -529,6 +536,7 @@ const defaultSettings: BackendSettings = {
       contextSelectionInitialized: true,
       contextWindow: "",
       autoCompactLimit: "",
+      modelMappings: [],
       modelList: "",
       responsesModelList: "",
       chatCompletionsModelList: "",
@@ -2599,7 +2607,7 @@ function SortableRelayProfileCard({
       </span>
       <span className="relay-summary">
         <strong>{profile.name || "未命名供应商"}</strong>
-        <small>{relayModeLabel(profile.relayMode)} · {relayProtocolLabel(profile.protocol)} · {relayProfileConfigBrief(profile)}</small>
+        <small>{relayModeLabel(profile.relayMode)} · {relayProfileConfigBrief(profile)}</small>
       </span>
       <span className="relay-card-actions">
         <Button
@@ -2842,8 +2850,39 @@ function RelayProfileEditor({
 }) {
   const showApiFields = profile.relayMode !== "official" || profile.officialMixApiKey;
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [modelChoices, setModelChoices] = useState<Record<RelayProtocol, string[]>>({
+    responses: [],
+    chatCompletions: [],
+  });
+  const [fetchingModelChoices, setFetchingModelChoices] = useState(false);
   const updateDraft = (patch: Partial<RelayProfile>) => {
     onProfileChange(applyRelayProfilePatchToFiles(profile, patch, { allowGenerateFiles: isNew }));
+  };
+  const updateModelMappings = (mappings: RelayModelMapping[]) => {
+    updateDraft({
+      modelMappings: normalizeRelayModelMappings(mappings),
+      responsesModelList: "",
+      chatCompletionsModelList: "",
+      modelList: "",
+    });
+  };
+  const fetchModelChoices = async () => {
+    if (fetchingModelChoices) return;
+    setFetchingModelChoices(true);
+    try {
+      const models = await actions.fetchRelayProfileModels(profile);
+      if (models?.length) {
+        const normalized = uniqueStrings(models.map((item) => item.trim()).filter(Boolean)).sort((a, b) =>
+          a.localeCompare(b),
+        );
+        setModelChoices({
+          responses: normalized,
+          chatCompletions: normalized,
+        });
+      }
+    } finally {
+      setFetchingModelChoices(false);
+    }
   };
   return (
     <div className="relay-profile-editor">
@@ -2932,14 +2971,6 @@ function RelayProfileEditor({
                 placeholder={`留空使用默认：${form.relayTestModel || defaultSettings.relayTestModel}`}
               />
             </Field>
-            <Field className="relay-field-context-window" label="上下文大小">
-              <Input
-                inputMode="numeric"
-                value={profile.contextWindow}
-                onChange={(event) => updateDraft({ contextWindow: event.currentTarget.value.replace(/[^\d]/g, "") })}
-                placeholder="留空不改写，例如 200000"
-              />
-            </Field>
             <Field className="relay-field-auto-compact" label="压缩上下文大小">
               <Input
                 inputMode="numeric"
@@ -2979,24 +3010,6 @@ function RelayProfileEditor({
                 placeholder="输入中转服务的 API Key"
               />
             </Field>
-            <Field className="relay-field-protocol" label="上游协议">
-              <div className="protocol-options">
-                <button
-                  className={`protocol-option ${profile.protocol === "responses" ? "active" : ""}`}
-                  onClick={() => updateDraft({ protocol: "responses" })}
-                  type="button"
-                >
-                  Responses API
-                </button>
-                <button
-                  className={`protocol-option ${profile.protocol === "chatCompletions" ? "active" : ""}`}
-                  onClick={() => updateDraft({ protocol: "chatCompletions" })}
-                  type="button"
-                >
-                  Chat Completions
-                </button>
-              </div>
-            </Field>
             <Field className="relay-field-local-proxy" label="本地代理">
               <label className="inline-check">
                 <input
@@ -3010,49 +3023,14 @@ function RelayProfileEditor({
           </div>
         ) : null}
         {showApiFields ? (
-          <Field className="relay-field-model-list" label="Responses API 模型列表">
-            <div className="relay-model-list-tools">
-              <Textarea
-                value={profile.responsesModelList}
-                onChange={(event) => updateDraft({ responsesModelList: event.currentTarget.value })}
-                placeholder="每行一个 Responses API 模型，例如 gpt-5.5"
-              />
-              <Button
-                onClick={async () => {
-                  const models = await actions.fetchRelayProfileModels({ ...profile, protocol: "responses" });
-                  if (models?.length) updateDraft({ responsesModelList: models.join("\n") });
-                }}
-                size="sm"
-                type="button"
-                variant="secondary"
-              >
-                <Download className="h-4 w-4" />
-                从上游获取
-              </Button>
-            </div>
-          </Field>
-        ) : null}
-        {showApiFields ? (
-          <Field className="relay-field-model-list" label="Chat Completions 模型列表">
-            <div className="relay-model-list-tools">
-              <Textarea
-                value={profile.chatCompletionsModelList}
-                onChange={(event) => updateDraft({ chatCompletionsModelList: event.currentTarget.value })}
-                placeholder="每行一个 Chat Completions 模型，例如 qwen3-coder"
-              />
-              <Button
-                onClick={async () => {
-                  const models = await actions.fetchRelayProfileModels({ ...profile, protocol: "chatCompletions" });
-                  if (models?.length) updateDraft({ chatCompletionsModelList: models.join("\n") });
-                }}
-                size="sm"
-                type="button"
-                variant="secondary"
-              >
-                <Download className="h-4 w-4" />
-                从上游获取
-              </Button>
-            </div>
+          <Field className="relay-field-model-list" label="模型列表">
+            <RelayModelMappingTable
+              choices={modelChoices}
+              fetching={fetchingModelChoices}
+              mappings={profile.modelMappings}
+              onChange={updateModelMappings}
+              onFetchModels={fetchModelChoices}
+            />
           </Field>
         ) : null}
         {showApiFields ? (
@@ -3074,6 +3052,122 @@ function RelayProfileEditor({
       <div className="hint-line relay-protocol-hint">
         <ShieldCheck className="h-4 w-4" />
         <span>{relayProfileModeHelp(profile)}</span>
+      </div>
+    </div>
+  );
+}
+
+function RelayModelMappingTable({
+  mappings,
+  choices,
+  fetching,
+  onChange,
+  onFetchModels,
+}: {
+  mappings: RelayModelMapping[];
+  choices: Record<RelayProtocol, string[]>;
+  fetching: boolean;
+  onChange: (mappings: RelayModelMapping[]) => void;
+  onFetchModels: () => Promise<void>;
+}) {
+  const displayRows = mappings.length
+    ? mappings
+    : [{ requestModel: "", protocol: "responses" as RelayProtocol, contextWindow: "" }];
+  const updateRow = (index: number, patch: Partial<RelayModelMapping>) => {
+    const next = mappings.length
+      ? [...mappings]
+      : [{ requestModel: "", protocol: "responses" as RelayProtocol, contextWindow: "" }];
+    next[index] = {
+      ...next[index],
+      ...patch,
+    };
+    onChange(next);
+  };
+  const addRow = () => {
+    onChange([
+      ...mappings,
+      {
+        requestModel: "",
+        protocol: "responses",
+        contextWindow: "",
+      },
+    ]);
+  };
+  const removeRow = (index: number) => {
+    onChange(mappings.filter((_, itemIndex) => itemIndex !== index));
+  };
+
+  return (
+    <div className="relay-model-table-wrap">
+      <div className="relay-model-table-actions">
+        <Button disabled={fetching} onClick={onFetchModels} size="sm" type="button" variant="secondary">
+          <Download className="h-4 w-4" />
+          {fetching ? "获取中" : "获取模型列表"}
+        </Button>
+        <Button onClick={addRow} size="sm" type="button" variant="secondary">
+          <Plus className="h-4 w-4" />
+          添加模型
+        </Button>
+      </div>
+      <datalist id="relay-model-choices-responses">
+        {choices.responses.map((model) => (
+          <option key={`responses-${model}`} value={model} />
+        ))}
+      </datalist>
+      <datalist id="relay-model-choices-chatCompletions">
+        {choices.chatCompletions.map((model) => (
+          <option key={`chat-${model}`} value={model} />
+        ))}
+      </datalist>
+      <div className="relay-model-table" role="table" aria-label="模型列表">
+        <div className="relay-model-table-head" role="row">
+          <span role="columnheader">请求模型</span>
+          <span role="columnheader">协议</span>
+          <span role="columnheader">上下文大小</span>
+          <span role="columnheader" aria-label="删除" />
+        </div>
+        {displayRows.map((row, index) => (
+          <div className="relay-model-table-row" role="row" key={`model-row-${index}`}>
+            <div className="relay-model-request-cell" role="cell">
+              <Input
+                list={`relay-model-choices-${row.protocol}`}
+                value={row.requestModel}
+                onChange={(event) => updateRow(index, { requestModel: event.currentTarget.value })}
+                placeholder="点击选择或输入模型"
+              />
+            </div>
+            <div role="cell">
+              <select
+                className="field-select"
+                value={row.protocol}
+                onChange={(event) => updateRow(index, { protocol: event.currentTarget.value as RelayProtocol })}
+              >
+                <option value="responses">Responses API</option>
+                <option value="chatCompletions">Chat Completions</option>
+              </select>
+            </div>
+            <div role="cell">
+              <Input
+                inputMode="numeric"
+                value={row.contextWindow}
+                onChange={(event) => updateRow(index, { contextWindow: event.currentTarget.value.replace(/[^\d]/g, "") })}
+                placeholder="例如 200000"
+              />
+            </div>
+            <div className="relay-model-delete-cell" role="cell">
+              <button
+                aria-label="删除模型"
+                className="relay-model-delete-button"
+                disabled={!mappings.length}
+                onClick={() => removeRow(index)}
+                title="删除模型"
+                type="button"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -4317,6 +4411,7 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
             contextSelectionInitialized: true,
             contextWindow: "",
             autoCompactLimit: "",
+            modelMappings: [],
             modelList: "",
             responsesModelList: "",
             chatCompletionsModelList: "",
@@ -4362,6 +4457,7 @@ function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = 
   const legacyModelList = profile.modelList || "";
   const responsesModelList = profile.responsesModelList || "";
   const chatCompletionsModelList = profile.chatCompletionsModelList || "";
+  const modelMappings = normalizeRelayModelMappings(profile.modelMappings);
   let normalized: RelayProfile = {
     ...profile,
     model: profile.model || "",
@@ -4382,6 +4478,7 @@ function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = 
     contextSelectionInitialized: true,
     contextWindow: profile.contextWindow || "",
     autoCompactLimit: profile.autoCompactLimit || "",
+    modelMappings,
     modelList: legacyModelList,
     responsesModelList,
     chatCompletionsModelList,
@@ -4398,8 +4495,26 @@ function activeRelayProfile(settings: BackendSettings): RelayProfile {
   );
 }
 
-function relayProtocolLabel(protocol: RelayProtocol): string {
-  return protocol === "chatCompletions" ? "Chat Completions" : "Responses API";
+function normalizeRelayModelMappings(mappings: RelayModelMapping[] | undefined): RelayModelMapping[] {
+  if (!Array.isArray(mappings)) return [];
+  return mappings.map((item) => ({
+    requestModel: item.requestModel || "",
+    protocol: item.protocol === "chatCompletions" ? "chatCompletions" : "responses",
+    contextWindow: (item.contextWindow || "").replace(/[^\d]/g, ""),
+  }));
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values));
+}
+
+function relayProfileContextWindowForActiveModel(profile: RelayProfile): string {
+  const model = profile.model.trim();
+  if (model && profile.modelMappings.length > 0) {
+    const match = profile.modelMappings.find((item) => item.requestModel.trim() === model);
+    return match?.contextWindow.trim() || "";
+  }
+  return profile.contextWindow.trim();
 }
 
 function normalizeRelayMode(mode: RelayMode | undefined): RelayMode {
@@ -4569,8 +4684,12 @@ function applyRelayProfilePatchToFiles(
     next.configContents = setCodexProviderStringKey(next.configContents, "base_url", baseUrlForConfig);
     next.configContents = removeRootTomlKey(next.configContents, CHAT_UPSTREAM_BASE_URL_KEY);
   }
-  if ("contextWindow" in patch) {
-    next.configContents = setRootTomlIntKey(next.configContents, "model_context_window", patch.contextWindow || "");
+  if ("model" in patch || "modelMappings" in patch || "contextWindow" in patch) {
+    next.configContents = setRootTomlIntKey(
+      next.configContents,
+      "model_context_window",
+      relayProfileContextWindowForActiveModel(next),
+    );
   }
   if ("autoCompactLimit" in patch) {
     next.configContents = setRootTomlIntKey(
@@ -4871,6 +4990,7 @@ function createRelayProfile(settings: BackendSettings): RelayProfile {
     contextSelectionInitialized: true,
     contextWindow: "",
     autoCompactLimit: "",
+    modelMappings: [],
     modelList: "",
     responsesModelList: "",
     chatCompletionsModelList: "",
