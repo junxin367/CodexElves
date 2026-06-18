@@ -38,6 +38,7 @@ Section "Install"
 
   Delete "$DESKTOP\CodexElves 绠＄悊宸ュ叿.lnk"
   Delete "$SMPROGRAMS\CodexElves\CodexElves 绠＄悊宸ュ叿.lnk"
+  Delete "$SMPROGRAMS\CodexElves\鍗歌浇 CodexElves.lnk"
 
   CreateShortcut "$DESKTOP\CodexElves.lnk" "$INSTDIR\codex-elves.exe" "" "$INSTDIR\codex-elves.exe"
   CreateShortcut "$DESKTOP\CodexElves 管理工具.lnk" "$INSTDIR\codex-elves-manager.exe" "" "$INSTDIR\codex-elves-manager.exe"
@@ -69,6 +70,7 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\CodexElves\CodexElves 管理工具.lnk"
   Delete "$SMPROGRAMS\CodexElves\CodexElves 绠＄悊宸ュ叿.lnk"
   Delete "$SMPROGRAMS\CodexElves\卸载 CodexElves.lnk"
+  Delete "$SMPROGRAMS\CodexElves\鍗歌浇 CodexElves.lnk"
   RMDir "$SMPROGRAMS\CodexElves"
 
   Delete "$INSTDIR\codex-elves.exe"

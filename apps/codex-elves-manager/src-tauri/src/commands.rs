@@ -1823,11 +1823,16 @@ pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
         );
     }
 
+    let codex_protocol = if relay.local_proxy_enabled() {
+        codex_elves_core::settings::RelayProtocol::ChatCompletions
+    } else {
+        codex_elves_core::settings::RelayProtocol::Responses
+    };
     match codex_elves_core::relay_config::apply_relay_config_to_home_with_protocol(
         &home,
         &relay.base_url,
         &relay.api_key,
-        relay.protocol,
+        codex_protocol,
         codex_elves_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
     ) {
         Ok(result) => {
@@ -1918,11 +1923,16 @@ pub fn apply_pure_api_injection() -> CommandResult<RelayPayload> {
         };
     }
 
+    let codex_protocol = if relay.local_proxy_enabled() {
+        codex_elves_core::settings::RelayProtocol::ChatCompletions
+    } else {
+        codex_elves_core::settings::RelayProtocol::Responses
+    };
     match codex_elves_core::relay_config::apply_pure_api_config_to_home_with_protocol(
         &home,
         &relay.base_url,
         &relay.api_key,
-        relay.protocol,
+        codex_protocol,
         codex_elves_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
     ) {
         Ok(result) => {
@@ -2030,7 +2040,7 @@ fn log_relay_apply_request(
             "baseUrl": relay.base_url,
             "hasConfigContents": !relay.config_contents.trim().is_empty(),
             "hasAuthContents": !relay.auth_contents.trim().is_empty(),
-            "configContainsProxy": relay.config_contents.contains("127.0.0.1:57321")
+            "configContainsProxy": relay.config_contents.contains("127.0.0.1:45221")
         }),
     );
 }
@@ -2481,7 +2491,7 @@ fn default_debug_port() -> u16 {
 }
 
 fn default_helper_port() -> u16 {
-    57321
+    45221
 }
 
 fn default_log_lines() -> usize {

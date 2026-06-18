@@ -185,7 +185,7 @@ model_provider = "custom"
 name = "custom"
 wire_api = "responses"
 requires_openai_auth = true
-base_url = "http://127.0.0.1:57321/v1"
+base_url = "http://127.0.0.1:45221/v1"
 "#,
     )
     .unwrap();
@@ -253,14 +253,14 @@ fn apply_chat_protocol_relay_points_codex_to_local_responses_proxy() {
         "https://chat-only.example.test/v1",
         "sk-test-redacted",
         RelayProtocol::ChatCompletions,
-        57321,
+        45221,
     )
     .unwrap();
     let updated = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
 
     assert!(result.configured);
     assert!(updated.contains(r#"wire_api = "responses""#));
-    assert!(updated.contains(r#"base_url = "http://127.0.0.1:57321/v1""#));
+    assert!(updated.contains(r#"base_url = "http://127.0.0.1:45221/v1""#));
     assert!(updated.contains(r#"experimental_bearer_token = "sk-test-redacted""#));
     assert!(!updated.contains("codex_elves_chat_base_url"));
 }
@@ -282,7 +282,7 @@ model_provider = "custom"
 name = "custom"
 wire_api = "responses"
 requires_openai_auth = true
-base_url = "http://127.0.0.1:57321/v1"
+base_url = "http://127.0.0.1:45221/v1"
 "#
         .to_string(),
         auth_contents: r#"{"OPENAI_API_KEY":"sk-test-redacted"}"#.to_string(),
@@ -301,13 +301,13 @@ base_url = "http://127.0.0.1:57321/v1"
     assert!(
         profile
             .config_contents
-            .contains(r#"base_url = "http://127.0.0.1:57321/v1""#)
+            .contains(r#"base_url = "http://127.0.0.1:45221/v1""#)
     );
 
     apply_relay_profile_to_home_with_switch_rules(temp.path(), &profile, "").unwrap();
     let live = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
     assert!(!live.contains("codex_elves_chat_base_url"));
-    assert!(live.contains(r#"base_url = "http://127.0.0.1:57321/v1""#));
+    assert!(live.contains(r#"base_url = "http://127.0.0.1:45221/v1""#));
 }
 
 #[test]
@@ -1264,7 +1264,7 @@ fn apply_relay_config_file_switches_config_without_touching_auth_json() {
 
     let result = apply_relay_config_file_to_home(
         home,
-        "model_provider = \"custom\"\n\n[model_providers.custom]\nname = \"custom\"\nwire_api = \"responses\"\nrequires_openai_auth = true\nbase_url = \"http://127.0.0.1:57321/v1\"\nexperimental_bearer_token = \"sk-new\"\n",
+        "model_provider = \"custom\"\n\n[model_providers.custom]\nname = \"custom\"\nwire_api = \"responses\"\nrequires_openai_auth = true\nbase_url = \"http://127.0.0.1:45221/v1\"\nexperimental_bearer_token = \"sk-new\"\n",
     )
     .unwrap();
 
@@ -1272,7 +1272,7 @@ fn apply_relay_config_file_switches_config_without_touching_auth_json() {
     assert!(
         std::fs::read_to_string(home.join("config.toml"))
             .unwrap()
-            .contains("http://127.0.0.1:57321/v1")
+            .contains("http://127.0.0.1:45221/v1")
     );
     assert_eq!(
         std::fs::read_to_string(home.join("auth.json")).unwrap(),

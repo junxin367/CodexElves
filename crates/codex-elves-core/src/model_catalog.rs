@@ -64,7 +64,7 @@ pub async fn read_codex_model_catalog() -> Value {
 }
 
 fn relay_profile_model_catalog_value(home: &Path, profile: &RelayProfile) -> Value {
-    let models = relay_profile_model_ids(profile);
+    let models = relay_profile_model_ids_for_proxy(profile);
     let model = profile.model.trim().to_string();
     let default_model = if models.iter().any(|item| item == &model) {
         model.clone()
@@ -100,15 +100,28 @@ fn relay_profile_model_catalog_value(home: &Path, profile: &RelayProfile) -> Val
     })
 }
 
-fn relay_profile_model_ids(profile: &RelayProfile) -> Vec<String> {
-    unique_strings(
-        std::iter::once(profile.model.as_str())
-            .chain(profile.model_list.split(['\r', '\n', ',']))
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToString::to_string)
-            .collect(),
-    )
+pub fn relay_profile_model_ids_for_proxy(profile: &RelayProfile) -> Vec<String> {
+    let mut models = Vec::new();
+    models.extend(relay_profile_responses_model_ids(profile));
+    models.extend(relay_profile_chat_completions_model_ids(profile));
+    unique_strings(models)
+}
+
+pub fn relay_profile_responses_model_ids(profile: &RelayProfile) -> Vec<String> {
+    unique_strings(split_model_ids(&profile.responses_model_list))
+}
+
+pub fn relay_profile_chat_completions_model_ids(profile: &RelayProfile) -> Vec<String> {
+    unique_strings(split_model_ids(&profile.chat_completions_model_list))
+}
+
+fn split_model_ids(value: &str) -> Vec<String> {
+    value
+        .split(['\r', '\n', ','])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
 pub async fn read_codex_model_catalog_from_home(

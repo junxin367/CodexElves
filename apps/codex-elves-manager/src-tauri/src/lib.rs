@@ -1,16 +1,36 @@
 pub mod commands;
 pub mod install;
 
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, WindowEvent};
+use tauri::{Manager, PhysicalPosition, PhysicalSize, Position, Size, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 static APP_EXITING: AtomicBool = AtomicBool::new(false);
 const TRAY_MENU_SHOW: &str = "tray_show_main";
 const TRAY_MENU_QUIT: &str = "tray_quit_app";
+const MANAGER_WAKE_MESSAGE: &[u8] = b"codex-elves-manager:show-main-window\n";
+const MANAGER_WINDOW_STATE_FILE: &str = "manager-window-state.json";
+const DEFAULT_WINDOW_WIDTH: f64 = 1180.0;
+const DEFAULT_WINDOW_HEIGHT: f64 = 820.0;
+const MIN_WINDOW_WIDTH: u32 = 960;
+const MIN_WINDOW_HEIGHT: u32 = 720;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagerWindowState {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
 
 pub fn run() {
     install_panic_logger();
@@ -20,8 +40,20 @@ pub fn run() {
             "version": env!("CARGO_PKG_VERSION")
         }),
     );
-    let Some(_guard) = acquire_single_instance_guard() else {
+    let Some(guard) = acquire_single_instance_guard() else {
         return;
+    };
+    let wake_listener = match guard.try_clone_listener() {
+        Ok(listener) => listener,
+        Err(error) => {
+            let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+                "manager.wake_listener_clone_failed",
+                serde_json::json!({
+                    "error": error.to_string()
+                }),
+            );
+            None
+        }
     };
     let show_update = commands::startup_should_show_update();
     let run_result = tauri::Builder::default()
@@ -32,14 +64,28 @@ pub fn run() {
             } else {
                 "index.html"
             };
-            let main_window =
+            let restore_window_state = load_manager_window_state()
+                .map(clamp_manager_window_state)
+                .filter(|state| manager_window_state_is_visible(&app.handle(), state));
+            let mut main_window_builder =
                 tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App(url.into()))
                     .title("CodexElves 管理工具")
-                    .inner_size(1180.0, 820.0)
-                    .min_inner_size(960.0, 720.0)
-                    .build()?;
+                    .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
+                    .min_inner_size(f64::from(MIN_WINDOW_WIDTH), f64::from(MIN_WINDOW_HEIGHT));
+            if restore_window_state.is_some() {
+                main_window_builder = main_window_builder.visible(false);
+            }
+            let main_window = main_window_builder.build()?;
+            if let Some(state) = restore_window_state {
+                apply_manager_window_state(&main_window, state);
+                let _ = main_window.show();
+                let _ = main_window.set_focus();
+            }
             install_tray(app)?;
             register_main_window_events(main_window, app.handle().clone());
+            if let Some(listener) = wake_listener {
+                spawn_manager_wake_listener(listener, app.handle().clone());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -154,11 +200,18 @@ fn register_main_window_events<R: tauri::Runtime>(
     let dialog_window = window.clone();
     let dialog_app_handle = app_handle.clone();
     let minimized_window = event_window.clone();
+    let moved_window = event_window.clone();
+    let resized_window = event_window.clone();
 
     event_window.on_window_event(move |event| match event {
+        WindowEvent::Moved(_) => {
+            persist_manager_window_state(&moved_window);
+        }
         WindowEvent::Resized(_) => {
             if matches!(minimized_window.is_minimized(), Ok(true)) {
                 let _ = minimized_window.hide();
+            } else {
+                persist_manager_window_state(&resized_window);
             }
         }
         WindowEvent::CloseRequested { api, .. } => {
@@ -166,6 +219,7 @@ fn register_main_window_events<R: tauri::Runtime>(
                 return;
             }
 
+            persist_manager_window_state(&dialog_window);
             api.prevent_close();
             let app_for_decision = dialog_app_handle.clone();
             let window_for_decision = dialog_window.clone();
@@ -191,12 +245,132 @@ fn register_main_window_events<R: tauri::Runtime>(
     });
 }
 
+fn manager_window_state_path() -> PathBuf {
+    codex_elves_core::paths::default_app_state_dir().join(MANAGER_WINDOW_STATE_FILE)
+}
+
+fn load_manager_window_state() -> Option<ManagerWindowState> {
+    let path = manager_window_state_path();
+    let contents = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&contents).ok()
+}
+
+fn save_manager_window_state(state: ManagerWindowState) {
+    let path = manager_window_state_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(bytes) = serde_json::to_vec_pretty(&state) {
+        let _ = std::fs::write(path, bytes);
+    }
+}
+
+fn persist_manager_window_state<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    if matches!(window.is_minimized(), Ok(true)) || matches!(window.is_fullscreen(), Ok(true)) {
+        return;
+    }
+    let Ok(position) = window.outer_position() else {
+        return;
+    };
+    let Ok(size) = window.inner_size() else {
+        return;
+    };
+    save_manager_window_state(clamp_manager_window_state(ManagerWindowState {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+    }));
+}
+
+fn clamp_manager_window_state(state: ManagerWindowState) -> ManagerWindowState {
+    ManagerWindowState {
+        x: state.x,
+        y: state.y,
+        width: state.width.max(MIN_WINDOW_WIDTH),
+        height: state.height.max(MIN_WINDOW_HEIGHT),
+    }
+}
+
+fn apply_manager_window_state<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    state: ManagerWindowState,
+) {
+    let state = clamp_manager_window_state(state);
+    let _ = window.set_size(Size::Physical(PhysicalSize::new(state.width, state.height)));
+    let _ = window.set_position(Position::Physical(PhysicalPosition::new(state.x, state.y)));
+}
+
+fn manager_window_state_is_visible<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    state: &ManagerWindowState,
+) -> bool {
+    app_handle
+        .available_monitors()
+        .map(|monitors| {
+            monitors
+                .iter()
+                .any(|monitor| manager_window_state_intersects_monitor(state, monitor))
+        })
+        .unwrap_or(false)
+}
+
+fn manager_window_state_intersects_monitor(
+    state: &ManagerWindowState,
+    monitor: &tauri::Monitor,
+) -> bool {
+    let area = monitor.work_area();
+    let state_left = i64::from(state.x);
+    let state_top = i64::from(state.y);
+    let state_right = state_left + i64::from(state.width);
+    let state_bottom = state_top + i64::from(state.height);
+    let monitor_left = i64::from(area.position.x);
+    let monitor_top = i64::from(area.position.y);
+    let monitor_right = monitor_left + i64::from(area.size.width);
+    let monitor_bottom = monitor_top + i64::from(area.size.height);
+
+    state_left < monitor_right
+        && state_right > monitor_left
+        && state_top < monitor_bottom
+        && state_bottom > monitor_top
+}
+
 fn show_main_window<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) {
     if let Some(window) = app_handle.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+fn spawn_manager_wake_listener<R: tauri::Runtime>(
+    listener: std::net::TcpListener,
+    app_handle: tauri::AppHandle<R>,
+) {
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                continue;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+            let mut buffer = [0_u8; MANAGER_WAKE_MESSAGE.len()];
+            if stream.read_exact(&mut buffer).is_err() {
+                continue;
+            }
+            if buffer.as_slice() == MANAGER_WAKE_MESSAGE {
+                show_main_window(&app_handle);
+            }
+        }
+    });
+}
+
+fn request_existing_manager_to_show() -> std::io::Result<()> {
+    let address =
+        std::net::SocketAddr::from(([127, 0, 0, 1], codex_elves_core::ports::MANAGER_GUARD_PORT));
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500))?;
+    stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+    stream.write_all(MANAGER_WAKE_MESSAGE)?;
+    stream.flush()
 }
 
 fn install_panic_logger() {
@@ -241,19 +415,25 @@ fn acquire_single_instance_guard() -> Option<codex_elves_core::ports::LoopbackPo
             Some(guard)
         }
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            let wake_result = request_existing_manager_to_show();
             let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
                 "manager.already_running",
                 serde_json::json!({
-                    "guard_port": codex_elves_core::ports::MANAGER_GUARD_PORT
+                    "guard_port": codex_elves_core::ports::MANAGER_GUARD_PORT,
+                    "wake_requested": wake_result.is_ok(),
+                    "wake_error": wake_result.err().map(|error| error.to_string())
                 }),
             );
             None
         }
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            let wake_result = request_existing_manager_to_show();
             let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
                 "manager.already_running",
                 serde_json::json!({
-                    "guard_port": codex_elves_core::ports::MANAGER_GUARD_PORT
+                    "guard_port": codex_elves_core::ports::MANAGER_GUARD_PORT,
+                    "wake_requested": wake_result.is_ok(),
+                    "wake_error": wake_result.err().map(|error| error.to_string())
                 }),
             );
             None

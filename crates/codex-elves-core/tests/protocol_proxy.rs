@@ -1307,6 +1307,76 @@ async fn responses_proxy_passes_through_original_user_agent_when_unconfigured() 
 }
 
 #[tokio::test]
+async fn responses_proxy_directs_responses_models_to_responses_upstream() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let server = spawn_chat_server();
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+
+    let upstream = open_responses_proxy_request(
+        r#"{"model":"gpt-responses","input":"hello","stream":false}"#,
+        Some("Original-Codex-UA/1.0"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(upstream.status_code, 200);
+    assert_eq!(
+        upstream.response_protocol,
+        codex_elves_core::protocol_proxy::UpstreamResponseProtocol::Responses
+    );
+
+    let request = server.finish();
+    assert_eq!(request.path, "/v1/responses");
+}
+
+#[tokio::test]
+async fn responses_proxy_directs_chat_models_to_chat_completions_upstream() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let server = spawn_chat_server();
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+
+    let upstream = open_responses_proxy_request(
+        r#"{"model":"gpt-chat","input":"hello","stream":false}"#,
+        Some("Original-Codex-UA/1.0"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(upstream.status_code, 200);
+    assert_eq!(
+        upstream.response_protocol,
+        codex_elves_core::protocol_proxy::UpstreamResponseProtocol::ChatCompletions
+    );
+
+    let request = server.finish();
+    assert_eq!(request.path, "/v1/chat/completions");
+}
+
+#[tokio::test]
+async fn responses_proxy_rejects_models_missing_from_protocol_lists() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    write_mixed_relay_settings(temp.path(), "https://example.test/v1");
+
+    let error = open_responses_proxy_request(
+        r#"{"model":"gpt-unlisted","input":"hello","stream":false}"#,
+        Some("Original-Codex-UA/1.0"),
+    )
+    .await
+    .err()
+    .unwrap();
+
+    assert!(
+        error
+            .to_string()
+            .contains("未配置到 Responses API 或 Chat Completions 模型列表")
+    );
+}
+
+#[tokio::test]
 async fn models_proxy_passes_through_original_user_agent_when_unconfigured() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -1323,6 +1393,29 @@ async fn models_proxy_passes_through_original_user_agent_when_unconfigured() {
     assert_eq!(request.user_agent, "Original-Codex-UA/1.0");
 }
 
+fn write_mixed_relay_settings(settings_dir: &Path, base_url: &str) {
+    let settings = json!({
+        "relayProfiles": [{
+            "id": "mixed",
+            "name": "Mixed",
+            "baseUrl": base_url,
+            "upstreamBaseUrl": base_url,
+            "apiKey": "sk-test",
+            "protocol": "responses",
+            "localProxyEnabled": true,
+            "relayMode": "mixedApi",
+            "responsesModelList": "gpt-responses",
+            "chatCompletionsModelList": "gpt-chat"
+        }],
+        "activeRelayId": "mixed"
+    });
+    std::fs::write(
+        settings_dir.join("settings.json"),
+        serde_json::to_vec_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+}
+
 fn write_chat_relay_settings(settings_dir: &Path, base_url: &str, user_agent: &str) {
     let settings = json!({
         "relayProfiles": [{
@@ -1332,7 +1425,9 @@ fn write_chat_relay_settings(settings_dir: &Path, base_url: &str, user_agent: &s
             "upstreamBaseUrl": base_url,
             "apiKey": "sk-test",
             "protocol": "chatCompletions",
+            "localProxyEnabled": true,
             "relayMode": "mixedApi",
+            "chatCompletionsModelList": "gpt-5.5",
             "userAgent": user_agent
         }],
         "activeRelayId": "chat"
@@ -1378,6 +1473,7 @@ impl ChatServer {
 }
 
 struct ChatRequest {
+    path: String,
     user_agent: String,
 }
 
@@ -1413,6 +1509,12 @@ fn spawn_chat_server() -> ChatServer {
             }
         };
         let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+        let path = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or_default()
+            .to_string();
         let user_agent = request
             .lines()
             .find_map(|line| {
@@ -1429,7 +1531,7 @@ fn spawn_chat_server() -> ChatServer {
             body
         );
         stream.write_all(response.as_bytes()).unwrap();
-        ChatRequest { user_agent }
+        ChatRequest { path, user_agent }
     });
     ChatServer { base_url, handle }
 }

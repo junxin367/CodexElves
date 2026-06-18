@@ -477,7 +477,7 @@ async fn launch_lifecycle_runs_sync_before_launch_writes_success_and_shutdowns_o
         LaunchOptions {
             app_dir: Some(app_dir.clone()),
             debug_port: 9229,
-            helper_port: 57321,
+            helper_port: 45221,
             status_store,
         },
         &hooks,
@@ -490,15 +490,15 @@ async fn launch_lifecycle_runs_sync_before_launch_writes_success_and_shutdowns_o
         *events.lock().unwrap(),
         vec![
             "select-debug:9229",
-            "select-helper:57321",
+            "select-helper:45221",
             "load-settings",
             "provider-sync",
-            "start-helper:57321",
+            "start-helper:45221",
             "launch:9229",
-            "inject:9229:57321",
+            "inject:9229:45221",
             "status:running",
             "wait-codex",
-            "shutdown-helper:57321",
+            "shutdown-helper:45221",
         ]
     );
     assert_eq!(
@@ -529,7 +529,7 @@ async fn launch_lifecycle_passes_configured_extra_args_to_codex_launch() {
         LaunchOptions {
             app_dir: Some(app_dir),
             debug_port: 9229,
-            helper_port: 57321,
+            helper_port: 45221,
             status_store,
         },
         &hooks,
@@ -562,7 +562,7 @@ async fn launch_lifecycle_keeps_js_injection_in_relay_mode() {
         LaunchOptions {
             app_dir: Some(app_dir),
             debug_port: 9229,
-            helper_port: 57321,
+            helper_port: 45221,
             status_store,
         },
         &hooks,
@@ -575,14 +575,14 @@ async fn launch_lifecycle_keeps_js_injection_in_relay_mode() {
         *events.lock().unwrap(),
         vec![
             "select-debug:9229",
-            "select-helper:57321",
+            "select-helper:45221",
             "load-settings",
-            "start-helper:57321",
+            "start-helper:45221",
             "launch:9229",
-            "inject:9229:57321",
+            "inject:9229:45221",
             "status:running",
             "wait-codex",
-            "shutdown-helper:57321",
+            "shutdown-helper:45221",
         ]
     );
 }
@@ -603,7 +603,7 @@ async fn launch_lifecycle_skips_helper_and_injection_when_enhancements_disabled(
         LaunchOptions {
             app_dir: Some(app_dir),
             debug_port: 9229,
-            helper_port: 57321,
+            helper_port: 45221,
             status_store,
         },
         &hooks,
@@ -616,7 +616,7 @@ async fn launch_lifecycle_skips_helper_and_injection_when_enhancements_disabled(
         *events.lock().unwrap(),
         vec![
             "select-debug:9229",
-            "select-helper:57321",
+            "select-helper:45221",
             "load-settings",
             "launch:9229",
             "status:running",
@@ -641,7 +641,7 @@ async fn launch_lifecycle_runs_computer_use_guard_when_enabled() {
         LaunchOptions {
             app_dir: Some(app_dir),
             debug_port: 9229,
-            helper_port: 57321,
+            helper_port: 45221,
             status_store,
         },
         &hooks,
@@ -654,16 +654,16 @@ async fn launch_lifecycle_runs_computer_use_guard_when_enabled() {
         *events.lock().unwrap(),
         vec![
             "select-debug:9229",
-            "select-helper:57321",
+            "select-helper:45221",
             "load-settings",
             "computer-use-guard",
-            "start-helper:57321",
+            "start-helper:45221",
             "launch:9229",
             "computer-use-guard-watchdog",
-            "inject:9229:57321",
+            "inject:9229:45221",
             "status:running",
             "wait-codex",
-            "shutdown-helper:57321",
+            "shutdown-helper:45221",
         ]
     );
 }
@@ -681,7 +681,7 @@ async fn launch_lifecycle_skips_computer_use_guard_by_default() {
         LaunchOptions {
             app_dir: Some(app_dir),
             debug_port: 9229,
-            helper_port: 57321,
+            helper_port: 45221,
             status_store,
         },
         &hooks,
@@ -712,7 +712,7 @@ async fn launch_lifecycle_does_not_apply_relay_profile_while_launching_codex() {
         LaunchOptions {
             app_dir: Some(app_dir),
             debug_port: 9229,
-            helper_port: 57321,
+            helper_port: 45221,
             status_store,
         },
         &hooks,
@@ -742,7 +742,7 @@ async fn launch_lifecycle_skips_active_relay_profile_when_supplier_config_disabl
         LaunchOptions {
             app_dir: Some(app_dir),
             debug_port: 9229,
-            helper_port: 57321,
+            helper_port: 45221,
             status_store,
         },
         &hooks,
@@ -794,7 +794,7 @@ experimental_bearer_token = "sk-test"
         LaunchOptions {
             app_dir: Some(app_dir),
             debug_port: 9229,
-            helper_port: 57321,
+            helper_port: 45221,
             status_store,
         },
         &hooks,
@@ -822,7 +822,7 @@ async fn launch_lifecycle_enters_degraded_mode_and_retries_when_injection_fails(
         LaunchOptions {
             app_dir: Some(app_dir),
             debug_port: 9229,
-            helper_port: 57321,
+            helper_port: 45221,
             status_store: status_store.clone(),
         },
         &hooks,
@@ -834,11 +834,11 @@ async fn launch_lifecycle_enters_degraded_mode_and_retries_when_injection_fails(
         *events.lock().unwrap(),
         vec![
             "select-debug:9229",
-            "select-helper:57321",
+            "select-helper:45221",
             "load-settings",
-            "start-helper:57321",
+            "start-helper:45221",
             "launch:9229",
-            "inject:9229:57321",
+            "inject:9229:45221",
             "status:running_degraded",
         ]
     );
@@ -849,7 +849,7 @@ async fn launch_lifecycle_enters_degraded_mode_and_retries_when_injection_fails(
     handle.wait_for_codex_exit().await.unwrap();
     let events = events.lock().unwrap().clone();
     assert!(events.contains(&"wait-codex".to_string()));
-    assert!(events.contains(&"shutdown-helper:57321".to_string()));
+    assert!(events.contains(&"shutdown-helper:45221".to_string()));
     assert!(!events.contains(&"terminate-codex".to_string()));
 }
 
@@ -866,7 +866,7 @@ async fn launch_lifecycle_cleans_helper_when_launch_fails_after_helper_started()
         LaunchOptions {
             app_dir: Some(app_dir),
             debug_port: 9229,
-            helper_port: 57321,
+            helper_port: 45221,
             status_store: status_store.clone(),
         },
         &hooks,
@@ -879,11 +879,11 @@ async fn launch_lifecycle_cleans_helper_when_launch_fails_after_helper_started()
         *events.lock().unwrap(),
         vec![
             "select-debug:9229",
-            "select-helper:57321",
+            "select-helper:45221",
             "load-settings",
-            "start-helper:57321",
+            "start-helper:45221",
             "launch:9229",
-            "shutdown-helper:57321",
+            "shutdown-helper:45221",
             "status:failed",
         ]
     );
@@ -906,6 +906,7 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
             upstream_base_url: "https://chat-only.example.test/v1".to_string(),
             api_key: "sk-test".to_string(),
             protocol: RelayProtocol::ChatCompletions,
+            local_proxy_enabled: Some(true),
             relay_mode: codex_elves_core::settings::RelayMode::MixedApi,
             official_mix_api_key: false,
             test_model: String::new(),
@@ -918,6 +919,8 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
             auto_compact_limit: String::new(),
             model_insert_mode: codex_elves_core::settings::RelayModelInsertMode::default(),
             model_list: String::new(),
+            responses_model_list: String::new(),
+            chat_completions_model_list: String::new(),
             user_agent: String::new(),
         }],
         active_relay_id: "relay-chat".to_string(),
@@ -939,14 +942,14 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
 
     let before_stop = events.lock().unwrap().clone();
     assert!(before_stop.contains(&"select-helper:58000".to_string()));
-    assert!(before_stop.contains(&"start-helper:57321".to_string()));
-    assert!(!before_stop.contains(&"inject:9229:57321".to_string()));
+    assert!(before_stop.contains(&"start-helper:45221".to_string()));
+    assert!(!before_stop.contains(&"inject:9229:45221".to_string()));
 
     handle.wait_for_codex_exit().await.unwrap();
 
     let after_stop = events.lock().unwrap().clone();
     assert!(after_stop.contains(&"wait-codex".to_string()));
-    assert!(after_stop.contains(&"shutdown-helper:57321".to_string()));
+    assert!(after_stop.contains(&"shutdown-helper:45221".to_string()));
 }
 
 #[tokio::test]
@@ -972,7 +975,7 @@ async fn launch_lifecycle_cleans_helper_and_codex_when_status_save_fails() {
         LaunchOptions {
             app_dir: Some(app_dir),
             debug_port: 9229,
-            helper_port: 57321,
+            helper_port: 45221,
             status_store,
         },
         &hooks,
@@ -985,12 +988,12 @@ async fn launch_lifecycle_cleans_helper_and_codex_when_status_save_fails() {
         *events.lock().unwrap(),
         vec![
             "select-debug:9229",
-            "select-helper:57321",
+            "select-helper:45221",
             "load-settings",
-            "start-helper:57321",
+            "start-helper:45221",
             "launch:9229",
-            "inject:9229:57321",
-            "shutdown-helper:57321",
+            "inject:9229:45221",
+            "shutdown-helper:45221",
             "terminate-packaged:4242",
             "status:failed",
         ]
@@ -1016,7 +1019,7 @@ async fn launch_lifecycle_keeps_packaged_process_id_running_and_retries_when_inj
         LaunchOptions {
             app_dir: Some(app_dir),
             debug_port: 9229,
-            helper_port: 57321,
+            helper_port: 45221,
             status_store,
         },
         &hooks,

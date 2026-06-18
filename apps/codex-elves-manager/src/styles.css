@@ -481,6 +481,10 @@ body {
   font-size: 12px;
 }
 
+.maintenance-saved-app-path {
+  margin-top: 14px;
+}
+
 .metric-list {
   display: grid;
   gap: 8px;

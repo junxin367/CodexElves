@@ -78,7 +78,7 @@ impl Default for LaunchOptions {
         Self {
             app_dir: None,
             debug_port: 9229,
-            helper_port: 57321,
+            helper_port: 45221,
             status_store: StatusStore::default(),
         }
     }
@@ -339,7 +339,7 @@ where
 }
 
 fn relay_protocol_proxy_enabled(settings: &BackendSettings) -> bool {
-    settings.active_relay_profile().protocol == crate::settings::RelayProtocol::ChatCompletions
+    settings.active_relay_profile().local_proxy_enabled()
 }
 
 pub trait IntoLaunchHooks {
@@ -925,6 +925,25 @@ async fn handle_models_proxy_connection(
         return Ok(());
     }
 
+    if let Some(response) = crate::protocol_proxy::local_models_proxy_response()? {
+        write_http_response(
+            stream,
+            &response.status,
+            &response.content_type,
+            &response.body,
+        )
+        .await?;
+        log_helper_response(
+            "helper.models_proxy_ok",
+            method,
+            path,
+            &response.status,
+            remote_addr_text,
+        );
+        stream.shutdown().await?;
+        return Ok(());
+    }
+
     let upstream = match crate::protocol_proxy::open_models_proxy_request(request_user_agent).await
     {
         Ok(upstream) => upstream,
@@ -1018,6 +1037,24 @@ async fn handle_protocol_proxy_connection(
         let status = upstream.status();
         let upstream_content_type = upstream.content_type.clone();
         let upstream_body = upstream.response.bytes().await?.to_vec();
+        if upstream.response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses
+        {
+            let content_type = if upstream_content_type.is_empty() {
+                "application/json; charset=utf-8".to_string()
+            } else {
+                upstream_content_type
+            };
+            write_http_response(stream, &status, &content_type, &upstream_body).await?;
+            log_helper_response(
+                "helper.protocol_proxy_upstream_error",
+                method,
+                path,
+                &status,
+                remote_addr_text,
+            );
+            stream.shutdown().await?;
+            return Ok(());
+        }
         let error = crate::protocol_proxy::responses_error_from_upstream(
             upstream.status_code,
             &upstream_content_type,
@@ -1037,6 +1074,30 @@ async fn handle_protocol_proxy_connection(
     }
 
     if upstream.is_stream {
+        if upstream.response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses
+        {
+            let status = upstream.status();
+            let content_type = if upstream.content_type.is_empty() {
+                "text/event-stream; charset=utf-8".to_string()
+            } else {
+                upstream.content_type.clone()
+            };
+            write_http_stream_headers(stream, &status, &content_type).await?;
+            let mut bytes_stream = upstream.response.bytes_stream();
+            while let Some(chunk) = bytes_stream.next().await {
+                stream.write_all(&chunk?).await?;
+            }
+            log_helper_response(
+                "helper.protocol_proxy_stream_ok",
+                method,
+                path,
+                &status,
+                remote_addr_text,
+            );
+            stream.shutdown().await?;
+            return Ok(());
+        }
+
         write_http_stream_headers(stream, "200 OK", "text/event-stream; charset=utf-8").await?;
         let mut converter = request_json
             .as_ref()
@@ -1085,6 +1146,24 @@ async fn handle_protocol_proxy_connection(
     }
 
     let upstream_body = upstream.response.bytes().await?;
+    if upstream.response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses {
+        let content_type = if upstream.content_type.is_empty() {
+            "application/json; charset=utf-8".to_string()
+        } else {
+            upstream.content_type.clone()
+        };
+        write_http_response(stream, "200 OK", &content_type, &upstream_body).await?;
+        log_helper_response(
+            "helper.protocol_proxy_ok",
+            method,
+            path,
+            "200 OK",
+            remote_addr_text,
+        );
+        stream.shutdown().await?;
+        return Ok(());
+    }
+
     let chat_json: serde_json::Value = serde_json::from_slice(&upstream_body)?;
     let response_json = if let Some(request_json) = request_json.as_ref() {
         crate::protocol_proxy::chat_completion_to_response_with_request(chat_json, request_json)?

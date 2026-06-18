@@ -32,6 +32,18 @@ fn manager_uses_single_instance_guard_before_starting_tauri() {
 }
 
 #[test]
+fn manager_second_launch_requests_existing_window_to_show() {
+    let lib_rs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+        .expect("read manager lib.rs");
+
+    assert!(lib_rs.contains("spawn_manager_wake_listener"));
+    assert!(lib_rs.contains("request_existing_manager_to_show"));
+    assert!(lib_rs.contains("MANAGER_WAKE_MESSAGE"));
+    assert!(lib_rs.contains("wake_requested"));
+    assert!(lib_rs.contains("show_main_window(&app_handle)"));
+}
+
+#[test]
 fn launcher_binary_embeds_codex_icon_resource() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let launcher_build = manifest_dir
@@ -222,8 +234,15 @@ fn manager_window_and_relay_detail_header_stay_usable() {
     assert!(styles.contains("position: sticky"));
     assert!(styles.contains("top: 0"));
     assert!(styles.contains("margin: 0"));
-    assert!(lib_rs.contains(".inner_size(1180.0, 820.0)"));
-    assert!(lib_rs.contains(".min_inner_size(960.0, 720.0)"));
+    assert!(lib_rs.contains("DEFAULT_WINDOW_WIDTH"));
+    assert!(lib_rs.contains("DEFAULT_WINDOW_HEIGHT"));
+    assert!(lib_rs.contains("MIN_WINDOW_WIDTH"));
+    assert!(lib_rs.contains("MIN_WINDOW_HEIGHT"));
+    assert!(lib_rs.contains("MANAGER_WINDOW_STATE_FILE"));
+    assert!(lib_rs.contains("visible(false)"));
+    assert!(lib_rs.contains("apply_manager_window_state"));
+    assert!(lib_rs.contains("manager_window_state_is_visible"));
+    assert!(lib_rs.contains("persist_manager_window_state"));
     assert!(tauri_conf.contains("\"width\": 1180"));
     assert!(tauri_conf.contains("\"height\": 820"));
     assert!(tauri_conf.contains("\"minWidth\": 960"));

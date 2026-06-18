@@ -824,7 +824,7 @@ async fn launch_lifecycle_uses_hook_supplied_bridge_context_for_injection() {
         LaunchOptions {
             app_dir: Some(app_dir),
             debug_port: 9229,
-            helper_port: 57321,
+            helper_port: 45221,
             status_store: StatusStore::new(temp.path().join("latest-status.json")),
         },
         &hooks,
@@ -836,8 +836,8 @@ async fn launch_lifecycle_uses_hook_supplied_bridge_context_for_injection() {
         *events.lock().unwrap(),
         vec![
             "bridge-context:9229",
-            "inject-bridge:9229:57321",
-            "watchdog:9229:57321",
+            "inject-bridge:9229:45221",
+            "watchdog:9229:45221",
             "status:running",
         ]
     );

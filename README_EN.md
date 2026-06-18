@@ -9,9 +9,9 @@
 </p>
 
 <p align="center">
-  <img alt="Release" src="https://img.shields.io/github/v/release/BigPizzaV3/CodexElves">
-  <img alt="Stars" src="https://img.shields.io/github/stars/BigPizzaV3/CodexElves">
-  <img alt="License" src="https://img.shields.io/github/license/BigPizzaV3/CodexElves">
+  <img alt="Release" src="https://img.shields.io/github/v/release/junxin367/CodexElves">
+  <img alt="Stars" src="https://img.shields.io/github/stars/junxin367/CodexElves">
+  <img alt="License" src="https://img.shields.io/github/license/junxin367/CodexElves">
   <img alt="Rust" src="https://img.shields.io/badge/rust-1.85%2B-orange">
   <img alt="Tauri" src="https://img.shields.io/badge/tauri-2.x-24C8DB">
 </p>
@@ -20,7 +20,7 @@ CodexElves is an external enhancement launcher and manager for the Codex App. It
 
 ## Quick Start
 
-Download the latest installer from [GitHub Releases](https://github.com/BigPizzaV3/CodexElves/releases):
+Download the latest installer from [GitHub Releases](https://github.com/junxin367/CodexElves/releases):
 
 - Windows: `CodexElves-*-windows-x64-setup.exe`
 - macOS Intel: `CodexElves-*-macos-x64.dmg`
@@ -119,7 +119,7 @@ Make sure Codex was launched from the `CodexElves` entry instead of the original
 First test the helper endpoint:
 
 ```powershell
-Invoke-RestMethod -Method Post -Uri http://127.0.0.1:57321/backend/status -Body "{}" -ContentType "application/json"
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:45221/backend/status -Body "{}" -ContentType "application/json"
 ```
 
 If the endpoint works but the plugin still times out, it is usually a Codex page CDP bridge or script cache issue. Restart CodexElves, or check manager logs for `renderer.script_loaded`, `bridge.request`, and `bridge.response`.

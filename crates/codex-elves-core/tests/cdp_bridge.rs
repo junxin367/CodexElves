@@ -42,10 +42,10 @@ fn bridge_script_defines_expected_globals_and_binding() {
 
 #[test]
 fn injection_script_prefixes_helper_url_without_sponsor_images() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("window.__CODEX_SESSION_DELETE_HELPER__"));
-    assert!(script.contains("http://127.0.0.1:57321"));
+    assert!(script.contains("http://127.0.0.1:45221"));
     assert!(!script.contains("window.__CODEX_ELVES_SPONSOR_IMAGES__"));
     assert!(script.contains("window.__CODEX_ELVES_VERSION__"));
     assert!(script.contains(codex_elves_core::version::VERSION));
@@ -72,18 +72,18 @@ fn injection_script_exposes_image_overlay_config() {
         codex_app_image_overlay_opacity: 42,
         ..Default::default()
     };
-    let script = assets::injection_script_with_settings(57321, &settings);
+    let script = assets::injection_script_with_settings(45221, &settings);
 
     assert!(script.contains("window.__CODEX_ELVES_IMAGE_OVERLAY__"));
     assert!(script.contains("\"enabled\":true"));
     assert!(script.contains("\"opacity\":0.42"));
     assert!(script.contains("\"dataUrl\":\"data:image/png;base64,"));
-    assert!(script.contains("http://127.0.0.1:57321/overlay/image"));
+    assert!(script.contains("http://127.0.0.1:45221/overlay/image"));
 }
 
 #[test]
 fn injection_script_installs_image_overlay_from_data_uri() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("const source = config.dataUrl || \"\""));
     assert!(script.contains("image.src = source"));
@@ -92,7 +92,7 @@ fn injection_script_installs_image_overlay_from_data_uri() {
 
 #[test]
 fn injection_script_marks_diagnostic_build_and_reports_script_loaded() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("window.__CODEX_ELVES_BUILD__"));
     assert!(script.contains(codex_elves_core::assets::DIAGNOSTIC_BUILD_ID));
@@ -102,7 +102,7 @@ fn injection_script_marks_diagnostic_build_and_reports_script_loaded() {
 
 #[test]
 fn injection_script_does_not_embed_ads_support_or_zed_features() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(!script.contains("directFetchCodexElvesAds"));
     assert!(!script.contains("BigPizzaV3/Ad-List"));
@@ -114,7 +114,7 @@ fn injection_script_does_not_embed_ads_support_or_zed_features() {
 
 #[test]
 fn injection_script_times_out_backend_bridge_calls_and_falls_back_to_helper() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("bridgeWithBackendTimeout"));
     assert!(script.contains("backend_bridge_timeout"));
@@ -125,14 +125,14 @@ fn injection_script_times_out_backend_bridge_calls_and_falls_back_to_helper() {
 
 #[test]
 fn injection_script_explains_plugin_patch_is_unneeded_in_relay_mode() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("兼容增强模式下无需开启"));
 }
 
 #[test]
 fn injection_script_menu_exposes_three_independent_plugin_switches() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("插件市场解锁"));
     assert!(script.contains("data-codex-elves-setting=\"pluginMarketplaceUnlock\""));
@@ -145,7 +145,7 @@ fn injection_script_menu_exposes_three_independent_plugin_switches() {
 
 #[test]
 fn injection_script_skips_plugin_patch_work_in_relay_mode() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("function pluginPatchDisabledInRelayMode()"));
     assert!(script.contains("!codexElvesBackendSettingsLoaded"));
@@ -155,7 +155,7 @@ fn injection_script_skips_plugin_patch_work_in_relay_mode() {
 
 #[test]
 fn injection_script_defines_version_gated_plugin_unlock_strategy() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("codexPluginLegacyEntryUnlockBeforeVersion = \"26.601.2237\""));
     assert!(script.contains("function parseCodexVersionParts(version)"));
@@ -167,7 +167,7 @@ fn injection_script_defines_version_gated_plugin_unlock_strategy() {
 
 #[test]
 fn injection_script_gates_legacy_and_modern_plugin_unlock_by_codex_version() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("const pluginUnlockStrategy = codexPluginUnlockStrategy()"));
     assert!(script.contains("if ((pluginUnlockStrategy === \"legacy\" || pluginUnlockStrategy === \"unknown\") && settings.pluginEntryUnlock)"));
@@ -178,7 +178,7 @@ fn injection_script_gates_legacy_and_modern_plugin_unlock_by_codex_version() {
 
 #[test]
 fn injection_script_restores_legacy_plugin_sidebar_entry_unlock() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("pluginEntryUnlock: true"));
     assert!(script.contains("pluginEntryUnlock: \"codexAppPluginEntryUnlock\""));
@@ -197,7 +197,7 @@ fn injection_script_restores_legacy_plugin_sidebar_entry_unlock() {
 
 #[test]
 fn injection_script_keeps_plugin_marketplace_unlock_separate_from_entry_unlock() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("pluginMarketplaceUnlock: true"));
     assert!(script.contains("pluginMarketplaceUnlock: \"codexAppPluginMarketplaceUnlock\""));
@@ -208,7 +208,7 @@ fn injection_script_keeps_plugin_marketplace_unlock_separate_from_entry_unlock()
 
 #[test]
 fn injection_script_unlocks_nested_disabled_plugin_install_buttons() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("button[aria-disabled=\"true\"]"));
     assert!(script.contains("[role=\"button\"][data-disabled]"));
@@ -221,7 +221,7 @@ fn injection_script_unlocks_nested_disabled_plugin_install_buttons() {
 
 #[test]
 fn injection_script_keeps_bundled_marketplace_name_for_default_filter() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"10\""));
     assert!(script.contains("if (name === \"openai-bundled\") return \"\""));
@@ -233,7 +233,7 @@ fn injection_script_keeps_bundled_marketplace_name_for_default_filter() {
 
 #[test]
 fn injection_script_does_not_bypass_plugin_marketplace_search_filters() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"10\""));
     assert!(script.contains("isCodexPluginBuildFlavorFilter"));
@@ -245,7 +245,7 @@ fn injection_script_does_not_bypass_plugin_marketplace_search_filters() {
 
 #[test]
 fn injection_script_expands_api_key_plugin_marketplace_requests() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"10\""));
     assert!(script.contains("installPluginMarketplaceRequestPatch"));
@@ -292,7 +292,7 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
 
 #[test]
 fn injection_script_deletes_marketplace_kinds_to_request_default_catalog() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("delete next.marketplaceKinds"));
     assert!(script.contains("plugin_marketplace_request_expanded"));
@@ -303,7 +303,7 @@ fn injection_script_deletes_marketplace_kinds_to_request_default_catalog() {
 
 #[test]
 fn injection_script_logs_marketplace_grouping_diagnostics() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("plugin_marketplace_response_debug"));
     assert!(script.contains("marketplaces: result.marketplaces.map"));
@@ -313,7 +313,7 @@ fn injection_script_logs_marketplace_grouping_diagnostics() {
 
 #[test]
 fn injection_script_keeps_force_install_unlock_visual_state_sticky() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("codex-force-install-unlocked"));
     assert!(script.contains("codexForcePluginInstallRefreshIntervalMs"));
@@ -323,7 +323,7 @@ fn injection_script_keeps_force_install_unlock_visual_state_sticky() {
 
 #[test]
 fn injection_script_loads_backend_settings_before_initial_scan() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
     let startup_call = script
         .rfind("void loadBackendSettingsForStartup();")
         .expect("script should load backend settings on startup");
@@ -341,7 +341,7 @@ fn injection_script_loads_backend_settings_before_initial_scan() {
 
 #[test]
 fn injection_script_exposes_conversation_view_width_control() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("conversationView: false"));
     assert!(script.contains("conversationView"));
@@ -354,7 +354,7 @@ fn injection_script_exposes_conversation_view_width_control() {
 
 #[test]
 fn injection_script_exposes_sidebar_thread_id_badge_control() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("threadIdBadge: false"));
     assert!(script.contains("threadIdBadge: \"codexAppThreadIdBadge\""));
@@ -371,7 +371,7 @@ fn injection_script_exposes_sidebar_thread_id_badge_control() {
 
 #[test]
 fn injection_script_keeps_session_action_buttons_in_pr_style() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("actionButtonClass = \"codex-session-action-button\""));
     assert!(script.contains("background: transparent;"));
@@ -381,7 +381,7 @@ fn injection_script_keeps_session_action_buttons_in_pr_style() {
 
 #[test]
 fn injection_script_moves_export_and_project_move_into_more_menu() {
-    let script = assets::injection_script(57321).replace("\r\n", "\n");
+    let script = assets::injection_script(45221).replace("\r\n", "\n");
 
     assert!(script.contains("moreButtonClass = \"codex-session-more-button\""));
     assert!(script.contains("moreMenuClass = \"codex-session-more-menu\""));
@@ -411,7 +411,7 @@ fn injection_script_moves_export_and_project_move_into_more_menu() {
 
 #[test]
 fn injection_script_does_not_add_delete_controls_on_archived_page() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("attachArchivedPageDeleteButton"));
     assert!(script.contains("data-codex-archive-row-action"));
@@ -423,7 +423,7 @@ fn injection_script_does_not_add_delete_controls_on_archived_page() {
 
 #[test]
 fn injection_script_unlocks_custom_model_catalog() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("/codex-model-catalog"));
     assert!(script.contains("codexModelCatalog"));
@@ -447,7 +447,7 @@ fn injection_script_unlocks_custom_model_catalog() {
 
 #[test]
 fn injection_script_exposes_fast_service_tier_control() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("default-service-tier"));
     assert!(script.contains("setting-storage-"));
@@ -518,7 +518,7 @@ fn injection_script_exposes_fast_service_tier_control() {
 
 #[test]
 fn injection_script_prompts_for_markdown_export_path_when_supported() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("showSaveFilePicker"));
     assert!(script.contains("suggestedName: filename"));
@@ -563,7 +563,7 @@ fn run_service_tier_contract_harness() -> serde_json::Value {
     let temp = tempfile::tempdir().expect("temp dir should be created");
     let script_path = temp.path().join("renderer-inject.js");
     let harness_path = temp.path().join("service-tier-harness.cjs");
-    std::fs::write(&script_path, assets::injection_script(57321))
+    std::fs::write(&script_path, assets::injection_script(45221))
         .expect("injection script should be written");
     let mut harness = std::fs::File::create(&harness_path).expect("harness should be created");
     write!(
@@ -684,7 +684,7 @@ process.stdout.write(JSON.stringify({{
 
 #[test]
 fn injection_script_restores_thread_scroll_positions() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("threadScrollRestore"));
     assert!(script.contains("codexThreadScroll"));
@@ -694,7 +694,7 @@ fn injection_script_restores_thread_scroll_positions() {
 
 #[test]
 fn injection_script_installs_upstream_branch_dropdown_adapter() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("installUpstreamBranchDropdownAdapter"));
     assert!(script.contains("installUpstreamPendingWorktreeDispatcherPatch"));
@@ -753,7 +753,7 @@ fn injection_script_installs_upstream_branch_dropdown_adapter() {
 
 #[test]
 fn injection_script_prevents_switching_to_branches_used_by_other_worktrees() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("data-codex-branch-worktree-path"));
     assert!(script.contains("annotateBranchMenuWorktreeUsage"));
@@ -764,7 +764,7 @@ fn injection_script_prevents_switching_to_branches_used_by_other_worktrees() {
 
 #[test]
 fn injection_script_rebuilds_upstream_options_for_each_project_branch_menu() {
-    let script = assets::injection_script(57321);
+    let script = assets::injection_script(45221);
 
     assert!(script.contains("currentProjectRepoPathForBranchMenu"));
     assert!(script.contains("repoPathFromProjectLabel"));

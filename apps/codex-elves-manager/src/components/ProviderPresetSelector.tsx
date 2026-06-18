@@ -10,6 +10,7 @@ export type RelayProfile = {
   upstreamBaseUrl: string;
   apiKey: string;
   protocol: RelayProtocol;
+  localProxyEnabled: boolean;
   relayMode: string;
   officialMixApiKey: boolean;
   testModel: string;
@@ -20,6 +21,8 @@ export type RelayProfile = {
   autoCompactLimit: string;
   modelInsertMode: string;
   modelList: string;
+  responsesModelList: string;
+  chatCompletionsModelList: string;
   userAgent: string;
 };
 
@@ -37,14 +40,18 @@ const initialFor = (name: string): string => {
 };
 
 export function createPresetPatch(preset: ProviderPreset): PresetPatch {
+  const modelList = preset.modelList?.join("\n") ?? "";
   return {
     name: preset.name,
     baseUrl: preset.baseUrl,
     upstreamBaseUrl: preset.baseUrl,
     protocol: preset.protocol,
+    localProxyEnabled: preset.protocol === "chatCompletions",
     model: preset.model,
     testModel: preset.model,
-    modelList: preset.modelList?.join("\n") ?? "",
+    modelList,
+    responsesModelList: preset.protocol === "responses" ? modelList : "",
+    chatCompletionsModelList: preset.protocol === "chatCompletions" ? modelList : "",
     relayMode: preset.category === "official" ? "official" : "pureApi",
     officialMixApiKey: false,
   };

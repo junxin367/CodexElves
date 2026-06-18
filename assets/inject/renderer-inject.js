@@ -1,5 +1,5 @@
 (() => {
-  const helperBase = window.__CODEX_SESSION_DELETE_HELPER__ || "http://127.0.0.1:57321";
+  const helperBase = window.__CODEX_SESSION_DELETE_HELPER__ || "http://127.0.0.1:45221";
   const buttonClass = "codex-delete-button";
   const exportButtonClass = "codex-export-button";
   const projectMoveButtonClass = "codex-project-move-button";
@@ -2098,7 +2098,7 @@
               <button type="button" class="codex-elves-action-button" data-codex-open-devtools="true">打开 DevTools</button>
             </div>
             <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">关于 CodexElves</div><div class="codex-elves-about">CodexElves 是通过外部 launcher 注入的增强菜单，不修改 Codex App 原始安装文件。<br>Build: <span data-codex-elves-build="true">${codexElvesBuild}</span><br>GitHub: <a href="https://github.com/BigPizzaV3/CodexElves" target="_blank" rel="noreferrer">https://github.com/BigPizzaV3/CodexElves</a></div></div>
+              <div><div class="codex-elves-row-title">关于 CodexElves</div><div class="codex-elves-about">CodexElves 是通过外部 launcher 注入的增强菜单，不修改 Codex App 原始安装文件。<br>Build: <span data-codex-elves-build="true">${codexElvesBuild}</span><br>GitHub: <a href="https://github.com/junxin367/CodexElves" target="_blank" rel="noreferrer">https://github.com/junxin367/CodexElves</a></div></div>
             </div>
             <div class="codex-elves-row">
               <div><div class="codex-elves-row-title">提出问题</div><div class="codex-elves-row-description">打开 GitHub Issues 反馈问题或建议。</div></div>
@@ -2168,7 +2168,7 @@
       }
       const issueButton = target?.closest("[data-codex-elves-issue]");
       if (issueButton) {
-        const issueUrl = "https://github.com/BigPizzaV3/CodexElves/issues";
+        const issueUrl = "https://github.com/junxin367/CodexElves/issues";
         window.open(issueUrl, "_blank");
         return;
       }

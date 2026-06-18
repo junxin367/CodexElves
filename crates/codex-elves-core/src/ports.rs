@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
 
-pub const LAUNCHER_GUARD_PORT: u16 = 57320;
-pub const MANAGER_GUARD_PORT: u16 = 57319;
+pub const LAUNCHER_GUARD_PORT: u16 = 45220;
+pub const MANAGER_GUARD_PORT: u16 = 45219;
 
 pub fn select_platform_loopback_port(requested: u16) -> u16 {
     select_platform_loopback_port_with(
@@ -118,6 +118,13 @@ impl LoopbackPortGuard {
             .then_some(())
             .and_then(|_| self.lock_path.as_deref())
     }
+
+    pub fn try_clone_listener(&self) -> std::io::Result<Option<TcpListener>> {
+        self._listener
+            .as_ref()
+            .map(TcpListener::try_clone)
+            .transpose()
+    }
 }
 
 pub fn acquire_resilient_loopback_port_guard(port: u16) -> std::io::Result<LoopbackPortGuard> {
@@ -214,7 +221,7 @@ mod tests {
     fn resilient_guard_reports_conflict_when_requested_port_is_connectable() {
         let temp = tempfile::tempdir().unwrap();
         let error = acquire_resilient_loopback_port_guard_with(
-            57319,
+            45219,
             temp.path(),
             |_| {
                 Err(std::io::Error::new(
@@ -233,7 +240,7 @@ mod tests {
     fn resilient_guard_uses_lock_fallback_when_requested_port_is_not_connectable() {
         let temp = tempfile::tempdir().unwrap();
         let guard = acquire_resilient_loopback_port_guard_with(
-            57319,
+            45219,
             temp.path(),
             |_| {
                 Err(std::io::Error::new(
@@ -249,7 +256,7 @@ mod tests {
         assert!(guard.fallback_path().is_some());
 
         let second = acquire_resilient_loopback_port_guard_with(
-            57319,
+            45219,
             temp.path(),
             |_| {
                 Err(std::io::Error::new(

@@ -146,6 +146,7 @@ type RelayProfile = {
   upstreamBaseUrl: string;
   apiKey: string;
   protocol: RelayProtocol;
+  localProxyEnabled: boolean;
   relayMode: RelayMode;
   officialMixApiKey: boolean;
   testModel: string;
@@ -157,6 +158,8 @@ type RelayProfile = {
   contextWindow: string;
   autoCompactLimit: string;
   modelList: string;
+  responsesModelList: string;
+  chatCompletionsModelList: string;
   userAgent: string;
 };
 
@@ -185,7 +188,7 @@ type CodexContextEntries = {
 
 type RelayProtocol = "responses" | "chatCompletions";
 type RelayMode = "official" | "mixedApi" | "pureApi";
-const PROTOCOL_PROXY_BASE_URL = "http://127.0.0.1:57321/v1";
+const PROTOCOL_PROXY_BASE_URL = "http://127.0.0.1:45221/v1";
 const CHAT_UPSTREAM_BASE_URL_KEY = "codex_elves_chat_base_url";
 const SCRIPT_MARKET_REPOSITORY_URL = "https://github.com/BigPizzaV3/CodexElvesScriptMarket";
 
@@ -515,6 +518,7 @@ const defaultSettings: BackendSettings = {
       upstreamBaseUrl: "",
       apiKey: "",
       protocol: "responses",
+      localProxyEnabled: false,
       relayMode: "official",
       officialMixApiKey: false,
       testModel: "",
@@ -526,6 +530,8 @@ const defaultSettings: BackendSettings = {
       contextWindow: "",
       autoCompactLimit: "",
       modelList: "",
+      responsesModelList: "",
+      chatCompletionsModelList: "",
       userAgent: "",
     },
   ],
@@ -558,7 +564,7 @@ export function App() {
   const [launchForm, setLaunchForm] = useState({
     appPath: "",
     debugPort: "9229",
-    helperPort: "57321",
+    helperPort: "45221",
   });
   const prevLaunchStatusRef = useRef<string | null>(null);
   const [settingsForm, setSettingsForm] = useState<BackendSettings>({ ...defaultSettings });
@@ -821,7 +827,7 @@ export function App() {
         request: {
           appPath: launchForm.appPath,
           debugPort: numberOrDefault(launchForm.debugPort, 9229),
-          helperPort: numberOrDefault(launchForm.helperPort, 57321),
+          helperPort: numberOrDefault(launchForm.helperPort, 45221),
         },
       }),
     );
@@ -2213,7 +2219,7 @@ function MaintenanceScreen({
             <StatusRow title="保存路径" status={savedCodexAppPath ? "ok" : "not_checked"} path={savedCodexAppPath || null} />
             <StatusRow title="当前识别" status={overview?.codex_app.status} path={overview?.codex_app.path} />
           </div>
-          <Field label="保存的应用路径">
+          <Field className="maintenance-saved-app-path" label="保存的应用路径">
             <Input
               value={settings?.settings.codexAppPath ?? ""}
               placeholder="选择 Codex.exe、Codex.app、app 目录或解包目录"
@@ -2284,14 +2290,14 @@ function AboutScreen({
           <div className="metric-list">
             <Metric label="CodexElves 版本" value={overview?.current_version ?? update?.currentVersion ?? "-"} />
             <Metric label="Codex 版本" value={overview?.codex_version ?? "未检测到"} />
-            <Metric label="项目地址" value="github.com/BigPizzaV3/CodexElves" />
+            <Metric label="项目地址" value="github.com/junxin367/CodexElves" />
           </div>
           <Toolbar>
-            <Button onClick={() => void actions.openExternalUrl("https://github.com/BigPizzaV3/CodexElves")} variant="secondary">
+            <Button onClick={() => void actions.openExternalUrl("https://github.com/junxin367/CodexElves")} variant="secondary">
               <ExternalLink className="h-4 w-4" />
               打开项目主页
             </Button>
-            <Button onClick={() => void actions.openExternalUrl("https://github.com/BigPizzaV3/CodexElves/issues")} variant="secondary">
+            <Button onClick={() => void actions.openExternalUrl("https://github.com/junxin367/CodexElves/issues")} variant="secondary">
               <ExternalLink className="h-4 w-4" />
               反馈问题
             </Button>
@@ -2991,20 +2997,53 @@ function RelayProfileEditor({
                 </button>
               </div>
             </Field>
+            <Field className="relay-field-local-proxy" label="本地代理">
+              <label className="inline-check">
+                <input
+                  checked={profile.localProxyEnabled}
+                  onChange={(event) => updateDraft({ localProxyEnabled: event.currentTarget.checked })}
+                  type="checkbox"
+                />
+                <span>启用本地代理</span>
+              </label>
+            </Field>
           </div>
         ) : null}
         {showApiFields ? (
-          <Field className="relay-field-model-list" label="模型列表">
+          <Field className="relay-field-model-list" label="Responses API 模型列表">
             <div className="relay-model-list-tools">
               <Textarea
-                value={profile.modelList}
-                onChange={(event) => updateDraft({ modelList: event.currentTarget.value })}
-                placeholder="每行一个模型，例如 qwen3-coder"
+                value={profile.responsesModelList}
+                onChange={(event) => updateDraft({ responsesModelList: event.currentTarget.value })}
+                placeholder="每行一个 Responses API 模型，例如 gpt-5.5"
               />
               <Button
                 onClick={async () => {
-                  const models = await actions.fetchRelayProfileModels(profile);
-                  if (models?.length) updateDraft({ modelList: models.join("\n") });
+                  const models = await actions.fetchRelayProfileModels({ ...profile, protocol: "responses" });
+                  if (models?.length) updateDraft({ responsesModelList: models.join("\n") });
+                }}
+                size="sm"
+                type="button"
+                variant="secondary"
+              >
+                <Download className="h-4 w-4" />
+                从上游获取
+              </Button>
+            </div>
+          </Field>
+        ) : null}
+        {showApiFields ? (
+          <Field className="relay-field-model-list" label="Chat Completions 模型列表">
+            <div className="relay-model-list-tools">
+              <Textarea
+                value={profile.chatCompletionsModelList}
+                onChange={(event) => updateDraft({ chatCompletionsModelList: event.currentTarget.value })}
+                placeholder="每行一个 Chat Completions 模型，例如 qwen3-coder"
+              />
+              <Button
+                onClick={async () => {
+                  const models = await actions.fetchRelayProfileModels({ ...profile, protocol: "chatCompletions" });
+                  if (models?.length) updateDraft({ chatCompletionsModelList: models.join("\n") });
                 }}
                 size="sm"
                 type="button"
@@ -3026,10 +3065,10 @@ function RelayProfileEditor({
           </Field>
         ) : null}
       </div>
-      {showApiFields && profile.protocol === "chatCompletions" ? (
+      {showApiFields && profile.localProxyEnabled ? (
         <div className="hint-line relay-protocol-hint">
           <MessageCircle className="h-4 w-4" />
-          <span>此上游会通过本地 127.0.0.1:57321 转成 Responses API，需要从 CodexElves 启动 Codex。</span>
+          <span>本地代理只按模型列表分流：Responses API 模型直连上游，Chat Completions 模型转换后转发；未列入模型不会自动兜底。</span>
         </div>
       ) : null}
       <div className="hint-line relay-protocol-hint">
@@ -4267,6 +4306,7 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
             upstreamBaseUrl: settings.relayBaseUrl || defaultSettings.relayBaseUrl,
             apiKey: settings.relayApiKey || "",
             protocol: "responses" as RelayProtocol,
+            localProxyEnabled: false,
             relayMode: "official" as RelayMode,
             officialMixApiKey: false,
             testModel: "",
@@ -4278,6 +4318,8 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
             contextWindow: "",
             autoCompactLimit: "",
             modelList: "",
+            responsesModelList: "",
+            chatCompletionsModelList: "",
             userAgent: "",
           },
         ];
@@ -4314,6 +4356,12 @@ function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = 
   const legacyMixedApi = profile.relayMode === "mixedApi";
   const relayMode = normalizeRelayMode(profile.relayMode);
   const officialMixApiKey = profile.officialMixApiKey === true || legacyMixedApi;
+  const localProxyEnabled = typeof profile.localProxyEnabled === "boolean"
+    ? profile.localProxyEnabled
+    : false;
+  const legacyModelList = profile.modelList || "";
+  const responsesModelList = profile.responsesModelList || "";
+  const chatCompletionsModelList = profile.chatCompletionsModelList || "";
   let normalized: RelayProfile = {
     ...profile,
     model: profile.model || "",
@@ -4321,6 +4369,7 @@ function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = 
     upstreamBaseUrl: profile.upstreamBaseUrl || profile.baseUrl || "",
     apiKey: profile.apiKey || "",
     protocol: profile.protocol === "chatCompletions" ? "chatCompletions" : "responses",
+    localProxyEnabled,
     relayMode,
     officialMixApiKey,
     testModel: profile.testModel || "",
@@ -4333,7 +4382,9 @@ function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = 
     contextSelectionInitialized: true,
     contextWindow: profile.contextWindow || "",
     autoCompactLimit: profile.autoCompactLimit || "",
-    modelList: profile.modelList || "",
+    modelList: legacyModelList,
+    responsesModelList,
+    chatCompletionsModelList,
     userAgent: profile.userAgent || "",
   };
   return relayProfileUsesLiveFiles(normalized) ? deriveRelayProfileFromFiles(normalized) : normalized;
@@ -4348,7 +4399,7 @@ function activeRelayProfile(settings: BackendSettings): RelayProfile {
 }
 
 function relayProtocolLabel(protocol: RelayProtocol): string {
-  return protocol === "chatCompletions" ? "Chat Completions 转 Responses" : "Responses API";
+  return protocol === "chatCompletions" ? "Chat Completions" : "Responses API";
 }
 
 function normalizeRelayMode(mode: RelayMode | undefined): RelayMode {
@@ -4381,7 +4432,8 @@ function relayModeLabel(mode: RelayMode): string {
 
 function relayProfileConfigBrief(profile: RelayProfile): string {
   if (profile.relayMode === "official") return profile.officialMixApiKey ? "混入 API Key" : "不写 API 文件";
-  return profile.baseUrl || "未填写 URL";
+  const proxyLabel = profile.localProxyEnabled ? "本地代理" : "直连";
+  return `${proxyLabel} · ${profile.baseUrl || "未填写 URL"}`;
 }
 
 function relayProfileModeHelp(profile: RelayProfile): string {
@@ -4419,10 +4471,10 @@ function withGeneratedRelayFiles(profile: RelayProfile): RelayProfile {
 }
 
 function buildRelayConfigToml(
-  profile: Pick<RelayProfile, "model" | "baseUrl" | "upstreamBaseUrl" | "apiKey" | "protocol">,
+  profile: Pick<RelayProfile, "model" | "baseUrl" | "upstreamBaseUrl" | "apiKey" | "protocol" | "localProxyEnabled">,
   options: { includeBearerToken: boolean },
 ): string {
-  const baseUrl = profile.protocol === "chatCompletions" ? PROTOCOL_PROXY_BASE_URL : profile.baseUrl.trim();
+  const baseUrl = profile.localProxyEnabled ? PROTOCOL_PROXY_BASE_URL : profile.baseUrl.trim();
   const apiKey = profile.apiKey.trim();
   const rootLines = [
     profile.model.trim() ? `model = "${tomlString(profile.model.trim())}"` : null,
@@ -4471,6 +4523,7 @@ function deriveRelayProfileFromFiles(profile: RelayProfile): RelayProfile {
     model: codexModelFromConfig(configContents),
     baseUrl: upstreamBaseUrl,
     upstreamBaseUrl,
+    localProxyEnabled: profile.localProxyEnabled || isProxyConfig,
     apiKey: profile.relayMode === "official"
       ? configApiKey || profile.apiKey || ""
       : codexApiKeyFromAuth(authContents) || configApiKey || "",
@@ -4511,8 +4564,8 @@ function applyRelayProfilePatchToFiles(
   if ("upstreamBaseUrl" in patch) {
     next.baseUrl = patch.upstreamBaseUrl || "";
   }
-  if ("baseUrl" in patch || "upstreamBaseUrl" in patch || "protocol" in patch) {
-    const baseUrlForConfig = next.protocol === "chatCompletions" ? PROTOCOL_PROXY_BASE_URL : next.upstreamBaseUrl || next.baseUrl;
+  if ("baseUrl" in patch || "upstreamBaseUrl" in patch || "protocol" in patch || "localProxyEnabled" in patch) {
+    const baseUrlForConfig = next.localProxyEnabled ? PROTOCOL_PROXY_BASE_URL : next.upstreamBaseUrl || next.baseUrl;
     next.configContents = setCodexProviderStringKey(next.configContents, "base_url", baseUrlForConfig);
     next.configContents = removeRootTomlKey(next.configContents, CHAT_UPSTREAM_BASE_URL_KEY);
   }
@@ -4807,6 +4860,7 @@ function createRelayProfile(settings: BackendSettings): RelayProfile {
     upstreamBaseUrl: defaultSettings.relayBaseUrl,
     apiKey: "",
     protocol: "responses" as RelayProtocol,
+    localProxyEnabled: false,
     relayMode: "official" as RelayMode,
     officialMixApiKey: false,
     testModel: "",
@@ -4818,6 +4872,8 @@ function createRelayProfile(settings: BackendSettings): RelayProfile {
     contextWindow: "",
     autoCompactLimit: "",
     modelList: "",
+    responsesModelList: "",
+    chatCompletionsModelList: "",
     userAgent: "",
   };
   return withGeneratedRelayFiles(next);

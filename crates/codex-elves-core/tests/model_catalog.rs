@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 use codex_elves_core::model_catalog::{
@@ -68,7 +69,8 @@ experimental_bearer_token = "relay-key"
 }
 
 #[tokio::test]
-async fn model_catalog_uses_active_relay_profile_model_list_for_display() {
+async fn model_catalog_uses_active_relay_profile_protocol_model_lists_for_display() {
+    let _lock = model_catalog_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let codex_home = temp.path().join("codex-home");
     std::fs::create_dir_all(&codex_home).unwrap();
@@ -91,7 +93,8 @@ async fn model_catalog_uses_active_relay_profile_model_list_for_display() {
                     base_url: "https://example.test/v1".to_string(),
                     protocol: RelayProtocol::Responses,
                     relay_mode: RelayMode::MixedApi,
-                    model_list: "deepseek-coder\nqwen3-coder\nclaude-compatible".to_string(),
+                    responses_model_list: "qwen3-coder\ndeepseek-coder\nclaude-compatible"
+                        .to_string(),
                     config_contents: "model = \"qwen3-coder\"\n".to_string(),
                     ..RelayProfile::default()
                 }],
@@ -122,6 +125,66 @@ async fn model_catalog_uses_active_relay_profile_model_list_for_display() {
         json!(["qwen3-coder", "deepseek-coder", "claude-compatible"])
     );
     assert_eq!(result["sources"][0]["type"], "relay_profile_model_list");
+}
+
+#[tokio::test]
+async fn model_catalog_merges_responses_and_chat_model_lists_for_display() {
+    let _lock = model_catalog_env_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let codex_home = temp.path().join("codex-home");
+    std::fs::create_dir_all(&codex_home).unwrap();
+    let settings_path = temp.path().join("settings.json");
+    let previous_codex_home = std::env::var_os("CODEX_HOME");
+    let previous_settings_path =
+        codex_elves_core::paths::set_settings_path_for_tests(Some(settings_path.clone()));
+    unsafe {
+        std::env::set_var("CODEX_HOME", &codex_home);
+    }
+
+    let result = async {
+        SettingsStore::new(settings_path)
+            .save(&BackendSettings {
+                active_relay_id: "relay-a".to_string(),
+                relay_profiles: vec![RelayProfile {
+                    id: "relay-a".to_string(),
+                    name: "Relay A".to_string(),
+                    model: "gpt-responses".to_string(),
+                    base_url: "https://example.test/v1".to_string(),
+                    protocol: RelayProtocol::Responses,
+                    local_proxy_enabled: Some(true),
+                    relay_mode: RelayMode::MixedApi,
+                    responses_model_list: "gpt-responses\ngpt-shared".to_string(),
+                    chat_completions_model_list: "gpt-chat\ngpt-shared".to_string(),
+                    config_contents: "model = \"gpt-responses\"\n".to_string(),
+                    ..RelayProfile::default()
+                }],
+                ..BackendSettings::default()
+            })
+            .unwrap();
+
+        read_codex_model_catalog().await
+    }
+    .await;
+
+    match previous_codex_home {
+        Some(value) => unsafe {
+            std::env::set_var("CODEX_HOME", value);
+        },
+        None => unsafe {
+            std::env::remove_var("CODEX_HOME");
+        },
+    }
+    codex_elves_core::paths::set_settings_path_for_tests(previous_settings_path);
+
+    assert_eq!(
+        result["models"],
+        json!(["gpt-responses", "gpt-shared", "gpt-chat"])
+    );
+}
+
+fn model_catalog_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[tokio::test]

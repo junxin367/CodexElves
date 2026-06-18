@@ -55,6 +55,12 @@ pub struct RelayProfile {
     pub api_key: String,
     #[serde(default)]
     pub protocol: RelayProtocol,
+    #[serde(
+        rename = "localProxyEnabled",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub local_proxy_enabled: Option<bool>,
     #[serde(rename = "relayMode", default)]
     pub relay_mode: RelayMode,
     #[serde(rename = "officialMixApiKey", default)]
@@ -79,6 +85,10 @@ pub struct RelayProfile {
     pub model_insert_mode: RelayModelInsertMode,
     #[serde(rename = "modelList", default)]
     pub model_list: String,
+    #[serde(rename = "responsesModelList", default)]
+    pub responses_model_list: String,
+    #[serde(rename = "chatCompletionsModelList", default)]
+    pub chat_completions_model_list: String,
     #[serde(
         rename = "userAgent",
         default,
@@ -97,6 +107,7 @@ impl Default for RelayProfile {
             upstream_base_url: String::new(),
             api_key: String::new(),
             protocol: RelayProtocol::Responses,
+            local_proxy_enabled: None,
             relay_mode: RelayMode::Official,
             official_mix_api_key: false,
             test_model: String::new(),
@@ -109,8 +120,16 @@ impl Default for RelayProfile {
             auto_compact_limit: String::new(),
             model_insert_mode: RelayModelInsertMode::Patch,
             model_list: String::new(),
+            responses_model_list: String::new(),
+            chat_completions_model_list: String::new(),
             user_agent: String::new(),
         }
+    }
+}
+
+impl RelayProfile {
+    pub fn local_proxy_enabled(&self) -> bool {
+        self.local_proxy_enabled.unwrap_or(false)
     }
 }
 
@@ -298,6 +317,7 @@ impl BackendSettings {
                 },
                 api_key: self.relay_api_key.clone(),
                 protocol: RelayProtocol::Responses,
+                local_proxy_enabled: Some(false),
                 relay_mode: RelayMode::MixedApi,
                 official_mix_api_key: true,
                 test_model: String::new(),
@@ -310,6 +330,8 @@ impl BackendSettings {
                 auto_compact_limit: String::new(),
                 model_insert_mode: RelayModelInsertMode::Patch,
                 model_list: String::new(),
+                responses_model_list: String::new(),
+                chat_completions_model_list: String::new(),
                 user_agent: String::new(),
             };
         }
@@ -342,6 +364,7 @@ impl BackendSettings {
             },
             api_key: self.relay_api_key.clone(),
             protocol: RelayProtocol::Responses,
+            local_proxy_enabled: Some(false),
             relay_mode: RelayMode::Official,
             official_mix_api_key: false,
             test_model: String::new(),
@@ -354,6 +377,8 @@ impl BackendSettings {
             auto_compact_limit: String::new(),
             model_insert_mode: RelayModelInsertMode::Patch,
             model_list: String::new(),
+            responses_model_list: String::new(),
+            chat_completions_model_list: String::new(),
             user_agent: String::new(),
         }
     }
@@ -1060,7 +1085,7 @@ model_provider = "custom"
 name = "custom"
 wire_api = "responses"
 requires_openai_auth = true
-base_url = "http://127.0.0.1:57321/v1"
+base_url = "http://127.0.0.1:45221/v1"
 "#
                 .to_string(),
                 auth_contents: r#"{"OPENAI_API_KEY":"sk-test"}"#.to_string(),

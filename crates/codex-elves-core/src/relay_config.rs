@@ -588,6 +588,18 @@ fn codex_base_url_for_protocol(base_url: &str, protocol: RelayProtocol, proxy_po
     }
 }
 
+pub fn codex_base_url_for_proxy(
+    base_url: &str,
+    local_proxy_enabled: bool,
+    proxy_port: u16,
+) -> String {
+    if local_proxy_enabled {
+        crate::protocol_proxy::local_responses_proxy_base_url(proxy_port)
+    } else {
+        base_url.to_string()
+    }
+}
+
 pub fn clear_relay_config_to_home(home: &Path) -> anyhow::Result<RelayApplyResult> {
     clear_relay_config_to_home_with_auth(home, None)
 }
@@ -1729,7 +1741,7 @@ pub fn relay_profile_model(profile: &RelayProfile) -> String {
 }
 
 fn relay_profile_base_url(profile: &RelayProfile) -> String {
-    if profile.protocol == RelayProtocol::ChatCompletions {
+    if profile.local_proxy_enabled() {
         if !profile.upstream_base_url.trim().is_empty() {
             return profile.upstream_base_url.trim().to_string();
         }
@@ -1745,7 +1757,7 @@ fn relay_profile_base_url(profile: &RelayProfile) -> String {
     let provider_base_url = provider_string_from_config(&profile.config_contents, "base_url")
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_default();
-    if profile.protocol == RelayProtocol::ChatCompletions
+    if profile.local_proxy_enabled()
         && provider_base_url
             == crate::protocol_proxy::local_responses_proxy_base_url(
                 crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
@@ -1820,9 +1832,9 @@ fn complete_relay_profile_config(profile: &RelayProfile) -> anyhow::Result<Strin
     {
         provider["requires_openai_auth"] = toml_edit::value(true);
     }
-    let provider_base_url = codex_base_url_for_protocol(
+    let provider_base_url = codex_base_url_for_proxy(
         base_url.trim(),
-        profile.protocol,
+        profile.local_proxy_enabled(),
         crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
     );
     if !provider_base_url.trim().is_empty() {
@@ -1846,8 +1858,18 @@ pub fn normalize_relay_profile_for_storage(profile: &mut RelayProfile) -> anyhow
         profile.base_url.clear();
         profile.upstream_base_url.clear();
         profile.api_key.clear();
+        profile.local_proxy_enabled = Some(false);
         profile.auth_contents = remove_openai_api_key_from_auth_contents(&profile.auth_contents)?;
         return Ok(());
+    }
+    let provider_base_url = provider_string_from_config(&profile.config_contents, "base_url")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_default();
+    let local_proxy_base_url = crate::protocol_proxy::local_responses_proxy_base_url(
+        crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+    );
+    if profile.local_proxy_enabled.is_none() && provider_base_url == local_proxy_base_url {
+        profile.local_proxy_enabled = Some(true);
     }
     let source_base_url = relay_profile_base_url(profile);
     let source_api_key = relay_profile_api_key(profile);
