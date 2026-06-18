@@ -10,7 +10,6 @@ use codex_plus_core::script_market::{self, MarketScript, ScriptMarketManifest};
 use codex_plus_core::settings::{BackendSettings, RelayProfile, SettingsStore};
 use codex_plus_core::status::{LaunchStatus, StatusStore};
 use codex_plus_core::user_scripts::UserScriptManager;
-use codex_plus_core::zed_remote::{ZedOpenStrategy, ZedRemoteProject};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -64,19 +63,6 @@ pub struct LocalSessionsPayload {
     pub db_path: String,
     pub db_paths: Vec<String>,
     pub sessions: Vec<codex_plus_data::LocalSession>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ZedRemoteProjectsPayload {
-    pub projects: Vec<ZedRemoteProject>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ZedRemoteOpenPayload {
-    pub url: String,
-    pub strategy: ZedOpenStrategy,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -258,12 +244,6 @@ pub struct DiagnosticsPayload {
 pub struct WatcherPayload {
     pub enabled: bool,
     pub disabled_flag: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AdsPayload {
-    pub version: u64,
-    pub ads: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -497,79 +477,6 @@ pub fn list_local_sessions() -> CommandResult<LocalSessionsPayload> {
             payload,
         )
     }
-}
-
-#[tauri::command]
-pub fn list_zed_remote_projects() -> CommandResult<ZedRemoteProjectsPayload> {
-    let result = codex_plus_core::zed_remote::list_zed_remote_projects_response(&json!({}));
-    if result.get("status").and_then(Value::as_str) == Some("ok") {
-        let projects = serde_json::from_value::<Vec<ZedRemoteProject>>(
-            result
-                .get("projects")
-                .cloned()
-                .unwrap_or_else(|| Value::Array(Vec::new())),
-        )
-        .unwrap_or_default();
-        return ok(
-            &format!("已读取 {} 个 Zed 远程项目。", projects.len()),
-            ZedRemoteProjectsPayload { projects },
-        );
-    }
-    failed(
-        result
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("读取 Zed 远程项目失败。"),
-        ZedRemoteProjectsPayload {
-            projects: Vec::new(),
-        },
-    )
-}
-
-#[tauri::command]
-pub fn open_zed_remote(payload: Value) -> CommandResult<ZedRemoteOpenPayload> {
-    let result = codex_plus_core::zed_remote::open_zed_remote(&payload);
-    let strategy = result
-        .get("strategy")
-        .cloned()
-        .and_then(|value| serde_json::from_value::<ZedOpenStrategy>(value).ok())
-        .unwrap_or_default();
-    let url = result
-        .get("url")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    if result.get("status").and_then(Value::as_str) == Some("ok") {
-        return ok(
-            "已在 Zed Remote 打开项目。",
-            ZedRemoteOpenPayload { url, strategy },
-        );
-    }
-    failed(
-        result
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("无法在 Zed Remote 打开项目。"),
-        ZedRemoteOpenPayload { url, strategy },
-    )
-}
-
-#[tauri::command]
-pub fn forget_zed_remote_project(id: String) -> CommandResult<ZedRemoteProjectsPayload> {
-    let result =
-        codex_plus_core::zed_remote::forget_zed_remote_project_response(&json!({ "id": id }));
-    if result.get("status").and_then(Value::as_str) != Some("ok") {
-        return failed(
-            result
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("移除 Zed 远程项目失败。"),
-            ZedRemoteProjectsPayload {
-                projects: Vec::new(),
-            },
-        );
-    }
-    list_zed_remote_projects()
 }
 
 #[tauri::command]
@@ -1013,20 +920,6 @@ fn persist_provider_sync_selection(provider: &str) {
     settings.provider_sync_saved_providers =
         normalize_provider_sync_provider_list(settings.provider_sync_saved_providers);
     let _ = store.save(&settings);
-}
-
-#[tauri::command]
-pub async fn load_ads() -> CommandResult<AdsPayload> {
-    match codex_plus_core::ads::fetch_ad_list().await {
-        Ok(payload) => ok("推荐内容已加载。", ads_payload(payload)),
-        Err(error) => failed(
-            &format!("推荐内容加载失败：{error}"),
-            AdsPayload {
-                version: 1,
-                ads: Vec::new(),
-            },
-        ),
-    }
 }
 
 #[tauri::command]
@@ -2277,17 +2170,6 @@ fn read_optional_text_file(path: &std::path::Path) -> anyhow::Result<String> {
     }
 }
 
-fn ads_payload(payload: Value) -> AdsPayload {
-    AdsPayload {
-        version: payload.get("version").and_then(Value::as_u64).unwrap_or(1),
-        ads: payload
-            .get("ads")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default(),
-    }
-}
-
 fn open_url(url: &str) -> anyhow::Result<()> {
     #[cfg(windows)]
     {
@@ -3216,18 +3098,6 @@ model_reasoning_effort = "high"
                 .relay_context_config_contents
                 .contains("[mcp_servers.context7]")
         );
-    }
-
-    #[test]
-    fn ads_payload_keeps_version_and_ad_items() {
-        let payload = ads_payload(json!({
-            "version": 1,
-            "ads": [{"id": "ad-1", "type": "normal", "title": "Ad"}]
-        }));
-
-        assert_eq!(payload.version, 1);
-        assert_eq!(payload.ads.len(), 1);
-        assert_eq!(payload.ads[0]["id"], json!("ad-1"));
     }
 
     #[test]

@@ -10,7 +10,7 @@ use super::types::{
     UpstreamWorktreeError, UpstreamWorktreeRequest, UpstreamWorktreeResult,
     UpstreamWorktreeSourceRequest,
 };
-use crate::zed_remote::{SshTarget, resolve_ssh_target_for_host_id};
+use crate::remote_ssh::{SshTarget, resolve_ssh_target_for_host_id};
 
 pub fn codex_global_state_path() -> PathBuf {
     crate::codex_home::default_codex_home_dir().join(".codex-global-state.json")

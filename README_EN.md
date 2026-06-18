@@ -36,30 +36,12 @@ The Windows installer creates desktop and Start Menu shortcuts. The macOS DMG in
 ## Sponsors
 
 <p align="center">
-  <a href="https://jojocode.com/">
-    <img src="docs/images/sponsor-jojocode.svg" alt="JOJO Code" width="180">
-  </a>
-</p>
-<p align="center">
-  <a href="https://jojocode.com/"><strong>JOJO Code | Official Codex++ Relay</strong></a><br>
-  The official Codex++ relay service, focused on stable access and cost-effective pricing. JOJO Code supports GPT-5.5, GPT-5.4, Claude Opus 4.8, Claude Opus 4.7, gpt-image-2, and more for daily development, team collaboration, and long-running project workflows.
-</p>
-
-<p align="center">
   <a href="mailto:1727532@qq.com">Want to be shown below?</a>
 </p>
 <table>
   <tr>
     <th width="180">🏆 Sponsor 🏆</th>
     <th>Introduction</th>
-  </tr>
-  <tr>
-    <td align="center">
-      <a href="https://jojocode.com/">
-        <img src="docs/images/sponsor-jojocode.svg" alt="JOJO Code" width="150">
-      </a>
-    </td>
-    <td><a href="https://jojocode.com/"><strong>JOJO Code | Official Codex++ Relay</strong></a><br>Thanks to JOJO Code for sponsoring this project. JOJO Code is the official Codex++ relay service with cost-effective pricing and stable, easy-to-configure Codex API access. It supports GPT-5.5, GPT-5.4, Claude Opus 4.8, Claude Opus 4.7, gpt-image-2, and more for daily development, quick setup, team collaboration, and continuous use.</td>
   </tr>
   <tr>
     <td align="center">
@@ -129,7 +111,6 @@ The Windows installer creates desktop and Start Menu shortcuts. The macOS DMG in
 - Traditional enhancement mode with plugin entry unlock, forced plugin install, session delete, Markdown export, project move, Timeline, and more.
 - Independent user script management with startup injection.
 - Provider Sync to keep historical sessions visible after switching providers.
-- Zed open entry detects remote SSH context and opens the matching remote file in Zed Remote Development from Codex.
 - Upstream worktree creation: create new worktrees from `upstream/<base-branch>` after fetching the remote branch, reducing conflicts caused by stale local HEAD state.
 - GitHub Release updates. Both the manager and silent launcher can detect available updates.
 - Windows single instance, no console window, administrator manifest, and system Desktop path detection.
@@ -180,18 +161,7 @@ To return to the official login mode, use the clear API mode button in the Relay
 
 Enhancements are controlled in the manager. Enhancement injection is enabled by default. When disabled, Codex++ will not inject its menu or scripts.
 
-When relay injection mode is active, plugin entry unlock and forced plugin install are unnecessary, and the UI will say so. Other enhancements, including session delete, export, move, Timeline, recommendations, and user scripts, can still be used.
-
-## Recommendations
-
-Recommended content is loaded from:
-
-```text
-https://raw.githubusercontent.com/BigPizzaV3/Ad-List/main/ads.json
-https://cdn.jsdelivr.net/gh/BigPizzaV3/Ad-List@main/ads.json
-```
-
-Requests automatically append a `?v=timestamp` cache buster to avoid stale CDN content. Slow recommendation loading does not mark the backend connection as failed.
+When relay injection mode is active, plugin entry unlock and forced plugin install are unnecessary, and the UI will say so. Other enhancements, including session delete, export, move, Timeline, and user scripts, can still be used.
 
 ## Updates and Packages
 
@@ -278,13 +248,6 @@ scripts/installer/
 Join the Codex++ discussion group to report issues, share usage notes, or suggest features:
 
 WeChat group: [get the latest QR code](https://docs.qq.com/doc/DQ2VOanZTTFZJcUpZ#).
-
-If Codex++ has helped you, you can buy me a coffee or send a small tip to support continued maintenance.
-
-<p align="center">
-  <img src="docs/images/sponsor-alipay.jpg" alt="Alipay sponsor QR code" width="220">
-  <img src="docs/images/sponsor-wechat.jpg" alt="WeChat sponsor QR code" width="220">
-</p>
 
 ## Friendly Links
 

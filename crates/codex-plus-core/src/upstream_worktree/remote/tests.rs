@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::zed_remote::SshTarget;
+use crate::remote_ssh::SshTarget;
 
 use super::{remote_defaults_snapshot_script, remote_git_command, remote_path_join, shell_quote};
 use crate::upstream_worktree::UpstreamRemoteProject;
@@ -78,12 +78,11 @@ fn remote_defaults_snapshot_script_collects_defaults_with_one_ssh_command() {
 #[test]
 fn remote_defaults_snapshot_script_is_valid_posix_shell() {
     let script = remote_defaults_snapshot_script("/Users/longnv/bin/repo/project");
-    let output = Command::new("sh")
-        .arg("-n")
-        .arg("-c")
-        .arg(&script)
-        .output()
-        .expect("sh should parse snapshot script");
+    let output = match Command::new("sh").arg("-n").arg("-c").arg(&script).output() {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!("sh should parse snapshot script: {error}"),
+    };
 
     assert!(
         output.status.success(),

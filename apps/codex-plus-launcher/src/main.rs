@@ -569,42 +569,6 @@ impl BridgeRuntimeService for LauncherRuntimeService {
         Ok(codex_plus_core::model_catalog::read_codex_model_catalog().await)
     }
 
-    async fn ads(&self) -> anyhow::Result<Value> {
-        codex_plus_core::ads::fetch_ad_list().await
-    }
-
-    async fn zed_remote_status(&self) -> anyhow::Result<Value> {
-        Ok(codex_plus_core::zed_remote::zed_remote_status())
-    }
-
-    async fn resolve_zed_remote_host(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(codex_plus_core::zed_remote::resolve_ssh_target_response(
-            &payload,
-        ))
-    }
-
-    async fn fallback_zed_remote_request(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(codex_plus_core::zed_remote::fallback_open_request_response(
-            &payload,
-        ))
-    }
-
-    async fn open_zed_remote(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(codex_plus_core::zed_remote::open_zed_remote(&payload))
-    }
-
-    async fn list_zed_remote_projects(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(codex_plus_core::zed_remote::list_zed_remote_projects_response(&payload))
-    }
-
-    async fn remember_zed_remote_project(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(codex_plus_core::zed_remote::remember_zed_remote_project_response(&payload))
-    }
-
-    async fn forget_zed_remote_project(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(codex_plus_core::zed_remote::forget_zed_remote_project_response(&payload))
-    }
-
     async fn upstream_worktree_status(&self) -> anyhow::Result<Value> {
         Ok(codex_plus_core::upstream_worktree::status_response())
     }

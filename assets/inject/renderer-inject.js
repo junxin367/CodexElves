@@ -18,16 +18,10 @@
   const conversationViewMaxAllowedWidth = 4000;
   const conversationViewDefaultWidth = 900;
   const conversationViewLegacyWidthKey = "codexPlus.threadCenter.maxWidth";
-  const zedRemoteButtonClass = "codex-zed-remote-button";
-  const zedRemoteOpenInMenuItemClass = "codex-zed-open-in-menu-item";
-  const zedRemoteToastClass = "codex-zed-remote-toast";
   const upstreamWorktreeDialogClass = "codex-upstream-worktree-dialog";
   const upstreamBranchOptionAttribute = "data-codex-upstream-branch-option";
   const upstreamBranchSelectionKey = "codexUpstreamBranchSelection";
   const upstreamProjectContextKey = "codexUpstreamProjectContext";
-  const zedRemoteOpenVersion = "1";
-  const zedRemoteOpenInMenuVersion = "1";
-  const zedRemoteOpenInMenuActivationWindowMs = 600;
   const timelineQuestionLimit = 40;
   const timelineMinTopPercent = 2;
   const timelineMaxTopPercent = 98;
@@ -276,48 +270,6 @@
         background: #fee2e2 !important;
         color: #991b1b !important;
         opacity: 1 !important;
-      }
-      .${zedRemoteButtonClass} {
-        border: 1px solid #10a37f;
-        border-radius: 7px;
-        background: #d1fae5;
-        color: #065f46;
-        font: 12px system-ui, sans-serif;
-        line-height: 16px;
-        margin-left: 6px;
-        padding: 2px 7px;
-        cursor: pointer;
-      }
-      .${zedRemoteButtonClass}:hover,
-      .${zedRemoteButtonClass}:focus-visible {
-        background: #a7f3d0;
-        outline: none;
-      }
-      .${zedRemoteOpenInMenuItemClass} {
-        cursor: pointer;
-      }
-      .codex-zed-open-in-menu-icon {
-        width: 18px;
-        height: 18px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        object-fit: contain;
-      }
-      .${zedRemoteToastClass} {
-        position: fixed;
-        right: 18px;
-        bottom: 58px;
-        z-index: 2147483000;
-        max-width: min(420px, calc(100vw - 36px));
-        border-radius: 8px;
-        background: #111827;
-        color: #ffffff;
-        font: 13px system-ui, sans-serif;
-        line-height: 18px;
-        padding: 10px 12px;
-        box-shadow: 0 8px 30px rgba(0,0,0,.25);
-        pointer-events: none;
       }
       [data-codex-delete-row="true"]:hover .${actionGroupClass} {
         opacity: 1;
@@ -644,7 +596,6 @@
         pointer-events: auto;
         -webkit-app-region: no-drag;
       }
-      .codex-plus-modal-content[data-codex-plus-active-tab="support"] { width: min(820px, calc(100vw - 48px)); }
       .codex-plus-modal-header {
         display: flex;
         align-items: center;
@@ -827,23 +778,6 @@
       .codex-plus-user-script-error { margin-top: 2px; color: #f87171; font-size: 11px; word-break: break-all; }
       .codex-plus-user-script-actions { display: grid; justify-items: end; gap: 8px; min-width: 120px; }
       .codex-plus-user-script-reload { border: 1px solid rgba(255,255,255,.18); border-radius: 7px; background: #3f3f46; color: #f3f4f6; font: 12px system-ui, sans-serif; padding: 6px 8px; }
-      .codex-plus-sponsor-text { color: #d1d5db; font-size: 13px; line-height: 1.55; margin: 4px 0 12px; }
-      .codex-plus-ad-section { display: grid; gap: 10px; margin-top: 12px; }
-      .codex-plus-ad-section:first-of-type { margin-top: 0; }
-      .codex-plus-ad-section-title { color: #f8fafc; font-size: 15px; margin: 0; }
-      .codex-plus-ad-list { display: grid; gap: 14px; }
-      .codex-plus-ad-card { border: 1px solid rgba(96,165,250,.26); border-radius: 16px; background: linear-gradient(135deg, rgba(37,99,235,.18), rgba(255,255,255,.05)); box-shadow: 0 14px 36px rgba(0,0,0,.22); }
-      .codex-plus-ad-content { padding: 14px; }
-      .codex-plus-ad-title { margin: 0; color: #f8fafc; font-size: 17px; line-height: 1.35; }
-      .codex-plus-ad-description { margin: 6px 0 10px; color: #dbeafe; font-size: 13px; line-height: 1.55; }
-      .codex-plus-ad-highlights { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
-      .codex-plus-ad-highlights span { border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: rgba(255,255,255,.08); color: #f3f4f6; font-size: 12px; padding: 4px 8px; }
-      .codex-plus-ad-link { display: inline-flex; align-items: center; justify-content: center; border-radius: 9px; background: #2563eb; color: #ffffff; font-size: 13px; font-weight: 650; text-decoration: none; padding: 8px 12px; }
-      .codex-plus-ad-empty { border: 1px dashed rgba(255,255,255,.16); border-radius: 12px; color: #9ca3af; font-size: 13px; padding: 12px; text-align: center; }
-      .codex-plus-sponsor-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-      .codex-plus-sponsor-card { border: 1px solid rgba(255,255,255,.1); border-radius: 12px; padding: 10px; background: rgba(255,255,255,.04); text-align: center; }
-      .codex-plus-sponsor-card-title { color: #f3f4f6; font-size: 13px; margin-bottom: 8px; }
-      .codex-plus-sponsor-qr { display: block; width: 100%; max-width: 340px; border-radius: 8px; margin: 0 auto; background: white; }
       .${timelineClass} {
         position: fixed;
         top: calc(72px + 12px);
@@ -923,7 +857,7 @@
   }
 
   function defaultCodexPlusSettings() {
-    return { pluginEntryUnlock: true, pluginMarketplaceUnlock: true, forcePluginInstall: true, modelWhitelistUnlock: true, sessionDelete: true, markdownExport: true, projectMove: true, conversationTimeline: true, conversationView: false, conversationViewMaxWidth: conversationViewDefaultWidth, threadScrollRestore: true, zedRemoteOpen: true, upstreamWorktreeCreate: true, nativeMenuPlacement: true, serviceTierControls: false };
+    return { pluginEntryUnlock: true, pluginMarketplaceUnlock: true, forcePluginInstall: true, modelWhitelistUnlock: true, sessionDelete: true, markdownExport: true, projectMove: true, conversationTimeline: true, conversationView: false, conversationViewMaxWidth: conversationViewDefaultWidth, threadScrollRestore: true, upstreamWorktreeCreate: true, nativeMenuPlacement: true, serviceTierControls: false };
   }
 
   const codexPlusBackendSettingMap = {
@@ -937,7 +871,7 @@
     conversationTimeline: "codexAppConversationTimeline",
     conversationView: "codexAppConversationView",
     threadScrollRestore: "codexAppThreadScrollRestore",
-    zedRemoteOpen: "codexAppZedRemoteOpen",
+
     upstreamWorktreeCreate: "codexAppUpstreamWorktreeCreate",
     nativeMenuPlacement: "codexAppNativeMenuPlacement",
     serviceTierControls: "codexAppServiceTierControls",
@@ -968,7 +902,7 @@
         conversationView: false,
         conversationViewMaxWidth: conversationViewDefaultWidth,
         threadScrollRestore: false,
-        zedRemoteOpen: false,
+
         upstreamWorktreeCreate: false,
         nativeMenuPlacement: false,
         serviceTierControls: false,
@@ -1993,105 +1927,6 @@
     }
   }
 
-  const codexPlusAdsUrl = "/ads";
-  let codexPlusAds = [];
-  let codexPlusAdsLoaded = false;
-
-  function isCodexPlusAdExpired(ad) {
-    if (!ad.expires_at) return false;
-    const expiresAt = Date.parse(ad.expires_at);
-    return Number.isFinite(expiresAt) && expiresAt < Date.now();
-  }
-
-  function normalizeCodexPlusAds(payload) {
-    if (!payload || !Array.isArray(payload.ads)) return [];
-    return payload.ads.filter((ad) => {
-      return ad && ["sponsor", "normal"].includes(ad.type) && ad.title && ad.description && ad.url && !isCodexPlusAdExpired(ad);
-    }).map((ad) => ({
-      id: String(ad.id || ad.title),
-      type: ad.type,
-      title: String(ad.title),
-      description: String(ad.description),
-      url: String(ad.url),
-      expires_at: ad.expires_at ? String(ad.expires_at) : "",
-      highlights: Array.isArray(ad.highlights) ? ad.highlights.map((item) => String(item)).filter(Boolean) : [],
-    }));
-  }
-
-  function renderCodexPlusAdGroup(type, emptyText) {
-    const ads = codexPlusAds.filter((ad) => ad.type === type);
-    if (!ads.length) return `<div class="codex-plus-ad-empty">${escapeHtml(emptyText)}</div>`;
-    return ads.map((ad) => `
-      <article class="codex-plus-ad-card">
-        <div class="codex-plus-ad-content">
-          <h3 class="codex-plus-ad-title">${escapeHtml(ad.title)}</h3>
-          <p class="codex-plus-ad-description">${escapeHtml(ad.description)}</p>
-          <div class="codex-plus-ad-highlights">
-            ${ad.highlights.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
-          </div>
-          <a class="codex-plus-ad-link" href="${escapeHtml(ad.url)}" target="_blank" rel="noreferrer">访问 ${escapeHtml(new URL(ad.url).hostname)}</a>
-        </div>
-      </article>
-    `).join("");
-  }
-
-  function renderCodexPlusAds() {
-    if (!codexPlusAdsLoaded) return `<div class="codex-plus-ad-empty">推荐内容加载中…</div>`;
-    if (!codexPlusAds.length) return `<div class="codex-plus-ad-empty">暂无推荐内容。</div>`;
-    return `
-      <section class="codex-plus-ad-section">
-        <h3 class="codex-plus-ad-section-title">赞助商推荐</h3>
-        <div class="codex-plus-ad-list">${renderCodexPlusAdGroup("sponsor", "暂无赞助商推荐。")}</div>
-      </section>
-      <section class="codex-plus-ad-section">
-        <h3 class="codex-plus-ad-section-title">普通推荐</h3>
-        <div class="codex-plus-ad-list">${renderCodexPlusAdGroup("normal", "暂无普通推荐。")}</div>
-      </section>
-    `;
-  }
-
-  function cacheBustCodexPlusAdUrl(url, version) {
-    return `${url}${url.includes("?") ? "&" : "?"}v=${version}`;
-  }
-
-  async function directFetchCodexPlusAds() {
-    const urls = [
-      "https://raw.githubusercontent.com/BigPizzaV3/Ad-List/main/ads.json",
-      "https://cdn.jsdelivr.net/gh/BigPizzaV3/Ad-List@main/ads.json",
-    ];
-    let lastError = null;
-    const cacheBust = Date.now();
-    for (const url of urls) {
-      try {
-        const response = await fetch(cacheBustCodexPlusAdUrl(url, cacheBust), {
-          headers: { "Accept": "application/json" },
-          cache: "no-store",
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return await response.json();
-      } catch (error) {
-        lastError = error;
-      }
-    }
-    throw lastError || new Error("ad list unavailable");
-  }
-
-  async function fetchCodexPlusAds() {
-    try {
-      codexPlusAds = normalizeCodexPlusAds(await directFetchCodexPlusAds());
-    } catch (error) {
-      sendCodexPlusDiagnostic("ads_fetch_failed", {
-        errorName: error?.name || "",
-        errorMessage: error?.message || String(error),
-      });
-      codexPlusAds = [];
-    } finally {
-      codexPlusAdsLoaded = true;
-      const panel = document.querySelector('[data-codex-plus-panel="sponsor"] .codex-plus-ad-remote');
-      if (panel) panel.innerHTML = renderCodexPlusAds();
-    }
-  }
-
   function selectCodexPlusTab(tab) {
     document.querySelectorAll(".codex-plus-modal-content").forEach((modal) => {
       modal.dataset.codexPlusActiveTab = tab;
@@ -2119,8 +1954,6 @@
         <div class="codex-plus-tabs" role="tablist" aria-label="Codex++">
           <button type="button" class="codex-plus-tab-button" data-codex-plus-tab="home" data-active="true">主页</button>
           <button type="button" class="codex-plus-tab-button" data-codex-plus-tab="userScripts" data-active="false">用户脚本</button>
-          <button type="button" class="codex-plus-tab-button" data-codex-plus-tab="sponsor" data-active="false">推荐内容</button>
-          <button type="button" class="codex-plus-tab-button" data-codex-plus-tab="support" data-active="false">请作者喝咖啡</button>
         </div>
         <div class="codex-plus-modal-body">
           <div class="codex-plus-panel" data-codex-plus-panel="home">
@@ -2201,10 +2034,6 @@
               <button type="button" class="codex-plus-toggle" data-codex-plus-setting="threadScrollRestore"><span></span></button>
             </div>
             <div class="codex-plus-row">
-              <div><div class="codex-plus-row-title">Zed Remote open</div><div class="codex-plus-row-description">Open supported remote SSH file references in Zed without patching Codex.app.</div></div>
-              <button type="button" class="codex-plus-toggle" data-codex-plus-setting="zedRemoteOpen"><span></span></button>
-            </div>
-            <div class="codex-plus-row">
               <div><div class="codex-plus-row-title">Upstream worktree</div><div class="codex-plus-row-description">Create a Git worktree from a fresh upstream branch, equivalent to git worktree add -b branch path upstream/base.</div></div>
               <div class="codex-plus-worktree-actions">
                 <button type="button" class="codex-plus-action-button" data-codex-upstream-worktree-open="true">创建</button>
@@ -2255,25 +2084,6 @@
               <div class="codex-plus-user-script-actions">
                 <button type="button" class="codex-plus-toggle" data-codex-user-scripts-enabled="true"><span></span></button>
                 <button type="button" class="codex-plus-user-script-reload" data-codex-user-scripts-reload="true">重新加载用户脚本</button>
-              </div>
-            </div>
-          </div>
-          <div class="codex-plus-panel" data-codex-plus-panel="sponsor" hidden>
-            <div class="codex-plus-sponsor-text">推荐内容分为赞助商推荐和普通推荐。赞助商推荐来自支持 Codex++ 继续维护的合作方；普通推荐用于展示适合 Codex 用户的服务与信息。</div>
-            <div class="codex-plus-ad-remote">
-              ${renderCodexPlusAds()}
-            </div>
-          </div>
-          <div class="codex-plus-panel" data-codex-plus-panel="support" hidden>
-            <div class="codex-plus-sponsor-text">如果 Codex++ 帮到了你，可以请我喝杯咖啡，或者随手赞赏支持一下继续维护。</div>
-            <div class="codex-plus-sponsor-grid">
-              <div class="codex-plus-sponsor-card">
-                <div class="codex-plus-sponsor-card-title">支付宝</div>
-                <img class="codex-plus-sponsor-qr" src="${window.__CODEX_PLUS_SPONSOR_IMAGES__?.alipay || `${helperBase}/assets/sponsor-alipay.jpg`}" alt="支付宝赞赏码">
-              </div>
-              <div class="codex-plus-sponsor-card">
-                <div class="codex-plus-sponsor-card-title">微信</div>
-                <img class="codex-plus-sponsor-qr" src="${window.__CODEX_PLUS_SPONSOR_IMAGES__?.wechat || `${helperBase}/assets/sponsor-wechat.jpg`}" alt="微信赞赏码">
               </div>
             </div>
           </div>
@@ -2402,7 +2212,6 @@
       }
     }, true);
     document.body.appendChild(overlay);
-    if (!codexPlusAdsLoaded) fetchCodexPlusAds();
     selectCodexPlusTab("home");
     renderCodexPlusMenu();
     refreshCodexPlusBackendToggles();
@@ -7478,594 +7287,6 @@
     refreshCodexServiceTierControls();
   }
 
-  let zedRemoteStatusPromise = null;
-  const zedRemoteMissingHostMessage = "Cannot determine remote SSH host for this file";
-
-  function showZedRemoteToast(message) {
-    document.querySelectorAll(`.${zedRemoteToastClass}`).forEach((node) => node.remove());
-    const toast = document.createElement("div");
-    toast.className = zedRemoteToastClass;
-    toast.textContent = message;
-    document.body.appendChild(toast);
-    setTimeout(() => toast.remove(), 3200);
-  }
-
-  async function loadZedRemoteStatus() {
-    zedRemoteStatusPromise = zedRemoteStatusPromise || postJson("/zed-remote/status", {});
-    return zedRemoteStatusPromise;
-  }
-
-  async function resolveZedRemoteHost(hostId) {
-    const result = await postJson("/zed-remote/resolve-host", { hostId });
-    return result?.status === "ok" && result.ssh ? result.ssh : null;
-  }
-
-  function zedRemoteIsRemoteHostId(hostId) {
-    return zedRemoteString(hostId).startsWith("remote-ssh-");
-  }
-
-  function zedRemoteProjectIdFromRow(row) {
-    const projectList = row?.closest?.("[data-app-action-sidebar-project-list-id]");
-    const projectId = zedRemoteString(projectList?.getAttribute?.("data-app-action-sidebar-project-list-id"));
-    if (projectId) return projectId;
-    const projectRow = row?.closest?.("[data-app-action-sidebar-project-id]");
-    return zedRemoteString(projectRow?.getAttribute?.("data-app-action-sidebar-project-id"));
-  }
-
-  function zedRemoteWorkspaceRootFromObject(source) {
-    if (!source || typeof source !== "object") return "";
-    for (const key of ["remoteWorkspaceRoot", "workspaceRoot", "displayCwd", "cwd", "rootPath", "workingDirectory", "workingDir"]) {
-      const workspaceRoot = zedRemoteString(source[key]);
-      if (workspaceRoot.startsWith("/") && !/\/\.codex$/.test(workspaceRoot)) return workspaceRoot;
-    }
-    const hostConfig = source.hostConfig || source.sshHostConfig || source.remoteHostConfig || source.ssh || {};
-    for (const key of ["remoteWorkspaceRoot", "workspaceRoot", "rootPath", "cwd"]) {
-      const workspaceRoot = zedRemoteString(hostConfig[key]);
-      if (workspaceRoot.startsWith("/") && !/\/\.codex$/.test(workspaceRoot)) return workspaceRoot;
-    }
-    return "";
-  }
-
-  function zedRemoteWorkspaceRootFromElement(element) {
-    for (const key of zedRemoteReactKeys(element)) {
-      const workspaceRoot = zedRemoteWalkObject(element[key], zedRemoteWorkspaceRootFromObject, { maxDepth: 10, maxNodes: 320 });
-      if (workspaceRoot) return workspaceRoot;
-    }
-    return "";
-  }
-
-  function zedRemoteWorkspaceRootFromRow(row) {
-    for (let node = row; node && node !== document.body; node = node.parentElement) {
-      const workspaceRoot = zedRemoteWorkspaceRootFromElement(node);
-      if (workspaceRoot) return workspaceRoot;
-    }
-    return "";
-  }
-
-  function zedRemoteActiveThreadRow() {
-    const rows = sessionRows(true).filter((row) => row instanceof HTMLElement);
-    return rows.find((row) => row.getAttribute("data-app-action-sidebar-thread-active") === "true")
-      || rows.find((row) => row.getAttribute("aria-current") === "page" || row.getAttribute("aria-current") === "true")
-      || null;
-  }
-
-  function zedRemoteCurrentFallbackPayload() {
-    const row = zedRemoteActiveThreadRow();
-    const ref = row ? sessionRefFromRow(row) : currentSessionRef();
-    const threadId = ref.session_id || locationThreadId();
-    const hostId = zedRemoteString(row?.getAttribute?.("data-app-action-sidebar-thread-host-id"));
-    const isRemoteHost = zedRemoteIsRemoteHostId(hostId);
-    const payload = {};
-    if (threadId) payload.threadId = threadId;
-    if (hostId && hostId !== "local") payload.hostId = hostId;
-    if (!isRemoteHost) return payload;
-    const remoteWorkspaceRoot = zedRemoteWorkspaceRootFromRow(row);
-    const remoteProjectId = zedRemoteProjectIdFromRow(row);
-    if (remoteWorkspaceRoot) payload.remoteWorkspaceRoot = remoteWorkspaceRoot;
-    if (remoteProjectId) payload.remoteProjectId = remoteProjectId;
-    return payload;
-  }
-
-  function zedRemoteCurrentThreadId() {
-    return zedRemoteCurrentFallbackPayload().threadId || "";
-  }
-
-  async function resolveZedRemoteFallbackRequest() {
-    const payload = zedRemoteCurrentFallbackPayload();
-    if (!zedRemoteIsRemoteHostId(payload.hostId)) return null;
-    const result = await postJson("/zed-remote/fallback-request", payload);
-    return result?.status === "ok" && result.request ? result.request : null;
-  }
-
-  function zedRemoteOpenStrategy() {
-    const strategy = zedRemoteString(codexPlusBackendSettings.zedRemoteOpenStrategy);
-    return ["addToFocusedWorkspace", "reuseWindow", "newWindow", "default"].includes(strategy)
-      ? strategy
-      : "addToFocusedWorkspace";
-  }
-
-  function zedRemoteString(value) {
-    return typeof value === "string" || typeof value === "number" ? String(value).trim() : "";
-  }
-
-  function zedRemoteTruthy(value) {
-    if (value === true) return true;
-    if (typeof value === "string") return /^(true|1|yes|enabled|ssh)$/i.test(value.trim());
-    return false;
-  }
-
-  function zedRemoteHasTrustedSshSignal(source, hostConfig) {
-    return zedRemoteTruthy(source?.supportsSsh) || zedRemoteTruthy(hostConfig?.supportsSsh);
-  }
-
-  function zedRemoteContextFromObject(source) {
-    if (!source || typeof source !== "object") return null;
-    const hostConfig = source.hostConfig || source.sshHostConfig || source.remoteHostConfig || source.ssh || {};
-    const host = zedRemoteString(source.remoteHost || source.sshHost || source.host || source.hostname || source.hostName || hostConfig.host || hostConfig.hostname || hostConfig.hostName || hostConfig.sshHost);
-    const hostId = zedRemoteString(source.hostId);
-    const cwd = zedRemoteString(source.cwd || source.workspaceRoot || source.rootPath || source.remoteWorkspaceRoot || hostConfig.remoteWorkspaceRoot || hostConfig.workspaceRoot || hostConfig.rootPath);
-    if ((!host || !zedRemoteHasTrustedSshSignal(source, hostConfig)) && !(hostId.startsWith("remote-ssh-") && cwd.startsWith("/"))) return null;
-    const user = zedRemoteString(source.remoteUser || source.sshUser || source.user || source.username || hostConfig.user || hostConfig.username || hostConfig.sshUser);
-    const port = zedRemoteString(source.remotePort || source.sshPort || source.port || hostConfig.port || hostConfig.sshPort);
-    const workspaceRoot = cwd;
-    return { hostId, ssh: { user, host, port }, workspaceRoot };
-  }
-
-  function zedRemoteWalkObject(root, visitor, options = {}) {
-    const maxDepth = options.maxDepth || 6;
-    const maxNodes = options.maxNodes || 180;
-    const visited = new WeakSet();
-    const stack = [{ value: root, depth: 0 }];
-    let scanned = 0;
-    while (stack.length && scanned < maxNodes) {
-      const { value, depth } = stack.pop();
-      if (!value || typeof value !== "object" || visited.has(value) || depth > maxDepth) continue;
-      visited.add(value);
-      scanned += 1;
-      const result = visitor(value);
-      if (result) return result;
-      if (value instanceof Element || value === window || value === document || value === document.body || value === document.documentElement) continue;
-      for (const key of Object.keys(value).slice(0, 80)) {
-        if (key === "ownerDocument" || key === "parentElement" || key === "parentNode" || key === "children" || key === "childNodes") continue;
-        let child;
-        try {
-          child = value[key];
-        } catch {
-          continue;
-        }
-        if (child && typeof child === "object") stack.push({ value: child, depth: depth + 1 });
-      }
-    }
-    return null;
-  }
-
-  function zedRemoteReactKeys(element) {
-    return Object.keys(element).filter((key) => key.startsWith("__reactFiber") || key.startsWith("__reactInternalInstance") || key.startsWith("__reactProps"));
-  }
-
-  function zedRemoteContextFromElement(element) {
-    for (const key of zedRemoteReactKeys(element)) {
-      const context = zedRemoteWalkObject(element[key], zedRemoteContextFromObject);
-      if (context) return context;
-    }
-    return null;
-  }
-
-  function zedRemoteContextForElement(element) {
-    for (let node = element; node && node !== document.body; node = node.parentElement) {
-      const context = zedRemoteContextFromElement(node);
-      if (context) return context;
-    }
-    return null;
-  }
-
-  function zedRemoteHostIdFromText(text) {
-    const source = String(text || "");
-    const match = source.match(/\bremote-ssh-[A-Za-z0-9:_-]+\b/);
-    return match ? match[0] : "";
-  }
-
-  function zedRemoteWorkspaceRootForPath(path) {
-    const source = String(path || "").trim();
-    const projects = Array.from(document.querySelectorAll(selectors.sidebarThread))
-      .map((row) => ({
-        label: (row.textContent || "").replace(/\s+/g, " ").trim(),
-        selected: row.getAttribute("aria-current") === "page" || row.getAttribute("data-selected") === "true" || row.getAttribute("data-active") === "true" || row.className.includes("selected"),
-      }))
-      .filter((row) => row.label);
-    const selected = projects.find((row) => row.selected)?.label || "";
-    for (const label of [selected, ...projects.map((row) => row.label)]) {
-      const name = label.match(/^([A-Za-z0-9._-]+)/)?.[1];
-      if (name && source.includes(`/repo/${name}/`)) return source.slice(0, source.indexOf(`/repo/${name}/`) + `/repo/${name}`.length);
-    }
-    const repoIndex = source.indexOf("/bin/repo/");
-    if (repoIndex >= 0) {
-      const afterRepo = source.slice(repoIndex + "/bin/repo/".length);
-      const project = afterRepo.split("/")[0];
-      if (project) return source.slice(0, repoIndex + "/bin/repo/".length + project.length);
-    }
-    return source;
-  }
-
-  function zedRemoteFallbackContextForElement(element) {
-    const pathText = (element.textContent || "").trim();
-    if (!pathText.startsWith("/")) return null;
-    const root = element.closest("main") || document.body;
-    const hostId = zedRemoteHostIdFromText(root?.textContent || "") || "remote-ssh-codex-managed:remote";
-    return { hostId, ssh: { user: "", host: "", port: "" }, workspaceRoot: zedRemoteWorkspaceRootForPath(pathText) };
-  }
-
-  function zedRemoteContextFromSerializedState(text) {
-    const source = String(text || "");
-    if (!source.includes("hostConfig") || !source.includes("supportsSsh") || !source.includes("remoteWorkspaceRoot")) return null;
-    const trimmed = source.trim();
-    if (/^[{[]/.test(trimmed)) {
-      try {
-        const parsed = JSON.parse(trimmed);
-        const context = zedRemoteWalkObject(parsed, zedRemoteContextFromObject, { maxDepth: 10, maxNodes: 300 });
-        if (context) return context;
-      } catch {
-      }
-    }
-    if (!/['"]supportsSsh['"]\s*:\s*true/.test(source)) return null;
-    const fieldValue = (name) => {
-      const match = source.match(new RegExp(`["']${name}["']\\s*:\\s*["']([^"']+)["']`));
-      return match ? match[1] : "";
-    };
-    const host = fieldValue("host") || fieldValue("hostname") || fieldValue("hostName") || fieldValue("sshHost") || fieldValue("remoteHost");
-    if (!host) return null;
-    return {
-      ssh: {
-        user: fieldValue("user") || fieldValue("username") || fieldValue("sshUser") || fieldValue("remoteUser"),
-        host,
-        port: fieldValue("port") || fieldValue("sshPort") || fieldValue("remotePort"),
-      },
-      workspaceRoot: fieldValue("remoteWorkspaceRoot") || fieldValue("workspaceRoot") || fieldValue("rootPath"),
-    };
-  }
-
-  const zedRemoteContextCacheTtlMs = 1200;
-  let zedRemoteContextCache = { scope: null, at: 0, value: null };
-
-  function zedRemoteScopedElements(scope, selector) {
-    const root = scope?.querySelectorAll ? scope : document;
-    const nodes = [];
-    if (scope instanceof HTMLElement && scope.matches?.(selector)) nodes.push(scope);
-    root.querySelectorAll?.(selector).forEach((node) => nodes.push(node));
-    return Array.from(new Set(nodes));
-  }
-
-  function zedRemoteContextFromDataset(node) {
-    if (!(node instanceof HTMLElement)) return null;
-    const data = node.dataset;
-    return zedRemoteContextFromObject({
-      hostConfig: data.hostConfig ? { host: data.hostConfig, supportsSsh: true } : {},
-      supportsSsh: data.supportsSsh || data.supportsSshRemote,
-      sshHost: data.sshHost,
-      remoteHost: data.remoteHost,
-      host: data.host,
-      sshUser: data.sshUser,
-      remoteUser: data.remoteUser,
-      user: data.user,
-      sshPort: data.sshPort,
-      remotePort: data.remotePort,
-      port: data.port,
-      remoteWorkspaceRoot: data.remoteWorkspaceRoot,
-      workspaceRoot: data.workspaceRoot,
-    });
-  }
-
-  function zedRemoteContextUncached(scope = document) {
-    const explicitSelector = "[data-host-config], [data-ssh-host], [data-remote-host], [data-remote-workspace-root], [data-supports-ssh]";
-    for (const node of zedRemoteScopedElements(scope, explicitSelector)) {
-      if (isExtensionUiNode(node)) continue;
-      const context = zedRemoteContextFromDataset(node);
-      if (context) return context;
-    }
-    const reactSelector = "[data-remote-path], [data-file-path], [data-path], [data-open-in-targets], [data-open-file], [data-codex-open-file], [role='menuitem']";
-    const reactNodes = zedRemoteScopedElements(scope, reactSelector);
-    if (scope instanceof HTMLElement && !isExtensionUiNode(scope)) reactNodes.unshift(scope);
-    for (const node of Array.from(new Set(reactNodes)).slice(0, 60)) {
-      if (!(node instanceof HTMLElement) || isExtensionUiNode(node)) continue;
-      const context = zedRemoteContextFromElement(node);
-      if (context) return context;
-    }
-    if (scope !== document) return null;
-    const scripts = Array.from(document.querySelectorAll("script[type='application/json'], script[data-state], script#__NEXT_DATA__, script:not([src])"));
-    for (const script of scripts.slice(0, 20)) {
-      const context = zedRemoteContextFromSerializedState(script.textContent || "");
-      if (context) return context;
-    }
-    return null;
-  }
-
-  function zedRemoteContext(scope = document) {
-    const settings = codexPlusSettings();
-    if (!settings.zedRemoteOpen) return null;
-    const now = Date.now();
-    if (zedRemoteContextCache.scope === scope && now - zedRemoteContextCache.at < zedRemoteContextCacheTtlMs) {
-      return zedRemoteContextCache.value;
-    }
-    const value = zedRemoteContextUncached(scope);
-    zedRemoteContextCache = { scope, at: now, value };
-    return value;
-  }
-
-  function zedRemoteAbsolutePath(value, workspaceRoot) {
-    const text = String(value || "").trim();
-    if (!text) return "";
-    if (text.startsWith("/")) return text;
-    if (workspaceRoot && !text.includes("://") && !text.startsWith("~")) {
-      return `${workspaceRoot.replace(/\/+$/, "")}/${text.replace(/^\.\//, "")}`;
-    }
-    return "";
-  }
-
-  function zedRemoteMetadataRemotePath(source) {
-    if (!source || typeof source !== "object") return "";
-    return zedRemoteString(source.remotePath || source.remote_path || source.path || source.filePath || source.file_path || source.openFile?.remotePath || source.openFile?.path);
-  }
-
-  function zedRemotePathFromElementMetadata(element) {
-    const dataPath = element.dataset.remotePath || element.dataset.filePath || element.dataset.path || "";
-    if (dataPath) return dataPath;
-    for (const key of zedRemoteReactKeys(element)) {
-      const path = zedRemoteWalkObject(element[key], zedRemoteMetadataRemotePath, { maxDepth: 6, maxNodes: 120 });
-      if (path) return path;
-    }
-    return "";
-  }
-
-  function zedRemoteInlinePathFromElement(element, context) {
-    if (!context?.hostId && !context?.ssh?.host) return "";
-    const text = (element.textContent || "").trim();
-    if (!text || text.length > 600 || !text.startsWith("/")) return "";
-    const path = zedRemoteAbsolutePath(text, context.workspaceRoot || "");
-    if (!path) return "";
-    if (context.workspaceRoot && !path.startsWith(`${context.workspaceRoot.replace(/\/+$/, "")}/`) && path !== context.workspaceRoot) return "";
-    return path;
-  }
-
-  function zedRemoteAnchorHasOpenFileMetadata(anchor) {
-    if (!(anchor instanceof HTMLAnchorElement)) return false;
-    if (anchor.dataset.remotePath || anchor.dataset.filePath || anchor.dataset.path || anchor.dataset.openInTargets || anchor.dataset.openFile || anchor.dataset.codexOpenFile) return true;
-    const label = `${anchor.getAttribute("aria-label") || ""} ${anchor.getAttribute("data-testid") || ""} ${anchor.getAttribute("rel") || ""}`;
-    return /open[-_\s]?file|open-in-targets|remote/i.test(label) && !!zedRemotePathFromElementMetadata(anchor);
-  }
-
-  function zedRemoteFileCandidates(context, scope = document) {
-    const candidates = [];
-    const seen = new Set();
-    const addCandidate = (node, candidateContext, rawPath) => {
-      if (!candidateContext?.ssh?.host && !candidateContext?.hostId) return;
-      const path = zedRemoteAbsolutePath(rawPath, candidateContext.workspaceRoot || "");
-      if (!path || seen.has(path)) return;
-      seen.add(path);
-      candidates.push({ node, request: { ssh: candidateContext.ssh, hostId: candidateContext.hostId || "", path } });
-    };
-    const selectors = "[data-remote-path], [data-file-path], [data-path], [data-open-in-targets], [data-open-file], [data-codex-open-file], a[data-remote-path], a[data-file-path], a[data-path]";
-    zedRemoteScopedElements(scope, selectors).forEach((node) => {
-      if (!(node instanceof HTMLElement) || isExtensionUiNode(node)) return;
-      if (node instanceof HTMLAnchorElement && !zedRemoteAnchorHasOpenFileMetadata(node)) return;
-      addCandidate(node, zedRemoteContextForElement(node) || context, zedRemotePathFromElementMetadata(node));
-    });
-    if (scope !== document) {
-      zedRemoteScopedElements(scope, "span.inline-markdown, code, [class*='inlineMarkdown']").forEach((node) => {
-        if (!(node instanceof HTMLElement) || isExtensionUiNode(node)) return;
-        const candidateContext = zedRemoteContextForElement(node) || context || zedRemoteFallbackContextForElement(node);
-        if (!candidateContext?.hostId && !candidateContext?.ssh?.host) return;
-        const path = zedRemoteInlinePathFromElement(node, candidateContext);
-        if (path) addCandidate(node, candidateContext, path);
-      });
-    }
-    return candidates;
-  }
-
-  function zedRemoteBestOpenRequest(scope = document, context = zedRemoteContext(scope) || zedRemoteContext(document) || {}) {
-    const candidates = zedRemoteFileCandidates(context, scope);
-    if (candidates.length) return candidates[0].request;
-    return null;
-  }
-
-  async function openZedRemote(request) {
-    let nextRequest = request;
-    if (!nextRequest?.ssh?.host && nextRequest?.hostId) {
-      const ssh = await resolveZedRemoteHost(nextRequest.hostId);
-      nextRequest = ssh ? { ...nextRequest, ssh } : nextRequest;
-    }
-    if (!nextRequest?.ssh?.host) {
-      showZedRemoteToast(zedRemoteMissingHostMessage);
-      return;
-    }
-    nextRequest = {
-      ...nextRequest,
-      strategy: nextRequest.strategy || zedRemoteOpenStrategy(),
-      remember: codexPlusBackendSettings.zedRemoteProjectRegistryEnabled !== false,
-    };
-    try {
-      const result = await postJson("/zed-remote/open", nextRequest);
-      if (result?.status === "ok") {
-        showZedRemoteToast("Opened in Zed Remote");
-        return;
-      }
-      showZedRemoteToast(result?.message || "Cannot open this file in Zed Remote");
-    } catch (error) {
-      showZedRemoteToast(error?.message || "Cannot open this file in Zed Remote");
-    }
-  }
-
-  async function openBestZedRemoteTarget() {
-    const request = zedRemoteBestOpenRequest(document) || await resolveZedRemoteFallbackRequest();
-    if (!request) {
-      showZedRemoteToast("Cannot find a remote workspace or file for Zed");
-      return;
-    }
-    openZedRemote(request);
-  }
-
-  function attachZedRemoteButton(candidate) {
-    const anchor = candidate.node;
-    if (anchor.dataset.codexZedRemoteVersion === zedRemoteOpenVersion) return;
-    anchor.dataset.codexZedRemoteVersion = zedRemoteOpenVersion;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = zedRemoteButtonClass;
-    button.textContent = "Open in Zed Remote";
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      openZedRemote(candidate.request);
-    }, true);
-    anchor.insertAdjacentElement("afterend", button);
-  }
-
-  function removeZedRemoteButtons() {
-    document.querySelectorAll(`[data-codex-zed-remote-version]`).forEach((node) => {
-      delete node.dataset.codexZedRemoteVersion;
-    });
-    document.querySelectorAll(`.${zedRemoteButtonClass}`).forEach((node) => node.remove());
-  }
-
-  function createZedRemoteOpenInMenuItem(referenceItem) {
-    const item = document.createElement("div");
-    item.className = referenceItem?.className || "no-drag text-token-foreground outline-hidden rounded-lg px-[var(--padding-row-x)] py-[var(--padding-row-y)] text-sm group hover:bg-token-list-hover-background focus:bg-token-list-hover-background cursor-interaction flex flex-col";
-    item.classList.add(zedRemoteOpenInMenuItemClass);
-    item.setAttribute("role", referenceItem?.getAttribute("role") || "menuitem");
-    item.setAttribute("tabindex", referenceItem?.getAttribute("tabindex") || "-1");
-    item.setAttribute("data-orientation", referenceItem?.getAttribute("data-orientation") || "vertical");
-    item.innerHTML = `
-      <div class="flex w-full items-center gap-1.5">
-        <span class="inline-flex size-[18px] items-center justify-center leading-none shrink-0 opacity-75 group-focus:opacity-100 group-hover:opacity-100">
-          <img alt="" class="codex-zed-open-in-menu-icon icon-sm" src="apps/zed.png">
-        </span>
-        <span class="flex-1 min-w-0 truncate">Zed</span>
-      </div>
-    `;
-    bindZedRemoteOpenInMenuItem(item, "injected");
-    return item;
-  }
-
-  function zedRemoteOpenInMenuActivationIsDuplicate(target) {
-    if (!(target instanceof HTMLElement)) return false;
-    const now = Date.now();
-    const activatedAt = Number(target.dataset.codexZedOpenInMenuActivatedAt || 0);
-    if (activatedAt && now - activatedAt < zedRemoteOpenInMenuActivationWindowMs) return true;
-    target.dataset.codexZedOpenInMenuActivatedAt = String(now);
-    return false;
-  }
-
-  async function activateZedRemoteOpenInMenuItem(event) {
-    if (!codexPlusSettings().zedRemoteOpen) return;
-    if (event?.type === "keydown" && !["Enter", " "].includes(event.key)) return;
-    const scope = event?.currentTarget?.closest?.('[role="menu"], [data-radix-popper-content-wrapper]') || event?.currentTarget || document;
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation?.();
-    if (zedRemoteOpenInMenuActivationIsDuplicate(event?.currentTarget)) return;
-    const request = zedRemoteBestOpenRequest(scope) || await resolveZedRemoteFallbackRequest();
-    if (!request) {
-      showZedRemoteToast("Cannot find a remote workspace or file for Zed");
-      return;
-    }
-    openZedRemote(request);
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
-  }
-
-  function bindZedRemoteOpenInMenuItem(item, source) {
-    item.setAttribute("data-codex-zed-open-in-menu", source);
-    if (item.dataset.codexZedOpenInMenuBound === zedRemoteOpenInMenuVersion) return;
-    item.dataset.codexZedOpenInMenuBound = zedRemoteOpenInMenuVersion;
-    item.dataset.codexZedOpenInMenuVersion = zedRemoteOpenInMenuVersion;
-    item.addEventListener("pointerup", activateZedRemoteOpenInMenuItem, true);
-    item.addEventListener("click", activateZedRemoteOpenInMenuItem, true);
-    item.addEventListener("keydown", activateZedRemoteOpenInMenuItem, true);
-  }
-
-  function removeZedRemoteOpenInMenuItems(scope = document) {
-    const root = scope?.querySelectorAll ? scope : document;
-    root.querySelectorAll(`.${zedRemoteOpenInMenuItemClass}, [data-codex-zed-open-in-menu="injected"]`).forEach((node) => node.remove());
-  }
-
-  function zedRemoteOpenInMenuScopes(scope = document) {
-    const root = scope?.querySelectorAll ? scope : document;
-    const menus = [];
-    if (scope instanceof HTMLElement && scope.matches?.('[role="menu"]')) menus.push(scope);
-    root.querySelectorAll?.('[role="menu"]').forEach((menu) => menus.push(menu));
-    return Array.from(new Set(menus));
-  }
-
-  function refreshZedRemoteOpenInMenus(scope = document) {
-    removeZedRemoteOpenInMenuItems(scope);
-    if (!codexPlusSettings().zedRemoteOpen) return;
-    const fallbackPayload = zedRemoteCurrentFallbackPayload();
-    zedRemoteOpenInMenuScopes(scope).forEach((menu) => {
-      if (!(menu instanceof HTMLElement) || isExtensionUiNode(menu)) return;
-      const items = Array.from(menu.querySelectorAll('[role="menuitem"]')).filter((item) => !isExtensionUiNode(item));
-      const menuText = items.map((item) => (item.textContent || "").trim()).join(" ");
-      if (!/\b(VS Code|Cursor|Antigravity)\b/.test(menuText)) return;
-      if (!zedRemoteBestOpenRequest(menu) && !zedRemoteIsRemoteHostId(fallbackPayload.hostId)) return;
-      const existingZedItem = items.find((item) => (item.textContent || "").trim() === "Zed");
-      if (existingZedItem) {
-        bindZedRemoteOpenInMenuItem(existingZedItem, "native");
-        return;
-      }
-      const referenceItem = items.find((item) => /^(VS Code|Cursor|Antigravity)$/.test((item.textContent || "").trim()));
-      if (!referenceItem) return;
-      referenceItem.parentElement?.appendChild(createZedRemoteOpenInMenuItem(referenceItem));
-    });
-  }
-
-  async function refreshZedRemoteOpenControls(scope = document) {
-    if (!codexPlusSettings().zedRemoteOpen) {
-      removeZedRemoteButtons();
-      removeZedRemoteOpenInMenuItems();
-      return;
-    }
-    try {
-      const status = await loadZedRemoteStatus();
-      if (!status?.platformSupported || (!status.zedAppFound && !status.zedCliFound)) {
-        removeZedRemoteButtons();
-        removeZedRemoteOpenInMenuItems();
-        return;
-      }
-    } catch (_) {
-      removeZedRemoteButtons();
-      removeZedRemoteOpenInMenuItems();
-      return;
-    }
-    refreshZedRemoteOpenInMenus(scope);
-  }
-
-  function runScheduledZedRemoteMenuRefresh() {
-    window.__codexZedRemoteMenuRefreshPending = false;
-    clearTimeout(window.__codexZedRemoteMenuRefreshTimer);
-    window.__codexZedRemoteMenuRefreshTimer = null;
-    refreshZedRemoteOpenControls().catch(() => {
-      removeZedRemoteOpenInMenuItems();
-    });
-  }
-
-  function shouldRefreshZedRemoteMenus(mutations) {
-    if (!codexPlusSettings().zedRemoteOpen) return false;
-    if (!mutations) return true;
-    return mutations.some((mutation) => {
-      const target = mutation.target;
-      if (isExtensionUiNode(target)) return false;
-      if (target?.nodeType === 1 && target.matches?.('[role="menu"], [data-radix-popper-content-wrapper]')) return true;
-      return [...Array.from(mutation.addedNodes), ...Array.from(mutation.removedNodes)].some((node) => node.nodeType === 1 && (
-        node.matches?.('[role="menu"], [data-radix-popper-content-wrapper]') ||
-        node.querySelector?.('[role="menu"], [data-radix-popper-content-wrapper]')
-      ));
-    });
-  }
-
-  function scheduleZedRemoteMenuRefresh(mutations) {
-    if (!shouldRefreshZedRemoteMenus(mutations)) return;
-    if (window.__codexZedRemoteMenuRefreshPending) return;
-    window.__codexZedRemoteMenuRefreshPending = true;
-    window.__codexZedRemoteMenuRefreshTimer = setTimeout(runScheduledZedRemoteMenuRefresh, 50);
-  }
-
   function scanDeferred() {
     if (pluginPatchDisabledInRelayMode()) {
       clearPluginPatchArtifacts();
@@ -8111,7 +7332,7 @@
   }
 
   function isExtensionUiNode(node) {
-    return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-plus-modal-overlay, .${projectMoveOverlayClass}, .${timelineClass}, .codex-conversation-timeline, .${codexServiceTierBadgeClass}, .codex-zed-remote-button, .codex-zed-remote-toast, #codex-plus-menu`);
+    return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-plus-modal-overlay, .${projectMoveOverlayClass}, .${timelineClass}, .codex-conversation-timeline, .${codexServiceTierBadgeClass}, #codex-plus-menu`);
   }
 
   function scanRelevantSelector() {
@@ -8179,7 +7400,7 @@
 
   function scheduleScan(mutations) {
     window.__codexSessionDeleteLastMutations = mutations;
-    scheduleZedRemoteMenuRefresh(mutations);
+
     if (!shouldScheduleScan(mutations)) return;
     if (window.__codexSessionDeleteScanPending) return;
     window.__codexSessionDeleteScanPending = true;

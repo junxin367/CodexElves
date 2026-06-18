@@ -79,14 +79,6 @@ pub trait BridgeRuntimeService: Send + Sync {
     async fn backend_status(&self) -> anyhow::Result<Value>;
     async fn repair_backend(&self) -> anyhow::Result<Value>;
     async fn codex_model_catalog(&self) -> anyhow::Result<Value>;
-    async fn ads(&self) -> anyhow::Result<Value>;
-    async fn zed_remote_status(&self) -> anyhow::Result<Value>;
-    async fn resolve_zed_remote_host(&self, payload: Value) -> anyhow::Result<Value>;
-    async fn fallback_zed_remote_request(&self, payload: Value) -> anyhow::Result<Value>;
-    async fn open_zed_remote(&self, payload: Value) -> anyhow::Result<Value>;
-    async fn list_zed_remote_projects(&self, payload: Value) -> anyhow::Result<Value>;
-    async fn remember_zed_remote_project(&self, payload: Value) -> anyhow::Result<Value>;
-    async fn forget_zed_remote_project(&self, payload: Value) -> anyhow::Result<Value>;
     async fn upstream_worktree_status(&self) -> anyhow::Result<Value>;
     async fn upstream_worktree_defaults(&self, payload: Value) -> anyhow::Result<Value>;
     async fn upstream_worktree_prepare(&self, payload: Value) -> anyhow::Result<Value>;
@@ -168,24 +160,6 @@ pub async fn handle_bridge_request(
         "/backend/repair" => ctx.runtime.repair_backend().await,
         "/codex-model-catalog" | "/codex-config-model" => ctx.runtime.codex_model_catalog().await,
         "/diagnostics/log" => diagnostic_log_value(payload.clone()),
-        "/ads" => ctx.runtime.ads().await,
-        "/zed-remote/status" => ctx.runtime.zed_remote_status().await,
-        "/zed-remote/resolve-host" => ctx.runtime.resolve_zed_remote_host(payload.clone()).await,
-        "/zed-remote/fallback-request" => {
-            ctx.runtime
-                .fallback_zed_remote_request(payload.clone())
-                .await
-        }
-        "/zed-remote/open" => ctx.runtime.open_zed_remote(payload.clone()).await,
-        "/zed-remote/projects" => ctx.runtime.list_zed_remote_projects(payload.clone()).await,
-        "/zed-remote/remember-project" => {
-            ctx.runtime
-                .remember_zed_remote_project(payload.clone())
-                .await
-        }
-        "/zed-remote/forget-project" => {
-            ctx.runtime.forget_zed_remote_project(payload.clone()).await
-        }
         "/upstream-worktree/status" => ctx.runtime.upstream_worktree_status().await,
         "/upstream-worktree/defaults" => {
             ctx.runtime
@@ -464,44 +438,6 @@ impl BridgeRuntimeService for CoreRuntimeService {
 
     async fn codex_model_catalog(&self) -> anyhow::Result<Value> {
         Ok(crate::model_catalog::read_codex_model_catalog().await)
-    }
-
-    async fn ads(&self) -> anyhow::Result<Value> {
-        crate::ads::fetch_ad_list().await
-    }
-
-    async fn zed_remote_status(&self) -> anyhow::Result<Value> {
-        Ok(crate::zed_remote::zed_remote_status())
-    }
-
-    async fn resolve_zed_remote_host(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(crate::zed_remote::resolve_ssh_target_response(&payload))
-    }
-
-    async fn fallback_zed_remote_request(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(crate::zed_remote::fallback_open_request_response(&payload))
-    }
-
-    async fn open_zed_remote(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(crate::zed_remote::open_zed_remote(&payload))
-    }
-
-    async fn list_zed_remote_projects(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(crate::zed_remote::list_zed_remote_projects_response(
-            &payload,
-        ))
-    }
-
-    async fn remember_zed_remote_project(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(crate::zed_remote::remember_zed_remote_project_response(
-            &payload,
-        ))
-    }
-
-    async fn forget_zed_remote_project(&self, payload: Value) -> anyhow::Result<Value> {
-        Ok(crate::zed_remote::forget_zed_remote_project_response(
-            &payload,
-        ))
     }
 
     async fn upstream_worktree_status(&self) -> anyhow::Result<Value> {

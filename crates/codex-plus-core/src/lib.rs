@@ -1,4 +1,3 @@
-pub mod ads;
 pub mod app_paths;
 pub mod assets;
 pub mod bridge;
@@ -20,6 +19,7 @@ pub mod protocol_proxy;
 pub mod proxy;
 pub mod relay_config;
 pub mod relay_switch;
+pub mod remote_ssh;
 pub mod routes;
 pub mod script_market;
 pub mod settings;
@@ -31,7 +31,6 @@ pub mod version;
 pub mod watcher;
 #[cfg(windows)]
 mod windows_integration;
-pub mod zed_remote;
 
 #[cfg(windows)]
 pub fn windows_create_no_window() -> u32 {
