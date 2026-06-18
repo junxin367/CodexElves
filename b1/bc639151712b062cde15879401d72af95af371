@@ -1,0 +1,26 @@
+.gitignore
+  s_945e980b26cc67::t_675aeb48e877a2 20
+.gitattributes
+  s_945e980b26cc67::t_675aeb48e877a2 6-8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.8",
+  "base_commit_sha": "b1bc639151712b062cde15879401d72af95af371",
+  "prompts": {},
+  "humans": {
+    "h_41e06c727a5312": {
+      "author": "刘俊鑫 <673638712@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_945e980b26cc67": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ed524-6416-7581-bf3a-3628dbd05629",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
