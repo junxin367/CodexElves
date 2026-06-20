@@ -51,7 +51,9 @@ import {
 } from "lucide-react";
 import { ProviderPresetSelector } from "@/components/ProviderPresetSelector";
 import type { PresetPatch } from "@/components/ProviderPresetSelector";
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { knownModelContextWindow } from "@/modelContextWindows";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 
 import { Badge as UiBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -161,6 +163,7 @@ type RelayProfile = {
   modelList: string;
   responsesModelList: string;
   chatCompletionsModelList: string;
+  anthropicModelList: string;
   userAgent: string;
 };
 
@@ -169,6 +172,8 @@ type RelayModelMapping = {
   protocol: RelayProtocol;
   contextWindow: string;
 };
+
+type ModelChoiceChangeSource = "input" | "select";
 
 type RelayContextSelection = {
   mcpServers: string[];
@@ -193,7 +198,7 @@ type CodexContextEntries = {
   plugins: CodexContextEntry[];
 };
 
-type RelayProtocol = "responses" | "chatCompletions";
+type RelayProtocol = "responses" | "chatCompletions" | "anthropic";
 type RelayMode = "official" | "mixedApi" | "pureApi";
 const PROTOCOL_PROXY_BASE_URL = "http://127.0.0.1:45221/v1";
 const CHAT_UPSTREAM_BASE_URL_KEY = "codex_elves_chat_base_url";
@@ -540,6 +545,7 @@ const defaultSettings: BackendSettings = {
       modelList: "",
       responsesModelList: "",
       chatCompletionsModelList: "",
+      anthropicModelList: "",
       userAgent: "",
     },
   ],
@@ -2853,6 +2859,7 @@ function RelayProfileEditor({
   const [modelChoices, setModelChoices] = useState<Record<RelayProtocol, string[]>>({
     responses: [],
     chatCompletions: [],
+    anthropic: [],
   });
   const [fetchingModelChoices, setFetchingModelChoices] = useState(false);
   const updateDraft = (patch: Partial<RelayProfile>) => {
@@ -2863,6 +2870,7 @@ function RelayProfileEditor({
       modelMappings: normalizeRelayModelMappings(mappings),
       responsesModelList: "",
       chatCompletionsModelList: "",
+      anthropicModelList: "",
       modelList: "",
     });
   };
@@ -2878,6 +2886,7 @@ function RelayProfileEditor({
         setModelChoices({
           responses: normalized,
           chatCompletions: normalized,
+          anthropic: normalized,
         });
       }
     } finally {
@@ -3023,7 +3032,7 @@ function RelayProfileEditor({
           </div>
         ) : null}
         {showApiFields ? (
-          <Field className="relay-field-model-list" label="模型列表">
+          <Field as="div" className="relay-field-model-list" label="模型列表">
             <RelayModelMappingTable
               choices={modelChoices}
               fetching={fetchingModelChoices}
@@ -3046,7 +3055,7 @@ function RelayProfileEditor({
       {showApiFields && profile.localProxyEnabled ? (
         <div className="hint-line relay-protocol-hint">
           <MessageCircle className="h-4 w-4" />
-          <span>本地代理只按模型列表分流：Responses API 模型直连上游，Chat Completions 模型转换后转发；未列入模型不会自动兜底。</span>
+          <span>本地代理只按模型列表分流：Responses API 模型直连上游，Chat Completions 与 Anthropic 模型转换后转发；未列入模型不会自动兜底。</span>
         </div>
       ) : null}
       <div className="hint-line relay-protocol-hint">
@@ -3083,6 +3092,17 @@ function RelayModelMappingTable({
     };
     onChange(next);
   };
+  const selectRowModel = (index: number, row: RelayModelMapping, requestModel: string) => {
+    const nextContextWindow = knownModelContextWindow(requestModel);
+    const currentContextWindow = row.contextWindow.trim();
+    const previousContextWindow = knownModelContextWindow(row.requestModel);
+    const shouldFillContextWindow =
+      !!nextContextWindow && (!currentContextWindow || (!!previousContextWindow && currentContextWindow === previousContextWindow));
+    updateRow(index, {
+      requestModel,
+      ...(shouldFillContextWindow ? { contextWindow: nextContextWindow } : {}),
+    });
+  };
   const addRow = () => {
     onChange([
       ...mappings,
@@ -3109,16 +3129,6 @@ function RelayModelMappingTable({
           添加模型
         </Button>
       </div>
-      <datalist id="relay-model-choices-responses">
-        {choices.responses.map((model) => (
-          <option key={`responses-${model}`} value={model} />
-        ))}
-      </datalist>
-      <datalist id="relay-model-choices-chatCompletions">
-        {choices.chatCompletions.map((model) => (
-          <option key={`chat-${model}`} value={model} />
-        ))}
-      </datalist>
       <div className="relay-model-table" role="table" aria-label="模型列表">
         <div className="relay-model-table-head" role="row">
           <span role="columnheader">请求模型</span>
@@ -3129,10 +3139,16 @@ function RelayModelMappingTable({
         {displayRows.map((row, index) => (
           <div className="relay-model-table-row" role="row" key={`model-row-${index}`}>
             <div className="relay-model-request-cell" role="cell">
-              <Input
-                list={`relay-model-choices-${row.protocol}`}
+              <ModelChoiceInput
+                choices={choices[row.protocol]}
                 value={row.requestModel}
-                onChange={(event) => updateRow(index, { requestModel: event.currentTarget.value })}
+                onChange={(value, source) => {
+                  if (source === "select") {
+                    selectRowModel(index, row, value);
+                    return;
+                  }
+                  updateRow(index, { requestModel: value });
+                }}
                 placeholder="点击选择或输入模型"
               />
             </div>
@@ -3144,6 +3160,7 @@ function RelayModelMappingTable({
               >
                 <option value="responses">Responses API</option>
                 <option value="chatCompletions">Chat Completions</option>
+                <option value="anthropic">Anthropic</option>
               </select>
             </div>
             <div role="cell">
@@ -3169,6 +3186,171 @@ function RelayModelMappingTable({
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function ModelChoiceInput({
+  value,
+  choices,
+  placeholder,
+  onChange,
+}: {
+  value: string;
+  choices: string[];
+  placeholder?: string;
+  onChange: (value: string, source: ModelChoiceChangeSource) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [menuStyle, setMenuStyle] = useState<CSSProperties | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const normalizedChoices = useMemo(
+    () => uniqueStrings(choices.map((item) => item.trim()).filter(Boolean)).sort((a, b) => a.localeCompare(b)),
+    [choices],
+  );
+  const filteredChoices = useMemo(() => {
+    const keyword = value.trim().toLowerCase();
+    const source = keyword
+      ? normalizedChoices.filter((model) => model.toLowerCase().includes(keyword))
+      : normalizedChoices;
+    return source.slice(0, 80);
+  }, [normalizedChoices, value]);
+
+  const updateMenuPosition = () => {
+    const input = inputRef.current;
+    if (!input) return;
+    const rect = input.getBoundingClientRect();
+    const gap = 4;
+    const viewportPadding = 8;
+    const spaceBelow = window.innerHeight - rect.bottom - viewportPadding;
+    const spaceAbove = rect.top - viewportPadding;
+    const openAbove = spaceBelow < 140 && spaceAbove > spaceBelow;
+    const maxHeight = Math.max(120, Math.min(220, openAbove ? spaceAbove - gap : spaceBelow - gap));
+    setMenuStyle({
+      left: rect.left,
+      maxHeight,
+      top: openAbove ? rect.top - gap - maxHeight : rect.bottom + gap,
+      width: rect.width,
+    });
+  };
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    updateMenuPosition();
+  }, [open, filteredChoices.length, normalizedChoices.length]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleLayoutChange = () => updateMenuPosition();
+    window.addEventListener("resize", handleLayoutChange);
+    window.addEventListener("scroll", handleLayoutChange, true);
+    return () => {
+      window.removeEventListener("resize", handleLayoutChange);
+      window.removeEventListener("scroll", handleLayoutChange, true);
+    };
+  }, [open]);
+
+  const containsModelChoiceTarget = (target: EventTarget | null) =>
+    target instanceof Node && (!!rootRef.current?.contains(target) || !!menuRef.current?.contains(target));
+
+  const focusOption = (direction: 1 | -1, current?: HTMLButtonElement | null) => {
+    const options = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>(".relay-model-choice-option") ?? []);
+    if (!options.length) return;
+    const currentIndex = current ? options.indexOf(current) : -1;
+    const nextIndex = currentIndex < 0 ? 0 : (currentIndex + direction + options.length) % options.length;
+    options[nextIndex]?.focus();
+  };
+
+  const menu = open ? (
+    <div
+      className="relay-model-choice-menu"
+      onBlur={(event) => {
+        if (containsModelChoiceTarget(event.relatedTarget)) return;
+        setOpen(false);
+      }}
+      ref={menuRef}
+      role="listbox"
+      style={menuStyle ?? undefined}
+    >
+      {normalizedChoices.length ? (
+        filteredChoices.length ? (
+          filteredChoices.map((model) => (
+            <button
+              aria-selected={model === value}
+              className="relay-model-choice-option"
+              key={model}
+              onClick={() => {
+                onChange(model, "select");
+                setOpen(false);
+                inputRef.current?.focus();
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  setOpen(false);
+                  inputRef.current?.focus();
+                }
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  focusOption(1, event.currentTarget);
+                }
+                if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  focusOption(-1, event.currentTarget);
+                }
+              }}
+              onMouseDown={(event) => event.preventDefault()}
+              role="option"
+              type="button"
+            >
+              {model}
+            </button>
+          ))
+        ) : (
+          <div className="relay-model-choice-empty">无匹配模型</div>
+        )
+      ) : (
+        <div className="relay-model-choice-empty">先点击获取模型列表</div>
+      )}
+    </div>
+  ) : null;
+
+  return (
+    <div
+      className="relay-model-choice"
+      onBlur={(event) => {
+        if (containsModelChoiceTarget(event.relatedTarget)) return;
+        setOpen(false);
+      }}
+      ref={rootRef}
+    >
+      <Input
+        aria-autocomplete="list"
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        onChange={(event) => {
+          onChange(event.currentTarget.value, "input");
+          setOpen(true);
+        }}
+        onClick={() => setOpen(true)}
+        onFocus={() => setOpen(true)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            setOpen(false);
+            return;
+          }
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            setOpen(true);
+            requestAnimationFrame(() => focusOption(1));
+          }
+        }}
+        placeholder={placeholder}
+        ref={inputRef}
+        value={value}
+      />
+      {menu ? createPortal(menu, document.body) : null}
     </div>
   );
 }
@@ -3631,7 +3813,26 @@ function Toolbar({ children }: { children: React.ReactNode }) {
   return <div className="toolbar">{children}</div>;
 }
 
-function Field({ label, children, className = "" }: { label: string; children: React.ReactNode; className?: string }) {
+function Field({
+  label,
+  children,
+  className = "",
+  as = "label",
+}: {
+  label: string;
+  children: React.ReactNode;
+  className?: string;
+  as?: "label" | "div";
+}) {
+  if (as === "div") {
+    return (
+      <div className={`field ${className}`}>
+        <span>{label}</span>
+        {children}
+      </div>
+    );
+  }
+
   return (
     <Label className={`field ${className}`}>
       <span>{label}</span>
@@ -4415,6 +4616,7 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
             modelList: "",
             responsesModelList: "",
             chatCompletionsModelList: "",
+            anthropicModelList: "",
             userAgent: "",
           },
         ];
@@ -4457,6 +4659,7 @@ function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = 
   const legacyModelList = profile.modelList || "";
   const responsesModelList = profile.responsesModelList || "";
   const chatCompletionsModelList = profile.chatCompletionsModelList || "";
+  const anthropicModelList = profile.anthropicModelList || "";
   const modelMappings = normalizeRelayModelMappings(profile.modelMappings);
   let normalized: RelayProfile = {
     ...profile,
@@ -4464,7 +4667,7 @@ function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = 
     baseUrl: profile.baseUrl || defaultSettings.relayBaseUrl,
     upstreamBaseUrl: profile.upstreamBaseUrl || profile.baseUrl || "",
     apiKey: profile.apiKey || "",
-    protocol: profile.protocol === "chatCompletions" ? "chatCompletions" : "responses",
+    protocol: normalizeRelayProtocol(profile.protocol),
     localProxyEnabled,
     relayMode,
     officialMixApiKey,
@@ -4482,6 +4685,7 @@ function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = 
     modelList: legacyModelList,
     responsesModelList,
     chatCompletionsModelList,
+    anthropicModelList,
     userAgent: profile.userAgent || "",
   };
   return relayProfileUsesLiveFiles(normalized) ? deriveRelayProfileFromFiles(normalized) : normalized;
@@ -4499,9 +4703,14 @@ function normalizeRelayModelMappings(mappings: RelayModelMapping[] | undefined):
   if (!Array.isArray(mappings)) return [];
   return mappings.map((item) => ({
     requestModel: item.requestModel || "",
-    protocol: item.protocol === "chatCompletions" ? "chatCompletions" : "responses",
+    protocol: normalizeRelayProtocol(item.protocol),
     contextWindow: (item.contextWindow || "").replace(/[^\d]/g, ""),
   }));
+}
+
+function normalizeRelayProtocol(protocol: RelayProtocol | undefined): RelayProtocol {
+  if (protocol === "chatCompletions" || protocol === "anthropic") return protocol;
+  return "responses";
 }
 
 function uniqueStrings(values: string[]): string[] {
@@ -4994,6 +5203,7 @@ function createRelayProfile(settings: BackendSettings): RelayProfile {
     modelList: "",
     responsesModelList: "",
     chatCompletionsModelList: "",
+    anthropicModelList: "",
     userAgent: "",
   };
   return withGeneratedRelayFiles(next);

@@ -24,6 +24,7 @@ export type RelayProfile = {
   modelList: string;
   responsesModelList: string;
   chatCompletionsModelList: string;
+  anthropicModelList: string;
   userAgent: string;
 };
 
@@ -65,6 +66,7 @@ export function createPresetPatch(preset: ProviderPreset): PresetPatch {
     modelMappings,
     responsesModelList: preset.protocol === "responses" ? modelList : "",
     chatCompletionsModelList: preset.protocol === "chatCompletions" ? modelList : "",
+    anthropicModelList: preset.protocol === "anthropic" ? modelList : "",
     relayMode: preset.category === "official" ? "official" : "pureApi",
     officialMixApiKey: false,
   };

@@ -1,10 +1,11 @@
 use codex_elves_core::protocol_proxy::{
-    ChatSseToResponsesConverter, chat_completion_to_response,
-    chat_completion_to_response_with_request, chat_completions_url, chat_sse_to_responses_sse,
-    chat_sse_to_responses_sse_with_request, is_chat_completions_proxy_path, is_models_proxy_path,
-    is_responses_proxy_path, models_url, open_chat_completions_proxy_request,
-    open_models_proxy_request, open_responses_proxy_request, responses_error_from_upstream,
-    responses_to_chat_completions,
+    ChatSseToResponsesConverter, anthropic_message_to_response_with_request,
+    anthropic_messages_url, anthropic_sse_to_responses_sse_with_request,
+    chat_completion_to_response, chat_completion_to_response_with_request, chat_completions_url,
+    chat_sse_to_responses_sse, chat_sse_to_responses_sse_with_request,
+    is_chat_completions_proxy_path, is_models_proxy_path, is_responses_proxy_path, models_url,
+    open_chat_completions_proxy_request, open_models_proxy_request, open_responses_proxy_request,
+    responses_error_from_upstream, responses_to_anthropic_messages, responses_to_chat_completions,
 };
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -100,6 +101,152 @@ fn responses_request_converts_to_chat_completions() {
             ]
         })
     );
+}
+
+#[test]
+fn responses_request_converts_to_anthropic_messages() {
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-sonnet-4",
+        "instructions": "You are helpful.",
+        "input": [
+            {
+                "type": "message",
+                "role": "developer",
+                "content": [
+                    { "type": "input_text", "text": "Prefer concise answers." }
+                ]
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "hello" },
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,aGVsbG8="
+                    }
+                ]
+            }
+        ],
+        "max_output_tokens": 512,
+        "temperature": 0.2,
+        "stream": true,
+        "tools": [
+            {
+                "type": "function",
+                "name": "lookup",
+                "description": "Lookup data",
+                "parameters": { "type": "object" }
+            }
+        ],
+        "tool_choice": { "type": "function", "name": "lookup" }
+    }))
+    .unwrap();
+
+    assert_eq!(converted["model"], "claude-sonnet-4");
+    assert_eq!(converted["max_tokens"], 512);
+    assert_eq!(
+        converted["system"],
+        "You are helpful.\n\nPrefer concise answers."
+    );
+    assert_eq!(converted["messages"][0]["role"], "user");
+    assert_eq!(converted["messages"][0]["content"][0]["text"], "hello");
+    assert_eq!(
+        converted["messages"][0]["content"][1],
+        json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "aGVsbG8="
+            }
+        })
+    );
+    assert_eq!(converted["tools"][0]["name"], "lookup");
+    assert_eq!(
+        converted["tools"][0]["input_schema"],
+        json!({ "type": "object", "properties": {}, "required": [] })
+    );
+    assert_eq!(
+        converted["tool_choice"],
+        json!({ "type": "tool", "name": "lookup" })
+    );
+    assert_eq!(converted["thinking"], json!({ "type": "adaptive" }));
+    assert_eq!(converted["output_config"], json!({ "effort": "high" }));
+}
+
+#[test]
+fn anthropic_reasoning_effort_is_clamped_by_model_capability() {
+    let sonnet = responses_to_anthropic_messages(json!({
+        "model": "claude-sonnet-4-6",
+        "reasoning": { "effort": "max" },
+        "input": "hi"
+    }))
+    .unwrap();
+    assert_eq!(sonnet["thinking"], json!({ "type": "adaptive" }));
+    assert_eq!(sonnet["output_config"], json!({ "effort": "high" }));
+
+    let opus = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-6",
+        "reasoning": { "effort": "max" },
+        "input": "hi"
+    }))
+    .unwrap();
+    assert_eq!(opus["thinking"], json!({ "type": "adaptive" }));
+    assert_eq!(opus["output_config"], json!({ "effort": "max" }));
+}
+
+#[test]
+fn anthropic_message_response_converts_to_responses() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4",
+            "content": [
+                { "type": "thinking", "thinking": "plan" },
+                { "type": "text", "text": "answer" },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "lookup",
+                    "input": { "query": "codex" }
+                }
+            ],
+            "stop_reason": "tool_use",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 2
+            }
+        }),
+        &json!({
+            "model": "claude-sonnet-4",
+            "input": "hello",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "lookup",
+                    "parameters": { "type": "object" }
+                }
+            ]
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(converted["id"], "resp_msg_test");
+    assert_eq!(converted["status"], "completed");
+    assert_eq!(converted["output"][0]["type"], "reasoning");
+    assert_eq!(converted["output"][0]["reasoning_content"], "plan");
+    assert_eq!(converted["output"][1]["type"], "message");
+    assert_eq!(converted["output"][1]["content"][0]["text"], "answer");
+    assert_eq!(converted["output"][2]["type"], "function_call");
+    assert_eq!(converted["output"][2]["name"], "lookup");
+    assert_eq!(converted["output"][2]["arguments"], r#"{"query":"codex"}"#);
+    assert_eq!(converted["usage"]["input_tokens"], 10);
+    assert_eq!(converted["usage"]["output_tokens"], 5);
+    assert_eq!(converted["usage"]["cache_read_input_tokens"], 2);
 }
 
 #[test]
@@ -211,7 +358,7 @@ fn responses_request_applies_ccswitch_reasoning_dialects() {
         "input": "hi"
     }))
     .unwrap();
-    assert_eq!(deepseek["reasoning_effort"], "max");
+    assert_eq!(deepseek["reasoning_effort"], "high");
 
     let openrouter = responses_to_chat_completions(json!({
         "model": "openrouter/deepseek/deepseek-r1",
@@ -219,7 +366,7 @@ fn responses_request_applies_ccswitch_reasoning_dialects() {
         "input": "hi"
     }))
     .unwrap();
-    assert_eq!(openrouter["reasoning"]["effort"], "xhigh");
+    assert_eq!(openrouter["reasoning"]["effort"], "high");
     assert!(openrouter.get("reasoning_effort").is_none());
 
     let openrouter_off = responses_to_chat_completions(json!({
@@ -1277,6 +1424,78 @@ data: [DONE]
 }
 
 #[test]
+fn anthropic_sse_converts_to_responses_sse_events() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_stream","type":"message","role":"assistant","model":"claude-sonnet-4","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Need context."}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"hello"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: content_block_start
+data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"lookup","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"codex\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":2}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-sonnet-4",
+            "tools": [{ "type": "function", "name": "lookup", "parameters": { "type": "object" } }]
+        }),
+    );
+
+    let events = parse_response_sse_events(&converted);
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event == "response.reasoning_summary_text.delta")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event == "response.output_text.delta")
+    );
+    let arguments_done = events
+        .iter()
+        .find(|event| event.event == "response.function_call_arguments.done")
+        .unwrap();
+    assert_eq!(arguments_done.data["name"], "lookup");
+    assert_eq!(arguments_done.data["arguments"], r#"{"query":"codex"}"#);
+    let completed = events
+        .iter()
+        .find(|event| event.event == "response.completed")
+        .unwrap();
+    assert_eq!(completed.data["response"]["usage"]["input_tokens"], 7);
+    assert_eq!(completed.data["response"]["usage"]["output_tokens"], 9);
+    assert!(converted.contains("data: [DONE]"));
+}
+
+#[test]
 fn chat_sse_maps_refusal_delta_to_responses_refusal_events() {
     let converted = chat_sse_to_responses_sse(
         r#"data: {"id":"chatcmpl_refusal","created":1710000000,"model":"gpt-5-mini","choices":[{"delta":{"refusal":"No"},"finish_reason":null}]}
@@ -1390,6 +1609,34 @@ fn chat_completions_url_normalizes_common_base_urls() {
     assert_eq!(
         chat_completions_url("https://api.example.test/openai#"),
         "https://api.example.test/openai/chat/completions"
+    );
+}
+
+#[test]
+fn anthropic_messages_url_normalizes_common_base_urls() {
+    assert_eq!(
+        anthropic_messages_url("https://api.example.test"),
+        "https://api.example.test/v1/messages"
+    );
+    assert_eq!(
+        anthropic_messages_url("https://api.example.test/v1"),
+        "https://api.example.test/v1/messages"
+    );
+    assert_eq!(
+        anthropic_messages_url("https://api.example.test/openai"),
+        "https://api.example.test/openai/messages"
+    );
+    assert_eq!(
+        anthropic_messages_url("https://api.example.test/v1/messages"),
+        "https://api.example.test/v1/messages"
+    );
+    assert_eq!(
+        anthropic_messages_url("https://api.example.test/v2"),
+        "https://api.example.test/v2/messages"
+    );
+    assert_eq!(
+        anthropic_messages_url("https://api.example.test/openai#"),
+        "https://api.example.test/openai/messages"
     );
 }
 
@@ -1542,6 +1789,37 @@ async fn responses_proxy_directs_chat_models_to_chat_completions_upstream() {
 }
 
 #[tokio::test]
+async fn responses_proxy_directs_anthropic_models_to_anthropic_upstream() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let server = spawn_chat_server();
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+
+    let upstream = open_responses_proxy_request(
+        r#"{"model":"claude-sonnet-4","input":"hello","stream":false}"#,
+        Some("Original-Codex-UA/1.0"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(upstream.status_code, 200);
+    assert_eq!(
+        upstream.response_protocol,
+        codex_elves_core::protocol_proxy::UpstreamResponseProtocol::Anthropic
+    );
+
+    let request = server.finish();
+    assert_eq!(request.path, "/v1/messages");
+    assert_eq!(request.x_api_key, "sk-test");
+    assert_eq!(request.anthropic_version, "2023-06-01");
+    let body: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["model"], "claude-sonnet-4");
+    assert_eq!(body["messages"][0]["role"], "user");
+    assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
+    assert_eq!(body["output_config"], json!({ "effort": "high" }));
+}
+
+#[tokio::test]
 async fn responses_proxy_rejects_models_missing_from_protocol_lists() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -1559,7 +1837,7 @@ async fn responses_proxy_rejects_models_missing_from_protocol_lists() {
     assert!(
         error
             .to_string()
-            .contains("未配置到 Responses API 或 Chat Completions 模型列表")
+            .contains("未配置到 Responses API、Chat Completions 或 Anthropic 模型列表")
     );
 }
 
@@ -1600,6 +1878,11 @@ fn write_mixed_relay_settings(settings_dir: &Path, base_url: &str) {
                 {
                     "requestModel": "gpt-chat",
                     "protocol": "chatCompletions",
+                    "contextWindow": "200000"
+                },
+                {
+                    "requestModel": "claude-sonnet-4",
+                    "protocol": "anthropic",
                     "contextWindow": "200000"
                 }
             ]
@@ -1678,6 +1961,9 @@ impl ChatServer {
 struct ChatRequest {
     path: String,
     user_agent: String,
+    x_api_key: String,
+    anthropic_version: String,
+    body: String,
 }
 
 fn spawn_chat_server() -> ChatServer {
@@ -1700,41 +1986,72 @@ fn spawn_chat_server() -> ChatServer {
                 Err(error) => panic!("failed to accept test request: {error}"),
             }
         };
+        let mut request_bytes = Vec::new();
         let mut buffer = [0u8; 4096];
-        let bytes = loop {
+        loop {
             match stream.read(&mut buffer) {
                 Ok(0) => std::thread::sleep(std::time::Duration::from_millis(10)),
-                Ok(bytes) => break bytes,
+                Ok(bytes) => {
+                    request_bytes.extend_from_slice(&buffer[..bytes]);
+                    let request = String::from_utf8_lossy(&request_bytes);
+                    if let Some(header_end) = request.find("\r\n\r\n") {
+                        let content_length = request
+                            .lines()
+                            .find_map(|line| {
+                                line.split_once(':').and_then(|(name, value)| {
+                                    name.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse::<usize>().ok())
+                                        .flatten()
+                                })
+                            })
+                            .unwrap_or(0);
+                        if request_bytes.len() >= header_end + 4 + content_length {
+                            break;
+                        }
+                    }
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
                 Err(error) => panic!("failed to read test request: {error}"),
             }
-        };
-        let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+        }
+        let request = String::from_utf8_lossy(&request_bytes).to_string();
         let path = request
             .lines()
             .next()
             .and_then(|line| line.split_whitespace().nth(1))
             .unwrap_or_default()
             .to_string();
-        let user_agent = request
-            .lines()
-            .find_map(|line| {
+        let header_value = |header_name: &str| {
+            request.lines().find_map(|line| {
                 line.split_once(':').and_then(|(name, value)| {
-                    name.eq_ignore_ascii_case("user-agent")
+                    name.eq_ignore_ascii_case(header_name)
                         .then(|| value.trim().to_string())
                 })
             })
+        };
+        let user_agent = header_value("user-agent").unwrap_or_default();
+        let x_api_key = header_value("x-api-key").unwrap_or_default();
+        let anthropic_version = header_value("anthropic-version").unwrap_or_default();
+        let request_body = request
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body.to_string())
             .unwrap_or_default();
-        let body = r#"{"id":"chatcmpl-test","object":"chat.completion","choices":[]}"#;
+        let response_body = r#"{"id":"chatcmpl-test","object":"chat.completion","choices":[]}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
+            response_body.len(),
+            response_body
         );
         stream.write_all(response.as_bytes()).unwrap();
-        ChatRequest { path, user_agent }
+        ChatRequest {
+            path,
+            user_agent,
+            x_api_key,
+            anthropic_version,
+            body: request_body,
+        }
     });
     ChatServer { base_url, handle }
 }

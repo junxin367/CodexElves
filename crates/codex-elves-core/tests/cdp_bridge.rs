@@ -498,6 +498,8 @@ fn injection_script_exposes_fast_service_tier_control() {
     assert!(script.contains("toggleCodexServiceTierFromBadge"));
     assert!(script.contains("wireCodexServiceTierBadge"));
     assert!(script.contains("codexServiceTierBadgePlacement"));
+    assert!(script.contains("codexServiceTierNativeServiceTierSlot"));
+    assert!(script.contains("[class*=\"_footer_\"]"));
     assert!(script.contains("codexServiceTierBadgeFooterGroup"));
     assert!(script.contains("codexServiceTierFindComposerEl"));
     assert!(script.contains("codexServiceTierVisibleComposerFooters"));

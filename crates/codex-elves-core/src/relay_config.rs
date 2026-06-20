@@ -524,12 +524,10 @@ pub async fn test_relay_profile(
     let endpoint = match protocol {
         RelayProtocol::Responses => format!("{base_url}/responses"),
         RelayProtocol::ChatCompletions => format!("{base_url}/chat/completions"),
+        RelayProtocol::Anthropic => format!("{base_url}/messages"),
     };
     let payload = relay_profile_test_payload(protocol, test_model);
-    let response = client
-        .post(&endpoint)
-        .bearer_auth(api_key)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
+    let response = relay_profile_test_request(client.post(&endpoint), protocol, api_key)
         .json(&payload)
         .send()
         .await?;
@@ -543,11 +541,9 @@ pub async fn test_relay_profile(
         let v1_endpoint = match protocol {
             RelayProtocol::Responses => format!("{v1_url}/responses"),
             RelayProtocol::ChatCompletions => format!("{v1_url}/chat/completions"),
+            RelayProtocol::Anthropic => format!("{v1_url}/messages"),
         };
-        let v1_response = client
-            .post(&v1_endpoint)
-            .bearer_auth(api_key)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
+        let v1_response = relay_profile_test_request(client.post(&v1_endpoint), protocol, api_key)
             .json(&payload)
             .send()
             .await?;
@@ -587,13 +583,34 @@ fn relay_profile_test_payload(protocol: RelayProtocol, model: &str) -> Value {
             ],
             "max_tokens": 16
         }),
+        RelayProtocol::Anthropic => serde_json::json!({
+            "model": model,
+            "messages": [
+                { "role": "user", "content": "hi" }
+            ],
+            "max_tokens": 16
+        }),
+    }
+}
+
+fn relay_profile_test_request(
+    request: reqwest::RequestBuilder,
+    protocol: RelayProtocol,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
+    let request = request.header(reqwest::header::CONTENT_TYPE, "application/json");
+    match protocol {
+        RelayProtocol::Anthropic => request
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01"),
+        RelayProtocol::Responses | RelayProtocol::ChatCompletions => request.bearer_auth(api_key),
     }
 }
 
 fn codex_base_url_for_protocol(base_url: &str, protocol: RelayProtocol, proxy_port: u16) -> String {
     match protocol {
         RelayProtocol::Responses => base_url.to_string(),
-        RelayProtocol::ChatCompletions => {
+        RelayProtocol::ChatCompletions | RelayProtocol::Anthropic => {
             crate::protocol_proxy::local_responses_proxy_base_url(proxy_port)
         }
     }
@@ -1409,17 +1426,30 @@ fn apply_generated_model_catalog_to_config(
     Ok(config_with_catalog)
 }
 
+#[derive(Debug, Clone)]
+struct CatalogModelRow {
+    model: String,
+    context_window: String,
+    protocol: RelayProtocol,
+}
+
 fn generated_model_catalog_json(
     profile: &RelayProfile,
     config_text: &str,
-    rows: Vec<(String, String)>,
+    rows: Vec<CatalogModelRow>,
 ) -> anyhow::Result<Value> {
     let reasoning_effort = catalog_reasoning_effort(config_text);
     let auto_compact_limit =
         parse_optional_positive_u64(&profile.auto_compact_limit, "压缩上下文大小")?;
     let mut models = Vec::new();
 
-    for (model, context_window) in rows {
+    for row in rows {
+        let model = row.model;
+        let protocol = upstream_response_protocol_for_relay(row.protocol);
+        let supported_reasoning_levels =
+            crate::protocol_proxy::supported_reasoning_efforts_for_model(&model, protocol);
+        let default_reasoning_level =
+            catalog_default_reasoning_effort(&reasoning_effort, &supported_reasoning_levels);
         let mut entry = Map::new();
         entry.insert("slug".to_string(), json!(model.clone()));
         entry.insert("display_name".to_string(), json!(model));
@@ -1427,20 +1457,22 @@ fn generated_model_catalog_json(
         entry.insert("supported_in_api".to_string(), json!(true));
         entry.insert(
             "default_reasoning_level".to_string(),
-            json!(reasoning_effort),
+            json!(default_reasoning_level),
         );
         entry.insert(
             "supported_reasoning_levels".to_string(),
-            json!([
-                { "effort": "minimal", "description": "Minimal reasoning" },
-                { "effort": "low", "description": "Low reasoning" },
-                { "effort": "medium", "description": "Medium reasoning" },
-                { "effort": "high", "description": "High reasoning" },
-                { "effort": "xhigh", "description": "Extra high reasoning" }
-            ]),
+            json!(
+                supported_reasoning_levels
+                    .iter()
+                    .map(|effort| json!({
+                        "effort": effort,
+                        "description": reasoning_effort_description(effort)
+                    }))
+                    .collect::<Vec<_>>()
+            ),
         );
 
-        if let Some(value) = parse_optional_positive_u64(&context_window, "上下文大小")? {
+        if let Some(value) = parse_optional_positive_u64(&row.context_window, "上下文大小")? {
             entry.insert("context_window".to_string(), json!(value));
             entry.insert("max_context_window".to_string(), json!(value));
         }
@@ -1454,7 +1486,7 @@ fn generated_model_catalog_json(
     Ok(json!({ "models": models }))
 }
 
-fn relay_profile_catalog_rows(profile: &RelayProfile) -> Vec<(String, String)> {
+fn relay_profile_catalog_rows(profile: &RelayProfile) -> Vec<CatalogModelRow> {
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
     if !profile.model_mappings.is_empty() {
@@ -1463,19 +1495,83 @@ fn relay_profile_catalog_rows(profile: &RelayProfile) -> Vec<(String, String)> {
             if model.is_empty() || !seen.insert(model.to_string()) {
                 continue;
             }
-            rows.push((model.to_string(), mapping.context_window.trim().to_string()));
+            rows.push(CatalogModelRow {
+                model: model.to_string(),
+                context_window: mapping.context_window.trim().to_string(),
+                protocol: mapping.protocol,
+            });
         }
         return rows;
     }
 
-    for model in crate::model_catalog::relay_profile_model_ids_for_proxy(profile) {
-        let model = model.trim().to_string();
-        if model.is_empty() || !seen.insert(model.clone()) {
-            continue;
+    for (protocol, models) in [
+        (
+            RelayProtocol::Responses,
+            crate::model_catalog::relay_profile_responses_model_ids(profile),
+        ),
+        (
+            RelayProtocol::ChatCompletions,
+            crate::model_catalog::relay_profile_chat_completions_model_ids(profile),
+        ),
+        (
+            RelayProtocol::Anthropic,
+            crate::model_catalog::relay_profile_anthropic_model_ids(profile),
+        ),
+    ] {
+        for model in models {
+            let model = model.trim().to_string();
+            if model.is_empty() || !seen.insert(model.clone()) {
+                continue;
+            }
+            rows.push(CatalogModelRow {
+                model,
+                context_window: String::new(),
+                protocol,
+            });
         }
-        rows.push((model, String::new()));
     }
     rows
+}
+
+fn upstream_response_protocol_for_relay(
+    protocol: RelayProtocol,
+) -> crate::protocol_proxy::UpstreamResponseProtocol {
+    match protocol {
+        RelayProtocol::Responses => crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+        RelayProtocol::ChatCompletions => {
+            crate::protocol_proxy::UpstreamResponseProtocol::ChatCompletions
+        }
+        RelayProtocol::Anthropic => crate::protocol_proxy::UpstreamResponseProtocol::Anthropic,
+    }
+}
+
+fn catalog_default_reasoning_effort(configured: &str, supported: &[&'static str]) -> &'static str {
+    let configured = configured.trim();
+    if supported.iter().any(|effort| *effort == configured) {
+        return supported
+            .iter()
+            .copied()
+            .find(|effort| *effort == configured)
+            .unwrap_or("medium");
+    }
+    for fallback in ["high", "medium", "low", "minimal"] {
+        if supported.iter().any(|effort| *effort == fallback) {
+            return fallback;
+        }
+    }
+    supported.first().copied().unwrap_or("medium")
+}
+
+fn reasoning_effort_description(effort: &str) -> &'static str {
+    match effort {
+        "minimal" => "Minimal reasoning",
+        "low" => "Low reasoning",
+        "medium" => "Medium reasoning",
+        "high" => "High reasoning",
+        "xhigh" => "Extra high reasoning",
+        "max" => "Max reasoning",
+        _ => "Reasoning",
+    }
 }
 
 fn catalog_reasoning_effort(config_text: &str) -> String {
@@ -1488,6 +1584,7 @@ fn catalog_reasoning_effort(config_text: &str) -> String {
         "medium" => "medium".to_string(),
         "high" => "high".to_string(),
         "xhigh" => "xhigh".to_string(),
+        "max" => "max".to_string(),
         _ => "medium".to_string(),
     }
 }

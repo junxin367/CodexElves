@@ -102,6 +102,8 @@ pub struct RelayProfile {
     pub responses_model_list: String,
     #[serde(rename = "chatCompletionsModelList", default)]
     pub chat_completions_model_list: String,
+    #[serde(rename = "anthropicModelList", default)]
+    pub anthropic_model_list: String,
     #[serde(
         rename = "userAgent",
         default,
@@ -136,6 +138,7 @@ impl Default for RelayProfile {
             model_list: String::new(),
             responses_model_list: String::new(),
             chat_completions_model_list: String::new(),
+            anthropic_model_list: String::new(),
             user_agent: String::new(),
         }
     }
@@ -188,6 +191,7 @@ pub enum RelayProtocol {
     #[default]
     Responses,
     ChatCompletions,
+    Anthropic,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -374,6 +378,7 @@ impl BackendSettings {
                 model_list: String::new(),
                 responses_model_list: String::new(),
                 chat_completions_model_list: String::new(),
+                anthropic_model_list: String::new(),
                 user_agent: String::new(),
             };
         }
@@ -422,6 +427,7 @@ impl BackendSettings {
             model_list: String::new(),
             responses_model_list: String::new(),
             chat_completions_model_list: String::new(),
+            anthropic_model_list: String::new(),
             user_agent: String::new(),
         }
     }
@@ -1070,9 +1076,11 @@ mod tests {
                 "modelInsertMode":"patch",
                 "modelMappings":[
                     {"requestModel":"qwen3-coder","protocol":"responses","contextWindow":"200000"},
-                    {"requestModel":"deepseek-coder","protocol":"chatCompletions","contextWindow":"128000"}
+                    {"requestModel":"deepseek-coder","protocol":"chatCompletions","contextWindow":"128000"},
+                    {"requestModel":"claude-sonnet-4","protocol":"anthropic","contextWindow":"200000"}
                 ],
-                "modelList":"qwen3-coder\ndeepseek-coder"
+                "modelList":"qwen3-coder\ndeepseek-coder",
+                "anthropicModelList":"claude-sonnet-4"
             }"#,
         )
         .unwrap();
@@ -1085,7 +1093,7 @@ mod tests {
         assert_eq!(profile.context_window, "200000");
         assert_eq!(profile.auto_compact_limit, "160000");
         assert_eq!(profile.model_insert_mode, RelayModelInsertMode::Patch);
-        assert_eq!(profile.model_mappings.len(), 2);
+        assert_eq!(profile.model_mappings.len(), 3);
         assert_eq!(profile.model_mappings[0].request_model, "qwen3-coder");
         assert_eq!(profile.model_mappings[0].protocol, RelayProtocol::Responses);
         assert_eq!(profile.model_mappings[0].context_window, "200000");
@@ -1093,24 +1101,37 @@ mod tests {
             profile.model_mappings[1].protocol,
             RelayProtocol::ChatCompletions
         );
+        assert_eq!(profile.model_mappings[2].protocol, RelayProtocol::Anthropic);
         assert_eq!(profile.model_list, "qwen3-coder\ndeepseek-coder");
+        assert_eq!(profile.anthropic_model_list, "claude-sonnet-4");
     }
 
     #[test]
     fn relay_profile_protocol_for_model_uses_model_mapping() {
         let profile = RelayProfile {
             protocol: RelayProtocol::Responses,
-            model_mappings: vec![RelayModelMapping {
-                request_model: "gpt-chat".to_string(),
-                protocol: RelayProtocol::ChatCompletions,
-                context_window: "200000".to_string(),
-            }],
+            model_mappings: vec![
+                RelayModelMapping {
+                    request_model: "gpt-chat".to_string(),
+                    protocol: RelayProtocol::ChatCompletions,
+                    context_window: "200000".to_string(),
+                },
+                RelayModelMapping {
+                    request_model: "claude-sonnet-4".to_string(),
+                    protocol: RelayProtocol::Anthropic,
+                    context_window: "200000".to_string(),
+                },
+            ],
             ..RelayProfile::default()
         };
 
         assert_eq!(
             profile.protocol_for_model("gpt-chat"),
             RelayProtocol::ChatCompletions
+        );
+        assert_eq!(
+            profile.protocol_for_model("claude-sonnet-4"),
+            RelayProtocol::Anthropic
         );
         assert_eq!(
             profile.protocol_for_model("gpt-other"),

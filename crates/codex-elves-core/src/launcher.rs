@@ -978,7 +978,7 @@ async fn handle_models_proxy_connection(
     } else {
         upstream.content_type.clone()
     };
-    let body = upstream.response.bytes().await?.to_vec();
+    let body = upstream.into_body_bytes().await?;
     write_http_response(stream, &status, &content_type, &body).await?;
     log_helper_response(
         if is_success {
@@ -993,6 +993,34 @@ async fn handle_models_proxy_connection(
     );
     stream.shutdown().await?;
     Ok(())
+}
+
+enum EitherResponsesStreamConverter<'a> {
+    Chat(&'a mut crate::protocol_proxy::ChatSseToResponsesConverter),
+    Anthropic(&'a mut crate::protocol_proxy::AnthropicSseToResponsesConverter),
+}
+
+impl EitherResponsesStreamConverter<'_> {
+    fn push_bytes(&mut self, bytes: &[u8]) -> Vec<u8> {
+        match self {
+            Self::Chat(converter) => converter.push_bytes(bytes),
+            Self::Anthropic(converter) => converter.push_bytes(bytes),
+        }
+    }
+
+    fn fail(&mut self, message: String, error_type: Option<String>) -> Vec<u8> {
+        match self {
+            Self::Chat(converter) => converter.fail(message, error_type),
+            Self::Anthropic(converter) => converter.fail(message, error_type),
+        }
+    }
+
+    fn finish(&mut self) -> Vec<u8> {
+        match self {
+            Self::Chat(converter) => converter.finish(),
+            Self::Anthropic(converter) => converter.finish(),
+        }
+    }
 }
 
 async fn handle_protocol_proxy_connection(
@@ -1036,9 +1064,10 @@ async fn handle_protocol_proxy_connection(
     if !upstream.is_success() {
         let status = upstream.status();
         let upstream_content_type = upstream.content_type.clone();
-        let upstream_body = upstream.response.bytes().await?.to_vec();
-        if upstream.response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses
-        {
+        let response_protocol = upstream.response_protocol;
+        let status_code = upstream.status_code;
+        let upstream_body = upstream.into_body_bytes().await?;
+        if response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses {
             let content_type = if upstream_content_type.is_empty() {
                 "application/json; charset=utf-8".to_string()
             } else {
@@ -1056,7 +1085,7 @@ async fn handle_protocol_proxy_connection(
             return Ok(());
         }
         let error = crate::protocol_proxy::responses_error_from_upstream(
-            upstream.status_code,
+            status_code,
             &upstream_content_type,
             &upstream_body,
         );
@@ -1083,7 +1112,7 @@ async fn handle_protocol_proxy_connection(
                 upstream.content_type.clone()
             };
             write_http_stream_headers(stream, &status, &content_type).await?;
-            let mut bytes_stream = upstream.response.bytes_stream();
+            let mut bytes_stream = upstream.into_response()?.bytes_stream();
             while let Some(chunk) = bytes_stream.next().await {
                 stream.write_all(&chunk?).await?;
             }
@@ -1099,11 +1128,26 @@ async fn handle_protocol_proxy_connection(
         }
 
         write_http_stream_headers(stream, "200 OK", "text/event-stream; charset=utf-8").await?;
-        let mut converter = request_json
-            .as_ref()
-            .map(crate::protocol_proxy::ChatSseToResponsesConverter::with_request)
-            .unwrap_or_default();
-        let mut bytes_stream = upstream.response.bytes_stream();
+        let mut chat_converter;
+        let mut anthropic_converter;
+        let response_protocol = upstream.response_protocol;
+        let converter_kind = if response_protocol
+            == crate::protocol_proxy::UpstreamResponseProtocol::ChatCompletions
+        {
+            chat_converter = request_json
+                .as_ref()
+                .map(crate::protocol_proxy::ChatSseToResponsesConverter::with_request)
+                .unwrap_or_default();
+            EitherResponsesStreamConverter::Chat(&mut chat_converter)
+        } else {
+            anthropic_converter = request_json
+                .as_ref()
+                .map(crate::protocol_proxy::AnthropicSseToResponsesConverter::with_request)
+                .unwrap_or_default();
+            EitherResponsesStreamConverter::Anthropic(&mut anthropic_converter)
+        };
+        let mut converter = converter_kind;
+        let mut bytes_stream = upstream.into_response()?.bytes_stream();
         let mut stream_failed = false;
 
         while let Some(chunk) = bytes_stream.next().await {
@@ -1145,12 +1189,14 @@ async fn handle_protocol_proxy_connection(
         return Ok(());
     }
 
-    let upstream_body = upstream.response.bytes().await?;
-    if upstream.response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses {
-        let content_type = if upstream.content_type.is_empty() {
+    let response_protocol = upstream.response_protocol;
+    let upstream_content_type = upstream.content_type.clone();
+    let upstream_body = upstream.into_body_bytes().await?;
+    if response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses {
+        let content_type = if upstream_content_type.is_empty() {
             "application/json; charset=utf-8".to_string()
         } else {
-            upstream.content_type.clone()
+            upstream_content_type
         };
         write_http_response(stream, "200 OK", &content_type, &upstream_body).await?;
         log_helper_response(
@@ -1164,11 +1210,29 @@ async fn handle_protocol_proxy_connection(
         return Ok(());
     }
 
-    let chat_json: serde_json::Value = serde_json::from_slice(&upstream_body)?;
-    let response_json = if let Some(request_json) = request_json.as_ref() {
-        crate::protocol_proxy::chat_completion_to_response_with_request(chat_json, request_json)?
-    } else {
-        crate::protocol_proxy::chat_completion_to_response(chat_json)?
+    let upstream_json: serde_json::Value = serde_json::from_slice(&upstream_body)?;
+    let response_json = match response_protocol {
+        crate::protocol_proxy::UpstreamResponseProtocol::ChatCompletions => {
+            if let Some(request_json) = request_json.as_ref() {
+                crate::protocol_proxy::chat_completion_to_response_with_request(
+                    upstream_json,
+                    request_json,
+                )?
+            } else {
+                crate::protocol_proxy::chat_completion_to_response(upstream_json)?
+            }
+        }
+        crate::protocol_proxy::UpstreamResponseProtocol::Anthropic => {
+            if let Some(request_json) = request_json.as_ref() {
+                crate::protocol_proxy::anthropic_message_to_response_with_request(
+                    upstream_json,
+                    request_json,
+                )?
+            } else {
+                crate::protocol_proxy::anthropic_message_to_response(upstream_json)?
+            }
+        }
+        crate::protocol_proxy::UpstreamResponseProtocol::Responses => unreachable!(),
     };
     let body = serde_json::to_vec(&response_json)?;
     write_http_response(stream, "200 OK", "application/json; charset=utf-8", &body).await?;
@@ -1232,7 +1296,7 @@ async fn handle_chat_completions_proxy_connection(
 
     if upstream.is_stream && is_success {
         write_http_stream_headers(stream, &status, &content_type).await?;
-        let mut bytes_stream = upstream.response.bytes_stream();
+        let mut bytes_stream = upstream.into_response()?.bytes_stream();
         while let Some(chunk) = bytes_stream.next().await {
             stream.write_all(&chunk?).await?;
         }
@@ -1247,7 +1311,7 @@ async fn handle_chat_completions_proxy_connection(
         return Ok(());
     }
 
-    let body = upstream.response.bytes().await?.to_vec();
+    let body = upstream.into_body_bytes().await?;
     write_http_response(stream, &status, &content_type, &body).await?;
     log_helper_response(
         if is_success {

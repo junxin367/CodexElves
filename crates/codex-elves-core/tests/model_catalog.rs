@@ -143,7 +143,7 @@ async fn model_catalog_uses_active_relay_profile_protocol_model_lists_for_displa
 }
 
 #[tokio::test]
-async fn model_catalog_merges_responses_and_chat_model_lists_for_display() {
+async fn model_catalog_merges_protocol_model_lists_for_display() {
     let _lock = model_catalog_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let codex_home = temp.path().join("codex-home");
@@ -189,6 +189,11 @@ async fn model_catalog_merges_responses_and_chat_model_lists_for_display() {
                             protocol: RelayProtocol::ChatCompletions,
                             context_window: String::new(),
                         },
+                        RelayModelMapping {
+                            request_model: "claude-sonnet-4".to_string(),
+                            protocol: RelayProtocol::Anthropic,
+                            context_window: String::new(),
+                        },
                     ],
                     config_contents: "model = \"gpt-responses\"\n".to_string(),
                     ..RelayProfile::default()
@@ -213,7 +218,7 @@ async fn model_catalog_merges_responses_and_chat_model_lists_for_display() {
 
     assert_eq!(
         result["models"],
-        json!(["gpt-responses", "gpt-shared", "gpt-chat"])
+        json!(["gpt-responses", "gpt-shared", "gpt-chat", "claude-sonnet-4"])
     );
 }
 

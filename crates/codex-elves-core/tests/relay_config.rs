@@ -971,9 +971,18 @@ experimental_bearer_token = "sk-new"
     assert_eq!(catalog["models"][0]["slug"], "deepseek-coder");
     assert_eq!(catalog["models"][0]["context_window"], 128000);
     assert_eq!(catalog["models"][0]["auto_compact_token_limit"], 160000);
-    assert_eq!(catalog["models"][0]["default_reasoning_level"], "xhigh");
+    assert_eq!(catalog["models"][0]["default_reasoning_level"], "high");
+    assert_eq!(
+        catalog["models"][0]["supported_reasoning_levels"],
+        serde_json::json!([
+            { "effort": "low", "description": "Low reasoning" },
+            { "effort": "medium", "description": "Medium reasoning" },
+            { "effort": "high", "description": "High reasoning" }
+        ])
+    );
     assert_eq!(catalog["models"][1]["slug"], "qwen3-coder");
     assert_eq!(catalog["models"][1]["context_window"], 200000);
+    assert_eq!(catalog["models"][1]["default_reasoning_level"], "xhigh");
 }
 
 #[test]

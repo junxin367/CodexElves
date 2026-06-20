@@ -104,6 +104,7 @@ pub fn relay_profile_model_ids_for_proxy(profile: &RelayProfile) -> Vec<String> 
     let mut models = Vec::new();
     models.extend(relay_profile_responses_model_ids(profile));
     models.extend(relay_profile_chat_completions_model_ids(profile));
+    models.extend(relay_profile_anthropic_model_ids(profile));
     unique_strings(models)
 }
 
@@ -137,6 +138,21 @@ pub fn relay_profile_chat_completions_model_ids(profile: &RelayProfile) -> Vec<S
         );
     }
     unique_strings(split_model_ids(&profile.chat_completions_model_list))
+}
+
+pub fn relay_profile_anthropic_model_ids(profile: &RelayProfile) -> Vec<String> {
+    if !profile.model_mappings.is_empty() {
+        return unique_strings(
+            profile
+                .model_mappings
+                .iter()
+                .filter(|mapping| mapping.protocol == crate::settings::RelayProtocol::Anthropic)
+                .map(|mapping| mapping.request_model.trim().to_string())
+                .filter(|model| !model.is_empty())
+                .collect(),
+        );
+    }
+    unique_strings(split_model_ids(&profile.anthropic_model_list))
 }
 
 fn split_model_ids(value: &str) -> Vec<String> {

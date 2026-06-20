@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::{Value, json};
 
@@ -28,6 +29,9 @@ const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
     "user",
 ];
 const ERROR_BODY_PREVIEW_LIMIT: usize = 1024;
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+const ANTHROPIC_DEFAULT_REASONING_EFFORT: &str = "high";
+const REASONING_EFFORT_ORDER: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChatReasoningStyle {
@@ -299,6 +303,125 @@ fn chat_completion_to_response_with_context(
     Ok(response)
 }
 
+pub fn responses_to_anthropic_messages(body: Value) -> anyhow::Result<Value> {
+    let mut result = json!({});
+
+    if let Some(model) = body.get("model") {
+        result["model"] = model.clone();
+    }
+
+    result["max_tokens"] = body
+        .get("max_output_tokens")
+        .or_else(|| body.get("max_tokens"))
+        .or_else(|| body.get("max_completion_tokens"))
+        .cloned()
+        .unwrap_or_else(|| json!(32000));
+
+    let mut system_chunks = Vec::new();
+    if let Some(instructions) = body.get("instructions") {
+        let text = instruction_text(instructions);
+        if !text.is_empty() {
+            system_chunks.push(text);
+        }
+    }
+
+    let mut messages = Vec::new();
+    if let Some(input) = body.get("input") {
+        append_responses_input_to_anthropic(input, &mut messages, &mut system_chunks);
+    }
+    if messages.is_empty() {
+        messages.push(json!({ "role": "user", "content": [{ "type": "text", "text": "" }] }));
+    }
+    result["messages"] = json!(messages);
+
+    for key in ["temperature", "top_p", "stream"] {
+        if let Some(value) = body.get(key) {
+            result[key] = value.clone();
+        }
+    }
+    if let Some(stop) = body.get("stop") {
+        result["stop_sequences"] = match stop {
+            Value::String(_) => json!([stop.clone()]),
+            Value::Array(_) => stop.clone(),
+            _ => Value::Null,
+        };
+    }
+    if let Some(user_id) = body.pointer("/metadata/user_id").and_then(Value::as_str) {
+        if !user_id.is_empty() {
+            result["metadata"] = json!({ "user_id": user_id });
+        }
+    }
+
+    let tool_context = build_codex_tool_context(body.get("tools"));
+    let mut has_tools = false;
+    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+        let converted = responses_tools_to_anthropic_tools(tools, &tool_context);
+        if !converted.is_empty() {
+            has_tools = true;
+            result["tools"] = json!(converted);
+        }
+    }
+    if has_tools {
+        if let Some(tool_choice) = body
+            .get("tool_choice")
+            .and_then(|value| responses_tool_choice_to_anthropic(value, &tool_context))
+        {
+            result["tool_choice"] = tool_choice;
+        }
+    }
+
+    if !system_chunks.is_empty() {
+        result["system"] = json!(system_chunks.join("\n\n"));
+    }
+
+    let model = body.get("model").and_then(Value::as_str).unwrap_or("");
+    apply_anthropic_reasoning_options(&mut result, &body, model);
+
+    Ok(result)
+}
+
+pub fn anthropic_message_to_response(body: Value) -> anyhow::Result<Value> {
+    anthropic_message_to_response_with_context(body, &CodexToolContext::default(), None)
+}
+
+pub fn anthropic_message_to_response_with_request(
+    body: Value,
+    original_request: &Value,
+) -> anyhow::Result<Value> {
+    let context = build_codex_tool_context(original_request.get("tools"));
+    anthropic_message_to_response_with_context(body, &context, Some(original_request))
+}
+
+fn anthropic_message_to_response_with_context(
+    body: Value,
+    tool_context: &CodexToolContext,
+    original_request: Option<&Value>,
+) -> anyhow::Result<Value> {
+    let response_id = response_id_from_chat_id(body.get("id").and_then(Value::as_str));
+    let stop_reason = body.get("stop_reason").and_then(Value::as_str);
+    let status = anthropic_response_status(stop_reason);
+    let mut response = json!({
+        "id": response_id,
+        "object": "response",
+        "created_at": 0,
+        "status": status,
+        "model": body.get("model").and_then(Value::as_str).unwrap_or(""),
+        "output": anthropic_content_to_response_output_items(
+            body.get("content").unwrap_or(&Value::Null),
+            &response_id,
+            tool_context
+        ),
+        "usage": anthropic_usage_to_responses_usage(body.get("usage"))
+    });
+
+    if status == "incomplete" {
+        response["incomplete_details"] = json!({ "reason": "max_output_tokens" });
+    }
+    copy_response_request_fields(&mut response, original_request);
+
+    Ok(response)
+}
+
 pub struct ProxyHttpResponse {
     pub status: String,
     pub content_type: String,
@@ -310,13 +433,15 @@ pub struct UpstreamProxyResponse {
     pub content_type: String,
     pub is_stream: bool,
     pub response_protocol: UpstreamResponseProtocol,
-    pub response: reqwest::Response,
+    pub response: Option<reqwest::Response>,
+    pub body_override: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpstreamResponseProtocol {
     Responses,
     ChatCompletions,
+    Anthropic,
 }
 
 impl UpstreamProxyResponse {
@@ -326,6 +451,23 @@ impl UpstreamProxyResponse {
 
     pub fn is_success(&self) -> bool {
         (200..300).contains(&self.status_code)
+    }
+
+    pub async fn into_body_bytes(mut self) -> anyhow::Result<Vec<u8>> {
+        if let Some(body) = self.body_override.take() {
+            return Ok(body);
+        }
+        let Some(response) = self.response.take() else {
+            anyhow::bail!("上游响应体已被本地代理消费");
+        };
+        Ok(response.bytes().await?.to_vec())
+    }
+
+    pub fn into_response(mut self) -> anyhow::Result<reqwest::Response> {
+        let Some(response) = self.response.take() else {
+            anyhow::bail!("上游响应已被本地代理消费");
+        };
+        Ok(response)
     }
 }
 
@@ -449,6 +591,134 @@ impl ChatSseToResponsesConverter {
     }
 }
 
+pub struct AnthropicSseToResponsesConverter {
+    buffer: String,
+    utf8_remainder: Vec<u8>,
+    state: AnthropicSseState,
+    failed: bool,
+    saw_message_stop: bool,
+}
+
+impl Default for AnthropicSseToResponsesConverter {
+    fn default() -> Self {
+        Self {
+            buffer: String::new(),
+            utf8_remainder: Vec::new(),
+            state: AnthropicSseState::default(),
+            failed: false,
+            saw_message_stop: false,
+        }
+    }
+}
+
+impl AnthropicSseToResponsesConverter {
+    pub fn with_request(original_request: &Value) -> Self {
+        Self {
+            state: AnthropicSseState::with_request(original_request),
+            ..Self::default()
+        }
+    }
+
+    pub fn push_bytes(&mut self, bytes: &[u8]) -> Vec<u8> {
+        append_utf8_safe(&mut self.buffer, &mut self.utf8_remainder, bytes);
+        let mut output = String::new();
+        while let Some(block) = take_sse_block(&mut self.buffer) {
+            if block.trim().is_empty() {
+                continue;
+            }
+            self.handle_block(&block, &mut output);
+            if self.failed {
+                break;
+            }
+        }
+        output.into_bytes()
+    }
+
+    pub fn finish(&mut self) -> Vec<u8> {
+        if !self.utf8_remainder.is_empty() {
+            self.buffer
+                .push_str(&String::from_utf8_lossy(&self.utf8_remainder));
+            self.utf8_remainder.clear();
+        }
+
+        let mut output = String::new();
+        if !self.failed && !self.buffer.trim().is_empty() && !self.state.inner.completed {
+            let pending = std::mem::take(&mut self.buffer);
+            self.handle_block(&pending, &mut output);
+        }
+        if !self.failed && !self.state.inner.completed {
+            if !self.saw_message_stop {
+                self.state.inner.failed_into(
+                    &mut output,
+                    "upstream stream ended before a completion marker".to_string(),
+                    Some("stream_error".to_string()),
+                );
+                self.failed = true;
+                return output.into_bytes();
+            }
+            self.state.inner.finalize_into(&mut output);
+        }
+        output.into_bytes()
+    }
+
+    pub fn fail(&mut self, message: String, error_type: Option<String>) -> Vec<u8> {
+        let mut output = String::new();
+        self.state
+            .inner
+            .failed_into(&mut output, message, error_type);
+        self.failed = true;
+        output.into_bytes()
+    }
+
+    fn handle_block(&mut self, block: &str, output: &mut String) {
+        let mut event_name: Option<String> = None;
+        let mut data_parts = Vec::new();
+        for line in block.lines() {
+            if let Some(event) = strip_sse_field(line, "event") {
+                event_name = Some(event.trim().to_string());
+            }
+            if let Some(data) = strip_sse_field(line, "data") {
+                data_parts.push(data.to_string());
+            }
+        }
+
+        if data_parts.is_empty() {
+            return;
+        }
+        let data = data_parts.join("\n");
+        if data.trim() == "[DONE]" {
+            self.saw_message_stop = true;
+            self.state.inner.finalize_into(output);
+            return;
+        }
+
+        let Ok(chunk) = serde_json::from_str::<Value>(&data) else {
+            self.state.inner.failed_into(
+                output,
+                "upstream stream sent invalid JSON data".to_string(),
+                Some("invalid_sse_json".to_string()),
+            );
+            self.failed = true;
+            return;
+        };
+        let event = event_name
+            .as_deref()
+            .or_else(|| chunk.get("type").and_then(Value::as_str))
+            .unwrap_or("");
+        if event == "error" || chunk.get("error").is_some() {
+            let (message, error_type) = extract_chat_sse_error(&chunk);
+            self.state.inner.failed_into(output, message, error_type);
+            self.failed = true;
+            return;
+        }
+        if event == "message_stop" {
+            self.saw_message_stop = true;
+        }
+        self.state
+            .handle_anthropic_event_into(event, &chunk, output);
+    }
+}
+
 pub fn is_responses_proxy_path(path: &str) -> bool {
     let path = path.split_once('?').map_or(path, |(path, _)| path);
     matches!(
@@ -509,6 +779,7 @@ pub async fn open_responses_proxy_request(
         original_user_agent,
     ))?;
     let response_protocol = responses_proxy_target_protocol(&relay, &request_json)?;
+    let mut anthropic_request_for_retry = None;
     let upstream = match response_protocol {
         UpstreamResponseProtocol::Responses => {
             client
@@ -529,21 +800,61 @@ pub async fn open_responses_proxy_request(
                 .send()
                 .await?
         }
+        UpstreamResponseProtocol::Anthropic => {
+            let mut anthropic_request = responses_to_anthropic_messages(request_json.clone())?;
+            apply_cached_anthropic_reasoning_compatibility(&mut anthropic_request);
+            let upstream =
+                send_anthropic_messages_request(&client, &relay, &anthropic_request).await?;
+            anthropic_request_for_retry = Some(anthropic_request);
+            upstream
+        }
     };
-    let status_code = upstream.status().as_u16();
-    let content_type = upstream
+    let mut upstream_response = Some(upstream);
+    let mut body_override = None;
+    let mut status_code = upstream_response.as_ref().unwrap().status().as_u16();
+    let mut content_type = upstream_response
+        .as_ref()
+        .unwrap()
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_string();
 
+    if let Some(anthropic_request) = anthropic_request_for_retry.as_ref() {
+        if should_retry_anthropic_max_effort(status_code, &content_type, anthropic_request) {
+            let response = upstream_response
+                .take()
+                .expect("anthropic response is present before retry inspection");
+            let error_body = response.bytes().await?.to_vec();
+            if let Some(fallback_effort) = anthropic_effort_fallback_from_error(&error_body, "max")
+            {
+                remember_anthropic_reasoning_compatibility(anthropic_request, fallback_effort);
+                let mut retry_request = anthropic_request.clone();
+                apply_cached_anthropic_reasoning_compatibility(&mut retry_request);
+                let retry =
+                    send_anthropic_messages_request(&client, &relay, &retry_request).await?;
+                status_code = retry.status().as_u16();
+                content_type = retry
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                upstream_response = Some(retry);
+            } else {
+                body_override = Some(error_body);
+            }
+        }
+    }
+
     Ok(UpstreamProxyResponse {
         status_code,
         is_stream: is_stream || content_type.contains("text/event-stream"),
         content_type,
         response_protocol,
-        response: upstream,
+        response: upstream_response,
+        body_override,
     })
 }
 
@@ -567,9 +878,28 @@ fn responses_proxy_target_protocol(
     if chat_models.iter().any(|item| item == model) {
         return Ok(UpstreamResponseProtocol::ChatCompletions);
     }
+    let anthropic_models = crate::model_catalog::relay_profile_anthropic_model_ids(relay);
+    if anthropic_models.iter().any(|item| item == model) {
+        return Ok(UpstreamResponseProtocol::Anthropic);
+    }
     anyhow::bail!(
-        "模型 {model} 未配置到 Responses API 或 Chat Completions 模型列表，已拒绝本地代理兜底转发"
+        "模型 {model} 未配置到 Responses API、Chat Completions 或 Anthropic 模型列表，已拒绝本地代理兜底转发"
     );
+}
+
+async fn send_anthropic_messages_request(
+    client: &reqwest::Client,
+    relay: &crate::settings::RelayProfile,
+    anthropic_request: &Value,
+) -> anyhow::Result<reqwest::Response> {
+    Ok(client
+        .post(anthropic_messages_url(&relay.base_url))
+        .header("x-api-key", relay.api_key.trim())
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .json(anthropic_request)
+        .send()
+        .await?)
 }
 
 pub async fn open_models_proxy_request(
@@ -609,7 +939,8 @@ pub async fn open_models_proxy_request(
         is_stream: false,
         content_type,
         response_protocol: UpstreamResponseProtocol::Responses,
-        response: upstream,
+        response: Some(upstream),
+        body_override: None,
     })
 }
 
@@ -658,7 +989,8 @@ pub async fn open_chat_completions_proxy_request(
         is_stream: is_stream || content_type.contains("text/event-stream"),
         content_type,
         response_protocol: UpstreamResponseProtocol::ChatCompletions,
-        response: upstream,
+        response: Some(upstream),
+        body_override: None,
     })
 }
 
@@ -680,10 +1012,11 @@ pub async fn handle_responses_proxy_request(body: &str) -> anyhow::Result<ProxyH
     let status_code = upstream.status_code;
     let upstream_content_type = upstream.content_type.clone();
     let is_stream = upstream.is_stream;
-    let upstream_body = upstream.response.bytes().await?;
+    let response_protocol = upstream.response_protocol;
+    let upstream_body = upstream.into_body_bytes().await?;
 
     if !(200..300).contains(&status_code) {
-        if upstream.response_protocol == UpstreamResponseProtocol::Responses {
+        if response_protocol == UpstreamResponseProtocol::Responses {
             return Ok(ProxyHttpResponse {
                 status: http_status_line(status_code),
                 content_type: if upstream_content_type.is_empty() {
@@ -691,7 +1024,7 @@ pub async fn handle_responses_proxy_request(body: &str) -> anyhow::Result<ProxyH
                 } else {
                     upstream_content_type
                 },
-                body: upstream_body.to_vec(),
+                body: upstream_body,
             });
         }
         let error =
@@ -704,31 +1037,48 @@ pub async fn handle_responses_proxy_request(body: &str) -> anyhow::Result<ProxyH
     }
 
     if is_stream {
-        if upstream.response_protocol == UpstreamResponseProtocol::Responses {
+        if response_protocol == UpstreamResponseProtocol::Responses {
             return Ok(ProxyHttpResponse {
                 status: "200 OK".to_string(),
                 content_type: upstream_content_type,
-                body: upstream_body.to_vec(),
+                body: upstream_body,
             });
         }
         let text = String::from_utf8_lossy(&upstream_body);
+        let body = match response_protocol {
+            UpstreamResponseProtocol::ChatCompletions => {
+                chat_sse_to_responses_sse_with_request(&text, &request_json).into_bytes()
+            }
+            UpstreamResponseProtocol::Anthropic => {
+                anthropic_sse_to_responses_sse_with_request(&text, &request_json).into_bytes()
+            }
+            UpstreamResponseProtocol::Responses => unreachable!(),
+        };
         return Ok(ProxyHttpResponse {
             status: "200 OK".to_string(),
             content_type: "text/event-stream; charset=utf-8".to_string(),
-            body: chat_sse_to_responses_sse_with_request(&text, &request_json).into_bytes(),
+            body,
         });
     }
 
-    if upstream.response_protocol == UpstreamResponseProtocol::Responses {
+    if response_protocol == UpstreamResponseProtocol::Responses {
         return Ok(ProxyHttpResponse {
             status: "200 OK".to_string(),
             content_type: upstream_content_type,
-            body: upstream_body.to_vec(),
+            body: upstream_body,
         });
     }
 
-    let chat_json: Value = serde_json::from_slice(&upstream_body)?;
-    let response_json = chat_completion_to_response_with_request(chat_json, &request_json)?;
+    let upstream_json: Value = serde_json::from_slice(&upstream_body)?;
+    let response_json = match response_protocol {
+        UpstreamResponseProtocol::ChatCompletions => {
+            chat_completion_to_response_with_request(upstream_json, &request_json)?
+        }
+        UpstreamResponseProtocol::Anthropic => {
+            anthropic_message_to_response_with_request(upstream_json, &request_json)?
+        }
+        UpstreamResponseProtocol::Responses => unreachable!(),
+    };
     Ok(ProxyHttpResponse {
         status: "200 OK".to_string(),
         content_type: "application/json; charset=utf-8".to_string(),
@@ -769,6 +1119,26 @@ pub fn responses_url(base_url: &str) -> String {
         format!("{base}/responses")
     } else {
         format!("{base}/v1/responses")
+    };
+    while url.contains("/v1/v1") {
+        url = url.replace("/v1/v1", "/v1");
+    }
+    url
+}
+
+pub fn anthropic_messages_url(base_url: &str) -> String {
+    let skip_version_prefix = base_url.trim().ends_with('#');
+    let base = base_url.trim().trim_end_matches('#').trim_end_matches('/');
+    if base.to_ascii_lowercase().ends_with("/messages") {
+        return base.to_string();
+    }
+    let origin_only = base
+        .split_once("://")
+        .map_or(!base.contains('/'), |(_, rest)| !rest.contains('/'));
+    let mut url = if skip_version_prefix || has_version_suffix(base) || !origin_only {
+        format!("{base}/messages")
+    } else {
+        format!("{base}/v1/messages")
     };
     while url.contains("/v1/v1") {
         url = url.replace("/v1/v1", "/v1");
@@ -820,6 +1190,23 @@ pub fn chat_sse_to_responses_sse(input: &str) -> String {
 
 pub fn chat_sse_to_responses_sse_with_request(input: &str, original_request: &Value) -> String {
     let mut converter = ChatSseToResponsesConverter::with_request(original_request);
+    let mut output = converter.push_bytes(input.as_bytes());
+    output.extend(converter.finish());
+    String::from_utf8(output).unwrap_or_default()
+}
+
+pub fn anthropic_sse_to_responses_sse(input: &str) -> String {
+    let mut converter = AnthropicSseToResponsesConverter::default();
+    let mut output = converter.push_bytes(input.as_bytes());
+    output.extend(converter.finish());
+    String::from_utf8(output).unwrap_or_default()
+}
+
+pub fn anthropic_sse_to_responses_sse_with_request(
+    input: &str,
+    original_request: &Value,
+) -> String {
+    let mut converter = AnthropicSseToResponsesConverter::with_request(original_request);
     let mut output = converter.push_bytes(input.as_bytes());
     output.extend(converter.finish());
     String::from_utf8(output).unwrap_or_default()
@@ -1607,6 +1994,176 @@ impl ChatSseState {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum AnthropicBlockKind {
+    Text,
+    Thinking,
+    Tool,
+}
+
+#[derive(Debug, Default)]
+struct AnthropicSseState {
+    inner: ChatSseState,
+    blocks: BTreeMap<usize, AnthropicBlockKind>,
+    usage: Value,
+}
+
+impl AnthropicSseState {
+    fn with_request(original_request: &Value) -> Self {
+        Self {
+            inner: ChatSseState::with_request(original_request),
+            blocks: BTreeMap::new(),
+            usage: json!({}),
+        }
+    }
+
+    fn handle_anthropic_event_into(&mut self, event: &str, chunk: &Value, output: &mut String) {
+        match event {
+            "message_start" => self.handle_message_start_into(chunk, output),
+            "content_block_start" => self.handle_content_block_start_into(chunk, output),
+            "content_block_delta" => self.handle_content_block_delta_into(chunk, output),
+            "content_block_stop" => self.handle_content_block_stop(chunk),
+            "message_delta" => self.handle_message_delta_into(chunk),
+            "message_stop" => self.inner.finalize_into(output),
+            _ => {}
+        }
+    }
+
+    fn handle_message_start_into(&mut self, chunk: &Value, output: &mut String) {
+        let message = chunk.get("message").unwrap_or(chunk);
+        if let Some(id) = message.get("id").and_then(Value::as_str) {
+            self.inner.response_id = response_id_from_chat_id(Some(id));
+        }
+        if let Some(model) = message.get("model").and_then(Value::as_str) {
+            if !model.is_empty() {
+                self.inner.model = model.to_string();
+            }
+        }
+        self.merge_usage(message.get("usage"));
+        self.inner.ensure_response_started_into(output);
+    }
+
+    fn handle_content_block_start_into(&mut self, chunk: &Value, output: &mut String) {
+        let index = chunk.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let block = chunk.get("content_block").unwrap_or(&Value::Null);
+        match block.get("type").and_then(Value::as_str).unwrap_or("") {
+            "text" => {
+                self.blocks.insert(index, AnthropicBlockKind::Text);
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        self.inner.push_content_delta_into(text, output);
+                    }
+                }
+            }
+            "thinking" => {
+                self.blocks.insert(index, AnthropicBlockKind::Thinking);
+                if let Some(thinking) = block.get("thinking").and_then(Value::as_str) {
+                    if !thinking.is_empty() {
+                        self.inner.push_reasoning_delta_into(thinking, output);
+                    }
+                }
+            }
+            "tool_use" => {
+                self.blocks.insert(index, AnthropicBlockKind::Tool);
+                self.inner.flush_inline_think_at_boundary_into(output);
+                self.inner.finalize_reasoning_into(output);
+                let fake = json!({
+                    "index": index,
+                    "id": block.get("id").and_then(Value::as_str).unwrap_or(""),
+                    "function": {
+                        "name": block.get("name").and_then(Value::as_str).unwrap_or(""),
+                        "arguments": ""
+                    }
+                });
+                self.inner.push_tool_call_delta_into(&fake, output);
+                if let Some(input) = block.get("input").filter(|value| {
+                    value
+                        .as_object()
+                        .map(|object| !object.is_empty())
+                        .unwrap_or(false)
+                }) {
+                    let fake = json!({
+                        "index": index,
+                        "function": {
+                            "arguments": canonical_json_string(input)
+                        }
+                    });
+                    self.inner.push_tool_call_delta_into(&fake, output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_content_block_delta_into(&mut self, chunk: &Value, output: &mut String) {
+        let index = chunk.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let delta = chunk.get("delta").unwrap_or(&Value::Null);
+        match delta.get("type").and_then(Value::as_str).unwrap_or("") {
+            "text_delta" => {
+                if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        self.inner.push_content_delta_into(text, output);
+                    }
+                }
+            }
+            "thinking_delta" => {
+                if let Some(thinking) = delta.get("thinking").and_then(Value::as_str) {
+                    if !thinking.is_empty() {
+                        self.inner.push_reasoning_delta_into(thinking, output);
+                    }
+                }
+            }
+            "input_json_delta" => {
+                self.inner.flush_inline_think_at_boundary_into(output);
+                self.inner.finalize_reasoning_into(output);
+                let partial = delta
+                    .get("partial_json")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if !partial.is_empty() {
+                    let fake = json!({
+                        "index": index,
+                        "function": {
+                            "arguments": partial
+                        }
+                    });
+                    self.inner.push_tool_call_delta_into(&fake, output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_content_block_stop(&mut self, chunk: &Value) {
+        let index = chunk.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+        self.blocks.remove(&index);
+    }
+
+    fn handle_message_delta_into(&mut self, chunk: &Value) {
+        if let Some(stop_reason) = chunk.pointer("/delta/stop_reason").and_then(Value::as_str) {
+            self.inner.finish_reason =
+                anthropic_stop_reason_to_chat_finish_reason(Some(stop_reason)).map(str::to_string);
+        }
+        self.merge_usage(chunk.get("usage"));
+    }
+
+    fn merge_usage(&mut self, usage: Option<&Value>) {
+        let Some(usage) = usage.and_then(Value::as_object) else {
+            return;
+        };
+        if !self.usage.is_object() {
+            self.usage = json!({});
+        }
+        let Some(target) = self.usage.as_object_mut() else {
+            return;
+        };
+        for (key, value) in usage {
+            target.insert(key.clone(), value.clone());
+        }
+        self.inner.latest_usage = Some(anthropic_usage_to_responses_usage(Some(&self.usage)));
+    }
+}
+
 fn take_sse_block(buffer: &mut String) -> Option<String> {
     let lf = buffer.find("\n\n").map(|index| (index, 2));
     let crlf = buffer.find("\r\n\r\n").map(|index| (index, 4));
@@ -1816,6 +2373,317 @@ fn append_responses_input(input: &Value, messages: &mut Vec<Value>) {
             flush_reasoning(messages, &mut pending_reasoning);
         }
         _ => {}
+    }
+}
+
+fn append_responses_input_to_anthropic(
+    input: &Value,
+    messages: &mut Vec<Value>,
+    system_chunks: &mut Vec<String>,
+) {
+    match input {
+        Value::String(text) => push_anthropic_message(
+            messages,
+            "user",
+            vec![json!({ "type": "text", "text": text })],
+        ),
+        Value::Array(items) => {
+            for item in items {
+                append_responses_item_to_anthropic(item, messages, system_chunks);
+            }
+        }
+        Value::Object(_) => append_responses_item_to_anthropic(input, messages, system_chunks),
+        _ => {}
+    }
+}
+
+fn append_responses_item_to_anthropic(
+    item: &Value,
+    messages: &mut Vec<Value>,
+    system_chunks: &mut Vec<String>,
+) {
+    match item.get("type").and_then(Value::as_str) {
+        Some("function_call") => {
+            let name = responses_history_function_name(item);
+            let call_id = item
+                .get("call_id")
+                .or_else(|| item.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !name.is_empty() && !call_id.is_empty() {
+                push_anthropic_message(
+                    messages,
+                    "assistant",
+                    vec![json!({
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": name,
+                        "input": anthropic_tool_input_from_arguments(item.get("arguments"))
+                    })],
+                );
+            }
+        }
+        Some("function_call_output") => {
+            let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or("");
+            if !call_id.is_empty() {
+                push_anthropic_message(
+                    messages,
+                    "user",
+                    vec![json!({
+                        "type": "tool_result",
+                        "tool_use_id": call_id,
+                        "content": response_output_text(item.get("output").unwrap_or(&Value::Null))
+                    })],
+                );
+            }
+        }
+        Some("custom_tool_call") => {
+            let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+            let input = item
+                .get("input")
+                .or_else(|| item.get("arguments"))
+                .unwrap_or(&Value::Null);
+            let (name, arguments) = build_custom_tool_call_history(name, input);
+            let call_id = item
+                .get("call_id")
+                .or_else(|| item.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !name.is_empty() && !call_id.is_empty() {
+                push_anthropic_message(
+                    messages,
+                    "assistant",
+                    vec![json!({
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": name,
+                        "input": anthropic_tool_input_from_argument_string(&arguments)
+                    })],
+                );
+            }
+        }
+        Some("custom_tool_call_output") => {
+            let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or("");
+            if !call_id.is_empty() {
+                push_anthropic_message(
+                    messages,
+                    "user",
+                    vec![json!({
+                        "type": "tool_result",
+                        "tool_use_id": call_id,
+                        "content": response_output_text(item.get("output").unwrap_or(&Value::Null))
+                    })],
+                );
+            }
+        }
+        Some("tool_call") => {
+            let Some(tool_use) = item.get("tool_use") else {
+                return;
+            };
+            let call_id = tool_use
+                .get("id")
+                .or_else(|| item.get("call_id"))
+                .or_else(|| item.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let name = tool_use.get("name").and_then(Value::as_str).unwrap_or("");
+            if !call_id.is_empty() && !name.is_empty() {
+                push_anthropic_message(
+                    messages,
+                    "assistant",
+                    vec![json!({
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": name,
+                        "input": anthropic_tool_input_from_arguments(tool_use.get("input"))
+                    })],
+                );
+            }
+        }
+        Some("tool_result") => {
+            let content = item.get("content").unwrap_or(&Value::Null);
+            let call_id = content
+                .get("tool_use_id")
+                .or_else(|| item.get("tool_call_id"))
+                .or_else(|| item.get("call_id"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !call_id.is_empty() {
+                let output = content.get("content").unwrap_or(content);
+                push_anthropic_message(
+                    messages,
+                    "user",
+                    vec![json!({
+                        "type": "tool_result",
+                        "tool_use_id": call_id,
+                        "content": response_output_text(output)
+                    })],
+                );
+            }
+        }
+        Some("reasoning") => {
+            if let Some(text) = responses_reasoning_text(item) {
+                if !text.is_empty() {
+                    push_anthropic_message(
+                        messages,
+                        "assistant",
+                        vec![json!({ "type": "thinking", "thinking": text })],
+                    );
+                }
+            }
+        }
+        _ => {
+            if item.get("role").is_none() && item.get("content").is_none() {
+                return;
+            }
+            let role = item.get("role").and_then(Value::as_str);
+            let anthropic_role = responses_role_to_anthropic_role(role);
+            let content = item.get("content").unwrap_or(&Value::Null);
+            if anthropic_role == "system" {
+                let text = responses_content_to_anthropic_system_text(content);
+                if !text.is_empty() {
+                    system_chunks.push(text);
+                }
+                return;
+            }
+            let content = responses_content_to_anthropic_content(content);
+            push_anthropic_message(messages, anthropic_role, content);
+        }
+    }
+}
+
+fn responses_role_to_anthropic_role(role: Option<&str>) -> &'static str {
+    match role {
+        Some("developer") | Some("system") => "system",
+        Some("assistant") => "assistant",
+        Some("user") | Some("latest_reminder") | Some("tool") | None => "user",
+        Some(_) => "user",
+    }
+}
+
+fn push_anthropic_message(messages: &mut Vec<Value>, role: &str, content: Vec<Value>) {
+    if content.is_empty() {
+        return;
+    }
+    if let Some(last) = messages.last_mut() {
+        if last.get("role").and_then(Value::as_str) == Some(role) {
+            if let Some(existing) = last.get_mut("content").and_then(Value::as_array_mut) {
+                existing.extend(content);
+                return;
+            }
+        }
+    }
+    messages.push(json!({ "role": role, "content": content }));
+}
+
+fn responses_content_to_anthropic_content(content: &Value) -> Vec<Value> {
+    match content {
+        Value::String(text) => vec![json!({ "type": "text", "text": text })],
+        Value::Array(parts) => {
+            let mut converted = Vec::new();
+            for part in parts {
+                match part.get("type").and_then(Value::as_str).unwrap_or("") {
+                    "input_text" | "output_text" | "text" => {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            converted.push(json!({ "type": "text", "text": text }));
+                        }
+                    }
+                    "refusal" => {
+                        if let Some(text) = part.get("refusal").and_then(Value::as_str) {
+                            converted.push(json!({ "type": "text", "text": text }));
+                        }
+                    }
+                    "input_image" => {
+                        if let Some(source) = anthropic_image_source(part) {
+                            converted.push(json!({ "type": "image", "source": source }));
+                        }
+                    }
+                    _ => converted.push(json!({
+                        "type": "text",
+                        "text": canonical_json_string(part)
+                    })),
+                }
+            }
+            converted
+        }
+        Value::Null => Vec::new(),
+        other => vec![json!({ "type": "text", "text": response_output_text(other) })],
+    }
+}
+
+fn responses_content_to_anthropic_system_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(
+                |part| match part.get("type").and_then(Value::as_str).unwrap_or("") {
+                    "input_text" | "output_text" | "text" => {
+                        part.get("text").and_then(Value::as_str).map(str::to_string)
+                    }
+                    "refusal" => part
+                        .get("refusal")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    _ => Some(canonical_json_string(part)),
+                },
+            )
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Null => String::new(),
+        other => response_output_text(other),
+    }
+}
+
+fn anthropic_image_source(part: &Value) -> Option<Value> {
+    let image_url = part.get("image_url")?;
+    let url = image_url
+        .get("url")
+        .and_then(Value::as_str)
+        .or_else(|| image_url.as_str())?;
+    if let Some(source) = data_url_to_anthropic_source(url) {
+        return Some(source);
+    }
+    if url.starts_with("http://") || url.starts_with("https://") {
+        return Some(json!({ "type": "url", "url": url }));
+    }
+    None
+}
+
+fn data_url_to_anthropic_source(url: &str) -> Option<Value> {
+    let rest = url.strip_prefix("data:")?;
+    let (media_type, data) = rest.split_once(";base64,")?;
+    if media_type.is_empty() || data.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "type": "base64",
+        "media_type": media_type,
+        "data": data
+    }))
+}
+
+fn anthropic_tool_input_from_arguments(value: Option<&Value>) -> Value {
+    let Some(value) = value else {
+        return json!({});
+    };
+    match value {
+        Value::String(text) => anthropic_tool_input_from_argument_string(text),
+        Value::Object(_) => value.clone(),
+        Value::Null => json!({}),
+        other => json!({ "input": other.clone() }),
+    }
+}
+
+fn anthropic_tool_input_from_argument_string(arguments: &str) -> Value {
+    if arguments.trim().is_empty() {
+        return json!({});
+    }
+    match serde_json::from_str::<Value>(arguments) {
+        Ok(Value::Object(object)) => Value::Object(object),
+        Ok(value) => json!({ "input": value }),
+        Err(_) => json!({ "input": arguments }),
     }
 }
 
@@ -2467,6 +3335,36 @@ fn responses_tools_to_chat_tools(tools: &[Value], context: &CodexToolContext) ->
     converted
 }
 
+fn responses_tools_to_anthropic_tools(tools: &[Value], context: &CodexToolContext) -> Vec<Value> {
+    responses_tools_to_chat_tools(tools, context)
+        .into_iter()
+        .filter_map(|tool| chat_tool_to_anthropic_tool(&tool))
+        .collect()
+}
+
+fn chat_tool_to_anthropic_tool(tool: &Value) -> Option<Value> {
+    let function = tool.get("function")?;
+    let name = function.get("name").and_then(Value::as_str)?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let mut anthropic_tool = json!({
+        "name": name,
+        "input_schema": normalize_chat_tool_parameters(
+            function.get("parameters").unwrap_or(&json!({}))
+        )
+    });
+    if let Some(description) = function
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        anthropic_tool["description"] = json!(description);
+    }
+    Some(anthropic_tool)
+}
+
 fn detect_codex_custom_tool_kind(tool: &Value, name: &str) -> CodexCustomToolKind {
     if name == "apply_patch" {
         return CodexCustomToolKind::ApplyPatch;
@@ -2887,6 +3785,34 @@ fn responses_tool_choice_to_chat(tool_choice: &Value, context: &CodexToolContext
     }
 }
 
+fn responses_tool_choice_to_anthropic(
+    tool_choice: &Value,
+    context: &CodexToolContext,
+) -> Option<Value> {
+    match tool_choice {
+        Value::String(value) => match value.trim() {
+            "auto" => Some(json!({ "type": "auto" })),
+            "required" => Some(json!({ "type": "any" })),
+            "none" => Some(json!({ "type": "none" })),
+            _ => None,
+        },
+        Value::Object(object) => match object.get("type").and_then(Value::as_str) {
+            Some("auto") => Some(json!({ "type": "auto" })),
+            Some("required") => Some(json!({ "type": "any" })),
+            Some("none") => Some(json!({ "type": "none" })),
+            _ => {
+                let chat_choice = responses_tool_choice_to_chat(tool_choice, context)?;
+                let name = chat_choice
+                    .pointer("/function/name")
+                    .and_then(Value::as_str)
+                    .or_else(|| chat_choice.get("name").and_then(Value::as_str))?;
+                (!name.is_empty()).then(|| json!({ "type": "tool", "name": name }))
+            }
+        },
+        _ => None,
+    }
+}
+
 fn chat_reasoning_to_response_output_item(message: &Value, response_id: &str) -> Option<Value> {
     let reasoning = chat_reasoning_text(message)?;
     if reasoning.is_empty() {
@@ -3175,6 +4101,83 @@ fn response_tool_call_item(
     item
 }
 
+fn anthropic_content_to_response_output_items(
+    content: &Value,
+    response_id: &str,
+    tool_context: &CodexToolContext,
+) -> Vec<Value> {
+    let Some(blocks) = content.as_array() else {
+        return Vec::new();
+    };
+
+    let mut reasoning_chunks = Vec::new();
+    let mut message_content = Vec::new();
+    let mut tool_items = Vec::new();
+
+    for (index, block) in blocks.iter().enumerate() {
+        match block.get("type").and_then(Value::as_str).unwrap_or("") {
+            "thinking" => {
+                if let Some(text) = block.get("thinking").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        reasoning_chunks.push(text.to_string());
+                    }
+                }
+            }
+            "text" => {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        message_content.push(
+                            json!({ "type": "output_text", "text": text, "annotations": [] }),
+                        );
+                    }
+                }
+            }
+            "tool_use" => {
+                let call_id = block
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| format!("call_{index}"));
+                let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+                let arguments = block
+                    .get("input")
+                    .map(canonical_json_string)
+                    .unwrap_or_else(|| "{}".to_string());
+                tool_items.push(response_tool_call_item(
+                    &call_id,
+                    name,
+                    &arguments,
+                    tool_context,
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    let mut output = Vec::new();
+    if !reasoning_chunks.is_empty() {
+        let reasoning = reasoning_chunks.join("\n\n");
+        output.push(json!({
+            "id": format!("rs_{response_id}"),
+            "type": "reasoning",
+            "reasoning_content": reasoning,
+            "summary": [{ "type": "summary_text", "text": reasoning }]
+        }));
+    }
+    if !message_content.is_empty() {
+        output.push(json!({
+            "id": format!("{response_id}_msg"),
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": message_content
+        }));
+    }
+    output.extend(tool_items);
+    output
+}
+
 fn split_leading_think_block(text: &str) -> Option<(String, String)> {
     let leading_ws_len = text.len() - text.trim_start().len();
     let after_ws = &text[leading_ws_len..];
@@ -3427,6 +4430,10 @@ fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
     result
 }
 
+fn anthropic_usage_to_responses_usage(usage: Option<&Value>) -> Value {
+    chat_usage_to_responses_usage(usage)
+}
+
 fn effective_cache_creation_tokens(
     cache_creation: u64,
     cache_creation_5m: u64,
@@ -3443,6 +4450,23 @@ fn response_status(finish_reason: Option<&str>) -> &'static str {
     match finish_reason {
         Some("length") => "incomplete",
         _ => "completed",
+    }
+}
+
+fn anthropic_response_status(stop_reason: Option<&str>) -> &'static str {
+    match stop_reason {
+        Some("max_tokens") => "incomplete",
+        _ => "completed",
+    }
+}
+
+fn anthropic_stop_reason_to_chat_finish_reason(stop_reason: Option<&str>) -> Option<&str> {
+    match stop_reason {
+        Some("max_tokens") => Some("length"),
+        Some("end_turn") | Some("stop_sequence") => Some("stop"),
+        Some("tool_use") => Some("tool_calls"),
+        Some(value) => Some(value),
+        None => None,
     }
 }
 
@@ -3892,7 +4916,7 @@ fn apply_chat_reasoning_options(result: &mut Value, body: &Value, model: &str) {
     let Some(effort) = body.pointer("/reasoning/effort").and_then(Value::as_str) else {
         return;
     };
-    let Some(mapped) = map_chat_reasoning_effort(effort, style) else {
+    let Some(mapped) = map_chat_reasoning_effort(effort, style, model) else {
         return;
     };
 
@@ -3909,6 +4933,24 @@ fn apply_chat_reasoning_options(result: &mut Value, body: &Value, model: &str) {
         }
         _ => {}
     }
+}
+
+fn apply_anthropic_reasoning_options(result: &mut Value, body: &Value, model: &str) {
+    if !model.to_ascii_lowercase().contains("claude") {
+        return;
+    }
+    let reasoning_enabled = reasoning_requested(body).unwrap_or(true);
+    if !reasoning_enabled {
+        result["thinking"] = json!({ "type": "disabled" });
+        return;
+    }
+    let effort = body
+        .pointer("/reasoning/effort")
+        .and_then(Value::as_str)
+        .and_then(|effort| map_anthropic_reasoning_effort(effort, model))
+        .unwrap_or(ANTHROPIC_DEFAULT_REASONING_EFFORT);
+    result["thinking"] = json!({ "type": "adaptive" });
+    result["output_config"] = json!({ "effort": effort });
 }
 
 fn reasoning_requested(body: &Value) -> Option<bool> {
@@ -3954,39 +4996,220 @@ fn infer_chat_reasoning_style(model: &str) -> ChatReasoningStyle {
     ChatReasoningStyle::Default
 }
 
-fn map_chat_reasoning_effort(effort: &str, style: ChatReasoningStyle) -> Option<&'static str> {
+fn map_chat_reasoning_effort(
+    effort: &str,
+    style: ChatReasoningStyle,
+    model: &str,
+) -> Option<&'static str> {
     let effort = effort.trim().to_ascii_lowercase();
     if matches!(effort.as_str(), "none" | "off" | "disabled") {
         return None;
     }
 
     match style {
-        ChatReasoningStyle::DeepSeek => match effort.as_str() {
-            "max" | "xhigh" => Some("max"),
-            _ => Some("high"),
-        },
-        ChatReasoningStyle::LowHigh => match effort.as_str() {
-            "minimal" | "low" => Some("low"),
-            _ => Some("high"),
-        },
-        ChatReasoningStyle::OpenRouter => match effort.as_str() {
-            "max" | "xhigh" => Some("xhigh"),
-            "high" => Some("high"),
-            "medium" => Some("medium"),
-            "low" => Some("low"),
-            "minimal" => Some("minimal"),
-            _ => None,
-        },
-        _ => match effort.as_str() {
-            "minimal" => Some("minimal"),
-            "low" => Some("low"),
-            "medium" => Some("medium"),
-            "high" => Some("high"),
-            "xhigh" => Some("xhigh"),
-            "max" => Some("max"),
-            _ => None,
-        },
+        ChatReasoningStyle::OpenRouter => {
+            let mapped = clamp_reasoning_effort_for_model(
+                &effort,
+                model,
+                UpstreamResponseProtocol::ChatCompletions,
+            )?;
+            Some(if mapped == "max" { "xhigh" } else { mapped })
+        }
+        _ => clamp_reasoning_effort_for_model(
+            &effort,
+            model,
+            UpstreamResponseProtocol::ChatCompletions,
+        ),
     }
+}
+
+fn map_anthropic_reasoning_effort(effort: &str, model: &str) -> Option<&'static str> {
+    clamp_reasoning_effort_for_model(effort, model, UpstreamResponseProtocol::Anthropic)
+}
+
+pub fn supported_reasoning_efforts_for_model(
+    model: &str,
+    protocol: UpstreamResponseProtocol,
+) -> Vec<&'static str> {
+    let model = model.trim().to_ascii_lowercase();
+    if model.contains("claude") || protocol == UpstreamResponseProtocol::Anthropic {
+        if model.contains("opus-4-7") || model.contains("opus-4-8") || model.contains("fable-5") {
+            return levels(&["low", "medium", "high", "xhigh", "max"]);
+        }
+        if model.contains("opus-4-6") {
+            return levels(&["low", "medium", "high", "max"]);
+        }
+        if model.contains("sonnet-4-6") {
+            return levels(&["low", "medium", "high"]);
+        }
+        return levels(&["low", "medium", "high"]);
+    }
+
+    if model.contains("gpt-") || is_openai_o_series(&model) {
+        return levels(&["minimal", "low", "medium", "high", "xhigh"]);
+    }
+    if model.contains("deepseek") {
+        return levels(&["low", "medium", "high"]);
+    }
+    if model.contains("grok") || model.contains("xai") {
+        return levels(&["low", "medium", "high"]);
+    }
+    if model.contains("gemini-3.1-pro") {
+        return levels(&["low", "medium", "high"]);
+    }
+    if model.contains("gemini-3-pro") {
+        return levels(&["low", "high"]);
+    }
+    if model.contains("gemini-3") {
+        return levels(&["minimal", "low", "medium", "high"]);
+    }
+    if model.contains("stepfun") || model.contains("step-3.5-flash-2603") {
+        return levels(&["low", "high"]);
+    }
+
+    match protocol {
+        UpstreamResponseProtocol::Anthropic => levels(&["low", "medium", "high"]),
+        _ => levels(&["minimal", "low", "medium", "high", "xhigh"]),
+    }
+}
+
+fn levels(values: &[&'static str]) -> Vec<&'static str> {
+    values.to_vec()
+}
+
+fn clamp_reasoning_effort_for_model(
+    effort: &str,
+    model: &str,
+    protocol: UpstreamResponseProtocol,
+) -> Option<&'static str> {
+    let effort = normalize_reasoning_effort(effort)?;
+    let supported = supported_reasoning_efforts_for_model(model, protocol);
+    if supported.contains(&effort) {
+        return Some(effort);
+    }
+    let requested_index = reasoning_effort_index(effort)?;
+    supported.into_iter().rev().find(|candidate| {
+        reasoning_effort_index(candidate).is_some_and(|index| index <= requested_index)
+    })
+}
+
+fn normalize_reasoning_effort(effort: &str) -> Option<&'static str> {
+    match effort.trim().to_ascii_lowercase().as_str() {
+        "minimal" => Some("minimal"),
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" => Some("xhigh"),
+        "max" => Some("max"),
+        _ => None,
+    }
+}
+
+fn reasoning_effort_index(effort: &str) -> Option<usize> {
+    REASONING_EFFORT_ORDER
+        .iter()
+        .position(|candidate| *candidate == effort)
+}
+
+fn anthropic_reasoning_compatibility_cache() -> &'static Mutex<BTreeMap<String, String>> {
+    static CACHE: OnceLock<Mutex<BTreeMap<String, String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn anthropic_model_cache_key(model: &str) -> String {
+    model.trim().to_ascii_lowercase()
+}
+
+fn apply_cached_anthropic_reasoning_compatibility(request: &mut Value) {
+    let Some(model) = request.get("model").and_then(Value::as_str) else {
+        return;
+    };
+    let key = anthropic_model_cache_key(model);
+    if key.is_empty() {
+        return;
+    }
+    let fallback = anthropic_reasoning_compatibility_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).cloned());
+    let Some(fallback) = fallback else {
+        return;
+    };
+    if request.pointer("/thinking/type").and_then(Value::as_str) != Some("adaptive") {
+        return;
+    }
+    if request
+        .pointer("/output_config/effort")
+        .and_then(Value::as_str)
+        == Some("max")
+    {
+        request["output_config"]["effort"] = json!(fallback);
+    }
+}
+
+fn remember_anthropic_reasoning_compatibility(request: &Value, fallback_effort: &str) {
+    let Some(model) = request.get("model").and_then(Value::as_str) else {
+        return;
+    };
+    let key = anthropic_model_cache_key(model);
+    if key.is_empty() {
+        return;
+    }
+    if let Ok(mut cache) = anthropic_reasoning_compatibility_cache().lock() {
+        cache.insert(key, fallback_effort.to_string());
+    }
+}
+
+pub fn clear_anthropic_reasoning_compatibility_cache_for_tests() {
+    if let Ok(mut cache) = anthropic_reasoning_compatibility_cache().lock() {
+        cache.clear();
+    }
+}
+
+fn should_retry_anthropic_max_effort(
+    status_code: u16,
+    content_type: &str,
+    request: &Value,
+) -> bool {
+    status_code == 400
+        && content_type.to_ascii_lowercase().contains("json")
+        && request.pointer("/thinking/type").and_then(Value::as_str) == Some("adaptive")
+        && request
+            .pointer("/output_config/effort")
+            .and_then(Value::as_str)
+            == Some("max")
+}
+
+fn anthropic_effort_fallback_from_error(
+    body: &[u8],
+    unsupported_effort: &str,
+) -> Option<&'static str> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    let error = value.get("error").unwrap_or(&value);
+    let message = error
+        .get("message")
+        .or_else(|| error.get("detail"))
+        .or_else(|| error.get("error"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let unsupported_effort = unsupported_effort.to_ascii_lowercase();
+    if !message.contains(&unsupported_effort)
+        || !message.contains("not supported")
+        || !message.contains("valid level")
+    {
+        return None;
+    }
+    highest_anthropic_effort_in_message(&message)
+}
+
+fn highest_anthropic_effort_in_message(message: &str) -> Option<&'static str> {
+    for candidate in ["high", "medium", "low"] {
+        if message.contains(candidate) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn supports_reasoning_effort(model: &str) -> bool {

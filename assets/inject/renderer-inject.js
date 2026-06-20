@@ -7106,15 +7106,32 @@
   function codexServiceTierVisibleComposerFooters(root = document) {
     const footers = [
       ...(root?.matches?.(".composer-footer") ? [root] : []),
-      ...Array.from(root?.querySelectorAll?.(".composer-footer") || []),
+      ...(root?.matches?.('[class*="_footer_"]') ? [root] : []),
+      ...Array.from(root?.querySelectorAll?.('.composer-footer, [class*="_footer_"]') || []),
     ];
     return footers
+      .filter(codexServiceTierLooksLikeComposerFooter)
       .filter(codexServiceTierBadgeVisibleElement)
       .sort((left, right) => {
         const leftRect = left.getBoundingClientRect();
         const rightRect = right.getBoundingClientRect();
         return (rightRect.bottom - leftRect.bottom) || (rightRect.width - leftRect.width);
       });
+  }
+
+  function codexServiceTierLooksLikeComposerFooter(footer) {
+    if (!(footer instanceof HTMLElement)) return false;
+    if (footer.matches?.(".composer-footer")) return true;
+    const className = String(footer.className || "");
+    if (!className.includes("_footer_")) return false;
+    if (!className.includes("items-center")) return false;
+    const rect = footer.getBoundingClientRect();
+    if (rect.width < 220 || rect.height > 90) return false;
+    const buttons = Array.from(footer.querySelectorAll("button, [role='button']")).filter(codexServiceTierBadgeVisibleElement);
+    if (buttons.length < 2) return false;
+    const text = codexServiceTierBadgeText(footer);
+    return /model|完全访问|full access|high|超高|gpt|claude|gemini|deepseek|qwen|kimi|sonnet|opus|haiku/i.test(text)
+      || buttons.some((button) => codexServiceTierBadgeText(button));
   }
 
   function codexServiceTierComposerScore(composer) {
@@ -7188,7 +7205,27 @@
     return providerGroup || children[children.length - 1] || footer;
   }
 
+  function codexServiceTierNativeServiceTierSlot(composer) {
+    const footer = codexServiceTierComposerFooter(composer);
+    if (!footer) return null;
+    const children = Array.from(footer.children).filter((child) => child instanceof HTMLElement);
+    if (children.length >= 3 && String(footer.className || "").includes("grid-cols")) {
+      const middle = children[Math.floor(children.length / 2)];
+      const middleText = codexServiceTierBadgeText(middle);
+      const onlyBadge = middle.children.length === 1 && middle.firstElementChild?.matches?.('[data-codex-service-tier-badge="true"]');
+      if (middleText.length <= 32 && (middle.children.length === 0 || onlyBadge)) return middle;
+    }
+    return children.find((child) => {
+      const text = codexServiceTierBadgeText(child);
+      const className = String(child.className || "");
+      const onlyBadge = child.children.length === 1 && child.firstElementChild?.matches?.('[data-codex-service-tier-badge="true"]');
+      return className.includes("items-center") && text.length <= 32 && (child.children.length === 0 || onlyBadge);
+    }) || null;
+  }
+
   function codexServiceTierBadgePlacement(composer) {
+    const nativeSlot = codexServiceTierNativeServiceTierSlot(composer);
+    if (nativeSlot) return { parent: nativeSlot, before: null };
     const anchor = composer ? codexServiceTierBadgeAnchor(composer) : null;
     if (anchor?.parentElement) return { parent: anchor.parentElement, before: anchor };
     const group = composer ? codexServiceTierBadgeFooterGroup(composer) : null;
@@ -7520,6 +7557,8 @@
       '[class*="user-message"]',
       '[class*="UserMessage"]',
       ".composer-footer",
+      '[class*="_footer_"]',
+      ".ProseMirror",
       selectors.appHeader,
       selectors.archiveNav,
       ...(pluginPatchDisabledInRelayMode() ? [] : [selectors.disabledInstallButton]),

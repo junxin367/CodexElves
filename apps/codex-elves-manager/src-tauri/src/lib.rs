@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, PhysicalPosition, PhysicalSize, Position, Size, WindowEvent};
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 static APP_EXITING: AtomicBool = AtomicBool::new(false);
 const TRAY_MENU_SHOW: &str = "tray_show_main";
@@ -82,7 +81,7 @@ pub fn run() {
                 let _ = main_window.set_focus();
             }
             install_tray(app)?;
-            register_main_window_events(main_window, app.handle().clone());
+            register_main_window_events(main_window);
             if let Some(listener) = wake_listener {
                 spawn_manager_wake_listener(listener, app.handle().clone());
             }
@@ -192,16 +191,12 @@ fn install_tray<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     Ok(())
 }
 
-fn register_main_window_events<R: tauri::Runtime>(
-    window: tauri::WebviewWindow<R>,
-    app_handle: tauri::AppHandle<R>,
-) {
+fn register_main_window_events<R: tauri::Runtime>(window: tauri::WebviewWindow<R>) {
     let event_window = window.clone();
-    let dialog_window = window.clone();
-    let dialog_app_handle = app_handle.clone();
     let minimized_window = event_window.clone();
     let moved_window = event_window.clone();
     let resized_window = event_window.clone();
+    let close_window = event_window.clone();
 
     event_window.on_window_event(move |event| match event {
         WindowEvent::Moved(_) => {
@@ -219,27 +214,9 @@ fn register_main_window_events<R: tauri::Runtime>(
                 return;
             }
 
-            persist_manager_window_state(&dialog_window);
             api.prevent_close();
-            let app_for_decision = dialog_app_handle.clone();
-            let window_for_decision = dialog_window.clone();
-            dialog_app_handle
-                .dialog()
-                .message("要退出 CodexElves 管理工具，还是最小化到系统托盘？")
-                .title("关闭确认")
-                .kind(MessageDialogKind::Info)
-                .buttons(MessageDialogButtons::OkCancelCustom(
-                    "退出程序".into(),
-                    "最小化到托盘".into(),
-                ))
-                .show(move |should_exit| {
-                    if should_exit {
-                        APP_EXITING.store(true, Ordering::SeqCst);
-                        app_for_decision.exit(0);
-                    } else {
-                        let _ = window_for_decision.hide();
-                    }
-                });
+            persist_manager_window_state(&close_window);
+            let _ = close_window.hide();
         }
         _ => {}
     });
