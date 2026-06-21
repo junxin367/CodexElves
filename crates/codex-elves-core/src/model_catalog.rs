@@ -66,11 +66,7 @@ pub async fn read_codex_model_catalog() -> Value {
 fn relay_profile_model_catalog_value(home: &Path, profile: &RelayProfile) -> Value {
     let models = relay_profile_model_ids_for_proxy(profile);
     let model = profile.model.trim().to_string();
-    let default_model = if models.iter().any(|item| item == &model) {
-        model.clone()
-    } else {
-        models.first().cloned().unwrap_or_default()
-    };
+    let default_model = models.first().cloned().unwrap_or_default();
     let provider_name = if profile.name.trim().is_empty() {
         profile.id.trim()
     } else {

@@ -922,6 +922,7 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
             model_list: String::new(),
             responses_model_list: String::new(),
             chat_completions_model_list: String::new(),
+            anthropic_model_list: String::new(),
             user_agent: String::new(),
         }],
         active_relay_id: "relay-chat".to_string(),

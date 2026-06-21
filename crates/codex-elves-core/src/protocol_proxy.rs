@@ -5,12 +5,18 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
+use anyhow::Context;
 use serde_json::{Value, json};
 
+use crate::relay_rotation::{RotationContext, RotationEvent};
 use crate::settings::SettingsStore;
 
 pub const DEFAULT_PROTOCOL_PROXY_PORT: u16 = 45221;
+const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const UPSTREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+const UPSTREAM_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
 const THINK_OPEN_TAG: &str = "<think>";
 const THINK_CLOSE_TAG: &str = "</think>";
 const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
@@ -437,7 +443,8 @@ pub struct UpstreamProxyResponse {
     pub body_override: Option<Vec<u8>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum UpstreamResponseProtocol {
     Responses,
     ChatCompletions,
@@ -469,6 +476,46 @@ impl UpstreamProxyResponse {
         };
         Ok(response)
     }
+}
+
+pub fn upstream_header_timeout() -> Duration {
+    UPSTREAM_HEADER_TIMEOUT
+}
+
+pub fn upstream_stream_header_timeout() -> Duration {
+    UPSTREAM_STREAM_HEADER_TIMEOUT
+}
+
+pub fn upstream_http_client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
+        .user_agent("CodexElves/ProtocolProxy")
+        .build()
+        .context("failed to build upstream HTTP client")
+}
+
+pub async fn send_upstream_request(
+    request: reqwest::RequestBuilder,
+) -> anyhow::Result<reqwest::Response> {
+    send_upstream_request_with_header_timeout(request, UPSTREAM_HEADER_TIMEOUT).await
+}
+
+pub async fn send_upstream_request_for_responses(
+    request: reqwest::RequestBuilder,
+    is_stream: bool,
+) -> anyhow::Result<reqwest::Response> {
+    let timeout = response_header_timeout(is_stream);
+    send_upstream_request_with_header_timeout(request, timeout).await
+}
+
+pub async fn send_upstream_request_with_header_timeout(
+    request: reqwest::RequestBuilder,
+    timeout: Duration,
+) -> anyhow::Result<reqwest::Response> {
+    tokio::time::timeout(timeout, request.send())
+        .await
+        .with_context(|| format!("上游请求超过 {} 秒未返回响应头", timeout.as_secs()))?
+        .context("上游请求失败")
 }
 
 pub struct ChatSseToResponsesConverter {
@@ -758,104 +805,242 @@ pub async fn open_responses_proxy_request(
     original_user_agent: Option<&str>,
 ) -> anyhow::Result<UpstreamProxyResponse> {
     let settings = SettingsStore::default().load().unwrap_or_default();
-    let relay = settings.active_relay_profile();
-    if !relay.local_proxy_enabled() {
-        anyhow::bail!("当前中转未启用本地代理");
-    }
-    if relay.base_url.trim().is_empty() {
-        anyhow::bail!("上游 Base URL 不能为空");
-    }
-    if relay.api_key.trim().is_empty() {
-        anyhow::bail!("上游 Key 不能为空");
-    }
+    open_responses_proxy_request_with_settings_and_user_agent(body, settings, original_user_agent)
+        .await
+}
 
+pub async fn open_responses_proxy_request_with_settings(
+    body: &str,
+    settings: crate::settings::BackendSettings,
+) -> anyhow::Result<UpstreamProxyResponse> {
+    open_responses_proxy_request_with_settings_and_user_agent(body, settings, None).await
+}
+
+async fn open_responses_proxy_request_with_settings_and_user_agent(
+    body: &str,
+    settings: crate::settings::BackendSettings,
+    original_user_agent: Option<&str>,
+) -> anyhow::Result<UpstreamProxyResponse> {
     let request_json: Value = serde_json::from_str(body)?;
     let is_stream = request_json
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let client = crate::http_client::proxied_client(&effective_user_agent(
-        &relay.user_agent,
-        original_user_agent,
-    ))?;
-    let response_protocol = responses_proxy_target_protocol(&relay, &request_json)?;
-    let mut anthropic_request_for_retry = None;
-    let upstream = match response_protocol {
+    let context = RotationContext {
+        conversation_id: conversation_id_from_responses_request(&request_json),
+    };
+    let relay = crate::relay_rotation::select_relay_for_request(&settings, context)?;
+    let mut relays = vec![relay.clone()];
+    relays.extend(crate::relay_rotation::fallback_relays_after(
+        &settings, &relay.id,
+    )?);
+    let relay_count = relays.len();
+    for (attempt, relay) in relays.into_iter().enumerate() {
+        validate_upstream(&relay)?;
+        let response_protocol = responses_proxy_target_protocol(&relay, &request_json)?;
+        let endpoint = upstream_endpoint_for_protocol(&relay, response_protocol);
+        let has_more_candidates = attempt + 1 < relay_count;
+        let header_timeout = response_header_timeout(is_stream);
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "protocol_proxy.upstream_request",
+            json!({
+                "relayId": relay.id,
+                "relayName": relay.name,
+                "endpoint": endpoint,
+                "responseProtocol": response_protocol,
+                "stream": is_stream,
+                "attempt": attempt + 1,
+                "candidateCount": relay_count,
+                "headerTimeoutSeconds": header_timeout.as_secs()
+            }),
+        );
+        let client = crate::http_client::proxied_client(&effective_user_agent(
+            &relay.user_agent,
+            original_user_agent,
+        ))?;
+        let upstream = match send_responses_upstream_request(
+            &client,
+            &relay,
+            &request_json,
+            response_protocol,
+            is_stream,
+        )
+        .await
+        {
+            Ok(upstream) => upstream,
+            Err(error) => {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "protocol_proxy.upstream_request_failed",
+                    json!({
+                        "relayId": relay.id,
+                        "relayName": relay.name,
+                        "endpoint": endpoint,
+                        "responseProtocol": response_protocol,
+                        "stream": is_stream,
+                        "attempt": attempt + 1,
+                        "candidateCount": relay_count,
+                        "headerTimeoutSeconds": header_timeout.as_secs(),
+                        "willFailover": has_more_candidates,
+                        "error": error.to_string()
+                    }),
+                );
+                crate::relay_rotation::record_relay_request_failure(&settings);
+                if has_more_candidates {
+                    continue;
+                }
+                return Err(error).with_context(|| {
+                    format!(
+                        "供应商「{}」请求上游失败，endpoint: {}",
+                        relay.name, endpoint
+                    )
+                });
+            }
+        };
+        let status_code = upstream.status().as_u16();
+        let mut upstream_response = Some(upstream);
+        let mut body_override = None;
+        let mut status_code = status_code;
+        let mut content_type = upstream_response
+            .as_ref()
+            .unwrap()
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        if response_protocol == UpstreamResponseProtocol::Anthropic {
+            let mut anthropic_request = responses_to_anthropic_messages(request_json.clone())?;
+            apply_cached_anthropic_reasoning_compatibility(&mut anthropic_request);
+            if should_retry_anthropic_max_effort(status_code, &content_type, &anthropic_request) {
+                let response = upstream_response
+                    .take()
+                    .expect("anthropic response is present before retry inspection");
+                let error_body = response.bytes().await?.to_vec();
+                if let Some(fallback_effort) =
+                    anthropic_effort_fallback_from_error(&error_body, "max")
+                {
+                    remember_anthropic_reasoning_compatibility(&anthropic_request, fallback_effort);
+                    let mut retry_request = anthropic_request.clone();
+                    apply_cached_anthropic_reasoning_compatibility(&mut retry_request);
+                    let retry =
+                        send_anthropic_messages_request(&client, &relay, &retry_request, is_stream)
+                            .await?;
+                    status_code = retry.status().as_u16();
+                    content_type = retry
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    upstream_response = Some(retry);
+                } else {
+                    body_override = Some(error_body);
+                }
+            }
+        }
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "protocol_proxy.upstream_response",
+            json!({
+                "relayId": relay.id,
+                "relayName": relay.name,
+                "endpoint": endpoint,
+                "responseProtocol": response_protocol,
+                "stream": is_stream,
+                "statusCode": status_code,
+                "attempt": attempt + 1,
+                "candidateCount": relay_count,
+                "headerTimeoutSeconds": header_timeout.as_secs(),
+                "willFailover": has_more_candidates && !(200..300).contains(&status_code)
+            }),
+        );
+        crate::relay_rotation::record_relay_request_event(
+            &settings,
+            if (200..300).contains(&status_code) {
+                RotationEvent::Success
+            } else {
+                RotationEvent::Failure
+            },
+        );
+        if (200..300).contains(&status_code) || !has_more_candidates {
+            return Ok(UpstreamProxyResponse {
+                status_code,
+                is_stream: is_stream || content_type.contains("text/event-stream"),
+                content_type,
+                response_protocol,
+                response: upstream_response,
+                body_override,
+            });
+        }
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "protocol_proxy.upstream_failover",
+            json!({
+                "relayId": relay.id,
+                "relayName": relay.name,
+                "endpoint": endpoint,
+                "responseProtocol": response_protocol,
+                "stream": is_stream,
+                "statusCode": status_code,
+                "attempt": attempt + 1,
+                "candidateCount": relay_count,
+                "headerTimeoutSeconds": header_timeout.as_secs()
+            }),
+        );
+    }
+    anyhow::bail!("未找到可用的聚合供应商成员")
+}
+
+async fn send_responses_upstream_request(
+    client: &reqwest::Client,
+    relay: &crate::settings::RelayProfile,
+    request_json: &Value,
+    response_protocol: UpstreamResponseProtocol,
+    is_stream: bool,
+) -> anyhow::Result<reqwest::Response> {
+    match response_protocol {
         UpstreamResponseProtocol::Responses => {
-            client
-                .post(responses_url(&relay.base_url))
-                .bearer_auth(relay.api_key.trim())
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .json(&request_json)
-                .send()
-                .await?
+            send_upstream_request_for_responses(
+                upstream_request_builder(
+                    client.clone(),
+                    &responses_url(&relay.base_url),
+                    relay.api_key.trim(),
+                    is_stream,
+                    request_json,
+                ),
+                is_stream,
+            )
+            .await
         }
         UpstreamResponseProtocol::ChatCompletions => {
             let chat_request = responses_to_chat_completions(request_json.clone())?;
-            client
-                .post(chat_completions_url(&relay.base_url))
-                .bearer_auth(relay.api_key.trim())
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .json(&chat_request)
-                .send()
-                .await?
+            send_upstream_request_for_responses(
+                upstream_request_builder(
+                    client.clone(),
+                    &chat_completions_url(&relay.base_url),
+                    relay.api_key.trim(),
+                    is_stream,
+                    &chat_request,
+                ),
+                is_stream,
+            )
+            .await
         }
         UpstreamResponseProtocol::Anthropic => {
             let mut anthropic_request = responses_to_anthropic_messages(request_json.clone())?;
             apply_cached_anthropic_reasoning_compatibility(&mut anthropic_request);
-            let upstream =
-                send_anthropic_messages_request(&client, &relay, &anthropic_request).await?;
-            anthropic_request_for_retry = Some(anthropic_request);
-            upstream
-        }
-    };
-    let mut upstream_response = Some(upstream);
-    let mut body_override = None;
-    let mut status_code = upstream_response.as_ref().unwrap().status().as_u16();
-    let mut content_type = upstream_response
-        .as_ref()
-        .unwrap()
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-
-    if let Some(anthropic_request) = anthropic_request_for_retry.as_ref() {
-        if should_retry_anthropic_max_effort(status_code, &content_type, anthropic_request) {
-            let response = upstream_response
-                .take()
-                .expect("anthropic response is present before retry inspection");
-            let error_body = response.bytes().await?.to_vec();
-            if let Some(fallback_effort) = anthropic_effort_fallback_from_error(&error_body, "max")
-            {
-                remember_anthropic_reasoning_compatibility(anthropic_request, fallback_effort);
-                let mut retry_request = anthropic_request.clone();
-                apply_cached_anthropic_reasoning_compatibility(&mut retry_request);
-                let retry =
-                    send_anthropic_messages_request(&client, &relay, &retry_request).await?;
-                status_code = retry.status().as_u16();
-                content_type = retry
-                    .headers()
-                    .get(reqwest::header::CONTENT_TYPE)
-                    .and_then(|value| value.to_str().ok())
-                    .unwrap_or("")
-                    .to_string();
-                upstream_response = Some(retry);
-            } else {
-                body_override = Some(error_body);
-            }
+            send_anthropic_messages_request(client, relay, &anthropic_request, is_stream).await
         }
     }
+}
 
-    Ok(UpstreamProxyResponse {
-        status_code,
-        is_stream: is_stream || content_type.contains("text/event-stream"),
-        content_type,
-        response_protocol,
-        response: upstream_response,
-        body_override,
-    })
+fn upstream_endpoint_for_protocol(
+    relay: &crate::settings::RelayProfile,
+    response_protocol: UpstreamResponseProtocol,
+) -> String {
+    match response_protocol {
+        UpstreamResponseProtocol::Responses => responses_url(&relay.base_url),
+        UpstreamResponseProtocol::ChatCompletions => chat_completions_url(&relay.base_url),
+        UpstreamResponseProtocol::Anthropic => anthropic_messages_url(&relay.base_url),
+    }
 }
 
 fn responses_proxy_target_protocol(
@@ -891,41 +1076,54 @@ async fn send_anthropic_messages_request(
     client: &reqwest::Client,
     relay: &crate::settings::RelayProfile,
     anthropic_request: &Value,
+    is_stream: bool,
 ) -> anyhow::Result<reqwest::Response> {
-    Ok(client
-        .post(anthropic_messages_url(&relay.base_url))
-        .header("x-api-key", relay.api_key.trim())
-        .header("anthropic-version", ANTHROPIC_VERSION)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .json(anthropic_request)
-        .send()
-        .await?)
+    send_upstream_request_for_responses(
+        client
+            .post(anthropic_messages_url(&relay.base_url))
+            .header("x-api-key", relay.api_key.trim())
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .json(anthropic_request),
+        is_stream,
+    )
+    .await
 }
 
 pub async fn open_models_proxy_request(
     original_user_agent: Option<&str>,
 ) -> anyhow::Result<UpstreamProxyResponse> {
     let settings = SettingsStore::default().load().unwrap_or_default();
-    let relay = settings.active_relay_profile();
-    if !relay.local_proxy_enabled() {
+    let aggregate_enabled = settings.active_aggregate_relay_profile().is_some();
+    let relay = if aggregate_enabled {
+        crate::relay_rotation::select_relay_for_probe(&settings)?
+    } else {
+        settings.active_relay_profile()
+    };
+    if !aggregate_enabled && !relay.local_proxy_enabled() {
         anyhow::bail!("当前中转未启用本地代理");
     }
-    if relay.base_url.trim().is_empty() {
-        anyhow::bail!("Chat Completions 上游 Base URL 不能为空");
-    }
-    if relay.api_key.trim().is_empty() {
-        anyhow::bail!("Chat Completions 上游 Key 不能为空");
-    }
+    validate_upstream(&relay)?;
 
-    let client = crate::http_client::proxied_client(&effective_user_agent(
-        &relay.user_agent,
-        original_user_agent,
-    ))?;
-    let upstream = client
-        .get(models_url(&relay.base_url))
-        .bearer_auth(relay.api_key.trim())
-        .send()
-        .await?;
+    let endpoint = models_url(&relay.base_url);
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "protocol_proxy.models_request",
+        json!({
+            "relayId": relay.id,
+            "relayName": relay.name,
+            "endpoint": endpoint,
+            "responseProtocol": UpstreamResponseProtocol::Responses
+        }),
+    );
+    let upstream = send_upstream_request(
+        crate::http_client::proxied_client(&effective_user_agent(
+            &relay.user_agent,
+            original_user_agent,
+        ))?
+        .get(endpoint)
+        .bearer_auth(relay.api_key.trim()),
+    )
+    .await?;
     let status_code = upstream.status().as_u16();
     let content_type = upstream
         .headers()
@@ -965,17 +1163,16 @@ pub async fn open_chat_completions_proxy_request(
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let client = crate::http_client::proxied_client(&effective_user_agent(
+    let upstream = crate::http_client::proxied_client(&effective_user_agent(
         &relay.user_agent,
         original_user_agent,
-    ))?;
-    let upstream = client
-        .post(chat_completions_url(&relay.base_url))
-        .bearer_auth(relay.api_key.trim())
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .json(&request_json)
-        .send()
-        .await?;
+    ))?
+    .post(chat_completions_url(&relay.base_url))
+    .bearer_auth(relay.api_key.trim())
+    .header(reqwest::header::CONTENT_TYPE, "application/json")
+    .json(&request_json)
+    .send()
+    .await?;
     let status_code = upstream.status().as_u16();
     let content_type = upstream
         .headers()
@@ -992,6 +1189,55 @@ pub async fn open_chat_completions_proxy_request(
         response: Some(upstream),
         body_override: None,
     })
+}
+
+fn response_header_timeout(is_stream: bool) -> Duration {
+    if is_stream {
+        UPSTREAM_STREAM_HEADER_TIMEOUT
+    } else {
+        UPSTREAM_HEADER_TIMEOUT
+    }
+}
+
+fn upstream_request_builder(
+    client: reqwest::Client,
+    endpoint: &str,
+    api_key: &str,
+    is_stream: bool,
+    upstream_body: &Value,
+) -> reqwest::RequestBuilder {
+    let mut builder = client
+        .post(endpoint)
+        .bearer_auth(api_key)
+        .header(reqwest::header::CONTENT_TYPE, "application/json");
+    if is_stream {
+        builder = builder
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .header(reqwest::header::CACHE_CONTROL, "no-cache");
+    }
+    builder.json(upstream_body)
+}
+
+fn validate_upstream(relay: &crate::settings::RelayProfile) -> anyhow::Result<()> {
+    if relay.base_url.trim().is_empty() {
+        anyhow::bail!("上游 Base URL 不能为空");
+    }
+    if relay.api_key.trim().is_empty() {
+        anyhow::bail!("上游 Key 不能为空");
+    }
+    Ok(())
+}
+
+fn conversation_id_from_responses_request(body: &Value) -> Option<String> {
+    for key in ["conversation", "conversation_id", "previous_response_id"] {
+        if let Some(value) = body.get(key).and_then(Value::as_str) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn effective_user_agent(configured_user_agent: &str, original_user_agent: Option<&str>) -> String {

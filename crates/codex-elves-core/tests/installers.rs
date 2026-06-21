@@ -22,6 +22,22 @@ fn windows_entrypoint_plan_contains_silent_and_manager_entrypoints() {
     assert_eq!(plan.silent_icon_path, "C:/Tools/codex-elves.exe");
     assert_eq!(plan.manager_icon_path, "C:/Tools/codex-elves-manager.exe");
     assert_eq!(plan.uninstall_key, "CodexElves");
+    assert_eq!(
+        plan.uninstaller_path.replace('\\', "/"),
+        "C:/Tools/uninstall.exe"
+    );
+    assert_eq!(
+        plan.uninstall_command.replace('\\', "/"),
+        "\"C:/Tools/uninstall.exe\""
+    );
+    assert_eq!(
+        plan.quiet_uninstall_command.replace('\\', "/"),
+        "\"C:/Tools/uninstall.exe\" /S"
+    );
+    assert_ne!(
+        plan.uninstall_command,
+        "\"C:/Tools/codex-elves-manager.exe\""
+    );
 }
 
 #[test]
@@ -59,6 +75,11 @@ fn macos_bundle_metadata_contains_silent_and_manager_apps() {
         manager
             .info_plist
             .contains("<string>CodexElves 管理工具</string>")
+    );
+    assert_eq!(silent.binary_target_name.as_deref(), Some("codex-elves"));
+    assert_eq!(
+        manager.binary_target_name.as_deref(),
+        Some("codex-elves-manager")
     );
     assert!(silent.launch_script.contains("codex-elves"));
     assert!(manager.launch_script.contains("codex-elves-manager"));
@@ -105,6 +126,21 @@ fn companion_binary_path_resolves_macos_silent_app_next_to_manager_app() {
 }
 
 #[test]
+fn companion_binary_path_resolves_macos_manager_app_next_to_silent_app() {
+    let silent_exe = std::path::Path::new("/Applications/CodexElves.app/Contents/MacOS/CodexElves");
+
+    let companion =
+        companion_binary_path_from_exe(silent_exe, codex_elves_core::install::MANAGER_BINARY);
+
+    assert_eq!(
+        companion,
+        std::path::PathBuf::from(
+            "/Applications/CodexElves 管理工具.app/Contents/MacOS/CodexElvesManager"
+        )
+    );
+}
+
+#[test]
 fn macos_bundle_does_not_wrap_the_bundle_executable_in_itself() {
     let options = InstallOptions {
         install_root: Some("/Applications".into()),
@@ -118,6 +154,18 @@ fn macos_bundle_does_not_wrap_the_bundle_executable_in_itself() {
     let silent = build_macos_app_bundle(&options, false);
     let manager = build_macos_app_bundle(&options, true);
 
+    assert_eq!(
+        silent.binary_source,
+        Some(std::path::PathBuf::from(
+            "/Applications/CodexElves.app/Contents/MacOS/CodexElves"
+        ))
+    );
+    assert_eq!(
+        manager.binary_source,
+        Some(std::path::PathBuf::from(
+            "/Applications/CodexElves 管理工具.app/Contents/MacOS/CodexElvesManager"
+        ))
+    );
     assert!(!silent.launch_script.contains("CodexElves\""));
     assert!(!manager.launch_script.contains("CodexElvesManager\""));
     assert!(silent.launch_script.contains("codex-elves"));

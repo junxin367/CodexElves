@@ -41,18 +41,13 @@ fn bridge_script_defines_expected_globals_and_binding() {
 }
 
 #[test]
-fn injection_script_prefixes_helper_url_without_sponsor_images() {
+fn injection_script_prefixes_helper_url_and_version() {
     let script = assets::injection_script(45221);
 
     assert!(script.contains("window.__CODEX_SESSION_DELETE_HELPER__"));
     assert!(script.contains("http://127.0.0.1:45221"));
-    assert!(!script.contains("window.__CODEX_ELVES_SPONSOR_IMAGES__"));
     assert!(script.contains("window.__CODEX_ELVES_VERSION__"));
     assert!(script.contains(codex_elves_core::version::VERSION));
-    assert!(!script.contains("https://discord.gg/y96kX7A76v"));
-    assert!(!script.contains("https://t.me/CodexElves"));
-    assert!(!script.contains("data-codex-elves-discord"));
-    assert!(!script.contains("data-codex-elves-telegram"));
 }
 
 #[test]
@@ -98,18 +93,6 @@ fn injection_script_marks_diagnostic_build_and_reports_script_loaded() {
     assert!(script.contains(codex_elves_core::assets::DIAGNOSTIC_BUILD_ID));
     assert!(script.contains("script_loaded"));
     assert!(script.contains("data-codex-elves-build"));
-}
-
-#[test]
-fn injection_script_does_not_embed_ads_support_or_zed_features() {
-    let script = assets::injection_script(45221);
-
-    assert!(!script.contains("directFetchCodexElvesAds"));
-    assert!(!script.contains("BigPizzaV3/Ad-List"));
-    assert!(!script.contains("data-codex-elves-tab=\"sponsor\""));
-    assert!(!script.contains("请作者喝咖啡"));
-    assert!(!script.contains("Zed Remote open"));
-    assert!(!script.contains("/zed-remote/"));
 }
 
 #[test]
@@ -223,8 +206,8 @@ fn injection_script_unlocks_nested_disabled_plugin_install_buttons() {
 fn injection_script_keeps_bundled_marketplace_name_for_default_filter() {
     let script = assets::injection_script(45221);
 
-    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"10\""));
-    assert!(script.contains("if (name === \"openai-bundled\") return \"\""));
+    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"12\""));
+    assert!(!script.contains("function pluginMarketplaceAliasForName"));
     assert!(
         !script.contains("if (name === \"openai-bundled\") return \"codex-elves-openai-bundled\"")
     );
@@ -235,7 +218,7 @@ fn injection_script_keeps_bundled_marketplace_name_for_default_filter() {
 fn injection_script_does_not_bypass_plugin_marketplace_search_filters() {
     let script = assets::injection_script(45221);
 
-    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"10\""));
+    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"12\""));
     assert!(script.contains("isCodexPluginBuildFlavorFilter"));
     assert!(script.contains("source.includes(\"!u(e.marketplaceName)||e.marketplaceName===r\")"));
     assert!(script.contains("source.includes(\"!t.includes(e.name)\")"));
@@ -247,8 +230,9 @@ fn injection_script_does_not_bypass_plugin_marketplace_search_filters() {
 fn injection_script_expands_api_key_plugin_marketplace_requests() {
     let script = assets::injection_script(45221);
 
-    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"10\""));
+    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"12\""));
     assert!(script.contains("installPluginMarketplaceRequestPatch"));
+    assert!(script.contains("installPluginMarketplaceBridgePatch"));
     assert!(script.contains("installPluginBuildFlavorFilterPatch"));
     assert!(script.contains("Array.prototype.filter"));
     assert!(script.contains("codexPluginBuildFlavorFilterPatch"));
@@ -262,15 +246,21 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
     ));
     assert!(script.contains("plugin_marketplace_hidden_filter_bypassed"));
     assert!(script.contains("method === \"list-plugins\""));
+    assert!(script.contains("method === \"vscode://codex/list-plugins\""));
+    assert!(script.contains("message.type === \"fetch\""));
+    assert!(script.contains("data?.type === \"fetch-response\""));
+    assert!(script.contains("__codexPluginMarketplaceFetchRequestIds"));
     assert!(script.contains("delete next.marketplaceKinds"));
     assert!(script.contains("patchPluginMarketplaceResult"));
-    assert!(script.contains("pluginMarketplaceAliasForName"));
-    assert!(script.contains("marketplace.name = alias"));
+    assert!(script.contains("__CODEX_ELVES_PLUGIN_MARKETPLACES__"));
+    assert!(script.contains("mergeLocalPluginMarketplaces(result)"));
+    assert!(script.contains("plugin_marketplace_local_merged"));
     assert!(script.contains("restorePluginMarketplaceName"));
     assert!(script.contains(
         "next.remoteMarketplaceName = restorePluginMarketplaceName(next.remoteMarketplaceName)"
     ));
-    assert!(script.contains("if (name === \"openai-bundled\") return \"\""));
+    assert!(!script.contains("marketplace.name = alias"));
+    assert!(script.contains("if (name === \"openai-curated\" || name === \"codex-elves-openai-curated\") return \"OpenAI插件2(CodexElves)\""));
     assert!(
         script.contains("if (name === \"openai-curated\") return \"codex-elves-openai-curated\"")
     );

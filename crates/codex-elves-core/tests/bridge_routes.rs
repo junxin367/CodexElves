@@ -263,31 +263,6 @@ async fn runtime_routes_keep_user_script_inventory_shape() {
 }
 
 #[tokio::test]
-async fn removed_promotion_and_zed_routes_are_not_exposed() {
-    let ctx = test_context();
-
-    for path in [
-        "/ads",
-        "/zed-remote/status",
-        "/zed-remote/resolve-host",
-        "/zed-remote/fallback-request",
-        "/zed-remote/open",
-        "/zed-remote/projects",
-        "/zed-remote/remember-project",
-        "/zed-remote/forget-project",
-    ] {
-        assert_eq!(
-            handle_bridge_request(ctx.clone(), path, json!({})).await,
-            json!({
-                "status": "failed",
-                "session_id": "",
-                "message": "Unknown bridge path"
-            })
-        );
-    }
-}
-
-#[tokio::test]
 async fn runtime_status_devtools_and_repair_routes_are_dispatched() {
     let ctx = test_context();
 

@@ -707,6 +707,8 @@ pub fn backfill_relay_profile_from_home(
 ) -> anyhow::Result<()> {
     profile.config_contents = read_optional_text(&home.join("config.toml"))?;
     profile.auth_contents = read_optional_text(&home.join("auth.json"))?;
+    let live_config = profile.config_contents.clone();
+    sync_context_limits_from_config(profile, &live_config);
     if profile.model.trim().is_empty() {
         if let Some(model) = root_key_string(&profile.config_contents, "model") {
             profile.model = model;
@@ -733,6 +735,7 @@ pub fn backfill_relay_profile_from_home_with_common(
     profile.auth_contents = read_optional_text(&home.join("auth.json"))?;
     restore_profile_auth_from_live_config(profile, &template_auth)?;
     sync_profile_mode_from_backfilled_live(profile);
+    sync_context_limits_from_config(profile, &live_config);
     if profile.model.trim().is_empty() {
         if let Some(model) = root_key_string(&live_config, "model") {
             profile.model = model;
@@ -1589,6 +1592,35 @@ fn catalog_reasoning_effort(config_text: &str) -> String {
     }
 }
 
+fn sync_context_limits_from_config(profile: &mut RelayProfile, config_text: &str) {
+    if let Some(value) = root_positive_int_string(config_text, "model_context_window") {
+        profile.context_window = value;
+    }
+    if let Some(value) = root_positive_int_string(config_text, "model_auto_compact_token_limit") {
+        profile.auto_compact_limit = value;
+    }
+}
+
+fn root_positive_int_string(config_text: &str, key: &str) -> Option<String> {
+    if let Ok(doc) = parse_toml_document(config_text) {
+        if let Some(value) = doc
+            .get(key)
+            .and_then(Item::as_value)
+            .and_then(toml_edit::Value::as_integer)
+            .filter(|value| *value > 0)
+        {
+            return Some(value.to_string());
+        }
+    }
+
+    root_key_value(config_text, key)
+        .and_then(|value| value.split('#').next())
+        .map(str::trim)
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.to_string())
+}
+
 fn toml_value_is_subset(target: &toml_edit::Value, source: &toml_edit::Value) -> bool {
     match (target, source) {
         (toml_edit::Value::String(target), toml_edit::Value::String(source)) => {
@@ -1954,6 +1986,11 @@ pub fn relay_profile_model(profile: &RelayProfile) -> String {
 }
 
 fn relay_profile_base_url(profile: &RelayProfile) -> String {
+    if profile.relay_mode == crate::settings::RelayMode::Aggregate {
+        return crate::protocol_proxy::local_responses_proxy_base_url(
+            crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+        );
+    }
     if profile.local_proxy_enabled() {
         if !profile.upstream_base_url.trim().is_empty() {
             return profile.upstream_base_url.trim().to_string();
@@ -1985,6 +2022,9 @@ fn relay_profile_base_url(profile: &RelayProfile) -> String {
 }
 
 fn relay_profile_api_key(profile: &RelayProfile) -> String {
+    if profile.relay_mode == crate::settings::RelayMode::Aggregate {
+        return "codex-elves-aggregate".to_string();
+    }
     if profile.relay_mode == crate::settings::RelayMode::Official {
         return experimental_bearer_token_from_config(&profile.config_contents)
             .ok()
@@ -2066,12 +2106,26 @@ fn complete_relay_profile_config(profile: &RelayProfile) -> anyhow::Result<Strin
 
 pub fn normalize_relay_profile_for_storage(profile: &mut RelayProfile) -> anyhow::Result<()> {
     if profile.relay_mode == crate::settings::RelayMode::Official && !profile.official_mix_api_key {
-        profile.config_contents.clear();
+        let has_api_config = !profile.base_url.trim().is_empty()
+            || !profile.api_key.trim().is_empty()
+            || codex_auth_api_key(&profile.auth_contents).is_some()
+            || config_has_model_provider(profile.config_contents.as_str());
+        if has_api_config {
+            profile.config_contents.clear();
+        }
+        if !profile.model_list.trim().is_empty() {
+            profile.model_list = merge_model_into_model_list(&profile.model, &profile.model_list);
+        }
         profile.model.clear();
         profile.base_url.clear();
         profile.upstream_base_url.clear();
         profile.api_key.clear();
-        profile.auth_contents = remove_openai_api_key_from_auth_contents(&profile.auth_contents)?;
+        if auth_contents_looks_like_chatgpt_auth(&profile.auth_contents) {
+            profile.auth_contents =
+                remove_openai_api_key_from_auth_contents(&profile.auth_contents)?;
+        } else {
+            profile.auth_contents.clear();
+        }
         return Ok(());
     }
     let provider_base_url = provider_string_from_config(&profile.config_contents, "base_url")
@@ -2103,6 +2157,7 @@ pub fn normalize_relay_profile_for_storage(profile: &mut RelayProfile) -> anyhow
         profile.auth_contents = remove_openai_api_key_from_auth_contents(&profile.auth_contents)?;
     }
     profile.model = relay_profile_model(profile);
+    profile.model_list = merge_model_into_model_list(&profile.model, &profile.model_list);
     profile.upstream_base_url = source_base_url.clone();
     profile.base_url = source_base_url;
     profile.api_key = relay_profile_api_key(profile);
@@ -2123,6 +2178,48 @@ fn remove_openai_api_key_from_auth_contents(auth_contents: &str) -> anyhow::Resu
         return Ok(String::new());
     }
     Ok(format!("{}\n", serde_json::to_string_pretty(&value)?))
+}
+
+fn merge_model_into_model_list(model: &str, model_list: &str) -> String {
+    let model = model.trim();
+    let mut models = Vec::new();
+    if !model.is_empty() {
+        models.push(model.to_string());
+    }
+    for item in model_list.split(['\r', '\n', ',']).map(str::trim) {
+        if !item.is_empty() && !models.iter().any(|existing| existing == item) {
+            models.push(item.to_string());
+        }
+    }
+    models.join("\n")
+}
+
+fn config_has_model_provider(config_contents: &str) -> bool {
+    parse_toml_document(config_contents)
+        .ok()
+        .and_then(|doc| {
+            doc.get("model_provider")
+                .and_then(Item::as_str)
+                .map(str::to_string)
+        })
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn auth_contents_looks_like_chatgpt_auth(contents: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(contents) else {
+        return false;
+    };
+    let is_chatgpt = value
+        .get("auth_mode")
+        .and_then(Value::as_str)
+        .map(|mode| mode.eq_ignore_ascii_case("chatgpt"))
+        .unwrap_or(false);
+    is_chatgpt
+        && value
+            .get("tokens")
+            .map(tokens_have_login_secret)
+            .unwrap_or(false)
 }
 
 fn provider_string_from_config(config_contents: &str, key: &str) -> Option<String> {

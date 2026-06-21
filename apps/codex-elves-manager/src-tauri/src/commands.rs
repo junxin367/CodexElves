@@ -25,7 +25,6 @@ where
     #[serde(flatten)]
     pub payload: T,
 }
-
 #[derive(Debug, Clone, Serialize)]
 pub struct VersionPayload {
     pub version: String,
@@ -55,6 +54,32 @@ pub struct SettingsPayload {
     pub settings: BackendSettings,
     pub settings_path: String,
     pub user_scripts: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMarketplaceRepairPayload {
+    pub codex_home: String,
+    pub marketplace_root: Option<String>,
+    pub initialized: bool,
+    pub configured: bool,
+    pub needs_repair: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMarketplaceStatusPayload {
+    pub codex_home: String,
+    pub marketplace_root: Option<String>,
+    pub config_registered: bool,
+    pub needs_repair: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CcsProvidersPayload {
+    pub db_path: String,
+    pub providers: Vec<codex_elves_core::ccs_import::CcsProviderImport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -435,6 +460,84 @@ pub fn save_settings(settings: BackendSettings) -> CommandResult<SettingsPayload
 }
 
 #[tauri::command]
+pub fn load_ccs_providers() -> CommandResult<CcsProvidersPayload> {
+    let db_path = codex_elves_core::ccs_import::default_ccs_db_path();
+    match codex_elves_core::ccs_import::list_codex_providers_from_db(&db_path) {
+        Ok(providers) => ok(
+            &format!(
+                "已读取 cc-switch Codex 供应商配置：{} 个。",
+                providers.len()
+            ),
+            CcsProvidersPayload {
+                db_path: db_path.to_string_lossy().to_string(),
+                providers,
+            },
+        ),
+        Err(error) => failed(
+            &format!("读取 cc-switch 供应商配置失败：{error}"),
+            CcsProvidersPayload {
+                db_path: db_path.to_string_lossy().to_string(),
+                providers: Vec::new(),
+            },
+        ),
+    }
+}
+
+#[tauri::command]
+pub fn import_ccs_providers() -> CommandResult<SettingsPayload> {
+    let providers = match codex_elves_core::ccs_import::list_codex_providers_from_default_db() {
+        Ok(providers) => providers,
+        Err(error) => {
+            let payload = settings_payload_value().unwrap_or_else(|(_, payload)| payload);
+            return failed(&format!("读取 cc-switch 供应商配置失败：{error}"), payload);
+        }
+    };
+
+    let store = SettingsStore::default();
+    let mut settings = store.load().unwrap_or_default();
+    let mut existing_keys: Vec<String> = settings
+        .relay_profiles
+        .iter()
+        .map(codex_elves_core::ccs_import::imported_provider_identity)
+        .collect();
+    let mut existing_ids: Vec<String> = settings
+        .relay_profiles
+        .iter()
+        .map(|profile| profile.id.clone())
+        .collect();
+    let mut imported = 0usize;
+
+    for provider in providers {
+        let key = codex_elves_core::ccs_import::provider_identity_from_ccs(&provider);
+        if existing_keys.iter().any(|existing| existing == &key) {
+            continue;
+        }
+        let profile =
+            codex_elves_core::ccs_import::relay_profile_from_ccs(&provider, &existing_ids);
+        existing_ids.push(profile.id.clone());
+        existing_keys.push(key);
+        settings.relay_profiles.push(profile);
+        imported += 1;
+    }
+
+    if imported == 0 {
+        return settings_payload("没有新的 cc-switch 供应商配置需要导入。", "设置读取失败");
+    }
+
+    settings = normalize_settings_before_save(settings);
+    match store.save(&settings) {
+        Ok(()) => settings_payload(
+            &format!("已从 cc-switch 导入供应商配置：{imported} 个。"),
+            "导入供应商配置后重新读取设置失败",
+        ),
+        Err(error) => failed(
+            &format!("保存 cc-switch 供应商配置失败：{error}"),
+            settings_payload_value().unwrap_or_else(|(_, payload)| payload),
+        ),
+    }
+}
+
+#[tauri::command]
 pub fn list_local_sessions() -> CommandResult<LocalSessionsPayload> {
     let home = codex_elves_core::codex_sqlite::default_codex_home_dir();
     let db_paths = codex_elves_core::codex_sqlite::codex_session_db_paths_from_home(&home);
@@ -707,10 +810,14 @@ fn strip_common_config_text_fallback(config_contents: &str, common_config: &str)
 
     let mut kept = Vec::new();
     let mut skipping_table = false;
+    let mut in_root_section = true;
+    let mut removed_root_keys = std::collections::HashSet::new();
+    let source_root_keys = toml_root_keys_before_first_table(config_contents);
 
     for line in config_contents.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_root_section = false;
             let header = trimmed.to_string();
             skipping_table = common.table_headers.contains(&header);
             if skipping_table {
@@ -722,9 +829,21 @@ fn strip_common_config_text_fallback(config_contents: &str, common_config: &str)
             continue;
         }
 
-        if let Some(key) = toml_key_from_line(trimmed) {
+        if in_root_section && let Some(key) = toml_key_from_line(trimmed) {
             if common.root_keys.contains(key) {
-                continue;
+                let is_duplicate_common_key = removed_root_keys.contains(key)
+                    || source_root_keys.contains(key)
+                    || common.table_headers.contains("[features]")
+                    || common
+                        .table_headers
+                        .contains("[marketplaces.openai-bundled]")
+                    || common
+                        .table_headers
+                        .contains("[plugins.\"superpowers@openai-curated\"]");
+                if is_duplicate_common_key {
+                    removed_root_keys.insert(key.to_string());
+                    continue;
+                }
             }
         }
 
@@ -732,6 +851,20 @@ fn strip_common_config_text_fallback(config_contents: &str, common_config: &str)
     }
 
     ensure_text_newline(kept.join("\n").trim_end())
+}
+
+fn toml_root_keys_before_first_table(config_contents: &str) -> std::collections::HashSet<String> {
+    let mut keys = std::collections::HashSet::new();
+    for line in config_contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            break;
+        }
+        if let Some(key) = toml_key_from_line(trimmed) {
+            keys.insert(key.to_string());
+        }
+    }
+    keys
 }
 
 struct CommonConfigAnchors {
@@ -1065,6 +1198,73 @@ pub fn repair_backend() -> CommandResult<SettingsPayload> {
         Err(error) => format!("后端修复部分失败：{error}"),
     };
     settings_payload(&message, "修复后重新读取设置失败")
+}
+
+#[tauri::command]
+pub fn plugin_marketplace_status() -> CommandResult<PluginMarketplaceStatusPayload> {
+    let home = codex_elves_core::codex_home::default_codex_home_dir();
+    let status = codex_elves_core::plugin_marketplace::openai_curated_marketplace_status(&home);
+    ok(
+        if status.needs_repair() {
+            "插件市场需要初始化或注册。"
+        } else {
+            "插件市场已可用。"
+        },
+        PluginMarketplaceStatusPayload {
+            codex_home: home.to_string_lossy().to_string(),
+            marketplace_root: status
+                .marketplace_root
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            config_registered: status.config_registered,
+            needs_repair: status.needs_repair(),
+        },
+    )
+}
+
+#[tauri::command]
+pub async fn repair_plugin_marketplace() -> CommandResult<PluginMarketplaceRepairPayload> {
+    let home = codex_elves_core::codex_home::default_codex_home_dir();
+    match codex_elves_core::plugin_marketplace::initialize_openai_curated_marketplace_and_configure(
+        &home,
+    )
+    .await
+    {
+        Ok(result) => ok(
+            if result.initialized {
+                "插件市场已从 openai/plugins 初始化并注册。"
+            } else if result.configured {
+                "已注册本地插件市场。"
+            } else {
+                "插件市场已可用，无需修复。"
+            },
+            PluginMarketplaceRepairPayload {
+                codex_home: home.to_string_lossy().to_string(),
+                marketplace_root:
+                    codex_elves_core::plugin_marketplace::openai_curated_marketplace_status(&home)
+                        .marketplace_root
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().to_string()),
+                initialized: result.initialized,
+                configured: result.configured,
+                needs_repair: false,
+            },
+        ),
+        Err(error) => failed(
+            &format!("插件市场修复失败：{error}"),
+            PluginMarketplaceRepairPayload {
+                codex_home: home.to_string_lossy().to_string(),
+                marketplace_root:
+                    codex_elves_core::plugin_marketplace::openai_curated_marketplace_status(&home)
+                        .marketplace_root
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().to_string()),
+                initialized: false,
+                configured: false,
+                needs_repair: true,
+            },
+        ),
+    }
 }
 
 #[tauri::command]
@@ -1769,6 +1969,9 @@ pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
     }
     let relay = settings.active_relay_profile();
     log_relay_apply_request("manager.apply_relay_injection", &settings, &relay);
+    if settings.active_aggregate_relay_profile().is_some() {
+        return apply_aggregate_relay_injection_to_home(&home);
+    }
     if relay_has_complete_files(&relay) {
         return match codex_elves_core::relay_config::apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard(
             &home,
@@ -1860,6 +2063,33 @@ pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
             );
             failed(
                 &format!("写入中转配置失败：{error}"),
+                relay_payload(status, None),
+            )
+        }
+    }
+}
+
+fn apply_aggregate_relay_injection_to_home(home: &Path) -> CommandResult<RelayPayload> {
+    match codex_elves_core::relay_config::apply_relay_config_to_home_with_protocol(
+        home,
+        &codex_elves_core::protocol_proxy::local_responses_proxy_base_url(
+            codex_elves_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+        ),
+        "codex-elves-aggregate",
+        codex_elves_core::settings::RelayProtocol::Responses,
+        codex_elves_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+    ) {
+        Ok(result) => {
+            let status = codex_elves_core::relay_config::relay_status_from_home(home);
+            ok(
+                "聚合供应商配置已写入，真实请求会由本地代理按策略轮转。",
+                relay_payload(status, result.backup_path),
+            )
+        }
+        Err(error) => {
+            let status = codex_elves_core::relay_config::relay_status_from_home(home);
+            failed(
+                &format!("写入聚合供应商配置失败：{error}"),
                 relay_payload(status, None),
             )
         }
@@ -2611,6 +2841,20 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_relay_injection_writes_local_proxy_without_chatgpt_auth() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let result = apply_aggregate_relay_injection_to_home(temp.path());
+        let config = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+
+        assert_eq!(result.status, "ok");
+        assert!(result.payload.configured);
+        assert!(!result.payload.authenticated);
+        assert!(config.contains(r#"base_url = "http://127.0.0.1:45221/v1""#));
+        assert!(config.contains(r#"experimental_bearer_token = "codex-elves-aggregate""#));
+    }
+
+    #[test]
     fn relay_files_payload_reads_config_and_auth_contents() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -2968,10 +3212,16 @@ mod tests {
 
         let normalized = normalize_settings_before_save(settings);
 
+        let auth_json: serde_json::Value =
+            serde_json::from_str(&normalized.relay_profiles[0].auth_contents).unwrap();
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&normalized.relay_profiles[0].auth_contents)
-                .unwrap(),
-            serde_json::json!({"auth_mode":"chatgpt","tokens":{"access_token":"edited"}})
+            auth_json,
+            serde_json::json!({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": "edited"
+                }
+            })
         );
         assert!(normalized.relay_profiles[0].config_contents.is_empty());
     }

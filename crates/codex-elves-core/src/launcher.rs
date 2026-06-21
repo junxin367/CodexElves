@@ -135,6 +135,12 @@ pub trait LaunchHooks: Send + Sync {
     async fn ensure_computer_use_config(&self, _settings: &BackendSettings) -> anyhow::Result<()> {
         Ok(())
     }
+    async fn ensure_plugin_marketplace_config(
+        &self,
+        _settings: &BackendSettings,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
     async fn start_helper(&self, helper_port: u16) -> anyhow::Result<()>;
     async fn launch_codex(
         &self,
@@ -251,6 +257,7 @@ where
         if settings.provider_sync_enabled {
             hooks.run_provider_sync().await?;
         }
+        hooks.ensure_plugin_marketplace_config(&settings).await?;
         if settings.computer_use_guard_enabled {
             hooks.ensure_computer_use_config(&settings).await?;
         }
@@ -339,7 +346,7 @@ where
 }
 
 fn relay_protocol_proxy_enabled(settings: &BackendSettings) -> bool {
-    settings.active_relay_profile().local_proxy_enabled()
+    settings.active_relay_uses_protocol_proxy()
 }
 
 pub trait IntoLaunchHooks {
@@ -401,6 +408,37 @@ impl LaunchHooks for DefaultLaunchHooks {
 
     async fn run_provider_sync(&self) -> anyhow::Result<()> {
         anyhow::bail!("provider sync requires launcher hooks with codex-elves-data integration")
+    }
+
+    async fn ensure_plugin_marketplace_config(
+        &self,
+        settings: &BackendSettings,
+    ) -> anyhow::Result<()> {
+        if !settings.codex_app_plugin_marketplace_unlock {
+            return Ok(());
+        }
+        let home = crate::relay_config::default_codex_home_dir();
+        match crate::plugin_marketplace::ensure_openai_curated_marketplace_config(&home) {
+            Ok(true) => {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "launcher.openai_curated_marketplace_config_updated",
+                    serde_json::json!({
+                        "home": home,
+                    }),
+                );
+            }
+            Ok(false) => {}
+            Err(error) => {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "launcher.openai_curated_marketplace_config_failed",
+                    serde_json::json!({
+                        "home": home,
+                        "message": error.to_string(),
+                    }),
+                );
+            }
+        }
+        Ok(())
     }
 
     async fn apply_active_relay_profile(&self, settings: &BackendSettings) -> anyhow::Result<()> {

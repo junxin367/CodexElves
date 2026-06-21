@@ -268,6 +268,27 @@ fn apply_chat_protocol_relay_points_codex_to_local_responses_proxy() {
 }
 
 #[test]
+fn apply_aggregate_relay_points_codex_to_local_responses_proxy_without_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = RelayProfile {
+        id: "agg".to_string(),
+        name: "聚合供应商 1".to_string(),
+        relay_mode: RelayMode::Aggregate,
+        config_contents: String::new(),
+        auth_contents: String::new(),
+        ..RelayProfile::default()
+    };
+
+    let result = apply_relay_profile_to_home_with_switch_rules(temp.path(), &profile, "").unwrap();
+    let updated = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+
+    assert!(result.configured);
+    assert!(updated.contains(r#"wire_api = "responses""#));
+    assert!(updated.contains(r#"base_url = "http://127.0.0.1:45221/v1""#));
+    assert!(updated.contains(r#"experimental_bearer_token = "codex-elves-aggregate""#));
+}
+
+#[test]
 fn chat_protocol_profile_keeps_upstream_base_url_separate_from_codex_proxy() {
     let temp = tempfile::tempdir().unwrap();
     let mut profile = RelayProfile {
@@ -1529,6 +1550,39 @@ fn backfill_relay_profile_reads_live_files_and_model() {
 }
 
 #[test]
+fn backfill_relay_profile_reads_live_context_limits() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        r#"model = "mimo-v2.5-pro"
+model_provider = "custom"
+model_context_window = 1000000
+model_auto_compact_token_limit = 900000
+
+[model_providers.custom]
+base_url = "http://127.0.0.1:45221/v1"
+"#,
+    )
+    .unwrap();
+    let mut profile = RelayProfile::default();
+
+    backfill_relay_profile_from_home(temp.path(), &mut profile).unwrap();
+
+    assert_eq!(profile.context_window, "1000000");
+    assert_eq!(profile.auto_compact_limit, "900000");
+    assert!(
+        profile
+            .config_contents
+            .contains("model_context_window = 1000000")
+    );
+    assert!(
+        profile
+            .config_contents
+            .contains("model_auto_compact_token_limit = 900000")
+    );
+}
+
+#[test]
 fn backfill_relay_profile_with_common_strips_common_config_for_switching() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -1564,6 +1618,40 @@ command = "npx"
             .contains(r#"model_provider = "live""#)
     );
     assert_eq!(profile.auth_contents, r#"{"OPENAI_API_KEY":"sk-live"}"#);
+}
+
+#[test]
+fn backfill_relay_profile_with_common_reads_live_context_limits() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        r#"model = "mimo-v2.5-pro"
+model_provider = "custom"
+model_context_window = 1000000
+model_auto_compact_token_limit = 900000
+
+[model_providers.custom]
+base_url = "http://127.0.0.1:45221/v1"
+
+[mcp_servers.context7]
+command = "npx"
+"#,
+    )
+    .unwrap();
+    let mut profile = RelayProfile::default();
+    let mut common = r#"[mcp_servers.context7]
+command = "npx"
+"#
+    .to_string();
+
+    backfill_relay_profile_from_home_with_common(temp.path(), &mut profile, &mut common).unwrap();
+    apply_relay_profile_files_to_home_with_context(temp.path(), &profile, &common).unwrap();
+
+    let config = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert_eq!(profile.context_window, "1000000");
+    assert_eq!(profile.auto_compact_limit, "900000");
+    assert!(config.contains("model_context_window = 1000000"));
+    assert!(config.contains("model_auto_compact_token_limit = 900000"));
 }
 
 #[test]
