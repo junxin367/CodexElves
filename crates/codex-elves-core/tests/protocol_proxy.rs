@@ -605,6 +605,59 @@ fn responses_request_normalizes_empty_assistant_messages_for_chat_upstream() {
 }
 
 #[test]
+fn responses_input_sanitizes_invalid_function_call_arguments_history() {
+    let converted = responses_to_chat_completions(json!({
+        "model": "gpt-5-mini",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "bad_object",
+                "name": "broken_args",
+                "arguments": "{foo: \"bar\"}"
+            },
+            {
+                "type": "function_call",
+                "call_id": "plain_text",
+                "name": "plain_args",
+                "arguments": "raw text with \"quotes\" and \\slashes"
+            },
+            {
+                "type": "function_call",
+                "call_id": "array_args",
+                "name": "array_args",
+                "arguments": "[1,2,3]"
+            },
+            {
+                "type": "tool_call",
+                "tool_use": {
+                    "id": "object_args",
+                    "name": "object_args",
+                    "input": { "ok": true }
+                }
+            }
+        ]
+    }))
+    .unwrap();
+
+    let calls = converted["messages"][0]["tool_calls"].as_array().unwrap();
+    for call in calls {
+        let arguments = call["function"]["arguments"].as_str().unwrap();
+        serde_json::from_str::<serde_json::Value>(arguments)
+            .expect("chat tool call arguments must always be valid JSON");
+    }
+    assert_eq!(
+        calls[0]["function"]["arguments"],
+        "{\"input\":\"{foo: \\\"bar\\\"}\"}"
+    );
+    assert_eq!(
+        calls[1]["function"]["arguments"],
+        "{\"input\":\"raw text with \\\"quotes\\\" and \\\\slashes\"}"
+    );
+    assert_eq!(calls[2]["function"]["arguments"], "{\"input\":[1,2,3]}");
+    assert_eq!(calls[3]["function"]["arguments"], "{\"ok\":true}");
+}
+
+#[test]
 fn responses_request_drops_tool_controls_when_no_chat_tools_survive() {
     let converted = responses_to_chat_completions(json!({
         "model": "gpt-5-mini",
