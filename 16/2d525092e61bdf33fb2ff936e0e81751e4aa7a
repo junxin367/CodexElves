@@ -1,0 +1,80 @@
+crates/codex-elves-core/src/settings.rs
+  s_945e980b26cc67::t_989c89c823cdc0 1602-1604,1609-1618,1878-1880
+  s_945e980b26cc67::t_40f2e8c6e76fd5 115-144,234,311-314,368-369,471-496,500,535-538,771-785,1557-1601,1605-1608,1619-1627,1847-1877,1881-1887
+  s_945e980b26cc67::t_e16434f836e14d 497-499
+assets/inject/renderer-inject.js
+  s_945e980b26cc67::t_8b5c4f92e9d78b 91-92
+  s_945e980b26cc67::t_4a0faee5b6dd45 63,102-105,124,2511,2553,2585,2806,2832,2860,2866,2872,2887,2898-2899,2914,2946,2959
+crates/codex-elves-core/src/install/windows.rs
+  s_945e980b26cc67::t_b590b77535742f 20-22
+Cargo.toml
+  s_945e980b26cc67::t_4a0faee5b6dd45 17
+crates/codex-elves-core/tests/relay_switch.rs
+  s_945e980b26cc67::t_b40d4bfdc52482 3-4
+crates/codex-elves-core/src/relay_rotation.rs
+  s_945e980b26cc67::t_4a0faee5b6dd45 1-335
+crates/codex-elves-core/tests/protocol_proxy.rs
+  s_945e980b26cc67::t_5a8ebfabfe0467 12-14
+  s_945e980b26cc67::t_a5cdb2028f2f6e 15,1839-1860,1867-1868
+  s_945e980b26cc67::t_3434427f696477 1757-1760,1778-1779
+  s_945e980b26cc67::t_40f2e8c6e76fd5 8-11,23-24,1692-1756,1761-1777,1780-1838,1861-1866,1869-1889
+crates/codex-elves-core/src/protocol_proxy.rs
+  s_945e980b26cc67::t_3c54bf4354ca56 8,10,13,17-19
+  s_945e980b26cc67::t_100a7acc08a9ac 1202-1204
+  s_945e980b26cc67::t_c92e60bec5414b 446-447,483
+  s_945e980b26cc67::t_40f2e8c6e76fd5 481-482,484-488,495-520,813-819,822-823,833-836,882-898,925-927,960,975-976,984-987,1083-1086,1111,1118-1126,1166,1169-1175,1194-1199,1201,1205-1242
+  s_945e980b26cc67::t_edc3b40e843f59 1200
+  s_945e980b26cc67::t_a9bad80874df26 991-999,1001-1011,1015-1025,1030,1033,1035-1043
+  s_945e980b26cc67::t_5c1298e8756ac2 489-494
+  s_945e980b26cc67::t_dfbcac251c6c6a 808-810,812,820-821,829-832,837-881,899-924,928-958,964-974,977-983,988-990
+  s_945e980b26cc67::t_a3f15b05d76880 959,961-963,1079,1081-1082,1087-1090
+  s_945e980b26cc67::t_6a386b1d34e687 1097-1103,1106-1110,1112-1117
+crates/codex-elves-core/tests/installers.rs
+  s_945e980b26cc67::t_210db0b3703c5e 25-27,32,34-40,79-83,129,131-141,157-168
+  s_945e980b26cc67::t_40f2e8c6e76fd5 28-31,33,128,130,142
+crates/codex-elves-core/src/assets.rs
+  s_945e980b26cc67::t_fec201eea46246 168-169
+  s_945e980b26cc67::t_9e315c5a6666ec 2
+  s_945e980b26cc67::t_4a0faee5b6dd45 22,24,29,34-167,172-173,184,186,193,195
+crates/codex-elves-core/tests/relay_rotation.rs
+  s_945e980b26cc67::t_4a0faee5b6dd45 2-4,6-409
+  s_945e980b26cc67::t_1f88ece98f3992 1,5
+crates/codex-elves-core/src/plugin_marketplace.rs
+  s_945e980b26cc67::t_c9c8f3cf7b7acb 99-100,234
+  s_945e980b26cc67::t_4a0faee5b6dd45 1-98,101-233,235-485
+crates/codex-elves-core/src/ccs_import.rs
+  s_945e980b26cc67::t_2efec7183d2665 86-94,102-111,262-266
+  s_945e980b26cc67::t_866bca7fb70a0f 268,270-271
+  s_945e980b26cc67::t_4a0faee5b6dd45 1-85,95-101,112-261,267,269,272-426
+apps/codex-elves-manager/src/App.tsx
+  s_945e980b26cc67::t_217f135e1ea7f3 195-196
+  s_945e980b26cc67::t_4a6a767675edcd 200
+  s_945e980b26cc67::t_4a0faee5b6dd45 99-113,146-147,185-194,197-199,201-205,240,340-343,355-369,427-432,544,618-619,636,657-662,5794
+scripts/build-windows-installer.ps1
+  s_945e980b26cc67::t_df72b7f56912a9 69
+  s_945e980b26cc67::t_3a1c9dd4663082 85
+  s_945e980b26cc67::t_ae86a56e95585a 1-68,70-84,86-128
+crates/codex-elves-core/src/install/macos.rs
+  s_945e980b26cc67::t_4a0faee5b6dd45 25-33
+apps/codex-elves-manager/src-tauri/src/commands.rs
+  s_945e980b26cc67::t_3bc93124e5be9b 2853
+  s_945e980b26cc67::t_40f2e8c6e76fd5 59-84,462-539,813-815,820,832,834-846,856-869,1203-1269,1972-1974,2072-2098,2843-2852,2854-2856,3215-3216,3218-3224
+build.ps1
+  s_945e980b26cc67::t_ae86a56e95585a 1-13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "162d525092e61bdf33fb2ff936e0e81751e4aa7a",
+  "prompts": {},
+  "sessions": {
+    "s_945e980b26cc67": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ed524-6416-7581-bf3a-3628dbd05629",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
