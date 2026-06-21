@@ -1,0 +1,19 @@
+AGENTS.md
+  s_945e980b26cc67::t_f9c9b8a529be4d 1-144
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "cd17cae27a12c2c2b7e8b6aff454ec25f6c14a73",
+  "prompts": {},
+  "sessions": {
+    "s_945e980b26cc67": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ed524-6416-7581-bf3a-3628dbd05629",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
