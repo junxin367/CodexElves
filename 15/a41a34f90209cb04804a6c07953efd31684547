@@ -1,0 +1,23 @@
+crates/codex-elves-core/tests/installers.rs
+  s_945e980b26cc67::t_5d50cd9cee9c21 109-112,114-117
+  s_945e980b26cc67::t_e069ec1a5c4da0 113
+apps/codex-elves-manager/src-tauri/src/lib.rs
+  s_945e980b26cc67::t_43281847770ba6 98-99
+  s_945e980b26cc67::t_57c57c3827ef4b 113-114
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "15a41a34f90209cb04804a6c07953efd31684547",
+  "prompts": {},
+  "sessions": {
+    "s_945e980b26cc67": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ed524-6416-7581-bf3a-3628dbd05629",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
