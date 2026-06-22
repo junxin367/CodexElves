@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -37,7 +38,14 @@ const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
 const ERROR_BODY_PREVIEW_LIMIT: usize = 1024;
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_DEFAULT_REASONING_EFFORT: &str = "high";
+const ANTHROPIC_TOOL_USE_SYSTEM_REMINDER: &str = "Tool use protocol for Anthropic: when a tool is needed, call one of the provided tools through Anthropic's native tool_use content block. Do not write XML-like tool calls in assistant text, including <invoke>, <parameter>, </parameter>, </invoke>, or a leading marker such as course/codex/call. Assistant text that contains a tool call is invalid; use native tool_use only.";
 const REASONING_EFFORT_ORDER: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
+static PROTOCOL_PROXY_DIAGNOSTIC_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn next_protocol_proxy_diagnostic_id() -> String {
+    let sequence = PROTOCOL_PROXY_DIAGNOSTIC_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("ppx-{}-{sequence}", std::process::id())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChatReasoningStyle {
@@ -310,6 +318,13 @@ fn chat_completion_to_response_with_context(
 }
 
 pub fn responses_to_anthropic_messages(body: Value) -> anyhow::Result<Value> {
+    responses_to_anthropic_messages_with_diagnostic_id(body, None)
+}
+
+fn responses_to_anthropic_messages_with_diagnostic_id(
+    body: Value,
+    diagnostic_id: Option<&str>,
+) -> anyhow::Result<Value> {
     let mut result = json!({});
 
     if let Some(model) = body.get("model") {
@@ -368,6 +383,7 @@ pub fn responses_to_anthropic_messages(body: Value) -> anyhow::Result<Value> {
         }
     }
     if has_tools {
+        system_chunks.push(ANTHROPIC_TOOL_USE_SYSTEM_REMINDER.to_string());
         if let Some(tool_choice) = body
             .get("tool_choice")
             .and_then(|value| responses_tool_choice_to_anthropic(value, &tool_context))
@@ -382,41 +398,58 @@ pub fn responses_to_anthropic_messages(body: Value) -> anyhow::Result<Value> {
 
     let model = body.get("model").and_then(Value::as_str).unwrap_or("");
     apply_anthropic_reasoning_options(&mut result, &body, model);
+    log_anthropic_request_shape(&result, &body, diagnostic_id);
 
     Ok(result)
 }
 
 pub fn anthropic_message_to_response(body: Value) -> anyhow::Result<Value> {
-    anthropic_message_to_response_with_context(body, &CodexToolContext::default(), None)
+    anthropic_message_to_response_with_context(body, &CodexToolContext::default(), None, None)
 }
 
 pub fn anthropic_message_to_response_with_request(
     body: Value,
     original_request: &Value,
 ) -> anyhow::Result<Value> {
+    anthropic_message_to_response_with_request_and_diagnostic_id(body, original_request, None)
+}
+
+pub fn anthropic_message_to_response_with_request_and_diagnostic_id(
+    body: Value,
+    original_request: &Value,
+    diagnostic_id: Option<&str>,
+) -> anyhow::Result<Value> {
     let context = build_codex_tool_context(original_request.get("tools"));
-    anthropic_message_to_response_with_context(body, &context, Some(original_request))
+    anthropic_message_to_response_with_context(
+        body,
+        &context,
+        Some(original_request),
+        diagnostic_id,
+    )
 }
 
 fn anthropic_message_to_response_with_context(
     body: Value,
     tool_context: &CodexToolContext,
     original_request: Option<&Value>,
+    diagnostic_id: Option<&str>,
 ) -> anyhow::Result<Value> {
     let response_id = response_id_from_chat_id(body.get("id").and_then(Value::as_str));
     let stop_reason = body.get("stop_reason").and_then(Value::as_str);
     let status = anthropic_response_status(stop_reason);
+    let output = anthropic_content_to_response_output_items(
+        body.get("content").unwrap_or(&Value::Null),
+        &response_id,
+        tool_context,
+    );
+    log_anthropic_response_shape(&body, &output, false, diagnostic_id);
     let mut response = json!({
         "id": response_id,
         "object": "response",
         "created_at": 0,
         "status": status,
         "model": body.get("model").and_then(Value::as_str).unwrap_or(""),
-        "output": anthropic_content_to_response_output_items(
-            body.get("content").unwrap_or(&Value::Null),
-            &response_id,
-            tool_context
-        ),
+        "output": output,
         "usage": anthropic_usage_to_responses_usage(body.get("usage"))
     });
 
@@ -439,6 +472,7 @@ pub struct UpstreamProxyResponse {
     pub content_type: String,
     pub is_stream: bool,
     pub response_protocol: UpstreamResponseProtocol,
+    pub diagnostic_id: String,
     pub response: Option<reqwest::Response>,
     pub body_override: Option<Vec<u8>>,
 }
@@ -660,8 +694,18 @@ impl Default for AnthropicSseToResponsesConverter {
 
 impl AnthropicSseToResponsesConverter {
     pub fn with_request(original_request: &Value) -> Self {
+        Self::with_request_and_diagnostic_id(original_request, None)
+    }
+
+    pub fn with_request_and_diagnostic_id(
+        original_request: &Value,
+        diagnostic_id: Option<&str>,
+    ) -> Self {
         Self {
-            state: AnthropicSseState::with_request(original_request),
+            state: AnthropicSseState::with_request_and_diagnostic_id(
+                original_request,
+                diagnostic_id,
+            ),
             ..Self::default()
         }
     }
@@ -821,6 +865,7 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
     settings: crate::settings::BackendSettings,
     original_user_agent: Option<&str>,
 ) -> anyhow::Result<UpstreamProxyResponse> {
+    let diagnostic_id = next_protocol_proxy_diagnostic_id();
     let request_json: Value = serde_json::from_str(body)?;
     let is_stream = request_json
         .get("stream")
@@ -844,6 +889,7 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
         let _ = crate::diagnostic_log::append_diagnostic_log(
             "protocol_proxy.upstream_request",
             json!({
+                "diagnosticId": diagnostic_id.as_str(),
                 "relayId": relay.id,
                 "relayName": relay.name,
                 "endpoint": endpoint,
@@ -864,6 +910,7 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
             &request_json,
             response_protocol,
             is_stream,
+            &diagnostic_id,
         )
         .await
         {
@@ -872,6 +919,7 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
                 let _ = crate::diagnostic_log::append_diagnostic_log(
                     "protocol_proxy.upstream_request_failed",
                     json!({
+                        "diagnosticId": diagnostic_id.as_str(),
                         "relayId": relay.id,
                         "relayName": relay.name,
                         "endpoint": endpoint,
@@ -909,7 +957,10 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
             .unwrap_or("")
             .to_string();
         if response_protocol == UpstreamResponseProtocol::Anthropic {
-            let mut anthropic_request = responses_to_anthropic_messages(request_json.clone())?;
+            let mut anthropic_request = responses_to_anthropic_messages_with_diagnostic_id(
+                request_json.clone(),
+                Some(&diagnostic_id),
+            )?;
             apply_cached_anthropic_reasoning_compatibility(&mut anthropic_request);
             if should_retry_anthropic_max_effort(status_code, &content_type, &anthropic_request) {
                 let response = upstream_response
@@ -941,6 +992,7 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
         let _ = crate::diagnostic_log::append_diagnostic_log(
             "protocol_proxy.upstream_response",
             json!({
+                "diagnosticId": diagnostic_id.as_str(),
                 "relayId": relay.id,
                 "relayName": relay.name,
                 "endpoint": endpoint,
@@ -967,6 +1019,7 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
                 is_stream: is_stream || content_type.contains("text/event-stream"),
                 content_type,
                 response_protocol,
+                diagnostic_id,
                 response: upstream_response,
                 body_override,
             });
@@ -974,6 +1027,7 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
         let _ = crate::diagnostic_log::append_diagnostic_log(
             "protocol_proxy.upstream_failover",
             json!({
+                "diagnosticId": diagnostic_id.as_str(),
                 "relayId": relay.id,
                 "relayName": relay.name,
                 "endpoint": endpoint,
@@ -995,6 +1049,7 @@ async fn send_responses_upstream_request(
     request_json: &Value,
     response_protocol: UpstreamResponseProtocol,
     is_stream: bool,
+    diagnostic_id: &str,
 ) -> anyhow::Result<reqwest::Response> {
     match response_protocol {
         UpstreamResponseProtocol::Responses => {
@@ -1025,7 +1080,10 @@ async fn send_responses_upstream_request(
             .await
         }
         UpstreamResponseProtocol::Anthropic => {
-            let mut anthropic_request = responses_to_anthropic_messages(request_json.clone())?;
+            let mut anthropic_request = responses_to_anthropic_messages_with_diagnostic_id(
+                request_json.clone(),
+                Some(diagnostic_id),
+            )?;
             apply_cached_anthropic_reasoning_compatibility(&mut anthropic_request);
             send_anthropic_messages_request(client, relay, &anthropic_request, is_stream).await
         }
@@ -1093,6 +1151,7 @@ async fn send_anthropic_messages_request(
 pub async fn open_models_proxy_request(
     original_user_agent: Option<&str>,
 ) -> anyhow::Result<UpstreamProxyResponse> {
+    let diagnostic_id = next_protocol_proxy_diagnostic_id();
     let settings = SettingsStore::default().load().unwrap_or_default();
     let aggregate_enabled = settings.active_aggregate_relay_profile().is_some();
     let relay = if aggregate_enabled {
@@ -1109,6 +1168,7 @@ pub async fn open_models_proxy_request(
     let _ = crate::diagnostic_log::append_diagnostic_log(
         "protocol_proxy.models_request",
         json!({
+            "diagnosticId": diagnostic_id.as_str(),
             "relayId": relay.id,
             "relayName": relay.name,
             "endpoint": endpoint,
@@ -1137,6 +1197,7 @@ pub async fn open_models_proxy_request(
         is_stream: false,
         content_type,
         response_protocol: UpstreamResponseProtocol::Responses,
+        diagnostic_id,
         response: Some(upstream),
         body_override: None,
     })
@@ -1146,6 +1207,7 @@ pub async fn open_chat_completions_proxy_request(
     body: &str,
     original_user_agent: Option<&str>,
 ) -> anyhow::Result<UpstreamProxyResponse> {
+    let diagnostic_id = next_protocol_proxy_diagnostic_id();
     let settings = SettingsStore::default().load().unwrap_or_default();
     let relay = settings.active_relay_profile();
     if !relay.local_proxy_enabled() {
@@ -1186,6 +1248,7 @@ pub async fn open_chat_completions_proxy_request(
         is_stream: is_stream || content_type.contains("text/event-stream"),
         content_type,
         response_protocol: UpstreamResponseProtocol::ChatCompletions,
+        diagnostic_id,
         response: Some(upstream),
         body_override: None,
     })
@@ -1259,6 +1322,7 @@ pub async fn handle_responses_proxy_request(body: &str) -> anyhow::Result<ProxyH
     let upstream_content_type = upstream.content_type.clone();
     let is_stream = upstream.is_stream;
     let response_protocol = upstream.response_protocol;
+    let diagnostic_id = upstream.diagnostic_id.clone();
     let upstream_body = upstream.into_body_bytes().await?;
 
     if !(200..300).contains(&status_code) {
@@ -1296,7 +1360,12 @@ pub async fn handle_responses_proxy_request(body: &str) -> anyhow::Result<ProxyH
                 chat_sse_to_responses_sse_with_request(&text, &request_json).into_bytes()
             }
             UpstreamResponseProtocol::Anthropic => {
-                anthropic_sse_to_responses_sse_with_request(&text, &request_json).into_bytes()
+                anthropic_sse_to_responses_sse_with_request_and_diagnostic_id(
+                    &text,
+                    &request_json,
+                    Some(&diagnostic_id),
+                )
+                .into_bytes()
             }
             UpstreamResponseProtocol::Responses => unreachable!(),
         };
@@ -1321,7 +1390,11 @@ pub async fn handle_responses_proxy_request(body: &str) -> anyhow::Result<ProxyH
             chat_completion_to_response_with_request(upstream_json, &request_json)?
         }
         UpstreamResponseProtocol::Anthropic => {
-            anthropic_message_to_response_with_request(upstream_json, &request_json)?
+            anthropic_message_to_response_with_request_and_diagnostic_id(
+                upstream_json,
+                &request_json,
+                Some(&diagnostic_id),
+            )?
         }
         UpstreamResponseProtocol::Responses => unreachable!(),
     };
@@ -1452,7 +1525,18 @@ pub fn anthropic_sse_to_responses_sse_with_request(
     input: &str,
     original_request: &Value,
 ) -> String {
-    let mut converter = AnthropicSseToResponsesConverter::with_request(original_request);
+    anthropic_sse_to_responses_sse_with_request_and_diagnostic_id(input, original_request, None)
+}
+
+pub fn anthropic_sse_to_responses_sse_with_request_and_diagnostic_id(
+    input: &str,
+    original_request: &Value,
+    diagnostic_id: Option<&str>,
+) -> String {
+    let mut converter = AnthropicSseToResponsesConverter::with_request_and_diagnostic_id(
+        original_request,
+        diagnostic_id,
+    );
     let mut output = converter.push_bytes(input.as_bytes());
     output.extend(converter.finish());
     String::from_utf8(output).unwrap_or_default()
@@ -2250,16 +2334,41 @@ enum AnthropicBlockKind {
 #[derive(Debug, Default)]
 struct AnthropicSseState {
     inner: ChatSseState,
+    diagnostic_id: Option<String>,
     blocks: BTreeMap<usize, AnthropicBlockKind>,
+    text_buffers: BTreeMap<usize, String>,
+    text_passthrough: BTreeSet<usize>,
     usage: Value,
+    text_block_count: usize,
+    thinking_block_count: usize,
+    native_tool_use_block_count: usize,
+    other_block_count: usize,
+    textual_invoke_block_count: usize,
+    textual_invoke_call_count: usize,
+    native_tool_names: BTreeSet<String>,
+    textual_invoke_tool_names: BTreeSet<String>,
 }
 
 impl AnthropicSseState {
-    fn with_request(original_request: &Value) -> Self {
+    fn with_request_and_diagnostic_id(
+        original_request: &Value,
+        diagnostic_id: Option<&str>,
+    ) -> Self {
         Self {
             inner: ChatSseState::with_request(original_request),
+            diagnostic_id: diagnostic_id.map(ToString::to_string),
             blocks: BTreeMap::new(),
+            text_buffers: BTreeMap::new(),
+            text_passthrough: BTreeSet::new(),
             usage: json!({}),
+            text_block_count: 0,
+            thinking_block_count: 0,
+            native_tool_use_block_count: 0,
+            other_block_count: 0,
+            textual_invoke_block_count: 0,
+            textual_invoke_call_count: 0,
+            native_tool_names: BTreeSet::new(),
+            textual_invoke_tool_names: BTreeSet::new(),
         }
     }
 
@@ -2268,9 +2377,9 @@ impl AnthropicSseState {
             "message_start" => self.handle_message_start_into(chunk, output),
             "content_block_start" => self.handle_content_block_start_into(chunk, output),
             "content_block_delta" => self.handle_content_block_delta_into(chunk, output),
-            "content_block_stop" => self.handle_content_block_stop(chunk),
+            "content_block_stop" => self.handle_content_block_stop(chunk, output),
             "message_delta" => self.handle_message_delta_into(chunk),
-            "message_stop" => self.inner.finalize_into(output),
+            "message_stop" => self.handle_message_stop_into(output),
             _ => {}
         }
     }
@@ -2294,14 +2403,16 @@ impl AnthropicSseState {
         let block = chunk.get("content_block").unwrap_or(&Value::Null);
         match block.get("type").and_then(Value::as_str).unwrap_or("") {
             "text" => {
+                self.text_block_count += 1;
                 self.blocks.insert(index, AnthropicBlockKind::Text);
                 if let Some(text) = block.get("text").and_then(Value::as_str) {
                     if !text.is_empty() {
-                        self.inner.push_content_delta_into(text, output);
+                        self.handle_text_delta_into(index, text, output);
                     }
                 }
             }
             "thinking" => {
+                self.thinking_block_count += 1;
                 self.blocks.insert(index, AnthropicBlockKind::Thinking);
                 if let Some(thinking) = block.get("thinking").and_then(Value::as_str) {
                     if !thinking.is_empty() {
@@ -2310,9 +2421,17 @@ impl AnthropicSseState {
                 }
             }
             "tool_use" => {
+                self.native_tool_use_block_count += 1;
                 self.blocks.insert(index, AnthropicBlockKind::Tool);
                 self.inner.flush_inline_think_at_boundary_into(output);
                 self.inner.finalize_reasoning_into(output);
+                if let Some(name) = block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                {
+                    self.native_tool_names.insert(name.to_string());
+                }
                 let fake = json!({
                     "index": index,
                     "id": block.get("id").and_then(Value::as_str).unwrap_or(""),
@@ -2337,7 +2456,9 @@ impl AnthropicSseState {
                     self.inner.push_tool_call_delta_into(&fake, output);
                 }
             }
-            _ => {}
+            _ => {
+                self.other_block_count += 1;
+            }
         }
     }
 
@@ -2348,7 +2469,7 @@ impl AnthropicSseState {
             "text_delta" => {
                 if let Some(text) = delta.get("text").and_then(Value::as_str) {
                     if !text.is_empty() {
-                        self.inner.push_content_delta_into(text, output);
+                        self.handle_text_delta_into(index, text, output);
                     }
                 }
             }
@@ -2380,9 +2501,87 @@ impl AnthropicSseState {
         }
     }
 
-    fn handle_content_block_stop(&mut self, chunk: &Value) {
+    fn handle_content_block_stop(&mut self, chunk: &Value, output: &mut String) {
         let index = chunk.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-        self.blocks.remove(&index);
+        let kind = self.blocks.remove(&index);
+        if matches!(kind, Some(AnthropicBlockKind::Text)) {
+            self.text_passthrough.remove(&index);
+            if let Some(text) = self.text_buffers.remove(&index) {
+                self.flush_buffered_text_block_into(index, &text, output);
+            }
+        }
+    }
+
+    fn handle_text_delta_into(&mut self, index: usize, text: &str, output: &mut String) {
+        if self.text_passthrough.contains(&index) {
+            self.inner.push_content_delta_into(text, output);
+            return;
+        }
+
+        let buffer = self.text_buffers.entry(index).or_default();
+        buffer.push_str(text);
+        if should_buffer_textual_invoke_candidate(buffer) {
+            return;
+        }
+
+        let text = self.text_buffers.remove(&index).unwrap_or_default();
+        self.text_passthrough.insert(index);
+        if !text.is_empty() {
+            self.inner.push_content_delta_into(&text, output);
+        }
+    }
+
+    fn flush_buffered_text_block_into(&mut self, index: usize, text: &str, output: &mut String) {
+        let marker_kinds = text_tool_marker_kinds(text);
+        let parsed_calls = parse_textual_invoke_tool_calls(text);
+        if !marker_kinds.is_empty() {
+            log_anthropic_text_tool_marker_detected(
+                true,
+                &self.inner.model,
+                Some(index),
+                marker_kinds,
+                parsed_calls.is_some(),
+                text.len(),
+                text,
+                self.diagnostic_id.as_deref(),
+            );
+        }
+        let Some(calls) = parsed_calls else {
+            if !text.is_empty() {
+                self.inner.push_content_delta_into(text, output);
+            }
+            return;
+        };
+
+        self.textual_invoke_block_count += 1;
+        self.textual_invoke_call_count += calls.len();
+        for call in &calls {
+            self.textual_invoke_tool_names.insert(call.name.clone());
+        }
+        log_anthropic_textual_invoke_detected(
+            true,
+            &self.inner.model,
+            Some(index),
+            calls.len(),
+            calls.iter().map(|call| call.name.clone()).collect(),
+            text.len(),
+            self.diagnostic_id.as_deref(),
+        );
+
+        self.inner.flush_inline_think_at_boundary_into(output);
+        self.inner.finalize_reasoning_into(output);
+        for (offset, call) in calls.into_iter().enumerate() {
+            let stream_index = index.saturating_mul(1000).saturating_add(offset);
+            let fake = json!({
+                "index": stream_index,
+                "id": format!("call_textual_invoke_{stream_index}"),
+                "function": {
+                    "name": call.name,
+                    "arguments": canonical_json_string(&Value::Object(call.arguments))
+                }
+            });
+            self.inner.push_tool_call_delta_into(&fake, output);
+        }
     }
 
     fn handle_message_delta_into(&mut self, chunk: &Value) {
@@ -2391,6 +2590,11 @@ impl AnthropicSseState {
                 anthropic_stop_reason_to_chat_finish_reason(Some(stop_reason)).map(str::to_string);
         }
         self.merge_usage(chunk.get("usage"));
+    }
+
+    fn handle_message_stop_into(&mut self, output: &mut String) {
+        log_anthropic_stream_response_shape(self);
+        self.inner.finalize_into(output);
     }
 
     fn merge_usage(&mut self, usage: Option<&Value>) {
@@ -4371,7 +4575,11 @@ fn anthropic_content_to_response_output_items(
             }
             "text" => {
                 if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    if !text.is_empty() {
+                    let parsed_tool_items =
+                        textual_invoke_tool_calls_to_response_items(text, tool_context);
+                    if !parsed_tool_items.is_empty() {
+                        tool_items.extend(parsed_tool_items);
+                    } else if !text.is_empty() {
                         message_content.push(
                             json!({ "type": "output_text", "text": text, "annotations": [] }),
                         );
@@ -4422,6 +4630,442 @@ fn anthropic_content_to_response_output_items(
     }
     output.extend(tool_items);
     output
+}
+
+fn log_anthropic_request_shape(
+    request: &Value,
+    original_body: &Value,
+    diagnostic_id: Option<&str>,
+) {
+    let tool_names = request
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+                .filter(|name| !name.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let original_tool_types = original_body
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|tools| {
+            tools
+                .iter()
+                .map(|tool| {
+                    tool.get("type")
+                        .and_then(Value::as_str)
+                        .or_else(|| tool.as_str())
+                        .unwrap_or("unknown")
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let system = request.get("system").and_then(Value::as_str).unwrap_or("");
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "protocol_proxy.anthropic_request_shape",
+        json!({
+            "diagnosticId": diagnostic_id,
+            "model": request.get("model").and_then(Value::as_str).unwrap_or(""),
+            "originalToolCount": original_tool_types.len(),
+            "originalToolTypes": original_tool_types,
+            "anthropicToolCount": tool_names.len(),
+            "anthropicToolNames": tool_names,
+            "hasToolChoice": request.get("tool_choice").is_some(),
+            "hasSystem": !system.is_empty(),
+            "systemLength": system.len(),
+            "systemHasNativeToolUseReminder": system.contains("native tool_use"),
+            "thinkingType": request.pointer("/thinking/type").and_then(Value::as_str).unwrap_or(""),
+            "outputConfigEffort": request.pointer("/output_config/effort").and_then(Value::as_str).unwrap_or(""),
+            "reasoningSource": reasoning_source_label(original_body)
+        }),
+    );
+}
+
+fn log_anthropic_response_shape(
+    body: &Value,
+    output: &[Value],
+    stream: bool,
+    diagnostic_id: Option<&str>,
+) {
+    let content = body.get("content").unwrap_or(&Value::Null);
+    let mut block_counts = BTreeMap::<String, usize>::new();
+    let mut native_tool_names = BTreeSet::<String>::new();
+    let mut textual_invoke_tool_names = BTreeSet::<String>::new();
+    let mut textual_invoke_block_count = 0usize;
+    let mut textual_invoke_call_count = 0usize;
+    let mut text_block_count = 0usize;
+    let mut max_text_block_len = 0usize;
+    let mut text_tool_marker_block_count = 0usize;
+    let mut text_tool_marker_kind_set = BTreeSet::<String>::new();
+
+    if let Some(blocks) = content.as_array() {
+        for block in blocks {
+            let block_type = block
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            *block_counts.entry(block_type.clone()).or_default() += 1;
+            if block_type == "tool_use" {
+                if let Some(name) = block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                {
+                    native_tool_names.insert(name.to_string());
+                }
+            }
+            if block_type == "text" {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    text_block_count += 1;
+                    max_text_block_len = max_text_block_len.max(text.len());
+                    let marker_kinds = text_tool_marker_kinds(text);
+                    if !marker_kinds.is_empty() {
+                        text_tool_marker_block_count += 1;
+                        for kind in &marker_kinds {
+                            text_tool_marker_kind_set.insert(kind.clone());
+                        }
+                        log_anthropic_text_tool_marker_detected(
+                            false,
+                            body.get("model").and_then(Value::as_str).unwrap_or(""),
+                            None,
+                            marker_kinds,
+                            parse_textual_invoke_tool_calls(text).is_some(),
+                            text.len(),
+                            text,
+                            diagnostic_id,
+                        );
+                    }
+                    if let Some(calls) = parse_textual_invoke_tool_calls(text) {
+                        textual_invoke_block_count += 1;
+                        textual_invoke_call_count += calls.len();
+                        for call in calls {
+                            textual_invoke_tool_names.insert(call.name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let output_counts = output_item_type_counts(output);
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "protocol_proxy.anthropic_response_shape",
+        json!({
+            "diagnosticId": diagnostic_id,
+            "stream": stream,
+            "model": body.get("model").and_then(Value::as_str).unwrap_or(""),
+            "stopReason": body.get("stop_reason").and_then(Value::as_str).unwrap_or(""),
+            "contentBlockCounts": block_counts,
+            "nativeToolUseNames": native_tool_names.into_iter().collect::<Vec<_>>(),
+            "textBlockCount": text_block_count,
+            "maxTextBlockLength": max_text_block_len,
+            "textToolMarkerBlockCount": text_tool_marker_block_count,
+            "textToolMarkerKinds": text_tool_marker_kind_set.into_iter().collect::<Vec<_>>(),
+            "textualInvokeBlockCount": textual_invoke_block_count,
+            "textualInvokeCallCount": textual_invoke_call_count,
+            "textualInvokeToolNames": textual_invoke_tool_names.into_iter().collect::<Vec<_>>(),
+            "convertedOutputCounts": output_counts
+        }),
+    );
+}
+
+fn log_anthropic_stream_response_shape(state: &AnthropicSseState) {
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "protocol_proxy.anthropic_stream_response_shape",
+        json!({
+            "diagnosticId": state.diagnostic_id.as_deref(),
+            "stream": true,
+            "model": state.inner.model.as_str(),
+            "textBlockCount": state.text_block_count,
+            "thinkingBlockCount": state.thinking_block_count,
+            "nativeToolUseBlockCount": state.native_tool_use_block_count,
+            "nativeToolUseNames": state.native_tool_names.iter().cloned().collect::<Vec<_>>(),
+            "otherBlockCount": state.other_block_count,
+            "textualInvokeBlockCount": state.textual_invoke_block_count,
+            "textualInvokeCallCount": state.textual_invoke_call_count,
+            "textualInvokeToolNames": state.textual_invoke_tool_names.iter().cloned().collect::<Vec<_>>()
+        }),
+    );
+}
+
+fn log_anthropic_textual_invoke_detected(
+    stream: bool,
+    model: &str,
+    block_index: Option<usize>,
+    call_count: usize,
+    tool_names: Vec<String>,
+    text_length: usize,
+    diagnostic_id: Option<&str>,
+) {
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "protocol_proxy.anthropic_textual_invoke_detected",
+        json!({
+            "diagnosticId": diagnostic_id,
+            "stream": stream,
+            "model": model,
+            "blockIndex": block_index,
+            "callCount": call_count,
+            "toolNames": tool_names,
+            "textLength": text_length
+        }),
+    );
+}
+
+fn log_anthropic_text_tool_marker_detected(
+    stream: bool,
+    model: &str,
+    block_index: Option<usize>,
+    marker_kinds: Vec<String>,
+    parsed_invoke: bool,
+    text_length: usize,
+    text: &str,
+    diagnostic_id: Option<&str>,
+) {
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "protocol_proxy.anthropic_text_tool_marker_detected",
+        json!({
+            "diagnosticId": diagnostic_id,
+            "stream": stream,
+            "model": model,
+            "blockIndex": block_index,
+            "markerKinds": marker_kinds,
+            "parsedInvoke": parsed_invoke,
+            "textLength": text_length,
+            "preview": diagnostic_text_preview(text),
+        }),
+    );
+}
+
+fn output_item_type_counts(output: &[Value]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for item in output {
+        let item_type = item
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        *counts.entry(item_type).or_default() += 1;
+    }
+    counts
+}
+
+fn reasoning_source_label(body: &Value) -> &'static str {
+    if body
+        .pointer("/reasoning/effort")
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        "reasoning.effort"
+    } else if body
+        .get("model_reasoning_effort")
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        "model_reasoning_effort"
+    } else if body
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        "reasoning_effort"
+    } else if body.get("reasoning").and_then(Value::as_str).is_some() {
+        "reasoning_string"
+    } else if body.get("reasoning").is_some() {
+        "reasoning_object"
+    } else {
+        "absent"
+    }
+}
+
+fn textual_invoke_tool_calls_to_response_items(
+    text: &str,
+    tool_context: &CodexToolContext,
+) -> Vec<Value> {
+    let Some(calls) = parse_textual_invoke_tool_calls(text) else {
+        return Vec::new();
+    };
+    calls
+        .into_iter()
+        .enumerate()
+        .map(|(index, call)| {
+            response_tool_call_item(
+                &format!("call_textual_invoke_{index}"),
+                &call.name,
+                &canonical_json_string(&Value::Object(call.arguments)),
+                tool_context,
+            )
+        })
+        .collect()
+}
+
+#[derive(Debug)]
+struct TextualInvokeToolCall {
+    name: String,
+    arguments: serde_json::Map<String, Value>,
+}
+
+fn parse_textual_invoke_tool_calls(text: &str) -> Option<Vec<TextualInvokeToolCall>> {
+    let mut rest = strip_textual_invoke_prefix(text.trim());
+    if !rest.starts_with("<invoke") {
+        return None;
+    }
+
+    let mut calls = Vec::new();
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        if !rest.starts_with("<invoke") {
+            return None;
+        }
+
+        let open_end = rest.find('>')?;
+        let open_tag = &rest[..=open_end];
+        let name = xml_attribute(open_tag, "name")?;
+        if name.trim().is_empty() {
+            return None;
+        }
+
+        let after_open = &rest[open_end + 1..];
+        let close_start = after_open.find("</invoke>")?;
+        let body = &after_open[..close_start];
+        let after_close = &after_open[close_start + "</invoke>".len()..];
+
+        calls.push(TextualInvokeToolCall {
+            name: name.trim().to_string(),
+            arguments: parse_textual_invoke_parameters(body)?,
+        });
+
+        rest = after_close.trim_start();
+    }
+
+    (!calls.is_empty()).then_some(calls)
+}
+
+fn strip_textual_invoke_prefix(text: &str) -> &str {
+    for marker in ["course", "codex", "call"] {
+        if let Some(rest) = text.strip_prefix(marker) {
+            if rest.trim_start().starts_with("<invoke") {
+                return rest.trim_start();
+            }
+        }
+    }
+    text
+}
+
+fn should_buffer_textual_invoke_candidate(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if "<invoke".starts_with(trimmed) || trimmed.starts_with("<invoke") {
+        return true;
+    }
+    for marker in ["course", "codex", "call"] {
+        if marker.starts_with(trimmed) {
+            return true;
+        }
+        if let Some(rest) = trimmed.strip_prefix(marker) {
+            let rest = rest.trim_start();
+            return rest.is_empty() || "<invoke".starts_with(rest) || rest.starts_with("<invoke");
+        }
+    }
+    false
+}
+
+fn text_tool_marker_kinds(text: &str) -> Vec<String> {
+    let mut kinds = BTreeSet::new();
+    let trimmed = text.trim_start();
+    let stripped = strip_textual_invoke_prefix(trimmed);
+    if stripped.starts_with("<invoke") {
+        kinds.insert("xmlInvokeAtStart".to_string());
+    }
+    if trimmed.contains("<invoke") {
+        kinds.insert("xmlInvoke".to_string());
+    }
+    for marker in ["course", "codex", "call"] {
+        if let Some(rest) = trimmed.strip_prefix(marker) {
+            if rest.trim_start().starts_with("<invoke") {
+                kinds.insert(format!("{marker}Prefix"));
+            }
+        }
+    }
+    if trimmed.starts_with("tool_use:") || trimmed.contains("\ntool_use:") {
+        kinds.insert("toolUseText".to_string());
+    }
+    kinds.into_iter().collect()
+}
+
+fn diagnostic_text_preview(text: &str) -> String {
+    const PREVIEW_LIMIT: usize = 240;
+    let mut preview = String::new();
+    for ch in text.chars().take(PREVIEW_LIMIT) {
+        preview.push(ch);
+    }
+    if text.chars().count() > PREVIEW_LIMIT {
+        preview.push_str("...");
+    }
+    preview
+}
+
+fn parse_textual_invoke_parameters(body: &str) -> Option<serde_json::Map<String, Value>> {
+    let mut rest = body;
+    let mut arguments = serde_json::Map::new();
+
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        if !rest.starts_with("<parameter") {
+            return None;
+        }
+
+        let open_end = rest.find('>')?;
+        let open_tag = &rest[..=open_end];
+        let name = xml_attribute(open_tag, "name")?;
+        if name.trim().is_empty() {
+            return None;
+        }
+
+        let after_open = &rest[open_end + 1..];
+        let close_start = after_open.find("</parameter>")?;
+        let value = &after_open[..close_start];
+        arguments.insert(
+            name.trim().to_string(),
+            Value::String(xml_unescape_text(value.trim())),
+        );
+        rest = &after_open[close_start + "</parameter>".len()..];
+    }
+
+    Some(arguments)
+}
+
+fn xml_attribute(tag: &str, name: &str) -> Option<String> {
+    for quote in ['"', '\''] {
+        let prefix = format!("{name}={quote}");
+        if let Some(start) = tag.find(&prefix) {
+            let value_start = start + prefix.len();
+            let value_end = tag[value_start..].find(quote)? + value_start;
+            return Some(tag[value_start..value_end].to_string());
+        }
+    }
+    None
+}
+
+fn xml_unescape_text(text: &str) -> String {
+    text.replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 fn split_leading_think_block(text: &str) -> Option<(String, String)> {

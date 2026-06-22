@@ -1147,6 +1147,8 @@ async fn handle_protocol_proxy_connection(
         return Ok(());
     }
 
+    let diagnostic_id = upstream.diagnostic_id.clone();
+
     if upstream.is_stream {
         if upstream.response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses
         {
@@ -1187,7 +1189,12 @@ async fn handle_protocol_proxy_connection(
         } else {
             anthropic_converter = request_json
                 .as_ref()
-                .map(crate::protocol_proxy::AnthropicSseToResponsesConverter::with_request)
+                .map(|request| {
+                    crate::protocol_proxy::AnthropicSseToResponsesConverter::with_request_and_diagnostic_id(
+                        request,
+                        Some(&diagnostic_id),
+                    )
+                })
                 .unwrap_or_default();
             EitherResponsesStreamConverter::Anthropic(&mut anthropic_converter)
         };
@@ -1269,9 +1276,10 @@ async fn handle_protocol_proxy_connection(
         }
         crate::protocol_proxy::UpstreamResponseProtocol::Anthropic => {
             if let Some(request_json) = request_json.as_ref() {
-                crate::protocol_proxy::anthropic_message_to_response_with_request(
+                crate::protocol_proxy::anthropic_message_to_response_with_request_and_diagnostic_id(
                     upstream_json,
                     request_json,
+                    Some(&diagnostic_id),
                 )?
             } else {
                 crate::protocol_proxy::anthropic_message_to_response(upstream_json)?

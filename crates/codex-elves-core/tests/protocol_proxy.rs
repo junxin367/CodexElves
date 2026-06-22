@@ -154,10 +154,10 @@ fn responses_request_converts_to_anthropic_messages() {
 
     assert_eq!(converted["model"], "claude-sonnet-4");
     assert_eq!(converted["max_tokens"], 512);
-    assert_eq!(
-        converted["system"],
-        "You are helpful.\n\nPrefer concise answers."
-    );
+    let system = converted["system"].as_str().unwrap();
+    assert!(system.starts_with("You are helpful.\n\nPrefer concise answers."));
+    assert!(system.contains("native tool_use"));
+    assert!(system.contains("Do not write XML-like tool calls"));
     assert_eq!(converted["messages"][0]["role"], "user");
     assert_eq!(converted["messages"][0]["content"][0]["text"], "hello");
     assert_eq!(
@@ -284,6 +284,102 @@ fn anthropic_message_response_converts_to_responses() {
     assert_eq!(converted["usage"]["input_tokens"], 10);
     assert_eq!(converted["usage"]["output_tokens"], 5);
     assert_eq!(converted["usage"]["cache_read_input_tokens"], 2);
+}
+
+#[test]
+fn anthropic_textual_invoke_response_converts_to_tool_call() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_textual_tool",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "course\n<invoke name=\"exec_command\">\n<parameter name=\"cmd\">git diff crates/codex-elves-core/src/protocol_proxy.rs</parameter>\n<parameter name=\"yield_time_ms\">3000</parameter>\n<parameter name=\"max_output_tokens\">6000</parameter>\n</invoke>"
+                }
+            ],
+            "stop_reason": "stop",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5
+            }
+        }),
+        &json!({
+            "model": "claude-opus-4-8",
+            "input": "检查 diff",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "cmd": { "type": "string" },
+                            "yield_time_ms": { "type": "integer" },
+                            "max_output_tokens": { "type": "integer" }
+                        }
+                    }
+                }
+            ]
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(converted["output"][0]["type"], "function_call");
+    assert_eq!(converted["output"][0]["name"], "exec_command");
+    assert_eq!(
+        converted["output"][0]["arguments"],
+        r#"{"cmd":"git diff crates/codex-elves-core/src/protocol_proxy.rs","max_output_tokens":"6000","yield_time_ms":"3000"}"#
+    );
+}
+
+#[test]
+fn anthropic_call_prefixed_textual_invoke_response_converts_to_tool_call() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_textual_call_tool",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "call\n<invoke name=\"exec_command\">\n<parameter name=\"cmd\">git status --short</parameter>\n</invoke>"
+                }
+            ],
+            "stop_reason": "stop",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5
+            }
+        }),
+        &json!({
+            "model": "claude-opus-4-8",
+            "input": "检查状态",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "cmd": { "type": "string" }
+                        }
+                    }
+                }
+            ]
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(converted["output"][0]["type"], "function_call");
+    assert_eq!(converted["output"][0]["name"], "exec_command");
+    assert_eq!(
+        converted["output"][0]["arguments"],
+        r#"{"cmd":"git status --short"}"#
+    );
 }
 
 #[test]
@@ -1583,6 +1679,122 @@ data: {"type":"message_stop"}
     assert_eq!(completed.data["response"]["usage"]["input_tokens"], 7);
     assert_eq!(completed.data["response"]["usage"]["output_tokens"], 9);
     assert!(converted.contains("data: [DONE]"));
+}
+
+#[test]
+fn anthropic_sse_textual_invoke_converts_to_tool_call_events() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_textual_stream","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"course\n<invoke name=\"exec_command\">\n"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<parameter name=\"cmd\">git status --short</parameter>\n</invoke>"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-opus-4-8",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": { "type": "object" }
+                }
+            ]
+        }),
+    );
+
+    let events = parse_response_sse_events(&converted);
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event == "response.output_text.delta")
+    );
+    let arguments_done = events
+        .iter()
+        .find(|event| event.event == "response.function_call_arguments.done")
+        .unwrap();
+    assert_eq!(arguments_done.data["name"], "exec_command");
+    assert_eq!(
+        arguments_done.data["arguments"],
+        r#"{"cmd":"git status --short"}"#
+    );
+    let completed = events
+        .iter()
+        .find(|event| event.event == "response.completed")
+        .unwrap();
+    assert_eq!(
+        completed.data["response"]["output"][0]["type"],
+        "function_call"
+    );
+}
+
+#[test]
+fn anthropic_sse_call_prefixed_textual_invoke_converts_to_tool_call_events() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_textual_stream_call","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"call\n<invoke name=\"exec_command\">\n"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<parameter name=\"cmd\">git diff crates/codex-elves-core/src/protocol_proxy.rs</parameter>\n</invoke>"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-opus-4-8",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": { "type": "object" }
+                }
+            ]
+        }),
+    );
+
+    let events = parse_response_sse_events(&converted);
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event == "response.output_text.delta")
+    );
+    let arguments_done = events
+        .iter()
+        .find(|event| event.event == "response.function_call_arguments.done")
+        .unwrap();
+    assert_eq!(arguments_done.data["name"], "exec_command");
+    assert_eq!(
+        arguments_done.data["arguments"],
+        r#"{"cmd":"git diff crates/codex-elves-core/src/protocol_proxy.rs"}"#
+    );
 }
 
 #[test]
