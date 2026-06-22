@@ -238,6 +238,30 @@ fn github_release_workflow_can_build_assets_from_tags_and_manual_dispatch() {
 }
 
 #[test]
+fn github_workflows_install_frontend_dependencies_from_lockfile() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workflow_root = manifest_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .and_then(std::path::Path::parent)
+        .unwrap()
+        .join(".github/workflows");
+
+    for workflow_name in ["release-assets.yml", "pr-build.yml"] {
+        let workflow = std::fs::read_to_string(workflow_root.join(workflow_name))
+            .unwrap_or_else(|error| panic!("read {workflow_name}: {error}"));
+        assert!(
+            workflow.contains("run: npm ci"),
+            "{workflow_name} should install frontend dependencies from package-lock.json"
+        );
+        assert!(
+            !workflow.contains("npm install --package-lock=false"),
+            "{workflow_name} should not ignore the committed package-lock.json"
+        );
+    }
+}
+
+#[test]
 fn github_release_workflow_uploads_static_latest_json() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let workflow = manifest_dir
