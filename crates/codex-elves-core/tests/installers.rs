@@ -106,6 +106,18 @@ fn macos_dmg_includes_applications_shortcut_for_drag_install() {
 }
 
 #[test]
+fn windows_nsis_installer_uses_chinese_manager_shortcut_only() {
+    let script = std::fs::read_to_string("../../scripts/installer/windows/CodexElves.nsi")
+        .expect("read Windows NSIS installer script");
+
+    assert!(script.contains(r#"CreateShortcut "$SMPROGRAMS\CodexElves\CodexElves 管理工具.lnk""#));
+    assert!(!script.contains(r#"CreateShortcut "$SMPROGRAMS\CodexElves Manager.lnk""#));
+    assert!(!script.contains(r#"CreateShortcut "$DESKTOP\CodexElves Manager.lnk""#));
+    assert!(script.contains(r#"Delete "$SMPROGRAMS\CodexElves Manager.lnk""#));
+    assert!(script.contains(r#"Delete "$DESKTOP\CodexElves Manager.lnk""#));
+}
+
+#[test]
 fn companion_binary_path_resolves_macos_silent_app_next_to_manager_app() {
     let manager_exe = std::path::Path::new(
         "/Applications/CodexElves 管理工具.app/Contents/MacOS/CodexElvesManager",

@@ -98,6 +98,84 @@ fn manager_launch_button_spawns_silent_launcher_binary() {
 }
 
 #[test]
+fn frontend_literal_tauri_commands_are_registered_for_invocation() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let lib_rs = std::fs::read_to_string(manifest_dir.join("src/lib.rs")).expect("read lib.rs");
+    let commands_rs =
+        std::fs::read_to_string(manifest_dir.join("src/commands.rs")).expect("read commands.rs");
+    let app_tsx = std::fs::read_to_string(manifest_dir.parent().unwrap().join("src/App.tsx"))
+        .expect("read App.tsx");
+
+    let frontend_commands = literal_tauri_commands(&app_tsx);
+    for expected in [
+        "load_ccs_providers",
+        "import_ccs_providers",
+        "plugin_marketplace_status",
+        "repair_plugin_marketplace",
+    ] {
+        assert!(
+            frontend_commands.contains(expected),
+            "expected frontend command {expected} to be covered"
+        );
+    }
+
+    for command in frontend_commands {
+        let sync_fn = format!("pub fn {command}");
+        let async_fn = format!("pub async fn {command}");
+        assert!(
+            commands_rs.contains(&sync_fn) || commands_rs.contains(&async_fn),
+            "frontend command {command} should have a backend command implementation"
+        );
+        assert!(
+            lib_rs.contains(&format!("commands::{command}")),
+            "frontend command {command} should be registered in Tauri invoke_handler"
+        );
+    }
+}
+
+fn literal_tauri_commands(source: &str) -> std::collections::BTreeSet<String> {
+    let mut commands = std::collections::BTreeSet::new();
+
+    for marker in ["call", "invoke"] {
+        let mut offset = 0;
+        while let Some(relative_start) = source[offset..].find(marker) {
+            let start = offset + relative_start;
+            let after_marker = start + marker.len();
+            if source[after_marker..]
+                .chars()
+                .next()
+                .is_some_and(|next| next.is_ascii_alphanumeric() || next == '_')
+            {
+                offset = after_marker;
+                continue;
+            }
+
+            let Some(relative_open_paren) = source[after_marker..].find('(') else {
+                break;
+            };
+            let open_paren = after_marker + relative_open_paren;
+            let argument = source[open_paren + 1..].trim_start();
+            let Some(quote) = argument.chars().next() else {
+                offset = open_paren + 1;
+                continue;
+            };
+            if quote != '"' && quote != '\'' {
+                offset = open_paren + 1;
+                continue;
+            }
+
+            let rest = &argument[quote.len_utf8()..];
+            if let Some(end) = rest.find(quote) {
+                commands.insert(rest[..end].to_string());
+            }
+            offset = open_paren + 1;
+        }
+    }
+
+    commands
+}
+
+#[test]
 fn macos_packager_hides_silent_launcher_but_not_manager() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let packager = manifest_dir
