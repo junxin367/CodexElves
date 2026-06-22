@@ -4285,7 +4285,23 @@
   }
 
   function codexElvesModelDescriptor(modelName) {
-    return {
+    // 从后端返回的 model_entries 中查找完整条目（含 context_window 和 reasoning levels）
+    const entries = Array.isArray(codexModelCatalog.model_entries) ? codexModelCatalog.model_entries : [];
+    const entry = entries.find((e) => e && e.slug === modelName);
+
+    // 思考深度：优先使用后端按模型能力计算的值，fallback 到全量列表
+    let defaultReasoningEffort = "medium";
+    let supportedReasoningEfforts = modelReasoningEfforts();
+    if (entry && entry.default_reasoning_level) {
+      defaultReasoningEffort = entry.default_reasoning_level;
+    }
+    if (entry && Array.isArray(entry.supported_reasoning_levels) && entry.supported_reasoning_levels.length > 0) {
+      supportedReasoningEfforts = entry.supported_reasoning_levels.map((item) =>
+        typeof item === "object" && item.effort ? { reasoningEffort: item.effort, description: item.description || `${item.effort} effort` } : item
+      );
+    }
+
+    const descriptor = {
       model: modelName,
       id: modelName,
       slug: modelName,
@@ -4294,9 +4310,17 @@
       description: codexModelCatalog.provider_name || codexModelCatalog.model_provider || "Custom model",
       hidden: false,
       isDefault: (codexModelCatalog.default_model || codexModelCatalog.model) === modelName,
-      defaultReasoningEffort: "medium",
-      supportedReasoningEfforts: modelReasoningEfforts(),
+      defaultReasoningEffort,
+      supportedReasoningEfforts,
     };
+
+    // 上下文窗口：从后端条目中读取，确保正确传递给 App
+    if (entry && entry.context_window) {
+      descriptor.contextWindow = entry.context_window;
+      descriptor.maxContextWindow = entry.max_context_window || entry.context_window;
+    }
+
+    return descriptor;
   }
 
   function modelArrayLooksPatchable(value, allowEmpty = false) {

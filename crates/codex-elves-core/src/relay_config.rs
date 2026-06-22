@@ -1430,13 +1430,13 @@ fn apply_generated_model_catalog_to_config(
 }
 
 #[derive(Debug, Clone)]
-struct CatalogModelRow {
+pub(crate) struct CatalogModelRow {
     model: String,
     context_window: String,
     protocol: RelayProtocol,
 }
 
-fn generated_model_catalog_json(
+pub(crate) fn generated_model_catalog_json(
     profile: &RelayProfile,
     config_text: &str,
     rows: Vec<CatalogModelRow>,
@@ -1489,7 +1489,57 @@ fn generated_model_catalog_json(
     Ok(json!({ "models": models }))
 }
 
-fn relay_profile_catalog_rows(profile: &RelayProfile) -> Vec<CatalogModelRow> {
+/// 返回供应商配置里每个模型的完整条目（context_window、reasoning levels 等），供 model_catalog 接口使用
+pub(crate) fn relay_profile_model_entries(profile: &RelayProfile) -> Vec<serde_json::Value> {
+    let rows = relay_profile_catalog_rows(profile);
+    rows.iter()
+        .map(|row| {
+            let protocol = upstream_response_protocol_for_relay(row.protocol);
+            let supported = crate::protocol_proxy::supported_reasoning_efforts_for_model(&row.model, protocol);
+            let default_level = {
+                let mut chosen = "medium";
+                for fallback in ["high", "medium", "low", "minimal"] {
+                    if supported.iter().any(|e| *e == fallback) {
+                        chosen = fallback;
+                        break;
+                    }
+                }
+                chosen
+            };
+            let mut entry = serde_json::Map::new();
+            entry.insert("slug".to_string(), json!(row.model));
+            entry.insert("display_name".to_string(), json!(row.model));
+            entry.insert("visibility".to_string(), json!("list"));
+            entry.insert("supported_in_api".to_string(), json!(true));
+            entry.insert("default_reasoning_level".to_string(), json!(default_level));
+            entry.insert(
+                "supported_reasoning_levels".to_string(),
+                json!(supported.iter().map(|e| json!({ "effort": e })).collect::<Vec<_>>()),
+            );
+            // 解析 context_window（支持 1m / 128k / 纯数字）
+            let cw_str = row.context_window.trim();
+            if !cw_str.is_empty() {
+                let cw_lower = cw_str.to_ascii_lowercase();
+                let (num_str, mult) = if cw_lower.ends_with('m') {
+                    (&cw_str[..cw_str.len() - 1], 1_000_000u64)
+                } else if cw_lower.ends_with('k') {
+                    (&cw_str[..cw_str.len() - 1], 1_000u64)
+                } else {
+                    (cw_str, 1u64)
+                };
+                if let Ok(v) = num_str.trim().parse::<f64>() {
+                    let cw = (v * mult as f64) as u64;
+                    if cw > 0 {
+                        entry.insert("context_window".to_string(), json!(cw));
+                        entry.insert("max_context_window".to_string(), json!(cw));
+                    }
+                }
+            }
+            serde_json::Value::Object(entry)
+        })
+        .collect()
+}
+pub(crate) fn relay_profile_catalog_rows(profile: &RelayProfile) -> Vec<CatalogModelRow> {
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
     if !profile.model_mappings.is_empty() {
@@ -1577,7 +1627,7 @@ fn reasoning_effort_description(effort: &str) -> &'static str {
     }
 }
 
-fn catalog_reasoning_effort(config_text: &str) -> String {
+pub(crate) fn catalog_reasoning_effort(config_text: &str) -> String {
     match root_key_string(config_text, "model_reasoning_effort")
         .unwrap_or_default()
         .trim()

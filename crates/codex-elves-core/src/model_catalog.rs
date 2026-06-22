@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+﻿use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::settings::{RelayProfile, SettingsStore};
@@ -73,6 +73,10 @@ fn relay_profile_model_catalog_value(home: &Path, profile: &RelayProfile) -> Val
         profile.name.trim()
     };
     let model_count = models.len();
+
+    // 构建完整模型条目（含 context_window、reasoning levels）
+    let model_entries = crate::relay_config::relay_profile_model_entries(profile);
+
     json!({
         "status": if models.is_empty() { "not_configured" } else { "ok" },
         "path": home.join("config.toml").to_string_lossy(),
@@ -81,6 +85,7 @@ fn relay_profile_model_catalog_value(home: &Path, profile: &RelayProfile) -> Val
         "provider_name": provider_name,
         "default_model": default_model,
         "models": models,
+        "model_entries": model_entries,
         "sources": [
             {
                 "id": format!("relay-profile:{}", profile.id),
@@ -95,7 +100,6 @@ fn relay_profile_model_catalog_value(home: &Path, profile: &RelayProfile) -> Val
         "responses_api": responses_api_status("unknown", "", "")
     })
 }
-
 pub fn relay_profile_model_ids_for_proxy(profile: &RelayProfile) -> Vec<String> {
     let mut models = Vec::new();
     models.extend(relay_profile_responses_model_ids(profile));
