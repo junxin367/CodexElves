@@ -1,0 +1,21 @@
+.github/workflows/pr-build.yml
+  s_945e980b26cc67::t_a00b5c17540319 33,115
+.github/workflows/release-assets.yml
+  s_945e980b26cc67::t_73468a45c42610 76,142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "d13e11bdb661524fdc8d14265462bc42a5da30f7",
+  "prompts": {},
+  "sessions": {
+    "s_945e980b26cc67": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ed524-6416-7581-bf3a-3628dbd05629",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
