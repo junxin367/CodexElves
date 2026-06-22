@@ -151,16 +151,20 @@ pub fn select_update_asset(assets: &[(String, String)]) -> Option<ReleaseAsset> 
         .iter()
         .filter(|(name, url)| !name.trim().is_empty() && !url.trim().is_empty())
         .collect::<Vec<_>>();
-    for (name, url) in &named {
-        let lower = name.to_ascii_lowercase();
-        if platform_asset_rank(&lower) == 0 {
-            return Some(ReleaseAsset {
-                name: (*name).clone(),
-                browser_download_url: (*url).clone(),
-            });
+    let mut best: Option<(u8, &str, &str)> = None;
+    for (name, url) in named {
+        let rank = platform_asset_rank(&name.to_ascii_lowercase());
+        if rank >= 2 {
+            continue;
+        }
+        if best.map_or(true, |(current_rank, _, _)| rank < current_rank) {
+            best = Some((rank, name.as_str(), url.as_str()));
         }
     }
-    None
+    best.map(|(_, name, url)| ReleaseAsset {
+        name: name.to_string(),
+        browser_download_url: url.to_string(),
+    })
 }
 
 pub async fn fetch_latest_release(latest_json_url: &str) -> anyhow::Result<Release> {
@@ -250,13 +254,49 @@ pub fn safe_asset_name(name: &str) -> anyhow::Result<String> {
 }
 
 fn platform_asset_rank(name: &str) -> u8 {
+    // 0 = current OS + native arch.
+    // 1 = current OS + other arch, used only as a fallback.
+    // 2 = wrong platform or unsupported asset.
+    if cfg!(target_os = "macos") {
+        if !is_macos_installer_asset(name) {
+            return 2;
+        }
+        if is_macos_native_arch_asset(name) {
+            return 0;
+        }
+        return 1;
+    }
     if cfg!(windows) && is_windows_installer_asset(name) {
         return 0;
     }
-    if cfg!(target_os = "macos") && is_macos_installer_asset(name) {
-        return 0;
-    }
     2
+}
+
+fn is_macos_native_arch_asset(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let native_arch_token = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        _ => return true,
+    };
+    if lower.contains(&format!("-{native_arch_token}."))
+        || lower.contains(&format!("_{native_arch_token}."))
+    {
+        return true;
+    }
+
+    let other_arch_token = if native_arch_token == "x64" {
+        "arm64"
+    } else {
+        "x64"
+    };
+    if lower.contains(&format!("-{other_arch_token}."))
+        || lower.contains(&format!("_{other_arch_token}."))
+    {
+        return false;
+    }
+
+    true
 }
 
 fn is_windows_installer_asset(name: &str) -> bool {
