@@ -1,0 +1,19 @@
+crates/codex-elves-core/tests/protocol_proxy.rs
+  s_b5d34c51542d1d::t_618af501846486 158
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "59dd19f4b4a059dd8d8b7e9e077e5ca525c5695a",
+  "prompts": {},
+  "sessions": {
+    "s_b5d34c51542d1d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef03c-300c-7c21-a615-1ac8cd46d9ad",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
