@@ -38,7 +38,6 @@ const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
 const ERROR_BODY_PREVIEW_LIMIT: usize = 1024;
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_DEFAULT_REASONING_EFFORT: &str = "high";
-const ANTHROPIC_TOOL_USE_SYSTEM_REMINDER: &str = "Tool use protocol for Anthropic: when a tool is needed, call one of the provided tools through Anthropic's native tool_use content block. Do not write XML-like tool calls in assistant text, including <invoke>, <parameter>, </parameter>, </invoke>, or a leading marker such as course/codex/call. Assistant text that contains a tool call is invalid; use native tool_use only.";
 const REASONING_EFFORT_ORDER: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
 static PROTOCOL_PROXY_DIAGNOSTIC_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -383,7 +382,6 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
         }
     }
     if has_tools {
-        system_chunks.push(ANTHROPIC_TOOL_USE_SYSTEM_REMINDER.to_string());
         if let Some(tool_choice) = body
             .get("tool_choice")
             .and_then(|value| responses_tool_choice_to_anthropic(value, &tool_context))
@@ -4678,7 +4676,6 @@ fn log_anthropic_request_shape(
             "hasToolChoice": request.get("tool_choice").is_some(),
             "hasSystem": !system.is_empty(),
             "systemLength": system.len(),
-            "systemHasNativeToolUseReminder": system.contains("native tool_use"),
             "thinkingType": request.pointer("/thinking/type").and_then(Value::as_str).unwrap_or(""),
             "outputConfigEffort": request.pointer("/output_config/effort").and_then(Value::as_str).unwrap_or(""),
             "reasoningSource": reasoning_source_label(original_body)

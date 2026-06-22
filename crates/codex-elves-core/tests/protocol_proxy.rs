@@ -155,9 +155,7 @@ fn responses_request_converts_to_anthropic_messages() {
     assert_eq!(converted["model"], "claude-sonnet-4");
     assert_eq!(converted["max_tokens"], 512);
     let system = converted["system"].as_str().unwrap();
-    assert!(system.starts_with("You are helpful.\n\nPrefer concise answers."));
-    assert!(system.contains("native tool_use"));
-    assert!(system.contains("Do not write XML-like tool calls"));
+    assert_eq!(system, "You are helpful.\n\nPrefer concise answers.");
     assert_eq!(converted["messages"][0]["role"], "user");
     assert_eq!(converted["messages"][0]["content"][0]["text"], "hello");
     assert_eq!(
