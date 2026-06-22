@@ -5449,7 +5449,7 @@ function deriveRelayProfileFromFiles(profile: RelayProfile): RelayProfile {
     localProxyEnabled: profile.localProxyEnabled || isProxyConfig,
     apiKey: profile.relayMode === "official"
       ? configApiKey || profile.apiKey || ""
-      : codexApiKeyFromAuth(authContents) || configApiKey || "",
+      : codexApiKeyFromAuth(authContents) || configApiKey || profile.apiKey || "",
     contextWindow: codexTopLevelIntFromConfig(configContents, "model_context_window"),
     autoCompactLimit: codexTopLevelIntFromConfig(configContents, "model_auto_compact_token_limit"),
     configContents,

@@ -4351,11 +4351,31 @@
     if (!modelArrayLooksPatchable(models, allowEmpty)) return false;
     const customModels = codexElvesModelNames();
     if (!customModels.length) return false;
+    // 已配置供应商时，隐藏所有不在自定义列表里的模型
+    const hasRelayProfile = !!(codexModelCatalog.model_provider);
     let changed = false;
     const existing = new Map(models.map((item) => [item.model, item]));
     models.forEach((item) => {
-      if (customModels.includes(item.model) && item.hidden !== false) {
-        item.hidden = false;
+      if (customModels.includes(item.model)) {
+        // 自定义模型：强制显示并覆盖 reasoning / context 字段
+        const descriptor = codexElvesModelDescriptor(item.model);
+        if (item.hidden !== false) { item.hidden = false; changed = true; }
+        if (descriptor.supportedReasoningEfforts && JSON.stringify(item.supportedReasoningEfforts) !== JSON.stringify(descriptor.supportedReasoningEfforts)) {
+          item.supportedReasoningEfforts = descriptor.supportedReasoningEfforts;
+          changed = true;
+        }
+        if (descriptor.defaultReasoningEffort && item.defaultReasoningEffort !== descriptor.defaultReasoningEffort) {
+          item.defaultReasoningEffort = descriptor.defaultReasoningEffort;
+          changed = true;
+        }
+        if (descriptor.contextWindow && item.contextWindow !== descriptor.contextWindow) {
+          item.contextWindow = descriptor.contextWindow;
+          item.maxContextWindow = descriptor.maxContextWindow || descriptor.contextWindow;
+          changed = true;
+        }
+      } else if (hasRelayProfile && item.hidden !== true) {
+        // 供应商模式下隐藏 App 内置的非自定义模型
+        item.hidden = true;
         changed = true;
       }
     });
@@ -4464,20 +4484,22 @@
     const names = codexElvesModelNames();
     const value = config?.value;
     if (!names.length || !value || typeof value !== "object") return config;
-    const availableModels = Array.isArray(value.available_models) ? [...value.available_models] : [];
-    let changed = false;
-    names.forEach((name) => {
-      if (!availableModels.includes(name)) {
-        availableModels.push(name);
-        changed = true;
-      }
-    });
+    const hasRelayProfile = !!(codexModelCatalog.model_provider);
+    // 供应商模式：available_models 只保留自定义模型；否则追加自定义模型
+    let availableModels;
+    if (hasRelayProfile) {
+      availableModels = names.slice();
+    } else {
+      availableModels = Array.isArray(value.available_models) ? [...value.available_models] : [];
+      names.forEach((name) => { if (!availableModels.includes(name)) availableModels.push(name); });
+    }
     const nextValue = {
       ...value,
       available_models: availableModels,
       default_model: names[0] || value.default_model,
     };
-    if (!changed && nextValue.default_model === value.default_model) return config;
+    const changed = JSON.stringify(availableModels) !== JSON.stringify(value.available_models) || nextValue.default_model !== value.default_model;
+    if (!changed) return config;
     try {
       config.value = nextValue;
     } catch {

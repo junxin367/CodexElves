@@ -1,4 +1,4 @@
-﻿//! Codex Responses API 与 OpenAI Chat Completions 的本地协议转换。
+//! Codex Responses API 与 OpenAI Chat Completions 的本地协议转换。
 //!
 //! Codex Chat 与 Responses 协议之间的转换实现。
 
@@ -5173,10 +5173,10 @@ fn apply_chat_reasoning_options(result: &mut Value, body: &Value, model: &str) {
         return;
     }
 
-    let Some(effort) = body.pointer("/reasoning/effort").and_then(Value::as_str) else {
+    let Some(effort) = extract_requested_reasoning_effort(body) else {
         return;
     };
-    let Some(mapped) = map_chat_reasoning_effort(effort, style, model) else {
+    let Some(mapped) = map_chat_reasoning_effort(&effort, style, model) else {
         return;
     };
 
@@ -5187,8 +5187,11 @@ fn apply_chat_reasoning_options(result: &mut Value, body: &Value, model: &str) {
         ChatReasoningStyle::DeepSeek
         | ChatReasoningStyle::LowHigh
         | ChatReasoningStyle::Default
-            if supports_reasoning_effort(model) =>
+            if supports_reasoning_effort(model)
+                || model.to_ascii_lowercase().contains("claude") =>
         {
+            // Claude 模型经 Chat Completions 协议转发时也透传 reasoning_effort，
+            // 由上游/中转站映射为 output_config.effort，避免协议转换丢失思考深度
             result["reasoning_effort"] = json!(mapped);
         }
         _ => {}
@@ -5204,24 +5207,54 @@ fn apply_anthropic_reasoning_options(result: &mut Value, body: &Value, model: &s
         result["thinking"] = json!({ "type": "disabled" });
         return;
     }
-    let effort = body
-        .pointer("/reasoning/effort")
-        .and_then(Value::as_str)
-        .and_then(|effort| map_anthropic_reasoning_effort(effort, model))
+    let effort = extract_requested_reasoning_effort(body)
+        .and_then(|effort| map_anthropic_reasoning_effort(&effort, model))
         .unwrap_or(ANTHROPIC_DEFAULT_REASONING_EFFORT);
     result["thinking"] = json!({ "type": "adaptive" });
     result["output_config"] = json!({ "effort": effort });
 }
 
-fn reasoning_requested(body: &Value) -> Option<bool> {
+/// 从请求体的多个可能位置提取思考深度字符串。
+/// App 在不同模式下可能把 effort 放在 reasoning.effort、顶层 reasoning（字符串）、
+/// model_reasoning_effort、reasoning_effort，需统一兜底读取，避免协议代理丢失思考深度。
+fn extract_requested_reasoning_effort(body: &Value) -> Option<String> {
     if let Some(effort) = body.pointer("/reasoning/effort").and_then(Value::as_str) {
+        let trimmed = effort.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    for key in ["model_reasoning_effort", "reasoning_effort"] {
+        if let Some(effort) = body.get(key).and_then(Value::as_str) {
+            let trimmed = effort.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    // 顶层 reasoning 也可能直接是字符串（如 "high"）
+    if let Some(effort) = body.get("reasoning").and_then(Value::as_str) {
+        let trimmed = effort.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+fn reasoning_requested(body: &Value) -> Option<bool> {
+    if let Some(effort) = extract_requested_reasoning_effort(body) {
         return Some(!matches!(
             effort.trim().to_ascii_lowercase().as_str(),
             "none" | "off" | "disabled"
         ));
     }
 
-    body.get("reasoning").map(|value| !value.is_null())
+    // reasoning 为对象（非 null）时视为开启；为 null 时返回 None（交由调用方决定默认行为）
+    match body.get("reasoning") {
+        Some(Value::Null) | None => None,
+        Some(_) => Some(true),
+    }
 }
 
 fn infer_chat_reasoning_style(model: &str) -> ChatReasoningStyle {
@@ -5300,9 +5333,9 @@ pub fn supported_reasoning_efforts_for_model(
             return levels(&["low", "medium", "high", "max"]);
         }
         if model.contains("sonnet-4-6") {
-            return levels(&["low", "medium", "high", "max"]);
+            return levels(&["low", "medium", "high"]);
         }
-        return levels(&["low", "medium", "high", "max"]);
+        return levels(&["low", "medium", "high"]);
     }
 
     if model.contains("gpt-") || is_openai_o_series(&model) {
@@ -5328,7 +5361,7 @@ pub fn supported_reasoning_efforts_for_model(
     }
 
     match protocol {
-        UpstreamResponseProtocol::Anthropic => levels(&["low", "medium", "high", "max"]),
+        UpstreamResponseProtocol::Anthropic => levels(&["low", "medium", "high"]),
         _ => levels(&["minimal", "low", "medium", "high", "xhigh"]),
     }
 }

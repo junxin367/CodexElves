@@ -206,6 +206,34 @@ fn anthropic_reasoning_effort_is_clamped_by_model_capability() {
 }
 
 #[test]
+fn anthropic_reasoning_reads_effort_from_model_reasoning_effort_when_reasoning_absent() {
+    // App 在自定义模型下可能不发 reasoning 对象，而把思考深度放在顶层 model_reasoning_effort，
+    // 协议代理需兜底读取，避免思考深度丢失（被转成 disabled）。
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "model_reasoning_effort": "high",
+        "input": "hi"
+    }))
+    .unwrap();
+    assert_eq!(converted["thinking"], json!({ "type": "adaptive" }));
+    assert_eq!(converted["output_config"], json!({ "effort": "high" }));
+}
+
+#[test]
+fn anthropic_reasoning_defaults_to_enabled_when_reasoning_is_null() {
+    // reasoning 显式为 null 且无任何 effort 字段时，不应被判定为关闭思考，
+    // 而是按默认开启（adaptive），避免 CPA 后台显示 none。
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "reasoning": serde_json::Value::Null,
+        "input": "hi"
+    }))
+    .unwrap();
+    assert_eq!(converted["thinking"], json!({ "type": "adaptive" }));
+    assert!(converted.get("output_config").is_some());
+}
+
+#[test]
 fn anthropic_message_response_converts_to_responses() {
     let converted = anthropic_message_to_response_with_request(
         json!({

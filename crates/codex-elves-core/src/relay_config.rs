@@ -1420,6 +1420,10 @@ fn apply_generated_model_catalog_to_config(
     }
 
     doc["model_catalog_json"] = toml_edit::value(GENERATED_MODEL_CATALOG_FILENAME);
+    // 已挂接 catalog 后，per-model 上下文大小由 catalog 提供；
+    // 顶层 model_context_window 会全局覆盖所有模型（导致如 Claude 1m 被压成激活模型的值），
+    // 因此在 catalog 模式下移除顶层覆盖，让各模型使用各自的 context_window。
+    doc.as_table_mut().remove("model_context_window");
     let config_with_catalog = normalize_optional_toml(doc);
     let catalog = generated_model_catalog_json(profile, &config_with_catalog, rows)?;
     let path = home.join(GENERATED_MODEL_CATALOG_FILENAME);
@@ -1427,6 +1431,34 @@ fn apply_generated_model_catalog_to_config(
     let bytes = serde_json::to_vec_pretty(&catalog)?;
     crate::settings::atomic_write(&path, &bytes).context("写入模型目录失败")?;
     Ok(config_with_catalog)
+}
+
+fn generated_catalog_prompt_fields() -> (String, Value) {
+    let source = serde_json::from_str::<Value>(include_str!("../assets/codex-models.json")).ok();
+    let first_model = source
+        .as_ref()
+        .and_then(|value| value.get("models"))
+        .and_then(Value::as_array)
+        .and_then(|models| models.first());
+    let base_instructions = first_model
+        .and_then(|model| model.get("base_instructions"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("You are Codex, a coding agent based on GPT-5.")
+        .to_string();
+    let model_messages = first_model
+        .and_then(|model| model.get("model_messages"))
+        .cloned()
+        .unwrap_or_else(|| {
+            json!({
+                "instructions_template": base_instructions.clone(),
+                "instructions_variables": {
+                    "personality_default": "",
+                    "personality_pragmatic": ""
+                }
+            })
+        });
+    (base_instructions, model_messages)
 }
 
 #[derive(Debug, Clone)]
@@ -1444,9 +1476,10 @@ pub(crate) fn generated_model_catalog_json(
     let reasoning_effort = catalog_reasoning_effort(config_text);
     let auto_compact_limit =
         parse_optional_positive_u64(&profile.auto_compact_limit, "压缩上下文大小")?;
+    let (base_instructions, model_messages) = generated_catalog_prompt_fields();
     let mut models = Vec::new();
 
-    for row in rows {
+    for (index, row) in rows.into_iter().enumerate() {
         let model = row.model;
         let protocol = upstream_response_protocol_for_relay(row.protocol);
         let supported_reasoning_levels =
@@ -1455,9 +1488,39 @@ pub(crate) fn generated_model_catalog_json(
             catalog_default_reasoning_effort(&reasoning_effort, &supported_reasoning_levels);
         let mut entry = Map::new();
         entry.insert("slug".to_string(), json!(model.clone()));
-        entry.insert("display_name".to_string(), json!(model));
+        entry.insert("display_name".to_string(), json!(model.clone()));
+        entry.insert("description".to_string(), json!(model));
+        entry.insert("priority".to_string(), json!(1000 + index as u64));
         entry.insert("visibility".to_string(), json!("list"));
         entry.insert("supported_in_api".to_string(), json!(true));
+        entry.insert(
+            "base_instructions".to_string(),
+            json!(base_instructions.clone()),
+        );
+        entry.insert("model_messages".to_string(), model_messages.clone());
+        // codex 解析 model_catalog_json 时 shell_type 为必填字段，缺失会导致整份目录解析失败
+        entry.insert("shell_type".to_string(), json!("shell_command"));
+        entry.insert("apply_patch_tool_type".to_string(), json!("freeform"));
+        entry.insert("web_search_tool_type".to_string(), json!("text_and_image"));
+        entry.insert("additional_speed_tiers".to_string(), json!([]));
+        entry.insert("availability_nux".to_string(), Value::Null);
+        entry.insert("default_verbosity".to_string(), json!("low"));
+        entry.insert("effective_context_window_percent".to_string(), json!(95));
+        entry.insert("experimental_supported_tools".to_string(), json!([]));
+        entry.insert("input_modalities".to_string(), json!(["text", "image"]));
+        entry.insert("service_tiers".to_string(), json!([]));
+        entry.insert("support_verbosity".to_string(), json!(true));
+        entry.insert("supports_image_detail_original".to_string(), json!(true));
+        entry.insert("supports_parallel_tool_calls".to_string(), json!(true));
+        entry.insert("supports_reasoning_summaries".to_string(), json!(true));
+        entry.insert("supports_search_tool".to_string(), json!(true));
+        entry.insert("default_reasoning_summary".to_string(), json!("none"));
+        entry.insert(
+            "truncation_policy".to_string(),
+            json!({ "mode": "tokens", "limit": 10000 }),
+        );
+        entry.insert("upgrade".to_string(), Value::Null);
+        entry.insert("use_responses_lite".to_string(), json!(false));
         entry.insert(
             "default_reasoning_level".to_string(),
             json!(default_reasoning_level),
@@ -1495,7 +1558,8 @@ pub(crate) fn relay_profile_model_entries(profile: &RelayProfile) -> Vec<serde_j
     rows.iter()
         .map(|row| {
             let protocol = upstream_response_protocol_for_relay(row.protocol);
-            let supported = crate::protocol_proxy::supported_reasoning_efforts_for_model(&row.model, protocol);
+            let supported =
+                crate::protocol_proxy::supported_reasoning_efforts_for_model(&row.model, protocol);
             let default_level = {
                 let mut chosen = "medium";
                 for fallback in ["high", "medium", "low", "minimal"] {
@@ -1514,7 +1578,12 @@ pub(crate) fn relay_profile_model_entries(profile: &RelayProfile) -> Vec<serde_j
             entry.insert("default_reasoning_level".to_string(), json!(default_level));
             entry.insert(
                 "supported_reasoning_levels".to_string(),
-                json!(supported.iter().map(|e| json!({ "effort": e })).collect::<Vec<_>>()),
+                json!(
+                    supported
+                        .iter()
+                        .map(|e| json!({ "effort": e }))
+                        .collect::<Vec<_>>()
+                ),
             );
             // 解析 context_window（支持 1m / 128k / 纯数字）
             let cw_str = row.context_window.trim();
