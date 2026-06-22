@@ -233,6 +233,9 @@ fn github_release_workflow_can_build_assets_from_tags_and_manual_dispatch() {
     assert!(workflow.contains("- \"v*\""));
     assert!(workflow.contains("ensure-release:"));
     assert!(workflow.contains("gh release create \"$TAG\""));
+    assert!(workflow.contains("release-notes.md"));
+    assert!(workflow.contains("gh release edit \"$TAG\""));
+    assert!(workflow.contains("[[ \"$BODY\" == \"**Full Changelog**\"* ]]"));
     assert!(workflow.contains("ref: ${{ needs.ensure-release.outputs.tag }}"));
     assert!(workflow.contains("tag_name: ${{ needs.ensure-release.outputs.tag }}"));
 }

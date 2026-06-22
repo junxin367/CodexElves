@@ -45,10 +45,33 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          VERSION="${TAG#v}"
+          VERSION="${VERSION#V}"
+          cat > release-notes.md <<EOF
+          ## $TAG
+
+          CodexElves $VERSION 发布版本。
+
+          ### 安装包
+          - Windows: \`CodexElves-$VERSION-windows-x64-setup.exe\`
+          - macOS Intel: \`CodexElves-$VERSION-macos-x64.dmg\`
+          - macOS Apple Silicon: \`CodexElves-$VERSION-macos-arm64.dmg\`
+
+          ### 说明
+          - 本 Release 由 GitHub Actions 自动编译并上传安装资产。
+          - \`latest.json\` 会在所有平台资产上传后自动更新。
+
+          ### 完整变更
+          https://github.com/$REPO/commits/$TAG
+          EOF
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             echo "Release already exists: $TAG"
+            BODY="$(gh release view "$TAG" --repo "$REPO" --json body --jq .body)"
+            if [ -z "$BODY" ] || [[ "$BODY" == "**Full Changelog**"* ]]; then
+              gh release edit "$TAG" --repo "$REPO" --notes-file release-notes.md
+            fi
           else
-            gh release create "$TAG" --repo "$REPO" --title "$TAG" --generate-notes --target "$GITHUB_SHA"
+            gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes-file release-notes.md --target "$GITHUB_SHA"
           fi
 
   windows-installer:
