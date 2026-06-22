@@ -3,18 +3,62 @@ name: Release assets
 on:
   release:
     types: [published]
+  push:
+    tags:
+      - "v*"
+      - "V*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build, for example v0.1.0"
+        required: true
 
 permissions:
   contents: write
 
+env:
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+
 jobs:
+  ensure-release:
+    name: Ensure GitHub Release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release-tag.outputs.tag }}
+    steps:
+      - name: Resolve release tag
+        id: release-tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$RELEASE_TAG" ]; then
+            echo "Release tag is empty" >&2
+            exit 1
+          fi
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create release when missing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.release-tag.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release already exists: $TAG"
+          else
+            gh release create "$TAG" --repo "$REPO" --title "$TAG" --generate-notes --target "$GITHUB_SHA"
+          fi
+
   windows-installer:
     runs-on: windows-latest
+    needs: ensure-release
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ needs.ensure-release.outputs.tag }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -48,7 +92,7 @@ jobs:
       - name: Build Windows installer
         shell: pwsh
         run: |
-          $version = "${{ github.event.release.tag_name }}".TrimStart("v", "V")
+          $version = "${{ needs.ensure-release.outputs.tag }}".TrimStart("v", "V")
           $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
           if (-not (Test-Path $makensis)) {
             $makensis = "makensis"
@@ -60,12 +104,13 @@ jobs:
       - name: Upload Windows installer
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.release.tag_name }}
+          tag_name: ${{ needs.ensure-release.outputs.tag }}
           files: dist/windows/*.exe
 
   macos-dmg:
     name: macOS DMG (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    needs: ensure-release
     strategy:
       fail-fast: false
       matrix:
@@ -80,7 +125,7 @@ jobs:
       - name: Checkout release tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ needs.ensure-release.outputs.tag }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -104,8 +149,10 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Build macOS DMG
+        env:
+          RELEASE_TAG: ${{ needs.ensure-release.outputs.tag }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           VERSION="${VERSION#V}"
           BINARY_DIR="$PWD/target/${{ matrix.target }}/release" bash scripts/installer/macos/package-dmg.sh "$VERSION" "${{ matrix.arch }}"
 
@@ -126,13 +173,14 @@ jobs:
       - name: Upload macOS DMG
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.release.tag_name }}
+          tag_name: ${{ needs.ensure-release.outputs.tag }}
           files: dist/macos/*.dmg
 
   latest-json:
     name: Upload static latest.json
     runs-on: ubuntu-latest
     needs:
+      - ensure-release
       - windows-installer
       - macos-dmg
     steps:
@@ -140,7 +188,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ needs.ensure-release.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
@@ -169,7 +217,7 @@ jobs:
       - name: Upload latest.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ needs.ensure-release.outputs.tag }}
           REPO: ${{ github.repository }}
         shell: bash
         run: gh release upload "$TAG" latest.json --clobber --repo "$REPO"

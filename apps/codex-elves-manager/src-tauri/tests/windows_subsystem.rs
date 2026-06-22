@@ -218,6 +218,26 @@ fn github_release_workflow_builds_separate_macos_x64_and_arm64_dmgs() {
 }
 
 #[test]
+fn github_release_workflow_can_build_assets_from_tags_and_manual_dispatch() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workflow = manifest_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .and_then(std::path::Path::parent)
+        .unwrap()
+        .join(".github/workflows/release-assets.yml");
+    let workflow = std::fs::read_to_string(&workflow).expect("read release assets workflow");
+
+    assert!(workflow.contains("workflow_dispatch:"));
+    assert!(workflow.contains("tags:"));
+    assert!(workflow.contains("- \"v*\""));
+    assert!(workflow.contains("ensure-release:"));
+    assert!(workflow.contains("gh release create \"$TAG\""));
+    assert!(workflow.contains("ref: ${{ needs.ensure-release.outputs.tag }}"));
+    assert!(workflow.contains("tag_name: ${{ needs.ensure-release.outputs.tag }}"));
+}
+
+#[test]
 fn github_release_workflow_uploads_static_latest_json() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let workflow = manifest_dir
@@ -230,6 +250,8 @@ fn github_release_workflow_uploads_static_latest_json() {
 
     assert!(workflow.contains("latest-json:"));
     assert!(workflow.contains("latest.json"));
+    assert!(workflow.contains("- ensure-release"));
+    assert!(workflow.contains("TAG: ${{ needs.ensure-release.outputs.tag }}"));
     assert!(workflow.contains("gh release upload \"$TAG\" latest.json --clobber"));
 }
 
