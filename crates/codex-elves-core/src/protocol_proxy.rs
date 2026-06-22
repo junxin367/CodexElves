@@ -1,4 +1,4 @@
-//! Codex Responses API 与 OpenAI Chat Completions 的本地协议转换。
+﻿//! Codex Responses API 与 OpenAI Chat Completions 的本地协议转换。
 //!
 //! Codex Chat 与 Responses 协议之间的转换实现。
 
@@ -5300,9 +5300,9 @@ pub fn supported_reasoning_efforts_for_model(
             return levels(&["low", "medium", "high", "max"]);
         }
         if model.contains("sonnet-4-6") {
-            return levels(&["low", "medium", "high"]);
+            return levels(&["low", "medium", "high", "max"]);
         }
-        return levels(&["low", "medium", "high"]);
+        return levels(&["low", "medium", "high", "max"]);
     }
 
     if model.contains("gpt-") || is_openai_o_series(&model) {
@@ -5328,7 +5328,7 @@ pub fn supported_reasoning_efforts_for_model(
     }
 
     match protocol {
-        UpstreamResponseProtocol::Anthropic => levels(&["low", "medium", "high"]),
+        UpstreamResponseProtocol::Anthropic => levels(&["low", "medium", "high", "max"]),
         _ => levels(&["minimal", "low", "medium", "high", "xhigh"]),
     }
 }
