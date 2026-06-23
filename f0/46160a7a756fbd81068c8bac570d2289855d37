@@ -1,0 +1,24 @@
+scripts/dev-manager.ps1
+  s_d11b1cb79587a2::t_f23b57a37a829d 1-38
+apps/codex-elves-manager/src-tauri/src/lib.rs
+  s_d11b1cb79587a2::t_d12dced8dabc85 20,72,230-253
+apps/codex-elves-manager/src-tauri/tests/windows_subsystem.rs
+  s_d11b1cb79587a2::t_cee3d4d75f19ff 37
+  s_d11b1cb79587a2::t_0ae24fbc0532bc 34-36,46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "f046160a7a756fbd81068c8bac570d2289855d37",
+  "prompts": {},
+  "sessions": {
+    "s_d11b1cb79587a2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef3e9-ce87-77f2-b081-5005242eb194",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
