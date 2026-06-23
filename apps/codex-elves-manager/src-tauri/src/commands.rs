@@ -1973,11 +1973,12 @@ pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
         return apply_aggregate_relay_injection_to_home(&home);
     }
     if relay_has_complete_files(&relay) {
+        let preserve_computer_use_guard = false;
         return match codex_elves_core::relay_config::apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard(
             &home,
             &relay,
             &relay_combined_common_config(&settings),
-            settings.computer_use_guard_enabled,
+            preserve_computer_use_guard,
         ) {
             Ok(result) => {
                 let status = codex_elves_core::relay_config::relay_status_from_home(&home);
@@ -2110,11 +2111,12 @@ pub fn apply_pure_api_injection() -> CommandResult<RelayPayload> {
     let relay = settings.active_relay_profile();
     log_relay_apply_request("manager.apply_pure_api_injection", &settings, &relay);
     if relay_has_complete_files(&relay) {
+        let preserve_computer_use_guard = false;
         return match codex_elves_core::relay_config::apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard(
             &home,
             &relay,
             &relay_combined_common_config(&settings),
-            settings.computer_use_guard_enabled,
+            preserve_computer_use_guard,
         ) {
             Ok(result) => {
                 let status = codex_elves_core::relay_config::relay_status_from_home(&home);
@@ -2852,6 +2854,79 @@ mod tests {
         assert!(!result.payload.authenticated);
         assert!(config.contains(r#"base_url = "http://127.0.0.1:45221/v1""#));
         assert!(config.contains(r#"experimental_bearer_token = "codex-elves-aggregate""#));
+    }
+
+    #[test]
+    fn manual_relay_injection_does_not_apply_computer_use_guard_to_complete_profile() {
+        complete_profile_command_does_not_apply_computer_use_guard(
+            codex_elves_core::settings::RelayMode::MixedApi,
+            apply_relay_injection,
+        );
+    }
+
+    #[test]
+    fn manual_pure_api_injection_does_not_apply_computer_use_guard_to_complete_profile() {
+        complete_profile_command_does_not_apply_computer_use_guard(
+            codex_elves_core::settings::RelayMode::PureApi,
+            apply_pure_api_injection,
+        );
+    }
+
+    fn complete_profile_command_does_not_apply_computer_use_guard(
+        relay_mode: codex_elves_core::settings::RelayMode,
+        command: fn() -> CommandResult<RelayPayload>,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let codex_home = temp.path().join("codex-home");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        let previous_codex_home = std::env::var_os("CODEX_HOME");
+        let previous_settings_path = codex_elves_core::paths::set_settings_path_for_tests(Some(
+            temp.path().join("settings.json"),
+        ));
+        unsafe {
+            std::env::set_var("CODEX_HOME", &codex_home);
+        }
+        SettingsStore::default()
+            .save(&BackendSettings {
+                active_relay_id: "supplier-a".to_string(),
+                computer_use_guard_enabled: true,
+                relay_profiles: vec![RelayProfile {
+                    id: "supplier-a".to_string(),
+                    name: "供应商 A".to_string(),
+                    relay_mode,
+                    protocol: codex_elves_core::settings::RelayProtocol::Responses,
+                    config_contents: complete_profile_config(),
+                    auth_contents: r#"{"OPENAI_API_KEY":"sk-test-redacted"}"#.to_string(),
+                    ..RelayProfile::default()
+                }],
+                ..BackendSettings::default()
+            })
+            .unwrap();
+
+        let result = command();
+
+        restore_codex_home(previous_codex_home);
+        codex_elves_core::paths::set_settings_path_for_tests(previous_settings_path);
+
+        let live = std::fs::read_to_string(codex_home.join("config.toml")).unwrap();
+        assert_eq!(result.status, "ok");
+        assert!(result.payload.configured);
+        assert!(!live.contains("js_repl"));
+        assert!(!live.contains("computer-use@openai-bundled"));
+        assert!(live.contains(r#"base_url = "https://manual.example/v1""#));
+    }
+
+    fn complete_profile_config() -> String {
+        r#"model = "gpt-5"
+model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://manual.example/v1"
+"#
+        .to_string()
     }
 
     #[test]

@@ -72,13 +72,15 @@ fn apply_selected_relay_profile(
 ) -> anyhow::Result<RelaySwitchResult> {
     let relay = settings.active_relay_profile();
     let common_config = relay_combined_common_config(settings);
+    // 手动切换供应商应按供应商快照精确落盘；Computer Use Guard 只在启动 Codex 时维护。
+    let preserve_computer_use_guard = false;
     let result = if relay.relay_mode == RelayMode::Official && !relay.official_mix_api_key {
         let auth_contents =
             (!relay.auth_contents.trim().is_empty()).then_some(relay.auth_contents.as_str());
         crate::relay_config::clear_relay_config_to_home_with_auth_and_computer_use_guard(
             home,
             auth_contents,
-            settings.computer_use_guard_enabled,
+            preserve_computer_use_guard,
         )?
     } else {
         validate_switch_profile_files(&relay)?;
@@ -86,7 +88,7 @@ fn apply_selected_relay_profile(
             home,
             &relay,
             &common_config,
-            settings.computer_use_guard_enabled,
+            preserve_computer_use_guard,
         )?
     };
     let status = relay_config_status_from_home(home);

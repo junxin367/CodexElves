@@ -221,6 +221,37 @@ goals = true
     assert!(returned.api_key.is_empty());
 }
 
+#[test]
+fn switch_does_not_apply_computer_use_guard_to_target_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("codex");
+    std::fs::create_dir(&home).unwrap();
+    let store = SettingsStore::new(temp.path().join("settings.json"));
+    let original = BackendSettings {
+        active_relay_id: "a".to_string(),
+        relay_profiles: vec![
+            pure_profile("a", "https://a.example/v1", "sk-a"),
+            pure_profile("b", "https://b.example/v1", "sk-b"),
+        ],
+        computer_use_guard_enabled: true,
+        ..BackendSettings::default()
+    };
+    store.save(&original).unwrap();
+    let next = BackendSettings {
+        active_relay_id: "b".to_string(),
+        relay_profiles: original.relay_profiles.clone(),
+        computer_use_guard_enabled: true,
+        ..BackendSettings::default()
+    };
+
+    switch_relay_profile_in_home(&store, &home, next, "").unwrap();
+
+    let live = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    assert!(!live.contains("js_repl"));
+    assert!(!live.contains("computer-use@openai-bundled"));
+    assert!(live.contains(r#"base_url = "https://b.example/v1""#));
+}
+
 fn pure_profile(id: &str, base_url: &str, key: &str) -> RelayProfile {
     RelayProfile {
         id: id.to_string(),
