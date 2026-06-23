@@ -1,0 +1,22 @@
+crates/codex-elves-core/src/ports.rs
+  s_d11b1cb79587a2::t_b853b49098e09a 9-32
+  s_d11b1cb79587a2::t_45844cd5813638 263-282
+apps/codex-elves-manager/src-tauri/src/lib.rs
+  s_d11b1cb79587a2::t_2c6cc4d5ff32fe 347-348,381-382,388,396,400,408,412,423
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "aa2a3e9bccd469a265ce6353593f6f56a79cab56",
+  "prompts": {},
+  "sessions": {
+    "s_d11b1cb79587a2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef3e9-ce87-77f2-b081-5005242eb194",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
