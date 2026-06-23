@@ -79,12 +79,12 @@ jobs:
     needs: ensure-release
     steps:
       - name: Checkout release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.ensure-release.outputs.tag }}
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "22"
 
@@ -125,10 +125,17 @@ jobs:
           Pop-Location
 
       - name: Upload Windows installer
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.ensure-release.outputs.tag }}
-          files: dist/windows/*.exe
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.ensure-release.outputs.tag }}
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -LiteralPath dist/windows -Filter *.exe
+          if (-not $files) {
+            throw "No Windows installer found in dist/windows"
+          }
+          gh release upload $env:TAG @($files.FullName) --clobber --repo $env:REPO
 
   macos-dmg:
     name: macOS DMG (${{ matrix.arch }})
@@ -146,12 +153,12 @@ jobs:
             target: aarch64-apple-darwin
     steps:
       - name: Checkout release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.ensure-release.outputs.tag }}
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "22"
 
@@ -194,10 +201,11 @@ jobs:
           done
 
       - name: Upload macOS DMG
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.ensure-release.outputs.tag }}
-          files: dist/macos/*.dmg
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.ensure-release.outputs.tag }}
+        run: gh release upload "$TAG" dist/macos/*.dmg --clobber --repo "$REPO"
 
   latest-json:
     name: Upload static latest.json
