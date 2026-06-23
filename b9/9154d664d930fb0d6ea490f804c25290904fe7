@@ -1,0 +1,30 @@
+apps/codex-elves-manager/src/App.tsx
+  s_d11b1cb79587a2::t_c090f42d196e60 657-665
+apps/codex-elves-manager/src-tauri/src/lib.rs
+  s_d11b1cb79587a2::t_01c64b394c026f 67
+  s_d11b1cb79587a2::t_205b8e9600845b 236-248
+  s_d11b1cb79587a2::t_c40a7f1721ea67 19,249,377-378,389-400,445,450,454-458,462,467,471-475,485-502
+apps/codex-elves-manager/src-tauri/permissions/default.toml
+  s_d11b1cb79587a2::t_474daf8afd0620 1-62
+apps/codex-elves-manager/src-tauri/tests/windows_subsystem.rs
+  s_d11b1cb79587a2::t_d019ac96de00dc 55,64-71
+  s_d11b1cb79587a2::t_5e20a76678eeea 97-99
+apps/codex-elves-manager/src-tauri/capabilities/default.json
+  s_d11b1cb79587a2::t_8141669d4637ac 5-7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "b99154d664d930fb0d6ea490f804c25290904fe7",
+  "prompts": {},
+  "sessions": {
+    "s_d11b1cb79587a2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef3e9-ce87-77f2-b081-5005242eb194",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
