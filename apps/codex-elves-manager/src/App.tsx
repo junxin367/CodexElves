@@ -3948,7 +3948,9 @@ function SessionTimeRangePicker({
     const spaceBelow = window.innerHeight - rect.bottom - viewportPadding;
     const spaceAbove = rect.top - viewportPadding;
     const openAbove = spaceBelow < 320 && spaceAbove > spaceBelow;
-    const left = Math.max(viewportPadding, Math.min(rect.left, window.innerWidth - menuWidth - viewportPadding));
+    // 优先与触发器右缘对齐（弹窗向左展开），避免右侧贴边被遮
+    const maxLeft = window.innerWidth - menuWidth - viewportPadding;
+    const left = Math.max(viewportPadding, Math.min(rect.right - menuWidth, maxLeft));
     setMenuStyle({
       left,
       top: openAbove ? undefined : rect.bottom + gap,
@@ -3979,9 +3981,11 @@ function SessionTimeRangePicker({
   const quickPresets: Array<{ label: string; apply: () => void }> = [
     { label: "最近 1 周", apply: () => onChange(daysAgoStartMs(7), startOfDayMs(new Date())) },
     { label: "最近 2 周", apply: () => onChange(daysAgoStartMs(14), startOfDayMs(new Date())) },
+    { label: "最近 3 周", apply: () => onChange(daysAgoStartMs(21), startOfDayMs(new Date())) },
     { label: "最近 1 月", apply: () => onChange(daysAgoStartMs(30), startOfDayMs(new Date())) },
     { label: "1 周前（更早）", apply: () => onChange(null, daysAgoStartMs(7)) },
     { label: "2 周前（更早）", apply: () => onChange(null, daysAgoStartMs(14)) },
+    { label: "3 周前（更早）", apply: () => onChange(null, daysAgoStartMs(21)) },
     { label: "1 月前（更早）", apply: () => onChange(null, daysAgoStartMs(30)) },
   ];
 

@@ -2078,6 +2078,7 @@ body {
 
 .session-filter-delete {
   flex: 0 0 auto;
+  height: 38px;
   white-space: nowrap;
 }
 
