@@ -306,7 +306,10 @@ fn github_release_workflow_can_build_assets_from_tags_and_manual_dispatch() {
     assert!(workflow.contains("gh release edit \"$TAG\""));
     assert!(workflow.contains("[[ \"$BODY\" == \"**Full Changelog**\"* ]]"));
     assert!(workflow.contains("ref: ${{ needs.ensure-release.outputs.tag }}"));
-    assert!(workflow.contains("tag_name: ${{ needs.ensure-release.outputs.tag }}"));
+    assert!(workflow.contains("TAG: ${{ needs.ensure-release.outputs.tag }}"));
+    assert!(workflow.contains("gh release upload $env:TAG @($files.FullName) --clobber"));
+    assert!(workflow.contains("gh release upload \"$TAG\" dist/macos/*.dmg --clobber"));
+    assert!(!workflow.contains("softprops/action-gh-release"));
 }
 
 #[test]
