@@ -1,0 +1,27 @@
+crates/codex-elves-core/src/protocol_proxy.rs
+  s_b5d34c51542d1d::t_0739639e85bf12 2513-2514,2518-2526,2528
+  s_b5d34c51542d1d::t_ab999fe8409915 4893-4894
+  s_b5d34c51542d1d::t_c888e6a77c5919 5000-5023,5025-5026,5029,5031,5034-5041
+  s_b5d34c51542d1d::t_3a8554a5faabdd 4580-4589
+  s_b5d34c51542d1d::t_816528a39dd3a0 4917-4949
+  s_b5d34c51542d1d::t_1bb2ec522a74c3 2533,2540,2546,2553-2556
+crates/codex-elves-core/tests/protocol_proxy.rs
+  s_b5d34c51542d1d::t_ca0e5c1de178b9 384-432
+  s_b5d34c51542d1d::t_e25ce6f6686b87 1849-1919
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "64f85aa59976ce3a6e9c62fcbc8bc0005273aef4",
+  "prompts": {},
+  "sessions": {
+    "s_b5d34c51542d1d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef03c-300c-7c21-a615-1ac8cd46d9ad",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
