@@ -1,0 +1,30 @@
+crates/codex-elves-core/src/protocol_proxy.rs
+  s_6912e0238f15c7::t_ffe7a4b99cf7fe 5123-5133,5136,5142,5146,5311,5316
+  s_6912e0238f15c7::t_480ff15bb0a029 5269-5272,5329
+  s_6912e0238f15c7::t_b78a5ae7d0a824 2470,2492,2525-2531,2679-2683,2724-2729,2739,5317
+  s_6912e0238f15c7::t_cdb2f368781dcb 5179,5285-5288,5310,5312-5315,5324-5328
+crates/codex-elves-core/tests/protocol_proxy.rs
+  s_6912e0238f15c7::t_d430f07eef6800 512-561,654-656
+  s_6912e0238f15c7::t_f6b32df6c8f743 429-501,509-511,562-653
+  s_6912e0238f15c7::t_e447aa75a66135 502-508,2354-2411,2413-2423
+  s_6912e0238f15c7::t_7eb82c4a1b3337 657-730
+  s_6912e0238f15c7::t_82b9e6c06a6db6 2234-2303,2478-2536
+  s_6912e0238f15c7::t_69730cd4c924d4 2304-2353,2412,2424-2426
+  s_6912e0238f15c7::t_1a0ac2fac9f4d4 428,2233,2427-2477
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "014404f64514c1e8d289339ba59f658c4de081be",
+  "prompts": {},
+  "sessions": {
+    "s_6912e0238f15c7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef2d9-13c1-7d22-9701-391aaf2fe996",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
