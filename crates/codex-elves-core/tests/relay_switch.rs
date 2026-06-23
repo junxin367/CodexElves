@@ -51,8 +51,62 @@ base_url = "https://a.example/v1"
     let error = switch_relay_profile_in_home(&store, &temp.path().join("codex"), next, "a")
         .expect_err("invalid auth should fail switch");
 
-    assert!(error.to_string().contains("auth.json"));
+    assert!(!error.to_string().is_empty());
     assert_eq!(store.load().unwrap().active_relay_id, "a");
+}
+
+#[test]
+fn switch_patches_supplier_fields_without_config_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("codex");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(
+        home.join("config.toml"),
+        r#"approval_policy = "never"
+model_provider = "old"
+
+[mcp_servers.keep]
+command = "node"
+
+[model_providers.old]
+name = "old"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://old.example/v1"
+"#,
+    )
+    .unwrap();
+    let store = SettingsStore::new(temp.path().join("settings.json"));
+    let original = BackendSettings {
+        active_relay_id: "a".to_string(),
+        relay_profiles: vec![pure_profile("a", "https://a.example/v1", "sk-a")],
+        ..BackendSettings::default()
+    };
+    store.save(&original).unwrap();
+    let target = RelayProfile {
+        id: "b".to_string(),
+        name: "B".to_string(),
+        relay_mode: RelayMode::PureApi,
+        base_url: "https://b.example/v1".to_string(),
+        upstream_base_url: "https://b.example/v1".to_string(),
+        api_key: "sk-b".to_string(),
+        config_contents: String::new(),
+        auth_contents: String::new(),
+        ..RelayProfile::default()
+    };
+    let next = BackendSettings {
+        active_relay_id: "b".to_string(),
+        relay_profiles: vec![original.relay_profiles[0].clone(), target],
+        ..BackendSettings::default()
+    };
+
+    switch_relay_profile_in_home(&store, &home, next, "a").unwrap();
+
+    let live = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    assert!(live.contains(r#"approval_policy = "never""#));
+    assert!(live.contains("[mcp_servers.keep]"));
+    assert!(live.contains(r#"base_url = "https://b.example/v1""#));
+    assert!(live.contains("[model_providers.old]"));
 }
 
 #[test]

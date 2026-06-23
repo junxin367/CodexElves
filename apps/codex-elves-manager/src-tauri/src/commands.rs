@@ -1990,7 +1990,7 @@ pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
                     None,
                 );
                 ok(
-                    "已按兼容切换规则切换供应商。",
+                    "已按字段级规则切换供应商。",
                     relay_payload(status, result.backup_path),
                 )
             }
@@ -2004,7 +2004,7 @@ pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
                     Some(error.to_string()),
                 );
                 failed(
-                    &format!("切换完整中转配置失败：{error}"),
+                    &format!("切换供应商字段失败：{error}"),
                     relay_payload(status, None),
                 )
             }
@@ -2134,7 +2134,7 @@ pub fn apply_pure_api_injection() -> CommandResult<RelayPayload> {
                     );
                 }
                 ok(
-                    "已按兼容切换规则切换供应商。",
+                    "已按字段级规则切换供应商。",
                     relay_payload(status, result.backup_path),
                 )
             }
@@ -3161,6 +3161,7 @@ base_url = "https://manual.example/v1"
         let profile = RelayProfile {
             relay_mode: codex_elves_core::settings::RelayMode::PureApi,
             protocol: codex_elves_core::settings::RelayProtocol::Responses,
+            api_key: "sk-test".to_string(),
             config_contents: "model_provider = \"ai\"\nmodel = \"gpt-image-2\"\n\n[model_providers.ai]\nname = \"ai\"\nwire_api = \"responses\"\nrequires_openai_auth = true\nbase_url = \"https://ahg.codes\"\n"
                 .to_string(),
             auth_contents: "{}\n".to_string(),

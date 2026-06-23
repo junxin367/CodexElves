@@ -5851,8 +5851,8 @@ function relayProfileReadinessText(profile: RelayProfile, relay: RelayResult | n
       ? `官方账号已登录：${relay.accountLabel || relay.authSource || "已检测"}。`
       : "当前未登录官方账号；切到官方登录模式后仍需要先在 Codex/ChatGPT 登录。";
   }
-  const hasFiles = profile.configContents.trim() && profile.authContents.trim();
-  if (!hasFiles) return "当前供应商还没有完整 config.toml / API Key 存档。";
+  const hasApiFields = relayProfileHasBaseUrl(profile) && relayProfileHasApiKey(profile);
+  if (!hasApiFields) return "当前供应商还没有填写 Base URL / API Key。";
   if (relay && !relay.configured) return "纯 API 配置未完整写入：请检查此供应商是否有 OPENAI_API_KEY，且 config.toml 是否包含 model_provider / provider / base_url。";
   return "纯 API 就绪：会同时写入 config.toml 和 auth.json。";
 }
@@ -6233,11 +6233,30 @@ function relayProfileSwitchValidation(profile: RelayProfile): string | null {
     return aggregateRelayProfileValidation(profile);
   }
   if (profile.relayMode === "official" && !profile.officialMixApiKey) return null;
-  if (!profile.configContents.trim()) {
-    return `供应商「${profile.name || profile.id}」缺少独立 config.toml，已停止切换，避免继续显示上一套配置文件。请先在该供应商详情里保存 config.toml。`;
+  if (!relayProfileHasBaseUrl(profile)) {
+    return `供应商「${profile.name || profile.id}」缺少 Base URL。`;
+  }
+  if (!relayProfileHasApiKey(profile)) {
+    return `供应商「${profile.name || profile.id}」缺少 API Key。`;
   }
   if (profile.relayMode !== "official" || !authJsonHasOpenAiApiKey(profile.authContents)) return null;
   return "官方混合 API 不应在 auth.json 中保存 OPENAI_API_KEY。请清理此供应商的 auth.json 后再切换。";
+}
+
+function relayProfileHasBaseUrl(profile: RelayProfile): boolean {
+  return Boolean(
+    profile.baseUrl.trim()
+      || profile.upstreamBaseUrl.trim()
+      || codexBaseUrlFromConfig(profile.configContents).trim(),
+  );
+}
+
+function relayProfileHasApiKey(profile: RelayProfile): boolean {
+  return Boolean(
+    profile.apiKey.trim()
+      || codexApiKeyFromAuth(profile.authContents).trim()
+      || codexExperimentalBearerTokenFromConfig(profile.configContents).trim(),
+  );
 }
 
 function relayProfileUsesLiveFiles(profile: RelayProfile): boolean {
