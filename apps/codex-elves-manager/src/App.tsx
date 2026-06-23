@@ -328,11 +328,6 @@ type LiveContextEntriesResult = CommandResult<{
   entries: CodexContextEntries;
 }>;
 
-type ExtractRelayCommonConfigResult = CommandResult<{
-  commonConfigContents: string;
-  profileConfigContents: string;
-}>;
-
 type RelaySwitchResult = CommandResult<{
   settings: BackendSettings;
   settingsPath: string;
@@ -1267,12 +1262,12 @@ export function App() {
     return !!result && isSuccessStatus(result.status) && !result.configured;
   };
 
-  const saveRelayFile = async (kind: "config" | "auth", contents: string, silent = false) => {
-    const result = await run(() => call<RelayFilesResult>("save_relay_file", { request: { kind, contents } }));
+  const saveRelayAuthFile = async (contents: string, silent = false) => {
+    const result = await run(() => call<RelayFilesResult>("save_relay_file", { request: { kind: "auth", contents } }));
     if (result) {
       setRelayFiles(result);
       if (!silent || !isSuccessStatus(result.status)) {
-        showNotice(kind === "config" ? "config.toml" : "auth.json", result.message, result.status);
+        showNotice("auth.json", result.message, result.status);
       }
       await refreshRelay(true);
     }
@@ -1312,16 +1307,6 @@ export function App() {
     setSettingsForm(normalized);
     if (!isSuccessStatus(result.status)) showResultNotice("工具与插件", result);
     return normalized;
-  };
-
-  const extractRelayCommonConfig = async (configContents: string) => {
-    const result = await run(() =>
-      call<ExtractRelayCommonConfigResult>("extract_relay_common_config", {
-        request: { configContents },
-      }),
-    );
-    if (result) showResultNotice("通用配置文件", result);
-    return result && isSuccessStatus(result.status) ? result : null;
   };
 
   const testRelayProfile = async (profile: RelayProfile) => {
@@ -1639,10 +1624,9 @@ export function App() {
       applyRelayInjection,
       applyPureApiInjection,
       clearRelayInjection,
-      saveRelayFile,
+      saveRelayAuthFile,
       upsertContextEntry,
       deleteContextEntry,
-      extractRelayCommonConfig,
       testRelayProfile,
       fetchRelayProfileModels,
       switchRelayProfile,
@@ -1871,7 +1855,7 @@ type Actions = {
   applyRelayInjection: () => Promise<boolean>;
   applyPureApiInjection: () => Promise<boolean>;
   clearRelayInjection: () => Promise<boolean>;
-  saveRelayFile: (kind: "config" | "auth", contents: string, silent?: boolean) => Promise<void>;
+  saveRelayAuthFile: (contents: string, silent?: boolean) => Promise<void>;
   upsertContextEntry: (
     settings: BackendSettings,
     kind: ContextKind,
@@ -1879,7 +1863,6 @@ type Actions = {
     tomlBody: string,
   ) => Promise<BackendSettings | null>;
   deleteContextEntry: (settings: BackendSettings, kind: ContextKind, id: string) => Promise<BackendSettings | null>;
-  extractRelayCommonConfig: (configContents: string) => Promise<ExtractRelayCommonConfigResult | null>;
   testRelayProfile: (profile: RelayProfile) => Promise<void>;
   fetchRelayProfileModels: (profile: RelayProfile) => Promise<string[] | null>;
   switchRelayProfile: (settings: BackendSettings, previousActiveRelayId?: string) => Promise<void>;
@@ -3146,12 +3129,7 @@ function RelayProfileDetail({
       : updateRelayProfile(form, profile.id, normalizedDraft);
     await onFormChange(next);
     if (isActive && relayProfileUsesLiveFiles(normalizedDraft)) {
-      await actions.saveRelayFile(
-        "config",
-        effectiveRelayConfigPreview(normalizedDraft, form, normalizedDraft),
-        true,
-      );
-      await actions.saveRelayFile("auth", normalizedDraft.authContents, true);
+      await actions.saveRelayAuthFile(normalizedDraft.authContents, true);
     }
     onSaved?.();
   };
@@ -3182,15 +3160,10 @@ function RelayProfileDetail({
       </div>
         <RelayProfileEditor profile={draft} form={form} isNew={isNew} onProfileChange={setDraft} onSwitch={switchDraft} actions={actions} />
       {isAggregateRelayProfile(draft) ? null : (
-      <RelayFileEditors
-        contextProfile={profile}
+      <RelayAuthEditor
         profile={draft}
-        form={form}
         isActive={isActive}
-        profileId={profile.id}
-        onFormChange={onFormChange}
         onProfileChange={setDraft}
-        actions={actions}
       />
       )}
     </div>
@@ -3342,20 +3315,6 @@ function RelayProfileEditor({
             onChange={(event) => updateDraft({ model: event.currentTarget.value })}
             placeholder="写入 config.toml 的 model 字段，例如 gpt-5"
           />
-        </Field>
-        <Field className="relay-field-goals" label="Codex 目标">
-          <label className="inline-check">
-            <input
-              checked={configHasCodexGoalsFeature(profile.configContents)}
-              onChange={(event) =>
-                updateDraft({
-                  configContents: setCodexGoalsFeatureInConfig(profile.configContents, event.currentTarget.checked),
-                })
-              }
-              type="checkbox"
-            />
-            <span>启用目标功能</span>
-          </label>
         </Field>
         <div className="relay-advanced-toggle">
           <Button
@@ -4381,7 +4340,7 @@ function RelayContextManager({
             </div>
           ))
         ) : (
-          <div className="empty">暂无{label}，可以从通用配置文件或这里新增。</div>
+          <div className="empty">暂无{label}，可以在这里新增。</div>
         )}
       </div>
       {editor ? (
@@ -4497,100 +4456,22 @@ function SyncedTextarea({
   );
 }
 
-function RelayFileEditors({
-  contextProfile,
+function RelayAuthEditor({
   profile,
-  form,
   isActive,
-  profileId,
-  onFormChange,
   onProfileChange,
-  actions,
 }: {
-  contextProfile: RelayProfile;
   profile: RelayProfile;
-  form: BackendSettings;
   isActive: boolean;
-  profileId: string;
-  onFormChange: (value: BackendSettings) => void;
   onProfileChange: (value: RelayProfile) => void;
-  actions: Actions;
 }) {
-  const configPreview = effectiveRelayConfigPreview(profile, form, contextProfile);
-  const entries = contextEntriesForProfile(form, contextProfile);
   return (
-    <div className="relay-file-grid">
-      <div className="relay-file-panel">
-        <div className="relay-file-head">
-          <div>
-            <strong>config.toml 预览</strong>
-            <span>{isActive ? "当前供应商切换后会写入的预览；上下文开关变化会立即反映" : "切换到此供应商时会写入的预览；上下文开关变化会立即反映"}</span>
-          </div>
-        </div>
-        <SyncedTextarea
-          className="relay-file-textarea"
-          value={configPreview}
-          onValueChange={(value) => {
-            const withoutCommon = stripCommonConfigTextFallback(
-              value,
-              relayCombinedCommonConfig(form),
-            );
-            const configContents = stripContextEntriesFromConfig(withoutCommon, entries);
-            onProfileChange(deriveRelayProfileFromFiles({
-              ...profile,
-              configContents,
-            }));
-          }}
-        />
-      </div>
-      <div className="relay-file-panel">
-        <div className="relay-file-head">
-          <div>
-            <strong>通用配置文件</strong>
-            <span>只保留非 MCP、Skills、Plugins 的跨供应商配置；工具与插件在独立页面管理。</span>
-          </div>
-          <Button
-            onClick={async () => {
-              const extracted = await actions.extractRelayCommonConfig(profile.configContents || "");
-              if (!extracted) return;
-              const split = splitContextConfigText(extracted.commonConfigContents || "");
-              if (!split.common.trim() && !split.context.trim()) {
-                await actions.showMessage("通用配置文件", "当前供应商 config.toml 里没有可提取的通用配置。", "failed");
-                return;
-              }
-              const promotedProfile = {
-                ...profile,
-                configContents: extracted.profileConfigContents,
-              };
-              const next = syncLegacyRelayFields({
-                ...form,
-                relayCommonConfigContents: split.common,
-                relayContextConfigContents: joinTomlSectionsRootFirst([form.relayContextConfigContents || "", split.context]),
-                relayProfiles: form.relayProfiles.map((item) => (item.id === profileId ? promotedProfile : item)),
-              });
-              onFormChange(next);
-              onProfileChange(promotedProfile);
-              await actions.saveSettingsValue(next, false);
-            }}
-            size="sm"
-            type="button"
-            variant="secondary"
-          >
-            <Download className="h-4 w-4" />
-            提取当前供应商配置
-          </Button>
-        </div>
-        <SyncedTextarea
-          className="relay-file-textarea"
-          value={form.relayCommonConfigContents}
-          onValueChange={(value) => onFormChange({ ...form, relayCommonConfigContents: value })}
-        />
-      </div>
+    <div className="relay-file-grid relay-auth-grid">
       <div className="relay-file-panel">
         <div className="relay-file-head">
           <div>
             <strong>auth.json</strong>
-            <span>{isActive ? "当前使用中：打开时从 ~/.codex/auth.json 回填，保存后会作为此供应商 auth 存档" : "切换到此供应商时会写入 ~/.codex/auth.json"}</span>
+            <span>{isActive ? "当前使用中：打开时从 ~/.codex/auth.json 回填，保存后会作为此供应商 auth 存档。" : "此供应商的独立 auth 存档；切换到此供应商时会写入 ~/.codex/auth.json。"}</span>
           </div>
         </div>
         <SyncedTextarea
@@ -4963,10 +4844,6 @@ function withLiveEntryState(entry: CodexContextEntry, live?: CodexContextEntry):
   return live ? { ...entry, enabled: live.enabled } : { ...entry, enabled: false };
 }
 
-function contextEntriesForProfile(settings: BackendSettings, profile: RelayProfile): CodexContextEntries {
-  return filterContextEntriesBySelection(contextEntriesFromSettings(settings), profile.contextSelection);
-}
-
 function contextEntriesFromConfig(configContents: string): CodexContextEntries {
   return {
     mcpServers: parseContextEntries(configContents, "mcp", "mcp_servers"),
@@ -5142,78 +5019,6 @@ function filterContextEntriesBySelection(entries: CodexContextEntries, selection
   };
 }
 
-function configHasCodexGoalsFeature(configContents: string): boolean {
-  let inFeatures = false;
-  for (const line of configContents.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (/^\[features\]$/.test(trimmed)) {
-      inFeatures = true;
-      continue;
-    }
-    if (inFeatures && /^\[[^\]]+\]$/.test(trimmed)) {
-      inFeatures = false;
-    }
-    if (inFeatures && /^goals\s*=\s*true\b/.test(trimmed)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function setCodexGoalsFeatureInConfig(configContents: string, enabled: boolean): string {
-  const lines = configContents.split(/\r?\n/);
-  const next: string[] = [];
-  let inFeatures = false;
-  let sawFeatures = false;
-  let featuresHasGoals = false;
-
-  const maybeInsertGoals = () => {
-    if (enabled && sawFeatures && !featuresHasGoals) {
-      next.push("goals = true");
-      featuresHasGoals = true;
-    }
-  };
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (/^\[features\]$/.test(trimmed)) {
-      if (inFeatures) maybeInsertGoals();
-      inFeatures = true;
-      sawFeatures = true;
-      featuresHasGoals = false;
-      next.push(line);
-      continue;
-    }
-    if (inFeatures && /^\[[^\]]+\]$/.test(trimmed)) {
-      maybeInsertGoals();
-      inFeatures = false;
-    }
-    if (inFeatures && /^goals\s*=/.test(trimmed)) {
-      if (enabled && !featuresHasGoals) {
-        next.push("goals = true");
-        featuresHasGoals = true;
-      }
-      continue;
-    }
-    next.push(line);
-  }
-
-  if (inFeatures) maybeInsertGoals();
-  if (enabled && !sawFeatures) {
-    const trimmed = ensureTrailingNewline(next.join("\n").trimEnd());
-    return joinTomlSections([trimmed, "[features]\ngoals = true"]);
-  }
-
-  return ensureTrailingNewline(next.join("\n").trimEnd());
-}
-
-function effectiveRelayConfigPreview(profile: RelayProfile, settings: BackendSettings, contextProfile = profile): string {
-  const entries = contextEntriesForProfile(settings, contextProfile);
-  const isolatedConfig = stripContextEntriesFromConfig(profile.configContents, entries);
-  const configWithLimits = applyContextLimitPreview(isolatedConfig, profile);
-  return joinTomlSectionsRootFirst([configWithLimits, settings.relayCommonConfigContents || "", selectedContextConfigToml(entries)]);
-}
-
 function selectedContextConfigToml(entries: CodexContextEntries): string {
   const sections: string[] = [];
   for (const option of contextKindOptions) {
@@ -5294,49 +5099,6 @@ function stripContextEntriesFromConfig(configContents: string, entries: CodexCon
   return ensureTrailingNewline(kept.join("\n").trimEnd());
 }
 
-function stripCommonConfigTextFallback(configContents: string, commonConfig: string): string {
-  const anchors = commonConfigAnchors(commonConfig);
-  if (!anchors.rootKeys.size && !anchors.tableHeaders.size) return ensureTrailingNewline(configContents.trimEnd());
-
-  const kept: string[] = [];
-  let skippingTable = false;
-
-  for (const line of configContents.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (/^\[[^\]]+\]$/.test(trimmed)) {
-      skippingTable = anchors.tableHeaders.has(trimmed);
-      if (skippingTable) continue;
-    }
-    if (skippingTable) continue;
-    const key = tomlRootKeyFromLine(trimmed);
-    if (key && anchors.rootKeys.has(key)) continue;
-    kept.push(line);
-  }
-
-  return ensureTrailingNewline(kept.join("\n").trimEnd());
-}
-
-function commonConfigAnchors(commonConfig: string): { rootKeys: Set<string>; tableHeaders: Set<string> } {
-  const rootKeys = new Set<string>();
-  const tableHeaders = new Set<string>();
-  let inRoot = true;
-
-  for (const line of commonConfig.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (/^\[[^\]]+\]$/.test(trimmed)) {
-      inRoot = false;
-      tableHeaders.add(trimmed);
-      continue;
-    }
-    if (inRoot) {
-      const key = tomlRootKeyFromLine(trimmed);
-      if (key) rootKeys.add(key);
-    }
-  }
-
-  return { rootKeys, tableHeaders };
-}
-
 function tomlRootKeyFromLine(line: string): string | null {
   if (!line || line.startsWith("#")) return null;
   const index = line.indexOf("=");
@@ -5350,34 +5112,6 @@ function contextHeaderFromLine(line: string): { kind: ContextKind; id: string } 
   if (!path || path.length !== 2) return null;
   const option = contextKindOptions.find((item) => item.tableName === path[0]);
   return option ? { kind: option.kind, id: path[1] } : null;
-}
-
-function applyContextLimitPreview(configContents: string, profile: RelayProfile): string {
-  const replacements: Array<[string, string]> = [
-    ["model_context_window", profile.contextWindow],
-    ["model_auto_compact_token_limit", profile.autoCompactLimit],
-  ];
-  let lines = configContents.split(/\r?\n/);
-
-  for (const [key, value] of replacements) {
-    const trimmed = value.trim();
-    if (!trimmed) continue;
-    let replaced = false;
-    lines = lines.map((line) => {
-      if (!replaced && new RegExp(`^\\s*${key}\\s*=`).test(line)) {
-        replaced = true;
-        return `${key} = ${trimmed}`;
-      }
-      return line;
-    });
-    if (!replaced) {
-      const firstTable = lines.findIndex((line) => /^\s*\[[^\]]+\]\s*$/.test(line));
-      const insertAt = firstTable >= 0 ? firstTable : lines.length;
-      lines.splice(insertAt, 0, `${key} = ${trimmed}`);
-    }
-  }
-
-  return ensureTrailingNewline(lines.join("\n").trimEnd());
 }
 
 function removeRootTomlKey(contents: string, key: string): string {

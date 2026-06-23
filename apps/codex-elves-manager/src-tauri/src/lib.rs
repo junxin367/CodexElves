@@ -135,7 +135,6 @@ pub fn run() {
             commands::sync_live_context_entries,
             commands::upsert_context_entry,
             commands::delete_context_entry,
-            commands::extract_relay_common_config,
             commands::test_relay_profile,
             commands::fetch_relay_profile_models,
             commands::switch_relay_profile,

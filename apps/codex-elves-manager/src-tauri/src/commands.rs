@@ -152,13 +152,6 @@ pub struct LiveContextEntriesPayload {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExtractRelayCommonConfigPayload {
-    pub common_config_contents: String,
-    pub profile_config_contents: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct RelayProfileTestPayload {
     pub http_status: u16,
     pub endpoint: String,
@@ -227,12 +220,6 @@ pub struct ContextDeleteRequest {
     pub settings: BackendSettings,
     pub kind: String,
     pub id: String,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExtractRelayCommonConfigRequest {
-    pub config_contents: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1534,9 +1521,9 @@ pub fn save_relay_file(request: SaveRelayFileRequest) -> CommandResult<RelayFile
     match save_relay_file_in_home(&home, &request.kind, &request.contents)
         .and_then(|_| relay_files_payload_from_home(&home))
     {
-        Ok(payload) => ok("配置文件已保存。", payload),
+        Ok(payload) => ok("auth.json 已保存。", payload),
         Err(error) => failed(
-            &format!("保存配置文件失败：{error}"),
+            &format!("保存 auth.json 失败：{error}"),
             relay_files_payload_from_home(&home).unwrap_or_else(|_| RelayFilesPayload {
                 config_path: home.join("config.toml").to_string_lossy().to_string(),
                 auth_path: home.join("auth.json").to_string_lossy().to_string(),
@@ -1840,35 +1827,6 @@ pub fn delete_context_entry(request: ContextDeleteRequest) -> CommandResult<Cont
             ContextEntriesPayload {
                 settings,
                 entries: empty_context_entries(),
-            },
-        ),
-    }
-}
-
-#[tauri::command]
-pub fn extract_relay_common_config(
-    request: ExtractRelayCommonConfigRequest,
-) -> CommandResult<ExtractRelayCommonConfigPayload> {
-    match codex_elves_core::relay_config::extract_common_config_from_config(
-        &request.config_contents,
-    )
-    .and_then(|common_config_contents| {
-        let profile_config_contents =
-            codex_elves_core::relay_config::strip_common_config_from_config(
-                &request.config_contents,
-                &common_config_contents,
-            )?;
-        Ok(ExtractRelayCommonConfigPayload {
-            common_config_contents,
-            profile_config_contents,
-        })
-    }) {
-        Ok(payload) => ok("通用配置已按兼容切换规则提取。", payload),
-        Err(error) => failed(
-            &format!("提取通用配置失败：{error}"),
-            ExtractRelayCommonConfigPayload {
-                common_config_contents: String::new(),
-                profile_config_contents: request.config_contents,
             },
         ),
     }
@@ -2398,8 +2356,8 @@ fn save_relay_file_in_home(
     contents: &str,
 ) -> anyhow::Result<()> {
     let path = match kind {
-        "config" => home.join("config.toml"),
         "auth" => home.join("auth.json"),
+        "config" => anyhow::bail!("供应商配置不再支持直接保存 config.toml"),
         other => anyhow::bail!("未知配置文件类型：{other}"),
     };
     if let Some(parent) = path.parent() {
@@ -3182,20 +3140,16 @@ base_url = "https://manual.example/v1"
     }
 
     #[test]
-    fn save_relay_file_in_home_only_allows_known_files() {
+    fn save_relay_file_in_home_only_allows_auth_file() {
         let temp = tempfile::tempdir().unwrap();
 
-        save_relay_file_in_home(temp.path(), "config", "model = \"gpt-5\"\n").unwrap();
         save_relay_file_in_home(temp.path(), "auth", "{}\n").unwrap();
 
-        assert_eq!(
-            std::fs::read_to_string(temp.path().join("config.toml")).unwrap(),
-            "model = \"gpt-5\"\n"
-        );
         assert_eq!(
             std::fs::read_to_string(temp.path().join("auth.json")).unwrap(),
             "{}\n"
         );
+        assert!(save_relay_file_in_home(temp.path(), "config", "model = \"gpt-5\"\n").is_err());
         assert!(save_relay_file_in_home(temp.path(), "../bad", "").is_err());
     }
 
