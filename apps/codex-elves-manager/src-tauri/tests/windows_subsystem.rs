@@ -44,6 +44,32 @@ fn manager_dev_mode_has_separate_title_and_window_state() {
 }
 
 #[test]
+fn manager_dev_mode_loads_vite_dev_url_for_manual_window() {
+    let lib_rs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+        .expect("read manager lib.rs");
+
+    assert!(lib_rs.contains("manager_webview_url(show_update)?"));
+    assert!(lib_rs.contains("tauri::WebviewUrl::External"));
+    assert!(lib_rs.contains("http://localhost:1420/"));
+    assert!(lib_rs.contains("tauri::WebviewUrl::App(url.into())"));
+}
+
+#[test]
+fn manager_default_capability_allows_vite_dev_origin() {
+    let capability = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/capabilities/default.json"
+    ))
+    .expect("read default capability");
+
+    assert!(capability.contains("\"local\": true"));
+    assert!(capability.contains("\"remote\""));
+    assert!(capability.contains("\"urls\""));
+    assert!(capability.contains("\"http://localhost:1420\""));
+    assert!(capability.contains("\"http://localhost:1420/*\""));
+}
+
+#[test]
 fn dev_manager_script_sets_isolated_dev_environment() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let script = manifest_dir
@@ -68,6 +94,9 @@ fn manager_second_launch_requests_existing_window_to_show() {
     assert!(lib_rs.contains("spawn_manager_wake_listener"));
     assert!(lib_rs.contains("request_existing_manager_to_show"));
     assert!(lib_rs.contains("MANAGER_WAKE_MESSAGE"));
+    assert!(lib_rs.contains("MANAGER_WAKE_ACK"));
+    assert!(lib_rs.contains("stream.write_all(MANAGER_WAKE_ACK)"));
+    assert!(lib_rs.contains("fallback_single_instance_guard()"));
     assert!(lib_rs.contains("wake_requested"));
     assert!(lib_rs.contains("show_main_window(&app_handle)"));
 }
@@ -134,8 +163,15 @@ fn frontend_literal_tauri_commands_are_registered_for_invocation() {
         std::fs::read_to_string(manifest_dir.join("src/commands.rs")).expect("read commands.rs");
     let app_tsx = std::fs::read_to_string(manifest_dir.parent().unwrap().join("src/App.tsx"))
         .expect("read App.tsx");
+    let default_capability =
+        std::fs::read_to_string(manifest_dir.join("capabilities/default.json"))
+            .expect("read default capability");
+    let default_permissions =
+        std::fs::read_to_string(manifest_dir.join("permissions/default.toml"))
+            .expect("read default permissions");
 
     let frontend_commands = literal_tauri_commands(&app_tsx);
+    assert!(default_capability.contains("\"allow-manager-commands\""));
     for expected in [
         "load_ccs_providers",
         "import_ccs_providers",
@@ -158,6 +194,10 @@ fn frontend_literal_tauri_commands_are_registered_for_invocation() {
         assert!(
             lib_rs.contains(&format!("commands::{command}")),
             "frontend command {command} should be registered in Tauri invoke_handler"
+        );
+        assert!(
+            default_permissions.contains(&format!("\"{command}\"")),
+            "frontend command {command} should be allowed by app permissions"
         );
     }
 }
@@ -322,7 +362,9 @@ fn relay_settings_uses_structured_config_and_isolated_auth() {
     assert!(app_tsx.contains("switch_relay_profile"));
     assert!(app_tsx.contains("previousActiveRelayId"));
     assert!(app_tsx.contains("relayProfileSwitchValidation(selectedBeforeSave)"));
-    assert!(app_tsx.contains("RelayAuthEditor"));
+    assert!(app_tsx.contains("RelayActivationPanel"));
+    assert!(app_tsx.contains("启用后会修改"));
+    assert!(app_tsx.contains("auth.json 存档"));
     assert!(app_tsx.contains("saveRelayAuthFile"));
     assert!(!app_tsx.contains("RelayFileEditors"));
     assert!(!app_tsx.contains("config.toml 预览"));

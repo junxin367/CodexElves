@@ -622,6 +622,207 @@ const defaultSettings: BackendSettings = {
   cliWrapperApiKeyEnv: "CUSTOM_OPENAI_API_KEY",
 };
 
+let browserPreviewSettingsState: BackendSettings | null = null;
+
+function isBrowserPreview(): boolean {
+  return typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
+}
+
+function createBrowserPreviewSettings(): BackendSettings {
+  return normalizeSettings({
+    ...defaultSettings,
+    codexAppPath: "C:\\Users\\junes\\AppData\\Local\\Programs\\CodexElves\\CodexElves.exe",
+    launchMode: "patch",
+    relayBaseUrl: "https://api.vendor.example/v1",
+    relayApiKey: "sk-preview-browser",
+    activeRelayId: "preview-pure-api",
+    relayTestModel: "gpt-5.5",
+    relayProfiles: [
+      {
+        ...defaultSettings.relayProfiles[0],
+        id: "preview-pure-api",
+        name: "浏览器预览供应商",
+        model: "gpt-5.5",
+        baseUrl: "https://api.vendor.example/v1",
+        upstreamBaseUrl: "https://api.vendor.example/v1",
+        apiKey: "sk-preview-browser",
+        protocol: "responses",
+        localProxyEnabled: true,
+        relayMode: "pureApi",
+        officialMixApiKey: false,
+        testModel: "gpt-5.5",
+        configContents: [
+          'model = "gpt-5.5"',
+          'model_provider = "custom"',
+          "model_auto_compact_token_limit = 900000",
+          'model_catalog_json = "codex-elves-model-catalog.json"',
+          "",
+          "[model_providers.custom]",
+          'name = "custom"',
+          'wire_api = "responses"',
+          "requires_openai_auth = true",
+          `base_url = "${PROTOCOL_PROXY_BASE_URL}"`,
+          "",
+        ].join("\n"),
+        authContents: `${JSON.stringify({ OPENAI_API_KEY: "sk-preview-browser" }, null, 2)}\n`,
+        contextWindow: "",
+        autoCompactLimit: "900000",
+        modelMappings: [
+          { requestModel: "gpt-5.5", protocol: "responses", contextWindow: "1047576" },
+          { requestModel: "gpt-5.4", protocol: "responses", contextWindow: "1047576" },
+          { requestModel: "gpt-5.4-mini", protocol: "responses", contextWindow: "1047576" },
+          { requestModel: "deepseek-chat", protocol: "chatCompletions", contextWindow: "65536" },
+          { requestModel: "deepseek-reasoner", protocol: "chatCompletions", contextWindow: "65536" },
+          { requestModel: "claude-opus-4-8", protocol: "anthropic", contextWindow: "200000" },
+        ],
+        responsesModelList: "gpt-5.5\ngpt-5.4\ngpt-5.4-mini",
+        chatCompletionsModelList: "deepseek-chat\ndeepseek-reasoner",
+        anthropicModelList: "claude-opus-4-8",
+      },
+      {
+        ...defaultSettings.relayProfiles[0],
+        id: "preview-official",
+        name: "官方登录",
+        relayMode: "official",
+        authContents: `${JSON.stringify({ tokens: { id_token: "browser-preview" } }, null, 2)}\n`,
+      },
+    ],
+  });
+}
+
+function browserPreviewSettings(): BackendSettings {
+  if (!browserPreviewSettingsState) {
+    browserPreviewSettingsState = createBrowserPreviewSettings();
+  }
+  return browserPreviewSettingsState;
+}
+
+function updateBrowserPreviewSettings(settings: BackendSettings): BackendSettings {
+  browserPreviewSettingsState = normalizeSettings(settings);
+  return browserPreviewSettingsState;
+}
+
+function browserPreviewResult<T extends Record<string, unknown>>(payload: T, message = "浏览器预览 mock 数据。"): CommandResult<T> {
+  return {
+    status: "ok",
+    message,
+    ...payload,
+  };
+}
+
+function browserPreviewRelayPayload(): RelayPayload {
+  const settings = browserPreviewSettings();
+  const active = activeRelayProfile(settings);
+  return {
+    authenticated: relayProfileHasApiKey(active),
+    authSource: active.relayMode === "pureApi" ? "auth.json" : "config.toml",
+    accountLabel: active.name,
+    configPath: "C:\\Users\\junes\\.codex\\config.toml",
+    configured: active.relayMode !== "official" || active.officialMixApiKey,
+    requiresOpenaiAuth: true,
+    hasBearerToken: Boolean(codexExperimentalBearerTokenFromConfig(active.configContents)),
+    backupPath: null,
+  };
+}
+
+function browserPreviewCommand<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  const settings = browserPreviewSettings();
+  const active = activeRelayProfile(settings);
+  switch (command) {
+    case "startup_options":
+      return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
+    case "check_update":
+      return Promise.resolve(browserPreviewResult({ currentVersion: "0.1.0", updateAvailable: false }) as T);
+    case "load_overview":
+      return Promise.resolve(browserPreviewResult({
+        codex_app: { status: "found", path: settings.codexAppPath },
+        codex_version: "0.1.0-browser-preview",
+        silent_shortcut: { status: "installed", path: "浏览器预览" },
+        management_shortcut: { status: "installed", path: "浏览器预览" },
+        latest_launch: {
+          status: "running",
+          message: "浏览器预览模式不启动真实进程。",
+          started_at_ms: Date.now() - 120000,
+          debug_port: 9229,
+          helper_port: 45221,
+          codex_app: settings.codexAppPath,
+        },
+        current_version: "0.1.0",
+        update_status: "ok",
+        settings_path: "浏览器预览 mock",
+        logs_path: "浏览器预览 mock",
+      }) as T);
+    case "load_settings":
+      return Promise.resolve(browserPreviewResult({
+        settings,
+        settings_path: "浏览器预览 mock",
+        user_scripts: { enabled: true, scripts: [] },
+      }) as T);
+    case "save_settings": {
+      const next = (args?.settings as BackendSettings | undefined) || settings;
+      const normalized = updateBrowserPreviewSettings(next);
+      return Promise.resolve(browserPreviewResult({
+        settings: normalized,
+        settings_path: "浏览器预览 mock",
+        user_scripts: { enabled: true, scripts: [] },
+      }, "浏览器预览已保存到内存。") as T);
+    }
+    case "relay_status":
+      return Promise.resolve(browserPreviewResult(browserPreviewRelayPayload()) as T);
+    case "read_relay_files":
+      return Promise.resolve(browserPreviewResult({
+        configPath: "C:\\Users\\junes\\.codex\\config.toml",
+        authPath: "C:\\Users\\junes\\.codex\\auth.json",
+        configContents: active.configContents,
+        authContents: active.authContents,
+      }) as T);
+    case "check_env_conflicts":
+      return Promise.resolve(browserPreviewResult({ conflicts: [] }) as T);
+    case "load_provider_sync_targets":
+      return Promise.resolve(browserPreviewResult({ currentProvider: "custom", targets: [] }) as T);
+    case "plugin_marketplace_status":
+      return Promise.resolve(browserPreviewResult({
+        codexHome: "C:\\Users\\junes\\.codex",
+        marketplaceRoot: null,
+        configRegistered: true,
+        needsRepair: false,
+      }) as T);
+    case "load_ccs_providers":
+      return Promise.resolve(browserPreviewResult({
+        dbPath: "C:\\Users\\junes\\.cc-switch\\cc-switch.db",
+        providers: [
+          {
+            sourceId: "browser-preview",
+            name: "浏览器预览供应商",
+            baseUrl: "https://api.vendor.example/v1",
+            apiKey: "sk-preview-browser",
+            protocol: "responses",
+            configContents: active.configContents,
+            authContents: active.authContents,
+          },
+        ],
+      }) as T);
+    case "backfill_relay_profile_from_live": {
+      const request = args?.request as { settings?: BackendSettings } | undefined;
+      return Promise.resolve(browserPreviewResult({ settings: request?.settings || settings }) as T);
+    }
+    case "switch_relay_profile": {
+      const request = args?.request as { settings?: BackendSettings } | undefined;
+      const normalized = updateBrowserPreviewSettings(request?.settings || settings);
+      return Promise.resolve(browserPreviewResult({
+        settings: normalized,
+        settingsPath: "浏览器预览 mock",
+        user_scripts: { enabled: true, scripts: [] },
+        relay: browserPreviewRelayPayload(),
+      }, "浏览器预览已切换供应商。") as T);
+    }
+    case "write_diagnostic_event":
+      return Promise.resolve(browserPreviewResult({}) as T);
+    default:
+      return Promise.resolve(browserPreviewResult({}) as T);
+  }
+}
+
 export function App() {
   const [theme, setTheme] = useState<Theme>(() => loadInitialTheme());
   const [route, setRoute] = useState<Route>(() => loadInitialRoute());
@@ -663,7 +864,8 @@ export function App() {
   const [removeOwnedData, setRemoveOwnedData] = useState(false);
   const [relaySwitching, setRelaySwitching] = useState(false);
 
-  const call = <T,>(command: string, args?: Record<string, unknown>) => invoke<T>(command, args);
+  const call = <T,>(command: string, args?: Record<string, unknown>) =>
+    isBrowserPreview() ? browserPreviewCommand<T>(command, args) : invoke<T>(command, args);
 
   const logDiagnostic = (event: string, detail: Record<string, unknown> = {}) => {
     void invoke("write_diagnostic_event", { event, detail }).catch(() => {});
@@ -1974,7 +2176,7 @@ function RelayScreen({
   actions: Actions;
 }) {
   const normalized = normalizeSettings(form);
-  const [detailProfileId, setDetailProfileId] = useState<string | null>(null);
+  const [detailProfileId, setDetailProfileId] = useState<string | null>(() => (isBrowserPreview() ? normalized.activeRelayId : null));
   const [newProfileDraft, setNewProfileDraft] = useState<RelayProfile | null>(null);
   const [thirdPartyImportOpen, setThirdPartyImportOpen] = useState(false);
   const detailProfile = newProfileDraft || (detailProfileId
@@ -2008,6 +2210,11 @@ function RelayScreen({
       setDetailProfileId(null);
     }
   }, [detailProfileId, newProfileDraft, normalized.relayProfiles]);
+  useEffect(() => {
+    if (isBrowserPreview() && !newProfileDraft && !detailProfileId) {
+      setDetailProfileId(normalized.activeRelayId);
+    }
+  }, [detailProfileId, newProfileDraft, normalized.activeRelayId]);
   useEffect(() => {
     if (!newProfileDraft && detailProfileId === normalized.activeRelayId) {
       void actions.refreshRelayFiles();
@@ -3160,11 +3367,11 @@ function RelayProfileDetail({
       </div>
         <RelayProfileEditor profile={draft} form={form} isNew={isNew} onProfileChange={setDraft} onSwitch={switchDraft} actions={actions} />
       {isAggregateRelayProfile(draft) ? null : (
-      <RelayAuthEditor
-        profile={draft}
-        isActive={isActive}
-        onProfileChange={setDraft}
-      />
+        <RelayActivationPanel
+          profile={draft}
+          isActive={isActive}
+          onProfileChange={setDraft}
+        />
       )}
     </div>
   );
@@ -4456,7 +4663,17 @@ function SyncedTextarea({
   );
 }
 
-function RelayAuthEditor({
+type RelayActivationImpactTone = "write" | "skip" | "remove" | "file";
+
+type RelayActivationImpactRow = {
+  file: string;
+  field: string;
+  value: string;
+  detail: string;
+  tone: RelayActivationImpactTone;
+};
+
+function RelayActivationPanel({
   profile,
   isActive,
   onProfileChange,
@@ -4465,23 +4682,291 @@ function RelayAuthEditor({
   isActive: boolean;
   onProfileChange: (value: RelayProfile) => void;
 }) {
+  const rows = relayActivationImpactRows(profile);
+  const groupedRows = relayActivationImpactGroups(rows.filter((row) => row.file !== "auth.json" && row.tone !== "skip"));
+  const apiKey = relayProfileEffectiveApiKey(profile);
+  const authApiKeyState = profile.relayMode === "pureApi" ? sensitiveStatus(apiKey) : "不写入";
+  const authWriteTarget =
+    profile.relayMode === "pureApi"
+      ? "~/.codex/auth.json"
+      : "不写入 auth.json";
+  const authWriteDetail =
+    profile.relayMode === "pureApi"
+      ? ""
+      : profile.relayMode === "official" && !profile.officialMixApiKey
+        ? "保留登录态。"
+        : "Key 写入 bearer token。";
+  const authApiKeyTone = authApiKeyState === "已配置" ? "ready" : authApiKeyState === "不写入" ? "muted" : "missing";
+  const authStatusLabel = authApiKeyState === "未配置" ? "缺少 Key" : authApiKeyState;
   return (
-    <div className="relay-file-grid relay-auth-grid">
-      <div className="relay-file-panel">
+    <div className="relay-file-grid relay-activation-grid">
+      <div className="relay-file-panel relay-impact-panel">
         <div className="relay-file-head">
           <div>
-            <strong>auth.json</strong>
-            <span>{isActive ? "当前使用中：打开时从 ~/.codex/auth.json 回填，保存后会作为此供应商 auth 存档。" : "此供应商的独立 auth 存档；切换到此供应商时会写入 ~/.codex/auth.json。"}</span>
+            <strong>启用后会修改</strong>
+            <span>仅更新必要的 Codex 配置字段。</span>
           </div>
         </div>
+        <div className="relay-impact-summary">
+          <span>{relayModeLabel(profile.relayMode)}</span>
+          <strong>{relayProfileConfigBrief(profile)}</strong>
+        </div>
+        <div className="relay-impact-groups">
+          {groupedRows.map((group) => (
+            <div className="relay-impact-group" key={group.file}>
+              <div className="relay-impact-group-head">
+                <strong>{group.file}</strong>
+                <span>{group.rows.length} 项</span>
+              </div>
+              <div className="relay-impact-table" role="table" aria-label={`${group.file} 启用修改清单`}>
+                <div className="relay-impact-table-head" role="row">
+                  <span>字段</span>
+                  <span>值 / 动作</span>
+                </div>
+                {group.rows.map((row) => (
+                  <div className="relay-impact-row" data-tone={row.tone} key={`${row.file}-${row.field}`} role="row">
+                    <span className="relay-impact-field" role="cell">
+                      <code>{row.field}</code>
+                      <small>{row.detail}</small>
+                    </span>
+                    <strong className="relay-impact-value" role="cell">{row.value}</strong>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="relay-file-panel relay-auth-archive-panel">
+        <div className="relay-auth-overview">
+          <div className="relay-auth-overview-head">
+            <div className="relay-auth-title-row">
+              <strong>auth.json 存档</strong>
+              <span className="relay-auth-status" data-tone={authApiKeyTone}>
+                {authStatusLabel}
+              </span>
+            </div>
+            <span className="relay-auth-summary-text">
+              {relayAuthArchiveSummary(profile, isActive)}
+            </span>
+          </div>
+          <div className="relay-auth-target">
+            <span>写入目标</span>
+            <code>{authWriteTarget}</code>
+            {authWriteDetail ? <small>{authWriteDetail}</small> : null}
+          </div>
+        </div>
+        <div className="relay-auth-preview-head">
+          <strong>JSON 预览</strong>
+          <span>{profile.relayMode === "pureApi" ? "启用时同步" : "独立存档"}</span>
+        </div>
         <SyncedTextarea
-          className="relay-file-textarea"
+          className="relay-file-textarea relay-auth-textarea"
           value={profile.authContents}
           onValueChange={(value) => onProfileChange(deriveRelayProfileFromFiles({ ...profile, authContents: value }))}
         />
       </div>
     </div>
   );
+}
+
+function relayActivationImpactGroups(rows: RelayActivationImpactRow[]): Array<{ file: string; rows: RelayActivationImpactRow[] }> {
+  const groups: Array<{ file: string; rows: RelayActivationImpactRow[] }> = [];
+  for (const row of rows) {
+    const existing = groups.find((group) => group.file === row.file);
+    if (existing) {
+      existing.rows.push(row);
+    } else {
+      groups.push({ file: row.file, rows: [row] });
+    }
+  }
+  return groups;
+}
+
+function relayActivationImpactRows(profile: RelayProfile): RelayActivationImpactRow[] {
+  if (profile.relayMode === "official" && !profile.officialMixApiKey) {
+    return [
+      {
+        file: "config.toml",
+        field: "CodexElves provider 注入",
+        value: "清理",
+        detail: "切回官方登录时移除供应商注入；工具、插件等通用配置仍按独立设置保留。",
+        tone: "remove",
+      },
+      {
+        file: "auth.json",
+        field: "OPENAI_API_KEY",
+        value: "不写入",
+        detail: "官方登录模式只保留 ChatGPT 登录态，不保存 API Key。",
+        tone: "skip",
+      },
+    ];
+  }
+
+  const providerId = relayProfileProviderId(profile);
+  const providerTable = `[model_providers.${providerId}]`;
+  const baseUrl = profile.localProxyEnabled ? PROTOCOL_PROXY_BASE_URL : relayProfileEffectiveBaseUrl(profile);
+  const apiKey = relayProfileEffectiveApiKey(profile);
+  const modelCatalogCount = relayProfileCatalogModelCount(profile);
+  const contextWindow = relayProfileContextWindowForActiveModel(profile).trim();
+  const rows: RelayActivationImpactRow[] = [
+    {
+      file: "config.toml",
+      field: "model_provider",
+      value: providerId,
+      detail: "选择当前 provider 表。",
+      tone: "write",
+    },
+    {
+      file: "config.toml",
+      field: "model",
+      value: profile.model.trim() || "不写入",
+      detail: profile.model.trim() ? "作为默认请求模型。" : "未填写配置模型时不覆盖现有 model 字段。",
+      tone: profile.model.trim() ? "write" : "skip",
+    },
+    {
+      file: "config.toml",
+      field: `${providerTable}.name`,
+      value: providerId,
+      detail: "保证 provider 表可被 Codex 识别。",
+      tone: "write",
+    },
+    {
+      file: "config.toml",
+      field: `${providerTable}.wire_api`,
+      value: "responses",
+      detail: "CodexElves 固定以 Responses API 入口承接请求。",
+      tone: "write",
+    },
+    {
+      file: "config.toml",
+      field: `${providerTable}.requires_openai_auth`,
+      value: "true",
+      detail: "沿用 Codex 对 provider auth 的要求。",
+      tone: "write",
+    },
+    {
+      file: "config.toml",
+      field: `${providerTable}.base_url`,
+      value: baseUrl || "未配置",
+      detail: profile.localProxyEnabled ? "写入本地协议代理地址；真实上游来自此供应商 Base URL。" : "写入此供应商 Base URL。",
+      tone: baseUrl ? "write" : "skip",
+    },
+    {
+      file: "config.toml",
+      field: `${providerTable}.experimental_bearer_token`,
+      value: profile.relayMode === "pureApi" ? "不写入" : sensitiveStatus(apiKey),
+      detail: profile.relayMode === "pureApi" ? "纯 API 的 Key 写入 auth.json。" : "官方混入 API Key 时写入 bearer token。",
+      tone: profile.relayMode === "pureApi" ? "skip" : apiKey ? "write" : "skip",
+    },
+    ...(!modelCatalogCount
+      ? [{
+          file: "config.toml",
+          field: "model_context_window",
+          value: contextWindow || "不写入",
+          detail: "没有模型目录时才写入顶层上下文大小。",
+          tone: contextWindow ? "write" : "skip",
+        } satisfies RelayActivationImpactRow]
+      : []),
+    {
+      file: "config.toml",
+      field: "model_auto_compact_token_limit",
+      value: profile.autoCompactLimit.trim() || "不写入",
+      detail: "仅在填写压缩上下文大小时写入。",
+      tone: profile.autoCompactLimit.trim() ? "write" : "skip",
+    },
+    {
+      file: "config.toml",
+      field: "model_catalog_json",
+      value: modelCatalogCount ? "codex-elves-model-catalog.json" : "不写入",
+      detail: modelCatalogCount ? "模型列表会生成独立目录文件供 Codex 读取。" : "没有模型映射时不生成模型目录。",
+      tone: modelCatalogCount ? "write" : "skip",
+    },
+  ];
+
+  if (modelCatalogCount) {
+    rows.push({
+      file: "codex-elves-model-catalog.json",
+      field: "models",
+      value: `${modelCatalogCount} 个模型`,
+      detail: "由模型列表生成，包含协议和上下文大小信息。",
+      tone: "file",
+    });
+  }
+
+  rows.push({
+    file: "auth.json",
+    field: "OPENAI_API_KEY",
+    value: profile.relayMode === "pureApi" ? sensitiveStatus(apiKey) : "不写入",
+    detail: profile.relayMode === "pureApi" ? "切换到此供应商时写入 API Key。" : "官方混入模式不把 API Key 放进 auth.json。",
+    tone: profile.relayMode === "pureApi" && apiKey ? "write" : "skip",
+  });
+
+  return rows;
+}
+
+function relayAuthArchiveSummary(profile: RelayProfile, isActive: boolean): string {
+  if (profile.relayMode === "official" && !profile.officialMixApiKey) {
+    return isActive ? "当前使用官方登录态，不会写入 API Key。" : "仅保留此供应商的官方登录态存档。";
+  }
+  if (profile.relayMode === "pureApi") {
+    return isActive ? "当前 auth.json 会回填到此供应商存档。" : "保存此供应商的 API Key，启用时写入本地 auth 文件。";
+  }
+  return "auth.json 保持登录态，API Key 由 config.toml 的 bearer token 承接。";
+}
+
+function relayProfileProviderId(profile: RelayProfile): string {
+  return rootTomlStringValue(profile.configContents, "model_provider").trim() || "custom";
+}
+
+function relayProfileEffectiveBaseUrl(profile: RelayProfile): string {
+  return (
+    profile.upstreamBaseUrl.trim()
+    || profile.baseUrl.trim()
+    || codexBaseUrlFromConfig(profile.configContents).trim()
+  );
+}
+
+function relayProfileEffectiveApiKey(profile: RelayProfile): string {
+  if (profile.relayMode === "official") {
+    return codexExperimentalBearerTokenFromConfig(profile.configContents).trim() || profile.apiKey.trim();
+  }
+  return (
+    codexApiKeyFromAuth(profile.authContents).trim()
+    || codexExperimentalBearerTokenFromConfig(profile.configContents).trim()
+    || profile.apiKey.trim()
+  );
+}
+
+function sensitiveStatus(value: string): string {
+  return value.trim() ? "已配置" : "未配置";
+}
+
+function relayProfileCatalogModelCount(profile: RelayProfile): number {
+  const models = new Set<string>();
+  for (const mapping of normalizeRelayModelMappings(profile.modelMappings)) {
+    const model = mapping.requestModel.trim();
+    if (model) models.add(model);
+  }
+  if (models.size) return models.size;
+  for (const list of [
+    profile.responsesModelList,
+    profile.chatCompletionsModelList,
+    profile.anthropicModelList,
+    profile.modelList,
+  ]) {
+    for (const model of splitRelayModelList(list)) {
+      models.add(model);
+    }
+  }
+  return models.size;
+}
+
+function splitRelayModelList(value: string): string[] {
+  return value
+    .split(/[\r\n,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function ModeSelector({ launchMode, actions }: { launchMode: LaunchMode; actions: Actions }) {
@@ -6342,5 +6827,6 @@ function loadInitialRoute(): Route {
   if (params.get("showUpdate") === "1" || window.location.hash === "#about") {
     return "about";
   }
+  if (isBrowserPreview()) return "relay";
   return "overview";
 }

@@ -780,9 +780,8 @@ body {
   display: flex;
   gap: 6px;
   align-items: center;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.16s ease;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .relay-use-button {
@@ -798,12 +797,6 @@ body {
 .relay-profile-card.active .relay-card-extra button:focus-visible {
   background: hsl(var(--primary) / 0.18);
   color: hsl(var(--primary));
-}
-
-.relay-profile-card:hover .relay-card-actions,
-.relay-profile-card:focus-within .relay-card-actions {
-  opacity: 1;
-  pointer-events: auto;
 }
 
 .relay-detail-page {
@@ -1424,6 +1417,11 @@ body {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.relay-activation-grid {
+  grid-template-columns: minmax(0, 1.28fr) minmax(300px, 0.72fr);
+  align-items: start;
+}
+
 .relay-file-grid.three {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   margin-top: 12px;
@@ -1433,9 +1431,306 @@ body {
   display: grid;
   gap: 10px;
   min-width: 0;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--background));
+  padding: 14px;
   transition:
     opacity var(--motion-normal) var(--motion-ease),
     transform var(--motion-normal) var(--motion-ease);
+}
+
+.relay-impact-panel {
+  align-content: start;
+}
+
+.relay-impact-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid hsl(var(--border) / 0.72);
+  border-radius: 8px;
+  background: hsl(var(--surface-sunken));
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.relay-impact-summary span {
+  color: hsl(var(--muted-foreground));
+}
+
+.relay-impact-summary strong {
+  overflow-wrap: anywhere;
+}
+
+.relay-impact-groups {
+  display: grid;
+  gap: 10px;
+}
+
+.relay-impact-group {
+  border: 1px solid hsl(var(--border) / 0.72);
+  border-radius: 8px;
+  background: hsl(var(--surface-sunken));
+  overflow: hidden;
+}
+
+.relay-impact-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid hsl(var(--border) / 0.72);
+  background: hsl(var(--muted) / 0.28);
+  padding: 7px 12px;
+}
+
+.relay-impact-group-head strong {
+  min-width: 0;
+  color: hsl(var(--foreground));
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 12px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.relay-impact-group-head span {
+  flex: 0 0 auto;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.relay-impact-table {
+  display: grid;
+}
+
+.relay-impact-table-head,
+.relay-impact-row {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(112px, 180px);
+  column-gap: 12px;
+  min-width: 0;
+}
+
+.relay-impact-table-head {
+  border-bottom: 1px solid hsl(var(--border) / 0.72);
+  background: hsl(var(--background) / 0.38);
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  padding: 6px 12px;
+  text-transform: uppercase;
+}
+
+.relay-impact-row {
+  position: relative;
+  align-items: center;
+  border-bottom: 1px solid hsl(var(--border) / 0.54);
+  padding: 8px 12px 8px 14px;
+}
+
+.relay-impact-row:last-child {
+  border-bottom: 0;
+}
+
+.relay-impact-row::before {
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  left: 0;
+  width: 3px;
+  border-radius: 0 999px 999px 0;
+  background: hsl(var(--primary));
+  content: "";
+}
+
+.relay-impact-row[data-tone="write"] {
+  --relay-impact-tone: hsl(var(--primary));
+}
+
+.relay-impact-row[data-tone="skip"] {
+  --relay-impact-tone: hsl(var(--muted-foreground) / 0.46);
+}
+
+.relay-impact-row[data-tone="remove"] {
+  --relay-impact-tone: hsl(var(--destructive, 0 84% 60%));
+}
+
+.relay-impact-row[data-tone="file"] {
+  --relay-impact-tone: hsl(var(--accent-foreground) / 0.6);
+}
+
+.relay-impact-row::before {
+  background: var(--relay-impact-tone, hsl(var(--primary)));
+}
+
+.relay-impact-row code,
+.relay-impact-row strong,
+.relay-impact-row small {
+  min-width: 0;
+}
+
+.relay-impact-row code {
+  display: block;
+  color: hsl(var(--foreground));
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 12px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.relay-impact-value {
+  justify-self: start;
+  min-width: 72px;
+  max-width: 100%;
+  border-radius: 999px;
+  background: hsl(var(--muted) / 0.42);
+  padding: 2px 8px;
+  color: hsl(var(--foreground));
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.relay-impact-row small {
+  display: block;
+  margin-top: 2px;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.relay-auth-archive-panel {
+  align-content: start;
+}
+
+.relay-auth-overview {
+  display: grid;
+  gap: 10px;
+  border: 1px solid hsl(var(--border) / 0.72);
+  border-radius: 8px;
+  background: hsl(var(--surface-sunken));
+  padding: 10px 11px;
+}
+
+.relay-auth-overview-head {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.relay-auth-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.relay-auth-title-row strong {
+  min-width: 0;
+  color: hsl(var(--foreground));
+  font-size: 13px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.relay-auth-summary-text {
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.relay-auth-status {
+  flex: 0 0 auto;
+  border: 1px solid hsl(var(--border) / 0.7);
+  border-radius: 999px;
+  background: hsl(var(--muted) / 0.42);
+  padding: 3px 8px;
+  color: hsl(var(--foreground));
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.relay-auth-status[data-tone="ready"] {
+  border-color: hsl(var(--primary) / 0.45);
+  background: hsl(var(--primary) / 0.12);
+}
+
+.relay-auth-status[data-tone="missing"] {
+  border-color: hsl(var(--destructive, 0 84% 60%) / 0.45);
+  background: hsl(var(--destructive, 0 84% 60%) / 0.12);
+}
+
+.relay-auth-status[data-tone="muted"] {
+  color: hsl(var(--muted-foreground));
+}
+
+.relay-auth-target {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  column-gap: 8px;
+  row-gap: 2px;
+  align-items: start;
+  min-width: 0;
+  border: 1px solid hsl(var(--border) / 0.66);
+  border-radius: 7px;
+  background: hsl(var(--background) / 0.58);
+  padding: 8px 9px;
+}
+
+.relay-auth-target span {
+  padding-top: 1px;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.relay-auth-target code {
+  min-width: 0;
+  color: hsl(var(--foreground));
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 12px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.relay-auth-target small {
+  grid-column: 2;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.relay-auth-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 2px;
+}
+
+.relay-auth-preview-head strong {
+  color: hsl(var(--foreground));
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.relay-auth-preview-head span {
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
 }
 
 .relay-file-textarea {
@@ -1447,6 +1742,12 @@ body {
 
 .relay-file-textarea.compact {
   min-height: 190px;
+}
+
+.relay-auth-textarea {
+  min-height: 160px;
+  max-height: 220px;
+  resize: vertical;
 }
 
 .mode-grid {
@@ -2774,6 +3075,19 @@ body {
 
   .relay-model-table-row {
     grid-template-columns: 1fr;
+  }
+
+  .relay-impact-table-head {
+    display: none;
+  }
+
+  .relay-impact-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
+  .relay-impact-value {
+    justify-self: start;
   }
 
   .relay-model-delete-cell {

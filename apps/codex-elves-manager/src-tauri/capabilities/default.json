@@ -2,7 +2,12 @@
   "identifier": "default",
   "description": "Default permissions for the CodexElves Manager main window. Grants the dialog plugin's default permission set so the file/folder picker can be opened from settings (fixes #345).",
   "windows": ["main"],
+  "local": true,
+  "remote": {
+    "urls": ["http://localhost:1420", "http://localhost:1420/*"]
+  },
   "permissions": [
+    "allow-manager-commands",
     "core:default",
     "dialog:default"
   ]

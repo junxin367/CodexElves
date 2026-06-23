@@ -16,6 +16,7 @@ static APP_EXITING: AtomicBool = AtomicBool::new(false);
 const TRAY_MENU_SHOW: &str = "tray_show_main";
 const TRAY_MENU_QUIT: &str = "tray_quit_app";
 const MANAGER_WAKE_MESSAGE: &[u8] = b"codex-elves-manager:show-main-window\n";
+const MANAGER_WAKE_ACK: &[u8] = b"codex-elves-manager:shown\n";
 const MANAGER_WINDOW_STATE_FILE: &str = "manager-window-state.json";
 const DEV_MANAGER_WINDOW_STATE_FILE: &str = "manager-window-state-dev.json";
 const DEFAULT_WINDOW_WIDTH: f64 = 1180.0;
@@ -59,16 +60,11 @@ pub fn run() {
     let run_result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
-            let url = if show_update {
-                "index.html?showUpdate=1"
-            } else {
-                "index.html"
-            };
             let restore_window_state = load_manager_window_state()
                 .map(clamp_manager_window_state)
                 .filter(|state| manager_window_state_is_visible(&app.handle(), state));
             let mut main_window_builder =
-                tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App(url.into()))
+                tauri::WebviewWindowBuilder::new(app, "main", manager_webview_url(show_update)?)
                     .title(manager_window_title())
                     .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
                     .min_inner_size(f64::from(MIN_WINDOW_WIDTH), f64::from(MIN_WINDOW_HEIGHT));
@@ -237,6 +233,21 @@ fn manager_dev_mode() -> bool {
             .unwrap_or(false)
 }
 
+fn manager_webview_url(show_update: bool) -> anyhow::Result<tauri::WebviewUrl> {
+    if manager_dev_mode() {
+        let suffix = if show_update { "?showUpdate=1" } else { "" };
+        let url = tauri::Url::parse(&format!("http://localhost:1420/{suffix}"))?;
+        return Ok(tauri::WebviewUrl::External(url));
+    }
+
+    let url = if show_update {
+        "index.html?showUpdate=1"
+    } else {
+        "index.html"
+    };
+    Ok(tauri::WebviewUrl::App(url.into()))
+}
+
 fn manager_window_title() -> &'static str {
     if manager_dev_mode() {
         "CodexElves 管理工具 Dev"
@@ -363,6 +374,8 @@ fn spawn_manager_wake_listener<R: tauri::Runtime>(
             }
             if buffer.as_slice() == MANAGER_WAKE_MESSAGE {
                 show_main_window(&app_handle);
+                let _ = stream.write_all(MANAGER_WAKE_ACK);
+                let _ = stream.flush();
             }
         }
     });
@@ -373,7 +386,18 @@ fn request_existing_manager_to_show(manager_guard_port: u16) -> std::io::Result<
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500))?;
     stream.set_write_timeout(Some(Duration::from_millis(500)))?;
     stream.write_all(MANAGER_WAKE_MESSAGE)?;
-    stream.flush()
+    stream.flush()?;
+    stream.set_read_timeout(Some(Duration::from_millis(500)))?;
+    let mut ack = [0_u8; MANAGER_WAKE_ACK.len()];
+    stream.read_exact(&mut ack)?;
+    if ack.as_slice() == MANAGER_WAKE_ACK {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "manager wake acknowledgement mismatch",
+        ))
+    }
 }
 
 fn install_panic_logger() {
@@ -418,27 +442,37 @@ fn acquire_single_instance_guard() -> Option<codex_elves_core::ports::LoopbackPo
         }
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
             let wake_result = request_existing_manager_to_show(manager_guard_port);
+            let should_start_fallback = wake_result.is_err();
             let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
                 "manager.already_running",
                 serde_json::json!({
                     "guard_port": manager_guard_port,
-                    "wake_requested": wake_result.is_ok(),
+                    "wake_requested": !should_start_fallback,
                     "wake_error": wake_result.err().map(|error| error.to_string())
                 }),
             );
-            None
+            if should_start_fallback {
+                fallback_single_instance_guard()
+            } else {
+                None
+            }
         }
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
             let wake_result = request_existing_manager_to_show(manager_guard_port);
+            let should_start_fallback = wake_result.is_err();
             let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
                 "manager.already_running",
                 serde_json::json!({
                     "guard_port": manager_guard_port,
-                    "wake_requested": wake_result.is_ok(),
+                    "wake_requested": !should_start_fallback,
                     "wake_error": wake_result.err().map(|error| error.to_string())
                 }),
             );
-            None
+            if should_start_fallback {
+                fallback_single_instance_guard()
+            } else {
+                None
+            }
         }
         Err(error) => {
             let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
@@ -448,20 +482,24 @@ fn acquire_single_instance_guard() -> Option<codex_elves_core::ports::LoopbackPo
                     "error": error.to_string()
                 }),
             );
-            match std::net::TcpListener::bind(("127.0.0.1", 0)) {
-                Ok(listener) => Some(codex_elves_core::ports::LoopbackPortGuard::listener(
-                    listener,
-                )),
-                Err(fallback_error) => {
-                    let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
-                        "manager.guard_fallback_failed",
-                        serde_json::json!({
-                            "error": fallback_error.to_string()
-                        }),
-                    );
-                    None
-                }
-            }
+            fallback_single_instance_guard()
+        }
+    }
+}
+
+fn fallback_single_instance_guard() -> Option<codex_elves_core::ports::LoopbackPortGuard> {
+    match std::net::TcpListener::bind(("127.0.0.1", 0)) {
+        Ok(listener) => Some(codex_elves_core::ports::LoopbackPortGuard::listener(
+            listener,
+        )),
+        Err(fallback_error) => {
+            let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+                "manager.guard_fallback_failed",
+                serde_json::json!({
+                    "error": fallback_error.to_string()
+                }),
+            );
+            None
         }
     }
 }
