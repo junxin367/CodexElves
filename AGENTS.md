@@ -38,7 +38,11 @@
 - `codex-plus-plus`
 - `codex-plus-manager`
 
-唯一例外：脚本市场兼容旧数据源时允许保留 `BigPizzaV3/CodexElvesScriptMarket`。
+唯一例外：脚本市场（插件市场）数据源地址以用户指定的 fork 源为准，当前固定为 `https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/index.json`，不得擅自修改或改回其它仓库。
+
+- 该地址是用户明确要求保留的 fork 源插件市场，属于外部第三方数据源仓库名，**不属于本产品品牌**；因此其中出现的 `CodexPlusPlus` 字样是有意保留的例外，不受上述品牌硬约束限制。
+- 涉及文件：`crates/codex-elves-core/src/script_market.rs` 的 `DEFAULT_MARKET_INDEX_URL`。
+- 品牌关键词扫描时必须排除脚本市场数据源地址这一项，不能因该 URL 命中 `CodexPlusPlus` 就判定违规。
 
 ## 已移除功能禁止回流
 
@@ -126,7 +130,8 @@ git diff --check
 合并后必须做关键词扫描。运行时代码、README、安装脚本、资源路径中不得出现旧品牌或已移除功能关键词：
 
 ```powershell
-git grep -n -E "codex-plus|codex_plus|CodexPlusPlus|Codex\\+\\+" -- apps crates assets scripts README.md README_EN.md Cargo.toml
+# 注：脚本市场数据源 script_market.rs 含有意保留的 fork 仓库名 CodexPlusPlusScriptMarket，已用 :(exclude) 排除，不算违规。
+git grep -n -E "codex-plus|codex_plus|CodexPlusPlus|Codex\\+\\+" -- apps crates assets scripts README.md README_EN.md Cargo.toml ":(exclude)crates/codex-elves-core/src/script_market.rs"
 git grep -n -i -E "discord|telegram|官方中转站|推荐内容|请作者|咖啡|mobile.?relay|(^|[^a-z])zed([^a-z]|$)" -- apps crates assets scripts README.md README_EN.md Cargo.toml
 git grep -n -i -E "sponsor|赞助" -- README.md README_EN.md apps/codex-elves-manager/src apps/codex-elves-manager/src-tauri crates assets scripts
 ```

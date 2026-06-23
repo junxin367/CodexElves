@@ -1169,7 +1169,17 @@
   }
 
   function codexServiceTierFastModelListLabel() {
-    return Array.from(codexServiceTierSupportedFastModels).join(" / ");
+    // 合并内置白名单与 catalog 中标记支持 fast 的模型，避免写死两个模型名
+    const names = new Set(codexServiceTierSupportedFastModels);
+    const entries = Array.isArray(codexModelCatalog.model_entries) ? codexModelCatalog.model_entries : [];
+    for (const entry of entries) {
+      const slug = String((entry && entry.slug) || "").trim();
+      if (!slug) continue;
+      const supports = entry.supports_fast === true
+        || (Array.isArray(entry.service_tiers) && entry.service_tiers.some((tier) => isFastServiceTierValue(tier && tier.id)));
+      if (supports) names.add(slug);
+    }
+    return Array.from(names).join(" / ");
   }
 
   function normalizeCodexServiceTierModelName(model) {
@@ -1191,8 +1201,98 @@
     return "";
   }
 
+  // 规范化模型名/文本用于匹配：小写、去除所有非字母数字字符
+  function codexServiceTierModelMatchKey(value) {
+    return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  }
+
+  // slug 去掉常见厂商前缀后的“核心版本片段”（如 gpt-5.5 -> 5.5），用于与 UI 简写文本匹配
+  function codexServiceTierModelCoreFragment(slug) {
+    const lower = String(slug || "").toLowerCase().trim();
+    if (!lower) return "";
+    const stripped = lower.replace(/^(gpt|gpt-|o|claude|claude-|gemini|gemini-|deepseek|deepseek-|qwen|qwen-|kimi|moonshot|mistral|llama)[-_]?/, "");
+    const frag = stripped.replace(/[^a-z0-9.]+/g, "");
+    return frag;
+  }
+
+  // 判断某个 catalog slug 是否与 composer 按钮文本匹配。优先精确/包含，其次版本号片段。
+  function codexServiceTierModelMatchesText(slug, text) {
+    const slugKey = codexServiceTierModelMatchKey(slug);
+    const textKey = codexServiceTierModelMatchKey(text);
+    if (!slugKey || !textKey) return false;
+    if (textKey === slugKey) return true;
+    if (textKey.includes(slugKey) && slugKey.length >= 3) return true;
+    const frag = codexServiceTierModelCoreFragment(slug);
+    const fragText = String(text || "").toLowerCase();
+    if (frag && frag.length >= 3 && /[0-9]/.test(frag)) {
+      // frag 仅含字母数字和点，按词边界查找（如 5.5 出现在 “5.5 超高”）
+      const escaped = frag.replace(/\./g, "\\.");
+      const pattern = new RegExp("(^|[^0-9.])" + escaped + "([^0-9.]|$)");
+      if (pattern.test(fragText)) return true;
+    }
+    return false;
+  }
+
+  // 从 composer footer 读取用户当前实际选中的模型，并匹配到 catalog 的 slug。
+  // 解决：fast 能力判断不应使用后端配置的默认模型，而应使用会话里实际选中的模型。
+  function codexServiceTierComposerSelectedModel() {
+    try {
+      const slugs = [];
+      const entries = Array.isArray(codexModelCatalog.model_entries) ? codexModelCatalog.model_entries : [];
+      for (const entry of entries) {
+        if (entry && entry.slug) slugs.push(String(entry.slug));
+        if (entry && entry.display_name) slugs.push(String(entry.display_name));
+      }
+      if (Array.isArray(codexModelCatalog.models)) {
+        for (const m of codexModelCatalog.models) if (m) slugs.push(String(m));
+      }
+      if (!slugs.length) return "";
+      if (typeof codexServiceTierBestComposerFooter !== "function") return "";
+      const footer = codexServiceTierBestComposerFooter();
+      if (!footer) return "";
+      const buttons = Array.from(footer.querySelectorAll("button, [role='button']"));
+      const texts = buttons.map((button) => codexServiceTierBadgeText(button)).filter(Boolean);
+      // 优先精确匹配，再包含，再片段；同时优先更长的 slug，避免短片段误命中
+      const sortedSlugs = slugs.slice().sort((a, b) => b.length - a.length);
+      for (const text of texts) {
+        for (const slug of sortedSlugs) {
+          if (codexServiceTierModelMatchKey(text) === codexServiceTierModelMatchKey(slug)) {
+            return findCatalogSlug(slug) || slug;
+          }
+        }
+      }
+      for (const text of texts) {
+        for (const slug of sortedSlugs) {
+          if (codexServiceTierModelMatchesText(slug, text)) {
+            return findCatalogSlug(slug) || slug;
+          }
+        }
+      }
+    } catch (error) {
+      void error;
+    }
+    return "";
+  }
+
+  // 将匹配到的 slug/display_name 归一回 catalog 真实 slug
+  function findCatalogSlug(value) {
+    const key = codexServiceTierModelMatchKey(value);
+    const entries = Array.isArray(codexModelCatalog.model_entries) ? codexModelCatalog.model_entries : [];
+    for (const entry of entries) {
+      if (entry && entry.slug && codexServiceTierModelMatchKey(entry.slug) === key) return String(entry.slug);
+      if (entry && entry.display_name && codexServiceTierModelMatchKey(entry.display_name) === key && entry.slug) return String(entry.slug);
+    }
+    if (Array.isArray(codexModelCatalog.models)) {
+      for (const m of codexModelCatalog.models) if (m && codexServiceTierModelMatchKey(m) === key) return String(m);
+    }
+    return "";
+  }
+
   function codexServiceTierCurrentModelName() {
-    return codexServiceTierModelFromValue(codexModelCatalog.model) || codexServiceTierModelFromValue(codexModelCatalog.default_model);
+    // 优先使用会话 composer 中实际选中的模型；回退到后端配置的激活/默认模型
+    return codexServiceTierComposerSelectedModel()
+      || codexServiceTierModelFromValue(codexModelCatalog.model)
+      || codexServiceTierModelFromValue(codexModelCatalog.default_model);
   }
 
   function codexServiceTierModelForRequest(params, modelHint = "") {
@@ -1200,12 +1300,31 @@
   }
 
   function codexServiceTierFastSupportedForModel(modelName) {
+    const catalogSupport = codexServiceTierCatalogFastSupport(modelName);
+    if (catalogSupport !== null) return catalogSupport;
     return codexServiceTierSupportedFastModels.has(normalizeCodexServiceTierModelName(modelName));
+  }
+
+  function codexServiceTierCatalogFastSupport(modelName) {
+    // 优先以后端 catalog 的模型能力为准（service_tiers 含 priority 或 supports_fast=true）；
+    // catalog 未提供该模型条目时返回 null，交由内置白名单兜底。
+    const normalized = normalizeCodexServiceTierModelName(modelName);
+    if (!normalized) return null;
+    const entries = Array.isArray(codexModelCatalog.model_entries) ? codexModelCatalog.model_entries : [];
+    const entry = entries.find(
+      (item) => normalizeCodexServiceTierModelName(item && item.slug) === normalized
+    );
+    if (!entry) return null;
+    if (typeof entry.supports_fast === "boolean") return entry.supports_fast;
+    if (Array.isArray(entry.service_tiers)) {
+      return entry.service_tiers.some((tier) => isFastServiceTierValue(tier && tier.id));
+    }
+    return null;
   }
 
   function codexServiceTierFastUnsupportedMessage(modelName = codexServiceTierCurrentModelName()) {
     const modelText = modelName ? `当前模型 ${modelName} 不支持` : "当前模型未读取";
-    return `Fast 仅支持 ${codexServiceTierFastModelListLabel()}，${modelText}`;
+    return `Fast 仅 OpenAI 部分模型支持（${codexServiceTierFastModelListLabel()}），Claude 等其他模型不支持；${modelText}`;
   }
 
   function codexServiceTierMaybeLoadModelCatalog(force = false) {
@@ -1223,7 +1342,7 @@
     const normalizedModel = normalizeCodexServiceTierModelName(modelName);
     return {
       modelName: modelName || "",
-      supported: !!normalizedModel && codexServiceTierSupportedFastModels.has(normalizedModel),
+      supported: !!normalizedModel && codexServiceTierFastSupportedForModel(modelName),
     };
   }
 
@@ -6575,6 +6694,10 @@
       if (result.status === "server_deleted" || result.status === "local_deleted") {
         removeDeletedRow(row, button, ref);
         showToast(result.message || "删除成功", result.undo_token);
+      } else if (result.status === "not_found") {
+        // 会话在本地存储中已不存在，目标（会话不存在）已达成，直接移除残留的列表行
+        removeDeletedRow(row, button, ref);
+        showToast(result.message || "会话已不存在，已从列表移除", null);
       } else {
         showToast(result.message || "删除失败", null);
       }

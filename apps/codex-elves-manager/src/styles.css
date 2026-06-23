@@ -2047,6 +2047,58 @@ body {
   gap: 12px;
 }
 
+.session-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-end;
+  margin-bottom: 12px;
+}
+
+.session-filter-field {
+  min-width: 200px;
+}
+
+.session-time-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.session-time-chip {
+  border: 1px solid hsl(var(--border));
+  border-radius: 999px;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-size: 12px;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition:
+    border-color var(--motion-normal) var(--motion-ease),
+    background-color var(--motion-normal) var(--motion-ease);
+}
+
+.session-time-chip:hover {
+  border-color: hsl(var(--primary) / 0.5);
+}
+
+.session-time-chip.active {
+  border-color: hsl(var(--primary));
+  background: hsl(var(--primary) / 0.14);
+  color: hsl(var(--primary));
+}
+
+.session-filter-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: hsl(var(--muted-foreground));
+}
+
 .session-list {
   display: grid;
   gap: 8px;

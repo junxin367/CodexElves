@@ -895,9 +895,15 @@ pub fn sync_live_config_context_entries(
         return Ok(normalize_optional_toml(live_doc));
     }
     let managed_doc = parse_toml_document(&normalized_context)?;
-    remove_managed_context_entries(live_doc.as_table_mut(), managed_doc.as_table());
-    let mut context_doc = managed_doc;
+    let mut context_doc = managed_doc.clone();
     remove_disabled_context_tables(context_doc.as_table_mut());
+    // 仅删除“禁用”的受管项（managed 有但启用集合里没有的）；
+    // 启用项交由 merge 原地更新，保留其在 config 中的原有位置，避免大范围位置漂移。
+    remove_disabled_managed_entries(
+        live_doc.as_table_mut(),
+        managed_doc.as_table(),
+        context_doc.as_table(),
+    );
     merge_managed_context_tables(live_doc.as_table_mut(), context_doc.as_table());
     Ok(normalize_optional_toml(live_doc))
 }
@@ -974,40 +980,71 @@ fn merge_managed_context_table(
     let Some(managed_table) = managed_item.as_table_like() else {
         return;
     };
-    if target.get(table_name).is_none() {
-        target[table_name] = toml_edit::table();
+    let target_existed = target.get(table_name).is_some();
+    if !target_existed {
+        let mut created = Table::new();
+        // 父表设为隐式，避免渲染出多余的空 `[mcp_servers]` 表头。
+        created.set_implicit(true);
+        target[table_name] = Item::Table(created);
     }
-    let Some(target_table) = target.get_mut(table_name).and_then(Item::as_table_like_mut) else {
+    let Some(target_table) = target.get_mut(table_name).and_then(Item::as_table_mut) else {
         target[table_name] = managed_item.clone();
         return;
     };
     for (id, item) in managed_table.iter() {
+        let is_new = target_table.get(id).is_none();
         target_table.insert(id, item.clone());
+        // 新插入的子表（如 [mcp_servers.context7]）表头前补一个空行，
+        // 与上一个配置块保持可读的空行间隔。
+        if is_new && let Some(child) = target_table.get_mut(id).and_then(Item::as_table_mut) {
+            ensure_leading_blank_line(child.decor_mut());
+        }
     }
 }
 
-fn remove_managed_context_entries(target: &mut toml_edit::Table, managed: &toml_edit::Table) {
-    for table_name in ["mcp_servers", "skills", "plugins"] {
-        remove_managed_context_entry_table(target, managed, table_name);
+/// 确保表头装饰的前缀以空行开头，使新表与上一块配置之间有空行间隔。
+/// 若前缀本就以换行开头（已有空行）则保持不变，避免重复叠加。
+fn ensure_leading_blank_line(decor: &mut toml_edit::Decor) {
+    let prefix = decor
+        .prefix()
+        .and_then(|raw| raw.as_str())
+        .unwrap_or("")
+        .to_string();
+    if prefix.starts_with('\n') || prefix.starts_with("\r\n") {
+        return;
     }
+    decor.set_prefix(format!("\n{prefix}"));
 }
 
-fn remove_managed_context_entry_table(
+
+/// 仅从 live 中删除“受管但已禁用”的 context 项（mcp_servers/skills/plugins）。
+/// 即 managed（全部受管项）里有、但 enabled（启用项）里没有的 id。
+/// 启用项不在此删除，交由 merge 原地更新以保留位置。
+fn remove_disabled_managed_entries(
     target: &mut toml_edit::Table,
     managed: &toml_edit::Table,
-    table_name: &str,
+    enabled: &toml_edit::Table,
 ) {
-    let Some(managed_item) = managed.get(table_name) else {
-        return;
-    };
-    let Some(managed_table) = managed_item.as_table_like() else {
-        return;
-    };
-    let Some(target_table) = target.get_mut(table_name).and_then(Item::as_table_like_mut) else {
-        return;
-    };
-    for (id, _) in managed_table.iter() {
-        target_table.remove(id);
+    for table_name in ["mcp_servers", "skills", "plugins"] {
+        let Some(managed_table) = managed.get(table_name).and_then(Item::as_table_like) else {
+            continue;
+        };
+        let enabled_ids: std::collections::HashSet<String> = enabled
+            .get(table_name)
+            .and_then(Item::as_table_like)
+            .map(|table| table.iter().map(|(id, _)| id.to_string()).collect())
+            .unwrap_or_default();
+        let Some(target_table) = target.get_mut(table_name).and_then(Item::as_table_like_mut) else {
+            continue;
+        };
+        let remove_ids: Vec<String> = managed_table
+            .iter()
+            .map(|(id, _)| id.to_string())
+            .filter(|id| !enabled_ids.contains(id))
+            .collect();
+        for id in remove_ids {
+            target_table.remove(&id);
+        }
     }
 }
 
@@ -1118,6 +1155,22 @@ fn write_codex_live_atomic(
 
     let old_config = read_optional_bytes(&config_path)?;
     let old_auth = read_optional_bytes(&auth_path)?;
+
+    // 幂等跳过：待写入内容与磁盘现有最终字节完全一致时，不重写也不备份，
+    // 避免每次启动都覆盖用户 config.toml 并堆积大量备份目录。
+    // 注：Windows 下 config_text 已经过 computer_use_guard 改写，此处比较的即最终落盘字节。
+    let config_unchanged = match config_text {
+        Some(config_text) => old_config.as_deref() == Some(config_text.as_bytes()),
+        None => true,
+    };
+    let auth_unchanged = match auth_bytes {
+        Some(auth_bytes) => old_auth.as_deref() == Some(auth_bytes),
+        None => true,
+    };
+    if config_unchanged && auth_unchanged {
+        return Ok(None);
+    }
+
     let backup_path = create_live_backup(home, old_config.as_deref(), old_auth.as_deref())?;
     let mut auth_written = false;
 
@@ -1255,6 +1308,13 @@ fn normalize_duplicate_toml_text(contents: &str) -> String {
         let trimmed = line.trim();
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
             in_root = false;
+            // [[array.table]] 是 TOML 数组表：多个同名元素合法且各自独立，
+            // 绝不能当作“重复表”去重，否则会误删 skills.config / hooks 等数组元素。
+            if trimmed.starts_with("[[") {
+                skipping_duplicate_table = false;
+                kept.push(line);
+                continue;
+            }
             skipping_duplicate_table = !seen_headers.insert(trimmed.to_string());
             if skipping_duplicate_table {
                 continue;
@@ -1433,6 +1493,39 @@ fn apply_generated_model_catalog_to_config(
     Ok(config_with_catalog)
 }
 
+/// 从打包的 codex-models.json 中按模型 slug 取出 fast 能力字段。
+///
+/// 仅当该模型确实声明了 `service_tiers`（含 priority）时返回 `Some`，
+/// 用于让生成的 catalog 与打包数据保持一致，避免把所有模型的 fast 能力抹平为 `[]`。
+/// 返回 `(service_tiers, additional_speed_tiers)`，均为 JSON 数组。
+fn fast_service_tier_capability(slug: &str) -> Option<(Value, Value)> {
+    let slug = slug.trim();
+    if slug.is_empty() {
+        return None;
+    }
+    let source = serde_json::from_str::<Value>(include_str!("../assets/codex-models.json")).ok()?;
+    let models = source.get("models").and_then(Value::as_array)?;
+    let model = models
+        .iter()
+        .find(|model| model.get("slug").and_then(Value::as_str) == Some(slug))?;
+    let service_tiers = model.get("service_tiers").and_then(Value::as_array)?;
+    let has_priority = service_tiers
+        .iter()
+        .any(|tier| tier.get("id").and_then(Value::as_str) == Some("priority"));
+    if !has_priority {
+        return None;
+    }
+    let speed_tiers = model
+        .get("additional_speed_tiers")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Some((
+        Value::Array(service_tiers.clone()),
+        Value::Array(speed_tiers),
+    ))
+}
+
 fn generated_catalog_prompt_fields() -> (String, Value) {
     let source = serde_json::from_str::<Value>(include_str!("../assets/codex-models.json")).ok();
     let first_model = source
@@ -1481,6 +1574,7 @@ pub(crate) fn generated_model_catalog_json(
 
     for (index, row) in rows.into_iter().enumerate() {
         let model = row.model;
+        let fast_capability = fast_service_tier_capability(&model);
         let protocol = upstream_response_protocol_for_relay(row.protocol);
         let supported_reasoning_levels =
             crate::protocol_proxy::supported_reasoning_efforts_for_model(&model, protocol);
@@ -1502,13 +1596,25 @@ pub(crate) fn generated_model_catalog_json(
         entry.insert("shell_type".to_string(), json!("shell_command"));
         entry.insert("apply_patch_tool_type".to_string(), json!("freeform"));
         entry.insert("web_search_tool_type".to_string(), json!("text_and_image"));
-        entry.insert("additional_speed_tiers".to_string(), json!([]));
+        entry.insert(
+            "additional_speed_tiers".to_string(),
+            fast_capability
+                .as_ref()
+                .map(|(_, speed)| speed.clone())
+                .unwrap_or_else(|| json!([])),
+        );
         entry.insert("availability_nux".to_string(), Value::Null);
         entry.insert("default_verbosity".to_string(), json!("low"));
         entry.insert("effective_context_window_percent".to_string(), json!(95));
         entry.insert("experimental_supported_tools".to_string(), json!([]));
         entry.insert("input_modalities".to_string(), json!(["text", "image"]));
-        entry.insert("service_tiers".to_string(), json!([]));
+        entry.insert(
+            "service_tiers".to_string(),
+            fast_capability
+                .as_ref()
+                .map(|(tiers, _)| tiers.clone())
+                .unwrap_or_else(|| json!([])),
+        );
         entry.insert("support_verbosity".to_string(), json!(true));
         entry.insert("supports_image_detail_original".to_string(), json!(true));
         entry.insert("supports_parallel_tool_calls".to_string(), json!(true));
@@ -1575,6 +1681,18 @@ pub(crate) fn relay_profile_model_entries(profile: &RelayProfile) -> Vec<serde_j
             entry.insert("display_name".to_string(), json!(row.model));
             entry.insert("visibility".to_string(), json!("list"));
             entry.insert("supported_in_api".to_string(), json!(true));
+            let fast_capability = fast_service_tier_capability(&row.model);
+            entry.insert(
+                "service_tiers".to_string(),
+                fast_capability
+                    .as_ref()
+                    .map(|(tiers, _)| tiers.clone())
+                    .unwrap_or_else(|| json!([])),
+            );
+            entry.insert(
+                "supports_fast".to_string(),
+                json!(fast_capability.is_some()),
+            );
             entry.insert("default_reasoning_level".to_string(), json!(default_level));
             entry.insert(
                 "supported_reasoning_levels".to_string(),
@@ -2527,7 +2645,40 @@ fn create_live_backup(
     if let Some(auth) = auth {
         std::fs::write(backup_dir.join("auth.json"), auth)?;
     }
+    prune_live_backups(home, LIVE_BACKUP_KEEP);
     Ok(Some(backup_dir.to_string_lossy().to_string()))
+}
+
+/// 实时备份目录保留份数上限，避免长期运行后 ~/.codex/backups 无限堆积。
+const LIVE_BACKUP_KEEP: usize = 20;
+
+/// 清理多余的实时备份目录，仅保留最近的 `keep` 份（按目录名时间戳倒序）。
+/// 仅处理 `codex-elves-live-` 前缀目录，其它内容不受影响；任何 IO 错误都静默忽略，不影响主流程。
+fn prune_live_backups(home: &Path, keep: usize) {
+    let backups_dir = home.join("backups");
+    let Ok(entries) = std::fs::read_dir(&backups_dir) else {
+        return;
+    };
+    let mut live_dirs: Vec<(String, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("codex-elves-live-") && entry.path().is_dir() {
+                Some((name, entry.path()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if live_dirs.len() <= keep {
+        return;
+    }
+    // 目录名包含递增时间戳，按名称升序排序后，前面的是较旧的。
+    live_dirs.sort_by(|a, b| a.0.cmp(&b.0));
+    let remove_count = live_dirs.len() - keep;
+    for (_, path) in live_dirs.into_iter().take(remove_count) {
+        let _ = std::fs::remove_dir_all(&path);
+    }
 }
 
 fn timestamp_millis() -> u128 {
@@ -2703,6 +2854,297 @@ mod tests {
             ..RelayProfile::default()
         };
         assert!(relay_profile_model(&empty).trim().is_empty());
+    }
+
+    #[test]
+    fn fast_service_tier_capability_matches_packaged_models() {
+        let (tiers, speed) = fast_service_tier_capability("gpt-5.5").expect("gpt-5.5 应支持 fast");
+        assert!(
+            tiers.as_array().is_some_and(|items| items
+                .iter()
+                .any(|item| item.get("id").and_then(Value::as_str) == Some("priority"))),
+            "service_tiers 应包含 priority: {tiers}"
+        );
+        assert!(
+            speed
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("fast"))),
+            "additional_speed_tiers 应包含 fast: {speed}"
+        );
+
+        assert!(fast_service_tier_capability("gpt-5.2").is_none());
+        assert!(fast_service_tier_capability("claude-sonnet-4.5").is_none());
+        assert!(fast_service_tier_capability("unknown-model").is_none());
+    }
+
+    #[test]
+    fn generated_model_catalog_backfills_fast_capability() {
+        let profile = RelayProfile {
+            relay_mode: crate::settings::RelayMode::PureApi,
+            protocol: crate::settings::RelayProtocol::Responses,
+            model_mappings: vec![
+                crate::settings::RelayModelMapping {
+                    request_model: "gpt-5.5".to_string(),
+                    context_window: "400000".to_string(),
+                    protocol: RelayProtocol::Responses,
+                },
+                crate::settings::RelayModelMapping {
+                    request_model: "gpt-5.2".to_string(),
+                    context_window: "400000".to_string(),
+                    protocol: RelayProtocol::Responses,
+                },
+            ],
+            ..RelayProfile::default()
+        };
+        let rows = relay_profile_catalog_rows(&profile);
+        let catalog = generated_model_catalog_json(&profile, "", rows).unwrap();
+        let models = catalog.get("models").and_then(Value::as_array).unwrap();
+
+        let fast_model = models
+            .iter()
+            .find(|m| m.get("slug").and_then(Value::as_str) == Some("gpt-5.5"))
+            .expect("应存在 gpt-5.5");
+        let tiers = fast_model
+            .get("service_tiers")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert!(
+            tiers
+                .iter()
+                .any(|item| item.get("id").and_then(Value::as_str) == Some("priority")),
+            "gpt-5.5 的 catalog 应保留 priority service_tier"
+        );
+        let speed = fast_model
+            .get("additional_speed_tiers")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert!(speed.iter().any(|item| item.as_str() == Some("fast")));
+
+        let standard_model = models
+            .iter()
+            .find(|m| m.get("slug").and_then(Value::as_str) == Some("gpt-5.2"))
+            .expect("应存在 gpt-5.2");
+        let standard_tiers = standard_model
+            .get("service_tiers")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert!(standard_tiers.is_empty(), "gpt-5.2 不应有 fast tier");
+    }
+
+    #[test]
+    fn model_entries_expose_fast_capability_for_frontend() {
+        let profile = RelayProfile {
+            relay_mode: crate::settings::RelayMode::PureApi,
+            protocol: crate::settings::RelayProtocol::Responses,
+            model_mappings: vec![
+                crate::settings::RelayModelMapping {
+                    request_model: "gpt-5.4".to_string(),
+                    context_window: "400000".to_string(),
+                    protocol: RelayProtocol::Responses,
+                },
+                crate::settings::RelayModelMapping {
+                    request_model: "claude-sonnet-4.5".to_string(),
+                    context_window: "200000".to_string(),
+                    protocol: RelayProtocol::Anthropic,
+                },
+            ],
+            ..RelayProfile::default()
+        };
+        let entries = relay_profile_model_entries(&profile);
+
+        let fast_entry = entries
+            .iter()
+            .find(|m| m.get("slug").and_then(Value::as_str) == Some("gpt-5.4"))
+            .expect("应存在 gpt-5.4");
+        assert_eq!(
+            fast_entry.get("supports_fast").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            fast_entry
+                .get("service_tiers")
+                .and_then(Value::as_array)
+                .is_some_and(|tiers| tiers
+                    .iter()
+                    .any(|t| t.get("id").and_then(Value::as_str) == Some("priority"))),
+            "gpt-5.4 entry 应暴露 priority service_tier"
+        );
+
+        let standard_entry = entries
+            .iter()
+            .find(|m| m.get("slug").and_then(Value::as_str) == Some("claude-sonnet-4.5"))
+            .expect("应存在 claude");
+        assert_eq!(
+            standard_entry.get("supports_fast").and_then(Value::as_bool),
+            Some(false)
+        );
+    }
+
+    fn count_live_backups(home: &Path) -> usize {
+        let backups = home.join("backups");
+        if !backups.exists() {
+            return 0;
+        }
+        std::fs::read_dir(&backups)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with("codex-elves-live-")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn write_codex_live_atomic_skips_rewrite_when_content_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let config = "model = \"gpt-5.5\"\n";
+        let auth = b"{}\n";
+
+        let first = write_codex_live_atomic(home, Some(config), Some(auth), false).unwrap();
+        assert!(first.is_none(), "首次无旧文件，不应产生备份");
+        assert_eq!(
+            std::fs::read_to_string(home.join("config.toml")).unwrap(),
+            config
+        );
+
+        let second = write_codex_live_atomic(home, Some(config), Some(auth), false).unwrap();
+        assert!(second.is_none(), "内容未变不应产生备份");
+        assert_eq!(
+            count_live_backups(home),
+            0,
+            "内容未变时不应生成任何备份目录"
+        );
+
+        let third = write_codex_live_atomic(home, Some("model = \"gpt-5.4\"\n"), Some(auth), false)
+            .unwrap();
+        assert!(third.is_some(), "内容变化应产生备份");
+        assert_eq!(count_live_backups(home), 1);
+    }
+
+    #[test]
+    fn prune_live_backups_keeps_only_recent() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let backups = home.join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        for ts in 1000u64..1025 {
+            std::fs::create_dir_all(backups.join(format!("codex-elves-live-{ts}"))).unwrap();
+        }
+        std::fs::create_dir_all(backups.join("keep-me")).unwrap();
+
+        prune_live_backups(home, 20);
+
+        assert_eq!(count_live_backups(home), 20, "只保留最近 20 份");
+        assert!(
+            !backups.join("codex-elves-live-1000").exists(),
+            "最旧的应被删除"
+        );
+        assert!(
+            backups.join("codex-elves-live-1024").exists(),
+            "最新的应保留"
+        );
+        assert!(backups.join("keep-me").exists(), "无关目录不受影响");
+    }
+
+    #[test]
+    fn normalize_duplicate_toml_text_keeps_array_of_tables() {
+        // [[array.table]] 是 TOML 数组表，多个同名元素合法，不能被当作重复表删除
+        let input = concat!(
+            "[[skills.config]]\n",
+            "name = \"a\"\n",
+            "enabled = false\n",
+            "\n",
+            "[[skills.config]]\n",
+            "name = \"b\"\n",
+            "enabled = false\n",
+        );
+        let out = normalize_duplicate_toml_text(input);
+        assert!(out.contains("name = \"a\""), "第一个数组表应保留");
+        assert!(out.contains("name = \"b\""), "第二个数组表不应被误删：\n{out}");
+    }
+
+    #[test]
+    fn sync_live_context_preserves_array_of_tables() {
+        // 保存 mcp 时不应误删 [[skills.config]] 等数组表
+        let live = concat!(
+            "model = \"gpt-5.5\"\n",
+            "\n",
+            "[[skills.config]]\n",
+            "name = \"superpowers:writing-skills\"\n",
+            "enabled = false\n",
+            "\n",
+            "[[skills.config]]\n",
+            "name = \"superpowers:using-git-worktrees\"\n",
+            "enabled = false\n",
+            "\n",
+            "[mcp_servers.old]\n",
+            "command = \"node\"\n",
+        );
+        let context = "[mcp_servers.context7]\ncommand = \"npx\"\n";
+        let out = sync_live_config_context_entries(live, context).unwrap();
+        assert!(out.contains("superpowers:writing-skills"), "skill 1 应保留");
+        assert!(
+            out.contains("superpowers:using-git-worktrees"),
+            "skill 2 不应被误删：\n{out}"
+        );
+        assert_eq!(
+            out.matches("[[skills.config]]").count(),
+            2,
+            "两个数组表都应保留：\n{out}"
+        );
+        assert!(out.contains("[mcp_servers.context7]"), "新 mcp 应写入");
+    }
+
+    #[test]
+    fn sync_live_context_updates_existing_mcp_in_place() {
+        // 更新已存在的 mcp 时应原地更新、保留位置，不漂移到文件末尾
+        let live = concat!(
+            "model = \"gpt-5.5\"\n",
+            "\n",
+            "[mcp_servers.alpha]\n",
+            "command = \"old\"\n",
+            "\n",
+            "[features]\n",
+            "hooks = true\n",
+        );
+        let context = "[mcp_servers.alpha]\ncommand = \"new\"\n";
+        let out = sync_live_config_context_entries(live, context).unwrap();
+        // alpha 仍在 features 之前（保留原位置），且 command 已更新
+        let alpha_pos = out.find("[mcp_servers.alpha]").unwrap();
+        let features_pos = out.find("[features]").unwrap();
+        assert!(alpha_pos < features_pos, "mcp 应保留在原位置，不漂移：\n{out}");
+        assert!(out.contains("command = \"new\""), "内容应更新");
+        assert!(!out.contains("command = \"old\""), "旧值应被替换");
+    }
+
+    #[test]
+    fn sync_live_context_removes_disabled_mcp() {
+        // context 里标记 enabled=false 的 mcp 应从 live 中移除
+        let live = concat!(
+            "[mcp_servers.keepme]\n",
+            "command = \"a\"\n",
+            "\n",
+            "[mcp_servers.dropme]\n",
+            "command = \"b\"\n",
+        );
+        let context = concat!(
+            "[mcp_servers.keepme]\n",
+            "command = \"a\"\n",
+            "\n",
+            "[mcp_servers.dropme]\n",
+            "command = \"b\"\n",
+            "enabled = false\n",
+        );
+        let out = sync_live_config_context_entries(live, context).unwrap();
+        assert!(out.contains("[mcp_servers.keepme]"), "启用项应保留");
+        assert!(!out.contains("[mcp_servers.dropme]"), "禁用项应被移除：\n{out}");
     }
 }
 

@@ -549,8 +549,8 @@ const routes: Array<{ id: Route; label: string; icon: LucideIcon; badge?: string
   { id: "enhance", label: "页面增强", icon: Hammer },
   { id: "userScripts", label: "脚本市场", icon: FileCode2 },
   { id: "maintenance", label: "安装维护", icon: Wrench },
-  { id: "about", label: "关于", icon: Info },
   { id: "settings", label: "设置", icon: Settings },
+  { id: "about", label: "关于", icon: Info },
 ];
 
 const defaultSettings: BackendSettings = {
@@ -831,6 +831,36 @@ export function App() {
       showResultNotice("会话删除", result);
       await refreshLocalSessions(true);
     }
+  };
+
+  const deleteLocalSessionsBatch = async (sessionsToDelete: LocalSession[]) => {
+    if (!sessionsToDelete.length) return;
+    if (!window.confirm(`确认批量删除这 ${sessionsToDelete.length} 个会话？此操作会删除本地数据库记录和 rollout 文件，并为每个会话创建备份。`)) return;
+    let deleted = 0;
+    let failed = 0;
+    for (const session of sessionsToDelete) {
+      const result = await run(() =>
+        call<DeleteLocalSessionResult>("delete_local_session", {
+          request: { sessionId: session.id, title: session.title, dbPath: session.dbPath },
+        }),
+      );
+      // not_found 也视为已达成目标（会话本来就不存在）
+      // 注：CommandResult 与 DeleteResult 的 status 字段经 serde flatten 后重名，
+      // 前端拿到的 result.status 实际是删除业务状态（local_deleted/server_deleted/not_found/failed），
+      // 因此这里按业务状态判断，not_found 视为已达成目标（会话本来就不存在）。
+      const deleteStatus = result?.status as string | undefined;
+      if (deleteStatus === "local_deleted" || deleteStatus === "server_deleted" || deleteStatus === "not_found") {
+        deleted += 1;
+      } else {
+        failed += 1;
+      }
+    }
+    await refreshLocalSessions(true);
+    showNotice(
+      "批量删除会话",
+      failed ? `已删除 ${deleted} 个，失败 ${failed} 个。` : `已成功删除 ${deleted} 个会话。`,
+      failed ? "failed" : "ok",
+    );
   };
 
   const refreshLiveContextEntries = async (silent = false) => {
@@ -1601,6 +1631,7 @@ export function App() {
       deleteUserScript,
       refreshLocalSessions,
       deleteLocalSession,
+      deleteLocalSessionsBatch,
       openExternalUrl,
       applyRelayInjection,
       applyPureApiInjection,
@@ -1832,6 +1863,7 @@ type Actions = {
   deleteUserScript: (key: string) => Promise<void>;
   refreshLocalSessions: () => Promise<LocalSessionsResult | null>;
   deleteLocalSession: (session: LocalSession) => Promise<void>;
+  deleteLocalSessionsBatch: (sessions: LocalSession[]) => Promise<void>;
   openExternalUrl: (url: string) => Promise<void>;
   applyRelayInjection: () => Promise<boolean>;
   applyPureApiInjection: () => Promise<boolean>;
@@ -2204,7 +2236,7 @@ function EnhanceScreen({
             <FeatureToggle title="强制解锁入口" detail="恢复 1.1.9 的入口解锁方式，强制显示并启用插件入口。" checked={form.codexAppPluginEntryUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginEntryUnlock", value)} />
             <FeatureToggle title="特殊插件强制安装" detail="解除 App unavailable / 应用不可用导致的前端安装禁用。" checked={form.codexAppForcePluginInstall} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppForcePluginInstall", value)} />
             <FeatureToggle title="模型白名单解锁" detail="从环境变量和 config.toml 的 /v1/models 拉取模型并补进模型列表。" checked={form.codexAppModelWhitelistUnlock} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppModelWhitelistUnlock", value)} />
-            <FeatureToggle title="Fast 按钮" detail="显示服务模式切换按钮；Fast 仅支持 gpt-5.4 / gpt-5.5，其他模型按 Standard 发送。" checked={form.codexAppServiceTierControls} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppServiceTierControls", value)} />
+            <FeatureToggle title="Fast 按钮" detail="显示服务模式切换按钮。Fast（service_tier=priority）仅 OpenAI 部分模型支持（如 gpt-5.4 / gpt-5.5）；Claude 等其他模型不支持，会按 Standard 发送。" checked={form.codexAppServiceTierControls} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppServiceTierControls", value)} />
             <FeatureToggle title="会话删除" detail="在会话列表悬停显示删除按钮，并支持撤销。" checked={form.codexAppSessionDelete} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppSessionDelete", value)} />
             <FeatureToggle title="Markdown 导出" detail="在会话列表显示导出按钮，导出带时间戳的 Markdown。" checked={form.codexAppMarkdownExport} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppMarkdownExport", value)} />
             <FeatureToggle title="会话项目移动" detail="把会话移动到普通对话或其他本地项目。" checked={form.codexAppProjectMove} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppProjectMove", value)} />
@@ -2316,6 +2348,54 @@ function SessionsScreen({
   const items = sessions?.sessions ?? [];
   const activeCount = items.filter((item) => !item.archived).length;
   const archivedCount = items.length - activeCount;
+  const [projectFilter, setProjectFilter] = useState<string>("");
+  const [timeFilter, setTimeFilter] = useState<"" | "1w" | "2w" | "3w" | "1m">("");
+  const [batchDeleting, setBatchDeleting] = useState(false);
+
+  // 项目（cwd）筛选选项：去重后的项目路径列表
+  const projectOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const item of items) {
+      const cwd = (item.cwd || "").trim();
+      if (cwd) set.add(cwd);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [items]);
+
+  // 时间筛选：选中后表示“更新时间早于 N 周/月之前”的旧会话
+  const timeFilterDays: Record<string, number> = { "1w": 7, "2w": 14, "3w": 21, "1m": 30 };
+  const timeCutoffMs = timeFilter ? Date.now() - timeFilterDays[timeFilter] * 24 * 60 * 60 * 1000 : null;
+
+  const filteredItems = useMemo(() => {
+    return items.filter((item) => {
+      if (projectFilter && (item.cwd || "").trim() !== projectFilter) return false;
+      if (timeCutoffMs !== null) {
+        const updated = item.updatedAtMs ?? 0;
+        if (!(updated > 0 && updated <= timeCutoffMs)) return false;
+      }
+      return true;
+    });
+  }, [items, projectFilter, timeCutoffMs]);
+
+  const batchDeleteDisabled = !timeFilter || batchDeleting || filteredItems.length === 0;
+  const timeFilterOptions: Array<{ value: "1w" | "2w" | "3w" | "1m"; label: string }> = [
+    { value: "1w", label: "1 周前" },
+    { value: "2w", label: "2 周前" },
+    { value: "3w", label: "3 周前" },
+    { value: "1m", label: "1 月前" },
+  ];
+
+  const onBatchDelete = async () => {
+    if (batchDeleteDisabled) return;
+    setBatchDeleting(true);
+    try {
+      await actions.deleteLocalSessionsBatch(filteredItems);
+      setProjectFilter("");
+      setTimeFilter("");
+    } finally {
+      setBatchDeleting(false);
+    }
+  };
   return (
     <>
       <Panel>
@@ -2391,29 +2471,74 @@ function SessionsScreen({
         </CardContent>
       </Panel>
       <Panel>
-        <CardHead title="本地会话" detail={items.length ? "按更新时间倒序显示" : "点击刷新会话读取本地数据库"} />
+        <CardHead title="本地会话" detail={items.length ? "按更新时间倒序显示；可按项目和时间筛选后批量删除" : "点击刷新会话读取本地数据库"} />
         <CardContent>
           {items.length ? (
-            <div className="session-list">
-              {items.map((session) => (
-                <div className="session-row" key={session.id}>
-                  <div className="session-main">
-                    <strong>{session.title || "未命名会话"}</strong>
-                    <span>{session.id}</span>
-                    <small>{session.cwd || "未记录项目路径"}</small>
+            <>
+              <div className="session-filter-bar">
+                <Field className="session-filter-field" label="项目">
+                  <select
+                    className="select-input"
+                    value={projectFilter}
+                    onChange={(event) => setProjectFilter(event.currentTarget.value)}
+                  >
+                    <option value="">全部项目</option>
+                    {projectOptions.map((cwd) => (
+                      <option key={cwd} value={cwd}>
+                        {cwd}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field as="div" className="session-filter-field" label="时间（更新早于）">
+                  <div className="session-time-quick">
+                    {timeFilterOptions.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        className={"session-time-chip" + (timeFilter === option.value ? " active" : "")}
+                        onClick={() => setTimeFilter((prev) => (prev === option.value ? "" : option.value))}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
                   </div>
-                  <div className="session-meta">
-                    <Badge status={session.archived ? "archived" : "ok"} />
-                    <span>{session.modelProvider || "provider 未记录"}</span>
-                    <span>{formatTime(session.updatedAtMs ?? 0)}</span>
-                  </div>
-                  <Button variant="outline" onClick={() => void actions.deleteLocalSession(session)}>
-                    <Trash2 className="h-4 w-4" />
-                    删除
-                  </Button>
+                </Field>
+              </div>
+              <div className="session-filter-summary">
+                {timeFilter
+                  ? `匹配 ${filteredItems.length} 个会话（共 ${items.length} 个）`
+                  : `共 ${items.length} 个会话；选择时间条件后可批量删除`}
+                <Button variant="destructive" size="sm" disabled={batchDeleteDisabled} onClick={() => void onBatchDelete()}>
+                  <Trash2 className="h-4 w-4" />
+                  {batchDeleting ? "正在批量删除…" : `批量删除${timeFilter ? `（${filteredItems.length}）` : ""}`}
+                </Button>
+              </div>
+              {filteredItems.length ? (
+                <div className="session-list">
+                  {filteredItems.map((session) => (
+                    <div className="session-row" key={session.id}>
+                      <div className="session-main">
+                        <strong>{session.title || "未命名会话"}</strong>
+                        <span>{session.id}</span>
+                        <small>{session.cwd || "未记录项目路径"}</small>
+                      </div>
+                      <div className="session-meta">
+                        <Badge status={session.archived ? "archived" : "ok"} />
+                        <span>{session.modelProvider || "provider 未记录"}</span>
+                        <span>{formatTime(session.updatedAtMs ?? 0)}</span>
+                      </div>
+                      <Button variant="outline" onClick={() => void actions.deleteLocalSession(session)}>
+                        <Trash2 className="h-4 w-4" />
+                        删除
+                      </Button>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
+              ) : (
+                <div className="empty">没有符合筛选条件的会话。</div>
+              )}
+            </>
           ) : (
             <div className="empty">未读取到本地会话，或当前 SQLite 会话库不存在。</div>
           )}
@@ -3797,6 +3922,10 @@ function RelayContextManager({
     const next = await actions.upsertContextEntry(form, kind, id, tomlBody);
     if (!next) return;
     onFormChange(next);
+    const syncResult = await actions.syncLiveContextEntries(next, true);
+    if (syncResult && isSuccessStatus(syncResult.status)) {
+      void actions.refreshRelayFiles();
+    }
     setEditor(null);
   };
 
@@ -3815,6 +3944,10 @@ function RelayContextManager({
     const next = await actions.deleteContextEntry(form, entry.kind, entry.id);
     if (!next) return;
     onFormChange(next);
+    const syncResult = await actions.syncLiveContextEntries(next, true);
+    if (syncResult && isSuccessStatus(syncResult.status)) {
+      void actions.refreshRelayFiles();
+    }
   };
 
   return (

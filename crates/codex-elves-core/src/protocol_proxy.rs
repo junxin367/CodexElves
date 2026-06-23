@@ -554,8 +554,12 @@ pub struct ChatSseToResponsesConverter {
     buffer: String,
     utf8_remainder: Vec<u8>,
     state: ChatSseState,
+    diagnostic_id: Option<String>,
     failed: bool,
     saw_done: bool,
+    failure_source: Option<&'static str>,
+    failure_message: Option<String>,
+    failure_type: Option<String>,
 }
 
 impl Default for ChatSseToResponsesConverter {
@@ -564,16 +568,28 @@ impl Default for ChatSseToResponsesConverter {
             buffer: String::new(),
             utf8_remainder: Vec::new(),
             state: ChatSseState::default(),
+            diagnostic_id: None,
             failed: false,
             saw_done: false,
+            failure_source: None,
+            failure_message: None,
+            failure_type: None,
         }
     }
 }
 
 impl ChatSseToResponsesConverter {
     pub fn with_request(original_request: &Value) -> Self {
+        Self::with_request_and_diagnostic_id(original_request, None)
+    }
+
+    pub fn with_request_and_diagnostic_id(
+        original_request: &Value,
+        diagnostic_id: Option<&str>,
+    ) -> Self {
         Self {
             state: ChatSseState::with_request(original_request),
+            diagnostic_id: diagnostic_id.map(ToString::to_string),
             ..Self::default()
         }
     }
@@ -609,12 +625,12 @@ impl ChatSseToResponsesConverter {
         }
         if !self.failed && !self.state.completed {
             if !self.saw_done && self.state.finish_reason.is_none() {
-                self.state.failed_into(
+                self.record_failure_into(
                     &mut output,
+                    "missing_completion_marker",
                     "upstream stream ended before a completion marker".to_string(),
                     Some("stream_error".to_string()),
                 );
-                self.failed = true;
                 return output.into_bytes();
             }
             self.state.finalize_into(&mut output);
@@ -624,9 +640,22 @@ impl ChatSseToResponsesConverter {
 
     pub fn fail(&mut self, message: String, error_type: Option<String>) -> Vec<u8> {
         let mut output = String::new();
-        self.state.failed_into(&mut output, message, error_type);
-        self.failed = true;
+        self.record_failure_into(&mut output, "stream_read_error", message, error_type);
         output.into_bytes()
+    }
+
+    pub fn diagnostic_summary(&self) -> Value {
+        json!({
+            "diagnosticId": self.diagnostic_id.as_deref(),
+            "responseProtocol": "chat_completions",
+            "model": self.state.model.as_str(),
+            "terminalStatus": stream_terminal_status(self.failed, self.state.completed),
+            "sawDone": self.saw_done,
+            "finishReason": self.state.finish_reason.as_deref(),
+            "failureSource": self.failure_source,
+            "failureType": self.failure_type.as_deref(),
+            "failureMessage": self.failure_message.as_deref().map(diagnostic_text_preview),
+        })
     }
 
     fn handle_block(&mut self, block: &str, output: &mut String) {
@@ -652,21 +681,68 @@ impl ChatSseToResponsesConverter {
         }
 
         let Ok(chunk) = serde_json::from_str::<Value>(&data) else {
-            self.state.failed_into(
+            self.record_failure_into(
                 output,
+                "invalid_sse_json",
                 "upstream stream sent invalid JSON data".to_string(),
                 Some("invalid_sse_json".to_string()),
             );
-            self.failed = true;
             return;
         };
         if event_name.as_deref() == Some("error") || chunk.get("error").is_some() {
             let (message, error_type) = extract_chat_sse_error(&chunk);
-            self.state.failed_into(output, message, error_type);
-            self.failed = true;
+            self.log_upstream_error_event(
+                "chat_completions",
+                event_name.as_deref(),
+                &chunk,
+                &message,
+                error_type.as_deref(),
+            );
+            self.record_failure_into(output, "upstream_sse_error", message, error_type);
             return;
         }
         self.state.handle_chat_chunk_into(&chunk, output);
+    }
+
+    fn record_failure_into(
+        &mut self,
+        output: &mut String,
+        source: &'static str,
+        message: String,
+        error_type: Option<String>,
+    ) {
+        self.failure_source = Some(source);
+        self.failure_message = Some(message.clone());
+        self.failure_type = error_type.clone();
+        log_stream_conversion_failure(
+            "chat_completions",
+            self.diagnostic_id.as_deref(),
+            self.state.model.as_str(),
+            source,
+            error_type.as_deref(),
+            &message,
+        );
+        self.state.failed_into(output, message, error_type);
+        self.failed = true;
+    }
+
+    fn log_upstream_error_event(
+        &self,
+        response_protocol: &'static str,
+        event_name: Option<&str>,
+        chunk: &Value,
+        message: &str,
+        error_type: Option<&str>,
+    ) {
+        log_stream_upstream_error_event(
+            response_protocol,
+            self.diagnostic_id.as_deref(),
+            self.state.model.as_str(),
+            event_name,
+            error_type,
+            message,
+            chunk,
+        );
     }
 }
 
@@ -676,6 +752,9 @@ pub struct AnthropicSseToResponsesConverter {
     state: AnthropicSseState,
     failed: bool,
     saw_message_stop: bool,
+    failure_source: Option<&'static str>,
+    failure_message: Option<String>,
+    failure_type: Option<String>,
 }
 
 impl Default for AnthropicSseToResponsesConverter {
@@ -686,6 +765,9 @@ impl Default for AnthropicSseToResponsesConverter {
             state: AnthropicSseState::default(),
             failed: false,
             saw_message_stop: false,
+            failure_source: None,
+            failure_message: None,
+            failure_type: None,
         }
     }
 }
@@ -737,12 +819,12 @@ impl AnthropicSseToResponsesConverter {
         }
         if !self.failed && !self.state.inner.completed {
             if !self.saw_message_stop {
-                self.state.inner.failed_into(
+                self.record_failure_into(
                     &mut output,
+                    "missing_completion_marker",
                     "upstream stream ended before a completion marker".to_string(),
                     Some("stream_error".to_string()),
                 );
-                self.failed = true;
                 return output.into_bytes();
             }
             self.state.inner.finalize_into(&mut output);
@@ -752,11 +834,22 @@ impl AnthropicSseToResponsesConverter {
 
     pub fn fail(&mut self, message: String, error_type: Option<String>) -> Vec<u8> {
         let mut output = String::new();
-        self.state
-            .inner
-            .failed_into(&mut output, message, error_type);
-        self.failed = true;
+        self.record_failure_into(&mut output, "stream_read_error", message, error_type);
         output.into_bytes()
+    }
+
+    pub fn diagnostic_summary(&self) -> Value {
+        json!({
+            "diagnosticId": self.state.diagnostic_id.as_deref(),
+            "responseProtocol": "anthropic",
+            "model": self.state.inner.model.as_str(),
+            "terminalStatus": stream_terminal_status(self.failed, self.state.inner.completed),
+            "sawMessageStop": self.saw_message_stop,
+            "finishReason": self.state.inner.finish_reason.as_deref(),
+            "failureSource": self.failure_source,
+            "failureType": self.failure_type.as_deref(),
+            "failureMessage": self.failure_message.as_deref().map(diagnostic_text_preview),
+        })
     }
 
     fn handle_block(&mut self, block: &str, output: &mut String) {
@@ -782,12 +875,12 @@ impl AnthropicSseToResponsesConverter {
         }
 
         let Ok(chunk) = serde_json::from_str::<Value>(&data) else {
-            self.state.inner.failed_into(
+            self.record_failure_into(
                 output,
+                "invalid_sse_json",
                 "upstream stream sent invalid JSON data".to_string(),
                 Some("invalid_sse_json".to_string()),
             );
-            self.failed = true;
             return;
         };
         let event = event_name
@@ -796,8 +889,16 @@ impl AnthropicSseToResponsesConverter {
             .unwrap_or("");
         if event == "error" || chunk.get("error").is_some() {
             let (message, error_type) = extract_chat_sse_error(&chunk);
-            self.state.inner.failed_into(output, message, error_type);
-            self.failed = true;
+            log_stream_upstream_error_event(
+                "anthropic",
+                self.state.diagnostic_id.as_deref(),
+                self.state.inner.model.as_str(),
+                Some(event),
+                error_type.as_deref(),
+                &message,
+                &chunk,
+            );
+            self.record_failure_into(output, "upstream_sse_error", message, error_type);
             return;
         }
         if event == "message_stop" {
@@ -805,6 +906,28 @@ impl AnthropicSseToResponsesConverter {
         }
         self.state
             .handle_anthropic_event_into(event, &chunk, output);
+    }
+
+    fn record_failure_into(
+        &mut self,
+        output: &mut String,
+        source: &'static str,
+        message: String,
+        error_type: Option<String>,
+    ) {
+        self.failure_source = Some(source);
+        self.failure_message = Some(message.clone());
+        self.failure_type = error_type.clone();
+        log_stream_conversion_failure(
+            "anthropic",
+            self.state.diagnostic_id.as_deref(),
+            self.state.inner.model.as_str(),
+            source,
+            error_type.as_deref(),
+            &message,
+        );
+        self.state.inner.failed_into(output, message, error_type);
+        self.failed = true;
     }
 }
 
@@ -4797,6 +4920,61 @@ fn log_anthropic_stream_response_shape(state: &AnthropicSseState) {
             "textualInvokeBlockCount": state.textual_invoke_block_count,
             "textualInvokeCallCount": state.textual_invoke_call_count,
             "textualInvokeToolNames": state.textual_invoke_tool_names.iter().cloned().collect::<Vec<_>>()
+        }),
+    );
+}
+
+fn stream_terminal_status(failed: bool, completed: bool) -> &'static str {
+    if failed {
+        "response_failed"
+    } else if completed {
+        "response_completed"
+    } else {
+        "missing_terminal_event"
+    }
+}
+
+fn log_stream_upstream_error_event(
+    response_protocol: &'static str,
+    diagnostic_id: Option<&str>,
+    model: &str,
+    event_name: Option<&str>,
+    error_type: Option<&str>,
+    message: &str,
+    chunk: &Value,
+) {
+    let error = chunk.get("error").unwrap_or(chunk);
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "protocol_proxy.stream_upstream_error_event",
+        json!({
+            "diagnosticId": diagnostic_id,
+            "responseProtocol": response_protocol,
+            "model": model,
+            "event": event_name,
+            "errorType": error_type,
+            "errorMessage": diagnostic_text_preview(message),
+            "errorPreview": diagnostic_text_preview(&error.to_string()),
+        }),
+    );
+}
+
+fn log_stream_conversion_failure(
+    response_protocol: &'static str,
+    diagnostic_id: Option<&str>,
+    model: &str,
+    source: &'static str,
+    error_type: Option<&str>,
+    message: &str,
+) {
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "protocol_proxy.stream_conversion_failure",
+        json!({
+            "diagnosticId": diagnostic_id,
+            "responseProtocol": response_protocol,
+            "model": model,
+            "source": source,
+            "errorType": error_type,
+            "errorMessage": diagnostic_text_preview(message),
         }),
     );
 }

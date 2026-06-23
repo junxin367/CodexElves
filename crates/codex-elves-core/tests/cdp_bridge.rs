@@ -549,6 +549,15 @@ fn injection_script_applies_fast_service_tier_contract() {
     );
 
     assert_eq!(cases["startConversation"]["serviceTier"], "priority");
+
+    // catalog 驱动：白名单之外但 catalog 标记 supports_fast 的模型也能注入 priority
+    assert_eq!(cases["catalogDrivenFast"]["service_tier"], "priority");
+    assert_eq!(cases["catalogDrivenFast"]["serviceTier"], "priority");
+    // catalog 明确 supports_fast=false 时，名字像 gpt-5.4 也被阻断
+    assert_eq!(
+        cases["catalogDrivenBlocked"]["service_tier"],
+        serde_json::Value::Null
+    );
 }
 
 fn run_service_tier_contract_harness() -> serde_json::Value {
@@ -646,6 +655,36 @@ const startConversation = api.requestOverride({{
   model: "gpt-5.5",
 }});
 
+// catalog 驱动：内置白名单之外的模型，但 catalog 标记 supports_fast=true 也应支持
+api.setModelCatalog({{
+  status: "ok",
+  model: "gpt-5.6-custom",
+  default_model: "gpt-5.6-custom",
+  models: ["gpt-5.6-custom"],
+  model_entries: [{{ slug: "gpt-5.6-custom", supports_fast: true, service_tiers: [{{ id: "priority", name: "Fast" }}] }}],
+}});
+api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
+const catalogDrivenFast = api.applyServiceTierOverride("turn/start", {{
+  threadId: "thread-12345678",
+  model: "gpt-5.6-custom",
+  service_tier: null,
+}}, "");
+
+// catalog 明确标记不支持（supports_fast=false）时，即使名字像 gpt-5.4 也应被阻断
+api.setModelCatalog({{
+  status: "ok",
+  model: "gpt-5.4",
+  default_model: "gpt-5.4",
+  models: ["gpt-5.4"],
+  model_entries: [{{ slug: "gpt-5.4", supports_fast: false, service_tiers: [] }}],
+}});
+api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
+const catalogDrivenBlocked = api.applyServiceTierOverride("turn/start", {{
+  threadId: "thread-12345678",
+  model: "gpt-5.4",
+  service_tier: "priority",
+}}, "");
+
 process.stdout.write(JSON.stringify({{
   supportedFast,
   unsupportedModel,
@@ -653,6 +692,8 @@ process.stdout.write(JSON.stringify({{
   turnWithoutModelDiagnosticModel,
   customInheritUnsupported,
   startConversation,
+  catalogDrivenFast,
+  catalogDrivenBlocked,
 }}));
 "#,
         script_path = serde_json::to_string(&script_path.to_string_lossy().to_string())

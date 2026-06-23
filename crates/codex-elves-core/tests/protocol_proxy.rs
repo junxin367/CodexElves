@@ -381,6 +381,88 @@ fn anthropic_call_prefixed_textual_invoke_response_converts_to_tool_call() {
 }
 
 #[test]
+fn anthropic_textual_invoke_exec_command_allows_invoke_text_inside_parameter() {
+    let command = r#"cd E:\code\junes\github\CodexPlusPlus; rg -n "invoke|textual_invoke|call_prefixed|<invoke|antml_tool_call|parse_textual|extract_tool" crates/codex-elves-core/src/protocol_proxy.rs | Select-Object -First 40"#;
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_textual_exec_with_invoke_text",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [
+                {
+                    "type": "text",
+                    "text": format!(
+                        "call\n<invoke name=\"exec_command\">\n<parameter name=\"cmd\">{command}</parameter>\n</invoke>"
+                    )
+                }
+            ],
+            "stop_reason": "stop",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-4-8",
+            "input": "定位协议转换",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "cmd": { "type": "string" } }
+                    }
+                }
+            ]
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(converted["output"][0]["type"], "function_call");
+    assert_eq!(converted["output"][0]["name"], "exec_command");
+    assert_eq!(
+        converted["output"][0]["arguments"],
+        json!({ "cmd": command }).to_string()
+    );
+}
+
+#[test]
+fn anthropic_textual_invoke_apply_patch_proxy_preserves_update_hunks() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_textual_patch_tool",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [
+                {
+                    "type": "text",
+                    "text": r#"call
+<invoke name="apply_patch_update_file">
+<parameter name="path">crates/codex-elves-core/tests/tmp_real_config_sync.rs</parameter>
+<parameter name="hunks">[{"context":"fn tmp_real_config_sync_only_touches_mcp() {","lines":[{"op":"context","text":"let before = original.clone();"},{"op":"add","text":"assert_eq!(before, after);"}]}]</parameter>
+</invoke>"#
+                }
+            ],
+            "stop_reason": "stop",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-4-8",
+            "input": "更新测试",
+            "tools": [{ "type": "custom", "name": "apply_patch" }]
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(converted["output"][0]["type"], "custom_tool_call");
+    assert_eq!(converted["output"][0]["name"], "apply_patch");
+    assert_eq!(
+        converted["output"][0]["input"],
+        "*** Begin Patch\n*** Update File: crates/codex-elves-core/tests/tmp_real_config_sync.rs\n@@ fn tmp_real_config_sync_only_touches_mcp() {\n let before = original.clone();\n+assert_eq!(before, after);\n*** End Patch"
+    );
+}
+
+#[test]
 fn anthropic_leading_text_then_textual_invoke_splits_message_and_tool_call() {
     // 回归：同一个 text 块里先是正文，末尾才是 call/<invoke> 工具调用。
     let converted = anthropic_message_to_response_with_request(

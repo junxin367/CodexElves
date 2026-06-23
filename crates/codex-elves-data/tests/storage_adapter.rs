@@ -647,6 +647,38 @@ fn missing_db_and_unsupported_schema_return_failed_results() {
 }
 
 #[test]
+fn delete_codex_thread_returns_not_found_when_thread_absent() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let rollout_path = tmp.path().join("rollout.jsonl");
+    fs::write(&rollout_path, "{\"type\":\"message\"}\n").unwrap();
+    create_codex_thread_db(&db_path, &rollout_path);
+    let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")));
+
+    // 会话在本地 DB 中不存在（仅残留在 UI），应返回 NotFound 而非 Failed
+    let result = adapter.delete_local(&session("local:does-not-exist", "Ghost"));
+
+    assert_eq!(result.status, DeleteStatus::NotFound);
+}
+
+#[test]
+fn delete_local_from_paths_returns_not_found_when_thread_absent_everywhere() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let rollout_path = tmp.path().join("rollout.jsonl");
+    fs::write(&rollout_path, "{\"type\":\"message\"}\n").unwrap();
+    create_codex_thread_db(&db_path, &rollout_path);
+
+    let result = delete_local_from_paths(
+        vec![db_path.clone()],
+        BackupStore::new(tmp.path().join("backups")),
+        &session("local:ghost", "Ghost"),
+    );
+
+    assert_eq!(result.status, DeleteStatus::NotFound);
+}
+
+#[test]
 fn archived_lookup_workspace_move_and_sort_keys_match_expected_shape() {
     let tmp = tempdir().unwrap();
     let db_path = tmp.path().join("state_5.sqlite");

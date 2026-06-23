@@ -27,6 +27,7 @@ pub enum DeleteStatus {
     ServerDeleted,
     LocalDeleted,
     Partial,
+    NotFound,
     Failed,
     Undone,
 }
@@ -90,6 +91,14 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<DeleteStatus>(json!("server_deleted")).unwrap(),
             DeleteStatus::ServerDeleted
+        );
+        assert_eq!(
+            serde_json::to_value(DeleteStatus::NotFound).unwrap(),
+            json!("not_found")
+        );
+        assert_eq!(
+            serde_json::from_value::<DeleteStatus>(json!("not_found")).unwrap(),
+            DeleteStatus::NotFound
         );
     }
 

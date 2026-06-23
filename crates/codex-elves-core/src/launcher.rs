@@ -1066,6 +1066,13 @@ impl EitherResponsesStreamConverter<'_> {
             Self::Anthropic(converter) => converter.finish(),
         }
     }
+
+    fn diagnostic_summary(&self) -> serde_json::Value {
+        match self {
+            Self::Chat(converter) => converter.diagnostic_summary(),
+            Self::Anthropic(converter) => converter.diagnostic_summary(),
+        }
+    }
 }
 
 async fn handle_protocol_proxy_connection(
@@ -1183,7 +1190,12 @@ async fn handle_protocol_proxy_connection(
         {
             chat_converter = request_json
                 .as_ref()
-                .map(crate::protocol_proxy::ChatSseToResponsesConverter::with_request)
+                .map(|request| {
+                    crate::protocol_proxy::ChatSseToResponsesConverter::with_request_and_diagnostic_id(
+                        request,
+                        Some(&diagnostic_id),
+                    )
+                })
                 .unwrap_or_default();
             EitherResponsesStreamConverter::Chat(&mut chat_converter)
         } else {
@@ -1230,6 +1242,10 @@ async fn handle_protocol_proxy_connection(
                 stream.write_all(&tail).await?;
             }
         }
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "protocol_proxy.stream_conversion_terminal",
+            converter.diagnostic_summary(),
+        );
         log_helper_response(
             "helper.protocol_proxy_stream_ok",
             method,

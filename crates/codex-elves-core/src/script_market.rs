@@ -4,8 +4,12 @@ use serde_json::Value;
 
 use crate::user_scripts::UserScriptManager;
 
+// 脚本市场（插件市场）数据源地址：使用 fork 源的插件市场。
+// 该地址由用户明确指定，固定为下方 fork 仓库，不能修改或改回其它仓库。
+// 其中的 CodexPlusPlus 字样属于外部第三方数据源仓库名，不是本产品品牌，
+// 已在 AGENTS.md 的品牌关键词扫描中显式排除本文件。
 pub const DEFAULT_MARKET_INDEX_URL: &str =
-    "https://raw.githubusercontent.com/BigPizzaV3/CodexElvesScriptMarket/main/index.json";
+    "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/index.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ScriptMarketManifest {

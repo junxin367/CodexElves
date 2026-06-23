@@ -15,10 +15,7 @@ pub fn delete_local_from_paths(
     backup_store: BackupStore,
     session: &SessionRef,
 ) -> DeleteResult {
-    let mut result = failed(
-        &session.session_id,
-        "Thread not found in local storage".to_string(),
-    );
+    let mut result = not_found(&session.session_id, "会话在本地存储中已不存在".to_string());
     let mut deleted_count = 0usize;
     for db_path in db_paths {
         let adapter = SQLiteStorageAdapter::new(db_path, backup_store.clone());
@@ -490,9 +487,9 @@ impl SQLiteStorageAdapter {
             &[&session.session_id],
         )?;
         if sessions.is_empty() {
-            return Ok(failed(
+            return Ok(not_found(
                 &session.session_id,
-                "Session not found in local storage".to_string(),
+                "会话在本地存储中已不存在".to_string(),
             ));
         }
         let messages = if has_table(db, "messages")? {
@@ -541,9 +538,9 @@ impl SQLiteStorageAdapter {
         let thread_id = normalize_codex_thread_id(&session.session_id);
         let thread_rows = select_dicts(db, "SELECT * FROM threads WHERE id = ?1", &[&thread_id])?;
         if thread_rows.is_empty() {
-            return Ok(failed(
+            return Ok(not_found(
                 &session.session_id,
-                "Thread not found in local storage".to_string(),
+                "会话在本地存储中已不存在".to_string(),
             ));
         }
         let mut tables = Map::new();
@@ -673,9 +670,9 @@ impl SQLiteStorageAdapter {
                 .map(|items| items.is_empty())
                 .unwrap_or(true)
         }) {
-            return Ok(failed(
+            return Ok(not_found(
                 &session.session_id,
-                "Thread not found in local storage".to_string(),
+                "会话在本地存储中已不存在".to_string(),
             ));
         }
         let token =
@@ -716,6 +713,19 @@ fn optional_column_expression<'a>(
 fn failed(session_id: &str, message: String) -> DeleteResult {
     DeleteResult {
         status: DeleteStatus::Failed,
+        session_id: session_id.to_string(),
+        message,
+        undo_token: None,
+        backup_path: None,
+    }
+}
+
+/// 会话/thread 在本地存储中本来就不存在（非错误）。
+/// 这种场景下“删除”的目标（会话不存在）其实已达成，
+/// 前端据此可以直接移除残留的 UI 行。
+fn not_found(session_id: &str, message: String) -> DeleteResult {
+    DeleteResult {
+        status: DeleteStatus::NotFound,
         session_id: session_id.to_string(),
         message,
         undo_token: None,
