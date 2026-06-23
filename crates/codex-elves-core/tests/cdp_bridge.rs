@@ -441,6 +441,16 @@ fn injection_script_exposes_fast_service_tier_control() {
 
     assert!(script.contains("default-service-tier"));
     assert!(script.contains("setting-storage-"));
+    assert!(script.contains("vscode-api-"));
+    assert!(script.contains("thread-context-inputs-"));
+    assert!(script.contains("findCodexServiceTierDispatcher"));
+    assert!(script.contains("codexServiceTierDispatcherFromModule"));
+    assert!(script.contains("codexServiceTierRequestClientClassFromModule"));
+    assert!(script.contains("patchCodexServiceTierRequestClientPrototype"));
+    assert!(script.contains("update-thread-settings-for-next-turn"));
+    assert!(script.contains("service_tier_native_thread_setting_synced"));
+    assert!(script.contains("service_tier_request_client_patch_installed"));
+    assert!(script.contains("installCodexServiceTierRequestClientPatch"));
     assert!(script.contains("codexAppAssetUrl"));
     assert!(script.contains("codexThreadServiceTierOverrides"));
     assert!(script.contains("setCodexThreadServiceTierMode"));
@@ -558,6 +568,15 @@ fn injection_script_applies_fast_service_tier_contract() {
         cases["catalogDrivenBlocked"]["service_tier"],
         serde_json::Value::Null
     );
+    assert_eq!(
+        cases["patchedCreateRequest"]["params"]["serviceTier"],
+        "priority"
+    );
+    assert_eq!(
+        cases["patchedCreateRequest"]["params"]["service_tier"],
+        "priority"
+    );
+    assert_eq!(cases["patchedCreateRequest"]["options"]["timeoutMs"], 123);
 }
 
 fn run_service_tier_contract_harness() -> serde_json::Value {
@@ -685,6 +704,22 @@ const catalogDrivenBlocked = api.applyServiceTierOverride("turn/start", {{
   service_tier: "priority",
 }}, "");
 
+class RequestClient {{
+  createRequest(method, params, options) {{
+    return {{ request: {{ method, params, options }}, promise: Promise.resolve(null) }};
+  }}
+  sendRequest() {{}}
+  prewarmThreadStart() {{}}
+}}
+api.patchRequestClientPrototype(RequestClient);
+api.setModelCatalog({{ status: "ok", model: "gpt-5.4", default_model: "gpt-5.4", models: ["gpt-5.4"] }});
+api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
+const patchedCreateRequest = new RequestClient().createRequest("turn/start", {{
+  threadId: "thread-12345678",
+  model: "gpt-5.4",
+  service_tier: null,
+}}, {{ timeoutMs: 123 }}).request;
+
 process.stdout.write(JSON.stringify({{
   supportedFast,
   unsupportedModel,
@@ -694,6 +729,7 @@ process.stdout.write(JSON.stringify({{
   startConversation,
   catalogDrivenFast,
   catalogDrivenBlocked,
+  patchedCreateRequest,
 }}));
 "#,
         script_path = serde_json::to_string(&script_path.to_string_lossy().to_string())

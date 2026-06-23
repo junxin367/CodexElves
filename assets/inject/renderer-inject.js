@@ -1138,6 +1138,111 @@
     return await codexServiceTierModulePromises.get(namePart);
   }
 
+  // Codex App 升级后会重排 chunk：dispatcher 类的归属模块与导出名都可能变化。
+  // 历史上它在 setting-storage-*.js 的 module.v；新版迁移到 vscode-api-*.js 的 module.d。
+  // 这里不写死模块名/导出名，按特征（含 dispatchMessage + getInstance）在候选模块里嗅探。
+  const codexServiceTierDispatcherModuleParts = ["vscode-api-", "setting-storage-"];
+  let codexServiceTierDispatcher = null;
+  let codexServiceTierNativeThreadSyncKey = "";
+
+  function codexServiceTierRequestClientClassFromModule(module) {
+    if (!module || typeof module !== "object") return null;
+    for (const value of Object.values(module)) {
+      if (typeof value !== "function") continue;
+      const prototype = value.prototype;
+      if (!prototype || typeof prototype !== "object") continue;
+      if (
+        typeof prototype.createRequest === "function" &&
+        typeof prototype.sendRequest === "function" &&
+        typeof prototype.prewarmThreadStart === "function"
+      ) {
+        return value;
+      }
+    }
+    return null;
+  }
+
+  function patchCodexServiceTierRequestClientPrototype(requestClientClass) {
+    const prototype = requestClientClass?.prototype;
+    if (!prototype || typeof prototype.createRequest !== "function") return false;
+    if (prototype.__codexServiceTierOriginalCreateRequest) return true;
+    prototype.__codexServiceTierOriginalCreateRequest = prototype.createRequest;
+    prototype.createRequest = function codexServiceTierPatchedCreateRequest(method, params, options) {
+      const methodName = String(method || "");
+      const nextParams = applyCodexServiceTierRequestOverride(methodName, params);
+      return prototype.__codexServiceTierOriginalCreateRequest.call(this, method, nextParams, options);
+    };
+    return true;
+  }
+
+  function codexServiceTierDispatcherFromModule(module) {
+    if (!module || typeof module !== "object") return null;
+    for (const value of Object.values(module)) {
+      if (typeof value !== "function" || typeof value.getInstance !== "function") continue;
+      let source = "";
+      try {
+        source = String(value);
+      } catch {
+        continue;
+      }
+      if (!source.includes("dispatchMessage")) continue;
+      let instance = null;
+      try {
+        instance = value.getInstance();
+      } catch {
+        continue;
+      }
+      if (instance && typeof instance.dispatchMessage === "function") return instance;
+    }
+    return null;
+  }
+
+  async function findCodexServiceTierDispatcher() {
+    let lastError = null;
+    for (const namePart of codexServiceTierDispatcherModuleParts) {
+      let module;
+      try {
+        module = await loadCodexAppModule(namePart);
+      } catch (error) {
+        lastError = error;
+        continue;
+      }
+      const dispatcher = codexServiceTierDispatcherFromModule(module);
+      if (dispatcher) return dispatcher;
+    }
+    if (lastError) throw lastError;
+    return null;
+  }
+
+  function syncCodexNativeThreadServiceTier(threadId, serviceTier, source = "state") {
+    const key = validThreadScrollSessionKey(threadId);
+    if (!key || !codexServiceTierDispatcher || typeof codexServiceTierDispatcher.dispatchMessage !== "function") return;
+    const normalizedServiceTier = serviceTier || null;
+    const syncKey = `${key}:${normalizedServiceTier || "default"}:${source}`;
+    if (codexServiceTierNativeThreadSyncKey === syncKey) return;
+    try {
+      codexServiceTierNativeThreadSyncKey = syncKey;
+      codexServiceTierDispatcher.dispatchMessage("update-thread-settings-for-next-turn", {
+        conversationId: key,
+        threadSettings: { serviceTier: normalizedServiceTier },
+      });
+      sendCodexElvesDiagnostic("service_tier_native_thread_setting_synced", {
+        threadId: key,
+        serviceTier: normalizedServiceTier || "standard",
+        source,
+      });
+    } catch (error) {
+      codexServiceTierNativeThreadSyncKey = "";
+      sendCodexElvesDiagnostic("service_tier_native_thread_setting_sync_failed", {
+        threadId: key,
+        serviceTier: normalizedServiceTier || "standard",
+        source,
+        errorName: error?.name || "",
+        errorMessage: error?.message || String(error),
+      });
+    }
+  }
+
   async function codexSettingStorageModule() {
     const module = await loadCodexAppModule("setting-storage-");
     if (typeof module.n !== "function" || typeof module.s !== "function") {
@@ -1587,6 +1692,10 @@
     const message = effectiveMode === "fast" && !fastAvailability.supported
       ? codexServiceTierFastUnsupportedMessage(fastAvailability.modelName)
       : serviceTierStatusMessage(controlMode, threadMode, effectiveMode, defaultMode);
+    const canSyncNativeThreadServiceTier = effectiveMode !== "fast" || fastAvailability.supported;
+    if (controlMode !== "inherit" && activeThreadId && canSyncNativeThreadServiceTier) {
+      syncCodexNativeThreadServiceTier(activeThreadId, effectiveServiceTier, "state");
+    }
     codexServiceTierState = {
       ...codexServiceTierState,
       controlMode,
@@ -1830,6 +1939,9 @@
     if (Object.prototype.hasOwnProperty.call(nextParams, "service_tier") || override.fastBlocked) {
       nextParams.service_tier = override.serviceTier;
     }
+    if (override.threadId && !override.fastBlocked) {
+      syncCodexNativeThreadServiceTier(override.threadId, override.serviceTier, "request");
+    }
     sendCodexElvesDiagnostic("service_tier_request_override_applied", {
       method,
       threadId: override.threadId || "",
@@ -1890,12 +2002,12 @@
     if (window.__codexServiceTierRequestOverrideInstalled === codexServiceTierRequestOverrideVersion) return;
     const patch = async () => {
       try {
-        const module = await loadCodexAppModule("setting-storage-");
-        const dispatcherClass = typeof module.v === "function" && String(module.v).includes("dispatchMessage") ? module.v : null;
-        const dispatcher = dispatcherClass?.getInstance?.();
+        const dispatcher = await findCodexServiceTierDispatcher();
         if (!dispatcher || typeof dispatcher.dispatchMessage !== "function") throw new Error("Codex dispatcher unavailable");
+        codexServiceTierDispatcher = dispatcher;
         if (dispatcher.__codexServiceTierOriginalDispatchMessage) {
           window.__codexServiceTierRequestOverrideInstalled = codexServiceTierRequestOverrideVersion;
+          refreshCodexServiceTierControls();
           return;
         }
         dispatcher.__codexServiceTierOriginalDispatchMessage = dispatcher.dispatchMessage.bind(dispatcher);
@@ -1907,8 +2019,31 @@
         };
         window.__codexServiceTierRequestOverrideInstalled = codexServiceTierRequestOverrideVersion;
         sendCodexElvesDiagnostic("service_tier_dispatcher_patch_installed", {});
+        refreshCodexServiceTierControls();
       } catch (error) {
         sendCodexElvesDiagnostic("service_tier_dispatcher_patch_failed", {
+          errorName: error?.name || "",
+          errorMessage: error?.message || String(error),
+        });
+      }
+    };
+    void patch();
+  }
+
+  function installCodexServiceTierRequestClientPatch() {
+    if (window.__codexServiceTierRequestClientPatchInstalled === codexServiceTierRequestOverrideVersion) return;
+    const patch = async () => {
+      try {
+        const module = await loadCodexAppModule("thread-context-inputs-");
+        const requestClientClass = codexServiceTierRequestClientClassFromModule(module);
+        if (!requestClientClass) throw new Error("Codex AppServerRequestClient unavailable");
+        if (!patchCodexServiceTierRequestClientPrototype(requestClientClass)) {
+          throw new Error("Codex AppServerRequestClient patch rejected");
+        }
+        window.__codexServiceTierRequestClientPatchInstalled = codexServiceTierRequestOverrideVersion;
+        sendCodexElvesDiagnostic("service_tier_request_client_patch_installed", {});
+      } catch (error) {
+        sendCodexElvesDiagnostic("service_tier_request_client_patch_failed", {
           errorName: error?.name || "",
           errorMessage: error?.message || String(error),
         });
@@ -4333,6 +4468,7 @@
     window.__codexElvesServiceTierTest = {
       applyServiceTierOverride: (method, params, threadIdHint = "") => applyCodexServiceTierRequestOverride(method, params, threadIdHint),
       requestOverride: (message) => codexServiceTierRequestOverride(message),
+      patchRequestClientPrototype: (klass) => patchCodexServiceTierRequestClientPrototype(klass),
       diagnostics: () => [...(window.__codexElvesServiceTierTestDiagnostics || [])],
       setModelCatalog: (catalog = {}) => {
         codexModelCatalog = {
@@ -7955,6 +8091,7 @@
   function scanLightweight() {
     installStyle();
     installCodexServiceTierDispatcherPatch();
+    installCodexServiceTierRequestClientPatch();
     installCodexElvesMenu();
     scheduleBackendHeartbeat();
     installDeleteButtonEventDelegation();
