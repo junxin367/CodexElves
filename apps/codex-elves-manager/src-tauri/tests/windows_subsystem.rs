@@ -32,6 +32,35 @@ fn manager_uses_single_instance_guard_before_starting_tauri() {
 }
 
 #[test]
+fn manager_dev_mode_has_separate_title_and_window_state() {
+    let lib_rs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+        .expect("read manager lib.rs");
+
+    assert!(lib_rs.contains("CODEX_ELVES_MANAGER_DEV"));
+    assert!(lib_rs.contains("CodexElves 管理工具 Dev"));
+    assert!(lib_rs.contains("manager-window-state-dev.json"));
+    assert!(lib_rs.contains("manager_window_title()"));
+    assert!(lib_rs.contains("manager_window_state_file()"));
+}
+
+#[test]
+fn dev_manager_script_sets_isolated_dev_environment() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = manifest_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .and_then(std::path::Path::parent)
+        .unwrap()
+        .join("scripts/dev-manager.ps1");
+    let script = std::fs::read_to_string(&script).expect("read dev manager script");
+
+    assert!(script.contains("CODEX_ELVES_MANAGER_DEV"));
+    assert!(script.contains("CODEX_ELVES_MANAGER_GUARD_PORT"));
+    assert!(script.contains("[int]$GuardPort = 45229"));
+    assert!(script.contains("npm run dev"));
+}
+
+#[test]
 fn manager_second_launch_requests_existing_window_to_show() {
     let lib_rs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
         .expect("read manager lib.rs");

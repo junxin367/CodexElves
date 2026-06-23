@@ -17,6 +17,7 @@ const TRAY_MENU_SHOW: &str = "tray_show_main";
 const TRAY_MENU_QUIT: &str = "tray_quit_app";
 const MANAGER_WAKE_MESSAGE: &[u8] = b"codex-elves-manager:show-main-window\n";
 const MANAGER_WINDOW_STATE_FILE: &str = "manager-window-state.json";
+const DEV_MANAGER_WINDOW_STATE_FILE: &str = "manager-window-state-dev.json";
 const DEFAULT_WINDOW_WIDTH: f64 = 1180.0;
 const DEFAULT_WINDOW_HEIGHT: f64 = 820.0;
 const MIN_WINDOW_WIDTH: u32 = 960;
@@ -68,7 +69,7 @@ pub fn run() {
                 .filter(|state| manager_window_state_is_visible(&app.handle(), state));
             let mut main_window_builder =
                 tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App(url.into()))
-                    .title("CodexElves 管理工具")
+                    .title(manager_window_title())
                     .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
                     .min_inner_size(f64::from(MIN_WINDOW_WIDTH), f64::from(MIN_WINDOW_HEIGHT));
             if restore_window_state.is_some() {
@@ -226,7 +227,30 @@ fn register_main_window_events<R: tauri::Runtime>(window: tauri::WebviewWindow<R
 }
 
 fn manager_window_state_path() -> PathBuf {
-    codex_elves_core::paths::default_app_state_dir().join(MANAGER_WINDOW_STATE_FILE)
+    codex_elves_core::paths::default_app_state_dir().join(manager_window_state_file())
+}
+
+fn manager_dev_mode() -> bool {
+    cfg!(debug_assertions)
+        || std::env::var("CODEX_ELVES_MANAGER_DEV")
+            .map(|value| value == "1")
+            .unwrap_or(false)
+}
+
+fn manager_window_title() -> &'static str {
+    if manager_dev_mode() {
+        "CodexElves 管理工具 Dev"
+    } else {
+        "CodexElves 管理工具"
+    }
+}
+
+fn manager_window_state_file() -> &'static str {
+    if manager_dev_mode() {
+        DEV_MANAGER_WINDOW_STATE_FILE
+    } else {
+        MANAGER_WINDOW_STATE_FILE
+    }
 }
 
 fn load_manager_window_state() -> Option<ManagerWindowState> {
