@@ -1,0 +1,45 @@
+crates/codex-elves-core/tests/protocol_proxy.rs
+  s_6912e0238f15c7::t_053e7c90c8561f 383-428
+  s_6912e0238f15c7::t_a0ff46da29715e 429-464
+crates/codex-elves-core/tests/cdp_bridge.rs
+  s_774a390a431415::t_9ea0a27268c07e 552-560,658-687,695-696
+crates/codex-elves-core/src/protocol_proxy.rs
+  s_4a1f641bc59246::t_3dd7db10bf4d49 557,560-562,571,574-576,583-589,592,628,630,643,647-660,684,686,694-701,706-746,755-757,768-770,822,824,837,841-854,878,880,892-901,910-924
+  s_4a1f641bc59246::t_454ba3d62b2fd9 925-926,4927-4975,4978
+crates/codex-elves-core/src/relay_config.rs
+  s_774a390a431415::t_9a0bec28194345 903,999,1026,1028-1029,1031-1032,1035-1036,1045-1046,1158-1173,1311-1317,1496-1528,1577,1599-1605,1611-1617,1684-1695,2648,2652-2683,2858-3148
+  s_774a390a431415::t_057296c3f71bd0 983-990,995,997-998,1000-1001
+  s_774a390a431415::t_a76a93e77ee586 1005-1014,1016,1043
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "1ff98f0629c82862ae1b0c09c216b946758ef479",
+  "prompts": {},
+  "sessions": {
+    "s_4a1f641bc59246": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef2b8-715c-7b53-960d-70f54edfee0f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    },
+    "s_6912e0238f15c7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef2d9-13c1-7d22-9701-391aaf2fe996",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    },
+    "s_774a390a431415": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef08b-1cdb-72c1-8740-8b923b97ea15",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
