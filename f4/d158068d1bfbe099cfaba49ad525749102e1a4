@@ -1,0 +1,35 @@
+crates/codex-elves-core/tests/relay_config.rs
+  s_d11b1cb79587a2::t_2d9a5bb5e68829 237,240-242
+  s_d11b1cb79587a2::t_6909add2e82c72 2296-2298
+  s_d11b1cb79587a2::t_be6820d724c9d3 208,235-236,238-239,413,434,1363,1385-1386,1860
+  s_d11b1cb79587a2::t_9138ca2279407d 2294-2295
+  s_d11b1cb79587a2::t_9217c53fe29581 2490-2523,2529-2531
+  s_d11b1cb79587a2::t_47e0f15c00fb6e 2486,2532-2683
+  s_d11b1cb79587a2::t_16786c24456ce9 2302-2303,2327,2379,2485,2524-2528,2684-2685,2725-2727,2831-2832,2834,2867
+crates/codex-elves-core/src/relay_config.rs
+  s_d11b1cb79587a2::t_c4349ed184be7b 3367
+  s_d11b1cb79587a2::t_e1a11841bf2cc8 395-396,398,401-407,411,995
+  s_d11b1cb79587a2::t_e324d2b0dba9a2 260-261
+  s_d11b1cb79587a2::t_4ce54cc9f04c3b 425-454,456-504,506-507
+  s_d11b1cb79587a2::t_9dd4bc3335fcc0 455
+  s_d11b1cb79587a2::t_61eabf0dfac471 3272,3274-3277,3280-3307,3309,3311-3324,3326-3366,3368-3450,3453
+crates/codex-elves-core/tests/relay_switch.rs
+  s_d11b1cb79587a2::t_4e54142564783d 54
+  s_d11b1cb79587a2::t_e41969552ab0b5 87-88
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "f4d158068d1bfbe099cfaba49ad525749102e1a4",
+  "prompts": {},
+  "sessions": {
+    "s_d11b1cb79587a2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef3e9-ce87-77f2-b081-5005242eb194",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
