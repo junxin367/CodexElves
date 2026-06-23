@@ -18,9 +18,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
+  Calendar,
   Bell,
   CheckCircle2,
   CircleArrowUp,
+  ChevronDown,
   Copy,
   Download,
   Edit3,
@@ -40,6 +42,7 @@ import {
   RefreshCw,
   Rocket,
   Save,
+  Search,
   Settings,
   ShieldCheck,
   ShieldAlert,
@@ -2349,41 +2352,39 @@ function SessionsScreen({
   const activeCount = items.filter((item) => !item.archived).length;
   const archivedCount = items.length - activeCount;
   const [projectFilter, setProjectFilter] = useState<string>("");
-  const [timeFilter, setTimeFilter] = useState<"" | "1w" | "2w" | "3w" | "1m">("");
+  // 时间范围筛选：start/end 为当天 00:00 的毫秒时间戳，null 表示不限
+  const [startMs, setStartMs] = useState<number | null>(null);
+  const [endMs, setEndMs] = useState<number | null>(null);
   const [batchDeleting, setBatchDeleting] = useState(false);
 
-  // 项目（cwd）筛选选项：去重后的项目路径列表
+  // 项目（cwd）筛选选项：去重后的项目路径列表，附带会话数量
   const projectOptions = useMemo(() => {
-    const set = new Set<string>();
+    const counts = new Map<string, number>();
     for (const item of items) {
       const cwd = (item.cwd || "").trim();
-      if (cwd) set.add(cwd);
+      if (cwd) counts.set(cwd, (counts.get(cwd) ?? 0) + 1);
     }
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
+    return Array.from(counts.entries())
+      .map(([value, count]) => ({ value, count }))
+      .sort((a, b) => a.value.localeCompare(b.value));
   }, [items]);
 
-  // 时间筛选：选中后表示“更新时间早于 N 周/月之前”的旧会话
-  const timeFilterDays: Record<string, number> = { "1w": 7, "2w": 14, "3w": 21, "1m": 30 };
-  const timeCutoffMs = timeFilter ? Date.now() - timeFilterDays[timeFilter] * 24 * 60 * 60 * 1000 : null;
+  // 结束时间含当天：转换为当天 23:59:59.999
+  const endCutoffMs = endMs === null ? null : endMs + 24 * 60 * 60 * 1000 - 1;
+  const hasTimeFilter = startMs !== null || endMs !== null;
 
   const filteredItems = useMemo(() => {
     return items.filter((item) => {
       if (projectFilter && (item.cwd || "").trim() !== projectFilter) return false;
-      if (timeCutoffMs !== null) {
-        const updated = item.updatedAtMs ?? 0;
-        if (!(updated > 0 && updated <= timeCutoffMs)) return false;
-      }
+      const updated = item.updatedAtMs ?? 0;
+      if (startMs !== null && !(updated >= startMs)) return false;
+      if (endCutoffMs !== null && !(updated > 0 && updated <= endCutoffMs)) return false;
       return true;
     });
-  }, [items, projectFilter, timeCutoffMs]);
+  }, [items, projectFilter, startMs, endCutoffMs]);
 
-  const batchDeleteDisabled = !timeFilter || batchDeleting || filteredItems.length === 0;
-  const timeFilterOptions: Array<{ value: "1w" | "2w" | "3w" | "1m"; label: string }> = [
-    { value: "1w", label: "1 周前" },
-    { value: "2w", label: "2 周前" },
-    { value: "3w", label: "3 周前" },
-    { value: "1m", label: "1 月前" },
-  ];
+  const hasFilter = Boolean(projectFilter) || hasTimeFilter;
+  const batchDeleteDisabled = !hasFilter || batchDeleting || filteredItems.length === 0;
 
   const onBatchDelete = async () => {
     if (batchDeleteDisabled) return;
@@ -2391,7 +2392,8 @@ function SessionsScreen({
     try {
       await actions.deleteLocalSessionsBatch(filteredItems);
       setProjectFilter("");
-      setTimeFilter("");
+      setStartMs(null);
+      setEndMs(null);
     } finally {
       setBatchDeleting(false);
     }
@@ -2476,43 +2478,35 @@ function SessionsScreen({
           {items.length ? (
             <>
               <div className="session-filter-bar">
-                <Field className="session-filter-field" label="项目">
-                  <select
-                    className="select-input"
-                    value={projectFilter}
-                    onChange={(event) => setProjectFilter(event.currentTarget.value)}
-                  >
-                    <option value="">全部项目</option>
-                    {projectOptions.map((cwd) => (
-                      <option key={cwd} value={cwd}>
-                        {cwd}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-                <Field as="div" className="session-filter-field" label="时间（更新早于）">
-                  <div className="session-time-quick">
-                    {timeFilterOptions.map((option) => (
-                      <button
-                        key={option.value}
-                        type="button"
-                        className={"session-time-chip" + (timeFilter === option.value ? " active" : "")}
-                        onClick={() => setTimeFilter((prev) => (prev === option.value ? "" : option.value))}
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                </Field>
+                <div className="session-filter-field">
+                  <span className="session-filter-label">项目</span>
+                  <SessionProjectSelect value={projectFilter} options={projectOptions} onChange={setProjectFilter} />
+                </div>
+                <div className="session-filter-field">
+                  <span className="session-filter-label">时间范围（按更新时间）</span>
+                  <SessionTimeRangePicker
+                    startMs={startMs}
+                    endMs={endMs}
+                    onChange={(nextStart, nextEnd) => {
+                      setStartMs(nextStart);
+                      setEndMs(nextEnd);
+                    }}
+                  />
+                </div>
+                <Button
+                  className="session-filter-delete"
+                  variant="destructive"
+                  disabled={batchDeleteDisabled}
+                  onClick={() => void onBatchDelete()}
+                >
+                  <Trash2 className="h-4 w-4" />
+                  {batchDeleting ? "正在批量删除…" : `批量删除${hasFilter ? `（${filteredItems.length}）` : ""}`}
+                </Button>
               </div>
               <div className="session-filter-summary">
-                {timeFilter
+                {hasFilter
                   ? `匹配 ${filteredItems.length} 个会话（共 ${items.length} 个）`
-                  : `共 ${items.length} 个会话；选择时间条件后可批量删除`}
-                <Button variant="destructive" size="sm" disabled={batchDeleteDisabled} onClick={() => void onBatchDelete()}>
-                  <Trash2 className="h-4 w-4" />
-                  {batchDeleting ? "正在批量删除…" : `批量删除${timeFilter ? `（${filteredItems.length}）` : ""}`}
-                </Button>
+                  : `共 ${items.length} 个会话；选择项目或时间范围后可批量删除`}
               </div>
               {filteredItems.length ? (
                 <div className="session-list">
@@ -3754,11 +3748,379 @@ function ModelChoiceInput({
         ref={inputRef}
         value={value}
       />
+       {menu ? createPortal(menu, document.body) : null}
+     </div>
+   );
+ }
+
+function projectLabel(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/, "");
+  const parts = trimmed.split(/[\\/]+/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : path;
+}
+
+function SessionProjectSelect({
+  value,
+  options,
+  onChange,
+}: {
+  value: string;
+  options: Array<{ value: string; count: number }>;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [keyword, setKeyword] = useState("");
+  const [menuStyle, setMenuStyle] = useState<CSSProperties | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const totalCount = useMemo(() => options.reduce((sum, item) => sum + item.count, 0), [options]);
+  const filtered = useMemo(() => {
+    const kw = keyword.trim().toLowerCase();
+    if (!kw) return options;
+    return options.filter((item) => item.value.toLowerCase().includes(kw));
+  }, [options, keyword]);
+
+  const updatePosition = () => {
+    const root = rootRef.current;
+    if (!root) return;
+    const rect = root.getBoundingClientRect();
+    const gap = 4;
+    const viewportPadding = 8;
+    const spaceBelow = window.innerHeight - rect.bottom - viewportPadding;
+    const spaceAbove = rect.top - viewportPadding;
+    const openAbove = spaceBelow < 220 && spaceAbove > spaceBelow;
+    const maxHeight = Math.max(160, Math.min(320, openAbove ? spaceAbove - gap : spaceBelow - gap));
+    setMenuStyle({
+      left: rect.left,
+      maxHeight,
+      top: openAbove ? rect.top - gap - maxHeight : rect.bottom + gap,
+      width: rect.width,
+    });
+  };
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    updatePosition();
+  }, [open, filtered.length]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleLayoutChange = () => updatePosition();
+    window.addEventListener("resize", handleLayoutChange);
+    window.addEventListener("scroll", handleLayoutChange, true);
+    return () => {
+      window.removeEventListener("resize", handleLayoutChange);
+      window.removeEventListener("scroll", handleLayoutChange, true);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (open) {
+      setKeyword("");
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  }, [open]);
+
+  const containsTarget = (target: EventTarget | null) =>
+    target instanceof Node && (!!rootRef.current?.contains(target) || !!menuRef.current?.contains(target));
+
+  const choose = (next: string) => {
+    onChange(next);
+    setOpen(false);
+  };
+
+  const triggerText = value ? projectLabel(value) : "全部项目";
+
+  const menu = open ? (
+    <div className="session-project-menu" ref={menuRef} style={menuStyle ?? undefined}>
+      <div className="session-project-search">
+        <Search className="h-4 w-4" />
+        <input
+          ref={inputRef}
+          value={keyword}
+          placeholder="搜索项目路径…"
+          onChange={(event) => setKeyword(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") setOpen(false);
+          }}
+        />
+      </div>
+      <div className="session-project-options">
+        <button
+          type="button"
+          className={"session-project-option" + (value === "" ? " active" : "")}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => choose("")}
+        >
+          <span className="session-project-option-name">全部项目</span>
+          <span className="session-project-option-count">{totalCount}</span>
+        </button>
+        {filtered.length ? (
+          filtered.map((item) => (
+            <button
+              key={item.value}
+              type="button"
+              title={item.value}
+              className={"session-project-option" + (value === item.value ? " active" : "")}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => choose(item.value)}
+            >
+              <span className="session-project-option-name">
+                <strong>{projectLabel(item.value)}</strong>
+                <small>{item.value}</small>
+              </span>
+              <span className="session-project-option-count">{item.count}</span>
+            </button>
+          ))
+        ) : (
+          <div className="session-project-empty">无匹配项目</div>
+        )}
+      </div>
+    </div>
+  ) : null;
+
+  return (
+    <div
+      className="session-project-select"
+      ref={rootRef}
+      onBlur={(event) => {
+        if (containsTarget(event.relatedTarget)) return;
+        setOpen(false);
+      }}
+    >
+      <button type="button" className="session-trigger" onClick={() => setOpen((prev) => !prev)}>
+        <span className="session-trigger-text" title={value || "全部项目"}>
+          {triggerText}
+        </span>
+        <ChevronDown className="h-4 w-4" />
+      </button>
       {menu ? createPortal(menu, document.body) : null}
     </div>
   );
 }
 
+function startOfDayMs(date: Date): number {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+}
+
+function daysAgoStartMs(days: number): number {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  return startOfDayMs(d);
+}
+
+function formatDateMs(ms: number | null): string {
+  if (ms === null) return "";
+  const d = new Date(ms);
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
+function SessionTimeRangePicker({
+  startMs,
+  endMs,
+  onChange,
+}: {
+  startMs: number | null;
+  endMs: number | null;
+  onChange: (start: number | null, end: number | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [menuStyle, setMenuStyle] = useState<CSSProperties | null>(null);
+  const [viewMonth, setViewMonth] = useState(() => {
+    const base = endMs ?? startMs ?? Date.now();
+    const d = new Date(base);
+    return new Date(d.getFullYear(), d.getMonth(), 1);
+  });
+  const rootRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  const updatePosition = () => {
+    const root = rootRef.current;
+    if (!root) return;
+    const rect = root.getBoundingClientRect();
+    const gap = 4;
+    const viewportPadding = 8;
+    const menuWidth = 420;
+    const spaceBelow = window.innerHeight - rect.bottom - viewportPadding;
+    const spaceAbove = rect.top - viewportPadding;
+    const openAbove = spaceBelow < 320 && spaceAbove > spaceBelow;
+    const left = Math.max(viewportPadding, Math.min(rect.left, window.innerWidth - menuWidth - viewportPadding));
+    setMenuStyle({
+      left,
+      top: openAbove ? undefined : rect.bottom + gap,
+      bottom: openAbove ? window.innerHeight - rect.top + gap : undefined,
+      width: menuWidth,
+    });
+  };
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    updatePosition();
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleLayoutChange = () => updatePosition();
+    window.addEventListener("resize", handleLayoutChange);
+    window.addEventListener("scroll", handleLayoutChange, true);
+    return () => {
+      window.removeEventListener("resize", handleLayoutChange);
+      window.removeEventListener("scroll", handleLayoutChange, true);
+    };
+  }, [open]);
+
+  const containsTarget = (target: EventTarget | null) =>
+    target instanceof Node && (!!rootRef.current?.contains(target) || !!menuRef.current?.contains(target));
+
+  const quickPresets: Array<{ label: string; apply: () => void }> = [
+    { label: "最近 1 周", apply: () => onChange(daysAgoStartMs(7), startOfDayMs(new Date())) },
+    { label: "最近 2 周", apply: () => onChange(daysAgoStartMs(14), startOfDayMs(new Date())) },
+    { label: "最近 1 月", apply: () => onChange(daysAgoStartMs(30), startOfDayMs(new Date())) },
+    { label: "1 周前（更早）", apply: () => onChange(null, daysAgoStartMs(7)) },
+    { label: "2 周前（更早）", apply: () => onChange(null, daysAgoStartMs(14)) },
+    { label: "1 月前（更早）", apply: () => onChange(null, daysAgoStartMs(30)) },
+  ];
+
+  const onPickDay = (dayMs: number) => {
+    if (startMs === null || endMs !== null) {
+      onChange(dayMs, null);
+      return;
+    }
+    if (dayMs < startMs) {
+      onChange(dayMs, startMs);
+    } else {
+      onChange(startMs, dayMs);
+    }
+  };
+
+  const monthGrid = useMemo(() => {
+    const year = viewMonth.getFullYear();
+    const month = viewMonth.getMonth();
+    const firstWeekday = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const cells: Array<number | null> = [];
+    for (let i = 0; i < firstWeekday; i += 1) cells.push(null);
+    for (let d = 1; d <= daysInMonth; d += 1) cells.push(new Date(year, month, d).getTime());
+    return cells;
+  }, [viewMonth]);
+
+  const triggerText =
+    startMs === null && endMs === null
+      ? "全部时间"
+      : `${formatDateMs(startMs) || "不限"} ~ ${formatDateMs(endMs) || "不限"}`;
+
+  const menu = open ? (
+    <div className="session-date-menu" ref={menuRef} style={menuStyle ?? undefined}>
+      <div className="session-date-quick">
+        {quickPresets.map((preset) => (
+          <button
+            key={preset.label}
+            type="button"
+            className="session-date-quick-item"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={preset.apply}
+          >
+            {preset.label}
+          </button>
+        ))}
+      </div>
+      <div className="session-date-calendar">
+        <div className="session-date-header">
+          <button
+            type="button"
+            className="session-date-nav"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => setViewMonth((prev) => new Date(prev.getFullYear(), prev.getMonth() - 1, 1))}
+          >
+            ‹
+          </button>
+          <span>
+            {viewMonth.getFullYear()} 年 {viewMonth.getMonth() + 1} 月
+          </span>
+          <button
+            type="button"
+            className="session-date-nav"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => setViewMonth((prev) => new Date(prev.getFullYear(), prev.getMonth() + 1, 1))}
+          >
+            ›
+          </button>
+        </div>
+        <div className="session-date-weekdays">
+          {["日", "一", "二", "三", "四", "五", "六"].map((w) => (
+            <span key={w}>{w}</span>
+          ))}
+        </div>
+        <div className="session-date-grid">
+          {monthGrid.map((dayMs, index) => {
+            if (dayMs === null) return <span key={`empty-${index}`} className="session-date-cell empty" />;
+            const isStart = startMs !== null && dayMs === startMs;
+            const isEnd = endMs !== null && dayMs === endMs;
+            const inRange = startMs !== null && endMs !== null && dayMs >= startMs && dayMs <= endMs;
+            return (
+              <button
+                key={dayMs}
+                type="button"
+                className={
+                  "session-date-cell" +
+                  (inRange ? " in-range" : "") +
+                  (isStart || isEnd ? " selected" : "")
+                }
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => onPickDay(dayMs)}
+              >
+                {new Date(dayMs).getDate()}
+              </button>
+            );
+          })}
+        </div>
+        <div className="session-date-footer">
+          <span>{triggerText}</span>
+          <div className="session-date-footer-actions">
+            <button
+              type="button"
+              className="session-date-clear"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => onChange(null, null)}
+            >
+              清空
+            </button>
+            <button
+              type="button"
+              className="session-date-done"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => setOpen(false)}
+            >
+              完成
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  return (
+    <div
+      className="session-date-select"
+      ref={rootRef}
+      onBlur={(event) => {
+        if (containsTarget(event.relatedTarget)) return;
+        setOpen(false);
+      }}
+    >
+      <button type="button" className="session-trigger" onClick={() => setOpen((prev) => !prev)}>
+        <Calendar className="h-4 w-4" />
+        <span className="session-trigger-text">{triggerText}</span>
+        <ChevronDown className="h-4 w-4" />
+      </button>
+      {menu ? createPortal(menu, document.body) : null}
+    </div>
+  );
+}
 function AggregateRelayProfileEditor({
   profile,
   form,

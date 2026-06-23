@@ -1016,7 +1016,6 @@ fn ensure_leading_blank_line(decor: &mut toml_edit::Decor) {
     decor.set_prefix(format!("\n{prefix}"));
 }
 
-
 /// 仅从 live 中删除“受管但已禁用”的 context 项（mcp_servers/skills/plugins）。
 /// 即 managed（全部受管项）里有、但 enabled（启用项）里没有的 id。
 /// 启用项不在此删除，交由 merge 原地更新以保留位置。
@@ -1034,7 +1033,8 @@ fn remove_disabled_managed_entries(
             .and_then(Item::as_table_like)
             .map(|table| table.iter().map(|(id, _)| id.to_string()).collect())
             .unwrap_or_default();
-        let Some(target_table) = target.get_mut(table_name).and_then(Item::as_table_like_mut) else {
+        let Some(target_table) = target.get_mut(table_name).and_then(Item::as_table_like_mut)
+        else {
             continue;
         };
         let remove_ids: Vec<String> = managed_table
@@ -3067,7 +3067,10 @@ mod tests {
         );
         let out = normalize_duplicate_toml_text(input);
         assert!(out.contains("name = \"a\""), "第一个数组表应保留");
-        assert!(out.contains("name = \"b\""), "第二个数组表不应被误删：\n{out}");
+        assert!(
+            out.contains("name = \"b\""),
+            "第二个数组表不应被误删：\n{out}"
+        );
     }
 
     #[test]
@@ -3119,7 +3122,10 @@ mod tests {
         // alpha 仍在 features 之前（保留原位置），且 command 已更新
         let alpha_pos = out.find("[mcp_servers.alpha]").unwrap();
         let features_pos = out.find("[features]").unwrap();
-        assert!(alpha_pos < features_pos, "mcp 应保留在原位置，不漂移：\n{out}");
+        assert!(
+            alpha_pos < features_pos,
+            "mcp 应保留在原位置，不漂移：\n{out}"
+        );
         assert!(out.contains("command = \"new\""), "内容应更新");
         assert!(!out.contains("command = \"old\""), "旧值应被替换");
     }
@@ -3144,7 +3150,10 @@ mod tests {
         );
         let out = sync_live_config_context_entries(live, context).unwrap();
         assert!(out.contains("[mcp_servers.keepme]"), "启用项应保留");
-        assert!(!out.contains("[mcp_servers.dropme]"), "禁用项应被移除：\n{out}");
+        assert!(
+            !out.contains("[mcp_servers.dropme]"),
+            "禁用项应被移除：\n{out}"
+        );
     }
 }
 

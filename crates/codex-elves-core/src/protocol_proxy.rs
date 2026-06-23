@@ -2467,6 +2467,7 @@ struct AnthropicSseState {
     textual_invoke_call_count: usize,
     native_tool_names: BTreeSet<String>,
     textual_invoke_tool_names: BTreeSet<String>,
+    pending_text_marker: Option<String>,
 }
 
 impl AnthropicSseState {
@@ -2488,6 +2489,7 @@ impl AnthropicSseState {
             textual_invoke_call_count: 0,
             native_tool_names: BTreeSet::new(),
             textual_invoke_tool_names: BTreeSet::new(),
+            pending_text_marker: None,
         }
     }
 
@@ -2520,7 +2522,13 @@ impl AnthropicSseState {
     fn handle_content_block_start_into(&mut self, chunk: &Value, output: &mut String) {
         let index = chunk.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
         let block = chunk.get("content_block").unwrap_or(&Value::Null);
-        match block.get("type").and_then(Value::as_str).unwrap_or("") {
+        let block_type = block.get("type").and_then(Value::as_str).unwrap_or("");
+        if block_type == "tool_use" {
+            self.pending_text_marker.take();
+        } else {
+            self.flush_pending_text_marker_into(output);
+        }
+        match block_type {
             "text" => {
                 self.text_block_count += 1;
                 self.blocks.insert(index, AnthropicBlockKind::Text);
@@ -2668,7 +2676,11 @@ impl AnthropicSseState {
         }
         let Some((leading, calls)) = split else {
             if !text.is_empty() {
-                self.inner.push_content_delta_into(text, output);
+                if is_standalone_textual_tool_marker(text) {
+                    self.pending_text_marker = Some(text.to_string());
+                } else {
+                    self.inner.push_content_delta_into(text, output);
+                }
             }
             return;
         };
@@ -2709,6 +2721,12 @@ impl AnthropicSseState {
         }
     }
 
+    fn flush_pending_text_marker_into(&mut self, output: &mut String) {
+        if let Some(text) = self.pending_text_marker.take() {
+            self.inner.push_content_delta_into(&text, output);
+        }
+    }
+
     fn handle_message_delta_into(&mut self, chunk: &Value) {
         if let Some(stop_reason) = chunk.pointer("/delta/stop_reason").and_then(Value::as_str) {
             self.inner.finish_reason =
@@ -2718,6 +2736,7 @@ impl AnthropicSseState {
     }
 
     fn handle_message_stop_into(&mut self, output: &mut String) {
+        self.flush_pending_text_marker_into(output);
         log_anthropic_stream_response_shape(self);
         self.inner.finalize_into(output);
     }
@@ -5101,28 +5120,30 @@ struct TextualInvokeToolCall {
 fn split_text_into_message_and_tool_calls(
     text: &str,
 ) -> Option<(String, Vec<TextualInvokeToolCall>)> {
-    let start = textual_invoke_region_start(text)?;
-    let leading = text[..start].trim_end();
-    let calls = parse_textual_invoke_tool_calls(&text[start..])?;
-    Some((leading.to_string(), calls))
+    let mut search_from = 0;
+    while let Some(relative_pos) = text[search_from..].find("<invoke") {
+        let invoke_pos = search_from + relative_pos;
+        let start = textual_invoke_region_start_before(text, invoke_pos);
+        if let Some(calls) = parse_textual_invoke_tool_calls(&text[start..]) {
+            let leading = text[..start].trim_end();
+            return Some((leading.to_string(), calls));
+        }
+        search_from = invoke_pos + "<invoke".len();
+    }
+    None
 }
 
-/// 返回文本中工具调用区的起始字节位置。
-///
-/// 起点优先取贴在 `<invoke` 之前的 course/codex/call 行级前缀标记；
-/// 没有前缀时取 `<invoke` 自身位置。找不到则返回 `None`。
-fn textual_invoke_region_start(text: &str) -> Option<usize> {
-    let invoke_pos = text.find("<invoke")?;
+fn textual_invoke_region_start_before(text: &str, invoke_pos: usize) -> usize {
     let trimmed_before = text[..invoke_pos].trim_end();
     for marker in ["course", "codex", "call"] {
         if let Some(prefix) = trimmed_before.strip_suffix(marker) {
             // 前缀标记必须是独立词：其前面要么是文本开头，要么是空白/换行。
             if prefix.is_empty() || prefix.ends_with(char::is_whitespace) {
-                return Some(prefix.len());
+                return prefix.len();
             }
         }
     }
-    Some(invoke_pos)
+    invoke_pos
 }
 
 fn parse_textual_invoke_tool_calls(text: &str) -> Option<Vec<TextualInvokeToolCall>> {
@@ -5155,7 +5176,7 @@ fn parse_textual_invoke_tool_calls(text: &str) -> Option<Vec<TextualInvokeToolCa
 
         calls.push(TextualInvokeToolCall {
             name: name.trim().to_string(),
-            arguments: parse_textual_invoke_parameters(body)?,
+            arguments: parse_textual_invoke_parameters(name.trim(), body)?,
         });
 
         rest = after_close.trim_start();
@@ -5245,6 +5266,10 @@ fn text_tool_marker_kinds(text: &str) -> Vec<String> {
     kinds.into_iter().collect()
 }
 
+fn is_standalone_textual_tool_marker(text: &str) -> bool {
+    matches!(text.trim(), "course" | "codex" | "call")
+}
+
 fn diagnostic_text_preview(text: &str) -> String {
     const PREVIEW_LIMIT: usize = 240;
     let mut preview = String::new();
@@ -5257,7 +5282,10 @@ fn diagnostic_text_preview(text: &str) -> String {
     preview
 }
 
-fn parse_textual_invoke_parameters(body: &str) -> Option<serde_json::Map<String, Value>> {
+fn parse_textual_invoke_parameters(
+    tool_name: &str,
+    body: &str,
+) -> Option<serde_json::Map<String, Value>> {
     let mut rest = body;
     let mut arguments = serde_json::Map::new();
 
@@ -5279,15 +5307,25 @@ fn parse_textual_invoke_parameters(body: &str) -> Option<serde_json::Map<String,
 
         let after_open = &rest[open_end + 1..];
         let close_start = after_open.find("</parameter>")?;
-        let value = &after_open[..close_start];
-        arguments.insert(
-            name.trim().to_string(),
-            Value::String(xml_unescape_text(value.trim())),
-        );
+        let parameter_name = name.trim();
+        let value = xml_unescape_text(after_open[..close_start].trim());
+        let value = if textual_invoke_parameter_is_json(tool_name, parameter_name) {
+            serde_json::from_str::<Value>(&value).unwrap_or(Value::String(value))
+        } else {
+            Value::String(value)
+        };
+        arguments.insert(parameter_name.to_string(), value);
         rest = &after_open[close_start + "</parameter>".len()..];
     }
 
     Some(arguments)
+}
+
+fn textual_invoke_parameter_is_json(tool_name: &str, parameter_name: &str) -> bool {
+    matches!(
+        (tool_name, parameter_name),
+        ("apply_patch_update_file", "hunks") | ("apply_patch_batch", "operations")
+    )
 }
 
 fn xml_attribute(tag: &str, name: &str) -> Option<String> {

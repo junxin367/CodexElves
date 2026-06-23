@@ -2049,50 +2049,326 @@ body {
 
 .session-filter-bar {
   display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
+  flex-wrap: nowrap;
+  gap: 12px;
   align-items: flex-end;
   margin-bottom: 12px;
 }
 
 .session-filter-field {
-  min-width: 200px;
-}
-
-.session-time-quick {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 6px;
+  min-width: 0;
 }
 
-.session-time-chip {
+.session-filter-field:first-child {
+  flex: 1 1 0;
+}
+
+.session-filter-field:nth-child(2) {
+  flex: 0 0 auto;
+}
+
+.session-filter-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: hsl(var(--muted-foreground));
+}
+
+.session-filter-delete {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* 触发器（项目与时间公用） */
+.session-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 38px;
+  padding: 0 12px;
   border: 1px solid hsl(var(--border));
-  border-radius: 999px;
+  border-radius: 8px;
   background: hsl(var(--background));
   color: hsl(var(--foreground));
-  font-size: 12px;
-  padding: 5px 12px;
+  font-size: 13px;
   cursor: pointer;
-  transition:
-    border-color var(--motion-normal) var(--motion-ease),
-    background-color var(--motion-normal) var(--motion-ease);
+  transition: border-color var(--motion-normal) var(--motion-ease);
 }
 
-.session-time-chip:hover {
+.session-trigger:hover {
   border-color: hsl(var(--primary) / 0.5);
 }
 
-.session-time-chip.active {
-  border-color: hsl(var(--primary));
+.session-trigger-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.session-project-select {
+  position: relative;
+}
+
+.session-date-select {
+  position: relative;
+}
+
+.session-date-select .session-trigger {
+  min-width: 240px;
+}
+
+/* 项目下拉菜单 */
+.session-project-menu {
+  position: fixed;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--popover, var(--card)));
+  box-shadow: 0 12px 32px hsl(var(--foreground) / 0.16);
+  overflow: hidden;
+}
+
+.session-project-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid hsl(var(--border));
+  color: hsl(var(--muted-foreground));
+}
+
+.session-project-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: hsl(var(--foreground));
+  font-size: 13px;
+}
+
+.session-project-options {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.session-project-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: hsl(var(--foreground));
+  cursor: pointer;
+  text-align: left;
+}
+
+.session-project-option:hover,
+.session-project-option.active {
+  background: hsl(var(--accent) / 0.6);
+}
+
+.session-project-option-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.session-project-option-name strong {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-project-option-name small {
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-project-option-count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--muted) / 0.6);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.session-project-empty {
+  padding: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+}
+
+/* 日期范围选择弹窗 */
+.session-date-menu {
+  position: fixed;
+  z-index: 1000;
+  display: flex;
+  border: 1px solid hsl(var(--border));
+  border-radius: 10px;
+  background: hsl(var(--popover, var(--card)));
+  box-shadow: 0 12px 32px hsl(var(--foreground) / 0.16);
+  overflow: hidden;
+}
+
+.session-date-quick {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 130px;
+  padding: 8px;
+  border-right: 1px solid hsl(var(--border));
+  background: hsl(var(--muted) / 0.3);
+}
+
+.session-date-quick-item {
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: hsl(var(--foreground));
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-date-quick-item:hover {
+  background: hsl(var(--accent) / 0.6);
+}
+
+.session-date-calendar {
+  flex: 1 1 auto;
+  padding: 10px 12px 12px;
+}
+
+.session-date-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.session-date-nav {
+  width: 26px;
+  height: 26px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  cursor: pointer;
+  line-height: 1;
+}
+
+.session-date-nav:hover {
+  border-color: hsl(var(--primary) / 0.5);
+}
+
+.session-date-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  text-align: center;
+}
+
+.session-date-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+
+.session-date-cell {
+  height: 32px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: hsl(var(--foreground));
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.session-date-cell.empty {
+  cursor: default;
+}
+
+.session-date-cell:not(.empty):hover {
+  background: hsl(var(--accent) / 0.6);
+}
+
+.session-date-cell.in-range {
   background: hsl(var(--primary) / 0.14);
-  color: hsl(var(--primary));
+  border-radius: 0;
+}
+
+.session-date-cell.selected {
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+  border-radius: 6px;
+}
+
+.session-date-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+}
+
+.session-date-footer-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.session-date-clear,
+.session-date-done {
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.session-date-clear {
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+}
+
+.session-date-done {
+  border: 1px solid hsl(var(--primary));
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
 }
 
 .session-filter-summary {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
   margin-bottom: 12px;
   font-size: 13px;
@@ -2509,6 +2785,24 @@ body {
 
   .session-meta {
     justify-items: start;
+  }
+
+  .session-filter-bar {
+    flex-wrap: wrap;
+  }
+
+  .session-filter-field,
+  .session-filter-field:nth-child(2) {
+    flex: 1 1 100%;
+  }
+
+  .session-date-select .session-trigger {
+    min-width: 0;
+  }
+
+  .session-filter-delete {
+    flex: 1 1 100%;
+    justify-content: center;
   }
 
   .script-row-actions {

@@ -426,6 +426,309 @@ fn anthropic_textual_invoke_exec_command_allows_invoke_text_inside_parameter() {
 }
 
 #[test]
+fn anthropic_textual_invoke_exec_command_keeps_json_like_parameter_as_string() {
+    let command = r#"{"query":"codex"}"#;
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_textual_exec_json_like_string",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [
+                {
+                    "type": "text",
+                    "text": format!(
+                        "call\n<invoke name=\"exec_command\">\n<parameter name=\"cmd\">{command}</parameter>\n</invoke>"
+                    )
+                }
+            ],
+            "stop_reason": "stop",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-4-8",
+            "input": "执行 JSON 字符串命令",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "cmd": { "type": "string" } }
+                    }
+                }
+            ]
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(converted["output"][0]["type"], "function_call");
+    assert_eq!(converted["output"][0]["name"], "exec_command");
+    assert_eq!(
+        converted["output"][0]["arguments"],
+        json!({ "cmd": command }).to_string()
+    );
+}
+
+#[test]
+fn anthropic_textual_invoke_with_only_descriptive_invoke_stays_message_text() {
+    let text = "这里仅说明 call<invoke name=...> 会泄漏成文本，没有真实工具调用。";
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_descriptive_invoke_only",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [{ "type": "text", "text": text }],
+            "stop_reason": "stop",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-4-8",
+            "input": "解释问题",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": { "type": "object" }
+                }
+            ]
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(converted["output"][0]["type"], "message");
+    assert_eq!(converted["output"][0]["content"][0]["text"], text);
+    assert!(
+        !converted["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "function_call")
+    );
+}
+
+#[test]
+fn anthropic_textual_invoke_ignores_descriptive_invoke_text_before_real_call() {
+    let command = r#"cd E:\code\junes\github\CodexPlusPlus; rg -n "invoke|textual_invoke|call_prefixed|<invoke|antml_tool_call|parse_textual|extract_tool" crates/codex-elves-core/src/protocol_proxy.rs | Select-Object -First 40"#;
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_descriptive_invoke_then_real_call",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [
+                {
+                    "type": "text",
+                    "text": format!(
+                        "这里是协议转换 bug：工具调用被当成文本处理了（call<invoke name=...> 泄漏成文本）。\n\n先看现有逻辑。\n\ncall\n<invoke name=\"exec_command\">\n<parameter name=\"cmd\">{command}</parameter>\n</invoke>"
+                    )
+                }
+            ],
+            "stop_reason": "stop",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-4-8",
+            "input": "定位协议转换",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "cmd": { "type": "string" } }
+                    }
+                }
+            ]
+        }),
+    )
+    .unwrap();
+
+    let output = converted["output"].as_array().unwrap();
+    assert_eq!(output[0]["type"], "message");
+    assert!(
+        output[0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("call<invoke name=...>")
+    );
+    let call = output
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .expect("应该还原出后续真实 exec_command 调用");
+    assert_eq!(call["name"], "exec_command");
+    assert_eq!(call["arguments"], json!({ "cmd": command }).to_string());
+}
+
+#[test]
+fn anthropic_textual_invoke_skips_multiple_bad_invoke_fragments_before_real_call() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_multiple_bad_invoke_then_real",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "示例一 <invoke name=...>。\n示例二 <invoke>\n示例三 <invoke name=\"\">\n\ncall\n<invoke name=\"exec_command\">\n<parameter name=\"cmd\">git status --short</parameter>\n</invoke>"
+                }
+            ],
+            "stop_reason": "stop",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-4-8",
+            "input": "定位问题",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": { "type": "object" }
+                }
+            ]
+        }),
+    )
+    .unwrap();
+
+    let output = converted["output"].as_array().unwrap();
+    assert_eq!(output[0]["type"], "message");
+    assert!(
+        output[0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("示例三")
+    );
+    let call = output
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .expect("应该跳过多个坏片段后还原真实调用");
+    assert_eq!(call["name"], "exec_command");
+    assert_eq!(call["arguments"], r#"{"cmd":"git status --short"}"#);
+}
+
+#[test]
+fn anthropic_textual_invoke_converts_multiple_real_calls_in_order() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_multiple_real_calls",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "call\n<invoke name=\"exec_command\">\n<parameter name=\"cmd\">git status --short</parameter>\n</invoke>\n<invoke name=\"apply_patch_delete_file\">\n<parameter name=\"path\">temp/old.txt</parameter>\n</invoke>"
+                }
+            ],
+            "stop_reason": "stop",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-4-8",
+            "input": "连续工具调用",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": { "type": "object" }
+                },
+                { "type": "custom", "name": "apply_patch" }
+            ]
+        }),
+    )
+    .unwrap();
+
+    let output = converted["output"].as_array().unwrap();
+    assert_eq!(output.len(), 2);
+    assert_eq!(output[0]["type"], "function_call");
+    assert_eq!(output[0]["name"], "exec_command");
+    assert_eq!(output[0]["arguments"], r#"{"cmd":"git status --short"}"#);
+    assert_eq!(output[1]["type"], "custom_tool_call");
+    assert_eq!(output[1]["name"], "apply_patch");
+    assert_eq!(
+        output[1]["input"],
+        "*** Begin Patch\n*** Delete File: temp/old.txt\n*** End Patch"
+    );
+}
+
+#[test]
+fn anthropic_textual_invoke_unescapes_parameter_text_with_nested_invoke_literal() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_xml_escaped_nested_invoke_literal",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "call\n<invoke name=\"exec_command\">\n<parameter name=\"cmd\">printf '&lt;invoke name=&quot;noop&quot;&gt;&lt;/invoke&gt; &amp; done'</parameter>\n</invoke>"
+                }
+            ],
+            "stop_reason": "stop",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-4-8",
+            "input": "执行带 XML 字面量的命令",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": { "type": "object" }
+                }
+            ]
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(converted["output"][0]["type"], "function_call");
+    assert_eq!(converted["output"][0]["name"], "exec_command");
+    assert_eq!(
+        converted["output"][0]["arguments"],
+        json!({ "cmd": "printf '<invoke name=\"noop\"></invoke> & done'" }).to_string()
+    );
+}
+
+#[test]
+fn anthropic_textual_invoke_apply_patch_batch_preserves_structured_operations() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_patch_batch_proxy",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [
+                {
+                    "type": "text",
+                    "text": r#"call
+<invoke name="apply_patch_batch">
+<parameter name="operations">[{"type":"add_file","path":"temp/new.txt","content":"hello"},{"type":"delete_file","path":"temp/old.txt"}]</parameter>
+</invoke>"#
+                }
+            ],
+            "stop_reason": "stop",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-4-8",
+            "input": "批量 patch",
+            "tools": [{ "type": "custom", "name": "apply_patch" }]
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(converted["output"][0]["type"], "custom_tool_call");
+    assert_eq!(converted["output"][0]["name"], "apply_patch");
+    assert_eq!(
+        converted["output"][0]["input"],
+        "*** Begin Patch\n*** Add File: temp/new.txt\n+hello\n*** Delete File: temp/old.txt\n*** End Patch"
+    );
+}
+
+#[test]
 fn anthropic_textual_invoke_apply_patch_proxy_preserves_update_hunks() {
     let converted = anthropic_message_to_response_with_request(
         json!({
@@ -1924,6 +2227,310 @@ data: {"type":"message_stop"}
     assert_eq!(
         arguments_done.data["arguments"],
         r#"{"cmd":"git diff crates/codex-elves-core/src/protocol_proxy.rs"}"#
+    );
+}
+
+#[test]
+fn anthropic_sse_ignores_descriptive_invoke_text_before_real_exec_call() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_stream_descriptive_invoke","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"这里是协议转换 bug：工具调用被当成文本处理了（call<invoke name=...> 泄漏成文本）。\n\n"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"先看现有逻辑。\n\ncall\n<invoke name=\"exec_command\">\n"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<parameter name=\"cmd\">cd E:\\code\\junes\\github\\CodexPlusPlus; rg -n \"invoke|textual_invoke|call_prefixed|<invoke|antml_tool_call|parse_textual|extract_tool\" crates/codex-elves-core/src/protocol_proxy.rs | Select-Object -First 40</parameter>\n</invoke>"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-opus-4-8",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": { "type": "object" }
+                }
+            ]
+        }),
+    );
+
+    let events = parse_response_sse_events(&converted);
+    let text_delta: String = events
+        .iter()
+        .filter(|event| event.event == "response.output_text.delta")
+        .filter_map(|event| event.data["delta"].as_str())
+        .collect();
+    assert!(
+        text_delta.contains("call<invoke name=...>") && text_delta.contains("先看现有逻辑"),
+        "描述正文应保留为文本，实际={text_delta:?}"
+    );
+    let arguments_done = events
+        .iter()
+        .find(|event| event.event == "response.function_call_arguments.done")
+        .expect("应该还原出后续真实 exec_command 调用");
+    assert_eq!(arguments_done.data["name"], "exec_command");
+    assert!(
+        arguments_done.data["arguments"]
+            .as_str()
+            .unwrap()
+            .contains("\"cmd\":\"cd E:\\\\code\\\\junes\\\\github\\\\CodexPlusPlus; rg -n")
+    );
+    let completed = events
+        .iter()
+        .find(|event| event.event == "response.completed")
+        .unwrap();
+    let output = completed.data["response"]["output"].as_array().unwrap();
+    assert!(output.iter().any(|item| item["type"] == "message"));
+    assert!(output.iter().any(|item| item["type"] == "function_call"));
+}
+
+#[test]
+fn anthropic_sse_textual_invoke_split_tag_across_chunks_converts_exec_call() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_split_invoke_tag","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"call\n<in"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"voke name=\"exec_command\">\n<parameter name=\"cmd\">git status --short</parameter>\n</in"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"voke>"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-opus-4-8",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": { "type": "object" }
+                }
+            ]
+        }),
+    );
+
+    let events = parse_response_sse_events(&converted);
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event == "response.output_text.delta"),
+        "完整工具调用分片不应泄漏为文本"
+    );
+    let arguments_done = events
+        .iter()
+        .find(|event| event.event == "response.function_call_arguments.done")
+        .expect("应该跨 chunk 还原 exec_command 调用");
+    assert_eq!(arguments_done.data["name"], "exec_command");
+    assert_eq!(
+        arguments_done.data["arguments"],
+        r#"{"cmd":"git status --short"}"#
+    );
+}
+
+#[test]
+fn anthropic_sse_drops_standalone_call_marker_before_native_tool_use() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_native_tool_with_call_marker","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"call"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"exec_command","input":{"cmd":"git status --short"}}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-opus-4-8",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": { "type": "object" }
+                }
+            ]
+        }),
+    );
+
+    let events = parse_response_sse_events(&converted);
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event == "response.output_text.delta"),
+        "原生 tool_use 前的孤立 call 标记不应显示成正文"
+    );
+    let arguments_done = events
+        .iter()
+        .find(|event| event.event == "response.function_call_arguments.done")
+        .expect("应该保留原生工具调用");
+    assert_eq!(arguments_done.data["name"], "exec_command");
+    assert_eq!(
+        arguments_done.data["arguments"],
+        r#"{"cmd":"git status --short"}"#
+    );
+    let completed = events
+        .iter()
+        .find(|event| event.event == "response.completed")
+        .unwrap();
+    let output = completed.data["response"]["output"].as_array().unwrap();
+    assert!(!output.iter().any(|item| item["type"] == "message"));
+    assert!(output.iter().any(|item| item["type"] == "function_call"));
+}
+
+#[test]
+fn anthropic_sse_keeps_standalone_call_marker_when_no_tool_follows() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_call_marker_without_tool","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"call"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-opus-4-8",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": { "type": "object" }
+                }
+            ]
+        }),
+    );
+
+    let events = parse_response_sse_events(&converted);
+    let text_delta: String = events
+        .iter()
+        .filter(|event| event.event == "response.output_text.delta")
+        .filter_map(|event| event.data["delta"].as_str())
+        .collect();
+    assert_eq!(text_delta, "call");
+    let completed = events
+        .iter()
+        .find(|event| event.event == "response.completed")
+        .unwrap();
+    assert_eq!(
+        completed.data["response"]["output"][0]["content"][0]["text"],
+        "call"
+    );
+}
+
+#[test]
+fn anthropic_sse_textual_invoke_apply_patch_proxy_preserves_update_hunks() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_stream_patch_proxy","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"call\n<invoke name=\"apply_patch_update_file\">\n"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<parameter name=\"path\">crates/codex-elves-core/tests/tmp_real_config_sync.rs</parameter>\n<parameter name=\"hunks\">[{\"context\":\"fn tmp_real_config_sync_only_touches_mcp() {\",\"lines\":[{\"op\":\"context\",\"text\":\"let before = original.clone();\"},{\"op\":\"add\",\"text\":\"assert_eq!(before, after);\"}]}]</parameter>\n</invoke>"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-opus-4-8",
+            "tools": [{ "type": "custom", "name": "apply_patch" }]
+        }),
+    );
+
+    let events = parse_response_sse_events(&converted);
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event == "response.function_call_arguments.done"),
+        "apply_patch proxy 应还原为 custom tool，而不是普通 function_call"
+    );
+    let input_done = events
+        .iter()
+        .find(|event| event.event == "response.custom_tool_call_input.done")
+        .expect("应该还原出 apply_patch custom tool");
+    assert_eq!(
+        input_done.data["input"],
+        "*** Begin Patch\n*** Update File: crates/codex-elves-core/tests/tmp_real_config_sync.rs\n@@ fn tmp_real_config_sync_only_touches_mcp() {\n let before = original.clone();\n+assert_eq!(before, after);\n*** End Patch"
+    );
+    let completed = events
+        .iter()
+        .find(|event| event.event == "response.completed")
+        .unwrap();
+    assert_eq!(
+        completed.data["response"]["output"][0]["type"],
+        "custom_tool_call"
+    );
+    assert_eq!(
+        completed.data["response"]["output"][0]["name"],
+        "apply_patch"
     );
 }
 
