@@ -344,9 +344,8 @@ fn spawn_manager_wake_listener<R: tauri::Runtime>(
     });
 }
 
-fn request_existing_manager_to_show() -> std::io::Result<()> {
-    let address =
-        std::net::SocketAddr::from(([127, 0, 0, 1], codex_elves_core::ports::MANAGER_GUARD_PORT));
+fn request_existing_manager_to_show(manager_guard_port: u16) -> std::io::Result<()> {
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], manager_guard_port));
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500))?;
     stream.set_write_timeout(Some(Duration::from_millis(500)))?;
     stream.write_all(MANAGER_WAKE_MESSAGE)?;
@@ -379,15 +378,14 @@ fn install_panic_logger() {
 }
 
 fn acquire_single_instance_guard() -> Option<codex_elves_core::ports::LoopbackPortGuard> {
-    match codex_elves_core::ports::acquire_resilient_loopback_port_guard(
-        codex_elves_core::ports::MANAGER_GUARD_PORT,
-    ) {
+    let manager_guard_port = codex_elves_core::ports::manager_guard_port();
+    match codex_elves_core::ports::acquire_resilient_loopback_port_guard(manager_guard_port) {
         Ok(guard) => {
             if let Some(fallback_lock_path) = guard.fallback_path() {
                 let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
                     "manager.guard_fallback",
                     serde_json::json!({
-                        "requested_guard_port": codex_elves_core::ports::MANAGER_GUARD_PORT,
+                        "requested_guard_port": manager_guard_port,
                         "fallback_lock_path": fallback_lock_path
                     }),
                 );
@@ -395,11 +393,11 @@ fn acquire_single_instance_guard() -> Option<codex_elves_core::ports::LoopbackPo
             Some(guard)
         }
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
-            let wake_result = request_existing_manager_to_show();
+            let wake_result = request_existing_manager_to_show(manager_guard_port);
             let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
                 "manager.already_running",
                 serde_json::json!({
-                    "guard_port": codex_elves_core::ports::MANAGER_GUARD_PORT,
+                    "guard_port": manager_guard_port,
                     "wake_requested": wake_result.is_ok(),
                     "wake_error": wake_result.err().map(|error| error.to_string())
                 }),
@@ -407,11 +405,11 @@ fn acquire_single_instance_guard() -> Option<codex_elves_core::ports::LoopbackPo
             None
         }
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-            let wake_result = request_existing_manager_to_show();
+            let wake_result = request_existing_manager_to_show(manager_guard_port);
             let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
                 "manager.already_running",
                 serde_json::json!({
-                    "guard_port": codex_elves_core::ports::MANAGER_GUARD_PORT,
+                    "guard_port": manager_guard_port,
                     "wake_requested": wake_result.is_ok(),
                     "wake_error": wake_result.err().map(|error| error.to_string())
                 }),
@@ -422,7 +420,7 @@ fn acquire_single_instance_guard() -> Option<codex_elves_core::ports::LoopbackPo
             let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
                 "manager.guard_failed",
                 serde_json::json!({
-                    "guard_port": codex_elves_core::ports::MANAGER_GUARD_PORT,
+                    "guard_port": manager_guard_port,
                     "error": error.to_string()
                 }),
             );

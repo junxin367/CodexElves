@@ -27,7 +27,7 @@ fn manager_uses_single_instance_guard_before_starting_tauri() {
         .expect("read manager lib.rs");
 
     assert!(lib_rs.contains("acquire_single_instance_guard()"));
-    assert!(lib_rs.contains("MANAGER_GUARD_PORT"));
+    assert!(lib_rs.contains("manager_guard_port()"));
     assert!(lib_rs.contains("manager.already_running"));
 }
 
@@ -283,7 +283,7 @@ fn github_release_workflow_uploads_static_latest_json() {
 }
 
 #[test]
-fn relay_settings_keeps_profile_config_and_auth_files_isolated() {
+fn relay_settings_uses_structured_config_and_isolated_auth() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let app_tsx = manifest_dir.parent().unwrap().join("src/App.tsx");
     let app_tsx = std::fs::read_to_string(&app_tsx).expect("read manager App.tsx");
@@ -293,8 +293,13 @@ fn relay_settings_keeps_profile_config_and_auth_files_isolated() {
     assert!(app_tsx.contains("switch_relay_profile"));
     assert!(app_tsx.contains("previousActiveRelayId"));
     assert!(app_tsx.contains("relayProfileSwitchValidation(selectedBeforeSave)"));
-    assert!(app_tsx.contains("缺少独立 config.toml"));
-    assert!(!commands_rs.contains("缺少独立 auth.json"));
+    assert!(app_tsx.contains("RelayAuthEditor"));
+    assert!(app_tsx.contains("saveRelayAuthFile"));
+    assert!(!app_tsx.contains("RelayFileEditors"));
+    assert!(!app_tsx.contains("config.toml 预览"));
+    assert!(!app_tsx.contains("提取当前供应商配置"));
+    assert!(!app_tsx.contains("启用目标功能"));
+    assert!(commands_rs.contains("供应商配置不再支持直接保存 config.toml"));
     assert!(commands_rs.contains("backfill_relay_profile_from_live"));
     assert!(commands_rs.contains("switch_relay_profile_in_home"));
 }

@@ -6,6 +6,30 @@ use fs2::FileExt;
 
 pub const LAUNCHER_GUARD_PORT: u16 = 45220;
 pub const MANAGER_GUARD_PORT: u16 = 45219;
+pub const DEV_MANAGER_GUARD_PORT: u16 = 45229;
+const MANAGER_GUARD_PORT_ENV: &str = "CODEX_ELVES_MANAGER_GUARD_PORT";
+
+pub fn manager_guard_port() -> u16 {
+    manager_guard_port_with(
+        cfg!(debug_assertions),
+        std::env::var(MANAGER_GUARD_PORT_ENV).ok().as_deref(),
+    )
+}
+
+fn manager_guard_port_with(debug_build: bool, env_value: Option<&str>) -> u16 {
+    if let Some(port) = env_value
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .filter(|port| *port > 0)
+    {
+        return port;
+    }
+
+    if debug_build {
+        DEV_MANAGER_GUARD_PORT
+    } else {
+        MANAGER_GUARD_PORT
+    }
+}
 
 pub fn select_platform_loopback_port(requested: u16) -> u16 {
     select_platform_loopback_port_with(
@@ -234,6 +258,26 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+    }
+
+    #[test]
+    fn manager_guard_port_uses_separate_default_for_debug_builds() {
+        assert_eq!(manager_guard_port_with(false, None), MANAGER_GUARD_PORT);
+        assert_eq!(manager_guard_port_with(true, None), DEV_MANAGER_GUARD_PORT);
+    }
+
+    #[test]
+    fn manager_guard_port_allows_environment_override() {
+        assert_eq!(manager_guard_port_with(true, Some("45299")), 45299);
+        assert_eq!(manager_guard_port_with(false, Some("45299")), 45299);
+        assert_eq!(
+            manager_guard_port_with(true, Some("not-a-port")),
+            DEV_MANAGER_GUARD_PORT
+        );
+        assert_eq!(
+            manager_guard_port_with(false, Some("0")),
+            MANAGER_GUARD_PORT
+        );
     }
 
     #[test]
