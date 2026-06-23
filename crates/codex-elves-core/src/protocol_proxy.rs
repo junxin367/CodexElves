@@ -2335,7 +2335,6 @@ struct AnthropicSseState {
     diagnostic_id: Option<String>,
     blocks: BTreeMap<usize, AnthropicBlockKind>,
     text_buffers: BTreeMap<usize, String>,
-    text_passthrough: BTreeSet<usize>,
     usage: Value,
     text_block_count: usize,
     thinking_block_count: usize,
@@ -2357,7 +2356,6 @@ impl AnthropicSseState {
             diagnostic_id: diagnostic_id.map(ToString::to_string),
             blocks: BTreeMap::new(),
             text_buffers: BTreeMap::new(),
-            text_passthrough: BTreeSet::new(),
             usage: json!({}),
             text_block_count: 0,
             thinking_block_count: 0,
@@ -2503,7 +2501,6 @@ impl AnthropicSseState {
         let index = chunk.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
         let kind = self.blocks.remove(&index);
         if matches!(kind, Some(AnthropicBlockKind::Text)) {
-            self.text_passthrough.remove(&index);
             if let Some(text) = self.text_buffers.remove(&index) {
                 self.flush_buffered_text_block_into(index, &text, output);
             }
@@ -2511,45 +2508,52 @@ impl AnthropicSseState {
     }
 
     fn handle_text_delta_into(&mut self, index: usize, text: &str, output: &mut String) {
-        if self.text_passthrough.contains(&index) {
-            self.inner.push_content_delta_into(text, output);
-            return;
-        }
-
         let buffer = self.text_buffers.entry(index).or_default();
         buffer.push_str(text);
-        if should_buffer_textual_invoke_candidate(buffer) {
+        // 缓冲区已出现 `<invoke`：进入工具调用区，不再透传，等 block 结束后统一切分。
+        if buffer.contains("<invoke") {
             return;
         }
 
-        let text = self.text_buffers.remove(&index).unwrap_or_default();
-        self.text_passthrough.insert(index);
-        if !text.is_empty() {
-            self.inner.push_content_delta_into(&text, output);
+        // 尚未出现 `<invoke`：把「绝不可能属于工具调用起点」的前缀作为正文透传，
+        // 尾部可能是起点开头的一小段留在缓冲区继续等待。
+        let safe_len = textual_invoke_safe_passthrough_len(buffer);
+        if safe_len == 0 {
+            return;
         }
+        let passthrough: String = buffer.drain(..safe_len).collect();
+        if buffer.is_empty() {
+            self.text_buffers.remove(&index);
+        }
+        self.inner.push_content_delta_into(&passthrough, output);
     }
 
     fn flush_buffered_text_block_into(&mut self, index: usize, text: &str, output: &mut String) {
         let marker_kinds = text_tool_marker_kinds(text);
-        let parsed_calls = parse_textual_invoke_tool_calls(text);
+        let split = split_text_into_message_and_tool_calls(text);
         if !marker_kinds.is_empty() {
             log_anthropic_text_tool_marker_detected(
                 true,
                 &self.inner.model,
                 Some(index),
                 marker_kinds,
-                parsed_calls.is_some(),
+                split.is_some(),
                 text.len(),
                 text,
                 self.diagnostic_id.as_deref(),
             );
         }
-        let Some(calls) = parsed_calls else {
+        let Some((leading, calls)) = split else {
             if !text.is_empty() {
                 self.inner.push_content_delta_into(text, output);
             }
             return;
         };
+
+        // 先输出工具调用前的正文，再把工具调用转为 tool_call delta。
+        if !leading.is_empty() {
+            self.inner.push_content_delta_into(&leading, output);
+        }
 
         self.textual_invoke_block_count += 1;
         self.textual_invoke_call_count += calls.len();
@@ -4573,10 +4577,16 @@ fn anthropic_content_to_response_output_items(
             }
             "text" => {
                 if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    let parsed_tool_items =
-                        textual_invoke_tool_calls_to_response_items(text, tool_context);
-                    if !parsed_tool_items.is_empty() {
-                        tool_items.extend(parsed_tool_items);
+                    if let Some((leading, calls)) = split_text_into_message_and_tool_calls(text) {
+                        if !leading.is_empty() {
+                            message_content.push(json!({
+                                "type": "output_text",
+                                "text": leading,
+                                "annotations": []
+                            }));
+                        }
+                        tool_items
+                            .extend(textual_invoke_calls_to_response_items(calls, tool_context));
                     } else if !text.is_empty() {
                         message_content.push(
                             json!({ "type": "output_text", "text": text, "annotations": [] }),
@@ -4880,13 +4890,10 @@ fn reasoning_source_label(body: &Value) -> &'static str {
     }
 }
 
-fn textual_invoke_tool_calls_to_response_items(
-    text: &str,
+fn textual_invoke_calls_to_response_items(
+    calls: Vec<TextualInvokeToolCall>,
     tool_context: &CodexToolContext,
 ) -> Vec<Value> {
-    let Some(calls) = parse_textual_invoke_tool_calls(text) else {
-        return Vec::new();
-    };
     calls
         .into_iter()
         .enumerate()
@@ -4905,6 +4912,39 @@ fn textual_invoke_tool_calls_to_response_items(
 struct TextualInvokeToolCall {
     name: String,
     arguments: serde_json::Map<String, Value>,
+}
+
+/// 把一段文本切成「前导正文」和「文本化工具调用」两部分。
+///
+/// 模型有时会先输出正常正文，再在结尾追加 `<invoke>` 形式的工具调用。
+/// 该函数定位第一个工具调用起点（含可选的 course/codex/call 前缀标记），
+/// 起点之前作为正文返回，起点之后交给 `parse_textual_invoke_tool_calls` 解析。
+/// 若起点之后无法解析为完整工具调用，则视为普通文本，返回 `None`。
+fn split_text_into_message_and_tool_calls(
+    text: &str,
+) -> Option<(String, Vec<TextualInvokeToolCall>)> {
+    let start = textual_invoke_region_start(text)?;
+    let leading = text[..start].trim_end();
+    let calls = parse_textual_invoke_tool_calls(&text[start..])?;
+    Some((leading.to_string(), calls))
+}
+
+/// 返回文本中工具调用区的起始字节位置。
+///
+/// 起点优先取贴在 `<invoke` 之前的 course/codex/call 行级前缀标记；
+/// 没有前缀时取 `<invoke` 自身位置。找不到则返回 `None`。
+fn textual_invoke_region_start(text: &str) -> Option<usize> {
+    let invoke_pos = text.find("<invoke")?;
+    let trimmed_before = text[..invoke_pos].trim_end();
+    for marker in ["course", "codex", "call"] {
+        if let Some(prefix) = trimmed_before.strip_suffix(marker) {
+            // 前缀标记必须是独立词：其前面要么是文本开头，要么是空白/换行。
+            if prefix.is_empty() || prefix.ends_with(char::is_whitespace) {
+                return Some(prefix.len());
+            }
+        }
+    }
+    Some(invoke_pos)
 }
 
 fn parse_textual_invoke_tool_calls(text: &str) -> Option<Vec<TextualInvokeToolCall>> {
@@ -4957,21 +4997,48 @@ fn strip_textual_invoke_prefix(text: &str) -> &str {
     text
 }
 
-fn should_buffer_textual_invoke_candidate(text: &str) -> bool {
-    let trimmed = text.trim_start();
-    if trimmed.is_empty() {
+/// 流式场景：当文本块尚未出现 `<invoke` 时，计算「可安全透传」的前缀字节长度。
+///
+/// 尾部可能是下一个工具调用起点的开头（`<invoke` 的不完整前缀，或 course/codex/call
+/// 标记的前缀），这部分必须保留继续缓冲；其余前缀可以作为正文先输出。
+fn textual_invoke_safe_passthrough_len(buffer: &str) -> usize {
+    // 尾部最多保留这么多字节用于拼接检测（足以容纳 "course" + 空白 + "<invoke"）。
+    const MAX_PENDING_TAIL: usize = 16;
+    let start = buffer.len().saturating_sub(MAX_PENDING_TAIL);
+    // 从距尾部 MAX_PENDING_TAIL 处向后逐个字节边界尝试，找到最早的「可能是起点」位置。
+    for candidate in start..=buffer.len() {
+        if !buffer.is_char_boundary(candidate) {
+            continue;
+        }
+        if textual_invoke_tail_may_start_call(&buffer[candidate..]) {
+            return candidate;
+        }
+    }
+    buffer.len()
+}
+
+/// 尾部子串是否可能是一个尚未输完的工具调用起点（`<invoke` 或 marker 前缀）。
+fn textual_invoke_tail_may_start_call(tail: &str) -> bool {
+    if tail.is_empty() {
+        return false;
+    }
+    // 尾部是 `<invoke` 的前缀（包括只有 `<`）。
+    if "<invoke".starts_with(tail) {
         return true;
     }
-    if "<invoke".starts_with(trimmed) || trimmed.starts_with("<invoke") {
-        return true;
-    }
+    // 尾部是 course/codex/call 标记的前缀，或标记后跟着空白/`<invoke` 前缀。
     for marker in ["course", "codex", "call"] {
-        if marker.starts_with(trimmed) {
+        if marker.starts_with(tail) {
             return true;
         }
-        if let Some(rest) = trimmed.strip_prefix(marker) {
-            let rest = rest.trim_start();
-            return rest.is_empty() || "<invoke".starts_with(rest) || rest.starts_with("<invoke");
+        if let Some(rest) = tail.strip_prefix(marker) {
+            let trimmed = rest.trim_start();
+            // marker 后面必须是空白起头（表明 marker 是独立词）。
+            if rest.len() != trimmed.len() || rest.is_empty() {
+                if trimmed.is_empty() || "<invoke".starts_with(trimmed) {
+                    return true;
+                }
+            }
         }
     }
     false

@@ -381,6 +381,56 @@ fn anthropic_call_prefixed_textual_invoke_response_converts_to_tool_call() {
 }
 
 #[test]
+fn anthropic_leading_text_then_textual_invoke_splits_message_and_tool_call() {
+    // 回归：同一个 text 块里先是正文，末尾才是 call/<invoke> 工具调用。
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_lead_then_invoke",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "代码正确。跟 release build。\n\ncall\n<invoke name=\"exec_command\">\n<parameter name=\"cmd\">cargo build --release</parameter>\n</invoke>"
+                }
+            ],
+            "stop_reason": "stop",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-4-8",
+            "input": "编译",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "cmd": { "type": "string" } }
+                    }
+                }
+            ]
+        }),
+    )
+    .unwrap();
+
+    let output = converted["output"].as_array().unwrap();
+    // 第一项是前导正文 message。
+    assert_eq!(output[0]["type"], "message");
+    assert_eq!(
+        output[0]["content"][0]["text"],
+        "代码正确。跟 release build。"
+    );
+    // 紧跟着工具调用。
+    let call = output
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .expect("应该还原出 function_call");
+    assert_eq!(call["name"], "exec_command");
+    assert_eq!(call["arguments"], r#"{"cmd":"cargo build --release"}"#);
+}
+#[test]
 fn responses_request_preserves_file_audio_and_unknown_content_parts() {
     let converted = responses_to_chat_completions(json!({
         "model": "gpt-5-mini",
@@ -1795,6 +1845,78 @@ data: {"type":"message_stop"}
     );
 }
 
+#[test]
+fn anthropic_sse_leading_text_then_textual_invoke_splits_message_and_tool_call() {
+    // 回归：模型先输出一段正文，再在同一文本块末尾追加 call/<invoke> 工具调用，
+    // 且跨多个 delta 分块。以前流式会因「开头不像工具调用」而整块透传，导致工具变文本。
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_lead_then_invoke","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"代码正确。现在做严格的逻辑复核：跟 release "}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"build。\n\ncall\n<invoke name=\"exec_command\">\n"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<parameter name=\"cmd\">cargo build --release</parameter>\n</invoke>"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-opus-4-8",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": { "type": "object" }
+                }
+            ]
+        }),
+    );
+
+    let events = parse_response_sse_events(&converted);
+    // 前导正文仍作为文本输出。
+    let text_delta: String = events
+        .iter()
+        .filter(|event| event.event == "response.output_text.delta")
+        .filter_map(|event| event.data["delta"].as_str())
+        .collect();
+    assert!(
+        text_delta.contains("代码正确") && text_delta.contains("release build。"),
+        "前导正文应保留为文本，实际={text_delta:?}"
+    );
+    // 末尾的 <invoke> 应被还原为工具调用。
+    let arguments_done = events
+        .iter()
+        .find(|event| event.event == "response.function_call_arguments.done")
+        .expect("应该还原出 function_call");
+    assert_eq!(arguments_done.data["name"], "exec_command");
+    assert_eq!(
+        arguments_done.data["arguments"],
+        r#"{"cmd":"cargo build --release"}"#
+    );
+    // 输出同时含 message 和 function_call 两类 item。
+    let completed = events
+        .iter()
+        .find(|event| event.event == "response.completed")
+        .unwrap();
+    let output = completed.data["response"]["output"].as_array().unwrap();
+    assert!(output.iter().any(|item| item["type"] == "message"));
+    assert!(output.iter().any(|item| item["type"] == "function_call"));
+}
 #[test]
 fn chat_sse_maps_refusal_delta_to_responses_refusal_events() {
     let converted = chat_sse_to_responses_sse(
