@@ -5,6 +5,7 @@ pub mod ccs_import;
 pub mod cdp;
 pub mod cli_wrapper;
 pub mod codex_home;
+pub mod codex_radar;
 pub mod codex_sqlite;
 mod computer_use_guard;
 pub mod diagnostic_log;

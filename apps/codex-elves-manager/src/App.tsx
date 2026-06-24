@@ -459,6 +459,50 @@ type UpdateResult = CommandResult<{
   progress?: number;
 }>;
 
+type CodexRadarIqRun = {
+  date: string;
+  score: number;
+  status: string;
+  passed: number;
+  tasks: number;
+  invalid: number;
+  totalTokens: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  wallSeconds: number;
+  wallTimeHuman: string;
+  model?: string | null;
+  reasoningEffort?: string | null;
+  validTasks?: number | null;
+  costUsd?: number | null;
+};
+
+type CodexRadarIqComparison = {
+  label: string;
+  model?: string | null;
+  reasoningEffort?: string | null;
+  latest?: CodexRadarIqRun | null;
+  recentDays: CodexRadarIqRun[];
+};
+
+type CodexRadarResult = CommandResult<{
+  sourceUrl: string;
+  cacheStatus: string;
+  cachedUntilMs?: number | null;
+  snapshot: {
+    schemaVersion?: string | null;
+    monitoredAt?: string | null;
+    timezone?: string | null;
+    links?: { html?: string | null; rss?: string | null } | null;
+    modelIq: {
+      latest?: CodexRadarIqRun | null;
+      recentDays: CodexRadarIqRun[];
+      comparisons: Record<string, CodexRadarIqComparison>;
+    };
+  } | null;
+}>;
+
 type ScriptMarketItem = {
   id: string;
   name: string;
@@ -536,7 +580,7 @@ type StartupResult = CommandResult<{
   showUpdate: boolean;
 }>;
 
-type Route = "overview" | "relay" | "sessions" | "context" | "enhance" | "userScripts" | "maintenance" | "about" | "settings";
+type Route = "overview" | "relay" | "sessions" | "context" | "enhance" | "userScripts" | "radar" | "maintenance" | "about" | "settings";
 type Theme = "dark" | "light";
 
 const routes: Array<{ id: Route; label: string; icon: LucideIcon; badge?: string }> = [
@@ -547,6 +591,7 @@ const routes: Array<{ id: Route; label: string; icon: LucideIcon; badge?: string
   { id: "enhance", label: "页面增强", icon: Hammer },
   { id: "userScripts", label: "脚本市场", icon: FileCode2 },
   { id: "maintenance", label: "安装维护", icon: Wrench },
+  { id: "radar", label: "降智雷达", icon: TestTube },
   { id: "settings", label: "设置", icon: Settings },
   { id: "about", label: "关于", icon: Info },
 ];
@@ -725,6 +770,94 @@ function browserPreviewRelayPayload(): RelayPayload {
   };
 }
 
+function browserPreviewCodexRadar(): Omit<CodexRadarResult, "status" | "message"> {
+  const recentDays: CodexRadarIqRun[] = [
+    codexRadarRun("2026-06-17-am", 87.5, "yellow", 7, "23分钟"),
+    codexRadarRun("2026-06-17-pm", 87.5, "yellow", 7, "39分钟"),
+    codexRadarRun("2026-06-18", 125, "green", 10, "44分钟"),
+    codexRadarRun("2026-06-19", 100, "green", 8, "47分钟"),
+    codexRadarRun("2026-06-20", 75, "red", 6, "48分钟"),
+    codexRadarRun("2026-06-21", 87.5, "yellow", 7, "37分钟"),
+    codexRadarRun("2026-06-22-am", 100, "green", 8, "45分钟"),
+    codexRadarRun("2026-06-22-pm", 50, "red", 4, "54分钟"),
+    codexRadarRun("2026-06-23", 125, "green", 10, "46分钟"),
+    codexRadarRun("2026-06-24-am", 87.5, "yellow", 7, "23分钟", {
+      model: "gpt-5.5",
+      reasoningEffort: "xhigh",
+      totalTokens: 34196051,
+      inputTokens: 33842289,
+      cachedInputTokens: 31681664,
+      outputTokens: 353762,
+      wallSeconds: 1393,
+      costUsd: 37.256817,
+    }),
+  ];
+  const latest = recentDays[recentDays.length - 1];
+  return {
+    sourceUrl: "https://codexradar.com/current.json",
+    cacheStatus: "refresh",
+    cachedUntilMs: Date.now() + (25 * 60 * 1000),
+    snapshot: {
+      schemaVersion: "2.0",
+      monitoredAt: "2026-06-24T04:52:00.084111+08:00",
+      timezone: "Asia/Shanghai",
+      links: { html: "https://codexradar.com/", rss: "https://codexradar.com/feed.xml" },
+      modelIq: {
+        latest,
+        recentDays,
+        comparisons: {
+          gpt_55_high: {
+            label: "GPT-5.5 high",
+            model: "gpt-5.5",
+            reasoningEffort: "high",
+            latest: codexRadarRun("2026-06-24-am", 100, "green", 8, "26分钟", { costUsd: 29.005678 }),
+            recentDays: [],
+          },
+          gpt_55_medium: {
+            label: "GPT-5.5 medium",
+            model: "gpt-5.5",
+            reasoningEffort: "medium",
+            latest: codexRadarRun("2026-06-24-am", 87.5, "yellow", 7, "24分钟", { costUsd: 22.212796 }),
+            recentDays: [],
+          },
+          gpt_54_xhigh: {
+            label: "GPT-5.4 xhigh",
+            model: "gpt-5.4",
+            reasoningEffort: "xhigh",
+            latest: codexRadarRun("2026-06-24-am", 62.5, "red", 5, "40分钟", { costUsd: 25.097168 }),
+            recentDays: [],
+          },
+        },
+      },
+    },
+  };
+}
+
+function codexRadarRun(
+  date: string,
+  score: number,
+  status: string,
+  passed: number,
+  wallTimeHuman: string,
+  patch: Partial<CodexRadarIqRun> = {},
+): CodexRadarIqRun {
+  return {
+    date,
+    score,
+    status,
+    passed,
+    tasks: 12,
+    invalid: 0,
+    totalTokens: 0,
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    wallSeconds: 0,
+    wallTimeHuman,
+    ...patch,
+  };
+}
+
 function browserPreviewCommand<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const settings = browserPreviewSettings();
   const active = activeRelayProfile(settings);
@@ -802,6 +935,8 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           },
         ],
       }) as T);
+    case "fetch_codex_radar":
+      return Promise.resolve(browserPreviewResult(browserPreviewCodexRadar(), "降智雷达已刷新。") as T);
     case "backfill_relay_profile_from_live": {
       const request = args?.request as { settings?: BackendSettings } | undefined;
       return Promise.resolve(browserPreviewResult({ settings: request?.settings || settings }) as T);
@@ -840,6 +975,7 @@ export function App() {
   const [watcher, setWatcher] = useState<WatcherResult | null>(null);
   const [update, setUpdate] = useState<UpdateResult | null>(null);
   const [scriptMarket, setScriptMarket] = useState<ScriptMarketResult | null>(null);
+  const [codexRadar, setCodexRadar] = useState<CodexRadarResult | null>(null);
   const [launchForm, setLaunchForm] = useState({
     appPath: "",
     debugPort: "9229",
@@ -1033,6 +1169,19 @@ export function App() {
     }
   };
 
+  const refreshCodexRadar = async (silent = false, forceRefresh = false) => {
+    const result = await run(() =>
+      call<CodexRadarResult>(
+        "fetch_codex_radar",
+        forceRefresh ? { request: { forceRefresh: true } } : undefined,
+      ),
+    );
+    if (result) {
+      setCodexRadar(result);
+      if (!silent || !isSuccessStatus(result.status)) showResultNotice("降智雷达", result, { silentSuccess: true });
+    }
+  };
+
   const deleteLocalSessionsBatch = async (sessionsToDelete: LocalSession[]) => {
     if (!sessionsToDelete.length) return;
     if (!window.confirm(`确认批量删除这 ${sessionsToDelete.length} 个会话？此操作会删除本地数据库记录和 rollout 文件，并为每个会话创建备份。`)) return;
@@ -1130,6 +1279,7 @@ export function App() {
       await refreshSettings(true);
       await refreshScriptMarket(true);
     }
+    if (next === "radar") await refreshCodexRadar(true);
     if (next === "about") {
       await refreshOverview(true);
       await refreshLogs(true);
@@ -1686,6 +1836,7 @@ export function App() {
       await refreshRelay(true);
       await refreshEnvConflicts(true);
       await refreshProviderSyncTargets(true);
+      if (route === "radar") await refreshCodexRadar(true);
       await checkPluginMarketplacePrompt();
     })();
   }, []);
@@ -1711,7 +1862,7 @@ export function App() {
 
   const actions = useMemo(
     () => ({
-      refreshCurrent: () => navigate(route),
+      refreshCurrent: () => (route === "radar" ? refreshCodexRadar(false, true) : navigate(route)),
       launch,
       restart,
       repairBackend,
@@ -1816,6 +1967,7 @@ export function App() {
       refreshLiveContextEntries,
       syncLiveContextEntries,
       refreshScriptMarket,
+      refreshCodexRadar: () => refreshCodexRadar(false, true),
       installMarketScript,
       setUserScriptEnabled,
       deleteUserScript,
@@ -1976,6 +2128,7 @@ export function App() {
             />
           ) : null}
           {route === "userScripts" ? <UserScriptsScreen settings={settings} market={scriptMarket} actions={actions} /> : null}
+          {route === "radar" ? <CodexRadarScreen radar={codexRadar} actions={actions} /> : null}
           {route === "maintenance" ? (
             <MaintenanceScreen
               overview={overview}
@@ -2047,6 +2200,7 @@ type Actions = {
   refreshLiveContextEntries: () => Promise<LiveContextEntriesResult | null>;
   syncLiveContextEntries: (settings: BackendSettings, silent?: boolean) => Promise<LiveContextEntriesResult | null>;
   refreshScriptMarket: () => Promise<void>;
+  refreshCodexRadar: () => Promise<void>;
   installMarketScript: (id: string) => Promise<void>;
   setUserScriptEnabled: (key: string, enabled: boolean) => Promise<void>;
   deleteUserScript: (key: string) => Promise<void>;
@@ -2516,6 +2670,130 @@ function UserScriptsScreen({ settings, market, actions }: { settings: SettingsRe
         </CardContent>
       </Panel>
     </>
+  );
+}
+
+function CodexRadarScreen({ radar, actions }: { radar: CodexRadarResult | null; actions: Actions }) {
+  const snapshot = radar?.snapshot;
+  const modelIq = snapshot?.modelIq;
+  const latest = modelIq?.latest ?? null;
+  const recentDays = modelIq?.recentDays ?? [];
+  const comparisons = Object.entries(modelIq?.comparisons ?? {})
+    .map(([key, comparison]) => ({ key, ...comparison }))
+    .filter((comparison) => comparison.latest)
+    .sort((left, right) => (right.latest?.score ?? 0) - (left.latest?.score ?? 0));
+  const sourceUrl = snapshot?.links?.html || radar?.sourceUrl || "https://codexradar.com/";
+
+  return (
+    <div className="grid gap-4">
+      <Panel className="radar-hero">
+        <CardContent className="radar-hero-content">
+          <div className="radar-score-block">
+            <span className="radar-kicker">CodexRadar Model IQ</span>
+            <strong className={`radar-score radar-${latest?.status ?? "unknown"}`}>{latest ? formatScore(latest.score) : "-"}</strong>
+          </div>
+          <div className="radar-hero-main">
+            <div>
+              <h2>{latest?.model || "模型未记录"} · {latest?.reasoningEffort || "推理档位未记录"}</h2>
+              <p>{latest ? `最近样本 ${latest.date}，通过 ${latest.passed}/${latest.tasks} 项，耗时 ${latest.wallTimeHuman || "-"}` : "点击刷新读取 codexradar.com 的最新模型 IQ 数据。"}</p>
+            </div>
+            <Toolbar>
+              <Button onClick={() => void actions.refreshCodexRadar()} variant="secondary">
+                <RefreshCw className="h-4 w-4" />
+                刷新
+              </Button>
+              <Button onClick={() => void actions.openExternalUrl(sourceUrl)} variant="outline">
+                <ExternalLink className="h-4 w-4" />
+                打开来源
+              </Button>
+            </Toolbar>
+          </div>
+        </CardContent>
+      </Panel>
+
+      <Panel>
+        <CardHead title="模型对比" detail={comparisons.length ? "来自 current.json 的 comparisons 字段" : "暂无对比模型"} />
+        <CardContent>
+          {comparisons.length ? (
+            <div className="radar-comparison-list">
+              {comparisons.map((comparison) => (
+                <div className="radar-comparison-row" key={comparison.key}>
+                  <div>
+                    <strong>{comparison.label}</strong>
+                    <span>{comparison.model || "model 未记录"} · {comparison.reasoningEffort || "effort 未记录"}</span>
+                  </div>
+                  <div className="radar-comparison-score">
+                    <strong className={`radar-${comparison.latest?.status ?? "unknown"}`}>{formatScore(comparison.latest?.score ?? 0)}</strong>
+                    <span>{comparison.latest?.passed ?? 0}/{comparison.latest?.tasks ?? 0}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="empty">暂无模型对比数据。</div>
+          )}
+        </CardContent>
+      </Panel>
+
+      <div className="radar-grid">
+        <Panel>
+          <CardHeader className="panel-head radar-sample-head">
+            <div>
+              <CardTitle>
+                {latest ? `最新样本 · ${latest.model || "模型未记录"} · ${latest.reasoningEffort || "推理档位未记录"}` : "最新样本"}
+              </CardTitle>
+              <CardDescription className="radar-sample-time">
+                {snapshot?.monitoredAt ? formatIsoTime(snapshot.monitoredAt) : radar?.message ?? "-"}
+              </CardDescription>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {latest ? (
+              <div className="metric-list radar-sample-metrics">
+                <Metric label="通过任务" value={`${latest.passed}/${latest.tasks}`} />
+                <Metric label="有效任务" value={`${latest.validTasks ?? latest.tasks} 个`} />
+                <Metric label="总 Token" value={formatCompactNumber(latest.totalTokens)} />
+                <Metric label="输出 Token" value={formatCompactNumber(latest.outputTokens)} />
+                <Metric label="耗时" value={latest.wallTimeHuman || `${latest.wallSeconds} 秒`} />
+                <Metric label="成本" value={formatUsd(latest.costUsd)} />
+              </div>
+            ) : (
+              <div className="empty">{radar?.message ?? "暂无雷达数据。"}</div>
+            )}
+          </CardContent>
+        </Panel>
+
+        <Panel>
+          <CardHead
+            title={latest ? `近日报告 · ${latest.model || "模型未记录"} · ${latest.reasoningEffort || "推理档位未记录"}` : "近日报告"}
+            detail={recentDays.length ? `${recentDays.length} 个样本，按近到远显示` : "暂无历史样本"}
+          />
+          <CardContent>
+            {recentDays.length ? <RadarTrend runs={[...recentDays].reverse()} /> : <div className="empty">暂无趋势数据。</div>}
+          </CardContent>
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
+function RadarTrend({ runs }: { runs: CodexRadarIqRun[] }) {
+  const maxScore = Math.max(125, ...runs.map((run) => run.score));
+  return (
+    <div className="radar-trend" aria-label="近日报告趋势">
+      {runs.map((run) => {
+        const height = Math.max(12, Math.round((run.score / maxScore) * 100));
+        return (
+          <div className="radar-trend-item" key={run.date} title={`${run.date}：${formatScore(run.score)}`}>
+            <div className="radar-trend-bar-track" style={{ "--bar-height": `${height}%` } as CSSProperties}>
+              <strong className="radar-trend-score">{formatScore(run.score)}</strong>
+              <div className={`radar-trend-bar radar-${run.status}`} style={{ height: `${height}%` }} />
+            </div>
+            <span>{run.date.replace("2026-", "")}</span>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -5271,6 +5549,7 @@ function routeSubtitle(route: Route) {
     context: "独立管理 MCP、Skills、Plugins",
     enhance: "会话删除、导出、项目移动和脚本能力",
     userScripts: "内置和用户自定义脚本清单",
+    radar: "读取 codexradar.com 的模型 IQ 与近日报告",
     maintenance: "入口安装、修复、Watcher 与手动启动",
     about: "版本信息、项目链接、GitHub Release 更新、日志与诊断",
     settings: "主题、命令包装器和启动参数",
@@ -6799,6 +7078,26 @@ function formatTime(value: number) {
   return new Date(value).toLocaleString("zh-CN");
 }
 
+function formatIsoTime(value: string) {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return value;
+  return new Date(timestamp).toLocaleString("zh-CN");
+}
+
+function formatScore(value: number) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function formatCompactNumber(value: number) {
+  if (!value) return "-";
+  return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+}
+
+function formatUsd(value?: number | null) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return `$${value.toFixed(2)}`;
+}
+
 function formatDuration(startedAtMs: number): string {
   if (!startedAtMs) return "-";
   const elapsed = Date.now() - startedAtMs;
@@ -6824,6 +7123,7 @@ function loadInitialTheme(): Theme {
 function loadInitialRoute(): Route {
   if (typeof window === "undefined") return "overview";
   const params = new URLSearchParams(window.location.search);
+  if (window.location.hash === "#radar") return "radar";
   if (params.get("showUpdate") === "1" || window.location.hash === "#about") {
     return "about";
   }

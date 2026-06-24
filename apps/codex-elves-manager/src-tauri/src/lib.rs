@@ -98,6 +98,7 @@ pub fn run() {
             commands::delete_local_session,
             commands::load_provider_sync_targets,
             commands::sync_providers_now,
+            commands::fetch_codex_radar,
             commands::refresh_script_market,
             commands::install_market_script,
             commands::set_user_script_enabled,

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use codex_elves_core::install::SILENT_BINARY;
 use codex_elves_core::models::{DeleteResult, SessionRef};
@@ -10,7 +10,7 @@ use codex_elves_core::script_market::{self, MarketScript, ScriptMarketManifest};
 use codex_elves_core::settings::{BackendSettings, RelayProfile, SettingsStore};
 use codex_elves_core::status::{LaunchStatus, StatusStore};
 use codex_elves_core::user_scripts::UserScriptManager;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::install::{self, InstallActionResult, InstallOptions};
@@ -74,6 +74,30 @@ pub struct PluginMarketplaceStatusPayload {
     pub config_registered: bool,
     pub needs_repair: bool,
 }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRadarPayload {
+    pub source_url: String,
+    pub snapshot: Option<codex_elves_core::codex_radar::CodexRadarSnapshot>,
+    pub cache_status: String,
+    pub cached_until_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRadarRequest {
+    #[serde(default)]
+    pub force_refresh: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CodexRadarCacheEntry {
+    snapshot: codex_elves_core::codex_radar::CodexRadarSnapshot,
+    expires_at: SystemTime,
+}
+
+static CODEX_RADAR_CACHE: OnceLock<Mutex<Option<CodexRadarCacheEntry>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1043,6 +1067,96 @@ fn persist_provider_sync_selection(provider: &str) {
     settings.provider_sync_saved_providers =
         normalize_provider_sync_provider_list(settings.provider_sync_saved_providers);
     let _ = store.save(&settings);
+}
+
+#[tauri::command]
+pub async fn fetch_codex_radar(
+    request: Option<CodexRadarRequest>,
+) -> CommandResult<CodexRadarPayload> {
+    let source_url = codex_elves_core::codex_radar::CODEX_RADAR_CURRENT_URL.to_string();
+    let force_refresh = request.map(|item| item.force_refresh).unwrap_or(false);
+    if !force_refresh
+        && let Some(cached) = codex_radar_cache_entry()
+        && cached.expires_at > SystemTime::now()
+    {
+        return ok(
+            "降智雷达已从缓存读取。",
+            codex_radar_payload(
+                source_url,
+                Some(cached.snapshot),
+                "hit",
+                Some(cached.expires_at),
+            ),
+        );
+    }
+
+    match codex_elves_core::codex_radar::fetch_current_snapshot().await {
+        Ok(snapshot) => {
+            let expires_at = codex_radar_next_expiry();
+            set_codex_radar_cache(snapshot.clone(), expires_at);
+            ok(
+                "降智雷达已刷新。",
+                codex_radar_payload(source_url, Some(snapshot), "refresh", Some(expires_at)),
+            )
+        }
+        Err(error) => failed(
+            &format!("降智雷达读取失败：{error}"),
+            codex_radar_payload(source_url, None, "failed", None),
+        ),
+    }
+}
+
+fn codex_radar_cache_entry() -> Option<CodexRadarCacheEntry> {
+    CODEX_RADAR_CACHE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+fn set_codex_radar_cache(
+    snapshot: codex_elves_core::codex_radar::CodexRadarSnapshot,
+    expires_at: SystemTime,
+) {
+    if let Ok(mut guard) = CODEX_RADAR_CACHE.get_or_init(|| Mutex::new(None)).lock() {
+        *guard = Some(CodexRadarCacheEntry {
+            snapshot,
+            expires_at,
+        });
+    }
+}
+
+fn codex_radar_next_expiry() -> SystemTime {
+    let jitter_seconds = codex_radar_cache_jitter_seconds();
+    SystemTime::now() + Duration::from_secs((25 * 60) + jitter_seconds)
+}
+
+fn codex_radar_cache_jitter_seconds() -> u64 {
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
+        ^ u128::from(std::process::id());
+    (seed % 3601) as u64
+}
+
+fn codex_radar_payload(
+    source_url: String,
+    snapshot: Option<codex_elves_core::codex_radar::CodexRadarSnapshot>,
+    cache_status: &str,
+    cached_until: Option<SystemTime>,
+) -> CodexRadarPayload {
+    CodexRadarPayload {
+        source_url,
+        snapshot,
+        cache_status: cache_status.to_string(),
+        cached_until_ms: cached_until.and_then(system_time_ms),
+    }
+}
+
+fn system_time_ms(value: SystemTime) -> Option<u64> {
+    let millis = value.duration_since(UNIX_EPOCH).ok()?.as_millis();
+    u64::try_from(millis).ok()
 }
 
 #[tauri::command]
