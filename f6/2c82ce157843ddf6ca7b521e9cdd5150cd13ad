@@ -1,0 +1,23 @@
+crates/codex-elves-core/src/relay_config.rs
+  s_74041562726f90::t_251ed97e4a0d84 1118,1130,1154,1165,1170,1186-1188,1190,1227-1237,1260-1261,1263,1265-1267,1271-1303
+crates/codex-elves-core/tests/relay_config.rs
+  s_74041562726f90::t_07f5a7107f346d 2916-2975
+crates/codex-elves-core/src/codex_radar.rs
+  s_74041562726f90::t_c7e897b9b9e891 30,44,94-182
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "f62c82ce157843ddf6ca7b521e9cdd5150cd13ad",
+  "prompts": {},
+  "sessions": {
+    "s_74041562726f90": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef744-0d23-7ec1-b41d-395f6e798c45",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
