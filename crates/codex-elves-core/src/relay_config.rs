@@ -1115,6 +1115,7 @@ fn remove_disabled_context_tables(table: &mut toml_edit::Table) {
 struct ContextTextBlock {
     table_name: String,
     id: String,
+    is_root: bool,
     start: usize,
     end: usize,
     text: String,
@@ -1126,7 +1127,7 @@ fn context_text_blocks(contents: &str) -> Vec<ContextTextBlock> {
     let mut index = 0;
 
     while index < lines.len() {
-        let Some((table_name, id)) = context_block_header(&lines[index]) else {
+        let Some((table_name, id, is_root)) = context_block_header(&lines[index]) else {
             index += 1;
             continue;
         };
@@ -1150,6 +1151,7 @@ fn context_text_blocks(contents: &str) -> Vec<ContextTextBlock> {
         blocks.push(ContextTextBlock {
             table_name,
             id,
+            is_root,
             start,
             end,
             text: lines[start..end].join("\n"),
@@ -1160,12 +1162,12 @@ fn context_text_blocks(contents: &str) -> Vec<ContextTextBlock> {
     blocks
 }
 
-fn context_block_header(line: &str) -> Option<(String, String)> {
+fn context_block_header(line: &str) -> Option<(String, String, bool)> {
     let path = toml_table_path_from_line(line)?;
     if path.len() < 2 || !is_context_table_name(&path[0]) {
         return None;
     }
-    Some((path[0].clone(), path[1].clone()))
+    Some((path[0].clone(), path[1].clone(), path.len() == 2))
 }
 
 fn toml_path_belongs_to_context_id(path: &[String], table_name: &str, id: &str) -> bool {
@@ -1181,13 +1183,11 @@ fn toml_table_path_from_line(line: &str) -> Option<Vec<String>> {
     if !trimmed.starts_with('[') {
         return None;
     }
+    if trimmed.starts_with("[[") {
+        return None;
+    }
 
-    let doc_text = if trimmed.starts_with("[[") {
-        let end = trimmed.find("]]")?;
-        format!("[{}]\n", trimmed[2..end].trim())
-    } else {
-        format!("{trimmed}\n")
-    };
+    let doc_text = format!("{trimmed}\n");
     let doc = doc_text.parse::<DocumentMut>().ok()?;
     single_table_path(doc.as_table())
 }
@@ -1224,12 +1224,17 @@ fn upsert_context_text_block(contents: &str, table_name: &str, id: &str, section
         return finish_toml_lines(lines);
     }
 
-    if let Some(block) = context_text_blocks(contents)
-        .into_iter()
-        .find(|block| block.table_name == table_name && block.id == id)
-    {
-        lines.splice(block.start..block.end, section_lines.clone());
-        ensure_context_block_spacing(&mut lines, block.start, section_lines.len());
+    let blocks = matching_context_text_blocks(contents, table_name, id);
+    if !blocks.is_empty() {
+        let original_insert_at = blocks
+            .iter()
+            .find(|block| block.is_root)
+            .or_else(|| blocks.first())
+            .map(|block| block.start)
+            .unwrap_or(lines.len());
+        let insert_at = remove_context_text_blocks(&mut lines, &blocks, original_insert_at);
+        lines.splice(insert_at..insert_at, section_lines.clone());
+        ensure_context_block_spacing(&mut lines, insert_at, section_lines.len());
         return finish_toml_lines(lines);
     }
 
@@ -1252,16 +1257,49 @@ fn upsert_context_text_block(contents: &str, table_name: &str, id: &str, section
 
 fn delete_context_text_block(contents: &str, table_name: &str, id: &str) -> String {
     let mut lines = normalized_lines(contents);
-    let Some(block) = context_text_blocks(contents)
-        .into_iter()
-        .find(|block| block.table_name == table_name && block.id == id)
-    else {
+    let blocks = matching_context_text_blocks(contents, table_name, id);
+    if blocks.is_empty() {
         return finish_toml_lines(lines);
-    };
+    }
 
-    lines.drain(block.start..block.end);
-    normalize_gap_after_delete(&mut lines, block.start);
+    let first_start = blocks.iter().map(|block| block.start).min().unwrap_or(0);
+    let index = remove_context_text_blocks(&mut lines, &blocks, first_start);
+    normalize_gap_after_delete(&mut lines, index);
     finish_toml_lines(lines)
+}
+
+fn matching_context_text_blocks(
+    contents: &str,
+    table_name: &str,
+    id: &str,
+) -> Vec<ContextTextBlock> {
+    context_text_blocks(contents)
+        .into_iter()
+        .filter(|block| block.table_name == table_name && block.id == id)
+        .collect()
+}
+
+fn remove_context_text_blocks(
+    lines: &mut Vec<String>,
+    blocks: &[ContextTextBlock],
+    insert_at: usize,
+) -> usize {
+    let mut adjusted_insert_at = insert_at;
+    let mut ranges = blocks
+        .iter()
+        .map(|block| (block.start, block.end))
+        .collect::<Vec<_>>();
+    ranges.sort_unstable();
+    ranges.dedup();
+
+    for (start, end) in ranges.into_iter().rev() {
+        lines.drain(start..end);
+        if start < adjusted_insert_at {
+            adjusted_insert_at -= end - start;
+        }
+    }
+
+    adjusted_insert_at
 }
 
 fn normalized_section_lines(section: &str) -> Vec<String> {

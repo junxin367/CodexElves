@@ -2914,6 +2914,66 @@ command = "drop"
 }
 
 #[test]
+fn sync_live_config_context_entries_replaces_out_of_order_child_and_root_blocks() {
+    let live = r#"model = "gpt-5"
+
+[mcp_servers.alpha.tools.read]
+description = "old tool"
+
+[features]
+goals = true
+
+[mcp_servers.alpha]
+command = "old"
+
+[mcp_servers.beta]
+command = "beta"
+"#;
+    let context = r#"[mcp_servers.alpha]
+command = "new"
+"#;
+
+    let updated = sync_live_config_context_entries(live, context).unwrap();
+
+    assert!(!updated.contains("[mcp_servers.alpha.tools.read]"));
+    assert!(!updated.contains("description = \"old tool\""));
+    assert!(!updated.contains("command = \"old\""));
+    assert_eq!(updated.matches("[mcp_servers.alpha]").count(), 1);
+    assert!(
+        updated.contains("[features]\ngoals = true\n\n[mcp_servers.alpha]\ncommand = \"new\"\n\n[mcp_servers.beta]"),
+        "replacement should use the root block position and keep TOML valid:\n{updated}"
+    );
+}
+
+#[test]
+fn sync_live_config_context_entries_deletes_out_of_order_child_and_root_blocks() {
+    let live = r#"model = "gpt-5"
+
+[mcp_servers.alpha.tools.read]
+description = "old tool"
+
+[features]
+goals = true
+
+[mcp_servers.alpha]
+command = "old"
+
+[mcp_servers.beta]
+command = "beta"
+"#;
+    let context = r#"[mcp_servers.alpha]
+enabled = false
+command = "old"
+"#;
+
+    let updated = sync_live_config_context_entries(live, context).unwrap();
+
+    assert!(!updated.contains("[mcp_servers.alpha"));
+    assert!(updated.contains("[features]\ngoals = true"));
+    assert!(updated.contains("[mcp_servers.beta]\ncommand = \"beta\""));
+}
+
+#[test]
 fn sync_live_config_context_entries_matches_quoted_ids_semantically() {
     let live = r#"model = "gpt-5"
 
