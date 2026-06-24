@@ -19,6 +19,7 @@ commands.allow = [
   "delete_user_script",
   "disable_watcher",
   "enable_watcher",
+  "fetch_codex_radar",
   "fetch_relay_profile_models",
   "import_ccs_providers",
   "install_entrypoints",
