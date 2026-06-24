@@ -1,0 +1,20 @@
+.github/workflows/release-assets.yml
+  s_a8ffdfd9839ccc::t_38e38cce9cd085 29-33,55,57,59-66,68-71,73-75,77-78,80-110,114
+  s_a8ffdfd9839ccc::t_4aa93a2bf4da31 56,58,72
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "f354e1966cf3af49e511898f7f0217cdddc37885",
+  "prompts": {},
+  "sessions": {
+    "s_a8ffdfd9839ccc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef74f-ecc3-7a62-ac05-3dc316039e1a",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
