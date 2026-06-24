@@ -1,0 +1,19 @@
+apps/codex-elves-manager/src-tauri/permissions/default.toml
+  s_3b1a6f694f0a73::t_3eac3a18ae0ba7 22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "f347887a3d0b20f8f97e5fe74892d27c34de67df",
+  "prompts": {},
+  "sessions": {
+    "s_3b1a6f694f0a73": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef792-9a3e-77a0-88a4-24f00c76655e",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
