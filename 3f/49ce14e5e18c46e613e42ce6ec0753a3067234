@@ -1,0 +1,60 @@
+apps/codex-elves-manager/src/App.tsx
+  s_d11b1cb79587a2::t_8c3e5500f386a6 1172-1177
+  s_a8ffdfd9839ccc::t_a1bd3ba3de7a3f 502-505,583
+  s_a8ffdfd9839ccc::t_9f33612ee29500 467-475
+  s_d11b1cb79587a2::t_2d45a50e1650da 485-486
+  s_a8ffdfd9839ccc::t_78322bb8b6081d 594
+  s_d11b1cb79587a2::t_188dfe0f906cc0 462-464,482-484
+  s_c4d195350e55f8::t_99e1f36587681f 852-855
+  s_774a390a431415::t_d6bb17442acbda 476-480,487
+  s_d11b1cb79587a2::t_f0ccd98de7a333 488-500
+  s_a8ffdfd9839ccc::t_0e7737fb8a8c61 465-466
+apps/codex-elves-manager/src-tauri/src/lib.rs
+  s_a8ffdfd9839ccc::t_153c768b48b90c 101
+apps/codex-elves-manager/src-tauri/src/commands.rs
+  s_a8ffdfd9839ccc::t_f4c2fb9e7f5754 78-101,1105,1113,1116-1117,1125,1130,1139,1153,1158
+  s_a8ffdfd9839ccc::t_208e8049ce6b57 5,13
+crates/codex-elves-core/src/codex_radar.rs
+  s_a8ffdfd9839ccc::t_d5b43c0c65500e 9,11,15,41,58,60,62,64,66,68,72,74,76
+  s_a8ffdfd9839ccc::t_8ba30897060746 1-8,10,12-14,16-40,42-57,59,61,63,65,67,69-71,73,75,77-93
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "3f49ce14e5e18c46e613e42ce6ec0753a3067234",
+  "prompts": {},
+  "sessions": {
+    "s_774a390a431415": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef08b-1cdb-72c1-8740-8b923b97ea15",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    },
+    "s_a8ffdfd9839ccc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef74f-ecc3-7a62-ac05-3dc316039e1a",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    },
+    "s_c4d195350e55f8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef31a-886c-7e81-807f-085c56382913",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    },
+    "s_d11b1cb79587a2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef3e9-ce87-77f2-b081-5005242eb194",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
