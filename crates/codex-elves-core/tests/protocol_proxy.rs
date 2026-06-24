@@ -1,14 +1,15 @@
 use codex_elves_core::protocol_proxy::{
-    ChatSseToResponsesConverter, anthropic_message_to_response_with_request,
-    anthropic_messages_url, anthropic_sse_to_responses_sse_with_request,
-    chat_completion_to_response, chat_completion_to_response_with_request, chat_completions_url,
-    chat_sse_to_responses_sse, chat_sse_to_responses_sse_with_request,
-    is_chat_completions_proxy_path, is_models_proxy_path, is_responses_proxy_path, models_url,
-    open_chat_completions_proxy_request, open_models_proxy_request, open_responses_proxy_request,
+    ChatSseToResponsesConverter, UpstreamResponseProtocol,
+    anthropic_message_to_response_with_request, anthropic_messages_url,
+    anthropic_sse_to_responses_sse_with_request, chat_completion_to_response,
+    chat_completion_to_response_with_request, chat_completions_url, chat_sse_to_responses_sse,
+    chat_sse_to_responses_sse_with_request, is_chat_completions_proxy_path, is_models_proxy_path,
+    is_responses_proxy_path, models_url, open_chat_completions_proxy_request,
+    open_models_proxy_request, open_responses_proxy_request,
     open_responses_proxy_request_with_settings, responses_error_from_upstream,
     responses_to_anthropic_messages, responses_to_chat_completions,
-    send_upstream_request_with_header_timeout, upstream_header_timeout, upstream_http_client,
-    upstream_stream_header_timeout,
+    send_upstream_request_with_header_timeout, supported_reasoning_efforts_for_model,
+    upstream_header_timeout, upstream_http_client, upstream_stream_header_timeout,
 };
 use codex_elves_core::settings::{
     AggregateRelayMember, AggregateRelayProfile, AggregateRelayStrategy, BackendSettings,
@@ -924,7 +925,7 @@ fn responses_request_applies_ccswitch_reasoning_dialects() {
         "input": "hi"
     }))
     .unwrap();
-    assert_eq!(deepseek["reasoning_effort"], "high");
+    assert_eq!(deepseek["reasoning_effort"], "max");
 
     let openrouter = responses_to_chat_completions(json!({
         "model": "openrouter/deepseek/deepseek-r1",
@@ -932,7 +933,7 @@ fn responses_request_applies_ccswitch_reasoning_dialects() {
         "input": "hi"
     }))
     .unwrap();
-    assert_eq!(openrouter["reasoning"]["effort"], "high");
+    assert_eq!(openrouter["reasoning"]["effort"], "xhigh");
     assert!(openrouter.get("reasoning_effort").is_none());
 
     let openrouter_off = responses_to_chat_completions(json!({
@@ -951,6 +952,17 @@ fn responses_request_applies_ccswitch_reasoning_dialects() {
     .unwrap();
     assert_eq!(kimi["thinking"]["type"], "enabled");
     assert!(kimi.get("reasoning_effort").is_none());
+}
+
+#[test]
+fn deepseek_reasoning_efforts_match_official_levels() {
+    assert_eq!(
+        supported_reasoning_efforts_for_model(
+            "deepseek-reasoner",
+            UpstreamResponseProtocol::ChatCompletions,
+        ),
+        vec!["high", "max"]
+    );
 }
 
 #[test]

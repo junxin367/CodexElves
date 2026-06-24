@@ -1021,9 +1021,8 @@ experimental_bearer_token = "sk-new"
     assert_eq!(
         catalog["models"][0]["supported_reasoning_levels"],
         serde_json::json!([
-            { "effort": "low", "description": "Low reasoning" },
-            { "effort": "medium", "description": "Medium reasoning" },
-            { "effort": "high", "description": "High reasoning" }
+            { "effort": "high", "description": "High reasoning" },
+            { "effort": "max", "description": "Max reasoning" }
         ])
     );
     assert_eq!(catalog["models"][1]["slug"], "qwen3-coder");

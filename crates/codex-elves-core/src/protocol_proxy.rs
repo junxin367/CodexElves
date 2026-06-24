@@ -6218,9 +6218,12 @@ fn map_chat_reasoning_effort(
     style: ChatReasoningStyle,
     model: &str,
 ) -> Option<&'static str> {
-    let effort = effort.trim().to_ascii_lowercase();
+    let mut effort = effort.trim().to_ascii_lowercase();
     if matches!(effort.as_str(), "none" | "off" | "disabled") {
         return None;
+    }
+    if style == ChatReasoningStyle::DeepSeek && effort == "xhigh" {
+        effort = "max".to_string();
     }
 
     match style {
@@ -6266,7 +6269,7 @@ pub fn supported_reasoning_efforts_for_model(
         return levels(&["minimal", "low", "medium", "high", "xhigh"]);
     }
     if model.contains("deepseek") {
-        return levels(&["low", "medium", "high"]);
+        return levels(&["high", "max"]);
     }
     if model.contains("grok") || model.contains("xai") {
         return levels(&["low", "medium", "high"]);
