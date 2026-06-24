@@ -2806,6 +2806,150 @@ command = "old"
 }
 
 #[test]
+fn sync_live_config_context_entries_replaces_only_target_block_text() {
+    let live = r#"# keep this heading
+model = "gpt-5"
+
+[mcp_servers.alpha]
+command = "old"
+
+[features]
+goals = true
+
+[mcp_servers.beta]
+command = "beta"
+"#;
+    let context = r#"[mcp_servers.alpha]
+command = "new"
+args = ["--fresh"]
+"#;
+
+    let updated = sync_live_config_context_entries(live, context).unwrap();
+
+    assert!(updated.contains("# keep this heading"));
+    assert!(updated.contains("[mcp_servers.alpha]\ncommand = \"new\"\nargs = [\"--fresh\"]"));
+    assert!(updated.contains("[features]\ngoals = true"));
+    assert!(updated.contains("[mcp_servers.beta]\ncommand = \"beta\""));
+    assert!(!updated.contains("command = \"old\""));
+    assert!(
+        updated.find("[mcp_servers.alpha]").unwrap() < updated.find("[features]").unwrap(),
+        "existing block position should not drift:\n{updated}"
+    );
+    assert!(
+        updated.find("[features]").unwrap() < updated.find("[mcp_servers.beta]").unwrap(),
+        "unrelated sections should keep their order:\n{updated}"
+    );
+}
+
+#[test]
+fn sync_live_config_context_entries_appends_after_last_same_kind_block() {
+    let live = r#"model = "gpt-5"
+
+[mcp_servers.alpha]
+command = "alpha"
+
+[features]
+goals = true
+
+[mcp_servers.beta]
+command = "beta"
+
+[plugins.local]
+enabled = true
+"#;
+    let context = r#"[mcp_servers.gamma]
+command = "gamma"
+"#;
+
+    let updated = sync_live_config_context_entries(live, context).unwrap();
+
+    let beta = updated.find("[mcp_servers.beta]").unwrap();
+    let gamma = updated.find("[mcp_servers.gamma]").unwrap();
+    let plugin = updated.find("[plugins.local]").unwrap();
+    assert!(
+        beta < gamma,
+        "new mcp should follow last existing mcp:\n{updated}"
+    );
+    assert!(
+        gamma < plugin,
+        "new mcp should not be appended to file end:\n{updated}"
+    );
+    assert!(
+        updated.contains("[mcp_servers.beta]\ncommand = \"beta\"\n\n[mcp_servers.gamma]\ncommand = \"gamma\"\n\n[plugins.local]"),
+        "context blocks should be separated by one blank line:\n{updated}"
+    );
+}
+
+#[test]
+fn sync_live_config_context_entries_deletes_target_block_with_children_only() {
+    let live = r#"model = "gpt-5"
+
+[mcp_servers.keep]
+command = "keep"
+
+[mcp_servers.drop]
+command = "drop"
+
+[mcp_servers.drop.env]
+TOKEN = "old"
+
+[plugins.local]
+enabled = true
+"#;
+    let context = r#"[mcp_servers.drop]
+enabled = false
+command = "drop"
+"#;
+
+    let updated = sync_live_config_context_entries(live, context).unwrap();
+
+    assert!(updated.contains("[mcp_servers.keep]"));
+    assert!(!updated.contains("[mcp_servers.drop]"));
+    assert!(!updated.contains("[mcp_servers.drop.env]"));
+    assert!(updated.contains("[plugins.local]"));
+    assert!(
+        updated.contains("[mcp_servers.keep]\ncommand = \"keep\"\n\n[plugins.local]"),
+        "delete should leave a single blank line between adjacent blocks:\n{updated}"
+    );
+}
+
+#[test]
+fn sync_live_config_context_entries_matches_quoted_ids_semantically() {
+    let live = r#"model = "gpt-5"
+
+[plugins.'browser@openai-bundled']
+enabled = true
+"#;
+    let context = r#"[plugins."browser@openai-bundled"]
+enabled = false
+"#;
+
+    let updated = sync_live_config_context_entries(live, context).unwrap();
+
+    assert!(!updated.contains("browser@openai-bundled"));
+    assert_eq!(updated, "model = \"gpt-5\"\n");
+}
+
+#[test]
+fn sync_live_config_context_entries_rejects_invalid_live_without_patch() {
+    let live = r#"model = "gpt-5"
+
+[mcp_servers.alpha]
+command = "old"
+
+[mcp_servers.alpha]
+command = "duplicate"
+"#;
+    let context = r#"[mcp_servers.alpha]
+command = "new"
+"#;
+
+    let error = sync_live_config_context_entries(live, context).unwrap_err();
+
+    assert!(error.to_string().contains("config.toml TOML 解析失败"));
+}
+
+#[test]
 fn apply_relay_profile_to_home_with_switch_rules_writes_provider_even_when_auth_has_no_api_key() {
     let temp = tempfile::tempdir().unwrap();
     let profile = RelayProfile {

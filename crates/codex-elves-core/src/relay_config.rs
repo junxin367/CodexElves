@@ -967,24 +967,24 @@ pub fn sync_live_config_context_entries(
     live_config: &str,
     context_config: &str,
 ) -> anyhow::Result<String> {
-    let normalized_live = normalize_duplicate_toml_text(live_config);
     let normalized_context = normalize_duplicate_toml_text(context_config);
-    let mut live_doc = parse_toml_document(&normalized_live)?;
+    parse_toml_document(live_config)?;
     if normalized_context.trim().is_empty() {
-        return Ok(normalize_optional_toml(live_doc));
+        return Ok(normalize_text_toml_preserving_layout(live_config));
     }
     let managed_doc = parse_toml_document(&normalized_context)?;
-    let mut context_doc = managed_doc.clone();
-    remove_disabled_context_tables(context_doc.as_table_mut());
-    // 仅删除“禁用”的受管项（managed 有但启用集合里没有的）；
-    // 启用项交由 merge 原地更新，保留其在 config 中的原有位置，避免大范围位置漂移。
-    remove_disabled_managed_entries(
-        live_doc.as_table_mut(),
-        managed_doc.as_table(),
-        context_doc.as_table(),
-    );
-    merge_managed_context_tables(live_doc.as_table_mut(), context_doc.as_table());
-    Ok(normalize_optional_toml(live_doc))
+    let context_blocks = context_text_blocks(&normalized_context);
+    let mut updated = live_config.to_string();
+    for block in context_blocks {
+        if context_doc_entry_enabled(&managed_doc, &block.table_name, &block.id) {
+            updated =
+                upsert_context_text_block(&updated, &block.table_name, &block.id, &block.text);
+        } else {
+            updated = delete_context_text_block(&updated, &block.table_name, &block.id);
+        }
+    }
+    parse_toml_document(&updated)?;
+    Ok(normalize_text_toml_preserving_layout(&updated))
 }
 
 fn preserve_unmanaged_live_context_entries(
@@ -1042,91 +1042,6 @@ fn filter_context_table_for_ids(
         .collect::<Vec<_>>();
     for id in remove_ids {
         context_table.remove(&id);
-    }
-}
-
-fn merge_managed_context_tables(target: &mut toml_edit::Table, managed: &toml_edit::Table) {
-    for table_name in ["mcp_servers", "skills", "plugins"] {
-        merge_managed_context_table(target, managed, table_name);
-    }
-}
-
-fn merge_managed_context_table(
-    target: &mut toml_edit::Table,
-    managed: &toml_edit::Table,
-    table_name: &str,
-) {
-    let Some(managed_item) = managed.get(table_name) else {
-        return;
-    };
-    let Some(managed_table) = managed_item.as_table_like() else {
-        return;
-    };
-    let target_existed = target.get(table_name).is_some();
-    if !target_existed {
-        let mut created = Table::new();
-        // 父表设为隐式，避免渲染出多余的空 `[mcp_servers]` 表头。
-        created.set_implicit(true);
-        target[table_name] = Item::Table(created);
-    }
-    let Some(target_table) = target.get_mut(table_name).and_then(Item::as_table_mut) else {
-        target[table_name] = managed_item.clone();
-        return;
-    };
-    for (id, item) in managed_table.iter() {
-        let is_new = target_table.get(id).is_none();
-        target_table.insert(id, item.clone());
-        // 新插入的子表（如 [mcp_servers.context7]）表头前补一个空行，
-        // 与上一个配置块保持可读的空行间隔。
-        if is_new && let Some(child) = target_table.get_mut(id).and_then(Item::as_table_mut) {
-            ensure_leading_blank_line(child.decor_mut());
-        }
-    }
-}
-
-/// 确保表头装饰的前缀以空行开头，使新表与上一块配置之间有空行间隔。
-/// 若前缀本就以换行开头（已有空行）则保持不变，避免重复叠加。
-fn ensure_leading_blank_line(decor: &mut toml_edit::Decor) {
-    let prefix = decor
-        .prefix()
-        .and_then(|raw| raw.as_str())
-        .unwrap_or("")
-        .to_string();
-    if prefix.starts_with('\n') || prefix.starts_with("\r\n") {
-        return;
-    }
-    decor.set_prefix(format!("\n{prefix}"));
-}
-
-/// 仅从 live 中删除“受管但已禁用”的 context 项（mcp_servers/skills/plugins）。
-/// 即 managed（全部受管项）里有、但 enabled（启用项）里没有的 id。
-/// 启用项不在此删除，交由 merge 原地更新以保留位置。
-fn remove_disabled_managed_entries(
-    target: &mut toml_edit::Table,
-    managed: &toml_edit::Table,
-    enabled: &toml_edit::Table,
-) {
-    for table_name in ["mcp_servers", "skills", "plugins"] {
-        let Some(managed_table) = managed.get(table_name).and_then(Item::as_table_like) else {
-            continue;
-        };
-        let enabled_ids: std::collections::HashSet<String> = enabled
-            .get(table_name)
-            .and_then(Item::as_table_like)
-            .map(|table| table.iter().map(|(id, _)| id.to_string()).collect())
-            .unwrap_or_default();
-        let Some(target_table) = target.get_mut(table_name).and_then(Item::as_table_like_mut)
-        else {
-            continue;
-        };
-        let remove_ids: Vec<String> = managed_table
-            .iter()
-            .map(|(id, _)| id.to_string())
-            .filter(|id| !enabled_ids.contains(id))
-            .collect();
-        for id in remove_ids {
-            target_table.remove(&id);
-        }
     }
 }
 
@@ -1193,6 +1108,247 @@ fn remove_disabled_context_tables(table: &mut toml_edit::Table) {
         for id in disabled_ids {
             context_table.remove(&id);
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextTextBlock {
+    table_name: String,
+    id: String,
+    start: usize,
+    end: usize,
+    text: String,
+}
+
+fn context_text_blocks(contents: &str) -> Vec<ContextTextBlock> {
+    let lines = normalized_lines(contents);
+    let mut blocks = Vec::new();
+    let mut index = 0;
+
+    while index < lines.len() {
+        let Some((table_name, id)) = context_block_header(&lines[index]) else {
+            index += 1;
+            continue;
+        };
+
+        let start = index;
+        let mut scan_end = start + 1;
+        while scan_end < lines.len() {
+            if let Some(path) = toml_table_path_from_line(&lines[scan_end]) {
+                if !toml_path_belongs_to_context_id(&path, &table_name, &id) {
+                    break;
+                }
+            }
+            scan_end += 1;
+        }
+
+        let mut end = scan_end;
+        while end > start + 1 && lines[end - 1].trim().is_empty() {
+            end -= 1;
+        }
+
+        blocks.push(ContextTextBlock {
+            table_name,
+            id,
+            start,
+            end,
+            text: lines[start..end].join("\n"),
+        });
+        index = scan_end;
+    }
+
+    blocks
+}
+
+fn context_block_header(line: &str) -> Option<(String, String)> {
+    let path = toml_table_path_from_line(line)?;
+    if path.len() < 2 || !is_context_table_name(&path[0]) {
+        return None;
+    }
+    Some((path[0].clone(), path[1].clone()))
+}
+
+fn toml_path_belongs_to_context_id(path: &[String], table_name: &str, id: &str) -> bool {
+    path.len() >= 2 && path[0] == table_name && path[1] == id
+}
+
+fn is_context_table_name(table_name: &str) -> bool {
+    matches!(table_name, "mcp_servers" | "skills" | "plugins")
+}
+
+fn toml_table_path_from_line(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('[') {
+        return None;
+    }
+
+    let doc_text = if trimmed.starts_with("[[") {
+        let end = trimmed.find("]]")?;
+        format!("[{}]\n", trimmed[2..end].trim())
+    } else {
+        format!("{trimmed}\n")
+    };
+    let doc = doc_text.parse::<DocumentMut>().ok()?;
+    single_table_path(doc.as_table())
+}
+
+fn single_table_path(table: &dyn TableLike) -> Option<Vec<String>> {
+    let mut entries = table.iter();
+    let (key, item) = entries.next()?;
+    if entries.next().is_some() {
+        return None;
+    }
+
+    let mut path = vec![key.to_string()];
+    if let Some(child) = item.as_table_like()
+        && let Some(mut child_path) = single_table_path(child)
+    {
+        path.append(&mut child_path);
+    }
+    Some(path)
+}
+
+fn context_doc_entry_enabled(doc: &DocumentMut, table_name: &str, id: &str) -> bool {
+    doc.get(table_name)
+        .and_then(Item::as_table)
+        .and_then(|table| table.get(id))
+        .and_then(Item::as_table)
+        .map(context_entry_enabled)
+        .unwrap_or(true)
+}
+
+fn upsert_context_text_block(contents: &str, table_name: &str, id: &str, section: &str) -> String {
+    let mut lines = normalized_lines(contents);
+    let section_lines = normalized_section_lines(section);
+    if section_lines.is_empty() {
+        return finish_toml_lines(lines);
+    }
+
+    if let Some(block) = context_text_blocks(contents)
+        .into_iter()
+        .find(|block| block.table_name == table_name && block.id == id)
+    {
+        lines.splice(block.start..block.end, section_lines.clone());
+        ensure_context_block_spacing(&mut lines, block.start, section_lines.len());
+        return finish_toml_lines(lines);
+    }
+
+    let insert_at = context_text_blocks(contents)
+        .into_iter()
+        .filter(|block| block.table_name == table_name)
+        .map(|block| block.end)
+        .last()
+        .unwrap_or_else(|| {
+            while lines.last().is_some_and(|line| line.trim().is_empty()) {
+                lines.pop();
+            }
+            lines.len()
+        });
+
+    lines.splice(insert_at..insert_at, section_lines.clone());
+    ensure_context_block_spacing(&mut lines, insert_at, section_lines.len());
+    finish_toml_lines(lines)
+}
+
+fn delete_context_text_block(contents: &str, table_name: &str, id: &str) -> String {
+    let mut lines = normalized_lines(contents);
+    let Some(block) = context_text_blocks(contents)
+        .into_iter()
+        .find(|block| block.table_name == table_name && block.id == id)
+    else {
+        return finish_toml_lines(lines);
+    };
+
+    lines.drain(block.start..block.end);
+    normalize_gap_after_delete(&mut lines, block.start);
+    finish_toml_lines(lines)
+}
+
+fn normalized_section_lines(section: &str) -> Vec<String> {
+    section
+        .trim()
+        .lines()
+        .map(|line| line.trim_end().to_string())
+        .collect()
+}
+
+fn ensure_context_block_spacing(lines: &mut Vec<String>, mut start: usize, block_len: usize) {
+    if block_len == 0 {
+        return;
+    }
+
+    if start > 0 {
+        let mut blank_count = 0;
+        while start > blank_count && lines[start - blank_count - 1].trim().is_empty() {
+            blank_count += 1;
+        }
+        if blank_count == 0 {
+            lines.insert(start, String::new());
+            start += 1;
+        } else if blank_count > 1 {
+            lines.drain(start - blank_count..start - 1);
+            start -= blank_count - 1;
+        }
+    }
+
+    let end = start + block_len;
+    if end < lines.len() {
+        let mut blank_count = 0;
+        while end + blank_count < lines.len() && lines[end + blank_count].trim().is_empty() {
+            blank_count += 1;
+        }
+        if blank_count == 0 {
+            lines.insert(end, String::new());
+        } else if blank_count > 1 {
+            lines.drain(end + 1..end + blank_count);
+        }
+    }
+}
+
+fn normalize_gap_after_delete(lines: &mut Vec<String>, mut index: usize) {
+    if lines.is_empty() {
+        return;
+    }
+
+    if index == 0 {
+        while lines.first().is_some_and(|line| line.trim().is_empty()) {
+            lines.remove(0);
+        }
+        return;
+    }
+
+    if index >= lines.len() {
+        while lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.pop();
+        }
+        return;
+    }
+
+    while index > 0 && lines[index - 1].trim().is_empty() {
+        lines.remove(index - 1);
+        index -= 1;
+    }
+    while index < lines.len() && lines[index].trim().is_empty() {
+        lines.remove(index);
+    }
+    if index > 0 && index < lines.len() {
+        lines.insert(index, String::new());
+    }
+}
+
+fn finish_toml_lines(mut lines: Vec<String>) -> String {
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    let contents = lines.join("\n");
+    normalize_text_toml_preserving_layout(&contents)
+}
+
+fn normalize_text_toml_preserving_layout(contents: &str) -> String {
+    if contents.trim().is_empty() {
+        String::new()
+    } else {
+        ensure_trailing_newline(contents.to_string())
     }
 }
 
