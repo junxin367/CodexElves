@@ -26,6 +26,11 @@ jobs:
     outputs:
       tag: ${{ steps.release-tag.outputs.tag }}
     steps:
+      - name: Checkout release history
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
       - name: Resolve release tag
         id: release-tag
         shell: bash
@@ -47,29 +52,66 @@ jobs:
           set -euo pipefail
           VERSION="${TAG#v}"
           VERSION="${VERSION#V}"
-          cat > release-notes.md <<EOF
-          ## $TAG
+          BASE_VERSION="${VERSION%.*}"
+          PREVIOUS_TAG="$(git tag --list "v${BASE_VERSION}.*" --sort=-v:refname | grep -Fvx "$TAG" | head -n1 || true)"
+          if [ -z "$PREVIOUS_TAG" ]; then
+            PREVIOUS_TAG="$(git tag --list "V${BASE_VERSION}.*" --sort=-v:refname | grep -Fvx "$TAG" | head -n1 || true)"
+          fi
+          if [ -n "$PREVIOUS_TAG" ]; then
+            RANGE="$PREVIOUS_TAG..$TAG"
+            CHANGES_URL="https://github.com/$REPO/compare/$PREVIOUS_TAG...$TAG"
+          else
+            RANGE="$TAG"
+            CHANGES_URL="https://github.com/$REPO/commits/$TAG"
+          fi
 
-          CodexElves $VERSION 发布版本。
+          commit_lines() {
+            local pattern="$1"
+            git log --format=%s "$RANGE" \
+              | grep -E "$pattern" \
+              | grep -Ev '^chore\(release\):' \
+              | sed -E 's/^[a-z]+(\([^)]+\))?:[[:space:]]*/- /' \
+              || true
+          }
 
-          ### 安装包
-          - Windows: \`CodexElves-$VERSION-windows-x64-setup.exe\`
-          - macOS Intel: \`CodexElves-$VERSION-macos-x64.dmg\`
-          - macOS Apple Silicon: \`CodexElves-$VERSION-macos-arm64.dmg\`
+          FEATURE_NOTES="$(commit_lines '^(feat|perf)(\([^)]+\))?:')"
+          MAINTENANCE_NOTES="$(commit_lines '^(fix|refactor|docs|test|ci|chore)(\([^)]+\))?:')"
 
-          ### 说明
-          - 本 Release 由 GitHub Actions 自动编译并上传安装资产。
-          - \`latest.json\` 会在所有平台资产上传后自动更新。
+          {
+            echo "## $TAG"
+            echo
+            echo "CodexElves $VERSION 发布版本。"
+            echo
+            echo "### 功能更新"
+            if [ -n "$FEATURE_NOTES" ]; then
+              echo "$FEATURE_NOTES"
+            else
+              echo "- 本版本包含应用能力和体验更新。"
+            fi
+            echo
+            echo "### 修复与维护"
+            if [ -n "$MAINTENANCE_NOTES" ]; then
+              echo "$MAINTENANCE_NOTES"
+            else
+              echo "- 无额外维护项。"
+            fi
+            echo
+            echo "### 安装包"
+            echo "- Windows: \`CodexElves-$VERSION-windows-x64-setup.exe\`"
+            echo "- macOS Intel: \`CodexElves-$VERSION-macos-x64.dmg\`"
+            echo "- macOS Apple Silicon: \`CodexElves-$VERSION-macos-arm64.dmg\`"
+            echo
+            echo "### 说明"
+            echo "- 本 Release 由 GitHub Actions 自动编译并上传安装资产。"
+            echo "- \`latest.json\` 会在所有平台资产上传后自动更新。"
+            echo
+            echo "### 完整变更"
+            echo "$CHANGES_URL"
+          } > release-notes.md
 
-          ### 完整变更
-          https://github.com/$REPO/commits/$TAG
-          EOF
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             echo "Release already exists: $TAG"
-            BODY="$(gh release view "$TAG" --repo "$REPO" --json body --jq .body)"
-            if [ -z "$BODY" ] || [[ "$BODY" == "**Full Changelog**"* ]]; then
-              gh release edit "$TAG" --repo "$REPO" --notes-file release-notes.md
-            fi
+            gh release edit "$TAG" --repo "$REPO" --notes-file release-notes.md
           else
             gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes-file release-notes.md --target "$GITHUB_SHA"
           fi
