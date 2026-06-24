@@ -304,7 +304,11 @@ fn github_release_workflow_can_build_assets_from_tags_and_manual_dispatch() {
     assert!(workflow.contains("gh release create \"$TAG\""));
     assert!(workflow.contains("release-notes.md"));
     assert!(workflow.contains("gh release edit \"$TAG\""));
-    assert!(workflow.contains("[[ \"$BODY\" == \"**Full Changelog**\"* ]]"));
+    assert!(workflow.contains("CodexElves $VERSION 发布版本。"));
+    assert!(
+        workflow
+            .contains("gh release edit \"$TAG\" --repo \"$REPO\" --notes-file release-notes.md")
+    );
     assert!(workflow.contains("ref: ${{ needs.ensure-release.outputs.tag }}"));
     assert!(workflow.contains("TAG: ${{ needs.ensure-release.outputs.tag }}"));
     assert!(workflow.contains("gh release upload $env:TAG @($files.FullName) --clobber"));
@@ -396,13 +400,13 @@ fn relay_context_management_is_global_not_supplier_scoped() {
     assert!(app_tsx.contains("function ContextScreen"));
     assert!(app_tsx.contains("route === \"context\""));
     assert!(app_tsx.contains("if (next === \"context\")"));
-    assert!(app_tsx.contains("selectedContextConfigToml(entries)"));
+    assert!(app_tsx.contains("contextConfigTextFromConfig(configContents, entries)"));
     assert!(app_tsx.contains("toggleContextEntryEnabled"));
     assert!(app_tsx.contains("relayFiles={relayFiles}"));
     assert!(app_tsx.contains("read_live_context_entries"));
     assert!(app_tsx.contains("sync_live_context_entries"));
     assert!(app_tsx.contains("refreshLiveContextEntries"));
-    assert!(app_tsx.contains("syncLiveContextEntries(next, true)"));
+    assert!(app_tsx.contains("syncLiveContextEntries(next, true, { kind"));
     assert!(app_tsx.contains("function contextEntriesWithLiveEntries"));
     assert!(app_tsx.contains("liveByKind"));
     assert!(app_tsx.contains("mergeLiveContextEntries"));
