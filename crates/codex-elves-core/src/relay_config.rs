@@ -891,9 +891,9 @@ pub fn list_context_entries_from_common_config(
     let normalized = normalize_duplicate_toml_text(common_config);
     let doc = parse_toml_document(&normalized)?;
     Ok(CodexContextEntries {
-        mcp_servers: list_context_entries_for_table(&doc, "mcp_servers"),
-        skills: list_context_entries_for_table(&doc, "skills"),
-        plugins: list_context_entries_for_table(&doc, "plugins"),
+        mcp_servers: list_context_entries_for_table(&normalized, &doc, "mcp_servers"),
+        skills: list_context_entries_for_table(&normalized, &doc, "skills"),
+        plugins: list_context_entries_for_table(&normalized, &doc, "plugins"),
     })
 }
 
@@ -908,17 +908,15 @@ pub fn upsert_context_entry_in_common_config(
         anyhow::bail!("上下文 id 不能为空");
     }
     let table_name = context_table_name(kind)?;
-    let body_doc = parse_toml_document(toml_body)?;
-    let normalized = normalize_duplicate_toml_text(common_config);
-    let mut doc = parse_toml_document(&normalized)?;
-    if !doc.as_table().contains_key(table_name) {
-        doc[table_name] = toml_edit::table();
-    }
-    if doc[table_name].as_table().is_none() {
-        anyhow::bail!("{table_name} 必须是 TOML 表");
-    }
-    doc[table_name][id] = Item::Table(body_doc.as_table().clone());
-    Ok(normalize_optional_toml(doc))
+    let existing_header = matching_context_text_blocks(common_config, table_name, id)
+        .into_iter()
+        .find(|block| block.is_root)
+        .and_then(|block| normalized_lines(&block.text).into_iter().next());
+    let section =
+        context_entry_section_text(table_name, id, toml_body, existing_header.as_deref())?;
+    let updated = upsert_context_text_block(common_config, table_name, id, &section);
+    parse_toml_document(&updated)?;
+    Ok(normalize_text_toml_preserving_layout(&updated))
 }
 
 pub fn delete_context_entry_from_common_config(
@@ -927,15 +925,9 @@ pub fn delete_context_entry_from_common_config(
     id: &str,
 ) -> anyhow::Result<String> {
     let table_name = context_table_name(kind)?;
-    let normalized = normalize_duplicate_toml_text(common_config);
-    let mut doc = parse_toml_document(&normalized)?;
-    if let Some(table) = doc[table_name].as_table_mut() {
-        table.remove(id.trim());
-        if table.is_empty() {
-            doc.as_table_mut().remove(table_name);
-        }
-    }
-    Ok(normalize_optional_toml(doc))
+    let updated = delete_context_text_block(common_config, table_name, id.trim());
+    parse_toml_document(&updated)?;
+    Ok(normalize_text_toml_preserving_layout(&updated))
 }
 
 pub fn filter_common_config_for_selection(
@@ -985,6 +977,45 @@ pub fn sync_live_config_context_entries(
     }
     parse_toml_document(&updated)?;
     Ok(normalize_text_toml_preserving_layout(&updated))
+}
+
+pub fn sync_live_config_context_entry(
+    live_config: &str,
+    context_config: &str,
+    kind: &str,
+    id: &str,
+) -> anyhow::Result<String> {
+    let table_name = context_table_name(kind)?;
+    let id = id.trim();
+    if id.is_empty() {
+        anyhow::bail!("上下文 id 不能为空");
+    }
+
+    let normalized_context = normalize_duplicate_toml_text(context_config);
+    parse_toml_document(live_config)?;
+    let managed_doc = parse_toml_document(&normalized_context)?;
+    let blocks = matching_context_text_blocks(&normalized_context, table_name, id);
+    let section = context_section_text_from_blocks(&blocks);
+    let updated = if let Some(section) = section {
+        if context_doc_entry_enabled(&managed_doc, table_name, id) {
+            upsert_context_text_block(live_config, table_name, id, &section)
+        } else {
+            delete_context_text_block(live_config, table_name, id)
+        }
+    } else {
+        delete_context_text_block(live_config, table_name, id)
+    };
+    parse_toml_document(&updated)?;
+    Ok(normalize_text_toml_preserving_layout(&updated))
+}
+
+fn context_section_text_from_blocks(blocks: &[ContextTextBlock]) -> Option<String> {
+    let root_index = blocks.iter().position(|block| block.is_root)?;
+    let mut sections = vec![blocks[root_index].text.trim_end().to_string()];
+    sections.extend(blocks.iter().enumerate().filter_map(|(index, block)| {
+        (index != root_index).then(|| block.text.trim_end().to_string())
+    }));
+    Some(sections.join("\n\n"))
 }
 
 fn preserve_unmanaged_live_context_entries(
@@ -1135,8 +1166,11 @@ fn context_text_blocks(contents: &str) -> Vec<ContextTextBlock> {
         let start = index;
         let mut scan_end = start + 1;
         while scan_end < lines.len() {
-            if let Some(path) = toml_table_path_from_line(&lines[scan_end]) {
+            if let Some(path) = toml_header_path_from_line(&lines[scan_end]) {
                 if !toml_path_belongs_to_context_id(&path, &table_name, &id) {
+                    break;
+                }
+                if !is_root && path.len() == 2 {
                     break;
                 }
             }
@@ -1170,6 +1204,95 @@ fn context_block_header(line: &str) -> Option<(String, String, bool)> {
     Some((path[0].clone(), path[1].clone(), path.len() == 2))
 }
 
+fn toml_header_path_from_line(line: &str) -> Option<Vec<String>> {
+    toml_table_path_from_line(line).or_else(|| toml_array_table_path_from_line(line))
+}
+
+fn context_block_body_text(block: &ContextTextBlock) -> String {
+    let body = normalized_lines(&block.text)
+        .into_iter()
+        .skip(1)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string();
+    normalize_text_toml_preserving_layout(&body)
+}
+
+fn context_entry_section_text(
+    table_name: &str,
+    id: &str,
+    toml_body: &str,
+    root_header: Option<&str>,
+) -> anyhow::Result<String> {
+    let mut lines = vec![
+        root_header
+            .map(|header| header.trim_end().to_string())
+            .unwrap_or_else(|| {
+                format!(
+                    "[{}.{}]",
+                    toml_key_segment(table_name),
+                    toml_key_segment(id)
+                )
+            }),
+    ];
+
+    for line in normalized_section_lines(toml_body) {
+        if let Some(line) = context_body_line_to_absolute(table_name, id, &line)? {
+            lines.push(line);
+        }
+    }
+
+    let section = lines.join("\n");
+    parse_toml_document(&section)?;
+    Ok(section)
+}
+
+fn context_body_line_to_absolute(
+    table_name: &str,
+    id: &str,
+    line: &str,
+) -> anyhow::Result<Option<String>> {
+    if let Some(path) = toml_table_path_from_line(line) {
+        return context_body_path_to_absolute(table_name, id, line, &path, false);
+    }
+    if let Some(path) = toml_array_table_path_from_line(line) {
+        return context_body_path_to_absolute(table_name, id, line, &path, true);
+    }
+    Ok(Some(line.trim_end().to_string()))
+}
+
+fn context_body_path_to_absolute(
+    table_name: &str,
+    id: &str,
+    line: &str,
+    path: &[String],
+    is_array: bool,
+) -> anyhow::Result<Option<String>> {
+    if path.len() >= 2 && path[0] == table_name && path[1] == id {
+        if path.len() == 2 {
+            return Ok(None);
+        }
+        return Ok(Some(line.trim_end().to_string()));
+    }
+    if path.len() >= 2 && is_context_table_name(&path[0]) {
+        anyhow::bail!("不能在一个扩展项中修改其他扩展项配置：{line}");
+    }
+
+    let mut absolute_path = vec![table_name.to_string(), id.to_string()];
+    absolute_path.extend(path.iter().cloned());
+    let joined = absolute_path
+        .iter()
+        .map(|segment| toml_key_segment(segment))
+        .collect::<Vec<_>>()
+        .join(".");
+    if is_array {
+        Ok(Some(format!("[[{joined}]]")))
+    } else {
+        Ok(Some(format!("[{joined}]")))
+    }
+}
+
 fn toml_path_belongs_to_context_id(path: &[String], table_name: &str, id: &str) -> bool {
     path.len() >= 2 && path[0] == table_name && path[1] == id
 }
@@ -1192,6 +1315,17 @@ fn toml_table_path_from_line(line: &str) -> Option<Vec<String>> {
     single_table_path(doc.as_table())
 }
 
+fn toml_array_table_path_from_line(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("[[") {
+        return None;
+    }
+
+    let doc_text = format!("{trimmed}\n");
+    let doc = doc_text.parse::<DocumentMut>().ok()?;
+    single_table_or_array_path(doc.as_table())
+}
+
 fn single_table_path(table: &dyn TableLike) -> Option<Vec<String>> {
     let mut entries = table.iter();
     let (key, item) = entries.next()?;
@@ -1202,6 +1336,25 @@ fn single_table_path(table: &dyn TableLike) -> Option<Vec<String>> {
     let mut path = vec![key.to_string()];
     if let Some(child) = item.as_table_like()
         && let Some(mut child_path) = single_table_path(child)
+    {
+        path.append(&mut child_path);
+    }
+    Some(path)
+}
+
+fn single_table_or_array_path(table: &dyn TableLike) -> Option<Vec<String>> {
+    let mut entries = table.iter();
+    let (key, item) = entries.next()?;
+    if entries.next().is_some() {
+        return None;
+    }
+
+    let mut path = vec![key.to_string()];
+    if item.as_array_of_tables().is_some() {
+        return Some(path);
+    }
+    if let Some(child) = item.as_table_like()
+        && let Some(mut child_path) = single_table_or_array_path(child)
     {
         path.append(&mut child_path);
     }
@@ -1802,6 +1955,128 @@ fn fast_service_tier_capability(slug: &str) -> Option<(Value, Value)> {
     ))
 }
 
+const GENERATED_CATALOG_FALLBACK_BASE_INSTRUCTIONS: &str = "You are Codex, a coding agent. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.";
+
+fn neutralize_generated_catalog_prompt_text(text: &str) -> String {
+    let text = remove_gpt_identity_phrases(text);
+    replace_gpt_identity_tokens(&text)
+}
+
+fn remove_gpt_identity_phrases(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut result = String::with_capacity(text.len());
+    let mut index = 0;
+
+    while let Some((start, pattern_len)) = find_next_gpt_identity_phrase(&lower, index) {
+        result.push_str(&text[index..start]);
+        let end = consume_optional_model_word(
+            text,
+            consume_gpt_identity_suffix(text, start + pattern_len),
+        );
+        index = end;
+    }
+
+    result.push_str(&text[index..]);
+    result
+}
+
+fn find_next_gpt_identity_phrase(lower: &str, from: usize) -> Option<(usize, usize)> {
+    [" based on gpt", " based on the gpt"]
+        .into_iter()
+        .filter_map(|pattern| {
+            lower[from..]
+                .find(pattern)
+                .map(|offset| (from + offset, pattern.len()))
+        })
+        .min_by_key(|(start, _)| *start)
+}
+
+fn consume_gpt_identity_suffix(text: &str, from: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut cursor = from;
+
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
+            cursor += 1;
+        } else if byte == b'.'
+            && cursor + 1 < bytes.len()
+            && bytes[cursor + 1].is_ascii_alphanumeric()
+        {
+            cursor += 1;
+        } else {
+            break;
+        }
+    }
+
+    cursor
+}
+
+fn consume_optional_model_word(text: &str, from: usize) -> usize {
+    let candidate = text.get(from..from + 6).unwrap_or_default();
+    if candidate.eq_ignore_ascii_case(" model") {
+        from + 6
+    } else {
+        from
+    }
+}
+
+fn replace_gpt_identity_tokens(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut result = String::with_capacity(text.len());
+    let mut index = 0;
+
+    while let Some(offset) = lower[index..].find("gpt") {
+        let start = index + offset;
+        result.push_str(&text[index..start]);
+        if is_gpt_identity_token_start(text, start) {
+            let end = consume_gpt_identity_suffix(text, start + 3);
+            result.push_str("Codex");
+            index = end;
+        } else {
+            result.push_str(&text[start..start + 3]);
+            index = start + 3;
+        }
+    }
+
+    result.push_str(&text[index..]);
+    result
+}
+
+fn is_gpt_identity_token_start(text: &str, start: usize) -> bool {
+    let bytes = text.as_bytes();
+    if start > 0 {
+        let previous = bytes[start - 1];
+        if previous.is_ascii_alphanumeric() || previous == b'_' || previous == b'-' {
+            return false;
+        }
+    }
+
+    let Some(next) = bytes.get(start + 3).copied() else {
+        return false;
+    };
+    next.is_ascii_digit() || next == b'-' || next == b'_'
+}
+
+fn neutralize_generated_catalog_prompt_value(value: Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(neutralize_generated_catalog_prompt_text(&text)),
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(neutralize_generated_catalog_prompt_value)
+                .collect(),
+        ),
+        Value::Object(object) => Value::Object(
+            object
+                .into_iter()
+                .map(|(key, value)| (key, neutralize_generated_catalog_prompt_value(value)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 fn generated_catalog_prompt_fields() -> (String, Value) {
     let source = serde_json::from_str::<Value>(include_str!("../assets/codex-models.json")).ok();
     let first_model = source
@@ -1813,11 +2088,12 @@ fn generated_catalog_prompt_fields() -> (String, Value) {
         .and_then(|model| model.get("base_instructions"))
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or("You are Codex, a coding agent based on GPT-5.")
-        .to_string();
+        .map(neutralize_generated_catalog_prompt_text)
+        .unwrap_or_else(|| GENERATED_CATALOG_FALLBACK_BASE_INSTRUCTIONS.to_string());
     let model_messages = first_model
         .and_then(|model| model.get("model_messages"))
         .cloned()
+        .map(neutralize_generated_catalog_prompt_value)
         .unwrap_or_else(|| {
             json!({
                 "instructions_template": base_instructions.clone(),
@@ -2287,28 +2563,60 @@ fn normalize_optional_toml(doc: DocumentMut) -> String {
     }
 }
 
-fn list_context_entries_for_table(doc: &DocumentMut, table_name: &str) -> Vec<CodexContextEntry> {
+fn list_context_entries_for_table(
+    contents: &str,
+    doc: &DocumentMut,
+    table_name: &str,
+) -> Vec<CodexContextEntry> {
     let Some(table) = doc.get(table_name).and_then(Item::as_table) else {
         return Vec::new();
     };
-    table
-        .iter()
-        .filter_map(|(id, item)| {
-            let table = item.as_table()?;
-            if table.is_implicit() {
-                return None;
-            }
-            let body = table_body_to_string(table);
-            Some(CodexContextEntry {
-                id: id.to_string(),
-                kind: context_kind_name(table_name).to_string(),
-                title: id.to_string(),
-                summary: context_entry_summary(&body),
-                toml_body: body,
-                enabled: context_entry_enabled(table),
-            })
+    let mut seen_ids = HashSet::new();
+    let mut entries = Vec::new();
+
+    for block in context_text_blocks(contents)
+        .into_iter()
+        .filter(|block| block.table_name == table_name && block.is_root)
+    {
+        if !seen_ids.insert(block.id.clone()) {
+            continue;
+        }
+        let Some(table) = table.get(&block.id).and_then(Item::as_table) else {
+            continue;
+        };
+        if table.is_implicit() {
+            continue;
+        }
+        let body = context_block_body_text(&block);
+        entries.push(CodexContextEntry {
+            id: block.id.clone(),
+            kind: context_kind_name(table_name).to_string(),
+            title: block.id,
+            summary: context_entry_summary(&body),
+            toml_body: body,
+            enabled: context_entry_enabled(table),
+        });
+    }
+
+    entries.extend(table.iter().filter_map(|(id, item)| {
+        if seen_ids.contains(id) {
+            return None;
+        }
+        let table = item.as_table()?;
+        if table.is_implicit() {
+            return None;
+        }
+        let body = table_body_to_string(table);
+        Some(CodexContextEntry {
+            id: id.to_string(),
+            kind: context_kind_name(table_name).to_string(),
+            title: id.to_string(),
+            summary: context_entry_summary(&body),
+            toml_body: body,
+            enabled: context_entry_enabled(table),
         })
-        .collect()
+    }));
+    entries
 }
 
 fn table_body_to_string(table: &Table) -> String {
@@ -3078,6 +3386,48 @@ fn account_label_from_jwt(token: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_catalog_prompt_neutralizes_gpt_identity_tokens_without_version_residue() {
+        let neutralized = neutralize_generated_catalog_prompt_text(
+            "You are Codex, a coding agent based on GPT-5.5. GPT5.5 is available. Powered by GPT-5-Codex.",
+        );
+
+        assert!(neutralized.contains("You are Codex, a coding agent."));
+        assert!(!neutralized.contains("GPT-5"));
+        assert!(!neutralized.contains("GPT5"));
+        assert!(!neutralized.contains(".5"));
+        assert!(!neutralized.contains("based on"));
+    }
+
+    #[test]
+    fn generated_catalog_prompt_neutralizes_nested_model_messages() {
+        let value = json!({
+            "instructions_template": "You are Codex, a coding agent based on the GPT-5 model.",
+            "instructions_variables": {
+                "personality_pragmatic": "Use GPT-5.5 behavior carefully."
+            }
+        });
+
+        let neutralized = neutralize_generated_catalog_prompt_value(value);
+        let text = neutralized.to_string();
+        assert!(!text.contains("GPT-5"));
+        assert!(!text.contains(".5"));
+        assert!(text.contains("Codex"));
+    }
+
+    #[test]
+    fn generated_catalog_prompt_neutralizes_older_gpt_versions_without_word_damage() {
+        let neutralized = neutralize_generated_catalog_prompt_text(
+            "Prefer GPT-4 API compatibility over gpt-3.5 assumptions, but keep gptable untouched.",
+        );
+
+        assert!(neutralized.contains("Prefer Codex API compatibility over Codex assumptions"));
+        assert!(neutralized.contains("gptable untouched"));
+        assert!(!neutralized.contains("GPT-4"));
+        assert!(!neutralized.contains("gpt-3"));
+        assert!(!neutralized.contains(".5"));
+    }
 
     #[test]
     fn backfill_relay_profile_from_home_with_common_restores_template_provider_id() {

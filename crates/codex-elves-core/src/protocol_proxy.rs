@@ -61,6 +61,7 @@ enum ChatReasoningStyle {
 struct CodexToolContext {
     custom_tools: BTreeMap<String, CodexCustomToolSpec>,
     function_tools: BTreeMap<String, CodexFunctionToolSpec>,
+    web_search_fallback: Option<CodexWebSearchFallbackTool>,
     has_custom_tools: bool,
     has_namespace_tools: bool,
 }
@@ -76,6 +77,14 @@ struct CodexCustomToolSpec {
 struct CodexFunctionToolSpec {
     namespace: String,
     name: String,
+}
+
+#[derive(Debug, Clone)]
+struct CodexWebSearchFallbackTool {
+    namespace: String,
+    name: String,
+    query_parameter: String,
+    score: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +143,10 @@ impl CodexToolContext {
             spec.name.clone()
         };
         (name, spec.namespace.clone())
+    }
+
+    fn web_search_fallback_tool(&self) -> Option<&CodexWebSearchFallbackTool> {
+        self.web_search_fallback.as_ref()
     }
 }
 
@@ -1006,7 +1019,26 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
         let response_protocol = responses_proxy_target_protocol(&relay, &request_json)?;
         let endpoint = upstream_endpoint_for_protocol(&relay, response_protocol);
         let has_more_candidates = attempt + 1 < relay_count;
-        let header_timeout = response_header_timeout(is_stream);
+        let upstream_is_stream = is_stream;
+        let header_timeout = response_header_timeout(upstream_is_stream);
+        let translated_server_side_tools =
+            if response_protocol == UpstreamResponseProtocol::Responses {
+                Vec::new()
+            } else {
+                proxy_internal_tool_types(request_json.get("tools"))
+            };
+        if !translated_server_side_tools.is_empty() {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "protocol_proxy.server_side_tools_translated",
+                json!({
+                    "diagnosticId": diagnostic_id.as_str(),
+                    "relayId": relay.id,
+                    "relayName": relay.name,
+                    "responseProtocol": response_protocol,
+                    "tools": translated_server_side_tools
+                }),
+            );
+        }
         let _ = crate::diagnostic_log::append_diagnostic_log(
             "protocol_proxy.upstream_request",
             json!({
@@ -1015,7 +1047,8 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
                 "relayName": relay.name,
                 "endpoint": endpoint,
                 "responseProtocol": response_protocol,
-                "stream": is_stream,
+                "stream": upstream_is_stream,
+                "clientStream": is_stream,
                 "attempt": attempt + 1,
                 "candidateCount": relay_count,
                 "headerTimeoutSeconds": header_timeout.as_secs()
@@ -1030,7 +1063,7 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
             &relay,
             &request_json,
             response_protocol,
-            is_stream,
+            upstream_is_stream,
             &diagnostic_id,
         )
         .await
@@ -1045,7 +1078,8 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
                         "relayName": relay.name,
                         "endpoint": endpoint,
                         "responseProtocol": response_protocol,
-                        "stream": is_stream,
+                        "stream": upstream_is_stream,
+                        "clientStream": is_stream,
                         "attempt": attempt + 1,
                         "candidateCount": relay_count,
                         "headerTimeoutSeconds": header_timeout.as_secs(),
@@ -1094,9 +1128,13 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
                     remember_anthropic_reasoning_compatibility(&anthropic_request, fallback_effort);
                     let mut retry_request = anthropic_request.clone();
                     apply_cached_anthropic_reasoning_compatibility(&mut retry_request);
-                    let retry =
-                        send_anthropic_messages_request(&client, &relay, &retry_request, is_stream)
-                            .await?;
+                    let retry = send_anthropic_messages_request(
+                        &client,
+                        &relay,
+                        &retry_request,
+                        upstream_is_stream,
+                    )
+                    .await?;
                     status_code = retry.status().as_u16();
                     content_type = retry
                         .headers()
@@ -1118,7 +1156,8 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
                 "relayName": relay.name,
                 "endpoint": endpoint,
                 "responseProtocol": response_protocol,
-                "stream": is_stream,
+                "stream": upstream_is_stream,
+                "clientStream": is_stream,
                 "statusCode": status_code,
                 "attempt": attempt + 1,
                 "candidateCount": relay_count,
@@ -1137,7 +1176,7 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
         if (200..300).contains(&status_code) || !has_more_candidates {
             return Ok(UpstreamProxyResponse {
                 status_code,
-                is_stream: is_stream || content_type.contains("text/event-stream"),
+                is_stream: upstream_is_stream || content_type.contains("text/event-stream"),
                 content_type,
                 response_protocol,
                 diagnostic_id,
@@ -1153,7 +1192,8 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
                 "relayName": relay.name,
                 "endpoint": endpoint,
                 "responseProtocol": response_protocol,
-                "stream": is_stream,
+                "stream": upstream_is_stream,
+                "clientStream": is_stream,
                 "statusCode": status_code,
                 "attempt": attempt + 1,
                 "candidateCount": relay_count,
@@ -1187,28 +1227,51 @@ async fn send_responses_upstream_request(
             .await
         }
         UpstreamResponseProtocol::ChatCompletions => {
-            let chat_request = responses_to_chat_completions(request_json.clone())?;
-            send_upstream_request_for_responses(
-                upstream_request_builder(
-                    client.clone(),
-                    &chat_completions_url(&relay.base_url),
-                    relay.api_key.trim(),
-                    is_stream,
-                    &chat_request,
-                ),
+            let chat_request = responses_to_chat_completions(responses_request_with_stream(
+                request_json,
                 is_stream,
-            )
-            .await
+            ))?;
+            send_chat_completions_request(client, relay, &chat_request, is_stream).await
         }
         UpstreamResponseProtocol::Anthropic => {
             let mut anthropic_request = responses_to_anthropic_messages_with_diagnostic_id(
-                request_json.clone(),
+                responses_request_with_stream(request_json, is_stream),
                 Some(diagnostic_id),
             )?;
             apply_cached_anthropic_reasoning_compatibility(&mut anthropic_request);
             send_anthropic_messages_request(client, relay, &anthropic_request, is_stream).await
         }
     }
+}
+
+fn responses_request_with_stream(request_json: &Value, is_stream: bool) -> Value {
+    let mut request = request_json.clone();
+    if let Some(object) = request.as_object_mut() {
+        object.insert("stream".to_string(), json!(is_stream));
+        if !is_stream {
+            object.remove("stream_options");
+        }
+    }
+    request
+}
+
+async fn send_chat_completions_request(
+    client: &reqwest::Client,
+    relay: &crate::settings::RelayProfile,
+    chat_request: &Value,
+    is_stream: bool,
+) -> anyhow::Result<reqwest::Response> {
+    send_upstream_request_for_responses(
+        upstream_request_builder(
+            client.clone(),
+            &chat_completions_url(&relay.base_url),
+            relay.api_key.trim(),
+            is_stream,
+            chat_request,
+        ),
+        is_stream,
+    )
+    .await
 }
 
 fn upstream_endpoint_for_protocol(
@@ -2526,6 +2589,7 @@ impl AnthropicSseState {
         if block_type == "tool_use" {
             self.pending_text_marker.take();
         } else {
+            // Anthropic 每个 text 块都会先发 content_block_start；这里先冲刷旧 marker，避免顺序落到新正文之后。
             self.flush_pending_text_marker_into(output);
         }
         match block_type {
@@ -2677,6 +2741,7 @@ impl AnthropicSseState {
         let Some((leading, calls)) = split else {
             if !text.is_empty() {
                 if is_standalone_textual_tool_marker(text) {
+                    self.flush_pending_text_marker_into(output);
                     self.pending_text_marker = Some(text.to_string());
                 } else {
                     self.inner.push_content_delta_into(text, output);
@@ -2940,6 +3005,7 @@ fn append_responses_input(input: &Value, messages: &mut Vec<Value>) {
             let mut pending_tool_calls = Vec::new();
             let mut pending_reasoning = Vec::new();
             let mut seen_tool_call_ids = BTreeSet::new();
+            let mut ignored_tool_call_ids = BTreeSet::new();
             for item in items {
                 append_responses_item(
                     item,
@@ -2947,6 +3013,7 @@ fn append_responses_input(input: &Value, messages: &mut Vec<Value>) {
                     &mut pending_tool_calls,
                     &mut pending_reasoning,
                     &mut seen_tool_call_ids,
+                    &mut ignored_tool_call_ids,
                 );
             }
             flush_tool_calls(messages, &mut pending_tool_calls, &mut pending_reasoning);
@@ -2956,12 +3023,14 @@ fn append_responses_input(input: &Value, messages: &mut Vec<Value>) {
             let mut pending_tool_calls = Vec::new();
             let mut pending_reasoning = Vec::new();
             let mut seen_tool_call_ids = BTreeSet::new();
+            let mut ignored_tool_call_ids = BTreeSet::new();
             append_responses_item(
                 input,
                 messages,
                 &mut pending_tool_calls,
                 &mut pending_reasoning,
                 &mut seen_tool_call_ids,
+                &mut ignored_tool_call_ids,
             );
             flush_tool_calls(messages, &mut pending_tool_calls, &mut pending_reasoning);
             flush_reasoning(messages, &mut pending_reasoning);
@@ -2982,11 +3051,25 @@ fn append_responses_input_to_anthropic(
             vec![json!({ "type": "text", "text": text })],
         ),
         Value::Array(items) => {
+            let mut ignored_tool_call_ids = BTreeSet::new();
             for item in items {
-                append_responses_item_to_anthropic(item, messages, system_chunks);
+                append_responses_item_to_anthropic(
+                    item,
+                    messages,
+                    system_chunks,
+                    &mut ignored_tool_call_ids,
+                );
             }
         }
-        Value::Object(_) => append_responses_item_to_anthropic(input, messages, system_chunks),
+        Value::Object(_) => {
+            let mut ignored_tool_call_ids = BTreeSet::new();
+            append_responses_item_to_anthropic(
+                input,
+                messages,
+                system_chunks,
+                &mut ignored_tool_call_ids,
+            );
+        }
         _ => {}
     }
 }
@@ -2995,6 +3078,7 @@ fn append_responses_item_to_anthropic(
     item: &Value,
     messages: &mut Vec<Value>,
     system_chunks: &mut Vec<String>,
+    ignored_tool_call_ids: &mut BTreeSet<String>,
 ) {
     match item.get("type").and_then(Value::as_str) {
         Some("function_call") => {
@@ -3004,6 +3088,10 @@ fn append_responses_item_to_anthropic(
                 .or_else(|| item.get("id"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
+            if !call_id.is_empty() && is_filtered_server_side_tool_type(&name) {
+                ignored_tool_call_ids.insert(call_id.to_string());
+                return;
+            }
             if !name.is_empty() && !call_id.is_empty() {
                 push_anthropic_message(
                     messages,
@@ -3019,6 +3107,9 @@ fn append_responses_item_to_anthropic(
         }
         Some("function_call_output") => {
             let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or("");
+            if ignored_tool_call_ids.contains(call_id) {
+                return;
+            }
             if !call_id.is_empty() {
                 push_anthropic_message(
                     messages,
@@ -3032,17 +3123,21 @@ fn append_responses_item_to_anthropic(
             }
         }
         Some("custom_tool_call") => {
-            let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+            let raw_name = item.get("name").and_then(Value::as_str).unwrap_or("");
             let input = item
                 .get("input")
                 .or_else(|| item.get("arguments"))
                 .unwrap_or(&Value::Null);
-            let (name, arguments) = build_custom_tool_call_history(name, input);
             let call_id = item
                 .get("call_id")
                 .or_else(|| item.get("id"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
+            if !call_id.is_empty() && is_filtered_server_side_tool_type(raw_name) {
+                ignored_tool_call_ids.insert(call_id.to_string());
+                return;
+            }
+            let (name, arguments) = build_custom_tool_call_history(raw_name, input);
             if !name.is_empty() && !call_id.is_empty() {
                 push_anthropic_message(
                     messages,
@@ -3058,6 +3153,9 @@ fn append_responses_item_to_anthropic(
         }
         Some("custom_tool_call_output") => {
             let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or("");
+            if ignored_tool_call_ids.contains(call_id) {
+                return;
+            }
             if !call_id.is_empty() {
                 push_anthropic_message(
                     messages,
@@ -3066,6 +3164,39 @@ fn append_responses_item_to_anthropic(
                         "type": "tool_result",
                         "tool_use_id": call_id,
                         "content": response_output_text(item.get("output").unwrap_or(&Value::Null))
+                    })],
+                );
+            }
+        }
+        Some("tool_search_call") => {
+            let call_id = item
+                .get("call_id")
+                .or_else(|| item.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !call_id.is_empty() {
+                push_anthropic_message(
+                    messages,
+                    "assistant",
+                    vec![json!({
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": "tool_search",
+                        "input": tool_search_arguments_from_value(item.get("arguments"))
+                    })],
+                );
+            }
+        }
+        Some("tool_search_output") => {
+            let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or("");
+            if !call_id.is_empty() {
+                push_anthropic_message(
+                    messages,
+                    "user",
+                    vec![json!({
+                        "type": "tool_result",
+                        "tool_use_id": call_id,
+                        "content": tool_search_output_text(item)
                     })],
                 );
             }
@@ -3081,6 +3212,10 @@ fn append_responses_item_to_anthropic(
                 .and_then(Value::as_str)
                 .unwrap_or("");
             let name = tool_use.get("name").and_then(Value::as_str).unwrap_or("");
+            if !call_id.is_empty() && is_filtered_server_side_tool_type(name) {
+                ignored_tool_call_ids.insert(call_id.to_string());
+                return;
+            }
             if !call_id.is_empty() && !name.is_empty() {
                 push_anthropic_message(
                     messages,
@@ -3102,6 +3237,9 @@ fn append_responses_item_to_anthropic(
                 .or_else(|| item.get("call_id"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
+            if ignored_tool_call_ids.contains(call_id) {
+                return;
+            }
             if !call_id.is_empty() {
                 let output = content.get("content").unwrap_or(content);
                 push_anthropic_message(
@@ -3287,6 +3425,7 @@ fn append_responses_item(
     pending_tool_calls: &mut Vec<Value>,
     pending_reasoning: &mut Vec<String>,
     seen_tool_call_ids: &mut BTreeSet<String>,
+    ignored_tool_call_ids: &mut BTreeSet<String>,
 ) {
     match item.get("type").and_then(Value::as_str) {
         Some("function_call") => {
@@ -3302,6 +3441,10 @@ fn append_responses_item(
             if call_id.is_empty() {
                 return;
             }
+            if is_filtered_server_side_tool_type(&name) {
+                ignored_tool_call_ids.insert(call_id.to_string());
+                return;
+            }
             seen_tool_call_ids.insert(call_id.to_string());
             pending_tool_calls.push(json!({
                 "id": call_id,
@@ -3315,6 +3458,9 @@ fn append_responses_item(
         Some("function_call_output") => {
             let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or("");
             if call_id.is_empty() {
+                return;
+            }
+            if ignored_tool_call_ids.contains(call_id) {
                 return;
             }
             if !seen_tool_call_ids.contains(call_id) {
@@ -3334,12 +3480,11 @@ fn append_responses_item(
             }));
         }
         Some("custom_tool_call") => {
-            let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+            let raw_name = item.get("name").and_then(Value::as_str).unwrap_or("");
             let input = item
                 .get("input")
                 .or_else(|| item.get("arguments"))
                 .unwrap_or(&Value::Null);
-            let (name, arguments) = build_custom_tool_call_history(name, input);
             let call_id = item
                 .get("call_id")
                 .or_else(|| item.get("id"))
@@ -3348,6 +3493,11 @@ fn append_responses_item(
             if call_id.is_empty() {
                 return;
             }
+            if is_filtered_server_side_tool_type(raw_name) {
+                ignored_tool_call_ids.insert(call_id.to_string());
+                return;
+            }
+            let (name, arguments) = build_custom_tool_call_history(raw_name, input);
             seen_tool_call_ids.insert(call_id.to_string());
             pending_tool_calls.push(json!({
                 "id": call_id,
@@ -3361,6 +3511,9 @@ fn append_responses_item(
         Some("custom_tool_call_output") => {
             let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or("");
             if call_id.is_empty() {
+                return;
+            }
+            if ignored_tool_call_ids.contains(call_id) {
                 return;
             }
             if !seen_tool_call_ids.contains(call_id) {
@@ -3379,6 +3532,43 @@ fn append_responses_item(
                 "content": response_output_text(item.get("output").unwrap_or(&Value::Null))
             }));
         }
+        Some("tool_search_call") => {
+            let call_id = item
+                .get("call_id")
+                .or_else(|| item.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if call_id.is_empty() {
+                return;
+            }
+            seen_tool_call_ids.insert(call_id.to_string());
+            pending_tool_calls.push(json!({
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": "tool_search",
+                    "arguments": canonical_json_string(&tool_search_arguments_from_value(item.get("arguments")))
+                }
+            }));
+        }
+        Some("tool_search_output") => {
+            let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or("");
+            if call_id.is_empty() {
+                return;
+            }
+            if !seen_tool_call_ids.contains(call_id) {
+                flush_tool_calls(messages, pending_tool_calls, pending_reasoning);
+                flush_reasoning(messages, pending_reasoning);
+                messages.push(orphan_tool_output_message(call_id, item));
+                return;
+            }
+            flush_tool_calls(messages, pending_tool_calls, pending_reasoning);
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": tool_search_output_text(item)
+            }));
+        }
         Some("tool_call") => {
             if let Some(tool_use) = item.get("tool_use") {
                 let call_id = tool_use
@@ -3390,12 +3580,17 @@ fn append_responses_item(
                 if call_id.is_empty() {
                     return;
                 }
+                let name = tool_use.get("name").and_then(Value::as_str).unwrap_or("");
+                if is_filtered_server_side_tool_type(name) {
+                    ignored_tool_call_ids.insert(call_id.to_string());
+                    return;
+                }
                 seen_tool_call_ids.insert(call_id.to_string());
                 pending_tool_calls.push(json!({
                     "id": call_id,
                     "type": "function",
                     "function": {
-                        "name": tool_use.get("name").and_then(Value::as_str).unwrap_or(""),
+                        "name": name,
                         "arguments": responses_arguments_to_chat(tool_use.get("input").unwrap_or(&json!({})))
                     }
                 }));
@@ -3411,6 +3606,9 @@ fn append_responses_item(
                 .and_then(Value::as_str)
                 .unwrap_or("");
             if call_id.is_empty() {
+                return;
+            }
+            if ignored_tool_call_ids.contains(call_id) {
                 return;
             }
             let output = content.get("content").unwrap_or(content);
@@ -3824,7 +4022,7 @@ fn build_codex_tool_context(tools: Option<&Value>) -> CodexToolContext {
                 }
             }
             "namespace" => add_namespace_tools_to_context(&mut context, tool),
-            "web_search" | "local_shell" | "computer_use" => {
+            _ if is_builtin_proxy_tool_type(tool_type) => {
                 let name = tool
                     .get("name")
                     .and_then(Value::as_str)
@@ -3881,15 +4079,96 @@ fn add_namespace_tools_to_context(context: &mut CodexToolContext, namespace_tool
             .is_none_or(|spec| !spec.namespace.is_empty())
         {
             context.function_tools.insert(
-                flat,
+                flat.clone(),
                 CodexFunctionToolSpec {
                     namespace: namespace.to_string(),
                     name: name.to_string(),
                 },
             );
+            maybe_set_web_search_fallback(context, namespace, name, &flat, child);
             context.has_namespace_tools = true;
         }
     }
+}
+
+fn maybe_set_web_search_fallback(
+    context: &mut CodexToolContext,
+    namespace: &str,
+    name: &str,
+    flat_name: &str,
+    tool: &Value,
+) {
+    let Some(score) = web_search_fallback_score(namespace, name, flat_name, tool) else {
+        return;
+    };
+    if context
+        .web_search_fallback
+        .as_ref()
+        .is_some_and(|candidate| candidate.score >= score)
+    {
+        return;
+    }
+    context.web_search_fallback = Some(CodexWebSearchFallbackTool {
+        namespace: namespace.to_string(),
+        name: name.to_string(),
+        query_parameter: web_search_fallback_query_parameter(tool),
+        score,
+    });
+}
+
+fn web_search_fallback_score(
+    namespace: &str,
+    name: &str,
+    flat_name: &str,
+    tool: &Value,
+) -> Option<i32> {
+    let namespace = namespace.to_ascii_lowercase();
+    let name = name.to_ascii_lowercase();
+    let flat_name = flat_name.to_ascii_lowercase();
+    let description = tool
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let haystack = format!("{namespace} {name} {flat_name} {description}");
+
+    if flat_name == "mcp__tavily__tavily_search" {
+        return Some(100);
+    }
+    if flat_name == "mcp__exa_search__web_search_exa" {
+        return Some(95);
+    }
+    if name == "web_search" || name == "web_search_exa" {
+        return Some(90);
+    }
+    if name == "tavily_search" {
+        return Some(85);
+    }
+    if name.contains("web_search") {
+        return Some(80);
+    }
+    if name.contains("search") && namespace.contains("tavily") {
+        return Some(75);
+    }
+    if name.contains("search") && namespace.contains("exa") {
+        return Some(70);
+    }
+    if name.contains("search") && haystack.contains("web") {
+        return Some(60);
+    }
+    None
+}
+
+fn web_search_fallback_query_parameter(tool: &Value) -> String {
+    let properties = tool
+        .pointer("/parameters/properties")
+        .and_then(Value::as_object);
+    for candidate in ["query", "q", "search_query", "input", "text"] {
+        if properties.is_some_and(|properties| properties.contains_key(candidate)) {
+            return candidate.to_string();
+        }
+    }
+    "query".to_string()
 }
 
 fn responses_tools_to_chat_tools(tools: &[Value], context: &CodexToolContext) -> Vec<Value> {
@@ -3905,7 +4184,7 @@ fn responses_tools_to_chat_tools(tools: &[Value], context: &CodexToolContext) ->
                     converted.push(tool);
                 }
             }
-            "custom" | "web_search" | "local_shell" | "computer_use" => {
+            "custom" => {
                 let tool_type = tool.get("type").and_then(Value::as_str).unwrap_or("");
                 let name = tool
                     .get("name")
@@ -3922,6 +4201,21 @@ fn responses_tools_to_chat_tools(tools: &[Value], context: &CodexToolContext) ->
                     converted.push(generic_custom_proxy_tool(name, description));
                 }
             }
+            tool_type if is_builtin_proxy_tool_type(tool_type) => {
+                let name = tool
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or(tool_type);
+                let description = tool
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                converted.push(generic_custom_proxy_tool(name, description));
+            }
+            tool_type if is_proxy_internal_tool_type(tool_type) => {
+                converted.push(proxy_internal_tool_to_chat_tool(tool_type, tool));
+            }
             "namespace" => converted.extend(namespace_tool_to_chat_tools(tool, context)),
             _ => {}
         }
@@ -3934,6 +4228,47 @@ fn responses_tools_to_anthropic_tools(tools: &[Value], context: &CodexToolContex
         .into_iter()
         .filter_map(|tool| chat_tool_to_anthropic_tool(&tool))
         .collect()
+}
+
+fn proxy_internal_tool_to_chat_tool(tool_type: &str, tool: &Value) -> Value {
+    let name = tool
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(tool_type);
+    let description = tool
+        .get("description")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| proxy_internal_tool_description(tool_type));
+    json!({
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query"
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": true
+            }
+        }
+    })
+}
+
+fn proxy_internal_tool_description(tool_type: &str) -> &'static str {
+    match tool_type {
+        "tool_search" => "Search the tool catalog available to this Codex session.",
+        "web_search" | "web_search_preview" | "web_search_preview_2025_03_11" => {
+            "Search the web for up-to-date information."
+        }
+        _ => "Proxy-managed built-in tool.",
+    }
 }
 
 fn chat_tool_to_anthropic_tool(tool: &Value) -> Option<Value> {
@@ -3971,14 +4306,59 @@ fn detect_codex_custom_tool_kind(tool: &Value, name: &str) -> CodexCustomToolKin
             return CodexCustomToolKind::ApplyPatch;
         }
     }
-    if matches!(
-        tool.get("type").and_then(Value::as_str),
-        Some("web_search" | "local_shell" | "computer_use")
-    ) {
+    if tool
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(is_builtin_proxy_tool_type)
+    {
         CodexCustomToolKind::BuiltIn
     } else {
         CodexCustomToolKind::Raw
     }
+}
+
+fn is_builtin_proxy_tool_type(tool_type: &str) -> bool {
+    matches!(
+        tool_type,
+        "local_shell" | "computer_use" | "computer_use_preview"
+    )
+}
+
+fn is_filtered_server_side_tool_type(tool_type: &str) -> bool {
+    let _ = tool_type;
+    false
+}
+
+fn is_proxy_internal_tool_type(tool_type: &str) -> bool {
+    matches!(
+        tool_type,
+        "tool_search" | "web_search" | "web_search_preview" | "web_search_preview_2025_03_11"
+    )
+}
+
+fn is_codex_tool_search_name(name: &str) -> bool {
+    name == "tool_search"
+}
+
+fn is_codex_web_search_name(name: &str) -> bool {
+    matches!(
+        name,
+        "web_search" | "web_search_preview" | "web_search_preview_2025_03_11"
+    )
+}
+
+fn proxy_internal_tool_types(tools: Option<&Value>) -> Vec<String> {
+    let Some(tools) = tools.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    tools
+        .iter()
+        .filter_map(|tool| tool.get("type").and_then(Value::as_str))
+        .filter(|tool_type| is_proxy_internal_tool_type(tool_type))
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn responses_function_tool_to_chat_tool(tool: &Value) -> Option<Value> {
@@ -4337,28 +4717,40 @@ fn responses_tool_choice_to_chat(tool_choice: &Value, context: &CodexToolContext
         Value::Object(object) if object.get("type").and_then(Value::as_str) == Some("function") => {
             if let Some(namespace) = object.get("namespace").and_then(Value::as_str) {
                 let name = object.get("name").and_then(Value::as_str).unwrap_or("");
+                let flat_name = flatten_namespace_tool_name(namespace, name);
+                if !chat_tool_choice_target_available(context, &flat_name) {
+                    return None;
+                }
                 return Some(json!({
                     "type": "function",
                     "function": {
-                        "name": flatten_namespace_tool_name(namespace, name)
+                        "name": flat_name
                     }
                 }));
             }
             if let Some(function) = object.get("function").and_then(Value::as_object) {
                 if let Some(namespace) = function.get("namespace").and_then(Value::as_str) {
                     let name = function.get("name").and_then(Value::as_str).unwrap_or("");
+                    let flat_name = flatten_namespace_tool_name(namespace, name);
+                    if !chat_tool_choice_target_available(context, &flat_name) {
+                        return None;
+                    }
                     return Some(json!({
                         "type": "function",
                         "function": {
-                            "name": flatten_namespace_tool_name(namespace, name)
+                            "name": flat_name
                         }
                     }));
                 }
             }
+            let name = object.get("name").and_then(Value::as_str).unwrap_or("");
+            if !chat_tool_choice_target_available(context, name) {
+                return None;
+            }
             Some(json!({
                 "type": "function",
                 "function": {
-                    "name": object.get("name").and_then(Value::as_str).unwrap_or("")
+                    "name": name
                 }
             }))
         }
@@ -4375,8 +4767,27 @@ fn responses_tool_choice_to_chat(tool_choice: &Value, context: &CodexToolContext
                 "function": { "name": upstream_name }
             }))
         }
+        Value::Object(object)
+            if object
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(is_proxy_internal_tool_type) =>
+        {
+            let name = object.get("type").and_then(Value::as_str).unwrap_or("");
+            Some(json!({
+                "type": "function",
+                "function": { "name": name }
+            }))
+        }
         other => Some(other.clone()),
     }
+}
+
+fn chat_tool_choice_target_available(context: &CodexToolContext, name: &str) -> bool {
+    !name.is_empty()
+        && (is_proxy_internal_tool_type(name)
+            || context.function_tools.contains_key(name)
+            || context.custom_tools.contains_key(name))
 }
 
 fn responses_tool_choice_to_anthropic(
@@ -4549,6 +4960,51 @@ fn tool_call_added_item(
     output_index: u32,
     tool_context: &CodexToolContext,
 ) -> Value {
+    if is_codex_web_search_name(&state.name) {
+        if let Some(fallback) = tool_context.web_search_fallback_tool() {
+            let mut item = json!({
+                "type": "response.output_item.added",
+                "output_index": output_index,
+                "item": {
+                    "id": state.item_id,
+                    "type": "function_call",
+                    "status": "in_progress",
+                    "call_id": state.call_id,
+                    "name": fallback.name,
+                    "arguments": ""
+                }
+            });
+            if !fallback.namespace.is_empty() {
+                item["item"]["namespace"] = json!(fallback.namespace);
+            }
+            return item;
+        }
+        return json!({
+            "type": "response.output_item.added",
+            "output_index": output_index,
+            "item": {
+                "id": web_search_item_id(&state.call_id),
+                "type": "web_search_call",
+                "status": "in_progress",
+                "execution": "client",
+                "action": { "type": "other" }
+            }
+        });
+    }
+    if is_codex_tool_search_name(&state.name) {
+        return json!({
+            "type": "response.output_item.added",
+            "output_index": output_index,
+            "item": {
+                "id": format!("tsc_{}", state.call_id),
+                "type": "tool_search_call",
+                "status": "in_progress",
+                "call_id": state.call_id,
+                "execution": "client",
+                "arguments": {}
+            }
+        });
+    }
     if tool_context.is_custom_tool_proxy(&state.name) {
         return json!({
             "type": "response.output_item.added",
@@ -4590,6 +5046,17 @@ fn push_tool_call_delta_sse(
     tool_context: &CodexToolContext,
     next_sequence_number: &mut u64,
 ) {
+    if is_codex_tool_search_name(&state.name)
+        || (is_codex_web_search_name(&state.name)
+            && tool_context.web_search_fallback_tool().is_none())
+    {
+        let _ = (output, output_index, delta, next_sequence_number);
+        return;
+    }
+    if is_codex_web_search_name(&state.name) {
+        let _ = (output, output_index, delta, next_sequence_number);
+        return;
+    }
     if tool_context.is_custom_tool_proxy(&state.name) {
         let _ = delta;
     } else {
@@ -4614,6 +5081,29 @@ fn push_tool_call_done_sse(
     tool_context: &CodexToolContext,
     next_sequence_number: &mut u64,
 ) {
+    if is_codex_tool_search_name(&state.name) {
+        let _ = (output, output_index, tool_context, next_sequence_number);
+        return;
+    }
+    if is_codex_web_search_name(&state.name) {
+        if let Some(fallback) = tool_context.web_search_fallback_tool() {
+            push_sse(
+                output,
+                "response.function_call_arguments.done",
+                json!({
+                    "type": "response.function_call_arguments.done",
+                    "item_id": state.item_id,
+                    "name": fallback.name,
+                    "output_index": output_index,
+                    "arguments": web_search_fallback_arguments(&state.arguments, fallback)
+                }),
+                next_sequence_number,
+            );
+        } else {
+            let _ = (output, output_index, next_sequence_number);
+        }
+        return;
+    }
     if tool_context.is_custom_tool_proxy(&state.name) {
         let input = reconstruct_custom_tool_call_input_with_context(
             tool_context,
@@ -4670,6 +5160,15 @@ fn response_tool_call_item(
     arguments: &str,
     tool_context: &CodexToolContext,
 ) -> Value {
+    if is_codex_web_search_name(name) {
+        if let Some(fallback) = tool_context.web_search_fallback_tool() {
+            return web_search_fallback_function_call_item(call_id, arguments, fallback);
+        }
+        return web_search_call_item(call_id, arguments);
+    }
+    if is_codex_tool_search_name(name) {
+        return tool_search_call_item(call_id, arguments);
+    }
     if tool_context.is_custom_tool_proxy(name) {
         return json!({
             "id": format!("ctc_{call_id}"),
@@ -4693,6 +5192,92 @@ fn response_tool_call_item(
         item["namespace"] = json!(namespace);
     }
     item
+}
+
+fn web_search_fallback_function_call_item(
+    call_id: &str,
+    arguments: &str,
+    fallback: &CodexWebSearchFallbackTool,
+) -> Value {
+    let mut item = json!({
+        "id": format!("fc_{call_id}"),
+        "type": "function_call",
+        "status": "completed",
+        "call_id": call_id,
+        "name": fallback.name,
+        "arguments": web_search_fallback_arguments(arguments, fallback)
+    });
+    if !fallback.namespace.is_empty() {
+        item["namespace"] = json!(fallback.namespace);
+    }
+    item
+}
+
+fn tool_search_call_item(call_id: &str, arguments: &str) -> Value {
+    json!({
+        "id": format!("tsc_{call_id}"),
+        "type": "tool_search_call",
+        "status": "completed",
+        "call_id": call_id,
+        "execution": "client",
+        "arguments": tool_search_arguments_from_argument_string(arguments)
+    })
+}
+
+fn web_search_item_id(call_id: &str) -> String {
+    if call_id.starts_with("ws_") {
+        call_id.to_string()
+    } else {
+        format!("ws_{call_id}")
+    }
+}
+
+fn web_search_call_item(call_id: &str, arguments: &str) -> Value {
+    let query = web_search_query_from_argument_string(arguments);
+    let action = if query.is_empty() {
+        json!({ "type": "other" })
+    } else {
+        json!({
+            "type": "search",
+            "query": query.clone(),
+            "queries": [query]
+        })
+    };
+    json!({
+        "id": web_search_item_id(call_id),
+        "type": "web_search_call",
+        "status": "completed",
+        "execution": "client",
+        "action": action
+    })
+}
+
+fn web_search_query_from_argument_string(arguments: &str) -> String {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(Value::Object(object)) => object
+            .get("query")
+            .or_else(|| object.get("q"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        Ok(Value::String(text)) => text.trim().to_string(),
+        Ok(other) => response_output_text(&other).trim().to_string(),
+        Err(_) => trimmed.to_string(),
+    }
+}
+
+fn web_search_fallback_arguments(arguments: &str, fallback: &CodexWebSearchFallbackTool) -> String {
+    let query = web_search_query_from_argument_string(arguments);
+    let mut object = serde_json::Map::new();
+    if !query.is_empty() {
+        object.insert(fallback.query_parameter.clone(), Value::String(query));
+    }
+    canonical_json_string(&Value::Object(object))
 }
 
 fn anthropic_content_to_response_output_items(
@@ -5209,7 +5794,12 @@ fn textual_invoke_safe_passthrough_len(buffer: &str) -> usize {
         if !buffer.is_char_boundary(candidate) {
             continue;
         }
-        if textual_invoke_tail_may_start_call(&buffer[candidate..]) {
+        let at_text_boundary = candidate == 0
+            || buffer[..candidate]
+                .chars()
+                .next_back()
+                .is_none_or(char::is_whitespace);
+        if textual_invoke_tail_may_start_call(&buffer[candidate..], at_text_boundary) {
             return candidate;
         }
     }
@@ -5217,7 +5807,7 @@ fn textual_invoke_safe_passthrough_len(buffer: &str) -> usize {
 }
 
 /// 尾部子串是否可能是一个尚未输完的工具调用起点（`<invoke` 或 marker 前缀）。
-fn textual_invoke_tail_may_start_call(tail: &str) -> bool {
+fn textual_invoke_tail_may_start_call(tail: &str, at_text_boundary: bool) -> bool {
     if tail.is_empty() {
         return false;
     }
@@ -5226,6 +5816,9 @@ fn textual_invoke_tail_may_start_call(tail: &str) -> bool {
         return true;
     }
     // 尾部是 course/codex/call 标记的前缀，或标记后跟着空白/`<invoke` 前缀。
+    if !at_text_boundary {
+        return false;
+    }
     for marker in ["course", "codex", "call"] {
         if marker.starts_with(tail) {
             return true;
@@ -5646,6 +6239,38 @@ fn response_output_text(value: &Value) -> String {
         Value::Null => String::new(),
         other => canonical_json_string(other),
     }
+}
+
+fn tool_search_arguments_from_value(value: Option<&Value>) -> Value {
+    match value {
+        Some(Value::String(text)) => tool_search_arguments_from_argument_string(text),
+        Some(Value::Object(_)) => value.cloned().unwrap_or_else(|| json!({})),
+        Some(Value::Null) | None => json!({}),
+        Some(other) => json!({ "query": response_output_text(other) }),
+    }
+}
+
+fn tool_search_arguments_from_argument_string(arguments: &str) -> Value {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        return json!({});
+    }
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(Value::Object(object)) => Value::Object(object),
+        Ok(Value::String(text)) => json!({ "query": text }),
+        Ok(other) => json!({ "query": response_output_text(&other) }),
+        Err(_) => json!({ "query": arguments }),
+    }
+}
+
+fn tool_search_output_text(item: &Value) -> String {
+    if let Some(output) = item.get("output") {
+        return response_output_text(output);
+    }
+    if let Some(tools) = item.get("tools") {
+        return response_output_text(tools);
+    }
+    response_output_text(item)
 }
 
 fn build_custom_tool_call_history(name: &str, input: &Value) -> (String, String) {

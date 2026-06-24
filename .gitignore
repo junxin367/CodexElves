@@ -6,6 +6,7 @@ venv/
 build/
 dist/
 target/
+temp/
 apps/codex-elves-manager/src-tauri/gen/
 
 .codex_asar_extract/

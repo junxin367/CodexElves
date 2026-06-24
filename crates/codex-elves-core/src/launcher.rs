@@ -1166,9 +1166,14 @@ async fn handle_protocol_proxy_connection(
                 upstream.content_type.clone()
             };
             write_http_stream_headers(stream, &status, &content_type).await?;
-            let mut bytes_stream = upstream.into_response()?.bytes_stream();
-            while let Some(chunk) = bytes_stream.next().await {
-                stream.write_all(&chunk?).await?;
+            if upstream.body_override.is_some() {
+                let body = upstream.into_body_bytes().await?;
+                stream.write_all(&body).await?;
+            } else {
+                let mut bytes_stream = upstream.into_response()?.bytes_stream();
+                while let Some(chunk) = bytes_stream.next().await {
+                    stream.write_all(&chunk?).await?;
+                }
             }
             log_helper_response(
                 "helper.protocol_proxy_stream_ok",

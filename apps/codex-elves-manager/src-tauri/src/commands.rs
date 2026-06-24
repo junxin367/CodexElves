@@ -231,6 +231,20 @@ pub struct ContextSettingsRequest {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ContextSyncTargetRequest {
+    pub kind: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncLiveContextEntriesRequest {
+    pub settings: BackendSettings,
+    pub target: ContextSyncTargetRequest,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContextEntryRequest {
     pub settings: BackendSettings,
     pub kind: String,
@@ -1863,7 +1877,7 @@ pub fn upsert_context_entry(request: ContextEntryRequest) -> CommandResult<Conte
 
 #[tauri::command]
 pub fn sync_live_context_entries(
-    request: ContextSettingsRequest,
+    request: SyncLiveContextEntriesRequest,
 ) -> CommandResult<LiveContextEntriesPayload> {
     let home = codex_elves_core::relay_config::default_codex_home_dir();
     let config_path = home.join("config.toml");
@@ -1878,9 +1892,11 @@ pub fn sync_live_context_entries(
             );
         }
     };
-    let updated_config = match codex_elves_core::relay_config::sync_live_config_context_entries(
+    let updated_config = match codex_elves_core::relay_config::sync_live_config_context_entry(
         &current_config,
         &request.settings.relay_context_config_contents,
+        &request.target.kind,
+        &request.target.id,
     ) {
         Ok(config) => config,
         Err(error) => {

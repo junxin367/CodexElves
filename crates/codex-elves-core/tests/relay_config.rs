@@ -11,7 +11,8 @@ use codex_elves_core::relay_config::{
     list_context_entries_from_common_config, normalize_relay_profile_for_storage,
     relay_config_status_from_home, sanitize_common_config_contents,
     set_codex_goals_feature_in_home, strip_common_config_from_config,
-    sync_live_config_context_entries, upsert_context_entry_in_common_config,
+    sync_live_config_context_entries, sync_live_config_context_entry,
+    upsert_context_entry_in_common_config,
 };
 use codex_elves_core::settings::{
     RelayContextSelection, RelayMode, RelayModelMapping, RelayProfile, RelayProtocol,
@@ -687,6 +688,295 @@ enabled = true
     assert!(updated.contains("enabled = false"));
 }
 
+fn redacted_real_config_context_sample() -> &'static str {
+    r#"model = "gpt-5.5"
+model_provider = "provider-redacted-1"
+approval_policy = "on-request"
+
+[model_providers.provider-redacted-1]
+name = "provider-redacted-1"
+base_url = "https://example.invalid/v1"
+env_key = "API_KEY_REDACTED"
+
+[projects."project-redacted-1"]
+trust_level = "trusted"
+path = "<WORKSPACE>/project-1"
+
+[projects."project-redacted-2"]
+trust_level = "untrusted"
+path = "<WORKSPACE>/project-2"
+
+[mcp_servers."mcp-redacted-1"]
+command = "node"
+args = ["<PATH>/mcp-redacted-1/server.js", "--api-key", "<MCP_API_KEY>"]
+
+[mcp_servers."mcp-redacted-1".env]
+MCP_API_KEY = "<MCP_API_KEY>"
+MCP_BASE_URL = "https://example.invalid/mcp"
+
+[mcp_servers."mcp-redacted-1".tools."tool-redacted-1"]
+approval_mode = "approved"
+
+[features]
+goals = true
+
+[mcp_servers."mcp-redacted-2"]
+command = "python"
+args = ["<PATH>/mcp-redacted-2.py"]
+
+[plugins."plugin-redacted-1"]
+enabled = true
+path = "<HOME>/.codex/plugins/plugin-redacted-1"
+
+[plugins."plugin-redacted-2"]
+enabled = false
+source = "https://example.invalid/plugin-index.json"
+"#
+}
+
+#[test]
+fn upsert_context_entry_in_redacted_real_config_replaces_only_target_block() {
+    let common = redacted_real_config_context_sample();
+    let old_block = r#"[mcp_servers."mcp-redacted-1"]
+command = "node"
+args = ["<PATH>/mcp-redacted-1/server.js", "--api-key", "<MCP_API_KEY>"]
+
+[mcp_servers."mcp-redacted-1".env]
+MCP_API_KEY = "<MCP_API_KEY>"
+MCP_BASE_URL = "https://example.invalid/mcp"
+
+[mcp_servers."mcp-redacted-1".tools."tool-redacted-1"]
+approval_mode = "approved""#;
+    let new_block = r#"[mcp_servers."mcp-redacted-1"]
+command = "node"
+args = ["<PATH>/mcp-redacted-1/server.js", "--mode", "safe"]
+
+[mcp_servers."mcp-redacted-1".env]
+MCP_API_KEY = "<MCP_API_KEY>"
+MCP_BASE_URL = "https://example.invalid/mcp"
+
+[mcp_servers."mcp-redacted-1".tools."tool-redacted-1"]
+approval_mode = "untrusted""#;
+    let new_body = new_block
+        .strip_prefix("[mcp_servers.\"mcp-redacted-1\"]\n")
+        .unwrap();
+
+    let updated =
+        upsert_context_entry_in_common_config(common, "mcp", "mcp-redacted-1", new_body).unwrap();
+
+    assert_eq!(
+        updated,
+        common.replacen(old_block, new_block, 1),
+        "编辑 MCP 时只能替换选中的 MCP 块及其子表"
+    );
+}
+
+#[test]
+fn delete_context_entry_in_redacted_real_config_removes_only_target_block() {
+    let common = redacted_real_config_context_sample();
+    let old_block_with_gap = r#"[mcp_servers."mcp-redacted-1"]
+command = "node"
+args = ["<PATH>/mcp-redacted-1/server.js", "--api-key", "<MCP_API_KEY>"]
+
+[mcp_servers."mcp-redacted-1".env]
+MCP_API_KEY = "<MCP_API_KEY>"
+MCP_BASE_URL = "https://example.invalid/mcp"
+
+[mcp_servers."mcp-redacted-1".tools."tool-redacted-1"]
+approval_mode = "approved"
+
+"#;
+
+    let deleted = delete_context_entry_from_common_config(common, "mcp", "mcp-redacted-1").unwrap();
+
+    assert_eq!(
+        deleted,
+        common.replacen(old_block_with_gap, "", 1),
+        "删除 MCP 时只能移除选中的 MCP 块及其子表，并保留周边配置顺序"
+    );
+    assert!(deleted.contains("[projects.\"project-redacted-1\"]"));
+    assert!(deleted.contains("[features]"));
+    assert!(deleted.contains("[mcp_servers.\"mcp-redacted-2\"]"));
+    assert!(deleted.contains("[plugins.\"plugin-redacted-1\"]"));
+}
+
+#[test]
+fn upsert_context_entry_in_redacted_real_config_appends_after_last_mcp_block() {
+    let common = redacted_real_config_context_sample();
+    let updated = upsert_context_entry_in_common_config(
+        common,
+        "mcp",
+        "mcp-redacted-3",
+        r#"command = "bunx"
+args = ["<PATH>/mcp-redacted-3.js"]
+"#,
+    )
+    .unwrap();
+
+    let second = updated.find("[mcp_servers.\"mcp-redacted-2\"]").unwrap();
+    let third = updated.find("[mcp_servers.mcp-redacted-3]").unwrap();
+    let plugin = updated.find("[plugins.\"plugin-redacted-1\"]").unwrap();
+    assert!(
+        second < third && third < plugin,
+        "新增 MCP 应插到同类最后一个 MCP 后面，而不是文件末尾：\n{updated}"
+    );
+    assert!(
+        updated.contains("[mcp_servers.\"mcp-redacted-2\"]\ncommand = \"python\"\nargs = [\"<PATH>/mcp-redacted-2.py\"]\n\n[mcp_servers.mcp-redacted-3]\ncommand = \"bunx\"\nargs = [\"<PATH>/mcp-redacted-3.js\"]\n\n[plugins.\"plugin-redacted-1\"]"),
+        "新增块与相邻配置块之间应只有一个空行：\n{updated}"
+    );
+}
+
+#[test]
+fn list_then_upsert_redacted_real_config_mcp_is_textually_stable() {
+    let common = redacted_real_config_context_sample();
+    let entries = list_context_entries_from_common_config(common).unwrap();
+    let entry = entries
+        .mcp_servers
+        .iter()
+        .find(|entry| entry.id == "mcp-redacted-1")
+        .unwrap();
+
+    let updated =
+        upsert_context_entry_in_common_config(common, "mcp", &entry.id, &entry.toml_body).unwrap();
+
+    assert_eq!(
+        updated, common,
+        "打开 MCP 编辑器后不修改直接保存，不应改变 config.toml 文本"
+    );
+}
+
+#[test]
+fn sync_live_config_context_entry_updates_only_selected_target() {
+    let live = redacted_real_config_context_sample();
+    let old_target = r#"[mcp_servers."mcp-redacted-1"]
+command = "node"
+args = ["<PATH>/mcp-redacted-1/server.js", "--api-key", "<MCP_API_KEY>"]
+
+[mcp_servers."mcp-redacted-1".env]
+MCP_API_KEY = "<MCP_API_KEY>"
+MCP_BASE_URL = "https://example.invalid/mcp"
+
+[mcp_servers."mcp-redacted-1".tools."tool-redacted-1"]
+approval_mode = "approved""#;
+    let new_target = r#"[mcp_servers."mcp-redacted-1"]
+command = "node"
+args = ["<PATH>/mcp-redacted-1/server.js", "--mode", "safe"]
+
+[mcp_servers."mcp-redacted-1".env]
+MCP_API_KEY = "<MCP_API_KEY>"
+MCP_BASE_URL = "https://example.invalid/mcp"
+
+[mcp_servers."mcp-redacted-1".tools."tool-redacted-1"]
+approval_mode = "untrusted""#;
+    let context = live.replacen(old_target, new_target, 1).replacen(
+        "command = \"python\"",
+        "command = \"context-python\"",
+        1,
+    );
+
+    let updated = sync_live_config_context_entry(live, &context, "mcp", "mcp-redacted-1").unwrap();
+
+    assert_eq!(
+        updated,
+        live.replacen(old_target, new_target, 1),
+        "同步单个 MCP 时不能顺带改写其他 managed MCP"
+    );
+}
+
+#[test]
+fn sync_live_config_context_entry_keeps_out_of_order_context_child_blocks() {
+    let live = r#"model = "gpt-5"
+
+[features]
+goals = true
+
+[mcp_servers.alpha]
+command = "old"
+
+[mcp_servers.beta]
+command = "beta"
+"#;
+    let context = r#"[mcp_servers.alpha.tools.read]
+description = "new tool"
+
+[mcp_servers.alpha]
+command = "new"
+"#;
+
+    let updated = sync_live_config_context_entry(live, context, "mcp", "alpha").unwrap();
+
+    assert!(updated.contains("[mcp_servers.alpha]\ncommand = \"new\""));
+    assert!(updated.contains("[mcp_servers.alpha.tools.read]\ndescription = \"new tool\""));
+    assert!(updated.contains("[features]\ngoals = true"));
+    assert!(updated.contains("[mcp_servers.beta]\ncommand = \"beta\""));
+    assert!(!updated.contains("command = \"old\""));
+}
+
+#[test]
+fn sync_live_config_context_entry_deletes_out_of_order_live_child_blocks() {
+    let live = r#"model = "gpt-5"
+
+[mcp_servers.alpha.tools.read]
+description = "old tool"
+
+[features]
+goals = true
+
+[mcp_servers.alpha]
+command = "old"
+
+[mcp_servers.beta]
+command = "beta"
+"#;
+    let context = r#"[mcp_servers.alpha]
+enabled = false
+command = "old"
+"#;
+
+    let updated = sync_live_config_context_entry(live, context, "mcp", "alpha").unwrap();
+
+    assert!(!updated.contains("[mcp_servers.alpha"));
+    assert!(updated.contains("[features]\ngoals = true"));
+    assert!(updated.contains("[mcp_servers.beta]\ncommand = \"beta\""));
+}
+
+#[test]
+fn context_entry_text_patch_does_not_absorb_following_array_tables() {
+    let common = r#"[mcp_servers.alpha]
+command = "old"
+
+[[skills.config]]
+name = "skill-redacted-1"
+enabled = false
+
+[plugins.local]
+enabled = true
+"#;
+
+    let updated =
+        upsert_context_entry_in_common_config(common, "mcp", "alpha", "command = \"new\"\n")
+            .unwrap();
+
+    assert_eq!(
+        updated,
+        common.replacen("command = \"old\"", "command = \"new\"", 1),
+        "编辑 MCP 不能误吞后续数组表"
+    );
+
+    let deleted = delete_context_entry_from_common_config(common, "mcp", "alpha").unwrap();
+    assert_eq!(
+        deleted,
+        r#"[[skills.config]]
+name = "skill-redacted-1"
+enabled = false
+
+[plugins.local]
+enabled = true
+"#,
+        "删除 MCP 不能删除后续数组表"
+    );
+}
+
 #[test]
 fn global_common_config_filters_context_by_supplier_selection() {
     let filtered = filter_common_config_for_selection(
@@ -1033,9 +1323,21 @@ experimental_bearer_token = "sk-new"
             .is_some_and(|value| value.contains("You are Codex"))
     );
     assert!(
+        catalog["models"][0]["base_instructions"]
+            .as_str()
+            .is_some_and(|value| !value.contains("GPT-5")),
+        "非 GPT 供应商模型不能继承 GPT-5 身份说明"
+    );
+    assert!(
         catalog["models"][0]["model_messages"]["instructions_template"]
             .as_str()
             .is_some_and(|value| value.contains("{{ personality }}"))
+    );
+    assert!(
+        catalog["models"][0]["model_messages"]["instructions_template"]
+            .as_str()
+            .is_some_and(|value| !value.contains("GPT-5")),
+        "非 GPT 供应商模型的模板不能继承 GPT-5 身份说明"
     );
     assert_eq!(catalog["models"][0]["context_window"], 128000);
     assert_eq!(catalog["models"][0]["auto_compact_token_limit"], 160000);

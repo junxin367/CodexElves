@@ -328,6 +328,11 @@ type LiveContextEntriesResult = CommandResult<{
   entries: CodexContextEntries;
 }>;
 
+type ContextSyncTarget = {
+  kind: ContextKind;
+  id: string;
+};
+
 type RelaySwitchResult = CommandResult<{
   settings: BackendSettings;
   settingsPath: string;
@@ -1221,8 +1226,8 @@ export function App() {
     return result;
   };
 
-  const syncLiveContextEntries = async (next: BackendSettings, silent = false) => {
-    const result = await run(() => call<LiveContextEntriesResult>("sync_live_context_entries", { request: { settings: next } }));
+  const syncLiveContextEntries = async (next: BackendSettings, silent: boolean, target: ContextSyncTarget) => {
+    const result = await run(() => call<LiveContextEntriesResult>("sync_live_context_entries", { request: { settings: next, target } }));
     if (result) {
       setLiveContextEntries(result.entries);
       if (!silent || !isSuccessStatus(result.status)) showResultNotice("工具与插件", result, { silentSuccess: true });
@@ -2198,7 +2203,11 @@ type Actions = {
   refreshCcsProviders: (silent?: boolean) => Promise<CcsProvidersResult | null>;
   importCcsProviders: () => Promise<void>;
   refreshLiveContextEntries: (silent?: boolean) => Promise<LiveContextEntriesResult | null>;
-  syncLiveContextEntries: (settings: BackendSettings, silent?: boolean) => Promise<LiveContextEntriesResult | null>;
+  syncLiveContextEntries: (
+    settings: BackendSettings,
+    silent: boolean,
+    target: ContextSyncTarget,
+  ) => Promise<LiveContextEntriesResult | null>;
   refreshScriptMarket: () => Promise<void>;
   refreshCodexRadar: () => Promise<void>;
   installMarketScript: (id: string) => Promise<void>;
@@ -4732,7 +4741,7 @@ function RelayContextManager({
     const next = await actions.upsertContextEntry(form, kind, id, tomlBody);
     if (!next) return;
     onFormChange(next);
-    const syncResult = await actions.syncLiveContextEntries(next, true);
+    const syncResult = await actions.syncLiveContextEntries(next, true, { kind, id });
     if (syncResult && isSuccessStatus(syncResult.status)) {
       void actions.refreshRelayFiles();
     }
@@ -4744,7 +4753,7 @@ function RelayContextManager({
     const next = await actions.upsertContextEntry(form, entry.kind, entry.id, nextBody);
     if (!next) return;
     onFormChange(next);
-    const syncResult = await actions.syncLiveContextEntries(next, true);
+    const syncResult = await actions.syncLiveContextEntries(next, true, { kind: entry.kind, id: entry.id });
     if (syncResult && isSuccessStatus(syncResult.status)) {
       void actions.refreshRelayFiles();
     }
@@ -4754,7 +4763,7 @@ function RelayContextManager({
     const next = await actions.deleteContextEntry(form, entry.kind, entry.id);
     if (!next) return;
     onFormChange(next);
-    const syncResult = await actions.syncLiveContextEntries(next, true);
+    const syncResult = await actions.syncLiveContextEntries(next, true, { kind: entry.kind, id: entry.id });
     if (syncResult && isSuccessStatus(syncResult.status)) {
       void actions.refreshRelayFiles();
     }
@@ -5643,7 +5652,6 @@ function dedupeContextEntryList(entries: CodexContextEntry[]): CodexContextEntry
 }
 
 function parseContextEntries(commonConfig: string, kind: ContextKind, tableName: string): CodexContextEntry[] {
-  const anyHeaderPattern = /^\s*\[[^\]]+\]\s*$/;
   const entries = new Map<string, CodexContextEntry>();
   let currentId: string | null = null;
   let body: string[] = [];
@@ -5662,19 +5670,22 @@ function parseContextEntries(commonConfig: string, kind: ContextKind, tableName:
   };
 
   for (const line of commonConfig.split(/\r?\n/)) {
-    const path = tomlTablePathFromLine(line);
-    if (path?.[0] === tableName && path.length === 2) {
-      const id = path[1];
+    const tablePath = tomlTablePathFromLine(line);
+    const arrayPath = tomlArrayTablePathFromLine(line);
+    const path = tablePath ?? arrayPath;
+    if (tablePath?.[0] === tableName && tablePath.length === 2) {
+      const id = tablePath[1];
       flush();
       currentId = id;
       body = [];
       continue;
     }
     if (currentId && path?.[0] === tableName && path[1] === currentId && path.length > 2) {
-      body.push(`[${path.slice(2).map(tomlKey).join(".")}]`);
+      const subtable = path.slice(2).map(tomlKey).join(".");
+      body.push(arrayPath ? `[[${subtable}]]` : `[${subtable}]`);
       continue;
     }
-    if (currentId && anyHeaderPattern.test(line)) {
+    if (currentId && path) {
       flush();
       currentId = null;
       body = [];
@@ -5691,6 +5702,16 @@ function tomlTablePathFromLine(line: string): string[] | null {
   const match = /^\s*\[([^\]]+)\]\s*$/.exec(line);
   if (!match) return null;
   return parseTomlDottedPath(match[1].trim());
+}
+
+function tomlArrayTablePathFromLine(line: string): string[] | null {
+  const match = /^\s*\[\[([^\]]+)\]\]\s*$/.exec(line);
+  if (!match) return null;
+  return parseTomlDottedPath(match[1].trim());
+}
+
+function tomlHeaderPathFromLine(line: string): string[] | null {
+  return tomlTablePathFromLine(line) ?? tomlArrayTablePathFromLine(line);
 }
 
 function parseTomlDottedPath(path: string): string[] | null {
@@ -5793,51 +5814,6 @@ function filterContextEntriesBySelection(entries: CodexContextEntries, selection
   };
 }
 
-function selectedContextConfigToml(entries: CodexContextEntries): string {
-  const sections: string[] = [];
-  for (const option of contextKindOptions) {
-    for (const entry of dedupeContextEntryList(contextEntriesByKind(entries, option.kind))) {
-      if (!entry.enabled) continue;
-      sections.push(contextEntryToTomlSection(option.tableName, entry));
-    }
-  }
-  return ensureTrailingNewline(sections.join("\n\n"));
-}
-
-function allContextConfigToml(entries: CodexContextEntries): string {
-  const sections: string[] = [];
-  for (const option of contextKindOptions) {
-    for (const entry of dedupeContextEntryList(contextEntriesByKind(entries, option.kind))) {
-      sections.push(contextEntryToTomlSection(option.tableName, entry));
-    }
-  }
-  return ensureTrailingNewline(sections.join("\n\n"));
-}
-
-function contextEntryToTomlSection(tableName: string, entry: CodexContextEntry): string {
-  const parentHeader = `[${tableName}.${tomlKey(entry.id)}]`;
-  const body = entry.tomlBody
-    .trimEnd()
-    .split(/\r?\n/)
-    .map((line) => relativeContextSubtableToAbsolute(line, tableName, entry.id))
-    .join("\n");
-  return `${parentHeader}\n${body}`;
-}
-
-function relativeContextSubtableToAbsolute(line: string, tableName: string, id: string): string {
-  const match = /^\s*\[([^\]]+)\]\s*$/.exec(line);
-  if (!match) return line;
-  const subtable = match[1].trim();
-  if (!subtable || subtable.includes(".")) return line;
-  return `[${tableName}.${tomlKey(id)}.${tomlKey(subtable)}]`;
-}
-
-function syncLiveConfigContextState(liveConfigContents: string, settings: BackendSettings): string {
-  const entries = contextEntriesFromSettings(settings);
-  const withoutManaged = stripContextEntriesFromConfig(liveConfigContents, entries);
-  return joinTomlSectionsRootFirst([withoutManaged, selectedContextConfigToml(entries)]);
-}
-
 function relayCombinedCommonConfig(settings: BackendSettings): string {
   return joinTomlSectionsRootFirst([settings.relayCommonConfigContents || "", settings.relayContextConfigContents || ""]);
 }
@@ -5846,8 +5822,30 @@ function splitContextConfigText(configContents: string): { common: string; conte
   const entries = contextEntriesFromConfig(configContents);
   return {
     common: stripContextEntriesFromConfig(configContents, entries),
-    context: allContextConfigToml(entries),
+    context: contextConfigTextFromConfig(configContents, entries),
   };
+}
+
+function contextConfigTextFromConfig(configContents: string, entries: CodexContextEntries): string {
+  const knownIds: Record<ContextKind, Set<string>> = {
+    mcp: new Set(entries.mcpServers.map((entry) => entry.id)),
+    skill: new Set(entries.skills.map((entry) => entry.id)),
+    plugin: new Set(entries.plugins.map((entry) => entry.id)),
+  };
+  const collected: string[] = [];
+  let collecting = false;
+
+  for (const line of configContents.split(/\r?\n/)) {
+    const contextHeader = contextHeaderFromLine(line);
+    if (contextHeader) {
+      collecting = knownIds[contextHeader.kind].has(contextHeader.id);
+    } else if (tomlHeaderPathFromLine(line)) {
+      collecting = false;
+    }
+    if (collecting) collected.push(line);
+  }
+
+  return ensureTrailingNewline(collected.join("\n").trimEnd());
 }
 
 function stripContextEntriesFromConfig(configContents: string, entries: CodexContextEntries): string {
@@ -5864,7 +5862,7 @@ function stripContextEntriesFromConfig(configContents: string, entries: CodexCon
     const contextHeader = contextHeaderFromLine(line);
     if (contextHeader) {
       skipping = knownIds[contextHeader.kind].has(contextHeader.id);
-    } else if (/^\s*\[[^\]]+\]\s*$/.test(line)) {
+    } else if (tomlHeaderPathFromLine(line)) {
       skipping = false;
     }
     if (!skipping) kept.push(line);
@@ -5882,8 +5880,8 @@ function tomlRootKeyFromLine(line: string): string | null {
 }
 
 function contextHeaderFromLine(line: string): { kind: ContextKind; id: string } | null {
-  const path = tomlTablePathFromLine(line);
-  if (!path || path.length !== 2) return null;
+  const path = tomlHeaderPathFromLine(line);
+  if (!path || path.length < 2) return null;
   const option = contextKindOptions.find((item) => item.tableName === path[0]);
   return option ? { kind: option.kind, id: path[1] } : null;
 }

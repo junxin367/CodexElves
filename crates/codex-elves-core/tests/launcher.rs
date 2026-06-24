@@ -1,5 +1,7 @@
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use codex_elves_core::app_paths::{
     build_codex_executable, codex_app_version, find_latest_codex_app_dir,
@@ -388,7 +390,7 @@ fn ports_non_windows_keeps_requested_even_when_busy() {
 #[tokio::test]
 async fn default_helper_serves_backend_status_over_http() {
     let hooks = DefaultLaunchHooks::default();
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
 
@@ -425,7 +427,7 @@ async fn default_helper_accepts_diagnostic_log_events_over_http() {
     let log_path = temp.path().join("codex-elves.log");
     codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
     let hooks = DefaultLaunchHooks::default();
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
 
@@ -453,6 +455,90 @@ async fn default_helper_accepts_diagnostic_log_events_over_http() {
     assert!(contents.contains("renderer.backend_check_failed"));
     assert!(contents.contains("fetch failed"));
     codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
+}
+
+#[tokio::test]
+async fn default_helper_streams_translated_tool_call_to_completion() {
+    let _lock = launcher_settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
+    let upstream = spawn_launcher_upstream_with_response(
+        "text/event-stream",
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_tool_search","type":"message","role":"assistant","model":"claude-sonnet-4","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_search","name":"tool_search","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"local_shell\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":5}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#
+        .to_string(),
+    );
+    write_launcher_mixed_relay_settings(temp.path(), &upstream.base_url);
+
+    let hooks = DefaultLaunchHooks::default();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    hooks.start_helper(port).await.unwrap();
+
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .json(&serde_json::json!({
+            "model": "claude-sonnet-4",
+            "input": "find shell tools",
+            "stream": true,
+            "tools": [
+                { "type": "tool_search" },
+                { "type": "local_shell" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let body = response.text().await.unwrap();
+    hooks.shutdown_helper(port).await;
+    let requests = upstream.finish_all();
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/v1/messages");
+    let first_upstream_body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(first_upstream_body["stream"], true);
+    assert!(
+        first_upstream_body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "tool_search")
+    );
+    assert!(content_type.contains("text/event-stream"));
+    assert!(body.contains("\"type\":\"tool_search_call\""));
+    assert!(body.contains("\"call_id\":\"toolu_search\""));
+    assert!(body.contains(r#""arguments":{"query":"local_shell"}"#));
+    assert!(body.contains("event: response.completed"));
+    assert!(body.contains("data: [DONE]"));
 }
 
 #[tokio::test]
@@ -1319,4 +1405,175 @@ impl LaunchHooks for FakeHooks {
             self.event("terminate-codex");
         }
     }
+}
+
+struct LauncherSettingsPathGuard {
+    previous: Option<PathBuf>,
+}
+
+impl LauncherSettingsPathGuard {
+    fn set(path: PathBuf) -> Self {
+        let previous = codex_elves_core::paths::set_settings_path_for_tests(Some(path));
+        Self { previous }
+    }
+}
+
+impl Drop for LauncherSettingsPathGuard {
+    fn drop(&mut self) {
+        codex_elves_core::paths::set_settings_path_for_tests(self.previous.take());
+    }
+}
+
+fn launcher_settings_path_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct LauncherUpstream {
+    base_url: String,
+    handle: std::thread::JoinHandle<Vec<LauncherUpstreamRequest>>,
+}
+
+impl LauncherUpstream {
+    fn finish_all(self) -> Vec<LauncherUpstreamRequest> {
+        self.handle.join().unwrap()
+    }
+}
+
+struct LauncherUpstreamRequest {
+    path: String,
+    body: String,
+}
+
+fn spawn_launcher_upstream_with_response(
+    content_type: &str,
+    response_body: String,
+) -> LauncherUpstream {
+    spawn_launcher_upstream_with_response_specs(vec![(content_type.to_string(), response_body)])
+}
+
+fn spawn_launcher_upstream_with_response_specs(
+    response_specs: Vec<(String, String)>,
+) -> LauncherUpstream {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let base_url = format!("http://{address}/v1");
+    listener.set_nonblocking(true).unwrap();
+
+    let handle = std::thread::spawn(move || {
+        let mut requests = Vec::new();
+        for (content_type, response_body) in response_specs {
+            let started = std::time::Instant::now();
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            started.elapsed() < std::time::Duration::from_secs(10),
+                            "test upstream did not receive a request"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("failed to accept test request: {error}"),
+                }
+            };
+
+            let request = read_launcher_upstream_request(&mut stream);
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or_default()
+                .to_string();
+            let body = request
+                .split_once("\r\n\r\n")
+                .map(|(_, body)| body.to_string())
+                .unwrap_or_default();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                content_type,
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            requests.push(LauncherUpstreamRequest { path, body });
+        }
+        requests
+    });
+
+    LauncherUpstream { base_url, handle }
+}
+
+fn read_launcher_upstream_request(stream: &mut std::net::TcpStream) -> String {
+    let mut request_bytes = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let bytes = match stream.read(&mut buffer) {
+            Ok(0) => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+            Err(error) => panic!("failed to read test upstream request: {error}"),
+        };
+        request_bytes.extend_from_slice(&buffer[..bytes]);
+        let request = String::from_utf8_lossy(&request_bytes);
+        if let Some(header_end) = request.find("\r\n\r\n") {
+            let content_length = request
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                })
+                .unwrap_or(0);
+            if request_bytes.len() >= header_end + 4 + content_length {
+                return request.to_string();
+            }
+        }
+    }
+}
+
+fn write_launcher_mixed_relay_settings(settings_dir: &Path, base_url: &str) {
+    let settings = serde_json::json!({
+        "relayProfiles": [{
+            "id": "mixed",
+            "name": "Mixed",
+            "baseUrl": base_url,
+            "upstreamBaseUrl": base_url,
+            "apiKey": "sk-test",
+            "protocol": "responses",
+            "localProxyEnabled": true,
+            "relayMode": "mixedApi",
+            "modelMappings": [
+                {
+                    "requestModel": "gpt-responses",
+                    "protocol": "responses",
+                    "contextWindow": "200000"
+                },
+                {
+                    "requestModel": "gpt-chat",
+                    "protocol": "chatCompletions",
+                    "contextWindow": "200000"
+                },
+                {
+                    "requestModel": "claude-sonnet-4",
+                    "protocol": "anthropic",
+                    "contextWindow": "200000"
+                }
+            ]
+        }],
+        "activeRelayId": "mixed"
+    });
+    std::fs::write(
+        settings_dir.join("settings.json"),
+        serde_json::to_vec_pretty(&settings).unwrap(),
+    )
+    .unwrap();
 }

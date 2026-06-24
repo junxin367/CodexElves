@@ -1,11 +1,11 @@
 use codex_elves_core::protocol_proxy::{
-    ChatSseToResponsesConverter, UpstreamResponseProtocol,
+    AnthropicSseToResponsesConverter, ChatSseToResponsesConverter, UpstreamResponseProtocol,
     anthropic_message_to_response_with_request, anthropic_messages_url,
     anthropic_sse_to_responses_sse_with_request, chat_completion_to_response,
     chat_completion_to_response_with_request, chat_completions_url, chat_sse_to_responses_sse,
-    chat_sse_to_responses_sse_with_request, is_chat_completions_proxy_path, is_models_proxy_path,
-    is_responses_proxy_path, models_url, open_chat_completions_proxy_request,
-    open_models_proxy_request, open_responses_proxy_request,
+    chat_sse_to_responses_sse_with_request, handle_responses_proxy_request,
+    is_chat_completions_proxy_path, is_models_proxy_path, is_responses_proxy_path, models_url,
+    open_chat_completions_proxy_request, open_models_proxy_request, open_responses_proxy_request,
     open_responses_proxy_request_with_settings, responses_error_from_upstream,
     responses_to_anthropic_messages, responses_to_chat_completions,
     send_upstream_request_with_header_timeout, supported_reasoning_efforts_for_model,
@@ -283,6 +283,81 @@ fn anthropic_message_response_converts_to_responses() {
     assert_eq!(converted["usage"]["input_tokens"], 10);
     assert_eq!(converted["usage"]["output_tokens"], 5);
     assert_eq!(converted["usage"]["cache_read_input_tokens"], 2);
+}
+
+#[test]
+fn anthropic_message_response_maps_web_search_to_native_call() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_web_search",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_web",
+                "name": "web_search",
+                "input": { "query": "pal mcp GitHub" }
+            }],
+            "stop_reason": "tool_use",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-sonnet-4",
+            "input": "search",
+            "tools": [{ "type": "web_search" }]
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(converted["output"][0]["type"], "web_search_call");
+    assert_eq!(converted["output"][0]["id"], "ws_toolu_web");
+    assert_eq!(converted["output"][0]["status"], "completed");
+    assert_eq!(converted["output"][0]["execution"], "client");
+    assert_eq!(converted["output"][0]["action"]["type"], "search");
+    assert_eq!(converted["output"][0]["action"]["query"], "pal mcp GitHub");
+    assert_eq!(
+        converted["output"][0]["action"]["queries"],
+        json!(["pal mcp GitHub"])
+    );
+}
+
+#[test]
+fn anthropic_message_response_maps_web_search_to_search_mcp_when_available() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_web_search",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_web",
+                "name": "web_search",
+                "input": { "query": "pal mcp GitHub" }
+            }],
+            "stop_reason": "tool_use",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-sonnet-4",
+            "input": "search",
+            "tools": [
+                { "type": "web_search" },
+                tavily_namespace_tool()
+            ]
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(converted["output"][0]["type"], "function_call");
+    assert_eq!(converted["output"][0]["call_id"], "toolu_web");
+    assert_eq!(converted["output"][0]["name"], "tavily_search");
+    assert_eq!(converted["output"][0]["namespace"], "mcp__tavily");
+    assert_eq!(
+        converted["output"][0]["arguments"],
+        r#"{"query":"pal mcp GitHub"}"#
+    );
 }
 
 #[test]
@@ -1297,6 +1372,19 @@ fn responses_request_maps_codex_custom_and_namespace_tools_to_chat_functions() {
             },
             {
                 "type": "web_search"
+            },
+            {
+                "type": "tool_search",
+                "description": "Discover deferred tools"
+            },
+            {
+                "type": "web_search_preview"
+            },
+            {
+                "type": "web_search_preview_2025_03_11"
+            },
+            {
+                "type": "local_shell"
             }
         ],
         "tool_choice": {
@@ -1316,7 +1404,11 @@ fn responses_request_maps_codex_custom_and_namespace_tools_to_chat_functions() {
         .collect();
     assert!(names.contains(&"exec"));
     assert!(names.contains(&"mcp__vscode_mcp__open_file"));
+    assert!(names.contains(&"local_shell"));
     assert!(names.contains(&"web_search"));
+    assert!(names.contains(&"tool_search"));
+    assert!(names.contains(&"web_search_preview"));
+    assert!(names.contains(&"web_search_preview_2025_03_11"));
     assert_eq!(
         converted["tools"][0]["function"]["parameters"]["properties"]["input"]["type"],
         "string"
@@ -1326,6 +1418,47 @@ fn responses_request_maps_codex_custom_and_namespace_tools_to_chat_functions() {
         converted["tool_choice"]["function"]["name"],
         "mcp__vscode_mcp__open_file"
     );
+}
+
+#[test]
+fn responses_request_maps_tool_choice_for_proxy_internal_tools() {
+    let converted = responses_to_chat_completions(json!({
+        "model": "gpt-5-mini",
+        "input": "hi",
+        "tools": [
+            { "type": "web_search_preview_2025_03_11" },
+            { "type": "local_shell" }
+        ],
+        "tool_choice": { "type": "function", "name": "web_search_preview_2025_03_11" }
+    }))
+    .unwrap();
+
+    let names: Vec<_> = converted["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["web_search_preview_2025_03_11", "local_shell"]);
+    assert_eq!(
+        converted["tool_choice"]["function"]["name"],
+        "web_search_preview_2025_03_11"
+    );
+
+    let anthropic = responses_to_anthropic_messages(json!({
+        "model": "claude-sonnet-4",
+        "input": "hi",
+        "tools": [
+            { "type": "web_search_preview" },
+            { "type": "computer_use_preview" }
+        ],
+        "tool_choice": { "type": "web_search_preview" }
+    }))
+    .unwrap();
+
+    assert_eq!(anthropic["tools"][0]["name"], "web_search_preview");
+    assert_eq!(anthropic["tools"][1]["name"], "computer_use_preview");
+    assert_eq!(anthropic["tool_choice"]["name"], "web_search_preview");
 }
 
 #[test]
@@ -1431,6 +1564,83 @@ fn responses_input_replays_custom_and_legacy_tool_history() {
         converted["messages"][3]["content"],
         "{\"result\":\"found\"}"
     );
+}
+
+#[test]
+fn responses_input_replays_server_side_tool_history() {
+    let input = json!([
+        {
+            "type": "tool_search_call",
+            "call_id": "call_tool_search",
+            "status": "completed",
+            "execution": "client",
+            "arguments": {
+                "query": "pal mcp",
+                "limit": 8
+            }
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_tool_search",
+            "status": "completed",
+            "execution": "client",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "mcp__pal",
+                    "tools": []
+                }
+            ]
+        },
+        {
+            "type": "function_call",
+            "call_id": "call_web",
+            "name": "web_search_preview",
+            "arguments": "{\"query\":\"rust\"}"
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_web",
+            "output": "unsupported call: web_search_preview"
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": "continue"
+        }
+    ]);
+
+    let chat = responses_to_chat_completions(json!({
+        "model": "gpt-5-mini",
+        "input": input
+    }))
+    .unwrap();
+    let chat_text = chat["messages"].to_string();
+    assert!(chat_text.contains("tool_search"));
+    assert!(chat_text.contains("pal mcp"));
+    assert!(chat_text.contains("mcp__pal"));
+    assert!(chat_text.contains("web_search_preview"));
+    assert!(chat_text.contains("unsupported"));
+    assert!(
+        chat["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["content"] == "continue")
+    );
+
+    let anthropic = responses_to_anthropic_messages(json!({
+        "model": "claude-sonnet-4",
+        "input": input
+    }))
+    .unwrap();
+    let anthropic_text = anthropic["messages"].to_string();
+    assert!(anthropic_text.contains("tool_search"));
+    assert!(anthropic_text.contains("pal mcp"));
+    assert!(anthropic_text.contains("mcp__pal"));
+    assert!(anthropic_text.contains("web_search_preview"));
+    assert!(anthropic_text.contains("unsupported"));
+    assert!(anthropic_text.contains("continue"));
 }
 
 #[test]
@@ -1639,6 +1849,93 @@ fn chat_completion_response_maps_reasoning_tool_calls_and_usage_details() {
 }
 
 #[test]
+fn chat_completion_response_maps_web_search_to_native_call() {
+    let converted = chat_completion_to_response_with_request(
+        json!({
+            "id": "chatcmpl_web_search",
+            "created": 123,
+            "model": "gpt-chat",
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_web",
+                        "type": "function",
+                        "function": {
+                            "name": "web_search_preview_2025_03_11",
+                            "arguments": "{\"query\":\"pal mcp GitHub\"}"
+                        }
+                    }]
+                }
+            }]
+        }),
+        &json!({
+            "model": "gpt-chat",
+            "input": "search",
+            "tools": [{ "type": "web_search_preview_2025_03_11" }]
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(converted["output"][0]["type"], "web_search_call");
+    assert_eq!(converted["output"][0]["id"], "ws_call_web");
+    assert_eq!(converted["output"][0]["status"], "completed");
+    assert_eq!(converted["output"][0]["execution"], "client");
+    assert_eq!(converted["output"][0]["action"]["type"], "search");
+    assert_eq!(converted["output"][0]["action"]["query"], "pal mcp GitHub");
+    assert_eq!(
+        converted["output"][0]["action"]["queries"],
+        json!(["pal mcp GitHub"])
+    );
+}
+
+#[test]
+fn chat_completion_response_maps_web_search_to_search_mcp_when_available() {
+    let converted = chat_completion_to_response_with_request(
+        json!({
+            "id": "chatcmpl_web_search",
+            "created": 123,
+            "model": "gpt-chat",
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_web",
+                        "type": "function",
+                        "function": {
+                            "name": "web_search_preview_2025_03_11",
+                            "arguments": "{\"query\":\"pal mcp GitHub\"}"
+                        }
+                    }]
+                }
+            }]
+        }),
+        &json!({
+            "model": "gpt-chat",
+            "input": "search",
+            "tools": [
+                { "type": "web_search_preview_2025_03_11" },
+                tavily_namespace_tool()
+            ]
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(converted["output"][0]["type"], "function_call");
+    assert_eq!(converted["output"][0]["call_id"], "call_web");
+    assert_eq!(converted["output"][0]["name"], "tavily_search");
+    assert_eq!(converted["output"][0]["namespace"], "mcp__tavily");
+    assert_eq!(
+        converted["output"][0]["arguments"],
+        r#"{"query":"pal mcp GitHub"}"#
+    );
+}
+
+#[test]
 fn chat_completion_response_extracts_reasoning_details_like_ccswitch() {
     let converted = chat_completion_to_response(json!({
         "id": "chatcmpl_reasoning_details",
@@ -1789,6 +2086,43 @@ fn chat_completion_response_reconstructs_apply_patch_proxy_call() {
     assert_eq!(
         converted["output"][0]["input"],
         "*** Begin Patch\n*** Add File: README.md\n+hello\n*** End Patch"
+    );
+}
+
+#[test]
+fn chat_completion_response_reconstructs_apply_patch_replace_file_proxy_call() {
+    let converted = chat_completion_to_response_with_request(
+        json!({
+            "id": "chatcmpl_patch_replace",
+            "created": 123,
+            "model": "gpt-5-mini",
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_patch",
+                        "type": "function",
+                        "function": {
+                            "name": "apply_patch_replace_file",
+                            "arguments": "{\"path\":\"README.md\",\"content\":\"hello\"}"
+                        }
+                    }]
+                }
+            }]
+        }),
+        &json!({
+            "model": "gpt-5-mini",
+            "tools": [{ "type": "custom", "name": "apply_patch" }]
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(converted["output"][0]["type"], "custom_tool_call");
+    assert_eq!(converted["output"][0]["name"], "apply_patch");
+    assert_eq!(
+        converted["output"][0]["input"],
+        "*** Begin Patch\n*** Delete File: README.md\n*** Add File: README.md\n+hello\n*** End Patch"
     );
 }
 
@@ -2010,6 +2344,94 @@ data: [DONE]
 }
 
 #[test]
+fn chat_sse_maps_web_search_to_native_call_events() {
+    let converted = chat_sse_to_responses_sse_with_request(
+        r#"data: {"id":"chatcmpl_web","model":"gpt-chat","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_web","type":"function","function":{"name":"web_search","arguments":"{\"query\":\"pal mcp GitHub\"}"}}]}}]}
+
+data: {"id":"chatcmpl_web","model":"gpt-chat","choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+"#,
+        &json!({
+            "model": "gpt-chat",
+            "tools": [{ "type": "web_search" }]
+        }),
+    );
+
+    assert!(!converted.contains("response.function_call_arguments"));
+    let events = parse_response_sse_events(&converted);
+    let added = events
+        .iter()
+        .find(|event| event.event == "response.output_item.added")
+        .unwrap();
+    assert_eq!(added.data["item"]["type"], "web_search_call");
+    assert_eq!(added.data["item"]["status"], "in_progress");
+    assert_eq!(added.data["item"]["execution"], "client");
+    let done = events
+        .iter()
+        .find(|event| event.event == "response.output_item.done")
+        .unwrap();
+    assert_eq!(done.data["item"]["type"], "web_search_call");
+    assert_eq!(done.data["item"]["id"], "ws_call_web");
+    assert_eq!(done.data["item"]["status"], "completed");
+    assert_eq!(done.data["item"]["execution"], "client");
+    assert_eq!(done.data["item"]["action"]["type"], "search");
+    assert_eq!(done.data["item"]["action"]["query"], "pal mcp GitHub");
+}
+
+#[test]
+fn chat_sse_maps_web_search_to_search_mcp_events_when_available() {
+    let converted = chat_sse_to_responses_sse_with_request(
+        r#"data: {"id":"chatcmpl_web","model":"gpt-chat","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_web","type":"function","function":{"name":"web_search","arguments":"{\"query\":\"pal mcp GitHub\"}"}}]}}]}
+
+data: {"id":"chatcmpl_web","model":"gpt-chat","choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+"#,
+        &json!({
+            "model": "gpt-chat",
+            "tools": [
+                { "type": "web_search" },
+                tavily_namespace_tool()
+            ]
+        }),
+    );
+
+    assert!(converted.contains("response.function_call_arguments.done"));
+    assert!(!converted.contains("web_search_call"));
+    let events = parse_response_sse_events(&converted);
+    let added = events
+        .iter()
+        .find(|event| event.event == "response.output_item.added")
+        .unwrap();
+    assert_eq!(added.data["item"]["type"], "function_call");
+    assert_eq!(added.data["item"]["name"], "tavily_search");
+    assert_eq!(added.data["item"]["namespace"], "mcp__tavily");
+    let arguments_done = events
+        .iter()
+        .find(|event| event.event == "response.function_call_arguments.done")
+        .unwrap();
+    assert_eq!(arguments_done.data["name"], "tavily_search");
+    assert_eq!(
+        arguments_done.data["arguments"],
+        r#"{"query":"pal mcp GitHub"}"#
+    );
+    let done = events
+        .iter()
+        .find(|event| event.event == "response.output_item.done")
+        .unwrap();
+    assert_eq!(done.data["item"]["type"], "function_call");
+    assert_eq!(done.data["item"]["name"], "tavily_search");
+    assert_eq!(done.data["item"]["namespace"], "mcp__tavily");
+    assert_eq!(
+        done.data["item"]["arguments"],
+        r#"{"query":"pal mcp GitHub"}"#
+    );
+}
+
+#[test]
 fn chat_sse_maps_custom_tool_call_with_request_context() {
     let converted = chat_sse_to_responses_sse_with_request(
         r#"data: {"id":"chatcmpl_custom","model":"gpt-5.4","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_custom","type":"function","function":{"name":"exec"}}]}}]}
@@ -2124,6 +2546,118 @@ data: {"type":"message_stop"}
     assert_eq!(completed.data["response"]["usage"]["input_tokens"], 7);
     assert_eq!(completed.data["response"]["usage"]["output_tokens"], 9);
     assert!(converted.contains("data: [DONE]"));
+}
+
+#[test]
+fn anthropic_sse_maps_web_search_to_native_call_events() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_web_stream","type":"message","role":"assistant","model":"claude-sonnet-4","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_web","name":"web_search","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"pal mcp GitHub\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-sonnet-4",
+            "tools": [{ "type": "web_search" }]
+        }),
+    );
+
+    assert!(!converted.contains("response.function_call_arguments"));
+    let events = parse_response_sse_events(&converted);
+    let added = events
+        .iter()
+        .find(|event| event.event == "response.output_item.added")
+        .unwrap();
+    assert_eq!(added.data["item"]["type"], "web_search_call");
+    assert_eq!(added.data["item"]["status"], "in_progress");
+    assert_eq!(added.data["item"]["execution"], "client");
+    let done = events
+        .iter()
+        .find(|event| event.event == "response.output_item.done")
+        .unwrap();
+    assert_eq!(done.data["item"]["type"], "web_search_call");
+    assert_eq!(done.data["item"]["id"], "ws_toolu_web");
+    assert_eq!(done.data["item"]["status"], "completed");
+    assert_eq!(done.data["item"]["execution"], "client");
+    assert_eq!(done.data["item"]["action"]["type"], "search");
+    assert_eq!(done.data["item"]["action"]["query"], "pal mcp GitHub");
+}
+
+#[test]
+fn anthropic_sse_maps_web_search_to_search_mcp_events_when_available() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_web_stream","type":"message","role":"assistant","model":"claude-sonnet-4","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_web","name":"web_search","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"pal mcp GitHub\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-sonnet-4",
+            "tools": [
+                { "type": "web_search" },
+                tavily_namespace_tool()
+            ]
+        }),
+    );
+
+    assert!(converted.contains("response.function_call_arguments.done"));
+    assert!(!converted.contains("web_search_call"));
+    let events = parse_response_sse_events(&converted);
+    let added = events
+        .iter()
+        .find(|event| event.event == "response.output_item.added")
+        .unwrap();
+    assert_eq!(added.data["item"]["type"], "function_call");
+    assert_eq!(added.data["item"]["name"], "tavily_search");
+    assert_eq!(added.data["item"]["namespace"], "mcp__tavily");
+    let arguments_done = events
+        .iter()
+        .find(|event| event.event == "response.function_call_arguments.done")
+        .unwrap();
+    assert_eq!(arguments_done.data["name"], "tavily_search");
+    assert_eq!(
+        arguments_done.data["arguments"],
+        r#"{"query":"pal mcp GitHub"}"#
+    );
+    let done = events
+        .iter()
+        .find(|event| event.event == "response.output_item.done")
+        .unwrap();
+    assert_eq!(done.data["item"]["type"], "function_call");
+    assert_eq!(done.data["item"]["name"], "tavily_search");
+    assert_eq!(done.data["item"]["namespace"], "mcp__tavily");
+    assert_eq!(
+        done.data["item"]["arguments"],
+        r#"{"query":"pal mcp GitHub"}"#
+    );
 }
 
 #[test]
@@ -2371,6 +2905,61 @@ data: {"type":"message_stop"}
 }
 
 #[test]
+fn anthropic_sse_textual_invoke_split_after_marker_whitespace_converts_exec_call() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_split_marker_whitespace","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"call\n\n\n<in"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"voke name=\"exec_command\">\n<parameter name=\"cmd\">git status --short</parameter>\n</invoke>"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-opus-4-8",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": { "type": "object" }
+                }
+            ]
+        }),
+    );
+
+    let events = parse_response_sse_events(&converted);
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event == "response.output_text.delta"),
+        "marker 和 <invoke> 之间有多空白时仍不应泄漏为文本"
+    );
+    let arguments_done = events
+        .iter()
+        .find(|event| event.event == "response.function_call_arguments.done")
+        .expect("应该跨 marker 空白 chunk 还原 exec_command 调用");
+    assert_eq!(arguments_done.data["name"], "exec_command");
+    assert_eq!(
+        arguments_done.data["arguments"],
+        r#"{"cmd":"git status --short"}"#
+    );
+}
+
+#[test]
 fn anthropic_sse_drops_standalone_call_marker_before_native_tool_use() {
     let converted = anthropic_sse_to_responses_sse_with_request(
         r#"event: message_start
@@ -2436,6 +3025,60 @@ data: {"type":"message_stop"}
 }
 
 #[test]
+fn anthropic_sse_keeps_marker_suffix_word_before_native_tool_use() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_native_tool_with_marker_suffix","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"recall"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"exec_command","input":{"cmd":"git status --short"}}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-opus-4-8",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": { "type": "object" }
+                }
+            ]
+        }),
+    );
+
+    let events = parse_response_sse_events(&converted);
+    let text_delta: String = events
+        .iter()
+        .filter(|event| event.event == "response.output_text.delta")
+        .filter_map(|event| event.data["delta"].as_str())
+        .collect();
+    assert_eq!(text_delta, "recall");
+    let arguments_done = events
+        .iter()
+        .find(|event| event.event == "response.function_call_arguments.done")
+        .expect("应该保留后续原生工具调用");
+    assert_eq!(arguments_done.data["name"], "exec_command");
+}
+
+#[test]
 fn anthropic_sse_keeps_standalone_call_marker_when_no_tool_follows() {
     let converted = anthropic_sse_to_responses_sse_with_request(
         r#"event: message_start
@@ -2483,6 +3126,66 @@ data: {"type":"message_stop"}
     assert_eq!(
         completed.data["response"]["output"][0]["content"][0]["text"],
         "call"
+    );
+}
+
+#[test]
+fn anthropic_sse_keeps_consecutive_standalone_markers_without_tool() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_consecutive_markers_without_tool","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"call"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"codex"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-opus-4-8",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": { "type": "object" }
+                }
+            ]
+        }),
+    );
+
+    let events = parse_response_sse_events(&converted);
+    let text_delta: String = events
+        .iter()
+        .filter(|event| event.event == "response.output_text.delta")
+        .filter_map(|event| event.data["delta"].as_str())
+        .collect();
+    assert_eq!(text_delta, "callcodex");
+    let completed = events
+        .iter()
+        .find(|event| event.event == "response.completed")
+        .unwrap();
+    assert_eq!(
+        completed.data["response"]["output"][0]["content"][0]["text"],
+        "callcodex"
     );
 }
 
@@ -2679,6 +3382,44 @@ fn chat_sse_converter_handles_partial_chunks_and_utf8_boundaries() {
 }
 
 #[test]
+fn anthropic_sse_converter_handles_partial_chunks_and_utf8_boundaries() {
+    let sse = r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_utf8","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"你好"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#;
+    let bytes = sse.as_bytes();
+    let split = bytes
+        .windows("好".len())
+        .position(|window| window == "好".as_bytes())
+        .unwrap()
+        + 1;
+
+    let mut converter = AnthropicSseToResponsesConverter::default();
+    let mut output = converter.push_bytes(&bytes[..split]);
+    output.extend(converter.push_bytes(&bytes[split..]));
+    output.extend(converter.finish());
+    let output = String::from_utf8(output).unwrap();
+
+    assert!(output.contains("\"delta\":\"你好\""));
+    assert!(output.contains("event: response.completed"));
+}
+
+#[test]
 fn chat_sse_fails_on_invalid_json_or_unfinished_stream() {
     let invalid = chat_sse_to_responses_sse("data: {bad json}\n\n");
     let invalid_events = parse_response_sse_events(&invalid);
@@ -2696,6 +3437,32 @@ fn chat_sse_fails_on_invalid_json_or_unfinished_stream() {
     );
     let unfinished_events = parse_response_sse_events(&unfinished);
     let failed = unfinished_events
+        .iter()
+        .find(|event| event.event == "response.failed")
+        .unwrap();
+    assert_eq!(failed.data["response"]["error"]["type"], "stream_error");
+    assert!(!unfinished.contains("event: response.completed"));
+}
+
+#[test]
+fn anthropic_sse_fails_on_unfinished_stream() {
+    let unfinished = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_drop","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}
+
+"#,
+        &json!({
+            "model": "claude-opus-4-8"
+        }),
+    );
+    let events = parse_response_sse_events(&unfinished);
+    let failed = events
         .iter()
         .find(|event| event.event == "response.failed")
         .unwrap();
@@ -3110,6 +3877,615 @@ async fn responses_proxy_directs_chat_models_to_chat_completions_upstream() {
 }
 
 #[tokio::test]
+async fn responses_proxy_e2e_chat_upstream_regular_text_with_tools_still_returns_message() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let upstream_response = json!({
+        "id": "chatcmpl_text",
+        "object": "chat.completion",
+        "created": 123,
+        "model": "gpt-chat",
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": "pong"
+            }
+        }],
+        "usage": {
+            "prompt_tokens": 8,
+            "completion_tokens": 3
+        }
+    })
+    .to_string();
+    let server = spawn_chat_server_with_response(upstream_response);
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+    let request_body = json!({
+        "model": "gpt-chat",
+        "input": "hello",
+        "stream": false,
+        "tools": [
+            { "type": "tool_search" },
+            { "type": "web_search" },
+            tavily_namespace_tool(),
+            pal_namespace_tool(),
+            { "type": "local_shell" }
+        ]
+    })
+    .to_string();
+
+    let response = handle_responses_proxy_request(&request_body).await.unwrap();
+    let upstream_request = server.finish();
+
+    assert_eq!(upstream_request.path, "/v1/chat/completions");
+    assert_eq!(response.status, "200 OK");
+    let response_body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(response_body["output"][0]["type"], "message");
+    assert_eq!(response_body["output"][0]["content"][0]["text"], "pong");
+}
+
+#[tokio::test]
+async fn responses_proxy_e2e_anthropic_upstream_regular_text_with_tools_still_returns_message() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let upstream_response = json!({
+        "id": "msg_text",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4",
+        "content": [{
+            "type": "text",
+            "text": "pong"
+        }],
+        "stop_reason": "end_turn",
+        "usage": {
+            "input_tokens": 8,
+            "output_tokens": 3
+        }
+    })
+    .to_string();
+    let server = spawn_chat_server_with_response(upstream_response);
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+    let request_body = json!({
+        "model": "claude-sonnet-4",
+        "input": "hello",
+        "stream": false,
+        "tools": [
+            { "type": "tool_search" },
+            { "type": "web_search" },
+            tavily_namespace_tool(),
+            pal_namespace_tool(),
+            { "type": "local_shell" }
+        ]
+    })
+    .to_string();
+
+    let response = handle_responses_proxy_request(&request_body).await.unwrap();
+    let upstream_request = server.finish();
+
+    assert_eq!(upstream_request.path, "/v1/messages");
+    assert_eq!(response.status, "200 OK");
+    let response_body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(response_body["output"][0]["type"], "message");
+    assert_eq!(response_body["output"][0]["content"][0]["text"], "pong");
+}
+
+#[tokio::test]
+async fn responses_proxy_e2e_chat_upstream_roundtrips_regular_namespace_tool_call() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let upstream_response = json!({
+        "id": "chatcmpl_pal",
+        "object": "chat.completion",
+        "created": 123,
+        "model": "gpt-chat",
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_pal",
+                    "type": "function",
+                    "function": {
+                        "name": "mcp__pal__version",
+                        "arguments": "{}"
+                    }
+                }]
+            }
+        }]
+    })
+    .to_string();
+    let server = spawn_chat_server_with_response(upstream_response);
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+    let request_body = json!({
+        "model": "gpt-chat",
+        "input": "check pal version",
+        "stream": false,
+        "tools": [pal_namespace_tool()]
+    })
+    .to_string();
+
+    let response = handle_responses_proxy_request(&request_body).await.unwrap();
+    let upstream_request = server.finish();
+
+    assert_eq!(upstream_request.path, "/v1/chat/completions");
+    let upstream_body: Value = serde_json::from_str(&upstream_request.body).unwrap();
+    assert!(
+        upstream_body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["function"]["name"] == "mcp__pal__version")
+    );
+    assert_eq!(response.status, "200 OK");
+    let response_body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(response_body["output"][0]["type"], "function_call");
+    assert_eq!(response_body["output"][0]["call_id"], "call_pal");
+    assert_eq!(response_body["output"][0]["name"], "version");
+    assert_eq!(response_body["output"][0]["namespace"], "mcp__pal");
+}
+
+#[tokio::test]
+async fn responses_proxy_e2e_anthropic_upstream_roundtrips_regular_namespace_tool_call() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let upstream_response = json!({
+        "id": "msg_pal",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4",
+        "content": [{
+            "type": "tool_use",
+            "id": "toolu_pal",
+            "name": "mcp__pal__version",
+            "input": {}
+        }],
+        "stop_reason": "tool_use",
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+        }
+    })
+    .to_string();
+    let server = spawn_chat_server_with_response(upstream_response);
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+    let request_body = json!({
+        "model": "claude-sonnet-4",
+        "input": "check pal version",
+        "stream": false,
+        "tools": [pal_namespace_tool()]
+    })
+    .to_string();
+
+    let response = handle_responses_proxy_request(&request_body).await.unwrap();
+    let upstream_request = server.finish();
+
+    assert_eq!(upstream_request.path, "/v1/messages");
+    let upstream_body: Value = serde_json::from_str(&upstream_request.body).unwrap();
+    assert!(
+        upstream_body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "mcp__pal__version")
+    );
+    assert_eq!(response.status, "200 OK");
+    let response_body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(response_body["output"][0]["type"], "function_call");
+    assert_eq!(response_body["output"][0]["call_id"], "toolu_pal");
+    assert_eq!(response_body["output"][0]["name"], "version");
+    assert_eq!(response_body["output"][0]["namespace"], "mcp__pal");
+}
+
+#[tokio::test]
+async fn responses_proxy_e2e_chat_upstream_maps_web_search_to_search_mcp_when_available() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let upstream_response = json!({
+        "id": "chatcmpl_web",
+        "object": "chat.completion",
+        "created": 123,
+        "model": "gpt-chat",
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_web",
+                    "type": "function",
+                    "function": {
+                        "name": "web_search",
+                        "arguments": "{\"query\":\"pal mcp GitHub\"}"
+                    }
+                }]
+            }
+        }]
+    })
+    .to_string();
+    let server = spawn_chat_server_with_response(upstream_response);
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+    let request_body = json!({
+        "model": "gpt-chat",
+        "input": "search pal mcp",
+        "stream": false,
+        "tools": [
+            { "type": "web_search" },
+            tavily_namespace_tool()
+        ]
+    })
+    .to_string();
+
+    let response = handle_responses_proxy_request(&request_body).await.unwrap();
+    let upstream_request = server.finish();
+
+    assert_eq!(upstream_request.path, "/v1/chat/completions");
+    let upstream_body: Value = serde_json::from_str(&upstream_request.body).unwrap();
+    let upstream_tool_names = upstream_body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(upstream_tool_names.contains(&"web_search"));
+    assert!(upstream_tool_names.contains(&"mcp__tavily__tavily_search"));
+
+    assert_eq!(response.status, "200 OK");
+    let response_body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(response_body["output"][0]["type"], "function_call");
+    assert_eq!(response_body["output"][0]["call_id"], "call_web");
+    assert_eq!(response_body["output"][0]["name"], "tavily_search");
+    assert_eq!(response_body["output"][0]["namespace"], "mcp__tavily");
+    assert_eq!(
+        response_body["output"][0]["arguments"],
+        r#"{"query":"pal mcp GitHub"}"#
+    );
+}
+
+#[tokio::test]
+async fn responses_proxy_e2e_anthropic_upstream_maps_web_search_to_search_mcp_when_available() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let upstream_response = json!({
+        "id": "msg_web",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4",
+        "content": [{
+            "type": "tool_use",
+            "id": "toolu_web",
+            "name": "web_search",
+            "input": { "query": "pal mcp GitHub" }
+        }],
+        "stop_reason": "tool_use",
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+        }
+    })
+    .to_string();
+    let server = spawn_chat_server_with_response(upstream_response);
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+    let request_body = json!({
+        "model": "claude-sonnet-4",
+        "input": "search pal mcp",
+        "stream": false,
+        "tools": [
+            { "type": "web_search" },
+            tavily_namespace_tool()
+        ]
+    })
+    .to_string();
+
+    let response = handle_responses_proxy_request(&request_body).await.unwrap();
+    let upstream_request = server.finish();
+
+    assert_eq!(upstream_request.path, "/v1/messages");
+    let upstream_body: Value = serde_json::from_str(&upstream_request.body).unwrap();
+    let upstream_tool_names = upstream_body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(upstream_tool_names.contains(&"web_search"));
+    assert!(upstream_tool_names.contains(&"mcp__tavily__tavily_search"));
+
+    assert_eq!(response.status, "200 OK");
+    let response_body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(response_body["output"][0]["type"], "function_call");
+    assert_eq!(response_body["output"][0]["call_id"], "toolu_web");
+    assert_eq!(response_body["output"][0]["name"], "tavily_search");
+    assert_eq!(response_body["output"][0]["namespace"], "mcp__tavily");
+    assert_eq!(
+        response_body["output"][0]["arguments"],
+        r#"{"query":"pal mcp GitHub"}"#
+    );
+}
+
+#[tokio::test]
+async fn responses_proxy_e2e_chat_upstream_roundtrips_builtin_proxy_tools() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let local_shell_args = json!({ "input": "pwd" }).to_string();
+    let computer_use_args = json!({ "input": "screenshot" }).to_string();
+    let upstream_response = json!({
+        "id": "chatcmpl_tools",
+        "object": "chat.completion",
+        "created": 123,
+        "model": "gpt-chat",
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_local_shell",
+                        "type": "function",
+                        "function": {
+                            "name": "local_shell",
+                            "arguments": local_shell_args
+                        }
+                    },
+                    {
+                        "id": "call_computer_use",
+                        "type": "function",
+                        "function": {
+                            "name": "computer_use_preview",
+                            "arguments": computer_use_args
+                        }
+                    }
+                ]
+            }
+        }]
+    })
+    .to_string();
+    let server = spawn_chat_server_with_response(upstream_response);
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+    let request_body = json!({
+        "model": "gpt-chat",
+        "input": "find tools and search docs",
+        "stream": false,
+        "tools": [
+            { "type": "local_shell" },
+            { "type": "computer_use_preview" }
+        ]
+    })
+    .to_string();
+
+    let response = handle_responses_proxy_request(&request_body).await.unwrap();
+    let upstream_request = server.finish();
+
+    assert_eq!(upstream_request.path, "/v1/chat/completions");
+    let upstream_body: Value = serde_json::from_str(&upstream_request.body).unwrap();
+    let upstream_tool_names = upstream_body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(upstream_tool_names.contains(&"local_shell"));
+    assert!(upstream_tool_names.contains(&"computer_use_preview"));
+
+    assert_eq!(response.status, "200 OK");
+    assert_eq!(response.content_type, "application/json; charset=utf-8");
+    let response_body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(response_body["output"][0]["type"], "custom_tool_call");
+    assert_eq!(response_body["output"][0]["name"], "local_shell");
+    assert_eq!(response_body["output"][0]["input"], "pwd");
+    assert_eq!(response_body["output"][1]["type"], "custom_tool_call");
+    assert_eq!(response_body["output"][1]["name"], "computer_use_preview");
+    assert_eq!(response_body["output"][1]["input"], "screenshot");
+}
+
+#[tokio::test]
+async fn responses_proxy_e2e_anthropic_upstream_roundtrips_builtin_proxy_tools() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let upstream_response = json!({
+        "id": "msg_tools",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "toolu_search",
+                "name": "local_shell",
+                "input": { "input": "pwd" }
+            },
+            {
+                "type": "tool_use",
+                "id": "toolu_web",
+                "name": "computer_use_preview",
+                "input": { "input": "screenshot" }
+            }
+        ],
+        "stop_reason": "tool_use",
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5
+        }
+    })
+    .to_string();
+    let server = spawn_chat_server_with_response(upstream_response);
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+    let request_body = json!({
+        "model": "claude-sonnet-4",
+        "input": "find tools and search docs",
+        "stream": false,
+        "tools": [
+            { "type": "local_shell" },
+            { "type": "computer_use_preview" }
+        ]
+    })
+    .to_string();
+
+    let response = handle_responses_proxy_request(&request_body).await.unwrap();
+    let upstream_request = server.finish();
+
+    assert_eq!(upstream_request.path, "/v1/messages");
+    assert_eq!(upstream_request.x_api_key, "sk-test");
+    assert_eq!(upstream_request.anthropic_version, "2023-06-01");
+    let upstream_body: Value = serde_json::from_str(&upstream_request.body).unwrap();
+    let upstream_tool_names = upstream_body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(upstream_tool_names.contains(&"local_shell"));
+    assert!(upstream_tool_names.contains(&"computer_use_preview"));
+
+    assert_eq!(response.status, "200 OK");
+    assert_eq!(response.content_type, "application/json; charset=utf-8");
+    let response_body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(response_body["output"][0]["type"], "custom_tool_call");
+    assert_eq!(response_body["output"][0]["name"], "local_shell");
+    assert_eq!(response_body["output"][0]["input"], "pwd");
+    assert_eq!(response_body["output"][1]["type"], "custom_tool_call");
+    assert_eq!(response_body["output"][1]["name"], "computer_use_preview");
+    assert_eq!(response_body["output"][1]["input"], "screenshot");
+}
+
+#[tokio::test]
+async fn responses_proxy_e2e_chat_upstream_returns_codex_tool_call() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let tool_args = json!({ "query": "shell" }).to_string();
+    let upstream_response = json!({
+        "id": "chatcmpl_tool_search",
+        "object": "chat.completion",
+        "created": 123,
+        "model": "gpt-chat",
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_tool_search",
+                    "type": "function",
+                    "function": {
+                        "name": "tool_search",
+                        "arguments": tool_args
+                    }
+                }]
+            }
+        }]
+    })
+    .to_string();
+    let server = spawn_chat_server_with_response(upstream_response);
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+    let request_body = json!({
+        "model": "gpt-chat",
+        "input": "find shell tools",
+        "stream": false,
+        "tools": [
+            { "type": "tool_search" },
+            { "type": "local_shell" }
+        ]
+    })
+    .to_string();
+
+    let response = handle_responses_proxy_request(&request_body).await.unwrap();
+    let request = server.finish();
+
+    assert_eq!(request.path, "/v1/chat/completions");
+    let first_body: Value = serde_json::from_str(&request.body).unwrap();
+    let first_tool_names = first_body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(first_tool_names.contains(&"tool_search"));
+    assert!(first_tool_names.contains(&"local_shell"));
+    assert_eq!(first_body["stream"], false);
+
+    assert_eq!(response.status, "200 OK");
+    assert_eq!(response.content_type, "application/json; charset=utf-8");
+    let response_body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(response_body["output"][0]["type"], "tool_search_call");
+    assert_eq!(response_body["output"][0]["call_id"], "call_tool_search");
+    assert_eq!(response_body["output"][0]["execution"], "client");
+    assert_eq!(
+        response_body["output"][0]["arguments"],
+        json!({ "query": "shell" })
+    );
+}
+
+#[tokio::test]
+async fn responses_proxy_e2e_anthropic_upstream_returns_codex_tool_call() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let upstream_response = json!({
+        "id": "msg_tool_search",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4",
+        "content": [{
+            "type": "tool_use",
+            "id": "toolu_search",
+            "name": "tool_search",
+            "input": { "query": "shell" }
+        }],
+        "stop_reason": "tool_use",
+        "usage": { "input_tokens": 10, "output_tokens": 5 }
+    })
+    .to_string();
+    let server = spawn_chat_server_with_response(upstream_response);
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+    let request_body = json!({
+        "model": "claude-sonnet-4",
+        "input": "find shell tools",
+        "stream": false,
+        "tools": [
+            { "type": "tool_search" },
+            { "type": "local_shell" }
+        ]
+    })
+    .to_string();
+
+    let response = handle_responses_proxy_request(&request_body).await.unwrap();
+    let request = server.finish();
+
+    assert_eq!(request.path, "/v1/messages");
+    let first_body: Value = serde_json::from_str(&request.body).unwrap();
+    let first_tool_names = first_body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(first_tool_names.contains(&"tool_search"));
+    assert!(first_tool_names.contains(&"local_shell"));
+    assert_eq!(first_body["stream"], false);
+
+    assert_eq!(response.status, "200 OK");
+    assert_eq!(response.content_type, "application/json; charset=utf-8");
+    let response_body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(response_body["output"][0]["type"], "tool_search_call");
+    assert_eq!(response_body["output"][0]["call_id"], "toolu_search");
+    assert_eq!(response_body["output"][0]["execution"], "client");
+    assert_eq!(
+        response_body["output"][0]["arguments"],
+        json!({ "query": "shell" })
+    );
+}
+
+#[tokio::test]
 async fn responses_proxy_directs_anthropic_models_to_anthropic_upstream() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -3177,6 +4553,45 @@ async fn models_proxy_passes_through_original_user_agent_when_unconfigured() {
 
     let request = server.finish();
     assert_eq!(request.user_agent, "Original-Codex-UA/1.0");
+}
+
+fn tavily_namespace_tool() -> Value {
+    json!({
+        "type": "namespace",
+        "name": "mcp__tavily",
+        "description": "Tavily web search MCP",
+        "tools": [{
+            "type": "function",
+            "name": "tavily_search",
+            "description": "Search the web for current information.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }
+        }]
+    })
+}
+
+fn pal_namespace_tool() -> Value {
+    json!({
+        "type": "namespace",
+        "name": "mcp__pal",
+        "description": "PAL MCP",
+        "tools": [{
+            "type": "function",
+            "name": "version",
+            "description": "Return PAL MCP version.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }]
+    })
 }
 
 fn write_mixed_relay_settings(settings_dir: &Path, base_url: &str) {
@@ -3270,12 +4685,12 @@ impl Drop for SettingsPathGuard {
 
 struct ChatServer {
     base_url: String,
-    handle: thread::JoinHandle<ChatRequest>,
+    handle: thread::JoinHandle<Vec<ChatRequest>>,
 }
 
 impl ChatServer {
     fn finish(self) -> ChatRequest {
-        self.handle.join().unwrap()
+        self.handle.join().unwrap().into_iter().next().unwrap()
     }
 }
 
@@ -3288,91 +4703,104 @@ struct ChatRequest {
 }
 
 fn spawn_chat_server() -> ChatServer {
+    spawn_chat_server_with_response(
+        r#"{"id":"chatcmpl-test","object":"chat.completion","choices":[]}"#,
+    )
+}
+
+fn spawn_chat_server_with_response(response_body: impl Into<String>) -> ChatServer {
+    spawn_chat_server_with_responses(vec![response_body.into()])
+}
+
+fn spawn_chat_server_with_responses(response_bodies: Vec<String>) -> ChatServer {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let address = listener.local_addr().unwrap();
     let base_url = format!("http://{address}/v1");
     listener.set_nonblocking(true).unwrap();
     let handle = thread::spawn(move || {
-        let started = std::time::Instant::now();
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(
-                        started.elapsed() < std::time::Duration::from_secs(5),
-                        "test upstream did not receive a request"
-                    );
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+        let mut requests = Vec::new();
+        for response_body in response_bodies {
+            let started = std::time::Instant::now();
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            started.elapsed() < std::time::Duration::from_secs(5),
+                            "test upstream did not receive a request"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("failed to accept test request: {error}"),
                 }
-                Err(error) => panic!("failed to accept test request: {error}"),
-            }
-        };
-        let mut request_bytes = Vec::new();
-        let mut buffer = [0u8; 4096];
-        loop {
-            match stream.read(&mut buffer) {
-                Ok(0) => std::thread::sleep(std::time::Duration::from_millis(10)),
-                Ok(bytes) => {
-                    request_bytes.extend_from_slice(&buffer[..bytes]);
-                    let request = String::from_utf8_lossy(&request_bytes);
-                    if let Some(header_end) = request.find("\r\n\r\n") {
-                        let content_length = request
-                            .lines()
-                            .find_map(|line| {
-                                line.split_once(':').and_then(|(name, value)| {
-                                    name.eq_ignore_ascii_case("content-length")
-                                        .then(|| value.trim().parse::<usize>().ok())
-                                        .flatten()
+            };
+            let mut request_bytes = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    Ok(bytes) => {
+                        request_bytes.extend_from_slice(&buffer[..bytes]);
+                        let request = String::from_utf8_lossy(&request_bytes);
+                        if let Some(header_end) = request.find("\r\n\r\n") {
+                            let content_length = request
+                                .lines()
+                                .find_map(|line| {
+                                    line.split_once(':').and_then(|(name, value)| {
+                                        name.eq_ignore_ascii_case("content-length")
+                                            .then(|| value.trim().parse::<usize>().ok())
+                                            .flatten()
+                                    })
                                 })
-                            })
-                            .unwrap_or(0);
-                        if request_bytes.len() >= header_end + 4 + content_length {
-                            break;
+                                .unwrap_or(0);
+                            if request_bytes.len() >= header_end + 4 + content_length {
+                                break;
+                            }
                         }
                     }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("failed to read test request: {error}"),
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Err(error) => panic!("failed to read test request: {error}"),
             }
-        }
-        let request = String::from_utf8_lossy(&request_bytes).to_string();
-        let path = request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .unwrap_or_default()
-            .to_string();
-        let header_value = |header_name: &str| {
-            request.lines().find_map(|line| {
-                line.split_once(':').and_then(|(name, value)| {
-                    name.eq_ignore_ascii_case(header_name)
-                        .then(|| value.trim().to_string())
+            let request = String::from_utf8_lossy(&request_bytes).to_string();
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or_default()
+                .to_string();
+            let header_value = |header_name: &str| {
+                request.lines().find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case(header_name)
+                            .then(|| value.trim().to_string())
+                    })
                 })
-            })
-        };
-        let user_agent = header_value("user-agent").unwrap_or_default();
-        let x_api_key = header_value("x-api-key").unwrap_or_default();
-        let anthropic_version = header_value("anthropic-version").unwrap_or_default();
-        let request_body = request
-            .split_once("\r\n\r\n")
-            .map(|(_, body)| body.to_string())
-            .unwrap_or_default();
-        let response_body = r#"{"id":"chatcmpl-test","object":"chat.completion","choices":[]}"#;
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            response_body.len(),
-            response_body
-        );
-        stream.write_all(response.as_bytes()).unwrap();
-        ChatRequest {
-            path,
-            user_agent,
-            x_api_key,
-            anthropic_version,
-            body: request_body,
+            };
+            let user_agent = header_value("user-agent").unwrap_or_default();
+            let x_api_key = header_value("x-api-key").unwrap_or_default();
+            let anthropic_version = header_value("anthropic-version").unwrap_or_default();
+            let request_body = request
+                .split_once("\r\n\r\n")
+                .map(|(_, body)| body.to_string())
+                .unwrap_or_default();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            requests.push(ChatRequest {
+                path,
+                user_agent,
+                x_api_key,
+                anthropic_version,
+                body: request_body,
+            });
         }
+        requests
     });
     ChatServer { base_url, handle }
 }
