@@ -551,6 +551,28 @@ timeout = 1800
 }
 
 #[test]
+fn lists_codex_context_entries_ignores_child_only_mcp_tool_tables() {
+    let entries = list_context_entries_from_common_config(
+        r#"[mcp_servers.sequential-thinking.tools.sequentialthinking]
+approval_mode = "approved"
+
+[mcp_servers.fetch]
+command = "fetch"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(entries.mcp_servers.len(), 1);
+    assert_eq!(entries.mcp_servers[0].id, "fetch");
+    assert!(
+        !entries
+            .mcp_servers
+            .iter()
+            .any(|entry| entry.id == "sequential-thinking")
+    );
+}
+
+#[test]
 fn lists_codex_context_entries_with_enabled_state() {
     let entries = list_context_entries_from_common_config(
         r#"[mcp_servers.enabled_mcp]

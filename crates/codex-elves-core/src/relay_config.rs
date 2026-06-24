@@ -2295,6 +2295,9 @@ fn list_context_entries_for_table(doc: &DocumentMut, table_name: &str) -> Vec<Co
         .iter()
         .filter_map(|(id, item)| {
             let table = item.as_table()?;
+            if table.is_implicit() {
+                return None;
+            }
             let body = table_body_to_string(table);
             Some(CodexContextEntry {
                 id: id.to_string(),

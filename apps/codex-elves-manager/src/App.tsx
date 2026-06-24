@@ -2197,7 +2197,7 @@ type Actions = {
   removeEnvConflicts: (names: string[]) => Promise<void>;
   refreshCcsProviders: (silent?: boolean) => Promise<CcsProvidersResult | null>;
   importCcsProviders: () => Promise<void>;
-  refreshLiveContextEntries: () => Promise<LiveContextEntriesResult | null>;
+  refreshLiveContextEntries: (silent?: boolean) => Promise<LiveContextEntriesResult | null>;
   syncLiveContextEntries: (settings: BackendSettings, silent?: boolean) => Promise<LiveContextEntriesResult | null>;
   refreshScriptMarket: () => Promise<void>;
   refreshCodexRadar: () => Promise<void>;
@@ -4760,6 +4760,12 @@ function RelayContextManager({
     }
   };
 
+  const openEditor = async (entry: CodexContextEntry) => {
+    const result = await actions.refreshLiveContextEntries(true);
+    const latestEntry = result ? findContextEntry(result.entries, entry.kind, entry.id) : undefined;
+    setEditor({ kind: entry.kind, entry: latestEntry ?? entry });
+  };
+
   return (
     <div className="relay-context-panel">
       <div className="relay-context-head">
@@ -4809,7 +4815,7 @@ function RelayContextManager({
                     <span className="context-switch-thumb" />
                   </span>
                 </button>
-                <Button onClick={() => setEditor({ kind: entry.kind, entry })} size="icon" title="编辑扩展项" variant="ghost">
+                <Button onClick={() => void openEditor(entry)} size="icon" title="编辑扩展项" variant="ghost">
                   <Edit3 className="h-4 w-4" />
                 </Button>
                 <Button
@@ -5657,15 +5663,15 @@ function parseContextEntries(commonConfig: string, kind: ContextKind, tableName:
 
   for (const line of commonConfig.split(/\r?\n/)) {
     const path = tomlTablePathFromLine(line);
-    if (path?.[0] === tableName && path.length >= 2) {
+    if (path?.[0] === tableName && path.length === 2) {
       const id = path[1];
-      if (currentId === id && path.length > 2) {
-        body.push(`[${path.slice(2).map(tomlKey).join(".")}]`);
-        continue;
-      }
       flush();
       currentId = id;
       body = [];
+      continue;
+    }
+    if (currentId && path?.[0] === tableName && path[1] === currentId && path.length > 2) {
+      body.push(`[${path.slice(2).map(tomlKey).join(".")}]`);
       continue;
     }
     if (currentId && anyHeaderPattern.test(line)) {
@@ -5768,6 +5774,10 @@ function contextEntriesByKind(entries: CodexContextEntries, kind: ContextKind): 
   if (kind === "mcp") return dedupeContextEntryList(entries.mcpServers);
   if (kind === "skill") return dedupeContextEntryList(entries.skills);
   return dedupeContextEntryList(entries.plugins);
+}
+
+function findContextEntry(entries: CodexContextEntries, kind: ContextKind, id: string): CodexContextEntry | undefined {
+  return contextEntriesByKind(entries, kind).find((entry) => entry.id === id);
 }
 
 function filterContextEntriesBySelection(entries: CodexContextEntries, selection: RelayContextSelection): CodexContextEntries {
