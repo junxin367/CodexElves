@@ -1,0 +1,24 @@
+crates/codex-elves-core/tests/relay_config.rs
+  s_3b1a6f694f0a73::t_165d05aac2e49a 1024-1025
+crates/codex-elves-core/src/protocol_proxy.rs
+  s_3b1a6f694f0a73::t_45df0fe64f55a0 6221,6225-6227,6272
+crates/codex-elves-core/tests/protocol_proxy.rs
+  s_3b1a6f694f0a73::t_32244d35560cdf 928,936,957-965
+  s_3b1a6f694f0a73::t_674fe62b01b88f 2-8,11-12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.11",
+  "base_commit_sha": "fd7308aa5609bbace5366be6dc241fe8e2f36ac1",
+  "prompts": {},
+  "sessions": {
+    "s_3b1a6f694f0a73": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef792-9a3e-77a0-88a4-24f00c76655e",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
