@@ -1,0 +1,85 @@
+crates/codex-elves-core/src/proxy_log.rs
+  s_aa0cb276dcf050::t_74f437633eba69 295
+  s_aa0cb276dcf050::t_e7dfc8d3065649 54,89
+  s_aa0cb276dcf050::t_c441dc2d886b5f 1-20,23-50,53,55-86,88,90-169,190-194,201-265,290
+  s_aa0cb276dcf050::t_51b733a5db8a18 195-200,294,296-297,299-306,346-388
+  s_aa0cb276dcf050::t_a064253c1b2625 21-22,51-52,87,170-189,266-289
+  s_aa0cb276dcf050::t_2b934e843e559b 291-293,298,307-345,389-390
+apps/codex-elves-manager/src-tauri/build.rs
+  s_aa0cb276dcf050::t_d5b5f510d5dc09 2-8
+apps/codex-elves-manager/src-tauri/src/commands.rs
+  s_aa0cb276dcf050::t_1fd5881c4daed8 281-293,301-330
+  s_aa0cb276dcf050::t_0d528bdd804ab3 331,1572-1700,1702,1709-1710
+crates/codex-elves-core/src/protocol_proxy.rs
+  s_aa0cb276dcf050::t_e39b6259a302a3 487-489,1187-1189
+  s_aa0cb276dcf050::t_6a60ec035ff5aa 5688-5702
+  s_aa0cb276dcf050::t_9f461be3e0a76f 1011
+apps/codex-elves-manager/src-tauri/windows-dev-app-manifest.xml
+  s_aa0cb276dcf050::t_d5b5f510d5dc09 1-22
+crates/codex-elves-core/src/lib.rs
+  s_aa0cb276dcf050::t_7179557cfc420c 23
+apps/codex-elves-manager/src-tauri/tests/windows_subsystem.rs
+  s_aa0cb276dcf050::t_d5b5f510d5dc09 125-127,144-145,149-150
+apps/codex-elves-manager/src-tauri/permissions/default.toml
+  s_aa0cb276dcf050::t_f8c271e07c2655 15,32,42-43
+apps/codex-elves-manager/src/styles.css
+  s_aa0cb276dcf050::t_d95c762fea9e55 350-356,358-360
+  s_aa0cb276dcf050::t_e8a72302b5593d 381-382,388-390,397-398,530,2449,2454,2497,2522,2530,2545,2580
+  s_aa0cb276dcf050::t_21ace258e7c860 341-342
+  s_aa0cb276dcf050::t_118c28775bf240 328-340,343-349,361-379,383-387,391-394,399-421,531,533,540,2451,2462,2464-2465,2470,2472,2475-2476,2481,2484-2485,2488,2491,2493,2498-2499,2505-2506,2509,2513,2515,2519,2523,2526-2527,2535,2542,2546-2548,2551-2553,2556,2562,2568,2572-2574,2576-2577,2583,2589,3514,3960
+  s_c4d195350e55f8::t_ad48bbb8b52833 317-327,523,538-539,2457-2458,2460,2468,2539,2561,2571
+apps/codex-elves-manager/src-tauri/src/lib.rs
+  s_aa0cb276dcf050::t_6ff871ede47aa8 121-124
+crates/codex-elves-core/src/launcher.rs
+  s_aa0cb276dcf050::t_97d5173152492e 1249-1250,1368-1369,1387-1388,1742-1744
+  s_aa0cb276dcf050::t_67bcce064ee8dd 5
+  s_aa0cb276dcf050::t_cc35442ca2b0e8 1535-1538,1547,1550,1564-1571,1573-1584,1591-1596,1608-1610,1612-1640,1647-1654,1656-1667,1684-1691,1693-1708,1714-1741,1745-1779
+  s_aa0cb276dcf050::t_5123dac4981b06 1086-1087,1089,1096,1099,1113-1120,1122-1133,1141-1144,1148,1163-1170,1172-1183,1200-1207,1209-1220,1227-1229,1235-1236,1243-1245,1248,1255-1284,1292-1299,1301-1312,1350-1353,1360-1362,1367,1371-1373,1376,1386,1401-1408,1410-1421,1428,1443-1450,1452-1463,1501-1508,1510-1521
+apps/codex-elves-manager/src/App.tsx
+  s_aa0cb276dcf050::t_cf006b4ec53785 838,909-919
+  s_aa0cb276dcf050::t_7b67421b8c9a63 1067
+  s_774a390a431415::t_d5f24b2bd4f728 851-857,860,865,867-868,871,884,887-895,905,924-928,1433,1444,1455,1467,2594,2742,6472,6480,6490,6494,6498,6502
+  s_aa0cb276dcf050::t_2e8af0cb3f1b3a 861,874-882,885,901
+  s_aa0cb276dcf050::t_c83b21c8b33d6d 1062-1066,1068-1069
+  s_aa0cb276dcf050::t_e7a4188a69f2fe 835
+  s_aa0cb276dcf050::t_7edd2733cf688c 898
+  s_aa0cb276dcf050::t_40f487de1b684e 1155-1158
+  s_aa0cb276dcf050::t_8dbe998158a0a1 1073-1076
+  s_aa0cb276dcf050::t_f58f7a28a94d77 1071-1072,1078-1085,1431,1442,1454,1466,1495
+scripts/dev-codex-real-smoke.ps1
+  s_aa0cb276dcf050::t_5d0ef5675f932f 670
+crates/codex-elves-core/src/paths.rs
+  s_aa0cb276dcf050::t_51b733a5db8a18 34-35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "bee4910eb711e8b72e91bc87578c3b69363ab977",
+  "prompts": {},
+  "sessions": {
+    "s_774a390a431415": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef08b-1cdb-72c1-8740-8b923b97ea15",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    },
+    "s_aa0cb276dcf050": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019efc64-a3c8-78e3-afe0-8d6258230f4b",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    },
+    "s_c4d195350e55f8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef31a-886c-7e81-807f-085c56382913",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
