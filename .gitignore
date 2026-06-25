@@ -6,6 +6,7 @@ venv/
 build/
 dist/
 target/
+node_modules/
 temp/
 apps/codex-elves-manager/src-tauri/gen/
 
