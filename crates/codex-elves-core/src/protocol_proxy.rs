@@ -484,6 +484,9 @@ pub struct UpstreamProxyResponse {
     pub is_stream: bool,
     pub response_protocol: UpstreamResponseProtocol,
     pub diagnostic_id: String,
+    pub relay_id: Option<String>,
+    pub relay_name: Option<String>,
+    pub endpoint: Option<String>,
     pub response: Option<reqwest::Response>,
     pub body_override: Option<Vec<u8>>,
 }
@@ -1005,6 +1008,7 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    log_responses_request_metadata(&request_json, body.len(), is_stream, &diagnostic_id);
     let context = RotationContext {
         conversation_id: conversation_id_from_responses_request(&request_json),
     };
@@ -1180,6 +1184,9 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
                 content_type,
                 response_protocol,
                 diagnostic_id,
+                relay_id: Some(relay.id),
+                relay_name: Some(relay.name),
+                endpoint: Some(endpoint),
                 response: upstream_response,
                 body_override,
             });
@@ -1364,7 +1371,7 @@ pub async fn open_models_proxy_request(
             &relay.user_agent,
             original_user_agent,
         ))?
-        .get(endpoint)
+        .get(&endpoint)
         .bearer_auth(relay.api_key.trim()),
     )
     .await?;
@@ -1382,6 +1389,9 @@ pub async fn open_models_proxy_request(
         content_type,
         response_protocol: UpstreamResponseProtocol::Responses,
         diagnostic_id,
+        relay_id: Some(relay.id),
+        relay_name: Some(relay.name),
+        endpoint: Some(endpoint),
         response: Some(upstream),
         body_override: None,
     })
@@ -1433,6 +1443,9 @@ pub async fn open_chat_completions_proxy_request(
         content_type,
         response_protocol: UpstreamResponseProtocol::ChatCompletions,
         diagnostic_id,
+        relay_id: Some(relay.id),
+        relay_name: Some(relay.name),
+        endpoint: Some(chat_completions_url(&relay.base_url)),
         response: Some(upstream),
         body_override: None,
     })
@@ -5670,6 +5683,26 @@ fn reasoning_source_label(body: &Value) -> &'static str {
     } else {
         "absent"
     }
+}
+
+fn log_responses_request_metadata(
+    request_json: &Value,
+    body_bytes: usize,
+    is_stream: bool,
+    diagnostic_id: &str,
+) {
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "protocol_proxy.responses_request_metadata",
+        json!({
+            "diagnosticId": diagnostic_id,
+            "model": request_json.get("model").and_then(Value::as_str).unwrap_or(""),
+            "reasoningEffort": extract_requested_reasoning_effort(request_json).unwrap_or_default(),
+            "reasoningSource": reasoning_source_label(request_json),
+            "serviceTier": request_json.get("service_tier").and_then(Value::as_str).unwrap_or(""),
+            "stream": is_stream,
+            "bodyBytes": body_bytes
+        }),
+    );
 }
 
 fn textual_invoke_calls_to_response_items(

@@ -20,6 +20,7 @@ pub mod plugin_marketplace;
 pub mod ports;
 pub mod protocol_proxy;
 pub mod proxy;
+pub mod proxy_log;
 pub mod relay_config;
 pub mod relay_rotation;
 pub mod relay_switch;

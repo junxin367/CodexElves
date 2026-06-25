@@ -5,6 +5,7 @@ const APP_STATE_DIR: &str = ".codex-session-delete";
 const SETTINGS_FILE: &str = "settings.json";
 const LATEST_STATUS_FILE: &str = "latest-status.json";
 const DIAGNOSTIC_LOG_FILE: &str = "codex-elves.log";
+const PROXY_LOG_FILE: &str = "proxy-requests.jsonl";
 
 pub fn default_app_state_dir() -> PathBuf {
     if let Some(home_dir) = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()) {
@@ -29,6 +30,13 @@ pub fn default_diagnostic_log_path() -> PathBuf {
     default_app_state_dir().join(DIAGNOSTIC_LOG_FILE)
 }
 
+pub fn default_proxy_log_path() -> PathBuf {
+    if let Some(path) = proxy_log_path_for_tests() {
+        return path;
+    }
+    default_app_state_dir().join(PROXY_LOG_FILE)
+}
+
 fn settings_path_for_tests() -> Option<PathBuf> {
     SETTINGS_PATH_FOR_TESTS
         .get_or_init(|| Mutex::new(None))
@@ -38,9 +46,26 @@ fn settings_path_for_tests() -> Option<PathBuf> {
 }
 
 static SETTINGS_PATH_FOR_TESTS: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+static PROXY_LOG_PATH_FOR_TESTS: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 pub fn set_settings_path_for_tests(path: Option<PathBuf>) -> Option<PathBuf> {
     SETTINGS_PATH_FOR_TESTS
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|mut current| std::mem::replace(&mut *current, path))
+}
+
+fn proxy_log_path_for_tests() -> Option<PathBuf> {
+    PROXY_LOG_PATH_FOR_TESTS
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|path| path.clone())
+}
+
+pub fn set_proxy_log_path_for_tests(path: Option<PathBuf>) -> Option<PathBuf> {
+    PROXY_LOG_PATH_FOR_TESTS
         .get_or_init(|| Mutex::new(None))
         .lock()
         .ok()
@@ -70,5 +95,12 @@ mod tests {
         let path = default_diagnostic_log_path();
 
         assert!(path.ends_with(".codex-session-delete/codex-elves.log"));
+    }
+
+    #[test]
+    fn default_proxy_log_path_uses_app_state_directory() {
+        let path = default_proxy_log_path();
+
+        assert!(path.ends_with(".codex-session-delete/proxy-requests.jsonl"));
     }
 }

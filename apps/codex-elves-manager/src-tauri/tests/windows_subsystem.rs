@@ -122,6 +122,9 @@ fn windows_binaries_request_administrator_privileges() {
         std::fs::read_to_string(manifest_dir.join("build.rs")).expect("read manager build.rs");
     let windows_manifest = std::fs::read_to_string(manifest_dir.join("windows-app-manifest.xml"))
         .expect("read windows app manifest");
+    let windows_dev_manifest =
+        std::fs::read_to_string(manifest_dir.join("windows-dev-app-manifest.xml"))
+            .expect("read windows dev app manifest");
     let launcher_build = manifest_dir
         .parent()
         .and_then(std::path::Path::parent)
@@ -138,9 +141,13 @@ fn windows_binaries_request_administrator_privileges() {
         std::fs::read_to_string(&windows_installer).expect("read windows installer");
 
     assert!(manager_build.contains("windows-app-manifest.xml"));
+    assert!(manager_build.contains("windows-dev-app-manifest.xml"));
+    assert!(manager_build.contains("PROFILE"));
     assert!(launcher_build.contains("windows-app-manifest.xml"));
     assert!(windows_manifest.contains("requireAdministrator"));
     assert!(windows_manifest.contains("Microsoft.Windows.Common-Controls"));
+    assert!(windows_dev_manifest.contains("asInvoker"));
+    assert!(windows_dev_manifest.contains("Microsoft.Windows.Common-Controls"));
     assert!(windows_installer.contains("RequestExecutionLevel admin"));
 }
 

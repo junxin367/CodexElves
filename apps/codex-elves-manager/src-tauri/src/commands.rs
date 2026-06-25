@@ -278,11 +278,56 @@ pub struct LogRequest {
     pub lines: usize,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalProxyLogsRequest {
+    #[serde(default = "default_log_lines")]
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalProxyLogDetailRequest {
+    pub id: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LogsPayload {
     pub path: String,
     pub text: String,
     pub lines: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalProxyStatusPayload {
+    pub enabled: bool,
+    pub listening: bool,
+    pub host: String,
+    pub port: u16,
+    pub active_relay_id: String,
+    pub active_relay_name: String,
+    pub active_relay_mode: String,
+    pub aggregate_relay_name: Option<String>,
+    pub upstream_base_url: String,
+    pub log_path: String,
+    pub latest_request_at_ms: Option<u64>,
+    pub recent_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalProxyLogsPayload {
+    pub path: String,
+    pub entries: Vec<codex_elves_core::proxy_log::ProxyRequestSummary>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalProxyLogDetailPayload {
+    pub path: String,
+    pub entry: Option<codex_elves_core::proxy_log::ProxyRequestRecord>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1519,6 +1564,145 @@ pub fn read_latest_logs(request: LogRequest) -> CommandResult<LogsPayload> {
                 path: path.to_string_lossy().to_string(),
                 text: String::new(),
                 lines: request.lines,
+            },
+        ),
+    }
+}
+
+#[tauri::command]
+pub fn local_proxy_status() -> CommandResult<LocalProxyStatusPayload> {
+    let settings = SettingsStore::default().load().unwrap_or_default();
+    let active_relay = settings.active_relay_profile();
+    let active_aggregate = settings.active_aggregate_relay_profile();
+    let enabled = settings.active_relay_uses_protocol_proxy();
+    let port = codex_elves_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT;
+    let listening = std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_millis(200),
+    )
+    .is_ok();
+    let summaries = codex_elves_core::proxy_log::read_summaries(1).unwrap_or_default();
+    let latest_request_at_ms = summaries.first().map(|entry| entry.timestamp_ms);
+    let recent_count = codex_elves_core::proxy_log::read_summaries(200)
+        .map(|entries| entries.len())
+        .unwrap_or(0);
+    let upstream_base_url =
+        if active_relay.relay_mode == codex_elves_core::settings::RelayMode::Aggregate {
+            format!(
+                "聚合供应商：{} 个成员",
+                active_aggregate
+                    .as_ref()
+                    .map(|profile| profile.members.len())
+                    .unwrap_or(0)
+            )
+        } else if active_relay.base_url.trim().is_empty() {
+            active_relay.upstream_base_url.clone()
+        } else {
+            active_relay.base_url.clone()
+        };
+    let payload = LocalProxyStatusPayload {
+        enabled,
+        listening,
+        host: "127.0.0.1".to_string(),
+        port,
+        active_relay_id: active_relay.id,
+        active_relay_name: active_relay.name,
+        active_relay_mode: serde_json::to_value(active_relay.relay_mode)
+            .ok()
+            .and_then(|value| value.as_str().map(ToString::to_string))
+            .unwrap_or_else(|| "unknown".to_string()),
+        aggregate_relay_name: active_aggregate.map(|profile| profile.name),
+        upstream_base_url,
+        log_path: codex_elves_core::proxy_log::default_log_path()
+            .to_string_lossy()
+            .to_string(),
+        latest_request_at_ms,
+        recent_count,
+    };
+    let message = if enabled && listening {
+        "本地代理正在监听。"
+    } else if enabled {
+        "本地代理已启用，但当前未监听端口。"
+    } else {
+        "当前供应商未启用本地代理。"
+    };
+    ok(message, payload)
+}
+
+#[tauri::command]
+pub fn read_local_proxy_logs(
+    request: LocalProxyLogsRequest,
+) -> CommandResult<LocalProxyLogsPayload> {
+    let path = codex_elves_core::proxy_log::default_log_path();
+    let limit = request.limit.clamp(1, 1000);
+    match codex_elves_core::proxy_log::read_summaries(limit) {
+        Ok(entries) => ok(
+            "本地代理日志已读取。",
+            LocalProxyLogsPayload {
+                path: path.to_string_lossy().to_string(),
+                entries,
+                limit,
+            },
+        ),
+        Err(error) => failed(
+            &format!("读取本地代理日志失败：{error}"),
+            LocalProxyLogsPayload {
+                path: path.to_string_lossy().to_string(),
+                entries: Vec::new(),
+                limit,
+            },
+        ),
+    }
+}
+
+#[tauri::command]
+pub fn read_local_proxy_log_detail(
+    request: LocalProxyLogDetailRequest,
+) -> CommandResult<LocalProxyLogDetailPayload> {
+    let path = codex_elves_core::proxy_log::default_log_path();
+    match codex_elves_core::proxy_log::find_record(&request.id) {
+        Ok(entry) => {
+            let message = if entry.is_some() {
+                "本地代理日志详情已读取。"
+            } else {
+                "未找到指定本地代理日志。"
+            };
+            ok(
+                message,
+                LocalProxyLogDetailPayload {
+                    path: path.to_string_lossy().to_string(),
+                    entry,
+                },
+            )
+        }
+        Err(error) => failed(
+            &format!("读取本地代理日志详情失败：{error}"),
+            LocalProxyLogDetailPayload {
+                path: path.to_string_lossy().to_string(),
+                entry: None,
+            },
+        ),
+    }
+}
+
+#[tauri::command]
+pub fn clear_local_proxy_logs() -> CommandResult<LocalProxyLogsPayload> {
+    let path = codex_elves_core::proxy_log::default_log_path();
+    match codex_elves_core::proxy_log::clear_records() {
+        Ok(()) => ok(
+            "本地代理日志已清空。",
+            LocalProxyLogsPayload {
+                path: path.to_string_lossy().to_string(),
+                entries: Vec::new(),
+                limit: 0,
+            },
+        ),
+        Err(error) => failed(
+            &format!("清空本地代理日志失败：{error}"),
+            LocalProxyLogsPayload {
+                path: path.to_string_lossy().to_string(),
+                entries: Vec::new(),
+                limit: 0,
             },
         ),
     }

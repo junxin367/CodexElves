@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -1083,16 +1083,20 @@ async fn handle_protocol_proxy_connection(
     path: &str,
     remote_addr_text: Option<String>,
 ) -> anyhow::Result<()> {
+    let started_at = Instant::now();
+    let timestamp_ms = crate::proxy_log::current_timestamp_ms();
     let request_json = serde_json::from_str::<serde_json::Value>(request_body).ok();
+    let request_metadata = crate::proxy_log::extract_request_metadata(request_json.as_ref());
     let upstream =
         match crate::protocol_proxy::open_responses_proxy_request(request_body, request_user_agent)
             .await
         {
             Ok(upstream) => upstream,
             Err(error) => {
+                let error_message = error.to_string();
                 let body = serde_json::to_vec(&serde_json::json!({
                     "status": "failed",
-                    "message": error.to_string()
+                    "message": error_message
                 }))?;
                 write_http_response(
                     stream,
@@ -1106,7 +1110,27 @@ async fn handle_protocol_proxy_connection(
                     method,
                     path,
                     "502 Bad Gateway",
+                    remote_addr_text.clone(),
+                );
+                append_local_proxy_record(
+                    format!("local-{}", uuid::Uuid::new_v4()),
+                    timestamp_ms,
+                    started_at,
+                    method,
+                    path,
                     remote_addr_text,
+                    &request_metadata,
+                    None,
+                    None,
+                    None,
+                    None,
+                    502,
+                    false,
+                    request_body,
+                    &body,
+                    body.len(),
+                    false,
+                    Some(error_message),
                 );
                 stream.shutdown().await?;
                 return Ok(());
@@ -1114,9 +1138,14 @@ async fn handle_protocol_proxy_connection(
         };
 
     if !upstream.is_success() {
+        let diagnostic_id = upstream.diagnostic_id.clone();
+        let relay_id = upstream.relay_id.clone();
+        let relay_name = upstream.relay_name.clone();
+        let endpoint = upstream.endpoint.clone();
         let status = upstream.status();
         let upstream_content_type = upstream.content_type.clone();
         let response_protocol = upstream.response_protocol;
+        let response_protocol_label = response_protocol_label(response_protocol);
         let status_code = upstream.status_code;
         let upstream_body = upstream.into_body_bytes().await?;
         if response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses {
@@ -1131,7 +1160,27 @@ async fn handle_protocol_proxy_connection(
                 method,
                 path,
                 &status,
+                remote_addr_text.clone(),
+            );
+            append_local_proxy_record(
+                diagnostic_id,
+                timestamp_ms,
+                started_at,
+                method,
+                path,
                 remote_addr_text,
+                &request_metadata,
+                relay_id,
+                relay_name,
+                endpoint,
+                Some(response_protocol_label),
+                status_code,
+                false,
+                request_body,
+                &upstream_body,
+                upstream_body.len(),
+                false,
+                Some(format!("上游返回 HTTP {status_code}")),
             );
             stream.shutdown().await?;
             return Ok(());
@@ -1148,31 +1197,91 @@ async fn handle_protocol_proxy_connection(
             method,
             path,
             &status,
+            remote_addr_text.clone(),
+        );
+        append_local_proxy_record(
+            diagnostic_id,
+            timestamp_ms,
+            started_at,
+            method,
+            path,
             remote_addr_text,
+            &request_metadata,
+            relay_id,
+            relay_name,
+            endpoint,
+            Some(response_protocol_label),
+            status_code,
+            false,
+            request_body,
+            &body,
+            body.len(),
+            false,
+            Some(format!("上游返回 HTTP {status_code}")),
         );
         stream.shutdown().await?;
         return Ok(());
     }
 
     let diagnostic_id = upstream.diagnostic_id.clone();
+    let relay_id = upstream.relay_id.clone();
+    let relay_name = upstream.relay_name.clone();
+    let endpoint = upstream.endpoint.clone();
 
     if upstream.is_stream {
         if upstream.response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses
         {
             let status = upstream.status();
+            let status_code = upstream.status_code;
+            let response_protocol_label = response_protocol_label(upstream.response_protocol);
             let content_type = if upstream.content_type.is_empty() {
                 "text/event-stream; charset=utf-8".to_string()
             } else {
                 upstream.content_type.clone()
             };
             write_http_stream_headers(stream, &status, &content_type).await?;
+            let mut response_capture = Vec::new();
+            let mut response_bytes = 0_usize;
+            let mut response_truncated = false;
             if upstream.body_override.is_some() {
                 let body = upstream.into_body_bytes().await?;
+                response_bytes += body.len();
+                response_truncated |=
+                    crate::proxy_log::append_capture(&mut response_capture, &body);
                 stream.write_all(&body).await?;
             } else {
                 let mut bytes_stream = upstream.into_response()?.bytes_stream();
                 while let Some(chunk) = bytes_stream.next().await {
-                    stream.write_all(&chunk?).await?;
+                    let bytes = match chunk {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            append_local_proxy_record(
+                                diagnostic_id,
+                                timestamp_ms,
+                                started_at,
+                                method,
+                                path,
+                                remote_addr_text,
+                                &request_metadata,
+                                relay_id,
+                                relay_name,
+                                endpoint,
+                                Some(response_protocol_label),
+                                status_code,
+                                true,
+                                request_body,
+                                &response_capture,
+                                response_bytes,
+                                response_truncated,
+                                Some(format!("Stream error: {error}")),
+                            );
+                            return Err(error.into());
+                        }
+                    };
+                    response_bytes += bytes.len();
+                    response_truncated |=
+                        crate::proxy_log::append_capture(&mut response_capture, &bytes);
+                    stream.write_all(&bytes).await?;
                 }
             }
             log_helper_response(
@@ -1180,7 +1289,27 @@ async fn handle_protocol_proxy_connection(
                 method,
                 path,
                 &status,
+                remote_addr_text.clone(),
+            );
+            append_local_proxy_record(
+                diagnostic_id,
+                timestamp_ms,
+                started_at,
+                method,
+                path,
                 remote_addr_text,
+                &request_metadata,
+                relay_id,
+                relay_name,
+                endpoint,
+                Some(response_protocol_label),
+                status_code,
+                true,
+                request_body,
+                &response_capture,
+                response_bytes,
+                response_truncated,
+                None,
             );
             stream.shutdown().await?;
             return Ok(());
@@ -1218,23 +1347,33 @@ async fn handle_protocol_proxy_connection(
         let mut converter = converter_kind;
         let mut bytes_stream = upstream.into_response()?.bytes_stream();
         let mut stream_failed = false;
+        let mut stream_error = None;
+        let mut response_capture = Vec::new();
+        let mut response_bytes = 0_usize;
+        let mut response_truncated = false;
 
         while let Some(chunk) = bytes_stream.next().await {
             match chunk {
                 Ok(bytes) => {
                     let converted = converter.push_bytes(&bytes);
                     if !converted.is_empty() {
+                        response_bytes += converted.len();
+                        response_truncated |=
+                            crate::proxy_log::append_capture(&mut response_capture, &converted);
                         stream.write_all(&converted).await?;
                     }
                 }
                 Err(error) => {
-                    let failed = converter.fail(
-                        format!("Stream error: {error}"),
-                        Some("stream_error".to_string()),
-                    );
+                    let error_message = format!("Stream error: {error}");
+                    let failed =
+                        converter.fail(error_message.clone(), Some("stream_error".to_string()));
                     if !failed.is_empty() {
+                        response_bytes += failed.len();
+                        response_truncated |=
+                            crate::proxy_log::append_capture(&mut response_capture, &failed);
                         stream.write_all(&failed).await?;
                     }
+                    stream_error = Some(error_message);
                     stream_failed = true;
                     break;
                 }
@@ -1244,6 +1383,9 @@ async fn handle_protocol_proxy_connection(
         if !stream_failed {
             let tail = converter.finish();
             if !tail.is_empty() {
+                response_bytes += tail.len();
+                response_truncated |=
+                    crate::proxy_log::append_capture(&mut response_capture, &tail);
                 stream.write_all(&tail).await?;
             }
         }
@@ -1256,13 +1398,34 @@ async fn handle_protocol_proxy_connection(
             method,
             path,
             "200 OK",
+            remote_addr_text.clone(),
+        );
+        append_local_proxy_record(
+            diagnostic_id,
+            timestamp_ms,
+            started_at,
+            method,
+            path,
             remote_addr_text,
+            &request_metadata,
+            relay_id,
+            relay_name,
+            endpoint,
+            Some(response_protocol_label(response_protocol)),
+            200,
+            true,
+            request_body,
+            &response_capture,
+            response_bytes,
+            response_truncated,
+            stream_error,
         );
         stream.shutdown().await?;
         return Ok(());
     }
 
     let response_protocol = upstream.response_protocol;
+    let status_code = upstream.status_code;
     let upstream_content_type = upstream.content_type.clone();
     let upstream_body = upstream.into_body_bytes().await?;
     if response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses {
@@ -1277,7 +1440,27 @@ async fn handle_protocol_proxy_connection(
             method,
             path,
             "200 OK",
+            remote_addr_text.clone(),
+        );
+        append_local_proxy_record(
+            diagnostic_id,
+            timestamp_ms,
+            started_at,
+            method,
+            path,
             remote_addr_text,
+            &request_metadata,
+            relay_id,
+            relay_name,
+            endpoint,
+            Some(response_protocol_label(response_protocol)),
+            status_code,
+            false,
+            request_body,
+            &upstream_body,
+            upstream_body.len(),
+            false,
+            None,
         );
         stream.shutdown().await?;
         return Ok(());
@@ -1315,7 +1498,27 @@ async fn handle_protocol_proxy_connection(
         method,
         path,
         "200 OK",
+        remote_addr_text.clone(),
+    );
+    append_local_proxy_record(
+        diagnostic_id,
+        timestamp_ms,
+        started_at,
+        method,
+        path,
         remote_addr_text,
+        &request_metadata,
+        relay_id,
+        relay_name,
+        endpoint,
+        Some(response_protocol_label(response_protocol)),
+        200,
+        false,
+        request_body,
+        &body,
+        body.len(),
+        false,
+        None,
     );
     stream.shutdown().await?;
     Ok(())
@@ -1329,6 +1532,10 @@ async fn handle_chat_completions_proxy_connection(
     path: &str,
     remote_addr_text: Option<String>,
 ) -> anyhow::Result<()> {
+    let started_at = Instant::now();
+    let timestamp_ms = crate::proxy_log::current_timestamp_ms();
+    let request_json = serde_json::from_str::<serde_json::Value>(request_body).ok();
+    let request_metadata = crate::proxy_log::extract_request_metadata(request_json.as_ref());
     let upstream = match crate::protocol_proxy::open_chat_completions_proxy_request(
         request_body,
         request_user_agent,
@@ -1337,9 +1544,10 @@ async fn handle_chat_completions_proxy_connection(
     {
         Ok(upstream) => upstream,
         Err(error) => {
+            let error_message = error.to_string();
             let body = serde_json::to_vec(&serde_json::json!({
                 "status": "failed",
-                "message": error.to_string()
+                "message": error_message
             }))?;
             write_http_response(
                 stream,
@@ -1353,13 +1561,39 @@ async fn handle_chat_completions_proxy_connection(
                 method,
                 path,
                 "502 Bad Gateway",
+                remote_addr_text.clone(),
+            );
+            append_local_proxy_record(
+                format!("local-{}", uuid::Uuid::new_v4()),
+                timestamp_ms,
+                started_at,
+                method,
+                path,
                 remote_addr_text,
+                &request_metadata,
+                None,
+                None,
+                None,
+                None,
+                502,
+                false,
+                request_body,
+                &body,
+                body.len(),
+                false,
+                Some(error_message),
             );
             stream.shutdown().await?;
             return Ok(());
         }
     };
 
+    let diagnostic_id = upstream.diagnostic_id.clone();
+    let relay_id = upstream.relay_id.clone();
+    let relay_name = upstream.relay_name.clone();
+    let endpoint = upstream.endpoint.clone();
+    let response_protocol = upstream.response_protocol;
+    let status_code = upstream.status_code;
     let status = upstream.status();
     let is_success = upstream.is_success();
     let content_type = if upstream.content_type.is_empty() {
@@ -1371,15 +1605,66 @@ async fn handle_chat_completions_proxy_connection(
     if upstream.is_stream && is_success {
         write_http_stream_headers(stream, &status, &content_type).await?;
         let mut bytes_stream = upstream.into_response()?.bytes_stream();
+        let mut response_capture = Vec::new();
+        let mut response_bytes = 0_usize;
+        let mut response_truncated = false;
         while let Some(chunk) = bytes_stream.next().await {
-            stream.write_all(&chunk?).await?;
+            let bytes = match chunk {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    append_local_proxy_record(
+                        diagnostic_id,
+                        timestamp_ms,
+                        started_at,
+                        method,
+                        path,
+                        remote_addr_text,
+                        &request_metadata,
+                        relay_id,
+                        relay_name,
+                        endpoint,
+                        Some(response_protocol_label(response_protocol)),
+                        status_code,
+                        true,
+                        request_body,
+                        &response_capture,
+                        response_bytes,
+                        response_truncated,
+                        Some(format!("Stream error: {error}")),
+                    );
+                    return Err(error.into());
+                }
+            };
+            response_bytes += bytes.len();
+            response_truncated |= crate::proxy_log::append_capture(&mut response_capture, &bytes);
+            stream.write_all(&bytes).await?;
         }
         log_helper_response(
             "helper.chat_completions_proxy_stream_ok",
             method,
             path,
             &status,
+            remote_addr_text.clone(),
+        );
+        append_local_proxy_record(
+            diagnostic_id,
+            timestamp_ms,
+            started_at,
+            method,
+            path,
             remote_addr_text,
+            &request_metadata,
+            relay_id,
+            relay_name,
+            endpoint,
+            Some(response_protocol_label(response_protocol)),
+            status_code,
+            true,
+            request_body,
+            &response_capture,
+            response_bytes,
+            response_truncated,
+            None,
         );
         stream.shutdown().await?;
         return Ok(());
@@ -1396,10 +1681,101 @@ async fn handle_chat_completions_proxy_connection(
         method,
         path,
         &status,
+        remote_addr_text.clone(),
+    );
+    append_local_proxy_record(
+        diagnostic_id,
+        timestamp_ms,
+        started_at,
+        method,
+        path,
         remote_addr_text,
+        &request_metadata,
+        relay_id,
+        relay_name,
+        endpoint,
+        Some(response_protocol_label(response_protocol)),
+        status_code,
+        false,
+        request_body,
+        &body,
+        body.len(),
+        false,
+        if is_success {
+            None
+        } else {
+            Some(format!("上游返回 HTTP {status_code}"))
+        },
     );
     stream.shutdown().await?;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_local_proxy_record(
+    id: String,
+    timestamp_ms: u64,
+    started_at: Instant,
+    method: &str,
+    path: &str,
+    remote_addr_text: Option<String>,
+    request_metadata: &crate::proxy_log::RequestMetadata,
+    relay_id: Option<String>,
+    relay_name: Option<String>,
+    endpoint: Option<String>,
+    response_protocol: Option<String>,
+    status_code: u16,
+    stream: bool,
+    request_body: &str,
+    response_body: &[u8],
+    response_bytes: usize,
+    response_truncated: bool,
+    error: Option<String>,
+) {
+    let record = crate::proxy_log::ProxyRequestRecord {
+        id,
+        timestamp_ms,
+        method: method.to_string(),
+        path: path.to_string(),
+        remote_addr: remote_addr_text,
+        model: request_metadata.model.clone(),
+        reasoning_tokens: crate::proxy_log::extract_reasoning_tokens_from_response_body(
+            response_body,
+        ),
+        reasoning_effort: request_metadata.reasoning_effort.clone(),
+        reasoning_source: request_metadata.reasoning_source.clone(),
+        service_tier: request_metadata.service_tier.clone(),
+        relay_id,
+        relay_name,
+        endpoint,
+        response_protocol,
+        status_code,
+        duration_ms: started_at.elapsed().as_millis() as u64,
+        stream,
+        request_bytes: request_body.len(),
+        response_bytes,
+        response_captured_bytes: response_body.len(),
+        response_truncated,
+        request_body: request_body.to_string(),
+        response_body: String::from_utf8_lossy(response_body).into_owned(),
+        error,
+    };
+    if let Err(error) = crate::proxy_log::append_record(&record) {
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "helper.local_proxy_log_failed",
+            serde_json::json!({
+                "id": record.id,
+                "error": error.to_string()
+            }),
+        );
+    }
+}
+
+fn response_protocol_label(protocol: crate::protocol_proxy::UpstreamResponseProtocol) -> String {
+    serde_json::to_value(protocol)
+        .ok()
+        .and_then(|value| value.as_str().map(ToString::to_string))
+        .unwrap_or_else(|| format!("{protocol:?}"))
 }
 
 async fn write_http_response(

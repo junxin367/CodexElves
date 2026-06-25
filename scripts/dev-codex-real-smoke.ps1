@@ -667,7 +667,7 @@ try {
     }
     $badMatches = @()
     if ($badFiles.Count -gt 0) {
-        $badMatches = Select-String -Path ($badFiles | ForEach-Object { $_.FullName }) -Pattern 'unsupported|stream disconnected|response\.failed|"type":"error"' -ErrorAction SilentlyContinue
+        $badMatches = @(Select-String -Path ($badFiles | ForEach-Object { $_.FullName }) -Pattern 'unsupported|stream disconnected|response\.failed|"type":"error"' -ErrorAction SilentlyContinue)
     }
     if ($badMatches.Count -gt 0) {
         $badMatches | ForEach-Object { Write-Output "[BAD] $($_.Path):$($_.LineNumber): $($_.Line)" }

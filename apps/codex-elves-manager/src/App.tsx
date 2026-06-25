@@ -439,6 +439,62 @@ type LogsResult = CommandResult<{
   lines: number;
 }>;
 
+type LocalProxyStatusResult = CommandResult<{
+  enabled: boolean;
+  listening: boolean;
+  host: string;
+  port: number;
+  activeRelayId: string;
+  activeRelayName: string;
+  activeRelayMode: RelayMode | string;
+  aggregateRelayName?: string | null;
+  upstreamBaseUrl: string;
+  logPath: string;
+  latestRequestAtMs?: number | null;
+  recentCount: number;
+}>;
+
+type LocalProxyLogEntry = {
+  id: string;
+  timestampMs: number;
+  method: string;
+  path: string;
+  remoteAddr?: string | null;
+  model?: string | null;
+  reasoningTokens?: number | null;
+  reasoningEffort?: string | null;
+  reasoningSource?: string | null;
+  serviceTier?: string | null;
+  relayId?: string | null;
+  relayName?: string | null;
+  endpoint?: string | null;
+  responseProtocol?: string | null;
+  statusCode: number;
+  durationMs: number;
+  stream: boolean;
+  requestBytes: number;
+  responseBytes: number;
+  responseCapturedBytes: number;
+  responseTruncated: boolean;
+  error?: string | null;
+};
+
+type LocalProxyLogDetail = LocalProxyLogEntry & {
+  requestBody: string;
+  responseBody: string;
+};
+
+type LocalProxyLogsResult = CommandResult<{
+  path: string;
+  entries: LocalProxyLogEntry[];
+  limit: number;
+}>;
+
+type LocalProxyLogDetailResult = CommandResult<{
+  path: string;
+  entry: LocalProxyLogDetail | null;
+}>;
+
 type DiagnosticsResult = CommandResult<{
   report: string;
 }>;
@@ -585,12 +641,13 @@ type StartupResult = CommandResult<{
   showUpdate: boolean;
 }>;
 
-type Route = "overview" | "relay" | "sessions" | "context" | "enhance" | "userScripts" | "radar" | "maintenance" | "about" | "settings";
+type Route = "overview" | "relay" | "localProxy" | "sessions" | "context" | "enhance" | "userScripts" | "radar" | "maintenance" | "about" | "settings";
 type Theme = "dark" | "light";
 
 const routes: Array<{ id: Route; label: string; icon: LucideIcon; badge?: string }> = [
   { id: "overview", label: "概览", icon: LayoutDashboard },
   { id: "relay", label: "供应商配置", icon: KeyRound },
+  { id: "localProxy", label: "本地代理", icon: Network },
   { id: "sessions", label: "会话管理", icon: MessageCircle },
   { id: "context", label: "工具与插件", icon: Network },
   { id: "enhance", label: "页面增强", icon: Hammer },
@@ -775,6 +832,101 @@ function browserPreviewRelayPayload(): RelayPayload {
   };
 }
 
+function browserPreviewLocalProxyStatus(): Omit<LocalProxyStatusResult, "status" | "message"> {
+  const settings = browserPreviewSettings();
+  const active = activeRelayProfile(settings);
+  return {
+    enabled: active.localProxyEnabled,
+    listening: active.localProxyEnabled,
+    host: "127.0.0.1",
+    port: 45221,
+    activeRelayId: active.id,
+    activeRelayName: active.name,
+    activeRelayMode: active.relayMode,
+    aggregateRelayName: null,
+    upstreamBaseUrl: active.baseUrl || active.upstreamBaseUrl,
+    logPath: "C:\\Users\\junes\\.codex-session-delete\\proxy-requests.jsonl",
+    latestRequestAtMs: Date.now() - 52000,
+    recentCount: browserPreviewLocalProxyEntries().length,
+  };
+}
+
+function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
+  return [
+    {
+      id: "ppx-preview-3",
+      timestampMs: Date.now() - 52000,
+      method: "POST",
+      path: "/v1/responses",
+      remoteAddr: "127.0.0.1:54624",
+      model: "gpt-5.4",
+      reasoningTokens: 516,
+      reasoningEffort: "medium",
+      reasoningSource: "reasoning.effort",
+      serviceTier: "auto",
+      relayId: "preview-pure-api",
+      relayName: "浏览器预览供应商",
+      endpoint: "https://api.vendor.example/v1/responses",
+      responseProtocol: "responses",
+      statusCode: 200,
+      durationMs: 1834,
+      stream: true,
+      requestBytes: 5842,
+      responseBytes: 12890,
+      responseCapturedBytes: 12890,
+      responseTruncated: false,
+      error: null,
+    },
+    {
+      id: "ppx-preview-2",
+      timestampMs: Date.now() - 93000,
+      method: "POST",
+      path: "/v1/responses",
+      remoteAddr: "127.0.0.1:54624",
+      model: "claude-opus-4-8",
+      reasoningTokens: 912,
+      reasoningEffort: "max",
+      reasoningSource: "reasoning.effort",
+      serviceTier: null,
+      relayId: "preview-pure-api",
+      relayName: "浏览器预览供应商",
+      endpoint: "https://api.vendor.example/v1/messages",
+      responseProtocol: "anthropic",
+      statusCode: 200,
+      durationMs: 2411,
+      stream: false,
+      requestBytes: 4211,
+      responseBytes: 7310,
+      responseCapturedBytes: 7310,
+      responseTruncated: false,
+      error: null,
+    },
+  ];
+}
+
+function browserPreviewLocalProxyDetail(id: string): LocalProxyLogDetail | null {
+  const entry = browserPreviewLocalProxyEntries().find((item) => item.id === id);
+  if (!entry) return null;
+  return {
+    ...entry,
+    reasoningSource: entry.reasoningEffort ? "reasoning.effort" : null,
+    requestBody: JSON.stringify(
+      {
+        model: entry.model,
+        reasoning: { effort: entry.reasoningEffort },
+        service_tier: entry.serviceTier,
+        stream: entry.stream,
+        input: [{ role: "user", content: "浏览器预览请求内容" }],
+      },
+      null,
+      2,
+    ),
+    responseBody: entry.stream
+      ? 'event: response.output_text.delta\ndata: {"delta":"浏览器预览响应"}\n\n'
+      : JSON.stringify({ id: entry.id, status: "completed", output_text: "浏览器预览响应" }, null, 2),
+  };
+}
+
 function browserPreviewCodexRadar(): Omit<CodexRadarResult, "status" | "message"> {
   const recentDays: CodexRadarIqRun[] = [
     codexRadarRun("2026-06-17-am", 87.5, "yellow", 7, "23分钟"),
@@ -907,6 +1059,30 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
     }
     case "relay_status":
       return Promise.resolve(browserPreviewResult(browserPreviewRelayPayload()) as T);
+    case "local_proxy_status":
+      return Promise.resolve(browserPreviewResult(browserPreviewLocalProxyStatus()) as T);
+    case "read_local_proxy_logs": {
+      const request = args?.request as { limit?: number } | undefined;
+      const entries = browserPreviewLocalProxyEntries().slice(0, request?.limit ?? 200);
+      return Promise.resolve(browserPreviewResult({
+        path: "C:\\Users\\junes\\.codex-session-delete\\proxy-requests.jsonl",
+        entries,
+        limit: request?.limit ?? 200,
+      }) as T);
+    }
+    case "read_local_proxy_log_detail": {
+      const request = args?.request as { id?: string } | undefined;
+      return Promise.resolve(browserPreviewResult({
+        path: "C:\\Users\\junes\\.codex-session-delete\\proxy-requests.jsonl",
+        entry: request?.id ? browserPreviewLocalProxyDetail(request.id) : null,
+      }) as T);
+    }
+    case "clear_local_proxy_logs":
+      return Promise.resolve(browserPreviewResult({
+        path: "C:\\Users\\junes\\.codex-session-delete\\proxy-requests.jsonl",
+        entries: [],
+        limit: 0,
+      }, "浏览器预览已清空代理日志。") as T);
     case "read_relay_files":
       return Promise.resolve(browserPreviewResult({
         configPath: "C:\\Users\\junes\\.codex\\config.toml",
@@ -976,6 +1152,10 @@ export function App() {
   const [localSessions, setLocalSessions] = useState<LocalSessionsResult | null>(null);
   const [liveContextEntries, setLiveContextEntries] = useState<CodexContextEntries | null>(null);
   const [logs, setLogs] = useState<LogsResult | null>(null);
+  const [localProxyStatus, setLocalProxyStatus] = useState<LocalProxyStatusResult | null>(null);
+  const [localProxyLogs, setLocalProxyLogs] = useState<LocalProxyLogsResult | null>(null);
+  const [localProxyDetail, setLocalProxyDetail] = useState<LocalProxyLogDetailResult | null>(null);
+  const [selectedLocalProxyLogId, setSelectedLocalProxyLogId] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
   const [watcher, setWatcher] = useState<WatcherResult | null>(null);
   const [update, setUpdate] = useState<UpdateResult | null>(null);
@@ -1243,6 +1423,49 @@ export function App() {
     }
   };
 
+  const refreshLocalProxyStatus = async (silent = false) => {
+    const result = await run(() => call<LocalProxyStatusResult>("local_proxy_status"));
+    if (result) {
+      setLocalProxyStatus(result);
+      if (!silent && !isSuccessStatus(result.status)) showResultNotice("本地代理状态", result);
+    }
+    return result;
+  };
+
+  const refreshLocalProxyLogs = async (silent = false) => {
+    const result = await run(() =>
+      call<LocalProxyLogsResult>("read_local_proxy_logs", { request: { limit: 240 } }),
+    );
+    if (result) {
+      setLocalProxyLogs(result);
+      if (!silent) showResultNotice("本地代理日志", result, { silentSuccess: true });
+    }
+    return result;
+  };
+
+  const loadLocalProxyLogDetail = async (id: string) => {
+    setSelectedLocalProxyLogId(id);
+    const result = await run(() =>
+      call<LocalProxyLogDetailResult>("read_local_proxy_log_detail", { request: { id } }),
+    );
+    if (result) {
+      setLocalProxyDetail(result);
+      if (!result.entry) showResultNotice("本地代理日志", result);
+    }
+  };
+
+  const clearLocalProxyLogs = async () => {
+    if (!window.confirm("清空本地代理请求日志？完整请求和返回内容都会被删除。")) return;
+    const result = await run(() => call<LocalProxyLogsResult>("clear_local_proxy_logs"));
+    if (result) {
+      setLocalProxyLogs(result);
+      setLocalProxyDetail(null);
+      setSelectedLocalProxyLogId(null);
+      await refreshLocalProxyStatus(true);
+      showResultNotice("本地代理日志", result);
+    }
+  };
+
   const refreshDiagnostics = async (silent = false) => {
     const result = await run(() => call<DiagnosticsResult>("copy_diagnostics"));
     if (result) {
@@ -1268,6 +1491,11 @@ export function App() {
       await refreshRelayFiles(true);
       await refreshEnvConflicts(true);
       await refreshCcsProviders(true);
+      await refreshLocalProxyStatus(true);
+    }
+    if (next === "localProxy") {
+      await refreshLocalProxyStatus(true);
+      await refreshLocalProxyLogs(true);
     }
     if (next === "sessions") {
       await refreshSettings(true);
@@ -1289,6 +1517,7 @@ export function App() {
       await refreshOverview(true);
       await refreshLogs(true);
       await refreshDiagnostics(true);
+      await refreshLocalProxyStatus(true);
     }
     if (next === "maintenance") {
       await refreshOverview(true);
@@ -1301,6 +1530,7 @@ export function App() {
     if (result) {
       showNotice("启动任务", result.message, result.status);
       await refreshOverview(true);
+      await refreshLocalProxyStatus(true);
     }
   };
 
@@ -1309,6 +1539,7 @@ export function App() {
     if (result) {
       showNotice("重启 CodexElves", result.message, result.status);
       await refreshOverview(true);
+      await refreshLocalProxyStatus(true);
     }
   };
 
@@ -1802,6 +2033,7 @@ export function App() {
   const copyText = async (text: string, message: string) => {
     try {
       await navigator.clipboard.writeText(text);
+      showNotice("复制完成", message, "ok");
     } catch (error) {
       showNotice("复制失败", stringifyError(error), "failed");
     }
@@ -1841,9 +2073,17 @@ export function App() {
       await refreshRelay(true);
       await refreshEnvConflicts(true);
       await refreshProviderSyncTargets(true);
+      await refreshLocalProxyStatus(true);
       if (route === "radar") await refreshCodexRadar(true);
       await checkPluginMarketplacePrompt();
     })();
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void refreshLocalProxyStatus(true);
+    }, 10000);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -1993,9 +2233,15 @@ export function App() {
       switchOfficialMode,
       switchPureApiMode,
       refreshLogs,
+      refreshLocalProxyStatus,
+      refreshLocalProxyLogs,
+      loadLocalProxyLogDetail,
+      clearLocalProxyLogs,
       refreshDiagnostics,
       showMessage: async (title: string, message: string, status?: Status) => showNotice(title, message, status),
       copyLogs: () => copyText(logs?.text ?? "", "日志已复制。"),
+      copyLocalProxyRequest: () => copyText(localProxyDetail?.entry?.requestBody ?? "", "请求内容已复制。"),
+      copyLocalProxyResponse: () => copyText(localProxyDetail?.entry?.responseBody ?? "", "返回内容已复制。"),
       copyDiagnostics: () => copyText(diagnostics?.report ?? "", "诊断报告已复制。"),
       goLogs: () => navigate("about"),
       checkHealth: async () => {
@@ -2010,7 +2256,7 @@ export function App() {
       disableWatcher: () => watcherAction("disable_watcher"),
       toggleTheme: () => setTheme((current) => (current === "dark" ? "light" : "dark")),
     }),
-    [route, launchForm, settingsForm, settings, removeOwnedData, update, logs, diagnostics, theme, relayFiles, localSessions, selectedProviderSyncTarget, envConflicts, ccsProviders],
+    [route, launchForm, settingsForm, settings, removeOwnedData, update, logs, localProxyDetail, diagnostics, theme, relayFiles, localSessions, selectedProviderSyncTarget, envConflicts, ccsProviders],
   );
   const hasUpdate = update?.updateAvailable === true;
 
@@ -2067,6 +2313,7 @@ export function App() {
             <p>{routeSubtitle(route)}</p>
           </div>
           <div className="topbar-actions">
+            <LocalProxyTopbarBadge status={localProxyStatus} />
             <Button
               onClick={actions.toggleTheme}
               size="icon"
@@ -2100,6 +2347,15 @@ export function App() {
               ccsProviders={ccsProviders}
               form={settingsForm}
               onFormChange={setSettingsForm}
+              actions={actions}
+            />
+          ) : null}
+          {route === "localProxy" ? (
+            <LocalProxyScreen
+              status={localProxyStatus}
+              logs={localProxyLogs}
+              detail={localProxyDetail}
+              selectedId={selectedLocalProxyLogId}
               actions={actions}
             />
           ) : null}
@@ -2235,9 +2491,15 @@ type Actions = {
   switchOfficialMode: () => Promise<void>;
   switchPureApiMode: () => Promise<void>;
   refreshLogs: () => Promise<void>;
+  refreshLocalProxyStatus: () => Promise<LocalProxyStatusResult | null>;
+  refreshLocalProxyLogs: () => Promise<LocalProxyLogsResult | null>;
+  loadLocalProxyLogDetail: (id: string) => Promise<void>;
+  clearLocalProxyLogs: () => Promise<void>;
   refreshDiagnostics: () => Promise<void>;
   showMessage: (title: string, message: string, status?: Status) => Promise<void>;
   copyLogs: () => Promise<void>;
+  copyLocalProxyRequest: () => Promise<void>;
+  copyLocalProxyResponse: () => Promise<void>;
   copyDiagnostics: () => Promise<void>;
   goLogs: () => Promise<void>;
   installWatcher: () => Promise<void>;
@@ -2313,6 +2575,164 @@ function OverviewScreen({
             </Button>
             <Button variant="secondary" onClick={() => void actions.goLogs()}>
               打开关于
+            </Button>
+          </Toolbar>
+        </CardContent>
+      </Panel>
+    </>
+  );
+}
+
+function LocalProxyTopbarBadge({ status }: { status: LocalProxyStatusResult | null }) {
+  const state = localProxyState(status);
+  return (
+    <div className={`proxy-topbar-badge ${state}`} title={status?.message ?? "尚未读取本地代理状态"}>
+      <span className="proxy-status-dot" />
+      <span>{localProxyStateLabel(status)}</span>
+    </div>
+  );
+}
+
+function LocalProxyScreen({
+  status,
+  logs,
+  detail,
+  selectedId,
+  actions,
+}: {
+  status: LocalProxyStatusResult | null;
+  logs: LocalProxyLogsResult | null;
+  detail: LocalProxyLogDetailResult | null;
+  selectedId: string | null;
+  actions: Actions;
+}) {
+  const selectedEntry = detail?.entry && detail.entry.id === selectedId ? detail.entry : null;
+  return (
+    <>
+      <Panel>
+        <CardHead
+          title="本地代理状态"
+          detail="当前运行状态与最近代理活动"
+          actions={
+            <>
+              <Button onClick={() => void actions.refreshLocalProxyStatus()} size="sm">
+                <RefreshCw className="h-4 w-4" />
+                刷新状态
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => void actions.refreshLocalProxyLogs()}>
+                刷新日志
+              </Button>
+            </>
+          }
+        />
+        <CardContent>
+          <div className="proxy-status-strip">
+            <div className={`proxy-status-cell proxy-status-state ${localProxyState(status)}`}>
+              <span className="proxy-status-dot" />
+              <div>
+                <strong>{localProxyStateLabel(status)}</strong>
+                <small>{status ? `${status.host}:${status.port}` : "尚未读取监听地址"}</small>
+              </div>
+            </div>
+            <div className="proxy-status-cell">
+              <span>供应商</span>
+              <strong>{status?.activeRelayName ?? "未读取"}</strong>
+            </div>
+            <div className="proxy-status-cell">
+              <span>最近记录</span>
+              <strong>{status?.latestRequestAtMs ? formatTime(status.latestRequestAtMs) : "暂无"}</strong>
+            </div>
+          </div>
+        </CardContent>
+      </Panel>
+      <Panel>
+        <CardHead title={`请求日志（${logs?.entries.length ?? 0}）`} detail={logs?.path ?? "默认记录完整请求体和返回体，列表只展示摘要"} />
+        <CardContent>
+          <div className="proxy-log-table">
+            {logs?.entries.length ? (
+              <>
+                <div className="proxy-log-row proxy-log-head">
+                  <span>模型</span>
+                  <span>时间</span>
+                  <span>推理</span>
+                  <span>状态</span>
+                  <span>耗时</span>
+                  <span>操作</span>
+                </div>
+                {logs.entries.map((entry) => (
+                  <div className={`proxy-log-row ${selectedId === entry.id ? "active" : ""}`} key={entry.id}>
+                    <span className="proxy-log-main">
+                      <strong>{entry.model || "未知模型"}</strong>
+                      <small>{formatProtocolRoute(entry)}</small>
+                    </span>
+                    <span className="proxy-log-time">{formatTime(entry.timestampMs)}</span>
+                    <span className="proxy-log-reasoning">
+                      <strong>{entry.reasoningEffort || "无推理"}</strong>
+                      <small>{`Reason Tok ${formatReasoningTokens(entry.reasoningTokens)}`}</small>
+                    </span>
+                    <span className={entry.statusCode >= 200 && entry.statusCode < 300 ? "proxy-code ok" : "proxy-code bad"}>
+                      {entry.statusCode}
+                    </span>
+                    <span>{entry.durationMs}ms</span>
+                    <Button
+                      size="sm"
+                      variant={selectedId === entry.id ? "secondary" : "outline"}
+                      onClick={() => void actions.loadLocalProxyLogDetail(entry.id)}
+                    >
+                      查看
+                    </Button>
+                  </div>
+                ))}
+              </>
+            ) : (
+              <div className="empty">暂无代理请求日志。启动 Codex 后，经过本地代理的请求会记录在这里。</div>
+            )}
+          </div>
+          {selectedEntry ? (
+            <div className="proxy-log-detail">
+              <div className="proxy-detail-head">
+                <div>
+                  <strong>{selectedEntry.model || "未知模型"}</strong>
+                  <span>{selectedEntry.endpoint || selectedEntry.path}</span>
+                </div>
+                <div className="proxy-detail-actions">
+                  <Button size="sm" variant="secondary" onClick={() => void actions.copyLocalProxyRequest()}>
+                    <Copy className="h-4 w-4" />
+                    复制请求
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={() => void actions.copyLocalProxyResponse()}>
+                    <Copy className="h-4 w-4" />
+                    复制返回
+                  </Button>
+                </div>
+              </div>
+              <div className="proxy-detail-meta">
+                <span>请求 {formatBytes(selectedEntry.requestBytes)}</span>
+                <span>返回 {formatBytes(selectedEntry.responseBytes)}</span>
+                <span>{selectedEntry.stream ? "流式" : "非流式"}</span>
+                {selectedEntry.responseTruncated ? <span>返回内容已截断</span> : null}
+                {selectedEntry.error ? <span>{selectedEntry.error}</span> : null}
+              </div>
+              <div className="proxy-detail-grid">
+                <Field label="完整请求" as="div">
+                  <Textarea className="log-view proxy-detail-code" readOnly value={formatProxyBody(selectedEntry.requestBody)} />
+                </Field>
+                <Field label="完整返回" as="div">
+                  <Textarea className="log-view proxy-detail-code" readOnly value={formatProxyBody(selectedEntry.responseBody)} />
+                </Field>
+              </div>
+            </div>
+          ) : selectedId ? (
+            <div className="empty">正在读取或未找到该日志详情。</div>
+          ) : null}
+          <Toolbar>
+            <Button onClick={() => void actions.refreshLocalProxyLogs()}>
+              <RefreshCw className="h-4 w-4" />
+              刷新
+            </Button>
+            <Button variant="outline" onClick={() => void actions.clearLocalProxyLogs()}>
+              <Trash2 className="h-4 w-4" />
+              清空日志
             </Button>
           </Toolbar>
         </CardContent>
@@ -5450,11 +5870,14 @@ function Panel({ children, fill = false, className = "" }: { children: React.Rea
   );
 }
 
-function CardHead({ title, detail }: { title: string; detail: string }) {
+function CardHead({ title, detail, actions }: { title: string; detail: string; actions?: React.ReactNode }) {
   return (
     <CardHeader className="panel-head">
-      <CardTitle>{title}</CardTitle>
-      <CardDescription>{detail}</CardDescription>
+      <div className="panel-head-copy">
+        <CardTitle>{title}</CardTitle>
+        <CardDescription>{detail}</CardDescription>
+      </div>
+      {actions ? <div className="panel-head-actions">{actions}</div> : null}
     </CardHeader>
   );
 }
@@ -5560,6 +5983,7 @@ function routeSubtitle(route: Route) {
   const subtitles: Record<Route, string> = {
     overview: "检查问题、启动与快速修复",
     relay: "管理 API 供应商、协议、Key 与配置文件",
+    localProxy: "查看本地代理状态、请求日志和完整返回内容",
     sessions: "查看、删除和修复 Codex 本地会话",
     context: "独立管理 MCP、Skills、Plugins",
     enhance: "会话删除、导出、项目移动和脚本能力",
@@ -6039,6 +6463,42 @@ function statusLabel(status: string) {
     unknown: "未知",
   };
   return labels[status] ?? status;
+}
+
+function localProxyState(status: LocalProxyStatusResult | null) {
+  if (!status) return "unknown";
+  if (!status.enabled) return "disabled";
+  return status.listening ? "running" : "failed";
+}
+
+function localProxyStateLabel(status: LocalProxyStatusResult | null) {
+  const state = localProxyState(status);
+  if (state === "running") return "代理运行中";
+  if (state === "disabled") return "代理未启用";
+  if (state === "failed") return "代理未启动";
+  return "代理未检查";
+}
+
+function formatProxyBody(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed) return "";
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2);
+  } catch {
+    return text;
+  }
+}
+
+function formatReasoningTokens(value?: number | null) {
+  return typeof value === "number" ? value.toLocaleString() : "-";
+}
+
+function formatProtocolRoute(entry: Pick<LocalProxyLogEntry, "responseProtocol">) {
+  return `协议 ${entry.responseProtocol || "-"} · ${formatTransportMode(entry)}`;
+}
+
+function formatTransportMode(entry: Pick<LocalProxyLogEntry, "responseProtocol">) {
+  return entry.responseProtocol && entry.responseProtocol !== "responses" ? "转换" : "直连";
 }
 
 function statusClass(status: string) {
