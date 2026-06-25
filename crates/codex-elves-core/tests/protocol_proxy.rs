@@ -4517,25 +4517,77 @@ async fn responses_proxy_directs_anthropic_models_to_anthropic_upstream() {
 }
 
 #[tokio::test]
-async fn responses_proxy_rejects_models_missing_from_protocol_lists() {
+async fn responses_proxy_falls_back_to_relay_protocol_for_models_missing_from_protocol_lists() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
-    write_mixed_relay_settings(temp.path(), "https://example.test/v1");
+    let server = spawn_chat_server();
+    write_mixed_relay_settings(temp.path(), &server.base_url);
 
-    let error = open_responses_proxy_request(
+    let upstream = open_responses_proxy_request(
         r#"{"model":"gpt-unlisted","input":"hello","stream":false}"#,
         Some("Original-Codex-UA/1.0"),
     )
     .await
-    .err()
     .unwrap();
 
-    assert!(
-        error
-            .to_string()
-            .contains("未配置到 Responses API、Chat Completions 或 Anthropic 模型列表")
+    assert_eq!(upstream.status_code, 200);
+    assert_eq!(
+        upstream.response_protocol,
+        codex_elves_core::protocol_proxy::UpstreamResponseProtocol::Responses
     );
+    let request = server.finish();
+    assert_eq!(request.path, "/v1/responses");
+}
+
+#[tokio::test]
+async fn responses_proxy_falls_back_to_chat_protocol_for_unlisted_chat_relay_models() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let server = spawn_chat_server();
+    write_chat_relay_settings(temp.path(), &server.base_url, "");
+
+    let upstream = open_responses_proxy_request(
+        r#"{"model":"gpt-unlisted","input":"hello","stream":false}"#,
+        Some("Original-Codex-UA/1.0"),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(upstream.status_code, 200);
+    assert_eq!(
+        upstream.response_protocol,
+        codex_elves_core::protocol_proxy::UpstreamResponseProtocol::ChatCompletions
+    );
+    let request = server.finish();
+    assert_eq!(request.path, "/v1/chat/completions");
+}
+
+#[tokio::test]
+async fn responses_proxy_falls_back_to_anthropic_protocol_for_unlisted_anthropic_relay_models() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let server = spawn_chat_server();
+    write_anthropic_relay_settings(temp.path(), &server.base_url);
+
+    let upstream = open_responses_proxy_request(
+        r#"{"model":"claude-unlisted","input":"hello","stream":false}"#,
+        Some("Original-Codex-UA/1.0"),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(upstream.status_code, 200);
+    assert_eq!(
+        upstream.response_protocol,
+        codex_elves_core::protocol_proxy::UpstreamResponseProtocol::Anthropic
+    );
+    let request = server.finish();
+    assert_eq!(request.path, "/v1/messages");
+    assert_eq!(request.x_api_key, "sk-test");
+    assert_eq!(request.anthropic_version, "2023-06-01");
 }
 
 #[tokio::test]
@@ -4653,6 +4705,34 @@ fn write_chat_relay_settings(settings_dir: &Path, base_url: &str, user_agent: &s
             "userAgent": user_agent
         }],
         "activeRelayId": "chat"
+    });
+    std::fs::write(
+        settings_dir.join("settings.json"),
+        serde_json::to_vec_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+}
+
+fn write_anthropic_relay_settings(settings_dir: &Path, base_url: &str) {
+    let settings = json!({
+        "relayProfiles": [{
+            "id": "anthropic",
+            "name": "Anthropic",
+            "baseUrl": base_url,
+            "upstreamBaseUrl": base_url,
+            "apiKey": "sk-test",
+            "protocol": "anthropic",
+            "localProxyEnabled": true,
+            "relayMode": "mixedApi",
+            "modelMappings": [
+                {
+                    "requestModel": "claude-listed",
+                    "protocol": "anthropic",
+                    "contextWindow": "200000"
+                }
+            ]
+        }],
+        "activeRelayId": "anthropic"
     });
     std::fs::write(
         settings_dir.join("settings.json"),

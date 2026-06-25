@@ -1316,9 +1316,19 @@ fn responses_proxy_target_protocol(
     if anthropic_models.iter().any(|item| item == model) {
         return Ok(UpstreamResponseProtocol::Anthropic);
     }
-    anyhow::bail!(
-        "模型 {model} 未配置到 Responses API、Chat Completions 或 Anthropic 模型列表，已拒绝本地代理兜底转发"
-    );
+    Ok(response_protocol_for_relay_protocol(relay.protocol))
+}
+
+fn response_protocol_for_relay_protocol(
+    protocol: crate::settings::RelayProtocol,
+) -> UpstreamResponseProtocol {
+    match protocol {
+        crate::settings::RelayProtocol::Responses => UpstreamResponseProtocol::Responses,
+        crate::settings::RelayProtocol::ChatCompletions => {
+            UpstreamResponseProtocol::ChatCompletions
+        }
+        crate::settings::RelayProtocol::Anthropic => UpstreamResponseProtocol::Anthropic,
+    }
 }
 
 async fn send_anthropic_messages_request(

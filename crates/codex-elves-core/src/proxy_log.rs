@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const MAX_CAPTURED_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_RETAINED_RECORDS: usize = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -192,16 +193,19 @@ pub fn append_record(record: &ProxyRequestRecord) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .append(true)
-        .open(path)?;
-    file.lock_exclusive()?;
-    let line = serde_json::to_string(record)?;
-    writeln!(file, "{line}")?;
-    file.unlock()?;
+    {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .append(true)
+            .open(&path)?;
+        file.lock_exclusive()?;
+        let line = serde_json::to_string(record)?;
+        writeln!(file, "{line}")?;
+        file.unlock()?;
+    }
+    retain_recent_records_at_path(&path, MAX_RETAINED_RECORDS)?;
     Ok(())
 }
 
@@ -265,6 +269,48 @@ fn read_records(limit: usize) -> std::io::Result<Vec<ProxyRequestRecord>> {
     Ok(records)
 }
 
+fn retain_recent_records_at_path(path: &PathBuf, limit: usize) -> std::io::Result<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    file.lock_exclusive()?;
+    retain_recent_records(&mut file, limit)?;
+    file.unlock()?;
+    Ok(())
+}
+
+fn retain_recent_records(file: &mut fs::File, limit: usize) -> std::io::Result<()> {
+    if limit == 0 {
+        file.set_len(0)?;
+        file.seek(SeekFrom::Start(0))?;
+        return Ok(());
+    }
+
+    file.flush()?;
+    file.seek(SeekFrom::Start(0))?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if lines.len() <= limit {
+        file.seek(SeekFrom::End(0))?;
+        return Ok(());
+    }
+
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    for line in &lines[lines.len() - limit..] {
+        writeln!(file, "{line}")?;
+    }
+    file.flush()?;
+    Ok(())
+}
+
 fn find_reasoning_tokens(value: &Value) -> Option<u64> {
     match value {
         Value::Object(map) => {
@@ -293,7 +339,7 @@ fn value_to_u64(value: &Value) -> Option<u64> {
 mod tests {
     use super::{
         ProxyRequestRecord, append_record, current_timestamp_ms,
-        extract_reasoning_tokens_from_response_body, find_record,
+        extract_reasoning_tokens_from_response_body, find_record, read_summaries,
     };
 
     fn temp_proxy_log_path(name: &str) -> std::path::PathBuf {
@@ -383,6 +429,23 @@ data: [DONE]
 
         assert_eq!(found.model.as_deref(), Some("gpt-5.4"));
         assert_eq!(found.reasoning_tokens, Some(516));
+
+        for index in 0..12 {
+            let mut next = record.clone();
+            next.id = format!("test-record-{index}");
+            next.timestamp_ms += index as u64 + 1;
+            append_record(&next).expect("append proxy log record");
+        }
+        let summaries = read_summaries(20).expect("read proxy log summaries");
+        assert_eq!(summaries.len(), super::MAX_RETAINED_RECORDS);
+        assert_eq!(
+            summaries.first().map(|entry| entry.id.as_str()),
+            Some("test-record-11")
+        );
+        assert_eq!(
+            summaries.last().map(|entry| entry.id.as_str()),
+            Some("test-record-2")
+        );
 
         let _ = std::fs::remove_file(path);
         crate::paths::set_proxy_log_path_for_tests(previous);

@@ -526,6 +526,11 @@ body {
   gap: 16px;
 }
 
+.panel-head.panel-head > :not([hidden]) {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
 .panel-head-copy {
   display: grid;
   min-width: 0;
@@ -2450,6 +2455,50 @@ body {
   gap: 6px;
 }
 
+.proxy-log-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+}
+
+.proxy-log-pagination {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.proxy-log-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.proxy-log-filter-select {
+  width: min(220px, 28vw);
+  height: 32px;
+  min-width: 150px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  background: hsl(var(--surface-raised));
+  color: hsl(var(--foreground));
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.proxy-log-filter-select:focus-visible {
+  border-color: hsl(var(--accent) / 0.68);
+  box-shadow: 0 0 0 3px hsl(var(--accent) / 0.15);
+  outline: none;
+}
+
 .proxy-log-row {
   display: grid;
   grid-template-columns: minmax(140px, 170px) 132px minmax(120px, 150px) 58px 70px 72px;
@@ -2534,6 +2583,67 @@ body {
   padding-top: 12px;
 }
 
+.proxy-log-detail-modal {
+  display: flex;
+  flex-direction: column;
+  width: 80vw;
+  height: 70vh;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 48px);
+  overflow: hidden;
+}
+
+.proxy-log-detail-head {
+  align-items: center;
+  margin-bottom: 8px;
+  border-bottom: 1px solid hsl(var(--border));
+  padding-bottom: 10px;
+}
+
+.proxy-detail-title-block {
+  display: block;
+  min-width: 0;
+}
+
+.proxy-detail-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.proxy-detail-title-row h2 {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.proxy-detail-endpoint {
+  min-width: 0;
+  overflow: hidden;
+  color: hsl(var(--muted-foreground));
+  font-size: 13px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proxy-detail-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.proxy-log-detail-modal .proxy-log-detail {
+  grid-template-rows: minmax(0, 1fr);
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 0;
+  border-top: 0;
+  padding-top: 0;
+}
+
 .proxy-detail-head {
   display: flex;
   align-items: center;
@@ -2542,9 +2652,11 @@ body {
 }
 
 .proxy-detail-head > div:first-child {
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
   min-width: 0;
-  gap: 2px;
+  gap: 4px 10px;
 }
 
 .proxy-detail-head span {
@@ -2553,12 +2665,6 @@ body {
   color: hsl(var(--muted-foreground));
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.proxy-detail-actions {
-  display: flex;
-  flex: 0 0 auto;
-  gap: 8px;
 }
 
 .proxy-detail-meta {
@@ -2580,12 +2686,37 @@ body {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+  min-height: 0;
+}
+
+.proxy-detail-pane {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+}
+
+.proxy-detail-pane-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  color: hsl(var(--foreground));
+  font-weight: 600;
+}
+
+.proxy-detail-copy-button {
+  height: 26px;
+  padding: 0 9px;
+  font-size: 12px;
 }
 
 .proxy-detail-code {
-  min-height: 280px;
-  max-height: 420px;
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  margin-top: 0;
   overflow: auto;
+  resize: none;
 }
 
 .table {
@@ -3504,12 +3635,14 @@ body {
     grid-template-columns: minmax(120px, 145px) 120px minmax(110px, 135px) 52px 64px 64px;
   }
 
-  .proxy-detail-grid {
-    grid-template-columns: 1fr;
-  }
-
   .proxy-topbar-badge {
     padding: 0 9px;
+  }
+}
+
+@media (max-width: 1000px) {
+  .proxy-detail-grid {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -3610,6 +3743,15 @@ body {
 
   .proxy-log-row > span:nth-child(n + 3):nth-child(-n + 5) {
     display: none;
+  }
+
+  .proxy-log-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .proxy-log-pagination {
+    justify-content: space-between;
   }
 
   .proxy-status-strip {
@@ -3956,5 +4098,18 @@ body {
   .panel-head {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .proxy-detail-summary {
+    flex-wrap: wrap;
+  }
+
+  .proxy-log-filters {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .proxy-log-filter-select {
+    width: 100%;
   }
 }

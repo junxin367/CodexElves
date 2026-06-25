@@ -465,10 +465,11 @@ fn manager_window_and_relay_detail_header_stay_usable() {
     assert!(lib_rs.contains("apply_manager_window_state"));
     assert!(lib_rs.contains("manager_window_state_is_visible"));
     assert!(lib_rs.contains("persist_manager_window_state"));
+    assert!(!lib_rs.contains("minimized_window.hide()"));
     assert!(tauri_conf.contains("\"width\": 1180"));
     assert!(tauri_conf.contains("\"height\": 820"));
     assert!(tauri_conf.contains("\"minWidth\": 960"));
-    assert!(tauri_conf.contains("\"minHeight\": 720"));
+    assert!(tauri_conf.contains("\"minHeight\": 750"));
 }
 
 #[test]

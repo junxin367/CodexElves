@@ -22,7 +22,7 @@ const DEV_MANAGER_WINDOW_STATE_FILE: &str = "manager-window-state-dev.json";
 const DEFAULT_WINDOW_WIDTH: f64 = 1180.0;
 const DEFAULT_WINDOW_HEIGHT: f64 = 820.0;
 const MIN_WINDOW_WIDTH: u32 = 960;
-const MIN_WINDOW_HEIGHT: u32 = 720;
+const MIN_WINDOW_HEIGHT: u32 = 750;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -198,7 +198,6 @@ fn install_tray<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
 
 fn register_main_window_events<R: tauri::Runtime>(window: tauri::WebviewWindow<R>) {
     let event_window = window.clone();
-    let minimized_window = event_window.clone();
     let moved_window = event_window.clone();
     let resized_window = event_window.clone();
     let close_window = event_window.clone();
@@ -208,11 +207,7 @@ fn register_main_window_events<R: tauri::Runtime>(window: tauri::WebviewWindow<R
             persist_manager_window_state(&moved_window);
         }
         WindowEvent::Resized(_) => {
-            if matches!(minimized_window.is_minimized(), Ok(true)) {
-                let _ = minimized_window.hide();
-            } else {
-                persist_manager_window_state(&resized_window);
-            }
+            persist_manager_window_state(&resized_window);
         }
         WindowEvent::CloseRequested { api, .. } => {
             if APP_EXITING.load(Ordering::SeqCst) {

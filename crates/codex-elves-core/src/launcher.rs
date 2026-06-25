@@ -271,6 +271,14 @@ where
         let protocol_proxy_enabled = relay_protocol_proxy_enabled(&settings);
         if protocol_proxy_enabled {
             helper_port = crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT;
+            if let Err(error) = crate::proxy_log::clear_records() {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "launcher.local_proxy_log_clear_failed_nonfatal",
+                    serde_json::json!({
+                        "message": error.to_string()
+                    }),
+                );
+            }
         }
         if settings.enhancements_enabled || protocol_proxy_enabled {
             hooks.start_helper(helper_port).await?;

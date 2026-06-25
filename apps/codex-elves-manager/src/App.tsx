@@ -50,6 +50,7 @@ import {
   TestTube,
   Trash2,
   Wrench,
+  X,
   type LucideIcon,
 } from "lucide-react";
 import { ProviderPresetSelector } from "@/components/ProviderPresetSelector";
@@ -658,6 +659,8 @@ const routes: Array<{ id: Route; label: string; icon: LucideIcon; badge?: string
   { id: "about", label: "关于", icon: Info },
 ];
 
+const LOCAL_PROXY_LOG_PAGE_SIZE = 6;
+
 const defaultSettings: BackendSettings = {
   codexAppPath: "",
   codexExtraArgs: [],
@@ -852,56 +855,41 @@ function browserPreviewLocalProxyStatus(): Omit<LocalProxyStatusResult, "status"
 }
 
 function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
-  return [
-    {
-      id: "ppx-preview-3",
-      timestampMs: Date.now() - 52000,
+  const models = ["gpt-5.4", "claude-opus-4-8", "deepseek-reasoner", "qwen3-coder"];
+  const protocols = ["responses", "anthropic", "chat_completions", "responses"];
+  return Array.from({ length: 23 }, (_, index) => {
+    const protocol = protocols[index % protocols.length];
+    const success = index % 7 !== 5;
+    return {
+      id: `ppx-preview-${23 - index}`,
+      timestampMs: Date.now() - ((index + 1) * 41000),
       method: "POST",
-      path: "/v1/responses",
-      remoteAddr: "127.0.0.1:54624",
-      model: "gpt-5.4",
-      reasoningTokens: 516,
-      reasoningEffort: "medium",
-      reasoningSource: "reasoning.effort",
-      serviceTier: "auto",
+      path: protocol === "chat_completions" ? "/v1/chat/completions" : "/v1/responses",
+      remoteAddr: `127.0.0.1:${54624 + index}`,
+      model: models[index % models.length],
+      reasoningTokens: index % 3 === 0 ? 516 + index * 17 : null,
+      reasoningEffort: index % 3 === 1 ? "medium" : index % 3 === 2 ? "max" : null,
+      reasoningSource: index % 3 === 0 ? "reasoning.effort" : null,
+      serviceTier: index % 2 === 0 ? "auto" : null,
       relayId: "preview-pure-api",
       relayName: "浏览器预览供应商",
-      endpoint: "https://api.vendor.example/v1/responses",
-      responseProtocol: "responses",
-      statusCode: 200,
-      durationMs: 1834,
-      stream: true,
-      requestBytes: 5842,
-      responseBytes: 12890,
-      responseCapturedBytes: 12890,
-      responseTruncated: false,
-      error: null,
-    },
-    {
-      id: "ppx-preview-2",
-      timestampMs: Date.now() - 93000,
-      method: "POST",
-      path: "/v1/responses",
-      remoteAddr: "127.0.0.1:54624",
-      model: "claude-opus-4-8",
-      reasoningTokens: 912,
-      reasoningEffort: "max",
-      reasoningSource: "reasoning.effort",
-      serviceTier: null,
-      relayId: "preview-pure-api",
-      relayName: "浏览器预览供应商",
-      endpoint: "https://api.vendor.example/v1/messages",
-      responseProtocol: "anthropic",
-      statusCode: 200,
-      durationMs: 2411,
-      stream: false,
-      requestBytes: 4211,
-      responseBytes: 7310,
-      responseCapturedBytes: 7310,
-      responseTruncated: false,
-      error: null,
-    },
-  ];
+      endpoint:
+        protocol === "anthropic"
+          ? "https://api.vendor.example/v1/messages"
+          : protocol === "chat_completions"
+            ? "https://api.vendor.example/v1/chat/completions"
+            : "https://api.vendor.example/v1/responses",
+      responseProtocol: protocol,
+      statusCode: success ? 200 : 502,
+      durationMs: 820 + index * 137,
+      stream: index % 2 === 0,
+      requestBytes: 2800 + index * 173,
+      responseBytes: 5400 + index * 241,
+      responseCapturedBytes: 5400 + index * 241,
+      responseTruncated: index === 8,
+      error: success ? null : "上游连接断开",
+    };
+  });
 }
 
 function browserPreviewLocalProxyDetail(id: string): LocalProxyLogDetail | null {
@@ -1445,6 +1433,7 @@ export function App() {
 
   const loadLocalProxyLogDetail = async (id: string) => {
     setSelectedLocalProxyLogId(id);
+    setLocalProxyDetail(null);
     const result = await run(() =>
       call<LocalProxyLogDetailResult>("read_local_proxy_log_detail", { request: { id } }),
     );
@@ -1452,6 +1441,11 @@ export function App() {
       setLocalProxyDetail(result);
       if (!result.entry) showResultNotice("本地代理日志", result);
     }
+  };
+
+  const closeLocalProxyLogDetail = () => {
+    setLocalProxyDetail(null);
+    setSelectedLocalProxyLogId(null);
   };
 
   const clearLocalProxyLogs = async () => {
@@ -2074,17 +2068,28 @@ export function App() {
       await refreshEnvConflicts(true);
       await refreshProviderSyncTargets(true);
       await refreshLocalProxyStatus(true);
+      if (route === "localProxy") await refreshLocalProxyLogs(true);
       if (route === "radar") await refreshCodexRadar(true);
       await checkPluginMarketplacePrompt();
     })();
   }, []);
 
   useEffect(() => {
+    if (route === "localProxy") return;
     const timer = window.setInterval(() => {
       void refreshLocalProxyStatus(true);
     }, 10000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [route]);
+
+  useEffect(() => {
+    if (route !== "localProxy") return;
+    const timer = window.setInterval(() => {
+      void refreshLocalProxyStatus(true);
+      void refreshLocalProxyLogs(true);
+    }, 10000);
+    return () => window.clearInterval(timer);
+  }, [route]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -2236,6 +2241,7 @@ export function App() {
       refreshLocalProxyStatus,
       refreshLocalProxyLogs,
       loadLocalProxyLogDetail,
+      closeLocalProxyLogDetail,
       clearLocalProxyLogs,
       refreshDiagnostics,
       showMessage: async (title: string, message: string, status?: Status) => showNotice(title, message, status),
@@ -2494,6 +2500,7 @@ type Actions = {
   refreshLocalProxyStatus: () => Promise<LocalProxyStatusResult | null>;
   refreshLocalProxyLogs: () => Promise<LocalProxyLogsResult | null>;
   loadLocalProxyLogDetail: (id: string) => Promise<void>;
+  closeLocalProxyLogDetail: () => void;
   clearLocalProxyLogs: () => Promise<void>;
   refreshDiagnostics: () => Promise<void>;
   showMessage: (title: string, message: string, status?: Status) => Promise<void>;
@@ -2607,6 +2614,43 @@ function LocalProxyScreen({
   actions: Actions;
 }) {
   const selectedEntry = detail?.entry && detail.entry.id === selectedId ? detail.entry : null;
+  const entries = logs?.entries ?? [];
+  const [page, setPage] = useState(1);
+  const [modelFilter, setModelFilter] = useState("");
+  const [reasoning516Only, setReasoning516Only] = useState(false);
+  const modelOptions = useMemo(
+    () =>
+      Array.from(new Set(entries.map((entry) => entry.model?.trim()).filter((model): model is string => Boolean(model))))
+        .sort((left, right) => left.localeCompare(right)),
+    [entries],
+  );
+  const filteredEntries = useMemo(
+    () =>
+      entries.filter((entry) => {
+        if (modelFilter && entry.model !== modelFilter) return false;
+        if (reasoning516Only && entry.reasoningTokens !== 516) return false;
+        return true;
+      }),
+    [entries, modelFilter, reasoning516Only],
+  );
+  const totalPages = Math.max(1, Math.ceil(filteredEntries.length / LOCAL_PROXY_LOG_PAGE_SIZE));
+  const visibleEntries = useMemo(
+    () => filteredEntries.slice((page - 1) * LOCAL_PROXY_LOG_PAGE_SIZE, page * LOCAL_PROXY_LOG_PAGE_SIZE),
+    [filteredEntries, page],
+  );
+
+  useEffect(() => {
+    setPage(1);
+  }, [modelFilter, reasoning516Only]);
+
+  useEffect(() => {
+    setPage((current) => Math.min(Math.max(current, 1), totalPages));
+  }, [totalPages]);
+
+  useEffect(() => {
+    if (modelFilter && !modelOptions.includes(modelFilter)) setModelFilter("");
+  }, [modelFilter, modelOptions]);
+
   return (
     <>
       <Panel>
@@ -2646,10 +2690,38 @@ function LocalProxyScreen({
         </CardContent>
       </Panel>
       <Panel>
-        <CardHead title={`请求日志（${logs?.entries.length ?? 0}）`} detail={logs?.path ?? "默认记录完整请求体和返回体，列表只展示摘要"} />
+        <CardHead
+          title={`请求日志（${filteredEntries.length}）`}
+          detail={logs?.path ?? "默认记录完整请求体和返回体，列表只展示摘要"}
+          actions={
+            <div className="proxy-log-filters" aria-label="请求日志筛选">
+              <select
+                aria-label="按模型筛选"
+                className="proxy-log-filter-select"
+                value={modelFilter}
+                onChange={(event) => setModelFilter(event.target.value)}
+              >
+                <option value="">全部模型</option>
+                {modelOptions.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+              <Button
+                size="sm"
+                title="只显示 Reason Tok = 516 的请求"
+                variant={reasoning516Only ? "default" : "outline"}
+                onClick={() => setReasoning516Only((current) => !current)}
+              >
+                思考 516
+              </Button>
+            </div>
+          }
+        />
         <CardContent>
           <div className="proxy-log-table">
-            {logs?.entries.length ? (
+            {filteredEntries.length ? (
               <>
                 <div className="proxy-log-row proxy-log-head">
                   <span>模型</span>
@@ -2659,7 +2731,7 @@ function LocalProxyScreen({
                   <span>耗时</span>
                   <span>操作</span>
                 </div>
-                {logs.entries.map((entry) => (
+                {visibleEntries.map((entry) => (
                   <div className={`proxy-log-row ${selectedId === entry.id ? "active" : ""}`} key={entry.id}>
                     <span className="proxy-log-main">
                       <strong>{entry.model || "未知模型"}</strong>
@@ -2685,59 +2757,153 @@ function LocalProxyScreen({
                 ))}
               </>
             ) : (
-              <div className="empty">暂无代理请求日志。启动 Codex 后，经过本地代理的请求会记录在这里。</div>
+              <div className="empty">
+                {entries.length ? "没有符合筛选条件的请求日志。" : "暂无代理请求日志。启动 Codex 后，经过本地代理的请求会记录在这里。"}
+              </div>
             )}
           </div>
-          {selectedEntry ? (
-            <div className="proxy-log-detail">
-              <div className="proxy-detail-head">
-                <div>
-                  <strong>{selectedEntry.model || "未知模型"}</strong>
-                  <span>{selectedEntry.endpoint || selectedEntry.path}</span>
-                </div>
-                <div className="proxy-detail-actions">
-                  <Button size="sm" variant="secondary" onClick={() => void actions.copyLocalProxyRequest()}>
-                    <Copy className="h-4 w-4" />
-                    复制请求
-                  </Button>
-                  <Button size="sm" variant="secondary" onClick={() => void actions.copyLocalProxyResponse()}>
-                    <Copy className="h-4 w-4" />
-                    复制返回
-                  </Button>
-                </div>
-              </div>
-              <div className="proxy-detail-meta">
-                <span>请求 {formatBytes(selectedEntry.requestBytes)}</span>
-                <span>返回 {formatBytes(selectedEntry.responseBytes)}</span>
-                <span>{selectedEntry.stream ? "流式" : "非流式"}</span>
-                {selectedEntry.responseTruncated ? <span>返回内容已截断</span> : null}
-                {selectedEntry.error ? <span>{selectedEntry.error}</span> : null}
-              </div>
-              <div className="proxy-detail-grid">
-                <Field label="完整请求" as="div">
-                  <Textarea className="log-view proxy-detail-code" readOnly value={formatProxyBody(selectedEntry.requestBody)} />
-                </Field>
-                <Field label="完整返回" as="div">
-                  <Textarea className="log-view proxy-detail-code" readOnly value={formatProxyBody(selectedEntry.responseBody)} />
-                </Field>
-              </div>
-            </div>
-          ) : selectedId ? (
+          {selectedId && !selectedEntry ? (
             <div className="empty">正在读取或未找到该日志详情。</div>
           ) : null}
-          <Toolbar>
-            <Button onClick={() => void actions.refreshLocalProxyLogs()}>
-              <RefreshCw className="h-4 w-4" />
-              刷新
-            </Button>
-            <Button variant="outline" onClick={() => void actions.clearLocalProxyLogs()}>
-              <Trash2 className="h-4 w-4" />
-              清空日志
-            </Button>
-          </Toolbar>
+          <div className="proxy-log-footer">
+            <div className="proxy-log-pagination" aria-label="请求日志分页">
+              <Button
+                disabled={page <= 1}
+                onClick={() => setPage((current) => Math.max(1, current - 1))}
+                size="sm"
+                variant="outline"
+              >
+                上一页
+              </Button>
+              <span>{`第 ${page} / ${totalPages} 页`}</span>
+              <Button
+                disabled={page >= totalPages}
+                onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+                size="sm"
+                variant="outline"
+              >
+                下一页
+              </Button>
+            </div>
+            <Toolbar>
+              <Button onClick={() => void actions.refreshLocalProxyLogs()}>
+                <RefreshCw className="h-4 w-4" />
+                刷新
+              </Button>
+              <Button variant="outline" onClick={() => void actions.clearLocalProxyLogs()}>
+                <Trash2 className="h-4 w-4" />
+                清空日志
+              </Button>
+            </Toolbar>
+          </div>
         </CardContent>
       </Panel>
+      {selectedEntry ? (
+        <LocalProxyLogDetailDialog
+          entry={selectedEntry}
+          onClose={actions.closeLocalProxyLogDetail}
+          onCopyRequest={actions.copyLocalProxyRequest}
+          onCopyResponse={actions.copyLocalProxyResponse}
+        />
+      ) : null}
     </>
+  );
+}
+
+function LocalProxyLogDetailDialog({
+  entry,
+  onClose,
+  onCopyRequest,
+  onCopyResponse,
+}: {
+  entry: LocalProxyLogDetail;
+  onClose: () => void;
+  onCopyRequest: () => Promise<void>;
+  onCopyResponse: () => Promise<void>;
+}) {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return createPortal(
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="proxy-log-detail-title" onClick={onClose}>
+      <div className="modal-card proxy-log-detail-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-head proxy-log-detail-head">
+          <div className="proxy-detail-title-block">
+            <div className="proxy-detail-title-row">
+              <h2 id="proxy-log-detail-title">请求详情</h2>
+              <span className={entry.statusCode >= 200 && entry.statusCode < 300 ? "proxy-code ok" : "proxy-code bad"}>
+                {entry.statusCode}
+              </span>
+              <span className="proxy-detail-endpoint" title={entry.endpoint || entry.path}>
+                {entry.endpoint || entry.path}
+              </span>
+            </div>
+          </div>
+          <Button onClick={onClose} size="icon" title="关闭请求详情" variant="ghost">
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+        <div className="proxy-detail-summary">
+          <div className="proxy-detail-head">
+            <div>
+              <strong>{entry.model || "未知模型"}</strong>
+              <span>{`${formatTime(entry.timestampMs)} · ${formatProtocolRoute(entry)}`}</span>
+            </div>
+          </div>
+          <div className="proxy-detail-meta">
+            <span>请求 {formatBytes(entry.requestBytes)}</span>
+            <span>返回 {formatBytes(entry.responseBytes)}</span>
+            <span>{entry.stream ? "流式" : "非流式"}</span>
+            {entry.responseTruncated ? <span>返回内容已截断</span> : null}
+            {entry.error ? <span>{entry.error}</span> : null}
+          </div>
+        </div>
+        <div className="proxy-log-detail">
+          <div className="proxy-detail-grid">
+            <div className="proxy-detail-pane">
+              <div className="proxy-detail-pane-head">
+                <span>完整请求</span>
+                <Button
+                  aria-label="复制请求"
+                  className="proxy-detail-copy-button"
+                  size="sm"
+                  title="复制请求"
+                  variant="secondary"
+                  onClick={() => void onCopyRequest()}
+                >
+                  <Copy className="h-4 w-4" />
+                  复制
+                </Button>
+              </div>
+              <Textarea className="log-view proxy-detail-code" readOnly value={formatProxyBody(entry.requestBody)} />
+            </div>
+            <div className="proxy-detail-pane">
+              <div className="proxy-detail-pane-head">
+                <span>完整返回</span>
+                <Button
+                  aria-label="复制返回"
+                  className="proxy-detail-copy-button"
+                  size="sm"
+                  title="复制返回"
+                  variant="secondary"
+                  onClick={() => void onCopyResponse()}
+                >
+                  <Copy className="h-4 w-4" />
+                  复制
+                </Button>
+              </div>
+              <Textarea className="log-view proxy-detail-code" readOnly value={formatProxyBody(entry.responseBody)} />
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -4326,7 +4492,7 @@ function RelayProfileEditor({
       {showApiFields && profile.localProxyEnabled ? (
         <div className="hint-line relay-protocol-hint">
           <MessageCircle className="h-4 w-4" />
-          <span>本地代理只按模型列表分流：Responses API 模型直连上游，Chat Completions 与 Anthropic 模型转换后转发；未列入模型不会自动兜底。</span>
+          <span>本地代理优先按模型列表分流；未列入模型时按当前供应商协议转发，不再拒绝请求。</span>
         </div>
       ) : null}
       <div className="hint-line relay-protocol-hint">
@@ -5875,7 +6041,7 @@ function CardHead({ title, detail, actions }: { title: string; detail: string; a
     <CardHeader className="panel-head">
       <div className="panel-head-copy">
         <CardTitle>{title}</CardTitle>
-        <CardDescription>{detail}</CardDescription>
+        {detail ? <CardDescription>{detail}</CardDescription> : null}
       </div>
       {actions ? <div className="panel-head-actions">{actions}</div> : null}
     </CardHeader>
