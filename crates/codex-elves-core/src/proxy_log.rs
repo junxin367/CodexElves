@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const MAX_CAPTURED_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
-pub const MAX_RETAINED_RECORDS: usize = 10;
+pub const STARTUP_RETAINED_RECORDS: usize = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -193,19 +193,16 @@ pub fn append_record(record: &ProxyRequestRecord) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .append(true)
-            .open(&path)?;
-        file.lock_exclusive()?;
-        let line = serde_json::to_string(record)?;
-        writeln!(file, "{line}")?;
-        file.unlock()?;
-    }
-    retain_recent_records_at_path(&path, MAX_RETAINED_RECORDS)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .append(true)
+        .open(&path)?;
+    file.lock_exclusive()?;
+    let line = serde_json::to_string(record)?;
+    writeln!(file, "{line}")?;
+    file.unlock()?;
     Ok(())
 }
 
@@ -244,6 +241,14 @@ pub fn clear_records() -> std::io::Result<()> {
     fs::write(path, "")
 }
 
+pub fn retain_recent_records(limit: usize) -> std::io::Result<()> {
+    let path = default_log_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    retain_recent_records_at_path(&path, limit)
+}
+
 pub fn default_log_path() -> PathBuf {
     crate::paths::default_proxy_log_path()
 }
@@ -277,12 +282,12 @@ fn retain_recent_records_at_path(path: &PathBuf, limit: usize) -> std::io::Resul
         .truncate(false)
         .open(path)?;
     file.lock_exclusive()?;
-    retain_recent_records(&mut file, limit)?;
+    retain_recent_records_in_file(&mut file, limit)?;
     file.unlock()?;
     Ok(())
 }
 
-fn retain_recent_records(file: &mut fs::File, limit: usize) -> std::io::Result<()> {
+fn retain_recent_records_in_file(file: &mut fs::File, limit: usize) -> std::io::Result<()> {
     if limit == 0 {
         file.set_len(0)?;
         file.seek(SeekFrom::Start(0))?;
@@ -340,6 +345,7 @@ mod tests {
     use super::{
         ProxyRequestRecord, append_record, current_timestamp_ms,
         extract_reasoning_tokens_from_response_body, find_record, read_summaries,
+        retain_recent_records,
     };
 
     fn temp_proxy_log_path(name: &str) -> std::path::PathBuf {
@@ -437,7 +443,19 @@ data: [DONE]
             append_record(&next).expect("append proxy log record");
         }
         let summaries = read_summaries(20).expect("read proxy log summaries");
-        assert_eq!(summaries.len(), super::MAX_RETAINED_RECORDS);
+        assert_eq!(summaries.len(), 13);
+        assert_eq!(
+            summaries.first().map(|entry| entry.id.as_str()),
+            Some("test-record-11")
+        );
+        assert_eq!(
+            summaries.last().map(|entry| entry.id.as_str()),
+            Some("test-record")
+        );
+
+        retain_recent_records(super::STARTUP_RETAINED_RECORDS).expect("retain recent proxy logs");
+        let summaries = read_summaries(20).expect("read retained proxy log summaries");
+        assert_eq!(summaries.len(), super::STARTUP_RETAINED_RECORDS);
         assert_eq!(
             summaries.first().map(|entry| entry.id.as_str()),
             Some("test-record-11")

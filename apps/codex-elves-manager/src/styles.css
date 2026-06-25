@@ -2499,6 +2499,16 @@ body {
   outline: none;
 }
 
+.proxy-log-view-spinner {
+  animation: proxy-log-view-spin 0.7s linear infinite;
+}
+
+@keyframes proxy-log-view-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .proxy-log-row {
   display: grid;
   grid-template-columns: minmax(140px, 170px) 132px minmax(120px, 150px) 58px 70px 72px;

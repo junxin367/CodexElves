@@ -271,7 +271,9 @@ where
         let protocol_proxy_enabled = relay_protocol_proxy_enabled(&settings);
         if protocol_proxy_enabled {
             helper_port = crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT;
-            if let Err(error) = crate::proxy_log::clear_records() {
+            if let Err(error) =
+                crate::proxy_log::retain_recent_records(crate::proxy_log::STARTUP_RETAINED_RECORDS)
+            {
                 let _ = crate::diagnostic_log::append_diagnostic_log(
                     "launcher.local_proxy_log_clear_failed_nonfatal",
                     serde_json::json!({

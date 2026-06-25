@@ -1144,6 +1144,9 @@ export function App() {
   const [localProxyLogs, setLocalProxyLogs] = useState<LocalProxyLogsResult | null>(null);
   const [localProxyDetail, setLocalProxyDetail] = useState<LocalProxyLogDetailResult | null>(null);
   const [selectedLocalProxyLogId, setSelectedLocalProxyLogId] = useState<string | null>(null);
+  const [loadingLocalProxyLogDetailId, setLoadingLocalProxyLogDetailId] = useState<string | null>(
+    null,
+  );
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
   const [watcher, setWatcher] = useState<WatcherResult | null>(null);
   const [update, setUpdate] = useState<UpdateResult | null>(null);
@@ -1434,18 +1437,24 @@ export function App() {
   const loadLocalProxyLogDetail = async (id: string) => {
     setSelectedLocalProxyLogId(id);
     setLocalProxyDetail(null);
-    const result = await run(() =>
-      call<LocalProxyLogDetailResult>("read_local_proxy_log_detail", { request: { id } }),
-    );
-    if (result) {
-      setLocalProxyDetail(result);
-      if (!result.entry) showResultNotice("本地代理日志", result);
+    setLoadingLocalProxyLogDetailId(id);
+    try {
+      const result = await run(() =>
+        call<LocalProxyLogDetailResult>("read_local_proxy_log_detail", { request: { id } }),
+      );
+      if (result) {
+        setLocalProxyDetail(result);
+        if (!result.entry) showResultNotice("本地代理日志", result);
+      }
+    } finally {
+      setLoadingLocalProxyLogDetailId((current) => (current === id ? null : current));
     }
   };
 
   const closeLocalProxyLogDetail = () => {
     setLocalProxyDetail(null);
     setSelectedLocalProxyLogId(null);
+    setLoadingLocalProxyLogDetailId(null);
   };
 
   const clearLocalProxyLogs = async () => {
@@ -1455,6 +1464,7 @@ export function App() {
       setLocalProxyLogs(result);
       setLocalProxyDetail(null);
       setSelectedLocalProxyLogId(null);
+      setLoadingLocalProxyLogDetailId(null);
       await refreshLocalProxyStatus(true);
       showResultNotice("本地代理日志", result);
     }
@@ -2362,6 +2372,7 @@ export function App() {
               logs={localProxyLogs}
               detail={localProxyDetail}
               selectedId={selectedLocalProxyLogId}
+              loadingDetailId={loadingLocalProxyLogDetailId}
               actions={actions}
             />
           ) : null}
@@ -2605,12 +2616,14 @@ function LocalProxyScreen({
   logs,
   detail,
   selectedId,
+  loadingDetailId,
   actions,
 }: {
   status: LocalProxyStatusResult | null;
   logs: LocalProxyLogsResult | null;
   detail: LocalProxyLogDetailResult | null;
   selectedId: string | null;
+  loadingDetailId: string | null;
   actions: Actions;
 }) {
   const selectedEntry = detail?.entry && detail.entry.id === selectedId ? detail.entry : null;
@@ -2749,9 +2762,14 @@ function LocalProxyScreen({
                     <Button
                       size="sm"
                       variant={selectedId === entry.id ? "secondary" : "outline"}
+                      disabled={loadingDetailId === entry.id}
                       onClick={() => void actions.loadLocalProxyLogDetail(entry.id)}
                     >
-                      查看
+                      {loadingDetailId === entry.id ? (
+                        <RefreshCw className="h-4 w-4 proxy-log-view-spinner" />
+                      ) : (
+                        "查看"
+                      )}
                     </Button>
                   </div>
                 ))}
@@ -2762,9 +2780,6 @@ function LocalProxyScreen({
               </div>
             )}
           </div>
-          {selectedId && !selectedEntry ? (
-            <div className="empty">正在读取或未找到该日志详情。</div>
-          ) : null}
           <div className="proxy-log-footer">
             <div className="proxy-log-pagination" aria-label="请求日志分页">
               <Button
