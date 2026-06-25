@@ -311,7 +311,12 @@ fn github_release_workflow_can_build_assets_from_tags_and_manual_dispatch() {
     assert!(workflow.contains("gh release create \"$TAG\""));
     assert!(workflow.contains("release-notes.md"));
     assert!(workflow.contains("gh release edit \"$TAG\""));
-    assert!(workflow.contains("CodexElves $VERSION 发布版本。"));
+    assert!(
+        workflow.contains(
+            "node scripts/generate-release-notes.mjs \"$TAG\" \"$REPO\" > release-notes.md"
+        )
+    );
+    assert!(!workflow.contains("CodexElves $VERSION 发布版本。"));
     assert!(
         workflow
             .contains("gh release edit \"$TAG\" --repo \"$REPO\" --notes-file release-notes.md")

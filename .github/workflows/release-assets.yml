@@ -50,64 +50,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="${TAG#v}"
-          VERSION="${VERSION#V}"
-          BASE_VERSION="${VERSION%.*}"
-          PREVIOUS_TAG="$(git tag --list "v${BASE_VERSION}.*" --sort=-v:refname | grep -Fvx "$TAG" | head -n1 || true)"
-          if [ -z "$PREVIOUS_TAG" ]; then
-            PREVIOUS_TAG="$(git tag --list "V${BASE_VERSION}.*" --sort=-v:refname | grep -Fvx "$TAG" | head -n1 || true)"
-          fi
-          if [ -n "$PREVIOUS_TAG" ]; then
-            RANGE="$PREVIOUS_TAG..$TAG"
-            CHANGES_URL="https://github.com/$REPO/compare/$PREVIOUS_TAG...$TAG"
-          else
-            RANGE="$TAG"
-            CHANGES_URL="https://github.com/$REPO/commits/$TAG"
-          fi
-
-          commit_lines() {
-            local pattern="$1"
-            git log --format=%s "$RANGE" \
-              | grep -E "$pattern" \
-              | grep -Ev '^chore\(release\):' \
-              | sed -E 's/^[a-z]+(\([^)]+\))?:[[:space:]]*/- /' \
-              || true
-          }
-
-          FEATURE_NOTES="$(commit_lines '^(feat|perf)(\([^)]+\))?:')"
-          MAINTENANCE_NOTES="$(commit_lines '^(fix|refactor|docs|test|ci|chore)(\([^)]+\))?:')"
-
-          {
-            echo "## $TAG"
-            echo
-            echo "CodexElves $VERSION 发布版本。"
-            echo
-            echo "### 功能更新"
-            if [ -n "$FEATURE_NOTES" ]; then
-              echo "$FEATURE_NOTES"
-            else
-              echo "- 本版本包含应用能力和体验更新。"
-            fi
-            echo
-            echo "### 修复与维护"
-            if [ -n "$MAINTENANCE_NOTES" ]; then
-              echo "$MAINTENANCE_NOTES"
-            else
-              echo "- 无额外维护项。"
-            fi
-            echo
-            echo "### 安装包"
-            echo "- Windows: \`CodexElves-$VERSION-windows-x64-setup.exe\`"
-            echo "- macOS Intel: \`CodexElves-$VERSION-macos-x64.dmg\`"
-            echo "- macOS Apple Silicon: \`CodexElves-$VERSION-macos-arm64.dmg\`"
-            echo
-            echo "### 说明"
-            echo "- 本 Release 由 GitHub Actions 自动编译并上传安装资产。"
-            echo "- \`latest.json\` 会在所有平台资产上传后自动更新。"
-            echo
-            echo "### 完整变更"
-            echo "$CHANGES_URL"
-          } > release-notes.md
+          node scripts/generate-release-notes.mjs "$TAG" "$REPO" > release-notes.md
 
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             echo "Release already exists: $TAG"
