@@ -1,0 +1,25 @@
+apps/codex-elves-manager/src-tauri/tests/windows_subsystem.rs
+  s_6cc77758084da5::t_3a75c4a06592f3 314-317
+scripts/generate-release-notes.mjs
+  s_6cc77758084da5::t_aa6069e47a9e4a 1-11,13-78,83,108-131,133-139,142-144,152-179
+  s_6cc77758084da5::t_3a75c4a06592f3 12,79-82,84-107
+  s_6cc77758084da5::t_36615ed98c9ffe 132,140-141,145-151
+.github/workflows/release-assets.yml
+  s_6cc77758084da5::t_aa6069e47a9e4a 53
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "116efb8de8f5a0003505792ab46739946472e464",
+  "prompts": {},
+  "sessions": {
+    "s_6cc77758084da5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef8e3-39a0-7c01-bf87-77b12b0fc63a",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
