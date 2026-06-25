@@ -1,0 +1,49 @@
+crates/codex-elves-core/tests/protocol_proxy.rs
+  s_6cc77758084da5::t_58f83fc7d82924 4565,4716-4743
+  s_6cc77758084da5::t_ff9e99359c7686 4568-4585,4587-4590
+  s_6cc77758084da5::t_e58af615e2087e 4520,4524-4525,4527,4534-4564,4567
+apps/codex-elves-manager/src-tauri/tauri.conf.json
+  s_6cc77758084da5::t_6318142e77452b 4
+apps/codex-elves-manager/src-tauri/tests/windows_subsystem.rs
+  s_6cc77758084da5::t_e173e278ebdb57 468
+  s_6cc77758084da5::t_32621ee3a7b5ba 472
+apps/codex-elves-manager/src/App.tsx
+  s_6cc77758084da5::t_2b69809521065f 891-892,2827
+  s_6cc77758084da5::t_6dce75f1a0ff78 663
+crates/codex-elves-core/src/launcher.rs
+  s_6cc77758084da5::t_5120548d1e47e4 274-281
+apps/codex-elves-manager/src-tauri/src/lib.rs
+  s_6cc77758084da5::t_eaa6fe5eee994f 25
+  s_6cc77758084da5::t_4cdf58b0939419 210
+crates/codex-elves-core/src/proxy_log.rs
+  s_6cc77758084da5::t_3860b6d56bf4b6 197-202
+  s_6cc77758084da5::t_689d4e9cb1d733 342,433-435,437-440
+  s_6cc77758084da5::t_5b366b05d15d60 2,11,283-295,300-312
+  s_6cc77758084da5::t_79d3c7f055967f 196,203-208,272-282,296-299,441-448
+  s_6cc77758084da5::t_dc4bba852ce61e 436
+crates/codex-elves-core/tests/launcher.rs
+  s_6cc77758084da5::t_cd203264ee6412 983-986,1039,1042
+crates/codex-elves-core/src/protocol_proxy.rs
+  s_6cc77758084da5::t_243c5d20e9b85e 1319-1331
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "fb64aa91d8317d58ce30904f465e084fb6e9c762",
+  "prompts": {},
+  "humans": {
+    "h_41e06c727a5312": {
+      "author": "刘俊鑫 <673638712@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_6cc77758084da5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef8e3-39a0-7c01-bf87-77b12b0fc63a",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
