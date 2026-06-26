@@ -2329,7 +2329,7 @@ export function App() {
             <p>{routeSubtitle(route)}</p>
           </div>
           <div className="topbar-actions">
-            <LocalProxyTopbarBadge status={localProxyStatus} />
+            <LocalProxyTopbarBadge status={localProxyStatus} onLaunch={actions.launch} />
             <Button
               onClick={actions.toggleTheme}
               size="icon"
@@ -2601,13 +2601,49 @@ function OverviewScreen({
   );
 }
 
-function LocalProxyTopbarBadge({ status }: { status: LocalProxyStatusResult | null }) {
+function LocalProxyTopbarBadge({
+  status,
+  onLaunch,
+}: {
+  status: LocalProxyStatusResult | null;
+  onLaunch: () => Promise<void>;
+}) {
+  const [launching, setLaunching] = useState(false);
   const state = localProxyState(status);
+  const canLaunch = localProxyCanLaunch(status);
+  const className = `proxy-topbar-badge ${state}${canLaunch ? " clickable" : ""}${launching ? " launching" : ""}`;
+  const label = launching ? "启动中" : localProxyStateLabel(status);
+
+  if (!canLaunch) {
+    return (
+      <div className={className} title={status?.message ?? "尚未读取本地代理状态"}>
+        <span className="proxy-status-dot" />
+        <span>{label}</span>
+      </div>
+    );
+  }
+
+  const handleLaunch = async () => {
+    if (launching) return;
+    setLaunching(true);
+    try {
+      await onLaunch();
+    } finally {
+      setLaunching(false);
+    }
+  };
+
   return (
-    <div className={`proxy-topbar-badge ${state}`} title={status?.message ?? "尚未读取本地代理状态"}>
+    <button
+      className={className}
+      disabled={launching}
+      onClick={() => void handleLaunch()}
+      title="点击启动 CodexElves"
+      type="button"
+    >
       <span className="proxy-status-dot" />
-      <span>{localProxyStateLabel(status)}</span>
-    </div>
+      <span>{label}</span>
+    </button>
   );
 }
 
@@ -4534,6 +4570,15 @@ function RelayModelMappingTable({
   const displayRows = mappings.length
     ? mappings
     : [{ requestModel: "", protocol: "responses" as RelayProtocol, contextWindow: "" }];
+  const canSort = mappings.length > 1;
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 8 },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  );
   const updateRow = (index: number, patch: Partial<RelayModelMapping>) => {
     const next = mappings.length
       ? [...mappings]
@@ -4568,6 +4613,12 @@ function RelayModelMappingTable({
   const removeRow = (index: number) => {
     onChange(mappings.filter((_, itemIndex) => itemIndex !== index));
   };
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const next = reorderRelayModelMappings(mappings, String(active.id), String(over.id));
+    if (next !== mappings) onChange(next);
+  };
 
   return (
     <div className="relay-model-table-wrap">
@@ -4583,60 +4634,124 @@ function RelayModelMappingTable({
       </div>
       <div className="relay-model-table" role="table" aria-label="模型列表">
         <div className="relay-model-table-head" role="row">
+          <span role="columnheader" aria-label="排序" />
           <span role="columnheader">请求模型</span>
           <span role="columnheader">协议</span>
           <span role="columnheader">上下文大小</span>
           <span role="columnheader" aria-label="删除" />
         </div>
-        {displayRows.map((row, index) => (
-          <div className="relay-model-table-row" role="row" key={`model-row-${index}`}>
-            <div className="relay-model-request-cell" role="cell">
-              <ModelChoiceInput
-                choices={choices[row.protocol]}
-                value={row.requestModel}
-                onChange={(value, source) => {
-                  if (source === "select") {
-                    selectRowModel(index, row, value);
-                    return;
-                  }
-                  updateRow(index, { requestModel: value });
-                }}
-                placeholder="点击选择或输入模型"
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <SortableContext
+            items={displayRows.map((_, index) => relayModelMappingRowId(index))}
+            strategy={verticalListSortingStrategy}
+          >
+            {displayRows.map((row, index) => (
+              <SortableRelayModelMappingRow
+                canSort={canSort}
+                choices={choices}
+                index={index}
+                key={relayModelMappingRowId(index)}
+                mappingsLength={mappings.length}
+                onRemove={removeRow}
+                onSelectModel={selectRowModel}
+                onUpdate={updateRow}
+                row={row}
               />
-            </div>
-            <div role="cell">
-              <select
-                className="field-select"
-                value={row.protocol}
-                onChange={(event) => updateRow(index, { protocol: event.currentTarget.value as RelayProtocol })}
-              >
-                <option value="responses">Responses API</option>
-                <option value="chatCompletions">Chat Completions</option>
-                <option value="anthropic">Anthropic</option>
-              </select>
-            </div>
-            <div role="cell">
-              <Input
-                inputMode="numeric"
-                value={row.contextWindow}
-                onChange={(event) => updateRow(index, { contextWindow: event.currentTarget.value.replace(/[^\d]/g, "") })}
-                placeholder="例如 200000"
-              />
-            </div>
-            <div className="relay-model-delete-cell" role="cell">
-              <button
-                aria-label="删除模型"
-                className="relay-model-delete-button"
-                disabled={!mappings.length}
-                onClick={() => removeRow(index)}
-                title="删除模型"
-                type="button"
-              >
-                <Trash2 className="h-4 w-4" />
-              </button>
-            </div>
-          </div>
-        ))}
+            ))}
+          </SortableContext>
+        </DndContext>
+      </div>
+    </div>
+  );
+}
+
+function SortableRelayModelMappingRow({
+  row,
+  index,
+  choices,
+  canSort,
+  mappingsLength,
+  onUpdate,
+  onSelectModel,
+  onRemove,
+}: {
+  row: RelayModelMapping;
+  index: number;
+  choices: Record<RelayProtocol, string[]>;
+  canSort: boolean;
+  mappingsLength: number;
+  onUpdate: (index: number, patch: Partial<RelayModelMapping>) => void;
+  onSelectModel: (index: number, row: RelayModelMapping, requestModel: string) => void;
+  onRemove: (index: number) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: relayModelMappingRowId(index),
+    disabled: !canSort,
+  });
+  const style: CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  return (
+    <div className={`relay-model-table-row ${isDragging ? "dragging" : ""}`} role="row" ref={setNodeRef} style={style}>
+      <div className="relay-model-drag-cell" role="cell">
+        <button
+          aria-label="拖动模型排序"
+          className="relay-model-drag-button"
+          disabled={!canSort}
+          title={canSort ? "拖动模型排序" : "至少两个模型才能排序"}
+          type="button"
+          {...attributes}
+          {...listeners}
+        >
+          <GripVertical className="h-4 w-4" />
+        </button>
+      </div>
+      <div className="relay-model-request-cell" role="cell">
+        <ModelChoiceInput
+          choices={choices[row.protocol]}
+          value={row.requestModel}
+          onChange={(value, source) => {
+            if (source === "select") {
+              onSelectModel(index, row, value);
+              return;
+            }
+            onUpdate(index, { requestModel: value });
+          }}
+          placeholder="点击选择或输入模型"
+        />
+      </div>
+      <div role="cell">
+        <select
+          className="field-select"
+          value={row.protocol}
+          onChange={(event) => onUpdate(index, { protocol: event.currentTarget.value as RelayProtocol })}
+        >
+          <option value="responses">Responses API</option>
+          <option value="chatCompletions">Chat Completions</option>
+          <option value="anthropic">Anthropic</option>
+        </select>
+      </div>
+      <div role="cell">
+        <Input
+          inputMode="numeric"
+          value={row.contextWindow}
+          onChange={(event) => onUpdate(index, { contextWindow: event.currentTarget.value.replace(/[^\d]/g, "") })}
+          placeholder="例如 200000"
+        />
+      </div>
+      <div className="relay-model-delete-cell" role="cell">
+        <button
+          aria-label="删除模型"
+          className="relay-model-delete-button"
+          disabled={!mappingsLength}
+          onClick={() => onRemove(index)}
+          title="删除模型"
+          type="button"
+        >
+          <Trash2 className="h-4 w-4" />
+        </button>
       </div>
     </div>
   );
@@ -6652,6 +6767,10 @@ function localProxyState(status: LocalProxyStatusResult | null) {
   return status.listening ? "running" : "failed";
 }
 
+function localProxyCanLaunch(status: LocalProxyStatusResult | null) {
+  return !status || (status.enabled && !status.listening);
+}
+
 function localProxyStateLabel(status: LocalProxyStatusResult | null) {
   const state = localProxyState(status);
   if (state === "running") return "代理运行中";
@@ -7593,6 +7712,28 @@ function reorderRelayProfiles(settings: BackendSettings, sourceId: string, targe
     ...settings,
     relayProfiles,
   });
+}
+
+function relayModelMappingRowId(index: number): string {
+  return `relay-model-mapping-${index}`;
+}
+
+function relayModelMappingIndexFromId(id: string): number {
+  const prefix = "relay-model-mapping-";
+  if (!id.startsWith(prefix)) return -1;
+  const parsed = Number.parseInt(id.slice(prefix.length), 10);
+  return Number.isFinite(parsed) ? parsed : -1;
+}
+
+function reorderRelayModelMappings(mappings: RelayModelMapping[], sourceId: string, targetId: string): RelayModelMapping[] {
+  if (sourceId === targetId || mappings.length < 2) return mappings;
+  const sourceIndex = relayModelMappingIndexFromId(sourceId);
+  const targetIndex = relayModelMappingIndexFromId(targetId);
+  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex >= mappings.length || targetIndex >= mappings.length) return mappings;
+  const next = [...mappings];
+  const [moved] = next.splice(sourceIndex, 1);
+  next.splice(targetIndex, 0, moved);
+  return next;
 }
 
 function removeRelayProfile(settings: BackendSettings, id: string): BackendSettings {

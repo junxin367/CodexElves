@@ -319,6 +319,7 @@ body {
 }
 
 .proxy-topbar-badge {
+  appearance: none;
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -328,9 +329,35 @@ body {
   background: hsl(var(--surface-raised));
   color: hsl(var(--muted-foreground));
   padding: 0 11px;
+  font-family: inherit;
   font-size: 12px;
   font-weight: 700;
+  line-height: 1;
   white-space: nowrap;
+}
+
+.proxy-topbar-badge.clickable {
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast) var(--motion-ease),
+    color var(--motion-fast) var(--motion-ease),
+    background var(--motion-fast) var(--motion-ease);
+}
+
+.proxy-topbar-badge.clickable:hover {
+  background: hsl(var(--surface));
+  border-color: hsl(var(--ring) / 0.55);
+  color: hsl(var(--foreground));
+}
+
+.proxy-topbar-badge.clickable:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 2px;
+}
+
+.proxy-topbar-badge.clickable:disabled {
+  cursor: progress;
+  opacity: 0.78;
 }
 
 .proxy-topbar-badge.running {
@@ -349,6 +376,21 @@ body {
   border-radius: 999px;
   background: currentColor;
   box-shadow: 0 0 0 3px hsl(var(--border));
+}
+
+.proxy-topbar-badge.launching .proxy-status-dot {
+  animation: proxy-topbar-dot-pulse 0.8s ease-in-out infinite;
+}
+
+@keyframes proxy-topbar-dot-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+
+  50% {
+    opacity: 1;
+  }
 }
 
 .proxy-status-strip {
@@ -1136,7 +1178,7 @@ body {
 .relay-model-table-head,
 .relay-model-table-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(150px, 180px) minmax(112px, 150px) 36px;
+  grid-template-columns: 28px minmax(180px, 1fr) minmax(150px, 180px) minmax(112px, 150px) 36px;
   gap: 8px;
   align-items: center;
 }
@@ -1160,9 +1202,49 @@ body {
   z-index: 20;
 }
 
+.relay-model-table-row.dragging {
+  z-index: 30;
+  box-shadow: 0 12px 28px hsl(var(--foreground) / 0.16);
+}
+
 .relay-model-table-row .field-input,
 .relay-model-table-row .field-select {
   width: 100%;
+}
+
+.relay-model-drag-cell {
+  display: flex;
+  justify-content: center;
+}
+
+.relay-model-drag-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 32px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  cursor: grab;
+}
+
+.relay-model-drag-button:hover:not(:disabled),
+.relay-model-drag-button:focus-visible:not(:disabled) {
+  border-color: hsl(var(--border));
+  background: hsl(var(--surface));
+  color: hsl(var(--foreground));
+  outline: none;
+}
+
+.relay-model-drag-button:active:not(:disabled) {
+  cursor: grabbing;
+}
+
+.relay-model-drag-button:disabled {
+  cursor: default;
+  opacity: 0.32;
 }
 
 .relay-model-request-cell {
