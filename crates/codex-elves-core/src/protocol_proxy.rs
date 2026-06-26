@@ -236,10 +236,11 @@ pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
 
     apply_chat_reasoning_options(&mut result, &body, model);
 
-    let tool_context = build_codex_tool_context(body.get("tools"));
+    let conversion_tools = tools_for_proxy_conversion(&body);
+    let tool_context = build_codex_tool_context_from_tools(&conversion_tools);
     let mut has_chat_tools = false;
-    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
-        let converted = responses_tools_to_chat_tools(tools, &tool_context);
+    if !conversion_tools.is_empty() {
+        let converted = responses_tools_to_chat_tools(&conversion_tools, &tool_context);
         if !converted.is_empty() {
             has_chat_tools = true;
             result["tools"] = json!(converted);
@@ -278,7 +279,7 @@ pub fn chat_completion_to_response_with_request(
     body: Value,
     original_request: &Value,
 ) -> anyhow::Result<Value> {
-    let context = build_codex_tool_context(original_request.get("tools"));
+    let context = build_codex_tool_context_for_request(original_request);
     chat_completion_to_response_with_context(body, &context, Some(original_request))
 }
 
@@ -385,10 +386,11 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
         }
     }
 
-    let tool_context = build_codex_tool_context(body.get("tools"));
+    let conversion_tools = tools_for_proxy_conversion(&body);
+    let tool_context = build_codex_tool_context_from_tools(&conversion_tools);
     let mut has_tools = false;
-    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
-        let converted = responses_tools_to_anthropic_tools(tools, &tool_context);
+    if !conversion_tools.is_empty() {
+        let converted = responses_tools_to_anthropic_tools(&conversion_tools, &tool_context);
         if !converted.is_empty() {
             has_tools = true;
             result["tools"] = json!(converted);
@@ -430,7 +432,7 @@ pub fn anthropic_message_to_response_with_request_and_diagnostic_id(
     original_request: &Value,
     diagnostic_id: Option<&str>,
 ) -> anyhow::Result<Value> {
-    let context = build_codex_tool_context(original_request.get("tools"));
+    let context = build_codex_tool_context_for_request(original_request);
     anthropic_message_to_response_with_context(
         body,
         &context,
@@ -1885,7 +1887,7 @@ impl Default for ChatSseState {
 impl ChatSseState {
     fn with_request(original_request: &Value) -> Self {
         Self {
-            tool_context: build_codex_tool_context(original_request.get("tools")),
+            tool_context: build_codex_tool_context_for_request(original_request),
             original_request: Some(original_request.clone()),
             ..Self::default()
         }
@@ -3958,12 +3960,120 @@ fn responses_history_function_name(item: &Value) -> String {
     }
 }
 
-fn build_codex_tool_context(tools: Option<&Value>) -> CodexToolContext {
-    let mut context = CodexToolContext::default();
-    let Some(tools) = tools.and_then(Value::as_array) else {
-        return context;
+fn tools_for_proxy_conversion(request: &Value) -> Vec<Value> {
+    let mut tools = Vec::new();
+    if let Some(request_tools) = request.get("tools").and_then(Value::as_array) {
+        append_unique_tools(&mut tools, request_tools);
+    }
+    append_tool_search_output_tools(request.get("input"), &mut tools);
+    tools
+}
+
+fn append_tool_search_output_tools(input: Option<&Value>, tools: &mut Vec<Value>) {
+    let Some(items) = input.and_then(Value::as_array) else {
+        return;
+    };
+    for item in items {
+        if item.get("type").and_then(Value::as_str) != Some("tool_search_output") {
+            continue;
+        }
+        if let Some(found_tools) = item.get("tools").and_then(Value::as_array) {
+            append_unique_tools(tools, found_tools);
+        }
+    }
+}
+
+fn append_unique_tools(tools: &mut Vec<Value>, additions: &[Value]) {
+    for tool in additions {
+        append_unique_tool(tools, tool.clone());
+    }
+}
+
+fn append_unique_tool(tools: &mut Vec<Value>, tool: Value) {
+    if tool.get("type").and_then(Value::as_str) == Some("namespace") {
+        if merge_namespace_tool(tools, &tool) {
+            return;
+        }
+    }
+    let key = tool_identity_key(&tool);
+    if tools
+        .iter()
+        .any(|existing| tool_identity_key(existing) == key)
+    {
+        return;
+    }
+    tools.push(tool);
+}
+
+fn merge_namespace_tool(tools: &mut [Value], tool: &Value) -> bool {
+    let namespace = tool.get("name").and_then(Value::as_str).unwrap_or("");
+    if namespace.is_empty() {
+        return false;
+    }
+    let Some(existing) = tools.iter_mut().find(|existing| {
+        existing.get("type").and_then(Value::as_str) == Some("namespace")
+            && existing.get("name").and_then(Value::as_str) == Some(namespace)
+    }) else {
+        return false;
     };
 
+    if existing
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .is_empty()
+    {
+        if let Some(description) = tool.get("description") {
+            existing["description"] = description.clone();
+        }
+    }
+
+    let Some(incoming_children) = tool.get("tools").and_then(Value::as_array) else {
+        return true;
+    };
+    if !existing.get("tools").is_some_and(Value::is_array) {
+        existing["tools"] = json!([]);
+    }
+    let Some(existing_children) = existing.get_mut("tools").and_then(Value::as_array_mut) else {
+        return true;
+    };
+    for child in incoming_children {
+        let key = tool_identity_key(child);
+        if existing_children
+            .iter()
+            .any(|existing_child| tool_identity_key(existing_child) == key)
+        {
+            continue;
+        }
+        existing_children.push(child.clone());
+    }
+    true
+}
+
+fn tool_identity_key(tool: &Value) -> String {
+    if let Some(name) = tool.as_str() {
+        return format!("string:{name}");
+    }
+    let tool_type = tool.get("type").and_then(Value::as_str).unwrap_or("");
+    let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
+    if !tool_type.is_empty() || !name.is_empty() {
+        return format!("{tool_type}:{name}");
+    }
+    tool.to_string()
+}
+
+fn build_codex_tool_context_for_request(request: &Value) -> CodexToolContext {
+    let tools = tools_for_proxy_conversion(request);
+    build_codex_tool_context_from_tools(&tools)
+}
+
+fn build_codex_tool_context_from_tools(tools: &[Value]) -> CodexToolContext {
+    let mut context = CodexToolContext::default();
+    add_tools_to_codex_tool_context(&mut context, tools);
+    context
+}
+
+fn add_tools_to_codex_tool_context(context: &mut CodexToolContext, tools: &[Value]) {
     for tool in tools {
         if let Some(name) = tool.as_str().filter(|name| !name.is_empty()) {
             if let Some(action) = proxy_action_from_upstream_name(name) {
@@ -4044,7 +4154,7 @@ fn build_codex_tool_context(tools: Option<&Value>) -> CodexToolContext {
                     );
                 }
             }
-            "namespace" => add_namespace_tools_to_context(&mut context, tool),
+            "namespace" => add_namespace_tools_to_context(&mut *context, tool),
             _ if is_builtin_proxy_tool_type(tool_type) => {
                 let name = tool
                     .get("name")
@@ -4064,8 +4174,6 @@ fn build_codex_tool_context(tools: Option<&Value>) -> CodexToolContext {
             _ => {}
         }
     }
-
-    context
 }
 
 fn add_namespace_tools_to_context(context: &mut CodexToolContext, namespace_tool: &Value) {
@@ -6937,6 +7045,9 @@ pub fn supported_reasoning_efforts_for_model(
         return levels(&["minimal", "low", "medium", "high", "xhigh"]);
     }
     if model.contains("deepseek") {
+        return levels(&["high", "max"]);
+    }
+    if model.contains("glm") || model.contains("zhipu") || model.contains("z.ai") {
         return levels(&["high", "max"]);
     }
     if model.contains("grok") || model.contains("xai") {

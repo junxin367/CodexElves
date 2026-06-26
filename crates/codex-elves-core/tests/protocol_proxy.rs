@@ -1041,6 +1041,28 @@ fn deepseek_reasoning_efforts_match_official_levels() {
 }
 
 #[test]
+fn glm_reasoning_efforts_match_supported_levels() {
+    assert_eq!(
+        supported_reasoning_efforts_for_model("glm-4.6", UpstreamResponseProtocol::ChatCompletions,),
+        vec!["high", "max"]
+    );
+    assert_eq!(
+        supported_reasoning_efforts_for_model(
+            "zhipu/glm-4.6",
+            UpstreamResponseProtocol::ChatCompletions,
+        ),
+        vec!["high", "max"]
+    );
+    assert_eq!(
+        supported_reasoning_efforts_for_model(
+            "z.ai/glm-4.6",
+            UpstreamResponseProtocol::ChatCompletions
+        ),
+        vec!["high", "max"]
+    );
+}
+
+#[test]
 fn responses_request_maps_developer_role_to_system_for_chat_upstream() {
     let converted = responses_to_chat_completions(json!({
         "model": "deepseek-chat",
@@ -1641,6 +1663,174 @@ fn responses_input_replays_server_side_tool_history() {
     assert!(anthropic_text.contains("web_search_preview"));
     assert!(anthropic_text.contains("unsupported"));
     assert!(anthropic_text.contains("continue"));
+}
+
+#[test]
+fn tool_search_output_tools_are_exposed_to_chat_upstream_and_response_context() {
+    let request = json!({
+        "model": "deepseek-v4-pro",
+        "input": [
+            {
+                "type": "tool_search_call",
+                "call_id": "call_tool_search",
+                "status": "completed",
+                "execution": "client",
+                "arguments": {
+                    "query": "pal consensus"
+                }
+            },
+            {
+                "type": "tool_search_output",
+                "call_id": "call_tool_search",
+                "status": "completed",
+                "execution": "client",
+                "tools": [{
+                    "type": "namespace",
+                    "name": "mcp__pal",
+                    "description": "PAL MCP",
+                    "tools": [{
+                        "type": "function",
+                        "name": "consensus",
+                        "description": "Build multi-model consensus.",
+                        "defer_loading": true,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "step": { "type": "string" }
+                            },
+                            "required": ["step"],
+                            "additionalProperties": false
+                        }
+                    }]
+                }]
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": "use pal"
+            }
+        ],
+        "tools": [{ "type": "tool_search" }]
+    });
+
+    let chat = responses_to_chat_completions(request.clone()).unwrap();
+    let names: Vec<_> = chat["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"tool_search"));
+    assert!(names.contains(&"mcp__pal__consensus"));
+
+    let converted = chat_completion_to_response_with_request(
+        json!({
+            "id": "chatcmpl_pal_consensus",
+            "created": 123,
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_pal",
+                        "type": "function",
+                        "function": {
+                            "name": "mcp__pal__consensus",
+                            "arguments": "{\"step\":\"discuss\"}"
+                        }
+                    }]
+                }
+            }]
+        }),
+        &request,
+    )
+    .unwrap();
+
+    assert_eq!(converted["output"][0]["type"], "function_call");
+    assert_eq!(converted["output"][0]["call_id"], "call_pal");
+    assert_eq!(converted["output"][0]["name"], "consensus");
+    assert_eq!(converted["output"][0]["namespace"], "mcp__pal");
+}
+
+#[test]
+fn tool_search_output_tools_are_exposed_to_anthropic_upstream_and_response_context() {
+    let request = json!({
+        "model": "claude-sonnet-4-6",
+        "input": [
+            {
+                "type": "tool_search_output",
+                "call_id": "call_tool_search",
+                "status": "completed",
+                "execution": "client",
+                "tools": [{
+                    "type": "namespace",
+                    "name": "mcp__pal",
+                    "description": "PAL MCP",
+                    "tools": [{
+                        "type": "function",
+                        "name": "consensus",
+                        "description": "Build multi-model consensus.",
+                        "defer_loading": true,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "step": { "type": "string" }
+                            },
+                            "required": ["step"],
+                            "additionalProperties": false
+                        }
+                    }]
+                }]
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": "use pal"
+            }
+        ],
+        "tools": [{ "type": "tool_search" }]
+    });
+
+    let anthropic = responses_to_anthropic_messages(request.clone()).unwrap();
+    let names: Vec<_> = anthropic["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"tool_search"));
+    assert!(names.contains(&"mcp__pal__consensus"));
+
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_pal_consensus",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-6",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_pal",
+                "name": "mcp__pal__consensus",
+                "input": {
+                    "step": "discuss"
+                }
+            }],
+            "stop_reason": "tool_use",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5
+            }
+        }),
+        &request,
+    )
+    .unwrap();
+
+    assert_eq!(converted["output"][0]["type"], "function_call");
+    assert_eq!(converted["output"][0]["call_id"], "toolu_pal");
+    assert_eq!(converted["output"][0]["name"], "consensus");
+    assert_eq!(converted["output"][0]["namespace"], "mcp__pal");
 }
 
 #[test]
