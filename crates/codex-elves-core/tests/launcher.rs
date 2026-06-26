@@ -981,7 +981,10 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
     let app_dir = temp.path().join("Codex.app");
     std::fs::create_dir_all(&app_dir).unwrap();
     let proxy_log_path = temp.path().join("proxy-requests.jsonl");
-    std::fs::write(&proxy_log_path, "stale-request\n").unwrap();
+    let old_proxy_log = (0..codex_elves_core::proxy_log::STARTUP_RETAINED_RECORDS + 2)
+        .map(|index| format!("stale-request-{index}"))
+        .collect::<Vec<_>>();
+    std::fs::write(&proxy_log_path, format!("{}\n", old_proxy_log.join("\n"))).unwrap();
     let previous_proxy_log_path =
         codex_elves_core::paths::set_proxy_log_path_for_tests(Some(proxy_log_path.clone()));
     let status_store = StatusStore::new(temp.path().join("latest-status.json"));
@@ -1036,7 +1039,13 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
     assert!(before_stop.contains(&"select-helper:58000".to_string()));
     assert!(before_stop.contains(&"start-helper:45221".to_string()));
     assert!(!before_stop.contains(&"inject:9229:45221".to_string()));
-    assert_eq!(std::fs::read_to_string(&proxy_log_path).unwrap(), "");
+    let retained_proxy_log = old_proxy_log
+        [old_proxy_log.len() - codex_elves_core::proxy_log::STARTUP_RETAINED_RECORDS..]
+        .join("\n");
+    assert_eq!(
+        std::fs::read_to_string(&proxy_log_path).unwrap(),
+        format!("{retained_proxy_log}\n")
+    );
 
     handle.wait_for_codex_exit().await.unwrap();
     codex_elves_core::paths::set_proxy_log_path_for_tests(previous_proxy_log_path);
