@@ -1,0 +1,51 @@
+apps/codex-elves-manager/src/styles.css
+  s_d11b1cb79587a2::t_10e3d39975f158 362
+  s_aa0cb276dcf050::t_118c28775bf240 1207
+  s_945e980b26cc67::t_56215fb53a5527 345,351,356,361,383,394,1208,1218,1231,1238-1241,1243,1248
+  s_b96d605f0acf2b::t_63cc2d0b32288e 322,332,335,339-344,346-350,352-355,357-360,381-382,384-393,395,1181,1205-1206,1209,1215-1217,1219-1230,1232-1237,1242,1244-1247,1249
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.1",
+  "base_commit_sha": "d19b3c1678c4273ae3a873e9cd3362ad2776dee0",
+  "prompts": {},
+  "humans": {
+    "h_41e06c727a5312": {
+      "author": "刘俊鑫 <673638712@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_945e980b26cc67": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ed524-6416-7581-bf3a-3628dbd05629",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    },
+    "s_aa0cb276dcf050": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019efc64-a3c8-78e3-afe0-8d6258230f4b",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    },
+    "s_b96d605f0acf2b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f0202-ae5b-7271-a587-297d9c54de00",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    },
+    "s_d11b1cb79587a2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef3e9-ce87-77f2-b081-5005242eb194",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
