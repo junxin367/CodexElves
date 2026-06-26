@@ -1,0 +1,33 @@
+crates/codex-elves-core/src/protocol_proxy.rs
+  s_d2f199786c73eb::t_f8c049e8ff64e0 239-240,242-243,282,389-390,392-393,435,1890
+  s_d2f199786c73eb::t_bb65a8167d3def 7050-7052
+  s_d2f199786c73eb::t_f7a119f0a4c8a4 3963-3998,4003-4017,4020-4076
+  s_d2f199786c73eb::t_d64fe62345c478 4157
+  s_d2f199786c73eb::t_f01bb8ccc0930e 3999-4002
+crates/codex-elves-core/tests/protocol_proxy.rs
+  s_d2f199786c73eb::t_b33bbe3edc44e8 1758-1835
+  s_d2f199786c73eb::t_f180bcf8c836a4 1043,1668-1757
+  s_d2f199786c73eb::t_2136c2e4f56b09 1044-1045,1047-1056,1061-1064
+  s_d2f199786c73eb::t_bef13e1d679cf6 1046,1057-1060
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.1",
+  "base_commit_sha": "a5ed0330f3210e0fe3a2a3167ffd1402333dcd3f",
+  "prompts": {},
+  "humans": {
+    "h_41e06c727a5312": {
+      "author": "刘俊鑫 <673638712@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_d2f199786c73eb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019effed-111f-75b2-8286-f5718610546f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
