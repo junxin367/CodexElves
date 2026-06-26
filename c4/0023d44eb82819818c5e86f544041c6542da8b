@@ -1,0 +1,24 @@
+README_EN.md
+  s_b96d605f0acf2b::t_37cfcc397a6156 50-70
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.1",
+  "base_commit_sha": "c40023d44eb82819818c5e86f544041c6542da8b",
+  "prompts": {},
+  "humans": {
+    "h_41e06c727a5312": {
+      "author": "刘俊鑫 <673638712@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_b96d605f0acf2b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f0202-ae5b-7271-a587-297d9c54de00",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
