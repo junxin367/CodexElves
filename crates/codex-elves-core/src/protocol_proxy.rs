@@ -3077,22 +3077,26 @@ fn append_responses_input_to_anthropic(
             vec![json!({ "type": "text", "text": text })],
         ),
         Value::Array(items) => {
+            let mut seen_tool_call_ids = BTreeSet::new();
             let mut ignored_tool_call_ids = BTreeSet::new();
             for item in items {
                 append_responses_item_to_anthropic(
                     item,
                     messages,
                     system_chunks,
+                    &mut seen_tool_call_ids,
                     &mut ignored_tool_call_ids,
                 );
             }
         }
         Value::Object(_) => {
+            let mut seen_tool_call_ids = BTreeSet::new();
             let mut ignored_tool_call_ids = BTreeSet::new();
             append_responses_item_to_anthropic(
                 input,
                 messages,
                 system_chunks,
+                &mut seen_tool_call_ids,
                 &mut ignored_tool_call_ids,
             );
         }
@@ -3104,6 +3108,7 @@ fn append_responses_item_to_anthropic(
     item: &Value,
     messages: &mut Vec<Value>,
     system_chunks: &mut Vec<String>,
+    seen_tool_call_ids: &mut BTreeSet<String>,
     ignored_tool_call_ids: &mut BTreeSet<String>,
 ) {
     match item.get("type").and_then(Value::as_str) {
@@ -3119,6 +3124,7 @@ fn append_responses_item_to_anthropic(
                 return;
             }
             if !name.is_empty() && !call_id.is_empty() {
+                seen_tool_call_ids.insert(call_id.to_string());
                 push_anthropic_message(
                     messages,
                     "assistant",
@@ -3137,6 +3143,14 @@ fn append_responses_item_to_anthropic(
                 return;
             }
             if !call_id.is_empty() {
+                if !seen_tool_call_ids.contains(call_id) {
+                    push_anthropic_orphan_tool_output_message(
+                        messages,
+                        call_id,
+                        item.get("output").unwrap_or(&Value::Null),
+                    );
+                    return;
+                }
                 push_anthropic_message(
                     messages,
                     "user",
@@ -3165,6 +3179,7 @@ fn append_responses_item_to_anthropic(
             }
             let (name, arguments) = build_custom_tool_call_history(raw_name, input);
             if !name.is_empty() && !call_id.is_empty() {
+                seen_tool_call_ids.insert(call_id.to_string());
                 push_anthropic_message(
                     messages,
                     "assistant",
@@ -3183,6 +3198,14 @@ fn append_responses_item_to_anthropic(
                 return;
             }
             if !call_id.is_empty() {
+                if !seen_tool_call_ids.contains(call_id) {
+                    push_anthropic_orphan_tool_output_message(
+                        messages,
+                        call_id,
+                        item.get("output").unwrap_or(&Value::Null),
+                    );
+                    return;
+                }
                 push_anthropic_message(
                     messages,
                     "user",
@@ -3201,6 +3224,7 @@ fn append_responses_item_to_anthropic(
                 .and_then(Value::as_str)
                 .unwrap_or("");
             if !call_id.is_empty() {
+                seen_tool_call_ids.insert(call_id.to_string());
                 push_anthropic_message(
                     messages,
                     "assistant",
@@ -3216,6 +3240,10 @@ fn append_responses_item_to_anthropic(
         Some("tool_search_output") => {
             let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or("");
             if !call_id.is_empty() {
+                if !seen_tool_call_ids.contains(call_id) {
+                    push_anthropic_orphan_tool_output_message(messages, call_id, item);
+                    return;
+                }
                 push_anthropic_message(
                     messages,
                     "user",
@@ -3243,6 +3271,7 @@ fn append_responses_item_to_anthropic(
                 return;
             }
             if !call_id.is_empty() && !name.is_empty() {
+                seen_tool_call_ids.insert(call_id.to_string());
                 push_anthropic_message(
                     messages,
                     "assistant",
@@ -3268,6 +3297,10 @@ fn append_responses_item_to_anthropic(
             }
             if !call_id.is_empty() {
                 let output = content.get("content").unwrap_or(content);
+                if !seen_tool_call_ids.contains(call_id) {
+                    push_anthropic_orphan_tool_output_message(messages, call_id, output);
+                    return;
+                }
                 push_anthropic_message(
                     messages,
                     "user",
@@ -3325,13 +3358,63 @@ fn push_anthropic_message(messages: &mut Vec<Value>, role: &str, content: Vec<Va
     }
     if let Some(last) = messages.last_mut() {
         if last.get("role").and_then(Value::as_str) == Some(role) {
-            if let Some(existing) = last.get_mut("content").and_then(Value::as_array_mut) {
-                existing.extend(content);
-                return;
+            let can_merge = last
+                .get("content")
+                .and_then(Value::as_array)
+                .is_some_and(|existing| can_merge_anthropic_content(role, existing, &content));
+            if can_merge {
+                if let Some(existing) = last.get_mut("content").and_then(Value::as_array_mut) {
+                    existing.extend(content);
+                    return;
+                }
             }
         }
     }
     messages.push(json!({ "role": role, "content": content }));
+}
+
+fn can_merge_anthropic_content(role: &str, existing: &[Value], incoming: &[Value]) -> bool {
+    if role != "user" {
+        return true;
+    }
+    let existing_has_tool_result = anthropic_content_has_type(existing, "tool_result");
+    let incoming_has_tool_result = anthropic_content_has_type(incoming, "tool_result");
+    if !existing_has_tool_result && !incoming_has_tool_result {
+        return true;
+    }
+    anthropic_content_is_all_type(existing, "tool_result")
+        && anthropic_content_is_all_type(incoming, "tool_result")
+}
+
+fn anthropic_content_has_type(content: &[Value], block_type: &str) -> bool {
+    content
+        .iter()
+        .any(|part| part.get("type").and_then(Value::as_str) == Some(block_type))
+}
+
+fn anthropic_content_is_all_type(content: &[Value], block_type: &str) -> bool {
+    !content.is_empty()
+        && content
+            .iter()
+            .all(|part| part.get("type").and_then(Value::as_str) == Some(block_type))
+}
+
+fn push_anthropic_orphan_tool_output_message(
+    messages: &mut Vec<Value>,
+    call_id: &str,
+    output: &Value,
+) {
+    push_anthropic_message(
+        messages,
+        "user",
+        vec![json!({
+            "type": "text",
+            "text": format!(
+                "Function call output ({call_id}): {}",
+                response_output_text(output)
+            )
+        })],
+    );
 }
 
 fn responses_content_to_anthropic_content(content: &Value) -> Vec<Value> {

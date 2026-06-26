@@ -1675,6 +1675,139 @@ fn responses_input_replays_server_side_tool_history() {
 }
 
 #[test]
+fn anthropic_tool_result_history_stays_separate_from_following_user_text() {
+    let anthropic = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "toolu_01GkD6H6YEdCrW3sAhhCcA3m",
+                "name": "update_plan",
+                "arguments": "{\"plan\":[]}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "toolu_01GkD6H6YEdCrW3sAhhCcA3m",
+                "output": "ok"
+            },
+            {
+                "type": "message",
+                "role": "developer",
+                "content": "Keep replies concise."
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": "continue"
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert_eq!(anthropic["system"], "Keep replies concise.");
+    let messages = anthropic["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["role"], "assistant");
+    assert_eq!(messages[0]["content"][0]["type"], "tool_use");
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(
+        messages[1]["content"],
+        json!([{
+            "type": "tool_result",
+            "tool_use_id": "toolu_01GkD6H6YEdCrW3sAhhCcA3m",
+            "content": "ok"
+        }])
+    );
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(
+        messages[2]["content"],
+        json!([{
+            "type": "text",
+            "text": "continue"
+        }])
+    );
+}
+
+#[test]
+fn anthropic_parallel_tool_results_can_share_one_user_turn() {
+    let anthropic = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "call_one",
+                "name": "lookup",
+                "arguments": "{\"query\":\"one\"}"
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_two",
+                "name": "lookup",
+                "arguments": "{\"query\":\"two\"}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_one",
+                "output": "one"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_two",
+                "output": "two"
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": "next"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let messages = anthropic["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["content"][0]["type"], "tool_use");
+    assert_eq!(messages[0]["content"][1]["type"], "tool_use");
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[1]["content"][0]["type"], "tool_result");
+    assert_eq!(messages[1]["content"][0]["tool_use_id"], "call_one");
+    assert_eq!(messages[1]["content"][1]["type"], "tool_result");
+    assert_eq!(messages[1]["content"][1]["tool_use_id"], "call_two");
+    assert_eq!(messages[2]["content"][0]["text"], "next");
+}
+
+#[test]
+fn anthropic_orphan_tool_outputs_are_downgraded_to_user_text() {
+    let anthropic = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": "before"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "missing_call",
+                "output": "orphan"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let messages = anthropic["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"][0]["type"], "text");
+    assert_eq!(messages[0]["content"][0]["text"], "before");
+    assert_eq!(messages[0]["content"][1]["type"], "text");
+    assert_eq!(
+        messages[0]["content"][1]["text"],
+        "Function call output (missing_call): orphan"
+    );
+}
+
+#[test]
 fn tool_search_output_tools_are_exposed_to_chat_upstream_and_response_context() {
     let request = json!({
         "model": "deepseek-v4-pro",

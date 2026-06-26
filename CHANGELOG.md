@@ -1,5 +1,12 @@
 # 更新日志
 
+## 0.1.9 - 2026-06-27
+
+- 修复 Responses 历史转换到 Anthropic Messages 时，`tool_result` 与普通用户文本被合并到同一个 user message 导致上游 400 的问题。
+- Anthropic 转换路径新增工具调用 ID 跟踪，孤儿工具输出会降级为普通用户文本，避免生成无前置 `tool_use` 的裸 `tool_result`。
+- 补充协议代理回归测试，覆盖工具结果隔离、并行工具结果合并和孤儿工具输出处理。
+- 版本号更新到 `0.1.9`，同步 Rust workspace、Tauri 和前端 package 配置。
+
 ## 1.2.4 - 2026-06-08
 
 - 修复供应商同步在存在多条 `session_meta` 记录时只处理部分会话元数据的问题。
