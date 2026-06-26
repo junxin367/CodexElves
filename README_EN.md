@@ -47,6 +47,27 @@ The Windows installer creates desktop and Start Menu shortcuts. The macOS DMG in
 - Windows single instance, no console window, administrator manifest, and system Desktop path detection.
 - Separate macOS x64 and arm64 DMGs. The silent launcher hides its Dock icon.
 
+## Screenshots
+
+## Full Feature Set
+![Full feature set](image.png)
+
+### Local Proxy
+
+- The local proxy improves protocol translation for non-GPT models, so Codex built-in tools such as `web_search` and `tool_search` can be used.
+- Custom models and context window sizes can be configured manually.
+
+![Local proxy](image-4.png)
+
+### Local Proxy And Request Logs
+![Local proxy and request logs](image-1.png)
+
+### Batch Session Deletion
+![Batch session deletion](image-2.png)
+
+### Codex Radar
+![Codex Radar](image-3.png)
+
 ## Relay Injection
 
 Relay injection is for users who are already logged in with an official ChatGPT account in Codex/ChatGPT and want model requests to go through a custom compatible API.
