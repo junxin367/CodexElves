@@ -1,10 +1,10 @@
 name: PR build artifacts
 
 on:
-  pull_request:
   push:
-    branches: [main]
-  workflow_dispatch:
+    tags:
+      - "v*"
+      - "V*"
 
 permissions:
   contents: read
