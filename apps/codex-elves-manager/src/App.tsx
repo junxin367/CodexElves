@@ -1110,6 +1110,16 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       const request = args?.request as { settings?: BackendSettings } | undefined;
       return Promise.resolve(browserPreviewResult({ settings: request?.settings || settings }) as T);
     }
+    case "fetch_relay_profile_models": {
+      const profile = args?.profile as RelayProfile | undefined;
+      return Promise.resolve(
+        browserPreviewResult({
+          responses: (profile?.responsesModelList ?? active.responsesModelList).split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
+          chatCompletions: (profile?.chatCompletionsModelList ?? active.chatCompletionsModelList).split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
+          anthropic: (profile?.anthropicModelList ?? active.anthropicModelList).split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
+        }) as T,
+      );
+    }
     case "switch_relay_profile": {
       const request = args?.request as { settings?: BackendSettings } | undefined;
       const normalized = updateBrowserPreviewSettings(request?.settings || settings);
@@ -2744,19 +2754,13 @@ function LocalProxyScreen({
           detail={logs?.path ?? "默认记录完整请求体和返回体，列表只展示摘要"}
           actions={
             <div className="proxy-log-filters" aria-label="请求日志筛选">
-              <select
-                aria-label="按模型筛选"
+              <SelectMenu
+                ariaLabel="按模型筛选"
                 className="proxy-log-filter-select"
                 value={modelFilter}
-                onChange={(event) => setModelFilter(event.target.value)}
-              >
-                <option value="">全部模型</option>
-                {modelOptions.map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
-              </select>
+                options={[{ value: "", label: "全部模型" }, ...modelOptions.map((model) => ({ value: model, label: model }))]}
+                onChange={(next) => setModelFilter(next)}
+              />
               <Button
                 size="sm"
                 title="只显示 Reason Tok = 516 的请求"
@@ -3525,19 +3529,20 @@ function SessionsScreen({
           </div>
           <div className="form-row">
             <Field className="provider-sync-target-field" label="同步目标">
-              <select
-                className="select-input"
+              <SelectMenu
                 disabled={providerSyncProgress.active || !(providerSyncTargets?.targets ?? []).length}
                 value={selectedProviderSyncTarget}
-                onChange={(event) => actions.setProviderSyncTarget(event.currentTarget.value)}
-              >
-                {(providerSyncTargets?.targets ?? []).map((target) => (
-                  <option key={target.id} value={target.id}>
-                    {target.id}（{providerSyncTargetLabel(target)}）
-                  </option>
-                ))}
-                {!(providerSyncTargets?.targets ?? []).length ? <option value="">当前配置 provider</option> : null}
-              </select>
+                placeholder="当前配置 provider"
+                options={
+                  (providerSyncTargets?.targets ?? []).length
+                    ? (providerSyncTargets?.targets ?? []).map((target) => ({
+                        value: target.id,
+                        label: `${target.id}（${providerSyncTargetLabel(target)}）`,
+                      }))
+                    : [{ value: "", label: "当前配置 provider" }]
+                }
+                onChange={(next) => actions.setProviderSyncTarget(next)}
+              />
             </Field>
           </div>
           <Toolbar>
@@ -4398,20 +4403,32 @@ function RelayProfileEditor({
   return (
     <div className="relay-profile-editor">
       <div className="relay-editor-head">
-        <div>
+        <div className="relay-editor-title">
           <strong>{profile.name || "未命名供应商"}</strong>
           <span>{relayProfileEditorStatus(profile, form, isNew)}</span>
         </div>
-        {isNew ? null : (
-          <Button
-            disabled={!form.relayProfilesEnabled || actions.relaySwitching}
-            onClick={onSwitch}
-            title={!form.relayProfilesEnabled ? "供应商配置总开关已关闭" : actions.relaySwitching ? "供应商切换中" : undefined}
-            variant={profile.id === form.activeRelayId ? "secondary" : "default"}
-          >
-            {actions.relaySwitching ? "切换中" : profile.id === form.activeRelayId ? "使用中" : "设为当前"}
-          </Button>
-        )}
+        <div className="relay-editor-actions">
+          {showApiFields ? (
+            <label className="inline-check">
+              <input
+                checked={profile.localProxyEnabled}
+                onChange={(event) => updateDraft({ localProxyEnabled: event.currentTarget.checked })}
+                type="checkbox"
+              />
+              <span>启用本地代理</span>
+            </label>
+          ) : null}
+          {isNew ? null : (
+            <Button
+              disabled={!form.relayProfilesEnabled || actions.relaySwitching}
+              onClick={onSwitch}
+              title={!form.relayProfilesEnabled ? "供应商配置总开关已关闭" : actions.relaySwitching ? "供应商切换中" : undefined}
+              variant={profile.id === form.activeRelayId ? "secondary" : "default"}
+            >
+              {actions.relaySwitching ? "切换中" : profile.id === form.activeRelayId ? "使用中" : "设为当前"}
+            </Button>
+          )}
+        </div>
       </div>
       {isNew ? (
         <ProviderPresetSelector
@@ -4428,17 +4445,17 @@ function RelayProfileEditor({
           />
         </Field>
         <Field className="relay-field-mode" label="接入模式">
-          <select
-            className="field-select"
+          <SelectMenu<RelayMode>
+            ariaLabel="接入模式"
             value={profile.relayMode}
-            onChange={(event) => {
-              const relayMode = event.currentTarget.value as RelayMode;
+            options={[
+              { value: "official", label: "官方登录" },
+              { value: "pureApi", label: "纯 API" },
+            ]}
+            onChange={(relayMode) => {
               updateDraft(relayMode === "official" ? { relayMode, officialMixApiKey: false } : { relayMode });
             }}
-          >
-            <option value="official">官方登录</option>
-            <option value="pureApi">纯 API</option>
-          </select>
+          />
         </Field>
         <Field className="relay-field-config-model" label="配置模型">
           <Input
@@ -4507,28 +4524,7 @@ function RelayProfileEditor({
                 placeholder="输入中转服务的 API Key"
               />
             </Field>
-            <Field className="relay-field-local-proxy" label="本地代理">
-              <label className="inline-check">
-                <input
-                  checked={profile.localProxyEnabled}
-                  onChange={(event) => updateDraft({ localProxyEnabled: event.currentTarget.checked })}
-                  type="checkbox"
-                />
-                <span>启用本地代理</span>
-              </label>
-            </Field>
           </div>
-        ) : null}
-        {showApiFields ? (
-          <Field as="div" className="relay-field-model-list" label="模型列表">
-            <RelayModelMappingTable
-              choices={modelChoices}
-              fetching={fetchingModelChoices}
-              mappings={profile.modelMappings}
-              onChange={updateModelMappings}
-              onFetchModels={fetchModelChoices}
-            />
-          </Field>
         ) : null}
         {showApiFields ? (
           <Field className="relay-field-user-agent" label="User-Agent">
@@ -4536,6 +4532,47 @@ function RelayProfileEditor({
               value={profile.userAgent}
               onChange={(event) => updateDraft({ userAgent: event.currentTarget.value })}
               placeholder="留空使用默认值"
+            />
+          </Field>
+        ) : null}
+        {showApiFields ? (
+          <Field
+            as="div"
+            className="relay-field-model-list"
+            label="模型列表"
+            actions={
+              <>
+                <Button
+                  disabled={fetchingModelChoices}
+                  onClick={fetchModelChoices}
+                  size="sm"
+                  type="button"
+                  variant="secondary"
+                >
+                  <Download className="h-4 w-4" />
+                  {fetchingModelChoices ? "获取中" : "获取模型列表"}
+                </Button>
+                <Button
+                  onClick={() =>
+                    updateModelMappings([
+                      ...profile.modelMappings,
+                      { requestModel: "", protocol: "responses", contextWindow: "" },
+                    ])
+                  }
+                  size="sm"
+                  type="button"
+                  variant="secondary"
+                >
+                  <Plus className="h-4 w-4" />
+                  添加模型
+                </Button>
+              </>
+            }
+          >
+            <RelayModelMappingTable
+              choices={modelChoices}
+              mappings={profile.modelMappings}
+              onChange={updateModelMappings}
             />
           </Field>
         ) : null}
@@ -4557,15 +4594,11 @@ function RelayProfileEditor({
 function RelayModelMappingTable({
   mappings,
   choices,
-  fetching,
   onChange,
-  onFetchModels,
 }: {
   mappings: RelayModelMapping[];
   choices: Record<RelayProtocol, string[]>;
-  fetching: boolean;
   onChange: (mappings: RelayModelMapping[]) => void;
-  onFetchModels: () => Promise<void>;
 }) {
   const displayRows = mappings.length
     ? mappings
@@ -4600,16 +4633,6 @@ function RelayModelMappingTable({
       ...(shouldFillContextWindow ? { contextWindow: nextContextWindow } : {}),
     });
   };
-  const addRow = () => {
-    onChange([
-      ...mappings,
-      {
-        requestModel: "",
-        protocol: "responses",
-        contextWindow: "",
-      },
-    ]);
-  };
   const removeRow = (index: number) => {
     onChange(mappings.filter((_, itemIndex) => itemIndex !== index));
   };
@@ -4622,19 +4645,9 @@ function RelayModelMappingTable({
 
   return (
     <div className="relay-model-table-wrap">
-      <div className="relay-model-table-actions">
-        <Button disabled={fetching} onClick={onFetchModels} size="sm" type="button" variant="secondary">
-          <Download className="h-4 w-4" />
-          {fetching ? "获取中" : "获取模型列表"}
-        </Button>
-        <Button onClick={addRow} size="sm" type="button" variant="secondary">
-          <Plus className="h-4 w-4" />
-          添加模型
-        </Button>
-      </div>
       <div className="relay-model-table" role="table" aria-label="模型列表">
         <div className="relay-model-table-head" role="row">
-          <span role="columnheader" aria-label="排序" />
+          <span aria-hidden="true" />
           <span role="columnheader">请求模型</span>
           <span role="columnheader">协议</span>
           <span role="columnheader">上下文大小</span>
@@ -4723,15 +4736,15 @@ function SortableRelayModelMappingRow({
         />
       </div>
       <div role="cell">
-        <select
-          className="field-select"
+        <SelectMenu
+          ariaLabel="协议"
           value={row.protocol}
-          onChange={(event) => onUpdate(index, { protocol: event.currentTarget.value as RelayProtocol })}
-        >
-          <option value="responses">Responses API</option>
-          <option value="chatCompletions">Chat Completions</option>
-          <option value="anthropic">Anthropic</option>
-        </select>
+          options={protocolSelectOptions.map((protocol) => ({
+            value: protocol,
+            label: relayProtocolLabel(protocol),
+          }))}
+          onChange={(protocol) => onUpdate(index, { protocol })}
+        />
       </div>
       <div role="cell">
         <Input
@@ -4753,6 +4766,178 @@ function SortableRelayModelMappingRow({
           <Trash2 className="h-4 w-4" />
         </button>
       </div>
+    </div>
+  );
+}
+
+const protocolSelectOptions: RelayProtocol[] = ["responses", "chatCompletions", "anthropic"];
+
+type SelectMenuOption<T extends string> = {
+  value: T;
+  label: React.ReactNode;
+};
+
+function SelectMenu<T extends string>({
+  value,
+  options,
+  onChange,
+  disabled = false,
+  className,
+  ariaLabel,
+  placeholder,
+}: {
+  value: T;
+  options: SelectMenuOption<T>[];
+  onChange: (value: T) => void;
+  disabled?: boolean;
+  className?: string;
+  ariaLabel?: string;
+  placeholder?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [menuStyle, setMenuStyle] = useState<CSSProperties | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const selectedOption = options.find((option) => option.value === value);
+
+  const updateMenuPosition = () => {
+    const button = buttonRef.current;
+    if (!button) return;
+    const rect = button.getBoundingClientRect();
+    const gap = 4;
+    const viewportPadding = 8;
+    const desiredHeight = Math.min(options.length * 36 + 8, 280);
+    const spaceBelow = window.innerHeight - rect.bottom - viewportPadding;
+    const spaceAbove = rect.top - viewportPadding;
+    const openAbove = spaceBelow < desiredHeight && spaceAbove > spaceBelow;
+    const maxHeight = Math.max(96, Math.min(desiredHeight, openAbove ? spaceAbove - gap : spaceBelow - gap));
+    setMenuStyle({
+      left: rect.left,
+      maxHeight,
+      top: openAbove ? rect.top - gap - maxHeight : rect.bottom + gap,
+      width: rect.width,
+    });
+  };
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    updateMenuPosition();
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleLayoutChange = () => updateMenuPosition();
+    window.addEventListener("resize", handleLayoutChange);
+    window.addEventListener("scroll", handleLayoutChange, true);
+    return () => {
+      window.removeEventListener("resize", handleLayoutChange);
+      window.removeEventListener("scroll", handleLayoutChange, true);
+    };
+  }, [open]);
+
+  const containsSelectTarget = (target: EventTarget | null) =>
+    target instanceof Node && (!!rootRef.current?.contains(target) || !!menuRef.current?.contains(target));
+
+  const focusOption = (direction: 1 | -1, current?: HTMLButtonElement | null) => {
+    const optionEls = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>(".app-select-option") ?? []);
+    if (!optionEls.length) return;
+    const currentIndex = current ? optionEls.indexOf(current) : -1;
+    const fallbackIndex = Math.max(0, options.findIndex((option) => option.value === value));
+    const nextIndex = currentIndex < 0 ? fallbackIndex : (currentIndex + direction + optionEls.length) % optionEls.length;
+    optionEls[nextIndex]?.focus();
+  };
+
+  const selectValue = (next: T) => {
+    onChange(next);
+    setOpen(false);
+    buttonRef.current?.focus();
+  };
+
+  const menu = open ? (
+    <div
+      className="app-select-menu"
+      onBlur={(event) => {
+        if (containsSelectTarget(event.relatedTarget)) return;
+        setOpen(false);
+      }}
+      ref={menuRef}
+      role="listbox"
+      style={menuStyle ?? undefined}
+    >
+      {options.map((option) => (
+        <button
+          aria-selected={option.value === value}
+          className="app-select-option"
+          key={option.value}
+          onClick={() => selectValue(option.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              setOpen(false);
+              buttonRef.current?.focus();
+            }
+            if (event.key === "ArrowDown") {
+              event.preventDefault();
+              focusOption(1, event.currentTarget);
+            }
+            if (event.key === "ArrowUp") {
+              event.preventDefault();
+              focusOption(-1, event.currentTarget);
+            }
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              selectValue(option.value);
+            }
+          }}
+          onMouseDown={(event) => event.preventDefault()}
+          role="option"
+          type="button"
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  ) : null;
+
+  return (
+    <div
+      className={`app-select${className ? ` ${className}` : ""}`}
+      onBlur={(event) => {
+        if (containsSelectTarget(event.relatedTarget)) return;
+        setOpen(false);
+      }}
+      ref={rootRef}
+    >
+      <button
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        aria-label={ariaLabel}
+        className="app-select-trigger"
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            setOpen(false);
+            return;
+          }
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            setOpen(true);
+            requestAnimationFrame(() => focusOption(1));
+          }
+          if (event.key === "ArrowUp") {
+            event.preventDefault();
+            setOpen(true);
+            requestAnimationFrame(() => focusOption(-1));
+          }
+        }}
+        ref={buttonRef}
+        type="button"
+      >
+        <span>{selectedOption ? selectedOption.label : (placeholder ?? "")}</span>
+        <ChevronDown className="h-4 w-4" aria-hidden="true" />
+      </button>
+      {menu ? createPortal(menu, document.body) : null}
     </div>
   );
 }
@@ -5352,17 +5537,12 @@ function AggregateRelayProfileEditor({
           />
         </Field>
         <Field className="aggregate-strategy-field" label="聚合策略">
-          <select
-            className="field-select"
+          <SelectMenu<RelayAggregateStrategy>
+            ariaLabel="聚合策略"
             value={aggregate.strategy}
-            onChange={(event) => updateAggregate({ ...aggregate, strategy: event.currentTarget.value as RelayAggregateStrategy })}
-          >
-            {aggregateStrategyOptions.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
+            options={aggregateStrategyOptions.map((option) => ({ value: option.value, label: option.label }))}
+            onChange={(strategy) => updateAggregate({ ...aggregate, strategy })}
+          />
         </Field>
       </div>
       <div className="aggregate-strategy-grid">
@@ -5591,16 +5771,13 @@ function ContextEntryEditor({
     <div className="context-editor">
       <div className="context-editor-fields">
         <Field label="类型">
-          <select
-            className="field-select"
+          <SelectMenu<ContextKind>
+            ariaLabel="类型"
             disabled={!!entry}
             value={draftKind}
-            onChange={(event) => setDraftKind(event.currentTarget.value as ContextKind)}
-          >
-            {contextKindOptions.map((option) => (
-              <option key={option.kind} value={option.kind}>{option.label}</option>
-            ))}
-          </select>
+            options={contextKindOptions.map((option) => ({ value: option.kind, label: option.label }))}
+            onChange={(kind) => setDraftKind(kind)}
+          />
         </Field>
         <Field label="ID">
           <Input
@@ -6187,16 +6364,25 @@ function Field({
   children,
   className = "",
   as = "label",
+  actions,
 }: {
   label: string;
   children: React.ReactNode;
   className?: string;
   as?: "label" | "div";
+  actions?: React.ReactNode;
 }) {
   if (as === "div") {
     return (
       <div className={`field ${className}`}>
-        <span>{label}</span>
+        {actions ? (
+          <div className="field-label-row">
+            <span>{label}</span>
+            <div className="field-label-actions">{actions}</div>
+          </div>
+        ) : (
+          <span>{label}</span>
+        )}
         {children}
       </div>
     );
