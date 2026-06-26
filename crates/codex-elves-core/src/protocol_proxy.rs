@@ -160,7 +160,8 @@ pub fn local_models_proxy_response() -> anyhow::Result<Option<ProxyHttpResponse>
     if !relay.local_proxy_enabled() {
         return Ok(None);
     }
-    let models = crate::model_catalog::relay_profile_model_ids_for_proxy(&relay);
+    let home = crate::codex_home::default_codex_home_dir();
+    let models = crate::model_catalog::read_configured_model_catalog_model_ids_from_home(&home);
     if models.is_empty() {
         return Ok(None);
     }

@@ -577,6 +577,31 @@ fn injection_script_applies_fast_service_tier_contract() {
         "priority"
     );
     assert_eq!(cases["patchedCreateRequest"]["options"]["timeoutMs"], 123);
+    assert_eq!(
+        cases["relayModelNames"],
+        json!(["first-model", "second-model", "current-model"])
+    );
+    assert_eq!(
+        cases["relayModelArrayOrder"],
+        json!([
+            {"model": "first-model", "hidden": false},
+            {"model": "second-model", "hidden": false},
+            {"model": "current-model", "hidden": false},
+            {"model": "built-in-model", "hidden": true}
+        ])
+    );
+    assert_eq!(
+        cases["relayModelContainer"]["models"],
+        json!(["first-model", "second-model", "current-model"])
+    );
+    assert_eq!(
+        cases["relayModelContainer"]["availableModels"],
+        json!(["first-model", "second-model", "current-model"])
+    );
+    assert_eq!(
+        cases["relayModelContainer"]["available_models"],
+        json!(["first-model", "second-model", "current-model"])
+    );
 }
 
 fn run_service_tier_contract_harness() -> serde_json::Value {
@@ -720,6 +745,31 @@ const patchedCreateRequest = new RequestClient().createRequest("turn/start", {{
   service_tier: null,
 }}, {{ timeoutMs: 123 }}).request;
 
+api.setModelCatalog({{
+  status: "ok",
+  model_provider: "relay",
+  model: "current-model",
+  default_model: "first-model",
+  models: ["first-model", "second-model", "current-model"],
+}});
+const relayModelNames = api.modelNames();
+const relayModelArray = [
+  {{ model: "current-model", hidden: true }},
+  {{ model: "built-in-model", hidden: false }},
+  {{ model: "second-model", hidden: true }},
+];
+api.patchModelArray(relayModelArray, true);
+const relayModelArrayOrder = relayModelArray.map((item) => ({{
+  model: item.model,
+  hidden: item.hidden,
+}}));
+const relayModelContainer = {{
+  models: ["built-in-model", "current-model"],
+  availableModels: ["built-in-model", "current-model"],
+  available_models: ["built-in-model", "second-model"],
+}};
+api.patchModelContainer(relayModelContainer);
+
 process.stdout.write(JSON.stringify({{
   supportedFast,
   unsupportedModel,
@@ -730,6 +780,9 @@ process.stdout.write(JSON.stringify({{
   catalogDrivenFast,
   catalogDrivenBlocked,
   patchedCreateRequest,
+  relayModelNames,
+  relayModelArrayOrder,
+  relayModelContainer,
 }}));
 "#,
         script_path = serde_json::to_string(&script_path.to_string_lossy().to_string())

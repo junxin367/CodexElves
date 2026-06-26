@@ -1,22 +1,8 @@
 ﻿use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::settings::{RelayProfile, SettingsStore};
+use crate::settings::RelayProfile;
 use serde_json::{Value, json};
-
-const BASE_URL_ENV_KEYS: &[&str] = &[
-    "CODEX_ELVES_OPENAI_BASE_URL",
-    "CODEX_ELVES_BASE_URL",
-    "OPENAI_BASE_URL",
-    "OPENAI_API_BASE_URL",
-    "OPENAI_API_BASE",
-    "OPENAI_API_URL",
-];
-const API_KEY_ENV_KEYS: &[&str] = &[
-    "CODEX_ELVES_OPENAI_API_KEY",
-    "CODEX_ELVES_API_KEY",
-    "OPENAI_API_KEY",
-];
 
 #[derive(Debug, Clone)]
 struct ModelSource {
@@ -34,73 +20,41 @@ struct CodexConfig {
     model_providers: HashMap<String, HashMap<String, String>>,
 }
 
+#[derive(Debug, Default)]
+struct ConfigModelCatalog {
+    models: Vec<String>,
+    model_entries: Vec<Value>,
+    status: Option<Value>,
+}
+
 pub async fn read_codex_model_catalog() -> Value {
     let home = codex_home_dir();
-    let settings_path = crate::paths::default_settings_path();
-    if settings_path.exists() {
-        if let Ok(settings) = SettingsStore::new(settings_path).load() {
-            return relay_profile_model_catalog_value(&home, &settings.active_relay_profile());
-        }
-    }
-    let env = std::env::vars().collect::<HashMap<_, _>>();
-    let client = match crate::http_client::proxied_client("CodexElves/1.0") {
-        Ok(client) => client,
-        Err(error) => {
-            return json!({
-                "status": "failed",
-                "path": home.join("config.toml").to_string_lossy(),
-                "message": error.to_string(),
-                "model": "",
-                "model_provider": "",
-                "provider_name": "",
-                "default_model": "",
-                "models": [],
-                "sources": [],
-                "responses_api": responses_api_status("unknown", "", "")
-            });
-        }
-    };
+    let env = HashMap::new();
+    let client = reqwest::Client::new();
     read_codex_model_catalog_from_home(&home, &env, client).await
 }
 
-fn relay_profile_model_catalog_value(home: &Path, profile: &RelayProfile) -> Value {
-    let models = relay_profile_model_ids_for_proxy(profile);
-    let model = profile.model.trim().to_string();
-    let default_model = models.first().cloned().unwrap_or_default();
-    let provider_name = if profile.name.trim().is_empty() {
-        profile.id.trim()
-    } else {
-        profile.name.trim()
-    };
-    let model_count = models.len();
-
-    // 构建完整模型条目（含 context_window、reasoning levels）
-    let model_entries = crate::relay_config::relay_profile_model_entries(profile);
-
-    json!({
-        "status": if models.is_empty() { "not_configured" } else { "ok" },
-        "path": home.join("config.toml").to_string_lossy(),
-        "model": model,
-        "model_provider": profile.id.trim(),
-        "provider_name": provider_name,
-        "default_model": default_model,
-        "models": models,
-        "model_entries": model_entries,
-        "sources": [
-            {
-                "id": format!("relay-profile:{}", profile.id),
-                "type": "relay_profile_model_list",
-                "name": provider_name,
-                "base_url": profile.base_url.trim(),
-                "status": "ok",
-                "models": model_count,
-                "responses_api": responses_api_status("unknown", "", "")
-            }
-        ],
-        "responses_api": responses_api_status("unknown", "", "")
-    })
+pub fn read_configured_model_catalog_model_ids_from_home(home: &Path) -> Vec<String> {
+    let config_path = home.join("config.toml");
+    let (_config, effective, error) = load_codex_config(&config_path);
+    if error.is_some() {
+        return Vec::new();
+    }
+    models_from_config_model_catalog_json(home, &effective).models
 }
+
 pub fn relay_profile_model_ids_for_proxy(profile: &RelayProfile) -> Vec<String> {
+    if !profile.model_mappings.is_empty() {
+        return unique_strings(
+            profile
+                .model_mappings
+                .iter()
+                .map(|mapping| mapping.request_model.trim().to_string())
+                .filter(|model| !model.is_empty())
+                .collect(),
+        );
+    }
+
     let mut models = Vec::new();
     models.extend(relay_profile_responses_model_ids(profile));
     models.extend(relay_profile_chat_completions_model_ids(profile));
@@ -166,11 +120,10 @@ fn split_model_ids(value: &str) -> Vec<String> {
 
 pub async fn read_codex_model_catalog_from_home(
     home: &Path,
-    env: &HashMap<String, String>,
-    client: reqwest::Client,
+    _env: &HashMap<String, String>,
+    _client: reqwest::Client,
 ) -> Value {
     let config_path = home.join("config.toml");
-    let auth_api_key = read_codex_auth_api_key(&home.join("auth.json"));
     let (config, effective, error) = load_codex_config(&config_path);
     let mut model = string_value(effective.get("model"));
     let mut model_provider = string_value(effective.get("model_provider"));
@@ -196,38 +149,20 @@ pub async fn read_codex_model_catalog_from_home(
             "provider_name": provider_name,
             "default_model": "",
             "models": [],
+            "model_entries": [],
             "sources": [],
             "responses_api": responses_api_status("unknown", "", "")
         });
     }
 
-    let mut sources = model_sources_from_environment(env, &auth_api_key);
-    if error.is_none() {
-        if let Some(source) = model_source_from_config(&config, &effective, env, &auth_api_key) {
-            if sources
-                .iter()
-                .all(|existing| trim_url(&existing.base_url) != trim_url(&source.base_url))
-            {
-                sources.push(source);
-            }
-        }
-    }
-
     let mut source_statuses = Vec::new();
-    let mut models = Vec::new();
-    for source in sources.iter() {
-        let (source_models, mut source_status) = fetch_models_from_source(&client, source).await;
-        source_status["responses_api"] = responses_api_status("unknown", "", "");
-        models.extend(source_models);
-        source_statuses.push(source_status);
-    }
-    let (catalog_models, catalog_status) = models_from_config_model_catalog_json(home, &effective);
-    models.extend(catalog_models);
-    if let Some(status) = catalog_status {
+    let catalog = models_from_config_model_catalog_json(home, &effective);
+    let models = catalog.models;
+    let model_entries = catalog.model_entries;
+    if let Some(status) = catalog.status {
         source_statuses.push(status);
     }
 
-    models = unique_strings(models);
     if model.is_empty() {
         model = string_value(effective.get("default_model"));
     }
@@ -259,6 +194,7 @@ pub async fn read_codex_model_catalog_from_home(
         "provider_name": provider_name,
         "default_model": default_model,
         "models": models,
+        "model_entries": model_entries,
         "sources": source_statuses,
         "responses_api": responses_api
     })
@@ -357,32 +293,6 @@ impl ConfigSection {
     }
 }
 
-fn read_codex_auth_api_key(path: &Path) -> String {
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return String::new();
-    };
-    let Ok(payload) = serde_json::from_str::<Value>(&contents) else {
-        return String::new();
-    };
-    for key in [
-        "OPENAI_API_KEY",
-        "api_key",
-        "apikey",
-        "access_token",
-        "token",
-    ] {
-        let value = payload
-            .get(key)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim();
-        if !value.is_empty() {
-            return value.to_string();
-        }
-    }
-    String::new()
-}
-
 fn provider_config_for_model_provider(
     config: &CodexConfig,
     model_provider: &str,
@@ -399,104 +309,6 @@ fn provider_config_for_model_provider(
         }
     }
     (model_provider.to_string(), None)
-}
-
-fn model_sources_from_environment(
-    env: &HashMap<String, String>,
-    auth_api_key: &str,
-) -> Vec<ModelSource> {
-    let base_url = first_env_value(env, BASE_URL_ENV_KEYS);
-    if base_url.is_empty() {
-        return Vec::new();
-    }
-    let api_key = first_env_value(env, API_KEY_ENV_KEYS);
-    vec![ModelSource {
-        source_id: "env:openai-compatible".to_string(),
-        source_type: "environment".to_string(),
-        name: "Environment".to_string(),
-        base_url,
-        api_key: if api_key.is_empty() {
-            auth_api_key.to_string()
-        } else {
-            api_key
-        },
-    }]
-}
-
-fn model_source_from_config(
-    config: &CodexConfig,
-    effective: &HashMap<String, String>,
-    env: &HashMap<String, String>,
-    auth_api_key: &str,
-) -> Option<ModelSource> {
-    let model_provider = string_value(effective.get("model_provider"));
-    let (resolved_provider, provider_config) =
-        provider_config_for_model_provider(config, &model_provider);
-    let provider_config = provider_config?;
-    let base_url = string_value(provider_config.get("base_url"));
-    if base_url.is_empty() {
-        return None;
-    }
-    let name = string_value(provider_config.get("name"));
-    let api_key = provider_api_key(&provider_config, env, auth_api_key);
-    Some(ModelSource {
-        source_id: format!(
-            "config:{}",
-            if resolved_provider.is_empty() {
-                &name
-            } else {
-                &resolved_provider
-            }
-        ),
-        source_type: "config".to_string(),
-        name: if name.is_empty() {
-            resolved_provider
-        } else {
-            name
-        },
-        base_url,
-        api_key,
-    })
-}
-
-fn provider_api_key(
-    provider_config: &HashMap<String, String>,
-    env: &HashMap<String, String>,
-    auth_api_key: &str,
-) -> String {
-    for key in [
-        "experimental_bearer_token",
-        "api_key",
-        "apikey",
-        "bearer_token",
-        "token",
-    ] {
-        let value = string_value(provider_config.get(key));
-        if !value.is_empty() {
-            return value;
-        }
-    }
-    for key in [
-        "env_key",
-        "api_key_env",
-        "api_key_env_var",
-        "key_env",
-        "bearer_token_env",
-    ] {
-        let env_name = string_value(provider_config.get(key));
-        if !env_name.is_empty() {
-            let value = first_env_value(env, &[&env_name]);
-            if !value.is_empty() {
-                return value;
-            }
-        }
-    }
-    let env_key = first_env_value(env, API_KEY_ENV_KEYS);
-    if env_key.is_empty() {
-        auth_api_key.to_string()
-    } else {
-        env_key
-    }
 }
 
 async fn fetch_models_from_source(
@@ -662,19 +474,18 @@ fn parse_model_payload(payload: &Value) -> Vec<String> {
 fn models_from_config_model_catalog_json(
     home: &Path,
     effective: &HashMap<String, String>,
-) -> (Vec<String>, Option<Value>) {
+) -> ConfigModelCatalog {
     let raw_path = string_value(effective.get("model_catalog_json"));
     if raw_path.is_empty() {
-        return (Vec::new(), None);
+        return ConfigModelCatalog::default();
     }
     let path = resolve_config_path(home, &raw_path);
     let safe_path = path.to_string_lossy().to_string();
     let contents = match std::fs::read_to_string(&path) {
         Ok(contents) => contents,
         Err(error) => {
-            return (
-                Vec::new(),
-                Some(json!({
+            return ConfigModelCatalog {
+                status: Some(json!({
                     "id": "config:model_catalog_json",
                     "type": "model_catalog_json",
                     "name": "Codex model catalog",
@@ -684,15 +495,15 @@ fn models_from_config_model_catalog_json(
                     "models": 0,
                     "responses_api": responses_api_status("unknown", "", "")
                 })),
-            );
+                ..ConfigModelCatalog::default()
+            };
         }
     };
     let payload = match serde_json::from_str::<Value>(&contents) {
         Ok(payload) => payload,
         Err(error) => {
-            return (
-                Vec::new(),
-                Some(json!({
+            return ConfigModelCatalog {
+                status: Some(json!({
                     "id": "config:model_catalog_json",
                     "type": "model_catalog_json",
                     "name": "Codex model catalog",
@@ -702,14 +513,25 @@ fn models_from_config_model_catalog_json(
                     "models": 0,
                     "responses_api": responses_api_status("unknown", "", "")
                 })),
-            );
+                ..ConfigModelCatalog::default()
+            };
         }
     };
-    let models = unique_strings(parse_model_catalog_json_models(&payload));
+    let model_entries = parse_model_catalog_json_model_entries(&payload);
+    let models = unique_strings(
+        model_entries
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|slug| !slug.is_empty())
+            .map(str::to_string)
+            .collect(),
+    );
     let count = models.len();
-    (
+    ConfigModelCatalog {
         models,
-        Some(json!({
+        model_entries,
+        status: Some(json!({
             "id": "config:model_catalog_json",
             "type": "model_catalog_json",
             "name": "Codex model catalog",
@@ -718,7 +540,7 @@ fn models_from_config_model_catalog_json(
             "models": count,
             "responses_api": responses_api_status("unknown", "", "")
         })),
-    )
+    }
 }
 
 fn resolve_config_path(home: &Path, value: &str) -> PathBuf {
@@ -730,17 +552,22 @@ fn resolve_config_path(home: &Path, value: &str) -> PathBuf {
     }
 }
 
-fn parse_model_catalog_json_models(payload: &Value) -> Vec<String> {
+fn parse_model_catalog_json_model_entries(payload: &Value) -> Vec<Value> {
     let Some(models) = payload.get("models").and_then(Value::as_array) else {
         return Vec::new();
     };
     models
         .iter()
         .filter(|model| catalog_model_visible_in_api(model))
-        .filter_map(|model| model.get("slug").and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|slug| !slug.is_empty())
-        .map(str::to_string)
+        .filter(|model| {
+            model
+                .get("slug")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .map(|slug| !slug.is_empty())
+                .unwrap_or(false)
+        })
+        .cloned()
         .collect()
 }
 
@@ -773,16 +600,6 @@ fn unique_strings(values: Vec<String>) -> Vec<String> {
     result
 }
 
-fn first_env_value(env: &HashMap<String, String>, names: &[&str]) -> String {
-    names
-        .iter()
-        .filter_map(|name| env.get(*name))
-        .map(|value| value.trim())
-        .find(|value| !value.is_empty())
-        .unwrap_or_default()
-        .to_string()
-}
-
 fn safe_url_for_status(url: &str) -> String {
     let mut cleaned = url
         .split('?')
@@ -801,10 +618,6 @@ fn safe_url_for_status(url: &str) -> String {
         cleaned = format!("{}://{}{}", parsed.scheme(), authority, parsed.path());
     }
     cleaned
-}
-
-fn trim_url(url: &str) -> String {
-    url.trim_end_matches('/').to_string()
 }
 
 fn string_value(value: Option<&String>) -> String {

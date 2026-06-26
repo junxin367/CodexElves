@@ -505,6 +505,38 @@ fn apply_owned_model_catalog_to_config(
     Ok(config_with_catalog)
 }
 
+pub fn sync_applied_relay_profile_model_catalog_to_home(
+    home: &Path,
+    profile: &RelayProfile,
+) -> anyhow::Result<bool> {
+    let live_config = read_optional_text(&home.join("config.toml"))?;
+    let live_provider = root_key_string(&live_config, "model_provider").unwrap_or_default();
+    let profile_provider = relay_profile_provider_id(profile)?;
+    if live_provider.trim() != profile_provider.trim() {
+        return Ok(false);
+    }
+
+    let rows = relay_profile_catalog_rows(profile);
+    let config_with_catalog = if rows.is_empty() {
+        live_config.clone()
+    } else {
+        set_root_toml_string_line(
+            &live_config,
+            "model_catalog_json",
+            GENERATED_MODEL_CATALOG_FILENAME,
+        )
+    };
+    if config_with_catalog != live_config {
+        write_codex_live_atomic(home, Some(&config_with_catalog), None, false)?;
+    }
+    let catalog = generated_model_catalog_json(profile, &config_with_catalog, rows)?;
+    let path = home.join(GENERATED_MODEL_CATALOG_FILENAME);
+    std::fs::create_dir_all(home)?;
+    let bytes = serde_json::to_vec_pretty(&catalog)?;
+    crate::settings::atomic_write(&path, &bytes).context("写入模型目录失败")?;
+    Ok(true)
+}
+
 pub fn apply_relay_profile_config_to_home_with_context(
     home: &Path,
     profile: &RelayProfile,
@@ -2210,74 +2242,6 @@ pub(crate) fn generated_model_catalog_json(
     Ok(json!({ "models": models }))
 }
 
-/// 返回供应商配置里每个模型的完整条目（context_window、reasoning levels 等），供 model_catalog 接口使用
-pub(crate) fn relay_profile_model_entries(profile: &RelayProfile) -> Vec<serde_json::Value> {
-    let rows = relay_profile_catalog_rows(profile);
-    rows.iter()
-        .map(|row| {
-            let protocol = upstream_response_protocol_for_relay(row.protocol);
-            let supported =
-                crate::protocol_proxy::supported_reasoning_efforts_for_model(&row.model, protocol);
-            let default_level = {
-                let mut chosen = "medium";
-                for fallback in ["high", "medium", "low", "minimal"] {
-                    if supported.iter().any(|e| *e == fallback) {
-                        chosen = fallback;
-                        break;
-                    }
-                }
-                chosen
-            };
-            let mut entry = serde_json::Map::new();
-            entry.insert("slug".to_string(), json!(row.model));
-            entry.insert("display_name".to_string(), json!(row.model));
-            entry.insert("visibility".to_string(), json!("list"));
-            entry.insert("supported_in_api".to_string(), json!(true));
-            let fast_capability = fast_service_tier_capability(&row.model);
-            entry.insert(
-                "service_tiers".to_string(),
-                fast_capability
-                    .as_ref()
-                    .map(|(tiers, _)| tiers.clone())
-                    .unwrap_or_else(|| json!([])),
-            );
-            entry.insert(
-                "supports_fast".to_string(),
-                json!(fast_capability.is_some()),
-            );
-            entry.insert("default_reasoning_level".to_string(), json!(default_level));
-            entry.insert(
-                "supported_reasoning_levels".to_string(),
-                json!(
-                    supported
-                        .iter()
-                        .map(|e| json!({ "effort": e }))
-                        .collect::<Vec<_>>()
-                ),
-            );
-            // 解析 context_window（支持 1m / 128k / 纯数字）
-            let cw_str = row.context_window.trim();
-            if !cw_str.is_empty() {
-                let cw_lower = cw_str.to_ascii_lowercase();
-                let (num_str, mult) = if cw_lower.ends_with('m') {
-                    (&cw_str[..cw_str.len() - 1], 1_000_000u64)
-                } else if cw_lower.ends_with('k') {
-                    (&cw_str[..cw_str.len() - 1], 1_000u64)
-                } else {
-                    (cw_str, 1u64)
-                };
-                if let Ok(v) = num_str.trim().parse::<f64>() {
-                    let cw = (v * mult as f64) as u64;
-                    if cw > 0 {
-                        entry.insert("context_window".to_string(), json!(cw));
-                        entry.insert("max_context_window".to_string(), json!(cw));
-                    }
-                }
-            }
-            serde_json::Value::Object(entry)
-        })
-        .collect()
-}
 pub(crate) fn relay_profile_catalog_rows(profile: &RelayProfile) -> Vec<CatalogModelRow> {
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
@@ -3561,52 +3525,94 @@ mod tests {
     }
 
     #[test]
-    fn model_entries_expose_fast_capability_for_frontend() {
-        let profile = RelayProfile {
+    fn sync_applied_relay_profile_model_catalog_updates_generated_file_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        std::fs::write(
+            home.join("config.toml"),
+            r#"
+model = "deepseek-coder"
+model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "http://127.0.0.1:45221/v1"
+"#,
+        )
+        .unwrap();
+
+        let mut profile = RelayProfile {
             relay_mode: crate::settings::RelayMode::PureApi,
             protocol: crate::settings::RelayProtocol::Responses,
             model_mappings: vec![
                 crate::settings::RelayModelMapping {
-                    request_model: "gpt-5.4".to_string(),
-                    context_window: "400000".to_string(),
+                    request_model: "deepseek-coder".to_string(),
+                    context_window: "128000".to_string(),
                     protocol: RelayProtocol::Responses,
                 },
                 crate::settings::RelayModelMapping {
-                    request_model: "claude-sonnet-4.5".to_string(),
+                    request_model: "qwen3-coder".to_string(),
                     context_window: "200000".to_string(),
-                    protocol: RelayProtocol::Anthropic,
+                    protocol: RelayProtocol::ChatCompletions,
                 },
             ],
             ..RelayProfile::default()
         };
-        let entries = relay_profile_model_entries(&profile);
 
-        let fast_entry = entries
-            .iter()
-            .find(|m| m.get("slug").and_then(Value::as_str) == Some("gpt-5.4"))
-            .expect("应存在 gpt-5.4");
-        assert_eq!(
-            fast_entry.get("supports_fast").and_then(Value::as_bool),
-            Some(true)
-        );
+        assert!(sync_applied_relay_profile_model_catalog_to_home(home, &profile).unwrap());
         assert!(
-            fast_entry
-                .get("service_tiers")
-                .and_then(Value::as_array)
-                .is_some_and(|tiers| tiers
-                    .iter()
-                    .any(|t| t.get("id").and_then(Value::as_str) == Some("priority"))),
-            "gpt-5.4 entry 应暴露 priority service_tier"
+            std::fs::read_to_string(home.join("config.toml"))
+                .unwrap()
+                .contains(r#"model_catalog_json = "codex-elves-model-catalog.json""#)
         );
-
-        let standard_entry = entries
+        let first_catalog: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(GENERATED_MODEL_CATALOG_FILENAME)).unwrap(),
+        )
+        .unwrap();
+        let first_models = first_catalog["models"]
+            .as_array()
+            .unwrap()
             .iter()
-            .find(|m| m.get("slug").and_then(Value::as_str) == Some("claude-sonnet-4.5"))
-            .expect("应存在 claude");
+            .filter_map(|model| model.get("slug").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(first_models, vec!["deepseek-coder", "qwen3-coder"]);
+
+        profile.model_mappings = vec![
+            crate::settings::RelayModelMapping {
+                request_model: "claude-opus-4.6".to_string(),
+                context_window: "1000000".to_string(),
+                protocol: RelayProtocol::Anthropic,
+            },
+            crate::settings::RelayModelMapping {
+                request_model: "qwen3-coder".to_string(),
+                context_window: "200000".to_string(),
+                protocol: RelayProtocol::ChatCompletions,
+            },
+            crate::settings::RelayModelMapping {
+                request_model: "deepseek-coder".to_string(),
+                context_window: "128000".to_string(),
+                protocol: RelayProtocol::Responses,
+            },
+        ];
+
+        assert!(sync_applied_relay_profile_model_catalog_to_home(home, &profile).unwrap());
+        let updated_catalog: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(GENERATED_MODEL_CATALOG_FILENAME)).unwrap(),
+        )
+        .unwrap();
+        let updated_models = updated_catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(Value::as_str))
+            .collect::<Vec<_>>();
         assert_eq!(
-            standard_entry.get("supports_fast").and_then(Value::as_bool),
-            Some(false)
+            updated_models,
+            vec!["claude-opus-4.6", "qwen3-coder", "deepseek-coder"]
         );
+        assert_eq!(updated_catalog["models"][0]["context_window"], 1_000_000);
     }
 
     fn count_live_backups(home: &Path) -> usize {

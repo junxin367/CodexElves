@@ -511,8 +511,9 @@ pub fn save_settings(settings: BackendSettings) -> CommandResult<SettingsPayload
     match SettingsStore::default().save(&settings) {
         Ok(()) => {
             let wrapper_message = refresh_cli_wrapper_after_settings_save(&settings);
+            let catalog_message = sync_applied_model_catalog_after_settings_save(&settings);
             settings_payload(
-                &format!("设置已保存。{wrapper_message}"),
+                &format!("设置已保存。{wrapper_message}{catalog_message}"),
                 "设置保存后重新读取失败",
             )
         }
@@ -2606,6 +2607,21 @@ fn refresh_cli_wrapper_after_settings_save(settings: &BackendSettings) -> String
         ),
         Ok(None) => String::new(),
         Err(error) => format!(" 但命令包装器更新失败：{error}。"),
+    }
+}
+
+fn sync_applied_model_catalog_after_settings_save(settings: &BackendSettings) -> String {
+    if !settings.relay_profiles_enabled || settings.active_aggregate_relay_profile().is_some() {
+        return String::new();
+    }
+    let home = codex_elves_core::relay_config::default_codex_home_dir();
+    let relay = settings.active_relay_profile();
+    match codex_elves_core::relay_config::sync_applied_relay_profile_model_catalog_to_home(
+        &home, &relay,
+    ) {
+        Ok(true) => " 模型目录已同步。".to_string(),
+        Ok(false) => String::new(),
+        Err(error) => format!(" 但模型目录同步失败：{error}。"),
     }
 }
 

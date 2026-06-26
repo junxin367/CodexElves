@@ -2287,7 +2287,7 @@
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="forcePluginInstall" ${codexElvesBackendSettings.launchMode === "relay" ? 'disabled data-relay-unneeded="true"' : ""}><span></span></button>
             </div>
             <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">模型白名单解锁</div><div class="codex-elves-row-description">从环境变量和 Codex config.toml 中的中转站 /v1/models 拉取模型，并补进模型选择列表。</div></div>
+              <div><div class="codex-elves-row-title">模型白名单解锁</div><div class="codex-elves-row-description">从 Codex config.toml 指向的模型目录文件读取模型，并补进模型选择列表。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="modelWhitelistUnlock"><span></span></button>
             </div>
             <div class="codex-elves-row">
@@ -4485,6 +4485,9 @@
         codexModelCatalogLoadedAt = Date.now();
         codexModelCatalogPromise = null;
       },
+      modelNames: () => codexElvesModelNames(),
+      patchModelArray: (models, allowEmpty = false) => patchModelArray(models, allowEmpty),
+      patchModelContainer: (value) => patchModelContainer(value),
       setServiceTierState: (state = {}) => {
         codexServiceTierState = { ...codexServiceTierState, ...state };
       },
@@ -4507,9 +4510,9 @@
 
   function codexElvesModelNames() {
     return uniqueValues([
+      ...(Array.isArray(codexModelCatalog.models) ? codexModelCatalog.models : []),
       codexModelCatalog.default_model,
       codexModelCatalog.model,
-      ...(Array.isArray(codexModelCatalog.models) ? codexModelCatalog.models : []),
     ]);
   }
 
@@ -4592,6 +4595,11 @@
     if (!stringArrayLooksPatchable(models)) return false;
     const customModels = codexElvesModelNames();
     if (!customModels.length) return false;
+    if (codexModelCatalog.model_provider) {
+      const before = JSON.stringify(models);
+      models.splice(0, models.length, ...customModels);
+      return before !== JSON.stringify(models);
+    }
     let changed = false;
     customModels.forEach((modelName) => {
       if (!models.includes(modelName)) {
@@ -4636,11 +4644,43 @@
     });
     customModels.forEach((modelName) => {
       if (!existing.has(modelName)) {
-        models.push(codexElvesModelDescriptor(modelName));
+        const descriptor = codexElvesModelDescriptor(modelName);
+        models.push(descriptor);
+        existing.set(modelName, descriptor);
         changed = true;
       }
     });
+    if (hasRelayProfile) {
+      const ordered = [];
+      const added = new Set();
+      customModels.forEach((modelName) => {
+        const item = existing.get(modelName);
+        if (item && !added.has(item)) {
+          ordered.push(item);
+          added.add(item);
+        }
+      });
+      models.forEach((item) => {
+        if (!added.has(item)) {
+          ordered.push(item);
+          added.add(item);
+        }
+      });
+      const beforeOrder = models.map((item) => item.model).join("\n");
+      const afterOrder = ordered.map((item) => item.model).join("\n");
+      if (beforeOrder !== afterOrder) {
+        models.splice(0, models.length, ...ordered);
+        changed = true;
+      }
+    }
     return changed;
+  }
+
+  function replaceOrderedStringSet(target, names) {
+    const before = JSON.stringify(Array.from(target));
+    target.clear();
+    names.forEach((name) => target.add(name));
+    return before !== JSON.stringify(Array.from(target));
   }
 
   function patchModelContainer(value) {
@@ -4656,37 +4696,58 @@
     if (patchModelArray(value.message?.result?.data)) changed = true;
     if (patchModelArray(value.message?.result?.models)) changed = true;
     const names = codexElvesModelNames();
+    const hasRelayProfile = !!(codexModelCatalog.model_provider);
     if (value.availableModels instanceof Set) {
-      names.forEach((name) => {
-        if (!value.availableModels.has(name)) {
-          value.availableModels.add(name);
-          changed = true;
-        }
-      });
+      if (hasRelayProfile) {
+        if (replaceOrderedStringSet(value.availableModels, names)) changed = true;
+      } else {
+        names.forEach((name) => {
+          if (!value.availableModels.has(name)) {
+            value.availableModels.add(name);
+            changed = true;
+          }
+        });
+      }
     }
     if (value.available_models instanceof Set) {
-      names.forEach((name) => {
-        if (!value.available_models.has(name)) {
-          value.available_models.add(name);
-          changed = true;
-        }
-      });
+      if (hasRelayProfile) {
+        if (replaceOrderedStringSet(value.available_models, names)) changed = true;
+      } else {
+        names.forEach((name) => {
+          if (!value.available_models.has(name)) {
+            value.available_models.add(name);
+            changed = true;
+          }
+        });
+      }
     }
     if (Array.isArray(value.availableModels)) {
-      names.forEach((name) => {
-        if (!value.availableModels.includes(name)) {
-          value.availableModels.push(name);
-          changed = true;
-        }
-      });
+      if (hasRelayProfile) {
+        const before = JSON.stringify(value.availableModels);
+        value.availableModels.splice(0, value.availableModels.length, ...names);
+        if (before !== JSON.stringify(value.availableModels)) changed = true;
+      } else {
+        names.forEach((name) => {
+          if (!value.availableModels.includes(name)) {
+            value.availableModels.push(name);
+            changed = true;
+          }
+        });
+      }
     }
     if (Array.isArray(value.available_models)) {
-      names.forEach((name) => {
-        if (!value.available_models.includes(name)) {
-          value.available_models.push(name);
-          changed = true;
-        }
-      });
+      if (hasRelayProfile) {
+        const before = JSON.stringify(value.available_models);
+        value.available_models.splice(0, value.available_models.length, ...names);
+        if (before !== JSON.stringify(value.available_models)) changed = true;
+      } else {
+        names.forEach((name) => {
+          if (!value.available_models.includes(name)) {
+            value.available_models.push(name);
+            changed = true;
+          }
+        });
+      }
     }
     if (Array.isArray(value.hiddenModels)) {
       const before = value.hiddenModels.length;
