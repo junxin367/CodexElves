@@ -1,0 +1,25 @@
+crates/codex-elves-core/tests/launcher.rs
+  s_5a52d9072ef9ee::t_6caf5c651668be 984-987,1044-1048
+  s_5a52d9072ef9ee::t_c7114772a3bde8 1042-1043
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.1",
+  "base_commit_sha": "774183ab8c99696be7a779058f9b4f7fd352e2a0",
+  "prompts": {},
+  "humans": {
+    "h_41e06c727a5312": {
+      "author": "刘俊鑫 <673638712@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_5a52d9072ef9ee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f022e-eebd-7352-af92-4d3050ccd3b4",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
