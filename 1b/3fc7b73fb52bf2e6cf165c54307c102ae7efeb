@@ -1,0 +1,24 @@
+.github/workflows/pr-build.yml
+  s_e216d192f06582::t_9f2e7b93d1fafa 5-7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.1",
+  "base_commit_sha": "1b3fc7b73fb52bf2e6cf165c54307c102ae7efeb",
+  "prompts": {},
+  "humans": {
+    "h_41e06c727a5312": {
+      "author": "刘俊鑫 <673638712@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_e216d192f06582": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f0214-63b6-7783-90ab-f6794a4b370c",
+        "model": "gpt-5.5"
+      },
+      "human_author": "刘俊鑫 <673638712@qq.com>"
+    }
+  }
+}
