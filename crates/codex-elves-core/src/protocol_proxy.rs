@@ -6317,7 +6317,7 @@ fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
     if !has_claude_cache_fields && has_cache_details && cached_tokens > 0 {
         result["input_tokens_details"] = json!({ "cached_tokens": cached_tokens });
     }
-    if let Some(details) = usage.get("completion_tokens_details") {
+    if let Some(details) = responses_output_tokens_details_from_usage(usage) {
         result["output_tokens_details"] = details.clone();
     }
     if let Some(cache_read) = usage.get("cache_read_input_tokens") {
@@ -6346,6 +6346,32 @@ fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
 
 fn anthropic_usage_to_responses_usage(usage: Option<&Value>) -> Value {
     chat_usage_to_responses_usage(usage)
+}
+
+fn responses_output_tokens_details_from_usage(usage: &Value) -> Option<Value> {
+    let mut details = usage
+        .get("completion_tokens_details")
+        .or_else(|| usage.get("output_tokens_details"))
+        .cloned();
+    let thinking_tokens = usage
+        .pointer("/output_tokens_details/thinking_tokens")
+        .or_else(|| usage.get("thinking_tokens"))
+        .cloned();
+
+    match (&mut details, thinking_tokens) {
+        (Some(Value::Object(map)), Some(tokens)) => {
+            map.entry("reasoning_tokens".to_string()).or_insert(tokens);
+        }
+        (None, Some(tokens)) => {
+            let mut map = serde_json::Map::new();
+            map.insert("thinking_tokens".to_string(), tokens.clone());
+            map.insert("reasoning_tokens".to_string(), tokens);
+            details = Some(Value::Object(map));
+        }
+        _ => {}
+    }
+
+    details
 }
 
 fn effective_cache_creation_tokens(

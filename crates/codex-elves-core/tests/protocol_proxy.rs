@@ -254,7 +254,8 @@ fn anthropic_message_response_converts_to_responses() {
             "usage": {
                 "input_tokens": 10,
                 "output_tokens": 5,
-                "cache_read_input_tokens": 2
+                "cache_read_input_tokens": 2,
+                "output_tokens_details": { "thinking_tokens": 3 }
             }
         }),
         &json!({
@@ -283,6 +284,14 @@ fn anthropic_message_response_converts_to_responses() {
     assert_eq!(converted["usage"]["input_tokens"], 10);
     assert_eq!(converted["usage"]["output_tokens"], 5);
     assert_eq!(converted["usage"]["cache_read_input_tokens"], 2);
+    assert_eq!(
+        converted["usage"]["output_tokens_details"]["thinking_tokens"],
+        3
+    );
+    assert_eq!(
+        converted["usage"]["output_tokens_details"]["reasoning_tokens"],
+        3
+    );
 }
 
 #[test]
@@ -2700,7 +2709,7 @@ event: content_block_stop
 data: {"type":"content_block_stop","index":2}
 
 event: message_delta
-data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":9}}
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":9,"output_tokens_details":{"thinking_tokens":4}}}
 
 event: message_stop
 data: {"type":"message_stop"}
@@ -2735,6 +2744,14 @@ data: {"type":"message_stop"}
         .unwrap();
     assert_eq!(completed.data["response"]["usage"]["input_tokens"], 7);
     assert_eq!(completed.data["response"]["usage"]["output_tokens"], 9);
+    assert_eq!(
+        completed.data["response"]["usage"]["output_tokens_details"]["thinking_tokens"],
+        4
+    );
+    assert_eq!(
+        completed.data["response"]["usage"]["output_tokens_details"]["reasoning_tokens"],
+        4
+    );
     assert!(converted.contains("data: [DONE]"));
 }
 

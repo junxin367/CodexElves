@@ -322,6 +322,9 @@ fn find_reasoning_tokens(value: &Value) -> Option<u64> {
             if let Some(tokens) = map.get("reasoning_tokens").and_then(value_to_u64) {
                 return Some(tokens);
             }
+            if let Some(tokens) = map.get("thinking_tokens").and_then(value_to_u64) {
+                return Some(tokens);
+            }
             for child in map.values() {
                 if let Some(tokens) = find_reasoning_tokens(child) {
                     return Some(tokens);
@@ -393,6 +396,22 @@ data: {"type":"response.completed","response":{"usage":{"output_tokens_details":
 
 data: [DONE]
 "#;
+
+        assert_eq!(extract_reasoning_tokens_from_response_body(body), Some(516));
+    }
+
+    #[test]
+    fn extracts_thinking_tokens_from_anthropic_usage() {
+        let body = br#"{
+            "id": "msg_1",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 760,
+                "output_tokens_details": {
+                    "thinking_tokens": 516
+                }
+            }
+        }"#;
 
         assert_eq!(extract_reasoning_tokens_from_response_body(body), Some(516));
     }
