@@ -1713,6 +1713,11 @@ fn responses_input_replays_custom_and_legacy_tool_history() {
 fn responses_input_replays_server_side_tool_history() {
     let input = json!([
         {
+            "type": "message",
+            "role": "user",
+            "content": "start"
+        },
+        {
             "type": "tool_search_call",
             "call_id": "call_tool_search",
             "status": "completed",
@@ -1792,6 +1797,11 @@ fn anthropic_tool_result_history_merges_following_user_text_into_same_turn() {
         "model": "claude-opus-4-8",
         "input": [
             {
+                "type": "message",
+                "role": "user",
+                "content": "start"
+            },
+            {
                 "type": "function_call",
                 "call_id": "toolu_01GkD6H6YEdCrW3sAhhCcA3m",
                 "name": "update_plan",
@@ -1831,10 +1841,10 @@ fn anthropic_tool_result_history_merges_following_user_text_into_same_turn() {
         "Keep replies concise.\n\nUse default mode."
     );
     let messages = anthropic["messages"].as_array().unwrap();
-    // 首条被补为占位 user，保证 Anthropic 首条为 user。
+    // 首条是真实 user（start），tool_use 不在开头，不被 drop-leading 处理。
     assert_eq!(messages.len(), 3);
     assert_eq!(messages[0]["role"], "user");
-    assert_eq!(messages[0]["content"][0]["type"], "text");
+    assert_eq!(messages[0]["content"][0]["text"], "start");
     assert_eq!(messages[1]["role"], "assistant");
     assert_eq!(messages[1]["content"][0]["type"], "tool_use");
     assert_eq!(messages[2]["role"], "user");
@@ -1863,6 +1873,11 @@ fn anthropic_parallel_tool_results_can_share_one_user_turn() {
     let anthropic = responses_to_anthropic_messages(json!({
         "model": "claude-opus-4-8",
         "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": "start"
+            },
             {
                 "type": "function_call",
                 "call_id": "call_one",
@@ -1895,9 +1910,10 @@ fn anthropic_parallel_tool_results_can_share_one_user_turn() {
     .unwrap();
 
     let messages = anthropic["messages"].as_array().unwrap();
-    // 首条被补为占位 user。
+    // 首条是真实 user（start）。
     assert_eq!(messages.len(), 3);
     assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"][0]["text"], "start");
     assert_eq!(messages[1]["content"][0]["type"], "tool_use");
     assert_eq!(messages[1]["content"][1]["type"], "tool_use");
     assert_eq!(messages[2]["role"], "user");
@@ -1945,10 +1961,10 @@ fn anthropic_does_not_merge_tool_result_after_plain_user_text() {
 }
 
 #[test]
-fn anthropic_history_starting_with_tool_use_gets_leading_user_message() {
-    // 被中断/压缩续写的会话历史可能以 function_call 开头，转换后首条会是
-    // assistant[tool_use]。Anthropic 要求首条必须是 user，否则报
-    // "tool_use ids were found without tool_result blocks"。需补前导 user。
+fn anthropic_history_starting_with_tool_use_drops_orphan_pair_and_keeps_following_user() {
+    // 真实压缩续写形态：开头是闭合的 function_call + function_call_output 对，
+    // 后跟真实 user/developer。开头的 update_plan 工具对是悬空上下文（发起它的轮次已被截断），
+    // 应丢弃这对 tool_use/tool_result，让首条回到真实 user，而不是补占位。
     let anthropic = responses_to_anthropic_messages(json!({
         "model": "claude-opus-4-8",
         "input": [
@@ -1961,7 +1977,106 @@ fn anthropic_history_starting_with_tool_use_gets_leading_user_message() {
             {
                 "type": "function_call_output",
                 "call_id": "toolu_lead",
-                "output": "ok"
+                "output": "Plan updated"
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": "continue the task"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let messages = anthropic["messages"].as_array().unwrap();
+    // 首条是真实 user，不再出现 tool_use/tool_result。
+    assert_eq!(messages[0]["role"], "user");
+    let serialized = anthropic["messages"].to_string();
+    assert!(!serialized.contains("tool_use"));
+    assert!(!serialized.contains("tool_result"));
+    assert!(serialized.contains("continue the task"));
+    // 不应出现占位文本（因为有真实 user 兑底）。
+    assert!(!serialized.contains("continuing the previous conversation"));
+}
+
+#[test]
+fn anthropic_history_starting_with_tool_use_then_merged_user_strips_orphan_tool_result_only() {
+    // 关键风险：tool_result 后续的普通 user 文本会被合并进同一条 user。
+    // 丢弃开头 assistant[tool_use] 后，只能精准删除那条 user 里的悬空 tool_result，
+    // 保留合并进来的 text（如 <turn_aborted> 和真实续写意图）。
+    let anthropic = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "toolu_lead",
+                "name": "update_plan",
+                "arguments": "{\"plan\":[]}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "toolu_lead",
+                "output": "Plan updated"
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": "<turn_aborted>"
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": "real follow up"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let messages = anthropic["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["role"], "user");
+    let content = messages[0]["content"].as_array().unwrap();
+    // 悬空 tool_result 被删，两段 text 保留。
+    assert!(content.iter().all(|b| b["type"] == "text"));
+    let serialized = messages[0]["content"].to_string();
+    assert!(serialized.contains("<turn_aborted>"));
+    assert!(serialized.contains("real follow up"));
+    assert!(!serialized.contains("tool_result"));
+}
+
+#[test]
+fn anthropic_history_with_parallel_leading_tool_uses_strips_all_orphans() {
+    // 并行工具调用：开头两个 function_call + 两个 function_call_output，后跟 user。
+    // 两个 tool_use 都是悬空，应全部丢弃/剔除，首条回到真实 user。
+    let anthropic = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "call_a",
+                "name": "lookup",
+                "arguments": "{\"q\":\"a\"}"
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_b",
+                "name": "lookup",
+                "arguments": "{\"q\":\"b\"}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_a",
+                "output": "ra"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_b",
+                "output": "rb"
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": "next"
             }
         ]
     }))
@@ -1969,10 +2084,66 @@ fn anthropic_history_starting_with_tool_use_gets_leading_user_message() {
 
     let messages = anthropic["messages"].as_array().unwrap();
     assert_eq!(messages[0]["role"], "user");
-    assert_eq!(messages[1]["role"], "assistant");
-    assert_eq!(messages[1]["content"][0]["type"], "tool_use");
-    assert_eq!(messages[2]["role"], "user");
-    assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+    let serialized = anthropic["messages"].to_string();
+    assert!(!serialized.contains("tool_use"));
+    assert!(!serialized.contains("tool_result"));
+    assert!(serialized.contains("next"));
+}
+
+#[test]
+fn anthropic_history_all_orphan_tool_use_falls_back_to_placeholder_user() {
+    // 退化场景：整段历史只有悬空的 tool_use/tool_result，丢完后为空，才补占位 user。
+    let anthropic = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "toolu_only",
+                "name": "update_plan",
+                "arguments": "{\"plan\":[]}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "toolu_only",
+                "output": "Plan updated"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let messages = anthropic["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(
+        messages[0]["content"][0]["text"],
+        "(continuing the previous conversation)"
+    );
+}
+
+#[test]
+fn anthropic_history_starting_with_assistant_text_drops_until_user() {
+    // 开头是 assistant 纯文本（无 tool_use）+ 后跟 user：直接丢弃 assistant 头，首条回到 user。
+    let anthropic = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "input": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": "leftover assistant text"
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": "actual question"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let messages = anthropic["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"][0]["text"], "actual question");
 }
 
 #[test]

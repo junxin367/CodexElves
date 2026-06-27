@@ -370,18 +370,7 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
     // Anthropic 要求 messages 首条必须是 user。被中断/压缩续写的会话历史可能以
     // function_call 开头，转换后首条会是 assistant[tool_use]，触发上游
     // "messages.N: tool_use ids were found without tool_result blocks" 校验失败。
-    // 在最前补一个占位 user 消息，保证首条为 user 且 tool_use/tool_result 配对成立。
-    if messages
-        .first()
-        .and_then(|message| message.get("role"))
-        .and_then(Value::as_str)
-        == Some("assistant")
-    {
-        messages.insert(
-            0,
-            json!({ "role": "user", "content": [{ "type": "text", "text": "(continuing the previous conversation)" }] }),
-        );
-    }
+    normalize_anthropic_leading_messages(&mut messages);
     result["messages"] = json!(messages);
 
     for key in ["temperature", "top_p", "stream"] {
@@ -3425,6 +3414,80 @@ fn responses_role_to_anthropic_role(role: Option<&str>) -> &'static str {
         Some("user") | Some("latest_reminder") | Some("tool") | None => "user",
         Some(_) => "user",
     }
+}
+
+/// 保证 Anthropic messages 首条为 user。被中断/压缩续写的会话历史可能以 function_call
+/// 开头，转换后首条是 assistant[tool_use]，违反 Anthropic “首条必须是 user”规则。
+/// 策略：从头丢弃悬空的 assistant 消息；若被丢的 assistant 含 tool_use，则按 id
+/// 精准删除紧跟的 user 消息里对应的悬空 tool_result 块（保留其余 text 等内容），
+/// 直到首条是含内容的 user 或 messages 为空；若丢空则补一个占位 user 作为兑底。
+fn normalize_anthropic_leading_messages(messages: &mut Vec<Value>) {
+    while messages
+        .first()
+        .and_then(|message| message.get("role"))
+        .and_then(Value::as_str)
+        == Some("assistant")
+    {
+        let head = messages.remove(0);
+        let dropped_ids = anthropic_tool_use_ids(&head);
+        if dropped_ids.is_empty() {
+            // 纯文本/thinking 的悬空 assistant 头，直接丢弃，无需清理下游。
+            continue;
+        }
+        // 紧跟的 user 消息里，只删除 id 匹配刚丢弃 tool_use 的悬空 tool_result 块。
+        let next_is_user = messages
+            .first()
+            .and_then(|message| message.get("role"))
+            .and_then(Value::as_str)
+            == Some("user");
+        if next_is_user {
+            let became_empty = {
+                let Some(content) = messages[0].get_mut("content").and_then(Value::as_array_mut)
+                else {
+                    break;
+                };
+                content.retain(|block| {
+                    let is_orphan_tool_result = block.get("type").and_then(Value::as_str)
+                        == Some("tool_result")
+                        && block
+                            .get("tool_use_id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| dropped_ids.contains(id));
+                    !is_orphan_tool_result
+                });
+                content.is_empty()
+            };
+            if became_empty {
+                // 该 user 消息只剩悬空 tool_result，已全部删除，丢弃后继续。
+                messages.remove(0);
+                continue;
+            }
+            // 还剩 text 等真实内容 → 首条已是合法 user，完成。
+            break;
+        }
+        // 丢弃 assistant[tool_use] 后紧跟的不是 user（理论上罕见），继续循环重新判断。
+    }
+    if messages.is_empty() {
+        messages.push(
+            json!({ "role": "user", "content": [{ "type": "text", "text": "(continuing the previous conversation)" }] }),
+        );
+    }
+}
+
+/// 提取一条 assistant 消息里所有 tool_use 块的 id。
+fn anthropic_tool_use_ids(message: &Value) -> std::collections::BTreeSet<String> {
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+                .filter_map(|block| block.get("id").and_then(Value::as_str))
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn push_anthropic_message(messages: &mut Vec<Value>, role: &str, content: Vec<Value>) {
