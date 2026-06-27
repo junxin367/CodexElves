@@ -1,5 +1,11 @@
 # 更新日志
 
+## 0.1.10 - 2026-06-27
+
+- 压缩/中断续写的会话历史以 function_call 开头时，改用 drop-leading 策略替代补占位 user：丢弃开头悬空的 tool_use/tool_result，按 id 精准剔除合并进同一 user 的悬空 tool_result 并保留真实文本，仅在全部丢空时才补占位 user。
+- 扩展协议代理回归测试，覆盖并行 tool_use、合并 user、assistant 纯文本开头、全悬空兑底等多种压缩历史形态。
+- 版本号更新到 `0.1.10`，同步 Rust workspace、Tauri 和前端 package 配置。
+
 ## 0.1.9 - 2026-06-27
 
 - 修复 Responses 历史转换到 Anthropic Messages 时，`tool_result` 与普通用户文本被合并到同一个 user message 导致上游 400 的问题。
