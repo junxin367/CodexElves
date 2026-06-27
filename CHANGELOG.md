@@ -4,7 +4,11 @@
 
 - 修复 Responses 历史转换到 Anthropic Messages 时，`tool_result` 与普通用户文本被合并到同一个 user message 导致上游 400 的问题。
 - Anthropic 转换路径新增工具调用 ID 跟踪，孤儿工具输出会降级为普通用户文本，避免生成无前置 `tool_use` 的裸 `tool_result`。
-- 补充协议代理回归测试，覆盖工具结果隔离、并行工具结果合并和孤儿工具输出处理。
+- 修复被中断/压缩续写的会话历史以 function_call 开头时，转换后首条为 assistant[tool_use] 违反 Anthropic “首条必须为 user”规则导致 400 的问题，首条为 assistant 时补一个占位 user。
+- 修复使用 Claude 模型时网页搜索死循环：web_search 在无 MCP fallback 时声明为 Anthropic 原生 server-side 工具（`web_search_20250305`），由 Claude 服务端执行搜索，避免被当客户端工具导致空结果反复重试。
+- 补充协议代理回归测试，覆盖工具结果隔离、首条补 user、孤儿工具输出降级、web_search server-side 声明与响应转换。
+- 安装/更新完成后自动启动 CodexElves 管理工具。
+- 新增文档记录协议代理 web_search 行为与 GPT 原生场景的差异（`docs/protocol-proxy-web-search.md`）。
 - 版本号更新到 `0.1.9`，同步 Rust workspace、Tauri 和前端 package 配置。
 
 ## 1.2.4 - 2026-06-08

@@ -295,6 +295,107 @@ fn anthropic_message_response_converts_to_responses() {
 }
 
 #[test]
+fn anthropic_request_declares_web_search_as_server_side_tool_without_fallback() {
+    // 无 MCP 搜索 fallback 时，web_search 应声明为 Anthropic 原生 server-side 工具，
+    // 由 Claude 服务端自己执行搜索，避免被当客户端工具导致空结果死循环。
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "input": "search the web",
+        "tools": [{ "type": "web_search" }]
+    }))
+    .unwrap();
+
+    let tools = converted["tools"].as_array().unwrap();
+    let web_search = tools
+        .iter()
+        .find(|tool| tool["name"] == "web_search")
+        .expect("web_search tool present");
+    assert_eq!(web_search["type"], "web_search_20250305");
+    // 不应再是普通 function 形态（无 input_schema）。
+    assert!(web_search.get("input_schema").is_none());
+}
+
+#[test]
+fn anthropic_request_keeps_web_search_as_function_when_mcp_fallback_available() {
+    // 有 MCP 搜索 fallback（如 tavily）时，客户端有真实执行能力，
+    // 保留原有可用路径，不切换为 server-side。
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "input": "search the web",
+        "tools": [{ "type": "web_search" }, tavily_namespace_tool()]
+    }))
+    .unwrap();
+
+    let tools = converted["tools"].as_array().unwrap();
+    // 没有 server-side web_search_20250305。
+    assert!(
+        !tools
+            .iter()
+            .any(|tool| tool["type"] == "web_search_20250305")
+    );
+}
+
+#[test]
+fn anthropic_request_downgrades_tool_choice_forcing_web_search_to_auto() {
+    // Anthropic 不允许用 tool_choice:tool 强制 server-side 工具，命中时应降级为 auto。
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "input": "search the web",
+        "tools": [{ "type": "web_search" }],
+        "tool_choice": { "type": "function", "name": "web_search" }
+    }))
+    .unwrap();
+
+    assert_eq!(converted["tool_choice"], json!({ "type": "auto" }));
+}
+
+#[test]
+fn anthropic_server_tool_use_web_search_maps_to_web_search_call() {
+    // Claude 原生 server-side web_search 响应（server_tool_use + web_search_tool_result）：
+    // server_tool_use 转为 Codex web_search_call 进度项；web_search_tool_result 不透传给客户端；
+    // 最终 text 正常输出。
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_ws_server",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_1",
+                    "name": "web_search",
+                    "input": { "query": "claude shannon birth" }
+                },
+                {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "srvtoolu_1",
+                    "content": [{ "type": "web_search_result", "url": "https://example.com", "title": "X" }]
+                },
+                { "type": "text", "text": "Claude Shannon was born in 1916." }
+            ],
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-4-8",
+            "input": "search",
+            "tools": [{ "type": "web_search" }]
+        }),
+    )
+    .unwrap();
+
+    let output = converted["output"].as_array().unwrap();
+    let serialized = converted["output"].to_string();
+    // 含 web_search_call 进度项。
+    assert!(output.iter().any(|item| item["type"] == "web_search_call"));
+    // 含最终 text。
+    assert!(serialized.contains("Claude Shannon was born in 1916."));
+    // web_search_tool_result 不透传。
+    assert!(!serialized.contains("web_search_tool_result"));
+}
+
+#[test]
 fn anthropic_message_response_maps_web_search_to_native_call() {
     let converted = anthropic_message_to_response_with_request(
         json!({
@@ -1487,9 +1588,20 @@ fn responses_request_maps_tool_choice_for_proxy_internal_tools() {
     }))
     .unwrap();
 
-    assert_eq!(anthropic["tools"][0]["name"], "web_search_preview");
-    assert_eq!(anthropic["tools"][1]["name"], "computer_use_preview");
-    assert_eq!(anthropic["tool_choice"]["name"], "web_search_preview");
+    // 无 MCP fallback 时，web_search_preview 声明为 Anthropic 原生 server-side 工具（追加到末尾）；
+    // 其他工具保留；tool_choice 强制 web_search 被降级为 auto。
+    let anthropic_tools = anthropic["tools"].as_array().unwrap();
+    assert!(
+        anthropic_tools
+            .iter()
+            .any(|tool| tool["type"] == "web_search_20250305" && tool["name"] == "web_search")
+    );
+    assert!(
+        anthropic_tools
+            .iter()
+            .any(|tool| tool["name"] == "computer_use_preview")
+    );
+    assert_eq!(anthropic["tool_choice"], json!({ "type": "auto" }));
 }
 
 #[test]
@@ -1675,7 +1787,7 @@ fn responses_input_replays_server_side_tool_history() {
 }
 
 #[test]
-fn anthropic_tool_result_history_stays_separate_from_following_user_text() {
+fn anthropic_tool_result_history_merges_following_user_text_into_same_turn() {
     let anthropic = responses_to_anthropic_messages(json!({
         "model": "claude-opus-4-8",
         "input": [
@@ -1697,34 +1809,52 @@ fn anthropic_tool_result_history_stays_separate_from_following_user_text() {
             },
             {
                 "type": "message",
+                "role": "developer",
+                "content": "Use default mode."
+            },
+            {
+                "type": "message",
                 "role": "user",
                 "content": "continue"
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": "next"
             }
         ]
     }))
     .unwrap();
 
-    assert_eq!(anthropic["system"], "Keep replies concise.");
-    let messages = anthropic["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 3);
-    assert_eq!(messages[0]["role"], "assistant");
-    assert_eq!(messages[0]["content"][0]["type"], "tool_use");
-    assert_eq!(messages[1]["role"], "user");
     assert_eq!(
-        messages[1]["content"],
-        json!([{
-            "type": "tool_result",
-            "tool_use_id": "toolu_01GkD6H6YEdCrW3sAhhCcA3m",
-            "content": "ok"
-        }])
+        anthropic["system"],
+        "Keep replies concise.\n\nUse default mode."
     );
+    let messages = anthropic["messages"].as_array().unwrap();
+    // 首条被补为占位 user，保证 Anthropic 首条为 user。
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"][0]["type"], "text");
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(messages[1]["content"][0]["type"], "tool_use");
     assert_eq!(messages[2]["role"], "user");
     assert_eq!(
         messages[2]["content"],
-        json!([{
-            "type": "text",
-            "text": "continue"
-        }])
+        json!([
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu_01GkD6H6YEdCrW3sAhhCcA3m",
+                "content": "ok"
+            },
+            {
+                "type": "text",
+                "text": "continue"
+            },
+            {
+                "type": "text",
+                "text": "next"
+            }
+        ])
     );
 }
 
@@ -1765,15 +1895,105 @@ fn anthropic_parallel_tool_results_can_share_one_user_turn() {
     .unwrap();
 
     let messages = anthropic["messages"].as_array().unwrap();
+    // 首条被补为占位 user。
     assert_eq!(messages.len(), 3);
-    assert_eq!(messages[0]["content"][0]["type"], "tool_use");
-    assert_eq!(messages[0]["content"][1]["type"], "tool_use");
-    assert_eq!(messages[1]["role"], "user");
-    assert_eq!(messages[1]["content"][0]["type"], "tool_result");
-    assert_eq!(messages[1]["content"][0]["tool_use_id"], "call_one");
-    assert_eq!(messages[1]["content"][1]["type"], "tool_result");
-    assert_eq!(messages[1]["content"][1]["tool_use_id"], "call_two");
-    assert_eq!(messages[2]["content"][0]["text"], "next");
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+    assert_eq!(messages[1]["content"][1]["type"], "tool_use");
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+    assert_eq!(messages[2]["content"][0]["tool_use_id"], "call_one");
+    assert_eq!(messages[2]["content"][1]["type"], "tool_result");
+    assert_eq!(messages[2]["content"][1]["tool_use_id"], "call_two");
+    assert_eq!(messages[2]["content"][2]["type"], "text");
+    assert_eq!(messages[2]["content"][2]["text"], "next");
+}
+
+#[test]
+fn anthropic_does_not_merge_tool_result_after_plain_user_text() {
+    let anthropic = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": "before"
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_lookup",
+                "name": "lookup",
+                "arguments": "{\"query\":\"one\"}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_lookup",
+                "output": "one"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let messages = anthropic["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"][0]["text"], "before");
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+}
+
+#[test]
+fn anthropic_history_starting_with_tool_use_gets_leading_user_message() {
+    // 被中断/压缩续写的会话历史可能以 function_call 开头，转换后首条会是
+    // assistant[tool_use]。Anthropic 要求首条必须是 user，否则报
+    // "tool_use ids were found without tool_result blocks"。需补前导 user。
+    let anthropic = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "toolu_lead",
+                "name": "update_plan",
+                "arguments": "{\"plan\":[]}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "toolu_lead",
+                "output": "ok"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let messages = anthropic["messages"].as_array().unwrap();
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+}
+
+#[test]
+fn anthropic_history_starting_with_user_is_unchanged() {
+    // 以 user 开头的正常历史不应被动，不插入多余的前导 user。
+    let anthropic = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": "hello"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let messages = anthropic["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"][0]["text"], "hello");
 }
 
 #[test]
@@ -1805,6 +2025,36 @@ fn anthropic_orphan_tool_outputs_are_downgraded_to_user_text() {
         messages[0]["content"][1]["text"],
         "Function call output (missing_call): orphan"
     );
+}
+
+#[test]
+fn anthropic_history_starting_with_orphan_tool_output_is_downgraded() {
+    // 压缩续写可能裁掉 function_call，只留下开头的 function_call_output。
+    // 此时首条不是 assistant（改动1 不触发），必须靠改动3 降级为普通文本，
+    // 否则会产出裸 tool_result 被上游拒绝。
+    let anthropic = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "input": [
+            {
+                "type": "function_call_output",
+                "call_id": "truncated_call",
+                "output": "done"
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": "continue"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let messages = anthropic["messages"].as_array().unwrap();
+    // 首条为 user，且全部为 text，不出现任何 tool_result。
+    assert_eq!(messages[0]["role"], "user");
+    let serialized = anthropic["messages"].to_string();
+    assert!(!serialized.contains("tool_result"));
+    assert!(serialized.contains("Function call output (truncated_call): done"));
 }
 
 #[test]

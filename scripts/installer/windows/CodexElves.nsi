@@ -57,6 +57,9 @@ Section "Install"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexElves" "DisplayIcon" "$INSTDIR\codex-elves-manager.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexElves" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexElves" "UninstallString" "$INSTDIR\uninstall.exe"
+
+  IfFileExists "$INSTDIR\codex-elves-manager.exe" 0 +2
+    Exec '"$INSTDIR\codex-elves-manager.exe"'
 SectionEnd
 
 Section "Uninstall"

@@ -367,6 +367,21 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
     if messages.is_empty() {
         messages.push(json!({ "role": "user", "content": [{ "type": "text", "text": "" }] }));
     }
+    // Anthropic 要求 messages 首条必须是 user。被中断/压缩续写的会话历史可能以
+    // function_call 开头，转换后首条会是 assistant[tool_use]，触发上游
+    // "messages.N: tool_use ids were found without tool_result blocks" 校验失败。
+    // 在最前补一个占位 user 消息，保证首条为 user 且 tool_use/tool_result 配对成立。
+    if messages
+        .first()
+        .and_then(|message| message.get("role"))
+        .and_then(Value::as_str)
+        == Some("assistant")
+    {
+        messages.insert(
+            0,
+            json!({ "role": "user", "content": [{ "type": "text", "text": "(continuing the previous conversation)" }] }),
+        );
+    }
     result["messages"] = json!(messages);
 
     for key in ["temperature", "top_p", "stream"] {
@@ -402,7 +417,19 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
             .get("tool_choice")
             .and_then(|value| responses_tool_choice_to_anthropic(value, &tool_context))
         {
-            result["tool_choice"] = tool_choice;
+            // Anthropic 不允许用 tool_choice:tool 强制 server-side 工具（如 web_search），
+            // 命中时降级为 auto，避免上游 400。
+            let forces_server_tool = tool_choice.get("type").and_then(Value::as_str)
+                == Some("tool")
+                && tool_choice
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_codex_web_search_name);
+            if forces_server_tool {
+                result["tool_choice"] = json!({ "type": "auto" });
+            } else {
+                result["tool_choice"] = tool_choice;
+            }
         }
     }
 
@@ -2612,7 +2639,7 @@ impl AnthropicSseState {
         let index = chunk.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
         let block = chunk.get("content_block").unwrap_or(&Value::Null);
         let block_type = block.get("type").and_then(Value::as_str).unwrap_or("");
-        if block_type == "tool_use" {
+        if block_type == "tool_use" || block_type == "server_tool_use" {
             self.pending_text_marker.take();
         } else {
             // Anthropic 每个 text 块都会先发 content_block_start；这里先冲刷旧 marker，避免顺序落到新正文之后。
@@ -2672,6 +2699,49 @@ impl AnthropicSseState {
                     });
                     self.inner.push_tool_call_delta_into(&fake, output);
                 }
+            }
+            "server_tool_use" => {
+                // Anthropic 原生 server-side 工具（如 web_search）。复用 tool_use 路径生成
+                // Codex web_search_call 进度项；因为是服务端执行，Claude 同一轮自己出答案，
+                // 不会触发客户端工具循环。
+                self.native_tool_use_block_count += 1;
+                self.blocks.insert(index, AnthropicBlockKind::Tool);
+                self.inner.flush_inline_think_at_boundary_into(output);
+                self.inner.finalize_reasoning_into(output);
+                if let Some(name) = block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                {
+                    self.native_tool_names.insert(name.to_string());
+                }
+                let fake = json!({
+                    "index": index,
+                    "id": block.get("id").and_then(Value::as_str).unwrap_or(""),
+                    "function": {
+                        "name": block.get("name").and_then(Value::as_str).unwrap_or(""),
+                        "arguments": ""
+                    }
+                });
+                self.inner.push_tool_call_delta_into(&fake, output);
+                if let Some(input) = block.get("input").filter(|value| {
+                    value
+                        .as_object()
+                        .map(|object| !object.is_empty())
+                        .unwrap_or(false)
+                }) {
+                    let fake = json!({
+                        "index": index,
+                        "function": {
+                            "arguments": canonical_json_string(input)
+                        }
+                    });
+                    self.inner.push_tool_call_delta_into(&fake, output);
+                }
+            }
+            "web_search_tool_result" => {
+                // 服务端搜索结果由 Claude 自己消化并写进最终 text，不透传给客户端。
+                self.other_block_count += 1;
             }
             _ => {
                 self.other_block_count += 1;
@@ -3323,6 +3393,11 @@ fn append_responses_item_to_anthropic(
                 }
             }
         }
+        Some("web_search_call") | Some("web_search_output") => {
+            // Anthropic 原生 server-side web_search 由 Claude 服务端自己执行，结果不经过客户端。
+            // 客户端后续轮次 echo 回的空壳 web_search_call 直接丢弃，避免被当普通消息
+            // 或非法 tool_use 历史发回上游。
+        }
         _ => {
             if item.get("role").is_none() && item.get("content").is_none() {
                 return;
@@ -3379,11 +3454,12 @@ fn can_merge_anthropic_content(role: &str, existing: &[Value], incoming: &[Value
     }
     let existing_has_tool_result = anthropic_content_has_type(existing, "tool_result");
     let incoming_has_tool_result = anthropic_content_has_type(incoming, "tool_result");
-    if !existing_has_tool_result && !incoming_has_tool_result {
+    if !incoming_has_tool_result {
         return true;
     }
-    anthropic_content_is_all_type(existing, "tool_result")
-        && anthropic_content_is_all_type(incoming, "tool_result")
+    existing_has_tool_result
+        && anthropic_content_is_all_type(existing, "tool_result")
+        && anthropic_content_has_only_leading_type(incoming, "tool_result")
 }
 
 fn anthropic_content_has_type(content: &[Value], block_type: &str) -> bool {
@@ -3397,6 +3473,21 @@ fn anthropic_content_is_all_type(content: &[Value], block_type: &str) -> bool {
         && content
             .iter()
             .all(|part| part.get("type").and_then(Value::as_str) == Some(block_type))
+}
+
+fn anthropic_content_has_only_leading_type(content: &[Value], block_type: &str) -> bool {
+    !content.is_empty()
+        && content
+            .iter()
+            .try_fold(false, |seen_other, part| {
+                let is_target = part.get("type").and_then(Value::as_str) == Some(block_type);
+                if is_target && seen_other {
+                    None
+                } else {
+                    Some(seen_other || !is_target)
+                }
+            })
+            .is_some()
 }
 
 fn push_anthropic_orphan_tool_output_message(
@@ -4439,10 +4530,34 @@ fn responses_tools_to_chat_tools(tools: &[Value], context: &CodexToolContext) ->
 }
 
 fn responses_tools_to_anthropic_tools(tools: &[Value], context: &CodexToolContext) -> Vec<Value> {
-    responses_tools_to_chat_tools(tools, context)
+    // Codex 的 web_search 是 OpenAI 平台 hosted 工具，在 Claude 链路里没有 OpenAI 服务端执行。
+    // 若会话没有可执行的 MCP 搜索 fallback，则把 web_search 声明为 Anthropic 原生 server-side
+    // 工具，由 Claude 服务端自己执行搜索，避免被当作客户端工具导致空结果死循环。
+    let wants_server_web_search = context.web_search_fallback_tool().is_none()
+        && tools.iter().any(|tool| {
+            tool.get("type")
+                .and_then(Value::as_str)
+                .is_some_and(is_codex_web_search_name)
+        });
+    let mut converted: Vec<Value> = responses_tools_to_chat_tools(tools, context)
         .into_iter()
         .filter_map(|tool| chat_tool_to_anthropic_tool(&tool))
-        .collect()
+        .collect();
+    if wants_server_web_search {
+        // 移除可能已生成的 function 形态 web_search 工具，替换为原生 server-side 工具。
+        converted.retain(|tool| {
+            tool.get("name")
+                .and_then(Value::as_str)
+                .map(|name| !is_codex_web_search_name(name))
+                .unwrap_or(true)
+        });
+        converted.push(json!({
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": 5
+        }));
+    }
+    converted
 }
 
 fn proxy_internal_tool_to_chat_tool(tool_type: &str, tool: &Value) -> Value {
@@ -5536,7 +5651,7 @@ fn anthropic_content_to_response_output_items(
                     }
                 }
             }
-            "tool_use" => {
+            "tool_use" | "server_tool_use" => {
                 let call_id = block
                     .get("id")
                     .and_then(Value::as_str)
@@ -5555,6 +5670,8 @@ fn anthropic_content_to_response_output_items(
                     tool_context,
                 ));
             }
+            // 服务端搜索结果由 Claude 自己消化并写进最终 text，不透传给客户端。
+            "web_search_tool_result" => {}
             _ => {}
         }
     }
@@ -6487,7 +6604,9 @@ fn anthropic_response_status(stop_reason: Option<&str>) -> &'static str {
 fn anthropic_stop_reason_to_chat_finish_reason(stop_reason: Option<&str>) -> Option<&str> {
     match stop_reason {
         Some("max_tokens") => Some("length"),
-        Some("end_turn") | Some("stop_sequence") => Some("stop"),
+        // pause_turn 是 server-side 工具耗时较长时的中间停止；Claude 已产出部分/完整文本，
+        // 映射为正常结束，避免非法 finish_reason 泄露给 Codex。
+        Some("end_turn") | Some("stop_sequence") | Some("pause_turn") => Some("stop"),
         Some("tool_use") => Some("tool_calls"),
         Some(value) => Some(value),
         None => None,
