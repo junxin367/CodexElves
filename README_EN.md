@@ -39,7 +39,7 @@ The Windows installer creates desktop and Start Menu shortcuts. The macOS DMG in
 - Tauri + React manager with dark/light theme support.
 - External CDP injection. No `app.asar` patching and no DLL writes into the Codex installation.
 - Relay injection mode with multiple relay profiles, `CodexElves` provider configuration, and a one-click switch back to official ChatGPT login mode.
-- Traditional enhancement mode with plugin entry unlock, forced plugin install, session delete, Markdown export, project move, Timeline, and more.
+- Traditional enhancement mode with plugin entry unlock, forced plugin install, session delete, Markdown export, project move, and more.
 - Independent user script management with startup injection.
 - Provider Sync to keep historical sessions visible after switching providers.
 - Upstream worktree creation: create new worktrees from `upstream/<base-branch>` after fetching the remote branch, reducing conflicts caused by stale local HEAD state.
@@ -113,7 +113,7 @@ To return to the official login mode, use the clear API mode button in the Relay
 
 Enhancements are controlled in the manager. Enhancement injection is enabled by default. When disabled, CodexElves will not inject its menu or scripts.
 
-When relay injection mode is active, plugin entry unlock and forced plugin install are unnecessary, and the UI will say so. Other enhancements, including session delete, export, move, Timeline, and user scripts, can still be used.
+When relay injection mode is active, plugin entry unlock and forced plugin install are unnecessary, and the UI will say so. Other enhancements, including session delete, export, move, and user scripts, can still be used.
 
 ## Updates and Packages
 
@@ -186,7 +186,8 @@ apps/
   codex-elves-launcher/          Silent launcher
   codex-elves-manager/           Tauri manager
 assets/inject/
-  renderer-inject.js            Enhancement script injected into Codex
+  renderer-inject.js            Lightweight bootstrap injected into Codex
+  renderer-features.js          Full enhancement runtime installed on demand
 crates/
   codex-elves-core/              Launch, injection, config, update, install, bridge
   codex-elves-data/              Session data, export, Provider Sync

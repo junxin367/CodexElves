@@ -51,6 +51,39 @@ fn injection_script_prefixes_helper_url_and_version() {
 }
 
 #[test]
+fn bootstrap_injection_script_loads_features_without_inlining_full_runtime() {
+    let script = assets::bootstrap_injection_script(45221);
+
+    assert!(script.contains("/runtime/install-renderer-features"));
+    assert!(script.contains("/inject/renderer-features.js"));
+    assert!(script.contains("/inject/user-scripts.js"));
+    assert!(script.contains("ready_fallback"));
+    assert!(script.contains("ready_fallback_degraded"));
+    assert!(script.contains("window.__CODEX_SESSION_DELETE_HELPER__"));
+    assert!(script.contains("http://127.0.0.1:45221"));
+    assert!(!script.contains("function installCodexElvesMenu"));
+    assert!(assets::renderer_features_script().contains("function installCodexElvesMenu"));
+}
+
+#[test]
+fn renderer_features_diagnostics_prefer_bridge_before_http_fallback() {
+    let script = assets::renderer_features_script();
+
+    assert!(script.contains("Promise.resolve(window.__codexSessionDeleteBridge"));
+    assert!(script.contains(".catch(() => sendCodexElvesDiagnosticOverHttp(payload))"));
+    assert!(script.contains("function sendCodexElvesDiagnosticOverHttp(payload)"));
+}
+
+#[test]
+fn renderer_features_reuses_scan_observers_when_roots_are_unchanged() {
+    let script = assets::renderer_features_script();
+
+    assert!(script.contains("function sameScanObserverRoots"));
+    assert!(script.contains("if (sameScanObserverRoots(roots)) return;"));
+    assert!(script.contains("window.__codexSessionDeleteObserverConfigs"));
+}
+
+#[test]
 fn injection_script_exposes_image_overlay_config() {
     let temp = tempfile::tempdir().unwrap();
     let image_path = temp.path().join("overlay.png");
@@ -306,16 +339,17 @@ fn injection_script_keeps_force_install_unlock_visual_state_sticky() {
     let script = assets::injection_script(45221);
 
     assert!(script.contains("codex-force-install-unlocked"));
-    assert!(script.contains("codexForcePluginInstallRefreshIntervalMs"));
+    assert!(script.contains("codexForcePluginInstallSettleWindowMs"));
     assert!(script.contains("refreshForcePluginInstallUnlockLoop"));
-    assert!(script.contains("setInterval(() => {"));
+    assert!(script.contains("__codexForcePluginInstallObserver = new MutationObserver"));
+    assert!(!script.contains("codexForcePluginInstallRefreshIntervalMs"));
 }
 
 #[test]
 fn injection_script_loads_backend_settings_before_initial_scan() {
     let script = assets::injection_script(45221);
     let startup_call = script
-        .rfind("void loadBackendSettingsForStartup();")
+        .find("void loadBackendSettingsForStartup();")
         .expect("script should load backend settings on startup");
     let footer = &script[startup_call..];
     let initial_scan = footer
@@ -343,20 +377,18 @@ fn injection_script_exposes_conversation_view_width_control() {
 }
 
 #[test]
-fn injection_script_exposes_sidebar_thread_id_badge_control() {
+fn injection_script_removes_timeline_and_sidebar_thread_id_badge_controls() {
     let script = assets::injection_script(45221);
 
-    assert!(script.contains("threadIdBadge: false"));
-    assert!(script.contains("threadIdBadge: \"codexAppThreadIdBadge\""));
-    assert!(script.contains("会话 ID 标识"));
-    assert!(script.contains("data-codex-elves-setting=\"threadIdBadge\""));
+    assert!(!script.contains("data-codex-elves-setting=\"threadIdBadge\""));
+    assert!(!script.contains("data-codex-elves-setting=\"conversationTimeline\""));
+    assert!(!script.contains("会话 ID 标识"));
+    assert!(!script.contains("对话 Timeline"));
+    assert!(!script.contains("function refreshThreadIdBadges()"));
+    assert!(!script.contains("function refreshConversationTimeline()"));
+    assert!(script.contains("cleanupRemovedConversationHelpers"));
+    assert!(script.contains("codex-conversation-timeline"));
     assert!(script.contains("codex-thread-id-badge"));
-    assert!(script.contains("data-codex-thread-id-badge-wrap=\"true\""));
-    assert!(script.contains("let threadIdBadgeActive = false"));
-    assert!(script.contains("if (threadIdBadgeActive)"));
-    assert!(script.contains("function refreshThreadIdBadges()"));
-    assert!(script.contains("uuidV7TimestampMs(sessionId)"));
-    assert!(script.contains("refreshThreadIdBadges();"));
 }
 
 #[test]
@@ -429,7 +461,9 @@ fn injection_script_unlocks_custom_model_catalog() {
     assert!(script.contains("runCodexModelWhitelistRefreshPass"));
     assert!(script.contains("model_whitelist_refresh_scheduled"));
     assert!(script.contains("available_models"));
-    assert!(script.contains("modelWhitelistUnlock"));
+    assert!(!script.contains("modelWhitelistUnlock"));
+    assert!(!script.contains("codexAppModelWhitelistUnlock"));
+    assert!(!script.contains("模型白名单解锁"));
     assert!(script.contains("isWorkspaceChromeNode"));
     assert!(script.contains("refreshCodexModelWhitelistFromScan"));
     assert!(!script.contains("querySelectorAll(\"button, [role='menu']"));

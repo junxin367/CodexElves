@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
@@ -14,6 +16,8 @@ use tokio::sync::Mutex;
 
 use crate::settings::{BackendSettings, SettingsStore, normalize_codex_extra_args};
 use crate::status::{LaunchStatus, StatusStore};
+
+static BRIDGE_TARGET_CACHE: OnceLock<std::sync::Mutex<HashMap<u16, String>>> = OnceLock::new();
 
 #[cfg(windows)]
 const POST_LAUNCH_COMPUTER_USE_GUARD_SECONDS: &[u64] = &[0, 5, 15, 30, 60, 120, 180, 240, 300];
@@ -871,6 +875,52 @@ async fn handle_helper_connection(
                 )
             } else {
                 overlay_image_response()
+            }
+        } else if path == "/inject/renderer-features.js" && matches!(method, "GET" | "OPTIONS") {
+            if method == "OPTIONS" {
+                (
+                    "200 OK".to_string(),
+                    Vec::new(),
+                    "application/javascript; charset=utf-8".to_string(),
+                    "helper.renderer_features_options",
+                )
+            } else {
+                (
+                    "200 OK".to_string(),
+                    crate::assets::renderer_features_script()
+                        .as_bytes()
+                        .to_vec(),
+                    "application/javascript; charset=utf-8".to_string(),
+                    "helper.renderer_features_ok",
+                )
+            }
+        } else if path == "/inject/user-scripts.js" && matches!(method, "GET" | "OPTIONS") {
+            if method == "OPTIONS" {
+                (
+                    "200 OK".to_string(),
+                    Vec::new(),
+                    "application/javascript; charset=utf-8".to_string(),
+                    "helper.user_scripts_options",
+                )
+            } else {
+                match crate::user_scripts::default_user_script_manager().build_enabled_bundle() {
+                    Ok(bundle) => (
+                        "200 OK".to_string(),
+                        bundle.into_bytes(),
+                        "application/javascript; charset=utf-8".to_string(),
+                        "helper.user_scripts_ok",
+                    ),
+                    Err(error) => (
+                        "500 Internal Server Error".to_string(),
+                        format!(
+                            "throw new Error({});",
+                            serde_json::json!(format!("failed to build user scripts: {error}"))
+                        )
+                        .into_bytes(),
+                        "application/javascript; charset=utf-8".to_string(),
+                        "helper.user_scripts_failed",
+                    ),
+                }
             }
         } else {
             (
@@ -1987,12 +2037,23 @@ pub fn build_packaged_activation(
 
 async fn retry_injection(debug_port: u16, helper_port: u16) -> anyhow::Result<()> {
     let mut last_error = None;
-    for _ in 0..20 {
+    let retry_delays = [
+        std::time::Duration::from_millis(200),
+        std::time::Duration::from_millis(500),
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(3),
+        std::time::Duration::from_secs(5),
+    ];
+    let retry_attempts = retry_delays.len();
+    for (attempt, delay) in retry_delays.into_iter().enumerate() {
         match try_inject(debug_port, helper_port).await {
             Ok(()) => return Ok(()),
             Err(error) => {
                 last_error = Some(error);
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if attempt + 1 < retry_attempts {
+                    tokio::time::sleep(delay).await;
+                }
             }
         }
     }
@@ -2000,6 +2061,21 @@ async fn retry_injection(debug_port: u16, helper_port: u16) -> anyhow::Result<()
 }
 
 pub async fn check_and_reinject_bridge(debug_port: u16, helper_port: u16) -> bool {
+    check_and_reinject_bridge_with(debug_port, helper_port, || {
+        retry_injection(debug_port, helper_port)
+    })
+    .await
+}
+
+pub async fn check_and_reinject_bridge_with<F, Fut>(
+    debug_port: u16,
+    helper_port: u16,
+    reinject: F,
+) -> bool
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
     let healthy = match bridge_health_ok(debug_port).await {
         Ok(healthy) => healthy,
         Err(error) => {
@@ -2025,7 +2101,7 @@ pub async fn check_and_reinject_bridge(debug_port: u16, helper_port: u16) -> boo
             "helper_port": helper_port
         }),
     );
-    match retry_injection(debug_port, helper_port).await {
+    match reinject().await {
         Ok(()) => {
             let _ = crate::diagnostic_log::append_diagnostic_log(
                 "bridge.reinject_ok",
@@ -2051,12 +2127,33 @@ pub async fn check_and_reinject_bridge(debug_port: u16, helper_port: u16) -> boo
 }
 
 async fn bridge_health_ok(debug_port: u16) -> anyhow::Result<bool> {
+    if let Some(websocket_url) = cached_bridge_websocket_url(debug_port) {
+        match bridge_health_ok_for_websocket(&websocket_url).await {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(error) => {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "bridge.cached_health_check_failed",
+                    serde_json::json!({
+                        "debug_port": debug_port,
+                        "message": error.to_string()
+                    }),
+                );
+            }
+        }
+        clear_cached_bridge_websocket_url(debug_port);
+    }
     let targets = crate::cdp::list_targets(debug_port).await?;
     let target = crate::cdp::pick_injectable_codex_page_target(&targets)?;
     let websocket_url = target
         .web_socket_debugger_url
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("selected CDP target has no websocket URL"))?;
+    cache_bridge_websocket_url(debug_port, websocket_url);
+    bridge_health_ok_for_websocket(websocket_url).await
+}
+
+async fn bridge_health_ok_for_websocket(websocket_url: &str) -> anyhow::Result<bool> {
     let result = crate::bridge::evaluate_script_with_await_promise(
         websocket_url,
         crate::bridge::bridge_health_check_script(),
@@ -2064,6 +2161,29 @@ async fn bridge_health_ok(debug_port: u16) -> anyhow::Result<bool> {
     )
     .await?;
     Ok(runtime_evaluate_result_is_true(&result))
+}
+
+fn bridge_target_cache() -> &'static std::sync::Mutex<HashMap<u16, String>> {
+    BRIDGE_TARGET_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn cached_bridge_websocket_url(debug_port: u16) -> Option<String> {
+    bridge_target_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&debug_port).cloned())
+}
+
+fn cache_bridge_websocket_url(debug_port: u16, websocket_url: &str) {
+    if let Ok(mut cache) = bridge_target_cache().lock() {
+        cache.insert(debug_port, websocket_url.to_string());
+    }
+}
+
+fn clear_cached_bridge_websocket_url(debug_port: u16) {
+    if let Ok(mut cache) = bridge_target_cache().lock() {
+        cache.remove(&debug_port);
+    }
 }
 
 fn runtime_evaluate_result_is_true(result: &Value) -> bool {
@@ -2083,11 +2203,11 @@ async fn try_inject(debug_port: u16, helper_port: u16) -> anyhow::Result<()> {
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("selected CDP target has no websocket URL"))?;
     let settings = SettingsStore::default().load().unwrap_or_default();
-    let script = crate::assets::injection_script_with_settings(helper_port, &settings);
-    let ctx = crate::routes::BridgeContext::core(Arc::new(crate::routes::CoreRuntimeService::new(
-        debug_port,
-        StatusStore::default(),
-    )));
+    let script = crate::assets::bootstrap_injection_script_with_settings(helper_port, &settings);
+    let ctx = crate::routes::BridgeContext::core(Arc::new(
+        crate::routes::CoreRuntimeService::new(debug_port, StatusStore::default())
+            .with_websocket_url(websocket_url),
+    ));
     crate::bridge::install_bridge(
         websocket_url,
         crate::bridge::BRIDGE_BINDING_NAME,
@@ -2099,7 +2219,9 @@ async fn try_inject(debug_port: u16, helper_port: u16) -> anyhow::Result<()> {
         }),
         &[script],
     )
-    .await
+    .await?;
+    cache_bridge_websocket_url(debug_port, websocket_url);
+    Ok(())
 }
 
 pub fn build_macos_open_command(

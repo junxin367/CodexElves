@@ -5,11 +5,20 @@ use std::path::Path;
 
 use crate::settings::BackendSettings;
 
-const RENDERER_SCRIPT: &str = include_str!("../../../assets/inject/renderer-inject.js");
-pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20260518-1";
+const RENDERER_BOOTSTRAP_SCRIPT: &str = include_str!("../../../assets/inject/renderer-inject.js");
+const RENDERER_FEATURES_SCRIPT: &str = include_str!("../../../assets/inject/renderer-features.js");
+pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20260628-1";
 
 pub fn renderer_script() -> &'static str {
-    RENDERER_SCRIPT
+    RENDERER_FEATURES_SCRIPT
+}
+
+pub fn renderer_bootstrap_script() -> &'static str {
+    RENDERER_BOOTSTRAP_SCRIPT
+}
+
+pub fn renderer_features_script() -> &'static str {
+    RENDERER_FEATURES_SCRIPT
 }
 
 pub fn injection_script(helper_port: u16) -> String {
@@ -17,6 +26,25 @@ pub fn injection_script(helper_port: u16) -> String {
 }
 
 pub fn injection_script_with_settings(helper_port: u16, settings: &BackendSettings) -> String {
+    injection_script_source_with_settings(helper_port, settings, renderer_features_script())
+}
+
+pub fn bootstrap_injection_script(helper_port: u16) -> String {
+    bootstrap_injection_script_with_settings(helper_port, &BackendSettings::default())
+}
+
+pub fn bootstrap_injection_script_with_settings(
+    helper_port: u16,
+    settings: &BackendSettings,
+) -> String {
+    injection_script_source_with_settings(helper_port, settings, renderer_bootstrap_script())
+}
+
+fn injection_script_source_with_settings(
+    helper_port: u16,
+    settings: &BackendSettings,
+    source: &str,
+) -> String {
     let helper_url = format!("http://127.0.0.1:{helper_port}");
     let image_overlay = image_overlay_config(helper_port, settings);
     let plugin_marketplaces = local_plugin_marketplaces();
@@ -27,7 +55,7 @@ pub fn injection_script_with_settings(helper_port: u16, settings: &BackendSettin
         serde_json::to_string(DIAGNOSTIC_BUILD_ID).expect("build id should serialize"),
         serde_json::to_string(&image_overlay).expect("image overlay config should serialize"),
         serde_json::to_string(&plugin_marketplaces).expect("plugin marketplaces should serialize"),
-        renderer_script(),
+        source,
     )
 }
 

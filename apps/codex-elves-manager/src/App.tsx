@@ -128,12 +128,9 @@ type BackendSettings = {
   codexAppPluginEntryUnlock: boolean;
   codexAppPluginMarketplaceUnlock: boolean;
   codexAppForcePluginInstall: boolean;
-  codexAppModelWhitelistUnlock: boolean;
   codexAppSessionDelete: boolean;
   codexAppMarkdownExport: boolean;
   codexAppProjectMove: boolean;
-  codexAppConversationTimeline: boolean;
-  codexAppThreadIdBadge: boolean;
   codexAppConversationView: boolean;
   codexAppThreadScrollRestore: boolean;
   codexAppUpstreamWorktreeCreate: boolean;
@@ -674,12 +671,9 @@ const defaultSettings: BackendSettings = {
   codexAppPluginEntryUnlock: true,
   codexAppPluginMarketplaceUnlock: true,
   codexAppForcePluginInstall: true,
-  codexAppModelWhitelistUnlock: true,
   codexAppSessionDelete: true,
   codexAppMarkdownExport: true,
   codexAppProjectMove: true,
-  codexAppConversationTimeline: true,
-  codexAppThreadIdBadge: false,
   codexAppConversationView: false,
   codexAppThreadScrollRestore: true,
   codexAppUpstreamWorktreeCreate: true,
@@ -3197,7 +3191,7 @@ function EnhanceScreen({
   return (
     <>
       <Panel>
-        <CardHead title="页面功能增强" detail="会话删除、导出、项目移动、Timeline 和用户脚本等界面能力" />
+        <CardHead title="页面功能增强" detail="会话删除、导出、项目移动和用户脚本等界面能力" />
         <CardContent>
           <label className="switch-row">
             <input
@@ -3207,7 +3201,7 @@ function EnhanceScreen({
             />
             <span>
               <strong>启用 CodexElves 页面增强</strong>
-              <small>关闭后会停用删除、导出、项目移动、Timeline、插件相关和菜单位置增强。</small>
+              <small>关闭后会停用删除、导出、项目移动、插件相关和菜单位置增强。</small>
             </span>
           </label>
           <label className="switch-row">
@@ -3232,13 +3226,10 @@ function EnhanceScreen({
             <FeatureToggle title="插件市场解锁" detail="API Key 模式下扩展插件市场请求，尽量显示完整插件列表；官方/混合模式通常不需要。" checked={form.codexAppPluginMarketplaceUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginMarketplaceUnlock", value)} />
             <FeatureToggle title="强制解锁入口" detail="恢复 1.1.9 的入口解锁方式，强制显示并启用插件入口。" checked={form.codexAppPluginEntryUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginEntryUnlock", value)} />
             <FeatureToggle title="特殊插件强制安装" detail="解除 App unavailable / 应用不可用导致的前端安装禁用。" checked={form.codexAppForcePluginInstall} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppForcePluginInstall", value)} />
-            <FeatureToggle title="模型白名单解锁" detail="从 config.toml 指向的模型目录文件读取模型并补进模型列表。" checked={form.codexAppModelWhitelistUnlock} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppModelWhitelistUnlock", value)} />
             <FeatureToggle title="Fast 按钮" detail="显示服务模式切换按钮。Fast（service_tier=priority）仅 OpenAI 部分模型支持（如 gpt-5.4 / gpt-5.5）；Claude 等其他模型不支持，会按 Standard 发送。" checked={form.codexAppServiceTierControls} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppServiceTierControls", value)} />
             <FeatureToggle title="会话删除" detail="在会话列表悬停显示删除按钮，并支持撤销。" checked={form.codexAppSessionDelete} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppSessionDelete", value)} />
             <FeatureToggle title="Markdown 导出" detail="在会话列表显示导出按钮，导出带时间戳的 Markdown。" checked={form.codexAppMarkdownExport} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppMarkdownExport", value)} />
             <FeatureToggle title="会话项目移动" detail="把会话移动到普通对话或其他本地项目。" checked={form.codexAppProjectMove} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppProjectMove", value)} />
-            <FeatureToggle title="对话 Timeline" detail="在对话右侧显示用户提问时间线，支持摘要和跳转。" checked={form.codexAppConversationTimeline} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppConversationTimeline", value)} />
-            <FeatureToggle title="会话 ID 标识" detail="在侧边栏会话标题前显示短 ID 和 UUIDv7 创建时间，方便定位历史会话。" checked={form.codexAppThreadIdBadge} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppThreadIdBadge", value)} />
             <FeatureToggle title="对话居中宽度" detail="把主对话和输入框限制到固定最大宽度，适合大屏阅读。" checked={form.codexAppConversationView} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppConversationView", value)} />
             <FeatureToggle title="切换对话保留位置" detail="切换 thread 时恢复上一次浏览位置。" checked={form.codexAppThreadScrollRestore} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppThreadScrollRestore", value)} />
             <FeatureToggle title="Upstream worktree" detail="从最新 upstream 分支创建 Git worktree。" checked={form.codexAppUpstreamWorktreeCreate} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppUpstreamWorktreeCreate", value)} />
@@ -6164,7 +6155,7 @@ function ModeSelector({ launchMode, actions }: { launchMode: LaunchMode; actions
         type="button"
       >
         <strong>兼容增强</strong>
-        <span>适合官方登录或官方混入 API Key；保留会话删除、导出、项目移动、Timeline 和用户脚本，关闭插件入口相关增强。</span>
+        <span>适合官方登录或官方混入 API Key；保留会话删除、导出、项目移动和用户脚本，关闭插件入口相关增强。</span>
       </button>
       <button
         className={`mode-option ${launchMode === "patch" ? "active" : ""}`}

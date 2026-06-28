@@ -35,6 +35,7 @@ async fn bridge_routes_cover_all_current_paths() {
         ("/manager/open", json!({})),
         ("/backend/status", json!({})),
         ("/backend/repair", json!({})),
+        ("/runtime/install-renderer-features", json!({})),
         ("/codex-model-catalog", json!({})),
         ("/codex-config-model", json!({})),
         ("/upstream-worktree/status", json!({})),
@@ -95,7 +96,8 @@ async fn settings_get_includes_runtime_codex_app_version() {
     assert_eq!(result["codexAppPluginEntryUnlock"], json!(true));
     assert_eq!(result["codexAppPluginMarketplaceUnlock"], json!(true));
     assert_eq!(result["codexAppForcePluginInstall"], json!(true));
-    assert_eq!(result["codexAppThreadIdBadge"], json!(false));
+    assert!(result.get("codexAppConversationTimeline").is_none());
+    assert!(result.get("codexAppThreadIdBadge").is_none());
 }
 
 #[tokio::test]
@@ -861,12 +863,9 @@ impl BridgeSettingsService for FakeSettings {
             "codexAppPluginEntryUnlock",
             "codexAppPluginMarketplaceUnlock",
             "codexAppForcePluginInstall",
-            "codexAppModelWhitelistUnlock",
             "codexAppSessionDelete",
             "codexAppMarkdownExport",
             "codexAppProjectMove",
-            "codexAppConversationTimeline",
-            "codexAppThreadIdBadge",
             "codexAppConversationView",
             "codexAppThreadScrollRestore",
             "codexAppUpstreamWorktreeCreate",
@@ -965,6 +964,10 @@ impl BridgeRuntimeService for FakeRuntime {
         Ok(
             json!({"status": "ok", "message": "后端已修复", "version": codex_elves_core::version::VERSION}),
         )
+    }
+
+    async fn install_renderer_features(&self) -> anyhow::Result<Value> {
+        Ok(json!({"status": "ok", "build": codex_elves_core::assets::DIAGNOSTIC_BUILD_ID}))
     }
 
     async fn codex_model_catalog(&self) -> anyhow::Result<Value> {

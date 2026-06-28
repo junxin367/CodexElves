@@ -457,6 +457,15 @@ async fn default_helper_accepts_diagnostic_log_events_over_http() {
     codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
 }
 
+#[test]
+fn helper_exposes_user_script_bundle_for_bootstrap_fallback() {
+    let source = include_str!("../src/launcher.rs");
+
+    assert!(source.contains("\"/inject/user-scripts.js\""));
+    assert!(source.contains("default_user_script_manager().build_enabled_bundle()"));
+    assert!(source.contains("helper.user_scripts_ok"));
+}
+
 #[tokio::test]
 async fn default_helper_streams_translated_tool_call_to_completion() {
     let _lock = launcher_settings_path_test_lock().lock().unwrap();

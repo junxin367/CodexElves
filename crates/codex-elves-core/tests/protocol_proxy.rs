@@ -568,7 +568,7 @@ fn anthropic_call_prefixed_textual_invoke_response_converts_to_tool_call() {
 
 #[test]
 fn anthropic_textual_invoke_exec_command_allows_invoke_text_inside_parameter() {
-    let command = r#"cd E:\code\junes\github\CodexPlusPlus; rg -n "invoke|textual_invoke|call_prefixed|<invoke|antml_tool_call|parse_textual|extract_tool" crates/codex-elves-core/src/protocol_proxy.rs | Select-Object -First 40"#;
+    let command = r#"cd E:\code\junes\github\CodexElves; rg -n "invoke|textual_invoke|call_prefixed|<invoke|antml_tool_call|parse_textual|extract_tool" crates/codex-elves-core/src/protocol_proxy.rs | Select-Object -First 40"#;
     let converted = anthropic_message_to_response_with_request(
         json!({
             "id": "msg_textual_exec_with_invoke_text",
@@ -696,7 +696,7 @@ fn anthropic_textual_invoke_with_only_descriptive_invoke_stays_message_text() {
 
 #[test]
 fn anthropic_textual_invoke_ignores_descriptive_invoke_text_before_real_call() {
-    let command = r#"cd E:\code\junes\github\CodexPlusPlus; rg -n "invoke|textual_invoke|call_prefixed|<invoke|antml_tool_call|parse_textual|extract_tool" crates/codex-elves-core/src/protocol_proxy.rs | Select-Object -First 40"#;
+    let command = r#"cd E:\code\junes\github\CodexElves; rg -n "invoke|textual_invoke|call_prefixed|<invoke|antml_tool_call|parse_textual|extract_tool" crates/codex-elves-core/src/protocol_proxy.rs | Select-Object -First 40"#;
     let converted = anthropic_message_to_response_with_request(
         json!({
             "id": "msg_descriptive_invoke_then_real_call",
@@ -3553,7 +3553,7 @@ event: content_block_delta
 data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"先看现有逻辑。\n\ncall\n<invoke name=\"exec_command\">\n"}}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<parameter name=\"cmd\">cd E:\\code\\junes\\github\\CodexPlusPlus; rg -n \"invoke|textual_invoke|call_prefixed|<invoke|antml_tool_call|parse_textual|extract_tool\" crates/codex-elves-core/src/protocol_proxy.rs | Select-Object -First 40</parameter>\n</invoke>"}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<parameter name=\"cmd\">cd E:\\code\\junes\\github\\CodexElves; rg -n \"invoke|textual_invoke|call_prefixed|<invoke|antml_tool_call|parse_textual|extract_tool\" crates/codex-elves-core/src/protocol_proxy.rs | Select-Object -First 40</parameter>\n</invoke>"}}
 
 event: content_block_stop
 data: {"type":"content_block_stop","index":0}
@@ -3596,7 +3596,7 @@ data: {"type":"message_stop"}
         arguments_done.data["arguments"]
             .as_str()
             .unwrap()
-            .contains("\"cmd\":\"cd E:\\\\code\\\\junes\\\\github\\\\CodexPlusPlus; rg -n")
+            .contains("\"cmd\":\"cd E:\\\\code\\\\junes\\\\github\\\\CodexElves; rg -n")
     );
     let completed = events
         .iter()

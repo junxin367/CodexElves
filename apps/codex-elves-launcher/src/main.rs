@@ -18,6 +18,8 @@ struct LauncherHooks {
     core: Arc<DefaultLaunchHooks>,
     data: Arc<LauncherDataService>,
     runtime: Arc<LauncherRuntimeService>,
+    app_dir: Arc<Mutex<Option<PathBuf>>>,
+    bridge_watchdog: Arc<tokio::sync::Mutex<Option<LauncherBridgeWatchdogRuntime>>>,
 }
 
 impl Default for LauncherHooks {
@@ -29,8 +31,15 @@ impl Default for LauncherHooks {
                 9229,
                 default_user_script_manager(),
             )),
+            app_dir: Arc::new(Mutex::new(None)),
+            bridge_watchdog: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
+}
+
+struct LauncherBridgeWatchdogRuntime {
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 #[tokio::main]
@@ -311,6 +320,7 @@ impl LaunchHooks for LauncherHooks {
         app_dir: &Path,
     ) -> anyhow::Result<Option<BridgeContext>> {
         self.runtime.set_debug_port(debug_port);
+        *self.app_dir.lock().unwrap() = Some(app_dir.to_path_buf());
         Ok(Some(BridgeContext::core_with_data_and_app_dir(
             self.runtime.clone(),
             self.data.clone(),
@@ -329,6 +339,60 @@ impl LaunchHooks for LauncherHooks {
 
     async fn inject(&self, debug_port: u16, helper_port: u16) -> anyhow::Result<()> {
         self.core.inject(debug_port, helper_port).await
+    }
+
+    async fn start_bridge_watchdog(&self, debug_port: u16, helper_port: u16) -> anyhow::Result<()> {
+        let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let runtime = self.runtime.clone();
+        let data = self.data.clone();
+        let app_dir = self.app_dir.clone();
+        let task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    _ = interval.tick() => {
+                        let runtime = runtime.clone();
+                        let data = data.clone();
+                        let app_dir = app_dir.clone();
+                        let _ = codex_elves_core::launcher::check_and_reinject_bridge_with(
+                            debug_port,
+                            helper_port,
+                            move || {
+                                let runtime = runtime.clone();
+                                let data = data.clone();
+                                let app_dir = app_dir.clone();
+                                async move {
+                                    let app_dir = app_dir
+                                        .lock()
+                                        .unwrap()
+                                        .clone()
+                                        .ok_or_else(|| anyhow::anyhow!("launcher app dir is not configured"))?;
+                                    runtime.set_debug_port(debug_port);
+                                    let ctx = BridgeContext::core_with_data_and_app_dir(
+                                        runtime.clone(),
+                                        data.clone(),
+                                        app_dir,
+                                    );
+                                    inject_with_context(debug_port, helper_port, ctx, runtime).await
+                                }
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
+        });
+        if let Some(runtime) = self
+            .bridge_watchdog
+            .lock()
+            .await
+            .replace(LauncherBridgeWatchdogRuntime { shutdown, task })
+        {
+            let _ = runtime.shutdown.send(());
+            let _ = runtime.task.await;
+        }
+        Ok(())
     }
 
     async fn start_computer_use_guard_watchdog(
@@ -565,6 +629,28 @@ impl BridgeRuntimeService for LauncherRuntimeService {
         self.backend_status().await
     }
 
+    async fn install_renderer_features(&self) -> anyhow::Result<Value> {
+        let websocket_url = self
+            .websocket_url
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No renderer target configured"))?;
+        codex_elves_core::bridge::evaluate_script(
+            &websocket_url,
+            codex_elves_core::assets::renderer_features_script(),
+        )
+        .await?;
+        let user_bundle = self.user_scripts.build_enabled_bundle().unwrap_or_default();
+        if !user_bundle.trim().is_empty() {
+            codex_elves_core::bridge::evaluate_script(&websocket_url, &user_bundle).await?;
+        }
+        Ok(json!({
+            "status": "ok",
+            "build": codex_elves_core::assets::DIAGNOSTIC_BUILD_ID
+        }))
+    }
+
     async fn codex_model_catalog(&self) -> anyhow::Result<Value> {
         Ok(codex_elves_core::model_catalog::read_codex_model_catalog().await)
     }
@@ -627,16 +713,8 @@ async fn try_inject_with_context(
     let settings = codex_elves_core::settings::SettingsStore::default()
         .load()
         .unwrap_or_default();
-    let script = codex_elves_core::assets::injection_script_with_settings(helper_port, &settings);
-    let user_bundle = runtime
-        .user_scripts
-        .build_enabled_bundle()
-        .unwrap_or_default();
-    let new_document_scripts = if user_bundle.is_empty() {
-        vec![script]
-    } else {
-        vec![script, user_bundle]
-    };
+    let script =
+        codex_elves_core::assets::bootstrap_injection_script_with_settings(helper_port, &settings);
     codex_elves_core::bridge::install_bridge(
         websocket_url,
         codex_elves_core::bridge::BRIDGE_BINDING_NAME,
@@ -646,7 +724,7 @@ async fn try_inject_with_context(
                 Ok(codex_elves_core::routes::handle_bridge_request(ctx, &path, payload).await)
             })
         }),
-        &new_document_scripts,
+        &[script],
     )
     .await
 }
@@ -699,28 +777,7 @@ fn manager_exe_path() -> PathBuf {
 }
 
 fn default_user_script_manager() -> UserScriptManager {
-    let config_dir = default_user_scripts_config_dir();
-    UserScriptManager::new(
-        builtin_user_scripts_dir(),
-        config_dir.join("user_scripts"),
-        config_dir.join("user_scripts.json"),
-    )
-}
-
-fn default_user_scripts_config_dir() -> PathBuf {
-    if cfg!(windows) {
-        if let Some(roaming) = std::env::var_os("APPDATA") {
-            return PathBuf::from(roaming).join("CodexElves");
-        }
-        if let Some(home) = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()) {
-            return home.join("AppData").join("Roaming").join("CodexElves");
-        }
-    }
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".config")))
-        .unwrap_or_else(|| PathBuf::from(".config"))
-        .join("CodexElves")
+    codex_elves_core::user_scripts::default_user_script_manager()
 }
 
 #[cfg(test)]
@@ -772,6 +829,22 @@ mod tests {
     }
 
     #[test]
+    fn launcher_hooks_use_context_preserving_bridge_watchdog() {
+        let source = include_str!("main.rs");
+
+        assert!(
+            source.contains(
+                "async fn start_bridge_watchdog(&self, debug_port: u16, helper_port: u16)"
+            )
+        );
+        assert!(source.contains("check_and_reinject_bridge_with"));
+        assert!(source.contains("BridgeContext::core_with_data_and_app_dir"));
+        assert!(
+            source.contains("inject_with_context(debug_port, helper_port, ctx, runtime).await")
+        );
+    }
+
+    #[test]
     fn manager_update_prompt_uses_sidecar_manager_binary_name() {
         let path = manager_exe_path();
 
@@ -781,12 +854,4 @@ mod tests {
                 .is_some_and(|name| name.contains(codex_elves_core::install::MANAGER_BINARY))
         );
     }
-}
-
-fn builtin_user_scripts_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .map(|path| path.join("user_scripts"))
-        .unwrap_or_else(|| PathBuf::from("user_scripts"))
 }

@@ -283,6 +283,39 @@ impl UserScriptManager {
     }
 }
 
+pub fn default_user_script_manager() -> UserScriptManager {
+    let config_dir = default_user_scripts_config_dir();
+    UserScriptManager::new(
+        default_builtin_user_scripts_dir(),
+        config_dir.join("user_scripts"),
+        config_dir.join("user_scripts.json"),
+    )
+}
+
+pub fn default_builtin_user_scripts_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+        .map(|path| path.join("user_scripts"))
+        .unwrap_or_else(|| PathBuf::from("user_scripts"))
+}
+
+pub fn default_user_scripts_config_dir() -> PathBuf {
+    if cfg!(windows) {
+        if let Some(roaming) = std::env::var_os("APPDATA") {
+            return PathBuf::from(roaming).join("CodexElves");
+        }
+        if let Some(home) = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()) {
+            return home.join("AppData").join("Roaming").join("CodexElves");
+        }
+    }
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".config")))
+        .unwrap_or_else(|| PathBuf::from(".config"))
+        .join("CodexElves")
+}
+
 #[derive(Debug)]
 struct UserScriptFile {
     key: String,
