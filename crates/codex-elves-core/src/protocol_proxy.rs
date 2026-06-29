@@ -7228,8 +7228,9 @@ fn apply_chat_reasoning_options(result: &mut Value, body: &Value, model: &str) {
         }
         ChatReasoningStyle::DeepSeek
         | ChatReasoningStyle::LowHigh
+        | ChatReasoningStyle::Thinking
         | ChatReasoningStyle::Default
-            if supports_reasoning_effort(model)
+            if supports_chat_reasoning_effort(model)
                 || model.to_ascii_lowercase().contains("claude") =>
         {
             // Claude 模型经 Chat Completions 协议转发时也透传 reasoning_effort，
@@ -7241,7 +7242,7 @@ fn apply_chat_reasoning_options(result: &mut Value, body: &Value, model: &str) {
 }
 
 fn apply_anthropic_reasoning_options(result: &mut Value, body: &Value, model: &str) {
-    if !model.to_ascii_lowercase().contains("claude") {
+    if !supports_anthropic_reasoning_effort(model) {
         return;
     }
     let reasoning_enabled = reasoning_requested(body).unwrap_or(true);
@@ -7370,7 +7371,7 @@ pub fn supported_reasoning_efforts_for_model(
     protocol: UpstreamResponseProtocol,
 ) -> Vec<&'static str> {
     let model = model.trim().to_ascii_lowercase();
-    if model.contains("claude") || protocol == UpstreamResponseProtocol::Anthropic {
+    if model.contains("claude") {
         if model.contains("opus-4-7") || model.contains("opus-4-8") || model.contains("fable-5") {
             return levels(&["low", "medium", "high", "xhigh", "max"]);
         }
@@ -7554,6 +7555,10 @@ fn highest_anthropic_effort_in_message(message: &str) -> Option<&'static str> {
 }
 
 fn supports_reasoning_effort(model: &str) -> bool {
+    supports_chat_reasoning_effort(model)
+}
+
+fn supports_chat_reasoning_effort(model: &str) -> bool {
     is_openai_o_series(model)
         || model
             .to_lowercase()
@@ -7561,7 +7566,17 @@ fn supports_reasoning_effort(model: &str) -> bool {
             .and_then(|rest| rest.chars().next())
             .is_some_and(|ch| ch.is_ascii_digit() && ch >= '5')
         || infer_chat_reasoning_style(model) == ChatReasoningStyle::DeepSeek
+        || is_glm_reasoning_model(model)
         || infer_chat_reasoning_style(model) == ChatReasoningStyle::LowHigh
+}
+
+fn supports_anthropic_reasoning_effort(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("claude") || supports_reasoning_effort(model)
+}
+
+fn is_glm_reasoning_model(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model.contains("glm") || model.contains("zhipu") || model.contains("z.ai")
 }
 
 fn is_openai_o_series(model: &str) -> bool {

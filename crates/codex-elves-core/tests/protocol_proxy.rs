@@ -1140,6 +1140,40 @@ fn responses_request_applies_ccswitch_reasoning_dialects() {
 }
 
 #[test]
+fn glm_chat_reasoning_keeps_enabled_flag_and_effort() {
+    let converted = responses_to_chat_completions(json!({
+        "model": "glm-5.2",
+        "reasoning": { "effort": "max" },
+        "input": "hi"
+    }))
+    .unwrap();
+
+    assert_eq!(converted["thinking"], json!({ "type": "enabled" }));
+    assert_eq!(converted["reasoning_effort"], "max");
+}
+
+#[test]
+fn non_claude_anthropic_compatible_reasoning_keeps_effort_by_model_capability() {
+    let glm = responses_to_anthropic_messages(json!({
+        "model": "glm-5.2",
+        "reasoning": { "effort": "xhigh" },
+        "input": "hi"
+    }))
+    .unwrap();
+    assert_eq!(glm["thinking"], json!({ "type": "adaptive" }));
+    assert_eq!(glm["output_config"], json!({ "effort": "high" }));
+
+    let deepseek = responses_to_anthropic_messages(json!({
+        "model": "deepseek-reasoner",
+        "model_reasoning_effort": "max",
+        "input": "hi"
+    }))
+    .unwrap();
+    assert_eq!(deepseek["thinking"], json!({ "type": "adaptive" }));
+    assert_eq!(deepseek["output_config"], json!({ "effort": "max" }));
+}
+
+#[test]
 fn deepseek_reasoning_efforts_match_official_levels() {
     assert_eq!(
         supported_reasoning_efforts_for_model(
