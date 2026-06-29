@@ -867,7 +867,6 @@ impl BridgeSettingsService for FakeSettings {
             "codexAppMarkdownExport",
             "codexAppProjectMove",
             "codexAppConversationView",
-            "codexAppThreadScrollRestore",
             "codexAppUpstreamWorktreeCreate",
             "codexAppNativeMenuPlacement",
             "codexAppServiceTierControls",

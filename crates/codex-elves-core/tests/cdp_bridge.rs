@@ -374,6 +374,10 @@ fn injection_script_exposes_conversation_view_width_control() {
     assert!(script.contains("data-codex-elves-conversation-view-width"));
     assert!(script.contains("conversationViewWidth()"));
     assert!(script.contains("normalizeConversationViewWidth"));
+    assert!(script.contains("installConversationViewRouteHooks"));
+    assert!(script.contains("scheduleConversationViewRouteRefresh"));
+    assert!(script.contains("scheduleCodexRouteFeatureRefresh"));
+    assert!(script.contains("installCodexRouteFeatureRefreshEvents"));
 }
 
 #[test]
@@ -457,8 +461,10 @@ fn injection_script_unlocks_custom_model_catalog() {
     assert!(script.contains("appServerModelRequestMethod"));
     assert!(script.contains("send-cli-request-for-host"));
     assert!(script.contains("Response.prototype.json"));
+    assert!(script.contains("looksLikeModelPayload(payload)"));
     assert!(script.contains("scheduleCodexModelWhitelistRefresh"));
     assert!(script.contains("runCodexModelWhitelistRefreshPass"));
+    assert!(script.contains("headerDirty || conversationDirty || shouldScheduleReactModelStatePatch"));
     assert!(script.contains("model_whitelist_refresh_scheduled"));
     assert!(script.contains("available_models"));
     assert!(!script.contains("modelWhitelistUnlock"));
@@ -836,16 +842,6 @@ process.stdout.write(JSON.stringify({{
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("harness stdout should be JSON")
-}
-
-#[test]
-fn injection_script_restores_thread_scroll_positions() {
-    let script = assets::injection_script(45221);
-
-    assert!(script.contains("threadScrollRestore"));
-    assert!(script.contains("codexThreadScroll"));
-    assert!(script.contains("installThreadScrollRouteHooks"));
-    assert!(script.contains("scheduleThreadScrollSync"));
 }
 
 #[test]

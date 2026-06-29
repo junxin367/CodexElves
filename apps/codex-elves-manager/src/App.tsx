@@ -132,7 +132,6 @@ type BackendSettings = {
   codexAppMarkdownExport: boolean;
   codexAppProjectMove: boolean;
   codexAppConversationView: boolean;
-  codexAppThreadScrollRestore: boolean;
   codexAppUpstreamWorktreeCreate: boolean;
   codexAppNativeMenuPlacement: boolean;
   codexAppServiceTierControls: boolean;
@@ -675,7 +674,6 @@ const defaultSettings: BackendSettings = {
   codexAppMarkdownExport: true,
   codexAppProjectMove: true,
   codexAppConversationView: false,
-  codexAppThreadScrollRestore: true,
   codexAppUpstreamWorktreeCreate: true,
   codexAppNativeMenuPlacement: true,
   codexAppServiceTierControls: false,
@@ -2977,6 +2975,7 @@ function RelayScreen({
   const [detailProfileId, setDetailProfileId] = useState<string | null>(() => (isBrowserPreview() ? normalized.activeRelayId : null));
   const [newProfileDraft, setNewProfileDraft] = useState<RelayProfile | null>(null);
   const [thirdPartyImportOpen, setThirdPartyImportOpen] = useState(false);
+  const browserPreviewDetailInitializedRef = useRef(isBrowserPreview());
   const detailProfile = newProfileDraft || (detailProfileId
     ? normalized.relayProfiles.find((profile) => profile.id === detailProfileId) || null
     : null);
@@ -3009,7 +3008,8 @@ function RelayScreen({
     }
   }, [detailProfileId, newProfileDraft, normalized.relayProfiles]);
   useEffect(() => {
-    if (isBrowserPreview() && !newProfileDraft && !detailProfileId) {
+    if (isBrowserPreview() && !browserPreviewDetailInitializedRef.current && !newProfileDraft && !detailProfileId) {
+      browserPreviewDetailInitializedRef.current = true;
       setDetailProfileId(normalized.activeRelayId);
     }
   }, [detailProfileId, newProfileDraft, normalized.activeRelayId]);
@@ -3047,23 +3047,34 @@ function RelayScreen({
   return (
     <>
       <Panel>
-        <CardHead title="供应商列表" detail={`${normalized.relayProfiles.length} 个供应商配置；可拖动排序，点编辑进入详情`} />
+        <CardHead
+          title="供应商列表"
+          detail={`${normalized.relayProfiles.length} 个供应商配置；可拖动排序，点编辑进入详情`}
+          actions={(
+            <label
+              className="relay-header-switch"
+              title="开启后允许手动切换供应商，并在启动 Codex 时按当前供应商同步 config.toml / auth.json。关闭后只保存列表配置，不主动切换或写入；不会清理已经写入的 Codex 配置，本地代理可能仍按现有配置运行。"
+            >
+              <input
+                checked={normalized.relayProfilesEnabled}
+                onChange={(event) => {
+                  const next = { ...normalized, relayProfilesEnabled: event.currentTarget.checked };
+                  void saveRelaySettings(next);
+                }}
+                type="checkbox"
+              />
+              <span>允许切换写入</span>
+              <span className="relay-header-switch-help" aria-label="说明" tabIndex={0}>
+                <Info className="h-3.5 w-3.5" />
+                <span className="relay-header-switch-tooltip" role="tooltip">
+                  开启后允许手动切换供应商，并在启动 Codex 时按当前供应商同步 config.toml / auth.json。关闭后只保存列表配置，不主动切换或写入；不会清理已经写入的 Codex 配置，本地代理可能仍按现有配置运行。
+                </span>
+              </span>
+            </label>
+          )}
+        />
         <CardContent>
           <EnvConflictNotice envConflicts={envConflicts} actions={actions} />
-          <label className="switch-row relay-master-switch">
-            <input
-              checked={normalized.relayProfilesEnabled}
-              onChange={(event) => {
-                const next = { ...normalized, relayProfilesEnabled: event.currentTarget.checked };
-                void saveRelaySettings(next);
-              }}
-              type="checkbox"
-            />
-            <span>
-              <strong>启用供应商配置切换</strong>
-              <small>关闭后本工具不会在手动切换时写入 Codex 的 config.toml / auth.json；启动 Codex 时始终不会自动改这些文件。</small>
-            </span>
-          </label>
           <div className="relay-add-row">
             <Button
               variant="secondary"
@@ -3231,7 +3242,6 @@ function EnhanceScreen({
             <FeatureToggle title="Markdown 导出" detail="在会话列表显示导出按钮，导出带时间戳的 Markdown。" checked={form.codexAppMarkdownExport} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppMarkdownExport", value)} />
             <FeatureToggle title="会话项目移动" detail="把会话移动到普通对话或其他本地项目。" checked={form.codexAppProjectMove} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppProjectMove", value)} />
             <FeatureToggle title="对话居中宽度" detail="把主对话和输入框限制到固定最大宽度，适合大屏阅读。" checked={form.codexAppConversationView} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppConversationView", value)} />
-            <FeatureToggle title="切换对话保留位置" detail="切换 thread 时恢复上一次浏览位置。" checked={form.codexAppThreadScrollRestore} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppThreadScrollRestore", value)} />
             <FeatureToggle title="Upstream worktree" detail="从最新 upstream 分支创建 Git worktree。" checked={form.codexAppUpstreamWorktreeCreate} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppUpstreamWorktreeCreate", value)} />
             <FeatureToggle title="原生菜单栏位置" detail="把 CodexElves 菜单插入 Codex 顶部原生菜单栏。" checked={form.codexAppNativeMenuPlacement} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppNativeMenuPlacement", value)} />
           </div>

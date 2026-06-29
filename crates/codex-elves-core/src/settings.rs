@@ -268,8 +268,6 @@ pub struct BackendSettings {
     pub codex_app_project_move: bool,
     #[serde(rename = "codexAppConversationView", default)]
     pub codex_app_conversation_view: bool,
-    #[serde(rename = "codexAppThreadScrollRestore", default = "default_true")]
-    pub codex_app_thread_scroll_restore: bool,
     #[serde(rename = "codexAppUpstreamWorktreeCreate", default = "default_true")]
     pub codex_app_upstream_worktree_create: bool,
     #[serde(rename = "codexAppNativeMenuPlacement", default = "default_true")]
@@ -341,7 +339,6 @@ impl Default for BackendSettings {
             codex_app_markdown_export: true,
             codex_app_project_move: true,
             codex_app_conversation_view: false,
-            codex_app_thread_scroll_restore: true,
             codex_app_upstream_worktree_create: true,
             codex_app_native_menu_placement: true,
             codex_app_service_tier_controls: false,
@@ -685,7 +682,6 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
     merge_bool_setting(target, source, "codexAppMarkdownExport");
     merge_bool_setting(target, source, "codexAppProjectMove");
     merge_bool_setting(target, source, "codexAppConversationView");
-    merge_bool_setting(target, source, "codexAppThreadScrollRestore");
     merge_bool_setting(target, source, "codexAppUpstreamWorktreeCreate");
     merge_bool_setting(target, source, "codexAppNativeMenuPlacement");
     merge_bool_setting(target, source, "codexAppServiceTierControls");
