@@ -6981,11 +6981,12 @@ function formatReasoningTokens(value?: number | null) {
 }
 
 function formatProtocolRoute(entry: Pick<LocalProxyLogEntry, "responseProtocol">) {
-  return `协议 ${entry.responseProtocol || "-"} · ${formatTransportMode(entry)}`;
+  return `协议 ${entry.responseProtocol || "未记录"} · ${formatTransportMode(entry)}`;
 }
 
 function formatTransportMode(entry: Pick<LocalProxyLogEntry, "responseProtocol">) {
-  return entry.responseProtocol && entry.responseProtocol !== "responses" ? "转换" : "直连";
+  if (!entry.responseProtocol) return "未记录";
+  return entry.responseProtocol !== "responses" ? "转换" : "直连";
 }
 
 function statusClass(status: string) {

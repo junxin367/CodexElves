@@ -1153,6 +1153,8 @@ async fn handle_protocol_proxy_connection(
         {
             Ok(upstream) => upstream,
             Err(error) => {
+                let failure_context = crate::protocol_proxy::upstream_failure_context(&error)
+                    .cloned();
                 let error_message = error.to_string();
                 let body = serde_json::to_vec(&serde_json::json!({
                     "status": "failed",
@@ -1172,18 +1174,30 @@ async fn handle_protocol_proxy_connection(
                     "502 Bad Gateway",
                     remote_addr_text.clone(),
                 );
+                let response_protocol = failure_context
+                    .as_ref()
+                    .and_then(|context| context.response_protocol.map(response_protocol_label));
                 append_local_proxy_record(
-                    format!("local-{}", uuid::Uuid::new_v4()),
+                    failure_context
+                        .as_ref()
+                        .map(|context| context.diagnostic_id.clone())
+                        .unwrap_or_else(|| format!("local-{}", uuid::Uuid::new_v4())),
                     timestamp_ms,
                     started_at,
                     method,
                     path,
                     remote_addr_text,
                     &request_metadata,
-                    None,
-                    None,
-                    None,
-                    None,
+                    failure_context
+                        .as_ref()
+                        .and_then(|context| context.relay_id.clone()),
+                    failure_context
+                        .as_ref()
+                        .and_then(|context| context.relay_name.clone()),
+                    failure_context
+                        .as_ref()
+                        .and_then(|context| context.endpoint.clone()),
+                    response_protocol,
                     502,
                     false,
                     request_body,

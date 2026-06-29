@@ -6796,6 +6796,33 @@
     return String(element?.textContent || "").replace(/\s+/g, " ").trim();
   }
 
+  function codexServiceTierComposerInputs(root) {
+    return Array.from(root?.querySelectorAll?.('.ProseMirror, textarea, [contenteditable="true"]') || [])
+      .filter(codexServiceTierBadgeVisibleElement);
+  }
+
+  function codexServiceTierRectHorizontalOverlap(left, right) {
+    return Math.max(0, Math.min(left.right, right.right) - Math.max(left.left, right.left));
+  }
+
+  function codexServiceTierFooterHasNearbyComposerInput(footer) {
+    if (!(footer instanceof HTMLElement)) return false;
+    const footerRect = footer.getBoundingClientRect();
+    for (let node = footer.parentElement, depth = 0; node instanceof HTMLElement && depth < 7; depth += 1, node = node.parentElement) {
+      const inputs = codexServiceTierComposerInputs(node);
+      if (!inputs.length) continue;
+      if (!inputs.some((input) => {
+        const inputRect = input.getBoundingClientRect();
+        const overlap = codexServiceTierRectHorizontalOverlap(inputRect, footerRect);
+        return overlap >= Math.min(160, footerRect.width * 0.45)
+          && inputRect.bottom <= footerRect.bottom + 12
+          && inputRect.bottom >= footerRect.top - 220;
+      })) continue;
+      return true;
+    }
+    return false;
+  }
+
   function codexServiceTierKnownProviderNames() {
     return uniqueValues([
       codexModelCatalog.provider_name,
@@ -6850,12 +6877,13 @@
 
   function codexServiceTierLooksLikeComposerFooter(footer) {
     if (!(footer instanceof HTMLElement)) return false;
-    if (footer.matches?.(".composer-footer")) return true;
+    if (footer.matches?.(".composer-footer")) return codexServiceTierFooterHasNearbyComposerInput(footer);
     const className = String(footer.className || "");
     if (!className.includes("_footer_")) return false;
     if (!className.includes("items-center")) return false;
     const rect = footer.getBoundingClientRect();
     if (rect.width < 220 || rect.height > 90) return false;
+    if (!codexServiceTierFooterHasNearbyComposerInput(footer)) return false;
     const buttons = Array.from(footer.querySelectorAll("button, [role='button']")).filter(codexServiceTierBadgeVisibleElement);
     if (buttons.length < 2) return false;
     const text = codexServiceTierBadgeText(footer);
@@ -6962,6 +6990,12 @@
     return null;
   }
 
+  function codexServiceTierPlacementFooter(placement) {
+    const parent = placement?.parent;
+    const footer = parent?.closest?.('.composer-footer, [class*="_footer_"]');
+    return codexServiceTierLooksLikeComposerFooter(footer) ? footer : null;
+  }
+
   function wireCodexServiceTierBadge(badge) {
     if (!badge || badge.dataset.codexServiceTierBadgeWired === codexServiceTierBadgeVersion) return;
     badge.dataset.codexServiceTierBadgeWired = codexServiceTierBadgeVersion;
@@ -6990,7 +7024,7 @@
     const composer = codexServiceTierFindComposerEl();
     const placement = composer ? codexServiceTierBadgePlacement(composer) : null;
     const existingBadges = Array.from(document.querySelectorAll(`[data-codex-service-tier-badge="true"]`));
-    if (!composer || !placement?.parent) {
+    if (!composer || !placement?.parent || !codexServiceTierPlacementFooter(placement)) {
       existingBadges.forEach((badge) => badge.remove());
       return;
     }
