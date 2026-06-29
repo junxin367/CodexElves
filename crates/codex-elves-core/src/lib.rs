@@ -13,6 +13,7 @@ pub mod env_conflicts;
 pub mod http_client;
 pub mod install;
 pub mod launcher;
+mod log_limits;
 pub mod model_catalog;
 pub mod models;
 pub mod paths;

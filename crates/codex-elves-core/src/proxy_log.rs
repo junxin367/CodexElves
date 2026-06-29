@@ -9,6 +9,8 @@ use serde_json::Value;
 
 pub const MAX_CAPTURED_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 pub const STARTUP_RETAINED_RECORDS: usize = 10;
+const LARGE_LOG_RECORD_SAFETY_BYTES: usize = 1024;
+const MAX_RETAINED_REQUEST_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -190,6 +192,10 @@ pub fn extract_reasoning_tokens_from_response_body(body: &[u8]) -> Option<u64> {
 
 pub fn append_record(record: &ProxyRequestRecord) -> std::io::Result<()> {
     let path = default_log_path();
+    append_record_at_path(&path, record)
+}
+
+fn append_record_at_path(path: &PathBuf, record: &ProxyRequestRecord) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -197,10 +203,10 @@ pub fn append_record(record: &ProxyRequestRecord) -> std::io::Result<()> {
         .create(true)
         .read(true)
         .write(true)
-        .append(true)
-        .open(&path)?;
+        .open(path)?;
     file.lock_exclusive()?;
-    let line = serde_json::to_string(record)?;
+    let line = serialize_record_for_log(record)?;
+    crate::log_limits::clear_if_append_would_exceed(&mut file, line.len() as u64 + 1)?;
     writeln!(file, "{line}")?;
     file.unlock()?;
     Ok(())
@@ -235,10 +241,23 @@ pub fn find_record(id: &str) -> std::io::Result<Option<ProxyRequestRecord>> {
 
 pub fn clear_records() -> std::io::Result<()> {
     let path = default_log_path();
+    clear_records_at_path(&path)
+}
+
+fn clear_records_at_path(path: &PathBuf) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, "")
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    file.lock_exclusive()?;
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.unlock()?;
+    Ok(())
 }
 
 pub fn retain_recent_records(limit: usize) -> std::io::Result<()> {
@@ -310,10 +329,72 @@ fn retain_recent_records_in_file(file: &mut fs::File, limit: usize) -> std::io::
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
     for line in &lines[lines.len() - limit..] {
+        crate::log_limits::clear_if_append_would_exceed(file, line.len() as u64 + 1)?;
         writeln!(file, "{line}")?;
     }
     file.flush()?;
     Ok(())
+}
+
+fn serialize_record_for_log(record: &ProxyRequestRecord) -> serde_json::Result<String> {
+    let line = serde_json::to_string(record)?;
+    if line.len() as u64 + 1 <= crate::log_limits::MAX_LOG_FILE_BYTES {
+        return Ok(line);
+    }
+
+    let mut trimmed = record.clone();
+    trimmed.request_body.clear();
+    trimmed.response_body.clear();
+    trimmed.response_truncated = true;
+    trimmed.response_captured_bytes = 0;
+
+    let empty_line = serde_json::to_string(&trimmed)?;
+    let max_bytes = crate::log_limits::MAX_LOG_FILE_BYTES as usize;
+    if empty_line.len() + 1 >= max_bytes {
+        return Ok(empty_line);
+    }
+
+    let available_body_bytes = max_bytes
+        .saturating_sub(empty_line.len() + 1)
+        .saturating_sub(LARGE_LOG_RECORD_SAFETY_BYTES);
+    let mut request_budget = available_body_bytes
+        .min(MAX_RETAINED_REQUEST_BODY_BYTES)
+        .min(record.request_body.len());
+    let mut response_budget = available_body_bytes
+        .saturating_sub(request_budget)
+        .min(record.response_body.len());
+
+    loop {
+        trimmed.request_body = truncate_to_utf8_byte_limit(&record.request_body, request_budget);
+        trimmed.response_body = truncate_to_utf8_byte_limit(&record.response_body, response_budget);
+        trimmed.response_truncated = true;
+        trimmed.response_captured_bytes = trimmed.response_body.len();
+
+        let line = serde_json::to_string(&trimmed)?;
+        if line.len() as u64 + 1 <= crate::log_limits::MAX_LOG_FILE_BYTES {
+            return Ok(line);
+        }
+
+        if response_budget > 0 {
+            response_budget /= 2;
+        } else if request_budget > 0 {
+            request_budget /= 2;
+        } else {
+            return Ok(line);
+        }
+    }
+}
+
+fn truncate_to_utf8_byte_limit(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+
+    let mut end = max_bytes.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }
 
 fn find_reasoning_tokens(value: &Value) -> Option<u64> {
@@ -346,9 +427,9 @@ fn value_to_u64(value: &Value) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProxyRequestRecord, append_record, current_timestamp_ms,
-        extract_reasoning_tokens_from_response_body, find_record, read_summaries,
-        retain_recent_records,
+        ProxyRequestRecord, append_record, append_record_at_path, clear_records_at_path,
+        current_timestamp_ms, extract_reasoning_tokens_from_response_body, find_record,
+        read_summaries, retain_recent_records, serialize_record_for_log,
     };
 
     fn temp_proxy_log_path(name: &str) -> std::path::PathBuf {
@@ -486,5 +567,87 @@ data: [DONE]
 
         let _ = std::fs::remove_file(path);
         crate::paths::set_proxy_log_path_for_tests(previous);
+    }
+
+    #[test]
+    fn append_record_clears_existing_log_when_append_would_exceed_limit() {
+        let path = temp_proxy_log_path("clear-before-append");
+        std::fs::write(
+            &path,
+            vec![b'x'; crate::log_limits::MAX_LOG_FILE_BYTES as usize - 2],
+        )
+        .expect("seed proxy log");
+        let record = sample_proxy_record("fresh-record");
+
+        append_record_at_path(&path, &record).expect("append proxy log record");
+
+        let metadata = std::fs::metadata(&path).expect("read proxy log metadata");
+        assert!(metadata.len() <= crate::log_limits::MAX_LOG_FILE_BYTES);
+        let text = std::fs::read_to_string(&path).expect("read proxy log");
+        assert!(!text.starts_with('x'));
+        assert!(text.contains("fresh-record"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn large_proxy_record_is_trimmed_to_fit_single_log_file_limit() {
+        let mut record = sample_proxy_record("large-record");
+        record.request_body = "q".repeat(128 * 1024);
+        record.response_body = "r".repeat(crate::log_limits::MAX_LOG_FILE_BYTES as usize + 1);
+        record.response_captured_bytes = record.response_body.len();
+        record.response_truncated = false;
+
+        let line = serialize_record_for_log(&record).expect("serialize trimmed proxy log record");
+        let parsed: ProxyRequestRecord =
+            serde_json::from_str(&line).expect("parse trimmed proxy log record");
+
+        assert!(line.len() as u64 + 1 <= crate::log_limits::MAX_LOG_FILE_BYTES);
+        assert_eq!(parsed.id, "large-record");
+        assert!(parsed.response_truncated);
+        assert!(parsed.response_body.len() < record.response_body.len());
+        assert!(parsed.request_body.len() <= super::MAX_RETAINED_REQUEST_BODY_BYTES);
+    }
+
+    #[test]
+    fn clear_records_uses_locked_file_truncation() {
+        let path = temp_proxy_log_path("clear-records");
+        std::fs::write(&path, "old\n").expect("seed proxy log");
+
+        clear_records_at_path(&path).expect("clear proxy logs");
+
+        let text = std::fs::read_to_string(&path).expect("read cleared proxy log");
+        assert!(text.is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn sample_proxy_record(id: &str) -> ProxyRequestRecord {
+        ProxyRequestRecord {
+            id: id.to_string(),
+            timestamp_ms: current_timestamp_ms(),
+            method: "POST".to_string(),
+            path: "/v1/responses".to_string(),
+            remote_addr: Some("127.0.0.1:1".to_string()),
+            model: Some("glm-5.2".to_string()),
+            reasoning_tokens: None,
+            reasoning_effort: None,
+            reasoning_source: None,
+            service_tier: None,
+            relay_id: Some("relay-test".to_string()),
+            relay_name: Some("Test".to_string()),
+            endpoint: Some("https://example.test/v1/chat/completions".to_string()),
+            response_protocol: Some("chatCompletions".to_string()),
+            status_code: 200,
+            duration_ms: 10,
+            stream: false,
+            request_bytes: 2,
+            response_bytes: 2,
+            response_captured_bytes: 2,
+            response_truncated: false,
+            request_body: "{}".to_string(),
+            response_body: "{}".to_string(),
+            error: None,
+        }
     }
 }

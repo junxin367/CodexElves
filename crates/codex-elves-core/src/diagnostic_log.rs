@@ -5,6 +5,7 @@ use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use fs2::FileExt;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -50,6 +51,7 @@ pub fn append_diagnostic_log(event: &str, detail: impl Serialize) -> std::io::Re
         })
         .to_string()
     });
+    let line = bound_diagnostic_line(event, line);
 
     if test_log_path_is_active() {
         return write_log_line(&path, &line);
@@ -120,6 +122,42 @@ fn dropped_log_write(path: &PathBuf, dropped: u64) -> LogWrite {
     }
 }
 
+fn bound_diagnostic_line(event: &str, line: String) -> String {
+    if line.len() as u64 + 1 <= crate::log_limits::MAX_LOG_FILE_BYTES {
+        return line;
+    }
+
+    let record = DiagnosticRecord {
+        timestamp_ms: now_ms(),
+        pid: std::process::id(),
+        event: "diagnostic_log.entry_too_large".to_string(),
+        detail: json!({
+            "original_event": truncate_for_diagnostic_summary(event, 1024),
+            "original_bytes": line.len()
+        }),
+    };
+    serde_json::to_string(&record).unwrap_or_else(|_| {
+        format!(
+            r#"{{"timestamp_ms":{},"pid":{},"event":"diagnostic_log.entry_too_large","detail":{{"original_bytes":{}}}}}"#,
+            now_ms(),
+            std::process::id(),
+            line.len()
+        )
+    })
+}
+
+fn truncate_for_diagnostic_summary(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+
+    let mut end = max_bytes.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
 fn start_log_writer() -> SyncSender<LogWrite> {
     let (tx, rx) = mpsc::sync_channel::<LogWrite>(2048);
     std::thread::Builder::new()
@@ -149,7 +187,24 @@ fn start_log_writer() -> SyncSender<LogWrite> {
                     current_path = Some(write.path.clone());
                 }
                 if let Some(file) = current_file.as_mut() {
-                    let _ = writeln!(file, "{}", write.line);
+                    let incoming_bytes = write.line.len() as u64 + 1;
+                    let result = (|| -> std::io::Result<()> {
+                        file.flush()?;
+                        file.get_mut().lock_exclusive()?;
+                        crate::log_limits::clear_if_append_would_exceed(
+                            file.get_mut(),
+                            incoming_bytes,
+                        )?;
+                        writeln!(file, "{}", write.line)?;
+                        file.flush()?;
+                        file.get_mut().unlock()?;
+                        Ok(())
+                    })();
+                    if result.is_err() {
+                        let _ = file.get_mut().unlock();
+                        current_file = None;
+                        current_path = None;
+                    }
                 }
             }
             if let Some(file) = current_file.as_mut() {
@@ -162,7 +217,10 @@ fn start_log_writer() -> SyncSender<LogWrite> {
 
 fn write_log_line(path: &PathBuf, line: &str) -> std::io::Result<()> {
     let mut file = open_log_file(path)?;
+    file.lock_exclusive()?;
+    crate::log_limits::clear_if_append_would_exceed(&mut file, line.len() as u64 + 1)?;
     writeln!(file, "{line}")?;
+    file.unlock()?;
     Ok(())
 }
 
@@ -172,7 +230,8 @@ fn open_log_file(path: &PathBuf) -> std::io::Result<std::fs::File> {
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
-        .append(true)
+        .read(true)
+        .write(true)
         .open(path)?;
     Ok(file)
 }
@@ -210,4 +269,40 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn write_log_line_clears_existing_log_when_append_would_exceed_limit() {
+        let path = std::env::temp_dir().join(format!(
+            "codex-elves-diagnostic-log-limit-{}-{}.log",
+            std::process::id(),
+            super::now_ms()
+        ));
+        std::fs::write(
+            &path,
+            vec![b'x'; crate::log_limits::MAX_LOG_FILE_BYTES as usize - 2],
+        )
+        .expect("seed oversized diagnostic log");
+
+        super::write_log_line(&path, "small").expect("append diagnostic log line");
+
+        let metadata = std::fs::metadata(&path).expect("read diagnostic log metadata");
+        assert!(metadata.len() <= crate::log_limits::MAX_LOG_FILE_BYTES);
+        let text = std::fs::read_to_string(&path).expect("read diagnostic log");
+        assert_eq!(text, "small\n");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn oversized_diagnostic_entry_is_replaced_with_small_summary() {
+        let line = "x".repeat(crate::log_limits::MAX_LOG_FILE_BYTES as usize + 1);
+        let bounded = super::bound_diagnostic_line("renderer.large_payload", line);
+
+        assert!(bounded.len() as u64 + 1 <= crate::log_limits::MAX_LOG_FILE_BYTES);
+        assert!(bounded.contains("diagnostic_log.entry_too_large"));
+        assert!(bounded.contains("renderer.large_payload"));
+    }
 }
