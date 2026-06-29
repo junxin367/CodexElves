@@ -35,8 +35,8 @@
   const codexArchiveRowActionsVersion = "1";
   const codexArchiveDeleteAllVersion = "2";
   const codexConversationViewVersion = "1";
-  const codexConversationViewRouteHooksVersion = "1";
-  const codexConversationViewRouteRefreshDelaysMs = [0, 80, 220, 500, 1000, 1800];
+  const codexConversationViewRouteHooksVersion = "2";
+  const codexConversationViewRouteRefreshDelaysMs = [0, 80, 220, 500, 1000, 1800, 3000];
   const codexRouteFeatureRefreshDelaysMs = [0, 120, 360, 900, 1600];
   const codexThreadServiceTierVersion = "1";
   const codexServiceTierBadgeClass = "codex-service-tier-badge";
@@ -6774,7 +6774,9 @@
 
   function conversationViewElementIsActive(el) {
     if (!el?.isConnected) return false;
-    if (el.closest?.("[hidden], [aria-hidden='true']")) return false;
+    if (el.closest?.("[hidden], [aria-hidden='true'], [inert], .invisible")) return false;
+    const style = getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden") return false;
     const rect = el.getBoundingClientRect?.();
     return !!rect && rect.width > 0 && rect.height > 0;
   }
@@ -7191,7 +7193,7 @@
     const composer = conversationViewElementIsActive(conversationViewState.composerEl) ? conversationViewState.composerEl : conversationViewFindComposerEl();
     const contentRoot = content?.parentElement?.parentElement || content?.parentElement || content;
     const composerRoot = composer?.parentElement?.parentElement || composer?.parentElement || composer;
-    return contentRoot?.parentElement || composerRoot?.parentElement || contentRoot || composerRoot || document.querySelector("main, [role='main']") || null;
+    return document.querySelector("main, [role='main']") || contentRoot?.parentElement || composerRoot?.parentElement || contentRoot || composerRoot || null;
   }
 
   function conversationViewAlignNow() {
@@ -7215,9 +7217,14 @@
     conversationViewState.rafId = requestAnimationFrame(tick);
   }
 
+  function conversationViewForgetTargets() {
+    conversationViewState.contentEl = null;
+    conversationViewState.composerEl = null;
+  }
+
   function startConversationViewSettleWindow() {
     if (conversationViewState.settleTimer) clearTimeout(conversationViewState.settleTimer);
-    scheduleConversationViewAlign(2);
+    scheduleConversationViewAlign(180);
     conversationViewState.settleTimer = window.setTimeout(() => {
       conversationViewState.settleTimer = 0;
     }, 3000);
@@ -7252,16 +7259,20 @@
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ["class", "hidden", "data-state", "aria-hidden"],
+        attributeFilter: ["class", "style", "hidden", "data-state", "aria-hidden"],
       });
       conversationViewState.observedRoot = root;
     }
   }
 
-  function refreshConversationView() {
+  function refreshConversationView(forceResolve = false) {
     if (!codexElvesSettings().conversationView) {
       cleanupConversationView();
       return;
+    }
+    if (forceResolve) {
+      conversationViewForgetTargets();
+      conversationViewState.observedRoot = null;
     }
     ensureConversationViewRuntime();
     startConversationViewSettleWindow();
@@ -7275,7 +7286,7 @@
     window.__codexConversationViewRouteRevision = revision;
     window.__codexConversationViewRouteTimers = codexConversationViewRouteRefreshDelaysMs.map((delay) => setTimeout(() => {
       if (window.__codexConversationViewRouteRevision !== revision) return;
-      refreshConversationView();
+      refreshConversationView(true);
     }, delay));
   }
 
@@ -7313,20 +7324,26 @@
     document.removeEventListener("pointerup", window.__codexRouteFeaturePointerHandler, true);
     document.removeEventListener("click", window.__codexRouteFeatureClickHandler, true);
     document.removeEventListener("keydown", window.__codexRouteFeatureKeyboardHandler, true);
-    const pointerHandler = (event) => {
-      if (event.target?.closest?.(selectors.sidebarThread)) scheduleCodexRouteFeatureRefresh();
+    const shouldRefreshConversationViewForControl = (event) => {
+      if (!codexElvesSettings().conversationView) return false;
+      const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+      if (!target || isExtensionUiNode(target)) return false;
+      const control = target.closest("button, a, [role='button'], [role='link']");
+      if (!control || isExtensionUiNode(control)) return false;
+      return true;
     };
     const clickHandler = (event) => {
       if (event.target?.closest?.(selectors.sidebarThread)) scheduleCodexRouteFeatureRefresh();
+      else if (shouldRefreshConversationViewForControl(event)) scheduleConversationViewRouteRefresh();
     };
     const keyboardHandler = (event) => {
       if (event.key !== "Enter" && event.key !== " ") return;
       if (event.target?.closest?.(selectors.sidebarThread)) scheduleCodexRouteFeatureRefresh();
+      else if (shouldRefreshConversationViewForControl(event)) scheduleConversationViewRouteRefresh();
     };
-    window.__codexRouteFeaturePointerHandler = pointerHandler;
+    window.__codexRouteFeaturePointerHandler = null;
     window.__codexRouteFeatureClickHandler = clickHandler;
     window.__codexRouteFeatureKeyboardHandler = keyboardHandler;
-    document.addEventListener("pointerup", pointerHandler, true);
     document.addEventListener("click", clickHandler, true);
     document.addEventListener("keydown", keyboardHandler, true);
   }

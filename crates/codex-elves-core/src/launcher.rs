@@ -1153,8 +1153,8 @@ async fn handle_protocol_proxy_connection(
         {
             Ok(upstream) => upstream,
             Err(error) => {
-                let failure_context = crate::protocol_proxy::upstream_failure_context(&error)
-                    .cloned();
+                let failure_context =
+                    crate::protocol_proxy::upstream_failure_context(&error).cloned();
                 let error_message = error.to_string();
                 let body = serde_json::to_vec(&serde_json::json!({
                     "status": "failed",
