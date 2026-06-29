@@ -1,5 +1,12 @@
 # 更新日志
 
+## 0.1.12 - 2026-06-30
+
+- Chat Completions 路径补全 web_search MCP 兜底:无 MCP 搜索 fallback 时剥离 web_search 工具,避免 CPA 等第三方 Chat Completions 上游无法执行服务端搜索导致模型调用后空结果死循环。
+- 有 MCP 搜索 fallback(tavily/exa)时保留 web_search function,响应方向已能改写成 MCP 工具由客户端执行真实搜索。
+- 扩展协议代理回归测试,覆盖 Chat 路径 web_search 在有无 MCP fallback 下的剥离/保留行为。
+- 版本号更新到 `0.1.12`。
+
 ## 0.1.10 - 2026-06-27
 
 - 压缩/中断续写的会话历史以 function_call 开头时，改用 drop-leading 策略替代补占位 user：丢弃开头悬空的 tool_use/tool_result，按 id 精准剔除合并进同一 user 的悬空 tool_result 并保留真实文本，仅在全部丢空时才补占位 user。

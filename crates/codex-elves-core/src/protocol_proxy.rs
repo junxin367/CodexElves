@@ -241,7 +241,25 @@ pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
     let tool_context = build_codex_tool_context_from_tools(&conversion_tools);
     let mut has_chat_tools = false;
     if !conversion_tools.is_empty() {
-        let converted = responses_tools_to_chat_tools(&conversion_tools, &tool_context);
+        // Chat 路径 web_search 兜底:CPA 等第三方 Chat Completions 上游不支持
+        // OpenAI/Codex 服务端 web_search,保留 function 形态会让模型调用后死循环。
+        // 有 MCP 搜索 fallback 时,响应方向(tool_call_added_item)会把模型对
+        // web_search 的调用改写成 fallback 工具(tavily/exa)由客户端执行;
+        // 无 fallback 时剥离 web_search,避免模型触发上游无法完成的调用。
+        let converted = if tool_context.web_search_fallback_tool().is_none() {
+            responses_tools_to_chat_tools(&conversion_tools, &tool_context)
+                .into_iter()
+                .filter(|tool| {
+                    tool.get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(Value::as_str)
+                        .map(|name| !is_codex_web_search_name(name))
+                        .unwrap_or(true)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            responses_tools_to_chat_tools(&conversion_tools, &tool_context)
+        };
         if !converted.is_empty() {
             has_chat_tools = true;
             result["tools"] = json!(converted);

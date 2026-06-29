@@ -1517,7 +1517,8 @@ fn responses_request_maps_codex_custom_and_namespace_tools_to_chat_functions() {
             },
             {
                 "type": "local_shell"
-            }
+            },
+            tavily_namespace_tool()
         ],
         "tool_choice": {
             "type": "function",
@@ -1559,7 +1560,8 @@ fn responses_request_maps_tool_choice_for_proxy_internal_tools() {
         "input": "hi",
         "tools": [
             { "type": "web_search_preview_2025_03_11" },
-            { "type": "local_shell" }
+            { "type": "local_shell" },
+            tavily_namespace_tool()
         ],
         "tool_choice": { "type": "function", "name": "web_search_preview_2025_03_11" }
     }))
@@ -1571,7 +1573,9 @@ fn responses_request_maps_tool_choice_for_proxy_internal_tools() {
         .iter()
         .map(|tool| tool["function"]["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, vec!["web_search_preview_2025_03_11", "local_shell"]);
+    assert!(names.contains(&"web_search_preview_2025_03_11"));
+    assert!(names.contains(&"local_shell"));
+    assert!(names.contains(&"mcp__tavily__tavily_search"));
     assert_eq!(
         converted["tool_choice"]["function"]["name"],
         "web_search_preview_2025_03_11"
@@ -5366,6 +5370,70 @@ async fn models_proxy_passes_through_original_user_agent_when_unconfigured() {
 
     let request = server.finish();
     assert_eq!(request.user_agent, "Original-Codex-UA/1.0");
+}
+
+#[test]
+fn chat_request_strips_web_search_when_no_mcp_fallback() {
+    // Chat 路径无 MCP 搜索 fallback 时,剥离 web_search 避免模型调用后死循环。
+    let converted = responses_to_chat_completions(json!({
+        "model": "glm-5.2",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "search the web" }]
+            }
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "name": "lookup",
+                "description": "Lookup",
+                "parameters": { "type": "object" }
+            },
+            { "type": "web_search_preview" }
+        ]
+    }))
+    .unwrap();
+
+    let tools = converted["tools"].as_array().expect("tools present");
+    // web_search 被剥离,只剩 lookup。
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["function"]["name"], "lookup");
+}
+
+#[test]
+fn chat_request_keeps_web_search_when_mcp_fallback_available() {
+    // Chat 路径有 MCP 搜索 fallback(tavily)时,保留 web_search function,
+    // 响应方向(tool_call_added_item)会把模型对 web_search 的调用改写成 tavily。
+    let converted = responses_to_chat_completions(json!({
+        "model": "glm-5.2",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "search the web" }]
+            }
+        ],
+        "tools": [
+            { "type": "web_search_preview" },
+            tavily_namespace_tool()
+        ]
+    }))
+    .unwrap();
+
+    let tools = converted["tools"].as_array().expect("tools present");
+    let names: Vec<&str> = tools
+        .iter()
+        .filter_map(|tool| {
+            tool.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str)
+        })
+        .collect();
+    // web_search function 保留(响应方向会改写),tavily 扁平化为 mcp__tavily__tavily_search。
+    assert!(names.contains(&"web_search_preview"));
+    assert!(names.contains(&"mcp__tavily__tavily_search"));
 }
 
 fn tavily_namespace_tool() -> Value {
