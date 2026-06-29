@@ -510,6 +510,29 @@ pub struct UpstreamProxyResponse {
     pub body_override: Option<Vec<u8>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct UpstreamFailureContext {
+    pub diagnostic_id: String,
+    pub relay_id: Option<String>,
+    pub relay_name: Option<String>,
+    pub endpoint: Option<String>,
+    pub response_protocol: Option<UpstreamResponseProtocol>,
+}
+
+impl std::fmt::Display for UpstreamFailureContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "upstream failure context {}", self.diagnostic_id)
+    }
+}
+
+impl std::error::Error for UpstreamFailureContext {}
+
+pub fn upstream_failure_context(error: &anyhow::Error) -> Option<&UpstreamFailureContext> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<UpstreamFailureContext>())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum UpstreamResponseProtocol {
@@ -1114,12 +1137,21 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
                 if has_more_candidates {
                     continue;
                 }
-                return Err(error).with_context(|| {
-                    format!(
-                        "供应商「{}」请求上游失败，endpoint: {}",
-                        relay.name, endpoint
-                    )
-                });
+                let failure_context = UpstreamFailureContext {
+                    diagnostic_id: diagnostic_id.clone(),
+                    relay_id: Some(relay.id.clone()),
+                    relay_name: Some(relay.name.clone()),
+                    endpoint: Some(endpoint.clone()),
+                    response_protocol: Some(response_protocol),
+                };
+                return Err(error)
+                    .with_context(|| {
+                        format!(
+                            "供应商「{}」请求上游失败，endpoint: {}",
+                            relay.name, endpoint
+                        )
+                    })
+                    .context(failure_context);
             }
         };
         let status_code = upstream.status().as_u16();
