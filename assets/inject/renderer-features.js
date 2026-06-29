@@ -6772,8 +6772,16 @@
     return classes.every((cls) => set.has(cls));
   }
 
+  function conversationViewElementIsActive(el) {
+    if (!el?.isConnected) return false;
+    if (el.closest?.("[hidden], [aria-hidden='true']")) return false;
+    const rect = el.getBoundingClientRect?.();
+    return !!rect && rect.width > 0 && rect.height > 0;
+  }
+
   function conversationViewFindByClasses(classes) {
-    return Array.from(document.querySelectorAll("div")).find((el) => conversationViewHasAllClasses(el, classes)) || null;
+    const matches = Array.from(document.querySelectorAll("div")).filter((el) => conversationViewHasAllClasses(el, classes));
+    return matches.find(conversationViewElementIsActive) || matches.find((el) => el?.isConnected) || null;
   }
 
   function conversationViewFindContentEl() {
@@ -7143,7 +7151,7 @@
   }
 
   function conversationViewAlignElement(el) {
-    if (!el?.isConnected) return;
+    if (!conversationViewElementIsActive(el)) return;
     conversationViewApplyNativeWidth(el);
     conversationViewResetOwnOffset(el);
     const nativeRect = el.getBoundingClientRect();
@@ -7164,8 +7172,8 @@
   }
 
   function conversationViewResolveTargets() {
-    if (!conversationViewState.contentEl?.isConnected) conversationViewState.contentEl = conversationViewFindContentEl();
-    if (!conversationViewState.composerEl?.isConnected) conversationViewState.composerEl = conversationViewFindComposerEl();
+    if (!conversationViewElementIsActive(conversationViewState.contentEl)) conversationViewState.contentEl = conversationViewFindContentEl();
+    if (!conversationViewElementIsActive(conversationViewState.composerEl)) conversationViewState.composerEl = conversationViewFindComposerEl();
     [
       document.documentElement,
       document.body,
@@ -7179,8 +7187,8 @@
   }
 
   function conversationViewObserverRoot() {
-    const content = conversationViewState.contentEl?.isConnected ? conversationViewState.contentEl : conversationViewFindContentEl();
-    const composer = conversationViewState.composerEl?.isConnected ? conversationViewState.composerEl : conversationViewFindComposerEl();
+    const content = conversationViewElementIsActive(conversationViewState.contentEl) ? conversationViewState.contentEl : conversationViewFindContentEl();
+    const composer = conversationViewElementIsActive(conversationViewState.composerEl) ? conversationViewState.composerEl : conversationViewFindComposerEl();
     const contentRoot = content?.parentElement?.parentElement || content?.parentElement || content;
     const composerRoot = composer?.parentElement?.parentElement || composer?.parentElement || composer;
     return contentRoot?.parentElement || composerRoot?.parentElement || contentRoot || composerRoot || document.querySelector("main, [role='main']") || null;
