@@ -7425,7 +7425,7 @@ fn apply_anthropic_reasoning_options(result: &mut Value, body: &Value, model: &s
         return;
     }
     let reasoning_enabled = reasoning_requested(body).unwrap_or(true);
-    if !reasoning_enabled {
+    if !reasoning_enabled || anthropic_tool_followup_lacks_signed_reasoning(body) {
         result["thinking"] = json!({ "type": "disabled" });
         return;
     }
@@ -7434,6 +7434,40 @@ fn apply_anthropic_reasoning_options(result: &mut Value, body: &Value, model: &s
         .unwrap_or(ANTHROPIC_DEFAULT_REASONING_EFFORT);
     result["thinking"] = json!({ "type": "adaptive" });
     result["output_config"] = json!({ "effort": effort });
+}
+
+fn anthropic_tool_followup_lacks_signed_reasoning(body: &Value) -> bool {
+    let Some(input) = body.get("input") else {
+        return false;
+    };
+    input_contains_tool_result(input) && !input_contains_signed_reasoning(input)
+}
+
+fn input_contains_tool_result(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(input_contains_tool_result),
+        Value::Object(_) => matches!(
+            value.get("type").and_then(Value::as_str),
+            Some(
+                "function_call_output"
+                    | "custom_tool_call_output"
+                    | "tool_result"
+                    | "tool_search_output"
+            )
+        ),
+        _ => false,
+    }
+}
+
+fn input_contains_signed_reasoning(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(input_contains_signed_reasoning),
+        Value::Object(_) => {
+            value.get("type").and_then(Value::as_str) == Some("reasoning")
+                && responses_reasoning_encrypted_content(value).is_some()
+        }
+        _ => false,
+    }
 }
 
 /// 从请求体的多个可能位置提取思考深度字符串。

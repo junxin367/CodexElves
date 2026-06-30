@@ -1384,6 +1384,43 @@ fn anthropic_request_preserves_thinking_signature_for_tool_followup() {
     assert_eq!(messages[1]["content"][1]["type"], "tool_use");
     assert_eq!(messages[2]["role"], "user");
     assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+    assert_eq!(converted["thinking"], json!({ "type": "adaptive" }));
+    assert_eq!(converted["output_config"], json!({ "effort": "high" }));
+}
+
+#[test]
+fn anthropic_tool_followup_without_signed_reasoning_disables_thinking() {
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "reasoning": { "effort": "xhigh" },
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "use the tool" }]
+            },
+            {
+                "type": "function_call",
+                "call_id": "toolu_123",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"rg foo\"}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "toolu_123",
+                "output": "result"
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert_eq!(converted["thinking"], json!({ "type": "disabled" }));
+    assert!(converted.get("output_config").is_none());
+    assert_eq!(converted["messages"][1]["content"][0]["type"], "tool_use");
+    assert_eq!(
+        converted["messages"][2]["content"][0]["type"],
+        "tool_result"
+    );
 }
 
 #[test]
