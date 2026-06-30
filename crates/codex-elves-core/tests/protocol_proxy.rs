@@ -1343,6 +1343,50 @@ fn responses_request_preserves_reasoning_content_for_thinking_followup() {
 }
 
 #[test]
+fn anthropic_request_preserves_thinking_signature_for_tool_followup() {
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "use the tool" }]
+            },
+            {
+                "id": "rs_msg_1",
+                "type": "reasoning",
+                "reasoning_content": "Need to inspect files.",
+                "encrypted_content": "sig_123"
+            },
+            {
+                "type": "function_call",
+                "call_id": "toolu_123",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"rg foo\"}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "toolu_123",
+                "output": "result"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let messages = converted["messages"].as_array().unwrap();
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(messages[1]["content"][0]["type"], "thinking");
+    assert_eq!(
+        messages[1]["content"][0]["thinking"],
+        "Need to inspect files."
+    );
+    assert_eq!(messages[1]["content"][0]["signature"], "sig_123");
+    assert_eq!(messages[1]["content"][1]["type"], "tool_use");
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+}
+
+#[test]
 fn responses_request_merges_reasoning_text_and_tool_calls_like_ccx() {
     let converted = responses_to_chat_completions(json!({
         "model": "deepseek-v4-pro",
@@ -3279,6 +3323,9 @@ data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"
 event: content_block_delta
 data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Need context."}}
 
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_stream"}}
+
 event: content_block_stop
 data: {"type":"content_block_stop","index":0}
 
@@ -3343,6 +3390,10 @@ data: {"type":"message_stop"}
     assert_eq!(
         completed.data["response"]["usage"]["output_tokens_details"]["reasoning_tokens"],
         4
+    );
+    assert_eq!(
+        completed.data["response"]["output"][0]["encrypted_content"],
+        "sig_stream"
     );
     assert!(converted.contains("data: [DONE]"));
 }
@@ -4373,7 +4424,7 @@ fn models_proxy_path_matches_v1_models() {
 fn upstream_header_timeout_is_bounded_for_hung_providers() {
     assert!(upstream_header_timeout() >= Duration::from_secs(30));
     assert!(upstream_header_timeout() <= Duration::from_secs(60));
-    assert!(upstream_stream_header_timeout() >= Duration::from_secs(120));
+    assert_eq!(upstream_stream_header_timeout(), Duration::from_secs(60));
 }
 
 #[tokio::test]

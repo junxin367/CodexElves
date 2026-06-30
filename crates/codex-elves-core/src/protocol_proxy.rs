@@ -17,7 +17,7 @@ use crate::settings::SettingsStore;
 pub const DEFAULT_PROTOCOL_PROXY_PORT: u16 = 45221;
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const UPSTREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
-const UPSTREAM_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
+const UPSTREAM_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(60);
 const THINK_OPEN_TAG: &str = "<think>";
 const THINK_CLOSE_TAG: &str = "</think>";
 const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
@@ -1129,6 +1129,7 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
             response_protocol,
             upstream_is_stream,
             &diagnostic_id,
+            header_timeout,
         )
         .await
         {
@@ -1206,6 +1207,7 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
                         &relay,
                         &retry_request,
                         upstream_is_stream,
+                        header_timeout,
                     )
                     .await?;
                     status_code = retry.status().as_u16();
@@ -1287,10 +1289,11 @@ async fn send_responses_upstream_request(
     response_protocol: UpstreamResponseProtocol,
     is_stream: bool,
     diagnostic_id: &str,
+    header_timeout: Duration,
 ) -> anyhow::Result<reqwest::Response> {
     match response_protocol {
         UpstreamResponseProtocol::Responses => {
-            send_upstream_request_for_responses(
+            send_upstream_request_with_header_timeout(
                 upstream_request_builder(
                     client.clone(),
                     &responses_url(&relay.base_url),
@@ -1298,7 +1301,7 @@ async fn send_responses_upstream_request(
                     is_stream,
                     request_json,
                 ),
-                is_stream,
+                header_timeout,
             )
             .await
         }
@@ -1307,7 +1310,8 @@ async fn send_responses_upstream_request(
                 request_json,
                 is_stream,
             ))?;
-            send_chat_completions_request(client, relay, &chat_request, is_stream).await
+            send_chat_completions_request(client, relay, &chat_request, is_stream, header_timeout)
+                .await
         }
         UpstreamResponseProtocol::Anthropic => {
             let mut anthropic_request = responses_to_anthropic_messages_with_diagnostic_id(
@@ -1315,7 +1319,14 @@ async fn send_responses_upstream_request(
                 Some(diagnostic_id),
             )?;
             apply_cached_anthropic_reasoning_compatibility(&mut anthropic_request);
-            send_anthropic_messages_request(client, relay, &anthropic_request, is_stream).await
+            send_anthropic_messages_request(
+                client,
+                relay,
+                &anthropic_request,
+                is_stream,
+                header_timeout,
+            )
+            .await
         }
     }
 }
@@ -1336,8 +1347,9 @@ async fn send_chat_completions_request(
     relay: &crate::settings::RelayProfile,
     chat_request: &Value,
     is_stream: bool,
+    header_timeout: Duration,
 ) -> anyhow::Result<reqwest::Response> {
-    send_upstream_request_for_responses(
+    send_upstream_request_with_header_timeout(
         upstream_request_builder(
             client.clone(),
             &chat_completions_url(&relay.base_url),
@@ -1345,7 +1357,7 @@ async fn send_chat_completions_request(
             is_stream,
             chat_request,
         ),
-        is_stream,
+        header_timeout,
     )
     .await
 }
@@ -1405,17 +1417,19 @@ async fn send_anthropic_messages_request(
     relay: &crate::settings::RelayProfile,
     anthropic_request: &Value,
     is_stream: bool,
+    header_timeout: Duration,
 ) -> anyhow::Result<reqwest::Response> {
-    send_upstream_request_for_responses(
-        client
-            .post(anthropic_messages_url(&relay.base_url))
-            .header("x-api-key", relay.api_key.trim())
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .json(anthropic_request),
-        is_stream,
-    )
-    .await
+    let mut builder = client
+        .post(anthropic_messages_url(&relay.base_url))
+        .header("x-api-key", relay.api_key.trim())
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .header(reqwest::header::CONTENT_TYPE, "application/json");
+    if is_stream {
+        builder = builder
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .header(reqwest::header::CACHE_CONTROL, "no-cache");
+    }
+    send_upstream_request_with_header_timeout(builder.json(anthropic_request), header_timeout).await
 }
 
 pub async fn open_models_proxy_request(
@@ -1856,6 +1870,7 @@ struct ReasoningItemState {
     output_index: Option<u32>,
     item_id: String,
     text: String,
+    encrypted_content: Option<String>,
     added: bool,
     done: bool,
 }
@@ -2183,6 +2198,17 @@ impl ChatSseState {
         );
     }
 
+    fn push_reasoning_encrypted_content(&mut self, encrypted_content: &str) {
+        if encrypted_content.is_empty() {
+            return;
+        }
+        let existing = self
+            .reasoning
+            .encrypted_content
+            .get_or_insert_with(String::new);
+        existing.push_str(encrypted_content);
+    }
+
     fn push_message_delta_into(
         &mut self,
         delta: &str,
@@ -2394,12 +2420,20 @@ impl ChatSseState {
             return;
         }
         let output_index = self.reasoning.output_index.unwrap_or(0);
-        let item = json!({
+        let mut item = json!({
             "id": self.reasoning.item_id,
             "type": "reasoning",
             "reasoning_content": self.reasoning.text,
             "summary": [{ "type": "summary_text", "text": self.reasoning.text }]
         });
+        if let Some(encrypted_content) = self
+            .reasoning
+            .encrypted_content
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            item["encrypted_content"] = json!(encrypted_content);
+        }
         self.output_items.push((output_index, item.clone()));
         self.reasoning.done = true;
         push_sse(
@@ -2804,6 +2838,11 @@ impl AnthropicSseState {
                     if !thinking.is_empty() {
                         self.inner.push_reasoning_delta_into(thinking, output);
                     }
+                }
+            }
+            "signature_delta" => {
+                if let Some(signature) = delta.get("signature").and_then(Value::as_str) {
+                    self.inner.push_reasoning_encrypted_content(signature);
                 }
             }
             "input_json_delta" => {
@@ -3422,14 +3461,8 @@ fn append_responses_item_to_anthropic(
             }
         }
         Some("reasoning") => {
-            if let Some(text) = responses_reasoning_text(item) {
-                if !text.is_empty() {
-                    push_anthropic_message(
-                        messages,
-                        "assistant",
-                        vec![json!({ "type": "thinking", "thinking": text })],
-                    );
-                }
+            if let Some(block) = responses_reasoning_to_anthropic_thinking_block(item) {
+                push_anthropic_message(messages, "assistant", vec![block]);
             }
         }
         Some("web_search_call") | Some("web_search_output") => {
@@ -4130,6 +4163,35 @@ fn merge_tool_calls_into_message(message: &mut Value, incoming: Vec<Value>) {
 
 fn responses_reasoning_text(item: &Value) -> Option<String> {
     extract_reasoning_summary_text(item).or_else(|| extract_reasoning_field_text(item))
+}
+
+fn responses_reasoning_to_anthropic_thinking_block(item: &Value) -> Option<Value> {
+    let text = responses_reasoning_text(item)?;
+    if text.is_empty() {
+        return None;
+    }
+
+    let mut block = json!({ "type": "thinking", "thinking": text });
+    if let Some(encrypted_content) = responses_reasoning_encrypted_content(item) {
+        block["signature"] = json!(encrypted_content);
+    }
+    Some(block)
+}
+
+fn responses_reasoning_encrypted_content(item: &Value) -> Option<String> {
+    for pointer in [
+        "/encrypted_content",
+        "/reasoning/encrypted_content",
+        "/signature",
+        "/reasoning/signature",
+    ] {
+        if let Some(value) = item.pointer(pointer).and_then(Value::as_str) {
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn responses_content_to_chat_content(_role: &str, content: &Value) -> Value {
