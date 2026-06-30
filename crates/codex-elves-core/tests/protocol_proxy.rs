@@ -4751,6 +4751,11 @@ async fn responses_proxy_replaces_system_prompt_before_chat_conversion() {
     );
 
     let request = server.finish();
+    let logged_body: Value = serde_json::from_str(&upstream.request_body).unwrap();
+    assert_eq!(
+        logged_body["messages"][0],
+        json!({ "role": "system", "content": "只使用新的系统提示词。" })
+    );
     let body: Value = serde_json::from_str(&request.body).unwrap();
     assert_eq!(
         body["messages"][0],
@@ -4790,6 +4795,10 @@ async fn responses_proxy_replaces_system_prompt_for_responses_upstream() {
     );
 
     let request = server.finish();
+    let logged_body: Value = serde_json::from_str(&upstream.request_body).unwrap();
+    assert_eq!(logged_body["instructions"], "新的 Responses 提示词");
+    assert_eq!(logged_body["input"].as_array().unwrap().len(), 1);
+    assert_eq!(logged_body["input"][0]["role"], "user");
     let body: Value = serde_json::from_str(&request.body).unwrap();
     assert_eq!(body["instructions"], "新的 Responses 提示词");
     assert_eq!(body["input"].as_array().unwrap().len(), 1);

@@ -1239,6 +1239,17 @@ async fn handle_protocol_proxy_connection(
             }
         };
 
+    let logged_request_body = if upstream.request_body.trim().is_empty() {
+        request_body.to_string()
+    } else {
+        upstream.request_body.clone()
+    };
+    let logged_request_json = serde_json::from_str::<serde_json::Value>(&logged_request_body).ok();
+    let logged_request_metadata =
+        crate::proxy_log::extract_request_metadata(logged_request_json.as_ref());
+    let request_metadata = logged_request_metadata;
+    let request_body = logged_request_body.as_str();
+
     if !upstream.is_success() {
         let diagnostic_id = upstream.diagnostic_id.clone();
         let relay_id = upstream.relay_id.clone();
@@ -1689,6 +1700,17 @@ async fn handle_chat_completions_proxy_connection(
             return Ok(());
         }
     };
+
+    let logged_request_body = if upstream.request_body.trim().is_empty() {
+        request_body.to_string()
+    } else {
+        upstream.request_body.clone()
+    };
+    let logged_request_json = serde_json::from_str::<serde_json::Value>(&logged_request_body).ok();
+    let logged_request_metadata =
+        crate::proxy_log::extract_request_metadata(logged_request_json.as_ref());
+    let request_metadata = logged_request_metadata;
+    let request_body = logged_request_body.as_str();
 
     let diagnostic_id = upstream.diagnostic_id.clone();
     let relay_id = upstream.relay_id.clone();
