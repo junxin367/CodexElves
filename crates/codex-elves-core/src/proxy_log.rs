@@ -9,7 +9,7 @@ use serde_json::Value;
 
 pub const MAX_CAPTURED_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 pub const STARTUP_RETAINED_RECORDS: usize = 10;
-pub const RUNTIME_RETAINED_RECORDS: usize = 200;
+pub const RUNTIME_RETAINED_RECORDS: usize = 500;
 const LARGE_LOG_RECORD_SAFETY_BYTES: usize = 1024;
 const MAX_RETAINED_REQUEST_BODY_BYTES: usize = 64 * 1024;
 

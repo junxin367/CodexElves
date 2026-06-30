@@ -2778,6 +2778,36 @@ body {
   font-size: 13px;
 }
 
+.proxy-iq-ratio {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--surface-sunken));
+  color: hsl(var(--muted-foreground));
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.proxy-iq-ratio-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.proxy-iq-ratio-item strong {
+  color: hsl(var(--foreground));
+  font-variant-numeric: tabular-nums;
+}
+
+.proxy-iq-ratio-item.high strong {
+  color: hsl(var(--brand-accent));
+}
+
 .proxy-log-view-spinner {
   animation: proxy-log-view-spin 0.7s linear infinite;
 }

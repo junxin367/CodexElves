@@ -2672,7 +2672,6 @@ function LocalProxyScreen({
   const entries = logs?.entries ?? [];
   const [page, setPage] = useState(1);
   const [modelFilter, setModelFilter] = useState("");
-  const [reasoning516Only, setReasoning516Only] = useState(false);
   const modelOptions = useMemo(
     () =>
       Array.from(new Set(entries.map((entry) => entry.model?.trim()).filter((model): model is string => Boolean(model))))
@@ -2683,11 +2682,11 @@ function LocalProxyScreen({
     () =>
       entries.filter((entry) => {
         if (modelFilter && entry.model !== modelFilter) return false;
-        if (reasoning516Only && entry.reasoningTokens !== 516) return false;
         return true;
       }),
-    [entries, modelFilter, reasoning516Only],
+    [entries, modelFilter],
   );
+  const gptIqRatio = useMemo(() => calculateGptIqRatio(filteredEntries), [filteredEntries]);
   const totalPages = Math.max(1, Math.ceil(filteredEntries.length / LOCAL_PROXY_LOG_PAGE_SIZE));
   const visibleEntries = useMemo(
     () => filteredEntries.slice((page - 1) * LOCAL_PROXY_LOG_PAGE_SIZE, page * LOCAL_PROXY_LOG_PAGE_SIZE),
@@ -2696,7 +2695,7 @@ function LocalProxyScreen({
 
   useEffect(() => {
     setPage(1);
-  }, [modelFilter, reasoning516Only]);
+  }, [modelFilter]);
 
   useEffect(() => {
     setPage((current) => Math.min(Math.max(current, 1), totalPages));
@@ -2757,14 +2756,18 @@ function LocalProxyScreen({
                 options={[{ value: "", label: "全部模型" }, ...modelOptions.map((model) => ({ value: model, label: model }))]}
                 onChange={(next) => setModelFilter(next)}
               />
-              <Button
-                size="sm"
-                title="只显示 Reason Tok = 516 的请求"
-                variant={reasoning516Only ? "default" : "outline"}
-                onClick={() => setReasoning516Only((current) => !current)}
+              <div
+                aria-label="GPT 请求低高智商比例"
+                className="proxy-iq-ratio"
+                title={`仅统计当前筛选范围内 GPT 请求：Reason Tok = 516 为低，超过 516 为高。样本 ${gptIqRatio.total} 条`}
               >
-                思考 516
-              </Button>
+                <span className="proxy-iq-ratio-item low">
+                  低 <strong>{gptIqRatio.lowPercent}%</strong>
+                </span>
+                <span className="proxy-iq-ratio-item high">
+                  高 <strong>{gptIqRatio.highPercent}%</strong>
+                </span>
+              </div>
             </div>
           }
         />
@@ -2794,7 +2797,7 @@ function LocalProxyScreen({
                     <span className={entry.statusCode >= 200 && entry.statusCode < 300 ? "proxy-code ok" : "proxy-code bad"}>
                       {entry.statusCode}
                     </span>
-                    <span>{entry.durationMs}ms</span>
+                    <span title={`${entry.durationMs}ms`}>{formatRequestDurationMs(entry.durationMs)}</span>
                     <Button
                       size="sm"
                       variant={selectedId === entry.id ? "secondary" : "outline"}
@@ -7077,8 +7080,44 @@ function formatProxyBody(text: string) {
   }
 }
 
+function calculateGptIqRatio(entries: LocalProxyLogEntry[]) {
+  let low = 0;
+  let high = 0;
+
+  entries.forEach((entry) => {
+    if (!isGptModel(entry.model)) return;
+    if (entry.reasoningTokens === 516) {
+      low += 1;
+    } else if (typeof entry.reasoningTokens === "number" && entry.reasoningTokens > 516) {
+      high += 1;
+    }
+  });
+
+  const total = low + high;
+  const lowPercent = total ? Math.round((low / total) * 100) : 0;
+  return {
+    low,
+    high,
+    total,
+    lowPercent,
+    highPercent: total ? 100 - lowPercent : 0,
+  };
+}
+
+function isGptModel(model?: string | null) {
+  return Boolean(model?.toLowerCase().includes("gpt"));
+}
+
 function formatReasoningTokens(value?: number | null) {
   return typeof value === "number" ? value.toLocaleString() : "-";
+}
+
+function formatRequestDurationMs(value: number) {
+  if (!Number.isFinite(value)) return "-";
+  if (value <= 1000) return `${Math.max(0, Math.round(value))}ms`;
+  const seconds = Math.max(0, value) / 1000;
+  const digits = seconds < 10 ? 2 : 1;
+  return `${seconds.toFixed(digits).replace(/\.?0+$/, "")}s`;
 }
 
 function formatProtocolRoute(entry: Pick<LocalProxyLogEntry, "responseProtocol">) {
