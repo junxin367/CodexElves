@@ -1389,7 +1389,7 @@ fn anthropic_request_preserves_thinking_signature_for_tool_followup() {
 }
 
 #[test]
-fn anthropic_tool_followup_without_signed_reasoning_disables_thinking() {
+fn anthropic_tool_followup_without_signed_reasoning_preserves_requested_thinking() {
     let converted = responses_to_anthropic_messages(json!({
         "model": "claude-opus-4-8",
         "reasoning": { "effort": "xhigh" },
@@ -1414,8 +1414,8 @@ fn anthropic_tool_followup_without_signed_reasoning_disables_thinking() {
     }))
     .unwrap();
 
-    assert_eq!(converted["thinking"], json!({ "type": "disabled" }));
-    assert!(converted.get("output_config").is_none());
+    assert_eq!(converted["thinking"], json!({ "type": "adaptive" }));
+    assert_eq!(converted["output_config"], json!({ "effort": "xhigh" }));
     assert_eq!(converted["messages"][1]["content"][0]["type"], "tool_use");
     assert_eq!(
         converted["messages"][2]["content"][0]["type"],

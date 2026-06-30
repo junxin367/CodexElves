@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -1163,6 +1163,70 @@ impl EitherResponsesStreamConverter<'_> {
     }
 }
 
+const DEFERRED_STREAM_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const DEFERRED_STREAM_KEEPALIVE_BYTES: &[u8] = b": codex-elves waiting for upstream\n\n";
+
+fn should_defer_claude_reasoning_stream(
+    request_json: Option<&serde_json::Value>,
+    request_metadata: &crate::proxy_log::RequestMetadata,
+) -> bool {
+    let Some(request) = request_json else {
+        return false;
+    };
+    if request.get("stream").and_then(serde_json::Value::as_bool) != Some(true) {
+        return false;
+    }
+    let model = request_metadata
+        .model
+        .as_deref()
+        .or_else(|| request.get("model").and_then(serde_json::Value::as_str))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !model.contains("claude") {
+        return false;
+    }
+    match request_metadata
+        .reasoning_effort
+        .as_deref()
+        .map(|value| value.trim().to_ascii_lowercase())
+    {
+        Some(effort) if matches!(effort.as_str(), "none" | "off" | "disabled") => false,
+        Some(effort) if matches!(effort.as_str(), "high" | "xhigh" | "max") => true,
+        Some(_) => false,
+        None => true,
+    }
+}
+
+fn responses_stream_failure_bytes(
+    request_json: Option<&serde_json::Value>,
+    diagnostic_id: Option<&str>,
+    response_protocol: Option<crate::protocol_proxy::UpstreamResponseProtocol>,
+    message: String,
+    error_type: Option<String>,
+) -> Vec<u8> {
+    if response_protocol == Some(crate::protocol_proxy::UpstreamResponseProtocol::Anthropic) {
+        let mut converter = request_json
+            .map(|request| {
+                crate::protocol_proxy::AnthropicSseToResponsesConverter::with_request_and_diagnostic_id(
+                    request,
+                    diagnostic_id,
+                )
+            })
+            .unwrap_or_default();
+        return converter.fail(message, error_type);
+    }
+
+    let mut converter = request_json
+        .map(|request| {
+            crate::protocol_proxy::ChatSseToResponsesConverter::with_request_and_diagnostic_id(
+                request,
+                diagnostic_id,
+            )
+        })
+        .unwrap_or_default();
+    converter.fail(message, error_type)
+}
+
 async fn handle_protocol_proxy_connection(
     stream: &mut tokio::net::TcpStream,
     request_body: &str,
@@ -1175,6 +1239,21 @@ async fn handle_protocol_proxy_connection(
     let timestamp_ms = crate::proxy_log::current_timestamp_ms();
     let request_json = serde_json::from_str::<serde_json::Value>(request_body).ok();
     let request_metadata = crate::proxy_log::extract_request_metadata(request_json.as_ref());
+    if should_defer_claude_reasoning_stream(request_json.as_ref(), &request_metadata) {
+        return handle_deferred_protocol_proxy_stream_connection(
+            stream,
+            request_body,
+            request_user_agent,
+            method,
+            path,
+            remote_addr_text,
+            started_at,
+            timestamp_ms,
+            request_json,
+            request_metadata,
+        )
+        .await;
+    }
     let upstream =
         match crate::protocol_proxy::open_responses_proxy_request(request_body, request_user_agent)
             .await
@@ -1632,6 +1711,361 @@ async fn handle_protocol_proxy_connection(
         body.len(),
         false,
         None,
+    );
+    stream.shutdown().await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_deferred_protocol_proxy_stream_connection(
+    stream: &mut tokio::net::TcpStream,
+    request_body: &str,
+    request_user_agent: Option<&str>,
+    method: &str,
+    path: &str,
+    remote_addr_text: Option<String>,
+    started_at: Instant,
+    timestamp_ms: u64,
+    request_json: Option<serde_json::Value>,
+    request_metadata: crate::proxy_log::RequestMetadata,
+) -> anyhow::Result<()> {
+    write_http_stream_headers(stream, "200 OK", "text/event-stream; charset=utf-8").await?;
+    let mut response_capture = Vec::new();
+    let mut response_bytes = 0_usize;
+    let mut response_truncated = false;
+
+    let upstream_open =
+        crate::protocol_proxy::open_responses_proxy_request_with_stream_header_timeout(
+            request_body,
+            request_user_agent,
+            crate::protocol_proxy::upstream_deferred_stream_header_timeout(),
+        );
+    tokio::pin!(upstream_open);
+    let upstream = loop {
+        tokio::select! {
+            result = &mut upstream_open => break result,
+            _ = tokio::time::sleep(DEFERRED_STREAM_KEEPALIVE_INTERVAL) => {
+                response_bytes += DEFERRED_STREAM_KEEPALIVE_BYTES.len();
+                response_truncated |= crate::proxy_log::append_capture(
+                    &mut response_capture,
+                    DEFERRED_STREAM_KEEPALIVE_BYTES,
+                );
+                stream.write_all(DEFERRED_STREAM_KEEPALIVE_BYTES).await?;
+                stream.flush().await?;
+            }
+        }
+    };
+
+    let upstream = match upstream {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            let failure_context = crate::protocol_proxy::upstream_failure_context(&error).cloned();
+            let error_message = error.to_string();
+            let failed = responses_stream_failure_bytes(
+                request_json.as_ref(),
+                failure_context
+                    .as_ref()
+                    .map(|context| context.diagnostic_id.as_str()),
+                failure_context
+                    .as_ref()
+                    .and_then(|context| context.response_protocol),
+                error_message.clone(),
+                Some("upstream_error".to_string()),
+            );
+            response_bytes += failed.len();
+            response_truncated |= crate::proxy_log::append_capture(&mut response_capture, &failed);
+            stream.write_all(&failed).await?;
+            log_helper_response(
+                "helper.protocol_proxy_deferred_stream_failed",
+                method,
+                path,
+                "200 OK",
+                remote_addr_text.clone(),
+            );
+            append_local_proxy_record(
+                failure_context
+                    .as_ref()
+                    .map(|context| context.diagnostic_id.clone())
+                    .unwrap_or_else(|| format!("local-{}", uuid::Uuid::new_v4())),
+                timestamp_ms,
+                started_at,
+                method,
+                path,
+                remote_addr_text,
+                &request_metadata,
+                failure_context
+                    .as_ref()
+                    .and_then(|context| context.relay_id.clone()),
+                failure_context
+                    .as_ref()
+                    .and_then(|context| context.relay_name.clone()),
+                failure_context
+                    .as_ref()
+                    .and_then(|context| context.endpoint.clone()),
+                failure_context
+                    .as_ref()
+                    .and_then(|context| context.response_protocol.map(response_protocol_label)),
+                200,
+                true,
+                request_body,
+                &response_capture,
+                response_bytes,
+                response_truncated,
+                Some(error_message),
+            );
+            stream.shutdown().await?;
+            return Ok(());
+        }
+    };
+
+    let logged_request_body = if upstream.request_body.trim().is_empty() {
+        request_body.to_string()
+    } else {
+        upstream.request_body.clone()
+    };
+    let logged_request_json = serde_json::from_str::<serde_json::Value>(&logged_request_body).ok();
+    let logged_request_metadata =
+        crate::proxy_log::extract_request_metadata(logged_request_json.as_ref());
+    let request_metadata = logged_request_metadata;
+    let request_body = logged_request_body.as_str();
+
+    let diagnostic_id = upstream.diagnostic_id.clone();
+    let relay_id = upstream.relay_id.clone();
+    let relay_name = upstream.relay_name.clone();
+    let endpoint = upstream.endpoint.clone();
+    let response_protocol = upstream.response_protocol;
+    let response_protocol_label = response_protocol_label(response_protocol);
+    let status_code = upstream.status_code;
+
+    if !upstream.is_success() {
+        let upstream_content_type = upstream.content_type.clone();
+        let upstream_body = upstream.into_body_bytes().await?;
+        let error = crate::protocol_proxy::responses_error_from_upstream(
+            status_code,
+            &upstream_content_type,
+            &upstream_body,
+        );
+        let message = error
+            .pointer("/error/message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("上游请求失败")
+            .to_string();
+        let error_type = error
+            .pointer("/error/type")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string)
+            .or_else(|| Some("upstream_error".to_string()));
+        let failed = responses_stream_failure_bytes(
+            request_json.as_ref(),
+            Some(&diagnostic_id),
+            Some(response_protocol),
+            message.clone(),
+            error_type,
+        );
+        response_bytes += failed.len();
+        response_truncated |= crate::proxy_log::append_capture(&mut response_capture, &failed);
+        stream.write_all(&failed).await?;
+        log_helper_response(
+            "helper.protocol_proxy_deferred_stream_upstream_error",
+            method,
+            path,
+            "200 OK",
+            remote_addr_text.clone(),
+        );
+        append_local_proxy_record(
+            diagnostic_id,
+            timestamp_ms,
+            started_at,
+            method,
+            path,
+            remote_addr_text,
+            &request_metadata,
+            relay_id,
+            relay_name,
+            endpoint,
+            Some(response_protocol_label),
+            status_code,
+            true,
+            request_body,
+            &response_capture,
+            response_bytes,
+            response_truncated,
+            Some(format!("上游返回 HTTP {status_code}: {message}")),
+        );
+        stream.shutdown().await?;
+        return Ok(());
+    }
+
+    if response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses {
+        if upstream.body_override.is_some() {
+            let body = upstream.into_body_bytes().await?;
+            response_bytes += body.len();
+            response_truncated |= crate::proxy_log::append_capture(&mut response_capture, &body);
+            stream.write_all(&body).await?;
+        } else {
+            let mut bytes_stream = upstream.into_response()?.bytes_stream();
+            while let Some(chunk) = bytes_stream.next().await {
+                let bytes = match chunk {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        append_local_proxy_record(
+                            diagnostic_id,
+                            timestamp_ms,
+                            started_at,
+                            method,
+                            path,
+                            remote_addr_text,
+                            &request_metadata,
+                            relay_id,
+                            relay_name,
+                            endpoint,
+                            Some(response_protocol_label),
+                            status_code,
+                            true,
+                            request_body,
+                            &response_capture,
+                            response_bytes,
+                            response_truncated,
+                            Some(format!("Stream error: {error}")),
+                        );
+                        return Err(error.into());
+                    }
+                };
+                response_bytes += bytes.len();
+                response_truncated |=
+                    crate::proxy_log::append_capture(&mut response_capture, &bytes);
+                stream.write_all(&bytes).await?;
+            }
+        }
+        log_helper_response(
+            "helper.protocol_proxy_deferred_stream_ok",
+            method,
+            path,
+            "200 OK",
+            remote_addr_text.clone(),
+        );
+        append_local_proxy_record(
+            diagnostic_id,
+            timestamp_ms,
+            started_at,
+            method,
+            path,
+            remote_addr_text,
+            &request_metadata,
+            relay_id,
+            relay_name,
+            endpoint,
+            Some(response_protocol_label),
+            status_code,
+            true,
+            request_body,
+            &response_capture,
+            response_bytes,
+            response_truncated,
+            None,
+        );
+        stream.shutdown().await?;
+        return Ok(());
+    }
+
+    let mut chat_converter;
+    let mut anthropic_converter;
+    let converter_kind = if response_protocol
+        == crate::protocol_proxy::UpstreamResponseProtocol::ChatCompletions
+    {
+        chat_converter = request_json
+            .as_ref()
+            .map(|request| {
+                crate::protocol_proxy::ChatSseToResponsesConverter::with_request_and_diagnostic_id(
+                    request,
+                    Some(&diagnostic_id),
+                )
+            })
+            .unwrap_or_default();
+        EitherResponsesStreamConverter::Chat(&mut chat_converter)
+    } else {
+        anthropic_converter = request_json
+                .as_ref()
+                .map(|request| {
+                    crate::protocol_proxy::AnthropicSseToResponsesConverter::with_request_and_diagnostic_id(
+                        request,
+                        Some(&diagnostic_id),
+                    )
+                })
+                .unwrap_or_default();
+        EitherResponsesStreamConverter::Anthropic(&mut anthropic_converter)
+    };
+    let mut converter = converter_kind;
+    let mut bytes_stream = upstream.into_response()?.bytes_stream();
+    let mut stream_failed = false;
+    let mut stream_error = None;
+
+    while let Some(chunk) = bytes_stream.next().await {
+        match chunk {
+            Ok(bytes) => {
+                let converted = converter.push_bytes(&bytes);
+                if !converted.is_empty() {
+                    response_bytes += converted.len();
+                    response_truncated |=
+                        crate::proxy_log::append_capture(&mut response_capture, &converted);
+                    stream.write_all(&converted).await?;
+                }
+            }
+            Err(error) => {
+                let error_message = format!("Stream error: {error}");
+                let failed =
+                    converter.fail(error_message.clone(), Some("stream_error".to_string()));
+                if !failed.is_empty() {
+                    response_bytes += failed.len();
+                    response_truncated |=
+                        crate::proxy_log::append_capture(&mut response_capture, &failed);
+                    stream.write_all(&failed).await?;
+                }
+                stream_error = Some(error_message);
+                stream_failed = true;
+                break;
+            }
+        }
+    }
+
+    if !stream_failed {
+        let tail = converter.finish();
+        if !tail.is_empty() {
+            response_bytes += tail.len();
+            response_truncated |= crate::proxy_log::append_capture(&mut response_capture, &tail);
+            stream.write_all(&tail).await?;
+        }
+    }
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "protocol_proxy.stream_conversion_terminal",
+        converter.diagnostic_summary(),
+    );
+    log_helper_response(
+        "helper.protocol_proxy_deferred_stream_ok",
+        method,
+        path,
+        "200 OK",
+        remote_addr_text.clone(),
+    );
+    append_local_proxy_record(
+        diagnostic_id,
+        timestamp_ms,
+        started_at,
+        method,
+        path,
+        remote_addr_text,
+        &request_metadata,
+        relay_id,
+        relay_name,
+        endpoint,
+        Some(response_protocol_label),
+        status_code,
+        true,
+        request_body,
+        &response_capture,
+        response_bytes,
+        response_truncated,
+        stream_error,
     );
     stream.shutdown().await?;
     Ok(())

@@ -551,6 +551,92 @@ data: {"type":"message_stop"}
 }
 
 #[tokio::test]
+async fn helper_defers_claude_high_reasoning_stream_header_wait() {
+    let _lock = launcher_settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
+    let upstream = spawn_launcher_upstream_with_delayed_response(
+        "text/event-stream",
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_slow","type":"message","role":"assistant","model":"claude-sonnet-4","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#
+        .to_string(),
+        std::time::Duration::from_secs(2),
+    );
+    write_launcher_mixed_relay_settings(temp.path(), &upstream.base_url);
+
+    let hooks = DefaultLaunchHooks::default();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    hooks.start_helper(port).await.unwrap();
+
+    let started = std::time::Instant::now();
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .json(&serde_json::json!({
+            "model": "claude-sonnet-4",
+            "input": "think deeply",
+            "stream": true,
+            "reasoning": { "effort": "high" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let header_elapsed = started.elapsed();
+
+    assert!(response.status().is_success());
+    assert!(
+        header_elapsed < std::time::Duration::from_secs(1),
+        "local SSE headers should not wait for delayed upstream headers: {header_elapsed:?}"
+    );
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let body = response.text().await.unwrap();
+    hooks.shutdown_helper(port).await;
+    let requests = upstream.finish_all();
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/v1/messages");
+    let first_upstream_body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(first_upstream_body["stream"], true);
+    assert_eq!(
+        first_upstream_body["thinking"],
+        serde_json::json!({ "type": "adaptive" })
+    );
+    assert_eq!(
+        first_upstream_body["output_config"],
+        serde_json::json!({ "effort": "high" })
+    );
+    assert!(content_type.contains("text/event-stream"));
+    assert!(body.contains("event: response.completed"));
+    assert!(body.contains("data: [DONE]"));
+}
+
+#[tokio::test]
 async fn launch_lifecycle_runs_sync_before_launch_writes_success_and_shutdowns_on_exit() {
     let temp = tempfile::tempdir().unwrap();
     let app_dir = temp.path().join("Codex.app");
@@ -1474,11 +1560,27 @@ fn spawn_launcher_upstream_with_response(
     content_type: &str,
     response_body: String,
 ) -> LauncherUpstream {
-    spawn_launcher_upstream_with_response_specs(vec![(content_type.to_string(), response_body)])
+    spawn_launcher_upstream_with_response_specs(vec![(
+        content_type.to_string(),
+        response_body,
+        std::time::Duration::ZERO,
+    )])
+}
+
+fn spawn_launcher_upstream_with_delayed_response(
+    content_type: &str,
+    response_body: String,
+    response_delay: std::time::Duration,
+) -> LauncherUpstream {
+    spawn_launcher_upstream_with_response_specs(vec![(
+        content_type.to_string(),
+        response_body,
+        response_delay,
+    )])
 }
 
 fn spawn_launcher_upstream_with_response_specs(
-    response_specs: Vec<(String, String)>,
+    response_specs: Vec<(String, String, std::time::Duration)>,
 ) -> LauncherUpstream {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let address = listener.local_addr().unwrap();
@@ -1487,7 +1589,7 @@ fn spawn_launcher_upstream_with_response_specs(
 
     let handle = std::thread::spawn(move || {
         let mut requests = Vec::new();
-        for (content_type, response_body) in response_specs {
+        for (content_type, response_body, response_delay) in response_specs {
             let started = std::time::Instant::now();
             let mut stream = loop {
                 match listener.accept() {
@@ -1520,6 +1622,9 @@ fn spawn_launcher_upstream_with_response_specs(
                 response_body.len(),
                 response_body
             );
+            if !response_delay.is_zero() {
+                std::thread::sleep(response_delay);
+            }
             stream.write_all(response.as_bytes()).unwrap();
             requests.push(LauncherUpstreamRequest { path, body });
         }

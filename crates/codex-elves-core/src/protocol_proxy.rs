@@ -15,9 +15,10 @@ use crate::relay_rotation::{RotationContext, RotationEvent};
 use crate::settings::SettingsStore;
 
 pub const DEFAULT_PROTOCOL_PROXY_PORT: u16 = 45221;
-const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const UPSTREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(60);
+const UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(300);
 const THINK_OPEN_TAG: &str = "<think>";
 const THINK_CLOSE_TAG: &str = "</think>";
 const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
@@ -928,6 +929,10 @@ pub fn upstream_stream_header_timeout() -> Duration {
     UPSTREAM_STREAM_HEADER_TIMEOUT
 }
 
+pub fn upstream_deferred_stream_header_timeout() -> Duration {
+    UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT
+}
+
 pub fn upstream_http_client() -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
         .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
@@ -1380,21 +1385,43 @@ pub async fn open_responses_proxy_request(
     original_user_agent: Option<&str>,
 ) -> anyhow::Result<UpstreamProxyResponse> {
     let settings = SettingsStore::default().load().unwrap_or_default();
-    open_responses_proxy_request_with_settings_and_user_agent(body, settings, original_user_agent)
-        .await
+    open_responses_proxy_request_with_settings_user_agent_and_timeout(
+        body,
+        settings,
+        original_user_agent,
+        None,
+    )
+    .await
 }
 
 pub async fn open_responses_proxy_request_with_settings(
     body: &str,
     settings: crate::settings::BackendSettings,
 ) -> anyhow::Result<UpstreamProxyResponse> {
-    open_responses_proxy_request_with_settings_and_user_agent(body, settings, None).await
+    open_responses_proxy_request_with_settings_user_agent_and_timeout(body, settings, None, None)
+        .await
 }
 
-async fn open_responses_proxy_request_with_settings_and_user_agent(
+pub async fn open_responses_proxy_request_with_stream_header_timeout(
+    body: &str,
+    original_user_agent: Option<&str>,
+    stream_header_timeout: Duration,
+) -> anyhow::Result<UpstreamProxyResponse> {
+    let settings = SettingsStore::default().load().unwrap_or_default();
+    open_responses_proxy_request_with_settings_user_agent_and_timeout(
+        body,
+        settings,
+        original_user_agent,
+        Some(stream_header_timeout),
+    )
+    .await
+}
+
+async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
     body: &str,
     settings: crate::settings::BackendSettings,
     original_user_agent: Option<&str>,
+    stream_header_timeout_override: Option<Duration>,
 ) -> anyhow::Result<UpstreamProxyResponse> {
     let diagnostic_id = next_protocol_proxy_diagnostic_id();
     let request_json: Value = serde_json::from_str(body)?;
@@ -1419,7 +1446,12 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
         let endpoint = upstream_endpoint_for_protocol(&relay, response_protocol);
         let has_more_candidates = attempt + 1 < relay_count;
         let upstream_is_stream = is_stream;
-        let header_timeout = response_header_timeout(upstream_is_stream);
+        let header_timeout = if upstream_is_stream {
+            stream_header_timeout_override
+                .unwrap_or_else(|| response_header_timeout(upstream_is_stream))
+        } else {
+            response_header_timeout(upstream_is_stream)
+        };
         let translated_server_side_tools =
             if response_protocol == UpstreamResponseProtocol::Responses {
                 Vec::new()
@@ -7680,7 +7712,7 @@ fn apply_anthropic_reasoning_options(result: &mut Value, body: &Value, model: &s
         return;
     }
     let reasoning_enabled = reasoning_requested(body).unwrap_or(true);
-    if !reasoning_enabled || anthropic_tool_followup_lacks_signed_reasoning(body) {
+    if !reasoning_enabled {
         result["thinking"] = json!({ "type": "disabled" });
         return;
     }
@@ -7689,40 +7721,6 @@ fn apply_anthropic_reasoning_options(result: &mut Value, body: &Value, model: &s
         .unwrap_or(ANTHROPIC_DEFAULT_REASONING_EFFORT);
     result["thinking"] = json!({ "type": "adaptive" });
     result["output_config"] = json!({ "effort": effort });
-}
-
-fn anthropic_tool_followup_lacks_signed_reasoning(body: &Value) -> bool {
-    let Some(input) = body.get("input") else {
-        return false;
-    };
-    input_contains_tool_result(input) && !input_contains_signed_reasoning(input)
-}
-
-fn input_contains_tool_result(value: &Value) -> bool {
-    match value {
-        Value::Array(items) => items.iter().any(input_contains_tool_result),
-        Value::Object(_) => matches!(
-            value.get("type").and_then(Value::as_str),
-            Some(
-                "function_call_output"
-                    | "custom_tool_call_output"
-                    | "tool_result"
-                    | "tool_search_output"
-            )
-        ),
-        _ => false,
-    }
-}
-
-fn input_contains_signed_reasoning(value: &Value) -> bool {
-    match value {
-        Value::Array(items) => items.iter().any(input_contains_signed_reasoning),
-        Value::Object(_) => {
-            value.get("type").and_then(Value::as_str) == Some("reasoning")
-                && responses_reasoning_encrypted_content(value).is_some()
-        }
-        _ => false,
-    }
 }
 
 /// 从请求体的多个可能位置提取思考深度字符串。
