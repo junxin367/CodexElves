@@ -9,6 +9,7 @@ use serde_json::Value;
 
 pub const MAX_CAPTURED_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 pub const STARTUP_RETAINED_RECORDS: usize = 10;
+pub const RUNTIME_RETAINED_RECORDS: usize = 200;
 const LARGE_LOG_RECORD_SAFETY_BYTES: usize = 1024;
 const MAX_RETAINED_REQUEST_BODY_BYTES: usize = 64 * 1024;
 
@@ -206,8 +207,9 @@ fn append_record_at_path(path: &PathBuf, record: &ProxyRequestRecord) -> std::io
         .open(path)?;
     file.lock_exclusive()?;
     let line = serialize_record_for_log(record)?;
-    crate::log_limits::clear_if_append_would_exceed(&mut file, line.len() as u64 + 1)?;
+    file.seek(SeekFrom::End(0))?;
     writeln!(file, "{line}")?;
+    retain_recent_records_in_file(&mut file, RUNTIME_RETAINED_RECORDS)?;
     file.unlock()?;
     Ok(())
 }
@@ -329,7 +331,6 @@ fn retain_recent_records_in_file(file: &mut fs::File, limit: usize) -> std::io::
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
     for line in &lines[lines.len() - limit..] {
-        crate::log_limits::clear_if_append_would_exceed(file, line.len() as u64 + 1)?;
         writeln!(file, "{line}")?;
     }
     file.flush()?;
@@ -570,22 +571,44 @@ data: [DONE]
     }
 
     #[test]
-    fn append_record_clears_existing_log_when_append_would_exceed_limit() {
-        let path = temp_proxy_log_path("clear-before-append");
-        std::fs::write(
-            &path,
-            vec![b'x'; crate::log_limits::MAX_LOG_FILE_BYTES as usize - 2],
-        )
-        .expect("seed proxy log");
+    fn append_record_does_not_clear_existing_log_by_file_size_under_runtime_record_limit() {
+        let path = temp_proxy_log_path("keep-under-record-limit");
+        let mut seed = "x".repeat(crate::log_limits::MAX_LOG_FILE_BYTES as usize - 2);
+        seed.push('\n');
+        std::fs::write(&path, seed).expect("seed proxy log");
         let record = sample_proxy_record("fresh-record");
 
         append_record_at_path(&path, &record).expect("append proxy log record");
 
         let metadata = std::fs::metadata(&path).expect("read proxy log metadata");
-        assert!(metadata.len() <= crate::log_limits::MAX_LOG_FILE_BYTES);
+        assert!(metadata.len() > crate::log_limits::MAX_LOG_FILE_BYTES);
         let text = std::fs::read_to_string(&path).expect("read proxy log");
-        assert!(!text.starts_with('x'));
+        assert!(text.starts_with('x'));
         assert!(text.contains("fresh-record"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn append_record_retains_recent_runtime_record_limit() {
+        let path = temp_proxy_log_path("runtime-retain-records");
+        let record = sample_proxy_record("record-0");
+
+        for index in 0..=super::RUNTIME_RETAINED_RECORDS {
+            let mut next = record.clone();
+            next.id = format!("record-{index}");
+            append_record_at_path(&path, &next).expect("append proxy log record");
+        }
+
+        let text = std::fs::read_to_string(&path).expect("read proxy log");
+        let lines = text.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), super::RUNTIME_RETAINED_RECORDS);
+        assert!(!text.contains("\"id\":\"record-0\""));
+        assert!(text.contains("\"id\":\"record-1\""));
+        assert!(text.contains(&format!(
+            "\"id\":\"record-{}\"",
+            super::RUNTIME_RETAINED_RECORDS
+        )));
 
         let _ = std::fs::remove_file(path);
     }
