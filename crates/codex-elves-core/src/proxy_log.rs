@@ -135,6 +135,11 @@ pub fn extract_request_metadata(request_json: Option<&Value>) -> RequestMetadata
                 .and_then(|value| value.get("reasoning_effort"))
                 .and_then(Value::as_str)
         })
+        .or_else(|| {
+            request_json
+                .and_then(|value| value.pointer("/output_config/effort"))
+                .and_then(Value::as_str)
+        })
         .filter(|value| !value.trim().is_empty())
         .map(ToString::to_string);
     let reasoning_source = if reasoning
@@ -149,6 +154,12 @@ pub fn extract_request_metadata(request_json: Option<&Value>) -> RequestMetadata
         .is_some()
     {
         Some("reasoning_effort".to_string())
+    } else if request_json
+        .and_then(|value| value.pointer("/output_config/effort"))
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        Some("output_config.effort".to_string())
     } else {
         None
     };
@@ -429,8 +440,9 @@ fn value_to_u64(value: &Value) -> Option<u64> {
 mod tests {
     use super::{
         ProxyRequestRecord, append_record, append_record_at_path, clear_records_at_path,
-        current_timestamp_ms, extract_reasoning_tokens_from_response_body, find_record,
-        read_summaries, retain_recent_records, serialize_record_for_log,
+        current_timestamp_ms, extract_reasoning_tokens_from_response_body,
+        extract_request_metadata, find_record, read_summaries, retain_recent_records,
+        serialize_record_for_log,
     };
 
     fn temp_proxy_log_path(name: &str) -> std::path::PathBuf {
@@ -454,6 +466,23 @@ mod tests {
         }"#;
 
         assert_eq!(extract_reasoning_tokens_from_response_body(body), Some(516));
+    }
+
+    #[test]
+    fn extracts_anthropic_output_config_effort_from_request_metadata() {
+        let request = serde_json::json!({
+            "model": "claude-opus-4-8",
+            "thinking": { "type": "adaptive" },
+            "output_config": { "effort": "high" }
+        });
+
+        let metadata = extract_request_metadata(Some(&request));
+
+        assert_eq!(metadata.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            metadata.reasoning_source.as_deref(),
+            Some("output_config.effort")
+        );
     }
 
     #[test]

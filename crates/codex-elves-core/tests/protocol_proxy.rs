@@ -4843,6 +4843,58 @@ async fn responses_proxy_replaces_system_prompt_for_responses_upstream() {
 }
 
 #[tokio::test]
+async fn responses_proxy_rewrites_default_system_prompt_model_for_responses_log() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let server = spawn_chat_server();
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+
+    let upstream = open_responses_proxy_request(
+        r#"{"model":"gpt-responses","instructions":"You are Codex, a coding agent based on GPT-5. GPT-5.6 Sol is available.","input":"hello","stream":false}"#,
+        Some("Original-Codex-UA/1.0"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(upstream.status_code, 200);
+
+    let request = server.finish();
+    let logged_body: Value = serde_json::from_str(&upstream.request_body).unwrap();
+    assert_eq!(
+        logged_body["instructions"],
+        "You are Codex, a coding agent based on the gpt-responses model. gpt-responses is available."
+    );
+    let body: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["instructions"], logged_body["instructions"]);
+}
+
+#[tokio::test]
+async fn responses_proxy_rewrites_default_system_prompt_model_before_chat_conversion() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let server = spawn_chat_server();
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+
+    let upstream = open_responses_proxy_request(
+        r#"{"model":"gpt-chat","instructions":"You are Codex, a coding agent based on GPT-5.","input":"hello","stream":false}"#,
+        Some("Original-Codex-UA/1.0"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(upstream.status_code, 200);
+
+    let request = server.finish();
+    let logged_body: Value = serde_json::from_str(&upstream.request_body).unwrap();
+    assert_eq!(
+        logged_body["messages"][0],
+        json!({ "role": "system", "content": "You are Codex, a coding agent based on the gpt-chat model." })
+    );
+    let body: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["messages"][0], logged_body["messages"][0]);
+}
+
+#[tokio::test]
 async fn responses_proxy_e2e_chat_upstream_regular_text_with_tools_still_returns_message() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();

@@ -9,7 +9,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::Context;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::relay_rotation::{RotationContext, RotationEvent};
 use crate::settings::SettingsStore;
@@ -189,16 +189,21 @@ fn apply_system_prompt_override_to_responses_request(
     relay: &crate::settings::RelayProfile,
 ) -> Value {
     let prompt = relay.system_prompt_override.trim();
-    if prompt.is_empty() {
-        return request.clone();
-    }
-
     let mut updated = request.clone();
+
     if let Some(object) = updated.as_object_mut() {
-        object.insert("instructions".to_string(), json!(prompt));
-        if let Some(input) = object.get_mut("input") {
-            remove_responses_system_messages(input);
+        if !prompt.is_empty() {
+            object.insert("instructions".to_string(), json!(prompt));
+            if let Some(input) = object.get_mut("input") {
+                remove_responses_system_messages(input);
+            }
         }
+        let model = object
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        rewrite_responses_system_prompt_model_identity(object, &model);
     }
     updated
 }
@@ -238,28 +243,278 @@ fn apply_system_prompt_override_to_chat_request(
     relay: &crate::settings::RelayProfile,
 ) -> Value {
     let prompt = relay.system_prompt_override.trim();
-    if prompt.is_empty() {
-        return request.clone();
-    }
-
     let mut updated = request.clone();
+
     if let Some(object) = updated.as_object_mut() {
+        let model = object
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         let messages = object
             .entry("messages".to_string())
             .or_insert_with(|| json!([]));
+        if !prompt.is_empty() {
+            if let Some(items) = messages.as_array_mut() {
+                items.retain(|message| {
+                    !matches!(
+                        message.get("role").and_then(Value::as_str),
+                        Some("system" | "developer")
+                    )
+                });
+                items.insert(0, json!({ "role": "system", "content": prompt }));
+            } else {
+                *messages = json!([{ "role": "system", "content": prompt }]);
+            }
+        }
         if let Some(items) = messages.as_array_mut() {
-            items.retain(|message| {
-                !matches!(
+            for message in items {
+                if matches!(
                     message.get("role").and_then(Value::as_str),
                     Some("system" | "developer")
-                )
-            });
-            items.insert(0, json!({ "role": "system", "content": prompt }));
-        } else {
-            *messages = json!([{ "role": "system", "content": prompt }]);
+                ) {
+                    rewrite_message_content_model_identity(message, &model);
+                }
+            }
         }
     }
     updated
+}
+
+fn rewrite_responses_system_prompt_model_identity(object: &mut Map<String, Value>, model: &str) {
+    if let Some(instructions) = object.get_mut("instructions") {
+        rewrite_prompt_value_model_identity(instructions, model);
+    }
+    if let Some(input) = object.get_mut("input") {
+        rewrite_responses_input_system_prompt_model_identity(input, model);
+    }
+}
+
+fn rewrite_responses_input_system_prompt_model_identity(value: &mut Value, model: &str) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                rewrite_responses_input_system_prompt_model_identity(item, model);
+            }
+        }
+        Value::Object(object) => {
+            if matches!(
+                object.get("role").and_then(Value::as_str),
+                Some("system" | "developer")
+            ) {
+                if let Some(content) = object.get_mut("content") {
+                    rewrite_prompt_value_model_identity(content, model);
+                }
+            } else {
+                for item in object.values_mut() {
+                    rewrite_responses_input_system_prompt_model_identity(item, model);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_message_content_model_identity(message: &mut Value, model: &str) {
+    if let Some(content) = message.get_mut("content") {
+        rewrite_prompt_value_model_identity(content, model);
+    }
+}
+
+fn rewrite_prompt_value_model_identity(value: &mut Value, model: &str) {
+    match value {
+        Value::String(text) => {
+            *text = rewrite_prompt_text_model_identity(text, model);
+        }
+        Value::Array(items) => {
+            for item in items {
+                rewrite_prompt_value_model_identity(item, model);
+            }
+        }
+        Value::Object(object) => {
+            for item in object.values_mut() {
+                rewrite_prompt_value_model_identity(item, model);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_prompt_text_model_identity(text: &str, model: &str) -> String {
+    let text = replace_gpt_identity_phrases_with_model(text, model);
+    replace_gpt_identity_tokens_with_model(&text, model)
+}
+
+fn replace_gpt_identity_phrases_with_model(text: &str, model: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut result = String::with_capacity(text.len());
+    let mut index = 0;
+    let model = prompt_model_name(model);
+    let replacement = format!(" based on the {model} model");
+
+    while let Some((start, pattern_len)) = find_next_gpt_identity_phrase(&lower, index) {
+        result.push_str(&text[index..start]);
+        let end = consume_optional_model_word(
+            text,
+            consume_gpt_identity_suffix(text, start + pattern_len),
+        );
+        result.push_str(&replacement);
+        index = end;
+    }
+
+    result.push_str(&text[index..]);
+    result
+}
+
+fn find_next_gpt_identity_phrase(lower: &str, from: usize) -> Option<(usize, usize)> {
+    [" based on gpt", " based on the gpt"]
+        .into_iter()
+        .filter_map(|pattern| {
+            lower[from..]
+                .find(pattern)
+                .map(|offset| (from + offset, pattern.len()))
+        })
+        .min_by_key(|(start, _)| *start)
+}
+
+fn replace_gpt_identity_tokens_with_model(text: &str, model: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut result = String::with_capacity(text.len());
+    let mut index = 0;
+    let model = prompt_model_name(model);
+
+    while let Some(offset) = lower[index..].find("gpt") {
+        let start = index + offset;
+        result.push_str(&text[index..start]);
+        if is_gpt_identity_token_start(text, start) {
+            let end = consume_gpt_identity_suffix(text, start + 3);
+            result.push_str(&model);
+            index = end;
+        } else {
+            result.push_str(&text[start..start + 3]);
+            index = start + 3;
+        }
+    }
+
+    result.push_str(&text[index..]);
+    result
+}
+
+fn consume_gpt_identity_suffix(text: &str, from: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut cursor = from;
+
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
+            cursor += 1;
+        } else if byte == b'.'
+            && cursor + 1 < bytes.len()
+            && bytes[cursor + 1].is_ascii_alphanumeric()
+        {
+            cursor += 1;
+        } else {
+            break;
+        }
+    }
+
+    consume_optional_model_suffix_words(text, cursor)
+}
+
+fn consume_optional_model_suffix_words(text: &str, from: usize) -> usize {
+    let mut cursor = from;
+    let mut consumed = 0;
+    while consumed < 3 {
+        let Some((word_start, word_end)) = next_space_separated_word(text, cursor) else {
+            break;
+        };
+        let word = &text[word_start..word_end];
+        if !is_likely_model_suffix_word(word) {
+            break;
+        }
+        cursor = word_end;
+        consumed += 1;
+    }
+    cursor
+}
+
+fn next_space_separated_word(text: &str, from: usize) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut cursor = from;
+    if bytes.get(cursor).copied() != Some(b' ') {
+        return None;
+    }
+    while bytes.get(cursor).copied() == Some(b' ') {
+        cursor += 1;
+    }
+    let start = cursor;
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
+            cursor += 1;
+        } else {
+            break;
+        }
+    }
+    (cursor > start).then_some((start, cursor))
+}
+
+fn is_likely_model_suffix_word(word: &str) -> bool {
+    if word.len() > 24 {
+        return false;
+    }
+    let lower = word.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "sol"
+            | "codex"
+            | "code"
+            | "chat"
+            | "mini"
+            | "nano"
+            | "turbo"
+            | "preview"
+            | "latest"
+            | "instruct"
+            | "reasoning"
+            | "thinking"
+    ) || word
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_uppercase())
+}
+
+fn consume_optional_model_word(text: &str, from: usize) -> usize {
+    let candidate = text.get(from..from + 6).unwrap_or_default();
+    if candidate.eq_ignore_ascii_case(" model") {
+        from + 6
+    } else {
+        from
+    }
+}
+
+fn is_gpt_identity_token_start(text: &str, start: usize) -> bool {
+    let bytes = text.as_bytes();
+    if start > 0 {
+        let previous = bytes[start - 1];
+        if previous.is_ascii_alphanumeric() || previous == b'_' || previous == b'-' {
+            return false;
+        }
+    }
+
+    let Some(next) = bytes.get(start + 3).copied() else {
+        return false;
+    };
+    next.is_ascii_digit() || next == b'-' || next == b'_'
+}
+
+fn prompt_model_name(model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        "Codex".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
