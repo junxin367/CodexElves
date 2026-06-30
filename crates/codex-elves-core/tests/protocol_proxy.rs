@@ -4727,6 +4727,76 @@ async fn responses_proxy_directs_chat_models_to_chat_completions_upstream() {
 }
 
 #[tokio::test]
+async fn responses_proxy_replaces_system_prompt_before_chat_conversion() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let server = spawn_chat_server();
+    write_mixed_relay_settings_with_system_prompt(
+        temp.path(),
+        &server.base_url,
+        "只使用新的系统提示词。",
+    );
+
+    let upstream = open_responses_proxy_request(
+        r#"{"model":"gpt-chat","instructions":"old system","input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"old developer"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}],"stream":false}"#,
+        Some("Original-Codex-UA/1.0"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(upstream.status_code, 200);
+    assert_eq!(
+        upstream.response_protocol,
+        codex_elves_core::protocol_proxy::UpstreamResponseProtocol::ChatCompletions
+    );
+
+    let request = server.finish();
+    let body: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(
+        body["messages"][0],
+        json!({ "role": "system", "content": "只使用新的系统提示词。" })
+    );
+    assert!(
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message.get("content").and_then(Value::as_str) != Some("old developer"))
+    );
+}
+
+#[tokio::test]
+async fn responses_proxy_replaces_system_prompt_for_responses_upstream() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let server = spawn_chat_server();
+    write_mixed_relay_settings_with_system_prompt(
+        temp.path(),
+        &server.base_url,
+        "新的 Responses 提示词",
+    );
+
+    let upstream = open_responses_proxy_request(
+        r#"{"model":"gpt-responses","instructions":"old system","input":[{"type":"message","role":"system","content":[{"type":"input_text","text":"old system in input"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}],"stream":false}"#,
+        Some("Original-Codex-UA/1.0"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(upstream.status_code, 200);
+    assert_eq!(
+        upstream.response_protocol,
+        codex_elves_core::protocol_proxy::UpstreamResponseProtocol::Responses
+    );
+
+    let request = server.finish();
+    let body: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["instructions"], "新的 Responses 提示词");
+    assert_eq!(body["input"].as_array().unwrap().len(), 1);
+    assert_eq!(body["input"][0]["role"], "user");
+}
+
+#[tokio::test]
 async fn responses_proxy_e2e_chat_upstream_regular_text_with_tools_still_returns_message() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -5561,6 +5631,14 @@ fn pal_namespace_tool() -> Value {
 }
 
 fn write_mixed_relay_settings(settings_dir: &Path, base_url: &str) {
+    write_mixed_relay_settings_with_system_prompt(settings_dir, base_url, "");
+}
+
+fn write_mixed_relay_settings_with_system_prompt(
+    settings_dir: &Path,
+    base_url: &str,
+    system_prompt: &str,
+) {
     let settings = json!({
         "relayProfiles": [{
             "id": "mixed",
@@ -5587,7 +5665,8 @@ fn write_mixed_relay_settings(settings_dir: &Path, base_url: &str) {
                     "protocol": "anthropic",
                     "contextWindow": "200000"
                 }
-            ]
+            ],
+            "systemPromptOverride": system_prompt
         }],
         "activeRelayId": "mixed"
     });

@@ -184,6 +184,84 @@ pub fn local_models_proxy_response() -> anyhow::Result<Option<ProxyHttpResponse>
     }))
 }
 
+fn apply_system_prompt_override_to_responses_request(
+    request: &Value,
+    relay: &crate::settings::RelayProfile,
+) -> Value {
+    let prompt = relay.system_prompt_override.trim();
+    if prompt.is_empty() {
+        return request.clone();
+    }
+
+    let mut updated = request.clone();
+    if let Some(object) = updated.as_object_mut() {
+        object.insert("instructions".to_string(), json!(prompt));
+        if let Some(input) = object.get_mut("input") {
+            remove_responses_system_messages(input);
+        }
+    }
+    updated
+}
+
+fn remove_responses_system_messages(value: &mut Value) {
+    match value {
+        Value::Array(items) => {
+            items.retain(|item| {
+                !matches!(
+                    item.get("role").and_then(Value::as_str),
+                    Some("system" | "developer")
+                )
+            });
+            for item in items.iter_mut() {
+                remove_responses_system_messages(item);
+            }
+        }
+        Value::Object(object) => {
+            if object
+                .get("role")
+                .and_then(Value::as_str)
+                .is_some_and(|role| matches!(role, "system" | "developer"))
+            {
+                object.clear();
+            } else {
+                for item in object.values_mut() {
+                    remove_responses_system_messages(item);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn apply_system_prompt_override_to_chat_request(
+    request: &Value,
+    relay: &crate::settings::RelayProfile,
+) -> Value {
+    let prompt = relay.system_prompt_override.trim();
+    if prompt.is_empty() {
+        return request.clone();
+    }
+
+    let mut updated = request.clone();
+    if let Some(object) = updated.as_object_mut() {
+        let messages = object
+            .entry("messages".to_string())
+            .or_insert_with(|| json!([]));
+        if let Some(items) = messages.as_array_mut() {
+            items.retain(|message| {
+                !matches!(
+                    message.get("role").and_then(Value::as_str),
+                    Some("system" | "developer")
+                )
+            });
+            items.insert(0, json!({ "role": "system", "content": prompt }));
+        } else {
+            *messages = json!([{ "role": "system", "content": prompt }]);
+        }
+    }
+    updated
+}
+
 pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
     let mut result = json!({});
 
@@ -524,6 +602,7 @@ pub struct UpstreamProxyResponse {
     pub relay_id: Option<String>,
     pub relay_name: Option<String>,
     pub endpoint: Option<String>,
+    pub request_body: String,
     pub response: Option<reqwest::Response>,
     pub body_override: Option<Vec<u8>>,
 }
@@ -1080,6 +1159,7 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
     let relay_count = relays.len();
     for (attempt, relay) in relays.into_iter().enumerate() {
         validate_upstream(&relay)?;
+        let request_json = apply_system_prompt_override_to_responses_request(&request_json, &relay);
         let response_protocol = responses_proxy_target_protocol(&relay, &request_json)?;
         let endpoint = upstream_endpoint_for_protocol(&relay, response_protocol);
         let has_more_candidates = attempt + 1 < relay_count;
@@ -1122,7 +1202,7 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
             &relay.user_agent,
             original_user_agent,
         ))?;
-        let upstream = match send_responses_upstream_request(
+        let (upstream, upstream_request_json) = match send_responses_upstream_request(
             &client,
             &relay,
             &request_json,
@@ -1173,6 +1253,7 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
                     .context(failure_context);
             }
         };
+        let mut logged_request_body = serialized_proxy_request_body(&upstream_request_json);
         let status_code = upstream.status().as_u16();
         let mut upstream_response = Some(upstream);
         let mut body_override = None;
@@ -1217,6 +1298,7 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
                         .and_then(|value| value.to_str().ok())
                         .unwrap_or("")
                         .to_string();
+                    logged_request_body = serialized_proxy_request_body(&retry_request);
                     upstream_response = Some(retry);
                 } else {
                     body_override = Some(error_body);
@@ -1258,6 +1340,7 @@ async fn open_responses_proxy_request_with_settings_and_user_agent(
                 relay_id: Some(relay.id),
                 relay_name: Some(relay.name),
                 endpoint: Some(endpoint),
+                request_body: logged_request_body,
                 response: upstream_response,
                 body_override,
             });
@@ -1290,8 +1373,14 @@ async fn send_responses_upstream_request(
     is_stream: bool,
     diagnostic_id: &str,
     header_timeout: Duration,
-) -> anyhow::Result<reqwest::Response> {
-    match response_protocol {
+) -> anyhow::Result<(reqwest::Response, Value)> {
+    let upstream_request = responses_upstream_request_for_protocol(
+        request_json,
+        response_protocol,
+        is_stream,
+        diagnostic_id,
+    )?;
+    let response = match response_protocol {
         UpstreamResponseProtocol::Responses => {
             send_upstream_request_with_header_timeout(
                 upstream_request_builder(
@@ -1299,36 +1388,60 @@ async fn send_responses_upstream_request(
                     &responses_url(&relay.base_url),
                     relay.api_key.trim(),
                     is_stream,
-                    request_json,
+                    &upstream_request,
                 ),
                 header_timeout,
             )
             .await
         }
         UpstreamResponseProtocol::ChatCompletions => {
-            let chat_request = responses_to_chat_completions(responses_request_with_stream(
-                request_json,
-                is_stream,
-            ))?;
-            send_chat_completions_request(client, relay, &chat_request, is_stream, header_timeout)
-                .await
-        }
-        UpstreamResponseProtocol::Anthropic => {
-            let mut anthropic_request = responses_to_anthropic_messages_with_diagnostic_id(
-                responses_request_with_stream(request_json, is_stream),
-                Some(diagnostic_id),
-            )?;
-            apply_cached_anthropic_reasoning_compatibility(&mut anthropic_request);
-            send_anthropic_messages_request(
+            send_chat_completions_request(
                 client,
                 relay,
-                &anthropic_request,
+                &upstream_request,
                 is_stream,
                 header_timeout,
             )
             .await
         }
+        UpstreamResponseProtocol::Anthropic => {
+            send_anthropic_messages_request(
+                client,
+                relay,
+                &upstream_request,
+                is_stream,
+                header_timeout,
+            )
+            .await
+        }
+    }?;
+    Ok((response, upstream_request))
+}
+
+fn responses_upstream_request_for_protocol(
+    request_json: &Value,
+    response_protocol: UpstreamResponseProtocol,
+    is_stream: bool,
+    diagnostic_id: &str,
+) -> anyhow::Result<Value> {
+    match response_protocol {
+        UpstreamResponseProtocol::Responses => Ok(request_json.clone()),
+        UpstreamResponseProtocol::ChatCompletions => {
+            responses_to_chat_completions(responses_request_with_stream(request_json, is_stream))
+        }
+        UpstreamResponseProtocol::Anthropic => {
+            let mut request = responses_to_anthropic_messages_with_diagnostic_id(
+                responses_request_with_stream(request_json, is_stream),
+                Some(diagnostic_id),
+            )?;
+            apply_cached_anthropic_reasoning_compatibility(&mut request);
+            Ok(request)
+        }
     }
+}
+
+fn serialized_proxy_request_body(request: &Value) -> String {
+    serde_json::to_string_pretty(request).unwrap_or_else(|_| request.to_string())
 }
 
 fn responses_request_with_stream(request_json: &Value, is_stream: bool) -> Value {
@@ -1485,6 +1598,7 @@ pub async fn open_models_proxy_request(
         relay_id: Some(relay.id),
         relay_name: Some(relay.name),
         endpoint: Some(endpoint),
+        request_body: String::new(),
         response: Some(upstream),
         body_override: None,
     })
@@ -1508,6 +1622,8 @@ pub async fn open_chat_completions_proxy_request(
     }
 
     let request_json: Value = serde_json::from_str(body)?;
+    let request_json = apply_system_prompt_override_to_chat_request(&request_json, &relay);
+    let request_body = serialized_proxy_request_body(&request_json);
     let is_stream = request_json
         .get("stream")
         .and_then(Value::as_bool)
@@ -1539,6 +1655,7 @@ pub async fn open_chat_completions_proxy_request(
         relay_id: Some(relay.id),
         relay_name: Some(relay.name),
         endpoint: Some(chat_completions_url(&relay.base_url)),
+        request_body,
         response: Some(upstream),
         body_override: None,
     })

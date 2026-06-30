@@ -2505,6 +2505,22 @@ body {
   margin-bottom: 12px;
 }
 
+.system-prompt-modal {
+  width: min(640px, calc(100vw - 32px));
+}
+
+.system-prompt-textarea {
+  min-height: 240px;
+  resize: vertical;
+  font-family: Inter, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  line-height: 1.55;
+}
+
+.system-prompt-modal .toolbar {
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
 .guide-list {
   margin-bottom: 12px;
 }

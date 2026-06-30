@@ -183,6 +183,7 @@ type RelayProfile = {
   chatCompletionsModelList: string;
   anthropicModelList: string;
   userAgent: string;
+  systemPromptOverride: string;
   aggregate?: RelayAggregateConfig | null;
 };
 
@@ -712,6 +713,7 @@ const defaultSettings: BackendSettings = {
       chatCompletionsModelList: "",
       anthropicModelList: "",
       userAgent: "",
+      systemPromptOverride: "",
     },
   ],
   relayCommonConfigContents: "",
@@ -4361,6 +4363,7 @@ function RelayProfileEditor({
     anthropic: [],
   });
   const [fetchingModelChoices, setFetchingModelChoices] = useState(false);
+  const [systemPromptOpen, setSystemPromptOpen] = useState(false);
   if (isAggregateRelayProfile(profile)) {
     return (
       <AggregateRelayProfileEditor
@@ -4421,6 +4424,17 @@ function RelayProfileEditor({
               />
               <span>启用本地代理</span>
             </label>
+          ) : null}
+          {showApiFields ? (
+            <Button
+              onClick={() => setSystemPromptOpen(true)}
+              size="sm"
+              title="设置当前供应商的系统提示词"
+              variant="secondary"
+            >
+              <MessageCircle className="h-4 w-4" />
+              替换系统提示词
+            </Button>
           ) : null}
           {isNew ? null : (
             <Button
@@ -4591,7 +4605,68 @@ function RelayProfileEditor({
         <ShieldCheck className="h-4 w-4" />
         <span>{relayProfileModeHelp(profile)}</span>
       </div>
+      {systemPromptOpen ? (
+        <SystemPromptOverrideModal
+          value={profile.systemPromptOverride}
+          onClose={() => setSystemPromptOpen(false)}
+          onSave={(value) => {
+            updateDraft({ systemPromptOverride: value });
+            setSystemPromptOpen(false);
+          }}
+        />
+      ) : null}
     </div>
+  );
+}
+
+function SystemPromptOverrideModal({
+  value,
+  onClose,
+  onSave,
+}: {
+  value: string;
+  onClose: () => void;
+  onSave: (value: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return createPortal(
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="system-prompt-title" onClick={onClose}>
+      <div className="modal-card system-prompt-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <h2 id="system-prompt-title">替换系统提示词</h2>
+            <p>直连会写入模型目录；本地代理请求会先替换这里的系统提示词，再执行模型协议分流。</p>
+          </div>
+          <Button onClick={onClose} size="icon" title="关闭" variant="ghost">
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+        <Textarea
+          autoFocus
+          className="system-prompt-textarea"
+          onChange={(event) => setDraft(event.currentTarget.value)}
+          placeholder="输入新的系统提示词；留空表示不替换。"
+          value={draft}
+        />
+        <Toolbar>
+          <Button onClick={() => onSave(draft)}>
+            <Save className="h-4 w-4" />
+            保存
+          </Button>
+          <Button onClick={() => onSave("")} variant="secondary">清空</Button>
+          <Button onClick={onClose} variant="secondary">取消</Button>
+        </Toolbar>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -7094,6 +7169,7 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
             chatCompletionsModelList: "",
             anthropicModelList: "",
             userAgent: "",
+            systemPromptOverride: "",
           },
         ];
   const activeRelayId = profiles.some((profile) => profile.id === settings.activeRelayId)
@@ -7149,6 +7225,7 @@ function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = 
         contextWindow: "",
         autoCompactLimit: "",
         modelList: "",
+        systemPromptOverride: "",
       },
       null,
     );
@@ -7189,6 +7266,7 @@ function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = 
     chatCompletionsModelList,
     anthropicModelList,
     userAgent: profile.userAgent || "",
+    systemPromptOverride: profile.systemPromptOverride || "",
     aggregate: null,
   };
   return relayProfileUsesLiveFiles(normalized) ? deriveRelayProfileFromFiles(normalized) : normalized;
@@ -7837,6 +7915,7 @@ function createRelayProfile(settings: BackendSettings): RelayProfile {
     chatCompletionsModelList: "",
     anthropicModelList: "",
     userAgent: "",
+    systemPromptOverride: "",
   };
   return withGeneratedRelayFiles(next);
 }
@@ -7871,6 +7950,7 @@ function createAggregateRelayProfile(settings: BackendSettings): RelayProfile {
       chatCompletionsModelList: "",
       anthropicModelList: "",
       userAgent: "",
+      systemPromptOverride: "",
       aggregate: {
         strategy: "failover",
         members: candidates.slice(0, 1).map((profile) => ({ profileId: profile.id, weight: 1 })),
@@ -8013,6 +8093,7 @@ function normalizeAggregateRelayProfile(profile: RelayProfile, settings: Backend
     officialMixApiKey: false,
     configContents: "",
     authContents: "",
+    systemPromptOverride: "",
     aggregate,
   };
 }

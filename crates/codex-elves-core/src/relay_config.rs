@@ -1989,15 +1989,17 @@ fn fast_service_tier_capability(slug: &str) -> Option<(Value, Value)> {
 
 const GENERATED_CATALOG_FALLBACK_BASE_INSTRUCTIONS: &str = "You are Codex, a coding agent. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.";
 
-fn neutralize_generated_catalog_prompt_text(text: &str) -> String {
-    let text = remove_gpt_identity_phrases(text);
-    replace_gpt_identity_tokens(&text)
+fn rewrite_generated_catalog_prompt_text_for_model(text: &str, model: &str) -> String {
+    let text = replace_gpt_identity_phrases_with_model(text, model);
+    replace_gpt_identity_tokens_with_model(&text, model)
 }
 
-fn remove_gpt_identity_phrases(text: &str) -> String {
+fn replace_gpt_identity_phrases_with_model(text: &str, model: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let mut result = String::with_capacity(text.len());
     let mut index = 0;
+    let model = prompt_model_name(model);
+    let replacement = format!(" based on the {model} model");
 
     while let Some((start, pattern_len)) = find_next_gpt_identity_phrase(&lower, index) {
         result.push_str(&text[index..start]);
@@ -2005,6 +2007,7 @@ fn remove_gpt_identity_phrases(text: &str) -> String {
             text,
             consume_gpt_identity_suffix(text, start + pattern_len),
         );
+        result.push_str(&replacement);
         index = end;
     }
 
@@ -2053,17 +2056,18 @@ fn consume_optional_model_word(text: &str, from: usize) -> usize {
     }
 }
 
-fn replace_gpt_identity_tokens(text: &str) -> String {
+fn replace_gpt_identity_tokens_with_model(text: &str, model: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let mut result = String::with_capacity(text.len());
     let mut index = 0;
+    let model = prompt_model_name(model);
 
     while let Some(offset) = lower[index..].find("gpt") {
         let start = index + offset;
         result.push_str(&text[index..start]);
         if is_gpt_identity_token_start(text, start) {
             let end = consume_gpt_identity_suffix(text, start + 3);
-            result.push_str("Codex");
+            result.push_str(&model);
             index = end;
         } else {
             result.push_str(&text[start..start + 3]);
@@ -2073,6 +2077,15 @@ fn replace_gpt_identity_tokens(text: &str) -> String {
 
     result.push_str(&text[index..]);
     result
+}
+
+fn prompt_model_name(model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        "Codex".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn is_gpt_identity_token_start(text: &str, start: usize) -> bool {
@@ -2090,26 +2103,49 @@ fn is_gpt_identity_token_start(text: &str, start: usize) -> bool {
     next.is_ascii_digit() || next == b'-' || next == b'_'
 }
 
-fn neutralize_generated_catalog_prompt_value(value: Value) -> Value {
+fn rewrite_generated_catalog_prompt_value_for_model(value: Value, model: &str) -> Value {
     match value {
-        Value::String(text) => Value::String(neutralize_generated_catalog_prompt_text(&text)),
+        Value::String(text) => Value::String(rewrite_generated_catalog_prompt_text_for_model(
+            &text, model,
+        )),
         Value::Array(values) => Value::Array(
             values
                 .into_iter()
-                .map(neutralize_generated_catalog_prompt_value)
+                .map(|value| rewrite_generated_catalog_prompt_value_for_model(value, model))
                 .collect(),
         ),
         Value::Object(object) => Value::Object(
             object
                 .into_iter()
-                .map(|(key, value)| (key, neutralize_generated_catalog_prompt_value(value)))
+                .map(|(key, value)| {
+                    (
+                        key,
+                        rewrite_generated_catalog_prompt_value_for_model(value, model),
+                    )
+                })
                 .collect(),
         ),
         other => other,
     }
 }
 
-fn generated_catalog_prompt_fields() -> (String, Value) {
+fn generated_catalog_prompt_fields(profile: &RelayProfile) -> (String, Value, bool) {
+    let override_prompt = profile.system_prompt_override.trim();
+    if !override_prompt.is_empty() {
+        let base_instructions = override_prompt.to_string();
+        return (
+            base_instructions.clone(),
+            json!({
+                "instructions_template": base_instructions,
+                "instructions_variables": {
+                    "personality_default": "",
+                    "personality_pragmatic": ""
+                }
+            }),
+            false,
+        );
+    }
+
     let source = serde_json::from_str::<Value>(include_str!("../assets/codex-models.json")).ok();
     let first_model = source
         .as_ref()
@@ -2120,12 +2156,11 @@ fn generated_catalog_prompt_fields() -> (String, Value) {
         .and_then(|model| model.get("base_instructions"))
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .map(neutralize_generated_catalog_prompt_text)
+        .map(str::to_string)
         .unwrap_or_else(|| GENERATED_CATALOG_FALLBACK_BASE_INSTRUCTIONS.to_string());
     let model_messages = first_model
         .and_then(|model| model.get("model_messages"))
         .cloned()
-        .map(neutralize_generated_catalog_prompt_value)
         .unwrap_or_else(|| {
             json!({
                 "instructions_template": base_instructions.clone(),
@@ -2135,7 +2170,7 @@ fn generated_catalog_prompt_fields() -> (String, Value) {
                 }
             })
         });
-    (base_instructions, model_messages)
+    (base_instructions, model_messages, true)
 }
 
 #[derive(Debug, Clone)]
@@ -2153,11 +2188,22 @@ pub(crate) fn generated_model_catalog_json(
     let reasoning_effort = catalog_reasoning_effort(config_text);
     let auto_compact_limit =
         parse_optional_positive_u64(&profile.auto_compact_limit, "压缩上下文大小")?;
-    let (base_instructions, model_messages) = generated_catalog_prompt_fields();
+    let (base_instructions, model_messages, rewrite_prompt_model) =
+        generated_catalog_prompt_fields(profile);
     let mut models = Vec::new();
 
     for (index, row) in rows.into_iter().enumerate() {
         let model = row.model;
+        let model_base_instructions = if rewrite_prompt_model {
+            rewrite_generated_catalog_prompt_text_for_model(&base_instructions, &model)
+        } else {
+            base_instructions.clone()
+        };
+        let model_messages = if rewrite_prompt_model {
+            rewrite_generated_catalog_prompt_value_for_model(model_messages.clone(), &model)
+        } else {
+            model_messages.clone()
+        };
         let fast_capability = fast_service_tier_capability(&model);
         let protocol = upstream_response_protocol_for_relay(row.protocol);
         let supported_reasoning_levels =
@@ -2173,7 +2219,7 @@ pub(crate) fn generated_model_catalog_json(
         entry.insert("supported_in_api".to_string(), json!(true));
         entry.insert(
             "base_instructions".to_string(),
-            json!(base_instructions.clone()),
+            json!(model_base_instructions),
         );
         entry.insert("model_messages".to_string(), model_messages.clone());
         // codex 解析 model_catalog_json 时 shell_type 为必填字段，缺失会导致整份目录解析失败
@@ -2258,6 +2304,16 @@ pub(crate) fn relay_profile_catalog_rows(profile: &RelayProfile) -> Vec<CatalogM
             });
         }
         return rows;
+    }
+
+    let active_model = relay_profile_model(profile);
+    if !profile.system_prompt_override.trim().is_empty() && !active_model.trim().is_empty() {
+        rows.push(CatalogModelRow {
+            model: active_model.trim().to_string(),
+            context_window: profile.context_window_for_active_model(),
+            protocol: profile.protocol,
+        });
+        seen.insert(active_model.trim().to_string());
     }
 
     for (protocol, models) in [
@@ -3352,20 +3408,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generated_catalog_prompt_neutralizes_gpt_identity_tokens_without_version_residue() {
-        let neutralized = neutralize_generated_catalog_prompt_text(
+    fn generated_catalog_prompt_replaces_gpt_identity_tokens_with_model() {
+        let rewritten = rewrite_generated_catalog_prompt_text_for_model(
             "You are Codex, a coding agent based on GPT-5.5. GPT5.5 is available. Powered by GPT-5-Codex.",
+            "deepseek-coder",
         );
 
-        assert!(neutralized.contains("You are Codex, a coding agent."));
-        assert!(!neutralized.contains("GPT-5"));
-        assert!(!neutralized.contains("GPT5"));
-        assert!(!neutralized.contains(".5"));
-        assert!(!neutralized.contains("based on"));
+        assert!(
+            rewritten.contains("You are Codex, a coding agent based on the deepseek-coder model.")
+        );
+        assert!(rewritten.contains("deepseek-coder is available"));
+        assert!(rewritten.contains("Powered by deepseek-coder."));
+        assert!(!rewritten.contains("GPT-5"));
+        assert!(!rewritten.contains("GPT5"));
+        assert!(!rewritten.contains(".5"));
     }
 
     #[test]
-    fn generated_catalog_prompt_neutralizes_nested_model_messages() {
+    fn generated_catalog_prompt_replaces_nested_model_messages() {
         let value = json!({
             "instructions_template": "You are Codex, a coding agent based on the GPT-5 model.",
             "instructions_variables": {
@@ -3373,24 +3433,29 @@ mod tests {
             }
         });
 
-        let neutralized = neutralize_generated_catalog_prompt_value(value);
-        let text = neutralized.to_string();
+        let rewritten = rewrite_generated_catalog_prompt_value_for_model(value, "qwen3-coder");
+        let text = rewritten.to_string();
+        assert!(text.contains("qwen3-coder"));
         assert!(!text.contains("GPT-5"));
         assert!(!text.contains(".5"));
-        assert!(text.contains("Codex"));
     }
 
     #[test]
-    fn generated_catalog_prompt_neutralizes_older_gpt_versions_without_word_damage() {
-        let neutralized = neutralize_generated_catalog_prompt_text(
+    fn generated_catalog_prompt_replaces_older_gpt_versions_without_word_damage() {
+        let rewritten = rewrite_generated_catalog_prompt_text_for_model(
             "Prefer GPT-4 API compatibility over gpt-3.5 assumptions, but keep gptable untouched.",
+            "claude-sonnet-4",
         );
 
-        assert!(neutralized.contains("Prefer Codex API compatibility over Codex assumptions"));
-        assert!(neutralized.contains("gptable untouched"));
-        assert!(!neutralized.contains("GPT-4"));
-        assert!(!neutralized.contains("gpt-3"));
-        assert!(!neutralized.contains(".5"));
+        assert!(
+            rewritten.contains(
+                "Prefer claude-sonnet-4 API compatibility over claude-sonnet-4 assumptions"
+            )
+        );
+        assert!(rewritten.contains("gptable untouched"));
+        assert!(!rewritten.contains("GPT-4"));
+        assert!(!rewritten.contains("gpt-3"));
+        assert!(!rewritten.contains(".5"));
     }
 
     #[test]
@@ -3522,6 +3587,62 @@ mod tests {
             .and_then(Value::as_array)
             .unwrap();
         assert!(standard_tiers.is_empty(), "gpt-5.2 不应有 fast tier");
+    }
+
+    #[test]
+    fn generated_model_catalog_uses_system_prompt_override() {
+        let profile = RelayProfile {
+            model: "gpt-direct".to_string(),
+            protocol: RelayProtocol::Responses,
+            system_prompt_override: "第一行\n第二行".to_string(),
+            ..RelayProfile::default()
+        };
+        let rows = relay_profile_catalog_rows(&profile);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model, "gpt-direct");
+
+        let catalog = generated_model_catalog_json(&profile, "", rows).unwrap();
+        let model = &catalog["models"][0];
+        assert_eq!(model["base_instructions"], "第一行\n第二行");
+        assert_eq!(
+            model["model_messages"]["instructions_template"],
+            "第一行\n第二行"
+        );
+    }
+
+    #[test]
+    fn generated_model_catalog_is_created_for_direct_prompt_override_without_model_list() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let profile = RelayProfile {
+            model: "gpt-direct".to_string(),
+            base_url: "https://example.test/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            protocol: RelayProtocol::Responses,
+            local_proxy_enabled: Some(false),
+            relay_mode: crate::settings::RelayMode::PureApi,
+            system_prompt_override: "直连提示词".to_string(),
+            config_contents: r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://example.test/v1"
+"#
+            .to_string(),
+            ..RelayProfile::default()
+        };
+
+        apply_relay_profile_files_to_home_with_context(home, &profile, "").unwrap();
+        let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        assert!(config.contains(r#"model_catalog_json = "codex-elves-model-catalog.json""#));
+        let catalog: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(GENERATED_MODEL_CATALOG_FILENAME)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(catalog["models"][0]["slug"], "gpt-direct");
+        assert_eq!(catalog["models"][0]["base_instructions"], "直连提示词");
     }
 
     #[test]

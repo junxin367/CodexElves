@@ -110,6 +110,12 @@ pub struct RelayProfile {
         skip_serializing_if = "String::is_empty"
     )]
     pub user_agent: String,
+    #[serde(
+        rename = "systemPromptOverride",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub system_prompt_override: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -170,6 +176,7 @@ impl Default for RelayProfile {
             chat_completions_model_list: String::new(),
             anthropic_model_list: String::new(),
             user_agent: String::new(),
+            system_prompt_override: String::new(),
         }
     }
 }
@@ -408,6 +415,7 @@ impl BackendSettings {
                 chat_completions_model_list: String::new(),
                 anthropic_model_list: String::new(),
                 user_agent: String::new(),
+                system_prompt_override: String::new(),
             };
         }
 
@@ -457,6 +465,7 @@ impl BackendSettings {
             chat_completions_model_list: String::new(),
             anthropic_model_list: String::new(),
             user_agent: String::new(),
+            system_prompt_override: String::new(),
         }
     }
 
