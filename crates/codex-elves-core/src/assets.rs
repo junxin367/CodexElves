@@ -61,13 +61,20 @@ fn injection_script_source_with_settings(
 
 fn local_plugin_marketplaces() -> Value {
     let home = crate::codex_home::default_codex_home_dir();
+    local_plugin_marketplaces_from_home(&home)
+}
+
+fn local_plugin_marketplaces_from_home(home: &Path) -> Value {
     let installed_plugins = installed_plugins_from_config(&home);
-    let candidates = [home
+    let marketplace_dir = home
         .join(".tmp")
         .join("plugins")
         .join(".agents")
-        .join("plugins")
-        .join("marketplace.json")];
+        .join("plugins");
+    let candidates = [
+        marketplace_dir.join("marketplace.json"),
+        marketplace_dir.join("api_marketplace.json"),
+    ];
     let marketplaces = candidates
         .iter()
         .filter_map(|path| {
@@ -269,5 +276,54 @@ fn image_content_type(path: &Path) -> Option<&'static str> {
         Some("gif") => Some("image/gif"),
         Some("bmp") => Some("image/bmp"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_plugin_marketplaces_includes_api_marketplace_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let marketplace_dir = home
+            .join(".tmp")
+            .join("plugins")
+            .join(".agents")
+            .join("plugins");
+        let api_plugin_dir = home
+            .join(".tmp")
+            .join("plugins")
+            .join("plugins")
+            .join("build-web-apps");
+        std::fs::create_dir_all(&marketplace_dir).unwrap();
+        std::fs::create_dir_all(api_plugin_dir.join(".codex-plugin")).unwrap();
+        std::fs::write(
+            marketplace_dir.join("marketplace.json"),
+            r#"{"name":"openai-curated","plugins":[{"name":"gmail"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            marketplace_dir.join("api_marketplace.json"),
+            r#"{"name":"openai-api-curated","plugins":[{"name":"build-web-apps"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            api_plugin_dir.join(".codex-plugin").join("plugin.json"),
+            r#"{"interface":{"displayName":"Build Web Apps"}}"#,
+        )
+        .unwrap();
+
+        let marketplaces = local_plugin_marketplaces_from_home(home);
+        let array = marketplaces.as_array().unwrap();
+
+        assert_eq!(array.len(), 2);
+        assert_eq!(array[0]["name"].as_str(), Some("openai-curated"));
+        assert_eq!(array[1]["name"].as_str(), Some("openai-api-curated"));
+        assert_eq!(
+            array[1]["plugins"][0]["interface"]["displayName"].as_str(),
+            Some("Build Web Apps")
+        );
     }
 }

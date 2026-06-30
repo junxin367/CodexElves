@@ -1133,7 +1133,7 @@ fn persist_provider_sync_selection(provider: &str) {
 pub async fn fetch_codex_radar(
     request: Option<CodexRadarRequest>,
 ) -> CommandResult<CodexRadarPayload> {
-    let source_url = codex_elves_core::codex_radar::CODEX_RADAR_CURRENT_URL.to_string();
+    let source_url = codex_elves_core::codex_radar::CODEX_RADAR_HTML_URL.to_string();
     let force_refresh = request.map(|item| item.force_refresh).unwrap_or(false);
     if !force_refresh
         && let Some(cached) = codex_radar_cache_entry()

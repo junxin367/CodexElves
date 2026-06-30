@@ -7,16 +7,66 @@ use fs2::FileExt;
 pub const LAUNCHER_GUARD_PORT: u16 = 45220;
 pub const MANAGER_GUARD_PORT: u16 = 45219;
 pub const DEV_MANAGER_GUARD_PORT: u16 = 45229;
+const LAUNCHER_GUARD_PORT_ENV: &str = "CODEX_ELVES_LAUNCHER_GUARD_PORT";
 const MANAGER_GUARD_PORT_ENV: &str = "CODEX_ELVES_MANAGER_GUARD_PORT";
+const GUARD_PORT_OFFSET_ENV: &str = "CODEX_ELVES_GUARD_PORT_OFFSET";
+
+pub fn launcher_guard_port() -> u16 {
+    launcher_guard_port_with(
+        std::env::var(LAUNCHER_GUARD_PORT_ENV).ok().as_deref(),
+        std::env::var(GUARD_PORT_OFFSET_ENV).ok().as_deref(),
+        std::env::var("USERNAME").ok().as_deref(),
+        cfg!(windows),
+    )
+}
+
+fn launcher_guard_port_with(
+    env_value: Option<&str>,
+    offset_value: Option<&str>,
+    username: Option<&str>,
+    is_windows: bool,
+) -> u16 {
+    guard_port_with(
+        LAUNCHER_GUARD_PORT,
+        env_value,
+        offset_value,
+        username,
+        is_windows,
+    )
+}
 
 pub fn manager_guard_port() -> u16 {
     manager_guard_port_with(
         cfg!(debug_assertions),
         std::env::var(MANAGER_GUARD_PORT_ENV).ok().as_deref(),
+        std::env::var(GUARD_PORT_OFFSET_ENV).ok().as_deref(),
+        std::env::var("USERNAME").ok().as_deref(),
+        cfg!(windows),
     )
 }
 
-fn manager_guard_port_with(debug_build: bool, env_value: Option<&str>) -> u16 {
+fn manager_guard_port_with(
+    debug_build: bool,
+    env_value: Option<&str>,
+    offset_value: Option<&str>,
+    username: Option<&str>,
+    is_windows: bool,
+) -> u16 {
+    let base_port = if debug_build {
+        DEV_MANAGER_GUARD_PORT
+    } else {
+        MANAGER_GUARD_PORT
+    };
+    guard_port_with(base_port, env_value, offset_value, username, is_windows)
+}
+
+fn guard_port_with(
+    base_port: u16,
+    env_value: Option<&str>,
+    offset_value: Option<&str>,
+    username: Option<&str>,
+    is_windows: bool,
+) -> u16 {
     if let Some(port) = env_value
         .and_then(|value| value.trim().parse::<u16>().ok())
         .filter(|port| *port > 0)
@@ -24,11 +74,31 @@ fn manager_guard_port_with(debug_build: bool, env_value: Option<&str>) -> u16 {
         return port;
     }
 
-    if debug_build {
-        DEV_MANAGER_GUARD_PORT
-    } else {
-        MANAGER_GUARD_PORT
+    if let Some(offset) = offset_value.and_then(|value| value.trim().parse::<u16>().ok()) {
+        return guard_port_with_offset(base_port, offset);
     }
+
+    guard_port_with_offset(base_port, guard_port_auto_offset(username, is_windows))
+}
+
+fn guard_port_with_offset(base_port: u16, offset: u16) -> u16 {
+    base_port
+        .checked_add(offset)
+        .filter(|port| *port > base_port)
+        .unwrap_or(base_port)
+}
+
+fn guard_port_auto_offset(username: Option<&str>, is_windows: bool) -> u16 {
+    if !is_windows {
+        return 0;
+    }
+    username
+        .map(|user| {
+            user.bytes()
+                .fold(0u16, |acc, byte| acc.wrapping_add(byte as u16))
+                % 1000
+        })
+        .unwrap_or(0)
 }
 
 pub fn select_platform_loopback_port(requested: u16) -> u16 {
@@ -262,21 +332,80 @@ mod tests {
 
     #[test]
     fn manager_guard_port_uses_separate_default_for_debug_builds() {
-        assert_eq!(manager_guard_port_with(false, None), MANAGER_GUARD_PORT);
-        assert_eq!(manager_guard_port_with(true, None), DEV_MANAGER_GUARD_PORT);
+        assert_eq!(
+            manager_guard_port_with(false, None, None, None, false),
+            MANAGER_GUARD_PORT
+        );
+        assert_eq!(
+            manager_guard_port_with(true, None, None, None, false),
+            DEV_MANAGER_GUARD_PORT
+        );
     }
 
     #[test]
     fn manager_guard_port_allows_environment_override() {
-        assert_eq!(manager_guard_port_with(true, Some("45299")), 45299);
-        assert_eq!(manager_guard_port_with(false, Some("45299")), 45299);
         assert_eq!(
-            manager_guard_port_with(true, Some("not-a-port")),
+            manager_guard_port_with(true, Some("45299"), None, None, false),
+            45299
+        );
+        assert_eq!(
+            manager_guard_port_with(false, Some("45299"), None, None, false),
+            45299
+        );
+        assert_eq!(
+            manager_guard_port_with(true, Some("not-a-port"), None, None, false),
             DEV_MANAGER_GUARD_PORT
         );
         assert_eq!(
-            manager_guard_port_with(false, Some("0")),
+            manager_guard_port_with(false, Some("0"), None, None, false),
             MANAGER_GUARD_PORT
+        );
+    }
+
+    #[test]
+    fn launcher_guard_port_allows_environment_override() {
+        assert_eq!(
+            launcher_guard_port_with(Some("45298"), None, Some("alice"), true),
+            45298
+        );
+        assert_eq!(
+            launcher_guard_port_with(Some("not-a-port"), None, None, false),
+            LAUNCHER_GUARD_PORT
+        );
+    }
+
+    #[test]
+    fn guard_ports_honor_shared_offset_without_collapsing_to_same_port() {
+        assert_eq!(
+            launcher_guard_port_with(None, Some("50"), Some("alice"), true),
+            LAUNCHER_GUARD_PORT + 50
+        );
+        assert_eq!(
+            manager_guard_port_with(false, None, Some("50"), Some("alice"), true),
+            MANAGER_GUARD_PORT + 50
+        );
+    }
+
+    #[test]
+    fn guard_ports_ignore_overflowing_shared_offset() {
+        assert_eq!(
+            launcher_guard_port_with(None, Some("65535"), Some("alice"), true),
+            LAUNCHER_GUARD_PORT
+        );
+        assert_eq!(
+            manager_guard_port_with(false, None, Some("65535"), Some("alice"), true),
+            MANAGER_GUARD_PORT
+        );
+    }
+
+    #[test]
+    fn guard_ports_use_username_offset_only_on_windows() {
+        let windows_port = launcher_guard_port_with(None, None, Some("alice"), true);
+        assert!(windows_port >= LAUNCHER_GUARD_PORT);
+        assert!(windows_port < LAUNCHER_GUARD_PORT + 1000);
+        assert_eq!(
+            launcher_guard_port_with(None, None, Some("alice"), false),
+            LAUNCHER_GUARD_PORT
         );
     }
 

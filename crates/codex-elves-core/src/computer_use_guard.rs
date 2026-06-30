@@ -777,6 +777,21 @@ fn ensure_trailing_newline(mut contents: String) -> String {
     contents
 }
 
+/// Kill orphaned SkyComputerUseClient processes on macOS.
+///
+/// Codex can leave these subprocesses behind after Computer Use sessions. The
+/// next session recreates them lazily, so cleanup is limited to this exact
+/// process name and leaves lightweight Node helper processes alone.
+#[cfg(target_os = "macos")]
+pub fn kill_orphaned_computer_use_processes() {
+    let _ = std::process::Command::new("pkill")
+        .arg("-x")
+        .arg("SkyComputerUseClient")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

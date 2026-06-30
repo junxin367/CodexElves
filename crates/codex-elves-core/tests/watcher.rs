@@ -4,6 +4,9 @@ use codex_elves_core::watcher::{
     process_ids_still_running, should_recover_stale_launcher, watcher_disabled_flag,
 };
 
+#[cfg(windows)]
+use codex_elves_core::watcher::{WindowsProcessInfo, find_codex_processes_from_snapshot};
+
 #[test]
 fn cdp_listening_returns_true_for_bound_loopback_port() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -110,4 +113,96 @@ fn stop_wait_tracks_only_expected_process_ids() {
         process_ids_still_running(&[10, 20, 30], [5, 20, 40, 30]),
         vec![20, 30]
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn find_codex_processes_finds_portable_install_with_capital_c() {
+    let processes = [WindowsProcessInfo {
+        process_id: 42,
+        parent_process_id: 0,
+        exe_file: "Codex.exe".to_string(),
+        executable_path: Some(std::path::PathBuf::from(
+            r"D:\Downloads\codexapp\app\Codex.exe",
+        )),
+    }];
+
+    assert_eq!(find_codex_processes_from_snapshot(&processes), vec![42]);
+}
+
+#[cfg(windows)]
+#[test]
+fn find_codex_processes_finds_portable_install_case_insensitively() {
+    let processes = [WindowsProcessInfo {
+        process_id: 43,
+        parent_process_id: 0,
+        exe_file: "codex.exe".to_string(),
+        executable_path: Some(std::path::PathBuf::from(
+            r"D:\Downloads\codexapp\app\codex.exe",
+        )),
+    }];
+
+    assert_eq!(find_codex_processes_from_snapshot(&processes), vec![43]);
+}
+
+#[cfg(windows)]
+#[test]
+fn find_codex_processes_combines_store_and_portable_installs() {
+    let processes = [
+        WindowsProcessInfo {
+            process_id: 11,
+            parent_process_id: 0,
+            exe_file: "Codex.exe".to_string(),
+            executable_path: Some(std::path::PathBuf::from(
+                r"C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__abc\app\Codex.exe",
+            )),
+        },
+        WindowsProcessInfo {
+            process_id: 42,
+            parent_process_id: 0,
+            exe_file: "Codex.exe".to_string(),
+            executable_path: Some(std::path::PathBuf::from(
+                r"D:\Downloads\codexapp\app\Codex.exe",
+            )),
+        },
+    ];
+
+    assert_eq!(find_codex_processes_from_snapshot(&processes), vec![11, 42]);
+}
+
+#[cfg(windows)]
+#[test]
+fn find_codex_processes_ignores_non_codex_main_processes() {
+    let processes = [
+        WindowsProcessInfo {
+            process_id: 10,
+            parent_process_id: 0,
+            exe_file: "notepad.exe".to_string(),
+            executable_path: Some(std::path::PathBuf::from(r"C:\Windows\notepad.exe")),
+        },
+        WindowsProcessInfo {
+            process_id: 20,
+            parent_process_id: 0,
+            exe_file: "codex-elves.exe".to_string(),
+            executable_path: Some(std::path::PathBuf::from(r"D:\Tools\codex-elves.exe")),
+        },
+        WindowsProcessInfo {
+            process_id: 21,
+            parent_process_id: 0,
+            exe_file: "codex-elves-manager.exe".to_string(),
+            executable_path: Some(std::path::PathBuf::from(
+                r"D:\Tools\codex-elves-manager.exe",
+            )),
+        },
+        WindowsProcessInfo {
+            process_id: 22,
+            parent_process_id: 0,
+            exe_file: "helper.exe".to_string(),
+            executable_path: Some(std::path::PathBuf::from(
+                r"C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__abc\app\helper.exe",
+            )),
+        },
+    ];
+
+    assert!(find_codex_processes_from_snapshot(&processes).is_empty());
 }

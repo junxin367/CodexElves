@@ -128,6 +128,7 @@ type BackendSettings = {
   codexAppPluginEntryUnlock: boolean;
   codexAppPluginMarketplaceUnlock: boolean;
   codexAppForcePluginInstall: boolean;
+  codexAppPluginAutoExpand: boolean;
   codexAppSessionDelete: boolean;
   codexAppMarkdownExport: boolean;
   codexAppProjectMove: boolean;
@@ -670,6 +671,7 @@ const defaultSettings: BackendSettings = {
   codexAppPluginEntryUnlock: true,
   codexAppPluginMarketplaceUnlock: true,
   codexAppForcePluginInstall: true,
+  codexAppPluginAutoExpand: true,
   codexAppSessionDelete: true,
   codexAppMarkdownExport: true,
   codexAppProjectMove: true,
@@ -3237,6 +3239,7 @@ function EnhanceScreen({
             <FeatureToggle title="插件市场解锁" detail="API Key 模式下扩展插件市场请求，尽量显示完整插件列表；官方/混合模式通常不需要。" checked={form.codexAppPluginMarketplaceUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginMarketplaceUnlock", value)} />
             <FeatureToggle title="强制解锁入口" detail="恢复 1.1.9 的入口解锁方式，强制显示并启用插件入口。" checked={form.codexAppPluginEntryUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginEntryUnlock", value)} />
             <FeatureToggle title="特殊插件强制安装" detail="解除 App unavailable / 应用不可用导致的前端安装禁用。" checked={form.codexAppForcePluginInstall} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppForcePluginInstall", value)} />
+            <FeatureToggle title="插件列表全量展示" detail="进入插件页后自动连续展开“更多”，尽量一次显示完整插件列表。" checked={form.codexAppPluginAutoExpand} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppPluginAutoExpand", value)} />
             <FeatureToggle title="Fast 按钮" detail="显示服务模式切换按钮。Fast（service_tier=priority）仅 OpenAI 部分模型支持（如 gpt-5.4 / gpt-5.5）；Claude 等其他模型不支持，会按 Standard 发送。" checked={form.codexAppServiceTierControls} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppServiceTierControls", value)} />
             <FeatureToggle title="会话删除" detail="在会话列表悬停显示删除按钮，并支持撤销。" checked={form.codexAppSessionDelete} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppSessionDelete", value)} />
             <FeatureToggle title="Markdown 导出" detail="在会话列表显示导出按钮，导出带时间戳的 Markdown。" checked={form.codexAppMarkdownExport} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppMarkdownExport", value)} />
@@ -3480,12 +3483,12 @@ function SessionsScreen({
   const projectOptions = useMemo(() => {
     const counts = new Map<string, number>();
     for (const item of items) {
-      const cwd = (item.cwd || "").trim();
-      if (cwd) counts.set(cwd, (counts.get(cwd) ?? 0) + 1);
+      const projectKey = sessionProjectKey(item.cwd);
+      if (projectKey) counts.set(projectKey, (counts.get(projectKey) ?? 0) + 1);
     }
     return Array.from(counts.entries())
       .map(([value, count]) => ({ value, count }))
-      .sort((a, b) => a.value.localeCompare(b.value));
+      .sort((a, b) => sessionProjectLabel(a.value).localeCompare(sessionProjectLabel(b.value)));
   }, [items]);
 
   // 结束时间含当天：转换为当天 23:59:59.999
@@ -3494,7 +3497,7 @@ function SessionsScreen({
 
   const filteredItems = useMemo(() => {
     return items.filter((item) => {
-      if (projectFilter && (item.cwd || "").trim() !== projectFilter) return false;
+      if (projectFilter && sessionProjectKey(item.cwd) !== projectFilter) return false;
       const updated = item.updatedAtMs ?? 0;
       if (startMs !== null && !(updated >= startMs)) return false;
       if (endCutoffMs !== null && !(updated > 0 && updated <= endCutoffMs)) return false;
@@ -3635,7 +3638,7 @@ function SessionsScreen({
                       <div className="session-main">
                         <strong>{session.title || "未命名会话"}</strong>
                         <span>{session.id}</span>
-                        <small>{session.cwd || "未记录项目路径"}</small>
+                        <small title={session.cwd || undefined}>{sessionProjectLabel(session.cwd) || "未记录项目路径"}</small>
                       </div>
                       <div className="session-meta">
                         <Badge status={session.archived ? "archived" : "ok"} />
@@ -5108,6 +5111,26 @@ function ModelChoiceInput({
    );
  }
 
+const CONVERSATION_PROJECT_KEY = "__codex_conversation_project__";
+const CONVERSATION_PROJECT_LABEL = "对话项目";
+
+function sessionProjectKey(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed) return "";
+  return isCodexConversationProjectPath(trimmed) ? CONVERSATION_PROJECT_KEY : trimmed;
+}
+
+function sessionProjectLabel(pathOrKey: string): string {
+  if (pathOrKey === CONVERSATION_PROJECT_KEY || isCodexConversationProjectPath(pathOrKey)) {
+    return CONVERSATION_PROJECT_LABEL;
+  }
+  return projectLabel(pathOrKey);
+}
+
+function isCodexConversationProjectPath(path: string): boolean {
+  return /(?:^|[\\/])Codex[\\/]\d{4}-\d{2}-\d{2}[\\/][^\\/]+[\\/]?$/i.test(path.trim());
+}
+
 function projectLabel(path: string): string {
   const trimmed = path.replace(/[\\/]+$/, "");
   const parts = trimmed.split(/[\\/]+/).filter(Boolean);
@@ -5134,7 +5157,10 @@ function SessionProjectSelect({
   const filtered = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
     if (!kw) return options;
-    return options.filter((item) => item.value.toLowerCase().includes(kw));
+    return options.filter((item) => {
+      const label = sessionProjectLabel(item.value).toLowerCase();
+      return label.includes(kw) || item.value.toLowerCase().includes(kw);
+    });
   }, [options, keyword]);
 
   const updatePosition = () => {
@@ -5186,7 +5212,7 @@ function SessionProjectSelect({
     setOpen(false);
   };
 
-  const triggerText = value ? projectLabel(value) : "全部项目";
+  const triggerText = value ? sessionProjectLabel(value) : "全部项目";
 
   const menu = open ? (
     <div className="session-project-menu" ref={menuRef} style={menuStyle ?? undefined}>
@@ -5217,14 +5243,14 @@ function SessionProjectSelect({
             <button
               key={item.value}
               type="button"
-              title={item.value}
+              title={sessionProjectLabel(item.value)}
               className={"session-project-option" + (value === item.value ? " active" : "")}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => choose(item.value)}
             >
               <span className="session-project-option-name">
-                <strong>{projectLabel(item.value)}</strong>
-                <small>{item.value}</small>
+                <strong>{sessionProjectLabel(item.value)}</strong>
+                <small>{item.value === CONVERSATION_PROJECT_KEY ? "Codex/yyyy-MM-dd/*" : item.value}</small>
               </span>
               <span className="session-project-option-count">{item.count}</span>
             </button>
@@ -5246,7 +5272,7 @@ function SessionProjectSelect({
       }}
     >
       <button type="button" className="session-trigger" onClick={() => setOpen((prev) => !prev)}>
-        <span className="session-trigger-text" title={value || "全部项目"}>
+        <span className="session-trigger-text" title={value ? sessionProjectLabel(value) : "全部项目"}>
           {triggerText}
         </span>
         <ChevronDown className="h-4 w-4" />

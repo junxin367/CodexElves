@@ -17,6 +17,7 @@ apps/codex-elves-manager/src-tauri/gen/
 docs/superpowers/
 
 *.log
+.env
 .DS_Store
 Thumbs.db
 

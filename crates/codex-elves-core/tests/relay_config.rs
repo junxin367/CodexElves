@@ -63,6 +63,39 @@ fn codex_session_db_path_accepts_new_automation_runs_schema() {
 }
 
 #[test]
+fn codex_session_db_path_prefers_threads_db_over_codex_dev_inbox_db() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let sqlite_dir = home.join("sqlite");
+    std::fs::create_dir(&sqlite_dir).unwrap();
+
+    let inbox_path = sqlite_dir.join("codex-dev.db");
+    let inbox = rusqlite::Connection::open(&inbox_path).unwrap();
+    inbox
+        .execute(
+            "CREATE TABLE automation_runs (thread_id TEXT PRIMARY KEY)",
+            [],
+        )
+        .unwrap();
+    inbox
+        .execute("CREATE TABLE inbox_items (id TEXT PRIMARY KEY)", [])
+        .unwrap();
+    drop(inbox);
+
+    let threads_path = sqlite_dir.join("state_5.sqlite");
+    let threads = rusqlite::Connection::open(&threads_path).unwrap();
+    threads
+        .execute(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, title TEXT)",
+            [],
+        )
+        .unwrap();
+    drop(threads);
+
+    assert_eq!(codex_session_db_path_from_home(home), threads_path);
+}
+
+#[test]
 fn codex_session_db_path_falls_back_to_legacy_state_db() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();
@@ -1285,6 +1318,11 @@ experimental_bearer_token = "sk-new"
                 protocol: RelayProtocol::Responses,
                 context_window: "200000".to_string(),
             },
+            RelayModelMapping {
+                request_model: "glm-5.2".to_string(),
+                protocol: RelayProtocol::ChatCompletions,
+                context_window: "1000000".to_string(),
+            },
         ],
         context_window: "200000".to_string(),
         auto_compact_limit: "160000".to_string(),
@@ -1352,6 +1390,15 @@ experimental_bearer_token = "sk-new"
     assert_eq!(catalog["models"][1]["slug"], "qwen3-coder");
     assert_eq!(catalog["models"][1]["context_window"], 200000);
     assert_eq!(catalog["models"][1]["default_reasoning_level"], "xhigh");
+    assert_eq!(catalog["models"][2]["slug"], "glm-5.2");
+    assert_eq!(catalog["models"][2]["default_reasoning_level"], "high");
+    assert_eq!(
+        catalog["models"][2]["supported_reasoning_levels"],
+        serde_json::json!([
+            { "effort": "high", "description": "High reasoning" },
+            { "effort": "max", "description": "Max reasoning" }
+        ])
+    );
 }
 
 #[test]

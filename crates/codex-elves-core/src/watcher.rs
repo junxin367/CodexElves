@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+#[cfg(windows)]
+pub use crate::windows_integration::WindowsProcessInfo;
+
 pub const WATCHER_INTERVAL_SECONDS: f64 = 3.0;
 pub const CDP_PROBE_TIMEOUT_SECONDS: f64 = 0.5;
 pub const TAKEOVER_FAILURE_BACKOFF_SECONDS: f64 = 30.0;
@@ -170,9 +173,20 @@ pub fn uninstall_watcher() -> anyhow::Result<()> {
 
 #[cfg(windows)]
 pub fn find_codex_processes() -> Vec<u32> {
-    codex_process_ids(
-        crate::windows_integration::enumerate_processes()
-            .into_iter()
+    let processes = crate::windows_integration::enumerate_processes()
+        .into_iter()
+        .filter(|process| process.exe_file.eq_ignore_ascii_case("codex.exe"))
+        .collect::<Vec<_>>();
+    find_codex_processes_from_snapshot(&processes)
+}
+
+#[cfg(windows)]
+pub fn find_codex_processes_from_snapshot(
+    processes: &[crate::windows_integration::WindowsProcessInfo],
+) -> Vec<u32> {
+    let mut ids = codex_process_ids(
+        processes
+            .iter()
             .filter(|process| process.exe_file.eq_ignore_ascii_case("codex.exe"))
             .filter_map(|process| {
                 process
@@ -183,7 +197,17 @@ pub fn find_codex_processes() -> Vec<u32> {
             .collect::<Vec<_>>()
             .iter()
             .map(|(pid, path)| (*pid, path.as_str())),
-    )
+    );
+
+    for process in processes {
+        if process.exe_file.eq_ignore_ascii_case("Codex.exe") {
+            ids.push(process.process_id);
+        }
+    }
+
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 #[cfg(not(windows))]

@@ -50,6 +50,9 @@
   const codexServiceTierRequestOverrideVersion = "3";
   const codexAppServerModelRequestPatchVersion = "1";
   const codexPluginMarketplaceUnlockVersion = "12";
+  const codexPluginAutoExpandVersion = "1";
+  const codexPluginAutoExpandMaxClicks = 24;
+  const codexPluginAutoExpandClickDelayMs = 180;
   const codexForcePluginInstallSettleWindowMs = 3000;
   const codexBackendHeartbeatIntervalMs = 30000;
   const codexElvesImageOverlayId = "codex-elves-image-overlay";
@@ -800,13 +803,14 @@
   }
 
   function defaultCodexElvesSettings() {
-    return { pluginEntryUnlock: true, pluginMarketplaceUnlock: true, forcePluginInstall: true, sessionDelete: true, markdownExport: true, projectMove: true, conversationView: false, conversationViewMaxWidth: conversationViewDefaultWidth, upstreamWorktreeCreate: true, nativeMenuPlacement: true, serviceTierControls: false };
+    return { pluginEntryUnlock: true, pluginMarketplaceUnlock: true, forcePluginInstall: true, pluginAutoExpand: true, sessionDelete: true, markdownExport: true, projectMove: true, conversationView: false, conversationViewMaxWidth: conversationViewDefaultWidth, upstreamWorktreeCreate: true, nativeMenuPlacement: true, serviceTierControls: false };
   }
 
   const codexElvesBackendSettingMap = {
     pluginEntryUnlock: "codexAppPluginEntryUnlock",
     pluginMarketplaceUnlock: "codexAppPluginMarketplaceUnlock",
     forcePluginInstall: "codexAppForcePluginInstall",
+    pluginAutoExpand: "codexAppPluginAutoExpand",
     sessionDelete: "codexAppSessionDelete",
     markdownExport: "codexAppMarkdownExport",
     projectMove: "codexAppProjectMove",
@@ -834,6 +838,7 @@
         pluginEntryUnlock: false,
         pluginMarketplaceUnlock: false,
         forcePluginInstall: false,
+        pluginAutoExpand: false,
         sessionDelete: false,
         markdownExport: false,
         projectMove: false,
@@ -885,6 +890,12 @@
         removeCodexServiceTierBadges();
         refreshCodexServiceTierControls();
       }
+    }
+    if (key === "pluginAutoExpand" && !value) {
+      clearTimeout(window.__codexPluginAutoExpandTimer);
+      window.__codexPluginAutoExpandTimer = null;
+      window.__codexPluginAutoExpandRunning = false;
+      window.__codexPluginAutoExpandLastSignature = "";
     }
     renderCodexElvesMenu();
     scan();
@@ -2181,6 +2192,10 @@
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="forcePluginInstall" ${codexElvesBackendSettings.launchMode === "relay" ? 'disabled data-relay-unneeded="true"' : ""}><span></span></button>
             </div>
             <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">插件列表全量展示</div><div class="codex-elves-row-description">进入插件页后自动连续展开“更多”，尽量一次显示完整插件列表。</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="pluginAutoExpand"><span></span></button>
+            </div>
+            <div class="codex-elves-row">
               <div><div class="codex-elves-row-title">Fast 按钮</div><div class="codex-elves-row-description">显示服务模式切换按钮；Fast 仅支持 ${codexServiceTierFastModelListLabel()}，其他模型按 Standard 发送。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="serviceTierControls"><span></span></button>
             </div>
@@ -2591,9 +2606,14 @@
     }
     const next = { ...params };
     const hadMarketplaceKinds = Object.prototype.hasOwnProperty.call(next, "marketplaceKinds");
-    if (hadMarketplaceKinds) delete next.marketplaceKinds;
+    if (hadMarketplaceKinds && Array.isArray(next.marketplaceKinds)) {
+      const nextKinds = next.marketplaceKinds.map((kind) => restorePluginMarketplaceName(kind));
+      if (!nextKinds.includes("vertical")) nextKinds.push("vertical");
+      next.marketplaceKinds = Array.from(new Set(nextKinds));
+    }
     sendCodexElvesDiagnostic("plugin_marketplace_request_expanded", {
       hadMarketplaceKinds,
+      marketplaceKinds: Array.isArray(next.marketplaceKinds) ? next.marketplaceKinds : null,
       cwdCount: Array.isArray(next.cwds) ? next.cwds.length : 0,
     });
     return next;
@@ -2603,12 +2623,16 @@
     if (name === "openai-bundled" || name === "codex-elves-openai-bundled") return "OpenAI插件1(CodexElves)";
     if (name === "openai-curated" || name === "codex-elves-openai-curated") return "OpenAI插件2(CodexElves)";
     if (name === "openai-primary-runtime" || name === "codex-elves-openai-primary-runtime") return "OpenAI插件3(CodexElves)";
+    if (name === "openai-api-curated" || name === "codex-elves-openai-api-curated") return "OpenAI插件4(CodexElves)";
+    if (name === "openai-curated-remote" || name === "codex-elves-openai-curated-remote") return "OpenAI插件5(CodexElves)";
     return fallback;
   }
 
   function codexPluginMarketplaceRemoteAliasForName(name) {
     if (name === "openai-curated") return "codex-elves-openai-curated";
     if (name === "openai-primary-runtime") return "codex-elves-openai-primary-runtime";
+    if (name === "openai-api-curated") return "codex-elves-openai-api-curated";
+    if (name === "openai-curated-remote") return "codex-elves-openai-curated-remote";
     return name;
   }
 
@@ -2722,12 +2746,18 @@
     if (name === "codex-elves-openai-bundled") return "openai-bundled";
     if (name === "codex-elves-openai-curated") return "openai-curated";
     if (name === "codex-elves-openai-primary-runtime") return "openai-primary-runtime";
+    if (name === "codex-elves-openai-api-curated") return "openai-api-curated";
+    if (name === "codex-elves-openai-curated-remote") return "openai-curated-remote";
     return name;
   }
 
   function codexPluginOfficialMarketplaceName(name) {
     const restored = restorePluginMarketplaceName(name);
-    return restored === "openai-bundled" || restored === "openai-curated" || restored === "openai-primary-runtime";
+    return restored === "openai-bundled"
+      || restored === "openai-curated"
+      || restored === "openai-primary-runtime"
+      || restored === "openai-api-curated"
+      || restored === "openai-curated-remote";
   }
 
   function isCodexPluginBuildFlavorFilter(callback, sample) {
@@ -2850,6 +2880,102 @@
       });
     }
     return result;
+  }
+
+  function pluginAutoExpandVisibleElement(el) {
+    if (!(el instanceof HTMLElement) || !el.isConnected) return false;
+    const style = getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden" || style.pointerEvents === "none") return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function pluginAutoExpandPageLooksRelevant() {
+    const routeText = `${location.pathname || ""} ${location.hash || ""} ${document.title || ""}`;
+    if (/插件|Plugins?|Marketplace|市场/i.test(routeText)) return true;
+    return !!document.querySelector('[data-testid*="plugin" i], [class*="plugin" i], [class*="marketplace" i]');
+  }
+
+  function pluginAutoExpandButtonLooksScoped(button) {
+    let node = button;
+    for (let depth = 0; node instanceof HTMLElement && node !== document.body && depth < 8; depth += 1, node = node.parentElement) {
+      const text = String(node.innerText || "");
+      if (text.length > 16000) continue;
+      if (/插件|Plugins?|Marketplace|市场/i.test(text)) return true;
+    }
+    return false;
+  }
+
+  function pluginAutoExpandButtonText(button) {
+    return String(button?.textContent || button?.getAttribute?.("aria-label") || button?.getAttribute?.("title") || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function pluginAutoExpandButtonLooksLikeMore(button) {
+    const text = pluginAutoExpandButtonText(button);
+    if (!text || text.length > 120) return false;
+    if (/^(更多|显示更多|查看更多|加载更多|Show more|Load more|More)$/i.test(text)) return true;
+    if (/^查看\s+.+以及另外\s*\d+\s*个$/i.test(text)) return true;
+    if (/^View\s+.+\s+and\s+\d+\s+more$/i.test(text)) return true;
+    if (/^Show\s+.+\s+and\s+\d+\s+more$/i.test(text)) return true;
+    return false;
+  }
+
+  function pluginAutoExpandButtonCandidates() {
+    if (!codexElvesSettings().pluginAutoExpand || !pluginAutoExpandPageLooksRelevant()) return [];
+    return Array.from(document.querySelectorAll('button, [role="button"]'))
+      .filter(pluginAutoExpandVisibleElement)
+      .filter((button) => !button.disabled && button.getAttribute("aria-disabled") !== "true")
+      .filter(pluginAutoExpandButtonLooksLikeMore)
+      .filter(pluginAutoExpandButtonLooksScoped)
+      .filter((button) => !button.closest?.(`.${moreMenuClass}, #${codexElvesMenuId}, .codex-elves-modal-overlay`));
+  }
+
+  function pluginAutoExpandSignature() {
+    return pluginAutoExpandButtonCandidates()
+      .map((button) => {
+        const rect = button.getBoundingClientRect();
+        return `${pluginAutoExpandButtonText(button)}:${Math.round(rect.top)}:${Math.round(rect.left)}`;
+      })
+      .join("|");
+  }
+
+  function schedulePluginAutoExpand(force = false) {
+    if (!codexElvesSettings().pluginAutoExpand) return;
+    if (window.__codexPluginAutoExpandRunning && !force) return;
+    clearTimeout(window.__codexPluginAutoExpandTimer);
+    window.__codexPluginAutoExpandTimer = setTimeout(() => runPluginAutoExpand(force), force ? 30 : 180);
+  }
+
+  function runPluginAutoExpand(force = false) {
+    if (!codexElvesSettings().pluginAutoExpand) return;
+    const currentSignature = pluginAutoExpandSignature();
+    if (!force && currentSignature && currentSignature === window.__codexPluginAutoExpandLastSignature) return;
+    window.__codexPluginAutoExpandLastSignature = currentSignature;
+    window.__codexPluginAutoExpandRunning = true;
+    window.__codexPluginAutoExpandClicks = 0;
+    const clickNext = () => {
+      if (!codexElvesSettings().pluginAutoExpand) {
+        window.__codexPluginAutoExpandRunning = false;
+        return;
+      }
+      const button = pluginAutoExpandButtonCandidates()[0];
+      if (!button || window.__codexPluginAutoExpandClicks >= codexPluginAutoExpandMaxClicks) {
+        window.__codexPluginAutoExpandRunning = false;
+        sendCodexElvesDiagnostic("plugin_auto_expand_finished", {
+          version: codexPluginAutoExpandVersion,
+          clicks: window.__codexPluginAutoExpandClicks || 0,
+          exhausted: !!button,
+        });
+        return;
+      }
+      window.__codexPluginAutoExpandClicks = (window.__codexPluginAutoExpandClicks || 0) + 1;
+      button.dataset.codexPluginAutoExpandClicked = String(Date.now());
+      button.click();
+      setTimeout(clickNext, codexPluginAutoExpandClickDelayMs);
+    };
+    clickNext();
   }
 
   function patchPluginMarketplaceRequestClient(client) {
@@ -7418,6 +7544,7 @@
         unblockPluginInstallButtons();
         refreshForcePluginInstallUnlockLoop();
       }
+      schedulePluginAutoExpand();
     }
     if (sidebarDirty) {
       sessionRows().forEach(tryAttachButton);

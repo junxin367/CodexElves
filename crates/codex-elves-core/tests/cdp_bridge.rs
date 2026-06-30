@@ -160,6 +160,20 @@ fn injection_script_menu_exposes_three_independent_plugin_switches() {
 }
 
 #[test]
+fn injection_script_exposes_plugin_list_auto_expand_switch() {
+    let script = assets::injection_script(45221);
+
+    assert!(script.contains("codexPluginAutoExpandVersion = \"1\""));
+    assert!(script.contains("pluginAutoExpand: true"));
+    assert!(script.contains("pluginAutoExpand: \"codexAppPluginAutoExpand\""));
+    assert!(script.contains("function pluginAutoExpandButtonLooksLikeMore"));
+    assert!(script.contains("function schedulePluginAutoExpand"));
+    assert!(script.contains("plugin_auto_expand_finished"));
+    assert!(script.contains("插件列表全量展示"));
+    assert!(script.contains("data-codex-elves-setting=\"pluginAutoExpand\""));
+}
+
+#[test]
 fn injection_script_skips_plugin_patch_work_in_relay_mode() {
     let script = assets::injection_script(45221);
 
@@ -283,7 +297,9 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
     assert!(script.contains("message.type === \"fetch\""));
     assert!(script.contains("data?.type === \"fetch-response\""));
     assert!(script.contains("__codexPluginMarketplaceFetchRequestIds"));
-    assert!(script.contains("delete next.marketplaceKinds"));
+    assert!(script.contains("if (hadMarketplaceKinds && Array.isArray(next.marketplaceKinds))"));
+    assert!(script.contains("if (!nextKinds.includes(\"vertical\")) nextKinds.push(\"vertical\")"));
+    assert!(script.contains("next.marketplaceKinds = Array.from(new Set(nextKinds));"));
     assert!(script.contains("patchPluginMarketplaceResult"));
     assert!(script.contains("__CODEX_ELVES_PLUGIN_MARKETPLACES__"));
     assert!(script.contains("mergeLocalPluginMarketplaces(result)"));
@@ -303,6 +319,8 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
     assert!(script.contains("OpenAI插件1(CodexElves)"));
     assert!(script.contains("OpenAI插件2(CodexElves)"));
     assert!(script.contains("OpenAI插件3(CodexElves)"));
+    assert!(script.contains("OpenAI插件4(CodexElves)"));
+    assert!(script.contains("OpenAI插件5(CodexElves)"));
     assert!(script.contains("method === \"install-plugin\""));
     assert!(script.contains("plugin_marketplace_response_expanded"));
     assert!(script.contains("plugin_build_flavor_filter_bypassed"));
@@ -314,14 +332,23 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
 }
 
 #[test]
-fn injection_script_deletes_marketplace_kinds_to_request_default_catalog() {
+fn injection_script_keeps_marketplace_kinds_and_adds_vertical_catalog() {
     let script = assets::injection_script(45221);
 
-    assert!(script.contains("delete next.marketplaceKinds"));
+    assert!(script.contains("const hadMarketplaceKinds = Object.prototype.hasOwnProperty.call(next, \"marketplaceKinds\")"));
+    assert!(script.contains("if (hadMarketplaceKinds && Array.isArray(next.marketplaceKinds))"));
+    assert!(script.contains(
+        "const nextKinds = next.marketplaceKinds.map((kind) => restorePluginMarketplaceName(kind));"
+    ));
+    assert!(script.contains("if (!nextKinds.includes(\"vertical\")) nextKinds.push(\"vertical\")"));
+    assert!(script.contains("next.marketplaceKinds = Array.from(new Set(nextKinds));"));
     assert!(script.contains("plugin_marketplace_request_expanded"));
+    assert!(script.contains(
+        "marketplaceKinds: Array.isArray(next.marketplaceKinds) ? next.marketplaceKinds : null"
+    ));
+    assert!(!script.contains("delete next.marketplaceKinds"));
     assert!(!script.contains("codexPluginAllowedMarketplaceKinds"));
     assert!(!script.contains("codexPluginExpandedMarketplaceKinds"));
-    assert!(!script.contains("next.marketplaceKinds = Array.from(new Set"));
 }
 
 #[test]
@@ -464,7 +491,9 @@ fn injection_script_unlocks_custom_model_catalog() {
     assert!(script.contains("looksLikeModelPayload(payload)"));
     assert!(script.contains("scheduleCodexModelWhitelistRefresh"));
     assert!(script.contains("runCodexModelWhitelistRefreshPass"));
-    assert!(script.contains("headerDirty || conversationDirty || shouldScheduleReactModelStatePatch"));
+    assert!(
+        script.contains("headerDirty || conversationDirty || shouldScheduleReactModelStatePatch")
+    );
     assert!(script.contains("model_whitelist_refresh_scheduled"));
     assert!(script.contains("available_models"));
     assert!(!script.contains("modelWhitelistUnlock"));

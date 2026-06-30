@@ -260,6 +260,8 @@ pub struct BackendSettings {
     pub codex_app_plugin_marketplace_unlock: bool,
     #[serde(rename = "codexAppForcePluginInstall", default = "default_true")]
     pub codex_app_force_plugin_install: bool,
+    #[serde(rename = "codexAppPluginAutoExpand", default = "default_true")]
+    pub codex_app_plugin_auto_expand: bool,
     #[serde(rename = "codexAppSessionDelete", default = "default_true")]
     pub codex_app_session_delete: bool,
     #[serde(rename = "codexAppMarkdownExport", default = "default_true")]
@@ -335,6 +337,7 @@ impl Default for BackendSettings {
             codex_app_plugin_entry_unlock: true,
             codex_app_plugin_marketplace_unlock: true,
             codex_app_force_plugin_install: true,
+            codex_app_plugin_auto_expand: true,
             codex_app_session_delete: true,
             codex_app_markdown_export: true,
             codex_app_project_move: true,
@@ -678,6 +681,7 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
     merge_bool_setting(target, source, "codexAppPluginEntryUnlock");
     merge_bool_setting(target, source, "codexAppPluginMarketplaceUnlock");
     merge_bool_setting(target, source, "codexAppForcePluginInstall");
+    merge_bool_setting(target, source, "codexAppPluginAutoExpand");
     merge_bool_setting(target, source, "codexAppSessionDelete");
     merge_bool_setting(target, source, "codexAppMarkdownExport");
     merge_bool_setting(target, source, "codexAppProjectMove");
@@ -1026,6 +1030,7 @@ mod tests {
         assert!(settings.codex_app_plugin_entry_unlock);
         assert!(settings.codex_app_plugin_marketplace_unlock);
         assert!(settings.codex_app_force_plugin_install);
+        assert!(settings.codex_app_plugin_auto_expand);
         assert!(!settings.codex_goals_enabled);
         assert!(settings.codex_app_path.is_empty());
         assert!(settings.codex_extra_args.is_empty());
@@ -1062,7 +1067,8 @@ mod tests {
             r#"{
                 "codexAppPluginEntryUnlock": false,
                 "codexAppPluginMarketplaceUnlock": true,
-                "codexAppForcePluginInstall": false
+                "codexAppForcePluginInstall": false,
+                "codexAppPluginAutoExpand": false
             }"#,
         )
         .unwrap();
@@ -1070,6 +1076,7 @@ mod tests {
         assert!(!settings.codex_app_plugin_entry_unlock);
         assert!(settings.codex_app_plugin_marketplace_unlock);
         assert!(!settings.codex_app_force_plugin_install);
+        assert!(!settings.codex_app_plugin_auto_expand);
 
         let legacy_settings: BackendSettings = serde_json::from_str(
             r#"{
@@ -1082,6 +1089,7 @@ mod tests {
         assert!(!legacy_settings.codex_app_plugin_entry_unlock);
         assert!(legacy_settings.codex_app_plugin_marketplace_unlock);
         assert!(!legacy_settings.codex_app_force_plugin_install);
+        assert!(legacy_settings.codex_app_plugin_auto_expand);
     }
 
     #[test]
