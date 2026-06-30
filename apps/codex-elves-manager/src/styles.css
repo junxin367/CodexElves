@@ -2781,12 +2781,7 @@ body {
 .proxy-iq-ratio {
   display: inline-flex;
   align-items: center;
-  gap: 12px;
-  min-height: 32px;
-  padding: 0 10px;
-  border: 1px solid hsl(var(--border));
-  border-radius: 8px;
-  background: hsl(var(--surface-sunken));
+  gap: 8px;
   color: hsl(var(--muted-foreground));
   font-size: 13px;
   font-weight: 700;
@@ -2795,13 +2790,41 @@ body {
 
 .proxy-iq-ratio-item {
   display: inline-flex;
-  align-items: baseline;
+  align-items: center;
+  justify-content: center;
   gap: 4px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--surface-sunken));
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .proxy-iq-ratio-item strong {
   color: hsl(var(--foreground));
   font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.proxy-iq-ratio-item:hover {
+  border-color: hsl(var(--brand-accent) / 0.42);
+  background: hsl(var(--accent));
+  color: hsl(var(--foreground));
+}
+
+.proxy-iq-ratio-item.active {
+  border-color: hsl(var(--brand-accent) / 0.7);
+  background: hsl(var(--brand-accent) / 0.16);
+  color: hsl(var(--foreground));
+}
+
+.proxy-iq-ratio-item.active strong {
+  color: hsl(var(--brand-accent));
 }
 
 .proxy-iq-ratio-item.high strong {

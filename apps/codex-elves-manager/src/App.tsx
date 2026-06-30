@@ -2672,13 +2672,14 @@ function LocalProxyScreen({
   const entries = logs?.entries ?? [];
   const [page, setPage] = useState(1);
   const [modelFilter, setModelFilter] = useState("");
+  const [iqFilter, setIqFilter] = useState<"low" | "high" | "">("");
   const modelOptions = useMemo(
     () =>
       Array.from(new Set(entries.map((entry) => entry.model?.trim()).filter((model): model is string => Boolean(model))))
         .sort((left, right) => left.localeCompare(right)),
     [entries],
   );
-  const filteredEntries = useMemo(
+  const modelFilteredEntries = useMemo(
     () =>
       entries.filter((entry) => {
         if (modelFilter && entry.model !== modelFilter) return false;
@@ -2686,7 +2687,15 @@ function LocalProxyScreen({
       }),
     [entries, modelFilter],
   );
-  const gptIqRatio = useMemo(() => calculateGptIqRatio(filteredEntries), [filteredEntries]);
+  const gptIqRatio = useMemo(() => calculateGptIqRatio(modelFilteredEntries), [modelFilteredEntries]);
+  const filteredEntries = useMemo(
+    () =>
+      modelFilteredEntries.filter((entry) => {
+        if (iqFilter && classifyGptIqRequest(entry) !== iqFilter) return false;
+        return true;
+      }),
+    [modelFilteredEntries, iqFilter],
+  );
   const totalPages = Math.max(1, Math.ceil(filteredEntries.length / LOCAL_PROXY_LOG_PAGE_SIZE));
   const visibleEntries = useMemo(
     () => filteredEntries.slice((page - 1) * LOCAL_PROXY_LOG_PAGE_SIZE, page * LOCAL_PROXY_LOG_PAGE_SIZE),
@@ -2695,7 +2704,7 @@ function LocalProxyScreen({
 
   useEffect(() => {
     setPage(1);
-  }, [modelFilter]);
+  }, [modelFilter, iqFilter]);
 
   useEffect(() => {
     setPage((current) => Math.min(Math.max(current, 1), totalPages));
@@ -2759,14 +2768,26 @@ function LocalProxyScreen({
               <div
                 aria-label="GPT 请求低高智商比例"
                 className="proxy-iq-ratio"
-                title={`仅统计当前筛选范围内 GPT 请求：Reason Tok = 516 为低，超过 516 为高。样本 ${gptIqRatio.total} 条`}
+                title={`按当前列表 ${gptIqRatio.total} 条请求计算：GPT Reason Tok = 516 为低，超过 516 为高，低于 516 不计入低/高。低 ${gptIqRatio.low} 条，高 ${gptIqRatio.high} 条`}
               >
-                <span className="proxy-iq-ratio-item low">
+                <button
+                  aria-pressed={iqFilter === "low"}
+                  className={`proxy-iq-ratio-item low ${iqFilter === "low" ? "active" : ""}`}
+                  onClick={() => setIqFilter((current) => (current === "low" ? "" : "low"))}
+                  title={`筛选 Reason Tok = 516 的 GPT 请求，共 ${gptIqRatio.low} 条`}
+                  type="button"
+                >
                   低 <strong>{gptIqRatio.lowPercent}%</strong>
-                </span>
-                <span className="proxy-iq-ratio-item high">
+                </button>
+                <button
+                  aria-pressed={iqFilter === "high"}
+                  className={`proxy-iq-ratio-item high ${iqFilter === "high" ? "active" : ""}`}
+                  onClick={() => setIqFilter((current) => (current === "high" ? "" : "high"))}
+                  title={`筛选 Reason Tok > 516 的 GPT 请求，共 ${gptIqRatio.high} 条`}
+                  type="button"
+                >
                   高 <strong>{gptIqRatio.highPercent}%</strong>
-                </span>
+                </button>
               </div>
             </div>
           }
@@ -7085,23 +7106,29 @@ function calculateGptIqRatio(entries: LocalProxyLogEntry[]) {
   let high = 0;
 
   entries.forEach((entry) => {
-    if (!isGptModel(entry.model)) return;
-    if (entry.reasoningTokens === 516) {
+    const iqClass = classifyGptIqRequest(entry);
+    if (iqClass === "low") {
       low += 1;
-    } else if (typeof entry.reasoningTokens === "number" && entry.reasoningTokens > 516) {
+    } else if (iqClass === "high") {
       high += 1;
     }
   });
 
-  const total = low + high;
-  const lowPercent = total ? Math.round((low / total) * 100) : 0;
+  const total = entries.length;
   return {
     low,
     high,
     total,
-    lowPercent,
-    highPercent: total ? 100 - lowPercent : 0,
+    lowPercent: total ? Math.round((low / total) * 100) : 0,
+    highPercent: total ? Math.round((high / total) * 100) : 0,
   };
+}
+
+function classifyGptIqRequest(entry: Pick<LocalProxyLogEntry, "model" | "reasoningTokens">) {
+  if (!isGptModel(entry.model)) return null;
+  if (entry.reasoningTokens === 516) return "low";
+  if (typeof entry.reasoningTokens === "number" && entry.reasoningTokens > 516) return "high";
+  return null;
 }
 
 function isGptModel(model?: string | null) {
