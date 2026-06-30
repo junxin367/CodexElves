@@ -7844,6 +7844,9 @@ pub fn supported_reasoning_efforts_for_model(
         if model.contains("opus-4-6") {
             return levels(&["low", "medium", "high", "max"]);
         }
+        if model.contains("sonnet-5") {
+            return levels(&["low", "medium", "high", "xhigh"]);
+        }
         if model.contains("sonnet-4-6") {
             return levels(&["low", "medium", "high"]);
         }

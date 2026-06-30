@@ -1207,6 +1207,25 @@ fn glm_reasoning_efforts_match_supported_levels() {
 }
 
 #[test]
+fn sonnet5_reasoning_efforts_include_xhigh() {
+    assert_eq!(
+        supported_reasoning_efforts_for_model(
+            "claude-sonnet-5",
+            UpstreamResponseProtocol::Anthropic,
+        ),
+        vec!["low", "medium", "high", "xhigh"]
+    );
+    // 带后缀的变体也应命中 sonnet-5 分支
+    assert_eq!(
+        supported_reasoning_efforts_for_model(
+            "claude-sonnet-5-20250929",
+            UpstreamResponseProtocol::Anthropic,
+        ),
+        vec!["low", "medium", "high", "xhigh"]
+    );
+}
+
+#[test]
 fn responses_request_maps_developer_role_to_system_for_chat_upstream() {
     let converted = responses_to_chat_completions(json!({
         "model": "deepseek-chat",
