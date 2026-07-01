@@ -1224,6 +1224,10 @@ body {
 }
 
 .relay-field-auto-compact {
+  grid-column: 1 / 2;
+}
+
+.relay-field-auto-compact:only-child {
   grid-column: 1 / -1;
 }
 
@@ -1232,7 +1236,7 @@ body {
 }
 
 .relay-field-user-agent {
-  grid-column: 1 / -1;
+  grid-column: 2 / 3;
 }
 
 .relay-field-model-list {
@@ -4188,6 +4192,8 @@ body {
   .form-row,
   .feature-switch-grid,
   .relay-fields,
+  .relay-advanced-fields,
+  .relay-api-fields,
   .segmented,
   .relay-context-row,
   .context-editor-fields,
@@ -4201,6 +4207,13 @@ body {
   .radar-grid,
   .radar-comparison-list {
     grid-template-columns: 1fr;
+  }
+
+  .relay-field-auto-compact,
+  .relay-field-user-agent,
+  .relay-field-base-url,
+  .relay-field-key {
+    grid-column: 1 / -1;
   }
 
   .hero-layout .toolbar {

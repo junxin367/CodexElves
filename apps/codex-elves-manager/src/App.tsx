@@ -4782,16 +4782,16 @@ function RelayProfileEditor({
               placeholder="留空不改写，例如 160000"
             />
           </Field>
+          {showApiFields ? (
+            <Field className="relay-field-user-agent" label="User-Agent">
+              <Input
+                value={profile.userAgent}
+                onChange={(event) => updateDraft({ userAgent: event.currentTarget.value })}
+                placeholder="留空使用默认值"
+              />
+            </Field>
+          ) : null}
         </div>
-        {showApiFields ? (
-          <Field className="relay-field-user-agent" label="User-Agent">
-            <Input
-              value={profile.userAgent}
-              onChange={(event) => updateDraft({ userAgent: event.currentTarget.value })}
-              placeholder="留空使用默认值"
-            />
-          </Field>
-        ) : null}
         {showApiFields ? (
           <Field
             as="div"
