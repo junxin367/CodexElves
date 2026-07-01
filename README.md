@@ -1,3 +1,5 @@
+当前项目 fork 自 [BigPizzaV3/CodexPlusPlus](https://github.com/BigPizzaV3/CodexPlusPlus)
+
 # CodexElves
 
 <p align="center">
