@@ -2062,6 +2062,7 @@ pub async fn apply_continue_thinking_to_responses_stream(
     }
 
     let mut current_sse_text = first_round_sse_text;
+    let max_continue_rounds = u32::from(settings.gpt_reasoning_continuation_max_rounds);
     let mut round: u32 = 0;
     let mut triggered = false;
     let mut completed_rounds = 0;
@@ -2087,7 +2088,7 @@ pub async fn apply_continue_thinking_to_responses_stream(
                 accumulated_reasoning_tokens,
             );
         }
-        if round >= crate::continue_thinking::MAX_CONTINUE_ROUNDS {
+        if round >= max_continue_rounds {
             return ContinueThinkingResult::from_state(
                 current_sse_text,
                 triggered,

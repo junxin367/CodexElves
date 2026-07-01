@@ -142,6 +142,7 @@ type BackendSettings = {
   codexAppImageOverlayOpacity: number;
   codexGoalsEnabled: boolean;
   gptReasoningContinuation: boolean;
+  gptReasoningContinuationMaxRounds: number;
   launchMode: LaunchMode;
   relayBaseUrl: string;
   relayApiKey: string;
@@ -690,6 +691,7 @@ const defaultSettings: BackendSettings = {
   codexAppImageOverlayOpacity: 35,
   codexGoalsEnabled: false,
   gptReasoningContinuation: false,
+  gptReasoningContinuationMaxRounds: 3,
   launchMode: "patch",
   relayBaseUrl: "",
   relayApiKey: "",
@@ -2773,28 +2775,53 @@ function LocalProxyScreen({
           detail="当前运行状态与最近代理活动"
           actions={
             <>
-              <label
-                className="proxy-inline-toggle"
-                title="检测到 GPT 推理被中途截断时，自动让模型继续思考，减少因推理不足导致的错误"
-              >
-                <input
-                  checked={form.gptReasoningContinuation}
-                  onChange={(event) =>
+              <div className="proxy-continue-thinking-control">
+                <label
+                  className="proxy-inline-toggle"
+                  title="检测到 GPT 推理被中途截断时，自动让模型继续思考，减少因推理不足导致的错误"
+                >
+                  <input
+                    checked={form.gptReasoningContinuation}
+                    onChange={(event) =>
+                      void actions.saveSettingsValue(
+                        { ...form, gptReasoningContinuation: event.currentTarget.checked },
+                        false,
+                      )
+                    }
+                    type="checkbox"
+                  />
+                  <span>GPT 推理续接</span>
+                </label>
+                <span className="proxy-continue-thinking-limit-label">最大次数:</span>
+                <Input
+                  aria-label="GPT 推理续接最大次数"
+                  className="proxy-continue-thinking-limit"
+                  inputMode="numeric"
+                  maxLength={1}
+                  onChange={(event) => {
+                    const digit = event.currentTarget.value.replace(/[^1-9]/g, "").slice(0, 1);
+                    if (!digit) return;
                     void actions.saveSettingsValue(
-                      { ...form, gptReasoningContinuation: event.currentTarget.checked },
-                      false,
-                    )
-                  }
-                  type="checkbox"
+                      { ...form, gptReasoningContinuationMaxRounds: Number(digit) },
+                      true,
+                    );
+                  }}
+                  pattern="[1-9]"
+                  title="GPT 推理续接最大次数，范围 1-9"
+                  value={String(form.gptReasoningContinuationMaxRounds)}
                 />
-                <span>GPT 推理续接</span>
-              </label>
-              <Button onClick={() => void actions.refreshLocalProxyStatus()} size="sm">
+              </div>
+              <Button
+                onClick={() => {
+                  void (async () => {
+                    await actions.refreshLocalProxyStatus();
+                    await actions.refreshLocalProxyLogs();
+                  })();
+                }}
+                size="sm"
+              >
                 <RefreshCw className="h-4 w-4" />
-                刷新状态
-              </Button>
-              <Button variant="secondary" size="sm" onClick={() => void actions.refreshLocalProxyLogs()}>
-                刷新日志
+                刷新
               </Button>
             </>
           }
@@ -2974,7 +3001,7 @@ function LocalProxyScreen({
             <Toolbar>
               <Button onClick={() => void actions.refreshLocalProxyLogs()}>
                 <RefreshCw className="h-4 w-4" />
-                刷新
+                刷新日志
               </Button>
               <Button variant="outline" onClick={() => void actions.clearLocalProxyLogs()}>
                 <Trash2 className="h-4 w-4" />
@@ -3206,7 +3233,7 @@ function RelayScreen({
                 }}
                 type="checkbox"
               />
-              <span>允许切换写入</span>
+              <span>允许写入代理配置</span>
               <span className="relay-header-switch-help" aria-label="说明" tabIndex={0}>
                 <Info className="h-3.5 w-3.5" />
                 <span className="relay-header-switch-tooltip" role="tooltip">
@@ -7480,6 +7507,7 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
     relayProfilesEnabled: settings.relayProfilesEnabled !== false,
     computerUseGuardEnabled: settings.computerUseGuardEnabled === true,
     codexAppImageOverlayOpacity: clampNumber(settings.codexAppImageOverlayOpacity || 35, 1, 100),
+    gptReasoningContinuationMaxRounds: clampNumber(settings.gptReasoningContinuationMaxRounds || 3, 1, 9),
     relayCommonConfigContents,
     relayContextConfigContents,
     relayProfiles: profiles,

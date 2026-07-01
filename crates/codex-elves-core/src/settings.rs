@@ -297,6 +297,12 @@ pub struct BackendSettings {
     pub codex_goals_enabled: bool,
     #[serde(rename = "gptReasoningContinuation", default)]
     pub gpt_reasoning_continuation: bool,
+    #[serde(
+        rename = "gptReasoningContinuationMaxRounds",
+        default = "default_gpt_reasoning_continuation_max_rounds",
+        deserialize_with = "deserialize_gpt_reasoning_continuation_max_rounds"
+    )]
+    pub gpt_reasoning_continuation_max_rounds: u8,
     #[serde(rename = "launchMode", default)]
     pub launch_mode: LaunchMode,
     #[serde(rename = "relayBaseUrl", default = "default_relay_base_url")]
@@ -359,6 +365,7 @@ impl Default for BackendSettings {
             codex_app_image_overlay_opacity: default_image_overlay_opacity(),
             codex_goals_enabled: false,
             gpt_reasoning_continuation: false,
+            gpt_reasoning_continuation_max_rounds: default_gpt_reasoning_continuation_max_rounds(),
             launch_mode: LaunchMode::Patch,
             relay_base_url: default_relay_base_url(),
             relay_api_key: String::new(),
@@ -515,6 +522,14 @@ fn clamp_image_overlay_opacity(value: u8) -> u8 {
     value.clamp(1, 100)
 }
 
+fn default_gpt_reasoning_continuation_max_rounds() -> u8 {
+    crate::continue_thinking::MAX_CONTINUE_ROUNDS as u8
+}
+
+fn clamp_gpt_reasoning_continuation_max_rounds(value: u64) -> u8 {
+    value.clamp(1, 9) as u8
+}
+
 pub fn default_true() -> bool {
     true
 }
@@ -556,6 +571,17 @@ where
     Ok(Option::<u8>::deserialize(deserializer)?
         .map(clamp_image_overlay_opacity)
         .unwrap_or_else(default_image_overlay_opacity))
+}
+
+fn deserialize_gpt_reasoning_continuation_max_rounds<'de, D>(
+    deserializer: D,
+) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?
+        .map(clamp_gpt_reasoning_continuation_max_rounds)
+        .unwrap_or_else(default_gpt_reasoning_continuation_max_rounds))
 }
 
 fn deserialize_profile_api_key<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -725,6 +751,17 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
         target.insert("codexGoalsEnabled".to_string(), Value::Bool(value));
     }
     merge_bool_setting(target, source, "gptReasoningContinuation");
+    if let Some(value) = source
+        .get("gptReasoningContinuationMaxRounds")
+        .and_then(Value::as_u64)
+    {
+        target.insert(
+            "gptReasoningContinuationMaxRounds".to_string(),
+            Value::Number(serde_json::Number::from(
+                clamp_gpt_reasoning_continuation_max_rounds(value),
+            )),
+        );
+    }
     if let Some(value) = source.get("launchMode").and_then(Value::as_str) {
         if matches!(value, "patch" | "relay") {
             target.insert("launchMode".to_string(), Value::String(value.to_string()));
@@ -935,6 +972,9 @@ fn normalize_settings_config_sections(mut settings: BackendSettings) -> BackendS
     }
     settings.codex_app_image_overlay_opacity =
         clamp_image_overlay_opacity(settings.codex_app_image_overlay_opacity);
+    settings.gpt_reasoning_continuation_max_rounds = clamp_gpt_reasoning_continuation_max_rounds(
+        u64::from(settings.gpt_reasoning_continuation_max_rounds),
+    );
     settings
 }
 
@@ -1055,6 +1095,7 @@ mod tests {
         assert_eq!(settings.relay_test_model, default_relay_test_model());
         assert!(!settings.cli_wrapper_enabled);
         assert_eq!(settings.cli_wrapper_api_key_env, "CUSTOM_OPENAI_API_KEY");
+        assert_eq!(settings.gpt_reasoning_continuation_max_rounds, 3);
     }
 
     #[test]
@@ -1072,6 +1113,18 @@ mod tests {
         assert_eq!(settings.cli_wrapper_api_key_env, "CUSTOM_OPENAI_API_KEY");
         assert_eq!(settings.relay_base_url, default_relay_base_url());
         assert!(settings.codex_extra_args.is_empty());
+        assert_eq!(settings.gpt_reasoning_continuation_max_rounds, 3);
+    }
+
+    #[test]
+    fn settings_clamps_gpt_reasoning_continuation_max_rounds() {
+        let low: BackendSettings =
+            serde_json::from_str(r#"{"gptReasoningContinuationMaxRounds":0}"#).unwrap();
+        assert_eq!(low.gpt_reasoning_continuation_max_rounds, 1);
+
+        let high: BackendSettings =
+            serde_json::from_str(r#"{"gptReasoningContinuationMaxRounds":999}"#).unwrap();
+        assert_eq!(high.gpt_reasoning_continuation_max_rounds, 9);
     }
 
     #[test]

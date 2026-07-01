@@ -4666,6 +4666,53 @@ async fn continue_thinking_reports_accumulated_reasoning_tokens() {
     assert!(request.body.contains("continue_thinking"));
 }
 
+#[tokio::test]
+async fn continue_thinking_respects_configured_max_rounds() {
+    let server =
+        spawn_chat_server_with_response(responses_sse_with_reasoning("resp_continue_one", 516));
+    let settings = BackendSettings {
+        gpt_reasoning_continuation: true,
+        gpt_reasoning_continuation_max_rounds: 1,
+        relay_profiles: vec![RelayProfile {
+            id: "responses".to_string(),
+            name: "Responses".to_string(),
+            base_url: server.base_url.clone(),
+            upstream_base_url: server.base_url.clone(),
+            api_key: "sk-test".to_string(),
+            protocol: RelayProtocol::Responses,
+            relay_mode: RelayMode::MixedApi,
+            model_mappings: vec![RelayModelMapping {
+                request_model: "gpt-responses".to_string(),
+                protocol: RelayProtocol::Responses,
+                context_window: "200000".to_string(),
+            }],
+            ..RelayProfile::default()
+        }],
+        active_relay_id: "responses".to_string(),
+        ..BackendSettings::default()
+    };
+
+    let result = apply_continue_thinking_to_responses_stream(
+        &json!({
+            "model": "gpt-responses",
+            "input": "hi",
+            "stream": true,
+            "reasoning": { "effort": "high" }
+        }),
+        settings,
+        None,
+        responses_sse_with_reasoning("resp_first", 516),
+    )
+    .await;
+
+    assert!(result.triggered);
+    assert_eq!(result.rounds, 1);
+    assert_eq!(result.reasoning_tokens, Some(1032));
+    assert!(result.sse_text.contains("resp_continue_one"));
+    let request = server.finish();
+    assert!(request.body.contains("call_continue_thinking_1"));
+}
+
 async fn respond_once(listener: tokio::net::TcpListener, response: &'static str) {
     let (mut stream, _) = listener.accept().await.unwrap();
     let mut buffer = [0; 1024];
