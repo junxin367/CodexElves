@@ -2002,6 +2002,7 @@ pub struct ContinueThinkingResult {
     pub sse_text: String,
     pub triggered: bool,
     pub rounds: u32,
+    pub reasoning_tokens: Option<u64>,
 }
 
 impl ContinueThinkingResult {
@@ -2010,15 +2011,28 @@ impl ContinueThinkingResult {
             sse_text,
             triggered: false,
             rounds: 0,
+            reasoning_tokens: None,
         }
     }
 
-    fn from_state(sse_text: String, triggered: bool, rounds: u32) -> Self {
+    fn from_state(
+        sse_text: String,
+        triggered: bool,
+        rounds: u32,
+        reasoning_tokens: Option<u64>,
+    ) -> Self {
         Self {
             sse_text,
             triggered,
             rounds,
+            reasoning_tokens,
         }
+    }
+}
+
+fn add_reasoning_tokens(total: &mut Option<u64>, reasoning_tokens: Option<u64>) {
+    if let Some(reasoning_tokens) = reasoning_tokens {
+        *total = Some(total.unwrap_or(0).saturating_add(reasoning_tokens));
     }
 }
 
@@ -2028,7 +2042,7 @@ impl ContinueThinkingResult {
 /// 网格且倍数低于阈值，则把上一轮的 reasoning item（带 encrypted_content）
 /// 和一个伪造的 continue_thinking 工具调用/返回回传上游，让模型从截断处
 /// 继续思考，直到不再命中网格或达到最大续写轮数。返回最后一轮的完整 SSE
-/// 文本和续写触发元数据，供上层原样转发给客户端并写入请求日志。
+/// 文本和续写触发元数据；其中 reasoning_tokens 是各轮累计值，供请求日志展示。
 ///
 /// 任何异常（无法解析终止事件、续写请求失败等）都直接返回当前已有的文本，
 /// 不阻断主流程。
@@ -2051,6 +2065,7 @@ pub async fn apply_continue_thinking_to_responses_stream(
     let mut round: u32 = 0;
     let mut triggered = false;
     let mut completed_rounds = 0;
+    let mut accumulated_reasoning_tokens = None;
     loop {
         let Some(response_object) =
             crate::continue_thinking::extract_terminal_response_object(&current_sse_text)
@@ -2059,14 +2074,17 @@ pub async fn apply_continue_thinking_to_responses_stream(
                 current_sse_text,
                 triggered,
                 completed_rounds,
+                accumulated_reasoning_tokens,
             );
         };
         let reasoning_tokens = crate::continue_thinking::extract_reasoning_tokens(&response_object);
+        add_reasoning_tokens(&mut accumulated_reasoning_tokens, reasoning_tokens);
         if !crate::continue_thinking::should_continue_thinking(reasoning_tokens) {
             return ContinueThinkingResult::from_state(
                 current_sse_text,
                 triggered,
                 completed_rounds,
+                accumulated_reasoning_tokens,
             );
         }
         if round >= crate::continue_thinking::MAX_CONTINUE_ROUNDS {
@@ -2074,6 +2092,7 @@ pub async fn apply_continue_thinking_to_responses_stream(
                 current_sse_text,
                 triggered,
                 completed_rounds,
+                accumulated_reasoning_tokens,
             );
         }
         round += 1;
@@ -2091,6 +2110,7 @@ pub async fn apply_continue_thinking_to_responses_stream(
                 current_sse_text,
                 triggered,
                 completed_rounds,
+                accumulated_reasoning_tokens,
             );
         };
 
@@ -2122,6 +2142,7 @@ pub async fn apply_continue_thinking_to_responses_stream(
                     current_sse_text,
                     triggered,
                     completed_rounds,
+                    accumulated_reasoning_tokens,
                 );
             }
         };
@@ -2130,6 +2151,7 @@ pub async fn apply_continue_thinking_to_responses_stream(
                 current_sse_text,
                 triggered,
                 completed_rounds,
+                accumulated_reasoning_tokens,
             );
         }
         let Ok(response) = upstream.into_response() else {
@@ -2137,6 +2159,7 @@ pub async fn apply_continue_thinking_to_responses_stream(
                 current_sse_text,
                 triggered,
                 completed_rounds,
+                accumulated_reasoning_tokens,
             );
         };
         let Ok(bytes) = response.bytes().await else {
@@ -2144,6 +2167,7 @@ pub async fn apply_continue_thinking_to_responses_stream(
                 current_sse_text,
                 triggered,
                 completed_rounds,
+                accumulated_reasoning_tokens,
             );
         };
         let round_sse_text = String::from_utf8_lossy(&bytes).into_owned();

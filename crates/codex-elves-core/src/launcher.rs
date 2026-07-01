@@ -1544,6 +1544,7 @@ async fn handle_protocol_proxy_connection(
                         triggered: result.triggered,
                         rounds: result.rounds,
                         first_token_ms: continue_thinking_log.first_token_ms,
+                        reasoning_tokens: result.reasoning_tokens,
                     };
                     result.sse_text
                 } else {
@@ -2386,6 +2387,7 @@ struct LocalContinueThinkingLog {
     triggered: bool,
     rounds: u32,
     first_token_ms: Option<u64>,
+    reasoning_tokens: Option<u64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2461,9 +2463,9 @@ fn append_local_proxy_record_with_continue_thinking(
         path: path.to_string(),
         remote_addr: remote_addr_text,
         model: request_metadata.model.clone(),
-        reasoning_tokens: crate::proxy_log::extract_reasoning_tokens_from_response_body(
-            response_body,
-        ),
+        reasoning_tokens: continue_thinking.reasoning_tokens.or_else(|| {
+            crate::proxy_log::extract_reasoning_tokens_from_response_body(response_body)
+        }),
         reasoning_effort: request_metadata.reasoning_effort.clone(),
         reasoning_source: request_metadata.reasoning_source.clone(),
         continue_thinking_triggered: continue_thinking.triggered,

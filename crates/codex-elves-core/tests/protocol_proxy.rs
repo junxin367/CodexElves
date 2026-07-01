@@ -1,11 +1,12 @@
 use codex_elves_core::protocol_proxy::{
     AnthropicSseToResponsesConverter, ChatSseToResponsesConverter, UpstreamResponseProtocol,
     anthropic_message_to_response_with_request, anthropic_messages_url,
-    anthropic_sse_to_responses_sse_with_request, chat_completion_to_response,
-    chat_completion_to_response_with_request, chat_completions_url, chat_sse_to_responses_sse,
-    chat_sse_to_responses_sse_with_request, handle_responses_proxy_request,
-    is_chat_completions_proxy_path, is_models_proxy_path, is_responses_proxy_path, models_url,
-    open_chat_completions_proxy_request, open_models_proxy_request, open_responses_proxy_request,
+    anthropic_sse_to_responses_sse_with_request, apply_continue_thinking_to_responses_stream,
+    chat_completion_to_response, chat_completion_to_response_with_request, chat_completions_url,
+    chat_sse_to_responses_sse, chat_sse_to_responses_sse_with_request,
+    handle_responses_proxy_request, is_chat_completions_proxy_path, is_models_proxy_path,
+    is_responses_proxy_path, models_url, open_chat_completions_proxy_request,
+    open_models_proxy_request, open_responses_proxy_request,
     open_responses_proxy_request_with_settings, responses_error_from_upstream,
     responses_to_anthropic_messages, responses_to_chat_completions,
     send_upstream_request_with_header_timeout, supported_reasoning_efforts_for_model,
@@ -58,6 +59,14 @@ fn parse_response_sse_events(input: &str) -> Vec<ParsedSseEvent> {
             Some(ParsedSseEvent { event, data })
         })
         .collect()
+}
+
+fn responses_sse_with_reasoning(response_id: &str, reasoning_tokens: u64) -> String {
+    format!(
+        "event: response.completed\n\
+data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{response_id}\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-responses\",\"output\":[],\"usage\":{{\"output_tokens_details\":{{\"reasoning_tokens\":{reasoning_tokens}}}}}}}}}\n\n\
+data: [DONE]\n\n"
+    )
 }
 
 #[test]
@@ -4609,6 +4618,52 @@ async fn aggregate_stream_request_sends_sse_accept_header() {
             .contains("accept: text/event-stream")
     );
     fallback_server.abort();
+}
+
+#[tokio::test]
+async fn continue_thinking_reports_accumulated_reasoning_tokens() {
+    let server = spawn_chat_server_with_response(responses_sse_with_reasoning("resp_continue", 38));
+    let settings = BackendSettings {
+        gpt_reasoning_continuation: true,
+        relay_profiles: vec![RelayProfile {
+            id: "responses".to_string(),
+            name: "Responses".to_string(),
+            base_url: server.base_url.clone(),
+            upstream_base_url: server.base_url.clone(),
+            api_key: "sk-test".to_string(),
+            protocol: RelayProtocol::Responses,
+            relay_mode: RelayMode::MixedApi,
+            model_mappings: vec![RelayModelMapping {
+                request_model: "gpt-responses".to_string(),
+                protocol: RelayProtocol::Responses,
+                context_window: "200000".to_string(),
+            }],
+            ..RelayProfile::default()
+        }],
+        active_relay_id: "responses".to_string(),
+        ..BackendSettings::default()
+    };
+
+    let result = apply_continue_thinking_to_responses_stream(
+        &json!({
+            "model": "gpt-responses",
+            "input": "hi",
+            "stream": true,
+            "reasoning": { "effort": "high" }
+        }),
+        settings,
+        None,
+        responses_sse_with_reasoning("resp_first", 516),
+    )
+    .await;
+
+    assert!(result.triggered);
+    assert_eq!(result.rounds, 1);
+    assert_eq!(result.reasoning_tokens, Some(554));
+    assert!(result.sse_text.contains("\"reasoning_tokens\":38"));
+    let request = server.finish();
+    assert_eq!(request.path, "/v1/responses");
+    assert!(request.body.contains("continue_thinking"));
 }
 
 async fn respond_once(listener: tokio::net::TcpListener, response: &'static str) {
