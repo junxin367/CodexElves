@@ -14,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
-use crate::settings::{BackendSettings, SettingsStore, normalize_codex_extra_args};
+use crate::settings::{BackendSettings, RelayProtocol, SettingsStore, normalize_codex_extra_args};
 use crate::status::{LaunchStatus, StatusStore};
 
 static BRIDGE_TARGET_CACHE: OnceLock<std::sync::Mutex<HashMap<u16, String>>> = OnceLock::new();
@@ -1166,7 +1166,7 @@ impl EitherResponsesStreamConverter<'_> {
 const DEFERRED_STREAM_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const DEFERRED_STREAM_KEEPALIVE_BYTES: &[u8] = b": codex-elves waiting for upstream\n\n";
 
-fn should_defer_claude_reasoning_stream(
+fn should_defer_reasoning_stream(
     request_json: Option<&serde_json::Value>,
     request_metadata: &crate::proxy_log::RequestMetadata,
 ) -> bool {
@@ -1176,15 +1176,16 @@ fn should_defer_claude_reasoning_stream(
     if request.get("stream").and_then(serde_json::Value::as_bool) != Some(true) {
         return false;
     }
-    let model = request_metadata
-        .model
-        .as_deref()
-        .or_else(|| request.get("model").and_then(serde_json::Value::as_str))
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if !model.contains("claude") {
+    let chat_completions = matches!(
+        deferred_stream_target_protocol(request),
+        Some(crate::protocol_proxy::UpstreamResponseProtocol::ChatCompletions)
+    );
+    // Responses 直连流严禁进入 deferred stream。GPT 推理续接依赖正常 Responses
+    // 流式路径处理；deferred stream 当初只开放给 Chat Completions 上游用于提前返回本地 SSE header。
+    if !chat_completions {
         return false;
     }
+
     match request_metadata
         .reasoning_effort
         .as_deref()
@@ -1193,8 +1194,53 @@ fn should_defer_claude_reasoning_stream(
         Some(effort) if matches!(effort.as_str(), "none" | "off" | "disabled") => false,
         Some(effort) if matches!(effort.as_str(), "high" | "xhigh" | "max") => true,
         Some(_) => false,
-        None => true,
+        None => {
+            let model = request_metadata
+                .model
+                .as_deref()
+                .or_else(|| request.get("model").and_then(serde_json::Value::as_str))
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            model.contains("claude")
+        }
     }
+}
+
+fn deferred_stream_target_protocol(
+    request: &serde_json::Value,
+) -> Option<crate::protocol_proxy::UpstreamResponseProtocol> {
+    let model = request
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if model.is_empty() {
+        return None;
+    }
+
+    let settings = SettingsStore::default().load().unwrap_or_default();
+    let relay = crate::relay_rotation::select_relay_for_probe(&settings)
+        .unwrap_or_else(|_| settings.active_relay_profile());
+    let responses_models = crate::model_catalog::relay_profile_responses_model_ids(&relay);
+    if responses_models.iter().any(|item| item == model) {
+        return Some(crate::protocol_proxy::UpstreamResponseProtocol::Responses);
+    }
+    let chat_models = crate::model_catalog::relay_profile_chat_completions_model_ids(&relay);
+    if chat_models.iter().any(|item| item == model) {
+        return Some(crate::protocol_proxy::UpstreamResponseProtocol::ChatCompletions);
+    }
+    let anthropic_models = crate::model_catalog::relay_profile_anthropic_model_ids(&relay);
+    if anthropic_models.iter().any(|item| item == model) {
+        return Some(crate::protocol_proxy::UpstreamResponseProtocol::Anthropic);
+    }
+
+    Some(match relay.protocol_for_model(model) {
+        RelayProtocol::Responses => crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+        RelayProtocol::ChatCompletions => {
+            crate::protocol_proxy::UpstreamResponseProtocol::ChatCompletions
+        }
+        RelayProtocol::Anthropic => crate::protocol_proxy::UpstreamResponseProtocol::Anthropic,
+    })
 }
 
 fn responses_stream_failure_bytes(
@@ -1239,7 +1285,7 @@ async fn handle_protocol_proxy_connection(
     let timestamp_ms = crate::proxy_log::current_timestamp_ms();
     let request_json = serde_json::from_str::<serde_json::Value>(request_body).ok();
     let request_metadata = crate::proxy_log::extract_request_metadata(request_json.as_ref());
-    if should_defer_claude_reasoning_stream(request_json.as_ref(), &request_metadata) {
+    if should_defer_reasoning_stream(request_json.as_ref(), &request_metadata) {
         return handle_deferred_protocol_proxy_stream_connection(
             stream,
             request_body,
@@ -1435,6 +1481,7 @@ async fn handle_protocol_proxy_connection(
             let mut response_capture = Vec::new();
             let mut response_bytes = 0_usize;
             let mut response_truncated = false;
+            let mut continue_thinking_log = LocalContinueThinkingLog::default();
             if upstream.body_override.is_some() {
                 let body = upstream.into_body_bytes().await?;
                 response_bytes += body.len();
@@ -1443,10 +1490,16 @@ async fn handle_protocol_proxy_connection(
                 stream.write_all(&body).await?;
             } else {
                 let mut bytes_stream = upstream.into_response()?.bytes_stream();
+                let mut first_round_bytes = Vec::new();
                 while let Some(chunk) = bytes_stream.next().await {
                     let bytes = match chunk {
                         Ok(bytes) => bytes,
                         Err(error) => {
+                            response_bytes += first_round_bytes.len();
+                            response_truncated |= crate::proxy_log::append_capture(
+                                &mut response_capture,
+                                &first_round_bytes,
+                            );
                             append_local_proxy_record(
                                 diagnostic_id,
                                 timestamp_ms,
@@ -1470,11 +1523,37 @@ async fn handle_protocol_proxy_connection(
                             return Err(error.into());
                         }
                     };
-                    response_bytes += bytes.len();
-                    response_truncated |=
-                        crate::proxy_log::append_capture(&mut response_capture, &bytes);
-                    stream.write_all(&bytes).await?;
+                    first_round_bytes.extend_from_slice(&bytes);
+                    if continue_thinking_log.first_token_ms.is_none() {
+                        continue_thinking_log.first_token_ms =
+                            Some(started_at.elapsed().as_millis() as u64);
+                    }
                 }
+                let first_round_sse_text = String::from_utf8_lossy(&first_round_bytes).into_owned();
+                let final_sse_text = if let Some(request) = logged_request_json.as_ref() {
+                    let settings = SettingsStore::default().load().unwrap_or_default();
+                    let result =
+                        crate::protocol_proxy::apply_continue_thinking_to_responses_stream(
+                            request,
+                            settings,
+                            request_user_agent,
+                            first_round_sse_text,
+                        )
+                        .await;
+                    continue_thinking_log = LocalContinueThinkingLog {
+                        triggered: result.triggered,
+                        rounds: result.rounds,
+                        first_token_ms: continue_thinking_log.first_token_ms,
+                    };
+                    result.sse_text
+                } else {
+                    first_round_sse_text
+                };
+                let final_bytes = final_sse_text.into_bytes();
+                response_bytes += final_bytes.len();
+                response_truncated |=
+                    crate::proxy_log::append_capture(&mut response_capture, &final_bytes);
+                stream.write_all(&final_bytes).await?;
             }
             log_helper_response(
                 "helper.protocol_proxy_stream_ok",
@@ -1483,7 +1562,7 @@ async fn handle_protocol_proxy_connection(
                 &status,
                 remote_addr_text.clone(),
             );
-            append_local_proxy_record(
+            append_local_proxy_record_with_continue_thinking(
                 diagnostic_id,
                 timestamp_ms,
                 started_at,
@@ -1502,6 +1581,7 @@ async fn handle_protocol_proxy_connection(
                 response_bytes,
                 response_truncated,
                 None,
+                continue_thinking_log,
             );
             stream.shutdown().await?;
             return Ok(());
@@ -1543,12 +1623,16 @@ async fn handle_protocol_proxy_connection(
         let mut response_capture = Vec::new();
         let mut response_bytes = 0_usize;
         let mut response_truncated = false;
+        let mut first_token_ms = None;
 
         while let Some(chunk) = bytes_stream.next().await {
             match chunk {
                 Ok(bytes) => {
                     let converted = converter.push_bytes(&bytes);
                     if !converted.is_empty() {
+                        if first_token_ms.is_none() {
+                            first_token_ms = Some(started_at.elapsed().as_millis() as u64);
+                        }
                         response_bytes += converted.len();
                         response_truncated |=
                             crate::proxy_log::append_capture(&mut response_capture, &converted);
@@ -1592,7 +1676,7 @@ async fn handle_protocol_proxy_connection(
             "200 OK",
             remote_addr_text.clone(),
         );
-        append_local_proxy_record(
+        append_local_proxy_record_with_continue_thinking(
             diagnostic_id,
             timestamp_ms,
             started_at,
@@ -1611,6 +1695,10 @@ async fn handle_protocol_proxy_connection(
             response_bytes,
             response_truncated,
             stream_error,
+            LocalContinueThinkingLog {
+                first_token_ms,
+                ..Default::default()
+            },
         );
         stream.shutdown().await?;
         return Ok(());
@@ -1733,6 +1821,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     let mut response_capture = Vec::new();
     let mut response_bytes = 0_usize;
     let mut response_truncated = false;
+    let mut first_token_ms = None;
 
     let upstream_open =
         crate::protocol_proxy::open_responses_proxy_request_with_stream_header_timeout(
@@ -1899,6 +1988,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     if response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses {
         if upstream.body_override.is_some() {
             let body = upstream.into_body_bytes().await?;
+            first_token_ms = Some(started_at.elapsed().as_millis() as u64);
             response_bytes += body.len();
             response_truncated |= crate::proxy_log::append_capture(&mut response_capture, &body);
             stream.write_all(&body).await?;
@@ -1931,6 +2021,9 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                         return Err(error.into());
                     }
                 };
+                if first_token_ms.is_none() {
+                    first_token_ms = Some(started_at.elapsed().as_millis() as u64);
+                }
                 response_bytes += bytes.len();
                 response_truncated |=
                     crate::proxy_log::append_capture(&mut response_capture, &bytes);
@@ -1944,7 +2037,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
             "200 OK",
             remote_addr_text.clone(),
         );
-        append_local_proxy_record(
+        append_local_proxy_record_with_continue_thinking(
             diagnostic_id,
             timestamp_ms,
             started_at,
@@ -1963,6 +2056,10 @@ async fn handle_deferred_protocol_proxy_stream_connection(
             response_bytes,
             response_truncated,
             None,
+            LocalContinueThinkingLog {
+                first_token_ms,
+                ..Default::default()
+            },
         );
         stream.shutdown().await?;
         return Ok(());
@@ -2005,6 +2102,9 @@ async fn handle_deferred_protocol_proxy_stream_connection(
             Ok(bytes) => {
                 let converted = converter.push_bytes(&bytes);
                 if !converted.is_empty() {
+                    if first_token_ms.is_none() {
+                        first_token_ms = Some(started_at.elapsed().as_millis() as u64);
+                    }
                     response_bytes += converted.len();
                     response_truncated |=
                         crate::proxy_log::append_capture(&mut response_capture, &converted);
@@ -2047,7 +2147,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
         "200 OK",
         remote_addr_text.clone(),
     );
-    append_local_proxy_record(
+    append_local_proxy_record_with_continue_thinking(
         diagnostic_id,
         timestamp_ms,
         started_at,
@@ -2066,6 +2166,10 @@ async fn handle_deferred_protocol_proxy_stream_connection(
         response_bytes,
         response_truncated,
         stream_error,
+        LocalContinueThinkingLog {
+            first_token_ms,
+            ..Default::default()
+        },
     );
     stream.shutdown().await?;
     Ok(())
@@ -2166,6 +2270,7 @@ async fn handle_chat_completions_proxy_connection(
         let mut response_capture = Vec::new();
         let mut response_bytes = 0_usize;
         let mut response_truncated = false;
+        let mut first_token_ms = None;
         while let Some(chunk) = bytes_stream.next().await {
             let bytes = match chunk {
                 Ok(bytes) => bytes,
@@ -2193,6 +2298,9 @@ async fn handle_chat_completions_proxy_connection(
                     return Err(error.into());
                 }
             };
+            if first_token_ms.is_none() {
+                first_token_ms = Some(started_at.elapsed().as_millis() as u64);
+            }
             response_bytes += bytes.len();
             response_truncated |= crate::proxy_log::append_capture(&mut response_capture, &bytes);
             stream.write_all(&bytes).await?;
@@ -2204,7 +2312,7 @@ async fn handle_chat_completions_proxy_connection(
             &status,
             remote_addr_text.clone(),
         );
-        append_local_proxy_record(
+        append_local_proxy_record_with_continue_thinking(
             diagnostic_id,
             timestamp_ms,
             started_at,
@@ -2223,6 +2331,10 @@ async fn handle_chat_completions_proxy_connection(
             response_bytes,
             response_truncated,
             None,
+            LocalContinueThinkingLog {
+                first_token_ms,
+                ..Default::default()
+            },
         );
         stream.shutdown().await?;
         return Ok(());
@@ -2269,6 +2381,13 @@ async fn handle_chat_completions_proxy_connection(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct LocalContinueThinkingLog {
+    triggered: bool,
+    rounds: u32,
+    first_token_ms: Option<u64>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_local_proxy_record(
     id: String,
@@ -2290,6 +2409,51 @@ fn append_local_proxy_record(
     response_truncated: bool,
     error: Option<String>,
 ) {
+    append_local_proxy_record_with_continue_thinking(
+        id,
+        timestamp_ms,
+        started_at,
+        method,
+        path,
+        remote_addr_text,
+        request_metadata,
+        relay_id,
+        relay_name,
+        endpoint,
+        response_protocol,
+        status_code,
+        stream,
+        request_body,
+        response_body,
+        response_bytes,
+        response_truncated,
+        error,
+        LocalContinueThinkingLog::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_local_proxy_record_with_continue_thinking(
+    id: String,
+    timestamp_ms: u64,
+    started_at: Instant,
+    method: &str,
+    path: &str,
+    remote_addr_text: Option<String>,
+    request_metadata: &crate::proxy_log::RequestMetadata,
+    relay_id: Option<String>,
+    relay_name: Option<String>,
+    endpoint: Option<String>,
+    response_protocol: Option<String>,
+    status_code: u16,
+    stream: bool,
+    request_body: &str,
+    response_body: &[u8],
+    response_bytes: usize,
+    response_truncated: bool,
+    error: Option<String>,
+    continue_thinking: LocalContinueThinkingLog,
+) {
     let record = crate::proxy_log::ProxyRequestRecord {
         id,
         timestamp_ms,
@@ -2302,12 +2466,15 @@ fn append_local_proxy_record(
         ),
         reasoning_effort: request_metadata.reasoning_effort.clone(),
         reasoning_source: request_metadata.reasoning_source.clone(),
+        continue_thinking_triggered: continue_thinking.triggered,
+        continue_thinking_rounds: continue_thinking.rounds,
         service_tier: request_metadata.service_tier.clone(),
         relay_id,
         relay_name,
         endpoint,
         response_protocol,
         status_code,
+        first_token_ms: continue_thinking.first_token_ms,
         duration_ms: started_at.elapsed().as_millis() as u64,
         stream,
         request_bytes: request_body.len(),

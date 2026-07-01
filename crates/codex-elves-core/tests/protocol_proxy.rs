@@ -9,7 +9,8 @@ use codex_elves_core::protocol_proxy::{
     open_responses_proxy_request_with_settings, responses_error_from_upstream,
     responses_to_anthropic_messages, responses_to_chat_completions,
     send_upstream_request_with_header_timeout, supported_reasoning_efforts_for_model,
-    upstream_header_timeout, upstream_http_client, upstream_stream_header_timeout,
+    upstream_deferred_stream_header_timeout, upstream_header_timeout, upstream_http_client,
+    upstream_stream_header_timeout,
 };
 use codex_elves_core::settings::{
     AggregateRelayMember, AggregateRelayProfile, AggregateRelayStrategy, BackendSettings,
@@ -4481,6 +4482,10 @@ fn upstream_header_timeout_is_bounded_for_hung_providers() {
     assert!(upstream_header_timeout() >= Duration::from_secs(30));
     assert!(upstream_header_timeout() <= Duration::from_secs(60));
     assert_eq!(upstream_stream_header_timeout(), Duration::from_secs(60));
+    assert_eq!(
+        upstream_deferred_stream_header_timeout(),
+        Duration::from_secs(600)
+    );
 }
 
 #[tokio::test]

@@ -46,6 +46,7 @@ import {
   Settings,
   ShieldCheck,
   ShieldAlert,
+  Sparkles,
   Sun,
   TestTube,
   Trash2,
@@ -140,6 +141,7 @@ type BackendSettings = {
   codexAppImageOverlayPath: string;
   codexAppImageOverlayOpacity: number;
   codexGoalsEnabled: boolean;
+  gptReasoningContinuation: boolean;
   launchMode: LaunchMode;
   relayBaseUrl: string;
   relayApiKey: string;
@@ -463,12 +465,15 @@ type LocalProxyLogEntry = {
   reasoningTokens?: number | null;
   reasoningEffort?: string | null;
   reasoningSource?: string | null;
+  continueThinkingTriggered?: boolean | null;
+  continueThinkingRounds?: number | null;
   serviceTier?: string | null;
   relayId?: string | null;
   relayName?: string | null;
   endpoint?: string | null;
   responseProtocol?: string | null;
   statusCode: number;
+  firstTokenMs?: number | null;
   durationMs: number;
   stream: boolean;
   requestBytes: number;
@@ -684,6 +689,7 @@ const defaultSettings: BackendSettings = {
   codexAppImageOverlayPath: "",
   codexAppImageOverlayOpacity: 35,
   codexGoalsEnabled: false,
+  gptReasoningContinuation: false,
   launchMode: "patch",
   relayBaseUrl: "",
   relayApiKey: "",
@@ -856,6 +862,8 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
   return Array.from({ length: 23 }, (_, index) => {
     const protocol = protocols[index % protocols.length];
     const success = index % 7 !== 5;
+    const continueThinkingTriggered = protocol === "responses" && index === 0;
+    const reasoningTokens = continueThinkingTriggered ? 2376 : browserPreviewReasoningTokens(index);
     return {
       id: `ppx-preview-${23 - index}`,
       timestampMs: Date.now() - ((index + 1) * 41000),
@@ -863,9 +871,11 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
       path: protocol === "chat_completions" ? "/v1/chat/completions" : "/v1/responses",
       remoteAddr: `127.0.0.1:${54624 + index}`,
       model: models[index % models.length],
-      reasoningTokens: index % 3 === 0 ? 516 + index * 17 : null,
-      reasoningEffort: index % 3 === 1 ? "medium" : index % 3 === 2 ? "max" : null,
-      reasoningSource: index % 3 === 0 ? "reasoning.effort" : null,
+      reasoningTokens,
+      reasoningEffort: continueThinkingTriggered ? "high" : index % 3 === 1 ? "medium" : index % 3 === 2 ? "max" : null,
+      reasoningSource: typeof reasoningTokens === "number" ? "reasoning.effort" : null,
+      continueThinkingTriggered,
+      continueThinkingRounds: continueThinkingTriggered ? 2 : 0,
       serviceTier: index % 2 === 0 ? "auto" : null,
       relayId: "preview-pure-api",
       relayName: "浏览器预览供应商",
@@ -877,7 +887,8 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
             : "https://api.vendor.example/v1/responses",
       responseProtocol: protocol,
       statusCode: success ? 200 : 502,
-      durationMs: 820 + index * 137,
+      firstTokenMs: browserPreviewFirstTokenMs(index),
+      durationMs: browserPreviewDurationMs(index),
       stream: index % 2 === 0,
       requestBytes: 2800 + index * 173,
       responseBytes: 5400 + index * 241,
@@ -886,6 +897,24 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
       error: success ? null : "上游连接断开",
     };
   });
+}
+
+function browserPreviewReasoningTokens(index: number) {
+  if (index === 0) return 480;
+  if (index === 4) return 516;
+  if (index === 8) return 652;
+  return index % 3 === 0 ? 516 + index * 17 : null;
+}
+
+function browserPreviewDurationMs(index: number) {
+  if (index === 2) return 68400;
+  return 820 + index * 137;
+}
+
+function browserPreviewFirstTokenMs(index: number) {
+  const total = browserPreviewDurationMs(index);
+  if (index % 7 === 5) return null;
+  return Math.min(total, 180 + index * 43);
 }
 
 function browserPreviewLocalProxyDetail(id: string): LocalProxyLogDetail | null {
@@ -1108,12 +1137,32 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
     }
     case "fetch_relay_profile_models": {
       const profile = args?.profile as RelayProfile | undefined;
+      const models = uniqueStrings([
+        ...(profile?.responsesModelList ?? active.responsesModelList).split(/\r?\n/),
+        ...(profile?.chatCompletionsModelList ?? active.chatCompletionsModelList).split(/\r?\n/),
+        ...(profile?.anthropicModelList ?? active.anthropicModelList).split(/\r?\n/),
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+      ].map((s) => s.trim()).filter(Boolean));
       return Promise.resolve(
         browserPreviewResult({
-          responses: (profile?.responsesModelList ?? active.responsesModelList).split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
-          chatCompletions: (profile?.chatCompletionsModelList ?? active.chatCompletionsModelList).split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
-          anthropic: (profile?.anthropicModelList ?? active.anthropicModelList).split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
-        }) as T,
+          models,
+          endpoint: `${profile?.baseUrl || active.baseUrl || active.upstreamBaseUrl}/models`,
+        }, `已从「${profile?.name || active.name}」获取 ${models.length} 个模型。`) as T,
+      );
+    }
+    case "test_relay_profile": {
+      const profile = args?.profile as RelayProfile | undefined;
+      const model = typeof args?.model === "string" && args.model.trim()
+        ? args.model.trim()
+        : profile?.testModel || profile?.model || settings.relayTestModel;
+      return Promise.resolve(
+        browserPreviewResult({
+          httpStatus: 200,
+          endpoint: `${profile?.baseUrl || active.baseUrl || active.upstreamBaseUrl}/responses`,
+          responsePreview: `hi from ${model}`,
+        }, `已向「${profile?.name || active.name}」用模型「${model}」发送 hi，HTTP 200。响应：hi from ${model}`) as T,
       );
     }
     case "switch_relay_profile": {
@@ -1907,9 +1956,8 @@ export function App() {
     return normalized;
   };
 
-  const testRelayProfile = async (profile: RelayProfile) => {
-    const result = await run(() => call<RelayProfileTestResult>("test_relay_profile", { profile }));
-    if (result) showNotice("供应商测试", result.message, result.status);
+  const testRelayProfile = async (profile: RelayProfile, model?: string) => {
+    return run(() => call<RelayProfileTestResult>("test_relay_profile", { profile, model }));
   };
 
   const fetchRelayProfileModels = async (profile: RelayProfile) => {
@@ -2379,6 +2427,7 @@ export function App() {
               detail={localProxyDetail}
               selectedId={selectedLocalProxyLogId}
               loadingDetailId={loadingLocalProxyLogDetailId}
+              form={settingsForm}
               actions={actions}
             />
           ) : null}
@@ -2507,7 +2556,7 @@ type Actions = {
     tomlBody: string,
   ) => Promise<BackendSettings | null>;
   deleteContextEntry: (settings: BackendSettings, kind: ContextKind, id: string) => Promise<BackendSettings | null>;
-  testRelayProfile: (profile: RelayProfile) => Promise<void>;
+  testRelayProfile: (profile: RelayProfile, model?: string) => Promise<RelayProfileTestResult | null>;
   fetchRelayProfileModels: (profile: RelayProfile) => Promise<string[] | null>;
   switchRelayProfile: (settings: BackendSettings, previousActiveRelayId?: string) => Promise<void>;
   relaySwitching: boolean;
@@ -2659,6 +2708,7 @@ function LocalProxyScreen({
   detail,
   selectedId,
   loadingDetailId,
+  form,
   actions,
 }: {
   status: LocalProxyStatusResult | null;
@@ -2666,6 +2716,7 @@ function LocalProxyScreen({
   detail: LocalProxyLogDetailResult | null;
   selectedId: string | null;
   loadingDetailId: string | null;
+  form: BackendSettings;
   actions: Actions;
 }) {
   const selectedEntry = detail?.entry && detail.entry.id === selectedId ? detail.entry : null;
@@ -2722,6 +2773,22 @@ function LocalProxyScreen({
           detail="当前运行状态与最近代理活动"
           actions={
             <>
+              <label
+                className="proxy-inline-toggle"
+                title="检测到 GPT 推理被中途截断时，自动让模型继续思考，减少因推理不足导致的错误"
+              >
+                <input
+                  checked={form.gptReasoningContinuation}
+                  onChange={(event) =>
+                    void actions.saveSettingsValue(
+                      { ...form, gptReasoningContinuation: event.currentTarget.checked },
+                      false,
+                    )
+                  }
+                  type="checkbox"
+                />
+                <span>GPT 推理续接</span>
+              </label>
               <Button onClick={() => void actions.refreshLocalProxyStatus()} size="sm">
                 <RefreshCw className="h-4 w-4" />
                 刷新状态
@@ -2768,7 +2835,7 @@ function LocalProxyScreen({
               <div
                 aria-label="GPT 请求低高智商比例"
                 className="proxy-iq-ratio"
-                title={`按当前列表 ${gptIqRatio.total} 条请求计算：GPT Reason Tok = 516 为低，超过 516 为高，低于 516 不计入低/高。低 ${gptIqRatio.low} 条，高 ${gptIqRatio.high} 条`}
+                title={`按当前列表 ${gptIqRatio.total} 条 GPT 请求计算：GPT Reason Tok = 516 为低，超过 516 为高，低于 516 不计入低/高。低 ${gptIqRatio.low} 条，高 ${gptIqRatio.high} 条`}
               >
                 <button
                   aria-pressed={iqFilter === "low"}
@@ -2801,7 +2868,11 @@ function LocalProxyScreen({
                   <span>时间</span>
                   <span>推理</span>
                   <span>状态</span>
-                  <span>耗时</span>
+                  <span className="proxy-log-latency">
+                    <span>首字</span>
+                    <span>|</span>
+                    <span>耗时</span>
+                  </span>
                   <span>操作</span>
                 </div>
                 {visibleEntries.map((entry) => (
@@ -2813,12 +2884,44 @@ function LocalProxyScreen({
                     <span className="proxy-log-time">{formatTime(entry.timestampMs)}</span>
                     <span className="proxy-log-reasoning">
                       <strong>{entry.reasoningEffort || "无推理"}</strong>
-                      <small>{`Reason Tok ${formatReasoningTokens(entry.reasoningTokens)}`}</small>
+                      <small className="proxy-log-reasoning-tokens">
+                        <span>
+                          Reason Tok{" "}
+                          <span className={`proxy-reasoning-token ${reasoningTokenTone(entry.reasoningTokens)}`}>
+                            {formatReasoningTokens(entry.reasoningTokens)}
+                          </span>
+                        </span>
+                        {entry.continueThinkingTriggered ? (
+                          <span
+                            aria-label={formatContinueThinkingTitle(entry)}
+                            className="proxy-continue-thinking-badge"
+                            title={formatContinueThinkingTitle(entry)}
+                          >
+                            <Sparkles aria-hidden="true" className="proxy-continue-thinking-icon" />
+                            {typeof entry.continueThinkingRounds === "number" && entry.continueThinkingRounds > 0 ? (
+                              <span className="proxy-continue-thinking-count">
+                                {entry.continueThinkingRounds}
+                              </span>
+                            ) : null}
+                          </span>
+                        ) : null}
+                      </small>
                     </span>
                     <span className={entry.statusCode >= 200 && entry.statusCode < 300 ? "proxy-code ok" : "proxy-code bad"}>
                       {entry.statusCode}
                     </span>
-                    <span title={`${entry.durationMs}ms`}>{formatRequestDurationMs(entry.durationMs)}</span>
+                    <span
+                      className="proxy-log-duration proxy-log-latency"
+                      title={formatRequestLatencyTitle(entry)}
+                    >
+                      <span className={isSlowRequestDuration(entry.firstTokenMs) ? "slow" : undefined}>
+                        {formatOptionalRequestDurationMs(entry.firstTokenMs)}
+                      </span>
+                      <span>|</span>
+                      <span className={isSlowRequestDuration(entry.durationMs) ? "slow" : undefined}>
+                        {formatRequestDurationMs(entry.durationMs)}
+                      </span>
+                    </span>
                     <Button
                       size="sm"
                       variant={selectedId === entry.id ? "secondary" : "outline"}
@@ -2842,6 +2945,14 @@ function LocalProxyScreen({
           </div>
           <div className="proxy-log-footer">
             <div className="proxy-log-pagination" aria-label="请求日志分页">
+              <Button
+                disabled={page <= 1}
+                onClick={() => setPage(1)}
+                size="sm"
+                variant="outline"
+              >
+                首页
+              </Button>
               <Button
                 disabled={page <= 1}
                 onClick={() => setPage((current) => Math.max(1, current - 1))}
@@ -3003,10 +3114,14 @@ function RelayScreen({
   const [detailProfileId, setDetailProfileId] = useState<string | null>(() => (isBrowserPreview() ? normalized.activeRelayId : null));
   const [newProfileDraft, setNewProfileDraft] = useState<RelayProfile | null>(null);
   const [thirdPartyImportOpen, setThirdPartyImportOpen] = useState(false);
+  const [testProfileId, setTestProfileId] = useState<string | null>(null);
   const browserPreviewDetailInitializedRef = useRef(isBrowserPreview());
   const detailProfile = newProfileDraft || (detailProfileId
     ? normalized.relayProfiles.find((profile) => profile.id === detailProfileId) || null
     : null);
+  const testProfile = testProfileId
+    ? normalized.relayProfiles.find((profile) => profile.id === testProfileId) || null
+    : null;
   const isNewProfile = !!newProfileDraft;
   const saveRelaySettings = async (next: BackendSettings) => {
     onFormChange(next);
@@ -3157,12 +3272,131 @@ function RelayScreen({
             form={normalized}
             onEdit={(profileId) => void editRelayProfile(profileId)}
             onFormChange={saveRelaySettings}
+            onTest={(profileId) => setTestProfileId(profileId)}
             disabled={!normalized.relayProfilesEnabled || actions.relaySwitching}
             actions={actions}
           />
         </CardContent>
       </Panel>
+      {testProfile ? (
+        <RelayProfileTestDialog
+          form={normalized}
+          profile={testProfile}
+          onClose={() => setTestProfileId(null)}
+          actions={actions}
+        />
+      ) : null}
     </>
+  );
+}
+
+function RelayProfileTestDialog({
+  profile,
+  form,
+  onClose,
+  actions,
+}: {
+  profile: RelayProfile;
+  form: BackendSettings;
+  onClose: () => void;
+  actions: Actions;
+}) {
+  const initialModel = relayProfileDefaultTestModel(profile, form);
+  const [model, setModel] = useState(initialModel);
+  const [choices, setChoices] = useState<string[]>(() => relayProfileKnownModels(profile, initialModel));
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [result, setResult] = useState<RelayProfileTestResult | null>(null);
+
+  useEffect(() => {
+    setModel(initialModel);
+    setChoices(relayProfileKnownModels(profile, initialModel));
+    setResult(null);
+  }, [profile.id, initialModel]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !sending) onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose, sending]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadModels = async () => {
+      setFetchingModels(true);
+      try {
+        const models = await actions.fetchRelayProfileModels(profile);
+        if (!cancelled && models?.length) {
+          setChoices(uniqueStrings([...relayProfileKnownModels(profile, initialModel), ...models]));
+        }
+      } finally {
+        if (!cancelled) setFetchingModels(false);
+      }
+    };
+    void loadModels();
+    return () => {
+      cancelled = true;
+    };
+  }, [actions, profile.id, initialModel]);
+
+  const sendTest = async () => {
+    const testModel = model.trim();
+    if (!testModel || sending) return;
+    setSending(true);
+    setResult(null);
+    try {
+      const nextResult = await actions.testRelayProfile(profile, testModel);
+      setResult(nextResult);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return createPortal(
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="relay-test-title" onClick={sending ? undefined : onClose}>
+      <div className="modal-card relay-test-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <h2 id="relay-test-title">发送测试</h2>
+            <p>{profile.name || "未命名供应商"} · 发送 hi 到当前供应商，返回结果会显示在这里。</p>
+          </div>
+          <Button disabled={sending} onClick={onClose} size="icon" title="关闭" variant="ghost">
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+        <Field label="发送模型">
+          <ModelChoiceInput
+            choices={choices}
+            onChange={(value) => {
+              setModel(value);
+              setResult(null);
+            }}
+            placeholder={fetchingModels ? "正在读取模型列表，可直接输入模型" : "选择或输入模型"}
+            value={model}
+          />
+        </Field>
+        {fetchingModels ? <p className="field-hint">正在读取模型列表；也可以直接输入模型。</p> : null}
+        {result ? (
+          <div className={`relay-test-result ${isSuccessStatus(result.status) ? "ok" : "bad"}`}>
+            <strong>{result.message}</strong>
+            {result.endpoint ? <span>Endpoint：{result.endpoint}</span> : null}
+            <pre>{result.responsePreview || "响应内容为空"}</pre>
+          </div>
+        ) : null}
+        <div className="relay-test-actions">
+          <Toolbar>
+            <Button disabled={sending || !model.trim()} onClick={() => void sendTest()}>
+              <TestTube className="h-4 w-4" />
+              {sending ? "发送中" : "发送"}
+            </Button>
+            <Button disabled={sending} onClick={onClose} variant="secondary">关闭</Button>
+          </Toolbar>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -3432,8 +3666,6 @@ function CodexRadarScreen({ radar, actions }: { radar: CodexRadarResult | null; 
               <div className="metric-list radar-sample-metrics">
                 <Metric label="通过任务" value={`${latest.passed}/${latest.tasks}`} />
                 <Metric label="有效任务" value={`${latest.validTasks ?? latest.tasks} 个`} />
-                <Metric label="总 Token" value={formatCompactNumber(latest.totalTokens)} />
-                <Metric label="输出 Token" value={formatCompactNumber(latest.outputTokens)} />
                 <Metric label="耗时" value={latest.wallTimeHuman || `${latest.wallSeconds} 秒`} />
                 <Metric label="成本" value={formatUsd(latest.costUsd)} />
               </div>
@@ -4045,12 +4277,14 @@ function RelayProfileList({
   form,
   onFormChange,
   onEdit,
+  onTest,
   disabled = false,
   actions,
 }: {
   form: BackendSettings;
   onFormChange: (value: BackendSettings) => void;
   onEdit: (id: string) => void;
+  onTest: (id: string) => void;
   disabled?: boolean;
   actions: Actions;
 }) {
@@ -4080,6 +4314,7 @@ function RelayProfileList({
               key={profile.id}
               onEdit={onEdit}
               onFormChange={onFormChange}
+              onTest={onTest}
               disabled={disabled}
               profile={profile}
             />
@@ -4096,6 +4331,7 @@ function SortableRelayProfileCard({
   index,
   onFormChange,
   onEdit,
+  onTest,
   disabled = false,
   actions,
 }: {
@@ -4104,6 +4340,7 @@ function SortableRelayProfileCard({
   index: number;
   onFormChange: (value: BackendSettings) => void;
   onEdit: (id: string) => void;
+  onTest: (id: string) => void;
   disabled?: boolean;
   actions: Actions;
 }) {
@@ -4167,7 +4404,7 @@ function SortableRelayProfileCard({
             onClick={(event) => {
               event.stopPropagation();
               if (isAggregateRelayProfile(profile)) return;
-              void actions.testRelayProfile(profile);
+              onTest(profile.id);
             }}
             size="icon"
             title={isAggregateRelayProfile(profile) ? "聚合供应商会在真实对话中轮转成员，请测试成员供应商" : "发送 hi 测试"}
@@ -4380,7 +4617,6 @@ function RelayProfileEditor({
   onSwitch: () => void;
   actions: Actions;
 }) {
-  const [showAdvanced, setShowAdvanced] = useState(false);
   const [modelChoices, setModelChoices] = useState<Record<RelayProtocol, string[]>>({
     responses: [],
     chatCompletions: [],
@@ -4506,37 +4742,6 @@ function RelayProfileEditor({
             placeholder="写入 config.toml 的 model 字段，例如 gpt-5"
           />
         </Field>
-        <div className="relay-advanced-toggle">
-          <Button
-            aria-expanded={showAdvanced}
-            onClick={() => setShowAdvanced((current) => !current)}
-            size="sm"
-            type="button"
-            variant="secondary"
-          >
-            <Settings className="h-4 w-4" />
-            更多选项
-          </Button>
-        </div>
-        {showAdvanced ? (
-          <div className="relay-advanced-fields">
-            <Field className="relay-field-test-model" label="测试模型">
-              <Input
-                value={profile.testModel}
-                onChange={(event) => updateDraft({ testModel: event.currentTarget.value })}
-                placeholder={`留空使用默认：${form.relayTestModel || defaultSettings.relayTestModel}`}
-              />
-            </Field>
-            <Field className="relay-field-auto-compact" label="压缩上下文大小">
-              <Input
-                inputMode="numeric"
-                value={profile.autoCompactLimit}
-                onChange={(event) => updateDraft({ autoCompactLimit: event.currentTarget.value.replace(/[^\d]/g, "") })}
-                placeholder="留空不改写，例如 160000"
-              />
-            </Field>
-          </div>
-        ) : null}
         {profile.relayMode === "official" ? (
           <Field className="relay-field-official-key" label="API Key">
             <label className="inline-check">
@@ -4568,6 +4773,16 @@ function RelayProfileEditor({
             </Field>
           </div>
         ) : null}
+        <div className="relay-advanced-fields">
+          <Field className="relay-field-auto-compact" label="压缩上下文大小">
+            <Input
+              inputMode="numeric"
+              value={profile.autoCompactLimit}
+              onChange={(event) => updateDraft({ autoCompactLimit: event.currentTarget.value.replace(/[^\d]/g, "") })}
+              placeholder="留空不改写，例如 160000"
+            />
+          </Field>
+        </div>
         {showApiFields ? (
           <Field className="relay-field-user-agent" label="User-Agent">
             <Input
@@ -5653,13 +5868,6 @@ function AggregateRelayProfileEditor({
             value={profile.name}
             onChange={(event) => onProfileChange({ ...profile, name: event.currentTarget.value })}
             placeholder="例如 主力聚合池"
-          />
-        </Field>
-        <Field className="relay-field-test-model" label="测试模型">
-          <Input
-            value={profile.testModel}
-            onChange={(event) => onProfileChange({ ...profile, testModel: event.currentTarget.value })}
-            placeholder={`留空使用默认：${form.relayTestModel || defaultSettings.relayTestModel}`}
           />
         </Field>
         <Field className="aggregate-strategy-field" label="聚合策略">
@@ -7104,8 +7312,11 @@ function formatProxyBody(text: string) {
 function calculateGptIqRatio(entries: LocalProxyLogEntry[]) {
   let low = 0;
   let high = 0;
+  let total = 0;
 
   entries.forEach((entry) => {
+    if (!isGptModel(entry.model)) return;
+    total += 1;
     const iqClass = classifyGptIqRequest(entry);
     if (iqClass === "low") {
       low += 1;
@@ -7114,7 +7325,6 @@ function calculateGptIqRatio(entries: LocalProxyLogEntry[]) {
     }
   });
 
-  const total = entries.length;
   return {
     low,
     high,
@@ -7139,12 +7349,35 @@ function formatReasoningTokens(value?: number | null) {
   return typeof value === "number" ? value.toLocaleString() : "-";
 }
 
+function formatContinueThinkingTitle(entry: Pick<LocalProxyLogEntry, "continueThinkingRounds">) {
+  return typeof entry.continueThinkingRounds === "number" && entry.continueThinkingRounds > 0
+    ? `已触发 GPT 推理续接 ${entry.continueThinkingRounds} 轮`
+    : "已触发 GPT 推理续接";
+}
+
+function reasoningTokenTone(value?: number | null) {
+  if (value === 516) return "low";
+  if (typeof value === "number" && value > 516) return "high";
+  return "normal";
+}
+
 function formatRequestDurationMs(value: number) {
   if (!Number.isFinite(value)) return "-";
-  if (value <= 1000) return `${Math.max(0, Math.round(value))}ms`;
   const seconds = Math.max(0, value) / 1000;
   const digits = seconds < 10 ? 2 : 1;
   return `${seconds.toFixed(digits).replace(/\.?0+$/, "")}s`;
+}
+
+function formatOptionalRequestDurationMs(value?: number | null) {
+  return typeof value === "number" ? formatRequestDurationMs(value) : "-";
+}
+
+function isSlowRequestDuration(value?: number | null) {
+  return typeof value === "number" && value >= 60000;
+}
+
+function formatRequestLatencyTitle(entry: Pick<LocalProxyLogEntry, "firstTokenMs" | "durationMs">) {
+  return `首字 ${formatOptionalRequestDurationMs(entry.firstTokenMs)} | 耗时 ${formatRequestDurationMs(entry.durationMs)}`;
 }
 
 function formatProtocolRoute(entry: Pick<LocalProxyLogEntry, "responseProtocol">) {
@@ -7378,6 +7611,26 @@ function normalizeRelayProtocol(protocol: RelayProtocol | undefined): RelayProto
 
 function uniqueStrings(values: string[]): string[] {
   return Array.from(new Set(values));
+}
+
+function relayProfileDefaultTestModel(profile: RelayProfile, form: BackendSettings): string {
+  return profile.testModel.trim() || profile.model.trim() || form.relayTestModel.trim() || defaultSettings.relayTestModel;
+}
+
+function relayProfileKnownModels(profile: RelayProfile, fallbackModel = ""): string[] {
+  const values = [
+    fallbackModel,
+    profile.testModel,
+    profile.model,
+    ...normalizeRelayModelMappings(profile.modelMappings).map((mapping) => mapping.requestModel),
+    ...profile.responsesModelList.split(/\r?\n/),
+    ...profile.chatCompletionsModelList.split(/\r?\n/),
+    ...profile.anthropicModelList.split(/\r?\n/),
+    ...profile.modelList.split(/\r?\n/),
+  ];
+  return uniqueStrings(values.map((value) => value.trim()).filter(Boolean)).sort((left, right) =>
+    left.localeCompare(right),
+  );
 }
 
 function relayProfileContextWindowForActiveModel(profile: RelayProfile): string {

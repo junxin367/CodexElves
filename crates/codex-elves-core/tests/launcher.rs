@@ -551,29 +551,16 @@ data: {"type":"message_stop"}
 }
 
 #[tokio::test]
-async fn helper_defers_claude_high_reasoning_stream_header_wait() {
+async fn helper_does_not_defer_high_reasoning_stream_for_responses_models() {
     let _lock = launcher_settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
     let upstream = spawn_launcher_upstream_with_delayed_response(
         "text/event-stream",
-        r#"event: message_start
-data: {"type":"message_start","message":{"id":"msg_slow","type":"message","role":"assistant","model":"claude-sonnet-4","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}
+r#"event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_slow","object":"response","status":"completed","model":"gpt-responses","output":[],"usage":{"input_tokens":10,"output_tokens":1}}}
 
-event: content_block_start
-data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
-
-event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}
-
-event: content_block_stop
-data: {"type":"content_block_stop","index":0}
-
-event: message_delta
-data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}
-
-event: message_stop
-data: {"type":"message_stop"}
+data: [DONE]
 
 "#
         .to_string(),
@@ -594,7 +581,7 @@ data: {"type":"message_stop"}
         .unwrap()
         .post(format!("http://127.0.0.1:{port}/v1/responses"))
         .json(&serde_json::json!({
-            "model": "claude-sonnet-4",
+            "model": "gpt-responses",
             "input": "think deeply",
             "stream": true,
             "reasoning": { "effort": "high" }
@@ -606,8 +593,8 @@ data: {"type":"message_stop"}
 
     assert!(response.status().is_success());
     assert!(
-        header_elapsed < std::time::Duration::from_secs(1),
-        "local SSE headers should not wait for delayed upstream headers: {header_elapsed:?}"
+        header_elapsed >= std::time::Duration::from_millis(1500),
+        "responses streams should wait for upstream headers instead of entering deferred path: {header_elapsed:?}"
     );
     let content_type = response
         .headers()
@@ -620,18 +607,81 @@ data: {"type":"message_stop"}
     let requests = upstream.finish_all();
 
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].path, "/v1/messages");
+    assert_eq!(requests[0].path, "/v1/responses");
     let first_upstream_body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
     assert_eq!(first_upstream_body["stream"], true);
     assert_eq!(
-        first_upstream_body["thinking"],
-        serde_json::json!({ "type": "adaptive" })
-    );
-    assert_eq!(
-        first_upstream_body["output_config"],
+        first_upstream_body["reasoning"],
         serde_json::json!({ "effort": "high" })
     );
     assert!(content_type.contains("text/event-stream"));
+    assert!(body.contains("event: response.completed"));
+    assert!(body.contains("data: [DONE]"));
+}
+
+#[tokio::test]
+async fn helper_defers_high_reasoning_stream_header_wait_for_chat_completions_models() {
+    let _lock = launcher_settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
+    let upstream = spawn_launcher_upstream_with_delayed_response(
+        "text/event-stream",
+        r#"data: {"id":"chatcmpl_slow","object":"chat.completion.chunk","created":0,"model":"gpt-chat","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_slow","object":"chat.completion.chunk","created":0,"model":"gpt-chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}
+
+data: [DONE]
+
+"#
+        .to_string(),
+        std::time::Duration::from_secs(2),
+    );
+    write_launcher_mixed_relay_settings(temp.path(), &upstream.base_url);
+
+    let hooks = DefaultLaunchHooks::default();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    hooks.start_helper(port).await.unwrap();
+
+    let started = std::time::Instant::now();
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .json(&serde_json::json!({
+            "model": "gpt-chat",
+            "input": "think deeply",
+            "stream": true,
+            "reasoning": { "effort": "high" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    let header_elapsed = started.elapsed();
+
+    assert!(response.status().is_success());
+    assert!(
+        header_elapsed < std::time::Duration::from_secs(1),
+        "chat completions streams should receive local deferred SSE headers quickly: {header_elapsed:?}"
+    );
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let body = response.text().await.unwrap();
+    hooks.shutdown_helper(port).await;
+    let requests = upstream.finish_all();
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/v1/chat/completions");
+    let first_upstream_body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(first_upstream_body["stream"], true);
+    assert!(content_type.contains("text/event-stream"));
+    assert!(body.contains("event: response.output_text.delta"));
     assert!(body.contains("event: response.completed"));
     assert!(body.contains("data: [DONE]"));
 }

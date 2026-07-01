@@ -18,7 +18,7 @@ pub const DEFAULT_PROTOCOL_PROXY_PORT: u16 = 45221;
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const UPSTREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(60);
-const UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(300);
+const UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(600);
 const THINK_OPEN_TAG: &str = "<think>";
 const THINK_CLOSE_TAG: &str = "</think>";
 const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
@@ -1995,6 +1995,165 @@ fn conversation_id_from_responses_request(body: &Value) -> Option<String> {
         }
     }
     None
+}
+
+#[derive(Debug, Clone)]
+pub struct ContinueThinkingResult {
+    pub sse_text: String,
+    pub triggered: bool,
+    pub rounds: u32,
+}
+
+impl ContinueThinkingResult {
+    fn unchanged(sse_text: String) -> Self {
+        Self {
+            sse_text,
+            triggered: false,
+            rounds: 0,
+        }
+    }
+
+    fn from_state(sse_text: String, triggered: bool, rounds: u32) -> Self {
+        Self {
+            sse_text,
+            triggered,
+            rounds,
+        }
+    }
+}
+
+/// GPT + Responses 直连协议下的"续思考"驱动。
+///
+/// 入参为第一轮已完成的上游 SSE 文本（UTF-8）。若 reasoning_tokens 命中 518
+/// 网格且倍数低于阈值，则把上一轮的 reasoning item（带 encrypted_content）
+/// 和一个伪造的 continue_thinking 工具调用/返回回传上游，让模型从截断处
+/// 继续思考，直到不再命中网格或达到最大续写轮数。返回最后一轮的完整 SSE
+/// 文本和续写触发元数据，供上层原样转发给客户端并写入请求日志。
+///
+/// 任何异常（无法解析终止事件、续写请求失败等）都直接返回当前已有的文本，
+/// 不阻断主流程。
+pub async fn apply_continue_thinking_to_responses_stream(
+    original_request: &Value,
+    settings: crate::settings::BackendSettings,
+    original_user_agent: Option<&str>,
+    first_round_sse_text: String,
+) -> ContinueThinkingResult {
+    let model = original_request
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !settings.gpt_reasoning_continuation || !crate::continue_thinking::is_supported_model(model)
+    {
+        return ContinueThinkingResult::unchanged(first_round_sse_text);
+    }
+
+    let mut current_sse_text = first_round_sse_text;
+    let mut round: u32 = 0;
+    let mut triggered = false;
+    let mut completed_rounds = 0;
+    loop {
+        let Some(response_object) =
+            crate::continue_thinking::extract_terminal_response_object(&current_sse_text)
+        else {
+            return ContinueThinkingResult::from_state(
+                current_sse_text,
+                triggered,
+                completed_rounds,
+            );
+        };
+        let reasoning_tokens = crate::continue_thinking::extract_reasoning_tokens(&response_object);
+        if !crate::continue_thinking::should_continue_thinking(reasoning_tokens) {
+            return ContinueThinkingResult::from_state(
+                current_sse_text,
+                triggered,
+                completed_rounds,
+            );
+        }
+        if round >= crate::continue_thinking::MAX_CONTINUE_ROUNDS {
+            return ContinueThinkingResult::from_state(
+                current_sse_text,
+                triggered,
+                completed_rounds,
+            );
+        }
+        round += 1;
+        triggered = true;
+
+        let previous_output_items =
+            crate::continue_thinking::extract_output_items(&response_object);
+        let continue_request = crate::continue_thinking::build_continue_request(
+            original_request,
+            &previous_output_items,
+            round,
+        );
+        let Ok(continue_body) = serde_json::to_string(&continue_request) else {
+            return ContinueThinkingResult::from_state(
+                current_sse_text,
+                triggered,
+                completed_rounds,
+            );
+        };
+
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "continue_thinking.round_start",
+            json!({
+                "model": model,
+                "round": round,
+                "reasoningTokens": reasoning_tokens,
+                "gridMultiple": reasoning_tokens.and_then(crate::continue_thinking::grid_multiple)
+            }),
+        );
+
+        let upstream = match open_responses_proxy_request_with_settings_user_agent_and_timeout(
+            &continue_body,
+            settings.clone(),
+            original_user_agent,
+            None,
+        )
+        .await
+        {
+            Ok(upstream) => upstream,
+            Err(error) => {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "continue_thinking.round_request_failed",
+                    json!({ "round": round, "error": error.to_string() }),
+                );
+                return ContinueThinkingResult::from_state(
+                    current_sse_text,
+                    triggered,
+                    completed_rounds,
+                );
+            }
+        };
+        if !upstream.is_success() {
+            return ContinueThinkingResult::from_state(
+                current_sse_text,
+                triggered,
+                completed_rounds,
+            );
+        }
+        let Ok(response) = upstream.into_response() else {
+            return ContinueThinkingResult::from_state(
+                current_sse_text,
+                triggered,
+                completed_rounds,
+            );
+        };
+        let Ok(bytes) = response.bytes().await else {
+            return ContinueThinkingResult::from_state(
+                current_sse_text,
+                triggered,
+                completed_rounds,
+            );
+        };
+        let round_sse_text = String::from_utf8_lossy(&bytes).into_owned();
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "continue_thinking.round_completed",
+            json!({ "round": round, "bytes": round_sse_text.len() }),
+        );
+        completed_rounds = round;
+        current_sse_text = round_sse_text;
+    }
 }
 
 fn effective_user_agent(configured_user_agent: &str, original_user_agent: Option<&str>) -> String {

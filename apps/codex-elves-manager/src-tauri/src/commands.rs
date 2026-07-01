@@ -2148,14 +2148,20 @@ pub fn delete_context_entry(request: ContextDeleteRequest) -> CommandResult<Cont
 }
 
 #[tauri::command]
-pub async fn test_relay_profile(profile: RelayProfile) -> CommandResult<RelayProfileTestPayload> {
+pub async fn test_relay_profile(
+    profile: RelayProfile,
+    model: Option<String>,
+) -> CommandResult<RelayProfileTestPayload> {
     let profile_name = if profile.name.trim().is_empty() {
         "未命名供应商"
     } else {
         profile.name.trim()
     };
     let settings = SettingsStore::default().load().unwrap_or_default();
-    let test_model: String = if !profile.test_model.trim().is_empty() {
+    let requested_model = model.as_deref().unwrap_or("").trim();
+    let test_model: String = if !requested_model.is_empty() {
+        requested_model.to_string()
+    } else if !profile.test_model.trim().is_empty() {
         // 1. 使用者在該供應商明確填的測試模型
         profile.test_model.trim().to_string()
     } else {
