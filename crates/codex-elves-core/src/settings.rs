@@ -265,8 +265,6 @@ pub struct BackendSettings {
     pub codex_app_plugin_entry_unlock: bool,
     #[serde(rename = "codexAppPluginMarketplaceUnlock", default = "default_true")]
     pub codex_app_plugin_marketplace_unlock: bool,
-    #[serde(rename = "codexAppForcePluginInstall", default = "default_true")]
-    pub codex_app_force_plugin_install: bool,
     #[serde(rename = "codexAppPluginAutoExpand", default = "default_true")]
     pub codex_app_plugin_auto_expand: bool,
     #[serde(rename = "codexAppSessionDelete", default = "default_true")]
@@ -351,7 +349,6 @@ impl Default for BackendSettings {
             computer_use_guard_enabled: false,
             codex_app_plugin_entry_unlock: true,
             codex_app_plugin_marketplace_unlock: true,
-            codex_app_force_plugin_install: true,
             codex_app_plugin_auto_expand: true,
             codex_app_session_delete: true,
             codex_app_markdown_export: true,
@@ -505,8 +502,9 @@ impl BackendSettings {
     }
 
     pub fn active_relay_uses_protocol_proxy(&self) -> bool {
-        self.active_aggregate_relay_profile().is_some()
-            || self.active_relay_profile().local_proxy_enabled()
+        self.relay_profiles_enabled
+            && (self.active_aggregate_relay_profile().is_some()
+                || self.active_relay_profile().local_proxy_enabled())
     }
 }
 
@@ -718,7 +716,6 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
     }
     merge_bool_setting(target, source, "codexAppPluginEntryUnlock");
     merge_bool_setting(target, source, "codexAppPluginMarketplaceUnlock");
-    merge_bool_setting(target, source, "codexAppForcePluginInstall");
     merge_bool_setting(target, source, "codexAppPluginAutoExpand");
     merge_bool_setting(target, source, "codexAppSessionDelete");
     merge_bool_setting(target, source, "codexAppMarkdownExport");
@@ -1082,7 +1079,6 @@ mod tests {
         assert!(!settings.computer_use_guard_enabled);
         assert!(settings.codex_app_plugin_entry_unlock);
         assert!(settings.codex_app_plugin_marketplace_unlock);
-        assert!(settings.codex_app_force_plugin_install);
         assert!(settings.codex_app_plugin_auto_expand);
         assert!(!settings.codex_goals_enabled);
         assert!(settings.codex_app_path.is_empty());
@@ -1133,7 +1129,6 @@ mod tests {
             r#"{
                 "codexAppPluginEntryUnlock": false,
                 "codexAppPluginMarketplaceUnlock": true,
-                "codexAppForcePluginInstall": false,
                 "codexAppPluginAutoExpand": false
             }"#,
         )
@@ -1141,20 +1136,17 @@ mod tests {
 
         assert!(!settings.codex_app_plugin_entry_unlock);
         assert!(settings.codex_app_plugin_marketplace_unlock);
-        assert!(!settings.codex_app_force_plugin_install);
         assert!(!settings.codex_app_plugin_auto_expand);
 
         let legacy_settings: BackendSettings = serde_json::from_str(
             r#"{
-                "codexAppPluginEntryUnlock": false,
-                "codexAppForcePluginInstall": false
+                "codexAppPluginEntryUnlock": false
             }"#,
         )
         .unwrap();
 
         assert!(!legacy_settings.codex_app_plugin_entry_unlock);
         assert!(legacy_settings.codex_app_plugin_marketplace_unlock);
-        assert!(!legacy_settings.codex_app_force_plugin_install);
         assert!(legacy_settings.codex_app_plugin_auto_expand);
     }
 
@@ -1938,6 +1930,45 @@ experimental_bearer_token = "sk-existing""#
         assert_eq!(active_aggregate.members[1].relay_id, "relay-b");
         assert_eq!(active_aggregate.members[1].weight, 4);
         assert!(updated.active_relay_uses_protocol_proxy());
+    }
+
+    #[test]
+    fn active_relay_uses_protocol_proxy_requires_relay_profiles_enabled() {
+        let local_proxy_settings = BackendSettings {
+            relay_profiles_enabled: false,
+            relay_profiles: vec![RelayProfile {
+                id: "relay-chat".to_string(),
+                name: "Chat".to_string(),
+                local_proxy_enabled: Some(true),
+                ..RelayProfile::default()
+            }],
+            active_relay_id: "relay-chat".to_string(),
+            ..BackendSettings::default()
+        };
+
+        assert!(!local_proxy_settings.active_relay_uses_protocol_proxy());
+
+        let aggregate_settings = BackendSettings {
+            relay_profiles_enabled: false,
+            relay_profiles: vec![RelayProfile {
+                id: "agg".to_string(),
+                name: "聚合".to_string(),
+                relay_mode: RelayMode::Aggregate,
+                ..RelayProfile::default()
+            }],
+            active_relay_id: "agg".to_string(),
+            aggregate_relay_profiles: vec![AggregateRelayProfile {
+                id: "agg".to_string(),
+                name: "聚合".to_string(),
+                strategy: AggregateRelayStrategy::WeightedRoundRobin,
+                members: Vec::new(),
+            }],
+            active_aggregate_relay_id: "agg".to_string(),
+            ..BackendSettings::default()
+        };
+
+        assert!(aggregate_settings.active_aggregate_relay_profile().is_some());
+        assert!(!aggregate_settings.active_relay_uses_protocol_proxy());
     }
 
     #[test]

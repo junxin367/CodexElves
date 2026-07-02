@@ -95,7 +95,7 @@ async fn settings_get_includes_runtime_codex_app_version() {
     assert_eq!(result["codexAppVersion"], json!("26.601.21317"));
     assert_eq!(result["codexAppPluginEntryUnlock"], json!(true));
     assert_eq!(result["codexAppPluginMarketplaceUnlock"], json!(true));
-    assert_eq!(result["codexAppForcePluginInstall"], json!(true));
+    assert!(result.get("codexAppForcePluginInstall").is_none());
     assert!(result.get("codexAppConversationTimeline").is_none());
     assert!(result.get("codexAppThreadIdBadge").is_none());
 }
@@ -862,7 +862,6 @@ impl BridgeSettingsService for FakeSettings {
         for key in [
             "codexAppPluginEntryUnlock",
             "codexAppPluginMarketplaceUnlock",
-            "codexAppForcePluginInstall",
             "codexAppSessionDelete",
             "codexAppMarkdownExport",
             "codexAppProjectMove",

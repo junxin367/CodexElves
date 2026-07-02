@@ -53,7 +53,6 @@
   const codexPluginAutoExpandVersion = "1";
   const codexPluginAutoExpandMaxClicks = 24;
   const codexPluginAutoExpandClickDelayMs = 180;
-  const codexForcePluginInstallSettleWindowMs = 3000;
   const codexBackendHeartbeatIntervalMs = 30000;
   const codexElvesImageOverlayId = "codex-elves-image-overlay";
   window.__codexProjectMoveRuntimeId = (window.__codexProjectMoveRuntimeId || 0) + 1;
@@ -69,10 +68,14 @@
   (window.__codexSessionDeleteObservers || []).forEach((observer) => observer.disconnect());
   window.__codexSessionDeleteObservers = [];
   window.__codexSessionDeleteObserverConfigs = [];
-  window.__codexForcePluginInstallObserver?.disconnect?.();
-  window.__codexForcePluginInstallObserver = null;
-  clearTimeout(window.__codexForcePluginInstallSettleTimer);
-  window.__codexForcePluginInstallSettleTimer = null;
+  function cleanupLegacyForcePluginInstallRuntime() {
+    window.__codexForcePluginInstallObserver?.disconnect?.();
+    window.__codexForcePluginInstallObserver = null;
+    window.__codexForcePluginInstallObserverRoot = null;
+    clearTimeout(window.__codexForcePluginInstallSettleTimer);
+    window.__codexForcePluginInstallSettleTimer = null;
+  }
+  cleanupLegacyForcePluginInstallRuntime();
   if (
     window.__codexElvesRuntimeBuild === codexElvesBuild &&
     window.__codexElvesRuntimeHelperBase === helperBase &&
@@ -173,7 +176,6 @@
     nativeMenuBar: "[class*=\"ms-auto\"][class*=\"flex\"][class*=\"items-center\"]",
     headerContextMenuSurface: '[data-testid="app-shell-header-context-menu-surface"]',
     archiveNav: 'button[aria-label="已归档对话"], button[aria-label="Archived conversations"]',
-    disabledInstallButton: 'button:disabled, button[aria-disabled="true"], [role="button"][aria-disabled="true"], button[data-disabled], [role="button"][data-disabled], button.cursor-not-allowed, [role="button"].cursor-not-allowed, button.pointer-events-none, [role="button"].pointer-events-none',
     pluginNavButton: 'nav[role="navigation"] button.h-token-nav-row.w-full',
     pluginSvgPath: 'svg path[d^="M7.94562 14.0277"]',
   };
@@ -284,12 +286,6 @@
         border-color: #93c5fd;
         background: #dbeafe;
         color: #1d4ed8;
-      }
-      .codex-force-install-unlocked {
-        border-color: #ef4444 !important;
-        background: #fee2e2 !important;
-        color: #991b1b !important;
-        opacity: 1 !important;
       }
       [data-codex-delete-row="true"]:hover .${actionGroupClass} {
         opacity: 1;
@@ -721,6 +717,53 @@
       .codex-elves-service-tier-button { border: 1px solid rgba(255,255,255,.18); border-radius: 7px; background: #3f3f46; color: #f3f4f6; font: 12px system-ui, sans-serif; padding: 5px 8px; white-space: nowrap; }
       .codex-elves-service-tier-button[data-active="true"] { border-color: #10a37f; background: rgba(16,163,127,.22); color: #6ee7b7; }
       .codex-elves-service-tier-button:disabled { opacity: .55; cursor: not-allowed; }
+      [data-codex-tooltip] { position: relative; }
+      [data-codex-tooltip]::before,
+      [data-codex-tooltip]::after {
+        position: absolute;
+        left: 50%;
+        z-index: 2147483647;
+        opacity: 0;
+        pointer-events: none;
+        transform: translate(-50%, -2px);
+        transition: opacity .12s ease, transform .12s ease;
+      }
+      [data-codex-tooltip]::before {
+        top: calc(100% + 3px);
+        width: 8px;
+        height: 8px;
+        border-left: 1px solid rgba(255,255,255,.12);
+        border-top: 1px solid rgba(255,255,255,.12);
+        background: #242628;
+        content: "";
+        transform: translate(-50%, -2px) rotate(45deg);
+      }
+      [data-codex-tooltip]::after {
+        top: calc(100% + 7px);
+        width: max-content;
+        max-width: min(360px, calc(100vw - 32px));
+        border: 1px solid rgba(255,255,255,.12);
+        border-radius: 10px;
+        background: #242628;
+        color: #f4f4f5;
+        content: attr(data-codex-tooltip);
+        font: 12px/18px system-ui, sans-serif;
+        padding: 8px 10px;
+        text-align: left;
+        white-space: pre-line;
+        box-shadow: 0 14px 40px rgba(0,0,0,.28);
+      }
+      [data-codex-tooltip]:hover::before,
+      [data-codex-tooltip]:hover::after,
+      [data-codex-tooltip]:focus-visible::before,
+      [data-codex-tooltip]:focus-visible::after {
+        opacity: 1;
+        transform: translate(-50%, 0);
+      }
+      [data-codex-tooltip]:hover::before,
+      [data-codex-tooltip]:focus-visible::before {
+        transform: translate(-50%, 0) rotate(45deg);
+      }
       .${codexServiceTierBadgeClass} {
         display: inline-flex;
         align-items: center;
@@ -803,13 +846,12 @@
   }
 
   function defaultCodexElvesSettings() {
-    return { pluginEntryUnlock: true, pluginMarketplaceUnlock: true, forcePluginInstall: true, pluginAutoExpand: true, sessionDelete: true, markdownExport: true, projectMove: true, conversationView: false, conversationViewMaxWidth: conversationViewDefaultWidth, upstreamWorktreeCreate: true, nativeMenuPlacement: true, serviceTierControls: false };
+    return { pluginEntryUnlock: true, pluginMarketplaceUnlock: true, pluginAutoExpand: true, sessionDelete: true, markdownExport: true, projectMove: true, conversationView: false, conversationViewMaxWidth: conversationViewDefaultWidth, upstreamWorktreeCreate: true, nativeMenuPlacement: true, serviceTierControls: false };
   }
 
   const codexElvesBackendSettingMap = {
     pluginEntryUnlock: "codexAppPluginEntryUnlock",
     pluginMarketplaceUnlock: "codexAppPluginMarketplaceUnlock",
-    forcePluginInstall: "codexAppForcePluginInstall",
     pluginAutoExpand: "codexAppPluginAutoExpand",
     sessionDelete: "codexAppSessionDelete",
     markdownExport: "codexAppMarkdownExport",
@@ -837,7 +879,6 @@
       return {
         pluginEntryUnlock: false,
         pluginMarketplaceUnlock: false,
-        forcePluginInstall: false,
         pluginAutoExpand: false,
         sessionDelete: false,
         markdownExport: false,
@@ -855,7 +896,6 @@
       if (relayPatchDisabled) {
         settings.pluginEntryUnlock = false;
         settings.pluginMarketplaceUnlock = false;
-        settings.forcePluginInstall = false;
       }
       return settings;
     } catch {
@@ -863,7 +903,6 @@
       if (relayPatchDisabled) {
         settings.pluginEntryUnlock = false;
         settings.pluginMarketplaceUnlock = false;
-        settings.forcePluginInstall = false;
       }
       return settings;
     }
@@ -1025,10 +1064,26 @@
     return urls.find((url) => url.includes("/assets/") && url.includes(namePart) && url.split("?")[0].endsWith(".js")) || "";
   }
 
+  async function codexAppAssetUrlFromScriptText(namePart) {
+    const scripts = Array.from(document.scripts || []).map((script) => script.src).filter(Boolean);
+    for (const src of scripts) {
+      if (!src.includes("/assets/") || !src.split("?")[0].endsWith(".js")) continue;
+      try {
+        const text = await fetch(src).then((response) => response.ok ? response.text() : "");
+        const escaped = namePart.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const match = text.match(new RegExp(`["'](\\./assets/${escaped}[^"']+\\.js)["']`));
+        if (!match) continue;
+        return new URL(match[1], src).href;
+      } catch {
+      }
+    }
+    return "";
+  }
+
   async function loadCodexAppModule(namePart) {
     if (!codexServiceTierModulePromises.has(namePart)) {
       const promise = Promise.resolve().then(async () => {
-        const url = codexAppAssetUrl(namePart);
+        const url = codexAppAssetUrl(namePart) || await codexAppAssetUrlFromScriptText(namePart);
         if (!url) throw new Error(`未找到 Codex App asset: ${namePart}`);
         return await import(url);
       }).catch((error) => {
@@ -1640,7 +1695,8 @@
       node.dataset.tier = state.tier;
       node.dataset.disabled = String(!!state.disabled);
       node.textContent = state.label;
-      node.title = state.title;
+      node.dataset.codexTooltip = state.title;
+      node.removeAttribute("title");
       node.setAttribute("aria-label", state.title);
     });
   }
@@ -1677,7 +1733,8 @@
     document.querySelectorAll("[data-codex-service-tier-fast]").forEach((button) => {
       button.disabled = fastDisabled;
       button.dataset.active = String(codexServiceTierState.controlMode === "global-fast");
-      button.title = fastTitle;
+      button.dataset.codexTooltip = fastTitle;
+      button.removeAttribute("title");
     });
     document.querySelectorAll("[data-codex-service-tier-custom]").forEach((button) => {
       button.disabled = !featureEnabled || !backendConnected || codexServiceTierState.status === "loading";
@@ -1686,7 +1743,8 @@
     document.querySelectorAll("[data-codex-service-tier-thread-inherit]").forEach((button) => {
       button.disabled = !featureEnabled || !backendConnected || codexServiceTierState.status === "loading";
       button.dataset.active = String(codexServiceTierState.controlMode === "custom" && codexServiceTierState.threadMode === "inherit");
-      button.title = `当前 thread 不单独覆盖，继承自定义默认 ${codexServiceTierState.defaultMode || "inherit"}`;
+      button.dataset.codexTooltip = `当前 thread 不单独覆盖，继承自定义默认 ${codexServiceTierState.defaultMode || "inherit"}`;
+      button.removeAttribute("title");
     });
     document.querySelectorAll("[data-codex-service-tier-thread-standard]").forEach((button) => {
       button.disabled = !featureEnabled || !backendConnected || codexServiceTierState.status === "loading";
@@ -1695,7 +1753,8 @@
     document.querySelectorAll("[data-codex-service-tier-thread-fast]").forEach((button) => {
       button.disabled = fastDisabled;
       button.dataset.active = String(codexServiceTierState.controlMode === "custom" && codexServiceTierState.threadMode === "fast");
-      button.title = fastTitle;
+      button.dataset.codexTooltip = fastTitle;
+      button.removeAttribute("title");
     });
     refreshCodexServiceTierBadges();
   }
@@ -2045,7 +2104,8 @@
     }
     document.querySelectorAll("[data-codex-backend-indicator]").forEach((indicator) => {
       indicator.dataset.status = status;
-      indicator.title = status === "ok" ? "后端已连接" : status === "checking" ? "正在检查后端" : "未连接";
+      indicator.dataset.codexTooltip = status === "ok" ? "后端已连接" : status === "checking" ? "正在检查后端" : "未连接";
+      indicator.removeAttribute("title");
     });
     const repair = document.querySelector("[data-codex-backend-repair]");
     if (repair) repair.hidden = status === "ok" || status === "checking";
@@ -2188,10 +2248,6 @@
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="pluginEntryUnlock" ${codexElvesBackendSettings.launchMode === "relay" ? 'disabled data-relay-unneeded="true"' : ""}><span></span></button>
             </div>
             <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">特殊插件强制安装</div><div class="codex-elves-row-description">${codexElvesBackendSettings.launchMode === "relay" ? "兼容增强模式下无需开启；不会改插件安装入口。" : "解除 App unavailable / 应用不可用导致的前端安装禁用。"}</div></div>
-              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="forcePluginInstall" ${codexElvesBackendSettings.launchMode === "relay" ? 'disabled data-relay-unneeded="true"' : ""}><span></span></button>
-            </div>
-            <div class="codex-elves-row">
               <div><div class="codex-elves-row-title">插件列表全量展示</div><div class="codex-elves-row-description">进入插件页后自动连续展开“更多”，尽量一次显示完整插件列表。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="pluginAutoExpand"><span></span></button>
             </div>
@@ -2211,9 +2267,9 @@
                 </div>
                 <div class="codex-elves-service-tier-actions codex-elves-service-tier-thread-actions">
                   <span class="codex-elves-service-tier-thread-label">当前 thread 覆盖</span>
-                  <button type="button" class="codex-elves-service-tier-button" data-codex-service-tier-thread-inherit="true" title="当前 thread 不单独覆盖，继承 config.toml">继承</button>
-                  <button type="button" class="codex-elves-service-tier-button" data-codex-service-tier-thread-standard="true" title="仅当前 thread 使用 Standard，并切到自定义模式">Standard</button>
-                  <button type="button" class="codex-elves-service-tier-button" data-codex-service-tier-thread-fast="true" title="仅当前 thread 使用 Fast，并切到自定义模式">Fast</button>
+                  <button type="button" class="codex-elves-service-tier-button" data-codex-service-tier-thread-inherit="true" data-codex-tooltip="当前 thread 不单独覆盖，继承 config.toml">继承</button>
+                  <button type="button" class="codex-elves-service-tier-button" data-codex-service-tier-thread-standard="true" data-codex-tooltip="仅当前 thread 使用 Standard，并切到自定义模式">Standard</button>
+                  <button type="button" class="codex-elves-service-tier-button" data-codex-service-tier-thread-fast="true" data-codex-tooltip="仅当前 thread 使用 Fast，并切到自定义模式">Fast</button>
                 </div>
               </div>
             </div>
@@ -2248,7 +2304,7 @@
               <button type="button" class="codex-elves-toggle" data-codex-backend-setting="providerSyncEnabled"><span></span></button>
             </div>
             <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">页面增强模式</div><div class="codex-elves-row-description">${codexElvesBackendSettings.launchMode === "relay" ? "兼容增强：保留会话删除、导出、项目移动和用户脚本，仅关闭插件入口相关增强。" : "完整增强：加载插件入口、强制安装、项目路径移动等全部页面能力。"}</div></div>
+              <div><div class="codex-elves-row-title">页面增强模式</div><div class="codex-elves-row-description">${codexElvesBackendSettings.launchMode === "relay" ? "兼容增强：保留会话删除、导出、项目移动和用户脚本，仅关闭插件入口相关增强。" : "完整增强：加载插件入口、项目路径移动等页面能力。"}</div></div>
               <button type="button" class="codex-elves-action-button" data-codex-open-manager="true">打开管理工具</button>
             </div>
             <div class="codex-elves-row">
@@ -3335,163 +3391,12 @@
     return !codexElvesBackendSettingsLoaded || codexElvesBackendSettings.launchMode === "relay";
   }
 
-  function pluginInstallCandidates() {
-    const nodes = Array.from(document.querySelectorAll(selectors.disabledInstallButton));
-    return Array.from(new Set(nodes.map((node) => node.closest?.("button, [role='button']") || node)));
-  }
-
-  function installButtonLabel(element) {
-    return (element.textContent || "").trim();
-  }
-
-  function isInstallButtonLabel(text) {
-    return /^安装\s*/.test(text) || /^Install\s*/i.test(text) || text === "强制安装";
-  }
-
-  function patchReactDisabledProps(element) {
-    Object.keys(element)
-      .filter((key) => key.startsWith("__reactProps"))
-      .forEach((key) => {
-        const props = element[key];
-        if (!props || typeof props !== "object") return;
-        props.disabled = false;
-        props["aria-disabled"] = false;
-        props["data-disabled"] = undefined;
-      });
-  }
-
-  function clearDisabledState(element) {
-    if (!(element instanceof HTMLElement)) return;
-    if ("disabled" in element) element.disabled = false;
-    element.removeAttribute("disabled");
-    element.removeAttribute("aria-disabled");
-    element.removeAttribute("data-disabled");
-    element.removeAttribute("inert");
-    element.classList.remove("disabled", "opacity-50", "cursor-not-allowed", "pointer-events-none");
-    element.classList.add("codex-force-install-unlocked");
-    element.style.pointerEvents = "auto";
-    element.style.opacity = "";
-    element.style.cursor = "pointer";
-    element.tabIndex = 0;
-    patchReactDisabledProps(element);
-  }
-
-  function installButtonUnlockNodes(button) {
-    const nodes = [button];
-    button.querySelectorAll?.("button, [role='button'], [disabled], [aria-disabled], [data-disabled], .cursor-not-allowed, .pointer-events-none")
-      .forEach((node) => nodes.push(node));
-    let parent = button.parentElement;
-    for (let depth = 0; parent && depth < 3; depth += 1, parent = parent.parentElement) {
-      if (parent.matches?.("button, [role='button'], [disabled], [aria-disabled], [data-disabled], .cursor-not-allowed, .pointer-events-none")) {
-        nodes.push(parent);
-      }
-    }
-    return Array.from(new Set(nodes));
-  }
-
-  function installForcedInstallGuard(button) {
-    if (button.dataset.codexForceInstallUnlocked === "true") return;
-    button.dataset.codexForceInstallUnlocked = "true";
-    const keepUnlocked = () => installButtonUnlockNodes(button).forEach(clearDisabledState);
-    ["pointerdown", "mousedown", "mouseup", "click", "focus"].forEach((eventName) => {
-      button.addEventListener(eventName, keepUnlocked, true);
-    });
-  }
-
-  function unblockButtonElement(button) {
-    installButtonUnlockNodes(button).forEach(clearDisabledState);
-    installForcedInstallGuard(button);
-  }
-
-  function labelForcedInstallButton(button) {
-    const walker = document.createTreeWalker(button, NodeFilter.SHOW_TEXT);
-    let textNode = null;
-    while (!textNode && walker.nextNode()) {
-      const node = walker.currentNode;
-      if (isInstallButtonLabel((node.nodeValue || "").trim())) textNode = node;
-    }
-    if (textNode) {
-      textNode.nodeValue = "强制安装";
-    }
-  }
-
-  function clearForcedInstallButtonLabel(button) {
-    const walker = document.createTreeWalker(button, NodeFilter.SHOW_TEXT);
-    let textNode = null;
-    while (!textNode && walker.nextNode()) {
-      const node = walker.currentNode;
-      if ((node.nodeValue || "").trim() === "强制安装") textNode = node;
-    }
-    if (textNode) {
-      textNode.nodeValue = "安装";
-    }
-  }
-
   function clearPluginPatchArtifacts() {
     const pluginButton = pluginEntryButton();
     if (pluginButton) {
       delete pluginButton.dataset.codexPluginEnabled;
       clearPluginEntryUnlockLabel(pluginButton);
     }
-    pluginInstallCandidates().forEach(clearForcedInstallButtonLabel);
-  }
-
-  function unblockPluginInstallButtons() {
-    if (pluginPatchDisabledInRelayMode()) return;
-    if (!codexElvesSettings().forcePluginInstall) return;
-    pluginInstallCandidates().forEach((button) => {
-      const text = installButtonLabel(button);
-      if (!isInstallButtonLabel(text)) return;
-      unblockButtonElement(button);
-      labelForcedInstallButton(button);
-    });
-  }
-
-  function pluginInstallObserverRoot() {
-    const candidate = pluginInstallCandidates()[0];
-    return candidate?.closest?.("main, [role='main'], section, [data-testid]") ||
-      document.querySelector("main, [role='main']") ||
-      document.body ||
-      document.documentElement;
-  }
-
-  function stopForcePluginInstallObserver() {
-    window.__codexForcePluginInstallObserver?.disconnect?.();
-    window.__codexForcePluginInstallObserver = null;
-    clearTimeout(window.__codexForcePluginInstallSettleTimer);
-    window.__codexForcePluginInstallSettleTimer = null;
-  }
-
-  function refreshForcePluginInstallUnlockLoop() {
-    const shouldRun = !pluginPatchDisabledInRelayMode() && codexElvesSettings().forcePluginInstall;
-    if (!shouldRun) {
-      stopForcePluginInstallObserver();
-      return;
-    }
-    unblockPluginInstallButtons();
-    const root = pluginInstallObserverRoot();
-    if (!root) return;
-    if (window.__codexForcePluginInstallObserverRoot !== root) {
-      window.__codexForcePluginInstallObserver?.disconnect?.();
-      window.__codexForcePluginInstallObserverRoot = root;
-      window.__codexForcePluginInstallObserver = new MutationObserver(() => {
-        if (!codexElvesSettings().forcePluginInstall || pluginPatchDisabledInRelayMode()) {
-          stopForcePluginInstallObserver();
-          return;
-        }
-        unblockPluginInstallButtons();
-      });
-      window.__codexForcePluginInstallObserver.observe(root, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ["disabled", "aria-disabled", "data-disabled", "class"],
-      });
-    }
-    clearTimeout(window.__codexForcePluginInstallSettleTimer);
-    window.__codexForcePluginInstallSettleTimer = setTimeout(() => {
-      unblockPluginInstallButtons();
-    }, codexForcePluginInstallSettleWindowMs);
   }
 
   let cachedSessionRows = [];
@@ -3774,7 +3679,7 @@
   let chatsSortLastFetchAt = 0;
 
   async function codexStateApi() {
-    codexStateApiPromise = codexStateApiPromise || import("./assets/vscode-api-Dc9pX2Bc.js");
+    codexStateApiPromise = codexStateApiPromise || loadCodexAppModule("vscode-api-");
     const api = await codexStateApiPromise;
     if (typeof api.n !== "function") throw new Error("Codex 状态 API 不可用");
     return api.n;
@@ -5270,10 +5175,34 @@
     }
   }
 
+  async function clearThreadWritableRoots(ref) {
+    const variants = threadIdVariants(ref.session_id);
+    if (variants.length === 0) return;
+    const roots = objectGlobalState(await getCodexGlobalState("thread-writable-roots").catch(() => ({})));
+    const rootKeys = variants.filter((id) => Object.prototype.hasOwnProperty.call(roots, id));
+    if (rootKeys.length > 0) {
+      rootKeys.forEach((id) => delete roots[id]);
+      await setCodexGlobalState("thread-writable-roots", roots);
+    }
+  }
+
+  async function clearThreadProjectlessOutputDirectories(ref) {
+    const variants = threadIdVariants(ref.session_id);
+    if (variants.length === 0) return;
+    const dirs = objectGlobalState(await getCodexGlobalState("thread-projectless-output-directories").catch(() => ({})));
+    const dirKeys = variants.filter((id) => Object.prototype.hasOwnProperty.call(dirs, id));
+    if (dirKeys.length > 0) {
+      dirKeys.forEach((id) => delete dirs[id]);
+      await setCodexGlobalState("thread-projectless-output-directories", dirs);
+    }
+  }
+
   async function moveSessionToProjectless(ref) {
     if (!ref.session_id) throw new Error("未找到会话 ID");
     await setProjectlessThreadIds(ref, "add");
     await clearThreadWorkspaceHints(ref);
+    await clearThreadWritableRoots(ref);
+    await clearThreadProjectlessOutputDirectories(ref);
     const sortKey = await postJson("/thread-sort-key", ref).catch(() => ({}));
     return { status: "moved", session_id: ref.session_id, updated_at: sortKey?.updated_at, updated_at_ms: sortKey?.updated_at_ms, created_at_ms: sortKey?.created_at_ms };
   }
@@ -5658,11 +5587,12 @@
     const usedBranches = worktreeBranchMap(defaultsResult);
     for (const item of branchMenuItems(menu)) {
       item.removeAttribute(branchWorktreePathAttribute);
+      item.removeAttribute("data-codex-tooltip");
       item.removeAttribute("title");
       const worktreePath = usedBranches.get(branchMenuItemLabel(item));
       if (!worktreePath) continue;
       item.setAttribute(branchWorktreePathAttribute, worktreePath);
-      item.setAttribute("title", `该分支已在另一个 worktree 使用：${worktreePath}`);
+      item.setAttribute("data-codex-tooltip", `该分支已在另一个 worktree 使用：${worktreePath}`);
     }
   }
 
@@ -5789,6 +5719,7 @@
       if (nativeLabel) nativeLabel.hidden = false;
       if (selectionLabel) selectionLabel.hidden = true;
       trigger.removeAttribute("aria-label");
+      trigger.removeAttribute("data-codex-tooltip");
       trigger.removeAttribute("title");
     });
   }
@@ -5807,7 +5738,8 @@
       selectionLabel.hidden = false;
       selectionLabel.textContent = selection.label;
       trigger.setAttribute("aria-label", selection.label);
-      trigger.setAttribute("title", selection.label);
+      trigger.setAttribute("data-codex-tooltip", selection.label);
+      trigger.removeAttribute("title");
     });
   }
 
@@ -7520,7 +7452,6 @@
     if (pluginsDirty) {
       if (pluginPatchDisabledInRelayMode()) {
         clearPluginPatchArtifacts();
-        refreshForcePluginInstallUnlockLoop();
       } else {
         const pluginUnlockStrategy = codexPluginUnlockStrategy();
         const settings = codexElvesSettings();
@@ -7541,8 +7472,6 @@
             installPluginMarketplaceRequestPatch();
           }
         }
-        unblockPluginInstallButtons();
-        refreshForcePluginInstallUnlockLoop();
       }
       schedulePluginAutoExpand();
     }
@@ -7640,7 +7569,6 @@
       ".ProseMirror",
       selectors.appHeader,
       selectors.archiveNav,
-      ...(pluginPatchDisabledInRelayMode() ? [] : [selectors.disabledInstallButton]),
     ].join(", ");
   }
 
@@ -7722,9 +7650,6 @@
     });
     push("conversation", conversationRoot);
     push("header", headerRoot, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style", "hidden", "aria-expanded", "data-state"] });
-    if (!pluginPatchDisabledInRelayMode() && codexElvesSettings().forcePluginInstall) {
-      push("plugins", pluginInstallObserverRoot());
-    }
     return roots;
   }
 
@@ -7794,10 +7719,10 @@
   window.__codexSessionDeleteObserver = null;
   installScanObservers();
   window.__codexElvesRefreshRuntime = () => {
+    cleanupLegacyForcePluginInstallRuntime();
     void loadBackendSettingsForStartup();
     void loadCodexServiceTierState();
     scan();
     installScanObservers();
-    refreshForcePluginInstallUnlockLoop();
   };
 })();

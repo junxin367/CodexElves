@@ -128,7 +128,6 @@ type BackendSettings = {
   computerUseGuardEnabled: boolean;
   codexAppPluginEntryUnlock: boolean;
   codexAppPluginMarketplaceUnlock: boolean;
-  codexAppForcePluginInstall: boolean;
   codexAppPluginAutoExpand: boolean;
   codexAppSessionDelete: boolean;
   codexAppMarkdownExport: boolean;
@@ -677,7 +676,6 @@ const defaultSettings: BackendSettings = {
   computerUseGuardEnabled: false,
   codexAppPluginEntryUnlock: true,
   codexAppPluginMarketplaceUnlock: true,
-  codexAppForcePluginInstall: true,
   codexAppPluginAutoExpand: true,
   codexAppSessionDelete: true,
   codexAppMarkdownExport: true,
@@ -1037,7 +1035,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
     case "startup_options":
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
-      return Promise.resolve(browserPreviewResult({ currentVersion: "0.1.0", updateAvailable: false }) as T);
+      return Promise.resolve(browserPreviewResult({ currentVersion: "0.1.18", updateAvailable: false }) as T);
     case "load_overview":
       return Promise.resolve(browserPreviewResult({
         codex_app: { status: "found", path: settings.codexAppPath },
@@ -1052,7 +1050,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.1.0",
+        current_version: "0.1.18",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -1989,7 +1987,7 @@ export function App() {
     }
     let switchSettings = normalizeSettings(next);
     if (!switchSettings.relayProfilesEnabled) {
-      showNotice("供应商配置已关闭", "当前不会写入 Codex config.toml / auth.json。打开供应商配置总开关后再切换。", "failed");
+      showNotice("供应商功能已关闭", "当前不会切换供应商，也不会写入 Codex config.toml / auth.json。启用供应商功能后再切换。", "failed");
       return;
     }
     const targetBeforeSnapshot = activeRelayProfile(switchSettings);
@@ -2343,11 +2341,11 @@ export function App() {
               {hasUpdate ? (
                 <button
                   className="update-dot"
+                  data-tooltip={`发现新版本 ${update?.latestVersion ?? ""}`}
                   onClick={() => {
                     setRoute("about");
                     void checkUpdate(false);
                   }}
-                  title={`发现新版本 ${update?.latestVersion ?? ""}`}
                   type="button"
                 >
                   <CircleArrowUp className="h-4 w-4" aria-hidden="true" />
@@ -2365,7 +2363,6 @@ export function App() {
               className={`nav-item ${route === item.id ? "active" : ""}`}
               key={item.id}
               onClick={() => void navigate(item.id)}
-              title={item.label}
               type="button"
             >
               <span className="nav-icon">
@@ -2670,10 +2667,11 @@ function LocalProxyTopbarBadge({
   const canLaunch = localProxyCanLaunch(status);
   const className = `proxy-topbar-badge ${state}${canLaunch ? " clickable" : ""}${launching ? " launching" : ""}`;
   const label = launching ? "启动中" : localProxyStateLabel(status);
+  const tooltip = localProxyTopbarTooltip(status, canLaunch);
 
   if (!canLaunch) {
     return (
-      <div className={className} title={status?.message ?? "尚未读取本地代理状态"}>
+      <div className={className} data-tooltip={tooltip}>
         <span className="proxy-status-dot" />
         <span>{label}</span>
       </div>
@@ -2693,9 +2691,9 @@ function LocalProxyTopbarBadge({
   return (
     <button
       className={className}
+      data-tooltip={tooltip}
       disabled={launching}
       onClick={() => void handleLaunch()}
-      title="点击启动 CodexElves"
       type="button"
     >
       <span className="proxy-status-dot" />
@@ -2778,7 +2776,7 @@ function LocalProxyScreen({
               <div className="proxy-continue-thinking-control">
                 <label
                   className="proxy-inline-toggle"
-                  title="检测到 GPT 推理被中途截断时，自动让模型继续思考，减少因推理不足导致的错误"
+                  data-tooltip="检测到 GPT 推理被中途截断时，自动让模型继续思考，减少因推理不足导致的错误"
                 >
                   <input
                     checked={form.gptReasoningContinuation}
@@ -2793,23 +2791,24 @@ function LocalProxyScreen({
                   <span>GPT 推理续接</span>
                 </label>
                 <span className="proxy-continue-thinking-limit-label">最大次数:</span>
-                <Input
-                  aria-label="GPT 推理续接最大次数"
-                  className="proxy-continue-thinking-limit"
-                  inputMode="numeric"
-                  maxLength={1}
-                  onChange={(event) => {
-                    const digit = event.currentTarget.value.replace(/[^1-9]/g, "").slice(0, 1);
-                    if (!digit) return;
-                    void actions.saveSettingsValue(
-                      { ...form, gptReasoningContinuationMaxRounds: Number(digit) },
-                      true,
-                    );
-                  }}
-                  pattern="[1-9]"
-                  title="GPT 推理续接最大次数，范围 1-9"
-                  value={String(form.gptReasoningContinuationMaxRounds)}
-                />
+                <span className="proxy-continue-thinking-limit-wrap" data-tooltip="GPT 推理续接最大次数，范围 1-9">
+                  <Input
+                    aria-label="GPT 推理续接最大次数"
+                    className="proxy-continue-thinking-limit"
+                    inputMode="numeric"
+                    maxLength={1}
+                    onChange={(event) => {
+                      const digit = event.currentTarget.value.replace(/[^1-9]/g, "").slice(0, 1);
+                      if (!digit) return;
+                      void actions.saveSettingsValue(
+                        { ...form, gptReasoningContinuationMaxRounds: Number(digit) },
+                        true,
+                      );
+                    }}
+                    pattern="[1-9]"
+                    value={String(form.gptReasoningContinuationMaxRounds)}
+                  />
+                </span>
               </div>
               <Button
                 onClick={() => {
@@ -2862,13 +2861,12 @@ function LocalProxyScreen({
               <div
                 aria-label="GPT 请求低高智商比例"
                 className="proxy-iq-ratio"
-                title={`按当前列表 ${gptIqRatio.total} 条 GPT 请求计算：GPT Reason Tok = 516 为低，超过 516 为高，低于 516 不计入低/高。低 ${gptIqRatio.low} 条，高 ${gptIqRatio.high} 条`}
               >
                 <button
                   aria-pressed={iqFilter === "low"}
                   className={`proxy-iq-ratio-item low ${iqFilter === "low" ? "active" : ""}`}
+                  data-tooltip={`按当前列表 ${gptIqRatio.total} 条 GPT 请求计算：GPT Reason Tok = 516 为低，超过 516 为高，低于 516 不计入低/高。筛选低智商请求，共 ${gptIqRatio.low} 条`}
                   onClick={() => setIqFilter((current) => (current === "low" ? "" : "low"))}
-                  title={`筛选 Reason Tok = 516 的 GPT 请求，共 ${gptIqRatio.low} 条`}
                   type="button"
                 >
                   低 <strong>{gptIqRatio.lowPercent}%</strong>
@@ -2876,8 +2874,8 @@ function LocalProxyScreen({
                 <button
                   aria-pressed={iqFilter === "high"}
                   className={`proxy-iq-ratio-item high ${iqFilter === "high" ? "active" : ""}`}
+                  data-tooltip={`按当前列表 ${gptIqRatio.total} 条 GPT 请求计算：GPT Reason Tok = 516 为低，超过 516 为高，低于 516 不计入低/高。筛选高智商请求，共 ${gptIqRatio.high} 条`}
                   onClick={() => setIqFilter((current) => (current === "high" ? "" : "high"))}
-                  title={`筛选 Reason Tok > 516 的 GPT 请求，共 ${gptIqRatio.high} 条`}
                   type="button"
                 >
                   高 <strong>{gptIqRatio.highPercent}%</strong>
@@ -2922,7 +2920,7 @@ function LocalProxyScreen({
                           <span
                             aria-label={formatContinueThinkingTitle(entry)}
                             className="proxy-continue-thinking-badge"
-                            title={formatContinueThinkingTitle(entry)}
+                            data-tooltip={formatContinueThinkingTitle(entry)}
                           >
                             <Sparkles aria-hidden="true" className="proxy-continue-thinking-icon" />
                             {typeof entry.continueThinkingRounds === "number" && entry.continueThinkingRounds > 0 ? (
@@ -2939,7 +2937,7 @@ function LocalProxyScreen({
                     </span>
                     <span
                       className="proxy-log-duration proxy-log-latency"
-                      title={formatRequestLatencyTitle(entry)}
+                      data-tooltip={formatRequestLatencyTitle(entry)}
                     >
                       <span className={isSlowRequestDuration(entry.firstTokenMs) ? "slow" : undefined}>
                         {formatOptionalRequestDurationMs(entry.firstTokenMs)}
@@ -3052,7 +3050,7 @@ function LocalProxyLogDetailDialog({
               <span className={entry.statusCode >= 200 && entry.statusCode < 300 ? "proxy-code ok" : "proxy-code bad"}>
                 {entry.statusCode}
               </span>
-              <span className="proxy-detail-endpoint" title={entry.endpoint || entry.path}>
+              <span className="proxy-detail-endpoint" data-tooltip={entry.endpoint || entry.path}>
                 {entry.endpoint || entry.path}
               </span>
             </div>
@@ -3223,7 +3221,7 @@ function RelayScreen({
           actions={(
             <label
               className="relay-header-switch"
-              title="开启后允许手动切换供应商，并在启动 Codex 时按当前供应商同步 config.toml / auth.json。关闭后只保存列表配置，不主动切换或写入；不会清理已经写入的 Codex 配置，本地代理可能仍按现有配置运行。"
+              data-tooltip="开启后允许切换供应商，并在启动 Codex 时按当前供应商同步 config.toml / auth.json；需要本地代理或聚合供应商时也会随启动启用。关闭后只保存供应商列表，不写入 Codex live 配置、不启动本地代理。"
             >
               <input
                 checked={normalized.relayProfilesEnabled}
@@ -3233,13 +3231,7 @@ function RelayScreen({
                 }}
                 type="checkbox"
               />
-              <span>允许写入代理配置</span>
-              <span className="relay-header-switch-help" aria-label="说明" tabIndex={0}>
-                <Info className="h-3.5 w-3.5" />
-                <span className="relay-header-switch-tooltip" role="tooltip">
-                  开启后允许手动切换供应商，并在启动 Codex 时按当前供应商同步 config.toml / auth.json。关闭后只保存列表配置，不主动切换或写入；不会清理已经写入的 Codex 配置，本地代理可能仍按现有配置运行。
-                </span>
-              </span>
+              <span>启用供应商功能</span>
             </label>
           )}
         />
@@ -3519,13 +3511,12 @@ function EnhanceScreen({
           {form.launchMode === "relay" ? (
             <div className="hint-line">
               <ShieldCheck className="h-4 w-4" />
-              <span>当前为兼容增强模式，插件市场解锁、强制解锁入口和特殊插件强制安装不会启用；其他页面功能仍可用。</span>
+              <span>当前为兼容增强模式，插件市场解锁和强制解锁入口不会启用；其他页面功能仍可用。</span>
             </div>
           ) : null}
           <div className="feature-switch-grid">
             <FeatureToggle title="插件市场解锁" detail="API Key 模式下扩展插件市场请求，尽量显示完整插件列表；官方/混合模式通常不需要。" checked={form.codexAppPluginMarketplaceUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginMarketplaceUnlock", value)} />
             <FeatureToggle title="强制解锁入口" detail="恢复 1.1.9 的入口解锁方式，强制显示并启用插件入口。" checked={form.codexAppPluginEntryUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginEntryUnlock", value)} />
-            <FeatureToggle title="特殊插件强制安装" detail="解除 App unavailable / 应用不可用导致的前端安装禁用。" checked={form.codexAppForcePluginInstall} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppForcePluginInstall", value)} />
             <FeatureToggle title="插件列表全量展示" detail="进入插件页后自动连续展开“更多”，尽量一次显示完整插件列表。" checked={form.codexAppPluginAutoExpand} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppPluginAutoExpand", value)} />
             <FeatureToggle title="Fast 按钮" detail="显示服务模式切换按钮。Fast（service_tier=priority）仅 OpenAI 部分模型支持（如 gpt-5.4 / gpt-5.5）；Claude 等其他模型不支持，会按 Standard 发送。" checked={form.codexAppServiceTierControls} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppServiceTierControls", value)} />
             <FeatureToggle title="会话删除" detail="在会话列表悬停显示删除按钮，并支持撤销。" checked={form.codexAppSessionDelete} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppSessionDelete", value)} />
@@ -3545,7 +3536,7 @@ function EnhanceScreen({
           <TaskProgressBox progress={pluginMarketplaceProgress} title="插件市场修复进度" />
           <div className="hint-line">
             <Info className="h-4 w-4" />
-            <span>如果使用官方模式或官方混入 API 模式，通常不需要开启插件市场解锁、强制解锁入口和特殊插件强制安装。</span>
+            <span>如果使用官方模式或官方混入 API 模式，通常不需要开启插件市场解锁和强制解锁入口。</span>
           </div>
           <Toolbar>
             <Button onClick={() => void actions.saveSettings()}>保存增强设置</Button>
@@ -3723,7 +3714,7 @@ function RadarTrend({ runs }: { runs: CodexRadarIqRun[] }) {
       {runs.map((run) => {
         const height = Math.max(12, Math.round((run.score / maxScore) * 100));
         return (
-          <div className="radar-trend-item" key={run.date} title={`${run.date}：${formatScore(run.score)}`}>
+          <div className="radar-trend-item" data-tooltip={`${run.date}：${formatScore(run.score)}`} key={run.date}>
             <div className="radar-trend-bar-track" style={{ "--bar-height": `${height}%` } as CSSProperties}>
               <strong className="radar-trend-score">{formatScore(run.score)}</strong>
               <div className={`radar-trend-bar radar-${run.status}`} style={{ height: `${height}%` }} />
@@ -3923,7 +3914,7 @@ function SessionsScreen({
                       <div className="session-main">
                         <strong>{session.title || "未命名会话"}</strong>
                         <span>{session.id}</span>
-                        <small title={session.cwd || undefined}>{sessionProjectLabel(session.cwd) || "未记录项目路径"}</small>
+                        <small data-tooltip={session.cwd || undefined}>{sessionProjectLabel(session.cwd) || "未记录项目路径"}</small>
                       </div>
                       <div className="session-meta">
                         <Badge status={session.archived ? "archived" : "ok"} />
@@ -4393,14 +4384,14 @@ function SortableRelayProfileCard({
       <button
         aria-label="拖动排序"
         className="relay-drag"
-        title="拖动排序"
+        data-tooltip="拖动排序"
         type="button"
         {...attributes}
         {...listeners}
       >
         <GripVertical className="h-4 w-4" />
       </button>
-      <span className="relay-index" title={profile.name || "未命名供应商"}>
+      <span className="relay-index" data-tooltip={profile.name || "未命名供应商"}>
         {providerInitial(profile.name)}
       </span>
       <span className="relay-summary">
@@ -4703,7 +4694,10 @@ function RelayProfileEditor({
         </div>
         <div className="relay-editor-actions">
           {showApiFields ? (
-            <label className="inline-check">
+            <label
+              className="inline-check local-proxy-toggle"
+              data-tooltip="启动 Codex 后会拉起本地协议代理；配合「GPT 推理续接」可解决 GPT 516 降智问题：推理被截断时自动续接，减少长任务中途降智。"
+            >
               <input
                 checked={profile.localProxyEnabled}
                 onChange={(event) => updateDraft({ localProxyEnabled: event.currentTarget.checked })}
@@ -4727,7 +4721,7 @@ function RelayProfileEditor({
             <Button
               disabled={!form.relayProfilesEnabled || actions.relaySwitching}
               onClick={onSwitch}
-              title={!form.relayProfilesEnabled ? "供应商配置总开关已关闭" : actions.relaySwitching ? "供应商切换中" : undefined}
+              title={!form.relayProfilesEnabled ? "供应商功能已关闭" : actions.relaySwitching ? "供应商切换中" : undefined}
               variant={profile.id === form.activeRelayId ? "secondary" : "default"}
             >
               {actions.relaySwitching ? "切换中" : profile.id === form.activeRelayId ? "使用中" : "设为当前"}
@@ -5057,8 +5051,8 @@ function SortableRelayModelMappingRow({
         <button
           aria-label="拖动模型排序"
           className="relay-model-drag-button"
+          data-tooltip={canSort ? "拖动模型排序" : "至少两个模型才能排序"}
           disabled={!canSort}
-          title={canSort ? "拖动模型排序" : "至少两个模型才能排序"}
           type="button"
           {...attributes}
           {...listeners}
@@ -5103,9 +5097,9 @@ function SortableRelayModelMappingRow({
         <button
           aria-label="删除模型"
           className="relay-model-delete-button"
+          data-tooltip="删除模型"
           disabled={!mappingsLength}
           onClick={() => onRemove(index)}
-          title="删除模型"
           type="button"
         >
           <Trash2 className="h-4 w-4" />
@@ -5584,7 +5578,7 @@ function SessionProjectSelect({
             <button
               key={item.value}
               type="button"
-              title={sessionProjectLabel(item.value)}
+              data-tooltip={sessionProjectLabel(item.value)}
               className={"session-project-option" + (value === item.value ? " active" : "")}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => choose(item.value)}
@@ -5613,7 +5607,7 @@ function SessionProjectSelect({
       }}
     >
       <button type="button" className="session-trigger" onClick={() => setOpen((prev) => !prev)}>
-        <span className="session-trigger-text" title={value ? sessionProjectLabel(value) : "全部项目"}>
+        <span className="session-trigger-text" data-tooltip={value ? sessionProjectLabel(value) : "全部项目"}>
           {triggerText}
         </span>
         <ChevronDown className="h-4 w-4" />
@@ -6072,9 +6066,9 @@ function RelayContextManager({
                   aria-checked={entry.enabled}
                   aria-label={`contextEnabledSwitch-${entry.kind}-${entry.id}`}
                   className={`context-enabled-switch ${entry.enabled ? "active" : ""}`}
+                  data-tooltip={entry.enabled ? "禁用此扩展项" : "启用此扩展项"}
                   onClick={() => void toggleContextEntryEnabled(entry)}
                   role="switch"
-                  title={entry.enabled ? "禁用此扩展项" : "启用此扩展项"}
                   type="button"
                 >
                   <span className="context-switch-track" aria-hidden="true">
@@ -6533,7 +6527,7 @@ function ModeSelector({ launchMode, actions }: { launchMode: LaunchMode; actions
         type="button"
       >
         <strong>完整增强</strong>
-        <span>适合纯 API；启用插件入口、强制安装、会话删除导出、项目移动等全部页面能力。</span>
+        <span>适合纯 API；启用插件入口、会话删除导出、项目移动等全部页面能力。</span>
       </button>
     </div>
   );
@@ -7281,7 +7275,7 @@ function contextSelectionForAllEntries(settings: BackendSettings): RelayContextS
 
 function relayProfileEditorStatus(profile: RelayProfile, form: BackendSettings, isNew: boolean) {
   if (isNew) return "新建供应商需要先保存到列表";
-  if (!form.relayProfilesEnabled) return "供应商配置总开关已关闭；当前只保存配置，不写入 Codex live 文件";
+  if (!form.relayProfilesEnabled) return "供应商功能已关闭；当前只保存供应商列表，不写入 Codex live 配置";
   return profile.id === form.activeRelayId ? "当前正在使用" : "编辑后保存列表，再切换模式时会使用新配置";
 }
 
@@ -7324,6 +7318,10 @@ function localProxyStateLabel(status: LocalProxyStatusResult | null) {
   if (state === "disabled") return "代理未启用";
   if (state === "failed") return "代理未启动";
   return "代理未检查";
+}
+
+function localProxyTopbarTooltip(_status: LocalProxyStatusResult | null, _canLaunch: boolean) {
+  return "启动条件：启用供应商功能并且当前供应商开启「启用本地代理」或当前供应商是聚合供应商。";
 }
 
 function formatProxyBody(text: string) {

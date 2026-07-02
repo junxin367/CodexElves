@@ -291,6 +291,8 @@ body {
 }
 
 .topbar {
+  position: relative;
+  z-index: 200;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -299,6 +301,7 @@ body {
   padding: 14px 20px;
   border-bottom: 1px solid hsl(var(--border));
   background: hsl(var(--shell-bg));
+  overflow: visible;
   animation: topbar-enter var(--motion-normal) var(--motion-ease) both;
 }
 
@@ -813,6 +816,68 @@ body {
   font-family: Inter, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
 }
 
+:where([data-tooltip]:not(.local-proxy-toggle)) {
+  position: relative;
+}
+
+:where([data-tooltip]:not(.local-proxy-toggle))::before,
+:where([data-tooltip]:not(.local-proxy-toggle))::after {
+  position: absolute;
+  left: 50%;
+  z-index: 1000;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -2px);
+  transition:
+    opacity var(--motion-fast) var(--motion-ease),
+    transform var(--motion-fast) var(--motion-ease);
+}
+
+:where([data-tooltip]:not(.local-proxy-toggle))::before {
+  top: calc(100% + 3px);
+  width: 8px;
+  height: 8px;
+  border-left: 1px solid hsl(var(--border));
+  border-top: 1px solid hsl(var(--border));
+  background: hsl(var(--popover));
+  content: "";
+  transform: translate(-50%, -2px) rotate(45deg);
+}
+
+:where([data-tooltip]:not(.local-proxy-toggle))::after {
+  top: calc(100% + 7px);
+  width: max-content;
+  max-width: min(360px, calc(100vw - 32px));
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--popover));
+  box-shadow: 0 14px 32px hsl(var(--foreground) / 0.14);
+  color: hsl(var(--popover-foreground));
+  content: attr(data-tooltip);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  padding: 8px 10px;
+  text-align: left;
+  white-space: pre-line;
+}
+
+:where([data-tooltip]:not(.local-proxy-toggle)):hover::before,
+:where([data-tooltip]:not(.local-proxy-toggle)):hover::after,
+:where([data-tooltip]:not(.local-proxy-toggle)):focus-visible::before,
+:where([data-tooltip]:not(.local-proxy-toggle)):focus-visible::after,
+:where([data-tooltip]:not(.local-proxy-toggle)):focus-within::before,
+:where([data-tooltip]:not(.local-proxy-toggle)):focus-within::after {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+:where([data-tooltip]:not(.local-proxy-toggle)):hover::before,
+:where([data-tooltip]:not(.local-proxy-toggle)):focus-visible::before,
+:where([data-tooltip]:not(.local-proxy-toggle)):focus-within::before {
+  transform: translate(-50%, 0) rotate(45deg);
+}
+
 .relay-header-switch {
   position: relative;
   display: inline-flex;
@@ -840,54 +905,6 @@ body {
   width: 15px;
   height: 15px;
   accent-color: #2563eb;
-}
-
-.relay-header-switch-help {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  color: hsl(var(--muted-foreground));
-}
-
-.relay-header-switch-help:hover,
-.relay-header-switch-help:focus-visible {
-  background: hsl(var(--muted));
-  color: hsl(var(--foreground));
-  outline: none;
-}
-
-.relay-header-switch-tooltip {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 8px);
-  z-index: 30;
-  width: min(420px, calc(100vw - 32px));
-  border: 1px solid hsl(var(--border));
-  border-radius: 8px;
-  background: hsl(var(--popover));
-  box-shadow: 0 12px 30px hsl(var(--foreground) / 0.14);
-  color: hsl(var(--foreground));
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1.5;
-  opacity: 0;
-  padding: 9px 10px;
-  pointer-events: none;
-  transform: translateY(-2px);
-  transition:
-    opacity var(--motion-fast) var(--motion-ease),
-    transform var(--motion-fast) var(--motion-ease);
-  white-space: normal;
-}
-
-.relay-header-switch-help:hover .relay-header-switch-tooltip,
-.relay-header-switch-help:focus-visible .relay-header-switch-tooltip {
-  opacity: 1;
-  transform: translateY(0);
 }
 
 .relay-profile-card {
@@ -1125,6 +1142,81 @@ body {
   border: 0;
   background: transparent;
   padding: 0 4px;
+}
+
+.relay-editor-actions .local-proxy-toggle {
+  position: relative;
+  min-height: 30px;
+  gap: 6px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  background: hsl(var(--background));
+  cursor: pointer;
+  padding: 0 8px;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.relay-editor-actions .local-proxy-toggle::before,
+.relay-editor-actions .local-proxy-toggle::after {
+  position: absolute;
+  right: 8px;
+  z-index: 40;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition:
+    opacity var(--motion-fast) var(--motion-ease),
+    transform var(--motion-fast) var(--motion-ease);
+}
+
+.relay-editor-actions .local-proxy-toggle::before {
+  top: calc(100% + 3px);
+  width: 8px;
+  height: 8px;
+  background: hsl(var(--popover));
+  border-left: 1px solid hsl(var(--border));
+  border-top: 1px solid hsl(var(--border));
+  content: "";
+  transform: translateY(-2px) rotate(45deg);
+}
+
+.relay-editor-actions .local-proxy-toggle::after {
+  top: calc(100% + 7px);
+  width: min(360px, calc(100vw - 32px));
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--popover));
+  box-shadow: 0 14px 32px hsl(var(--foreground) / 0.14);
+  color: hsl(var(--popover-foreground));
+  content: attr(data-tooltip);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  padding: 9px 10px;
+  text-align: left;
+  white-space: normal;
+}
+
+.relay-editor-actions .local-proxy-toggle:hover::before,
+.relay-editor-actions .local-proxy-toggle:hover::after,
+.relay-editor-actions .local-proxy-toggle:focus-within::before,
+.relay-editor-actions .local-proxy-toggle:focus-within::after {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.relay-editor-actions .local-proxy-toggle:hover::before,
+.relay-editor-actions .local-proxy-toggle:focus-within::before {
+  transform: translateY(0) rotate(45deg);
+}
+
+.relay-editor-actions .local-proxy-toggle input {
+  width: 14px;
+  height: 14px;
+  accent-color: #2563eb;
+  cursor: pointer;
 }
 
 .relay-editor-title > span,
@@ -2394,6 +2486,11 @@ body {
   color: hsl(var(--muted-foreground));
   font-size: 12px;
   white-space: nowrap;
+}
+
+.proxy-continue-thinking-limit-wrap {
+  display: inline-flex;
+  width: 42px;
 }
 
 .proxy-continue-thinking-limit {

@@ -181,8 +181,8 @@ function PresetButton({
   return (
     <button
       className="preset-btn"
+      data-tooltip={`${preset.websiteUrl ?? ""}\n${preset.baseUrl}`}
       onClick={() => onSelect(preset)}
-      title={`${preset.websiteUrl ?? ""}\n${preset.baseUrl}`}
       type="button"
     >
       <span className="preset-btn-icon">{initialFor(preset.name)}</span>
