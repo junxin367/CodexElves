@@ -1277,6 +1277,15 @@ fn non_claude_anthropic_compatible_reasoning_keeps_effort_by_model_capability() 
     .unwrap();
     assert_eq!(deepseek["thinking"], json!({ "type": "adaptive" }));
     assert_eq!(deepseek["output_config"], json!({ "effort": "max" }));
+
+    let deepseek_xhigh = responses_to_anthropic_messages(json!({
+        "model": "deepseek-reasoner",
+        "model_reasoning_effort": "xhigh",
+        "input": "hi"
+    }))
+    .unwrap();
+    assert_eq!(deepseek_xhigh["thinking"], json!({ "type": "adaptive" }));
+    assert_eq!(deepseek_xhigh["output_config"], json!({ "effort": "max" }));
 }
 
 #[test]

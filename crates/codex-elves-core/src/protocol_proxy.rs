@@ -8053,6 +8053,11 @@ fn map_chat_reasoning_effort(
 }
 
 fn map_anthropic_reasoning_effort(effort: &str, model: &str) -> Option<&'static str> {
+    if model.to_ascii_lowercase().contains("deepseek")
+        && effort.trim().eq_ignore_ascii_case("xhigh")
+    {
+        return Some("max");
+    }
     clamp_reasoning_effort_for_model(effort, model, UpstreamResponseProtocol::Anthropic)
 }
 
