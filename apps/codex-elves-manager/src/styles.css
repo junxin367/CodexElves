@@ -816,66 +816,46 @@ body {
   font-family: Inter, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
 }
 
-:where([data-tooltip]:not(.local-proxy-toggle)) {
+:where([data-tooltip]) {
   position: relative;
 }
 
-:where([data-tooltip]:not(.local-proxy-toggle))::before,
-:where([data-tooltip]:not(.local-proxy-toggle))::after {
-  position: absolute;
-  left: 50%;
-  z-index: 1000;
-  opacity: 0;
-  pointer-events: none;
-  transform: translate(-50%, -2px);
-  transition:
-    opacity var(--motion-fast) var(--motion-ease),
-    transform var(--motion-fast) var(--motion-ease);
-}
-
-:where([data-tooltip]:not(.local-proxy-toggle))::before {
-  top: calc(100% + 3px);
-  width: 8px;
-  height: 8px;
-  border-left: 1px solid hsl(var(--border));
-  border-top: 1px solid hsl(var(--border));
-  background: hsl(var(--popover));
-  content: "";
-  transform: translate(-50%, -2px) rotate(45deg);
-}
-
-:where([data-tooltip]:not(.local-proxy-toggle))::after {
-  top: calc(100% + 7px);
+.app-tooltip {
+  position: fixed;
+  z-index: 10000;
   width: max-content;
-  max-width: min(360px, calc(100vw - 32px));
-  border: 1px solid hsl(var(--border));
+  border: 1px solid hsl(var(--border, 220 13% 88%));
   border-radius: 8px;
-  background: hsl(var(--popover));
-  box-shadow: 0 14px 32px hsl(var(--foreground) / 0.14);
-  color: hsl(var(--popover-foreground));
-  content: attr(data-tooltip);
+  background: hsl(var(--popover, 0 0% 100%));
+  box-shadow: 0 16px 36px hsl(var(--foreground) / 0.16);
+  color: hsl(var(--popover-foreground, 220 13% 13%));
   font-size: 12px;
   font-weight: 500;
   line-height: 1.5;
+  overflow-wrap: anywhere;
   padding: 8px 10px;
+  pointer-events: none;
   text-align: left;
   white-space: pre-line;
 }
 
-:where([data-tooltip]:not(.local-proxy-toggle)):hover::before,
-:where([data-tooltip]:not(.local-proxy-toggle)):hover::after,
-:where([data-tooltip]:not(.local-proxy-toggle)):focus-visible::before,
-:where([data-tooltip]:not(.local-proxy-toggle)):focus-visible::after,
-:where([data-tooltip]:not(.local-proxy-toggle)):focus-within::before,
-:where([data-tooltip]:not(.local-proxy-toggle)):focus-within::after {
-  opacity: 1;
-  transform: translate(-50%, 0);
+.app-tooltip-arrow {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-left: 1px solid hsl(var(--border, 220 13% 88%));
+  border-top: 1px solid hsl(var(--border, 220 13% 88%));
+  background: hsl(var(--popover, 0 0% 100%));
+  transform: translateX(-50%) rotate(45deg);
 }
 
-:where([data-tooltip]:not(.local-proxy-toggle)):hover::before,
-:where([data-tooltip]:not(.local-proxy-toggle)):focus-visible::before,
-:where([data-tooltip]:not(.local-proxy-toggle)):focus-within::before {
-  transform: translate(-50%, 0) rotate(45deg);
+.app-tooltip[data-placement="bottom"] .app-tooltip-arrow {
+  top: -5px;
+}
+
+.app-tooltip[data-placement="top"] .app-tooltip-arrow {
+  bottom: -5px;
+  transform: translateX(-50%) rotate(225deg);
 }
 
 .relay-header-switch {
@@ -1156,60 +1136,6 @@ body {
   font-size: 13px;
   font-weight: 400;
   line-height: 1;
-}
-
-.relay-editor-actions .local-proxy-toggle::before,
-.relay-editor-actions .local-proxy-toggle::after {
-  position: absolute;
-  right: 8px;
-  z-index: 40;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(-2px);
-  transition:
-    opacity var(--motion-fast) var(--motion-ease),
-    transform var(--motion-fast) var(--motion-ease);
-}
-
-.relay-editor-actions .local-proxy-toggle::before {
-  top: calc(100% + 3px);
-  width: 8px;
-  height: 8px;
-  background: hsl(var(--popover));
-  border-left: 1px solid hsl(var(--border));
-  border-top: 1px solid hsl(var(--border));
-  content: "";
-  transform: translateY(-2px) rotate(45deg);
-}
-
-.relay-editor-actions .local-proxy-toggle::after {
-  top: calc(100% + 7px);
-  width: min(360px, calc(100vw - 32px));
-  border: 1px solid hsl(var(--border));
-  border-radius: 8px;
-  background: hsl(var(--popover));
-  box-shadow: 0 14px 32px hsl(var(--foreground) / 0.14);
-  color: hsl(var(--popover-foreground));
-  content: attr(data-tooltip);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1.5;
-  padding: 9px 10px;
-  text-align: left;
-  white-space: normal;
-}
-
-.relay-editor-actions .local-proxy-toggle:hover::before,
-.relay-editor-actions .local-proxy-toggle:hover::after,
-.relay-editor-actions .local-proxy-toggle:focus-within::before,
-.relay-editor-actions .local-proxy-toggle:focus-within::after {
-  opacity: 1;
-  transform: translateY(0);
-}
-
-.relay-editor-actions .local-proxy-toggle:hover::before,
-.relay-editor-actions .local-proxy-toggle:focus-within::before {
-  transform: translateY(0) rotate(45deg);
 }
 
 .relay-editor-actions .local-proxy-toggle input {
@@ -4058,7 +3984,7 @@ body {
   top: 16px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 50;
+  z-index: 2147483647;
   width: min(420px, calc(100vw - 32px));
 }
 

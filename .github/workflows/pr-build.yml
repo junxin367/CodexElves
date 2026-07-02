@@ -1,10 +1,11 @@
 name: PR build artifacts
 
 on:
-  push:
-    tags:
-      - "v*"
-      - "V*"
+  pull_request:
+  workflow_dispatch:
+
+env:
+  ARTIFACT_VERSION: 0.0.0-${{ github.run_number }}
 
 permissions:
   contents: read
@@ -56,11 +57,7 @@ jobs:
       - name: Build Windows installer
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}".TrimStart("v", "V")
-          $version = $version -replace '[\\/]', '-'
-          if (-not $version -or $version -eq "main") {
-            $version = "0.0.0-${{ github.run_number }}"
-          }
+          $version = "${{ env.ARTIFACT_VERSION }}"
           $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
           if (-not (Test-Path $makensis)) {
             $makensis = "makensis"
@@ -123,12 +120,7 @@ jobs:
 
       - name: Build macOS DMG
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          VERSION="${VERSION#V}"
-          VERSION="${VERSION//\//-}"
-          if [ -z "$VERSION" ] || [ "$VERSION" = "main" ]; then
-            VERSION="0.0.0-${GITHUB_RUN_NUMBER}"
-          fi
+          VERSION="${ARTIFACT_VERSION}"
           BINARY_DIR="$PWD/target/${{ matrix.target }}/release" bash scripts/installer/macos/package-dmg.sh "$VERSION" "${{ matrix.arch }}"
 
       - name: Verify macOS bundle structure

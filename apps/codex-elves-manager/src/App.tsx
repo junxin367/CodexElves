@@ -66,6 +66,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { TooltipLayer } from "@/components/ui/tooltip-layer";
 import appIconUrl from "../src-tauri/icons/icon.png";
 
 type Status = "ok" | "failed" | "not_implemented" | "not_checked" | string;
@@ -2494,6 +2495,7 @@ export function App() {
           onRepair={() => void actions.repairPluginMarketplace()}
         />
       ) : null}
+      <TooltipLayer theme={theme} />
     </div>
   );
 }
@@ -2865,7 +2867,6 @@ function LocalProxyScreen({
                 <button
                   aria-pressed={iqFilter === "low"}
                   className={`proxy-iq-ratio-item low ${iqFilter === "low" ? "active" : ""}`}
-                  data-tooltip={`按当前列表 ${gptIqRatio.total} 条 GPT 请求计算：GPT Reason Tok = 516 为低，超过 516 为高，低于 516 不计入低/高。筛选低智商请求，共 ${gptIqRatio.low} 条`}
                   onClick={() => setIqFilter((current) => (current === "low" ? "" : "low"))}
                   type="button"
                 >
@@ -2874,7 +2875,6 @@ function LocalProxyScreen({
                 <button
                   aria-pressed={iqFilter === "high"}
                   className={`proxy-iq-ratio-item high ${iqFilter === "high" ? "active" : ""}`}
-                  data-tooltip={`按当前列表 ${gptIqRatio.total} 条 GPT 请求计算：GPT Reason Tok = 516 为低，超过 516 为高，低于 516 不计入低/高。筛选高智商请求，共 ${gptIqRatio.high} 条`}
                   onClick={() => setIqFilter((current) => (current === "high" ? "" : "high"))}
                   type="button"
                 >
@@ -4573,7 +4573,7 @@ function RelayProfileDetail({
             <ArrowLeft className="h-4 w-4" />
             返回列表
           </Button>
-          <Button disabled={!!validationError} onClick={() => void saveDraft()} title={validationError || "保存"}>
+          <Button disabled={!!validationError} onClick={() => void saveDraft()}>
             <Save className="h-4 w-4" />
             保存
           </Button>
