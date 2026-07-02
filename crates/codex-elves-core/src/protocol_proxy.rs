@@ -16,8 +16,7 @@ use crate::settings::SettingsStore;
 
 pub const DEFAULT_PROTOCOL_PROXY_PORT: u16 = 45221;
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const UPSTREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
-const UPSTREAM_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(60);
+const UPSTREAM_MODELS_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(600);
 const THINK_OPEN_TAG: &str = "<think>";
 const THINK_CLOSE_TAG: &str = "</think>";
@@ -921,12 +920,8 @@ impl UpstreamProxyResponse {
     }
 }
 
-pub fn upstream_header_timeout() -> Duration {
-    UPSTREAM_HEADER_TIMEOUT
-}
-
-pub fn upstream_stream_header_timeout() -> Duration {
-    UPSTREAM_STREAM_HEADER_TIMEOUT
+pub fn upstream_models_header_timeout() -> Duration {
+    UPSTREAM_MODELS_HEADER_TIMEOUT
 }
 
 pub fn upstream_deferred_stream_header_timeout() -> Duration {
@@ -941,18 +936,21 @@ pub fn upstream_http_client() -> anyhow::Result<reqwest::Client> {
         .context("failed to build upstream HTTP client")
 }
 
-pub async fn send_upstream_request(
+pub async fn send_models_upstream_request(
     request: reqwest::RequestBuilder,
 ) -> anyhow::Result<reqwest::Response> {
-    send_upstream_request_with_header_timeout(request, UPSTREAM_HEADER_TIMEOUT).await
+    send_upstream_request_with_header_timeout(request, UPSTREAM_MODELS_HEADER_TIMEOUT).await
 }
 
-pub async fn send_upstream_request_for_responses(
+async fn send_upstream_request_with_optional_header_timeout(
     request: reqwest::RequestBuilder,
-    is_stream: bool,
+    timeout: Option<Duration>,
 ) -> anyhow::Result<reqwest::Response> {
-    let timeout = response_header_timeout(is_stream);
-    send_upstream_request_with_header_timeout(request, timeout).await
+    if let Some(timeout) = timeout {
+        send_upstream_request_with_header_timeout(request, timeout).await
+    } else {
+        request.send().await.context("上游请求发送失败")
+    }
 }
 
 pub async fn send_upstream_request_with_header_timeout(
@@ -1448,9 +1446,8 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
         let upstream_is_stream = is_stream;
         let header_timeout = if upstream_is_stream {
             stream_header_timeout_override
-                .unwrap_or_else(|| response_header_timeout(upstream_is_stream))
         } else {
-            response_header_timeout(upstream_is_stream)
+            None
         };
         let translated_server_side_tools =
             if response_protocol == UpstreamResponseProtocol::Responses {
@@ -1482,7 +1479,7 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
                 "clientStream": is_stream,
                 "attempt": attempt + 1,
                 "candidateCount": relay_count,
-                "headerTimeoutSeconds": header_timeout.as_secs()
+                "headerTimeoutSeconds": header_timeout.map(|timeout| timeout.as_secs())
             }),
         );
         let client = crate::http_client::proxied_client(&effective_user_agent(
@@ -1514,7 +1511,7 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
                         "clientStream": is_stream,
                         "attempt": attempt + 1,
                         "candidateCount": relay_count,
-                        "headerTimeoutSeconds": header_timeout.as_secs(),
+                        "headerTimeoutSeconds": header_timeout.map(|timeout| timeout.as_secs()),
                         "willFailover": has_more_candidates,
                         "error": error.to_string()
                     }),
@@ -1605,7 +1602,7 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
                 "statusCode": status_code,
                 "attempt": attempt + 1,
                 "candidateCount": relay_count,
-                "headerTimeoutSeconds": header_timeout.as_secs(),
+                "headerTimeoutSeconds": header_timeout.map(|timeout| timeout.as_secs()),
                 "willFailover": has_more_candidates && !(200..300).contains(&status_code)
             }),
         );
@@ -1645,7 +1642,7 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
                 "statusCode": status_code,
                 "attempt": attempt + 1,
                 "candidateCount": relay_count,
-                "headerTimeoutSeconds": header_timeout.as_secs()
+                "headerTimeoutSeconds": header_timeout.map(|timeout| timeout.as_secs())
             }),
         );
     }
@@ -1659,7 +1656,7 @@ async fn send_responses_upstream_request(
     response_protocol: UpstreamResponseProtocol,
     is_stream: bool,
     diagnostic_id: &str,
-    header_timeout: Duration,
+    header_timeout: Option<Duration>,
 ) -> anyhow::Result<(reqwest::Response, Value)> {
     let upstream_request = responses_upstream_request_for_protocol(
         request_json,
@@ -1669,7 +1666,7 @@ async fn send_responses_upstream_request(
     )?;
     let response = match response_protocol {
         UpstreamResponseProtocol::Responses => {
-            send_upstream_request_with_header_timeout(
+            send_upstream_request_with_optional_header_timeout(
                 upstream_request_builder(
                     client.clone(),
                     &responses_url(&relay.base_url),
@@ -1747,9 +1744,9 @@ async fn send_chat_completions_request(
     relay: &crate::settings::RelayProfile,
     chat_request: &Value,
     is_stream: bool,
-    header_timeout: Duration,
+    header_timeout: Option<Duration>,
 ) -> anyhow::Result<reqwest::Response> {
-    send_upstream_request_with_header_timeout(
+    send_upstream_request_with_optional_header_timeout(
         upstream_request_builder(
             client.clone(),
             &chat_completions_url(&relay.base_url),
@@ -1817,7 +1814,7 @@ async fn send_anthropic_messages_request(
     relay: &crate::settings::RelayProfile,
     anthropic_request: &Value,
     is_stream: bool,
-    header_timeout: Duration,
+    header_timeout: Option<Duration>,
 ) -> anyhow::Result<reqwest::Response> {
     let mut builder = client
         .post(anthropic_messages_url(&relay.base_url))
@@ -1829,7 +1826,11 @@ async fn send_anthropic_messages_request(
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .header(reqwest::header::CACHE_CONTROL, "no-cache");
     }
-    send_upstream_request_with_header_timeout(builder.json(anthropic_request), header_timeout).await
+    send_upstream_request_with_optional_header_timeout(
+        builder.json(anthropic_request),
+        header_timeout,
+    )
+    .await
 }
 
 pub async fn open_models_proxy_request(
@@ -1859,7 +1860,7 @@ pub async fn open_models_proxy_request(
             "responseProtocol": UpstreamResponseProtocol::Responses
         }),
     );
-    let upstream = send_upstream_request(
+    let upstream = send_models_upstream_request(
         crate::http_client::proxied_client(&effective_user_agent(
             &relay.user_agent,
             original_user_agent,
@@ -1946,14 +1947,6 @@ pub async fn open_chat_completions_proxy_request(
         response: Some(upstream),
         body_override: None,
     })
-}
-
-fn response_header_timeout(is_stream: bool) -> Duration {
-    if is_stream {
-        UPSTREAM_STREAM_HEADER_TIMEOUT
-    } else {
-        UPSTREAM_HEADER_TIMEOUT
-    }
 }
 
 fn upstream_request_builder(

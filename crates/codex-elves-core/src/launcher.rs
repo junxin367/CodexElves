@@ -1166,44 +1166,22 @@ impl EitherResponsesStreamConverter<'_> {
 const DEFERRED_STREAM_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const DEFERRED_STREAM_KEEPALIVE_BYTES: &[u8] = b": codex-elves waiting for upstream\n\n";
 
-fn should_defer_reasoning_stream(
-    request_json: Option<&serde_json::Value>,
-    request_metadata: &crate::proxy_log::RequestMetadata,
-) -> bool {
+fn should_defer_protocol_stream(request_json: Option<&serde_json::Value>) -> bool {
     let Some(request) = request_json else {
         return false;
     };
     if request.get("stream").and_then(serde_json::Value::as_bool) != Some(true) {
         return false;
     }
-    let chat_completions = matches!(
+    // Responses 直连流保留原处理逻辑；deferred 只用于需要协议转换的
+    // Chat Completions / Anthropic 上游，避免伪流式供应商迟迟不返回响应头。
+    matches!(
         deferred_stream_target_protocol(request),
-        Some(crate::protocol_proxy::UpstreamResponseProtocol::ChatCompletions)
-    );
-    // Responses 直连流严禁进入 deferred stream。GPT 推理续接依赖正常 Responses
-    // 流式路径处理；deferred stream 当初只开放给 Chat Completions 上游用于提前返回本地 SSE header。
-    if !chat_completions {
-        return false;
-    }
-
-    match request_metadata
-        .reasoning_effort
-        .as_deref()
-        .map(|value| value.trim().to_ascii_lowercase())
-    {
-        Some(effort) if matches!(effort.as_str(), "none" | "off" | "disabled") => false,
-        Some(effort) if matches!(effort.as_str(), "high" | "xhigh" | "max") => true,
-        Some(_) => false,
-        None => {
-            let model = request_metadata
-                .model
-                .as_deref()
-                .or_else(|| request.get("model").and_then(serde_json::Value::as_str))
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            model.contains("claude")
-        }
-    }
+        Some(
+            crate::protocol_proxy::UpstreamResponseProtocol::ChatCompletions
+                | crate::protocol_proxy::UpstreamResponseProtocol::Anthropic
+        )
+    )
 }
 
 fn deferred_stream_target_protocol(
@@ -1285,7 +1263,7 @@ async fn handle_protocol_proxy_connection(
     let timestamp_ms = crate::proxy_log::current_timestamp_ms();
     let request_json = serde_json::from_str::<serde_json::Value>(request_body).ok();
     let request_metadata = crate::proxy_log::extract_request_metadata(request_json.as_ref());
-    if should_defer_reasoning_stream(request_json.as_ref(), &request_metadata) {
+    if should_defer_protocol_stream(request_json.as_ref()) {
         return handle_deferred_protocol_proxy_stream_connection(
             stream,
             request_body,

@@ -1967,7 +1967,11 @@ experimental_bearer_token = "sk-existing""#
             ..BackendSettings::default()
         };
 
-        assert!(aggregate_settings.active_aggregate_relay_profile().is_some());
+        assert!(
+            aggregate_settings
+                .active_aggregate_relay_profile()
+                .is_some()
+        );
         assert!(!aggregate_settings.active_relay_uses_protocol_proxy());
     }
 
