@@ -193,6 +193,103 @@ fn responses_request_converts_to_anthropic_messages() {
 }
 
 #[test]
+fn anthropic_request_keeps_agents_context_name_and_dedupes_repeated_blocks() {
+    let agents = "# AGENTS.md instructions for E:\\code\\junes\\github\\CodexPlusPlus\n\n<INSTRUCTIONS>\n默认使用简体中文。\n</INSTRUCTIONS>";
+    let environment = "<environment_context>\n  <cwd>E:\\code\\junes\\github\\CodexPlusPlus</cwd>\n</environment_context>";
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-sonnet-5",
+        "instructions": "You are CodexElves.",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": agents },
+                    { "type": "input_text", "text": environment },
+                    { "type": "input_text", "text": agents },
+                    { "type": "input_text", "text": environment },
+                    { "type": "input_text", "text": "真实用户问题" }
+                ]
+            }
+        ],
+        "max_output_tokens": 512
+    }))
+    .unwrap();
+
+    assert_eq!(converted["system"], "You are CodexElves.");
+    let content = converted["messages"][0]["content"].as_array().unwrap();
+    let texts = content
+        .iter()
+        .filter_map(|part| part["text"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(texts.len(), 3);
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.starts_with("# AGENTS.md instructions for "))
+            .count(),
+        1
+    );
+    assert!(texts.iter().all(|text| !text.contains("CLAUDE.md")));
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.starts_with("<environment_context>"))
+            .count(),
+        1
+    );
+    assert!(texts.contains(&"真实用户问题"));
+}
+
+#[test]
+fn anthropic_request_dedupes_repeated_system_chunks() {
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-sonnet-5",
+        "instructions": "You are CodexElves.",
+        "input": [
+            {
+                "type": "message",
+                "role": "developer",
+                "content": [
+                    { "type": "input_text", "text": "You are CodexElves." }
+                ]
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "hello" }
+                ]
+            }
+        ],
+        "max_output_tokens": 512
+    }))
+    .unwrap();
+
+    assert_eq!(converted["system"], "You are CodexElves.");
+    assert_eq!(converted["messages"][0]["role"], "user");
+    assert_eq!(converted["messages"][0]["content"][0]["text"], "hello");
+}
+
+#[test]
+fn anthropic_request_serializes_system_before_messages() {
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-sonnet-5",
+        "instructions": "You are CodexElves.",
+        "input": "hello",
+        "max_output_tokens": 512
+    }))
+    .unwrap();
+
+    let body = serde_json::to_string(&converted).unwrap();
+    let max_tokens_index = body.find("\"max_tokens\"").unwrap();
+    let system_index = body.find("\"system\"").unwrap();
+    let messages_index = body.find("\"messages\"").unwrap();
+    assert!(max_tokens_index < system_index);
+    assert!(system_index < messages_index);
+}
+
+#[test]
 fn anthropic_reasoning_effort_is_clamped_by_model_capability() {
     let sonnet = responses_to_anthropic_messages(json!({
         "model": "claude-sonnet-4-6",

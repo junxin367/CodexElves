@@ -718,6 +718,11 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
     if messages.is_empty() {
         messages.push(json!({ "role": "user", "content": [{ "type": "text", "text": "" }] }));
     }
+    dedupe_anthropic_codex_context_text(&mut messages);
+    dedupe_anthropic_system_chunks(&mut system_chunks);
+    if !system_chunks.is_empty() {
+        result["system"] = json!(system_chunks.join("\n\n"));
+    }
     // Anthropic 要求 messages 首条必须是 user。被中断/压缩续写的会话历史可能以
     // function_call 开头，转换后首条会是 assistant[tool_use]，触发上游
     // "messages.N: tool_use ids were found without tool_result blocks" 校验失败。
@@ -771,10 +776,6 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
                 result["tool_choice"] = tool_choice;
             }
         }
-    }
-
-    if !system_chunks.is_empty() {
-        result["system"] = json!(system_chunks.join("\n\n"));
     }
 
     let model = body.get("model").and_then(Value::as_str).unwrap_or("");
@@ -4136,6 +4137,52 @@ fn normalize_anthropic_leading_messages(messages: &mut Vec<Value>) {
             json!({ "role": "user", "content": [{ "type": "text", "text": "(continuing the previous conversation)" }] }),
         );
     }
+}
+
+fn dedupe_anthropic_system_chunks(system_chunks: &mut Vec<String>) {
+    let mut seen = BTreeSet::new();
+    system_chunks.retain(|chunk| {
+        let key = normalized_anthropic_context_text_key(chunk);
+        !key.is_empty() && seen.insert(key)
+    });
+}
+
+fn dedupe_anthropic_codex_context_text(messages: &mut Vec<Value>) {
+    let mut seen = BTreeSet::new();
+    for message in messages.iter_mut() {
+        let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        content.retain(|block| {
+            let Some(text) = block.get("text").and_then(Value::as_str) else {
+                return true;
+            };
+            if !is_codex_context_text(text) {
+                return true;
+            }
+            seen.insert(normalized_anthropic_context_text_key(text))
+        });
+    }
+    messages.retain(|message| {
+        message
+            .get("content")
+            .and_then(Value::as_array)
+            .is_none_or(|content| !content.is_empty())
+    });
+    if messages.is_empty() {
+        messages.push(json!({ "role": "user", "content": [{ "type": "text", "text": "" }] }));
+    }
+}
+
+fn is_codex_context_text(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with("# AGENTS.md instructions for ")
+        || trimmed.starts_with("<environment_context>")
+        || trimmed.starts_with("<INSTRUCTIONS>")
+}
+
+fn normalized_anthropic_context_text_key(text: &str) -> String {
+    text.replace("\r\n", "\n").trim().to_string()
 }
 
 /// 提取一条 assistant 消息里所有 tool_use 块的 id。
