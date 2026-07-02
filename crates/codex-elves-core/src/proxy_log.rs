@@ -251,6 +251,7 @@ pub fn find_record(id: &str) -> std::io::Result<Option<ProxyRequestRecord>> {
         return Ok(None);
     }
     let file = fs::File::open(path)?;
+    file.lock_shared()?;
     let reader = BufReader::new(file);
     let mut found = None;
     for line in reader.lines() {
@@ -305,7 +306,10 @@ fn read_records(limit: usize) -> std::io::Result<Vec<ProxyRequestRecord>> {
     if !path.is_file() {
         return Ok(Vec::new());
     }
-    let text = fs::read_to_string(path)?;
+    let mut file = fs::File::open(path)?;
+    file.lock_shared()?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
     let mut records = Vec::new();
     for line in text.lines().rev() {
         if line.trim().is_empty() {
