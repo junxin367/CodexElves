@@ -194,8 +194,8 @@ fn responses_request_converts_to_anthropic_messages() {
 
 #[test]
 fn anthropic_request_keeps_agents_context_name_and_dedupes_repeated_blocks() {
-    let agents = "# AGENTS.md instructions for E:\\code\\junes\\github\\CodexPlusPlus\n\n<INSTRUCTIONS>\n默认使用简体中文。\n</INSTRUCTIONS>";
-    let environment = "<environment_context>\n  <cwd>E:\\code\\junes\\github\\CodexPlusPlus</cwd>\n</environment_context>";
+    let agents = "# AGENTS.md instructions for E:\\code\\junes\\github\\CodexElves\n\n<INSTRUCTIONS>\n默认使用简体中文。\n</INSTRUCTIONS>";
+    let environment = "<environment_context>\n  <cwd>E:\\code\\junes\\github\\CodexElves</cwd>\n</environment_context>";
     let converted = responses_to_anthropic_messages(json!({
         "model": "claude-sonnet-5",
         "instructions": "You are CodexElves.",

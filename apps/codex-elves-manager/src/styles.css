@@ -2429,6 +2429,37 @@ body {
   margin: 12px 0;
 }
 
+.feature-action-row {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--background));
+  padding: 11px 12px;
+}
+
+.feature-action-row strong,
+.feature-action-row small {
+  display: block;
+}
+
+.feature-action-row small {
+  margin-top: 3px;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.feature-action-status {
+  color: hsl(var(--muted-foreground));
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .health-item,
 .feature-item {
   display: grid;
@@ -4373,6 +4404,7 @@ body {
   .grid.two,
   .form-row,
   .feature-switch-grid,
+  .feature-action-row,
   .relay-fields,
   .relay-advanced-fields,
   .relay-api-fields,
@@ -4389,6 +4421,12 @@ body {
   .radar-grid,
   .radar-comparison-list {
     grid-template-columns: 1fr;
+  }
+
+  .feature-action-row .inline-flex,
+  .feature-action-row button,
+  .feature-action-status {
+    width: fit-content;
   }
 
   .relay-field-auto-compact,

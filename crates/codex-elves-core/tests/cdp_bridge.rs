@@ -185,6 +185,15 @@ fn injection_script_skips_plugin_patch_work_in_relay_mode() {
 }
 
 #[test]
+fn injection_script_disables_plugin_auto_expand_in_relay_mode() {
+    let script = assets::injection_script(45221);
+
+    assert!(script.contains("settings.pluginAutoExpand = false"));
+    assert!(script.contains("if (pluginPatchDisabledInRelayMode()) return"));
+    assert!(script.contains("if (!codexElvesSettings().pluginAutoExpand) return"));
+}
+
+#[test]
 fn injection_script_defines_version_gated_plugin_unlock_strategy() {
     let script = assets::injection_script(45221);
 
@@ -303,6 +312,8 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
     assert!(script.contains("__CODEX_ELVES_PLUGIN_MARKETPLACES__"));
     assert!(script.contains("mergeLocalPluginMarketplaces(result)"));
     assert!(script.contains("plugin_marketplace_local_merged"));
+    assert!(script.contains("cloned.marketplaceName = marketplaceName"));
+    assert!(script.contains("cloned.marketplacePath = marketplaceName"));
     assert!(script.contains("restorePluginMarketplaceName"));
     assert!(script.contains(
         "next.remoteMarketplaceName = restorePluginMarketplaceName(next.remoteMarketplaceName)"
@@ -1007,6 +1018,28 @@ fn manager_ui_exposes_pure_api_relay_mode_button() {
     assert!(source.contains("纯 API"));
     assert!(source.contains("apply_pure_api_injection"));
     assert!(commands.contains("commands::apply_pure_api_injection"));
+}
+
+#[test]
+fn manager_ui_exposes_remote_plugin_marketplace_controls() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("core crate should live under crates/codex-elves-core");
+    let source =
+        std::fs::read_to_string(repo.join("apps/codex-elves-manager/src/App.tsx")).unwrap();
+    let commands =
+        std::fs::read_to_string(repo.join("apps/codex-elves-manager/src-tauri/src/lib.rs"))
+            .unwrap();
+
+    assert!(source.contains("官方远端插件缓存"));
+    assert!(source.contains("释放并注册内置缓存"));
+    assert!(source.contains("repair_remote_plugin_marketplace"));
+    assert!(source.contains(
+        "checked={form.codexAppPluginAutoExpand} disabled={!masterEnabled || !patchMode}"
+    ));
+    assert!(commands.contains("commands::remote_plugin_marketplace_status"));
+    assert!(commands.contains("commands::repair_remote_plugin_marketplace"));
 }
 
 #[test]
