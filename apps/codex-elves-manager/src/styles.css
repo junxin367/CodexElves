@@ -1055,8 +1055,7 @@ body {
   position: sticky;
   top: 0;
   z-index: 20;
-  margin: -16px -20px 0;
-  padding: 10px 20px;
+  padding: 10px 0px;
   background: hsl(var(--shell-bg));
   border-bottom: 1px solid hsl(var(--border));
   animation: relay-detail-toolbar-enter 220ms var(--motion-ease) both;
@@ -1194,6 +1193,8 @@ body {
   display: grid;
   grid-column: 1 / -1;
   gap: 12px;
+  margin: -2px;
+  padding: 2px;
   animation: relay-section-enter 240ms var(--motion-ease) both;
   overflow: hidden;
 }
@@ -1238,8 +1239,48 @@ body {
   grid-column: 1 / 2;
 }
 
+.relay-field-mode .app-select-trigger {
+  height: 2.25rem;
+  min-height: 2.25rem;
+}
+
 .relay-field-config-model {
   grid-column: 2 / 3;
+}
+
+.relay-secret-input {
+  position: relative;
+  display: grid;
+  min-width: 0;
+}
+
+.relay-secret-input-control {
+  padding-right: 36px;
+}
+
+.relay-secret-toggle {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  padding: 0;
+  transform: translateY(-50%);
+}
+
+.relay-secret-toggle:hover,
+.relay-secret-toggle:focus-visible {
+  background: hsl(var(--accent));
+  color: hsl(var(--foreground));
+  outline: none;
 }
 
 .relay-field-context-window {

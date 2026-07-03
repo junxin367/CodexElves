@@ -308,6 +308,15 @@ fn anthropic_reasoning_effort_is_clamped_by_model_capability() {
     .unwrap();
     assert_eq!(opus["thinking"], json!({ "type": "adaptive" }));
     assert_eq!(opus["output_config"], json!({ "effort": "max" }));
+
+    let sonnet5 = responses_to_anthropic_messages(json!({
+        "model": "claude-sonnet-5",
+        "reasoning": { "effort": "max" },
+        "input": "hi"
+    }))
+    .unwrap();
+    assert_eq!(sonnet5["thinking"], json!({ "type": "adaptive" }));
+    assert_eq!(sonnet5["output_config"], json!({ "effort": "max" }));
 }
 
 #[test]
@@ -1322,13 +1331,13 @@ fn glm_reasoning_efforts_match_supported_levels() {
 }
 
 #[test]
-fn sonnet5_reasoning_efforts_include_xhigh() {
+fn sonnet5_reasoning_efforts_include_max() {
     assert_eq!(
         supported_reasoning_efforts_for_model(
             "claude-sonnet-5",
             UpstreamResponseProtocol::Anthropic,
         ),
-        vec!["low", "medium", "high", "xhigh"]
+        vec!["low", "medium", "high", "xhigh", "max"]
     );
     // 带后缀的变体也应命中 sonnet-5 分支
     assert_eq!(
@@ -1336,7 +1345,7 @@ fn sonnet5_reasoning_efforts_include_xhigh() {
             "claude-sonnet-5-20250929",
             UpstreamResponseProtocol::Anthropic,
         ),
-        vec!["low", "medium", "high", "xhigh"]
+        vec!["low", "medium", "high", "xhigh", "max"]
     );
 }
 

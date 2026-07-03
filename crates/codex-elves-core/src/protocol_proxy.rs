@@ -8074,7 +8074,7 @@ pub fn supported_reasoning_efforts_for_model(
             return levels(&["low", "medium", "high", "max"]);
         }
         if model.contains("sonnet-5") {
-            return levels(&["low", "medium", "high", "xhigh"]);
+            return levels(&["low", "medium", "high", "xhigh", "max"]);
         }
         if model.contains("sonnet-4-6") {
             return levels(&["low", "medium", "high"]);

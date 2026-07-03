@@ -26,6 +26,8 @@ import {
   Copy,
   Download,
   Edit3,
+  Eye,
+  EyeOff,
   GripVertical,
   Info,
   ExternalLink,
@@ -4642,6 +4644,7 @@ function RelayProfileEditor({
   });
   const [fetchingModelChoices, setFetchingModelChoices] = useState(false);
   const [systemPromptOpen, setSystemPromptOpen] = useState(false);
+  const [apiKeyVisible, setApiKeyVisible] = useState(false);
   if (isAggregateRelayProfile(profile)) {
     return (
       <AggregateRelayProfileEditor
@@ -4785,12 +4788,24 @@ function RelayProfileEditor({
               />
             </Field>
             <Field className="relay-field-key" label="Key">
-              <Input
-                type="password"
-                value={profile.apiKey}
-                onChange={(event) => updateDraft({ apiKey: event.currentTarget.value })}
-                placeholder="输入中转服务的 API Key"
-              />
+              <div className="relay-secret-input">
+                <Input
+                  className="relay-secret-input-control"
+                  type={apiKeyVisible ? "text" : "password"}
+                  value={profile.apiKey}
+                  onChange={(event) => updateDraft({ apiKey: event.currentTarget.value })}
+                  placeholder="输入中转服务的 API Key"
+                />
+                <button
+                  aria-label={apiKeyVisible ? "隐藏 API Key" : "显示 API Key"}
+                  className="relay-secret-toggle"
+                  onClick={() => setApiKeyVisible((current) => !current)}
+                  title={apiKeyVisible ? "隐藏 API Key" : "显示 API Key"}
+                  type="button"
+                >
+                  {apiKeyVisible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
             </Field>
           </div>
         ) : null}
