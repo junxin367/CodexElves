@@ -89,6 +89,11 @@
   --motion-normal: 180ms;
   --motion-slow: 240ms;
   --motion-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --z-topbar: 200;
+  --z-floating-menu: 1000;
+  --z-modal: 20000;
+  --z-tooltip: 20100;
+  --z-toast: 2147483647;
   font-family:
     Inter, "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   font-size: 14px;
@@ -292,7 +297,7 @@ body {
 
 .topbar {
   position: relative;
-  z-index: 200;
+  z-index: var(--z-topbar);
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -822,7 +827,7 @@ body {
 
 .app-tooltip {
   position: fixed;
-  z-index: 10000;
+  z-index: var(--z-tooltip);
   width: max-content;
   border: 1px solid hsl(var(--border, 220 13% 88%));
   border-radius: 8px;
@@ -1398,7 +1403,7 @@ body {
 
 .relay-model-choice-menu {
   position: fixed;
-  z-index: 1000;
+  z-index: var(--z-floating-menu);
   top: 0;
   left: 0;
   right: auto;
@@ -1551,7 +1556,7 @@ body {
 
 .app-select-menu {
   position: fixed;
-  z-index: 1000;
+  z-index: var(--z-floating-menu);
   display: grid;
   overflow: auto;
   border: 1px solid hsl(var(--border));
@@ -2524,7 +2529,7 @@ body {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 60;
+  z-index: var(--z-modal);
   display: grid;
   place-items: center;
   background: hsl(0 0% 0% / 0.45);
@@ -3379,7 +3384,7 @@ body {
 /* 项目下拉菜单 */
 .session-project-menu {
   position: fixed;
-  z-index: 1000;
+  z-index: var(--z-floating-menu);
   display: flex;
   flex-direction: column;
   border: 1px solid hsl(var(--border));
@@ -3475,7 +3480,7 @@ body {
 /* 日期范围选择弹窗 */
 .session-date-menu {
   position: fixed;
-  z-index: 1000;
+  z-index: var(--z-floating-menu);
   display: flex;
   border: 1px solid hsl(var(--border));
   border-radius: 10px;
@@ -3984,7 +3989,7 @@ body {
   top: 16px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 2147483647;
+  z-index: var(--z-toast);
   width: min(420px, calc(100vw - 32px));
 }
 
