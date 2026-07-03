@@ -95,6 +95,12 @@ pub struct PluginCacheInfosPayload {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RemoteContextOptionsPayload {
+    pub options: Vec<codex_elves_core::plugin_marketplace::RemoteContextOption>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginCacheRefreshPayload {
     pub plugin: codex_elves_core::plugin_marketplace::PluginCacheInfo,
 }
@@ -1663,6 +1669,33 @@ pub fn read_plugin_cache_infos() -> CommandResult<PluginCacheInfosPayload> {
         };
     let plugins = codex_elves_core::plugin_marketplace::list_plugin_cache_infos(&home, &plugin_ids);
     ok("插件缓存信息已读取。", PluginCacheInfosPayload { plugins })
+}
+
+#[tauri::command]
+pub fn read_remote_context_options() -> CommandResult<RemoteContextOptionsPayload> {
+    let home = saved_codex_home_dir();
+    let status =
+        codex_elves_core::plugin_marketplace::openai_curated_remote_marketplace_status(&home);
+    if status.needs_repair() {
+        return ok(
+            "官方远端插件缓存需要释放或注册。",
+            RemoteContextOptionsPayload {
+                options: Vec::new(),
+            },
+        );
+    }
+    match codex_elves_core::plugin_marketplace::list_openai_curated_remote_context_options(&home) {
+        Ok(options) => ok(
+            "官方远端插件缓存候选项已读取。",
+            RemoteContextOptionsPayload { options },
+        ),
+        Err(error) => failed(
+            &format!("读取官方远端插件缓存候选项失败：{error}"),
+            RemoteContextOptionsPayload {
+                options: Vec::new(),
+            },
+        ),
+    }
 }
 
 #[tauri::command]

@@ -44,6 +44,7 @@ commands.allow = [
   "read_local_proxy_logs",
   "read_live_context_entries",
   "read_plugin_cache_infos",
+  "read_remote_context_options",
   "read_relay_files",
   "remote_plugin_marketplace_status",
   "refresh_script_market",

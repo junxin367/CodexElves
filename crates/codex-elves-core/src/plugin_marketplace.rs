@@ -32,6 +32,19 @@ pub struct PluginCacheInfo {
     pub refresh_reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteContextOption {
+    pub kind: String,
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub plugin_id: String,
+    pub plugin_title: String,
+    pub category: Option<String>,
+    pub toml_body: String,
+}
+
 struct LocalPluginSource {
     root: PathBuf,
     version: Option<String>,
@@ -221,6 +234,125 @@ pub fn openai_curated_remote_marketplace_status(home: &Path) -> MarketplaceStatu
         marketplace_root,
         config_registered,
     }
+}
+
+pub fn list_openai_curated_remote_context_options(
+    home: &Path,
+) -> anyhow::Result<Vec<RemoteContextOption>> {
+    let Some(marketplace_root) = local_openai_curated_remote_marketplace_root(home)? else {
+        return Ok(Vec::new());
+    };
+    let marketplace_path = marketplace_root
+        .join(".agents")
+        .join("plugins")
+        .join("marketplace.json");
+    let marketplace_text = std::fs::read_to_string(&marketplace_path)
+        .with_context(|| format!("failed to read {}", marketplace_path.display()))?;
+    let marketplace: Value = serde_json::from_str(&marketplace_text)
+        .with_context(|| format!("failed to parse {}", marketplace_path.display()))?;
+    let plugins = marketplace
+        .get("plugins")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut options = Vec::new();
+    for plugin in plugins {
+        let Some(plugin_name) = plugin.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let plugin_relative_path = plugin
+            .get("source")
+            .and_then(|source| source.get("path"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim_start_matches("./");
+        let plugin_root = if plugin_relative_path.is_empty() {
+            marketplace_root.join("plugins").join(plugin_name)
+        } else {
+            resolve_marketplace_path(&marketplace_root, Path::new(plugin_relative_path))
+        };
+        if !plugin_root.is_dir() {
+            continue;
+        }
+
+        let manifest = read_plugin_manifest(&plugin_root).unwrap_or(Value::Null);
+        let plugin_title = manifest_text(&manifest, &["interface", "displayName"])
+            .or_else(|| manifest_text(&manifest, &["interface", "name"]))
+            .or_else(|| manifest_text(&manifest, &["name"]))
+            .unwrap_or_else(|| plugin_name.to_string());
+        let plugin_description = manifest_text(&manifest, &["interface", "shortDescription"])
+            .or_else(|| manifest_text(&manifest, &["description"]))
+            .unwrap_or_default();
+        let category = plugin
+            .get("category")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .or_else(|| manifest_text(&manifest, &["interface", "category"]));
+
+        options.push(RemoteContextOption {
+            kind: "plugin".to_string(),
+            id: format!("{plugin_name}@{OPENAI_CURATED_REMOTE_MARKETPLACE}"),
+            title: plugin_title.clone(),
+            description: plugin_description,
+            plugin_id: plugin_name.to_string(),
+            plugin_title: plugin_title.clone(),
+            category: category.clone(),
+            toml_body: "enabled = true\n".to_string(),
+        });
+
+        let skills_root = plugin_root.join("skills");
+        let skill_entries = match std::fs::read_dir(&skills_root) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in skill_entries.flatten() {
+            let skill_dir = entry.path();
+            if !skill_dir.is_dir() {
+                continue;
+            }
+            let skill_file = skill_dir.join("SKILL.md");
+            if !skill_file.is_file() {
+                continue;
+            }
+            let skill_text = std::fs::read_to_string(&skill_file)
+                .with_context(|| format!("failed to read {}", skill_file.display()))?;
+            let frontmatter = skill_frontmatter(&skill_text);
+            let skill_slug = skill_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            if skill_slug.is_empty() {
+                continue;
+            }
+            let skill_name = frontmatter
+                .get("name")
+                .filter(|name| !name.is_empty())
+                .cloned()
+                .unwrap_or_else(|| skill_slug.to_string());
+            let skill_description = frontmatter.get("description").cloned().unwrap_or_default();
+            let skill_path =
+                format!(".tmp/plugins-remote/plugins/{plugin_name}/skills/{skill_slug}");
+            options.push(RemoteContextOption {
+                kind: "skill".to_string(),
+                id: format!("{plugin_name}:{skill_name}"),
+                title: skill_name,
+                description: skill_description,
+                plugin_id: plugin_name.to_string(),
+                plugin_title: plugin_title.clone(),
+                category: category.clone(),
+                toml_body: format!("path = {}\nenabled = true\n", toml_edit::value(skill_path)),
+            });
+        }
+    }
+
+    options.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.plugin_title.cmp(&right.plugin_title))
+            .then_with(|| left.title.cmp(&right.title))
+    });
+    Ok(options)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -957,6 +1089,46 @@ fn plugin_manifest_version(path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+fn read_plugin_manifest(plugin_root: &Path) -> anyhow::Result<Value> {
+    let manifest_path = plugin_root.join(".codex-plugin").join("plugin.json");
+    let text = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    serde_json::from_str(&text)
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))
+}
+
+fn manifest_text(manifest: &Value, path: &[&str]) -> Option<String> {
+    let mut current = manifest;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    current.as_str().map(ToString::to_string)
+}
+
+fn skill_frontmatter(contents: &str) -> std::collections::BTreeMap<String, String> {
+    let mut values = std::collections::BTreeMap::new();
+    let mut lines = contents.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return values;
+    }
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            break;
+        }
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let value = value
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_string();
+        values.insert(key.trim().to_string(), value);
+    }
+    values
+}
+
 fn sanitize_path_segment(value: &str) -> String {
     value
         .chars()
@@ -1038,13 +1210,31 @@ mod tests {
 
     fn write_remote_marketplace(home: &Path) {
         let root = home.join(".tmp").join("plugins-remote");
+        let plugin_root = root.join("plugins").join("product-design");
         std::fs::create_dir_all(root.join(".agents").join("plugins")).unwrap();
-        std::fs::create_dir_all(root.join("plugins").join("product-design")).unwrap();
+        std::fs::create_dir_all(plugin_root.join(".codex-plugin")).unwrap();
+        std::fs::create_dir_all(plugin_root.join("skills").join("audit")).unwrap();
         std::fs::write(
             root.join(".agents")
                 .join("plugins")
                 .join("marketplace.json"),
-            r#"{"name":"openai-curated-remote","plugins":[{"name":"product-design","path":"./plugins/product-design"}]}"#,
+            r#"{"name":"openai-curated-remote","plugins":[{"name":"product-design","source":{"source":"local","path":"./plugins/product-design"},"category":"Creativity"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            plugin_root.join(".codex-plugin").join("plugin.json"),
+            r#"{"name":"product-design","description":"Prototype ideas","interface":{"displayName":"Product Design","shortDescription":"Explore and prototype ideas"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            plugin_root.join("skills").join("audit").join("SKILL.md"),
+            r#"---
+name: audit
+description: "Audit product flows."
+---
+
+# Audit
+"#,
         )
         .unwrap();
     }
@@ -1238,6 +1428,36 @@ enabled = true
             parsed["marketplaces"]["openai-curated-remote"]["source"].as_str(),
             Some(expected_source.as_str())
         );
+    }
+
+    #[test]
+    fn list_openai_curated_remote_context_options_reads_plugins_and_skills() {
+        let temp = tempfile::tempdir().unwrap();
+        write_remote_marketplace(temp.path());
+
+        let options = list_openai_curated_remote_context_options(temp.path()).unwrap();
+
+        let plugin = options
+            .iter()
+            .find(|option| {
+                option.kind == "plugin" && option.id == "product-design@openai-curated-remote"
+            })
+            .unwrap();
+        assert_eq!(plugin.title, "Product Design");
+        assert_eq!(plugin.toml_body, "enabled = true\n");
+
+        let skill = options
+            .iter()
+            .find(|option| option.kind == "skill" && option.id == "product-design:audit")
+            .unwrap();
+        assert_eq!(skill.plugin_title, "Product Design");
+        assert_eq!(skill.description, "Audit product flows.");
+        assert!(
+            skill
+                .toml_body
+                .contains(r#"path = ".tmp/plugins-remote/plugins/product-design/skills/audit""#)
+        );
+        assert!(skill.toml_body.contains("enabled = true"));
     }
 
     #[test]

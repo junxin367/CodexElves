@@ -1639,6 +1639,28 @@ body {
   outline: none;
 }
 
+.remote-context-option-label {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.remote-context-option-label strong {
+  font-size: 13px;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-context-option-label small {
+  overflow: hidden;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .relay-protocol-hint {
   margin-top: 12px;
 }
@@ -1871,8 +1893,10 @@ body {
 .context-editor {
   display: grid;
   gap: 10px;
-  border-top: 1px solid hsl(var(--border));
-  padding-top: 12px;
+}
+
+.context-editor-modal {
+  width: min(760px, calc(100vw - 32px));
 }
 
 .context-editor-fields {
@@ -1886,6 +1910,105 @@ body {
   font-family: Consolas, "SFMono-Regular", monospace;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.remote-context-install-picker {
+  display: grid;
+  gap: 8px;
+}
+
+.remote-context-install-search {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--muted) / 0.26);
+  color: hsl(var(--muted-foreground));
+  padding: 6px 8px;
+}
+
+.remote-context-install-search input {
+  height: 30px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font-size: 12px;
+}
+
+.remote-context-install-search input:focus {
+  box-shadow: none;
+}
+
+.remote-context-install-search span {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.remote-context-install-list {
+  display: grid;
+  gap: 5px;
+  max-height: min(500px, 56vh);
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.remote-context-install-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  border: 1px solid hsl(var(--border));
+  border-radius: 7px;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  padding: 7px 8px;
+  text-align: left;
+  transition:
+    background var(--motion-fast) var(--motion-ease),
+    border-color var(--motion-fast) var(--motion-ease),
+    box-shadow var(--motion-fast) var(--motion-ease);
+}
+
+.remote-context-install-item:hover,
+.remote-context-install-item:focus-within {
+  border-color: hsl(var(--primary) / 0.55);
+  background: hsl(var(--primary) / 0.06);
+  box-shadow: 0 8px 20px hsl(var(--foreground) / 0.08);
+  outline: none;
+}
+
+.remote-context-install-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.remote-context-install-copy > small {
+  display: -webkit-box;
+  overflow: hidden;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.remote-context-install-button {
+  min-height: 28px;
+  padding-inline: 10px;
+}
+
+@media (max-width: 640px) {
+  .remote-context-install-item {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .remote-context-install-button {
+    justify-self: start;
+  }
 }
 
 .relay-file-grid {

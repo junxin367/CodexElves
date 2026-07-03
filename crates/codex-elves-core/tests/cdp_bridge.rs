@@ -1043,7 +1043,10 @@ fn manager_ui_exposes_remote_plugin_marketplace_controls() {
     assert!(source.contains("官方远端插件缓存"));
     assert!(source.contains("释放并注册内置缓存"));
     assert!(source.contains("官方远端插件缓存未释放"));
+    assert!(source.contains("官方远端插件缓存候选项"));
+    assert!(source.contains("read_remote_context_options"));
     assert!(source.contains("checkRemotePluginMarketplacePrompt"));
+    assert!(source.contains("refreshRemoteContextOptions"));
     assert!(source.contains("RemotePluginMarketplacePromptDialog"));
     assert!(source.contains("repair_remote_plugin_marketplace"));
     assert!(source.contains(
@@ -1051,8 +1054,10 @@ fn manager_ui_exposes_remote_plugin_marketplace_controls() {
     ));
     assert!(commands.contains("commands::remote_plugin_marketplace_status"));
     assert!(commands.contains("commands::repair_remote_plugin_marketplace"));
+    assert!(commands.contains("commands::read_remote_context_options"));
     assert!(permissions.contains("\"remote_plugin_marketplace_status\""));
     assert!(permissions.contains("\"repair_remote_plugin_marketplace\""));
+    assert!(permissions.contains("\"read_remote_context_options\""));
 }
 
 #[test]

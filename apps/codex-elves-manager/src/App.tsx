@@ -150,6 +150,21 @@ type PluginCacheRefreshResult = CommandResult<{
   plugin: PluginCacheInfo;
 }>;
 
+type RemoteContextOption = {
+  kind: "skill" | "plugin";
+  id: string;
+  title: string;
+  description: string;
+  pluginId: string;
+  pluginTitle: string;
+  category?: string | null;
+  tomlBody: string;
+};
+
+type RemoteContextOptionsResult = CommandResult<{
+  options: RemoteContextOption[];
+}>;
+
 type BackendSettings = {
   codexAppPath: string;
   codexHomePath: string;
@@ -969,6 +984,122 @@ function browserPreviewPluginCacheInfos(settings = browserPreviewSettings()): Pl
   });
 }
 
+function browserPreviewRemoteContextOptions(): RemoteContextOption[] {
+  const plugins = [
+    {
+      id: "product-design",
+      title: "Product Design",
+      description: "Turn early ideas into prototypes teams can review. Explore product directions, audit user flows, research friction, prototype from URLs, and make static screenshots interactive.",
+      category: "Creativity",
+      skills: [
+        {
+          slug: "audit",
+          name: "audit",
+          description: "Audit or critique a product flow, journey, workflow, funnel, onboarding path, checkout path, settings path, screen, or multi-step product experience.",
+        },
+        {
+          slug: "prototype",
+          name: "prototype",
+          description: "Route coded prototype requests after Product Design get-context has confirmed the design brief.",
+        },
+        {
+          slug: "get-context",
+          name: "get-context",
+          description: "Mandatory design-brief gate for Product Design build and design workflows before ideation, prototyping, image-to-code builds, redesigns, or product UI work.",
+        },
+        {
+          slug: "image-to-code",
+          name: "image-to-code",
+          description: "Implement a selected image, screenshot, mockup, or Image Gen reference as a faithful responsive frontend after Product Design get-context has confirmed the design brief.",
+        },
+        {
+          slug: "research",
+          name: "research",
+          description: "Run fast, source-grounded UX research on high-signal problems users are experiencing with a specified digital product.",
+        },
+      ],
+    },
+    {
+      id: "figma",
+      title: "Figma",
+      description: "Figma workflows for design implementation, Code Connect templates, and design system rule generation.",
+      category: "Creativity",
+      skills: [
+        {
+          slug: "figma-use",
+          name: "figma-use",
+          description: "Mandatory prerequisite before use_figma write actions or unique reads that require JavaScript execution in a Figma file context.",
+        },
+        {
+          slug: "figma-generate-design",
+          name: "figma-generate-design",
+          description: "Translate an application page, view, modal, dialog, drawer, sidebar, or multi-section layout into Figma from code or a description.",
+        },
+        {
+          slug: "figma-code-connect",
+          name: "figma-code-connect",
+          description: "Create and maintain Figma Code Connect template files that map Figma components to code snippets.",
+        },
+        {
+          slug: "figma-generate-library",
+          name: "figma-generate-library",
+          description: "Build or update a professional-grade design system in Figma from a codebase.",
+        },
+      ],
+    },
+    {
+      id: "superpowers",
+      title: "Superpowers",
+      description: "Planning, TDD, debugging, and delivery workflows for coding agents.",
+      category: "Developer Tools",
+      skills: [
+        {
+          slug: "brainstorming",
+          name: "brainstorming",
+          description: "Explore user intent, requirements, and design before implementation.",
+        },
+        {
+          slug: "systematic-debugging",
+          name: "systematic-debugging",
+          description: "Use when encountering a bug, test failure, or unexpected behavior before proposing fixes.",
+        },
+        {
+          slug: "requesting-code-review",
+          name: "requesting-code-review",
+          description: "Use when completing tasks, implementing major features, or before merging to verify work meets requirements.",
+        },
+      ],
+    },
+  ];
+
+  const options: RemoteContextOption[] = [];
+  for (const plugin of plugins) {
+    options.push({
+      kind: "plugin",
+      id: `${plugin.id}@openai-curated-remote`,
+      title: plugin.title,
+      description: plugin.description,
+      pluginId: plugin.id,
+      pluginTitle: plugin.title,
+      category: plugin.category,
+      tomlBody: "enabled = true\n",
+    });
+    for (const skill of plugin.skills) {
+      options.push({
+        kind: "skill",
+        id: `${plugin.id}:${skill.name}`,
+        title: skill.name,
+        description: skill.description,
+        pluginId: plugin.id,
+        pluginTitle: plugin.title,
+        category: plugin.category,
+        tomlBody: `path = ".tmp/plugins-remote/plugins/${plugin.id}/skills/${skill.slug}"\nenabled = true\n`,
+      });
+    }
+  }
+  return options;
+}
+
 function browserPreviewContextTarget(kind: ContextKind, id: string): CodexContextEntries {
   const entry: CodexContextEntry = {
     id,
@@ -1351,6 +1482,10 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({
         plugins: browserPreviewPluginCacheInfos(settings),
       }, "浏览器预览已读取插件缓存信息。") as T);
+    case "read_remote_context_options":
+      return Promise.resolve(browserPreviewResult({
+        options: browserPreviewRemoteContextOptions(),
+      }, "浏览器预览已读取官方远端插件缓存候选项。") as T);
     case "force_refresh_plugin_cache": {
       const request = args?.request as { pluginId?: unknown } | undefined;
       const pluginId = typeof request?.pluginId === "string" ? request.pluginId : "";
@@ -1496,6 +1631,7 @@ export function App() {
   const [pluginCacheInfos, setPluginCacheInfos] = useState<PluginCacheInfo[]>([]);
   const [pluginCacheRefreshConfirm, setPluginCacheRefreshConfirm] = useState<PluginCacheInfo | null>(null);
   const [pluginCacheRefreshActive, setPluginCacheRefreshActive] = useState(false);
+  const [remoteContextOptions, setRemoteContextOptions] = useState<RemoteContextOption[]>([]);
   const [codexHomeRestartPrompt, setCodexHomeRestartPrompt] = useState<{
     codexHomePath: string;
     effectiveCodexHome: string;
@@ -1776,6 +1912,15 @@ export function App() {
     return result;
   };
 
+  const refreshRemoteContextOptions = async (silent = false) => {
+    const result = await run(() => call<RemoteContextOptionsResult>("read_remote_context_options"));
+    if (result) {
+      setRemoteContextOptions(result.options);
+      if (!silent || !isSuccessStatus(result.status)) showResultNotice("官方远端插件缓存", result, { silentSuccess: true });
+    }
+    return result;
+  };
+
   const forceRefreshPluginCache = async (pluginId: string) => {
     const info = pluginCacheInfos.find((item) => item.id === pluginId);
     if (!info) {
@@ -1921,6 +2066,7 @@ export function App() {
       await refreshRelayFiles(true);
       await refreshLiveContextEntries(true);
       await refreshPluginCacheInfos(true);
+      await refreshRemoteContextOptions(true);
     }
     if (next === "enhance") {
       await refreshRemotePluginMarketplace(true);
@@ -2576,7 +2722,10 @@ export function App() {
       await refreshLocalProxyStatus(true);
       if (route === "localProxy") await refreshLocalProxyLogs(true);
       if (route === "radar") await refreshCodexRadar(true);
-      if (route === "context") await refreshPluginCacheInfos(true);
+      if (route === "context") {
+        await refreshPluginCacheInfos(true);
+        await refreshRemoteContextOptions(true);
+      }
       await checkPluginMarketplacePrompt();
       await checkRemotePluginMarketplacePrompt();
     })();
@@ -2677,6 +2826,7 @@ export function App() {
       repairBackend,
       repairPluginMarketplace,
       checkPluginMarketplacePrompt,
+      checkRemotePluginMarketplacePrompt,
       refreshRemotePluginMarketplace,
       repairRemotePluginMarketplace,
       installEntrypoints,
@@ -2805,6 +2955,7 @@ export function App() {
       importCcsProviders,
       refreshLiveContextEntries,
       refreshPluginCacheInfos,
+      refreshRemoteContextOptions,
       forceRefreshPluginCache,
       syncLiveContextEntries,
       refreshScriptMarket,
@@ -2974,6 +3125,7 @@ export function App() {
               form={settingsForm}
               liveEntries={liveContextEntries}
               pluginCacheInfos={pluginCacheInfos}
+              remoteContextOptions={remoteContextOptions}
               relayFiles={relayFiles}
               onFormChange={setSettingsForm}
               actions={actions}
@@ -3066,6 +3218,7 @@ type Actions = {
   repairBackend: () => Promise<void>;
   repairPluginMarketplace: () => Promise<void>;
   checkPluginMarketplacePrompt: () => Promise<PluginMarketplaceStatusResult | null>;
+  checkRemotePluginMarketplacePrompt: () => Promise<RemotePluginMarketplaceResult | null>;
   refreshRemotePluginMarketplace: (silent?: boolean) => Promise<RemotePluginMarketplaceResult | null>;
   repairRemotePluginMarketplace: () => Promise<void>;
   installEntrypoints: () => Promise<void>;
@@ -3097,6 +3250,7 @@ type Actions = {
   importCcsProviders: () => Promise<void>;
   refreshLiveContextEntries: (silent?: boolean) => Promise<LiveContextEntriesResult | null>;
   refreshPluginCacheInfos: (silent?: boolean) => Promise<PluginCacheInfosResult | null>;
+  refreshRemoteContextOptions: (silent?: boolean) => Promise<RemoteContextOptionsResult | null>;
   forceRefreshPluginCache: (pluginId: string) => Promise<void>;
   syncLiveContextEntries: (
     settings: BackendSettings,
@@ -5231,6 +5385,7 @@ function ContextScreen({
   form,
   liveEntries,
   pluginCacheInfos,
+  remoteContextOptions,
   relayFiles,
   onFormChange,
   actions,
@@ -5238,6 +5393,7 @@ function ContextScreen({
   form: BackendSettings;
   liveEntries: CodexContextEntries | null;
   pluginCacheInfos: PluginCacheInfo[];
+  remoteContextOptions: RemoteContextOption[];
   relayFiles: RelayFilesResult | null;
   onFormChange: (value: BackendSettings) => void;
   actions: Actions;
@@ -5250,6 +5406,7 @@ function ContextScreen({
           form={normalizeSettings(form)}
           liveEntries={liveEntries}
           pluginCacheInfos={pluginCacheInfos}
+          remoteContextOptions={remoteContextOptions}
           relayFiles={relayFiles}
           onFormChange={onFormChange}
           actions={actions}
@@ -6744,6 +6901,7 @@ function RelayContextManager({
   form,
   liveEntries,
   pluginCacheInfos,
+  remoteContextOptions,
   relayFiles,
   onFormChange,
   actions,
@@ -6751,6 +6909,7 @@ function RelayContextManager({
   form: BackendSettings;
   liveEntries: CodexContextEntries | null;
   pluginCacheInfos: PluginCacheInfo[];
+  remoteContextOptions: RemoteContextOption[];
   relayFiles: RelayFilesResult | null;
   onFormChange: (value: BackendSettings) => void;
   actions: Actions;
@@ -6800,6 +6959,15 @@ function RelayContextManager({
     setEditor({ kind: entry.kind, entry: latestEntry ?? entry });
   };
 
+  const openNewEditor = async () => {
+    if (activeKind === "plugin" || activeKind === "skill") {
+      const status = await actions.checkRemotePluginMarketplacePrompt();
+      if (status?.needsRepair) return;
+      await actions.refreshRemoteContextOptions(true);
+    }
+    setEditor({ kind: activeKind });
+  };
+
   return (
     <div className="relay-context-panel">
       <div className="relay-context-head">
@@ -6808,7 +6976,7 @@ function RelayContextManager({
           <span>MCP、Skills、Plugins 作为全局配置独立管理，切换任意供应商都会合并。</span>
         </div>
         <div className="relay-context-head-actions">
-          <Button onClick={() => setEditor({ kind: activeKind })} size="sm" variant="secondary">
+          <Button onClick={() => void openNewEditor()} size="sm" variant="secondary">
             <Plus className="h-4 w-4" />
             新增{label}
           </Button>
@@ -6888,6 +7056,7 @@ function RelayContextManager({
         <ContextEntryEditor
           entry={editor.entry}
           kind={editor.kind}
+          remoteOptions={remoteContextOptions}
           onCancel={() => setEditor(null)}
           onSave={(kind, id, tomlBody) => void saveEntry(kind, id, tomlBody)}
         />
@@ -6899,57 +7068,152 @@ function RelayContextManager({
 function ContextEntryEditor({
   kind,
   entry,
+  remoteOptions,
   onCancel,
   onSave,
 }: {
   kind: ContextKind;
   entry?: CodexContextEntry;
+  remoteOptions: RemoteContextOption[];
   onCancel: () => void;
   onSave: (kind: ContextKind, id: string, tomlBody: string) => void;
 }) {
   const [draftKind, setDraftKind] = useState<ContextKind>(entry?.kind ?? kind);
   const [id, setId] = useState(entry?.id ?? "");
   const [tomlBody, setTomlBody] = useState(entry?.tomlBody ?? "");
+  const [remoteSearch, setRemoteSearch] = useState("");
+  const isRemoteInstall = !entry && (draftKind === "plugin" || draftKind === "skill");
+  const availableRemoteOptions = isRemoteInstall
+    ? remoteOptions.filter((option) => option.kind === draftKind)
+    : [];
+  const normalizedRemoteSearch = remoteSearch.trim().toLowerCase();
+  const filteredRemoteOptions = normalizedRemoteSearch
+    ? availableRemoteOptions.filter((option) => [
+      option.title,
+      option.id,
+      option.pluginId,
+      option.pluginTitle,
+      option.category ?? "",
+      option.description,
+    ].join(" ").toLowerCase().includes(normalizedRemoteSearch))
+    : availableRemoteOptions;
   const canSave = id.trim().length > 0;
 
+  const changeDraftKind = (next: ContextKind) => {
+    setDraftKind(next);
+    if (!entry) {
+      setId("");
+      setTomlBody("");
+      setRemoteSearch("");
+    }
+  };
+
   return (
-    <div className="context-editor">
-      <div className="context-editor-fields">
-        <Field label="类型">
-          <SelectMenu<ContextKind>
-            ariaLabel="类型"
-            disabled={!!entry}
-            value={draftKind}
-            options={contextKindOptions.map((option) => ({ value: option.kind, label: option.label }))}
-            onChange={(kind) => setDraftKind(kind)}
-          />
-        </Field>
-        <Field label="ID">
-          <Input
-            disabled={!!entry}
-            value={id}
-            onChange={(event) => setId(event.currentTarget.value.trim())}
-            placeholder="例如 context7"
-          />
-        </Field>
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <div className="modal-card context-editor-modal">
+        <div className="modal-head">
+          <div>
+            <h2>{entry ? `编辑${contextKindLabel(draftKind)}` : `新增${contextKindLabel(draftKind)}`}</h2>
+            <p>
+              {isRemoteInstall
+                ? "从已释放的官方远端插件缓存中选择一项，点击安装后会直接写入配置并同步到当前 Codex 配置目录。"
+                : "填写扩展项 ID 和 TOML 配置体，保存后会同步到当前 Codex 配置目录。"}
+            </p>
+          </div>
+          <button className="toast-close" onClick={onCancel} type="button">×</button>
+        </div>
+        {isRemoteInstall ? (
+          <div className="remote-context-install-picker">
+            <div className="remote-context-install-search">
+              <Search className="h-4 w-4" />
+              <Input
+                aria-label={`搜索${contextKindLabel(draftKind)}`}
+                value={remoteSearch}
+                onChange={(event) => setRemoteSearch(event.currentTarget.value)}
+                placeholder={`搜索${contextKindLabel(draftKind)}名称、插件、分类或描述`}
+              />
+              <span>{filteredRemoteOptions.length}/{availableRemoteOptions.length}</span>
+            </div>
+            <div className="remote-context-install-list">
+              {availableRemoteOptions.length ? (
+                filteredRemoteOptions.length ? (
+                  filteredRemoteOptions.map((option) => (
+                    <div
+                      className="remote-context-install-item"
+                      key={`${option.kind}-${option.id}`}
+                    >
+                      <div className="remote-context-install-copy">
+                        <RemoteContextOptionLabel option={option} />
+                        <small>{option.description || "无描述"}</small>
+                      </div>
+                      <Button
+                        className="remote-context-install-button"
+                        onClick={() => onSave(option.kind, option.id, option.tomlBody)}
+                        size="sm"
+                      >
+                        安装
+                      </Button>
+                    </div>
+                  ))
+                ) : (
+                  <div className="empty">没有匹配“{remoteSearch.trim()}”的{contextKindLabel(draftKind)}。</div>
+                )
+              ) : (
+                <div className="empty">当前官方远端插件缓存中没有可用的{contextKindLabel(draftKind)}。</div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="context-editor">
+            <div className="context-editor-fields">
+              <Field label="类型">
+                <SelectMenu<ContextKind>
+                  ariaLabel="类型"
+                  disabled={!!entry}
+                  value={draftKind}
+                  options={contextKindOptions.map((option) => ({ value: option.kind, label: option.label }))}
+                  onChange={changeDraftKind}
+                />
+              </Field>
+              <Field label="ID">
+                <Input
+                  disabled={!!entry}
+                  value={id}
+                  onChange={(event) => setId(event.currentTarget.value.trim())}
+                  placeholder="例如 context7"
+                />
+              </Field>
+            </div>
+            <Field label="TOML 配置体">
+              <Textarea
+                className="context-editor-textarea"
+                value={tomlBody}
+                onChange={(event) => setTomlBody(event.currentTarget.value)}
+                placeholder={'只填写表头下面的内容，例如：\ncommand = "npx"\nargs = ["-y", "@upstash/context7-mcp"]'}
+                spellCheck={false}
+              />
+            </Field>
+            <Toolbar>
+              <Button disabled={!canSave} onClick={() => onSave(draftKind, id.trim(), tomlBody)} size="sm">
+                <Save className="h-4 w-4" />
+                保存扩展项
+              </Button>
+              <Button onClick={onCancel} size="sm" variant="secondary">取消</Button>
+            </Toolbar>
+          </div>
+        )}
       </div>
-      <Field label="TOML 配置体">
-        <Textarea
-          className="context-editor-textarea"
-          value={tomlBody}
-          onChange={(event) => setTomlBody(event.currentTarget.value)}
-          placeholder={'只填写表头下面的内容，例如：\ncommand = "npx"\nargs = ["-y", "@upstash/context7-mcp"]'}
-          spellCheck={false}
-        />
-      </Field>
-      <Toolbar>
-        <Button disabled={!canSave} onClick={() => onSave(draftKind, id.trim(), tomlBody)} size="sm">
-          <Save className="h-4 w-4" />
-          保存扩展项
-        </Button>
-        <Button onClick={onCancel} size="sm" variant="secondary">取消</Button>
-      </Toolbar>
     </div>
+  );
+}
+
+function RemoteContextOptionLabel({ option }: { option: RemoteContextOption }) {
+  const meta = [option.pluginTitle, option.category].filter(Boolean).join(" / ");
+  return (
+    <span className="remote-context-option-label">
+      <strong>{option.title}</strong>
+      <small>{meta || option.pluginId}</small>
+    </span>
   );
 }
 
