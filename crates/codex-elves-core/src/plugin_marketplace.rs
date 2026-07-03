@@ -194,24 +194,11 @@ pub fn ensure_openai_curated_remote_marketplace_available(
 
 pub fn openai_curated_marketplace_status(home: &Path) -> MarketplaceStatus {
     let marketplace_root = local_openai_curated_marketplace_root(home).ok().flatten();
-    let remote_marketplace_root = local_openai_curated_remote_marketplace_root(home)
-        .ok()
-        .flatten();
     let config_registered = marketplace_root
         .as_deref()
         .map(|root| {
             marketplace_config_points_to_root(home, OPENAI_CURATED_MARKETPLACE, root)
                 && marketplace_config_points_to_root(home, OPENAI_API_CURATED_MARKETPLACE, root)
-                && remote_marketplace_root
-                    .as_deref()
-                    .map(|remote_root| {
-                        marketplace_config_points_to_root(
-                            home,
-                            OPENAI_CURATED_REMOTE_MARKETPLACE,
-                            remote_root,
-                        )
-                    })
-                    .unwrap_or(true)
         })
         .unwrap_or(false);
     MarketplaceStatus {
@@ -996,7 +983,7 @@ fn normalize_windows_extended_path(value: &str) -> String {
 
 fn windows_extended_path(path: &Path) -> String {
     let value = path.to_string_lossy();
-    if value.starts_with(r"\\?\") {
+    if !cfg!(windows) || value.starts_with(r"\\?\") {
         value.into_owned()
     } else {
         format!(r"\\?\{value}")
@@ -1148,15 +1135,10 @@ enabled = true
             parsed["marketplaces"]["openai-curated-remote"]["source_type"].as_str(),
             Some("local")
         );
+        let expected_source = windows_extended_path(&home.join(".tmp").join("plugins-remote"));
         assert_eq!(
             parsed["marketplaces"]["openai-curated-remote"]["source"].as_str(),
-            Some(
-                format!(
-                    r"\\?\{}",
-                    home.join(".tmp").join("plugins-remote").display()
-                )
-                .as_str()
-            )
+            Some(expected_source.as_str())
         );
     }
 
@@ -1198,7 +1180,7 @@ enabled = true
     }
 
     #[test]
-    fn openai_curated_marketplace_status_requires_remote_config_when_cached() {
+    fn openai_curated_marketplace_status_ignores_remote_config_when_cached() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
         let root = home.join(".tmp").join("plugins");
@@ -1214,8 +1196,8 @@ enabled = true
         let status = openai_curated_marketplace_status(home);
 
         assert!(status.marketplace_root.is_some());
-        assert!(!status.config_registered);
-        assert!(status.needs_repair());
+        assert!(status.config_registered);
+        assert!(!status.needs_repair());
     }
 
     #[test]
@@ -1251,15 +1233,10 @@ enabled = true
             parsed["marketplaces"]["openai-curated-remote"]["source_type"].as_str(),
             Some("local")
         );
+        let expected_source = windows_extended_path(&home.join(".tmp").join("plugins-remote"));
         assert_eq!(
             parsed["marketplaces"]["openai-curated-remote"]["source"].as_str(),
-            Some(
-                format!(
-                    r"\\?\{}",
-                    home.join(".tmp").join("plugins-remote").display()
-                )
-                .as_str()
-            )
+            Some(expected_source.as_str())
         );
     }
 
@@ -1300,6 +1277,23 @@ enabled = true
                 .join(".tmp/plugins-remote/plugins/product-design/.codex-plugin/plugin.json")
                 .is_file()
         );
+    }
+
+    #[test]
+    fn embedded_openai_curated_remote_marketplace_zip_uses_codex_elves_branding() {
+        let cursor = Cursor::new(OPENAI_CURATED_REMOTE_MARKETPLACE_ZIP);
+        let mut archive = zip::ZipArchive::new(cursor).unwrap();
+        let mut marketplace = String::new();
+        archive
+            .by_name(".agents/plugins/marketplace.json")
+            .unwrap()
+            .read_to_string(&mut marketplace)
+            .unwrap();
+
+        assert!(marketplace.contains("openai-curated-remote"));
+        assert!(marketplace.contains("CodexElves"));
+        assert!(!marketplace.contains("Codex++"));
+        assert!(!marketplace.contains("CodexPlusPlus"));
     }
 
     #[test]

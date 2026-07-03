@@ -1615,13 +1615,23 @@ fn remote_plugin_marketplace_counts(root: Option<&Path>) -> (usize, usize) {
 }
 
 fn count_skill_files(root: &Path) -> std::io::Result<usize> {
-    if !root.is_dir() {
+    let metadata = match std::fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Ok(0);
     }
     let mut total = 0;
     for entry in std::fs::read_dir(root)? {
-        let path = entry?.path();
-        if path.is_dir() {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if file_type.is_dir() {
             total += count_skill_files(&path)?;
         } else if path.file_name().and_then(|name| name.to_str()) == Some("SKILL.md") {
             total += 1;

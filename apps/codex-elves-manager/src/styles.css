@@ -482,7 +482,6 @@ body {
   min-height: 0;
   overflow: auto;
   padding: 16px 20px 24px;
-  scrollbar-gutter: stable;
   animation: screen-enter 260ms var(--motion-ease) both;
   will-change: opacity, transform;
 }
@@ -2427,6 +2426,42 @@ body {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   margin: 12px 0;
+}
+
+.remote-plugin-marketplace-section {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--card));
+  box-shadow: var(--shadow-sm);
+  padding: 14px 16px;
+}
+
+.remote-plugin-marketplace-copy strong,
+.remote-plugin-marketplace-copy small {
+  display: block;
+}
+
+.remote-plugin-marketplace-copy small {
+  margin-top: 3px;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.remote-plugin-marketplace-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+
+.remote-plugin-marketplace-section .task-progress {
+  grid-column: 1 / -1;
 }
 
 .feature-action-row {
@@ -4403,6 +4438,7 @@ body {
 
   .grid.two,
   .form-row,
+  .remote-plugin-marketplace-section,
   .feature-switch-grid,
   .feature-action-row,
   .relay-fields,
@@ -4425,8 +4461,14 @@ body {
 
   .feature-action-row .inline-flex,
   .feature-action-row button,
+  .remote-plugin-marketplace-actions,
   .feature-action-status {
     width: fit-content;
+  }
+
+  .remote-plugin-marketplace-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
   }
 
   .relay-field-auto-compact,

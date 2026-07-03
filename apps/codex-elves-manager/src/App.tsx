@@ -743,15 +743,15 @@ const defaultSettings: BackendSettings = {
   providerSyncLastSelectedProvider: "",
   relayProfilesEnabled: true,
   enhancementsEnabled: true,
-  computerUseGuardEnabled: false,
+  computerUseGuardEnabled: true,
   codexAppPluginEntryUnlock: true,
   codexAppPluginMarketplaceUnlock: true,
   codexAppPluginAutoExpand: true,
   codexAppSessionDelete: true,
-  codexAppMarkdownExport: true,
-  codexAppProjectMove: true,
-  codexAppConversationView: false,
-  codexAppUpstreamWorktreeCreate: true,
+  codexAppMarkdownExport: false,
+  codexAppProjectMove: false,
+  codexAppConversationView: true,
+  codexAppUpstreamWorktreeCreate: false,
   codexAppNativeMenuPlacement: true,
   codexAppServiceTierControls: false,
   codexAppImageOverlayEnabled: false,
@@ -1026,6 +1026,12 @@ function browserPreviewResult<T extends Record<string, unknown>>(payload: T, mes
   };
 }
 
+function browserPreviewRemotePluginMarketplaceMissing(): boolean {
+  if (typeof window === "undefined") return false;
+  const params = new URLSearchParams(window.location.search);
+  return params.get("mockRemotePluginMarketplace") === "missing";
+}
+
 function browserPreviewRelayPayload(): RelayPayload {
   const settings = browserPreviewSettings();
   const active = activeRelayProfile(settings);
@@ -1239,7 +1245,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
     case "startup_options":
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
-      return Promise.resolve(browserPreviewResult({ currentVersion: "0.1.18", updateAvailable: false }) as T);
+      return Promise.resolve(browserPreviewResult({ currentVersion: "0.2.0", updateAvailable: false }) as T);
     case "load_overview":
       return Promise.resolve(browserPreviewResult({
         codex_app: { status: "found", path: settings.codexAppPath },
@@ -1254,7 +1260,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.1.18",
+        current_version: "0.2.0",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -1379,6 +1385,16 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         needsRepair: false,
       }) as T);
     case "remote_plugin_marketplace_status":
+      if (browserPreviewRemotePluginMarketplaceMissing()) {
+        return Promise.resolve(browserPreviewResult({
+          codexHome: browserPreviewCodexHome(settings),
+          marketplaceRoot: null,
+          configRegistered: false,
+          needsRepair: true,
+          pluginCount: 0,
+          skillCount: 0,
+        }, "官方远端插件缓存需要释放或注册。") as T);
+      }
       return Promise.resolve(browserPreviewResult({
         codexHome: browserPreviewCodexHome(settings),
         marketplaceRoot: `${browserPreviewCodexHome(settings)}\\.tmp\\plugins-remote`,
@@ -1522,6 +1538,8 @@ export function App() {
     percent: 0,
     message: "尚未检查官方远端插件缓存。",
   });
+  const [remotePluginMarketplacePrompt, setRemotePluginMarketplacePrompt] =
+    useState<RemotePluginMarketplaceResult | null>(null);
   const [pluginMarketplacePrompt, setPluginMarketplacePrompt] = useState<PluginMarketplaceStatusResult | null>(null);
   const [providerSyncTargets, setProviderSyncTargets] = useState<ProviderSyncTargetsResult | null>(null);
   const [selectedProviderSyncTarget, setSelectedProviderSyncTarget] = useState("");
@@ -2013,16 +2031,35 @@ export function App() {
 
   const refreshRemotePluginMarketplace = async (silent = false) => {
     const result = await run(() => call<RemotePluginMarketplaceResult>("remote_plugin_marketplace_status"));
-    if (result) {
-      setRemotePluginMarketplace(result);
+    if (!result) {
       if (!silent) {
+        setRemotePluginMarketplace(null);
         setRemotePluginMarketplaceProgress({
           active: false,
           percent: 100,
-          message: result.message,
+          message: "官方远端插件缓存状态刷新失败，请查看错误提示后重试。",
         });
-        showNotice("官方远端插件缓存", result.message, result.status);
       }
+      return null;
+    }
+    setRemotePluginMarketplace(result);
+    if (!silent) {
+      setRemotePluginMarketplaceProgress({
+        active: false,
+        percent: 100,
+        message: result.message,
+      });
+      showNotice("官方远端插件缓存", result.message, result.status);
+    }
+    return result;
+  };
+
+  const checkRemotePluginMarketplacePrompt = async () => {
+    const result = await refreshRemotePluginMarketplace(true);
+    if (result?.needsRepair) {
+      setRemotePluginMarketplacePrompt(result);
+    } else {
+      setRemotePluginMarketplacePrompt(null);
     }
     return result;
   };
@@ -2051,6 +2088,11 @@ export function App() {
       const result = await run(() => call<RemotePluginMarketplaceResult>("repair_remote_plugin_marketplace"));
       if (result) {
         setRemotePluginMarketplace(result);
+        if (result.needsRepair) {
+          setRemotePluginMarketplacePrompt(result);
+        } else {
+          setRemotePluginMarketplacePrompt(null);
+        }
         setRemotePluginMarketplaceProgress({
           active: false,
           percent: 100,
@@ -2536,6 +2578,7 @@ export function App() {
       if (route === "radar") await refreshCodexRadar(true);
       if (route === "context") await refreshPluginCacheInfos(true);
       await checkPluginMarketplacePrompt();
+      await checkRemotePluginMarketplacePrompt();
     })();
   }, []);
 
@@ -2589,6 +2632,7 @@ export function App() {
         refreshLocalSessions(true),
         refreshProviderSyncTargets(true),
         checkPluginMarketplacePrompt(),
+        checkRemotePluginMarketplacePrompt(),
       ]);
     }
     return result;
@@ -3000,6 +3044,14 @@ export function App() {
           status={pluginMarketplacePrompt}
           onClose={() => setPluginMarketplacePrompt(null)}
           onRepair={() => void actions.repairPluginMarketplace()}
+        />
+      ) : null}
+      {remotePluginMarketplacePrompt && !pluginMarketplacePrompt ? (
+        <RemotePluginMarketplacePromptDialog
+          progress={remotePluginMarketplaceProgress}
+          status={remotePluginMarketplacePrompt}
+          onClose={() => setRemotePluginMarketplacePrompt(null)}
+          onRepair={() => void actions.repairRemotePluginMarketplace()}
         />
       ) : null}
       <TooltipLayer theme={theme} />
@@ -4008,6 +4060,32 @@ function EnhanceScreen({
     : "未发现本地缓存；点击按钮会从 CodexElves 内置快照释放并注册，无需官方账号预缓存。";
   return (
     <>
+      <div className="remote-plugin-marketplace-section">
+        <div className="remote-plugin-marketplace-copy">
+          <strong>官方远端插件缓存</strong>
+          <small>使用 CodexElves 内置快照补齐远端插件，API 模式也可显示和安装 Product Design 插件。</small>
+          <small>{remoteMarketplaceSummary}</small>
+        </div>
+        <div className="remote-plugin-marketplace-actions">
+          <Badge status={remotePluginMarketplace?.configRegistered ? "ok" : "not_checked"} />
+          <Button
+            disabled={remotePluginMarketplaceProgress.active}
+            onClick={() => void actions.repairRemotePluginMarketplace()}
+            variant="outline"
+          >
+            {remotePluginMarketplaceProgress.active ? "正在处理…" : "释放并注册内置缓存"}
+          </Button>
+          <Button
+            disabled={remotePluginMarketplaceProgress.active}
+            onClick={() => void actions.refreshRemotePluginMarketplace()}
+            variant="outline"
+          >
+            刷新
+          </Button>
+          <span className="feature-action-status">{remoteMarketplaceStatus}</span>
+        </div>
+        <TaskProgressBox progress={remotePluginMarketplaceProgress} title="官方远端插件缓存进度" />
+      </div>
       <Panel>
         <CardHead title="页面功能增强" detail="会话删除、导出、项目移动和用户脚本等界面能力" />
         <CardContent>
@@ -4045,29 +4123,6 @@ function EnhanceScreen({
             <FeatureToggle title="强制解锁入口" detail="恢复 1.1.9 的入口解锁方式，强制显示并启用插件入口。" checked={form.codexAppPluginEntryUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginEntryUnlock", value)} />
             <FeatureToggle title="插件列表全量展示" detail="进入插件页后自动连续展开“更多”，尽量一次显示完整插件列表。" checked={form.codexAppPluginAutoExpand} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginAutoExpand", value)} />
             <FeatureToggle title="Fast 按钮" detail="显示服务模式切换按钮。Fast（service_tier=priority）仅 OpenAI 部分模型支持（如 gpt-5.4 / gpt-5.5）；Claude 等其他模型不支持，会按 Standard 发送。" checked={form.codexAppServiceTierControls} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppServiceTierControls", value)} />
-            <div className="feature-action-row">
-              <div>
-                <strong>官方远端插件缓存</strong>
-                <small>使用 CodexElves 内置快照补齐远端插件，API 模式也可显示和安装 Product Design 插件。</small>
-                <small>{remoteMarketplaceSummary}</small>
-              </div>
-              <Badge status={remotePluginMarketplace?.configRegistered ? "ok" : "not_checked"} />
-              <Button
-                disabled={remotePluginMarketplaceProgress.active}
-                onClick={() => void actions.repairRemotePluginMarketplace()}
-                variant="secondary"
-              >
-                {remotePluginMarketplaceProgress.active ? "正在处理…" : "释放并注册内置缓存"}
-              </Button>
-              <Button
-                disabled={remotePluginMarketplaceProgress.active}
-                onClick={() => void actions.refreshRemotePluginMarketplace()}
-                variant="outline"
-              >
-                刷新
-              </Button>
-              <span className="feature-action-status">{remoteMarketplaceStatus}</span>
-            </div>
             <FeatureToggle title="会话删除" detail="在会话列表悬停显示删除按钮，并支持撤销。" checked={form.codexAppSessionDelete} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppSessionDelete", value)} />
             <FeatureToggle title="Markdown 导出" detail="在会话列表显示导出按钮，导出带时间戳的 Markdown。" checked={form.codexAppMarkdownExport} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppMarkdownExport", value)} />
             <FeatureToggle title="会话项目移动" detail="把会话移动到普通对话或其他本地项目。" checked={form.codexAppProjectMove} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppProjectMove", value)} />
@@ -4083,7 +4138,6 @@ function EnhanceScreen({
             </Button>
           </div>
           <TaskProgressBox progress={pluginMarketplaceProgress} title="插件市场修复进度" />
-          <TaskProgressBox progress={remotePluginMarketplaceProgress} title="官方远端插件缓存进度" />
           <div className="hint-line">
             <Info className="h-4 w-4" />
             <span>如果使用官方模式或官方混入 API 模式，通常不需要开启插件市场解锁、强制解锁入口和插件列表全量展示。</span>
@@ -7481,6 +7535,49 @@ function PluginMarketplacePromptDialog({
   );
 }
 
+function RemotePluginMarketplacePromptDialog({
+  status,
+  progress,
+  onRepair,
+  onClose,
+}: {
+  status: RemotePluginMarketplaceResult;
+  progress: TaskProgress;
+  onRepair: () => void;
+  onClose: () => void;
+}) {
+  const cachedSummary = status.marketplaceRoot
+    ? `${status.pluginCount} 个插件 / ${status.skillCount} 个技能`
+    : "未释放";
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <div className="modal-card plugin-marketplace-modal">
+        <div className="modal-head">
+          <div>
+            <h2>官方远端插件缓存未释放</h2>
+            <p>Product Design 等官方远端插件需要先释放并注册内置缓存，重启 Codex 后才会出现在插件搜索中。</p>
+          </div>
+          <button className="toast-close" disabled={progress.active} onClick={onClose} type="button">×</button>
+        </div>
+        <div className="metric-list">
+          <Metric label="配置目录" value={status.codexHome} />
+          <Metric label="远端缓存" value={status.marketplaceRoot ?? "未发现"} />
+          <Metric label="配置状态" value={status.configRegistered ? "已注册" : "未注册"} />
+          <Metric label="缓存内容" value={cachedSummary} />
+        </div>
+        <TaskProgressBox progress={progress} title="官方远端插件缓存进度" />
+        <Toolbar>
+          <Button disabled={progress.active} onClick={onRepair}>
+            <Download className="h-4 w-4" />
+            {progress.active ? "正在处理…" : "释放并注册内置缓存"}
+          </Button>
+          <Button disabled={progress.active} onClick={onClose} variant="secondary">稍后处理</Button>
+        </Toolbar>
+      </div>
+    </div>
+  );
+}
+
 function TaskProgressBox({ progress, title }: { progress: TaskProgress; title: string }) {
   if (!progress.active && progress.percent <= 0) return null;
   return (
@@ -8348,7 +8445,7 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
     ...settings,
     codexHomePath: (settings.codexHomePath || "").trim(),
     relayProfilesEnabled: settings.relayProfilesEnabled !== false,
-    computerUseGuardEnabled: settings.computerUseGuardEnabled === true,
+    computerUseGuardEnabled: settings.computerUseGuardEnabled !== false,
     codexAppImageOverlayOpacity: clampNumber(settings.codexAppImageOverlayOpacity || 35, 1, 100),
     gptReasoningContinuationMaxRounds: clampNumber(settings.gptReasoningContinuationMaxRounds || 3, 1, 9),
     relayCommonConfigContents,

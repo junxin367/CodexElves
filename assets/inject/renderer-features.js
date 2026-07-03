@@ -25,7 +25,7 @@
   const chatsSortRefreshIntervalMs = 1500;
   const chatsSortDbRefreshIntervalMs = 5000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "14";
+  const codexDeleteStyleVersion = "15";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
   const codexDeleteVersion = "7";
@@ -720,6 +720,7 @@
       [data-codex-tooltip] { position: relative; }
       [data-codex-tooltip]::before,
       [data-codex-tooltip]::after {
+        display: none;
         position: absolute;
         left: 50%;
         z-index: 2147483647;
@@ -757,6 +758,7 @@
       [data-codex-tooltip]:hover::after,
       [data-codex-tooltip]:focus-visible::before,
       [data-codex-tooltip]:focus-visible::after {
+        display: block;
         opacity: 1;
         transform: translate(-50%, 0);
       }
@@ -2738,7 +2740,7 @@
     if (!cloned.name) cloned.name = name;
     if (!cloned.id) cloned.id = `${name}@${marketplaceName}`;
     if (!cloned.marketplaceName) cloned.marketplaceName = marketplaceName;
-    if (!cloned.marketplacePath) cloned.marketplacePath = marketplaceName;
+    if (!cloned.marketplacePath) cloned.marketplacePath = `remote:${marketplaceName}`;
     if (!cloned.interface || typeof cloned.interface !== "object") cloned.interface = {};
     if (!cloned.interface.displayName) cloned.interface.displayName = name;
     if (!Array.isArray(cloned.keywords)) cloned.keywords = [];

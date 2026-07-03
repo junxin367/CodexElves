@@ -245,7 +245,11 @@ pub enum RelayMode {
 pub struct BackendSettings {
     #[serde(rename = "codexAppPath", default)]
     pub codex_app_path: String,
-    #[serde(rename = "codexHomePath", default)]
+    #[serde(
+        rename = "codexHomePath",
+        default,
+        deserialize_with = "deserialize_codex_home_path"
+    )]
     pub codex_home_path: String,
     #[serde(rename = "codexExtraArgs", default)]
     pub codex_extra_args: Vec<String>,
@@ -261,7 +265,7 @@ pub struct BackendSettings {
     pub relay_profiles_enabled: bool,
     #[serde(rename = "enhancementsEnabled", default = "default_true")]
     pub enhancements_enabled: bool,
-    #[serde(rename = "computerUseGuardEnabled", default)]
+    #[serde(rename = "computerUseGuardEnabled", default = "default_true")]
     pub computer_use_guard_enabled: bool,
     #[serde(rename = "codexAppPluginEntryUnlock", default = "default_true")]
     pub codex_app_plugin_entry_unlock: bool,
@@ -271,13 +275,13 @@ pub struct BackendSettings {
     pub codex_app_plugin_auto_expand: bool,
     #[serde(rename = "codexAppSessionDelete", default = "default_true")]
     pub codex_app_session_delete: bool,
-    #[serde(rename = "codexAppMarkdownExport", default = "default_true")]
+    #[serde(rename = "codexAppMarkdownExport", default)]
     pub codex_app_markdown_export: bool,
-    #[serde(rename = "codexAppProjectMove", default = "default_true")]
+    #[serde(rename = "codexAppProjectMove", default)]
     pub codex_app_project_move: bool,
-    #[serde(rename = "codexAppConversationView", default)]
+    #[serde(rename = "codexAppConversationView", default = "default_true")]
     pub codex_app_conversation_view: bool,
-    #[serde(rename = "codexAppUpstreamWorktreeCreate", default = "default_true")]
+    #[serde(rename = "codexAppUpstreamWorktreeCreate", default)]
     pub codex_app_upstream_worktree_create: bool,
     #[serde(rename = "codexAppNativeMenuPlacement", default = "default_true")]
     pub codex_app_native_menu_placement: bool,
@@ -349,15 +353,15 @@ impl Default for BackendSettings {
             provider_sync_last_selected_provider: String::new(),
             relay_profiles_enabled: true,
             enhancements_enabled: true,
-            computer_use_guard_enabled: false,
+            computer_use_guard_enabled: true,
             codex_app_plugin_entry_unlock: true,
             codex_app_plugin_marketplace_unlock: true,
             codex_app_plugin_auto_expand: true,
             codex_app_session_delete: true,
-            codex_app_markdown_export: true,
-            codex_app_project_move: true,
-            codex_app_conversation_view: false,
-            codex_app_upstream_worktree_create: true,
+            codex_app_markdown_export: false,
+            codex_app_project_move: false,
+            codex_app_conversation_view: true,
+            codex_app_upstream_worktree_create: false,
             codex_app_native_menu_placement: true,
             codex_app_service_tier_controls: false,
             codex_app_image_overlay_enabled: false,
@@ -590,6 +594,15 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn deserialize_codex_home_path<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?
+        .map(|value| normalize_codex_home_path(&value))
+        .unwrap_or_default())
 }
 
 pub fn normalize_codex_extra_args(args: &[String]) -> Vec<String> {
@@ -1091,10 +1104,16 @@ mod tests {
         assert!(!settings.provider_sync_enabled);
         assert!(settings.relay_profiles_enabled);
         assert!(settings.enhancements_enabled);
-        assert!(!settings.computer_use_guard_enabled);
+        assert!(settings.computer_use_guard_enabled);
         assert!(settings.codex_app_plugin_entry_unlock);
         assert!(settings.codex_app_plugin_marketplace_unlock);
         assert!(settings.codex_app_plugin_auto_expand);
+        assert!(settings.codex_app_session_delete);
+        assert!(!settings.codex_app_markdown_export);
+        assert!(!settings.codex_app_project_move);
+        assert!(settings.codex_app_conversation_view);
+        assert!(!settings.codex_app_upstream_worktree_create);
+        assert!(settings.codex_app_native_menu_placement);
         assert!(!settings.codex_goals_enabled);
         assert!(settings.codex_app_path.is_empty());
         assert!(settings.codex_extra_args.is_empty());

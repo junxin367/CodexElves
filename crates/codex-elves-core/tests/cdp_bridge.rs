@@ -313,7 +313,7 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
     assert!(script.contains("mergeLocalPluginMarketplaces(result)"));
     assert!(script.contains("plugin_marketplace_local_merged"));
     assert!(script.contains("cloned.marketplaceName = marketplaceName"));
-    assert!(script.contains("cloned.marketplacePath = marketplaceName"));
+    assert!(script.contains("cloned.marketplacePath = `remote:${marketplaceName}`"));
     assert!(script.contains("restorePluginMarketplaceName"));
     assert!(script.contains(
         "next.remoteMarketplaceName = restorePluginMarketplaceName(next.remoteMarketplaceName)"
@@ -548,6 +548,10 @@ fn injection_script_exposes_fast_service_tier_control() {
     assert!(script.contains("serviceTierControls: false"));
     assert!(script.contains("data-codex-elves-setting=\"serviceTierControls\""));
     assert!(script.contains("data-codex-service-tier-controls"));
+    assert!(script.contains("[data-codex-tooltip]::before"));
+    assert!(script.contains("[data-codex-tooltip]::after"));
+    assert!(script.contains("display: none;\n        position: absolute;"));
+    assert!(script.contains("display: block;\n        opacity: 1;"));
     assert!(script.contains("removeCodexServiceTierBadges"));
     assert!(script.contains("installCodexServiceTierDispatcherPatch"));
     assert!(script.contains("服务模式"));
@@ -1031,15 +1035,24 @@ fn manager_ui_exposes_remote_plugin_marketplace_controls() {
     let commands =
         std::fs::read_to_string(repo.join("apps/codex-elves-manager/src-tauri/src/lib.rs"))
             .unwrap();
+    let permissions = std::fs::read_to_string(
+        repo.join("apps/codex-elves-manager/src-tauri/permissions/default.toml"),
+    )
+    .unwrap();
 
     assert!(source.contains("官方远端插件缓存"));
     assert!(source.contains("释放并注册内置缓存"));
+    assert!(source.contains("官方远端插件缓存未释放"));
+    assert!(source.contains("checkRemotePluginMarketplacePrompt"));
+    assert!(source.contains("RemotePluginMarketplacePromptDialog"));
     assert!(source.contains("repair_remote_plugin_marketplace"));
     assert!(source.contains(
         "checked={form.codexAppPluginAutoExpand} disabled={!masterEnabled || !patchMode}"
     ));
     assert!(commands.contains("commands::remote_plugin_marketplace_status"));
     assert!(commands.contains("commands::repair_remote_plugin_marketplace"));
+    assert!(permissions.contains("\"remote_plugin_marketplace_status\""));
+    assert!(permissions.contains("\"repair_remote_plugin_marketplace\""));
 }
 
 #[test]

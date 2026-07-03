@@ -47,7 +47,8 @@ fn injection_script_source_with_settings(
 ) -> String {
     let helper_url = format!("http://127.0.0.1:{helper_port}");
     let image_overlay = image_overlay_config(helper_port, settings);
-    let plugin_marketplaces = local_plugin_marketplaces();
+    let codex_home = crate::codex_home::codex_home_dir_for_settings(settings);
+    let plugin_marketplaces = local_plugin_marketplaces_from_home(&codex_home);
     format!(
         "window.__CODEX_SESSION_DELETE_HELPER__ = {};\nwindow.__CODEX_ELVES_VERSION__ = {};\nwindow.__CODEX_ELVES_BUILD__ = {};\nwindow.__CODEX_ELVES_IMAGE_OVERLAY__ = {};\nwindow.__CODEX_ELVES_PLUGIN_MARKETPLACES__ = {};\n{}",
         serde_json::to_string(&helper_url).expect("helper URL should serialize"),
@@ -57,11 +58,6 @@ fn injection_script_source_with_settings(
         serde_json::to_string(&plugin_marketplaces).expect("plugin marketplaces should serialize"),
         source,
     )
-}
-
-fn local_plugin_marketplaces() -> Value {
-    let home = crate::codex_home::default_codex_home_dir();
-    local_plugin_marketplaces_from_home(&home)
 }
 
 fn local_plugin_marketplaces_from_home(home: &Path) -> Value {
@@ -156,7 +152,7 @@ fn expand_local_plugin_marketplace(
             .or_insert_with(|| Value::String(marketplace_name.clone()));
         plugin_object
             .entry("marketplacePath".to_string())
-            .or_insert_with(|| Value::String(marketplace_name.clone()));
+            .or_insert_with(|| Value::String(format!("remote:{marketplace_name}")));
         plugin_object
             .entry("keywords".to_string())
             .or_insert_with(|| Value::Array(Vec::new()));
@@ -369,7 +365,45 @@ mod tests {
         );
         assert_eq!(
             array[2]["plugins"][0]["marketplacePath"].as_str(),
-            Some("openai-curated-remote")
+            Some("remote:openai-curated-remote")
         );
+    }
+
+    #[test]
+    fn injection_script_uses_settings_codex_home_for_plugin_marketplaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("custom-codex-home");
+        let remote_marketplace_dir = home
+            .join(".tmp")
+            .join("plugins-remote")
+            .join(".agents")
+            .join("plugins");
+        let remote_plugin_dir = home
+            .join(".tmp")
+            .join("plugins-remote")
+            .join("plugins")
+            .join("product-design");
+        std::fs::create_dir_all(&remote_marketplace_dir).unwrap();
+        std::fs::create_dir_all(remote_plugin_dir.join(".codex-plugin")).unwrap();
+        std::fs::write(
+            remote_marketplace_dir.join("marketplace.json"),
+            r#"{"name":"openai-curated-remote","plugins":[{"name":"product-design"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            remote_plugin_dir.join(".codex-plugin").join("plugin.json"),
+            r#"{"interface":{"displayName":"Product Design"}}"#,
+        )
+        .unwrap();
+        let settings = BackendSettings {
+            codex_home_path: home.to_string_lossy().to_string(),
+            ..BackendSettings::default()
+        };
+
+        let script = injection_script_source_with_settings(45221, &settings, "");
+
+        assert!(script.contains("openai-curated-remote"));
+        assert!(script.contains("Product Design"));
+        assert!(script.contains("remote:openai-curated-remote"));
     }
 }
