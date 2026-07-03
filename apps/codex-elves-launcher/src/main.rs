@@ -279,9 +279,11 @@ impl LaunchHooks for LauncherHooks {
     }
 
     async fn run_provider_sync(&self) -> anyhow::Result<()> {
-        let _ = tokio::task::spawn_blocking(|| codex_elves_data::run_provider_sync(None))
-            .await
-            .map_err(|error| anyhow::anyhow!("provider sync task failed: {error}"))?;
+        let home = codex_elves_core::codex_home::default_codex_home_dir();
+        let _ =
+            tokio::task::spawn_blocking(move || codex_elves_data::run_provider_sync(Some(&home)))
+                .await
+                .map_err(|error| anyhow::anyhow!("provider sync task failed: {error}"))?;
         Ok(())
     }
 
@@ -297,6 +299,13 @@ impl LaunchHooks for LauncherHooks {
         settings: &codex_elves_core::settings::BackendSettings,
     ) -> anyhow::Result<()> {
         self.core.ensure_computer_use_config(settings).await
+    }
+
+    async fn ensure_plugin_marketplace_config(
+        &self,
+        settings: &codex_elves_core::settings::BackendSettings,
+    ) -> anyhow::Result<()> {
+        self.core.ensure_plugin_marketplace_config(settings).await
     }
 
     async fn start_helper(&self, helper_port: u16) -> anyhow::Result<()> {
@@ -518,7 +527,7 @@ impl BridgeDataService for LauncherDataService {
 
 impl LauncherDataService {
     fn candidate_db_paths(&self) -> Vec<PathBuf> {
-        let mut paths = vec![self.db_path.clone()];
+        let mut paths = Vec::new();
         for path in codex_elves_core::codex_sqlite::codex_session_db_paths_from_home(
             &codex_elves_core::codex_sqlite::default_codex_home_dir(),
         ) {
@@ -526,12 +535,22 @@ impl LauncherDataService {
                 paths.push(path);
             }
         }
+        if !paths.iter().any(|candidate| candidate == &self.db_path) {
+            paths.push(self.db_path.clone());
+        }
         paths
+    }
+
+    fn current_db_path(&self) -> PathBuf {
+        self.candidate_db_paths()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| self.db_path.clone())
     }
 
     fn storage_adapter(&self) -> codex_elves_data::SQLiteStorageAdapter {
         codex_elves_data::SQLiteStorageAdapter::new(
-            self.db_path.clone(),
+            self.current_db_path(),
             codex_elves_data::BackupStore::new(self.backup_dir.clone()),
         )
     }

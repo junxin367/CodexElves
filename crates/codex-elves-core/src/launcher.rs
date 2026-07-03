@@ -438,7 +438,7 @@ impl LaunchHooks for DefaultLaunchHooks {
         if !settings.codex_app_plugin_marketplace_unlock {
             return Ok(());
         }
-        let home = crate::relay_config::default_codex_home_dir();
+        let home = crate::codex_home::codex_home_dir_for_settings(settings);
         match crate::plugin_marketplace::ensure_openai_curated_marketplace_config(&home) {
             Ok(true) => {
                 let _ = crate::diagnostic_log::append_diagnostic_log(
@@ -467,7 +467,7 @@ impl LaunchHooks for DefaultLaunchHooks {
             return Ok(());
         }
         let profile = settings.active_relay_profile();
-        let home = crate::relay_config::default_codex_home_dir();
+        let home = crate::codex_home::codex_home_dir_for_settings(settings);
         let common_config = crate::relay_config::normalize_config_text(
             &[
                 settings.relay_common_config_contents.as_str(),
@@ -504,7 +504,7 @@ impl LaunchHooks for DefaultLaunchHooks {
         if !settings.computer_use_guard_enabled {
             return Ok(());
         }
-        let home = crate::relay_config::default_codex_home_dir();
+        let home = crate::codex_home::codex_home_dir_for_settings(settings);
         let artifacts = crate::computer_use_guard::resolve_computer_use_guard_artifacts(&home)?;
         crate::computer_use_guard::ensure_computer_use_config_with_artifacts(&home, &artifacts)?;
         *self.computer_use_guard_artifacts.lock().await = Some(artifacts);
@@ -660,7 +660,7 @@ impl LaunchHooks for DefaultLaunchHooks {
             if !settings.computer_use_guard_enabled {
                 return Ok(());
             }
-            let home = crate::relay_config::default_codex_home_dir();
+            let home = crate::codex_home::codex_home_dir_for_settings(settings);
             let artifacts = self.computer_use_guard_artifacts.lock().await.clone();
             let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
             let task = tokio::spawn(async move {

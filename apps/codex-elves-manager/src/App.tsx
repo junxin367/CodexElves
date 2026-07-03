@@ -121,6 +121,7 @@ type PluginMarketplaceStatusResult = CommandResult<{
 
 type BackendSettings = {
   codexAppPath: string;
+  codexHomePath: string;
   codexExtraArgs: string[];
   providerSyncEnabled: boolean;
   providerSyncSavedProviders: string[];
@@ -275,6 +276,7 @@ type UserScriptInventory = {
 type SettingsResult = CommandResult<{
   settings: BackendSettings;
   settings_path: string;
+  codex_home: string;
   user_scripts: UserScriptInventory;
 }>;
 
@@ -340,6 +342,7 @@ type ContextSyncTarget = {
 type RelaySwitchResult = CommandResult<{
   settings: BackendSettings;
   settingsPath: string;
+  codexHome: string;
   user_scripts: unknown;
   relay: RelayPayload;
 }>;
@@ -666,9 +669,16 @@ const routes: Array<{ id: Route; label: string; icon: LucideIcon; badge?: string
 ];
 
 const LOCAL_PROXY_LOG_PAGE_SIZE = 6;
+const CODEX_HOME_BOUNDARY_NOTICE =
+  "CodexElves 只覆盖自己读写配置的目录，不改变 Codex 本体执行时默认读取目录；如需 Codex 本体读取此目录，请通过它自己的 CODEX_HOME/启动环境处理。";
+const CODEX_HOME_SAVE_NOTICE =
+  `${CODEX_HOME_BOUNDARY_NOTICE} 保存后请重启 Codex 和 CodexElves，再确认会话索引、插件和模型目录状态。`;
+const CODEX_HOME_CLEAR_NOTICE =
+  `已清除覆盖目录，后续回到 CODEX_HOME 或 ~/.codex。${CODEX_HOME_BOUNDARY_NOTICE} 建议重启 Codex 和 CodexElves。`;
 
 const defaultSettings: BackendSettings = {
   codexAppPath: "",
+  codexHomePath: "",
   codexExtraArgs: [],
   providerSyncEnabled: false,
   providerSyncSavedProviders: [],
@@ -815,6 +825,10 @@ function browserPreviewSettings(): BackendSettings {
 function updateBrowserPreviewSettings(settings: BackendSettings): BackendSettings {
   browserPreviewSettingsState = normalizeSettings(settings);
   return browserPreviewSettingsState;
+}
+
+function browserPreviewCodexHome(settings = browserPreviewSettings()): string {
+  return settings.codexHomePath || "C:\\Users\\junes\\.codex";
 }
 
 function browserPreviewResult<T extends Record<string, unknown>>(payload: T, message = "浏览器预览 mock 数据。"): CommandResult<T> {
@@ -1062,6 +1076,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({
         settings,
         settings_path: "浏览器预览 mock",
+        codex_home: browserPreviewCodexHome(settings),
         user_scripts: { enabled: true, scripts: [] },
       }) as T);
     case "save_settings": {
@@ -1070,6 +1085,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({
         settings: normalized,
         settings_path: "浏览器预览 mock",
+        codex_home: browserPreviewCodexHome(normalized),
         user_scripts: { enabled: true, scripts: [] },
       }, "浏览器预览已保存到内存。") as T);
     }
@@ -1101,8 +1117,8 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       }, "浏览器预览已清空代理日志。") as T);
     case "read_relay_files":
       return Promise.resolve(browserPreviewResult({
-        configPath: "C:\\Users\\junes\\.codex\\config.toml",
-        authPath: "C:\\Users\\junes\\.codex\\auth.json",
+        configPath: `${browserPreviewCodexHome(settings)}\\config.toml`,
+        authPath: `${browserPreviewCodexHome(settings)}\\auth.json`,
         configContents: active.configContents,
         authContents: active.authContents,
       }) as T);
@@ -1112,7 +1128,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({ currentProvider: "custom", targets: [] }) as T);
     case "plugin_marketplace_status":
       return Promise.resolve(browserPreviewResult({
-        codexHome: "C:\\Users\\junes\\.codex",
+        codexHome: browserPreviewCodexHome(settings),
         marketplaceRoot: null,
         configRegistered: true,
         needsRepair: false,
@@ -1174,6 +1190,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({
         settings: normalized,
         settingsPath: "浏览器预览 mock",
+        codexHome: browserPreviewCodexHome(normalized),
         user_scripts: { enabled: true, scripts: [] },
         relay: browserPreviewRelayPayload(),
       }, "浏览器预览已切换供应商。") as T);
@@ -2040,6 +2057,7 @@ export function App() {
         message: result.message,
         settings: selectedSettings,
         settings_path: result.settingsPath,
+        codex_home: result.codexHome,
         user_scripts: result.user_scripts as UserScriptInventory,
       });
       setSettingsForm(selectedSettings);
@@ -2177,6 +2195,24 @@ export function App() {
     return result;
   };
 
+  const saveCodexHomePath = async (codexHomePath: string) => {
+    const next = { ...settingsForm, codexHomePath };
+    const result = await run(() => call<SettingsResult>("save_settings", { settings: next }));
+    if (result) {
+      setSettings(result);
+      setSettingsForm(normalizeSettings(result.settings));
+      await Promise.all([
+        refreshRelay(true),
+        refreshRelayFiles(true),
+        refreshLiveContextEntries(true),
+        refreshLocalSessions(true),
+        refreshProviderSyncTargets(true),
+        checkPluginMarketplacePrompt(),
+      ]);
+    }
+    return result;
+  };
+
   const actions = useMemo(
     () => ({
       refreshCurrent: () => (route === "radar" ? refreshCodexRadar(false, true) : navigate(route)),
@@ -2231,6 +2267,34 @@ export function App() {
           setLaunchForm((current) => ({ ...current, appPath: "" }));
           showNotice("Codex 应用路径", "已清除保存路径，后续启动会回到自动探测。", result.status);
           await refreshOverview(true);
+        }
+      },
+      chooseCodexHomePath: async () => {
+        let selected: unknown;
+        try {
+          selected = await open({ directory: true, multiple: false, title: "选择 Codex 配置目录" });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          showNotice("Codex 配置目录", `打开选择器失败：${message}`, "failed");
+          return;
+        }
+        if (typeof selected === "string" && selected.trim()) {
+          const result = await saveCodexHomePath(selected.trim());
+          if (result) {
+            showNotice("Codex 配置目录", CODEX_HOME_SAVE_NOTICE, result.status);
+          }
+        }
+      },
+      saveCodexHomePath: async (path: string) => {
+        const result = await saveCodexHomePath(path);
+        if (result) {
+          showNotice("Codex 配置目录", CODEX_HOME_SAVE_NOTICE, result.status);
+        }
+      },
+      clearCodexHomePath: async () => {
+        const result = await saveCodexHomePath("");
+        if (result) {
+          showNotice("Codex 配置目录", CODEX_HOME_CLEAR_NOTICE, result.status);
         }
       },
       chooseImageOverlayPath: async () => {
@@ -2469,6 +2533,8 @@ export function App() {
               overview={overview}
               watcher={watcher}
               settings={settings}
+              form={settingsForm}
+              onFormChange={setSettingsForm}
               launchForm={launchForm}
               onLaunchFormChange={setLaunchForm}
               removeOwnedData={removeOwnedData}
@@ -2521,6 +2587,9 @@ type Actions = {
   resetImageOverlaySettings: () => Promise<void>;
   chooseCodexAppPath: (mode: "folder" | "file") => Promise<void>;
   clearCodexAppPath: () => Promise<void>;
+  chooseCodexHomePath: () => Promise<void>;
+  saveCodexHomePath: (path: string) => Promise<void>;
+  clearCodexHomePath: () => Promise<void>;
   chooseImageOverlayPath: () => Promise<void>;
   saveManualCodexAppPath: () => Promise<void>;
   syncProvidersNow: () => Promise<void>;
@@ -3530,7 +3599,7 @@ function EnhanceScreen({
           </div>
           <div className="hint-line">
             <Wrench className="h-4 w-4" />
-            <span>新机器没有本地插件市场时，可从 openai/plugins 初始化到当前 CODEX_HOME。</span>
+            <span>新机器没有本地插件市场时，可从 openai/plugins 初始化到当前配置目录。</span>
             <Button disabled={pluginMarketplaceProgress.active} variant="secondary" onClick={() => void actions.repairPluginMarketplace()}>
               {pluginMarketplaceProgress.active ? "正在修复…" : "修复插件市场"}
             </Button>
@@ -3947,6 +4016,8 @@ function MaintenanceScreen({
   overview,
   watcher,
   settings,
+  form,
+  onFormChange,
   launchForm,
   onLaunchFormChange,
   removeOwnedData,
@@ -3956,6 +4027,8 @@ function MaintenanceScreen({
   overview: OverviewResult | null;
   watcher: WatcherResult | null;
   settings: SettingsResult | null;
+  form: BackendSettings;
+  onFormChange: (value: BackendSettings) => void;
   launchForm: { appPath: string; debugPort: string; helperPort: string };
   onLaunchFormChange: (next: { appPath: string; debugPort: string; helperPort: string }) => void;
   removeOwnedData: boolean;
@@ -3963,6 +4036,8 @@ function MaintenanceScreen({
   actions: Actions;
 }) {
   const savedCodexAppPath = settings?.settings.codexAppPath ?? "";
+  const savedCodexHomePath = settings?.settings.codexHomePath ?? "";
+  const effectiveCodexHomePath = settings?.codex_home ?? "";
   return (
     <>
       <Panel>
@@ -4024,6 +4099,30 @@ function MaintenanceScreen({
             <Button onClick={() => void actions.chooseCodexAppPath("folder")}>选择应用目录</Button>
             <Button variant="secondary" onClick={() => void actions.chooseCodexAppPath("file")}>选择 Codex.exe</Button>
             <Button variant="secondary" onClick={() => void actions.clearCodexAppPath()}>清除保存路径</Button>
+          </Toolbar>
+        </CardContent>
+      </Panel>
+      <Panel>
+        <CardHead title="Codex 配置目录" detail="为空时使用 CODEX_HOME 或系统默认 ~/.codex；设置后 CodexElves 写入的 config.toml、auth.json、codex-elves-model-catalog.json、会话索引和插件市场都会指向此目录" />
+        <CardContent>
+          <div className="status-table">
+            <StatusRow title="当前生效" status={effectiveCodexHomePath ? "ok" : "not_checked"} path={effectiveCodexHomePath || null} />
+            <StatusRow title="保存覆盖" status={savedCodexHomePath ? "ok" : "disabled"} path={savedCodexHomePath || "未覆盖"} />
+          </div>
+          <Field label="保存的配置目录">
+            <Input
+              value={form.codexHomePath}
+              onChange={(event) => onFormChange({ ...form, codexHomePath: event.currentTarget.value })}
+              placeholder={effectiveCodexHomePath || "例如 C:\\Users\\me\\.codex 或 \\\\wsl.localhost\\Ubuntu\\home\\me\\.codex"}
+            />
+          </Field>
+          <p className="field-hint codex-home-warning">
+            只覆盖 CodexElves 修改和生成文件的目录，不会改变 Codex 本体执行时自己读取的配置目录；修改后请重启 Codex 和 CodexElves。
+          </p>
+          <Toolbar>
+            <Button onClick={() => void actions.saveCodexHomePath(form.codexHomePath)}>保存配置目录</Button>
+            <Button onClick={() => void actions.chooseCodexHomePath()}>选择配置目录</Button>
+            <Button variant="secondary" onClick={() => void actions.clearCodexHomePath()}>清除覆盖目录</Button>
           </Toolbar>
         </CardContent>
       </Panel>
@@ -6661,12 +6760,12 @@ function PluginMarketplacePromptDialog({
         <div className="modal-head">
           <div>
             <h2>插件市场需要修复</h2>
-            <p>当前 CODEX_HOME 未发现可用的完整插件市场，API Key 模式下可能出现插件安装后不可用。</p>
+            <p>当前配置目录未发现可用的完整插件市场，API Key 模式下可能出现插件安装后不可用。</p>
           </div>
           <button className="toast-close" onClick={onClose} type="button">×</button>
         </div>
         <div className="metric-list">
-          <Metric label="CODEX_HOME" value={status.codexHome} />
+          <Metric label="配置目录" value={status.codexHome} />
           <Metric label="本地插件市场" value={status.marketplaceRoot ?? "未发现"} />
           <Metric label="配置状态" value={status.configRegistered ? "已注册" : "未注册"} />
         </div>
@@ -7517,6 +7616,7 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
   return syncLegacyRelayFields({
     ...defaultSettings,
     ...settings,
+    codexHomePath: (settings.codexHomePath || "").trim(),
     relayProfilesEnabled: settings.relayProfilesEnabled !== false,
     computerUseGuardEnabled: settings.computerUseGuardEnabled === true,
     codexAppImageOverlayOpacity: clampNumber(settings.codexAppImageOverlayOpacity || 35, 1, 100),

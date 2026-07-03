@@ -245,6 +245,8 @@ pub enum RelayMode {
 pub struct BackendSettings {
     #[serde(rename = "codexAppPath", default)]
     pub codex_app_path: String,
+    #[serde(rename = "codexHomePath", default)]
+    pub codex_home_path: String,
     #[serde(rename = "codexExtraArgs", default)]
     pub codex_extra_args: Vec<String>,
     #[serde(rename = "providerSyncEnabled", default)]
@@ -339,6 +341,7 @@ impl Default for BackendSettings {
     fn default() -> Self {
         Self {
             codex_app_path: String::new(),
+            codex_home_path: String::new(),
             codex_extra_args: Vec::new(),
             provider_sync_enabled: false,
             provider_sync_saved_providers: Vec::new(),
@@ -597,6 +600,10 @@ pub fn normalize_codex_extra_args(args: &[String]) -> Vec<String> {
         .collect()
 }
 
+pub fn normalize_codex_home_path(path: &str) -> String {
+    path.trim().trim_matches('"').trim().to_string()
+}
+
 #[derive(Debug, Clone)]
 pub struct SettingsStore {
     path: PathBuf,
@@ -632,6 +639,7 @@ impl SettingsStore {
 
     pub fn save(&self, settings: &BackendSettings) -> anyhow::Result<()> {
         let mut settings = normalize_settings_config_sections(settings.clone());
+        settings.codex_home_path = normalize_codex_home_path(&settings.codex_home_path);
         settings.codex_extra_args = normalize_codex_extra_args(&settings.codex_extra_args);
         let bytes = serde_json::to_vec_pretty(&settings)?;
         atomic_write(&self.path, &bytes)
@@ -682,6 +690,12 @@ impl SettingsStore {
 fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<String, Value>) {
     if let Some(value) = source.get("codexAppPath").and_then(Value::as_str) {
         target.insert("codexAppPath".to_string(), Value::String(value.to_string()));
+    }
+    if let Some(value) = source.get("codexHomePath").and_then(Value::as_str) {
+        target.insert(
+            "codexHomePath".to_string(),
+            Value::String(normalize_codex_home_path(value)),
+        );
     }
     if let Some(value) = source.get("codexExtraArgs").and_then(Value::as_array) {
         let args = value
@@ -967,6 +981,7 @@ fn normalize_settings_config_sections(mut settings: BackendSettings) -> BackendS
     for profile in &mut settings.relay_profiles {
         let _ = crate::relay_config::normalize_relay_profile_for_storage(profile);
     }
+    settings.codex_home_path = normalize_codex_home_path(&settings.codex_home_path);
     settings.codex_app_image_overlay_opacity =
         clamp_image_overlay_opacity(settings.codex_app_image_overlay_opacity);
     settings.gpt_reasoning_continuation_max_rounds = clamp_gpt_reasoning_continuation_max_rounds(
@@ -1092,15 +1107,17 @@ mod tests {
         assert!(!settings.cli_wrapper_enabled);
         assert_eq!(settings.cli_wrapper_api_key_env, "CUSTOM_OPENAI_API_KEY");
         assert_eq!(settings.gpt_reasoning_continuation_max_rounds, 3);
+        assert!(settings.codex_home_path.is_empty());
     }
 
     #[test]
     fn settings_deserialize_uses_existing_json_keys() {
         let settings: BackendSettings = serde_json::from_str(
-            r#"{"codexAppPath":"C:\\Portable\\Codex\\app","providerSyncEnabled":true,"codexGoalsEnabled":true,"cliWrapperEnabled":true,"cliWrapperBaseUrl":"https://example.test","cliWrapperApiKey":"sk-test","cliWrapperApiKeyEnv":""}"#,
+            r#"{"codexAppPath":"C:\\Portable\\Codex\\app","codexHomePath":" C:\\Portable\\CodexHome ","providerSyncEnabled":true,"codexGoalsEnabled":true,"cliWrapperEnabled":true,"cliWrapperBaseUrl":"https://example.test","cliWrapperApiKey":"sk-test","cliWrapperApiKeyEnv":""}"#,
         )
         .unwrap();
         assert_eq!(settings.codex_app_path, r"C:\Portable\Codex\app");
+        assert_eq!(settings.codex_home_path, r"C:\Portable\CodexHome");
         assert!(settings.provider_sync_enabled);
         assert!(settings.codex_goals_enabled);
         assert!(settings.cli_wrapper_enabled);
@@ -1692,6 +1709,7 @@ experimental_bearer_token = "sk-existing""#
             .update(json!({
             "providerSyncEnabled": true,
             "codexAppPath": "C:\\Portable\\Codex\\Codex.exe",
+            "codexHomePath": " C:\\Portable\\CodexHome ",
             "enhancementsEnabled": false,
             "codexAppPluginEntryUnlock": false,
             "codexAppSessionDelete": false,
@@ -1708,6 +1726,7 @@ experimental_bearer_token = "sk-existing""#
 
         assert!(updated.provider_sync_enabled);
         assert_eq!(updated.codex_app_path, r"C:\Portable\Codex\Codex.exe");
+        assert_eq!(updated.codex_home_path, r"C:\Portable\CodexHome");
         assert!(!updated.enhancements_enabled);
         assert!(!updated.codex_app_plugin_entry_unlock);
         assert!(!updated.codex_app_session_delete);

@@ -2791,6 +2791,11 @@ body {
   font-size: 12px;
 }
 
+.codex-home-warning {
+  color: hsl(var(--destructive));
+  font-weight: 600;
+}
+
 .form-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

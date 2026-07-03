@@ -53,6 +53,7 @@ pub struct OverviewPayload {
 pub struct SettingsPayload {
     pub settings: BackendSettings,
     pub settings_path: String,
+    pub codex_home: String,
     pub user_scripts: Value,
 }
 
@@ -152,6 +153,7 @@ pub struct RelaySwitchPayload {
     pub settings: BackendSettings,
     pub relay: RelayPayload,
     pub settings_path: String,
+    pub codex_home: String,
     pub user_scripts: Value,
 }
 
@@ -508,6 +510,21 @@ pub fn load_settings() -> CommandResult<SettingsPayload> {
 #[tauri::command]
 pub fn save_settings(settings: BackendSettings) -> CommandResult<SettingsPayload> {
     let settings = normalize_settings_before_save(settings);
+    if let Err(error) = ensure_codex_home_path_ready(&settings) {
+        return failed(
+            &format!("保存设置失败：{error}"),
+            SettingsPayload {
+                codex_home: codex_elves_core::codex_home::codex_home_dir_for_settings(&settings)
+                    .to_string_lossy()
+                    .to_string(),
+                settings,
+                settings_path: codex_elves_core::paths::default_settings_path()
+                    .to_string_lossy()
+                    .to_string(),
+                user_scripts: user_script_inventory(),
+            },
+        );
+    }
     match SettingsStore::default().save(&settings) {
         Ok(()) => {
             let wrapper_message = refresh_cli_wrapper_after_settings_save(&settings);
@@ -520,6 +537,9 @@ pub fn save_settings(settings: BackendSettings) -> CommandResult<SettingsPayload
         Err(error) => failed(
             &format!("保存设置失败：{error}"),
             SettingsPayload {
+                codex_home: codex_elves_core::codex_home::codex_home_dir_for_settings(&settings)
+                    .to_string_lossy()
+                    .to_string(),
                 settings,
                 settings_path: codex_elves_core::paths::default_settings_path()
                     .to_string_lossy()
@@ -610,7 +630,7 @@ pub fn import_ccs_providers() -> CommandResult<SettingsPayload> {
 
 #[tauri::command]
 pub fn list_local_sessions() -> CommandResult<LocalSessionsPayload> {
-    let home = codex_elves_core::codex_sqlite::default_codex_home_dir();
+    let home = saved_codex_home_dir();
     let db_paths = codex_elves_core::codex_sqlite::codex_session_db_paths_from_home(&home);
     let mut sessions = Vec::new();
     let mut errors = Vec::new();
@@ -682,9 +702,9 @@ pub fn delete_local_session(request: DeleteLocalSessionRequest) -> CommandResult
             candidate_paths.push(path);
         }
     }
-    for path in codex_elves_core::codex_sqlite::codex_session_db_paths_from_home(
-        &codex_elves_core::codex_sqlite::default_codex_home_dir(),
-    ) {
+    for path in
+        codex_elves_core::codex_sqlite::codex_session_db_paths_from_home(&saved_codex_home_dir())
+    {
         if !candidate_paths.iter().any(|candidate| candidate == &path) {
             candidate_paths.push(path);
         }
@@ -750,6 +770,8 @@ fn normalize_settings_before_save(mut settings: BackendSettings) -> BackendSetti
     {
         settings.codex_app_path = path.to_string_lossy().to_string();
     }
+    settings.codex_home_path =
+        codex_elves_core::settings::normalize_codex_home_path(&settings.codex_home_path);
     settings.relay_common_config_contents =
         codex_elves_core::relay_config::sanitize_common_config_contents(
             &settings.relay_common_config_contents,
@@ -807,6 +829,24 @@ fn normalize_settings_before_save(mut settings: BackendSettings) -> BackendSetti
         .trim()
         .to_string();
     settings
+}
+
+fn ensure_codex_home_path_ready(settings: &BackendSettings) -> anyhow::Result<()> {
+    let Some(home) = codex_elves_core::codex_home::configured_codex_home_dir(settings) else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(&home).map_err(|error| {
+        anyhow::anyhow!(
+            "创建 Codex 配置目录 {} 失败：{error}",
+            home.to_string_lossy()
+        )
+    })?;
+    let probe = home.join(".codex-elves-write-test.tmp");
+    std::fs::write(&probe, b"ok").map_err(|error| {
+        anyhow::anyhow!("Codex 配置目录 {} 不可写：{error}", home.to_string_lossy())
+    })?;
+    let _ = std::fs::remove_file(probe);
+    Ok(())
 }
 
 fn normalize_provider_sync_provider_list(values: Vec<String>) -> Vec<String> {
@@ -986,13 +1026,20 @@ fn ensure_text_newline(value: &str) -> String {
     }
 }
 
+fn saved_codex_home_dir() -> PathBuf {
+    let settings = SettingsStore::default().load().unwrap_or_default();
+    codex_elves_core::codex_home::codex_home_dir_for_settings(&settings)
+}
+
 #[tauri::command]
 pub async fn load_provider_sync_targets() -> CommandResult<Value> {
     let settings = SettingsStore::default().load().unwrap_or_default();
-    let result =
-        tauri::async_runtime::spawn_blocking(|| codex_elves_data::load_provider_sync_targets(None))
-            .await
-            .map_err(|error| anyhow::anyhow!("provider target discovery task failed: {error}"));
+    let home = codex_elves_core::codex_home::codex_home_dir_for_settings(&settings);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        codex_elves_data::load_provider_sync_targets(Some(&home))
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("provider target discovery task failed: {error}"));
     match result {
         Ok(mut targets) => {
             let manual = settings
@@ -1058,12 +1105,14 @@ fn merge_manual_provider_sync_targets(
 
 #[tauri::command]
 pub async fn sync_providers_now(target_provider: Option<String>) -> CommandResult<Value> {
+    let settings = SettingsStore::default().load().unwrap_or_default();
     let target_provider = target_provider
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let target_for_settings = target_provider.clone();
+    let home = codex_elves_core::codex_home::codex_home_dir_for_settings(&settings);
     let result = tauri::async_runtime::spawn_blocking(move || {
-        codex_elves_data::run_provider_sync_with_target(None, target_provider.as_deref())
+        codex_elves_data::run_provider_sync_with_target(Some(&home), target_provider.as_deref())
     })
     .await
     .map_err(|error| anyhow::anyhow!("provider sync task failed: {error}"));
@@ -1363,7 +1412,7 @@ pub fn repair_backend() -> CommandResult<SettingsPayload> {
 
 #[tauri::command]
 pub fn plugin_marketplace_status() -> CommandResult<PluginMarketplaceStatusPayload> {
-    let home = codex_elves_core::codex_home::default_codex_home_dir();
+    let home = saved_codex_home_dir();
     let status = codex_elves_core::plugin_marketplace::openai_curated_marketplace_status(&home);
     ok(
         if status.needs_repair() {
@@ -1385,7 +1434,7 @@ pub fn plugin_marketplace_status() -> CommandResult<PluginMarketplaceStatusPaylo
 
 #[tauri::command]
 pub async fn repair_plugin_marketplace() -> CommandResult<PluginMarketplaceRepairPayload> {
-    let home = codex_elves_core::codex_home::default_codex_home_dir();
+    let home = saved_codex_home_dir();
     match codex_elves_core::plugin_marketplace::initialize_openai_curated_marketplace_and_configure(
         &home,
     )
@@ -1727,6 +1776,9 @@ pub fn reset_settings() -> CommandResult<SettingsPayload> {
         Err(error) => failed(
             &format!("重置设置失败：{error}"),
             SettingsPayload {
+                codex_home: codex_elves_core::codex_home::codex_home_dir_for_settings(&settings)
+                    .to_string_lossy()
+                    .to_string(),
                 settings,
                 settings_path: codex_elves_core::paths::default_settings_path()
                     .to_string_lossy()
@@ -1751,6 +1803,9 @@ pub fn reset_image_overlay_settings() -> CommandResult<SettingsPayload> {
         Err(error) => failed(
             &format!("重置图片覆盖层失败：{error}"),
             SettingsPayload {
+                codex_home: codex_elves_core::codex_home::codex_home_dir_for_settings(&settings)
+                    .to_string_lossy()
+                    .to_string(),
                 settings,
                 settings_path: codex_elves_core::paths::default_settings_path()
                     .to_string_lossy()
@@ -1774,7 +1829,7 @@ pub fn relay_status() -> CommandResult<RelayPayload> {
 
 #[tauri::command]
 pub fn read_relay_files() -> CommandResult<RelayFilesPayload> {
-    let home = codex_elves_core::relay_config::default_codex_home_dir();
+    let home = saved_codex_home_dir();
     match relay_files_payload_from_home(&home) {
         Ok(payload) => ok("配置文件内容已读取。", payload),
         Err(error) => failed(
@@ -1830,7 +1885,7 @@ pub fn remove_env_conflicts(
 
 #[tauri::command]
 pub fn save_relay_file(request: SaveRelayFileRequest) -> CommandResult<RelayFilesPayload> {
-    let home = codex_elves_core::relay_config::default_codex_home_dir();
+    let home = saved_codex_home_dir();
     match save_relay_file_in_home(&home, &request.kind, &request.contents)
         .and_then(|_| relay_files_payload_from_home(&home))
     {
@@ -1870,10 +1925,10 @@ pub fn switch_relay_profile(
             ),
         );
     };
-    let home = codex_elves_core::relay_config::default_codex_home_dir();
     let store = SettingsStore::default();
     let previous_active_relay_id = request.previous_active_relay_id;
     let settings = normalize_settings_before_save(request.settings);
+    let home = codex_elves_core::codex_home::codex_home_dir_for_settings(&settings);
     log_manager_event(
         "manager.switch_relay_profile.start",
         json!({
@@ -1934,8 +1989,8 @@ pub fn write_diagnostic_event(event: String, detail: Value) -> CommandResult<Val
 pub fn backfill_relay_profile_from_live(
     request: BackfillRelayProfileRequest,
 ) -> CommandResult<SettingsBackfillPayload> {
-    let home = codex_elves_core::relay_config::default_codex_home_dir();
     let mut settings = request.settings;
+    let home = codex_elves_core::codex_home::codex_home_dir_for_settings(&settings);
     let requested_profile_id = request.profile_id.clone();
     log_manager_event(
         "manager.backfill_relay_profile_from_live.start",
@@ -2020,7 +2075,7 @@ pub fn list_context_entries(
 
 #[tauri::command]
 pub fn read_live_context_entries() -> CommandResult<LiveContextEntriesPayload> {
-    let home = codex_elves_core::relay_config::default_codex_home_dir();
+    let home = saved_codex_home_dir();
     let config_path = home.join("config.toml");
     let config = read_optional_text_file(&config_path).unwrap_or_default();
     match codex_elves_core::relay_config::list_context_entries_from_common_config(&config) {
@@ -2064,7 +2119,7 @@ pub fn upsert_context_entry(request: ContextEntryRequest) -> CommandResult<Conte
 pub fn sync_live_context_entries(
     request: SyncLiveContextEntriesRequest,
 ) -> CommandResult<LiveContextEntriesPayload> {
-    let home = codex_elves_core::relay_config::default_codex_home_dir();
+    let home = codex_elves_core::codex_home::codex_home_dir_for_settings(&request.settings);
     let config_path = home.join("config.toml");
     let current_config = match read_optional_text_file(&config_path) {
         Ok(config) => config,
@@ -2237,8 +2292,8 @@ pub async fn fetch_relay_profile_models(
 
 #[tauri::command]
 pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
-    let home = codex_elves_core::relay_config::default_codex_home_dir();
     let settings = SettingsStore::default().load().unwrap_or_default();
+    let home = codex_elves_core::codex_home::codex_home_dir_for_settings(&settings);
     if !settings.relay_profiles_enabled {
         let status = codex_elves_core::relay_config::relay_status_from_home(&home);
         return failed(
@@ -2378,8 +2433,8 @@ fn apply_aggregate_relay_injection_to_home(home: &Path) -> CommandResult<RelayPa
 
 #[tauri::command]
 pub fn apply_pure_api_injection() -> CommandResult<RelayPayload> {
-    let home = codex_elves_core::relay_config::default_codex_home_dir();
     let settings = SettingsStore::default().load().unwrap_or_default();
+    let home = codex_elves_core::codex_home::codex_home_dir_for_settings(&settings);
     if !settings.relay_profiles_enabled {
         let status = codex_elves_core::relay_config::relay_status_from_home(&home);
         return failed(
@@ -2485,8 +2540,8 @@ pub fn apply_pure_api_injection() -> CommandResult<RelayPayload> {
 
 #[tauri::command]
 pub fn clear_relay_injection() -> CommandResult<RelayPayload> {
-    let home = codex_elves_core::relay_config::default_codex_home_dir();
     let settings = SettingsStore::default().load().unwrap_or_default();
+    let home = codex_elves_core::codex_home::codex_home_dir_for_settings(&settings);
     let relay = settings.active_relay_profile();
     log_manager_event("manager.clear_relay_injection.start", json!({}));
     let auth_contents = (relay.relay_mode == codex_elves_core::settings::RelayMode::Official
@@ -2620,7 +2675,7 @@ fn sync_applied_model_catalog_after_settings_save(settings: &BackendSettings) ->
     if !settings.relay_profiles_enabled || settings.active_aggregate_relay_profile().is_some() {
         return String::new();
     }
-    let home = codex_elves_core::relay_config::default_codex_home_dir();
+    let home = codex_elves_core::codex_home::codex_home_dir_for_settings(settings);
     let relay = settings.active_relay_profile();
     match codex_elves_core::relay_config::sync_applied_relay_profile_model_catalog_to_home(
         &home, &relay,
@@ -2652,12 +2707,16 @@ fn relay_switch_payload(
     status: codex_elves_core::relay_config::RelayStatus,
     backup_path: Option<String>,
 ) -> RelaySwitchPayload {
+    let codex_home = codex_elves_core::codex_home::codex_home_dir_for_settings(&settings)
+        .to_string_lossy()
+        .to_string();
     RelaySwitchPayload {
         settings,
         relay: relay_payload(status, backup_path),
         settings_path: codex_elves_core::paths::default_settings_path()
             .to_string_lossy()
             .to_string(),
+        codex_home,
         user_scripts: user_script_inventory(),
     }
 }
@@ -2740,6 +2799,9 @@ fn settings_payload_value() -> Result<SettingsPayload, (anyhow::Error, SettingsP
         .to_string();
     match store.load() {
         Ok(settings) => Ok(SettingsPayload {
+            codex_home: codex_elves_core::codex_home::codex_home_dir_for_settings(&settings)
+                .to_string_lossy()
+                .to_string(),
             settings,
             settings_path,
             user_scripts: user_script_inventory(),
@@ -2748,6 +2810,9 @@ fn settings_payload_value() -> Result<SettingsPayload, (anyhow::Error, SettingsP
             error,
             SettingsPayload {
                 settings: BackendSettings::default(),
+                codex_home: codex_elves_core::codex_home::default_codex_home_dir()
+                    .to_string_lossy()
+                    .to_string(),
                 settings_path,
                 user_scripts: user_script_inventory(),
             },
@@ -2756,8 +2821,12 @@ fn settings_payload_value() -> Result<SettingsPayload, (anyhow::Error, SettingsP
 }
 
 fn fallback_settings_payload() -> SettingsPayload {
+    let settings = SettingsStore::default().load().unwrap_or_default();
     SettingsPayload {
-        settings: SettingsStore::default().load().unwrap_or_default(),
+        codex_home: codex_elves_core::codex_home::codex_home_dir_for_settings(&settings)
+            .to_string_lossy()
+            .to_string(),
+        settings,
         settings_path: codex_elves_core::paths::default_settings_path()
             .to_string_lossy()
             .to_string(),
