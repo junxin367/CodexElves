@@ -205,10 +205,13 @@ fn switch_to_aggregate_relay_allows_empty_config_snapshot() {
 
     let result = switch_relay_profile_in_home(&store, &home, next, "api").unwrap();
     let live = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    let auth = std::fs::read_to_string(home.join("auth.json")).unwrap();
 
     assert!(result.configured);
     assert_eq!(store.load().unwrap().active_relay_id, "agg");
     assert!(live.contains(r#"base_url = "http://127.0.0.1:45221/v1""#));
+    assert!(live.contains(r#"experimental_bearer_token = "codex-elves-aggregate""#));
+    assert!(auth.contains(r#""OPENAI_API_KEY": "codex-elves-aggregate""#));
 }
 
 #[test]

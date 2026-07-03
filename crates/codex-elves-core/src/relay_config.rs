@@ -397,7 +397,10 @@ pub fn apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard(
     let config_with_catalog =
         apply_relay_profile_owned_fields_to_config(home, &live_config, profile)?;
 
-    if profile.relay_mode == crate::settings::RelayMode::PureApi {
+    if matches!(
+        profile.relay_mode,
+        crate::settings::RelayMode::PureApi | crate::settings::RelayMode::Aggregate
+    ) {
         let api_key = relay_profile_owned_api_key(profile);
         if api_key.trim().is_empty() {
             anyhow::bail!("供应商 API Key 不能为空");
