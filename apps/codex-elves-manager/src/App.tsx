@@ -7055,6 +7055,7 @@ function RelayContextManager({
       {editor ? (
         <ContextEntryEditor
           entry={editor.entry}
+          installedIds={new Set(contextEntriesByKind(entries, editor.kind).map((item) => item.id))}
           kind={editor.kind}
           remoteOptions={remoteContextOptions}
           onCancel={() => setEditor(null)}
@@ -7068,12 +7069,14 @@ function RelayContextManager({
 function ContextEntryEditor({
   kind,
   entry,
+  installedIds,
   remoteOptions,
   onCancel,
   onSave,
 }: {
   kind: ContextKind;
   entry?: CodexContextEntry;
+  installedIds: Set<string>;
   remoteOptions: RemoteContextOption[];
   onCancel: () => void;
   onSave: (kind: ContextKind, id: string, tomlBody: string) => void;
@@ -7108,7 +7111,20 @@ function ContextEntryEditor({
     }
   };
 
-  return (
+  useEffect(() => {
+    const screens = Array.from(document.querySelectorAll<HTMLElement>(".screen"));
+    const previousOverflow = screens.map((screen) => screen.style.overflow);
+    screens.forEach((screen) => {
+      screen.style.overflow = "hidden";
+    });
+    return () => {
+      screens.forEach((screen, index) => {
+        screen.style.overflow = previousOverflow[index] ?? "";
+      });
+    };
+  }, []);
+
+  return createPortal(
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="modal-card context-editor-modal">
         <div className="modal-head">
@@ -7116,7 +7132,7 @@ function ContextEntryEditor({
             <h2>{entry ? `编辑${contextKindLabel(draftKind)}` : `新增${contextKindLabel(draftKind)}`}</h2>
             <p>
               {isRemoteInstall
-                ? "从已释放的官方远端插件缓存中选择一项，点击安装后会直接写入配置并同步到当前 Codex 配置目录。"
+                ? "选择官方远端缓存项，点击安装后写入当前 Codex 配置。"
                 : "填写扩展项 ID 和 TOML 配置体，保存后会同步到当前 Codex 配置目录。"}
             </p>
           </div>
@@ -7128,6 +7144,7 @@ function ContextEntryEditor({
               <Search className="h-4 w-4" />
               <Input
                 aria-label={`搜索${contextKindLabel(draftKind)}`}
+                className="remote-context-install-input"
                 value={remoteSearch}
                 onChange={(event) => setRemoteSearch(event.currentTarget.value)}
                 placeholder={`搜索${contextKindLabel(draftKind)}名称、插件、分类或描述`}
@@ -7137,24 +7154,30 @@ function ContextEntryEditor({
             <div className="remote-context-install-list">
               {availableRemoteOptions.length ? (
                 filteredRemoteOptions.length ? (
-                  filteredRemoteOptions.map((option) => (
-                    <div
-                      className="remote-context-install-item"
-                      key={`${option.kind}-${option.id}`}
-                    >
-                      <div className="remote-context-install-copy">
-                        <RemoteContextOptionLabel option={option} />
-                        <small>{option.description || "无描述"}</small>
-                      </div>
-                      <Button
-                        className="remote-context-install-button"
-                        onClick={() => onSave(option.kind, option.id, option.tomlBody)}
-                        size="sm"
+                  filteredRemoteOptions.map((option) => {
+                    const installed = installedIds.has(option.id);
+                    return (
+                      <div
+                        className={`remote-context-install-item ${installed ? "installed" : ""}`}
+                        key={`${option.kind}-${option.id}`}
                       >
-                        安装
-                      </Button>
-                    </div>
-                  ))
+                        <div className="remote-context-install-copy">
+                          <RemoteContextOptionLabel option={option} />
+                          <small>{option.description || "无描述"}</small>
+                        </div>
+                        <Button
+                          className="remote-context-install-button"
+                          disabled={installed}
+                          onClick={() => onSave(option.kind, option.id, option.tomlBody)}
+                          size="sm"
+                          title={installed ? "已安装到当前配置" : "安装到当前配置"}
+                          variant={installed ? "secondary" : "default"}
+                        >
+                          {installed ? "已安装" : "安装"}
+                        </Button>
+                      </div>
+                    );
+                  })
                 ) : (
                   <div className="empty">没有匹配“{remoteSearch.trim()}”的{contextKindLabel(draftKind)}。</div>
                 )
@@ -7203,7 +7226,8 @@ function ContextEntryEditor({
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
