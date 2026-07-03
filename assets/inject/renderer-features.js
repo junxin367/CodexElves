@@ -7371,7 +7371,7 @@
       sidebar: true,
       conversation: true,
       header: true,
-      plugins: false,
+      plugins: pluginAutoExpandPageLooksRelevant(),
       shell: false,
     };
   }
@@ -7613,6 +7613,7 @@
 
   function shouldScheduleScan(mutations) {
     if (!mutations) return true;
+    if (codexElvesSettings().pluginAutoExpand && pluginAutoExpandPageLooksRelevant()) return true;
     return mutations.some((mutation) => {
       if (isChatContentMutation(mutation)) return false;
       const target = mutation.target;
@@ -7625,6 +7626,7 @@
 
   function runScheduledScan() {
     const dirty = window.__codexSessionDeleteScanDirty || allScanDirty();
+    if (pluginAutoExpandPageLooksRelevant()) dirty.plugins = true;
     window.__codexSessionDeleteScanPending = false;
     window.__codexSessionDeleteScanDirty = emptyScanDirty();
     clearTimeout(window.__codexSessionDeleteScanTimer);

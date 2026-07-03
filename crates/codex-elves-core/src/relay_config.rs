@@ -1610,6 +1610,17 @@ fn write_codex_live_atomic(
     #[cfg(windows)]
     let config_text = guarded_config_text.as_deref();
 
+    let config_text = match config_text {
+        Some(config_text) => Some(
+            crate::plugin_marketplace::preserve_openai_curated_remote_marketplace_config(
+                home,
+                config_text,
+            )?,
+        ),
+        None => None,
+    };
+    let config_text = config_text.as_deref();
+
     if let Some(config_text) = config_text {
         validate_toml_config(config_text, &config_path)?;
     }

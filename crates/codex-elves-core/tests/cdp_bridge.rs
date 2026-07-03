@@ -169,6 +169,13 @@ fn injection_script_exposes_plugin_list_auto_expand_switch() {
     assert!(script.contains("pluginAutoExpand: \"codexAppPluginAutoExpand\""));
     assert!(script.contains("function pluginAutoExpandButtonLooksLikeMore"));
     assert!(script.contains("function schedulePluginAutoExpand"));
+    assert!(script.contains("plugins: pluginAutoExpandPageLooksRelevant()"));
+    assert!(
+        script.contains(
+            "codexElvesSettings().pluginAutoExpand && pluginAutoExpandPageLooksRelevant()"
+        )
+    );
+    assert!(script.contains("if (pluginAutoExpandPageLooksRelevant()) dirty.plugins = true"));
     assert!(script.contains("plugin_auto_expand_finished"));
     assert!(script.contains("插件列表全量展示"));
     assert!(script.contains("data-codex-elves-setting=\"pluginAutoExpand\""));
