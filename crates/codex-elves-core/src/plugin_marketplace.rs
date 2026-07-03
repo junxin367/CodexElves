@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 
@@ -70,7 +71,9 @@ pub fn plugin_cache_info(home: &Path, plugin_id: &str) -> PluginCacheInfo {
         .as_ref()
         .map(|source| source.root.to_string_lossy().to_string());
     let (can_refresh, refresh_reason) = match (&source, &source_version) {
-        (Some(_), Some(_)) => (true, "可从本地 marketplace source 重建缓存。".to_string()),
+        (Some(_), Some(source_version)) => {
+            plugin_refresh_state(current_version.as_deref(), source_version)
+        }
         (Some(_), None) => (
             false,
             "本地 source 缺少 .codex-plugin/plugin.json 或 version。".to_string(),
@@ -105,6 +108,14 @@ pub fn force_refresh_plugin_cache(home: &Path, plugin_id: &str) -> anyhow::Resul
         .clone()
         .ok_or_else(|| anyhow::anyhow!("本地 source 缺少 .codex-plugin/plugin.json 或 version"))?;
     let cache_root = plugin_cache_root(home, &marketplace, &name);
+    let current_version = cached_plugin_versions(&cache_root).last().cloned();
+    if let Some(current_version) = current_version.as_deref()
+        && compare_plugin_versions(&version, current_version) == Ordering::Less
+    {
+        anyhow::bail!(
+            "源版本 {version} 低于当前缓存版本 {current_version}，强制刷新会降级，已阻止"
+        );
+    }
     std::fs::create_dir_all(&cache_root)
         .with_context(|| format!("failed to create {}", cache_root.display()))?;
     let staging = cache_root.join(format!(
@@ -563,9 +574,91 @@ fn cached_plugin_versions(cache_root: &Path) -> Vec<String> {
             Some(version)
         })
         .collect::<Vec<_>>();
-    versions.sort();
+    versions.sort_by(|left, right| compare_plugin_versions(left, right));
     versions.dedup();
     versions
+}
+
+fn plugin_refresh_state(current_version: Option<&str>, source_version: &str) -> (bool, String) {
+    let Some(current_version) = current_version else {
+        return (
+            true,
+            "未缓存，可从本地 marketplace source 生成缓存。".to_string(),
+        );
+    };
+    match compare_plugin_versions(source_version, current_version) {
+        Ordering::Less => (
+            false,
+            "源版本低于缓存版本，强制刷新会降级，已阻止。".to_string(),
+        ),
+        Ordering::Equal => (true, "可从本地 marketplace source 重建缓存。".to_string()),
+        Ordering::Greater => (true, "源版本更高，可强制刷新缓存。".to_string()),
+    }
+}
+
+fn compare_plugin_versions(left: &str, right: &str) -> Ordering {
+    let (left_core, left_pre) = split_plugin_version(left);
+    let (right_core, right_pre) = split_plugin_version(right);
+    let core_order = compare_version_core(left_core, right_core);
+    if core_order != Ordering::Equal {
+        return core_order;
+    }
+    match (left_pre, right_pre) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(left_pre), Some(right_pre)) => compare_prerelease(left_pre, right_pre),
+    }
+}
+
+fn split_plugin_version(version: &str) -> (&str, Option<&str>) {
+    version
+        .split_once('-')
+        .map(|(core, prerelease)| (core, Some(prerelease)))
+        .unwrap_or((version, None))
+}
+
+fn compare_version_core(left: &str, right: &str) -> Ordering {
+    let left_parts = left.split('.').collect::<Vec<_>>();
+    let right_parts = right.split('.').collect::<Vec<_>>();
+    let max_len = left_parts.len().max(right_parts.len());
+    for index in 0..max_len {
+        let left_part = left_parts.get(index).copied().unwrap_or("0");
+        let right_part = right_parts.get(index).copied().unwrap_or("0");
+        let order = compare_version_identifier(left_part, right_part);
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+    Ordering::Equal
+}
+
+fn compare_prerelease(left: &str, right: &str) -> Ordering {
+    let left_parts = left.split('.').collect::<Vec<_>>();
+    let right_parts = right.split('.').collect::<Vec<_>>();
+    let max_len = left_parts.len().max(right_parts.len());
+    for index in 0..max_len {
+        let Some(left_part) = left_parts.get(index).copied() else {
+            return Ordering::Less;
+        };
+        let Some(right_part) = right_parts.get(index).copied() else {
+            return Ordering::Greater;
+        };
+        let order = compare_version_identifier(left_part, right_part);
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+    Ordering::Equal
+}
+
+fn compare_version_identifier(left: &str, right: &str) -> Ordering {
+    match (left.parse::<u64>(), right.parse::<u64>()) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        (Ok(_), Err(_)) => Ordering::Less,
+        (Err(_), Ok(_)) => Ordering::Greater,
+        (Err(_), Err(_)) => left.cmp(right),
+    }
 }
 
 fn local_plugin_source(
@@ -949,6 +1042,35 @@ enabled = true
     }
 
     #[test]
+    fn plugin_cache_info_blocks_refresh_when_source_version_is_lower() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let source = temp.path().join("marketplace");
+        std::fs::create_dir_all(&home).unwrap();
+        write_local_plugin_marketplace(&home, &source, "0.1.2-alpha.6", "source");
+        let cache = home
+            .join("plugins")
+            .join("cache")
+            .join("zeroone")
+            .join("zeroone")
+            .join("0.1.2-alpha.7");
+        std::fs::create_dir_all(cache.join(".codex-plugin")).unwrap();
+        std::fs::write(
+            cache.join(".codex-plugin").join("plugin.json"),
+            r#"{"name":"zeroone","version":"0.1.2-alpha.7"}"#,
+        )
+        .unwrap();
+
+        let info = plugin_cache_info(&home, "zeroone@zeroone");
+
+        assert!(info.cached);
+        assert_eq!(info.current_version.as_deref(), Some("0.1.2-alpha.7"));
+        assert_eq!(info.source_version.as_deref(), Some("0.1.2-alpha.6"));
+        assert!(!info.can_refresh);
+        assert!(info.refresh_reason.contains("降级"));
+    }
+
+    #[test]
     fn force_refresh_plugin_cache_rebuilds_cache_from_local_source() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
@@ -975,6 +1097,36 @@ enabled = true
         assert_eq!(
             std::fs::read_to_string(cache.join("marker.txt")).unwrap(),
             "fresh"
+        );
+    }
+
+    #[test]
+    fn force_refresh_plugin_cache_rejects_lower_source_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let source = temp.path().join("marketplace");
+        std::fs::create_dir_all(&home).unwrap();
+        write_local_plugin_marketplace(&home, &source, "0.1.2-alpha.6", "fresh");
+        let cache = home
+            .join("plugins")
+            .join("cache")
+            .join("zeroone")
+            .join("zeroone")
+            .join("0.1.2-alpha.7");
+        std::fs::create_dir_all(cache.join(".codex-plugin")).unwrap();
+        std::fs::write(
+            cache.join(".codex-plugin").join("plugin.json"),
+            r#"{"name":"zeroone","version":"0.1.2-alpha.7"}"#,
+        )
+        .unwrap();
+        std::fs::write(cache.join("marker.txt"), "keep").unwrap();
+
+        let error = force_refresh_plugin_cache(&home, "zeroone@zeroone").unwrap_err();
+
+        assert!(error.to_string().contains("降级"));
+        assert_eq!(
+            std::fs::read_to_string(cache.join("marker.txt")).unwrap(),
+            "keep"
         );
     }
 }

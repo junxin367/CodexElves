@@ -665,7 +665,8 @@ body {
   font-size: 12px;
 }
 
-.maintenance-saved-app-path {
+.maintenance-saved-app-path,
+.maintenance-saved-config-path {
   margin-top: 14px;
 }
 
@@ -1044,7 +1045,7 @@ body {
   inset: 0;
   display: grid;
   align-content: start;
-  gap: 14px;
+  gap: 20px;
   overflow: auto;
   background: hsl(var(--shell-bg));
   scrollbar-gutter: stable;
@@ -1076,7 +1077,7 @@ body {
   border: 1px solid hsl(var(--border));
   border-radius: 8px;
   background: hsl(var(--background));
-  margin: 16px 20px 0;
+  margin: 0 20px;
   padding: 14px;
   animation: relay-editor-enter 260ms var(--motion-ease) 40ms both;
   transition:
@@ -1229,6 +1230,16 @@ body {
 
 .aggregate-fields {
   margin-top: 0;
+}
+
+.aggregate-fields .relay-field-name,
+.aggregate-fields .aggregate-strategy-field {
+  grid-column: auto;
+}
+
+.aggregate-fields .relay-field-name input {
+  height: 40px;
+  min-height: 40px;
 }
 
 .relay-field-name {
@@ -1893,6 +1904,40 @@ body {
   align-items: start;
 }
 
+.aggregate-impact-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.aggregate-impact-grid .relay-file-panel {
+  gap: 8px;
+  padding: 12px;
+}
+
+.aggregate-impact-grid .relay-impact-summary {
+  padding: 6px 10px;
+}
+
+.aggregate-impact-grid .relay-impact-groups {
+  gap: 8px;
+}
+
+.aggregate-impact-grid .relay-impact-group-head {
+  padding: 6px 10px;
+}
+
+.aggregate-impact-grid .relay-impact-table-head {
+  padding: 5px 10px;
+}
+
+.aggregate-impact-grid .relay-impact-row {
+  padding: 6px 10px 6px 12px;
+}
+
+.aggregate-impact-grid .relay-impact-row::before {
+  top: 8px;
+  bottom: 8px;
+}
+
 .relay-file-grid.three {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   margin-top: 12px;
@@ -2278,7 +2323,20 @@ body {
 }
 
 .aggregate-strategy-option {
-  min-height: 118px;
+  align-content: start;
+  gap: 4px;
+  min-height: 86px;
+  padding: 10px 12px;
+}
+
+.aggregate-strategy-option strong {
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.aggregate-strategy-option span {
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .aggregate-members {
@@ -2345,10 +2403,6 @@ body {
 
 .aggregate-weight-box input {
   min-height: 34px;
-}
-
-.aggregate-preview {
-  margin-top: 0;
 }
 
 .metric-list div,
@@ -2632,8 +2686,18 @@ body {
   line-height: 1.5;
 }
 
-.plugin-marketplace-modal .metric-list {
+.codex-home-restart-modal .metric-list,
+.plugin-marketplace-modal .metric-list,
+.plugin-cache-refresh-modal .metric-list {
   margin-bottom: 12px;
+}
+
+.modal-note {
+  margin: 0 0 14px;
+  color: hsl(var(--destructive));
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.55;
 }
 
 .system-prompt-modal {

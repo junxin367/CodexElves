@@ -693,10 +693,6 @@ const routes: Array<{ id: Route; label: string; icon: LucideIcon; badge?: string
 const LOCAL_PROXY_LOG_PAGE_SIZE = 6;
 const CODEX_HOME_BOUNDARY_NOTICE =
   "CodexElves 只覆盖自己读写配置的目录，不改变 Codex 本体执行时默认读取目录；如需 Codex 本体读取此目录，请通过它自己的 CODEX_HOME/启动环境处理。";
-const CODEX_HOME_SAVE_NOTICE =
-  `${CODEX_HOME_BOUNDARY_NOTICE} 保存后请重启 Codex 和 CodexElves，再确认会话索引、插件和模型目录状态。`;
-const CODEX_HOME_CLEAR_NOTICE =
-  `已清除覆盖目录，后续回到 CODEX_HOME 或 ~/.codex。${CODEX_HOME_BOUNDARY_NOTICE} 建议重启 Codex 和 CodexElves。`;
 const BROWSER_PREVIEW_CONTEXT_CONFIG = [
   "[mcp_servers.context7]",
   'command = "npx"',
@@ -887,6 +883,21 @@ function browserPreviewContextEntries(settings = browserPreviewSettings()): Code
 function browserPreviewPluginCacheInfos(settings = browserPreviewSettings()): PluginCacheInfo[] {
   return browserPreviewContextEntries(settings).plugins.map((entry) => {
     const [name = entry.id, marketplace = "local"] = entry.id.split("@");
+    if (entry.id === "browser@openai-bundled") {
+      return {
+        id: entry.id,
+        name,
+        marketplace,
+        cached: true,
+        cachedVersions: ["26.623.81905"],
+        currentVersion: "26.623.81905",
+        sourceVersion: "26.609.30741",
+        cachePath: `${browserPreviewCodexHome(settings)}\\plugins\\cache\\${marketplace}\\${name}\\26.623.81905`,
+        sourcePath: `浏览器预览 marketplace\\${name}`,
+        canRefresh: false,
+        refreshReason: "源版本低于缓存版本，强制刷新会降级，已阻止。",
+      };
+    }
     if (entry.id === "chrome@openai-bundled") {
       return {
         id: entry.id,
@@ -1328,7 +1339,21 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
     case "force_refresh_plugin_cache": {
       const request = args?.request as { pluginId?: unknown } | undefined;
       const pluginId = typeof request?.pluginId === "string" ? request.pluginId : "";
-      const plugin = browserPreviewPluginCacheInfos(settings).find((item) => item.id === pluginId) ?? browserPreviewPluginCacheInfos(settings)[0];
+      const plugins = browserPreviewPluginCacheInfos(settings);
+      const plugin = plugins.find((item) => item.id === pluginId) ?? plugins[0];
+      if (!plugin) {
+        return Promise.resolve({
+          status: "failed",
+          message: "浏览器预览未找到插件缓存信息。",
+        } as T);
+      }
+      if (!plugin.canRefresh) {
+        return Promise.resolve({
+          status: "failed",
+          message: plugin.refreshReason || "当前插件不能强制刷新缓存。",
+          plugin,
+        } as T);
+      }
       return Promise.resolve(browserPreviewResult({
         plugin,
       }, "浏览器预览已强制刷新插件缓存。") as T);
@@ -1426,6 +1451,13 @@ export function App() {
   const [localSessions, setLocalSessions] = useState<LocalSessionsResult | null>(null);
   const [liveContextEntries, setLiveContextEntries] = useState<CodexContextEntries | null>(null);
   const [pluginCacheInfos, setPluginCacheInfos] = useState<PluginCacheInfo[]>([]);
+  const [pluginCacheRefreshConfirm, setPluginCacheRefreshConfirm] = useState<PluginCacheInfo | null>(null);
+  const [pluginCacheRefreshActive, setPluginCacheRefreshActive] = useState(false);
+  const [codexHomeRestartPrompt, setCodexHomeRestartPrompt] = useState<{
+    codexHomePath: string;
+    effectiveCodexHome: string;
+  } | null>(null);
+  const [codexHomeRestartActive, setCodexHomeRestartActive] = useState(false);
   const [logs, setLogs] = useState<LogsResult | null>(null);
   const [localProxyStatus, setLocalProxyStatus] = useState<LocalProxyStatusResult | null>(null);
   const [localProxyLogs, setLocalProxyLogs] = useState<LocalProxyLogsResult | null>(null);
@@ -1695,14 +1727,32 @@ export function App() {
 
   const forceRefreshPluginCache = async (pluginId: string) => {
     const info = pluginCacheInfos.find((item) => item.id === pluginId);
-    const title = info ? `${info.name}@${info.marketplace}` : pluginId;
-    if (!window.confirm(`强制刷新插件缓存“${title}”？将用本地 marketplace source 重建缓存目录，完成后请重启 Codex 和 CodexElves。`)) return;
-    const result = await run(() => call<PluginCacheRefreshResult>("force_refresh_plugin_cache", { request: { pluginId } }));
-    if (result) {
-      setPluginCacheInfos((current) => upsertPluginCacheInfo(current, result.plugin));
-      showResultNotice("插件缓存", result);
-      await refreshPluginCacheInfos(true);
-      await refreshLiveContextEntries(true);
+    if (!info) {
+      showNotice("插件缓存", "插件缓存信息未读取，请刷新后再试。", "failed");
+      return;
+    }
+    if (!info.canRefresh) {
+      showNotice("插件缓存", info.refreshReason || "当前插件不能强制刷新缓存。", "failed");
+      return;
+    }
+    setPluginCacheRefreshConfirm(info);
+  };
+
+  const confirmForceRefreshPluginCache = async () => {
+    const info = pluginCacheRefreshConfirm;
+    if (!info || pluginCacheRefreshActive) return;
+    setPluginCacheRefreshActive(true);
+    try {
+      const result = await run(() => call<PluginCacheRefreshResult>("force_refresh_plugin_cache", { request: { pluginId: info.id } }));
+      if (result) {
+        setPluginCacheInfos((current) => upsertPluginCacheInfo(current, result.plugin));
+        showResultNotice("插件缓存", result);
+        await refreshPluginCacheInfos(true);
+        await refreshLiveContextEntries(true);
+      }
+    } finally {
+      setPluginCacheRefreshActive(false);
+      setPluginCacheRefreshConfirm(null);
     }
   };
 
@@ -2253,7 +2303,7 @@ export function App() {
       targetRelayMode: targetBeforeSnapshot.relayMode,
     });
     const selectedBeforeSave = activeRelayProfile(switchSettings);
-    const validationError = relayProfileSwitchValidation(selectedBeforeSave);
+    const validationError = relayProfileSwitchValidation(selectedBeforeSave, switchSettings);
     if (validationError) {
       logDiagnostic("switchRelayProfile.validation_failed", {
         targetRelayId: selectedBeforeSave.id,
@@ -2450,6 +2500,37 @@ export function App() {
     return result;
   };
 
+  const promptCodexHomeRestart = (result: SettingsResult, cleared: boolean) => {
+    if (!isSuccessStatus(result.status)) {
+      showNotice("Codex 配置目录", result.message, result.status);
+      return;
+    }
+    const normalized = normalizeSettings(result.settings);
+    if (!normalized.codexHomePath) {
+      showNotice(
+        "Codex 配置目录",
+        cleared ? "已清除覆盖目录，后续回到 CODEX_HOME 或 ~/.codex。" : "未设置覆盖目录，继续使用 CODEX_HOME 或 ~/.codex。",
+        result.status,
+      );
+      return;
+    }
+    setCodexHomeRestartPrompt({
+      codexHomePath: normalized.codexHomePath,
+      effectiveCodexHome: result.codex_home,
+    });
+  };
+
+  const restartFromCodexHomePrompt = async () => {
+    if (codexHomeRestartActive) return;
+    setCodexHomeRestartActive(true);
+    try {
+      await restart();
+    } finally {
+      setCodexHomeRestartActive(false);
+      setCodexHomeRestartPrompt(null);
+    }
+  };
+
   const actions = useMemo(
     () => ({
       refreshCurrent: () => (route === "radar" ? refreshCodexRadar(false, true) : navigate(route)),
@@ -2518,20 +2599,20 @@ export function App() {
         if (typeof selected === "string" && selected.trim()) {
           const result = await saveCodexHomePath(selected.trim());
           if (result) {
-            showNotice("Codex 配置目录", CODEX_HOME_SAVE_NOTICE, result.status);
+            promptCodexHomeRestart(result, false);
           }
         }
       },
       saveCodexHomePath: async (path: string) => {
         const result = await saveCodexHomePath(path);
         if (result) {
-          showNotice("Codex 配置目录", CODEX_HOME_SAVE_NOTICE, result.status);
+          promptCodexHomeRestart(result, !path.trim());
         }
       },
       clearCodexHomePath: async () => {
         const result = await saveCodexHomePath("");
         if (result) {
-          showNotice("Codex 配置目录", CODEX_HOME_CLEAR_NOTICE, result.status);
+          promptCodexHomeRestart(result, true);
         }
       },
       chooseImageOverlayPath: async () => {
@@ -2788,6 +2869,26 @@ export function App() {
           ) : null}
         </section>
       </main>
+      {codexHomeRestartPrompt ? (
+        <CodexHomeRestartPromptDialog
+          active={codexHomeRestartActive}
+          prompt={codexHomeRestartPrompt}
+          onClose={() => {
+            if (!codexHomeRestartActive) setCodexHomeRestartPrompt(null);
+          }}
+          onRestart={() => void restartFromCodexHomePrompt()}
+        />
+      ) : null}
+      {pluginCacheRefreshConfirm ? (
+        <PluginCacheRefreshConfirmDialog
+          active={pluginCacheRefreshActive}
+          plugin={pluginCacheRefreshConfirm}
+          onCancel={() => {
+            if (!pluginCacheRefreshActive) setPluginCacheRefreshConfirm(null);
+          }}
+          onConfirm={() => void confirmForceRefreshPluginCache()}
+        />
+      ) : null}
       {notice ? (
         <NoticeDialog
           key={`${notice.title}-${notice.message}-${notice.status ?? ""}`}
@@ -4351,7 +4452,7 @@ function MaintenanceScreen({
             <StatusRow title="当前生效" status={effectiveCodexHomePath ? "ok" : "not_checked"} path={effectiveCodexHomePath || null} />
             <StatusRow title="保存覆盖" status={savedCodexHomePath ? "ok" : "disabled"} path={savedCodexHomePath || "未覆盖"} />
           </div>
-          <Field label="保存的配置目录">
+          <Field className="maintenance-saved-config-path" label="保存的配置目录">
             <Input
               value={form.codexHomePath}
               onChange={(event) => onFormChange({ ...form, codexHomePath: event.currentTarget.value })}
@@ -4884,7 +4985,7 @@ function RelayProfileDetail({
           ),
     );
   }, [profile.id, profileUsesLiveFiles, isActive, isNew, relayFiles?.configContents, relayFiles?.authContents]);
-  const validationError = isAggregateRelayProfile(draft) ? aggregateRelayProfileValidation(draft) : null;
+  const validationError = isAggregateRelayProfile(draft) ? aggregateRelayProfileValidation(draft, form) : null;
   const saveDraft = async () => {
     if (validationError) return;
     const normalizedDraft = isAggregateRelayProfile(draft) ? normalizeAggregateRelayProfile(draft, form) : deriveRelayProfileFromFiles(draft);
@@ -4892,7 +4993,7 @@ function RelayProfileDetail({
       ? addRelayProfile(form, normalizedDraft)
       : updateRelayProfile(form, profile.id, normalizedDraft);
     await onFormChange(next);
-    if (isActive && relayProfileUsesLiveFiles(normalizedDraft)) {
+    if (isActive && !isAggregateRelayProfile(normalizedDraft) && relayProfileUsesLiveFiles(normalizedDraft)) {
       await actions.saveRelayAuthFile(normalizedDraft.authContents, true);
     }
     onSaved?.();
@@ -4922,8 +5023,10 @@ function RelayProfileDetail({
           </Button>
         </Toolbar>
       </div>
-        <RelayProfileEditor profile={draft} form={form} isNew={isNew} onProfileChange={setDraft} onSwitch={switchDraft} actions={actions} />
-      {isAggregateRelayProfile(draft) ? null : (
+      <RelayProfileEditor profile={draft} form={form} isNew={isNew} onProfileChange={setDraft} onSwitch={switchDraft} actions={actions} />
+      {isAggregateRelayProfile(draft) ? (
+        <AggregateRelayImpactPanel profile={draft} form={form} isNew={isNew} />
+      ) : (
         <RelayActivationPanel
           profile={draft}
           isActive={isActive}
@@ -6231,14 +6334,12 @@ function AggregateRelayProfileEditor({
       ),
     });
   };
-  const totalWeight = aggregate.members.reduce((total, member) => total + clampAggregateWeight(member.weight), 0);
-
   return (
     <div className="relay-profile-editor aggregate-editor">
       <div className="relay-editor-head">
         <div>
           <strong>{profile.name || "未命名聚合供应商"}</strong>
-          <span>{isNew ? "选择已有供应商作为成员，保存后写入 settings payload" : "聚合配置只引用已有供应商，不复制 Key 和配置文件"}</span>
+          <span>{isNew ? "选择已有供应商作为成员，并按策略分配请求" : "聚合配置只引用已有供应商，不复制 Key 和配置文件"}</span>
         </div>
         <UiBadge variant="secondary">聚合</UiBadge>
       </div>
@@ -6314,15 +6415,136 @@ function AggregateRelayProfileEditor({
           <div className="empty">先添加至少 1 个已填写 Base URL / Key 的 API 供应商，再创建聚合供应商。</div>
         )}
       </div>
-      <div className="relay-grid compact aggregate-preview">
-        <Metric label="策略" value={aggregateStrategyLabel(aggregate.strategy)} />
-        <Metric label="成员数量" value={`${aggregate.members.length} 个`} />
-        <Metric label="总权重" value={`${totalWeight}`} />
-        <Metric label="序列化字段" value="aggregate.strategy / aggregate.members" />
-      </div>
-      <div className="hint-line relay-protocol-hint">
-        <ShieldCheck className="h-4 w-4" />
-        <span>{aggregateStrategyHelp(aggregate.strategy)}</span>
+    </div>
+  );
+}
+
+function AggregateRelayImpactPanel({ profile, form, isNew = false }: { profile: RelayProfile; form: BackendSettings; isNew?: boolean }) {
+  const candidates = aggregateMemberCandidates(form, profile.id);
+  const aggregate = normalizeAggregateConfig(profile.aggregate, candidates);
+  const memberById = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+  const totalWeight = aggregate.members.reduce((total, member) => total + clampAggregateWeight(member.weight), 0);
+  const isActive = !isNew && profile.id === form.activeRelayId;
+  const canSwitchToThis = !isNew && !isActive;
+  const memberDetails = aggregate.members.length
+    ? aggregate.members
+        .map((member) => {
+          const candidate = memberById.get(member.profileId);
+          const name = candidate?.name || member.profileId;
+          return `${name} / 权重 ${clampAggregateWeight(member.weight)}`;
+        })
+        .join("；")
+    : "未选择成员，保存按钮会保持禁用。";
+  const rows: RelayActivationImpactRow[] = [
+    {
+      file: "settings payload",
+      field: "relayProfiles[].aggregate.strategy",
+      value: aggregateStrategyLabel(aggregate.strategy),
+      detail: `保存聚合策略为 ${aggregate.strategy}。${aggregateStrategyHelp(aggregate.strategy)}`,
+      tone: "write",
+    },
+    {
+      file: "settings payload",
+      field: "relayProfiles[].aggregate.members",
+      value: `${aggregate.members.length} 个`,
+      detail: memberDetails,
+      tone: aggregate.members.length ? "write" : "remove",
+    },
+    {
+      file: "settings payload",
+      field: "aggregateRelayProfiles[]",
+      value: "同步当前聚合供应商",
+      detail: `由 relayProfiles[].aggregate 同步生成；当前聚合包含 ${aggregate.members.length} 个成员，供本地代理按聚合策略读取。`,
+      tone: aggregate.members.length ? "write" : "remove",
+    },
+    {
+      file: "settings payload",
+      field: "aggregate.members[].weight",
+      value: String(totalWeight),
+      detail: "保存成员权重；仅权重轮转策略会按权重分配更多请求，其它策略仍保留权重数据。",
+      tone: aggregate.strategy === "weightedRoundRobin" ? "write" : "file",
+    },
+  ];
+  const switchRows: RelayActivationImpactRow[] = [
+    {
+      file: "设为当前后",
+      field: "activeRelayId / activeAggregateRelayId",
+      value: profile.id,
+      detail: "回列表点击“使用”后会一并保存当前编辑内容，切换 activeRelayId，并把当前聚合 ID 写入 settings payload。",
+      tone: "write",
+    },
+    {
+      file: "设为当前后",
+      field: "launchMode",
+      value: "relay",
+      detail: "聚合供应商切为当前后使用兼容增强模式；纯 API 供应商才会使用完整增强模式。",
+      tone: "write",
+    },
+    {
+      file: "设为当前后",
+      field: "config.toml",
+      value: "本地协议代理",
+      detail: "回列表点击“使用”后会把当前 provider 的 base_url 写成本地协议代理地址，由代理按聚合策略转发。",
+      tone: "file",
+    },
+    {
+      file: "设为当前后",
+      field: "auth.json",
+      value: "codex-elves-aggregate",
+      detail: "回列表点击“使用”后会写入聚合代理占位 Key；不会复制任何成员供应商的真实 Key。",
+      tone: "file",
+    },
+  ];
+  const groupedRows = relayActivationImpactGroups(canSwitchToThis ? [...rows, ...switchRows] : rows);
+
+  return (
+    <div className="relay-file-grid aggregate-impact-grid">
+      <div className="relay-file-panel relay-impact-panel">
+        <div className="relay-file-head">
+          <div>
+            <strong>{canSwitchToThis ? "保存 / 设为当前影响" : "保存影响"}</strong>
+            <span>
+              {canSwitchToThis
+                ? "保存只写 settings payload；回列表点击“使用”才会更新 Codex config.toml / auth.json。"
+                : isActive
+                  ? "保存只更新聚合 settings payload；当前 Codex config.toml / auth.json 不会因保存动作重新写入。"
+                  : "保存只写 settings payload，不复制成员 Key，也不直接写 Codex config.toml / auth.json。"}
+            </span>
+          </div>
+        </div>
+        <div className="relay-impact-summary">
+          <span>聚合供应商</span>
+          <strong>{aggregateStrategyLabel(aggregate.strategy)} · {aggregate.members.length} 个成员</strong>
+        </div>
+        <div className="relay-impact-groups">
+          {groupedRows.map((group) => (
+            <div className="relay-impact-group" key={group.file}>
+              <div className="relay-impact-group-head">
+                <strong>{group.file}</strong>
+                <span>{group.rows.length} 项</span>
+              </div>
+              <div className="relay-impact-table" role="table" aria-label={`${group.file} 操作影响清单`}>
+                <div className="relay-impact-table-head" role="row">
+                  <span>字段</span>
+                  <span>值 / 动作</span>
+                </div>
+                {group.rows.map((row) => (
+                  <div className="relay-impact-row" data-tone={row.tone} key={`${row.file}-${row.field}`} role="row">
+                    <span className="relay-impact-field" role="cell">
+                      <code>{row.field}</code>
+                      <small>{row.detail}</small>
+                    </span>
+                    <strong className="relay-impact-value" role="cell">{row.value}</strong>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="hint-line relay-protocol-hint">
+          <ShieldCheck className="h-4 w-4" />
+          <span>聚合供应商不会复制成员 Key；真实对话只有在设为当前后才会走本地协议代理按策略轮转成员。</span>
+        </div>
       </div>
     </div>
   );
@@ -7002,6 +7224,83 @@ function NoticeDialog({
           <p>{notice.message}</p>
         </div>
         <button className="toast-close" onClick={onClose} type="button">×</button>
+      </div>
+    </div>
+  );
+}
+
+function CodexHomeRestartPromptDialog({
+  prompt,
+  active,
+  onClose,
+  onRestart,
+}: {
+  prompt: { codexHomePath: string; effectiveCodexHome: string };
+  active: boolean;
+  onClose: () => void;
+  onRestart: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="codex-home-restart-title">
+      <div className="modal-card codex-home-restart-modal">
+        <div className="modal-head">
+          <div>
+            <h2 id="codex-home-restart-title">配置目录覆盖已保存</h2>
+            <p>修改配置目录后需要重启 Codex 和 CodexElves，新的会话索引、插件和模型目录状态才会完整生效。</p>
+          </div>
+          <button className="toast-close" disabled={active} onClick={onClose} type="button">×</button>
+        </div>
+        <div className="metric-list">
+          <Metric label="保存覆盖" value={prompt.codexHomePath} />
+          <Metric label="当前生效" value={prompt.effectiveCodexHome || "等待重新读取"} />
+        </div>
+        <p className="modal-note">{CODEX_HOME_BOUNDARY_NOTICE}</p>
+        <Toolbar>
+          <Button disabled={active} onClick={onRestart}>
+            <Rocket className={`h-4 w-4 ${active ? "proxy-log-view-spinner" : ""}`} />
+            {active ? "正在重启…" : "立即重启"}
+          </Button>
+          <Button disabled={active} onClick={onClose} variant="secondary">稍后重启</Button>
+        </Toolbar>
+      </div>
+    </div>
+  );
+}
+
+function PluginCacheRefreshConfirmDialog({
+  plugin,
+  active,
+  onCancel,
+  onConfirm,
+}: {
+  plugin: PluginCacheInfo;
+  active: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const title = `${plugin.name}@${plugin.marketplace}`;
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="plugin-cache-refresh-title">
+      <div className="modal-card plugin-cache-refresh-modal">
+        <div className="modal-head">
+          <div>
+            <h2 id="plugin-cache-refresh-title">确认强制刷新插件缓存</h2>
+            <p>将使用本地 marketplace source 重建该插件缓存目录，完成后请重启 Codex 和 CodexElves。</p>
+          </div>
+          <button className="toast-close" disabled={active} onClick={onCancel} type="button">×</button>
+        </div>
+        <div className="metric-list">
+          <Metric label="插件" value={title} />
+          <Metric label="缓存版本" value={plugin.currentVersion ?? (plugin.cachedVersions.length ? plugin.cachedVersions.join(", ") : "未缓存")} />
+          <Metric label="源版本" value={plugin.sourceVersion ?? "无本地源"} />
+        </div>
+        <Toolbar>
+          <Button disabled={active} onClick={onConfirm}>
+            <RefreshCw className={`h-4 w-4 ${active ? "proxy-log-view-spinner" : ""}`} />
+            {active ? "正在刷新…" : "确认刷新"}
+          </Button>
+          <Button disabled={active} onClick={onCancel} variant="secondary">取消</Button>
+        </Toolbar>
       </div>
     </div>
   );
@@ -8541,9 +8840,9 @@ function removeTomlSectionKey(contents: string, sectionName: string, key: string
   return ensureTrailingNewline(next.join("\n").trimEnd());
 }
 
-function relayProfileSwitchValidation(profile: RelayProfile): string | null {
+function relayProfileSwitchValidation(profile: RelayProfile, settings?: BackendSettings): string | null {
   if (isAggregateRelayProfile(profile)) {
-    return aggregateRelayProfileValidation(profile);
+    return aggregateRelayProfileValidation(profile, settings);
   }
   if (profile.relayMode === "official" && !profile.officialMixApiKey) return null;
   if (!relayProfileHasBaseUrl(profile)) {
@@ -8899,8 +9198,8 @@ function aggregateStrategyHelp(strategy: RelayAggregateStrategy): string {
   return "权重轮转会读取每个成员的权重值，权重越高的成员获得更多请求。";
 }
 
-function aggregateRelayProfileValidation(profile: RelayProfile): string | null {
-  const aggregate = normalizeAggregateConfig(profile.aggregate, []);
+function aggregateRelayProfileValidation(profile: RelayProfile, settings?: BackendSettings): string | null {
+  const aggregate = normalizeAggregateConfig(profile.aggregate, settings ? aggregateMemberCandidates(settings, profile.id) : []);
   return aggregate.members.length >= 1 ? null : "聚合供应商至少需要勾选 1 个已填写 Base URL / Key 的 API 供应商。";
 }
 

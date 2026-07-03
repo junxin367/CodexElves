@@ -1695,8 +1695,8 @@
       node.dataset.tier = state.tier;
       node.dataset.disabled = String(!!state.disabled);
       node.textContent = state.label;
-      node.dataset.codexTooltip = state.title;
-      node.removeAttribute("title");
+      node.removeAttribute("data-codex-tooltip");
+      node.setAttribute("title", state.title);
       node.setAttribute("aria-label", state.title);
     });
   }
@@ -3740,6 +3740,18 @@
       patchModelContainer: (value) => patchModelContainer(value),
       setServiceTierState: (state = {}) => {
         codexServiceTierState = { ...codexServiceTierState, ...state };
+      },
+      refreshBadgeNode: (node) => {
+        const originalQuerySelectorAll = document.querySelectorAll;
+        document.querySelectorAll = (selector) => selector === `[data-codex-service-tier-badge="true"]`
+          ? [node]
+          : originalQuerySelectorAll.call(document, selector);
+        try {
+          refreshCodexServiceTierBadges();
+        } finally {
+          document.querySelectorAll = originalQuerySelectorAll;
+        }
+        return node;
       },
       setThreadState: (state = {}) => {
         localStorage.setItem(codexThreadServiceTierKey, JSON.stringify({

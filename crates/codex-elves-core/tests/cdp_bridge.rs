@@ -672,6 +672,19 @@ fn injection_script_applies_fast_service_tier_contract() {
         cases["relayModelContainer"]["available_models"],
         json!(["first-model", "second-model", "current-model"])
     );
+    assert_eq!(
+        cases["badgeTooltip"]["dataCodexTooltip"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        cases["badgeTooltip"]["title"],
+        cases["badgeTooltip"]["ariaLabel"]
+    );
+    assert!(
+        cases["badgeTooltip"]["title"]
+            .as_str()
+            .is_some_and(|value| value.contains("服务模式"))
+    );
 }
 
 fn run_service_tier_contract_harness() -> serde_json::Value {
@@ -840,6 +853,27 @@ const relayModelContainer = {{
 }};
 api.patchModelContainer(relayModelContainer);
 
+const badgeNode = {{
+  dataset: {{ codexTooltip: "stale custom tooltip" }},
+  textContent: "",
+  attributes: {{}},
+  removeAttribute(name) {{
+    delete this.attributes[name];
+    if (name === "data-codex-tooltip") delete this.dataset.codexTooltip;
+    if (name === "title") delete this.title;
+  }},
+  setAttribute(name, value) {{
+    this.attributes[name] = String(value);
+    if (name === "title") this.title = String(value);
+  }},
+}};
+api.refreshBadgeNode(badgeNode);
+const badgeTooltip = {{
+  dataCodexTooltip: Object.prototype.hasOwnProperty.call(badgeNode.dataset, "codexTooltip") ? badgeNode.dataset.codexTooltip : null,
+  title: badgeNode.title || "",
+  ariaLabel: badgeNode.attributes["aria-label"] || "",
+}};
+
 process.stdout.write(JSON.stringify({{
   supportedFast,
   unsupportedModel,
@@ -853,6 +887,7 @@ process.stdout.write(JSON.stringify({{
   relayModelNames,
   relayModelArrayOrder,
   relayModelContainer,
+  badgeTooltip,
 }}));
 "#,
         script_path = serde_json::to_string(&script_path.to_string_lossy().to_string())
