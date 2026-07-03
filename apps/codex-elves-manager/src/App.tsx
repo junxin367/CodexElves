@@ -119,6 +119,28 @@ type PluginMarketplaceStatusResult = CommandResult<{
   needsRepair: boolean;
 }>;
 
+type PluginCacheInfo = {
+  id: string;
+  name: string;
+  marketplace: string;
+  cached: boolean;
+  cachedVersions: string[];
+  currentVersion?: string | null;
+  sourceVersion?: string | null;
+  cachePath?: string | null;
+  sourcePath?: string | null;
+  canRefresh: boolean;
+  refreshReason: string;
+};
+
+type PluginCacheInfosResult = CommandResult<{
+  plugins: PluginCacheInfo[];
+}>;
+
+type PluginCacheRefreshResult = CommandResult<{
+  plugin: PluginCacheInfo;
+}>;
+
 type BackendSettings = {
   codexAppPath: string;
   codexHomePath: string;
@@ -675,6 +697,36 @@ const CODEX_HOME_SAVE_NOTICE =
   `${CODEX_HOME_BOUNDARY_NOTICE} 保存后请重启 Codex 和 CodexElves，再确认会话索引、插件和模型目录状态。`;
 const CODEX_HOME_CLEAR_NOTICE =
   `已清除覆盖目录，后续回到 CODEX_HOME 或 ~/.codex。${CODEX_HOME_BOUNDARY_NOTICE} 建议重启 Codex 和 CodexElves。`;
+const BROWSER_PREVIEW_CONTEXT_CONFIG = [
+  "[mcp_servers.context7]",
+  'command = "npx"',
+  'args = ["-y", "@upstash/context7-mcp"]',
+  "",
+  "[mcp_servers.playwright]",
+  'command = "npx"',
+  'args = ["-y", "@playwright/mcp"]',
+  "enabled = false",
+  "",
+  "[skills.openai-docs]",
+  "enabled = true",
+  'path = "skills/openai-docs"',
+  "",
+  "[skills.code-review]",
+  "enabled = true",
+  'path = "skills/code-review"',
+  "",
+  '[plugins."browser@openai-bundled"]',
+  "enabled = true",
+  "",
+  '[plugins."chrome@openai-bundled"]',
+  "enabled = true",
+  "",
+  '[plugins."zeroone@zeroone"]',
+  "enabled = true",
+  "",
+  '[plugins."computer-use@openai-bundled"]',
+  "enabled = false",
+].join("\n");
 
 const defaultSettings: BackendSettings = {
   codexAppPath: "",
@@ -762,6 +814,7 @@ function createBrowserPreviewSettings(): BackendSettings {
     relayApiKey: "sk-preview-browser",
     activeRelayId: "preview-pure-api",
     relayTestModel: "gpt-5.5",
+    relayContextConfigContents: BROWSER_PREVIEW_CONTEXT_CONFIG,
     relayProfiles: [
       {
         ...defaultSettings.relayProfiles[0],
@@ -825,6 +878,120 @@ function browserPreviewSettings(): BackendSettings {
 function updateBrowserPreviewSettings(settings: BackendSettings): BackendSettings {
   browserPreviewSettingsState = normalizeSettings(settings);
   return browserPreviewSettingsState;
+}
+
+function browserPreviewContextEntries(settings = browserPreviewSettings()): CodexContextEntries {
+  return contextEntriesFromSettings(settings);
+}
+
+function browserPreviewPluginCacheInfos(settings = browserPreviewSettings()): PluginCacheInfo[] {
+  return browserPreviewContextEntries(settings).plugins.map((entry) => {
+    const [name = entry.id, marketplace = "local"] = entry.id.split("@");
+    if (entry.id === "chrome@openai-bundled") {
+      return {
+        id: entry.id,
+        name,
+        marketplace,
+        cached: true,
+        cachedVersions: ["26.610.74120"],
+        currentVersion: "26.610.74120",
+        sourceVersion: "26.623.81905",
+        cachePath: `${browserPreviewCodexHome(settings)}\\plugins\\cache\\${marketplace}\\${name}\\26.610.74120`,
+        sourcePath: `浏览器预览 marketplace\\${name}`,
+        canRefresh: true,
+        refreshReason: "源版本更高，可强制刷新缓存。",
+      };
+    }
+    if (entry.id === "zeroone@zeroone") {
+      return {
+        id: entry.id,
+        name,
+        marketplace,
+        cached: false,
+        cachedVersions: [],
+        currentVersion: null,
+        sourceVersion: "0.1.2-alpha.7",
+        cachePath: null,
+        sourcePath: "E:\\code\\junes\\github\\ZeroOne\\src\\plugins",
+        canRefresh: true,
+        refreshReason: "未缓存，但可从本地 ZeroOne source 生成缓存。",
+      };
+    }
+    if (entry.id === "computer-use@openai-bundled") {
+      return {
+        id: entry.id,
+        name,
+        marketplace,
+        cached: true,
+        cachedVersions: ["26.623.81905"],
+        currentVersion: "26.623.81905",
+        sourceVersion: null,
+        cachePath: `${browserPreviewCodexHome(settings)}\\plugins\\cache\\${marketplace}\\${name}\\26.623.81905`,
+        sourcePath: null,
+        canRefresh: false,
+        refreshReason: "未找到本地 marketplace source，不能直接强制刷新。",
+      };
+    }
+    const version = "26.623.81905";
+    return {
+      id: entry.id,
+      name,
+      marketplace,
+      cached: true,
+      cachedVersions: [version],
+      currentVersion: version,
+      sourceVersion: version,
+      cachePath: `${browserPreviewCodexHome(settings)}\\plugins\\cache\\${marketplace}\\${name}\\${version}`,
+      sourcePath: `浏览器预览 marketplace\\${name}`,
+      canRefresh: true,
+      refreshReason: "浏览器预览可模拟强制刷新。",
+    };
+  });
+}
+
+function browserPreviewContextTarget(kind: ContextKind, id: string): CodexContextEntries {
+  const entry: CodexContextEntry = {
+    id,
+    kind,
+    title: id,
+    summary: "",
+    tomlBody: "",
+    enabled: true,
+  };
+  return {
+    mcpServers: kind === "mcp" ? [entry] : [],
+    skills: kind === "skill" ? [entry] : [],
+    plugins: kind === "plugin" ? [entry] : [],
+  };
+}
+
+function browserPreviewUpsertContextEntry(settings: BackendSettings, kind: ContextKind, id: string, tomlBody: string): BackendSettings {
+  const option = contextKindOptions.find((item) => item.kind === kind);
+  if (!option || !id.trim()) return normalizeSettings(settings);
+  const normalizedId = id.trim();
+  const target = browserPreviewContextTarget(kind, normalizedId);
+  const current = settings.relayContextConfigContents || "";
+  const stripped = stripContextEntriesFromConfig(current, target);
+  const body = ensureTrailingNewline(tomlBody.trimEnd());
+  const section = `[${option.tableName}.${tomlKey(normalizedId)}]\n${body}`;
+  return normalizeSettings({
+    ...settings,
+    relayContextConfigContents: joinTomlSectionsRootFirst([stripped, section]),
+  });
+}
+
+function browserPreviewDeleteContextEntry(settings: BackendSettings, kind: ContextKind, id: string): BackendSettings {
+  const normalizedId = id.trim();
+  if (!normalizedId) return normalizeSettings(settings);
+  const target = browserPreviewContextTarget(kind, normalizedId);
+  return normalizeSettings(removeContextSelectionFromSettings({
+    ...settings,
+    relayContextConfigContents: stripContextEntriesFromConfig(settings.relayContextConfigContents || "", target),
+  }, kind, normalizedId));
+}
+
+function isContextKind(value: unknown): value is ContextKind {
+  return value === "mcp" || value === "skill" || value === "plugin";
 }
 
 function browserPreviewCodexHome(settings = browserPreviewSettings()): string {
@@ -1122,6 +1289,50 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         configContents: active.configContents,
         authContents: active.authContents,
       }) as T);
+    case "read_live_context_entries":
+      return Promise.resolve(browserPreviewResult({
+        entries: browserPreviewContextEntries(settings),
+      }, "浏览器预览已读取工具与插件。") as T);
+    case "sync_live_context_entries": {
+      const request = args?.request as { settings?: BackendSettings } | undefined;
+      const normalized = updateBrowserPreviewSettings(request?.settings || settings);
+      return Promise.resolve(browserPreviewResult({
+        entries: browserPreviewContextEntries(normalized),
+      }, "浏览器预览已同步工具与插件。") as T);
+    }
+    case "upsert_context_entry": {
+      const request = args?.request as { settings?: BackendSettings; kind?: unknown; id?: unknown; tomlBody?: unknown } | undefined;
+      const kind = isContextKind(request?.kind) ? request.kind : "mcp";
+      const id = typeof request?.id === "string" ? request.id : "";
+      const tomlBody = typeof request?.tomlBody === "string" ? request.tomlBody : "";
+      const normalized = updateBrowserPreviewSettings(browserPreviewUpsertContextEntry(request?.settings || settings, kind, id, tomlBody));
+      return Promise.resolve(browserPreviewResult({
+        settings: normalized,
+        entries: browserPreviewContextEntries(normalized),
+      }, "浏览器预览已保存工具与插件。") as T);
+    }
+    case "delete_context_entry": {
+      const request = args?.request as { settings?: BackendSettings; kind?: unknown; id?: unknown } | undefined;
+      const kind = isContextKind(request?.kind) ? request.kind : "mcp";
+      const id = typeof request?.id === "string" ? request.id : "";
+      const normalized = updateBrowserPreviewSettings(browserPreviewDeleteContextEntry(request?.settings || settings, kind, id));
+      return Promise.resolve(browserPreviewResult({
+        settings: normalized,
+        entries: browserPreviewContextEntries(normalized),
+      }, "浏览器预览已删除工具与插件。") as T);
+    }
+    case "read_plugin_cache_infos":
+      return Promise.resolve(browserPreviewResult({
+        plugins: browserPreviewPluginCacheInfos(settings),
+      }, "浏览器预览已读取插件缓存信息。") as T);
+    case "force_refresh_plugin_cache": {
+      const request = args?.request as { pluginId?: unknown } | undefined;
+      const pluginId = typeof request?.pluginId === "string" ? request.pluginId : "";
+      const plugin = browserPreviewPluginCacheInfos(settings).find((item) => item.id === pluginId) ?? browserPreviewPluginCacheInfos(settings)[0];
+      return Promise.resolve(browserPreviewResult({
+        plugin,
+      }, "浏览器预览已强制刷新插件缓存。") as T);
+    }
     case "check_env_conflicts":
       return Promise.resolve(browserPreviewResult({ conflicts: [] }) as T);
     case "load_provider_sync_targets":
@@ -1214,6 +1425,7 @@ export function App() {
   const [ccsProviders, setCcsProviders] = useState<CcsProvidersResult | null>(null);
   const [localSessions, setLocalSessions] = useState<LocalSessionsResult | null>(null);
   const [liveContextEntries, setLiveContextEntries] = useState<CodexContextEntries | null>(null);
+  const [pluginCacheInfos, setPluginCacheInfos] = useState<PluginCacheInfo[]>([]);
   const [logs, setLogs] = useState<LogsResult | null>(null);
   const [localProxyStatus, setLocalProxyStatus] = useState<LocalProxyStatusResult | null>(null);
   const [localProxyLogs, setLocalProxyLogs] = useState<LocalProxyLogsResult | null>(null);
@@ -1472,6 +1684,28 @@ export function App() {
     return result;
   };
 
+  const refreshPluginCacheInfos = async (silent = false) => {
+    const result = await run(() => call<PluginCacheInfosResult>("read_plugin_cache_infos"));
+    if (result) {
+      setPluginCacheInfos(result.plugins);
+      if (!silent || !isSuccessStatus(result.status)) showResultNotice("插件缓存", result, { silentSuccess: true });
+    }
+    return result;
+  };
+
+  const forceRefreshPluginCache = async (pluginId: string) => {
+    const info = pluginCacheInfos.find((item) => item.id === pluginId);
+    const title = info ? `${info.name}@${info.marketplace}` : pluginId;
+    if (!window.confirm(`强制刷新插件缓存“${title}”？将用本地 marketplace source 重建缓存目录，完成后请重启 Codex 和 CodexElves。`)) return;
+    const result = await run(() => call<PluginCacheRefreshResult>("force_refresh_plugin_cache", { request: { pluginId } }));
+    if (result) {
+      setPluginCacheInfos((current) => upsertPluginCacheInfo(current, result.plugin));
+      showResultNotice("插件缓存", result);
+      await refreshPluginCacheInfos(true);
+      await refreshLiveContextEntries(true);
+    }
+  };
+
   const syncLiveContextEntries = async (next: BackendSettings, silent: boolean, target: ContextSyncTarget) => {
     const result = await run(() => call<LiveContextEntriesResult>("sync_live_context_entries", { request: { settings: next, target } }));
     if (result) {
@@ -1585,6 +1819,7 @@ export function App() {
       await refreshSettings(true);
       await refreshRelayFiles(true);
       await refreshLiveContextEntries(true);
+      await refreshPluginCacheInfos(true);
     }
     if (next === "settings") await refreshSettings(true);
     if (next === "userScripts") {
@@ -2155,6 +2390,7 @@ export function App() {
       await refreshLocalProxyStatus(true);
       if (route === "localProxy") await refreshLocalProxyLogs(true);
       if (route === "radar") await refreshCodexRadar(true);
+      if (route === "context") await refreshPluginCacheInfos(true);
       await checkPluginMarketplacePrompt();
     })();
   }, []);
@@ -2205,6 +2441,7 @@ export function App() {
         refreshRelay(true),
         refreshRelayFiles(true),
         refreshLiveContextEntries(true),
+        refreshPluginCacheInfos(true),
         refreshLocalSessions(true),
         refreshProviderSyncTargets(true),
         checkPluginMarketplacePrompt(),
@@ -2346,6 +2583,8 @@ export function App() {
       refreshCcsProviders,
       importCcsProviders,
       refreshLiveContextEntries,
+      refreshPluginCacheInfos,
+      forceRefreshPluginCache,
       syncLiveContextEntries,
       refreshScriptMarket,
       refreshCodexRadar: () => refreshCodexRadar(false, true),
@@ -2393,7 +2632,7 @@ export function App() {
       disableWatcher: () => watcherAction("disable_watcher"),
       toggleTheme: () => setTheme((current) => (current === "dark" ? "light" : "dark")),
     }),
-    [route, launchForm, settingsForm, settings, removeOwnedData, update, logs, localProxyDetail, diagnostics, theme, relayFiles, localSessions, selectedProviderSyncTarget, envConflicts, ccsProviders],
+    [route, launchForm, settingsForm, settings, removeOwnedData, update, logs, localProxyDetail, diagnostics, theme, relayFiles, localSessions, pluginCacheInfos, selectedProviderSyncTarget, envConflicts, ccsProviders],
   );
   const hasUpdate = update?.updateAvailable === true;
 
@@ -2513,6 +2752,7 @@ export function App() {
             <ContextScreen
               form={settingsForm}
               liveEntries={liveContextEntries}
+              pluginCacheInfos={pluginCacheInfos}
               relayFiles={relayFiles}
               onFormChange={setSettingsForm}
               actions={actions}
@@ -2603,6 +2843,8 @@ type Actions = {
   refreshCcsProviders: (silent?: boolean) => Promise<CcsProvidersResult | null>;
   importCcsProviders: () => Promise<void>;
   refreshLiveContextEntries: (silent?: boolean) => Promise<LiveContextEntriesResult | null>;
+  refreshPluginCacheInfos: (silent?: boolean) => Promise<PluginCacheInfosResult | null>;
+  forceRefreshPluginCache: (pluginId: string) => Promise<void>;
   syncLiveContextEntries: (
     settings: BackendSettings,
     silent: boolean,
@@ -4695,12 +4937,14 @@ function RelayProfileDetail({
 function ContextScreen({
   form,
   liveEntries,
+  pluginCacheInfos,
   relayFiles,
   onFormChange,
   actions,
 }: {
   form: BackendSettings;
   liveEntries: CodexContextEntries | null;
+  pluginCacheInfos: PluginCacheInfo[];
   relayFiles: RelayFilesResult | null;
   onFormChange: (value: BackendSettings) => void;
   actions: Actions;
@@ -4712,6 +4956,7 @@ function ContextScreen({
         <RelayContextManager
           form={normalizeSettings(form)}
           liveEntries={liveEntries}
+          pluginCacheInfos={pluginCacheInfos}
           relayFiles={relayFiles}
           onFormChange={onFormChange}
           actions={actions}
@@ -6086,17 +6331,20 @@ function AggregateRelayProfileEditor({
 function RelayContextManager({
   form,
   liveEntries,
+  pluginCacheInfos,
   relayFiles,
   onFormChange,
   actions,
 }: {
   form: BackendSettings;
   liveEntries: CodexContextEntries | null;
+  pluginCacheInfos: PluginCacheInfo[];
   relayFiles: RelayFilesResult | null;
   onFormChange: (value: BackendSettings) => void;
   actions: Actions;
 }) {
   const entries = contextEntriesWithLiveEntries(form, liveEntries);
+  const pluginCacheInfoById = useMemo(() => new Map(pluginCacheInfos.map((item) => [item.id, item])), [pluginCacheInfos]);
   const [activeKind, setActiveKind] = useState<ContextKind>("mcp");
   const [editor, setEditor] = useState<{ kind: ContextKind; entry?: CodexContextEntry } | null>(null);
   const visibleEntries = contextEntriesByKind(entries, activeKind);
@@ -6174,7 +6422,12 @@ function RelayContextManager({
         {visibleEntries.length ? (
           visibleEntries.map((entry) => (
             <div className="relay-context-row" key={`${entry.kind}-${entry.id}`}>
-              <strong className="context-title">{entry.title || entry.id}</strong>
+              <div className="context-entry-main">
+                <strong className="context-title">{entry.title || entry.id}</strong>
+                {entry.kind === "plugin" ? (
+                  <span className="context-meta">{pluginCacheInfoMeta(pluginCacheInfoById.get(entry.id))}</span>
+                ) : null}
+              </div>
               <div className="relay-context-actions">
                 <button
                   aria-checked={entry.enabled}
@@ -6192,6 +6445,17 @@ function RelayContextManager({
                 <Button onClick={() => void openEditor(entry)} size="icon" title="编辑扩展项" variant="ghost">
                   <Edit3 className="h-4 w-4" />
                 </Button>
+                {entry.kind === "plugin" ? (
+                  <Button
+                    disabled={!pluginCacheInfoById.get(entry.id)?.canRefresh}
+                    onClick={() => void actions.forceRefreshPluginCache(entry.id)}
+                    size="icon"
+                    title={pluginCacheInfoById.get(entry.id)?.refreshReason || "刷新插件缓存"}
+                    variant="ghost"
+                  >
+                    <RefreshCw className="h-4 w-4" />
+                  </Button>
+                ) : null}
                 <Button
                   className="relay-context-delete"
                   onClick={() => void deleteEntry(entry)}
@@ -7170,6 +7434,37 @@ function contextEntriesByKind(entries: CodexContextEntries, kind: ContextKind): 
   if (kind === "mcp") return dedupeContextEntryList(entries.mcpServers);
   if (kind === "skill") return dedupeContextEntryList(entries.skills);
   return dedupeContextEntryList(entries.plugins);
+}
+
+function pluginCacheInfoMeta(info?: PluginCacheInfo) {
+  if (!info) return "缓存未读取";
+  const cached = info.currentVersion ? `缓存 ${info.currentVersion}` : info.cached ? `缓存 ${info.cachedVersions.join(", ")}` : "未缓存";
+  const sourceVersionChanged = Boolean(info.currentVersion && info.sourceVersion && info.currentVersion !== info.sourceVersion);
+  const refresh = info.canRefresh ? "可强制刷新" : info.refreshReason;
+  return (
+    <>
+      <span>{cached}</span>
+      <span className="context-meta-separator"> · </span>
+      {info.sourceVersion ? (
+        <span>
+          源{" "}
+          <span className={sourceVersionChanged ? "context-source-version changed" : "context-source-version"}>
+            {info.sourceVersion}
+          </span>
+        </span>
+      ) : (
+        <span>无本地源</span>
+      )}
+      <span className="context-meta-separator"> · </span>
+      <span>{refresh}</span>
+    </>
+  );
+}
+
+function upsertPluginCacheInfo(items: PluginCacheInfo[], next: PluginCacheInfo) {
+  const exists = items.some((item) => item.id === next.id);
+  if (!exists) return [...items, next];
+  return items.map((item) => (item.id === next.id ? next : item));
 }
 
 function findContextEntry(entries: CodexContextEntries, kind: ContextKind, id: string): CodexContextEntry | undefined {

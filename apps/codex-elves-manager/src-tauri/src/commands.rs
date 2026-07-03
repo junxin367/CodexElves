@@ -78,6 +78,24 @@ pub struct PluginMarketplaceStatusPayload {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PluginCacheInfosPayload {
+    pub plugins: Vec<codex_elves_core::plugin_marketplace::PluginCacheInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCacheRefreshPayload {
+    pub plugin: codex_elves_core::plugin_marketplace::PluginCacheInfo,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCacheRefreshRequest {
+    pub plugin_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CodexRadarPayload {
     pub source_url: String,
     pub snapshot: Option<codex_elves_core::codex_radar::CodexRadarSnapshot>,
@@ -1472,6 +1490,56 @@ pub async fn repair_plugin_marketplace() -> CommandResult<PluginMarketplaceRepai
                 initialized: false,
                 configured: false,
                 needs_repair: true,
+            },
+        ),
+    }
+}
+
+#[tauri::command]
+pub fn read_plugin_cache_infos() -> CommandResult<PluginCacheInfosPayload> {
+    let home = saved_codex_home_dir();
+    let config_path = home.join("config.toml");
+    let config = read_optional_text_file(&config_path).unwrap_or_default();
+    let plugin_ids =
+        match codex_elves_core::relay_config::list_context_entries_from_common_config(&config) {
+            Ok(entries) => entries
+                .plugins
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                return failed(
+                    &format!("读取插件缓存信息失败：{error}"),
+                    PluginCacheInfosPayload {
+                        plugins: Vec::new(),
+                    },
+                );
+            }
+        };
+    let plugins = codex_elves_core::plugin_marketplace::list_plugin_cache_infos(&home, &plugin_ids);
+    ok("插件缓存信息已读取。", PluginCacheInfosPayload { plugins })
+}
+
+#[tauri::command]
+pub fn force_refresh_plugin_cache(
+    request: PluginCacheRefreshRequest,
+) -> CommandResult<PluginCacheRefreshPayload> {
+    let home = saved_codex_home_dir();
+    match codex_elves_core::plugin_marketplace::force_refresh_plugin_cache(
+        &home,
+        &request.plugin_id,
+    ) {
+        Ok(plugin) => ok(
+            "插件缓存已从本地 marketplace source 强制刷新；请重启 Codex 和 CodexElves 后生效。",
+            PluginCacheRefreshPayload { plugin },
+        ),
+        Err(error) => failed(
+            &format!("强制刷新插件缓存失败：{error}"),
+            PluginCacheRefreshPayload {
+                plugin: codex_elves_core::plugin_marketplace::plugin_cache_info(
+                    &home,
+                    &request.plugin_id,
+                ),
             },
         ),
     }

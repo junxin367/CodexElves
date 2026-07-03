@@ -1748,6 +1748,12 @@ body {
   transform: translateY(-1px);
 }
 
+.context-entry-main {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
 .context-title {
   min-width: 0;
   overflow: hidden;
@@ -1756,6 +1762,25 @@ body {
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.context-meta {
+  min-width: 0;
+  overflow: hidden;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-meta-separator {
+  color: hsl(var(--muted-foreground) / 0.72);
+}
+
+.context-source-version.changed {
+  color: hsl(var(--destructive));
+  font-weight: 700;
 }
 
 .relay-context-actions {

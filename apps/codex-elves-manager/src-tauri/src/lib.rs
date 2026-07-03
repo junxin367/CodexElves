@@ -110,6 +110,8 @@ pub fn run() {
             commands::repair_backend,
             commands::plugin_marketplace_status,
             commands::repair_plugin_marketplace,
+            commands::read_plugin_cache_infos,
+            commands::force_refresh_plugin_cache,
             commands::check_update,
             commands::perform_update,
             commands::load_watcher_state,
