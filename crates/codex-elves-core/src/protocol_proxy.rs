@@ -17,7 +17,7 @@ use crate::settings::SettingsStore;
 pub const DEFAULT_PROTOCOL_PROXY_PORT: u16 = 45221;
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const UPSTREAM_MODELS_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
-const UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(600);
+const UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(900);
 const THINK_OPEN_TAG: &str = "<think>";
 const THINK_CLOSE_TAG: &str = "</think>";
 const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[

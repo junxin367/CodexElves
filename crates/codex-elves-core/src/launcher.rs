@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use async_trait::async_trait;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
@@ -1783,6 +1783,46 @@ async fn handle_protocol_proxy_connection(
     Ok(())
 }
 
+async fn write_deferred_stream_keepalive(
+    stream: &mut tokio::net::TcpStream,
+    response_capture: &mut Vec<u8>,
+    response_bytes: &mut usize,
+    response_truncated: &mut bool,
+) -> anyhow::Result<()> {
+    *response_bytes += DEFERRED_STREAM_KEEPALIVE_BYTES.len();
+    *response_truncated |=
+        crate::proxy_log::append_capture(response_capture, DEFERRED_STREAM_KEEPALIVE_BYTES);
+    stream.write_all(DEFERRED_STREAM_KEEPALIVE_BYTES).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+async fn next_deferred_stream_chunk_with_keepalive<S, T, E>(
+    bytes_stream: &mut S,
+    stream: &mut tokio::net::TcpStream,
+    response_capture: &mut Vec<u8>,
+    response_bytes: &mut usize,
+    response_truncated: &mut bool,
+    keepalive_interval: Duration,
+) -> anyhow::Result<Option<Result<T, E>>>
+where
+    S: Stream<Item = Result<T, E>> + Unpin,
+{
+    loop {
+        tokio::select! {
+            chunk = bytes_stream.next() => return Ok(chunk),
+            _ = tokio::time::sleep(keepalive_interval) => {
+                write_deferred_stream_keepalive(
+                    stream,
+                    response_capture,
+                    response_bytes,
+                    response_truncated,
+                ).await?;
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_deferred_protocol_proxy_stream_connection(
     stream: &mut tokio::net::TcpStream,
@@ -1813,13 +1853,12 @@ async fn handle_deferred_protocol_proxy_stream_connection(
         tokio::select! {
             result = &mut upstream_open => break result,
             _ = tokio::time::sleep(DEFERRED_STREAM_KEEPALIVE_INTERVAL) => {
-                response_bytes += DEFERRED_STREAM_KEEPALIVE_BYTES.len();
-                response_truncated |= crate::proxy_log::append_capture(
+                write_deferred_stream_keepalive(
+                    stream,
                     &mut response_capture,
-                    DEFERRED_STREAM_KEEPALIVE_BYTES,
-                );
-                stream.write_all(DEFERRED_STREAM_KEEPALIVE_BYTES).await?;
-                stream.flush().await?;
+                    &mut response_bytes,
+                    &mut response_truncated,
+                ).await?;
             }
         }
     };
@@ -1973,7 +2012,16 @@ async fn handle_deferred_protocol_proxy_stream_connection(
             stream.write_all(&body).await?;
         } else {
             let mut bytes_stream = upstream.into_response()?.bytes_stream();
-            while let Some(chunk) = bytes_stream.next().await {
+            while let Some(chunk) = next_deferred_stream_chunk_with_keepalive(
+                &mut bytes_stream,
+                stream,
+                &mut response_capture,
+                &mut response_bytes,
+                &mut response_truncated,
+                DEFERRED_STREAM_KEEPALIVE_INTERVAL,
+            )
+            .await?
+            {
                 let bytes = match chunk {
                     Ok(bytes) => bytes,
                     Err(error) => {
@@ -2076,7 +2124,16 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     let mut stream_failed = false;
     let mut stream_error = None;
 
-    while let Some(chunk) = bytes_stream.next().await {
+    while let Some(chunk) = next_deferred_stream_chunk_with_keepalive(
+        &mut bytes_stream,
+        stream,
+        &mut response_capture,
+        &mut response_bytes,
+        &mut response_truncated,
+        DEFERRED_STREAM_KEEPALIVE_INTERVAL,
+    )
+    .await?
+    {
         match chunk {
             Ok(bytes) => {
                 let converted = converter.push_bytes(&bytes);
@@ -3310,5 +3367,59 @@ mod tests {
             3,
             &missing_runtime_package
         ));
+    }
+
+    #[tokio::test]
+    async fn deferred_stream_wait_writes_keepalive_before_late_body_chunk() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let client_task = tokio::spawn(async move {
+            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            let mut buffer = vec![0_u8; DEFERRED_STREAM_KEEPALIVE_BYTES.len()];
+            stream.read_exact(&mut buffer).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            buffer
+        });
+        let (mut server_stream, _) = listener.accept().await.unwrap();
+        let mut chunks = Box::pin(futures_util::stream::unfold(false, |sent| async move {
+            if sent {
+                None
+            } else {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                Some((Ok::<&'static [u8], ()>(&b"upstream"[..]), true))
+            }
+        }));
+        let mut response_capture = Vec::new();
+        let mut response_bytes = 0_usize;
+        let mut response_truncated = false;
+
+        let chunk = next_deferred_stream_chunk_with_keepalive(
+            &mut chunks,
+            &mut server_stream,
+            &mut response_capture,
+            &mut response_bytes,
+            &mut response_truncated,
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let keepalive = tokio::time::timeout(Duration::from_secs(1), client_task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(chunk, &b"upstream"[..]);
+        assert_eq!(keepalive, DEFERRED_STREAM_KEEPALIVE_BYTES);
+        assert!(response_bytes >= DEFERRED_STREAM_KEEPALIVE_BYTES.len());
+        assert!(
+            response_capture
+                .windows(DEFERRED_STREAM_KEEPALIVE_BYTES.len())
+                .any(|window| window == DEFERRED_STREAM_KEEPALIVE_BYTES)
+        );
+        assert!(!response_truncated);
     }
 }

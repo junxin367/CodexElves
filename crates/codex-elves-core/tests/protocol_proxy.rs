@@ -4605,7 +4605,7 @@ fn retained_upstream_header_timeouts_match_proxy_policy() {
     assert_eq!(upstream_models_header_timeout(), Duration::from_secs(30));
     assert_eq!(
         upstream_deferred_stream_header_timeout(),
-        Duration::from_secs(600)
+        Duration::from_secs(900)
     );
 }
 
