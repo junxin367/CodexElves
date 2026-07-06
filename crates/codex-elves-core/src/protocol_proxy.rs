@@ -2123,6 +2123,26 @@ pub async fn apply_continue_thinking_to_responses_stream(
                 before_response_body,
             );
         }
+        let tool_call_types = crate::continue_thinking::response_tool_call_types(&response_object);
+        if !tool_call_types.is_empty() {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "continue_thinking.skipped_tool_call",
+                json!({
+                    "model": model,
+                    "reasoningTokens": reasoning_tokens,
+                    "gridMultiple": reasoning_tokens.and_then(crate::continue_thinking::grid_multiple),
+                    "toolCallTypes": tool_call_types
+                }),
+            );
+            return ContinueThinkingResult::from_state(
+                current_sse_text,
+                triggered,
+                completed_rounds,
+                accumulated_reasoning_tokens,
+                continue_request_body(&continue_requests),
+                before_response_body,
+            );
+        }
         if round >= max_continue_rounds {
             return ContinueThinkingResult::from_state(
                 current_sse_text,

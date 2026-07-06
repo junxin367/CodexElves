@@ -1434,7 +1434,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
     case "startup_options":
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
-      return Promise.resolve(browserPreviewResult({ currentVersion: "0.2.1", updateAvailable: false }) as T);
+      return Promise.resolve(browserPreviewResult({ currentVersion: "0.2.2", updateAvailable: false }) as T);
     case "load_overview":
       return Promise.resolve(browserPreviewResult({
         codex_app: { status: "found", path: settings.codexAppPath },
@@ -1449,7 +1449,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.2.1",
+        current_version: "0.2.2",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -8393,10 +8393,52 @@ function contextEntriesByKind(entries: CodexContextEntries, kind: ContextKind): 
   return dedupeContextEntryList(entries.plugins);
 }
 
+function comparePluginVersions(left: string, right: string) {
+  const [leftMain, leftPre = ""] = left.trim().split("-", 2);
+  const [rightMain, rightPre = ""] = right.trim().split("-", 2);
+  const leftParts = leftMain.split(".");
+  const rightParts = rightMain.split(".");
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const order = compareVersionIdentifier(leftParts[index] ?? "0", rightParts[index] ?? "0");
+    if (order !== 0) return order;
+  }
+  if (!leftPre && rightPre) return 1;
+  if (leftPre && !rightPre) return -1;
+  if (!leftPre && !rightPre) return 0;
+  return comparePrereleaseVersions(leftPre, rightPre);
+}
+
+function comparePrereleaseVersions(left: string, right: string) {
+  const leftParts = left.split(".");
+  const rightParts = right.split(".");
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftPart = leftParts[index];
+    const rightPart = rightParts[index];
+    if (leftPart === undefined) return -1;
+    if (rightPart === undefined) return 1;
+    const order = compareVersionIdentifier(leftPart, rightPart);
+    if (order !== 0) return order;
+  }
+  return 0;
+}
+
+function compareVersionIdentifier(left: string, right: string) {
+  const leftNumber = /^\d+$/.test(left) ? Number(left) : null;
+  const rightNumber = /^\d+$/.test(right) ? Number(right) : null;
+  if (leftNumber !== null && rightNumber !== null) return Math.sign(leftNumber - rightNumber);
+  if (leftNumber !== null) return -1;
+  if (rightNumber !== null) return 1;
+  return left.localeCompare(right);
+}
+
 function pluginCacheInfoMeta(info?: PluginCacheInfo) {
   if (!info) return "缓存未读取";
   const cached = info.currentVersion ? `缓存 ${info.currentVersion}` : info.cached ? `缓存 ${info.cachedVersions.join(", ")}` : "未缓存";
-  const sourceVersionChanged = Boolean(info.currentVersion && info.sourceVersion && info.currentVersion !== info.sourceVersion);
+  const sourceVersionNewer = Boolean(
+    info.currentVersion && info.sourceVersion && comparePluginVersions(info.sourceVersion, info.currentVersion) > 0,
+  );
   const refresh = info.canRefresh ? "可强制刷新" : info.refreshReason;
   return (
     <>
@@ -8405,7 +8447,7 @@ function pluginCacheInfoMeta(info?: PluginCacheInfo) {
       {info.sourceVersion ? (
         <span>
           源{" "}
-          <span className={sourceVersionChanged ? "context-source-version changed" : "context-source-version"}>
+          <span className={sourceVersionNewer ? "context-source-version changed" : "context-source-version"}>
             {info.sourceVersion}
           </span>
         </span>

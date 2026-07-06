@@ -61,9 +61,18 @@ fn parse_response_sse_events(input: &str) -> Vec<ParsedSseEvent> {
 }
 
 fn responses_sse_with_reasoning(response_id: &str, reasoning_tokens: u64) -> String {
+    responses_sse_with_reasoning_and_output(response_id, reasoning_tokens, json!([]))
+}
+
+fn responses_sse_with_reasoning_and_output(
+    response_id: &str,
+    reasoning_tokens: u64,
+    output: Value,
+) -> String {
+    let output = serde_json::to_string(&output).unwrap();
     format!(
         "event: response.completed\n\
-data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{response_id}\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-responses\",\"output\":[],\"usage\":{{\"output_tokens_details\":{{\"reasoning_tokens\":{reasoning_tokens}}}}}}}}}\n\n\
+data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{response_id}\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-responses\",\"output\":{output},\"usage\":{{\"output_tokens_details\":{{\"reasoning_tokens\":{reasoning_tokens}}}}}}}}}\n\n\
 data: [DONE]\n\n"
     )
 }
@@ -4850,6 +4859,69 @@ async fn continue_thinking_reports_accumulated_reasoning_tokens() {
     let request = server.finish();
     assert_eq!(request.path, "/v1/responses");
     assert!(request.body.contains("continue_thinking"));
+}
+
+#[tokio::test]
+async fn continue_thinking_skips_response_with_tool_call_output() {
+    let settings = BackendSettings {
+        gpt_reasoning_continuation: true,
+        relay_profiles: vec![RelayProfile {
+            id: "responses".to_string(),
+            name: "Responses".to_string(),
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            upstream_base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            protocol: RelayProtocol::Responses,
+            relay_mode: RelayMode::MixedApi,
+            model_mappings: vec![RelayModelMapping {
+                request_model: "gpt-responses".to_string(),
+                protocol: RelayProtocol::Responses,
+                context_window: "200000".to_string(),
+            }],
+            ..RelayProfile::default()
+        }],
+        active_relay_id: "responses".to_string(),
+        ..BackendSettings::default()
+    };
+    let first_round = responses_sse_with_reasoning_and_output(
+        "resp_tool_call",
+        516,
+        json!([
+            {
+                "id": "rs_1",
+                "type": "reasoning",
+                "encrypted_content": "abc123"
+            },
+            {
+                "id": "fc_1",
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"pwd\"}",
+                "call_id": "call_1"
+            }
+        ]),
+    );
+
+    let result = apply_continue_thinking_to_responses_stream(
+        &json!({
+            "model": "gpt-responses",
+            "input": "hi",
+            "stream": true,
+            "reasoning": { "effort": "high" }
+        }),
+        settings,
+        None,
+        first_round,
+    )
+    .await;
+
+    assert!(!result.triggered);
+    assert_eq!(result.rounds, 0);
+    assert_eq!(result.reasoning_tokens, Some(516));
+    assert!(result.sse_text.contains("resp_tool_call"));
+    assert!(result.request_body.is_none());
+    assert!(result.before_response_body.is_none());
+    assert!(result.after_response_body.is_none());
 }
 
 #[tokio::test]

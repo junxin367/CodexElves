@@ -157,6 +157,7 @@ pub fn force_refresh_plugin_cache(home: &Path, plugin_id: &str) -> anyhow::Resul
         let _ = std::fs::remove_dir_all(&staging);
     }
     result?;
+    remove_obsolete_plugin_cache_directories(&cache_root, &version)?;
     Ok(plugin_cache_info(home, plugin_id))
 }
 
@@ -778,6 +779,29 @@ fn replace_plugin_cache_directory(source: &Path, destination: &Path) -> anyhow::
             })
         }
     }
+}
+
+fn remove_obsolete_plugin_cache_directories(
+    cache_root: &Path,
+    keep_version: &str,
+) -> anyhow::Result<()> {
+    let keep_path = cache_root.join(keep_version);
+    let entries = std::fs::read_dir(cache_root)
+        .with_context(|| format!("failed to read {}", cache_root.display()))?;
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        if path == keep_path {
+            continue;
+        }
+        std::fs::remove_dir_all(&path).with_context(|| {
+            format!("failed to remove obsolete plugin cache {}", path.display())
+        })?;
+    }
+    Ok(())
 }
 
 fn copy_dir_recursive(source: &Path, destination: &Path) -> anyhow::Result<()> {
@@ -1861,6 +1885,34 @@ enabled = true
             std::fs::read_to_string(cache.join("marker.txt")).unwrap(),
             "fresh"
         );
+    }
+
+    #[test]
+    fn force_refresh_plugin_cache_removes_old_version_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let source = temp.path().join("marketplace");
+        std::fs::create_dir_all(&home).unwrap();
+        write_local_plugin_marketplace(&home, &source, "0.1.2-alpha.8", "fresh");
+        let old_cache = home
+            .join("plugins")
+            .join("cache")
+            .join("zeroone")
+            .join("zeroone")
+            .join("0.1.2-alpha.7");
+        std::fs::create_dir_all(old_cache.join(".codex-plugin")).unwrap();
+        std::fs::write(
+            old_cache.join(".codex-plugin").join("plugin.json"),
+            r#"{"name":"zeroone","version":"0.1.2-alpha.7"}"#,
+        )
+        .unwrap();
+        std::fs::write(old_cache.join("marker.txt"), "stale").unwrap();
+
+        let info = force_refresh_plugin_cache(&home, "zeroone@zeroone").unwrap();
+
+        assert_eq!(info.current_version.as_deref(), Some("0.1.2-alpha.8"));
+        assert_eq!(info.cached_versions, vec!["0.1.2-alpha.8".to_string()]);
+        assert!(!old_cache.exists());
     }
 
     #[test]

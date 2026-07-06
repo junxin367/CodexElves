@@ -1,7 +1,8 @@
 use base64::Engine;
 use serde_json::Map;
 use serde_json::{Value, json};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use toml_edit::Item;
 
 use crate::settings::BackendSettings;
 
@@ -76,12 +77,16 @@ fn local_plugin_marketplaces_from_home(home: &Path) -> Value {
             .join("plugins")
             .join("marketplace.json"),
     ];
+    let mut candidates = candidates.to_vec();
+    candidates.extend(marketplace_candidates_from_config(home));
+    let mut seen = std::collections::BTreeSet::new();
     let marketplaces = candidates
-        .iter()
+        .into_iter()
+        .filter(|path| seen.insert(path.clone()))
         .filter_map(|path| {
-            let text = std::fs::read_to_string(path).ok()?;
+            let text = std::fs::read_to_string(&path).ok()?;
             let mut marketplace: Value = serde_json::from_str(&text).ok()?;
-            expand_local_plugin_marketplace(&mut marketplace, path, &home, &installed_plugins);
+            expand_local_plugin_marketplace(&mut marketplace, &path, home, &installed_plugins);
             if let Some(object) = marketplace.as_object_mut() {
                 object
                     .entry("path")
@@ -91,6 +96,72 @@ fn local_plugin_marketplaces_from_home(home: &Path) -> Value {
         })
         .collect::<Vec<_>>();
     Value::Array(marketplaces)
+}
+
+fn marketplace_candidates_from_config(home: &Path) -> Vec<PathBuf> {
+    let text = std::fs::read_to_string(home.join("config.toml")).unwrap_or_default();
+    let Ok(doc) = text
+        .trim_start_matches('\u{feff}')
+        .parse::<toml_edit::DocumentMut>()
+    else {
+        return Vec::new();
+    };
+    let Some(marketplaces) = doc.get("marketplaces").and_then(Item::as_table) else {
+        return Vec::new();
+    };
+    marketplaces
+        .iter()
+        .filter_map(|(name, item)| {
+            let table = item.as_table()?;
+            let source_type = table
+                .get("source_type")
+                .and_then(Item::as_str)
+                .unwrap_or_default();
+            let source = table
+                .get("source")
+                .and_then(Item::as_str)
+                .unwrap_or_default()
+                .trim();
+            if source.is_empty() {
+                return None;
+            }
+            marketplace_root_from_config(home, name, source_type, source)
+        })
+        .flat_map(|root| {
+            [
+                root.join(".agents")
+                    .join("plugins")
+                    .join("marketplace.json"),
+                root.join(".agents")
+                    .join("plugins")
+                    .join("api_marketplace.json"),
+            ]
+        })
+        .collect()
+}
+
+fn marketplace_root_from_config(
+    home: &Path,
+    marketplace_name: &str,
+    source_type: &str,
+    source: &str,
+) -> Option<PathBuf> {
+    match source_type {
+        "local" => Some(PathBuf::from(normalize_windows_extended_path(source))),
+        "git" => {
+            let direct = PathBuf::from(normalize_windows_extended_path(source));
+            if direct.is_dir() {
+                Some(direct)
+            } else {
+                let checkout = home
+                    .join(".tmp")
+                    .join("marketplaces")
+                    .join(marketplace_name);
+                checkout.is_dir().then_some(checkout)
+            }
+        }
+        _ => None,
+    }
 }
 
 fn expand_local_plugin_marketplace(
@@ -131,12 +202,10 @@ fn expand_local_plugin_marketplace(
         if plugin_name.is_empty() {
             continue;
         }
-        let manifest_path = marketplace_root
-            .join("plugins")
-            .join(&plugin_name)
-            .join(".codex-plugin")
-            .join("plugin.json");
-        let plugin_root = marketplace_root.join("plugins").join(&plugin_name);
+        let plugin_root = plugin_source_relative_path(plugin_object)
+            .map(|path| resolve_marketplace_path(&marketplace_root, &path))
+            .unwrap_or_else(|| marketplace_root.join("plugins").join(&plugin_name));
+        let manifest_path = plugin_root.join(".codex-plugin").join("plugin.json");
         if let Some(manifest) = plugin_manifest(&manifest_path) {
             merge_plugin_manifest(plugin_object, manifest);
         }
@@ -160,6 +229,58 @@ fn expand_local_plugin_marketplace(
             "installed".to_string(),
             Value::Bool(installed_plugins.contains(&format!("{plugin_name}@{marketplace_name}"))),
         );
+    }
+}
+
+fn plugin_source_relative_path(plugin: &Map<String, Value>) -> Option<PathBuf> {
+    let path = plugin
+        .get("source")
+        .and_then(Value::as_object)
+        .and_then(|source| source.get("path"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            plugin
+                .get("source")
+                .and_then(Value::as_object)
+                .and_then(|source| source.get("url"))
+                .and_then(Value::as_str)
+                .filter(|url| is_local_plugin_source_url(url))
+        })
+        .or_else(|| plugin.get("path").and_then(Value::as_str))?;
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed.strip_prefix("./").unwrap_or(trimmed)))
+    }
+}
+
+fn is_local_plugin_source_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed == "." || trimmed == ".." || trimmed.starts_with("./") || trimmed.starts_with("../")
+    {
+        return true;
+    }
+    if Path::new(trimmed).is_absolute() {
+        return true;
+    }
+    if trimmed.contains("://") || trimmed.starts_with("git@") {
+        return false;
+    }
+    !trimmed.contains(':')
+}
+
+fn resolve_marketplace_path(marketplace_root: &Path, path: &Path) -> PathBuf {
+    if path.as_os_str().is_empty() {
+        return marketplace_root.to_path_buf();
+    }
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        marketplace_root.join(path)
     }
 }
 
@@ -212,6 +333,10 @@ fn merge_plugin_manifest(plugin: &mut Map<String, Value>, manifest: Map<String, 
     for (key, value) in manifest {
         plugin.entry(key).or_insert(value);
     }
+}
+
+fn normalize_windows_extended_path(value: &str) -> String {
+    value.strip_prefix(r"\\?\").unwrap_or(value).to_string()
 }
 
 fn installed_plugins_from_config(home: &Path) -> std::collections::BTreeSet<String> {
@@ -366,6 +491,60 @@ mod tests {
         assert_eq!(
             array[2]["plugins"][0]["marketplacePath"].as_str(),
             Some("remote:openai-curated-remote")
+        );
+    }
+
+    #[test]
+    fn local_plugin_marketplaces_includes_git_marketplace_from_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let checkout = home
+            .join(".tmp")
+            .join("marketplaces")
+            .join("superpowers-dev");
+        let marketplace_dir = checkout.join(".agents").join("plugins");
+        std::fs::create_dir_all(&marketplace_dir).unwrap();
+        std::fs::create_dir_all(checkout.join(".codex-plugin")).unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            r#"[marketplaces.superpowers-dev]
+source_type = "git"
+source = "https://github.com/obra/superpowers.git"
+
+[plugins."superpowers@superpowers-dev"]
+enabled = true
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            marketplace_dir.join("marketplace.json"),
+            r#"{"name":"superpowers-dev","plugins":[{"name":"superpowers","source":{"source":"url","url":"./"}}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            checkout.join(".codex-plugin").join("plugin.json"),
+            r#"{"version":"6.1.1","interface":{"displayName":"Superpowers","logo":"./assets/app-icon.png"}}"#,
+        )
+        .unwrap();
+
+        let marketplaces = local_plugin_marketplaces_from_home(home);
+        let array = marketplaces.as_array().unwrap();
+
+        assert_eq!(array.len(), 1);
+        assert_eq!(array[0]["name"].as_str(), Some("superpowers-dev"));
+        assert_eq!(
+            array[0]["plugins"][0]["id"].as_str(),
+            Some("superpowers@superpowers-dev")
+        );
+        assert_eq!(array[0]["plugins"][0]["version"].as_str(), Some("6.1.1"));
+        assert_eq!(
+            array[0]["plugins"][0]["interface"]["displayName"].as_str(),
+            Some("Superpowers")
+        );
+        assert_eq!(array[0]["plugins"][0]["installed"].as_bool(), Some(true));
+        assert_eq!(
+            array[0]["plugins"][0]["marketplacePath"].as_str(),
+            Some("remote:superpowers-dev")
         );
     }
 

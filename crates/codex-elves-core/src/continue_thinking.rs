@@ -145,6 +145,56 @@ pub fn extract_output_items(response_object: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+fn is_tool_call_output_item_type(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function_call"
+            | "custom_tool_call"
+            | "tool_call"
+            | "tool_search_call"
+            | "web_search_call"
+            | "file_search_call"
+            | "computer_call"
+            | "computer_use_call"
+            | "local_shell_call"
+            | "code_interpreter_call"
+            | "image_generation_call"
+            | "mcp_call"
+    ) || kind.ends_with("_tool_call")
+}
+
+/// 终止响应已经在请求工具调用时，不再把低 reasoning token 视为需要续写。
+/// 这类响应不是最终答案，后续应由正常工具调用链路推进。
+pub fn response_tool_call_types(response_object: &Value) -> Vec<String> {
+    response_object
+        .get("output")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("type").and_then(Value::as_str))
+                .filter(|kind| is_tool_call_output_item_type(kind))
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 终止响应已经在请求工具调用时，不再把低 reasoning token 视为需要续写。
+/// 这类响应不是最终答案，后续应由正常工具调用链路推进。
+pub fn response_contains_tool_call(response_object: &Value) -> bool {
+    response_object
+        .get("output")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_tool_call_output_item_type)
+            })
+        })
+}
+
 /// 从一段完整的 Responses SSE 文本中提取终止事件（response.completed /
 /// response.incomplete / response.failed）里的 `response` 对象。取最后一个
 /// 匹配的事件（正常情况下每轮响应只有一个终止事件）。
@@ -301,6 +351,47 @@ mod tests {
         let response = json!({ "output": [{"type": "reasoning"}, {"type": "message"}] });
         assert_eq!(extract_output_items(&response).len(), 2);
         assert!(extract_output_items(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn response_contains_tool_call_detects_tool_call_outputs() {
+        let response = json!({
+            "output": [
+                {"type": "reasoning"},
+                {"type": "function_call", "name": "exec_command"},
+                {"type": "custom_tool_call", "name": "apply_patch"},
+                {"type": "local_shell_call", "name": "shell"},
+                {"type": "web_search_call", "name": "search"},
+                {"type": "tool_search_call", "name": "tool_search"}
+            ]
+        });
+
+        assert!(response_contains_tool_call(&response));
+        assert_eq!(
+            response_tool_call_types(&response),
+            vec![
+                "function_call",
+                "custom_tool_call",
+                "local_shell_call",
+                "web_search_call",
+                "tool_search_call"
+            ]
+        );
+    }
+
+    #[test]
+    fn response_contains_tool_call_ignores_final_message_outputs() {
+        let response = json!({
+            "output": [
+                {"type": "reasoning"},
+                {"type": "message", "content": [{"type": "output_text", "text": "done"}]},
+                {"type": "function_call_output", "output": "tool result"},
+                {"type": "unknown_call", "output": "not a known tool call"}
+            ]
+        });
+
+        assert!(!response_contains_tool_call(&response));
+        assert!(!response_contains_tool_call(&json!({})));
     }
 
     #[test]
