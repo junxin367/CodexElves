@@ -1063,9 +1063,6 @@ fn marketplace_source_path_from_config(
         .get("source_type")
         .and_then(Item::as_str)
         .unwrap_or_default();
-    if source_type != "local" {
-        return Ok(None);
-    }
     let source = table
         .get("source")
         .and_then(Item::as_str)
@@ -1074,7 +1071,79 @@ fn marketplace_source_path_from_config(
     if source.is_empty() {
         return Ok(None);
     }
-    Ok(Some(PathBuf::from(normalize_windows_extended_path(source))))
+    match source_type {
+        "local" => Ok(Some(PathBuf::from(normalize_windows_extended_path(source)))),
+        "git" => Ok(git_marketplace_source_path(home, marketplace_name, source)),
+        _ => Ok(None),
+    }
+}
+
+fn git_marketplace_source_path(
+    home: &Path,
+    marketplace_name: &str,
+    source: &str,
+) -> Option<PathBuf> {
+    let direct = PathBuf::from(normalize_windows_extended_path(source));
+    if direct.is_dir() {
+        return Some(direct);
+    }
+
+    let checkout = home
+        .join(".tmp")
+        .join("marketplaces")
+        .join(marketplace_name);
+    if checkout.is_dir() && git_marketplace_source_matches(&checkout, source) {
+        return Some(checkout);
+    }
+
+    None
+}
+
+fn git_marketplace_source_matches(checkout: &Path, source: &str) -> bool {
+    let expected = normalize_git_source(source);
+    if expected.is_empty() {
+        return false;
+    }
+
+    if marketplace_install_source(checkout)
+        .as_deref()
+        .map(normalize_git_source)
+        .is_some_and(|actual| actual == expected)
+    {
+        return true;
+    }
+
+    git_origin_url(checkout)
+        .as_deref()
+        .map(normalize_git_source)
+        .is_some_and(|actual| actual == expected)
+}
+
+fn marketplace_install_source(checkout: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(checkout.join(".codex-marketplace-install.json")).ok()?;
+    serde_json::from_str::<Value>(&text)
+        .ok()?
+        .get("source")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn git_origin_url(checkout: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(checkout.join(".git").join("config")).ok()?;
+    text.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("url =").map(str::trim))
+        .filter(|url| !url.is_empty())
+        .map(str::to_string)
+}
+
+fn normalize_git_source(source: &str) -> String {
+    source
+        .trim()
+        .trim_end_matches('/')
+        .strip_suffix(".git")
+        .unwrap_or_else(|| source.trim().trim_end_matches('/'))
+        .to_ascii_lowercase()
 }
 
 fn plugin_source_relative_path(plugin: &Value) -> Option<PathBuf> {
@@ -1083,6 +1152,14 @@ fn plugin_source_relative_path(plugin: &Value) -> Option<PathBuf> {
         .and_then(Value::as_object)
         .and_then(|source| source.get("path"))
         .and_then(Value::as_str)
+        .or_else(|| {
+            plugin
+                .get("source")
+                .and_then(Value::as_object)
+                .and_then(|source| source.get("url"))
+                .and_then(Value::as_str)
+                .filter(|url| is_local_plugin_source_url(url))
+        })
         .or_else(|| plugin.get("path").and_then(Value::as_str))?;
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -1092,7 +1169,28 @@ fn plugin_source_relative_path(plugin: &Value) -> Option<PathBuf> {
     }
 }
 
+fn is_local_plugin_source_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed == "." || trimmed == ".." || trimmed.starts_with("./") || trimmed.starts_with("../")
+    {
+        return true;
+    }
+    if Path::new(trimmed).is_absolute() {
+        return true;
+    }
+    if trimmed.contains("://") || trimmed.starts_with("git@") {
+        return false;
+    }
+    !trimmed.contains(':')
+}
+
 fn resolve_marketplace_path(marketplace_root: &Path, path: &Path) -> PathBuf {
+    if path.as_os_str().is_empty() {
+        return marketplace_root.to_path_buf();
+    }
     if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -1298,6 +1396,45 @@ enabled = true
 "#,
                 source.display()
             ),
+        )
+        .unwrap();
+    }
+
+    fn write_git_plugin_marketplace(home: &Path, version: &str, marker: &str) {
+        let source = home
+            .join(".tmp")
+            .join("marketplaces")
+            .join("superpowers-dev");
+        std::fs::create_dir_all(source.join(".agents").join("plugins")).unwrap();
+        std::fs::create_dir_all(source.join(".codex-plugin")).unwrap();
+        std::fs::write(
+            source
+                .join(".agents")
+                .join("plugins")
+                .join("marketplace.json"),
+            r#"{"name":"superpowers-dev","plugins":[{"name":"superpowers","source":{"source":"url","url":"./"}}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            source.join(".codex-plugin").join("plugin.json"),
+            format!(r#"{{"name":"superpowers","version":"{version}"}}"#),
+        )
+        .unwrap();
+        std::fs::write(source.join("marker.txt"), marker).unwrap();
+        std::fs::write(
+            source.join(".codex-marketplace-install.json"),
+            r#"{"source_type":"git","source":"https://github.com/obra/superpowers.git","revision":"d884ae04edebef577e82ff7c4e143debd0bbec99"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            r#"[marketplaces.superpowers-dev]
+source_type = "git"
+source = "https://github.com/obra/superpowers.git"
+
+[plugins."superpowers@superpowers-dev"]
+enabled = true
+"#,
         )
         .unwrap();
     }
@@ -1631,6 +1768,43 @@ enabled = true
     }
 
     #[test]
+    fn plugin_cache_info_reads_git_marketplace_source_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        write_git_plugin_marketplace(&home, "6.1.1", "source");
+        let cache = home
+            .join("plugins")
+            .join("cache")
+            .join("superpowers-dev")
+            .join("superpowers")
+            .join("6.1.0");
+        std::fs::create_dir_all(cache.join(".codex-plugin")).unwrap();
+        std::fs::write(
+            cache.join(".codex-plugin").join("plugin.json"),
+            r#"{"name":"superpowers","version":"6.1.0"}"#,
+        )
+        .unwrap();
+
+        let info = plugin_cache_info(&home, "superpowers@superpowers-dev");
+
+        assert!(info.cached);
+        assert_eq!(info.current_version.as_deref(), Some("6.1.0"));
+        assert_eq!(info.source_version.as_deref(), Some("6.1.1"));
+        assert_eq!(
+            info.source_path.as_deref(),
+            Some(
+                home.join(".tmp")
+                    .join("marketplaces")
+                    .join("superpowers-dev")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert!(info.can_refresh);
+    }
+
+    #[test]
     fn plugin_cache_info_blocks_refresh_when_source_version_is_lower() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
@@ -1683,6 +1857,35 @@ enabled = true
         let info = force_refresh_plugin_cache(&home, "zeroone@zeroone").unwrap();
 
         assert_eq!(info.current_version.as_deref(), Some("0.1.2-alpha.7"));
+        assert_eq!(
+            std::fs::read_to_string(cache.join("marker.txt")).unwrap(),
+            "fresh"
+        );
+    }
+
+    #[test]
+    fn force_refresh_plugin_cache_rebuilds_cache_from_git_marketplace_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        write_git_plugin_marketplace(&home, "6.1.1", "fresh");
+        let cache = home
+            .join("plugins")
+            .join("cache")
+            .join("superpowers-dev")
+            .join("superpowers")
+            .join("6.1.1");
+        std::fs::create_dir_all(cache.join(".codex-plugin")).unwrap();
+        std::fs::write(
+            cache.join(".codex-plugin").join("plugin.json"),
+            r#"{"name":"superpowers","version":"6.1.1"}"#,
+        )
+        .unwrap();
+        std::fs::write(cache.join("marker.txt"), "stale").unwrap();
+
+        let info = force_refresh_plugin_cache(&home, "superpowers@superpowers-dev").unwrap();
+
+        assert_eq!(info.current_version.as_deref(), Some("6.1.1"));
         assert_eq!(
             std::fs::read_to_string(cache.join("marker.txt")).unwrap(),
             "fresh"

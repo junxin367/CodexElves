@@ -538,6 +538,9 @@ type LocalProxyLogEntry = {
 type LocalProxyLogDetail = LocalProxyLogEntry & {
   requestBody: string;
   responseBody: string;
+  continueThinkingRequestBody?: string | null;
+  continueThinkingBeforeResponseBody?: string | null;
+  continueThinkingAfterResponseBody?: string | null;
 };
 
 type LocalProxyLogsResult = CommandResult<{
@@ -1278,6 +1281,61 @@ function browserPreviewLocalProxyDetail(id: string): LocalProxyLogDetail | null 
     responseBody: entry.stream
       ? 'event: response.output_text.delta\ndata: {"delta":"浏览器预览响应"}\n\n'
       : JSON.stringify({ id: entry.id, status: "completed", output_text: "浏览器预览响应" }, null, 2),
+    continueThinkingRequestBody: entry.continueThinkingTriggered
+      ? JSON.stringify(
+          {
+            model: entry.model,
+            reasoning: { effort: entry.reasoningEffort },
+            service_tier: entry.serviceTier,
+            stream: entry.stream,
+            input: [
+              { role: "user", content: "浏览器预览请求内容" },
+              {
+                id: "rs_preview_before_continue",
+                type: "reasoning",
+                encrypted_content: "preview-encrypted-reasoning",
+              },
+              {
+                type: "function_call",
+                name: "continue_thinking",
+                arguments: "{\"continue\":true}",
+                call_id: "call_continue_thinking_1",
+              },
+              {
+                type: "function_call_output",
+                call_id: "call_continue_thinking_1",
+                output: "Please continue thinking about the query.",
+              },
+            ],
+          },
+          null,
+          2,
+        )
+      : null,
+    continueThinkingBeforeResponseBody: entry.continueThinkingTriggered
+      ? JSON.stringify(
+          {
+            id: "resp_preview_before_continue",
+            status: "completed",
+            output: [{ type: "message", content: [{ type: "output_text", text: "续接前汇总响应" }] }],
+            usage: { output_tokens_details: { reasoning_tokens: 516 } },
+          },
+          null,
+          2,
+        )
+      : null,
+    continueThinkingAfterResponseBody: entry.continueThinkingTriggered
+      ? JSON.stringify(
+          {
+            id: "resp_preview_after_continue",
+            status: "completed",
+            output: [{ type: "message", content: [{ type: "output_text", text: "续接后汇总响应" }] }],
+            usage: { output_tokens_details: { reasoning_tokens: 2376 } },
+          },
+          null,
+          2,
+        )
+      : null,
   };
 }
 
@@ -2988,8 +3046,10 @@ export function App() {
       refreshDiagnostics,
       showMessage: async (title: string, message: string, status?: Status) => showNotice(title, message, status),
       copyLogs: () => copyText(logs?.text ?? "", "日志已复制。"),
-      copyLocalProxyRequest: () => copyText(localProxyDetail?.entry?.requestBody ?? "", "请求内容已复制。"),
-      copyLocalProxyResponse: () => copyText(localProxyDetail?.entry?.responseBody ?? "", "返回内容已复制。"),
+      copyLocalProxyRequest: (text?: string) =>
+        copyText(text ?? localProxyDetail?.entry?.requestBody ?? "", "请求内容已复制。"),
+      copyLocalProxyResponse: (text?: string) =>
+        copyText(text ?? localProxyDetail?.entry?.responseBody ?? "", "返回内容已复制。"),
       copyDiagnostics: () => copyText(diagnostics?.report ?? "", "诊断报告已复制。"),
       goLogs: () => navigate("about"),
       checkHealth: async () => {
@@ -3292,8 +3352,8 @@ type Actions = {
   refreshDiagnostics: () => Promise<void>;
   showMessage: (title: string, message: string, status?: Status) => Promise<void>;
   copyLogs: () => Promise<void>;
-  copyLocalProxyRequest: () => Promise<void>;
-  copyLocalProxyResponse: () => Promise<void>;
+  copyLocalProxyRequest: (text?: string) => Promise<void>;
+  copyLocalProxyResponse: (text?: string) => Promise<void>;
   copyDiagnostics: () => Promise<void>;
   goLogs: () => Promise<void>;
   installWatcher: () => Promise<void>;
@@ -3445,7 +3505,7 @@ function LocalProxyScreen({
   const entries = logs?.entries ?? [];
   const [page, setPage] = useState(1);
   const [modelFilter, setModelFilter] = useState("");
-  const [iqFilter, setIqFilter] = useState<"low" | "high" | "">("");
+  const [logFilter, setLogFilter] = useState<"high" | "continuation" | "">("");
   const modelOptions = useMemo(
     () =>
       Array.from(new Set(entries.map((entry) => entry.model?.trim()).filter((model): model is string => Boolean(model))))
@@ -3460,14 +3520,15 @@ function LocalProxyScreen({
       }),
     [entries, modelFilter],
   );
-  const gptIqRatio = useMemo(() => calculateGptIqRatio(modelFilteredEntries), [modelFilteredEntries]);
+  const gptRequestRatio = useMemo(() => calculateGptRequestRatio(modelFilteredEntries), [modelFilteredEntries]);
   const filteredEntries = useMemo(
     () =>
       modelFilteredEntries.filter((entry) => {
-        if (iqFilter && classifyGptIqRequest(entry) !== iqFilter) return false;
+        if (logFilter === "high" && classifyGptIqRequest(entry) !== "high") return false;
+        if (logFilter === "continuation" && !isContinueThinkingEntry(entry)) return false;
         return true;
       }),
-    [modelFilteredEntries, iqFilter],
+    [modelFilteredEntries, logFilter],
   );
   const totalPages = Math.max(1, Math.ceil(filteredEntries.length / LOCAL_PROXY_LOG_PAGE_SIZE));
   const visibleEntries = useMemo(
@@ -3477,7 +3538,7 @@ function LocalProxyScreen({
 
   useEffect(() => {
     setPage(1);
-  }, [modelFilter, iqFilter]);
+  }, [modelFilter, logFilter]);
 
   useEffect(() => {
     setPage((current) => Math.min(Math.max(current, 1), totalPages));
@@ -3581,24 +3642,24 @@ function LocalProxyScreen({
                 onChange={(next) => setModelFilter(next)}
               />
               <div
-                aria-label="GPT 请求低高智商比例"
+                aria-label="GPT 请求高智商和续接比例"
                 className="proxy-iq-ratio"
               >
                 <button
-                  aria-pressed={iqFilter === "low"}
-                  className={`proxy-iq-ratio-item low ${iqFilter === "low" ? "active" : ""}`}
-                  onClick={() => setIqFilter((current) => (current === "low" ? "" : "low"))}
+                  aria-pressed={logFilter === "high"}
+                  className={`proxy-iq-ratio-item high ${logFilter === "high" ? "active" : ""}`}
+                  onClick={() => setLogFilter((current) => (current === "high" ? "" : "high"))}
                   type="button"
                 >
-                  低 <strong>{gptIqRatio.lowPercent}%</strong>
+                  高 <strong>{gptRequestRatio.highPercent}%</strong>
                 </button>
                 <button
-                  aria-pressed={iqFilter === "high"}
-                  className={`proxy-iq-ratio-item high ${iqFilter === "high" ? "active" : ""}`}
-                  onClick={() => setIqFilter((current) => (current === "high" ? "" : "high"))}
+                  aria-pressed={logFilter === "continuation"}
+                  className={`proxy-iq-ratio-item continuation ${logFilter === "continuation" ? "active" : ""}`}
+                  onClick={() => setLogFilter((current) => (current === "continuation" ? "" : "continuation"))}
                   type="button"
                 >
-                  高 <strong>{gptIqRatio.highPercent}%</strong>
+                  续接 <strong>{gptRequestRatio.continuationPercent}%</strong>
                 </button>
               </div>
             </div>
@@ -3749,9 +3810,26 @@ function LocalProxyLogDetailDialog({
 }: {
   entry: LocalProxyLogDetail;
   onClose: () => void;
-  onCopyRequest: () => Promise<void>;
-  onCopyResponse: () => Promise<void>;
+  onCopyRequest: (text?: string) => Promise<void>;
+  onCopyResponse: (text?: string) => Promise<void>;
 }) {
+  const [requestView, setRequestView] = useState<"full" | "continue">("full");
+  const [responseView, setResponseView] = useState<"full" | "before" | "after">("full");
+  const continueRequestBody = entry.continueThinkingRequestBody?.trim() || "";
+  const continueBeforeBody = entry.continueThinkingBeforeResponseBody?.trim() || "";
+  const continueAfterBody = entry.continueThinkingAfterResponseBody?.trim() || "";
+  const hasContinueThinkingRequest = entry.continueThinkingTriggered && continueRequestBody;
+  const hasContinueThinkingViews = entry.continueThinkingTriggered && (continueBeforeBody || continueAfterBody);
+  const requestViewBody = requestView === "continue" ? continueRequestBody : entry.requestBody;
+  const responseViewBody =
+    responseView === "before"
+      ? continueBeforeBody
+      : responseView === "after"
+        ? continueAfterBody
+        : entry.responseBody;
+  const formattedRequestViewBody = formatProxyBody(requestViewBody);
+  const formattedResponseViewBody = formatProxyResponseBody(responseViewBody);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
@@ -3759,6 +3837,11 @@ function LocalProxyLogDetailDialog({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
+
+  useEffect(() => {
+    setRequestView("full");
+    setResponseView("full");
+  }, [entry.id]);
 
   return createPortal(
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="proxy-log-detail-title" onClick={onClose}>
@@ -3799,36 +3882,90 @@ function LocalProxyLogDetailDialog({
             <div className="proxy-detail-pane">
               <div className="proxy-detail-pane-head">
                 <span>完整请求</span>
+                {hasContinueThinkingRequest ? (
+                  <span className="proxy-detail-response-tabs" aria-label="续接请求视图">
+                    <Button
+                      aria-pressed={requestView === "full"}
+                      className={`proxy-detail-copy-button proxy-detail-view-button ${requestView === "full" ? "active" : ""}`}
+                      onClick={() => setRequestView("full")}
+                      size="sm"
+                      title="查看续接前请求"
+                      type="button"
+                      variant="secondary"
+                    >
+                      续接前
+                    </Button>
+                    <Button
+                      aria-pressed={requestView === "continue"}
+                      className={`proxy-detail-copy-button proxy-detail-view-button ${requestView === "continue" ? "active" : ""}`}
+                      onClick={() => setRequestView("continue")}
+                      size="sm"
+                      title="查看续接后请求"
+                      type="button"
+                      variant="secondary"
+                    >
+                      续接后
+                    </Button>
+                  </span>
+                ) : null}
                 <Button
                   aria-label="复制请求"
                   className="proxy-detail-copy-button"
                   size="sm"
                   title="复制请求"
                   variant="secondary"
-                  onClick={() => void onCopyRequest()}
+                  onClick={() => void onCopyRequest(formattedRequestViewBody)}
                 >
                   <Copy className="h-4 w-4" />
                   复制
                 </Button>
               </div>
-              <Textarea className="log-view proxy-detail-code" readOnly value={formatProxyBody(entry.requestBody)} />
+              <Textarea className="log-view proxy-detail-code" readOnly value={formattedRequestViewBody} />
             </div>
             <div className="proxy-detail-pane">
               <div className="proxy-detail-pane-head">
                 <span>完整返回</span>
+                {hasContinueThinkingViews ? (
+                  <span className="proxy-detail-response-tabs" aria-label="续接返回视图">
+                    <Button
+                      aria-pressed={responseView === "before"}
+                      className={`proxy-detail-copy-button proxy-detail-view-button ${responseView === "before" ? "active" : ""}`}
+                      disabled={!continueBeforeBody}
+                      onClick={() => setResponseView("before")}
+                      size="sm"
+                      title={continueBeforeBody ? "查看续接前汇总返回" : "当前日志未保存续接前汇总返回"}
+                      type="button"
+                      variant="secondary"
+                    >
+                      续接前
+                    </Button>
+                    <Button
+                      aria-pressed={responseView === "after"}
+                      className={`proxy-detail-copy-button proxy-detail-view-button ${responseView === "after" ? "active" : ""}`}
+                      disabled={!continueAfterBody}
+                      onClick={() => setResponseView("after")}
+                      size="sm"
+                      title={continueAfterBody ? "查看续接后汇总返回" : "当前日志未保存续接后汇总返回"}
+                      type="button"
+                      variant="secondary"
+                    >
+                      续接后
+                    </Button>
+                  </span>
+                ) : null}
                 <Button
                   aria-label="复制返回"
                   className="proxy-detail-copy-button"
                   size="sm"
                   title="复制返回"
                   variant="secondary"
-                  onClick={() => void onCopyResponse()}
+                  onClick={() => void onCopyResponse(formattedResponseViewBody)}
                 >
                   <Copy className="h-4 w-4" />
                   复制
                 </Button>
               </div>
-              <Textarea className="log-view proxy-detail-code" readOnly value={formatProxyBody(entry.responseBody)} />
+              <Textarea className="log-view proxy-detail-code" readOnly value={formattedResponseViewBody} />
             </div>
           </div>
         </div>
@@ -7125,8 +7262,8 @@ function ContextEntryEditor({
   }, []);
 
   return createPortal(
-    <div className="modal-backdrop" role="dialog" aria-modal="true">
-      <div className="modal-card context-editor-modal">
+    <div className="modal-backdrop" role="dialog" aria-modal="true" onClick={onCancel}>
+      <div className="modal-card context-editor-modal" onClick={(event) => event.stopPropagation()}>
         <div className="modal-head">
           <div>
             <h2>{entry ? `编辑${contextKindLabel(draftKind)}` : `新增${contextKindLabel(draftKind)}`}</h2>
@@ -8563,28 +8700,66 @@ function formatProxyBody(text: string) {
   }
 }
 
-function calculateGptIqRatio(entries: LocalProxyLogEntry[]) {
-  let low = 0;
+function formatProxyResponseBody(text: string) {
+  return formatProxyBody(extractProxySseJsonBody(text) ?? text);
+}
+
+function extractProxySseJsonBody(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed.includes("data:")) return null;
+
+  const events: unknown[] = [];
+  let terminalResponse: unknown = null;
+  trimmed.split(/\n\s*\n/).forEach((block) => {
+    const dataLines = block
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice("data:".length).trim())
+      .filter((line) => line && line !== "[DONE]");
+    if (!dataLines.length) return;
+    const rawData = dataLines.join("\n");
+    try {
+      const parsed = JSON.parse(rawData) as { type?: unknown; response?: unknown };
+      if (
+        typeof parsed.type === "string" &&
+        ["response.completed", "response.incomplete", "response.failed"].includes(parsed.type) &&
+        parsed.response
+      ) {
+        terminalResponse = parsed.response;
+      }
+      events.push(parsed);
+    } catch {
+      events.push(rawData);
+    }
+  });
+
+  const body = terminalResponse ?? (events.length === 1 ? events[0] : events.length ? events : null);
+  return body === null ? null : JSON.stringify(body, null, 2);
+}
+
+function calculateGptRequestRatio(entries: LocalProxyLogEntry[]) {
   let high = 0;
+  let continuation = 0;
   let total = 0;
 
   entries.forEach((entry) => {
     if (!isGptModel(entry.model)) return;
     total += 1;
-    const iqClass = classifyGptIqRequest(entry);
-    if (iqClass === "low") {
-      low += 1;
-    } else if (iqClass === "high") {
+    if (classifyGptIqRequest(entry) === "high") {
       high += 1;
+    }
+    if (isContinueThinkingEntry(entry)) {
+      continuation += 1;
     }
   });
 
   return {
-    low,
     high,
+    continuation,
     total,
-    lowPercent: total ? Math.round((low / total) * 100) : 0,
     highPercent: total ? Math.round((high / total) * 100) : 0,
+    continuationPercent: total ? Math.round((continuation / total) * 100) : 0,
   };
 }
 
@@ -8593,6 +8768,10 @@ function classifyGptIqRequest(entry: Pick<LocalProxyLogEntry, "model" | "reasoni
   if (entry.reasoningTokens === 516) return "low";
   if (typeof entry.reasoningTokens === "number" && entry.reasoningTokens > 516) return "high";
   return null;
+}
+
+function isContinueThinkingEntry(entry: Pick<LocalProxyLogEntry, "model" | "continueThinkingTriggered">) {
+  return isGptModel(entry.model) && entry.continueThinkingTriggered === true;
 }
 
 function isGptModel(model?: string | null) {

@@ -1896,7 +1896,7 @@ body {
 }
 
 .context-editor-modal {
-  width: min(760px, calc(100vw - 32px));
+  width: min(900px, calc(100vw - 32px));
 }
 
 .context-editor-modal .modal-head > div {
@@ -3630,10 +3630,21 @@ body {
   font-weight: 600;
 }
 
+.proxy-detail-response-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .proxy-detail-copy-button {
   height: 26px;
   padding: 0 9px;
   font-size: 12px;
+}
+
+.proxy-detail-view-button.active {
+  border-color: hsl(var(--brand-accent) / 0.72);
+  color: hsl(var(--brand-accent));
 }
 
 .proxy-detail-code {

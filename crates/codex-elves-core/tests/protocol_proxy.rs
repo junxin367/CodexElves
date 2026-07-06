@@ -193,6 +193,80 @@ fn responses_request_converts_to_anthropic_messages() {
 }
 
 #[test]
+fn anthropic_tool_schema_flattens_top_level_union() {
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-4-8",
+        "input": "check automations",
+        "tools": [
+            {
+                "type": "function",
+                "name": "codex_app__automation_update",
+                "description": "Create, update, view, or delete recurring automations.",
+                "parameters": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "mode": { "type": "string", "enum": ["view"] }
+                            },
+                            "required": ["mode", "id"],
+                            "additionalProperties": false
+                        },
+                        {
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "mode": { "type": "string", "enum": ["create"] },
+                                        "name": { "type": "string" },
+                                        "prompt": { "type": "string" }
+                                    },
+                                    "required": ["mode", "name", "prompt"],
+                                    "additionalProperties": false
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string" },
+                                        "mode": { "type": "string", "enum": ["delete"] }
+                                    },
+                                    "required": ["mode", "id"],
+                                    "additionalProperties": false
+                                }
+                            ]
+                        }
+                    ],
+                    "$defs": {
+                        "id": { "type": "string" }
+                    }
+                }
+            }
+        ]
+    }))
+    .unwrap();
+
+    let schema = &converted["tools"][0]["input_schema"];
+    assert_eq!(
+        converted["tools"][0]["name"],
+        "codex_app__automation_update"
+    );
+    assert_eq!(schema["type"], "object");
+    assert!(schema.get("oneOf").is_none());
+    assert!(schema.get("anyOf").is_none());
+    assert!(schema.get("allOf").is_none());
+    assert_eq!(schema["required"], json!(["mode"]));
+    assert!(schema["properties"].get("id").is_some());
+    assert!(schema["properties"].get("name").is_some());
+    assert!(schema["properties"].get("prompt").is_some());
+    let mode_enum = schema["properties"]["mode"]["enum"].as_array().unwrap();
+    assert!(mode_enum.contains(&json!("view")));
+    assert!(mode_enum.contains(&json!("create")));
+    assert!(mode_enum.contains(&json!("delete")));
+    assert!(schema.get("$defs").is_some());
+}
+
+#[test]
 fn anthropic_request_keeps_agents_context_name_and_dedupes_repeated_blocks() {
     let agents = "# AGENTS.md instructions for E:\\code\\junes\\github\\CodexElves\n\n<INSTRUCTIONS>\n默认使用简体中文。\n</INSTRUCTIONS>";
     let environment = "<environment_context>\n  <cwd>E:\\code\\junes\\github\\CodexElves</cwd>\n</environment_context>";

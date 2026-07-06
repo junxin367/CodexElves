@@ -30,6 +30,12 @@ pub struct ProxyRequestRecord {
     pub continue_thinking_triggered: bool,
     #[serde(default)]
     pub continue_thinking_rounds: u32,
+    #[serde(default)]
+    pub continue_thinking_request_body: Option<String>,
+    #[serde(default)]
+    pub continue_thinking_before_response_body: Option<String>,
+    #[serde(default)]
+    pub continue_thinking_after_response_body: Option<String>,
     pub service_tier: Option<String>,
     pub relay_id: Option<String>,
     pub relay_name: Option<String>,
@@ -376,6 +382,9 @@ fn serialize_record_for_log(record: &ProxyRequestRecord) -> serde_json::Result<S
     let mut trimmed = record.clone();
     trimmed.request_body.clear();
     trimmed.response_body.clear();
+    trimmed.continue_thinking_request_body = None;
+    trimmed.continue_thinking_before_response_body = None;
+    trimmed.continue_thinking_after_response_body = None;
     trimmed.response_truncated = true;
     trimmed.response_captured_bytes = 0;
 
@@ -562,6 +571,9 @@ data: [DONE]
             reasoning_source: Some("reasoning.effort".to_string()),
             continue_thinking_triggered: false,
             continue_thinking_rounds: 0,
+            continue_thinking_request_body: None,
+            continue_thinking_before_response_body: None,
+            continue_thinking_after_response_body: None,
             service_tier: Some("auto".to_string()),
             relay_id: Some("relay-test".to_string()),
             relay_name: Some("Test".to_string()),
@@ -709,6 +721,9 @@ data: [DONE]
             reasoning_source: None,
             continue_thinking_triggered: false,
             continue_thinking_rounds: 0,
+            continue_thinking_request_body: None,
+            continue_thinking_before_response_body: None,
+            continue_thinking_after_response_body: None,
             service_tier: None,
             relay_id: Some("relay-test".to_string()),
             relay_name: Some("Test".to_string()),

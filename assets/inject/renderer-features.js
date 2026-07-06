@@ -25,7 +25,7 @@
   const chatsSortRefreshIntervalMs = 1500;
   const chatsSortDbRefreshIntervalMs = 5000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "15";
+  const codexDeleteStyleVersion = "17";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
   const codexDeleteVersion = "7";
@@ -551,7 +551,7 @@
         top: var(--codex-elves-menu-top, 0);
         right: var(--codex-elves-menu-right, 140px);
         left: auto;
-        z-index: 2147483645;
+        z-index: 40;
         height: var(--codex-elves-menu-height, 30px);
         color: #d1d5db;
         font: 13px system-ui, sans-serif;
@@ -598,7 +598,8 @@
         -webkit-app-region: no-drag;
       }
       .codex-elves-modal-content {
-        width: min(520px, calc(100vw - 48px));
+        width: min(600px, calc(100vw - 48px));
+        min-width: 600px;
         max-height: min(680px, calc(100vh - 40px));
         display: flex;
         flex-direction: column;

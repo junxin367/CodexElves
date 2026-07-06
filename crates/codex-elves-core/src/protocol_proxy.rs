@@ -1997,6 +1997,9 @@ pub struct ContinueThinkingResult {
     pub triggered: bool,
     pub rounds: u32,
     pub reasoning_tokens: Option<u64>,
+    pub request_body: Option<String>,
+    pub before_response_body: Option<String>,
+    pub after_response_body: Option<String>,
 }
 
 impl ContinueThinkingResult {
@@ -2006,6 +2009,9 @@ impl ContinueThinkingResult {
             triggered: false,
             rounds: 0,
             reasoning_tokens: None,
+            request_body: None,
+            before_response_body: None,
+            after_response_body: None,
         }
     }
 
@@ -2014,13 +2020,42 @@ impl ContinueThinkingResult {
         triggered: bool,
         rounds: u32,
         reasoning_tokens: Option<u64>,
+        request_body: Option<String>,
+        before_response_body: Option<String>,
     ) -> Self {
+        let after_response_body = if triggered {
+            terminal_response_body_from_sse(&sse_text)
+        } else {
+            None
+        };
         Self {
             sse_text,
             triggered,
             rounds,
             reasoning_tokens,
+            request_body,
+            before_response_body,
+            after_response_body,
         }
+    }
+}
+
+fn terminal_response_body_from_sse(sse_text: &str) -> Option<String> {
+    let response_object = crate::continue_thinking::extract_terminal_response_object(sse_text)?;
+    serde_json::to_string_pretty(&response_object).ok()
+}
+
+fn terminal_response_body(response_object: &Value) -> Option<String> {
+    serde_json::to_string_pretty(response_object).ok()
+}
+
+fn continue_request_body(requests: &[Value]) -> Option<String> {
+    match requests {
+        [] => None,
+        [single] => single
+            .get("request")
+            .and_then(|request| serde_json::to_string_pretty(request).ok()),
+        _ => serde_json::to_string_pretty(&json!({ "rounds": requests })).ok(),
     }
 }
 
@@ -2061,6 +2096,8 @@ pub async fn apply_continue_thinking_to_responses_stream(
     let mut triggered = false;
     let mut completed_rounds = 0;
     let mut accumulated_reasoning_tokens = None;
+    let mut continue_requests = Vec::new();
+    let mut before_response_body = None;
     loop {
         let Some(response_object) =
             crate::continue_thinking::extract_terminal_response_object(&current_sse_text)
@@ -2070,6 +2107,8 @@ pub async fn apply_continue_thinking_to_responses_stream(
                 triggered,
                 completed_rounds,
                 accumulated_reasoning_tokens,
+                continue_request_body(&continue_requests),
+                before_response_body,
             );
         };
         let reasoning_tokens = crate::continue_thinking::extract_reasoning_tokens(&response_object);
@@ -2080,6 +2119,8 @@ pub async fn apply_continue_thinking_to_responses_stream(
                 triggered,
                 completed_rounds,
                 accumulated_reasoning_tokens,
+                continue_request_body(&continue_requests),
+                before_response_body,
             );
         }
         if round >= max_continue_rounds {
@@ -2088,10 +2129,15 @@ pub async fn apply_continue_thinking_to_responses_stream(
                 triggered,
                 completed_rounds,
                 accumulated_reasoning_tokens,
+                continue_request_body(&continue_requests),
+                before_response_body,
             );
         }
         round += 1;
         triggered = true;
+        if before_response_body.is_none() {
+            before_response_body = terminal_response_body(&response_object);
+        }
 
         let previous_output_items =
             crate::continue_thinking::extract_output_items(&response_object);
@@ -2100,12 +2146,18 @@ pub async fn apply_continue_thinking_to_responses_stream(
             &previous_output_items,
             round,
         );
+        continue_requests.push(json!({
+            "round": round,
+            "request": continue_request.clone()
+        }));
         let Ok(continue_body) = serde_json::to_string(&continue_request) else {
             return ContinueThinkingResult::from_state(
                 current_sse_text,
                 triggered,
                 completed_rounds,
                 accumulated_reasoning_tokens,
+                continue_request_body(&continue_requests),
+                before_response_body,
             );
         };
 
@@ -2138,6 +2190,8 @@ pub async fn apply_continue_thinking_to_responses_stream(
                     triggered,
                     completed_rounds,
                     accumulated_reasoning_tokens,
+                    continue_request_body(&continue_requests),
+                    before_response_body,
                 );
             }
         };
@@ -2147,6 +2201,8 @@ pub async fn apply_continue_thinking_to_responses_stream(
                 triggered,
                 completed_rounds,
                 accumulated_reasoning_tokens,
+                continue_request_body(&continue_requests),
+                before_response_body,
             );
         }
         let Ok(response) = upstream.into_response() else {
@@ -2155,6 +2211,8 @@ pub async fn apply_continue_thinking_to_responses_stream(
                 triggered,
                 completed_rounds,
                 accumulated_reasoning_tokens,
+                continue_request_body(&continue_requests),
+                before_response_body,
             );
         };
         let Ok(bytes) = response.bytes().await else {
@@ -2163,6 +2221,8 @@ pub async fn apply_continue_thinking_to_responses_stream(
                 triggered,
                 completed_rounds,
                 accumulated_reasoning_tokens,
+                continue_request_body(&continue_requests),
+                before_response_body,
             );
         };
         let round_sse_text = String::from_utf8_lossy(&bytes).into_owned();
@@ -5412,7 +5472,7 @@ fn chat_tool_to_anthropic_tool(tool: &Value) -> Option<Value> {
     }
     let mut anthropic_tool = json!({
         "name": name,
-        "input_schema": normalize_chat_tool_parameters(
+        "input_schema": normalize_anthropic_tool_input_schema(
             function.get("parameters").unwrap_or(&json!({}))
         )
     });
@@ -5600,6 +5660,163 @@ fn normalize_chat_tool_parameters(parameters: &Value) -> Value {
         normalized["required"] = json!([]);
     }
     normalized
+}
+
+fn normalize_anthropic_tool_input_schema(parameters: &Value) -> Value {
+    let mut normalized = normalize_chat_tool_parameters(parameters);
+    if !has_top_level_schema_union(&normalized) {
+        return normalized;
+    }
+
+    let (merged_properties, merged_required) = {
+        let parent = normalized.as_object().expect("normalized schema is object");
+        let mut merged_properties = parent
+            .get("properties")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let parent_required = schema_required_fields(parent);
+        let mut union_leaves = Vec::new();
+        collect_schema_union_leaves(&normalized, &mut union_leaves);
+
+        let mut common_required: Option<BTreeSet<String>> = None;
+        for leaf in union_leaves {
+            if let Some(properties) = leaf.get("properties").and_then(Value::as_object) {
+                for (name, schema) in properties {
+                    match merged_properties.get_mut(name) {
+                        Some(existing) => merge_schema_property(existing, schema),
+                        None => {
+                            merged_properties.insert(name.clone(), schema.clone());
+                        }
+                    }
+                }
+            }
+
+            let required = schema_required_fields(leaf);
+            common_required = Some(match common_required {
+                Some(current) => current.intersection(&required).cloned().collect(),
+                None => required,
+            });
+        }
+
+        let mut merged_required = parent_required;
+        if let Some(common_required) = common_required {
+            merged_required.extend(common_required);
+        }
+        (merged_properties, merged_required)
+    };
+
+    if let Some(object) = normalized.as_object_mut() {
+        object.remove("oneOf");
+        object.remove("anyOf");
+        object.remove("allOf");
+        object.insert("type".to_string(), json!("object"));
+        object.insert("properties".to_string(), Value::Object(merged_properties));
+        object.insert(
+            "required".to_string(),
+            Value::Array(merged_required.into_iter().map(Value::String).collect()),
+        );
+    }
+    normalized
+}
+
+fn has_top_level_schema_union(schema: &Value) -> bool {
+    schema.as_object().is_some_and(|object| {
+        object.contains_key("oneOf") || object.contains_key("anyOf") || object.contains_key("allOf")
+    })
+}
+
+fn collect_schema_union_leaves<'a>(schema: &'a Value, leaves: &mut Vec<&'a Map<String, Value>>) {
+    let Some(object) = schema.as_object() else {
+        return;
+    };
+
+    let mut expanded = false;
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(items) = object.get(key).and_then(Value::as_array) {
+            expanded = true;
+            for item in items {
+                collect_schema_union_leaves(item, leaves);
+            }
+        }
+    }
+
+    if !expanded {
+        leaves.push(object);
+    }
+}
+
+fn schema_required_fields(schema: &Map<String, Value>) -> BTreeSet<String> {
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn merge_schema_property(existing: &mut Value, incoming: &Value) {
+    if existing == incoming {
+        return;
+    }
+    if merge_enum_property_schema(existing, incoming) {
+        return;
+    }
+
+    let mut variants = Vec::new();
+    append_any_of_variants(&mut variants, existing.clone());
+    append_any_of_variants(&mut variants, incoming.clone());
+    *existing = json!({ "anyOf": variants });
+}
+
+fn merge_enum_property_schema(existing: &mut Value, incoming: &Value) -> bool {
+    let Some(existing_object) = existing.as_object_mut() else {
+        return false;
+    };
+    let Some(incoming_object) = incoming.as_object() else {
+        return false;
+    };
+    let existing_type = existing_object.get("type").cloned();
+    let incoming_type = incoming_object.get("type").cloned();
+    if existing_type.is_some() && incoming_type.is_some() && existing_type != incoming_type {
+        return false;
+    }
+    let Some(existing_enum) = existing_object.get("enum").and_then(Value::as_array) else {
+        return false;
+    };
+    let Some(incoming_enum) = incoming_object.get("enum").and_then(Value::as_array) else {
+        return false;
+    };
+
+    let mut merged_enum = existing_enum.clone();
+    for value in incoming_enum {
+        if !merged_enum.contains(value) {
+            merged_enum.push(value.clone());
+        }
+    }
+    existing_object.insert("enum".to_string(), Value::Array(merged_enum));
+    if existing_type.is_none() {
+        if let Some(incoming_type) = incoming_type {
+            existing_object.insert("type".to_string(), incoming_type);
+        }
+    }
+    true
+}
+
+fn append_any_of_variants(variants: &mut Vec<Value>, schema: Value) {
+    if let Some(items) = schema.get("anyOf").and_then(Value::as_array) {
+        for item in items {
+            if !variants.contains(item) {
+                variants.push(item.clone());
+            }
+        }
+        return;
+    }
+    if !variants.contains(&schema) {
+        variants.push(schema);
+    }
 }
 
 fn generic_custom_proxy_tool(name: &str, description: &str) -> Value {

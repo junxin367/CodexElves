@@ -1523,6 +1523,9 @@ async fn handle_protocol_proxy_connection(
                         rounds: result.rounds,
                         first_token_ms: continue_thinking_log.first_token_ms,
                         reasoning_tokens: result.reasoning_tokens,
+                        request_body: result.request_body,
+                        before_response_body: result.before_response_body,
+                        after_response_body: result.after_response_body,
                     };
                     result.sse_text
                 } else {
@@ -2417,12 +2420,15 @@ async fn handle_chat_completions_proxy_connection(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct LocalContinueThinkingLog {
     triggered: bool,
     rounds: u32,
     first_token_ms: Option<u64>,
     reasoning_tokens: Option<u64>,
+    request_body: Option<String>,
+    before_response_body: Option<String>,
+    after_response_body: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2505,6 +2511,9 @@ fn append_local_proxy_record_with_continue_thinking(
         reasoning_source: request_metadata.reasoning_source.clone(),
         continue_thinking_triggered: continue_thinking.triggered,
         continue_thinking_rounds: continue_thinking.rounds,
+        continue_thinking_request_body: continue_thinking.request_body,
+        continue_thinking_before_response_body: continue_thinking.before_response_body,
+        continue_thinking_after_response_body: continue_thinking.after_response_body,
         service_tier: request_metadata.service_tier.clone(),
         relay_id,
         relay_name,
