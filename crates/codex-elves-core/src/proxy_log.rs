@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -17,6 +18,8 @@ const MAX_RETAINED_REQUEST_BODY_BYTES: usize = 64 * 1024;
 #[serde(rename_all = "camelCase")]
 pub struct ProxyRequestRecord {
     pub id: String,
+    #[serde(default = "default_proxy_request_state")]
+    pub state: ProxyRequestState,
     pub timestamp_ms: u64,
     pub method: String,
     pub path: String,
@@ -41,14 +44,19 @@ pub struct ProxyRequestRecord {
     pub relay_name: Option<String>,
     pub endpoint: Option<String>,
     pub response_protocol: Option<String>,
-    pub status_code: u16,
+    #[serde(default)]
+    pub status_code: Option<u16>,
     #[serde(default)]
     pub first_token_ms: Option<u64>,
-    pub duration_ms: u64,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
     pub stream: bool,
     pub request_bytes: usize,
-    pub response_bytes: usize,
-    pub response_captured_bytes: usize,
+    #[serde(default)]
+    pub response_bytes: Option<usize>,
+    #[serde(default)]
+    pub response_captured_bytes: Option<usize>,
+    #[serde(default)]
     pub response_truncated: bool,
     pub request_body: String,
     pub response_body: String,
@@ -59,6 +67,8 @@ pub struct ProxyRequestRecord {
 #[serde(rename_all = "camelCase")]
 pub struct ProxyRequestSummary {
     pub id: String,
+    #[serde(default = "default_proxy_request_state")]
+    pub state: ProxyRequestState,
     pub timestamp_ms: u64,
     pub method: String,
     pub path: String,
@@ -77,16 +87,32 @@ pub struct ProxyRequestSummary {
     pub relay_name: Option<String>,
     pub endpoint: Option<String>,
     pub response_protocol: Option<String>,
-    pub status_code: u16,
+    #[serde(default)]
+    pub status_code: Option<u16>,
     #[serde(default)]
     pub first_token_ms: Option<u64>,
-    pub duration_ms: u64,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
     pub stream: bool,
     pub request_bytes: usize,
-    pub response_bytes: usize,
-    pub response_captured_bytes: usize,
+    #[serde(default)]
+    pub response_bytes: Option<usize>,
+    #[serde(default)]
+    pub response_captured_bytes: Option<usize>,
+    #[serde(default)]
     pub response_truncated: bool,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProxyRequestState {
+    Pending,
+    Completed,
+}
+
+fn default_proxy_request_state() -> ProxyRequestState {
+    ProxyRequestState::Completed
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +127,7 @@ impl From<&ProxyRequestRecord> for ProxyRequestSummary {
     fn from(record: &ProxyRequestRecord) -> Self {
         Self {
             id: record.id.clone(),
+            state: record.state,
             timestamp_ms: record.timestamp_ms,
             method: record.method.clone(),
             path: record.path.clone(),
@@ -309,6 +336,10 @@ pub fn default_log_path() -> PathBuf {
 
 fn read_records(limit: usize) -> std::io::Result<Vec<ProxyRequestRecord>> {
     let path = default_log_path();
+    read_records_at_path(&path, limit)
+}
+
+fn read_records_at_path(path: &PathBuf, limit: usize) -> std::io::Result<Vec<ProxyRequestRecord>> {
     if !path.is_file() {
         return Ok(Vec::new());
     }
@@ -317,12 +348,15 @@ fn read_records(limit: usize) -> std::io::Result<Vec<ProxyRequestRecord>> {
     let mut text = String::new();
     file.read_to_string(&mut text)?;
     let mut records = Vec::new();
+    let mut seen_ids = HashSet::new();
     for line in text.lines().rev() {
         if line.trim().is_empty() {
             continue;
         }
         if let Ok(record) = serde_json::from_str::<ProxyRequestRecord>(line) {
-            records.push(record);
+            if seen_ids.insert(record.id.clone()) {
+                records.push(record);
+            }
         }
         if records.len() >= limit {
             break;
@@ -386,7 +420,7 @@ fn serialize_record_for_log(record: &ProxyRequestRecord) -> serde_json::Result<S
     trimmed.continue_thinking_before_response_body = None;
     trimmed.continue_thinking_after_response_body = None;
     trimmed.response_truncated = true;
-    trimmed.response_captured_bytes = 0;
+    trimmed.response_captured_bytes = Some(0);
 
     let empty_line = serde_json::to_string(&trimmed)?;
     let max_bytes = crate::log_limits::MAX_LOG_FILE_BYTES as usize;
@@ -408,7 +442,7 @@ fn serialize_record_for_log(record: &ProxyRequestRecord) -> serde_json::Result<S
         trimmed.request_body = truncate_to_utf8_byte_limit(&record.request_body, request_budget);
         trimmed.response_body = truncate_to_utf8_byte_limit(&record.response_body, response_budget);
         trimmed.response_truncated = true;
-        trimmed.response_captured_bytes = trimmed.response_body.len();
+        trimmed.response_captured_bytes = Some(trimmed.response_body.len());
 
         let line = serde_json::to_string(&trimmed)?;
         if line.len() as u64 + 1 <= crate::log_limits::MAX_LOG_FILE_BYTES {
@@ -467,10 +501,10 @@ fn value_to_u64(value: &Value) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProxyRequestRecord, append_record, append_record_at_path, clear_records_at_path,
-        current_timestamp_ms, extract_reasoning_tokens_from_response_body,
-        extract_request_metadata, find_record, read_summaries, retain_recent_records,
-        serialize_record_for_log,
+        ProxyRequestRecord, ProxyRequestState, append_record, append_record_at_path,
+        clear_records_at_path, current_timestamp_ms, extract_reasoning_tokens_from_response_body,
+        extract_request_metadata, find_record, read_records_at_path, read_summaries,
+        retain_recent_records, serialize_record_for_log,
     };
 
     fn temp_proxy_log_path(name: &str) -> std::path::PathBuf {
@@ -561,6 +595,7 @@ data: [DONE]
         let previous = crate::paths::set_proxy_log_path_for_tests(Some(path.clone()));
         let record = ProxyRequestRecord {
             id: "test-record".to_string(),
+            state: ProxyRequestState::Completed,
             timestamp_ms: current_timestamp_ms(),
             method: "POST".to_string(),
             path: "/v1/responses".to_string(),
@@ -579,13 +614,13 @@ data: [DONE]
             relay_name: Some("Test".to_string()),
             endpoint: Some("https://example.test/v1/responses".to_string()),
             response_protocol: Some("responses".to_string()),
-            status_code: 200,
+            status_code: Some(200),
             first_token_ms: Some(4),
-            duration_ms: 10,
+            duration_ms: Some(10),
             stream: false,
             request_bytes: 2,
-            response_bytes: 2,
-            response_captured_bytes: 2,
+            response_bytes: Some(2),
+            response_captured_bytes: Some(2),
             response_truncated: false,
             request_body: "{}".to_string(),
             response_body: "{}".to_string(),
@@ -631,6 +666,74 @@ data: [DONE]
 
         let _ = std::fs::remove_file(path);
         crate::paths::set_proxy_log_path_for_tests(previous);
+    }
+
+    #[test]
+    fn read_summaries_deduplicates_pending_record_by_latest_entry() {
+        let path = temp_proxy_log_path("dedupe-pending");
+        let mut pending = sample_proxy_record("same-request");
+        pending.state = ProxyRequestState::Pending;
+        pending.status_code = None;
+        pending.first_token_ms = None;
+        pending.duration_ms = None;
+        pending.response_bytes = None;
+        pending.response_captured_bytes = None;
+        pending.response_body.clear();
+
+        let mut completed = pending.clone();
+        completed.state = ProxyRequestState::Completed;
+        completed.timestamp_ms += 1;
+        completed.status_code = Some(200);
+        completed.duration_ms = Some(12);
+        completed.response_bytes = Some(2);
+        completed.response_captured_bytes = Some(2);
+        completed.response_body = "{}".to_string();
+
+        append_record_at_path(&path, &pending).expect("append pending proxy log record");
+        append_record_at_path(&path, &completed).expect("append completed proxy log record");
+
+        let records = read_records_at_path(&path, 10).expect("read proxy log records");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "same-request");
+        assert_eq!(records[0].state, ProxyRequestState::Completed);
+        assert_eq!(records[0].status_code, Some(200));
+        assert_eq!(records[0].duration_ms, Some(12));
+        assert_eq!(records[0].response_body, "{}");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_summaries_keeps_latest_pending_first_token_update() {
+        let path = temp_proxy_log_path("dedupe-first-token");
+        let mut pending = sample_proxy_record("stream-request");
+        pending.state = ProxyRequestState::Pending;
+        pending.status_code = None;
+        pending.first_token_ms = None;
+        pending.duration_ms = None;
+        pending.response_bytes = None;
+        pending.response_captured_bytes = None;
+        pending.response_body.clear();
+
+        let mut first_token = pending.clone();
+        first_token.timestamp_ms += 1;
+        first_token.status_code = Some(200);
+        first_token.first_token_ms = Some(345);
+        first_token.response_protocol = Some("responses".to_string());
+
+        append_record_at_path(&path, &pending).expect("append pending proxy log record");
+        append_record_at_path(&path, &first_token).expect("append first token proxy log record");
+
+        let records = read_records_at_path(&path, 10).expect("read proxy log records");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "stream-request");
+        assert_eq!(records[0].state, ProxyRequestState::Pending);
+        assert_eq!(records[0].status_code, Some(200));
+        assert_eq!(records[0].first_token_ms, Some(345));
+        assert_eq!(records[0].duration_ms, None);
+        assert_eq!(records[0].response_body, "");
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -681,7 +784,7 @@ data: [DONE]
         let mut record = sample_proxy_record("large-record");
         record.request_body = "q".repeat(128 * 1024);
         record.response_body = "r".repeat(crate::log_limits::MAX_LOG_FILE_BYTES as usize + 1);
-        record.response_captured_bytes = record.response_body.len();
+        record.response_captured_bytes = Some(record.response_body.len());
         record.response_truncated = false;
 
         let line = serialize_record_for_log(&record).expect("serialize trimmed proxy log record");
@@ -711,6 +814,7 @@ data: [DONE]
     fn sample_proxy_record(id: &str) -> ProxyRequestRecord {
         ProxyRequestRecord {
             id: id.to_string(),
+            state: ProxyRequestState::Completed,
             timestamp_ms: current_timestamp_ms(),
             method: "POST".to_string(),
             path: "/v1/responses".to_string(),
@@ -729,13 +833,13 @@ data: [DONE]
             relay_name: Some("Test".to_string()),
             endpoint: Some("https://example.test/v1/chat/completions".to_string()),
             response_protocol: Some("chatCompletions".to_string()),
-            status_code: 200,
+            status_code: Some(200),
             first_token_ms: None,
-            duration_ms: 10,
+            duration_ms: Some(10),
             stream: false,
             request_bytes: 2,
-            response_bytes: 2,
-            response_captured_bytes: 2,
+            response_bytes: Some(2),
+            response_captured_bytes: Some(2),
             response_truncated: false,
             request_body: "{}".to_string(),
             response_body: "{}".to_string(),

@@ -404,7 +404,10 @@ fn relay_context_management_is_global_not_supplier_scoped() {
 
     assert!(app_tsx.contains("作为全局配置独立管理"));
     assert!(app_tsx.contains("label: \"工具与插件\""));
-    assert!(app_tsx.contains("title=\"Codex 工具与插件\""));
+    assert!(app_tsx.contains("<strong>Codex 工具与插件</strong>"));
+    assert!(!app_tsx.contains("<CardHead title=\"Codex 工具与插件\""));
+    assert!(app_tsx.contains("className=\"relay-context-content\""));
+    assert!(!app_tsx.contains("className=\"relay-context-panel\""));
     assert!(!app_tsx.contains("label: \"上下文配置\""));
     assert!(!app_tsx.contains("title=\"上下文配置\""));
     assert!(!app_tsx.contains("<strong>Codex 上下文</strong>"));

@@ -1263,6 +1263,17 @@ async fn handle_protocol_proxy_connection(
     let timestamp_ms = crate::proxy_log::current_timestamp_ms();
     let request_json = serde_json::from_str::<serde_json::Value>(request_body).ok();
     let request_metadata = crate::proxy_log::extract_request_metadata(request_json.as_ref());
+    let log_id = next_local_proxy_log_id();
+    append_pending_local_proxy_record(
+        &log_id,
+        timestamp_ms,
+        method,
+        path,
+        remote_addr_text.clone(),
+        &request_metadata,
+        request_body,
+        request_json.as_ref(),
+    );
     if should_defer_protocol_stream(request_json.as_ref()) {
         return handle_deferred_protocol_proxy_stream_connection(
             stream,
@@ -1275,6 +1286,7 @@ async fn handle_protocol_proxy_connection(
             timestamp_ms,
             request_json,
             request_metadata,
+            log_id,
         )
         .await;
     }
@@ -1309,10 +1321,7 @@ async fn handle_protocol_proxy_connection(
                     .as_ref()
                     .and_then(|context| context.response_protocol.map(response_protocol_label));
                 append_local_proxy_record(
-                    failure_context
-                        .as_ref()
-                        .map(|context| context.diagnostic_id.clone())
-                        .unwrap_or_else(|| format!("local-{}", uuid::Uuid::new_v4())),
+                    log_id.clone(),
                     timestamp_ms,
                     started_at,
                     method,
@@ -1354,7 +1363,6 @@ async fn handle_protocol_proxy_connection(
     let request_body = logged_request_body.as_str();
 
     if !upstream.is_success() {
-        let diagnostic_id = upstream.diagnostic_id.clone();
         let relay_id = upstream.relay_id.clone();
         let relay_name = upstream.relay_name.clone();
         let endpoint = upstream.endpoint.clone();
@@ -1379,7 +1387,7 @@ async fn handle_protocol_proxy_connection(
                 remote_addr_text.clone(),
             );
             append_local_proxy_record(
-                diagnostic_id,
+                log_id.clone(),
                 timestamp_ms,
                 started_at,
                 method,
@@ -1416,7 +1424,7 @@ async fn handle_protocol_proxy_connection(
             remote_addr_text.clone(),
         );
         append_local_proxy_record(
-            diagnostic_id,
+            log_id.clone(),
             timestamp_ms,
             started_at,
             method,
@@ -1479,7 +1487,7 @@ async fn handle_protocol_proxy_connection(
                                 &first_round_bytes,
                             );
                             append_local_proxy_record(
-                                diagnostic_id,
+                                log_id.clone(),
                                 timestamp_ms,
                                 started_at,
                                 method,
@@ -1503,8 +1511,24 @@ async fn handle_protocol_proxy_connection(
                     };
                     first_round_bytes.extend_from_slice(&bytes);
                     if continue_thinking_log.first_token_ms.is_none() {
-                        continue_thinking_log.first_token_ms =
-                            Some(started_at.elapsed().as_millis() as u64);
+                        let first_token_ms = started_at.elapsed().as_millis() as u64;
+                        continue_thinking_log.first_token_ms = Some(first_token_ms);
+                        append_local_proxy_first_token_record(
+                            &log_id,
+                            timestamp_ms,
+                            method,
+                            path,
+                            remote_addr_text.clone(),
+                            &request_metadata,
+                            relay_id.clone(),
+                            relay_name.clone(),
+                            endpoint.clone(),
+                            Some(response_protocol_label.clone()),
+                            status_code,
+                            true,
+                            request_body,
+                            first_token_ms,
+                        );
                     }
                 }
                 let first_round_sse_text = String::from_utf8_lossy(&first_round_bytes).into_owned();
@@ -1545,7 +1569,7 @@ async fn handle_protocol_proxy_connection(
                 remote_addr_text.clone(),
             );
             append_local_proxy_record_with_continue_thinking(
-                diagnostic_id,
+                log_id.clone(),
                 timestamp_ms,
                 started_at,
                 method,
@@ -1613,7 +1637,24 @@ async fn handle_protocol_proxy_connection(
                     let converted = converter.push_bytes(&bytes);
                     if !converted.is_empty() {
                         if first_token_ms.is_none() {
-                            first_token_ms = Some(started_at.elapsed().as_millis() as u64);
+                            let elapsed_ms = started_at.elapsed().as_millis() as u64;
+                            first_token_ms = Some(elapsed_ms);
+                            append_local_proxy_first_token_record(
+                                &log_id,
+                                timestamp_ms,
+                                method,
+                                path,
+                                remote_addr_text.clone(),
+                                &request_metadata,
+                                relay_id.clone(),
+                                relay_name.clone(),
+                                endpoint.clone(),
+                                Some(response_protocol_label(response_protocol)),
+                                200,
+                                true,
+                                request_body,
+                                elapsed_ms,
+                            );
                         }
                         response_bytes += converted.len();
                         response_truncated |=
@@ -1659,7 +1700,7 @@ async fn handle_protocol_proxy_connection(
             remote_addr_text.clone(),
         );
         append_local_proxy_record_with_continue_thinking(
-            diagnostic_id,
+            log_id.clone(),
             timestamp_ms,
             started_at,
             method,
@@ -1705,7 +1746,7 @@ async fn handle_protocol_proxy_connection(
             remote_addr_text.clone(),
         );
         append_local_proxy_record(
-            diagnostic_id,
+            log_id.clone(),
             timestamp_ms,
             started_at,
             method,
@@ -1763,7 +1804,7 @@ async fn handle_protocol_proxy_connection(
         remote_addr_text.clone(),
     );
     append_local_proxy_record(
-        diagnostic_id,
+        log_id.clone(),
         timestamp_ms,
         started_at,
         method,
@@ -1838,6 +1879,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     timestamp_ms: u64,
     request_json: Option<serde_json::Value>,
     request_metadata: crate::proxy_log::RequestMetadata,
+    log_id: String,
 ) -> anyhow::Result<()> {
     write_http_stream_headers(stream, "200 OK", "text/event-stream; charset=utf-8").await?;
     let mut response_capture = Vec::new();
@@ -1893,10 +1935,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                 remote_addr_text.clone(),
             );
             append_local_proxy_record(
-                failure_context
-                    .as_ref()
-                    .map(|context| context.diagnostic_id.clone())
-                    .unwrap_or_else(|| format!("local-{}", uuid::Uuid::new_v4())),
+                log_id.clone(),
                 timestamp_ms,
                 started_at,
                 method,
@@ -1983,7 +2022,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
             remote_addr_text.clone(),
         );
         append_local_proxy_record(
-            diagnostic_id,
+            log_id.clone(),
             timestamp_ms,
             started_at,
             method,
@@ -2009,7 +2048,24 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     if response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses {
         if upstream.body_override.is_some() {
             let body = upstream.into_body_bytes().await?;
-            first_token_ms = Some(started_at.elapsed().as_millis() as u64);
+            let elapsed_ms = started_at.elapsed().as_millis() as u64;
+            first_token_ms = Some(elapsed_ms);
+            append_local_proxy_first_token_record(
+                &log_id,
+                timestamp_ms,
+                method,
+                path,
+                remote_addr_text.clone(),
+                &request_metadata,
+                relay_id.clone(),
+                relay_name.clone(),
+                endpoint.clone(),
+                Some(response_protocol_label.clone()),
+                status_code,
+                true,
+                request_body,
+                elapsed_ms,
+            );
             response_bytes += body.len();
             response_truncated |= crate::proxy_log::append_capture(&mut response_capture, &body);
             stream.write_all(&body).await?;
@@ -2029,7 +2085,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                     Ok(bytes) => bytes,
                     Err(error) => {
                         append_local_proxy_record(
-                            diagnostic_id,
+                            log_id.clone(),
                             timestamp_ms,
                             started_at,
                             method,
@@ -2052,7 +2108,24 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                     }
                 };
                 if first_token_ms.is_none() {
-                    first_token_ms = Some(started_at.elapsed().as_millis() as u64);
+                    let elapsed_ms = started_at.elapsed().as_millis() as u64;
+                    first_token_ms = Some(elapsed_ms);
+                    append_local_proxy_first_token_record(
+                        &log_id,
+                        timestamp_ms,
+                        method,
+                        path,
+                        remote_addr_text.clone(),
+                        &request_metadata,
+                        relay_id.clone(),
+                        relay_name.clone(),
+                        endpoint.clone(),
+                        Some(response_protocol_label.clone()),
+                        status_code,
+                        true,
+                        request_body,
+                        elapsed_ms,
+                    );
                 }
                 response_bytes += bytes.len();
                 response_truncated |=
@@ -2068,7 +2141,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
             remote_addr_text.clone(),
         );
         append_local_proxy_record_with_continue_thinking(
-            diagnostic_id,
+            log_id.clone(),
             timestamp_ms,
             started_at,
             method,
@@ -2142,7 +2215,24 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                 let converted = converter.push_bytes(&bytes);
                 if !converted.is_empty() {
                     if first_token_ms.is_none() {
-                        first_token_ms = Some(started_at.elapsed().as_millis() as u64);
+                        let elapsed_ms = started_at.elapsed().as_millis() as u64;
+                        first_token_ms = Some(elapsed_ms);
+                        append_local_proxy_first_token_record(
+                            &log_id,
+                            timestamp_ms,
+                            method,
+                            path,
+                            remote_addr_text.clone(),
+                            &request_metadata,
+                            relay_id.clone(),
+                            relay_name.clone(),
+                            endpoint.clone(),
+                            Some(response_protocol_label.clone()),
+                            status_code,
+                            true,
+                            request_body,
+                            elapsed_ms,
+                        );
                     }
                     response_bytes += converted.len();
                     response_truncated |=
@@ -2187,7 +2277,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
         remote_addr_text.clone(),
     );
     append_local_proxy_record_with_continue_thinking(
-        diagnostic_id,
+        log_id.clone(),
         timestamp_ms,
         started_at,
         method,
@@ -2226,6 +2316,17 @@ async fn handle_chat_completions_proxy_connection(
     let timestamp_ms = crate::proxy_log::current_timestamp_ms();
     let request_json = serde_json::from_str::<serde_json::Value>(request_body).ok();
     let request_metadata = crate::proxy_log::extract_request_metadata(request_json.as_ref());
+    let log_id = next_local_proxy_log_id();
+    append_pending_local_proxy_record(
+        &log_id,
+        timestamp_ms,
+        method,
+        path,
+        remote_addr_text.clone(),
+        &request_metadata,
+        request_body,
+        request_json.as_ref(),
+    );
     let upstream = match crate::protocol_proxy::open_chat_completions_proxy_request(
         request_body,
         request_user_agent,
@@ -2254,7 +2355,7 @@ async fn handle_chat_completions_proxy_connection(
                 remote_addr_text.clone(),
             );
             append_local_proxy_record(
-                format!("local-{}", uuid::Uuid::new_v4()),
+                log_id.clone(),
                 timestamp_ms,
                 started_at,
                 method,
@@ -2289,7 +2390,6 @@ async fn handle_chat_completions_proxy_connection(
     let request_metadata = logged_request_metadata;
     let request_body = logged_request_body.as_str();
 
-    let diagnostic_id = upstream.diagnostic_id.clone();
     let relay_id = upstream.relay_id.clone();
     let relay_name = upstream.relay_name.clone();
     let endpoint = upstream.endpoint.clone();
@@ -2315,7 +2415,7 @@ async fn handle_chat_completions_proxy_connection(
                 Ok(bytes) => bytes,
                 Err(error) => {
                     append_local_proxy_record(
-                        diagnostic_id,
+                        log_id.clone(),
                         timestamp_ms,
                         started_at,
                         method,
@@ -2338,7 +2438,24 @@ async fn handle_chat_completions_proxy_connection(
                 }
             };
             if first_token_ms.is_none() {
-                first_token_ms = Some(started_at.elapsed().as_millis() as u64);
+                let elapsed_ms = started_at.elapsed().as_millis() as u64;
+                first_token_ms = Some(elapsed_ms);
+                append_local_proxy_first_token_record(
+                    &log_id,
+                    timestamp_ms,
+                    method,
+                    path,
+                    remote_addr_text.clone(),
+                    &request_metadata,
+                    relay_id.clone(),
+                    relay_name.clone(),
+                    endpoint.clone(),
+                    Some(response_protocol_label(response_protocol)),
+                    status_code,
+                    true,
+                    request_body,
+                    elapsed_ms,
+                );
             }
             response_bytes += bytes.len();
             response_truncated |= crate::proxy_log::append_capture(&mut response_capture, &bytes);
@@ -2352,7 +2469,7 @@ async fn handle_chat_completions_proxy_connection(
             remote_addr_text.clone(),
         );
         append_local_proxy_record_with_continue_thinking(
-            diagnostic_id,
+            log_id.clone(),
             timestamp_ms,
             started_at,
             method,
@@ -2393,7 +2510,7 @@ async fn handle_chat_completions_proxy_connection(
         remote_addr_text.clone(),
     );
     append_local_proxy_record(
-        diagnostic_id,
+        log_id.clone(),
         timestamp_ms,
         started_at,
         method,
@@ -2429,6 +2546,114 @@ struct LocalContinueThinkingLog {
     request_body: Option<String>,
     before_response_body: Option<String>,
     after_response_body: Option<String>,
+}
+
+fn next_local_proxy_log_id() -> String {
+    format!("local-{}", uuid::Uuid::new_v4())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_pending_local_proxy_record(
+    id: &str,
+    timestamp_ms: u64,
+    method: &str,
+    path: &str,
+    remote_addr_text: Option<String>,
+    request_metadata: &crate::proxy_log::RequestMetadata,
+    request_body: &str,
+    request_json: Option<&serde_json::Value>,
+) {
+    let stream = request_json
+        .and_then(|request| request.get("stream"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let record = crate::proxy_log::ProxyRequestRecord {
+        id: id.to_string(),
+        state: crate::proxy_log::ProxyRequestState::Pending,
+        timestamp_ms,
+        method: method.to_string(),
+        path: path.to_string(),
+        remote_addr: remote_addr_text,
+        model: request_metadata.model.clone(),
+        reasoning_tokens: None,
+        reasoning_effort: request_metadata.reasoning_effort.clone(),
+        reasoning_source: request_metadata.reasoning_source.clone(),
+        continue_thinking_triggered: false,
+        continue_thinking_rounds: 0,
+        continue_thinking_request_body: None,
+        continue_thinking_before_response_body: None,
+        continue_thinking_after_response_body: None,
+        service_tier: request_metadata.service_tier.clone(),
+        relay_id: None,
+        relay_name: None,
+        endpoint: None,
+        response_protocol: None,
+        status_code: None,
+        first_token_ms: None,
+        duration_ms: None,
+        stream,
+        request_bytes: request_body.len(),
+        response_bytes: None,
+        response_captured_bytes: None,
+        response_truncated: false,
+        request_body: request_body.to_string(),
+        response_body: String::new(),
+        error: None,
+    };
+    append_local_proxy_log_record(&record);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_local_proxy_first_token_record(
+    id: &str,
+    timestamp_ms: u64,
+    method: &str,
+    path: &str,
+    remote_addr_text: Option<String>,
+    request_metadata: &crate::proxy_log::RequestMetadata,
+    relay_id: Option<String>,
+    relay_name: Option<String>,
+    endpoint: Option<String>,
+    response_protocol: Option<String>,
+    status_code: u16,
+    stream: bool,
+    request_body: &str,
+    first_token_ms: u64,
+) {
+    let record = crate::proxy_log::ProxyRequestRecord {
+        id: id.to_string(),
+        state: crate::proxy_log::ProxyRequestState::Pending,
+        timestamp_ms,
+        method: method.to_string(),
+        path: path.to_string(),
+        remote_addr: remote_addr_text,
+        model: request_metadata.model.clone(),
+        reasoning_tokens: None,
+        reasoning_effort: request_metadata.reasoning_effort.clone(),
+        reasoning_source: request_metadata.reasoning_source.clone(),
+        continue_thinking_triggered: false,
+        continue_thinking_rounds: 0,
+        continue_thinking_request_body: None,
+        continue_thinking_before_response_body: None,
+        continue_thinking_after_response_body: None,
+        service_tier: request_metadata.service_tier.clone(),
+        relay_id,
+        relay_name,
+        endpoint,
+        response_protocol,
+        status_code: Some(status_code),
+        first_token_ms: Some(first_token_ms),
+        duration_ms: None,
+        stream,
+        request_bytes: request_body.len(),
+        response_bytes: None,
+        response_captured_bytes: None,
+        response_truncated: false,
+        request_body: request_body.to_string(),
+        response_body: String::new(),
+        error: None,
+    };
+    append_local_proxy_log_record(&record);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2499,6 +2724,7 @@ fn append_local_proxy_record_with_continue_thinking(
 ) {
     let record = crate::proxy_log::ProxyRequestRecord {
         id,
+        state: crate::proxy_log::ProxyRequestState::Completed,
         timestamp_ms,
         method: method.to_string(),
         path: path.to_string(),
@@ -2519,19 +2745,23 @@ fn append_local_proxy_record_with_continue_thinking(
         relay_name,
         endpoint,
         response_protocol,
-        status_code,
+        status_code: Some(status_code),
         first_token_ms: continue_thinking.first_token_ms,
-        duration_ms: started_at.elapsed().as_millis() as u64,
+        duration_ms: Some(started_at.elapsed().as_millis() as u64),
         stream,
         request_bytes: request_body.len(),
-        response_bytes,
-        response_captured_bytes: response_body.len(),
+        response_bytes: Some(response_bytes),
+        response_captured_bytes: Some(response_body.len()),
         response_truncated,
         request_body: request_body.to_string(),
         response_body: String::from_utf8_lossy(response_body).into_owned(),
         error,
     };
-    if let Err(error) = crate::proxy_log::append_record(&record) {
+    append_local_proxy_log_record(&record);
+}
+
+fn append_local_proxy_log_record(record: &crate::proxy_log::ProxyRequestRecord) {
+    if let Err(error) = crate::proxy_log::append_record(record) {
         let _ = crate::diagnostic_log::append_diagnostic_log(
             "helper.local_proxy_log_failed",
             serde_json::json!({

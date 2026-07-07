@@ -509,6 +509,7 @@ type LocalProxyStatusResult = CommandResult<{
 
 type LocalProxyLogEntry = {
   id: string;
+  state?: "pending" | "completed" | null;
   timestampMs: number;
   method: string;
   path: string;
@@ -524,13 +525,13 @@ type LocalProxyLogEntry = {
   relayName?: string | null;
   endpoint?: string | null;
   responseProtocol?: string | null;
-  statusCode: number;
+  statusCode?: number | null;
   firstTokenMs?: number | null;
-  durationMs: number;
+  durationMs?: number | null;
   stream: boolean;
   requestBytes: number;
-  responseBytes: number;
-  responseCapturedBytes: number;
+  responseBytes?: number | null;
+  responseCapturedBytes?: number | null;
   responseTruncated: boolean;
   error?: string | null;
 };
@@ -3713,8 +3714,8 @@ function LocalProxyScreen({
                         ) : null}
                       </small>
                     </span>
-                    <span className={entry.statusCode >= 200 && entry.statusCode < 300 ? "proxy-code ok" : "proxy-code bad"}>
-                      {entry.statusCode}
+                    <span className={localProxyStatusCodeClass(entry)}>
+                      {formatLocalProxyStatusCode(entry)}
                     </span>
                     <span
                       className="proxy-log-duration proxy-log-latency"
@@ -3725,7 +3726,7 @@ function LocalProxyScreen({
                       </span>
                       <span>|</span>
                       <span className={isSlowRequestDuration(entry.durationMs) ? "slow" : undefined}>
-                        {formatRequestDurationMs(entry.durationMs)}
+                        {formatOptionalRequestDurationMs(entry.durationMs)}
                       </span>
                     </span>
                     <Button
@@ -3850,8 +3851,8 @@ function LocalProxyLogDetailDialog({
           <div className="proxy-detail-title-block">
             <div className="proxy-detail-title-row">
               <h2 id="proxy-log-detail-title">请求详情</h2>
-              <span className={entry.statusCode >= 200 && entry.statusCode < 300 ? "proxy-code ok" : "proxy-code bad"}>
-                {entry.statusCode}
+              <span className={localProxyStatusCodeClass(entry)}>
+                {formatLocalProxyStatusCode(entry)}
               </span>
               <span className="proxy-detail-endpoint" data-tooltip={entry.endpoint || entry.path}>
                 {entry.endpoint || entry.path}
@@ -3871,7 +3872,7 @@ function LocalProxyLogDetailDialog({
           </div>
           <div className="proxy-detail-meta">
             <span>请求 {formatBytes(entry.requestBytes)}</span>
-            <span>返回 {formatBytes(entry.responseBytes)}</span>
+            <span>返回 {formatOptionalBytes(entry.responseBytes)}</span>
             <span>{entry.stream ? "流式" : "非流式"}</span>
             {entry.responseTruncated ? <span>返回内容已截断</span> : null}
             {entry.error ? <span>{entry.error}</span> : null}
@@ -5537,8 +5538,7 @@ function ContextScreen({
 }) {
   return (
     <Panel className="context-panel">
-      <CardHead title="Codex 工具与插件" detail="独立管理 Codex 的 MCP、Skills、Plugins；切换任意供应商都会带上。" />
-      <CardContent>
+      <CardContent className="relay-context-content">
         <RelayContextManager
           form={normalizeSettings(form)}
           liveEntries={liveEntries}
@@ -7106,7 +7106,7 @@ function RelayContextManager({
   };
 
   return (
-    <div className="relay-context-panel">
+    <>
       <div className="relay-context-head">
         <div>
           <strong>Codex 工具与插件</strong>
@@ -7199,7 +7199,7 @@ function RelayContextManager({
           onSave={(kind, id, tomlBody) => void saveEntry(kind, id, tomlBody)}
         />
       ) : null}
-    </div>
+    </>
   );
 }
 
@@ -7800,6 +7800,10 @@ function formatBytes(bytes: number) {
     index += 1;
   }
   return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
+}
+
+function formatOptionalBytes(bytes?: number | null) {
+  return typeof bytes === "number" ? formatBytes(bytes) : "-";
 }
 
 function GuideList({ items }: { items: string[] }) {
@@ -8851,8 +8855,18 @@ function isSlowRequestDuration(value?: number | null) {
   return typeof value === "number" && value >= 60000;
 }
 
+function localProxyStatusCodeClass(entry: Pick<LocalProxyLogEntry, "state" | "statusCode">) {
+  const statusCode = entry.statusCode;
+  if (typeof statusCode !== "number") return "proxy-code pending";
+  return typeof statusCode === "number" && statusCode >= 200 && statusCode < 300 ? "proxy-code ok" : "proxy-code bad";
+}
+
+function formatLocalProxyStatusCode(entry: Pick<LocalProxyLogEntry, "state" | "statusCode">) {
+  return typeof entry.statusCode === "number" ? String(entry.statusCode) : "-";
+}
+
 function formatRequestLatencyTitle(entry: Pick<LocalProxyLogEntry, "firstTokenMs" | "durationMs">) {
-  return `首字 ${formatOptionalRequestDurationMs(entry.firstTokenMs)} | 耗时 ${formatRequestDurationMs(entry.durationMs)}`;
+  return `首字 ${formatOptionalRequestDurationMs(entry.firstTokenMs)} | 耗时 ${formatOptionalRequestDurationMs(entry.durationMs)}`;
 }
 
 function formatProtocolRoute(entry: Pick<LocalProxyLogEntry, "responseProtocol">) {

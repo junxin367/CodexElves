@@ -1665,22 +1665,11 @@ body {
   margin-top: 12px;
 }
 
-.relay-context-panel {
+.relay-context-content {
   display: grid;
   gap: 12px;
   min-height: 0;
-  border: 1px solid hsl(var(--border));
-  border-radius: 8px;
-  background: hsl(var(--surface-sunken));
-  padding: 14px;
-  transition:
-    border-color var(--motion-normal) var(--motion-ease),
-    box-shadow var(--motion-normal) var(--motion-ease);
-}
-
-.relay-context-panel:focus-within {
-  border-color: hsl(var(--primary) / 0.38);
-  box-shadow: 0 10px 26px hsl(var(--foreground) / 0.07);
+  padding: 16px;
 }
 
 .relay-context-head {
@@ -1726,6 +1715,7 @@ body {
   border-radius: 8px;
   background: hsl(var(--secondary) / 0.35);
   color: hsl(var(--foreground));
+  cursor: pointer;
   font: inherit;
   font-size: 13px;
   font-weight: 650;
@@ -3467,6 +3457,10 @@ body {
 
 .proxy-code.bad {
   color: hsl(var(--destructive));
+}
+
+.proxy-code.pending {
+  color: hsl(var(--muted-foreground));
 }
 
 .proxy-log-latency {
