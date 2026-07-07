@@ -1367,7 +1367,7 @@ fn non_claude_anthropic_compatible_reasoning_keeps_effort_by_model_capability() 
         "input": "hi"
     }))
     .unwrap();
-    assert_eq!(deepseek["thinking"], json!({ "type": "adaptive" }));
+    assert_eq!(deepseek["thinking"], json!({ "type": "enabled" }));
     assert_eq!(deepseek["output_config"], json!({ "effort": "max" }));
 
     let deepseek_xhigh = responses_to_anthropic_messages(json!({
@@ -1376,8 +1376,19 @@ fn non_claude_anthropic_compatible_reasoning_keeps_effort_by_model_capability() 
         "input": "hi"
     }))
     .unwrap();
-    assert_eq!(deepseek_xhigh["thinking"], json!({ "type": "adaptive" }));
+    assert_eq!(deepseek_xhigh["thinking"], json!({ "type": "enabled" }));
     assert_eq!(deepseek_xhigh["output_config"], json!({ "effort": "max" }));
+
+    let deepseek_default = responses_to_anthropic_messages(json!({
+        "model": "deepseek-v4-pro",
+        "input": "hi"
+    }))
+    .unwrap();
+    assert_eq!(deepseek_default["thinking"], json!({ "type": "enabled" }));
+    assert_eq!(
+        deepseek_default["output_config"],
+        json!({ "effort": "max" })
+    );
 }
 
 #[test]

@@ -8179,9 +8179,24 @@ fn apply_anthropic_reasoning_options(result: &mut Value, body: &Value, model: &s
     }
     let effort = extract_requested_reasoning_effort(body)
         .and_then(|effort| map_anthropic_reasoning_effort(&effort, model))
-        .unwrap_or(ANTHROPIC_DEFAULT_REASONING_EFFORT);
-    result["thinking"] = json!({ "type": "adaptive" });
+        .unwrap_or_else(|| default_anthropic_reasoning_effort(model));
+    result["thinking"] = json!({ "type": anthropic_thinking_type(model) });
     result["output_config"] = json!({ "effort": effort });
+}
+
+fn default_anthropic_reasoning_effort(model: &str) -> &'static str {
+    if model.to_ascii_lowercase().contains("deepseek") {
+        return "max";
+    }
+    ANTHROPIC_DEFAULT_REASONING_EFFORT
+}
+
+fn anthropic_thinking_type(model: &str) -> &'static str {
+    if model.to_ascii_lowercase().contains("deepseek") {
+        // DeepSeek Anthropic 兼容接口文档使用 enabled/disabled，不使用 Claude 的 adaptive。
+        return "enabled";
+    }
+    "adaptive"
 }
 
 /// 从请求体的多个可能位置提取思考深度字符串。
