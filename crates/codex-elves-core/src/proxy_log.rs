@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -133,7 +133,9 @@ impl From<&ProxyRequestRecord> for ProxyRequestSummary {
             path: record.path.clone(),
             remote_addr: record.remote_addr.clone(),
             model: record.model.clone(),
-            reasoning_tokens: record.reasoning_tokens,
+            reasoning_tokens: record
+                .reasoning_tokens
+                .or_else(|| infer_reasoning_tokens_for_summary(record)),
             reasoning_effort: record.reasoning_effort.clone(),
             reasoning_source: record.reasoning_source.clone(),
             continue_thinking_triggered: record.continue_thinking_triggered,
@@ -154,6 +156,23 @@ impl From<&ProxyRequestRecord> for ProxyRequestSummary {
             error: record.error.clone(),
         }
     }
+}
+
+fn infer_reasoning_tokens_for_summary(record: &ProxyRequestRecord) -> Option<u64> {
+    if record.response_body.is_empty()
+        || !response_body_may_contain_reasoning(&record.response_body)
+    {
+        return None;
+    }
+    extract_reasoning_tokens_from_response_body(record.response_body.as_bytes())
+}
+
+fn response_body_may_contain_reasoning(response_body: &str) -> bool {
+    response_body.contains("reasoning_tokens")
+        || response_body.contains("thinking_tokens")
+        || response_body.contains("reasoning_content")
+        || response_body.contains("reasoning_summary")
+        || response_body.contains("\"thinking\"")
 }
 
 pub fn current_timestamp_ms() -> u64 {
@@ -233,21 +252,38 @@ pub fn append_capture(buffer: &mut Vec<u8>, bytes: &[u8]) -> bool {
 pub fn extract_reasoning_tokens_from_response_body(body: &[u8]) -> Option<u64> {
     let text = String::from_utf8_lossy(body);
     if let Ok(value) = serde_json::from_str::<Value>(&text) {
-        return find_reasoning_tokens(&value);
+        return find_reasoning_tokens(&value)
+            .filter(|tokens| *tokens > 0)
+            .or_else(|| estimate_reasoning_tokens_from_value(&value))
+            .or_else(|| find_reasoning_tokens(&value));
     }
 
-    text.lines()
-        .filter_map(|line| line.trim().strip_prefix("data:"))
-        .filter_map(|data| {
-            let data = data.trim();
-            if data.is_empty() || data == "[DONE]" {
-                return None;
-            }
-            serde_json::from_str::<Value>(data)
-                .ok()
-                .and_then(|value| find_reasoning_tokens(&value))
-        })
-        .max()
+    let mut exact_tokens = None;
+    let mut terminal_texts = Vec::new();
+    let mut done_texts = BTreeMap::new();
+    let mut delta_texts = BTreeMap::new();
+    let mut fallback_texts = Vec::new();
+
+    for value in text.lines().filter_map(parse_sse_data_line) {
+        if let Some(tokens) = find_reasoning_tokens(&value) {
+            exact_tokens = Some(exact_tokens.unwrap_or(0).max(tokens));
+        }
+        collect_sse_reasoning_texts(
+            &value,
+            &mut terminal_texts,
+            &mut done_texts,
+            &mut delta_texts,
+            &mut fallback_texts,
+        );
+    }
+
+    exact_tokens
+        .filter(|tokens| *tokens > 0)
+        .or_else(|| estimate_reasoning_tokens_from_texts(&terminal_texts))
+        .or_else(|| estimate_reasoning_tokens_from_texts(done_texts.values()))
+        .or_else(|| estimate_reasoning_tokens_from_texts(delta_texts.values()))
+        .or_else(|| estimate_reasoning_tokens_from_texts(&fallback_texts))
+        .or(exact_tokens)
 }
 
 pub fn append_record(record: &ProxyRequestRecord) -> std::io::Result<()> {
@@ -496,6 +532,384 @@ fn find_reasoning_tokens(value: &Value) -> Option<u64> {
     }
 }
 
+fn parse_sse_data_line(line: &str) -> Option<Value> {
+    let data = line.trim().strip_prefix("data:")?.trim();
+    if data.is_empty() || data == "[DONE]" {
+        return None;
+    }
+    serde_json::from_str::<Value>(data).ok()
+}
+
+fn collect_sse_reasoning_texts(
+    value: &Value,
+    terminal_texts: &mut Vec<String>,
+    done_texts: &mut BTreeMap<String, String>,
+    delta_texts: &mut BTreeMap<String, String>,
+    fallback_texts: &mut Vec<String>,
+) {
+    match value.get("type").and_then(Value::as_str) {
+        Some("response.completed" | "response.incomplete" | "response.failed") => {
+            if let Some(response) = value.get("response") {
+                let texts = response_output_reasoning_texts(response);
+                if !texts.is_empty() {
+                    *terminal_texts = texts;
+                    return;
+                }
+            }
+        }
+        Some("response.output_item.done") => {
+            if let Some(item) = value.get("item") {
+                if let Some(text) = reasoning_item_text(item) {
+                    done_texts.insert(reasoning_event_key(value), text);
+                    return;
+                }
+            }
+        }
+        Some("response.reasoning_summary_text.done") => {
+            if let Some(text) = value.get("text").and_then(Value::as_str) {
+                if !text.is_empty() {
+                    done_texts.insert(reasoning_event_key(value), text.to_string());
+                    return;
+                }
+            }
+        }
+        Some("response.reasoning_summary_part.done") => {
+            if let Some(text) = value
+                .get("part")
+                .and_then(|part| part.get("text"))
+                .and_then(Value::as_str)
+            {
+                if !text.is_empty() {
+                    done_texts.insert(reasoning_event_key(value), text.to_string());
+                    return;
+                }
+            }
+        }
+        Some("response.reasoning_summary_text.delta") => {
+            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                if !delta.is_empty() {
+                    delta_texts
+                        .entry(reasoning_event_key(value))
+                        .or_default()
+                        .push_str(delta);
+                    return;
+                }
+            }
+        }
+        Some("content_block_start") => {
+            if let Some(text) = value
+                .get("content_block")
+                .and_then(|block| block.get("thinking"))
+                .and_then(Value::as_str)
+            {
+                if !text.is_empty() {
+                    delta_texts
+                        .entry(reasoning_event_key(value))
+                        .or_default()
+                        .push_str(text);
+                    return;
+                }
+            }
+        }
+        Some("content_block_delta") => {
+            if let Some(text) = value
+                .get("delta")
+                .and_then(|delta| delta.get("thinking"))
+                .and_then(Value::as_str)
+            {
+                if !text.is_empty() {
+                    delta_texts
+                        .entry(reasoning_event_key(value))
+                        .or_default()
+                        .push_str(text);
+                    return;
+                }
+            }
+        }
+        _ => {}
+    }
+
+    collect_chat_delta_reasoning_texts(value, delta_texts);
+    if fallback_texts.is_empty() {
+        fallback_texts.extend(reasoning_texts_from_value(value));
+    }
+}
+
+fn reasoning_event_key(value: &Value) -> String {
+    let item = value
+        .get("item_id")
+        .or_else(|| value.get("index"))
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(ToString::to_string)
+                .or_else(|| value.as_u64().map(|number| number.to_string()))
+        })
+        .unwrap_or_else(|| "reasoning".to_string());
+    let output_index = value
+        .get("output_index")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let summary_index = value
+        .get("summary_index")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    format!("{item}:{output_index}:{summary_index}")
+}
+
+fn estimate_reasoning_tokens_from_value(value: &Value) -> Option<u64> {
+    estimate_reasoning_tokens_from_texts(reasoning_texts_from_value(value))
+}
+
+fn reasoning_texts_from_value(value: &Value) -> Vec<String> {
+    let mut texts = response_output_reasoning_texts(value);
+    if !texts.is_empty() {
+        return texts;
+    }
+
+    if let Some(response) = value.get("response") {
+        texts = response_output_reasoning_texts(response);
+        if !texts.is_empty() {
+            return texts;
+        }
+    }
+
+    collect_chat_message_reasoning_texts(value, &mut texts);
+    if !texts.is_empty() {
+        return texts;
+    }
+
+    collect_anthropic_reasoning_texts(value, &mut texts);
+    if !texts.is_empty() {
+        return texts;
+    }
+
+    collect_generic_reasoning_texts(value, &mut texts);
+    texts
+}
+
+fn response_output_reasoning_texts(value: &Value) -> Vec<String> {
+    value
+        .get("output")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(reasoning_item_text)
+                .filter(|text| !text.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn reasoning_item_text(item: &Value) -> Option<String> {
+    let is_reasoning_item = item.get("type").and_then(Value::as_str) == Some("reasoning")
+        || item.get("reasoning_content").is_some();
+    if !is_reasoning_item {
+        return None;
+    }
+
+    item.get("reasoning_content")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| summary_text(item.get("summary")))
+        .or_else(|| {
+            item.get("content")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+                .map(ToString::to_string)
+        })
+        .or_else(|| {
+            item.get("text")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+                .map(ToString::to_string)
+        })
+}
+
+fn summary_text(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    match value {
+        Value::String(text) => (!text.is_empty()).then(|| text.to_string()),
+        Value::Array(parts) => {
+            let text = parts
+                .iter()
+                .filter_map(|part| {
+                    part.get("text")
+                        .and_then(Value::as_str)
+                        .or_else(|| part.get("content").and_then(Value::as_str))
+                        .or_else(|| part.as_str())
+                })
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            (!text.is_empty()).then_some(text)
+        }
+        Value::Object(_) => value
+            .get("text")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("content").and_then(Value::as_str))
+            .filter(|text| !text.is_empty())
+            .map(ToString::to_string),
+        _ => None,
+    }
+}
+
+fn collect_chat_delta_reasoning_texts(value: &Value, texts: &mut BTreeMap<String, String>) {
+    let Some(choices) = value.get("choices").and_then(Value::as_array) else {
+        return;
+    };
+    for (index, choice) in choices.iter().enumerate() {
+        let Some(text) = choice
+            .get("delta")
+            .and_then(reasoning_text_from_object)
+            .filter(|text| !text.is_empty())
+        else {
+            continue;
+        };
+        texts
+            .entry(format!("chat-choice-{index}"))
+            .or_default()
+            .push_str(&text);
+    }
+}
+
+fn collect_chat_message_reasoning_texts(value: &Value, texts: &mut Vec<String>) {
+    let Some(choices) = value.get("choices").and_then(Value::as_array) else {
+        return;
+    };
+    for choice in choices {
+        if let Some(text) = choice
+            .get("message")
+            .and_then(reasoning_text_from_object)
+            .filter(|text| !text.is_empty())
+        {
+            texts.push(text);
+        }
+    }
+}
+
+fn collect_anthropic_reasoning_texts(value: &Value, texts: &mut Vec<String>) {
+    let Some(content) = value.get("content").and_then(Value::as_array) else {
+        return;
+    };
+    for block in content {
+        if block.get("type").and_then(Value::as_str) == Some("thinking") {
+            if let Some(text) = block
+                .get("thinking")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+            {
+                texts.push(text.to_string());
+            }
+        }
+    }
+}
+
+fn collect_generic_reasoning_texts(value: &Value, texts: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(text) = reasoning_text_from_object(value) {
+                texts.push(text);
+                return;
+            }
+            if let Some(text) = summary_text(map.get("summary")) {
+                texts.push(text);
+                return;
+            }
+            for child in map.values() {
+                collect_generic_reasoning_texts(child, texts);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_generic_reasoning_texts(item, texts);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn reasoning_text_from_object(value: &Value) -> Option<String> {
+    for key in ["reasoning_content", "reasoning"] {
+        if let Some(text) = value.get(key).and_then(Value::as_str) {
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+
+    value
+        .get("reasoning")
+        .and_then(|reasoning| {
+            reasoning
+                .get("content")
+                .and_then(Value::as_str)
+                .or_else(|| reasoning.get("text").and_then(Value::as_str))
+                .or_else(|| reasoning.get("summary").and_then(Value::as_str))
+        })
+        .filter(|text| !text.is_empty())
+        .map(ToString::to_string)
+}
+
+fn estimate_reasoning_tokens_from_texts(
+    texts: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Option<u64> {
+    let mut total = 0_u64;
+    for text in texts {
+        total = total.saturating_add(estimate_reasoning_tokens_from_text(text.as_ref()));
+    }
+    (total > 0).then_some(total)
+}
+
+fn estimate_reasoning_tokens_from_text(text: &str) -> u64 {
+    let mut tokens = 0_u64;
+    let mut ascii_word_len = 0_u64;
+
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            ascii_word_len += 1;
+            continue;
+        }
+
+        tokens = tokens.saturating_add(ascii_word_tokens(ascii_word_len));
+        ascii_word_len = 0;
+
+        if ch.is_whitespace() {
+            continue;
+        }
+        if is_cjk_or_kana_or_hangul(ch) {
+            tokens += 1;
+        } else if ch.is_ascii_punctuation() {
+            tokens += 1;
+        } else {
+            tokens += 1;
+        }
+    }
+
+    tokens.saturating_add(ascii_word_tokens(ascii_word_len))
+}
+
+fn ascii_word_tokens(len: u64) -> u64 {
+    if len == 0 { 0 } else { len.div_ceil(4) }
+}
+
+fn is_cjk_or_kana_or_hangul(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3040..=0x30ff
+            | 0x3400..=0x4dbf
+            | 0x4e00..=0x9fff
+            | 0xac00..=0xd7af
+            | 0xf900..=0xfaff
+            | 0x20000..=0x2a6df
+            | 0x2a700..=0x2b73f
+            | 0x2b740..=0x2b81f
+            | 0x2b820..=0x2ceaf
+    )
+}
+
 fn value_to_u64(value: &Value) -> Option<u64> {
     value
         .as_u64()
@@ -591,6 +1005,87 @@ data: [DONE]
         }"#;
 
         assert_eq!(extract_reasoning_tokens_from_response_body(body), Some(516));
+    }
+
+    #[test]
+    fn estimates_reasoning_tokens_from_chat_reasoning_content() {
+        let body = br#"{
+            "id": "chatcmpl_1",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "abcd efgh",
+                    "content": "done"
+                }
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        }"#;
+
+        assert_eq!(extract_reasoning_tokens_from_response_body(body), Some(2));
+    }
+
+    #[test]
+    fn estimates_reasoning_tokens_from_responses_sse_reasoning_content() {
+        let body = br#"event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"delta":"abcd "}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"delta":"efgh"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","output":[{"type":"reasoning","reasoning_content":"abcd efgh","summary":[{"type":"summary_text","text":"abcd efgh"}]}],"usage":{"output_tokens":5}}}
+
+data: [DONE]
+"#;
+
+        assert_eq!(extract_reasoning_tokens_from_response_body(body), Some(2));
+    }
+
+    #[test]
+    fn keeps_reported_reasoning_tokens_before_text_estimate() {
+        let body = br#"{
+            "id": "chatcmpl_1",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "abcd efgh ijkl mnop",
+                    "content": "done"
+                }
+            }],
+            "usage": {
+                "completion_tokens_details": {
+                    "reasoning_tokens": 3
+                }
+            }
+        }"#;
+
+        assert_eq!(extract_reasoning_tokens_from_response_body(body), Some(3));
+    }
+
+    #[test]
+    fn summary_backfills_reasoning_tokens_from_existing_response_body() {
+        let mut record = sample_proxy_record("existing-log");
+        record.reasoning_tokens = None;
+        record.response_body = r#"{
+            "id": "chatcmpl_1",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "abcd efgh",
+                    "content": "done"
+                }
+            }]
+        }"#
+        .to_string();
+
+        let summary = super::ProxyRequestSummary::from(&record);
+
+        assert_eq!(record.reasoning_tokens, None);
+        assert_eq!(summary.reasoning_tokens, Some(2));
     }
 
     #[test]
