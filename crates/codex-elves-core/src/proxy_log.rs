@@ -358,10 +358,14 @@ fn read_records_at_path(path: &PathBuf, limit: usize) -> std::io::Result<Vec<Pro
                 records.push(record);
             }
         }
-        if records.len() >= limit {
-            break;
-        }
     }
+    records.sort_by(|left, right| {
+        right
+            .timestamp_ms
+            .cmp(&left.timestamp_ms)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    records.truncate(limit);
     Ok(records)
 }
 
@@ -732,6 +736,48 @@ data: [DONE]
         assert_eq!(records[0].first_token_ms, Some(345));
         assert_eq!(records[0].duration_ms, None);
         assert_eq!(records[0].response_body, "");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_summaries_orders_by_request_timestamp_not_update_order() {
+        let path = temp_proxy_log_path("request-time-order");
+        let mut older = sample_proxy_record("older-request");
+        older.state = ProxyRequestState::Pending;
+        older.timestamp_ms = 100;
+        older.status_code = None;
+        older.first_token_ms = None;
+        older.duration_ms = None;
+        older.response_bytes = None;
+        older.response_captured_bytes = None;
+        older.response_body.clear();
+
+        let mut newer = sample_proxy_record("newer-request");
+        newer.state = ProxyRequestState::Pending;
+        newer.timestamp_ms = 200;
+        newer.status_code = None;
+        newer.first_token_ms = None;
+        newer.duration_ms = None;
+        newer.response_bytes = None;
+        newer.response_captured_bytes = None;
+        newer.response_body.clear();
+
+        let mut older_first_token = older.clone();
+        older_first_token.status_code = Some(200);
+        older_first_token.first_token_ms = Some(345);
+
+        append_record_at_path(&path, &older).expect("append older pending record");
+        append_record_at_path(&path, &newer).expect("append newer pending record");
+        append_record_at_path(&path, &older_first_token).expect("append older first token update");
+
+        let records = read_records_at_path(&path, 10).expect("read proxy log records");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].id, "newer-request");
+        assert_eq!(records[0].timestamp_ms, 200);
+        assert_eq!(records[1].id, "older-request");
+        assert_eq!(records[1].timestamp_ms, 100);
+        assert_eq!(records[1].first_token_ms, Some(345));
 
         let _ = std::fs::remove_file(path);
     }
