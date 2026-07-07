@@ -8185,7 +8185,8 @@ fn apply_anthropic_reasoning_options(result: &mut Value, body: &Value, model: &s
 }
 
 fn default_anthropic_reasoning_effort(model: &str) -> &'static str {
-    if model.to_ascii_lowercase().contains("deepseek") {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("deepseek") || is_glm_reasoning_model(&lower) {
         return "max";
     }
     ANTHROPIC_DEFAULT_REASONING_EFFORT
@@ -8283,7 +8284,8 @@ fn map_chat_reasoning_effort(
     if matches!(effort.as_str(), "none" | "off" | "disabled") {
         return None;
     }
-    if style == ChatReasoningStyle::DeepSeek && effort == "xhigh" {
+    if (style == ChatReasoningStyle::DeepSeek || is_glm_reasoning_model(model)) && effort == "xhigh"
+    {
         effort = "max".to_string();
     }
 
@@ -8305,7 +8307,8 @@ fn map_chat_reasoning_effort(
 }
 
 fn map_anthropic_reasoning_effort(effort: &str, model: &str) -> Option<&'static str> {
-    if model.to_ascii_lowercase().contains("deepseek")
+    let lower = model.to_ascii_lowercase();
+    if (lower.contains("deepseek") || is_glm_reasoning_model(&lower))
         && effort.trim().eq_ignore_ascii_case("xhigh")
     {
         return Some("max");

@@ -2222,8 +2222,11 @@ pub(crate) fn generated_model_catalog_json(
         let protocol = upstream_response_protocol_for_relay(row.protocol);
         let supported_reasoning_levels =
             crate::protocol_proxy::supported_reasoning_efforts_for_model(&model, protocol);
-        let default_reasoning_level =
-            catalog_default_reasoning_effort(&reasoning_effort, &supported_reasoning_levels);
+        let default_reasoning_level = catalog_default_reasoning_effort(
+            &model,
+            &reasoning_effort,
+            &supported_reasoning_levels,
+        );
         let mut entry = Map::new();
         entry.insert("slug".to_string(), json!(model.clone()));
         entry.insert("display_name".to_string(), json!(model.clone()));
@@ -2371,7 +2374,16 @@ fn upstream_response_protocol_for_relay(
     }
 }
 
-fn catalog_default_reasoning_effort(configured: &str, supported: &[&'static str]) -> &'static str {
+fn catalog_default_reasoning_effort(
+    model: &str,
+    configured: &str,
+    supported: &[&'static str],
+) -> &'static str {
+    if model_prefers_max_reasoning_default(model) && supported.iter().any(|effort| *effort == "max")
+    {
+        return "max";
+    }
+
     let configured = configured.trim();
     if supported.iter().any(|effort| *effort == configured) {
         return supported
@@ -2386,6 +2398,14 @@ fn catalog_default_reasoning_effort(configured: &str, supported: &[&'static str]
         }
     }
     supported.first().copied().unwrap_or("medium")
+}
+
+fn model_prefers_max_reasoning_default(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    model.contains("deepseek")
+        || model.contains("glm")
+        || model.contains("zhipu")
+        || model.contains("z.ai")
 }
 
 fn reasoning_effort_description(effort: &str) -> &'static str {

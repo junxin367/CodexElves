@@ -1348,6 +1348,16 @@ fn glm_chat_reasoning_keeps_enabled_flag_and_effort() {
 
     assert_eq!(converted["thinking"], json!({ "type": "enabled" }));
     assert_eq!(converted["reasoning_effort"], "max");
+
+    let xhigh = responses_to_chat_completions(json!({
+        "model": "glm-5.2",
+        "reasoning": { "effort": "xhigh" },
+        "input": "hi"
+    }))
+    .unwrap();
+
+    assert_eq!(xhigh["thinking"], json!({ "type": "enabled" }));
+    assert_eq!(xhigh["reasoning_effort"], "max");
 }
 
 #[test]
@@ -1359,7 +1369,15 @@ fn non_claude_anthropic_compatible_reasoning_keeps_effort_by_model_capability() 
     }))
     .unwrap();
     assert_eq!(glm["thinking"], json!({ "type": "adaptive" }));
-    assert_eq!(glm["output_config"], json!({ "effort": "high" }));
+    assert_eq!(glm["output_config"], json!({ "effort": "max" }));
+
+    let glm_default = responses_to_anthropic_messages(json!({
+        "model": "glm-5.2",
+        "input": "hi"
+    }))
+    .unwrap();
+    assert_eq!(glm_default["thinking"], json!({ "type": "adaptive" }));
+    assert_eq!(glm_default["output_config"], json!({ "effort": "max" }));
 
     let deepseek = responses_to_anthropic_messages(json!({
         "model": "deepseek-reasoner",

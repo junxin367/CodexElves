@@ -1426,7 +1426,7 @@ experimental_bearer_token = "sk-new"
     );
     assert_eq!(catalog["models"][0]["context_window"], 128000);
     assert_eq!(catalog["models"][0]["auto_compact_token_limit"], 160000);
-    assert_eq!(catalog["models"][0]["default_reasoning_level"], "high");
+    assert_eq!(catalog["models"][0]["default_reasoning_level"], "max");
     assert_eq!(
         catalog["models"][0]["supported_reasoning_levels"],
         serde_json::json!([
@@ -1438,7 +1438,7 @@ experimental_bearer_token = "sk-new"
     assert_eq!(catalog["models"][1]["context_window"], 200000);
     assert_eq!(catalog["models"][1]["default_reasoning_level"], "xhigh");
     assert_eq!(catalog["models"][2]["slug"], "glm-5.2");
-    assert_eq!(catalog["models"][2]["default_reasoning_level"], "high");
+    assert_eq!(catalog["models"][2]["default_reasoning_level"], "max");
     assert_eq!(
         catalog["models"][2]["supported_reasoning_levels"],
         serde_json::json!([
