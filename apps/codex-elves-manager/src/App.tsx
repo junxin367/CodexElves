@@ -186,6 +186,7 @@ type BackendSettings = {
   codexAppUpstreamWorktreeCreate: boolean;
   codexAppNativeMenuPlacement: boolean;
   codexAppServiceTierControls: boolean;
+  codexAppFlatModelMenu: boolean;
   codexAppImageOverlayEnabled: boolean;
   codexAppImageOverlayPath: string;
   codexAppImageOverlayOpacity: number;
@@ -773,6 +774,7 @@ const defaultSettings: BackendSettings = {
   codexAppUpstreamWorktreeCreate: false,
   codexAppNativeMenuPlacement: true,
   codexAppServiceTierControls: false,
+  codexAppFlatModelMenu: false,
   codexAppImageOverlayEnabled: false,
   codexAppImageOverlayPath: "",
   codexAppImageOverlayOpacity: 35,
@@ -871,7 +873,7 @@ function createBrowserPreviewSettings(): BackendSettings {
         autoCompactLimit: "900000",
         modelMappings: [
           { requestModel: "gpt-5.5", protocol: "responses", contextWindow: "1047576" },
-          { requestModel: "gpt-5.4", protocol: "responses", contextWindow: "1047576" },
+          { requestModel: "gpt-5.4", protocol: "responses", contextWindow: "1000000" },
           { requestModel: "gpt-5.4-mini", protocol: "responses", contextWindow: "1047576" },
           { requestModel: "deepseek-chat", protocol: "chatCompletions", contextWindow: "65536" },
           { requestModel: "deepseek-reasoner", protocol: "chatCompletions", contextWindow: "65536" },
@@ -4389,7 +4391,7 @@ function EnhanceScreen({
             />
             <span>
               <strong>启用 CodexElves 页面增强</strong>
-              <small>关闭后会停用删除、导出、项目移动、插件相关和菜单位置增强。</small>
+              <small>关闭后会停用删除、导出、项目移动、模型菜单、插件相关和菜单位置增强。</small>
             </span>
           </label>
           <label className="switch-row">
@@ -4415,6 +4417,7 @@ function EnhanceScreen({
             <FeatureToggle title="强制解锁入口" detail="恢复 1.1.9 的入口解锁方式，强制显示并启用插件入口。" checked={form.codexAppPluginEntryUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginEntryUnlock", value)} />
             <FeatureToggle title="插件列表全量展示" detail="进入插件页后自动连续展开“更多”，尽量一次显示完整插件列表。" checked={form.codexAppPluginAutoExpand} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginAutoExpand", value)} />
             <FeatureToggle title="Fast 按钮" detail="显示服务模式切换按钮。Fast（service_tier=priority）仅 OpenAI 部分模型支持（如 gpt-5.4 / gpt-5.5）；Claude 等其他模型不支持，会按 Standard 发送。" checked={form.codexAppServiceTierControls} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppServiceTierControls", value)} />
+            <FeatureToggle title="模型选择优化" detail="进入会话页预加载模型列表，并把 hover 子菜单改成同一菜单里的单列选择。" checked={form.codexAppFlatModelMenu} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppFlatModelMenu", value)} />
             <FeatureToggle title="会话删除" detail="在会话列表悬停显示删除按钮，并支持撤销。" checked={form.codexAppSessionDelete} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppSessionDelete", value)} />
             <FeatureToggle title="Markdown 导出" detail="在会话列表显示导出按钮，导出带时间戳的 Markdown。" checked={form.codexAppMarkdownExport} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppMarkdownExport", value)} />
             <FeatureToggle title="会话项目移动" detail="把会话移动到普通对话或其他本地项目。" checked={form.codexAppProjectMove} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppProjectMove", value)} />

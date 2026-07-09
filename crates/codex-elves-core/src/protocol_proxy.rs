@@ -8337,6 +8337,9 @@ pub fn supported_reasoning_efforts_for_model(
         return levels(&["low", "medium", "high"]);
     }
 
+    if model.contains("gpt-5.6") {
+        return levels(&["minimal", "low", "medium", "high", "xhigh", "max"]);
+    }
     if model.contains("gpt-") || is_openai_o_series(&model) {
         return levels(&["minimal", "low", "medium", "high", "xhigh"]);
     }

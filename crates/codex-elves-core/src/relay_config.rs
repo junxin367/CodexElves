@@ -2227,6 +2227,7 @@ pub(crate) fn generated_model_catalog_json(
             &reasoning_effort,
             &supported_reasoning_levels,
         );
+        let context_window = catalog_context_window_for_model(&model, &row.context_window);
         let mut entry = Map::new();
         entry.insert("slug".to_string(), json!(model.clone()));
         entry.insert("display_name".to_string(), json!(model.clone()));
@@ -2291,7 +2292,7 @@ pub(crate) fn generated_model_catalog_json(
             ),
         );
 
-        if let Some(value) = parse_optional_positive_u64(&row.context_window, "上下文大小")? {
+        if let Some(value) = parse_optional_positive_u64(&context_window, "上下文大小")? {
             entry.insert("context_window".to_string(), json!(value));
             entry.insert("max_context_window".to_string(), json!(value));
         }
@@ -2398,6 +2399,29 @@ fn catalog_default_reasoning_effort(
         }
     }
     supported.first().copied().unwrap_or("medium")
+}
+
+fn catalog_context_window_for_model(model: &str, configured: &str) -> String {
+    let configured = configured.trim();
+    if !configured.is_empty() {
+        return configured.to_string();
+    }
+    default_catalog_context_window(model)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn default_catalog_context_window(model: &str) -> Option<&'static str> {
+    let normalized = model.trim().to_ascii_lowercase();
+    let model = normalized
+        .rsplit('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(normalized.as_str());
+    if model == "gpt-5.4" || model == "gpt-5.6" || model.starts_with("gpt-5.6-") {
+        return Some("1000000");
+    }
+    None
 }
 
 fn model_prefers_max_reasoning_default(model: &str) -> bool {
@@ -3621,6 +3645,53 @@ mod tests {
             .and_then(Value::as_array)
             .unwrap();
         assert!(standard_tiers.is_empty(), "gpt-5.2 不应有 fast tier");
+    }
+
+    #[test]
+    fn generated_model_catalog_backfills_gpt54_and_gpt56_context_defaults() {
+        let profile = RelayProfile {
+            relay_mode: crate::settings::RelayMode::PureApi,
+            protocol: crate::settings::RelayProtocol::Responses,
+            model_mappings: vec![
+                crate::settings::RelayModelMapping {
+                    request_model: "gpt-5.4".to_string(),
+                    context_window: String::new(),
+                    protocol: RelayProtocol::Responses,
+                },
+                crate::settings::RelayModelMapping {
+                    request_model: "openai/gpt-5.6-custom".to_string(),
+                    context_window: String::new(),
+                    protocol: RelayProtocol::Responses,
+                },
+            ],
+            ..RelayProfile::default()
+        };
+        let rows = relay_profile_catalog_rows(&profile);
+        let catalog = generated_model_catalog_json(&profile, "", rows).unwrap();
+        let models = catalog.get("models").and_then(Value::as_array).unwrap();
+
+        for slug in ["gpt-5.4", "openai/gpt-5.6-custom"] {
+            let model = models
+                .iter()
+                .find(|model| model.get("slug").and_then(Value::as_str) == Some(slug))
+                .unwrap_or_else(|| panic!("应存在模型 {slug}"));
+            assert_eq!(model["context_window"], 1_000_000);
+            assert_eq!(model["max_context_window"], 1_000_000);
+        }
+
+        let gpt56 = models
+            .iter()
+            .find(|model| {
+                model.get("slug").and_then(Value::as_str) == Some("openai/gpt-5.6-custom")
+            })
+            .expect("应存在 gpt-5.6 自定义模型");
+        assert!(
+            gpt56["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|level| level.get("effort").and_then(Value::as_str) == Some("max"))
+        );
     }
 
     #[test]

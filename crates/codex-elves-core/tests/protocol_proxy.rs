@@ -1421,6 +1421,21 @@ fn deepseek_reasoning_efforts_match_official_levels() {
 }
 
 #[test]
+fn gpt56_reasoning_efforts_include_max() {
+    assert_eq!(
+        supported_reasoning_efforts_for_model("gpt-5.6", UpstreamResponseProtocol::Responses,),
+        vec!["minimal", "low", "medium", "high", "xhigh", "max"]
+    );
+    assert_eq!(
+        supported_reasoning_efforts_for_model(
+            "openai/gpt-5.6-custom",
+            UpstreamResponseProtocol::ChatCompletions,
+        ),
+        vec!["minimal", "low", "medium", "high", "xhigh", "max"]
+    );
+}
+
+#[test]
 fn glm_reasoning_efforts_match_supported_levels() {
     assert_eq!(
         supported_reasoning_efforts_for_model("glm-4.6", UpstreamResponseProtocol::ChatCompletions,),

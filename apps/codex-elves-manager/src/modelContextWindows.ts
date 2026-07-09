@@ -10,9 +10,10 @@ const COMMON_MODEL_CONTEXT_WINDOWS: Record<string, string> = {
   "gpt-5-nano": "272000",
   "gpt-5.2": "272000",
   "gpt-5.3-codex": "272000",
-  "gpt-5.4": "272000",
+  "gpt-5.4": "1000000",
   "gpt-5.4-mini": "272000",
   "gpt-5.5": "272000",
+  "gpt-5.6": "1000000",
   o3: "200000",
   "o3-mini": "200000",
   o4: "200000",
@@ -53,6 +54,7 @@ const COMMON_MODEL_CONTEXT_WINDOWS: Record<string, string> = {
 };
 
 const COMMON_MODEL_CONTEXT_PATTERNS: Array<{ pattern: RegExp; contextWindow: string }> = [
+  { pattern: /^gpt-5\.6(?:[.-]|$)/, contextWindow: "1000000" },
   { pattern: /^gpt-5(?:[.-]|$)/, contextWindow: "272000" },
   { pattern: /^gpt-4\.1(?:[.-]|$)/, contextWindow: "1047576" },
   { pattern: /^gpt-4o(?:[.-]|$)/, contextWindow: "128000" },

@@ -41,6 +41,9 @@
   const codexThreadServiceTierVersion = "1";
   const codexServiceTierBadgeClass = "codex-service-tier-badge";
   const codexServiceTierBadgeVersion = "3";
+  const codexFlatModelMenuGroupClass = "codex-elves-flat-model-menu-group";
+  const codexFlatModelMenuItemClass = "codex-elves-flat-model-menu-item";
+  const codexFlatModelMenuHiddenTriggerClass = "codex-elves-flat-model-menu-hidden-trigger";
   let codexElvesVersion = window.__CODEX_ELVES_VERSION__ || "unknown";
   const codexElvesBuild = window.__CODEX_ELVES_BUILD__ || "unknown";
   const codexElvesSettingsKey = "codexElvesSettings";
@@ -55,6 +58,8 @@
   const codexPluginAutoExpandClickDelayMs = 180;
   const codexBackendHeartbeatIntervalMs = 30000;
   const codexElvesImageOverlayId = "codex-elves-image-overlay";
+  let codexFlatModelMenuPreloadTimer = 0;
+  let codexFlatModelMenuPatchSettleRevision = 0;
   window.__codexProjectMoveRuntimeId = (window.__codexProjectMoveRuntimeId || 0) + 1;
   const codexProjectMoveRuntimeId = window.__codexProjectMoveRuntimeId;
   clearTimeout(window.__codexProjectMoveProjectionTimer);
@@ -266,6 +271,27 @@
       .codex-session-more-menu-icon {
         width: 16px;
         text-align: center;
+      }
+      .${codexFlatModelMenuGroupClass} {
+        display: contents;
+      }
+      .${codexFlatModelMenuHiddenTriggerClass} {
+        position: absolute !important;
+        width: 1px !important;
+        height: 1px !important;
+        margin: -1px !important;
+        padding: 0 !important;
+        overflow: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+        clip-path: inset(50%) !important;
+      }
+      .${codexFlatModelMenuItemClass} {
+        cursor: default;
+      }
+      .${codexFlatModelMenuItemClass} [data-codex-flat-model-menu-check="true"] {
+        margin-left: auto;
+        opacity: .9;
       }
       .codex-archive-row-button {
         border: 1px solid #ef4444;
@@ -849,7 +875,7 @@
   }
 
   function defaultCodexElvesSettings() {
-    return { pluginEntryUnlock: true, pluginMarketplaceUnlock: true, pluginAutoExpand: true, sessionDelete: true, markdownExport: true, projectMove: true, conversationView: false, conversationViewMaxWidth: conversationViewDefaultWidth, upstreamWorktreeCreate: true, nativeMenuPlacement: true, serviceTierControls: false };
+    return { pluginEntryUnlock: true, pluginMarketplaceUnlock: true, pluginAutoExpand: true, sessionDelete: true, markdownExport: true, projectMove: true, conversationView: false, conversationViewMaxWidth: conversationViewDefaultWidth, upstreamWorktreeCreate: true, nativeMenuPlacement: true, serviceTierControls: false, flatModelMenu: false };
   }
 
   const codexElvesBackendSettingMap = {
@@ -864,6 +890,7 @@
     upstreamWorktreeCreate: "codexAppUpstreamWorktreeCreate",
     nativeMenuPlacement: "codexAppNativeMenuPlacement",
     serviceTierControls: "codexAppServiceTierControls",
+    flatModelMenu: "codexAppFlatModelMenu",
   };
 
   function backendCodexElvesSettings() {
@@ -892,6 +919,7 @@
         upstreamWorktreeCreate: false,
         nativeMenuPlacement: false,
         serviceTierControls: false,
+        flatModelMenu: false,
       };
     }
     try {
@@ -916,6 +944,7 @@
   function setCodexElvesSetting(key, value) {
     const backendKey = codexElvesBackendSettingMap[key];
     if (backendKey) {
+      if (key === "flatModelMenu" && !value) cleanupFlatModelMenus();
       setBackendSetting(backendKey, value);
       return;
     }
@@ -934,6 +963,9 @@
         removeCodexServiceTierBadges();
         refreshCodexServiceTierControls();
       }
+    }
+    if (key === "flatModelMenu" && !value) {
+      cleanupFlatModelMenus();
     }
     if (key === "pluginAutoExpand" && !value) {
       clearTimeout(window.__codexPluginAutoExpandTimer);
@@ -2241,7 +2273,7 @@
               </div>
             </div>
             <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">页面功能增强</div><div class="codex-elves-row-description">关闭后停用删除、导出、移动、插件相关和菜单位置增强。</div></div>
+              <div><div class="codex-elves-row-title">页面功能增强</div><div class="codex-elves-row-description">关闭后停用删除、导出、移动、模型菜单、插件相关和菜单位置增强。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-backend-setting="enhancementsEnabled"><span></span></button>
             </div>
             <div class="codex-elves-row">
@@ -2259,6 +2291,10 @@
             <div class="codex-elves-row">
               <div><div class="codex-elves-row-title">Fast 按钮</div><div class="codex-elves-row-description">显示服务模式切换按钮；Fast 仅支持 ${codexServiceTierFastModelListLabel()}，其他模型按 Standard 发送。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="serviceTierControls"><span></span></button>
+            </div>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">模型选择优化</div><div class="codex-elves-row-description">进入会话页预加载模型列表，并把 hover 子菜单改成同一菜单里的单列选择。</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="flatModelMenu"><span></span></button>
             </div>
             <div class="codex-elves-row" data-codex-service-tier-controls="true">
               <div><div class="codex-elves-row-title">服务模式</div><div class="codex-elves-row-description">继承使用 config.toml 的 service tier；全局模式覆盖全部 thread；自定义允许按 thread 覆盖。</div></div>
@@ -3745,6 +3781,8 @@
       modelNames: () => codexElvesModelNames(),
       patchModelArray: (models, allowEmpty = false) => patchModelArray(models, allowEmpty),
       patchModelContainer: (value) => patchModelContainer(value),
+      patchFlatModelMenus: (scope = document) => patchFlatModelMenus(scope),
+      cleanupFlatModelMenus: (scope = document) => cleanupFlatModelMenus(scope),
       setServiceTierState: (state = {}) => {
         codexServiceTierState = { ...codexServiceTierState, ...state };
       },
@@ -3811,6 +3849,24 @@
     return ["minimal", "low", "medium", "high", "xhigh"].map((reasoningEffort) => ({ reasoningEffort, description: `${reasoningEffort} effort` }));
   }
 
+  function modelReasoningEffortsForModel(modelName) {
+    const efforts = modelReasoningEfforts();
+    const lower = String(modelName || "").toLowerCase();
+    if (lower.includes("gpt-5.6")) {
+      efforts.push({ reasoningEffort: "max", description: "max effort" });
+    }
+    return efforts;
+  }
+
+  function codexElvesDefaultContextWindow(modelName) {
+    const lower = String(modelName || "").toLowerCase().trim();
+    const slug = lower.split("/").filter(Boolean).pop() || lower;
+    if (slug === "gpt-5.4" || slug === "gpt-5.6" || slug.startsWith("gpt-5.6-")) {
+      return 1000000;
+    }
+    return null;
+  }
+
   function codexElvesModelDescriptor(modelName) {
     // 从后端返回的 model_entries 中查找完整条目（含 context_window 和 reasoning levels）
     const entries = Array.isArray(codexModelCatalog.model_entries) ? codexModelCatalog.model_entries : [];
@@ -3818,7 +3874,7 @@
 
     // 思考深度：优先使用后端按模型能力计算的值，fallback 到全量列表
     let defaultReasoningEffort = "medium";
-    let supportedReasoningEfforts = modelReasoningEfforts();
+    let supportedReasoningEfforts = modelReasoningEffortsForModel(modelName);
     if (entry && entry.default_reasoning_level) {
       defaultReasoningEffort = entry.default_reasoning_level;
     }
@@ -3845,6 +3901,12 @@
     if (entry && entry.context_window) {
       descriptor.contextWindow = entry.context_window;
       descriptor.maxContextWindow = entry.max_context_window || entry.context_window;
+    } else {
+      const contextWindow = codexElvesDefaultContextWindow(modelName);
+      if (contextWindow) {
+        descriptor.contextWindow = contextWindow;
+        descriptor.maxContextWindow = contextWindow;
+      }
     }
 
     return descriptor;
@@ -4241,6 +4303,363 @@
     return changed;
   }
 
+  function flatModelMenuSelector() {
+    return '[role="menu"], [data-radix-menu-content], [role="listbox"]';
+  }
+
+  function codexFlatModelMenuEnabled() {
+    return !!codexElvesSettings().flatModelMenu && codexElvesModelUnlockEnabled();
+  }
+
+  function flatModelMenuConversationActive() {
+    try {
+      if (typeof codexServiceTierBestComposerFooter === "function" && codexServiceTierBestComposerFooter()) return true;
+    } catch {
+    }
+    return !!document.querySelector?.('.composer-footer, [class*="_footer_"]');
+  }
+
+  function scheduleFlatModelMenuSettlePatch(reason = "settle") {
+    void reason;
+    const revision = ++codexFlatModelMenuPatchSettleRevision;
+    [0, 40, 120, 260].forEach((delay) => {
+      window.setTimeout(() => {
+        if (revision !== codexFlatModelMenuPatchSettleRevision) return;
+        try {
+          patchFlatModelMenus();
+        } catch (error) {
+          window.__codexElvesModelPatchFailures = window.__codexElvesModelPatchFailures || [];
+          window.__codexElvesModelPatchFailures.push(String(error?.stack || error));
+        }
+      }, delay);
+    });
+  }
+
+  function scheduleFlatModelMenuPreload(reason = "scan") {
+    if (!codexFlatModelMenuEnabled()) {
+      cleanupFlatModelMenus();
+      return;
+    }
+    if (codexFlatModelMenuPreloadTimer) return;
+    codexFlatModelMenuPreloadTimer = window.setTimeout(async () => {
+      codexFlatModelMenuPreloadTimer = 0;
+      if (!codexFlatModelMenuEnabled()) {
+        cleanupFlatModelMenus();
+        return;
+      }
+      if (!flatModelMenuConversationActive()) return;
+      try {
+        if (!codexElvesModelNames().length) await loadCodexModelCatalog();
+        scheduleFlatModelMenuSettlePatch(reason);
+        scheduleCodexModelWhitelistRefresh(1800);
+      } catch (error) {
+        window.__codexElvesModelPatchFailures = window.__codexElvesModelPatchFailures || [];
+        window.__codexElvesModelPatchFailures.push(String(error?.stack || error));
+      }
+    }, 80);
+  }
+
+  function flatModelMenuCatalogLabels() {
+    const labels = [];
+    const entries = Array.isArray(codexModelCatalog.model_entries) ? codexModelCatalog.model_entries : [];
+    for (const entry of entries) {
+      if (entry?.slug) labels.push(String(entry.slug));
+      if (entry?.display_name) labels.push(String(entry.display_name));
+      if (entry?.displayName) labels.push(String(entry.displayName));
+      if (entry?.name) labels.push(String(entry.name));
+    }
+    return uniqueValues([...labels, ...codexElvesModelNames()]);
+  }
+
+  function flatModelMenuDirectItems(menu) {
+    if (!menu?.querySelectorAll) return [];
+    return [...menu.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [data-radix-collection-item]')]
+      .filter((item) => item.closest?.(flatModelMenuSelector()) === menu);
+  }
+
+  function flatModelMenuItemTextMatchesModel(text, model) {
+    if (!text || !model) return false;
+    if (codexServiceTierModelMatchKey(text) === codexServiceTierModelMatchKey(model)) return true;
+    return codexServiceTierModelMatchesText(model, text);
+  }
+
+  function flatModelMenuItemMatchesAnyModel(item) {
+    const text = normalizedElementText(item);
+    return flatModelMenuCatalogLabels()
+      .sort((left, right) => right.length - left.length)
+      .some((model) => flatModelMenuItemTextMatchesModel(text, model));
+  }
+
+  function flatModelMenuTriggerItem(menu) {
+    const items = flatModelMenuDirectItems(menu)
+      .filter((item) => !item.closest?.(`.${codexFlatModelMenuGroupClass}`))
+      .filter((item) => !item.hasAttribute?.("data-codex-flat-model-menu-item"));
+    const matches = items.filter(flatModelMenuItemMatchesAnyModel);
+    if (!matches.length) return null;
+    return matches.find((item) =>
+      item.getAttribute?.("aria-haspopup") === "menu" ||
+      item.getAttribute?.("data-state") ||
+      item.querySelector?.("svg")
+    ) || matches[matches.length - 1];
+  }
+
+  function flatModelMenuLooksLikeRoot(menu, trigger) {
+    if (!menu || !trigger) return false;
+    if (menu.closest?.(`#${codexElvesMenuId}, .codex-elves-modal-overlay, .${moreMenuClass}`)) return false;
+    if (isWorkspaceChromeNode(menu)) return false;
+    const text = normalizedElementText(menu).toLowerCase();
+    const hasReasoningLabel = /推理|reasoning/.test(text);
+    const hasReasoningLevel = /(^|\s)(low|medium|high|minimal|xhigh|max)(\s|$)/.test(text) || /低|中|高|超高/.test(text);
+    if (hasReasoningLabel && hasReasoningLevel) return true;
+    const levelCount = [
+      /(^|\s)low(\s|$)|低/.test(text),
+      /(^|\s)medium(\s|$)|中/.test(text),
+      /(^|\s)high(\s|$)|高/.test(text),
+      /(^|\s)(xhigh|max)(\s|$)|超高/.test(text),
+    ].filter(Boolean).length;
+    return levelCount >= 3 && flatModelMenuItemMatchesAnyModel(trigger);
+  }
+
+  function selectedFlatModelName() {
+    return codexServiceTierCurrentModelName()
+      || codexServiceTierModelFromValue(codexModelCatalog.model)
+      || codexServiceTierModelFromValue(codexModelCatalog.default_model);
+  }
+
+  function flatModelMenuItemSelected(modelName) {
+    const selected = selectedFlatModelName();
+    return !!selected && codexServiceTierModelMatchKey(selected) === codexServiceTierModelMatchKey(modelName);
+  }
+
+  function flatModelMenuItemClassName(trigger) {
+    const base = String(trigger?.className || "")
+      .split(/\s+/)
+      .filter((className) => className && className !== codexFlatModelMenuHiddenTriggerClass && className !== codexFlatModelMenuItemClass)
+      .join(" ");
+    return `${base} ${codexFlatModelMenuItemClass}`.trim();
+  }
+
+  function createFlatModelMenuItem(modelName, trigger) {
+    const item = document.createElement("div");
+    const selected = flatModelMenuItemSelected(modelName);
+    item.setAttribute("role", "menuitem");
+    item.setAttribute("tabindex", "-1");
+    item.setAttribute("aria-checked", selected ? "true" : "false");
+    item.setAttribute("data-codex-flat-model-menu-item", "true");
+    item.setAttribute("data-codex-flat-model", modelName);
+    item.className = flatModelMenuItemClassName(trigger);
+    item.innerHTML = `<span class="min-w-0 flex-1 truncate">${escapeHtml(modelName)}</span><span data-codex-flat-model-menu-check="true" aria-hidden="true">${selected ? "&#10003;" : ""}</span>`;
+    return item;
+  }
+
+  function flatModelMenuSignature(modelNames) {
+    return JSON.stringify({
+      models: modelNames,
+      selected: selectedFlatModelName(),
+    });
+  }
+
+  function removeFlatModelMenuGroup(menu) {
+    menu?.querySelectorAll?.(`.${codexFlatModelMenuGroupClass}`).forEach((node) => node.remove());
+  }
+
+  function restoreFlatModelMenuTrigger(trigger) {
+    if (!trigger) return;
+    trigger.classList?.remove(codexFlatModelMenuHiddenTriggerClass);
+    trigger.removeAttribute?.("data-codex-flat-model-menu-native-trigger");
+  }
+
+  function cleanupFlatModelMenus(scope = document) {
+    scope.querySelectorAll?.(`.${codexFlatModelMenuGroupClass}`).forEach((node) => node.remove());
+    scope.querySelectorAll?.("[data-codex-flat-model-menu-native-trigger]").forEach(restoreFlatModelMenuTrigger);
+  }
+
+  function patchFlatModelMenu(menu) {
+    const trigger = flatModelMenuTriggerItem(menu);
+    if (!codexFlatModelMenuEnabled() || !flatModelMenuLooksLikeRoot(menu, trigger)) {
+      removeFlatModelMenuGroup(menu);
+      menu?.querySelectorAll?.("[data-codex-flat-model-menu-native-trigger]").forEach(restoreFlatModelMenuTrigger);
+      return false;
+    }
+    const modelNames = codexElvesModelNames();
+    if (!modelNames.length) return false;
+    const signature = flatModelMenuSignature(modelNames);
+    const existing = menu.querySelector?.(`.${codexFlatModelMenuGroupClass}`);
+    if (existing?.getAttribute?.("data-codex-flat-model-menu-signature") === signature) {
+      trigger.classList?.add(codexFlatModelMenuHiddenTriggerClass);
+      trigger.setAttribute?.("data-codex-flat-model-menu-native-trigger", "true");
+      return false;
+    }
+    removeFlatModelMenuGroup(menu);
+    const group = document.createElement("div");
+    group.className = codexFlatModelMenuGroupClass;
+    group.setAttribute("data-codex-flat-model-menu-signature", signature);
+    modelNames.forEach((modelName) => group.appendChild(createFlatModelMenuItem(modelName, trigger)));
+    trigger.insertAdjacentElement?.("afterend", group) || menu.appendChild(group);
+    trigger.classList?.add(codexFlatModelMenuHiddenTriggerClass);
+    trigger.setAttribute?.("data-codex-flat-model-menu-native-trigger", "true");
+    return true;
+  }
+
+  function patchFlatModelMenus(scope = document) {
+    if (!codexFlatModelMenuEnabled()) {
+      cleanupFlatModelMenus(scope);
+      return false;
+    }
+    if (!codexElvesModelNames().length) {
+      scheduleFlatModelMenuPreload("menu-open");
+      return false;
+    }
+    let changed = false;
+    const menus = scope.querySelectorAll ? [...scope.querySelectorAll(flatModelMenuSelector())] : [];
+    for (const menu of menus.slice(0, 80)) {
+      if (patchFlatModelMenu(menu)) changed = true;
+    }
+    return changed;
+  }
+
+  function flatModelMenuEvent(eventName, options = {}) {
+    if (eventName.startsWith("pointer") && typeof PointerEvent === "function") {
+      return new PointerEvent(eventName, { bubbles: true, cancelable: true, ...options });
+    }
+    if ((eventName.startsWith("mouse") || eventName === "click") && typeof MouseEvent === "function") {
+      return new MouseEvent(eventName, { bubbles: true, cancelable: true, ...options });
+    }
+    return new Event(eventName, { bubbles: true, cancelable: true });
+  }
+
+  function openNativeModelSubmenu(trigger) {
+    if (!trigger) return;
+    ["pointerenter", "mouseenter", "mouseover", "mousemove"].forEach((eventName) => {
+      try {
+        trigger.dispatchEvent(flatModelMenuEvent(eventName));
+      } catch {
+      }
+    });
+    try {
+      trigger.focus?.();
+      trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", code: "ArrowRight", bubbles: true, cancelable: true }));
+    } catch {
+    }
+  }
+
+  function clickNativeModelMenuItem(item) {
+    ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((eventName) => {
+      try {
+        item.dispatchEvent(flatModelMenuEvent(eventName));
+      } catch {
+      }
+    });
+  }
+
+  function findNativeModelMenuItem(modelName, rootMenu) {
+    const menus = [...document.querySelectorAll(flatModelMenuSelector())]
+      .filter((menu) => menu !== rootMenu)
+      .filter((menu) => !menu.closest?.(`#${codexElvesMenuId}, .codex-elves-modal-overlay, .${moreMenuClass}`));
+    for (const menu of menus) {
+      const items = flatModelMenuDirectItems(menu)
+        .filter((item) => !item.hasAttribute?.("data-codex-flat-model-menu-item"))
+        .filter((item) => !item.closest?.(`.${codexFlatModelMenuGroupClass}`));
+      const match = items.find((item) => flatModelMenuItemTextMatchesModel(normalizedElementText(item), modelName));
+      if (match) return match;
+    }
+    return null;
+  }
+
+  async function activateFlatModelMenuItem(item) {
+    const modelName = item?.getAttribute?.("data-codex-flat-model") || "";
+    const rootMenu = item?.closest?.(flatModelMenuSelector());
+    const trigger = rootMenu?.querySelector?.("[data-codex-flat-model-menu-native-trigger]");
+    if (!modelName || !rootMenu || !trigger) return;
+    openNativeModelSubmenu(trigger);
+    for (const delay of [0, 40, 120, 240]) {
+      if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+      const nativeItem = findNativeModelMenuItem(modelName, rootMenu);
+      if (nativeItem) {
+        clickNativeModelMenuItem(nativeItem);
+        return;
+      }
+      openNativeModelSubmenu(trigger);
+    }
+    sendCodexElvesDiagnostic("flat_model_menu_select_failed", { model: modelName });
+  }
+
+  function flatModelMenuControlFromTarget(target) {
+    if (!(target instanceof Element)) return null;
+    const control = target.closest?.('button, [role="button"], [aria-haspopup="menu"]');
+    if (!control || control.closest?.(`#${codexElvesMenuId}, .codex-elves-modal-overlay`)) return null;
+    const footer = control.closest?.('.composer-footer, [class*="_footer_"]');
+    if (!footer) return null;
+    const text = normalizedElementText(control);
+    const aria = control.getAttribute?.("aria-label") || "";
+    const combined = `${text} ${aria}`;
+    if (/模型|model|gpt|claude|deepseek|glm|qwen|kimi|moonshot|mistral|llama/i.test(combined)) return control;
+    if (/(^|[^0-9])\d+(?:\.\d+)+([^0-9.]|$)/.test(combined)) return control;
+    const selected = selectedFlatModelName();
+    if (selected && flatModelMenuItemTextMatchesModel(combined, selected)) return control;
+    return flatModelMenuCatalogLabels().some((model) => flatModelMenuItemTextMatchesModel(combined, model)) ? control : null;
+  }
+
+  function handleFlatModelMenuControlIntent(event) {
+    const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+    if (!flatModelMenuControlFromTarget(target)) return;
+    scheduleFlatModelMenuPreload("model-control");
+    scheduleFlatModelMenuSettlePatch("model-control");
+  }
+
+  function flatModelMenuMutationLooksRelevant(mutations) {
+    if (!mutations) return false;
+    return mutations.some((mutation) => {
+      const target = mutation.target;
+      if (target?.nodeType === 1 && !isWorkspaceChromeNode(target) && (target.matches?.(flatModelMenuSelector()) || target.closest?.(flatModelMenuSelector()))) {
+        return true;
+      }
+      return [...mutation.addedNodes].some((node) => {
+        if (node.nodeType !== 1 || isWorkspaceChromeNode(node)) return false;
+        return !!node.matches?.(flatModelMenuSelector()) || !!node.querySelector?.(flatModelMenuSelector());
+      });
+    });
+  }
+
+  function installFlatModelMenuPortalObserver() {
+    if (window.__codexFlatModelMenuPortalObserverInstalled) return;
+    window.__codexFlatModelMenuPortalObserverInstalled = true;
+    window.__codexFlatModelMenuPortalObserver?.disconnect?.();
+    window.__codexFlatModelMenuPortalObserver = new MutationObserver((mutations) => {
+      if (!codexFlatModelMenuEnabled()) return;
+      if (!flatModelMenuMutationLooksRelevant(mutations)) return;
+      scheduleFlatModelMenuPreload("menu-portal");
+      scheduleFlatModelMenuSettlePatch("menu-portal");
+    });
+    window.__codexFlatModelMenuPortalObserver.observe(document.body || document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["role", "data-state", "hidden", "style", "aria-expanded"],
+    });
+  }
+
+  function installFlatModelMenuEvents() {
+    if (window.__codexFlatModelMenuEventsInstalled) return;
+    window.__codexFlatModelMenuEventsInstalled = true;
+    ["pointerdown", "mousedown", "click", "keydown"].forEach((eventName) => {
+      document.addEventListener(eventName, (event) => {
+        if (eventName === "keydown" && event.key !== "Enter" && event.key !== " ") return;
+        handleFlatModelMenuControlIntent(event);
+      }, true);
+    });
+    document.addEventListener("click", (event) => {
+      const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+      const item = target?.closest?.("[data-codex-flat-model-menu-item]");
+      if (!item) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation?.();
+      void activateFlatModelMenuItem(item);
+    }, true);
+    installFlatModelMenuPortalObserver();
+  }
+
   function patchAppServerModelMessages() {
     if (window.__codexElvesModelMessagePatchInstalled) return;
     window.__codexElvesModelMessagePatchInstalled = true;
@@ -4371,11 +4790,13 @@
   }
 
   function runCodexModelWhitelistRefreshPass() {
+    if (!codexFlatModelMenuEnabled()) cleanupFlatModelMenus();
     if (!codexElvesModelUnlockEnabled() || !codexElvesModelNames().length) return false;
     let changed = false;
     try {
       patchStatsigModelWhitelist();
       if (patchReactModelState()) changed = true;
+      if (patchFlatModelMenus()) changed = true;
       installAppServerModelRequestPatch();
     } catch (error) {
       window.__codexElvesModelPatchFailures = window.__codexElvesModelPatchFailures || [];
@@ -7386,6 +7807,7 @@
 
   function scheduleCodexRouteFeatureRefresh() {
     scheduleConversationViewRouteRefresh();
+    scheduleFlatModelMenuPreload("route");
     refreshCodexModelWhitelistFromScan();
     scheduleCodexModelWhitelistRefresh(2500);
     (window.__codexRouteFeatureRefreshTimers || []).forEach((timer) => clearTimeout(timer));
@@ -7456,9 +7878,11 @@
     installCodexElvesMenu();
     scheduleBackendHeartbeat();
     installDeleteButtonEventDelegation();
+    installFlatModelMenuEvents();
     installConversationViewRouteHooks();
     installCodexRouteFeatureRefreshEvents();
     refreshCodexServiceTierControls();
+    scheduleFlatModelMenuPreload("startup");
   }
 
   function scanDeferred(dirty = allScanDirty()) {
@@ -7505,11 +7929,13 @@
     }
     if (conversationDirty) {
       refreshConversationView();
+      scheduleFlatModelMenuPreload("conversation");
     }
     const lastMutations = window.__codexSessionDeleteLastMutations;
     const modelUiDirty = headerDirty || conversationDirty || shouldScheduleReactModelStatePatch(lastMutations);
     if (headerDirty || conversationDirty) {
       installCodexServiceTierBadge();
+      scheduleFlatModelMenuPreload(headerDirty ? "header" : "conversation");
     }
     if (modelUiDirty) {
       refreshCodexModelWhitelistFromScan(lastMutations);

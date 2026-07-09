@@ -515,6 +515,14 @@ fn injection_script_unlocks_custom_model_catalog() {
     );
     assert!(script.contains("model_whitelist_refresh_scheduled"));
     assert!(script.contains("available_models"));
+    assert!(script.contains("data-codex-elves-setting=\"flatModelMenu\""));
+    assert!(script.contains("function patchFlatModelMenus"));
+    assert!(script.contains("scheduleFlatModelMenuPreload"));
+    assert!(script.contains("handleFlatModelMenuControlIntent"));
+    assert!(script.contains("installFlatModelMenuPortalObserver"));
+    assert!(script.contains("flat_model_menu_select_failed"));
+    assert!(script.contains("data-codex-flat-model-menu-item"));
+    assert!(script.contains("codexAppFlatModelMenu"));
     assert!(!script.contains("modelWhitelistUnlock"));
     assert!(!script.contains("codexAppModelWhitelistUnlock"));
     assert!(!script.contains("模型白名单解锁"));
