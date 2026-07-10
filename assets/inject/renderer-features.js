@@ -25,7 +25,7 @@
   const chatsSortRefreshIntervalMs = 1500;
   const chatsSortDbRefreshIntervalMs = 5000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "18";
+  const codexDeleteStyleVersion = "19";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
   const codexDeleteVersion = "7";
@@ -40,7 +40,8 @@
   const codexRouteFeatureRefreshDelaysMs = [0, 120, 360, 900, 1600];
   const codexThreadServiceTierVersion = "1";
   const codexServiceTierBadgeClass = "codex-service-tier-badge";
-  const codexServiceTierComposerSurfaceClass = "codex-elves-service-tier-composer-surface";
+  const codexComposerOverflowGuardClass = "codex-elves-composer-overflow-guard";
+  const codexLegacyServiceTierComposerSurfaceClass = "codex-elves-service-tier-composer-surface";
   const codexServiceTierBadgeVersion = "3";
   let codexElvesVersion = window.__CODEX_ELVES_VERSION__ || "unknown";
   const codexElvesBuild = window.__CODEX_ELVES_BUILD__ || "unknown";
@@ -791,7 +792,7 @@
       .${codexServiceTierBadgeClass}[data-tier="failed"] { border-color: rgba(248,113,113,.42); background: rgba(248,113,113,.12); color: #fca5a5; }
       .${codexServiceTierBadgeClass}[data-tier="unsupported"] { border-color: rgba(251,191,36,.48); background: rgba(251,191,36,.13); color: #fbbf24; }
       .${codexServiceTierBadgeClass}[data-disabled="true"] { cursor: not-allowed; opacity: .78; }
-      .${codexServiceTierComposerSurfaceClass} { overflow: clip !important; }
+      .${codexComposerOverflowGuardClass} { overflow: clip !important; }
       .codex-elves-about { color: #a1a1aa; line-height: 1.5; }
       .codex-elves-tabs { display: flex; gap: 8px; padding: 0 20px 6px; flex: 0 0 auto; }
       .codex-elves-tab-button { border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: transparent; color: #d1d5db; font: 12px system-ui, sans-serif; padding: 5px 10px; }
@@ -1311,12 +1312,9 @@
     if (textKey === slugKey) return true;
     if (textKey.includes(slugKey) && slugKey.length >= 3) return true;
     const frag = codexServiceTierModelCoreFragment(slug);
-    const fragText = String(text || "").toLowerCase();
+    const fragText = String(text || "").toLowerCase().replace(/[^a-z0-9.]+/g, "");
     if (frag && frag.length >= 3 && /[0-9]/.test(frag)) {
-      // frag 仅含字母数字和点，按词边界查找（如 5.5 出现在 “5.5 超高”）
-      const escaped = frag.replace(/\./g, "\\.");
-      const pattern = new RegExp("(^|[^0-9.])" + escaped + "([^0-9.]|$)");
-      if (pattern.test(fragText)) return true;
+      if (fragText.includes(frag)) return true;
     }
     return false;
   }
@@ -1339,7 +1337,12 @@
       const footer = codexServiceTierBestComposerFooter();
       if (!footer) return "";
       const buttons = Array.from(footer.querySelectorAll("button, [role='button']"));
-      const texts = buttons.map((button) => codexServiceTierBadgeText(button)).filter(Boolean);
+      const modelButtons = buttons.filter((button) =>
+        button.matches?.('[data-codex-intelligence-trigger="true"], [data-composer-navigation-target="reasoning"]')
+      );
+      const texts = (modelButtons.length ? modelButtons : buttons)
+        .flatMap(codexServiceTierSelectedModelTexts)
+        .filter(Boolean);
       // 优先精确匹配，再包含，再片段；同时优先更长的 slug，避免短片段误命中
       const sortedSlugs = slugs.slice().sort((a, b) => b.length - a.length);
       for (const text of texts) {
@@ -1360,6 +1363,26 @@
       void error;
     }
     return "";
+  }
+
+  function codexServiceTierSelectedModelTexts(button) {
+    if (!(button instanceof HTMLElement)) return [];
+    const selectors = [
+      '[class*="_WorkTriggerModelText_"]',
+      '[class*="_WorkTriggerModelLabel_"]',
+      '[data-tooltip-overflow-target="true"]',
+    ];
+    const visibleTexts = uniqueValues(selectors.flatMap((selector) =>
+      Array.from(button.querySelectorAll(selector))
+        .filter((node) => !node.closest?.('[aria-hidden="true"]'))
+        .filter(codexServiceTierBadgeVisibleElement)
+        .map(codexServiceTierBadgeText)
+    ));
+    if (visibleTexts.length) return visibleTexts;
+    const fallback = button.cloneNode(true);
+    fallback.querySelectorAll?.('[aria-hidden="true"]').forEach((node) => node.remove());
+    const fallbackText = String(fallback.textContent || "").replace(/\s+/g, " ").trim();
+    return fallbackText ? [fallbackText] : [];
   }
 
   // 将匹配到的 slug/display_name 归一回 catalog 真实 slug
@@ -2048,6 +2071,7 @@
       codexElvesBackendSettings = { ...codexElvesBackendSettings, ...settings };
       codexElvesBackendSettingsLoaded = true;
       refreshCodexElvesBackendToggles();
+      refreshCodexServiceTierFeatureState();
       return true;
     } catch (_) {
       refreshCodexElvesBackendToggles();
@@ -2075,6 +2099,17 @@
       codexElvesBackendSettings = { ...codexElvesBackendSettings, ...settings };
     } finally {
       refreshCodexElvesBackendToggles();
+      if (key === codexElvesBackendSettingMap.serviceTierControls) {
+        refreshCodexServiceTierFeatureState();
+      }
+    }
+  }
+
+  function refreshCodexServiceTierFeatureState() {
+    if (codexElvesSettings().serviceTierControls) {
+      void loadCodexServiceTierState();
+    } else {
+      refreshCodexServiceTierControls();
     }
   }
 
@@ -3764,6 +3799,7 @@
         codexModelCatalogPromise = null;
       },
       modelNames: () => codexElvesModelNames(),
+      modelMatchesText: (slug, text) => codexServiceTierModelMatchesText(slug, text),
       patchModelArray: (models, allowEmpty = false) => patchModelArray(models, allowEmpty),
       patchModelContainer: (value) => patchModelContainer(value),
       setServiceTierState: (state = {}) => {
@@ -6934,7 +6970,7 @@
       .filter(codexServiceTierBadgeVisibleElement);
   }
 
-  function codexServiceTierComposerSurfaces() {
+  function codexComposerOverflowSurfaces() {
     return Array.from(new Set([
       ...document.querySelectorAll(".composer-surface-chrome"),
       ...document.querySelectorAll('[class*="_multilineSurface_"]'),
@@ -6943,7 +6979,7 @@
       .filter((surface) => codexServiceTierComposerInputs(surface).length > 0);
   }
 
-  function codexServiceTierHiddenMeasurementOverflows(surface) {
+  function codexComposerHiddenMeasurementOverflows(surface) {
     if (!(surface instanceof HTMLElement) || surface.scrollHeight <= surface.clientHeight + 1) return false;
     return Array.from(surface.querySelectorAll('[aria-hidden="true"]')).some((node) => {
       if (!(node instanceof HTMLElement)) return false;
@@ -6955,13 +6991,16 @@
     });
   }
 
-  function syncCodexServiceTierComposerOverflowGuard(enabled = codexElvesSettings().serviceTierControls) {
-    document.querySelectorAll(`.${codexServiceTierComposerSurfaceClass}`)
-      .forEach((surface) => surface.classList.remove(codexServiceTierComposerSurfaceClass));
+  function syncCodexComposerOverflowGuard(enabled = codexElvesBackendSettings.enhancementsEnabled !== false) {
+    document.querySelectorAll(`.${codexComposerOverflowGuardClass}, .${codexLegacyServiceTierComposerSurfaceClass}`)
+      .forEach((surface) => {
+        surface.classList.remove(codexComposerOverflowGuardClass);
+        surface.classList.remove(codexLegacyServiceTierComposerSurfaceClass);
+      });
     if (!enabled) return;
-    codexServiceTierComposerSurfaces()
-      .filter(codexServiceTierHiddenMeasurementOverflows)
-      .forEach((surface) => surface.classList.add(codexServiceTierComposerSurfaceClass));
+    codexComposerOverflowSurfaces()
+      .filter(codexComposerHiddenMeasurementOverflows)
+      .forEach((surface) => surface.classList.add(codexComposerOverflowGuardClass));
   }
 
   function codexServiceTierRectHorizontalOverlap(left, right) {
@@ -7184,7 +7223,6 @@
       removeCodexServiceTierBadges();
       return;
     }
-    syncCodexServiceTierComposerOverflowGuard(true);
     const composer = codexServiceTierFindComposerEl();
     const placement = composer ? codexServiceTierBadgePlacement(composer) : null;
     const existingBadges = Array.from(document.querySelectorAll(`[data-codex-service-tier-badge="true"]`));
@@ -7213,7 +7251,6 @@
 
   function removeCodexServiceTierBadges() {
     document.querySelectorAll(`[data-codex-service-tier-badge="true"]`).forEach((badge) => badge.remove());
-    syncCodexServiceTierComposerOverflowGuard(false);
   }
 
   function conversationViewRememberOriginals(el) {
@@ -7464,6 +7501,7 @@
 
   function scheduleCodexRouteFeatureRefresh() {
     scheduleConversationViewRouteRefresh();
+    refreshCodexServiceTierFeatureState();
     refreshCodexModelWhitelistFromScan();
     scheduleCodexModelWhitelistRefresh(2500);
     (window.__codexRouteFeatureRefreshTimers || []).forEach((timer) => clearTimeout(timer));
@@ -7529,6 +7567,7 @@
 
   function scanLightweight() {
     installStyle();
+    syncCodexComposerOverflowGuard();
     installCodexServiceTierDispatcherPatch();
     installCodexServiceTierRequestClientPatch();
     installCodexElvesMenu();

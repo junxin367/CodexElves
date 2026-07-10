@@ -1704,6 +1704,7 @@ export function App() {
   const [loadingLocalProxyLogDetailId, setLoadingLocalProxyLogDetailId] = useState<string | null>(
     null,
   );
+  const localProxyPollInFlightRef = useRef(false);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
   const [watcher, setWatcher] = useState<WatcherResult | null>(null);
   const [update, setUpdate] = useState<UpdateResult | null>(null);
@@ -2112,8 +2113,7 @@ export function App() {
       await refreshLocalProxyStatus(true);
     }
     if (next === "localProxy") {
-      await refreshLocalProxyStatus(true);
-      await refreshLocalProxyLogs(true);
+      await Promise.all([refreshLocalProxyStatus(true), refreshLocalProxyLogs(true)]);
     }
     if (next === "sessions") {
       await refreshSettings(true);
@@ -2793,7 +2793,11 @@ export function App() {
   useEffect(() => {
     if (route === "localProxy") return;
     const timer = window.setInterval(() => {
-      void refreshLocalProxyStatus(true);
+      if (localProxyPollInFlightRef.current) return;
+      localProxyPollInFlightRef.current = true;
+      void refreshLocalProxyStatus(true).finally(() => {
+        localProxyPollInFlightRef.current = false;
+      });
     }, 10000);
     return () => window.clearInterval(timer);
   }, [route]);
@@ -2801,8 +2805,11 @@ export function App() {
   useEffect(() => {
     if (route !== "localProxy") return;
     const timer = window.setInterval(() => {
-      void refreshLocalProxyStatus(true);
-      void refreshLocalProxyLogs(true);
+      if (localProxyPollInFlightRef.current) return;
+      localProxyPollInFlightRef.current = true;
+      void Promise.all([refreshLocalProxyStatus(true), refreshLocalProxyLogs(true)]).finally(() => {
+        localProxyPollInFlightRef.current = false;
+      });
     }, 10000);
     return () => window.clearInterval(timer);
   }, [route]);
@@ -3596,10 +3603,10 @@ function LocalProxyScreen({
               </div>
               <Button
                 onClick={() => {
-                  void (async () => {
-                    await actions.refreshLocalProxyStatus();
-                    await actions.refreshLocalProxyLogs();
-                  })();
+                  void Promise.all([
+                    actions.refreshLocalProxyStatus(),
+                    actions.refreshLocalProxyLogs(),
+                  ]);
                 }}
                 size="sm"
               >

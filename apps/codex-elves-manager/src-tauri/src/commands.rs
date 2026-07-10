@@ -1869,7 +1869,7 @@ pub fn read_latest_logs(request: LogRequest) -> CommandResult<LogsPayload> {
 }
 
 #[tauri::command]
-pub fn local_proxy_status() -> CommandResult<LocalProxyStatusPayload> {
+pub async fn local_proxy_status() -> CommandResult<LocalProxyStatusPayload> {
     let settings = SettingsStore::default().load().unwrap_or_default();
     let active_relay = settings.active_relay_profile();
     let active_aggregate = settings.active_aggregate_relay_profile();
@@ -1880,11 +1880,14 @@ pub fn local_proxy_status() -> CommandResult<LocalProxyStatusPayload> {
         Duration::from_millis(200),
     )
     .is_ok();
-    let summaries = codex_elves_core::proxy_log::read_summaries(1).unwrap_or_default();
+    let summaries =
+        tauri::async_runtime::spawn_blocking(|| codex_elves_core::proxy_log::read_summaries(200))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
     let latest_request_at_ms = summaries.first().map(|entry| entry.timestamp_ms);
-    let recent_count = codex_elves_core::proxy_log::read_summaries(200)
-        .map(|entries| entries.len())
-        .unwrap_or(0);
+    let recent_count = summaries.len();
     let upstream_base_url =
         if active_relay.relay_mode == codex_elves_core::settings::RelayMode::Aggregate {
             format!(
@@ -1929,13 +1932,17 @@ pub fn local_proxy_status() -> CommandResult<LocalProxyStatusPayload> {
 }
 
 #[tauri::command]
-pub fn read_local_proxy_logs(
+pub async fn read_local_proxy_logs(
     request: LocalProxyLogsRequest,
 ) -> CommandResult<LocalProxyLogsPayload> {
     let path = codex_elves_core::proxy_log::default_log_path();
     let limit = request.limit.clamp(1, 1000);
-    match codex_elves_core::proxy_log::read_summaries(limit) {
-        Ok(entries) => ok(
+    match tauri::async_runtime::spawn_blocking(move || {
+        codex_elves_core::proxy_log::read_summaries(limit)
+    })
+    .await
+    {
+        Ok(Ok(entries)) => ok(
             "本地代理日志已读取。",
             LocalProxyLogsPayload {
                 path: path.to_string_lossy().to_string(),
@@ -1943,8 +1950,16 @@ pub fn read_local_proxy_logs(
                 limit,
             },
         ),
-        Err(error) => failed(
+        Ok(Err(error)) => failed(
             &format!("读取本地代理日志失败：{error}"),
+            LocalProxyLogsPayload {
+                path: path.to_string_lossy().to_string(),
+                entries: Vec::new(),
+                limit,
+            },
+        ),
+        Err(error) => failed(
+            &format!("读取本地代理日志后台任务失败：{error}"),
             LocalProxyLogsPayload {
                 path: path.to_string_lossy().to_string(),
                 entries: Vec::new(),
@@ -1955,12 +1970,16 @@ pub fn read_local_proxy_logs(
 }
 
 #[tauri::command]
-pub fn read_local_proxy_log_detail(
+pub async fn read_local_proxy_log_detail(
     request: LocalProxyLogDetailRequest,
 ) -> CommandResult<LocalProxyLogDetailPayload> {
     let path = codex_elves_core::proxy_log::default_log_path();
-    match codex_elves_core::proxy_log::find_record(&request.id) {
-        Ok(entry) => {
+    match tauri::async_runtime::spawn_blocking(move || {
+        codex_elves_core::proxy_log::find_record(&request.id)
+    })
+    .await
+    {
+        Ok(Ok(entry)) => {
             let message = if entry.is_some() {
                 "本地代理日志详情已读取。"
             } else {
@@ -1974,8 +1993,15 @@ pub fn read_local_proxy_log_detail(
                 },
             )
         }
-        Err(error) => failed(
+        Ok(Err(error)) => failed(
             &format!("读取本地代理日志详情失败：{error}"),
+            LocalProxyLogDetailPayload {
+                path: path.to_string_lossy().to_string(),
+                entry: None,
+            },
+        ),
+        Err(error) => failed(
+            &format!("读取本地代理日志详情后台任务失败：{error}"),
             LocalProxyLogDetailPayload {
                 path: path.to_string_lossy().to_string(),
                 entry: None,
@@ -1985,10 +2011,10 @@ pub fn read_local_proxy_log_detail(
 }
 
 #[tauri::command]
-pub fn clear_local_proxy_logs() -> CommandResult<LocalProxyLogsPayload> {
+pub async fn clear_local_proxy_logs() -> CommandResult<LocalProxyLogsPayload> {
     let path = codex_elves_core::proxy_log::default_log_path();
-    match codex_elves_core::proxy_log::clear_records() {
-        Ok(()) => ok(
+    match tauri::async_runtime::spawn_blocking(codex_elves_core::proxy_log::clear_records).await {
+        Ok(Ok(())) => ok(
             "本地代理日志已清空。",
             LocalProxyLogsPayload {
                 path: path.to_string_lossy().to_string(),
@@ -1996,8 +2022,16 @@ pub fn clear_local_proxy_logs() -> CommandResult<LocalProxyLogsPayload> {
                 limit: 0,
             },
         ),
-        Err(error) => failed(
+        Ok(Err(error)) => failed(
             &format!("清空本地代理日志失败：{error}"),
+            LocalProxyLogsPayload {
+                path: path.to_string_lossy().to_string(),
+                entries: Vec::new(),
+                limit: 0,
+            },
+        ),
+        Err(error) => failed(
+            &format!("清空本地代理日志后台任务失败：{error}"),
             LocalProxyLogsPayload {
                 path: path.to_string_lossy().to_string(),
                 entries: Vec::new(),

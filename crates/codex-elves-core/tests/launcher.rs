@@ -1383,12 +1383,9 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
     assert!(before_stop.contains(&"select-helper:58000".to_string()));
     assert!(before_stop.contains(&"start-helper:45221".to_string()));
     assert!(!before_stop.contains(&"inject:9229:45221".to_string()));
-    let retained_proxy_log = old_proxy_log
-        [old_proxy_log.len() - codex_elves_core::proxy_log::STARTUP_RETAINED_RECORDS..]
-        .join("\n");
     assert_eq!(
         std::fs::read_to_string(&proxy_log_path).unwrap(),
-        format!("{retained_proxy_log}\n")
+        "{\"format\":\"codex-elves-proxy-index\",\"version\":1}\n"
     );
 
     handle.wait_for_codex_exit().await.unwrap();

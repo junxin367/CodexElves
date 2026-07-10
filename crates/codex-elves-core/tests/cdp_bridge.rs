@@ -604,6 +604,10 @@ fn injection_script_exposes_fast_service_tier_control() {
     assert!(script.contains("codexServiceTierBestComposerFooter"));
     assert!(script.contains("codexServiceTierComposerCandidates"));
     assert!(script.contains("codexServiceTierComposerScore"));
+    assert!(script.contains("codexServiceTierSelectedModelTexts"));
+    assert!(script.contains("data-codex-intelligence-trigger"));
+    assert!(script.contains("data-composer-navigation-target=\"reasoning\""));
+    assert!(script.contains("!node.closest?.('[aria-hidden=\"true\"]')"));
     assert!(script.contains("data-codex-service-tier-badge"));
     assert!(script.contains("codexServiceTierBadgeWired"));
     assert!(script.contains("setAttribute(\"role\", \"button\")"));
@@ -617,16 +621,34 @@ fn injection_script_exposes_fast_service_tier_control() {
 }
 
 #[test]
-fn injection_script_clips_fast_composer_measurement_overflow() {
+fn injection_script_clips_native_composer_measurement_overflow_without_fast_dependency() {
     let script = assets::injection_script(45221);
 
+    assert!(script.contains("codex-elves-composer-overflow-guard"));
     assert!(script.contains("codex-elves-service-tier-composer-surface"));
     assert!(script.contains("overflow: clip !important;"));
-    assert!(script.contains("codexServiceTierComposerSurfaces"));
-    assert!(script.contains("codexServiceTierHiddenMeasurementOverflows"));
-    assert!(script.contains("syncCodexServiceTierComposerOverflowGuard"));
+    assert!(script.contains("codexComposerOverflowSurfaces"));
+    assert!(script.contains("codexComposerHiddenMeasurementOverflows"));
+    assert!(script.contains("syncCodexComposerOverflowGuard"));
+    assert!(script.contains("enabled = codexElvesBackendSettings.enhancementsEnabled !== false"));
+    assert!(script.contains("syncCodexComposerOverflowGuard();"));
     assert!(script.contains("style.position === \"absolute\""));
     assert!(script.contains("style.visibility === \"hidden\""));
+    assert!(!script.contains(
+        "syncCodexServiceTierComposerOverflowGuard(enabled = codexElvesSettings().serviceTierControls)"
+    ));
+}
+
+#[test]
+fn injection_script_refreshes_fast_state_after_backend_load_and_route_entry() {
+    let script = assets::injection_script(45221);
+
+    assert!(script.contains("refreshCodexServiceTierFeatureState"));
+    assert!(script.contains("if (key === codexElvesBackendSettingMap.serviceTierControls)"));
+    assert!(script.contains("refreshCodexServiceTierFeatureState();\n      return true;"));
+    assert!(script.contains(
+        "scheduleConversationViewRouteRefresh();\n    refreshCodexServiceTierFeatureState();"
+    ));
 }
 
 #[test]
@@ -689,6 +711,9 @@ fn injection_script_applies_fast_service_tier_contract() {
         );
     }
     assert_eq!(cases["gpt56EmptyCatalogFast"]["service_tier"], "priority");
+    assert_eq!(cases["displayNameMatches"]["gpt56Sol"], true);
+    assert_eq!(cases["displayNameMatches"]["gpt56Terra"], true);
+    assert_eq!(cases["displayNameMatches"]["gpt55"], true);
 
     // catalog 驱动：白名单之外但 catalog 标记 supports_fast 的模型也能注入 priority
     assert_eq!(cases["catalogDrivenFast"]["service_tier"], "priority");
@@ -806,6 +831,11 @@ require(scriptPath);
 const api = window.__codexElvesServiceTierTest;
 api.setServiceTierState({{ serviceTier: "priority", fastTierValue: "priority" }});
 api.setModelCatalog({{ status: "ok", model: "gpt-5.4", default_model: "gpt-5.4", models: ["gpt-5.4", "gpt-5.5"] }});
+const displayNameMatches = {{
+  gpt56Sol: api.modelMatchesText("gpt-5.6-sol", "5.6 Sol"),
+  gpt56Terra: api.modelMatchesText("gpt-5.6-terra", "5.6 Terra"),
+  gpt55: api.modelMatchesText("gpt-5.5", "5.5 超高"),
+}};
 
 api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
 const supportedFast = api.applyServiceTierOverride("turn/start", {{
@@ -975,6 +1005,7 @@ process.stdout.write(JSON.stringify({{
   startConversation,
   gpt56Fast,
   gpt56EmptyCatalogFast,
+  displayNameMatches,
   catalogDrivenFast,
   catalogDrivenBlocked,
   patchedCreateRequest,
