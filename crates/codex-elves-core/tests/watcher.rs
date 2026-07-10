@@ -81,9 +81,21 @@ fn codex_process_filter_keeps_only_windowsapps_codex_processes() {
             13,
             r"C:\Program Files\WindowsApps\Other.App_1.0.0.0_x64__abc\app\Codex.exe",
         ),
+        (
+            14,
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_26.707.3563.0_x64__abc\app\ChatGPT.exe",
+        ),
+        (
+            15,
+            r"C:/Program Files/WindowsApps/OpenAI.CodexBeta_26.707.3563.0_x64__abc/app/ChatGPT.exe",
+        ),
+        (
+            16,
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_26.707.3563.0_x64__abc\app\resources\codex.exe",
+        ),
     ];
 
-    assert_eq!(codex_process_ids(processes), vec![11]);
+    assert_eq!(codex_process_ids(processes), vec![11, 14, 15]);
 }
 
 #[test]
@@ -118,13 +130,17 @@ fn stop_wait_tracks_only_expected_process_ids() {
 #[cfg(windows)]
 #[test]
 fn find_codex_processes_finds_portable_install_with_capital_c() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = temp.path().join("app");
+    std::fs::create_dir_all(app.join("resources")).unwrap();
+    let executable = app.join("Codex.exe");
+    std::fs::write(&executable, "").unwrap();
+    std::fs::write(app.join("resources").join("app.asar"), "").unwrap();
     let processes = [WindowsProcessInfo {
         process_id: 42,
         parent_process_id: 0,
         exe_file: "Codex.exe".to_string(),
-        executable_path: Some(std::path::PathBuf::from(
-            r"D:\Downloads\codexapp\app\Codex.exe",
-        )),
+        executable_path: Some(executable),
     }];
 
     assert_eq!(find_codex_processes_from_snapshot(&processes), vec![42]);
@@ -133,13 +149,17 @@ fn find_codex_processes_finds_portable_install_with_capital_c() {
 #[cfg(windows)]
 #[test]
 fn find_codex_processes_finds_portable_install_case_insensitively() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = temp.path().join("app");
+    std::fs::create_dir_all(app.join("resources")).unwrap();
+    let executable = app.join("codex.exe");
+    std::fs::write(&executable, "").unwrap();
+    std::fs::write(app.join("resources").join("app.asar"), "").unwrap();
     let processes = [WindowsProcessInfo {
         process_id: 43,
         parent_process_id: 0,
         exe_file: "codex.exe".to_string(),
-        executable_path: Some(std::path::PathBuf::from(
-            r"D:\Downloads\codexapp\app\codex.exe",
-        )),
+        executable_path: Some(executable),
     }];
 
     assert_eq!(find_codex_processes_from_snapshot(&processes), vec![43]);
@@ -147,7 +167,47 @@ fn find_codex_processes_finds_portable_install_case_insensitively() {
 
 #[cfg(windows)]
 #[test]
+fn find_codex_processes_finds_store_chatgpt_processes() {
+    let processes = [WindowsProcessInfo {
+        process_id: 44,
+        parent_process_id: 0,
+        exe_file: "ChatGPT.exe".to_string(),
+        executable_path: Some(std::path::PathBuf::from(
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_26.707.3563.0_x64__abc\app\ChatGPT.exe",
+        )),
+    }];
+
+    assert_eq!(find_codex_processes_from_snapshot(&processes), vec![44]);
+}
+
+#[cfg(windows)]
+#[test]
+fn find_codex_processes_finds_portable_chatgpt_with_codex_runtime() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = temp.path().join("app");
+    std::fs::create_dir_all(app.join("resources")).unwrap();
+    let executable = app.join("ChatGPT.exe");
+    std::fs::write(&executable, "").unwrap();
+    std::fs::write(app.join("resources").join("codex.exe"), "").unwrap();
+    let processes = [WindowsProcessInfo {
+        process_id: 45,
+        parent_process_id: 0,
+        exe_file: "ChatGPT.exe".to_string(),
+        executable_path: Some(executable),
+    }];
+
+    assert_eq!(find_codex_processes_from_snapshot(&processes), vec![45]);
+}
+
+#[cfg(windows)]
+#[test]
 fn find_codex_processes_combines_store_and_portable_installs() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = temp.path().join("app");
+    std::fs::create_dir_all(app.join("resources")).unwrap();
+    let portable_executable = app.join("Codex.exe");
+    std::fs::write(&portable_executable, "").unwrap();
+    std::fs::write(app.join("resources").join("app.asar"), "").unwrap();
     let processes = [
         WindowsProcessInfo {
             process_id: 11,
@@ -161,9 +221,7 @@ fn find_codex_processes_combines_store_and_portable_installs() {
             process_id: 42,
             parent_process_id: 0,
             exe_file: "Codex.exe".to_string(),
-            executable_path: Some(std::path::PathBuf::from(
-                r"D:\Downloads\codexapp\app\Codex.exe",
-            )),
+            executable_path: Some(portable_executable),
         },
     ];
 
@@ -200,6 +258,30 @@ fn find_codex_processes_ignores_non_codex_main_processes() {
             exe_file: "helper.exe".to_string(),
             executable_path: Some(std::path::PathBuf::from(
                 r"C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__abc\app\helper.exe",
+            )),
+        },
+        WindowsProcessInfo {
+            process_id: 23,
+            parent_process_id: 0,
+            exe_file: "ChatGPT.exe".to_string(),
+            executable_path: Some(std::path::PathBuf::from(
+                r"C:\Users\me\AppData\Local\Programs\ChatGPT Classic\ChatGPT.exe",
+            )),
+        },
+        WindowsProcessInfo {
+            process_id: 24,
+            parent_process_id: 0,
+            exe_file: "codex.exe".to_string(),
+            executable_path: Some(std::path::PathBuf::from(
+                r"C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__abc\app\resources\codex.exe",
+            )),
+        },
+        WindowsProcessInfo {
+            process_id: 25,
+            parent_process_id: 0,
+            exe_file: "codex.exe".to_string(),
+            executable_path: Some(std::path::PathBuf::from(
+                r"C:\Users\me\AppData\Roaming\npm\codex.exe",
             )),
         },
     ];

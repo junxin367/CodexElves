@@ -16,6 +16,8 @@ const RESTART_STOP_WAIT_INTERVAL_MS: u64 = 100;
 pub const WATCHER_RUN_NAME: &str = "CodexElvesWatcher";
 pub const WATCHER_RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 pub const WATCHER_STARTUP_SHORTCUT_NAME: &str = "CodexElvesWatcher.lnk";
+#[cfg(windows)]
+const DESKTOP_APP_PROCESS_NAMES: &[&str] = &["Codex.exe", "ChatGPT.exe"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatcherInstallPlan {
@@ -91,10 +93,7 @@ pub fn codex_process_ids<'a>(processes: impl IntoIterator<Item = (u32, &'a str)>
     processes
         .into_iter()
         .filter_map(|(process_id, executable)| {
-            let executable = executable.to_ascii_lowercase();
-            executable
-                .contains("\\windowsapps\\openai.codex_")
-                .then_some(process_id)
+            is_codex_store_executable_path(executable).then_some(process_id)
         })
         .collect()
 }
@@ -173,10 +172,7 @@ pub fn uninstall_watcher() -> anyhow::Result<()> {
 
 #[cfg(windows)]
 pub fn find_codex_processes() -> Vec<u32> {
-    let processes = crate::windows_integration::enumerate_processes()
-        .into_iter()
-        .filter(|process| process.exe_file.eq_ignore_ascii_case("codex.exe"))
-        .collect::<Vec<_>>();
+    let processes = crate::windows_integration::enumerate_processes();
     find_codex_processes_from_snapshot(&processes)
 }
 
@@ -187,7 +183,7 @@ pub fn find_codex_processes_from_snapshot(
     let mut ids = codex_process_ids(
         processes
             .iter()
-            .filter(|process| process.exe_file.eq_ignore_ascii_case("codex.exe"))
+            .filter(|process| is_desktop_app_process_name(&process.exe_file))
             .filter_map(|process| {
                 process
                     .executable_path
@@ -200,7 +196,21 @@ pub fn find_codex_processes_from_snapshot(
     );
 
     for process in processes {
-        if process.exe_file.eq_ignore_ascii_case("Codex.exe") {
+        if process.exe_file.eq_ignore_ascii_case("Codex.exe")
+            && process
+                .executable_path
+                .as_deref()
+                .is_some_and(is_portable_codex_desktop_process)
+        {
+            ids.push(process.process_id);
+            continue;
+        }
+        if process.exe_file.eq_ignore_ascii_case("ChatGPT.exe")
+            && process
+                .executable_path
+                .as_deref()
+                .is_some_and(is_portable_codex_chatgpt_process)
+        {
             ids.push(process.process_id);
         }
     }
@@ -354,4 +364,52 @@ fn startup_shortcut_path() -> Option<PathBuf> {
             .join("Startup")
             .join(WATCHER_STARTUP_SHORTCUT_NAME)
     })
+}
+
+#[cfg(windows)]
+fn is_desktop_app_process_name(exe_file: &str) -> bool {
+    DESKTOP_APP_PROCESS_NAMES
+        .iter()
+        .any(|candidate| exe_file.eq_ignore_ascii_case(candidate))
+}
+
+fn is_codex_store_executable_path(executable: &str) -> bool {
+    let executable = executable.replace('/', "\\").to_ascii_lowercase();
+    let is_codex_package = executable.contains("\\windowsapps\\openai.codex_")
+        || executable.contains("\\windowsapps\\openai.codexbeta_");
+    is_codex_package && !executable.ends_with("\\resources\\codex.exe")
+}
+
+#[cfg(windows)]
+fn is_portable_codex_desktop_process(executable: &Path) -> bool {
+    let Some(app_dir) = executable.parent() else {
+        return false;
+    };
+    if app_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("resources"))
+    {
+        return false;
+    }
+
+    let executable = executable
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    executable.contains("\\openai\\codex\\bin\\codex.exe")
+        || executable.contains("\\programs\\openai\\codex\\")
+        || app_dir.join("ChatGPT.exe").exists()
+        || app_dir.join("resources").join("app.asar").exists()
+        || app_dir.join("resources").join("codex.exe").exists()
+}
+
+#[cfg(windows)]
+fn is_portable_codex_chatgpt_process(executable: &Path) -> bool {
+    let Some(app_dir) = executable.parent() else {
+        return false;
+    };
+    app_dir.join("Codex.exe").exists()
+        || app_dir.join("codex.exe").exists()
+        || app_dir.join("resources").join("codex.exe").exists()
 }

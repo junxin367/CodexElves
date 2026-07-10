@@ -16,7 +16,14 @@
   <img alt="Tauri" src="https://img.shields.io/badge/tauri-2.x-24C8DB">
 </p>
 
-CodexElves is an external enhancement launcher and manager for the Codex App. It does not modify the original Codex installation. Instead, it starts Codex externally and injects enhancements through the Chromium DevTools Protocol.
+CodexElves is an external enhancement launcher and manager for the Codex workspace in the new ChatGPT desktop app, while remaining compatible with the legacy Codex App. It does not modify the original installation. Instead, it launches ChatGPT/Codex externally and injects enhancements through the Chromium DevTools Protocol.
+
+Desktop rename compatibility:
+
+- Windows: supports the new `ChatGPT.exe` and the legacy `Codex.exe`; the current Microsoft Store package identity remains `OpenAI.Codex`.
+- macOS: supports the new `ChatGPT.app` and legacy names such as `Codex.app` and `OpenAI Codex.app`.
+- The watcher only takes over desktop apps with a Codex runtime; it does not treat ChatGPT Classic or the bundled `resources\codex.exe` CLI as the desktop process.
+- Codex CLI, the `~/.codex` data directory, protocol fields, and session data keep their existing Codex names.
 
 ## Quick Start
 
@@ -28,7 +35,7 @@ Download the latest installer from [GitHub Releases](https://github.com/junxin36
 
 After installation, two entry points are available:
 
-- `CodexElves`: a silent launcher. It does not show the manager UI and only starts Codex with CodexElves injection.
+- `CodexElves`: a silent launcher. It does not show the manager UI and only starts ChatGPT/Codex with CodexElves injection.
 - `CodexElves Manager`: a Tauri control panel for launch, diagnostics, repair, updates, relay injection, enhancements, and user scripts.
 
 The Windows installer creates desktop and Start Menu shortcuts. The macOS DMG installs `/Applications/CodexElves.app` and `/Applications/CodexElves 管理工具.app`.
@@ -37,7 +44,7 @@ The Windows installer creates desktop and Start Menu shortcuts. The macOS DMG in
 
 - Rust backend and silent launcher with no extra runtime requirement.
 - Tauri + React manager with dark/light theme support.
-- External CDP injection. No `app.asar` patching and no DLL writes into the Codex installation.
+- External CDP injection. No `app.asar` patching and no DLL writes into the ChatGPT/Codex installation.
 - Relay injection mode with multiple relay profiles, `CodexElves` provider configuration, and a one-click switch back to official ChatGPT login mode.
 - Traditional enhancement mode with plugin entry unlock, forced plugin install, session delete, Markdown export, project move, and more.
 - Independent user script management with startup injection.
@@ -74,7 +81,7 @@ Relay injection is for users who are already logged in with an official ChatGPT 
 
 The boundary of this hybrid mode is:
 
-- The official ChatGPT/Codex login state still owns Codex App account features and the plugin entry.
+- The official ChatGPT/Codex login state still owns the desktop app account features and the plugin entry.
 - The relay profile only controls the Base URL, key, and model names used for model requests.
 - The compatible API provider is not tied to any specific vendor; it only needs to match the selected upstream protocol and Codex configuration.
 - Clearing API mode should return Codex to the official login mode so the official account and plugins keep working.
@@ -133,7 +140,7 @@ The manager's About page can check and start updates. When the silent launcher f
 
 ### The CodexElves menu does not appear
 
-Make sure Codex was launched from the `CodexElves` entry instead of the original Codex entry. You can also inspect the Diagnostics and Logs pages in the manager.
+Make sure ChatGPT/Codex was launched from the `CodexElves` entry instead of opening the original desktop app directly. You can also inspect the Diagnostics and Logs pages in the manager.
 
 ### The plugin says the backend is disconnected
 
@@ -198,4 +205,4 @@ scripts/installer/
 
 ## Notes
 
-CodexElves is an external enhancement tool and does not modify original Codex App files. If a future Codex App update changes page structure, the injection script may need updates.
+CodexElves is an external enhancement tool and does not modify original ChatGPT/Codex desktop app files. If a future desktop app update changes the page structure, the injection script may need updates.

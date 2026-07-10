@@ -1,5 +1,15 @@
 # 更新日志
 
+## 0.2.4 - 2026-07-10
+
+- 模型目录资源同步 OpenAI 官方 `codex-rs/models-manager/models.json`，生成目录按模型读取各自的默认提示词和 `use_responses_lite`，并兼容供应商前缀及快照模型。
+- Fast 模式新增 GPT-5.6 系列支持，覆盖 `gpt-5.6`、Sol、Terra、Luna 及对应快照模型；生成的模型目录同步写入 `priority` service tier。
+- 兼容 Codex 桌面应用并入 ChatGPT 后的新版外壳：Windows 支持 `ChatGPT.exe` 进程和入口，同时保留 `Codex.exe`；macOS 支持 `ChatGPT.app` 和旧版 Codex bundle 名称。
+- Watcher、窗口激活、退出等待和重启流程可识别新版 ChatGPT 进程，并避免把 ChatGPT Classic 或 `resources\codex.exe` CLI 当作桌面应用结束。
+- CDP 注入目标兼容 `ChatGPT` 标题和 `app://-/` 桌面应用页面；管理器和文档同步更新应用名称提示。
+- 移除已不兼容新版 ChatGPT 的“模型选择优化”功能及其菜单预加载、扁平化注入和配置项。
+- 修复新版 ChatGPT 在启用 Fast 控件后，composer 原生隐藏测量节点撑高输入面板并显示滚动条的问题。
+
 ## 0.1.12 - 2026-06-30
 
 - Chat Completions 路径补全 web_search MCP 兜底:无 MCP 搜索 fallback 时剥离 web_search 工具,避免 CPA 等第三方 Chat Completions 上游无法执行服务端搜索导致模型调用后空结果死循环。

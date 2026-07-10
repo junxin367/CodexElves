@@ -59,16 +59,23 @@ async fn query_targets_url(client: &reqwest::Client, url: &str) -> anyhow::Resul
 
 pub fn pick_page_target(targets: &[CdpTarget]) -> anyhow::Result<CdpTarget> {
     let mut first_page = None;
+    let mut best_target = None;
+    let mut best_score = 0;
     for target in targets
         .iter()
         .filter(|target| is_injectable_page_target(target))
     {
         first_page.get_or_insert(target);
-        if is_codex_page_target(target) {
-            return Ok(target.clone());
+        let score = codex_page_target_score(target);
+        if score > best_score {
+            best_score = score;
+            best_target = Some(target);
         }
     }
 
+    if let Some(target) = best_target {
+        return Ok(target.clone());
+    }
     if let Some(target) = first_page {
         return Ok(target.clone());
     }
@@ -77,16 +84,23 @@ pub fn pick_page_target(targets: &[CdpTarget]) -> anyhow::Result<CdpTarget> {
 }
 
 pub fn pick_injectable_codex_page_target(targets: &[CdpTarget]) -> anyhow::Result<CdpTarget> {
+    let mut best_target = None;
+    let mut best_score = 0;
     for target in targets
         .iter()
         .filter(|target| is_injectable_page_target(target))
     {
-        if is_codex_page_target(target) {
-            return Ok(target.clone());
+        let score = codex_page_target_score(target);
+        if score > best_score {
+            best_score = score;
+            best_target = Some(target);
         }
     }
 
-    bail!("No injectable Codex page target found")
+    if let Some(target) = best_target {
+        return Ok(target.clone());
+    }
+    bail!("No injectable ChatGPT/Codex page target found")
 }
 
 pub fn is_injectable_page_target(target: &CdpTarget) -> bool {
@@ -98,9 +112,22 @@ pub fn is_injectable_page_target(target: &CdpTarget) -> bool {
 }
 
 pub fn is_codex_page_target(target: &CdpTarget) -> bool {
+    codex_page_target_score(target) > 0
+}
+
+fn codex_page_target_score(target: &CdpTarget) -> u8 {
     if target.target_type != "page" {
-        return false;
+        return 0;
     }
-    let haystack = format!("{} {}", target.title, target.url).to_lowercase();
-    haystack.contains("codex")
+    let title = target.title.to_lowercase();
+    let url = target.url.to_lowercase();
+    if title.contains("codex") || url.contains("codex") {
+        4
+    } else if title.contains("chatgpt") || url.contains("chatgpt") {
+        if url.starts_with("app://-/") { 3 } else { 2 }
+    } else if url.starts_with("app://-/") {
+        1
+    } else {
+        0
+    }
 }

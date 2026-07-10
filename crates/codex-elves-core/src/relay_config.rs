@@ -3,6 +3,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use toml_edit::{DocumentMut, Item, Table, TableLike};
 
@@ -1974,34 +1975,90 @@ fn apply_generated_model_catalog_to_config(
 /// 用于让生成的 catalog 与打包数据保持一致，避免把所有模型的 fast 能力抹平为 `[]`。
 /// 返回 `(service_tiers, additional_speed_tiers)`，均为 JSON 数组。
 fn fast_service_tier_capability(slug: &str) -> Option<(Value, Value)> {
-    let slug = slug.trim();
-    if slug.is_empty() {
-        return None;
+    let slug = slug.trim().to_ascii_lowercase();
+    let slug = slug.rsplit('/').next().filter(|value| !value.is_empty())?;
+    if let Some(model) = packaged_model_catalog_entry(slug)
+        && let Some(service_tiers) = model.get("service_tiers").and_then(Value::as_array)
+        && service_tiers
+            .iter()
+            .any(|tier| tier.get("id").and_then(Value::as_str) == Some("priority"))
+    {
+        let speed_tiers = model
+            .get("additional_speed_tiers")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        return Some((
+            Value::Array(service_tiers.clone()),
+            Value::Array(speed_tiers),
+        ));
     }
-    let source = serde_json::from_str::<Value>(include_str!("../assets/codex-models.json")).ok()?;
-    let models = source.get("models").and_then(Value::as_array)?;
-    let model = models
-        .iter()
-        .find(|model| model.get("slug").and_then(Value::as_str) == Some(slug))?;
-    let service_tiers = model.get("service_tiers").and_then(Value::as_array)?;
-    let has_priority = service_tiers
-        .iter()
-        .any(|tier| tier.get("id").and_then(Value::as_str) == Some("priority"));
-    if !has_priority {
-        return None;
-    }
-    let speed_tiers = model
-        .get("additional_speed_tiers")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    Some((
-        Value::Array(service_tiers.clone()),
-        Value::Array(speed_tiers),
-    ))
+    is_gpt56_fast_service_tier_model(slug).then(|| {
+        (
+            json!([{
+                "id": "priority",
+                "name": "Fast",
+                "description": "1.5x speed, increased usage"
+            }]),
+            json!(["fast"]),
+        )
+    })
 }
 
+fn is_gpt56_fast_service_tier_model(slug: &str) -> bool {
+    matches!(
+        slug,
+        "gpt-5.6" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
+    ) || ["gpt-5.6-sol-", "gpt-5.6-terra-", "gpt-5.6-luna-"]
+        .iter()
+        .any(|prefix| slug.starts_with(prefix))
+}
+
+const PACKAGED_CATALOG_FALLBACK_MODEL_SLUG: &str = "gpt-5.5";
 const GENERATED_CATALOG_FALLBACK_BASE_INSTRUCTIONS: &str = "You are Codex, a coding agent. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.";
+static PACKAGED_MODEL_CATALOG: OnceLock<Option<Value>> = OnceLock::new();
+
+fn packaged_model_catalog() -> Option<&'static Value> {
+    PACKAGED_MODEL_CATALOG
+        .get_or_init(|| {
+            serde_json::from_str::<Value>(include_str!("../assets/codex-models.json")).ok()
+        })
+        .as_ref()
+}
+
+fn packaged_model_catalog_entry(slug: &str) -> Option<Value> {
+    let normalized = slug.trim().to_ascii_lowercase();
+    let normalized = normalized
+        .rsplit('/')
+        .next()
+        .filter(|value| !value.is_empty())?;
+    let source = packaged_model_catalog()?;
+    let models = source.get("models").and_then(Value::as_array)?;
+
+    let exact_slug = if normalized == "gpt-5.6" {
+        "gpt-5.6-sol"
+    } else {
+        normalized
+    };
+    if let Some(model) = models
+        .iter()
+        .find(|model| model.get("slug").and_then(Value::as_str) == Some(exact_slug))
+    {
+        return Some(model.clone());
+    }
+
+    models
+        .iter()
+        .filter_map(|model| {
+            let candidate = model.get("slug").and_then(Value::as_str)?;
+            normalized
+                .strip_prefix(candidate)
+                .filter(|suffix| suffix.starts_with('-'))
+                .map(|_| (candidate.len(), model))
+        })
+        .max_by_key(|(length, _)| *length)
+        .map(|(_, model)| model.clone())
+}
 
 fn rewrite_generated_catalog_prompt_text_for_model(text: &str, model: &str) -> String {
     let text = replace_gpt_identity_phrases_with_model(text, model);
@@ -2143,7 +2200,11 @@ fn rewrite_generated_catalog_prompt_value_for_model(value: Value, model: &str) -
     }
 }
 
-fn generated_catalog_prompt_fields(profile: &RelayProfile) -> (String, Value, bool) {
+fn generated_catalog_prompt_fields(
+    profile: &RelayProfile,
+    model: &str,
+    packaged_model: Option<&Value>,
+) -> (String, Value) {
     let override_prompt = profile.system_prompt_override.trim();
     if !override_prompt.is_empty() {
         let base_instructions = override_prompt.to_string();
@@ -2156,23 +2217,22 @@ fn generated_catalog_prompt_fields(profile: &RelayProfile) -> (String, Value, bo
                     "personality_pragmatic": ""
                 }
             }),
-            false,
         );
     }
 
-    let source = serde_json::from_str::<Value>(include_str!("../assets/codex-models.json")).ok();
-    let first_model = source
+    let rewrite_prompt_model = packaged_model.is_none();
+    let source_model = packaged_model
+        .cloned()
+        .or_else(|| packaged_model_catalog_entry(PACKAGED_CATALOG_FALLBACK_MODEL_SLUG));
+    let base_instructions = source_model
         .as_ref()
-        .and_then(|value| value.get("models"))
-        .and_then(Value::as_array)
-        .and_then(|models| models.first());
-    let base_instructions = first_model
         .and_then(|model| model.get("base_instructions"))
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| GENERATED_CATALOG_FALLBACK_BASE_INSTRUCTIONS.to_string());
-    let model_messages = first_model
+    let model_messages = source_model
+        .as_ref()
         .and_then(|model| model.get("model_messages"))
         .cloned()
         .unwrap_or_else(|| {
@@ -2184,7 +2244,14 @@ fn generated_catalog_prompt_fields(profile: &RelayProfile) -> (String, Value, bo
                 }
             })
         });
-    (base_instructions, model_messages, true)
+    if rewrite_prompt_model {
+        (
+            rewrite_generated_catalog_prompt_text_for_model(&base_instructions, model),
+            rewrite_generated_catalog_prompt_value_for_model(model_messages, model),
+        )
+    } else {
+        (base_instructions, model_messages)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2202,22 +2269,18 @@ pub(crate) fn generated_model_catalog_json(
     let reasoning_effort = catalog_reasoning_effort(config_text);
     let auto_compact_limit =
         parse_optional_positive_u64(&profile.auto_compact_limit, "压缩上下文大小")?;
-    let (base_instructions, model_messages, rewrite_prompt_model) =
-        generated_catalog_prompt_fields(profile);
     let mut models = Vec::new();
 
     for (index, row) in rows.into_iter().enumerate() {
         let model = row.model;
-        let model_base_instructions = if rewrite_prompt_model {
-            rewrite_generated_catalog_prompt_text_for_model(&base_instructions, &model)
-        } else {
-            base_instructions.clone()
-        };
-        let model_messages = if rewrite_prompt_model {
-            rewrite_generated_catalog_prompt_value_for_model(model_messages.clone(), &model)
-        } else {
-            model_messages.clone()
-        };
+        let packaged_model = packaged_model_catalog_entry(&model);
+        let (model_base_instructions, model_messages) =
+            generated_catalog_prompt_fields(profile, &model, packaged_model.as_ref());
+        let use_responses_lite = packaged_model
+            .as_ref()
+            .and_then(|entry| entry.get("use_responses_lite"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let fast_capability = fast_service_tier_capability(&model);
         let protocol = upstream_response_protocol_for_relay(row.protocol);
         let supported_reasoning_levels =
@@ -2274,7 +2337,7 @@ pub(crate) fn generated_model_catalog_json(
             json!({ "mode": "tokens", "limit": 10000 }),
         );
         entry.insert("upgrade".to_string(), Value::Null);
-        entry.insert("use_responses_lite".to_string(), json!(false));
+        entry.insert("use_responses_lite".to_string(), json!(use_responses_lite));
         entry.insert(
             "default_reasoning_level".to_string(),
             json!(default_reasoning_level),
@@ -2418,8 +2481,11 @@ fn default_catalog_context_window(model: &str) -> Option<&'static str> {
         .next()
         .filter(|value| !value.is_empty())
         .unwrap_or(normalized.as_str());
-    if model == "gpt-5.4" || model == "gpt-5.6" || model.starts_with("gpt-5.6-") {
+    if model == "gpt-5.4" {
         return Some("1000000");
+    }
+    if model == "gpt-5.6" || model.starts_with("gpt-5.6-") {
+        return Some("372000");
     }
     None
 }
@@ -3517,6 +3583,24 @@ mod tests {
     }
 
     #[test]
+    fn packaged_model_catalog_matches_exact_prefixed_and_snapshot_models() {
+        for (requested, expected) in [
+            ("gpt-5.6", "gpt-5.6-sol"),
+            ("gpt-5.6-sol", "gpt-5.6-sol"),
+            ("openai/gpt-5.6-terra", "gpt-5.6-terra"),
+            ("gpt-5.6-luna-2026-07-09", "gpt-5.6-luna"),
+            ("gpt-5.4-mini-2026-06-30", "gpt-5.4-mini"),
+        ] {
+            let model = packaged_model_catalog_entry(requested)
+                .unwrap_or_else(|| panic!("{requested} 应匹配打包模型目录"));
+            assert_eq!(model["slug"], expected);
+        }
+
+        assert!(packaged_model_catalog_entry("gpt-5.6-custom").is_none());
+        assert!(packaged_model_catalog_entry("qwen3-coder").is_none());
+    }
+
+    #[test]
     fn backfill_relay_profile_from_home_with_common_restores_template_provider_id() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -3573,7 +3657,7 @@ mod tests {
     }
 
     #[test]
-    fn fast_service_tier_capability_matches_packaged_models() {
+    fn fast_service_tier_capability_matches_packaged_and_gpt56_models() {
         let (tiers, speed) = fast_service_tier_capability("gpt-5.5").expect("gpt-5.5 应支持 fast");
         assert!(
             tiers.as_array().is_some_and(|items| items
@@ -3588,7 +3672,32 @@ mod tests {
             "additional_speed_tiers 应包含 fast: {speed}"
         );
 
+        for slug in [
+            "gpt-5.6",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "openai/gpt-5.6-terra",
+            "gpt-5.6-sol-2026-07-09",
+        ] {
+            let (tiers, speed) =
+                fast_service_tier_capability(slug).unwrap_or_else(|| panic!("{slug} 应支持 fast"));
+            assert!(
+                tiers.as_array().is_some_and(|items| items
+                    .iter()
+                    .any(|item| item.get("id").and_then(Value::as_str) == Some("priority"))),
+                "{slug} 的 service_tiers 应包含 priority: {tiers}"
+            );
+            assert!(
+                speed
+                    .as_array()
+                    .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("fast"))),
+                "{slug} 的 additional_speed_tiers 应包含 fast: {speed}"
+            );
+        }
+
         assert!(fast_service_tier_capability("gpt-5.2").is_none());
+        assert!(fast_service_tier_capability("gpt-5.6-custom").is_none());
         assert!(fast_service_tier_capability("claude-sonnet-4.5").is_none());
         assert!(fast_service_tier_capability("unknown-model").is_none());
     }
@@ -3607,6 +3716,11 @@ mod tests {
                 crate::settings::RelayModelMapping {
                     request_model: "gpt-5.2".to_string(),
                     context_window: "400000".to_string(),
+                    protocol: RelayProtocol::Responses,
+                },
+                crate::settings::RelayModelMapping {
+                    request_model: "openai/gpt-5.6-terra".to_string(),
+                    context_window: "1000000".to_string(),
                     protocol: RelayProtocol::Responses,
                 },
             ],
@@ -3645,6 +3759,27 @@ mod tests {
             .and_then(Value::as_array)
             .unwrap();
         assert!(standard_tiers.is_empty(), "gpt-5.2 不应有 fast tier");
+
+        let gpt56_model = models
+            .iter()
+            .find(|m| m.get("slug").and_then(Value::as_str) == Some("openai/gpt-5.6-terra"))
+            .expect("应存在 openai/gpt-5.6-terra");
+        assert!(
+            gpt56_model
+                .get("service_tiers")
+                .and_then(Value::as_array)
+                .is_some_and(|items| items
+                    .iter()
+                    .any(|item| item.get("id").and_then(Value::as_str) == Some("priority"))),
+            "GPT-5.6 生成目录应包含 priority service_tier"
+        );
+        assert!(
+            gpt56_model
+                .get("additional_speed_tiers")
+                .and_then(Value::as_array)
+                .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("fast"))),
+            "GPT-5.6 生成目录应包含 fast speed tier"
+        );
     }
 
     #[test]
@@ -3670,14 +3805,12 @@ mod tests {
         let catalog = generated_model_catalog_json(&profile, "", rows).unwrap();
         let models = catalog.get("models").and_then(Value::as_array).unwrap();
 
-        for slug in ["gpt-5.4", "openai/gpt-5.6-custom"] {
-            let model = models
-                .iter()
-                .find(|model| model.get("slug").and_then(Value::as_str) == Some(slug))
-                .unwrap_or_else(|| panic!("应存在模型 {slug}"));
-            assert_eq!(model["context_window"], 1_000_000);
-            assert_eq!(model["max_context_window"], 1_000_000);
-        }
+        let gpt54 = models
+            .iter()
+            .find(|model| model.get("slug").and_then(Value::as_str) == Some("gpt-5.4"))
+            .expect("应存在 gpt-5.4");
+        assert_eq!(gpt54["context_window"], 1_000_000);
+        assert_eq!(gpt54["max_context_window"], 1_000_000);
 
         let gpt56 = models
             .iter()
@@ -3685,6 +3818,8 @@ mod tests {
                 model.get("slug").and_then(Value::as_str) == Some("openai/gpt-5.6-custom")
             })
             .expect("应存在 gpt-5.6 自定义模型");
+        assert_eq!(gpt56["context_window"], 372_000);
+        assert_eq!(gpt56["max_context_window"], 372_000);
         assert!(
             gpt56["supported_reasoning_levels"]
                 .as_array()
@@ -3697,14 +3832,14 @@ mod tests {
     #[test]
     fn generated_model_catalog_uses_system_prompt_override() {
         let profile = RelayProfile {
-            model: "gpt-direct".to_string(),
+            model: "gpt-5.6-sol".to_string(),
             protocol: RelayProtocol::Responses,
             system_prompt_override: "第一行\n第二行".to_string(),
             ..RelayProfile::default()
         };
         let rows = relay_profile_catalog_rows(&profile);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].model, "gpt-direct");
+        assert_eq!(rows[0].model, "gpt-5.6-sol");
 
         let catalog = generated_model_catalog_json(&profile, "", rows).unwrap();
         let model = &catalog["models"][0];
@@ -3713,6 +3848,73 @@ mod tests {
             model["model_messages"]["instructions_template"],
             "第一行\n第二行"
         );
+        assert_eq!(model["use_responses_lite"], true);
+    }
+
+    #[test]
+    fn generated_model_catalog_uses_packaged_prompt_for_each_known_model() {
+        let requested_models = [
+            "gpt-5.6-sol",
+            "openai/gpt-5.6-terra",
+            "gpt-5.6-luna-2026-07-09",
+            "gpt-5.5",
+        ];
+        let profile = RelayProfile {
+            protocol: RelayProtocol::Responses,
+            model_mappings: requested_models
+                .iter()
+                .map(|model| crate::settings::RelayModelMapping {
+                    request_model: (*model).to_string(),
+                    context_window: String::new(),
+                    protocol: RelayProtocol::Responses,
+                })
+                .collect(),
+            ..RelayProfile::default()
+        };
+
+        let rows = relay_profile_catalog_rows(&profile);
+        let catalog = generated_model_catalog_json(&profile, "", rows).unwrap();
+        let models = catalog["models"].as_array().unwrap();
+        for requested in requested_models {
+            let generated = models
+                .iter()
+                .find(|model| model["slug"] == requested)
+                .unwrap_or_else(|| panic!("应生成模型 {requested}"));
+            let packaged = packaged_model_catalog_entry(requested).unwrap();
+            assert_eq!(
+                generated["base_instructions"], packaged["base_instructions"],
+                "{requested} 应使用官方 base_instructions"
+            );
+            assert_eq!(
+                generated["model_messages"], packaged["model_messages"],
+                "{requested} 应使用官方 model_messages"
+            );
+            assert_eq!(
+                generated["use_responses_lite"], packaged["use_responses_lite"],
+                "{requested} 应继承官方 use_responses_lite"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_model_catalog_uses_named_fallback_for_unknown_models() {
+        let profile = RelayProfile {
+            protocol: RelayProtocol::Responses,
+            model_mappings: vec![crate::settings::RelayModelMapping {
+                request_model: "qwen3-coder".to_string(),
+                context_window: String::new(),
+                protocol: RelayProtocol::Responses,
+            }],
+            ..RelayProfile::default()
+        };
+
+        let rows = relay_profile_catalog_rows(&profile);
+        let catalog = generated_model_catalog_json(&profile, "", rows).unwrap();
+        let model = &catalog["models"][0];
+        let prompt = model["base_instructions"].as_str().unwrap();
+        assert!(prompt.contains("qwen3-coder"));
+        assert!(!prompt.contains("GPT-5"));
+        assert_eq!(model["use_responses_lite"], false);
     }
 
     #[test]

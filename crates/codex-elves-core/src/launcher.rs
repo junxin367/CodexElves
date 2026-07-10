@@ -311,7 +311,7 @@ where
             } else {
                 let degraded = launch_status(
                     "running_degraded",
-                    "Codex launched; CodexElves enhancements are still waiting for the page bridge.",
+                    "ChatGPT/Codex launched; CodexElves enhancements are still waiting for the page bridge.",
                     debug_port,
                     helper_port,
                     &app_dir,
@@ -412,7 +412,7 @@ impl LaunchHooks for DefaultLaunchHooks {
             app_dir,
             Some(settings.codex_app_path.as_str()),
         )
-        .ok_or_else(|| anyhow::anyhow!("Codex App directory not found"))
+        .ok_or_else(|| anyhow::anyhow!("ChatGPT/Codex desktop app directory not found"))
     }
 
     fn select_debug_port(&self, requested: u16) -> u16 {
@@ -591,7 +591,7 @@ impl LaunchHooks for DefaultLaunchHooks {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
-                .context("failed to launch macOS Codex app")?;
+                .context("failed to launch macOS ChatGPT/Codex app")?;
             *self.child.lock().await = Some(child);
             return Ok(CodexLaunch::Process {
                 command,
@@ -603,7 +603,7 @@ impl LaunchHooks for DefaultLaunchHooks {
         let command = build_codex_command(app_dir, debug_port, extra_args);
         let executable = command
             .first()
-            .ok_or_else(|| anyhow::anyhow!("Codex command is empty"))?;
+            .ok_or_else(|| anyhow::anyhow!("ChatGPT/Codex command is empty"))?;
         let mut child_command = Command::new(executable);
         child_command
             .args(&command[1..])
@@ -613,7 +613,7 @@ impl LaunchHooks for DefaultLaunchHooks {
         child_command.creation_flags(crate::windows_integration::CREATE_NO_WINDOW);
         let child = child_command
             .spawn()
-            .with_context(|| format!("failed to launch Codex executable {executable}"))?;
+            .with_context(|| format!("failed to launch ChatGPT/Codex executable {executable}"))?;
         *self.child.lock().await = Some(child);
         Ok(CodexLaunch::Process {
             command,
@@ -2998,7 +2998,7 @@ async fn retry_injection(debug_port: u16, helper_port: u16) -> anyhow::Result<()
             }
         }
     }
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Codex injection failed")))
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("ChatGPT/Codex injection failed")))
 }
 
 pub async fn check_and_reinject_bridge(debug_port: u16, helper_port: u16) -> bool {

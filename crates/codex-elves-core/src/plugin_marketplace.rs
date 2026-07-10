@@ -1695,8 +1695,10 @@ enabled = true
 
         assert!(marketplace.contains("openai-curated-remote"));
         assert!(marketplace.contains("CodexElves"));
-        assert!(!marketplace.contains("Codex++"));
-        assert!(!marketplace.contains("CodexPlusPlus"));
+        let legacy_short_brand = ["Codex", "+", "+"].concat();
+        let legacy_long_brand = ["Codex", "Plus", "Plus"].concat();
+        assert!(!marketplace.contains(&legacy_short_brand));
+        assert!(!marketplace.contains(&legacy_long_brand));
     }
 
     #[test]

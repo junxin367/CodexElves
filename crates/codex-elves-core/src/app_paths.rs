@@ -4,6 +4,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const CODEX_PACKAGE_IDENTITIES: &[&str] = &["OpenAI.Codex", "OpenAI.CodexBeta"];
+const WINDOWS_DESKTOP_EXECUTABLE_NAMES: &[&str] = &["ChatGPT.exe", "Codex.exe", "codex.exe"];
+const MACOS_DESKTOP_EXECUTABLE_NAMES: &[&str] = &["ChatGPT", "Codex"];
+const MACOS_CHATGPT_APP_NAMES: &[&str] =
+    &["ChatGPT.app", "OpenAI ChatGPT.app", "OpenAI.ChatGPT.app"];
+const MACOS_LEGACY_CODEX_APP_NAMES: &[&str] =
+    &["Codex.app", "OpenAI Codex.app", "OpenAI.Codex.app"];
 
 pub fn find_latest_codex_app_dir(root: &Path) -> Option<PathBuf> {
     let mut matches = std::fs::read_dir(root)
@@ -104,7 +110,27 @@ pub fn user_data_candidates_from(local: Option<&Path>, roaming: Option<&Path>) -
 
 pub fn find_macos_codex_app(search_roots: &[PathBuf]) -> Option<PathBuf> {
     for root in search_roots {
-        for candidate in macos_app_candidates(root) {
+        if is_macos_app_bundle(root) && root.is_dir() {
+            return Some(root.to_path_buf());
+        }
+    }
+    for app_name in MACOS_CHATGPT_APP_NAMES {
+        for root in search_roots
+            .iter()
+            .filter(|root| !is_macos_app_bundle(root))
+        {
+            let candidate = root.join(app_name);
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+    }
+    for root in search_roots
+        .iter()
+        .filter(|root| !is_macos_app_bundle(root))
+    {
+        for app_name in MACOS_LEGACY_CODEX_APP_NAMES {
+            let candidate = root.join(app_name);
             if candidate.is_dir() {
                 return Some(candidate);
             }
@@ -138,29 +164,32 @@ pub fn resolve_codex_app_dir(app_dir: Option<&Path>) -> Option<PathBuf> {
 /// - %LOCALAPPDATA%\OpenAI\Codex\bin\  (standalone installer)
 /// - %LOCALAPPDATA%\OpenAI\Codex\      (user data root)
 /// - %LOCALAPPDATA%\Programs\OpenAI\Codex\ (alternative)
+/// - matching ChatGPT paths when a Codex runtime marker is present
 pub fn find_standalone_codex_app_dir() -> Option<PathBuf> {
     let local_appdata = std::env::var_os("LOCALAPPDATA")?;
+    find_standalone_codex_app_dir_from(Path::new(&local_appdata))
+}
 
-    let candidates: &[PathBuf] = &[
-        PathBuf::from(&local_appdata)
-            .join("OpenAI")
-            .join("Codex")
-            .join("bin"),
-        PathBuf::from(&local_appdata).join("OpenAI").join("Codex"),
-        PathBuf::from(&local_appdata)
+pub fn find_standalone_codex_app_dir_from(local_appdata: &Path) -> Option<PathBuf> {
+    let codex_candidates = [
+        local_appdata.join("OpenAI").join("Codex").join("bin"),
+        local_appdata.join("OpenAI").join("Codex"),
+        local_appdata.join("Programs").join("OpenAI").join("Codex"),
+    ];
+    if let Some(path) = find_standalone_app_candidate(&codex_candidates, false) {
+        return Some(path);
+    }
+
+    let chatgpt_candidates = [
+        local_appdata.join("OpenAI").join("ChatGPT").join("bin"),
+        local_appdata.join("OpenAI").join("ChatGPT"),
+        local_appdata
             .join("Programs")
             .join("OpenAI")
-            .join("Codex"),
+            .join("ChatGPT"),
+        local_appdata.join("Programs").join("ChatGPT"),
     ];
-
-    for candidate in candidates {
-        if let Some(path) = normalize_codex_app_path(candidate) {
-            if build_codex_executable(&path).exists() {
-                return Some(path);
-            }
-        }
-    }
-    None
+    find_standalone_app_candidate(&chatgpt_candidates, true)
 }
 
 pub fn resolve_codex_app_dir_with_saved(
@@ -187,31 +216,39 @@ pub fn normalize_codex_app_path(path: &Path) -> Option<PathBuf> {
     }
 
     let file_name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
-    if file_name.eq_ignore_ascii_case("Codex.exe") || file_name.eq_ignore_ascii_case("codex.exe") {
-        return path.parent().map(Path::to_path_buf);
+    if is_windows_desktop_executable_name(file_name) {
+        let app_dir = normalize_windows_desktop_executable_parent(path)?;
+        if path.is_file() || windows_desktop_executable(&app_dir).is_some() {
+            return Some(app_dir);
+        }
+        return None;
     }
 
-    if path.extension() == Some(OsStr::new("app")) {
-        return Some(path.to_path_buf());
+    if is_macos_app_bundle(path) {
+        if path.is_dir() {
+            return Some(path.to_path_buf());
+        }
+        let parent = path.parent()?;
+        for app_name in MACOS_CHATGPT_APP_NAMES {
+            let candidate = parent.join(app_name);
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+        return None;
     }
 
     if path.is_file() {
-        return path.parent().map(Path::to_path_buf);
+        return None;
     }
 
-    let upper = path.join("Codex.exe");
-    let lower = path.join("codex.exe");
-    if upper.exists() || lower.exists() {
+    if windows_desktop_executable(path).is_some() {
         return Some(path.to_path_buf());
     }
 
     let nested_app = path.join("app");
-    if nested_app.is_dir() {
-        let upper = nested_app.join("Codex.exe");
-        let lower = nested_app.join("codex.exe");
-        if upper.exists() || lower.exists() {
-            return Some(nested_app);
-        }
+    if nested_app.is_dir() && windows_desktop_executable(&nested_app).is_some() {
+        return Some(nested_app);
     }
 
     if path.is_dir() {
@@ -222,19 +259,34 @@ pub fn normalize_codex_app_path(path: &Path) -> Option<PathBuf> {
 }
 
 pub fn build_codex_executable(app_dir: &Path) -> PathBuf {
-    if app_dir.extension() == Some(OsStr::new("app")) {
-        return app_dir.join("Contents").join("MacOS").join("Codex");
+    if is_macos_app_bundle(app_dir) {
+        let macos_dir = app_dir.join("Contents").join("MacOS");
+        if let Some(executable) = macos_bundle_executable_name(app_dir) {
+            return macos_dir.join(executable);
+        }
+        if let Some(executable) = MACOS_DESKTOP_EXECUTABLE_NAMES
+            .iter()
+            .map(|name| macos_dir.join(name))
+            .find(|candidate| candidate.exists())
+        {
+            return executable;
+        }
+        let fallback = if app_dir
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| name.to_ascii_lowercase().contains("chatgpt"))
+        {
+            "ChatGPT"
+        } else {
+            "Codex"
+        };
+        return macos_dir.join(fallback);
     }
-    let upper = app_dir.join("Codex.exe");
-    if upper.exists() {
-        upper
-    } else {
-        app_dir.join("codex.exe")
-    }
+    windows_desktop_executable(app_dir).unwrap_or_else(|| app_dir.join("ChatGPT.exe"))
 }
 
 pub fn codex_app_version(app_dir: &Path) -> Option<String> {
-    if app_dir.extension() == Some(OsStr::new("app")) {
+    if is_macos_app_bundle(app_dir) {
         return macos_app_version(app_dir);
     }
     let package_dir = if app_dir
@@ -288,6 +340,11 @@ fn macos_app_version(app_dir: &Path) -> Option<String> {
         .or_else(|| plist_string_value(&plist, "CFBundleVersion"))
 }
 
+fn macos_bundle_executable_name(app_dir: &Path) -> Option<String> {
+    let plist = std::fs::read_to_string(app_dir.join("Contents").join("Info.plist")).ok()?;
+    plist_string_value(&plist, "CFBundleExecutable")
+}
+
 fn plist_string_value(plist: &str, key: &str) -> Option<String> {
     let (_, after_key) = plist.split_once(&format!("<key>{key}</key>"))?;
     let (_, after_string_open) = after_key.split_once("<string>")?;
@@ -306,14 +363,62 @@ fn append_user_data_variants(candidates: &mut Vec<PathBuf>, base: &Path) {
     candidates.push(base.join("Codex"));
 }
 
-fn macos_app_candidates(root: &Path) -> Vec<PathBuf> {
-    if root.extension() == Some(OsStr::new("app")) {
-        return vec![root.to_path_buf()];
+fn is_macos_app_bundle(path: &Path) -> bool {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+}
+
+fn is_windows_desktop_executable_name(file_name: &str) -> bool {
+    WINDOWS_DESKTOP_EXECUTABLE_NAMES
+        .iter()
+        .any(|candidate| file_name.eq_ignore_ascii_case(candidate))
+}
+
+fn windows_desktop_executable(app_dir: &Path) -> Option<PathBuf> {
+    WINDOWS_DESKTOP_EXECUTABLE_NAMES
+        .iter()
+        .map(|name| app_dir.join(name))
+        .find(|candidate| candidate.exists())
+}
+
+fn find_standalone_app_candidate(
+    candidates: &[PathBuf],
+    require_codex_runtime_marker: bool,
+) -> Option<PathBuf> {
+    for candidate in candidates {
+        let Some(path) = normalize_codex_app_path(candidate) else {
+            continue;
+        };
+        if build_codex_executable(&path).exists()
+            && (!require_codex_runtime_marker || has_codex_runtime_marker(&path))
+        {
+            return Some(path);
+        }
     }
-    ["Codex.app", "OpenAI Codex.app", "OpenAI.Codex.app"]
-        .into_iter()
-        .map(|name| root.join(name))
-        .collect()
+    None
+}
+
+fn has_codex_runtime_marker(app_dir: &Path) -> bool {
+    app_dir.join("Codex.exe").exists()
+        || app_dir.join("codex.exe").exists()
+        || app_dir.join("resources").join("codex.exe").exists()
+}
+
+fn normalize_windows_desktop_executable_parent(path: &Path) -> Option<PathBuf> {
+    let parent = path.parent()?;
+    if parent
+        .file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|name| name.eq_ignore_ascii_case("resources"))
+    {
+        if let Some(app_dir) = parent.parent()
+            && windows_desktop_executable(app_dir).is_some()
+        {
+            return Some(app_dir.to_path_buf());
+        }
+    }
+    Some(parent.to_path_buf())
 }
 
 fn version_tuple(path: &Path) -> Option<Vec<u32>> {

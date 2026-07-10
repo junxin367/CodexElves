@@ -25,7 +25,7 @@
   const chatsSortRefreshIntervalMs = 1500;
   const chatsSortDbRefreshIntervalMs = 5000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "17";
+  const codexDeleteStyleVersion = "18";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
   const codexDeleteVersion = "7";
@@ -40,10 +40,8 @@
   const codexRouteFeatureRefreshDelaysMs = [0, 120, 360, 900, 1600];
   const codexThreadServiceTierVersion = "1";
   const codexServiceTierBadgeClass = "codex-service-tier-badge";
+  const codexServiceTierComposerSurfaceClass = "codex-elves-service-tier-composer-surface";
   const codexServiceTierBadgeVersion = "3";
-  const codexFlatModelMenuGroupClass = "codex-elves-flat-model-menu-group";
-  const codexFlatModelMenuItemClass = "codex-elves-flat-model-menu-item";
-  const codexFlatModelMenuHiddenTriggerClass = "codex-elves-flat-model-menu-hidden-trigger";
   let codexElvesVersion = window.__CODEX_ELVES_VERSION__ || "unknown";
   const codexElvesBuild = window.__CODEX_ELVES_BUILD__ || "unknown";
   const codexElvesSettingsKey = "codexElvesSettings";
@@ -58,8 +56,6 @@
   const codexPluginAutoExpandClickDelayMs = 180;
   const codexBackendHeartbeatIntervalMs = 30000;
   const codexElvesImageOverlayId = "codex-elves-image-overlay";
-  let codexFlatModelMenuPreloadTimer = 0;
-  let codexFlatModelMenuPatchSettleRevision = 0;
   window.__codexProjectMoveRuntimeId = (window.__codexProjectMoveRuntimeId || 0) + 1;
   const codexProjectMoveRuntimeId = window.__codexProjectMoveRuntimeId;
   clearTimeout(window.__codexProjectMoveProjectionTimer);
@@ -271,27 +267,6 @@
       .codex-session-more-menu-icon {
         width: 16px;
         text-align: center;
-      }
-      .${codexFlatModelMenuGroupClass} {
-        display: contents;
-      }
-      .${codexFlatModelMenuHiddenTriggerClass} {
-        position: absolute !important;
-        width: 1px !important;
-        height: 1px !important;
-        margin: -1px !important;
-        padding: 0 !important;
-        overflow: hidden !important;
-        opacity: 0 !important;
-        pointer-events: none !important;
-        clip-path: inset(50%) !important;
-      }
-      .${codexFlatModelMenuItemClass} {
-        cursor: default;
-      }
-      .${codexFlatModelMenuItemClass} [data-codex-flat-model-menu-check="true"] {
-        margin-left: auto;
-        opacity: .9;
       }
       .codex-archive-row-button {
         border: 1px solid #ef4444;
@@ -816,6 +791,7 @@
       .${codexServiceTierBadgeClass}[data-tier="failed"] { border-color: rgba(248,113,113,.42); background: rgba(248,113,113,.12); color: #fca5a5; }
       .${codexServiceTierBadgeClass}[data-tier="unsupported"] { border-color: rgba(251,191,36,.48); background: rgba(251,191,36,.13); color: #fbbf24; }
       .${codexServiceTierBadgeClass}[data-disabled="true"] { cursor: not-allowed; opacity: .78; }
+      .${codexServiceTierComposerSurfaceClass} { overflow: clip !important; }
       .codex-elves-about { color: #a1a1aa; line-height: 1.5; }
       .codex-elves-tabs { display: flex; gap: 8px; padding: 0 20px 6px; flex: 0 0 auto; }
       .codex-elves-tab-button { border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: transparent; color: #d1d5db; font: 12px system-ui, sans-serif; padding: 5px 10px; }
@@ -875,7 +851,7 @@
   }
 
   function defaultCodexElvesSettings() {
-    return { pluginEntryUnlock: true, pluginMarketplaceUnlock: true, pluginAutoExpand: true, sessionDelete: true, markdownExport: true, projectMove: true, conversationView: false, conversationViewMaxWidth: conversationViewDefaultWidth, upstreamWorktreeCreate: true, nativeMenuPlacement: true, serviceTierControls: false, flatModelMenu: false };
+    return { pluginEntryUnlock: true, pluginMarketplaceUnlock: true, pluginAutoExpand: true, sessionDelete: true, markdownExport: true, projectMove: true, conversationView: false, conversationViewMaxWidth: conversationViewDefaultWidth, upstreamWorktreeCreate: true, nativeMenuPlacement: true, serviceTierControls: false };
   }
 
   const codexElvesBackendSettingMap = {
@@ -890,7 +866,6 @@
     upstreamWorktreeCreate: "codexAppUpstreamWorktreeCreate",
     nativeMenuPlacement: "codexAppNativeMenuPlacement",
     serviceTierControls: "codexAppServiceTierControls",
-    flatModelMenu: "codexAppFlatModelMenu",
   };
 
   function backendCodexElvesSettings() {
@@ -919,7 +894,6 @@
         upstreamWorktreeCreate: false,
         nativeMenuPlacement: false,
         serviceTierControls: false,
-        flatModelMenu: false,
       };
     }
     try {
@@ -944,7 +918,6 @@
   function setCodexElvesSetting(key, value) {
     const backendKey = codexElvesBackendSettingMap[key];
     if (backendKey) {
-      if (key === "flatModelMenu" && !value) cleanupFlatModelMenus();
       setBackendSetting(backendKey, value);
       return;
     }
@@ -963,9 +936,6 @@
         removeCodexServiceTierBadges();
         refreshCodexServiceTierControls();
       }
-    }
-    if (key === "flatModelMenu" && !value) {
-      cleanupFlatModelMenus();
     }
     if (key === "pluginAutoExpand" && !value) {
       clearTimeout(window.__codexPluginAutoExpandTimer);
@@ -1088,7 +1058,19 @@
   const codexDefaultServiceTierSetting = { key: "default-service-tier", default: null };
   const codexServiceTierFallbackFastValue = "priority";
   const codexServiceTierModulePromises = new Map();
-  const codexServiceTierSupportedFastModels = new Set(["gpt-5.4", "gpt-5.5"]);
+  const codexServiceTierSupportedFastModels = new Set([
+    "gpt-5.4",
+    "gpt-5.5",
+    "gpt-5.6",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+  ]);
+  const codexServiceTierSupportedFastModelPrefixes = [
+    "gpt-5.6-sol-",
+    "gpt-5.6-terra-",
+    "gpt-5.6-luna-",
+  ];
   const codexThreadServiceTierModes = new Set(["inherit", "standard", "fast"]);
   const codexServiceTierControlModes = new Set(["inherit", "global-standard", "global-fast", "custom"]);
 
@@ -1121,7 +1103,7 @@
     if (!codexServiceTierModulePromises.has(namePart)) {
       const promise = Promise.resolve().then(async () => {
         const url = codexAppAssetUrl(namePart) || await codexAppAssetUrlFromScriptText(namePart);
-        if (!url) throw new Error(`未找到 Codex App asset: ${namePart}`);
+        if (!url) throw new Error(`未找到 ChatGPT/Codex 桌面应用 asset: ${namePart}`);
         return await import(url);
       }).catch((error) => {
         codexServiceTierModulePromises.delete(namePart);
@@ -1285,6 +1267,13 @@
     return String(model || "").trim().toLowerCase();
   }
 
+  function codexServiceTierBuiltInFastSupported(modelName) {
+    const normalized = normalizeCodexServiceTierModelName(modelName);
+    const model = normalized.split("/").filter(Boolean).pop() || normalized;
+    return codexServiceTierSupportedFastModels.has(model)
+      || codexServiceTierSupportedFastModelPrefixes.some((prefix) => model.startsWith(prefix));
+  }
+
   function codexServiceTierModelFromValue(value, visited = new WeakSet(), depth = 0) {
     if (typeof value === "string") return value.trim();
     if (!value || typeof value !== "object" || visited.has(value) || depth > 3) return "";
@@ -1401,7 +1390,7 @@
   function codexServiceTierFastSupportedForModel(modelName) {
     const catalogSupport = codexServiceTierCatalogFastSupport(modelName);
     if (catalogSupport !== null) return catalogSupport;
-    return codexServiceTierSupportedFastModels.has(normalizeCodexServiceTierModelName(modelName));
+    return codexServiceTierBuiltInFastSupported(modelName);
   }
 
   function codexServiceTierCatalogFastSupport(modelName) {
@@ -1415,7 +1404,7 @@
     );
     if (!entry) return null;
     if (typeof entry.supports_fast === "boolean") return entry.supports_fast;
-    if (Array.isArray(entry.service_tiers)) {
+    if (Array.isArray(entry.service_tiers) && entry.service_tiers.length > 0) {
       return entry.service_tiers.some((tier) => isFastServiceTierValue(tier && tier.id));
     }
     return null;
@@ -2273,7 +2262,7 @@
               </div>
             </div>
             <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">页面功能增强</div><div class="codex-elves-row-description">关闭后停用删除、导出、移动、模型菜单、插件相关和菜单位置增强。</div></div>
+              <div><div class="codex-elves-row-title">页面功能增强</div><div class="codex-elves-row-description">关闭后停用删除、导出、移动、Fast 按钮、插件相关和菜单位置增强。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-backend-setting="enhancementsEnabled"><span></span></button>
             </div>
             <div class="codex-elves-row">
@@ -2291,10 +2280,6 @@
             <div class="codex-elves-row">
               <div><div class="codex-elves-row-title">Fast 按钮</div><div class="codex-elves-row-description">显示服务模式切换按钮；Fast 仅支持 ${codexServiceTierFastModelListLabel()}，其他模型按 Standard 发送。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="serviceTierControls"><span></span></button>
-            </div>
-            <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">模型选择优化</div><div class="codex-elves-row-description">进入会话页预加载模型列表，并把 hover 子菜单改成同一菜单里的单列选择。</div></div>
-              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="flatModelMenu"><span></span></button>
             </div>
             <div class="codex-elves-row" data-codex-service-tier-controls="true">
               <div><div class="codex-elves-row-title">服务模式</div><div class="codex-elves-row-description">继承使用 config.toml 的 service tier；全局模式覆盖全部 thread；自定义允许按 thread 覆盖。</div></div>
@@ -2353,11 +2338,11 @@
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="nativeMenuPlacement"><span></span></button>
             </div>
             <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">打开 DevTools</div><div class="codex-elves-row-description">打开当前 Codex 页面开发者工具，方便查看用户脚本报错。</div></div>
+              <div><div class="codex-elves-row-title">打开 DevTools</div><div class="codex-elves-row-description">打开当前 ChatGPT/Codex 页面开发者工具，方便查看用户脚本报错。</div></div>
               <button type="button" class="codex-elves-action-button" data-codex-open-devtools="true">打开 DevTools</button>
             </div>
             <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">关于 CodexElves</div><div class="codex-elves-about">CodexElves 是通过外部 launcher 注入的增强菜单，不修改 Codex App 原始安装文件。<br>Build: <span data-codex-elves-build="true">${codexElvesBuild}</span><br>GitHub: <a href="https://github.com/junxin367/CodexElves" target="_blank" rel="noreferrer">https://github.com/junxin367/CodexElves</a></div></div>
+              <div><div class="codex-elves-row-title">关于 CodexElves</div><div class="codex-elves-about">CodexElves 是通过外部 launcher 注入的增强菜单，不修改 ChatGPT/Codex 桌面应用原始安装文件。<br>Build: <span data-codex-elves-build="true">${codexElvesBuild}</span><br>GitHub: <a href="https://github.com/junxin367/CodexElves" target="_blank" rel="noreferrer">https://github.com/junxin367/CodexElves</a></div></div>
             </div>
             <div class="codex-elves-row">
               <div><div class="codex-elves-row-title">提出问题</div><div class="codex-elves-row-description">打开 GitHub Issues 反馈问题或建议。</div></div>
@@ -2369,7 +2354,7 @@
               <div>
                 <div class="codex-elves-row-title">用户脚本</div>
                 <div class="codex-elves-row-description">启用用户脚本：自动加载内置目录和用户配置目录中的 .js 文件。</div>
-                <div class="codex-elves-user-script-warning">禁用后需重载页面或重启 CodexElves 才能完全移除已执行效果。</div>
+                <div class="codex-elves-user-script-warning">禁用后需重载页面或重启 Codex 才能完全移除已执行效果。</div>
                 <div class="codex-elves-user-script-dirs" data-codex-user-script-dirs="true">正在读取脚本目录…</div>
                 <div class="codex-elves-user-script-list" data-codex-user-script-list="true">正在读取用户脚本…</div>
               </div>
@@ -3781,8 +3766,6 @@
       modelNames: () => codexElvesModelNames(),
       patchModelArray: (models, allowEmpty = false) => patchModelArray(models, allowEmpty),
       patchModelContainer: (value) => patchModelContainer(value),
-      patchFlatModelMenus: (scope = document) => patchFlatModelMenus(scope),
-      cleanupFlatModelMenus: (scope = document) => cleanupFlatModelMenus(scope),
       setServiceTierState: (state = {}) => {
         codexServiceTierState = { ...codexServiceTierState, ...state };
       },
@@ -3861,9 +3844,10 @@
   function codexElvesDefaultContextWindow(modelName) {
     const lower = String(modelName || "").toLowerCase().trim();
     const slug = lower.split("/").filter(Boolean).pop() || lower;
-    if (slug === "gpt-5.4" || slug === "gpt-5.6" || slug.startsWith("gpt-5.6-")) {
+    if (slug === "gpt-5.4") {
       return 1000000;
     }
+    if (slug === "gpt-5.6" || slug.startsWith("gpt-5.6-")) return 372000;
     return null;
   }
 
@@ -4303,363 +4287,6 @@
     return changed;
   }
 
-  function flatModelMenuSelector() {
-    return '[role="menu"], [data-radix-menu-content], [role="listbox"]';
-  }
-
-  function codexFlatModelMenuEnabled() {
-    return !!codexElvesSettings().flatModelMenu && codexElvesModelUnlockEnabled();
-  }
-
-  function flatModelMenuConversationActive() {
-    try {
-      if (typeof codexServiceTierBestComposerFooter === "function" && codexServiceTierBestComposerFooter()) return true;
-    } catch {
-    }
-    return !!document.querySelector?.('.composer-footer, [class*="_footer_"]');
-  }
-
-  function scheduleFlatModelMenuSettlePatch(reason = "settle") {
-    void reason;
-    const revision = ++codexFlatModelMenuPatchSettleRevision;
-    [0, 40, 120, 260].forEach((delay) => {
-      window.setTimeout(() => {
-        if (revision !== codexFlatModelMenuPatchSettleRevision) return;
-        try {
-          patchFlatModelMenus();
-        } catch (error) {
-          window.__codexElvesModelPatchFailures = window.__codexElvesModelPatchFailures || [];
-          window.__codexElvesModelPatchFailures.push(String(error?.stack || error));
-        }
-      }, delay);
-    });
-  }
-
-  function scheduleFlatModelMenuPreload(reason = "scan") {
-    if (!codexFlatModelMenuEnabled()) {
-      cleanupFlatModelMenus();
-      return;
-    }
-    if (codexFlatModelMenuPreloadTimer) return;
-    codexFlatModelMenuPreloadTimer = window.setTimeout(async () => {
-      codexFlatModelMenuPreloadTimer = 0;
-      if (!codexFlatModelMenuEnabled()) {
-        cleanupFlatModelMenus();
-        return;
-      }
-      if (!flatModelMenuConversationActive()) return;
-      try {
-        if (!codexElvesModelNames().length) await loadCodexModelCatalog();
-        scheduleFlatModelMenuSettlePatch(reason);
-        scheduleCodexModelWhitelistRefresh(1800);
-      } catch (error) {
-        window.__codexElvesModelPatchFailures = window.__codexElvesModelPatchFailures || [];
-        window.__codexElvesModelPatchFailures.push(String(error?.stack || error));
-      }
-    }, 80);
-  }
-
-  function flatModelMenuCatalogLabels() {
-    const labels = [];
-    const entries = Array.isArray(codexModelCatalog.model_entries) ? codexModelCatalog.model_entries : [];
-    for (const entry of entries) {
-      if (entry?.slug) labels.push(String(entry.slug));
-      if (entry?.display_name) labels.push(String(entry.display_name));
-      if (entry?.displayName) labels.push(String(entry.displayName));
-      if (entry?.name) labels.push(String(entry.name));
-    }
-    return uniqueValues([...labels, ...codexElvesModelNames()]);
-  }
-
-  function flatModelMenuDirectItems(menu) {
-    if (!menu?.querySelectorAll) return [];
-    return [...menu.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [data-radix-collection-item]')]
-      .filter((item) => item.closest?.(flatModelMenuSelector()) === menu);
-  }
-
-  function flatModelMenuItemTextMatchesModel(text, model) {
-    if (!text || !model) return false;
-    if (codexServiceTierModelMatchKey(text) === codexServiceTierModelMatchKey(model)) return true;
-    return codexServiceTierModelMatchesText(model, text);
-  }
-
-  function flatModelMenuItemMatchesAnyModel(item) {
-    const text = normalizedElementText(item);
-    return flatModelMenuCatalogLabels()
-      .sort((left, right) => right.length - left.length)
-      .some((model) => flatModelMenuItemTextMatchesModel(text, model));
-  }
-
-  function flatModelMenuTriggerItem(menu) {
-    const items = flatModelMenuDirectItems(menu)
-      .filter((item) => !item.closest?.(`.${codexFlatModelMenuGroupClass}`))
-      .filter((item) => !item.hasAttribute?.("data-codex-flat-model-menu-item"));
-    const matches = items.filter(flatModelMenuItemMatchesAnyModel);
-    if (!matches.length) return null;
-    return matches.find((item) =>
-      item.getAttribute?.("aria-haspopup") === "menu" ||
-      item.getAttribute?.("data-state") ||
-      item.querySelector?.("svg")
-    ) || matches[matches.length - 1];
-  }
-
-  function flatModelMenuLooksLikeRoot(menu, trigger) {
-    if (!menu || !trigger) return false;
-    if (menu.closest?.(`#${codexElvesMenuId}, .codex-elves-modal-overlay, .${moreMenuClass}`)) return false;
-    if (isWorkspaceChromeNode(menu)) return false;
-    const text = normalizedElementText(menu).toLowerCase();
-    const hasReasoningLabel = /推理|reasoning/.test(text);
-    const hasReasoningLevel = /(^|\s)(low|medium|high|minimal|xhigh|max)(\s|$)/.test(text) || /低|中|高|超高/.test(text);
-    if (hasReasoningLabel && hasReasoningLevel) return true;
-    const levelCount = [
-      /(^|\s)low(\s|$)|低/.test(text),
-      /(^|\s)medium(\s|$)|中/.test(text),
-      /(^|\s)high(\s|$)|高/.test(text),
-      /(^|\s)(xhigh|max)(\s|$)|超高/.test(text),
-    ].filter(Boolean).length;
-    return levelCount >= 3 && flatModelMenuItemMatchesAnyModel(trigger);
-  }
-
-  function selectedFlatModelName() {
-    return codexServiceTierCurrentModelName()
-      || codexServiceTierModelFromValue(codexModelCatalog.model)
-      || codexServiceTierModelFromValue(codexModelCatalog.default_model);
-  }
-
-  function flatModelMenuItemSelected(modelName) {
-    const selected = selectedFlatModelName();
-    return !!selected && codexServiceTierModelMatchKey(selected) === codexServiceTierModelMatchKey(modelName);
-  }
-
-  function flatModelMenuItemClassName(trigger) {
-    const base = String(trigger?.className || "")
-      .split(/\s+/)
-      .filter((className) => className && className !== codexFlatModelMenuHiddenTriggerClass && className !== codexFlatModelMenuItemClass)
-      .join(" ");
-    return `${base} ${codexFlatModelMenuItemClass}`.trim();
-  }
-
-  function createFlatModelMenuItem(modelName, trigger) {
-    const item = document.createElement("div");
-    const selected = flatModelMenuItemSelected(modelName);
-    item.setAttribute("role", "menuitem");
-    item.setAttribute("tabindex", "-1");
-    item.setAttribute("aria-checked", selected ? "true" : "false");
-    item.setAttribute("data-codex-flat-model-menu-item", "true");
-    item.setAttribute("data-codex-flat-model", modelName);
-    item.className = flatModelMenuItemClassName(trigger);
-    item.innerHTML = `<span class="min-w-0 flex-1 truncate">${escapeHtml(modelName)}</span><span data-codex-flat-model-menu-check="true" aria-hidden="true">${selected ? "&#10003;" : ""}</span>`;
-    return item;
-  }
-
-  function flatModelMenuSignature(modelNames) {
-    return JSON.stringify({
-      models: modelNames,
-      selected: selectedFlatModelName(),
-    });
-  }
-
-  function removeFlatModelMenuGroup(menu) {
-    menu?.querySelectorAll?.(`.${codexFlatModelMenuGroupClass}`).forEach((node) => node.remove());
-  }
-
-  function restoreFlatModelMenuTrigger(trigger) {
-    if (!trigger) return;
-    trigger.classList?.remove(codexFlatModelMenuHiddenTriggerClass);
-    trigger.removeAttribute?.("data-codex-flat-model-menu-native-trigger");
-  }
-
-  function cleanupFlatModelMenus(scope = document) {
-    scope.querySelectorAll?.(`.${codexFlatModelMenuGroupClass}`).forEach((node) => node.remove());
-    scope.querySelectorAll?.("[data-codex-flat-model-menu-native-trigger]").forEach(restoreFlatModelMenuTrigger);
-  }
-
-  function patchFlatModelMenu(menu) {
-    const trigger = flatModelMenuTriggerItem(menu);
-    if (!codexFlatModelMenuEnabled() || !flatModelMenuLooksLikeRoot(menu, trigger)) {
-      removeFlatModelMenuGroup(menu);
-      menu?.querySelectorAll?.("[data-codex-flat-model-menu-native-trigger]").forEach(restoreFlatModelMenuTrigger);
-      return false;
-    }
-    const modelNames = codexElvesModelNames();
-    if (!modelNames.length) return false;
-    const signature = flatModelMenuSignature(modelNames);
-    const existing = menu.querySelector?.(`.${codexFlatModelMenuGroupClass}`);
-    if (existing?.getAttribute?.("data-codex-flat-model-menu-signature") === signature) {
-      trigger.classList?.add(codexFlatModelMenuHiddenTriggerClass);
-      trigger.setAttribute?.("data-codex-flat-model-menu-native-trigger", "true");
-      return false;
-    }
-    removeFlatModelMenuGroup(menu);
-    const group = document.createElement("div");
-    group.className = codexFlatModelMenuGroupClass;
-    group.setAttribute("data-codex-flat-model-menu-signature", signature);
-    modelNames.forEach((modelName) => group.appendChild(createFlatModelMenuItem(modelName, trigger)));
-    trigger.insertAdjacentElement?.("afterend", group) || menu.appendChild(group);
-    trigger.classList?.add(codexFlatModelMenuHiddenTriggerClass);
-    trigger.setAttribute?.("data-codex-flat-model-menu-native-trigger", "true");
-    return true;
-  }
-
-  function patchFlatModelMenus(scope = document) {
-    if (!codexFlatModelMenuEnabled()) {
-      cleanupFlatModelMenus(scope);
-      return false;
-    }
-    if (!codexElvesModelNames().length) {
-      scheduleFlatModelMenuPreload("menu-open");
-      return false;
-    }
-    let changed = false;
-    const menus = scope.querySelectorAll ? [...scope.querySelectorAll(flatModelMenuSelector())] : [];
-    for (const menu of menus.slice(0, 80)) {
-      if (patchFlatModelMenu(menu)) changed = true;
-    }
-    return changed;
-  }
-
-  function flatModelMenuEvent(eventName, options = {}) {
-    if (eventName.startsWith("pointer") && typeof PointerEvent === "function") {
-      return new PointerEvent(eventName, { bubbles: true, cancelable: true, ...options });
-    }
-    if ((eventName.startsWith("mouse") || eventName === "click") && typeof MouseEvent === "function") {
-      return new MouseEvent(eventName, { bubbles: true, cancelable: true, ...options });
-    }
-    return new Event(eventName, { bubbles: true, cancelable: true });
-  }
-
-  function openNativeModelSubmenu(trigger) {
-    if (!trigger) return;
-    ["pointerenter", "mouseenter", "mouseover", "mousemove"].forEach((eventName) => {
-      try {
-        trigger.dispatchEvent(flatModelMenuEvent(eventName));
-      } catch {
-      }
-    });
-    try {
-      trigger.focus?.();
-      trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", code: "ArrowRight", bubbles: true, cancelable: true }));
-    } catch {
-    }
-  }
-
-  function clickNativeModelMenuItem(item) {
-    ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((eventName) => {
-      try {
-        item.dispatchEvent(flatModelMenuEvent(eventName));
-      } catch {
-      }
-    });
-  }
-
-  function findNativeModelMenuItem(modelName, rootMenu) {
-    const menus = [...document.querySelectorAll(flatModelMenuSelector())]
-      .filter((menu) => menu !== rootMenu)
-      .filter((menu) => !menu.closest?.(`#${codexElvesMenuId}, .codex-elves-modal-overlay, .${moreMenuClass}`));
-    for (const menu of menus) {
-      const items = flatModelMenuDirectItems(menu)
-        .filter((item) => !item.hasAttribute?.("data-codex-flat-model-menu-item"))
-        .filter((item) => !item.closest?.(`.${codexFlatModelMenuGroupClass}`));
-      const match = items.find((item) => flatModelMenuItemTextMatchesModel(normalizedElementText(item), modelName));
-      if (match) return match;
-    }
-    return null;
-  }
-
-  async function activateFlatModelMenuItem(item) {
-    const modelName = item?.getAttribute?.("data-codex-flat-model") || "";
-    const rootMenu = item?.closest?.(flatModelMenuSelector());
-    const trigger = rootMenu?.querySelector?.("[data-codex-flat-model-menu-native-trigger]");
-    if (!modelName || !rootMenu || !trigger) return;
-    openNativeModelSubmenu(trigger);
-    for (const delay of [0, 40, 120, 240]) {
-      if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
-      const nativeItem = findNativeModelMenuItem(modelName, rootMenu);
-      if (nativeItem) {
-        clickNativeModelMenuItem(nativeItem);
-        return;
-      }
-      openNativeModelSubmenu(trigger);
-    }
-    sendCodexElvesDiagnostic("flat_model_menu_select_failed", { model: modelName });
-  }
-
-  function flatModelMenuControlFromTarget(target) {
-    if (!(target instanceof Element)) return null;
-    const control = target.closest?.('button, [role="button"], [aria-haspopup="menu"]');
-    if (!control || control.closest?.(`#${codexElvesMenuId}, .codex-elves-modal-overlay`)) return null;
-    const footer = control.closest?.('.composer-footer, [class*="_footer_"]');
-    if (!footer) return null;
-    const text = normalizedElementText(control);
-    const aria = control.getAttribute?.("aria-label") || "";
-    const combined = `${text} ${aria}`;
-    if (/模型|model|gpt|claude|deepseek|glm|qwen|kimi|moonshot|mistral|llama/i.test(combined)) return control;
-    if (/(^|[^0-9])\d+(?:\.\d+)+([^0-9.]|$)/.test(combined)) return control;
-    const selected = selectedFlatModelName();
-    if (selected && flatModelMenuItemTextMatchesModel(combined, selected)) return control;
-    return flatModelMenuCatalogLabels().some((model) => flatModelMenuItemTextMatchesModel(combined, model)) ? control : null;
-  }
-
-  function handleFlatModelMenuControlIntent(event) {
-    const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-    if (!flatModelMenuControlFromTarget(target)) return;
-    scheduleFlatModelMenuPreload("model-control");
-    scheduleFlatModelMenuSettlePatch("model-control");
-  }
-
-  function flatModelMenuMutationLooksRelevant(mutations) {
-    if (!mutations) return false;
-    return mutations.some((mutation) => {
-      const target = mutation.target;
-      if (target?.nodeType === 1 && !isWorkspaceChromeNode(target) && (target.matches?.(flatModelMenuSelector()) || target.closest?.(flatModelMenuSelector()))) {
-        return true;
-      }
-      return [...mutation.addedNodes].some((node) => {
-        if (node.nodeType !== 1 || isWorkspaceChromeNode(node)) return false;
-        return !!node.matches?.(flatModelMenuSelector()) || !!node.querySelector?.(flatModelMenuSelector());
-      });
-    });
-  }
-
-  function installFlatModelMenuPortalObserver() {
-    if (window.__codexFlatModelMenuPortalObserverInstalled) return;
-    window.__codexFlatModelMenuPortalObserverInstalled = true;
-    window.__codexFlatModelMenuPortalObserver?.disconnect?.();
-    window.__codexFlatModelMenuPortalObserver = new MutationObserver((mutations) => {
-      if (!codexFlatModelMenuEnabled()) return;
-      if (!flatModelMenuMutationLooksRelevant(mutations)) return;
-      scheduleFlatModelMenuPreload("menu-portal");
-      scheduleFlatModelMenuSettlePatch("menu-portal");
-    });
-    window.__codexFlatModelMenuPortalObserver.observe(document.body || document.documentElement, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ["role", "data-state", "hidden", "style", "aria-expanded"],
-    });
-  }
-
-  function installFlatModelMenuEvents() {
-    if (window.__codexFlatModelMenuEventsInstalled) return;
-    window.__codexFlatModelMenuEventsInstalled = true;
-    ["pointerdown", "mousedown", "click", "keydown"].forEach((eventName) => {
-      document.addEventListener(eventName, (event) => {
-        if (eventName === "keydown" && event.key !== "Enter" && event.key !== " ") return;
-        handleFlatModelMenuControlIntent(event);
-      }, true);
-    });
-    document.addEventListener("click", (event) => {
-      const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-      const item = target?.closest?.("[data-codex-flat-model-menu-item]");
-      if (!item) return;
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation?.();
-      void activateFlatModelMenuItem(item);
-    }, true);
-    installFlatModelMenuPortalObserver();
-  }
-
   function patchAppServerModelMessages() {
     if (window.__codexElvesModelMessagePatchInstalled) return;
     window.__codexElvesModelMessagePatchInstalled = true;
@@ -4790,13 +4417,11 @@
   }
 
   function runCodexModelWhitelistRefreshPass() {
-    if (!codexFlatModelMenuEnabled()) cleanupFlatModelMenus();
     if (!codexElvesModelUnlockEnabled() || !codexElvesModelNames().length) return false;
     let changed = false;
     try {
       patchStatsigModelWhitelist();
       if (patchReactModelState()) changed = true;
-      if (patchFlatModelMenus()) changed = true;
       installAppServerModelRequestPatch();
     } catch (error) {
       window.__codexElvesModelPatchFailures = window.__codexElvesModelPatchFailures || [];
@@ -7309,6 +6934,36 @@
       .filter(codexServiceTierBadgeVisibleElement);
   }
 
+  function codexServiceTierComposerSurfaces() {
+    return Array.from(new Set([
+      ...document.querySelectorAll(".composer-surface-chrome"),
+      ...document.querySelectorAll('[class*="_multilineSurface_"]'),
+    ]))
+      .filter(codexServiceTierBadgeVisibleElement)
+      .filter((surface) => codexServiceTierComposerInputs(surface).length > 0);
+  }
+
+  function codexServiceTierHiddenMeasurementOverflows(surface) {
+    if (!(surface instanceof HTMLElement) || surface.scrollHeight <= surface.clientHeight + 1) return false;
+    return Array.from(surface.querySelectorAll('[aria-hidden="true"]')).some((node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      const style = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.position === "absolute"
+        && style.visibility === "hidden"
+        && rect.height > surface.clientHeight;
+    });
+  }
+
+  function syncCodexServiceTierComposerOverflowGuard(enabled = codexElvesSettings().serviceTierControls) {
+    document.querySelectorAll(`.${codexServiceTierComposerSurfaceClass}`)
+      .forEach((surface) => surface.classList.remove(codexServiceTierComposerSurfaceClass));
+    if (!enabled) return;
+    codexServiceTierComposerSurfaces()
+      .filter(codexServiceTierHiddenMeasurementOverflows)
+      .forEach((surface) => surface.classList.add(codexServiceTierComposerSurfaceClass));
+  }
+
   function codexServiceTierRectHorizontalOverlap(left, right) {
     return Math.max(0, Math.min(left.right, right.right) - Math.max(left.left, right.left));
   }
@@ -7529,6 +7184,7 @@
       removeCodexServiceTierBadges();
       return;
     }
+    syncCodexServiceTierComposerOverflowGuard(true);
     const composer = codexServiceTierFindComposerEl();
     const placement = composer ? codexServiceTierBadgePlacement(composer) : null;
     const existingBadges = Array.from(document.querySelectorAll(`[data-codex-service-tier-badge="true"]`));
@@ -7557,6 +7213,7 @@
 
   function removeCodexServiceTierBadges() {
     document.querySelectorAll(`[data-codex-service-tier-badge="true"]`).forEach((badge) => badge.remove());
+    syncCodexServiceTierComposerOverflowGuard(false);
   }
 
   function conversationViewRememberOriginals(el) {
@@ -7807,7 +7464,6 @@
 
   function scheduleCodexRouteFeatureRefresh() {
     scheduleConversationViewRouteRefresh();
-    scheduleFlatModelMenuPreload("route");
     refreshCodexModelWhitelistFromScan();
     scheduleCodexModelWhitelistRefresh(2500);
     (window.__codexRouteFeatureRefreshTimers || []).forEach((timer) => clearTimeout(timer));
@@ -7878,11 +7534,9 @@
     installCodexElvesMenu();
     scheduleBackendHeartbeat();
     installDeleteButtonEventDelegation();
-    installFlatModelMenuEvents();
     installConversationViewRouteHooks();
     installCodexRouteFeatureRefreshEvents();
     refreshCodexServiceTierControls();
-    scheduleFlatModelMenuPreload("startup");
   }
 
   function scanDeferred(dirty = allScanDirty()) {
@@ -7929,13 +7583,11 @@
     }
     if (conversationDirty) {
       refreshConversationView();
-      scheduleFlatModelMenuPreload("conversation");
     }
     const lastMutations = window.__codexSessionDeleteLastMutations;
     const modelUiDirty = headerDirty || conversationDirty || shouldScheduleReactModelStatePatch(lastMutations);
     if (headerDirty || conversationDirty) {
       installCodexServiceTierBadge();
-      scheduleFlatModelMenuPreload(headerDirty ? "header" : "conversation");
     }
     if (modelUiDirty) {
       refreshCodexModelWhitelistFromScan(lastMutations);

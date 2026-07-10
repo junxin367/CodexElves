@@ -515,14 +515,6 @@ fn injection_script_unlocks_custom_model_catalog() {
     );
     assert!(script.contains("model_whitelist_refresh_scheduled"));
     assert!(script.contains("available_models"));
-    assert!(script.contains("data-codex-elves-setting=\"flatModelMenu\""));
-    assert!(script.contains("function patchFlatModelMenus"));
-    assert!(script.contains("scheduleFlatModelMenuPreload"));
-    assert!(script.contains("handleFlatModelMenuControlIntent"));
-    assert!(script.contains("installFlatModelMenuPortalObserver"));
-    assert!(script.contains("flat_model_menu_select_failed"));
-    assert!(script.contains("data-codex-flat-model-menu-item"));
-    assert!(script.contains("codexAppFlatModelMenu"));
     assert!(!script.contains("modelWhitelistUnlock"));
     assert!(!script.contains("codexAppModelWhitelistUnlock"));
     assert!(!script.contains("模型白名单解锁"));
@@ -552,8 +544,14 @@ fn injection_script_exposes_fast_service_tier_control() {
     assert!(script.contains("setCodexThreadServiceTierMode"));
     assert!(script.contains("codexServiceTierRequestOverride"));
     assert!(script.contains("codexServiceTierSupportedFastModels"));
+    assert!(script.contains("codexServiceTierSupportedFastModelPrefixes"));
     assert!(script.contains("\"gpt-5.4\""));
     assert!(script.contains("\"gpt-5.5\""));
+    assert!(script.contains("\"gpt-5.6\""));
+    assert!(script.contains("\"gpt-5.6-sol\""));
+    assert!(script.contains("\"gpt-5.6-terra\""));
+    assert!(script.contains("\"gpt-5.6-luna\""));
+    assert!(script.contains("codexServiceTierBuiltInFastSupported"));
     assert!(script.contains("codexServiceTierFastSupportedForModel"));
     assert!(script.contains("codexServiceTierModelForRequest"));
     assert!(script.contains("codexServiceTierMaybeLoadModelCatalog"));
@@ -619,6 +617,19 @@ fn injection_script_exposes_fast_service_tier_control() {
 }
 
 #[test]
+fn injection_script_clips_fast_composer_measurement_overflow() {
+    let script = assets::injection_script(45221);
+
+    assert!(script.contains("codex-elves-service-tier-composer-surface"));
+    assert!(script.contains("overflow: clip !important;"));
+    assert!(script.contains("codexServiceTierComposerSurfaces"));
+    assert!(script.contains("codexServiceTierHiddenMeasurementOverflows"));
+    assert!(script.contains("syncCodexServiceTierComposerOverflowGuard"));
+    assert!(script.contains("style.position === \"absolute\""));
+    assert!(script.contains("style.visibility === \"hidden\""));
+}
+
+#[test]
 fn injection_script_prompts_for_markdown_export_path_when_supported() {
     let script = assets::injection_script(45221);
 
@@ -659,6 +670,25 @@ fn injection_script_applies_fast_service_tier_contract() {
     );
 
     assert_eq!(cases["startConversation"]["serviceTier"], "priority");
+
+    for model in [
+        "gpt-5.6",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "openai/gpt-5.6-terra",
+        "gpt-5.6-sol-2026-07-09",
+    ] {
+        assert_eq!(
+            cases["gpt56Fast"][model]["service_tier"], "priority",
+            "{model} 应启用 Fast"
+        );
+        assert_eq!(
+            cases["gpt56Fast"][model]["serviceTier"], "priority",
+            "{model} 应同步 serviceTier"
+        );
+    }
+    assert_eq!(cases["gpt56EmptyCatalogFast"]["service_tier"], "priority");
 
     // catalog 驱动：白名单之外但 catalog 标记 supports_fast 的模型也能注入 priority
     assert_eq!(cases["catalogDrivenFast"]["service_tier"], "priority");
@@ -812,6 +842,38 @@ const startConversation = api.requestOverride({{
   model: "gpt-5.5",
 }});
 
+const gpt56Fast = {{}};
+for (const model of [
+  "gpt-5.6",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "openai/gpt-5.6-terra",
+  "gpt-5.6-sol-2026-07-09",
+]) {{
+  api.setModelCatalog({{ status: "ok", model, default_model: model, models: [model] }});
+  api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
+  gpt56Fast[model] = api.applyServiceTierOverride("turn/start", {{
+    threadId: "thread-12345678",
+    model,
+    service_tier: null,
+  }}, "");
+}}
+
+api.setModelCatalog({{
+  status: "ok",
+  model: "gpt-5.6-luna",
+  default_model: "gpt-5.6-luna",
+  models: ["gpt-5.6-luna"],
+  model_entries: [{{ slug: "gpt-5.6-luna", service_tiers: [] }}],
+}});
+api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
+const gpt56EmptyCatalogFast = api.applyServiceTierOverride("turn/start", {{
+  threadId: "thread-12345678",
+  model: "gpt-5.6-luna",
+  service_tier: null,
+}}, "");
+
 // catalog 驱动：内置白名单之外的模型，但 catalog 标记 supports_fast=true 也应支持
 api.setModelCatalog({{
   status: "ok",
@@ -827,18 +889,18 @@ const catalogDrivenFast = api.applyServiceTierOverride("turn/start", {{
   service_tier: null,
 }}, "");
 
-// catalog 明确标记不支持（supports_fast=false）时，即使名字像 gpt-5.4 也应被阻断
+// catalog 明确标记不支持（supports_fast=false）时，即使属于 GPT-5.6 系列也应被阻断
 api.setModelCatalog({{
   status: "ok",
-  model: "gpt-5.4",
-  default_model: "gpt-5.4",
-  models: ["gpt-5.4"],
-  model_entries: [{{ slug: "gpt-5.4", supports_fast: false, service_tiers: [] }}],
+  model: "gpt-5.6-terra",
+  default_model: "gpt-5.6-terra",
+  models: ["gpt-5.6-terra"],
+  model_entries: [{{ slug: "gpt-5.6-terra", supports_fast: false, service_tiers: [] }}],
 }});
 api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
 const catalogDrivenBlocked = api.applyServiceTierOverride("turn/start", {{
   threadId: "thread-12345678",
-  model: "gpt-5.4",
+  model: "gpt-5.6-terra",
   service_tier: "priority",
 }}, "");
 
@@ -911,6 +973,8 @@ process.stdout.write(JSON.stringify({{
   turnWithoutModelDiagnosticModel,
   customInheritUnsupported,
   startConversation,
+  gpt56Fast,
+  gpt56EmptyCatalogFast,
   catalogDrivenFast,
   catalogDrivenBlocked,
   patchedCreateRequest,
@@ -1170,6 +1234,71 @@ fn pick_page_target_prefers_codex_title_or_url() {
 }
 
 #[test]
+fn pick_page_target_accepts_renamed_chatgpt_shell() {
+    let targets = vec![
+        target(
+            "first",
+            "page",
+            "Other",
+            "https://example.test",
+            Some("ws://first"),
+        ),
+        target(
+            "chatgpt",
+            "page",
+            "ChatGPT",
+            "app://-/index.html",
+            Some("ws://chatgpt"),
+        ),
+    ];
+
+    let picked = pick_injectable_codex_page_target(&targets)
+        .expect("renamed ChatGPT shell should be selected");
+
+    assert_eq!(picked.id, "chatgpt");
+}
+
+#[test]
+fn pick_page_target_accepts_app_shell_when_title_changes() {
+    let targets = vec![target(
+        "app-shell",
+        "page",
+        "OpenAI",
+        "app://-/index.html",
+        Some("ws://app-shell"),
+    )];
+
+    let picked = pick_injectable_codex_page_target(&targets).expect("app shell should be selected");
+
+    assert_eq!(picked.id, "app-shell");
+}
+
+#[test]
+fn pick_page_target_prefers_explicit_workspace_over_generic_app_shell() {
+    let targets = vec![
+        target(
+            "generic-shell",
+            "page",
+            "OpenAI",
+            "app://-/background.html",
+            Some("ws://generic-shell"),
+        ),
+        target(
+            "workspace",
+            "page",
+            "Codex",
+            "app://-/index.html",
+            Some("ws://workspace"),
+        ),
+    ];
+
+    let picked =
+        pick_injectable_codex_page_target(&targets).expect("explicit workspace target should win");
+
+    assert_eq!(picked.id, "workspace");
+}
+
+#[test]
 fn pick_page_target_leniently_falls_back_to_first_injectable_page() {
     let targets = vec![
         target(
@@ -1247,7 +1376,7 @@ fn pick_injectable_codex_page_target_rejects_non_codex_pages() {
     assert!(
         error
             .to_string()
-            .contains("No injectable Codex page target found")
+            .contains("No injectable ChatGPT/Codex page target found")
     );
 }
 
@@ -1261,7 +1390,7 @@ fn pick_injectable_codex_page_target_requires_websocket() {
     assert!(
         error
             .to_string()
-            .contains("No injectable Codex page target found")
+            .contains("No injectable ChatGPT/Codex page target found")
     );
 }
 

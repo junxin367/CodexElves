@@ -117,7 +117,8 @@ fn log_launcher_guard_fallback(fallback_lock_path: &Path) {
 }
 
 fn should_recover_stale_launcher(debug_port: u16) -> bool {
-    let has_codex_process = !codex_elves_core::watcher::find_codex_processes().is_empty();
+    let codex_process_ids = codex_elves_core::watcher::find_codex_processes();
+    let has_codex_process = !codex_process_ids.is_empty();
     let cdp_listening = codex_elves_core::watcher::cdp_listening(debug_port);
     let recover =
         codex_elves_core::watcher::should_recover_stale_launcher(has_codex_process, cdp_listening);
@@ -126,6 +127,7 @@ fn should_recover_stale_launcher(debug_port: u16) -> bool {
         json!({
             "debug_port": debug_port,
             "has_codex_process": has_codex_process,
+            "process_ids": codex_process_ids,
             "cdp_listening": cdp_listening,
             "recover": recover
         }),
@@ -719,7 +721,7 @@ async fn inject_with_context(
             }
         }
     }
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Codex injection failed")))
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("ChatGPT/Codex injection failed")))
 }
 
 async fn try_inject_with_context(

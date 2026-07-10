@@ -186,7 +186,6 @@ type BackendSettings = {
   codexAppUpstreamWorktreeCreate: boolean;
   codexAppNativeMenuPlacement: boolean;
   codexAppServiceTierControls: boolean;
-  codexAppFlatModelMenu: boolean;
   codexAppImageOverlayEnabled: boolean;
   codexAppImageOverlayPath: string;
   codexAppImageOverlayOpacity: number;
@@ -774,7 +773,6 @@ const defaultSettings: BackendSettings = {
   codexAppUpstreamWorktreeCreate: false,
   codexAppNativeMenuPlacement: true,
   codexAppServiceTierControls: false,
-  codexAppFlatModelMenu: false,
   codexAppImageOverlayEnabled: false,
   codexAppImageOverlayPath: "",
   codexAppImageOverlayOpacity: 35,
@@ -1437,7 +1435,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
     case "startup_options":
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
-      return Promise.resolve(browserPreviewResult({ currentVersion: "0.2.3", updateAvailable: false }) as T);
+      return Promise.resolve(browserPreviewResult({ currentVersion: "0.2.4", updateAvailable: false }) as T);
     case "load_overview":
       return Promise.resolve(browserPreviewResult({
         codex_app: { status: "found", path: settings.codexAppPath },
@@ -1452,7 +1450,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.2.3",
+        current_version: "0.2.4",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -1766,7 +1764,7 @@ export function App() {
       const prev = prevLaunchStatusRef.current;
       const current = result.latest_launch?.status;
       if (prev && prev === "running" && current && (current === "stopped" || current === "failed" || current === "crashed")) {
-        showNotice("Codex 意外停止", `进程状态：${current}。是否要重新启动？`, "failed");
+        showNotice("ChatGPT/Codex 意外停止", `进程状态：${current}。是否要重新启动？`, "failed");
       }
       prevLaunchStatusRef.current = current ?? null;
       setOverview(result);
@@ -2162,7 +2160,7 @@ export function App() {
   const restart = async () => {
     const result = await launchCommand("restart_codex_elves");
     if (result) {
-      showNotice("重启 CodexElves", result.message, result.status);
+      showNotice("重启 Codex", result.message, result.status);
       await refreshOverview(true);
       await refreshLocalProxyStatus(true);
     }
@@ -2905,25 +2903,25 @@ export function App() {
         try {
           selected = await open(
             mode === "folder"
-              ? { directory: true, multiple: false, title: "选择 Codex 应用目录" }
+              ? { directory: true, multiple: false, title: "选择 ChatGPT/Codex 应用目录" }
               : {
                   directory: false,
                   multiple: false,
-                  title: "选择 Codex.exe 或 Codex.app",
-                  filters: [{ name: "Codex 应用", extensions: ["exe", "app"] }],
+                  title: "选择 ChatGPT.exe、Codex.exe 或 macOS 应用",
+                  filters: [{ name: "ChatGPT/Codex 应用", extensions: ["exe", "app"] }],
                 },
           );
         } catch (error) {
           // Surface plugin failures (e.g. missing capability permission) so the
           // buttons no longer appear unresponsive — see #345.
           const message = error instanceof Error ? error.message : String(error);
-          showNotice("Codex 应用路径", `打开选择器失败：${message}`, "failed");
+          showNotice("ChatGPT/Codex 应用路径", `打开选择器失败：${message}`, "failed");
           return;
         }
         if (typeof selected === "string" && selected.trim()) {
           const result = await saveCodexAppPath(selected.trim());
           if (result) {
-            showNotice("Codex 应用路径", "应用路径已保存，之后启动会自动复用。", result.status);
+            showNotice("ChatGPT/Codex 应用路径", "应用路径已保存，之后启动会自动复用。", result.status);
           }
         }
       },
@@ -2934,7 +2932,7 @@ export function App() {
           setSettings(result);
           setSettingsForm(normalizeSettings(result.settings));
           setLaunchForm((current) => ({ ...current, appPath: "" }));
-          showNotice("Codex 应用路径", "已清除保存路径，后续启动会回到自动探测。", result.status);
+          showNotice("ChatGPT/Codex 应用路径", "已清除保存路径，后续启动会回到自动探测。", result.status);
           await refreshOverview(true);
         }
       },
@@ -2991,12 +2989,12 @@ export function App() {
       saveManualCodexAppPath: async () => {
         const appPath = launchForm.appPath.trim();
         if (!appPath) {
-          showNotice("Codex 应用路径", "请先填写或选择应用路径。", "failed");
+          showNotice("ChatGPT/Codex 应用路径", "请先填写或选择应用路径。", "failed");
           return;
         }
         const result = await saveCodexAppPath(appPath);
         if (result) {
-          showNotice("Codex 应用路径", "应用路径已保存，之后启动会自动复用。", result.status);
+          showNotice("ChatGPT/Codex 应用路径", "应用路径已保存，之后启动会自动复用。", result.status);
         }
       },
       syncProvidersNow,
@@ -3059,7 +3057,7 @@ export function App() {
         await refreshOverview(true);
         await refreshRelay(true);
         await refreshWatcher(true);
-        showNotice("检查完成", "已刷新 Codex 应用、入口和 Watcher 状态。", "ok");
+        showNotice("检查完成", "已刷新 ChatGPT/Codex 应用、入口和 Watcher 状态。", "ok");
       },
       installWatcher: () => watcherAction("install_watcher"),
       uninstallWatcher: () => watcherAction("uninstall_watcher"),
@@ -3132,9 +3130,9 @@ export function App() {
             >
               {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </Button>
-            <Button onClick={() => void actions.restart()} title="重启 CodexElves" variant="outline">
+            <Button onClick={() => void actions.restart()} title="重启 Codex" variant="outline">
               <Rocket className="h-4 w-4" />
-              重启 CodexElves
+              重启 Codex
             </Button>
             <Button onClick={() => void actions.refreshCurrent()} size="icon" title="刷新当前页面" variant="outline">
               <RefreshCw className="h-4 w-4" />
@@ -3386,8 +3384,8 @@ function OverviewScreen({
             <div className={`health-item ${overview?.codex_version ? "ok" : "needs-fix"}`}>
               {overview?.codex_version ? <CheckCircle2 className="h-4 w-4" /> : <Bell className="h-4 w-4" />}
               <div>
-                <strong>Codex 版本</strong>
-                <span>{overview?.codex_version ?? "未检测到 Codex 应用版本。"}</span>
+                <strong>ChatGPT/Codex 版本</strong>
+                <span>{overview?.codex_version ?? "未检测到 ChatGPT/Codex 应用版本。"}</span>
               </div>
               <Badge status={overview?.codex_version ? "ok" : "not_checked"} />
             </div>
@@ -3748,7 +3746,7 @@ function LocalProxyScreen({
               </>
             ) : (
               <div className="empty">
-                {entries.length ? "没有符合筛选条件的请求日志。" : "暂无代理请求日志。启动 Codex 后，经过本地代理的请求会记录在这里。"}
+                {entries.length ? "没有符合筛选条件的请求日志。" : "暂无代理请求日志。启动 ChatGPT/Codex 后，经过本地代理的请求会记录在这里。"}
               </div>
             )}
           </div>
@@ -4081,7 +4079,7 @@ function RelayScreen({
           actions={(
             <label
               className="relay-header-switch"
-              data-tooltip="开启后允许切换供应商，并在启动 Codex 时按当前供应商同步 config.toml / auth.json；需要本地代理或聚合供应商时也会随启动启用。关闭后只保存供应商列表，不写入 Codex live 配置、不启动本地代理。"
+              data-tooltip="开启后允许切换供应商，并在启动 ChatGPT/Codex 时按当前供应商同步 config.toml / auth.json；需要本地代理或聚合供应商时也会随启动启用。关闭后只保存供应商列表，不写入 Codex live 配置、不启动本地代理。"
             >
               <input
                 checked={normalized.relayProfilesEnabled}
@@ -4391,7 +4389,7 @@ function EnhanceScreen({
             />
             <span>
               <strong>启用 CodexElves 页面增强</strong>
-              <small>关闭后会停用删除、导出、项目移动、模型菜单、插件相关和菜单位置增强。</small>
+              <small>关闭后会停用删除、导出、项目移动、Fast 按钮、插件相关和菜单位置增强。</small>
             </span>
           </label>
           <label className="switch-row">
@@ -4402,7 +4400,7 @@ function EnhanceScreen({
             />
             <span>
               <strong>启用 Windows Computer Use Guard</strong>
-              <small>默认关闭；开启后启动 Codex 时会自动保留官方 Computer Use 插件所需的 config.toml、bundled 插件和 notify 配置。</small>
+              <small>默认关闭；开启后启动 ChatGPT/Codex 时会自动保留官方 Computer Use 插件所需的 config.toml、bundled 插件和 notify 配置。</small>
             </span>
           </label>
           <ModeSelector launchMode={form.launchMode} actions={actions} />
@@ -4416,8 +4414,7 @@ function EnhanceScreen({
             <FeatureToggle title="插件市场解锁" detail="API Key 模式下扩展插件市场请求，尽量显示完整插件列表；官方/混合模式通常不需要。" checked={form.codexAppPluginMarketplaceUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginMarketplaceUnlock", value)} />
             <FeatureToggle title="强制解锁入口" detail="恢复 1.1.9 的入口解锁方式，强制显示并启用插件入口。" checked={form.codexAppPluginEntryUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginEntryUnlock", value)} />
             <FeatureToggle title="插件列表全量展示" detail="进入插件页后自动连续展开“更多”，尽量一次显示完整插件列表。" checked={form.codexAppPluginAutoExpand} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginAutoExpand", value)} />
-            <FeatureToggle title="Fast 按钮" detail="显示服务模式切换按钮。Fast（service_tier=priority）仅 OpenAI 部分模型支持（如 gpt-5.4 / gpt-5.5）；Claude 等其他模型不支持，会按 Standard 发送。" checked={form.codexAppServiceTierControls} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppServiceTierControls", value)} />
-            <FeatureToggle title="模型选择优化" detail="进入会话页预加载模型列表，并把 hover 子菜单改成同一菜单里的单列选择。" checked={form.codexAppFlatModelMenu} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppFlatModelMenu", value)} />
+            <FeatureToggle title="Fast 按钮" detail="显示服务模式切换按钮。Fast（service_tier=priority）支持 gpt-5.4、gpt-5.5 和 GPT-5.6 系列；Claude 等其他模型不支持，会按 Standard 发送。" checked={form.codexAppServiceTierControls} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppServiceTierControls", value)} />
             <FeatureToggle title="会话删除" detail="在会话列表悬停显示删除按钮，并支持撤销。" checked={form.codexAppSessionDelete} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppSessionDelete", value)} />
             <FeatureToggle title="Markdown 导出" detail="在会话列表显示导出按钮，导出带时间戳的 Markdown。" checked={form.codexAppMarkdownExport} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppMarkdownExport", value)} />
             <FeatureToggle title="会话项目移动" detail="把会话移动到普通对话或其他本地项目。" checked={form.codexAppProjectMove} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppProjectMove", value)} />
@@ -4752,7 +4749,7 @@ function SessionsScreen({
           </div>
           <div className="hint-line session-delete-hint">
             <Info className="h-4 w-4" />
-            <span>删除会创建本地备份；如果 Codex App 正在使用该会话，建议先关闭对应会话窗口再操作。</span>
+            <span>删除会创建本地备份；如果 ChatGPT 的 Codex 工作区正在使用该会话，建议先关闭对应会话窗口再操作。</span>
           </div>
           <label className="switch-row">
             <input
@@ -4762,7 +4759,7 @@ function SessionsScreen({
             />
             <span>
               <strong>启动前自动修复历史会话</strong>
-              <small>开启后，通过 CodexElves 启动 Codex 前自动整理一次旧对话的归属标记。</small>
+              <small>开启后，通过 CodexElves 启动 ChatGPT/Codex 前自动整理一次旧对话的归属标记。</small>
             </span>
           </label>
           <Toolbar>
@@ -4869,10 +4866,10 @@ function MaintenanceScreen({
   return (
     <>
       <Panel>
-        <CardHead title="检查与修复" detail="检查入口、Codex 应用和 Watcher 状态" />
+        <CardHead title="检查与修复" detail="检查入口、ChatGPT/Codex 应用和 Watcher 状态" />
         <CardContent>
           <div className="status-table">
-            <StatusRow title="Codex 应用" status={overview?.codex_app.status} path={overview?.codex_app.path} />
+            <StatusRow title="ChatGPT/Codex 应用" status={overview?.codex_app.status} path={overview?.codex_app.path} />
             <StatusRow title="静默启动入口" status={overview?.silent_shortcut.status} path={overview?.silent_shortcut.path} />
             <StatusRow title="管理控制台入口" status={overview?.management_shortcut.status} path={overview?.management_shortcut.path} />
             <StatusRow title="Watcher 自动接管" status={watcher?.enabled ? "ok" : "disabled"} path={watcher?.disabled_flag} />
@@ -4910,7 +4907,7 @@ function MaintenanceScreen({
         </CardContent>
       </Panel>
       <Panel>
-        <CardHead title="Codex 应用路径" detail="免安装版或解包版只需要选择一次，之后静默启动会自动复用" />
+        <CardHead title="ChatGPT/Codex 应用路径" detail="免安装版或解包版只需要选择一次，之后静默启动会自动复用" />
         <CardContent>
           <div className="status-table">
             <StatusRow title="保存路径" status={savedCodexAppPath ? "ok" : "not_checked"} path={savedCodexAppPath || null} />
@@ -4919,13 +4916,13 @@ function MaintenanceScreen({
           <Field className="maintenance-saved-app-path" label="保存的应用路径">
             <Input
               value={settings?.settings.codexAppPath ?? ""}
-              placeholder="选择 Codex.exe、Codex.app、app 目录或解包目录"
+              placeholder="选择 ChatGPT.exe、Codex.exe、ChatGPT.app、Codex.app 或应用目录"
               readOnly
             />
           </Field>
           <Toolbar>
             <Button onClick={() => void actions.chooseCodexAppPath("folder")}>选择应用目录</Button>
-            <Button variant="secondary" onClick={() => void actions.chooseCodexAppPath("file")}>选择 Codex.exe</Button>
+            <Button variant="secondary" onClick={() => void actions.chooseCodexAppPath("file")}>选择应用程序</Button>
             <Button variant="secondary" onClick={() => void actions.clearCodexAppPath()}>清除保存路径</Button>
           </Toolbar>
         </CardContent>
@@ -4945,7 +4942,7 @@ function MaintenanceScreen({
             />
           </Field>
           <p className="field-hint codex-home-warning">
-            只覆盖 CodexElves 修改和生成文件的目录，不会改变 Codex 本体执行时自己读取的配置目录；修改后请重启 Codex 和 CodexElves。
+            只覆盖 CodexElves 修改和生成文件的目录，不会改变 Codex 运行时自己读取的配置目录；修改后请重启 ChatGPT/Codex 应用和 CodexElves。
           </p>
           <Toolbar>
             <Button onClick={() => void actions.saveCodexHomePath(form.codexHomePath)}>保存配置目录</Button>
@@ -5006,11 +5003,11 @@ function AboutScreen({
   return (
     <>
       <Panel>
-        <CardHead title="关于 CodexElves" detail="本地 Codex 增强、管理工具和安装包维护" />
+        <CardHead title="关于 CodexElves" detail="本地 ChatGPT/Codex 增强、管理工具和安装包维护" />
         <CardContent>
           <div className="metric-list">
             <Metric label="CodexElves 版本" value={overview?.current_version ?? update?.currentVersion ?? "-"} />
-            <Metric label="Codex 版本" value={overview?.codex_version ?? "未检测到"} />
+            <Metric label="ChatGPT/Codex 版本" value={overview?.codex_version ?? "未检测到"} />
             <Metric label="项目地址" value="github.com/junxin367/CodexElves" />
           </div>
           <Toolbar>
@@ -5148,7 +5145,7 @@ function SettingsScreen({
         </CardContent>
       </Panel>
       <Panel>
-        <CardHead title="Codex 启动参数" detail="启动 Codex App 时追加到默认 CDP 参数后。留空则保持默认启动行为。" />
+        <CardHead title="ChatGPT/Codex 启动参数" detail="启动桌面应用时追加到默认 CDP 参数后。留空则保持默认启动行为。" />
         <CardContent>
           <Field label="额外参数">
             <Textarea
@@ -5633,7 +5630,7 @@ function RelayProfileEditor({
           {showApiFields ? (
             <label
               className="inline-check local-proxy-toggle"
-              data-tooltip="启动 Codex 后会拉起本地协议代理；配合「GPT 推理续接」可解决 GPT 516 降智问题：推理被截断时自动续接，减少长任务中途降智。"
+              data-tooltip="启动 ChatGPT/Codex 后会拉起本地协议代理；配合「GPT 推理续接」可解决 GPT 516 降智问题：推理被截断时自动续接，减少长任务中途降智。"
             >
               <input
                 checked={profile.localProxyEnabled}
@@ -7868,7 +7865,7 @@ function CodexHomeRestartPromptDialog({
         <div className="modal-head">
           <div>
             <h2 id="codex-home-restart-title">配置目录覆盖已保存</h2>
-            <p>修改配置目录后需要重启 Codex 和 CodexElves，新的会话索引、插件和模型目录状态才会完整生效。</p>
+            <p>修改配置目录后需要重启 ChatGPT/Codex 应用和 CodexElves，新的会话索引、插件和模型目录状态才会完整生效。</p>
           </div>
           <button className="toast-close" disabled={active} onClick={onClose} type="button">×</button>
         </div>
@@ -7907,7 +7904,7 @@ function PluginCacheRefreshConfirmDialog({
         <div className="modal-head">
           <div>
             <h2 id="plugin-cache-refresh-title">确认强制刷新插件缓存</h2>
-            <p>将使用本地 marketplace source 重建该插件缓存目录，完成后请重启 Codex 和 CodexElves。</p>
+            <p>将使用本地 marketplace source 重建该插件缓存目录，完成后请重启 ChatGPT/Codex 应用和 CodexElves。</p>
           </div>
           <button className="toast-close" disabled={active} onClick={onCancel} type="button">×</button>
         </div>
@@ -7987,7 +7984,7 @@ function RemotePluginMarketplacePromptDialog({
         <div className="modal-head">
           <div>
             <h2>官方远端插件缓存未释放</h2>
-            <p>Product Design 等官方远端插件需要先释放并注册内置缓存，重启 Codex 后才会出现在插件搜索中。</p>
+            <p>Product Design 等官方远端插件需要先释放并注册内置缓存，重启 ChatGPT/Codex 应用后才会出现在插件搜索中。</p>
           </div>
           <button className="toast-close" disabled={progress.active} onClick={onClose} type="button">×</button>
         </div>
@@ -8894,10 +8891,10 @@ function isSuccessStatus(status?: Status) {
 function healthItems(overview: OverviewResult | null) {
   return [
     {
-      title: "Codex 应用",
+      title: "ChatGPT/Codex 应用",
       status: overview?.codex_app.status ?? "not_checked",
       ok: overview?.codex_app.status === "found",
-      detail: overview?.codex_app.path || "尚未检查 Codex 应用路径。",
+      detail: overview?.codex_app.path || "尚未检查 ChatGPT/Codex 应用路径。",
     },
     {
       title: "静默启动入口",

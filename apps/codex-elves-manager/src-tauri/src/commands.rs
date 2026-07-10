@@ -479,7 +479,10 @@ pub fn launch_codex_elves(request: LaunchRequest) -> CommandResult<Value> {
 pub fn restart_codex_elves(request: LaunchRequest) -> CommandResult<Value> {
     codex_elves_core::watcher::stop_launcher_processes_and_wait();
     codex_elves_core::watcher::stop_codex_processes_and_wait();
-    spawn_codex_elves_launch(request, "Codex 已请求重启，启动任务正在后台运行。")
+    spawn_codex_elves_launch(
+        request,
+        "ChatGPT/Codex 应用已请求重启，启动任务正在后台运行。",
+    )
 }
 
 fn spawn_codex_elves_launch(
@@ -1708,7 +1711,7 @@ pub fn force_refresh_plugin_cache(
         &request.plugin_id,
     ) {
         Ok(plugin) => ok(
-            "插件缓存已从本地 marketplace source 强制刷新；请重启 Codex 和 CodexElves 后生效。",
+            "插件缓存已从本地 marketplace source 强制刷新；请重启 ChatGPT/Codex 应用和 CodexElves 后生效。",
             PluginCacheRefreshPayload { plugin },
         ),
         Err(error) => failed(
@@ -2110,7 +2113,7 @@ pub fn remove_env_conflicts(
         Ok(result) => {
             let remaining = codex_elves_core::env_conflicts::detect_env_conflicts();
             ok(
-                "环境变量已按确认项删除；重新启动 Codex 后生效。",
+                "环境变量已按确认项删除；重新启动 ChatGPT/Codex 应用后生效。",
                 RemoveEnvConflictsPayload {
                     removed: result.removed,
                     backup_path: result.backup_path,

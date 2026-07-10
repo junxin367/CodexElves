@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use codex_elves_core::app_paths::{
     build_codex_executable, codex_app_version, find_latest_codex_app_dir,
-    find_latest_codex_app_dir_from_roots, find_macos_codex_app,
+    find_latest_codex_app_dir_from_roots, find_macos_codex_app, find_standalone_codex_app_dir_from,
     latest_appx_install_location_from_output, normalize_codex_app_path, packaged_app_user_model_id,
     resolve_codex_app_dir_with_saved, user_data_candidates_from,
 };
@@ -153,12 +153,59 @@ fn app_paths_find_macos_codex_app_prefers_first_search_root_and_known_names() {
 }
 
 #[test]
+fn app_paths_find_macos_codex_app_accepts_chatgpt_bundle_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("Applications");
+    let app = root.join("ChatGPT.app");
+    std::fs::create_dir_all(&app).unwrap();
+
+    assert_eq!(find_macos_codex_app(&[root]).unwrap(), app);
+}
+
+#[test]
+fn app_paths_find_macos_codex_app_prefers_chatgpt_across_search_roots() {
+    let temp = tempfile::tempdir().unwrap();
+    let system_root = temp.path().join("Applications");
+    let user_root = temp.path().join("Users/me/Applications");
+    let legacy_app = system_root.join("Codex.app");
+    let chatgpt_app = user_root.join("OpenAI ChatGPT.app");
+    std::fs::create_dir_all(&legacy_app).unwrap();
+    std::fs::create_dir_all(&chatgpt_app).unwrap();
+
+    assert_eq!(
+        find_macos_codex_app(&[system_root, user_root]).unwrap(),
+        chatgpt_app
+    );
+}
+
+#[test]
 fn app_paths_build_macos_bundle_executable() {
     let app = PathBuf::from("/Applications/OpenAI Codex.app");
 
     assert_eq!(
         build_codex_executable(&app),
         PathBuf::from("/Applications/OpenAI Codex.app/Contents/MacOS/Codex")
+    );
+}
+
+#[test]
+fn app_paths_build_macos_chatgpt_bundle_uses_plist_executable() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = temp.path().join("ChatGPT.app");
+    let contents = app.join("Contents");
+    std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+    std::fs::write(
+        contents.join("Info.plist"),
+        r#"<plist><dict>
+<key>CFBundleExecutable</key>
+<string>ChatGPT</string>
+</dict></plist>"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        build_codex_executable(&app),
+        app.join("Contents").join("MacOS").join("ChatGPT")
     );
 }
 
@@ -176,6 +223,73 @@ fn app_paths_normalizes_executable_and_package_paths() {
     );
     assert_eq!(
         normalize_codex_app_path(&portable).as_deref(),
+        Some(app.as_path())
+    );
+}
+
+#[test]
+fn app_paths_prefers_chatgpt_desktop_executable_and_avoids_bundled_cli() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = temp.path().join("app");
+    let resources = app.join("resources");
+    std::fs::create_dir_all(&resources).unwrap();
+    std::fs::write(app.join("ChatGPT.exe"), "").unwrap();
+    std::fs::write(app.join("Codex.exe"), "").unwrap();
+    let bundled_cli = resources.join("codex.exe");
+    std::fs::write(&bundled_cli, "").unwrap();
+
+    assert_eq!(build_codex_executable(&app), app.join("ChatGPT.exe"));
+    assert_eq!(
+        normalize_codex_app_path(&app.join("ChatGPT.exe")).as_deref(),
+        Some(app.as_path())
+    );
+    assert_eq!(
+        normalize_codex_app_path(&bundled_cli).as_deref(),
+        Some(app.as_path())
+    );
+}
+
+#[test]
+fn app_paths_migrates_saved_legacy_executable_to_chatgpt_sibling() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = temp.path().join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(app.join("ChatGPT.exe"), "").unwrap();
+
+    assert_eq!(
+        normalize_codex_app_path(&app.join("Codex.exe")).as_deref(),
+        Some(app.as_path())
+    );
+}
+
+#[test]
+fn app_paths_migrates_saved_legacy_macos_bundle_to_chatgpt_sibling() {
+    let temp = tempfile::tempdir().unwrap();
+    let chatgpt_app = temp.path().join("ChatGPT.app");
+    std::fs::create_dir_all(&chatgpt_app).unwrap();
+
+    assert_eq!(
+        normalize_codex_app_path(&temp.path().join("Codex.app")).as_deref(),
+        Some(chatgpt_app.as_path())
+    );
+}
+
+#[test]
+fn app_paths_detects_chatgpt_standalone_only_with_codex_runtime_marker() {
+    let temp = tempfile::tempdir().unwrap();
+    let local = temp.path().join("Local");
+    let classic = local.join("Programs").join("ChatGPT");
+    std::fs::create_dir_all(&classic).unwrap();
+    std::fs::write(classic.join("ChatGPT.exe"), "").unwrap();
+    assert_eq!(find_standalone_codex_app_dir_from(&local), None);
+
+    let app = local.join("Programs").join("OpenAI").join("ChatGPT");
+    std::fs::create_dir_all(app.join("resources")).unwrap();
+    std::fs::write(app.join("ChatGPT.exe"), "").unwrap();
+    std::fs::write(app.join("resources").join("codex.exe"), "").unwrap();
+
+    assert_eq!(
+        find_standalone_codex_app_dir_from(&local).as_deref(),
         Some(app.as_path())
     );
 }
@@ -204,6 +318,7 @@ fn launcher_builds_debug_arguments_and_commands() {
         ]
     );
     let command = build_codex_command(&app_dir, 9229, &[]);
+    assert!(command[0].ends_with("ChatGPT.exe"));
     assert_eq!(command[1], "--remote-debugging-port=9229");
     assert_eq!(command[2], "--remote-allow-origins=http://127.0.0.1:9229");
 }
@@ -774,6 +889,7 @@ async fn launch_lifecycle_runs_sync_before_launch_writes_success_and_shutdowns_o
     let hooks = FakeHooks::new(events.clone())
         .with_settings(BackendSettings {
             provider_sync_enabled: true,
+            computer_use_guard_enabled: false,
             ..BackendSettings::default()
         })
         .with_launch_result(CodexLaunch::Process {
@@ -864,6 +980,7 @@ async fn launch_lifecycle_keeps_js_injection_in_relay_mode() {
     let events = Arc::new(Mutex::new(Vec::<String>::new()));
     let hooks = FakeHooks::new(events.clone()).with_settings(BackendSettings {
         launch_mode: codex_elves_core::settings::LaunchMode::Relay,
+        computer_use_guard_enabled: false,
         ..BackendSettings::default()
     });
 
@@ -905,6 +1022,7 @@ async fn launch_lifecycle_skips_helper_and_injection_when_enhancements_disabled(
     let events = Arc::new(Mutex::new(Vec::<String>::new()));
     let hooks = FakeHooks::new(events.clone()).with_settings(BackendSettings {
         enhancements_enabled: false,
+        computer_use_guard_enabled: false,
         ..BackendSettings::default()
     });
 
@@ -978,7 +1096,7 @@ async fn launch_lifecycle_runs_computer_use_guard_when_enabled() {
 }
 
 #[tokio::test]
-async fn launch_lifecycle_skips_computer_use_guard_by_default() {
+async fn launch_lifecycle_skips_computer_use_guard_when_disabled() {
     let temp = tempfile::tempdir().unwrap();
     let app_dir = temp.path().join("Codex.app");
     std::fs::create_dir_all(&app_dir).unwrap();
@@ -1044,6 +1162,7 @@ async fn launch_lifecycle_skips_active_relay_profile_when_supplier_config_disabl
     let events = Arc::new(Mutex::new(Vec::<String>::new()));
     let hooks = FakeHooks::new(events.clone()).with_settings(BackendSettings {
         relay_profiles_enabled: false,
+        computer_use_guard_enabled: false,
         ..BackendSettings::default()
     });
 
@@ -1096,6 +1215,7 @@ experimental_bearer_token = "sk-test"
             ..RelayProfile::default()
         }],
         active_relay_id: "relay-a".to_string(),
+        computer_use_guard_enabled: false,
         ..BackendSettings::default()
     });
 
@@ -1468,7 +1588,10 @@ impl FakeHooks {
     fn new(events: Arc<Mutex<Vec<String>>>) -> Self {
         Self {
             events,
-            settings: BackendSettings::default(),
+            settings: BackendSettings {
+                computer_use_guard_enabled: false,
+                ..BackendSettings::default()
+            },
             launch_result: CodexLaunch::Process {
                 command: vec!["codex".to_string()],
                 wait_strategy: codex_elves_core::launcher::ProcessWaitStrategy::TrackedChild,
