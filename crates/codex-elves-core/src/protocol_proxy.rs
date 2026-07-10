@@ -18,6 +18,7 @@ pub const DEFAULT_PROTOCOL_PROXY_PORT: u16 = 45221;
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const UPSTREAM_MODELS_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(900);
+const MODEL_CAPACITY_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(2)];
 const THINK_OPEN_TAG: &str = "<think>";
 const THINK_CLOSE_TAG: &str = "</think>";
 const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
@@ -2065,6 +2066,110 @@ fn add_reasoning_tokens(total: &mut Option<u64>, reasoning_tokens: Option<u64>) 
     }
 }
 
+fn is_gpt_model(model: &str) -> bool {
+    model.trim().to_ascii_lowercase().starts_with("gpt")
+}
+
+fn responses_stream_has_retryable_model_capacity_error(sse_text: &str) -> bool {
+    let Some(response) = crate::continue_thinking::extract_terminal_response_object(sse_text)
+    else {
+        return false;
+    };
+    let error = response.get("error").unwrap_or(&response);
+    let code = error
+        .get("code")
+        .or_else(|| error.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(
+        code.as_str(),
+        "server_is_overloaded" | "model_overloaded" | "model_at_capacity"
+    ) {
+        return true;
+    }
+
+    let message = error
+        .get("message")
+        .or_else(|| error.get("detail"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    [
+        "selected model is at capacity",
+        "model is at capacity",
+        "model is currently overloaded",
+        "servers are currently overloaded",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+}
+
+async fn retry_model_capacity_responses_stream(
+    original_request: &Value,
+    settings: &crate::settings::BackendSettings,
+    original_user_agent: Option<&str>,
+    first_round_sse_text: String,
+) -> String {
+    let model = original_request
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !is_gpt_model(model)
+        || !responses_stream_has_retryable_model_capacity_error(&first_round_sse_text)
+    {
+        return first_round_sse_text;
+    }
+
+    let Ok(request_body) = serde_json::to_string(original_request) else {
+        return first_round_sse_text;
+    };
+    let mut current_sse_text = first_round_sse_text;
+
+    for (retry_index, delay) in MODEL_CAPACITY_RETRY_DELAYS.into_iter().enumerate() {
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "protocol_proxy.model_capacity_retry",
+            json!({
+                "model": model,
+                "attempt": retry_index + 1,
+                "maxRetries": MODEL_CAPACITY_RETRY_DELAYS.len(),
+                "delayMs": delay.as_millis()
+            }),
+        );
+        tokio::time::sleep(delay).await;
+
+        let upstream = match open_responses_proxy_request_with_settings_user_agent_and_timeout(
+            &request_body,
+            settings.clone(),
+            original_user_agent,
+            None,
+        )
+        .await
+        {
+            Ok(upstream) => upstream,
+            Err(_) => break,
+        };
+
+        if upstream.status_code == 429
+            || !upstream.is_success()
+            || !upstream.is_stream
+            || upstream.response_protocol != UpstreamResponseProtocol::Responses
+        {
+            break;
+        }
+
+        let Ok(body) = upstream.into_body_bytes().await else {
+            break;
+        };
+        current_sse_text = String::from_utf8_lossy(&body).into_owned();
+        if !responses_stream_has_retryable_model_capacity_error(&current_sse_text) {
+            return current_sse_text;
+        }
+    }
+
+    current_sse_text
+}
+
 /// GPT + Responses 直连协议下的"续思考"驱动。
 ///
 /// 入参为第一轮已完成的上游 SSE 文本（UTF-8）。若 reasoning_tokens 命中 518
@@ -2081,6 +2186,13 @@ pub async fn apply_continue_thinking_to_responses_stream(
     original_user_agent: Option<&str>,
     first_round_sse_text: String,
 ) -> ContinueThinkingResult {
+    let first_round_sse_text = retry_model_capacity_responses_stream(
+        original_request,
+        &settings,
+        original_user_agent,
+        first_round_sse_text,
+    )
+    .await;
     let model = original_request
         .get("model")
         .and_then(Value::as_str)
@@ -8542,4 +8654,49 @@ fn is_openai_o_series(model: &str) -> bool {
             .as_bytes()
             .get(1)
             .is_some_and(|byte| byte.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod model_capacity_retry_tests {
+    use super::responses_stream_has_retryable_model_capacity_error;
+
+    #[test]
+    fn detects_observed_responses_capacity_errors() {
+        let overloaded = r#"event: error
+data: {"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}
+
+event: response.failed
+data: {"type":"response.failed","response":{"error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}
+
+"#;
+        let at_capacity = r#"event: error
+data: {"type":"error","error":{"type":"service_unavailable_error","message":"Selected model is at capacity. Please try a different model."}}
+
+event: response.failed
+data: {"type":"response.failed","response":{"error":{"message":"Selected model is at capacity. Please try a different model."}}}
+
+"#;
+
+        assert!(responses_stream_has_retryable_model_capacity_error(
+            overloaded
+        ));
+        assert!(responses_stream_has_retryable_model_capacity_error(
+            at_capacity
+        ));
+    }
+
+    #[test]
+    fn excludes_rate_limit_errors() {
+        let rate_limited = r#"event: error
+data: {"type":"error","error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"Rate limit reached for this account."}}
+
+event: response.failed
+data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"Rate limit reached for this account."}}}
+
+"#;
+
+        assert!(!responses_stream_has_retryable_model_capacity_error(
+            rate_limited
+        ));
+    }
 }

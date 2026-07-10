@@ -735,6 +735,71 @@ data: [DONE]
 }
 
 #[tokio::test]
+async fn helper_retries_same_responses_request_when_model_is_overloaded() {
+    let _lock = launcher_settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
+    let overloaded = r#"event: error
+data: {"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later.","param":null},"sequence_number":2}
+
+event: response.failed
+data: {"type":"response.failed","response":{"id":"resp_overloaded","object":"response","status":"failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}
+
+"#;
+    let recovered = r#"event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_recovered","object":"response","status":"completed","model":"gpt-responses","output":[],"usage":{"input_tokens":10,"output_tokens":1}}}
+
+data: [DONE]
+
+"#;
+    let upstream = spawn_launcher_upstream_with_response_specs(vec![
+        (
+            "text/event-stream".to_string(),
+            overloaded.to_string(),
+            std::time::Duration::ZERO,
+        ),
+        (
+            "text/event-stream".to_string(),
+            recovered.to_string(),
+            std::time::Duration::ZERO,
+        ),
+    ]);
+    write_launcher_mixed_relay_settings(temp.path(), &upstream.base_url);
+
+    let hooks = DefaultLaunchHooks::default();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    hooks.start_helper(port).await.unwrap();
+
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .json(&serde_json::json!({
+            "model": "gpt-responses",
+            "input": "retry the same model",
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body = response.text().await.unwrap();
+    hooks.shutdown_helper(port).await;
+    let requests = upstream.finish_all();
+
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].path, "/v1/responses");
+    assert_eq!(requests[1].path, "/v1/responses");
+    assert_eq!(requests[0].body, requests[1].body);
+    assert!(body.contains("resp_recovered"));
+    assert!(!body.contains("server_is_overloaded"));
+}
+
+#[tokio::test]
 async fn helper_defers_high_reasoning_stream_header_wait_for_chat_completions_models() {
     let _lock = launcher_settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
