@@ -1435,7 +1435,7 @@
 
   function codexServiceTierFastUnsupportedMessage(modelName = codexServiceTierCurrentModelName()) {
     const modelText = modelName ? `当前模型 ${modelName} 不支持` : "当前模型未读取";
-    return `Fast 仅 OpenAI 部分模型支持（${codexServiceTierFastModelListLabel()}），Claude 等其他模型不支持；${modelText}`;
+    return `Fast 仅 支持 gpt-5.4及以上模型， ${modelText}`;
   }
 
   function codexServiceTierMaybeLoadModelCatalog(force = false) {
@@ -3871,7 +3871,11 @@
   function modelReasoningEffortsForModel(modelName) {
     const efforts = modelReasoningEfforts();
     const lower = String(modelName || "").toLowerCase();
-    if (lower.includes("gpt-5.6")) {
+    const slug = lower.split("/").filter(Boolean).pop() || lower;
+    if (slug === "gpt-5.6-sol" || slug.startsWith("gpt-5.6-sol-")) {
+      efforts.push({ reasoningEffort: "max", description: "max effort" });
+      efforts.push({ reasoningEffort: "ultra", description: "Maximum reasoning with automatic task delegation" });
+    } else if (lower.includes("gpt-5.6")) {
       efforts.push({ reasoningEffort: "max", description: "max effort" });
     }
     return efforts;

@@ -1421,17 +1421,42 @@ fn deepseek_reasoning_efforts_match_official_levels() {
 }
 
 #[test]
-fn gpt56_reasoning_efforts_include_max() {
+fn gpt56_sol_reasoning_efforts_include_ultra_only_for_sol() {
+    let sol_efforts = vec!["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+    for model in [
+        "gpt-5.6-sol",
+        "openai/gpt-5.6-sol",
+        "gpt-5.6-sol-2026-07-09",
+    ] {
+        assert_eq!(
+            supported_reasoning_efforts_for_model(model, UpstreamResponseProtocol::Responses),
+            sol_efforts,
+            "{model} 应支持 ultra"
+        );
+    }
+
+    let standard_efforts = vec!["minimal", "low", "medium", "high", "xhigh", "max"];
+    for model in [
+        "gpt-5.6",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna-2026-07-09",
+        "openai/gpt-5.6-custom",
+    ] {
+        assert_eq!(
+            supported_reasoning_efforts_for_model(model, UpstreamResponseProtocol::Responses),
+            standard_efforts,
+            "{model} 不应支持 ultra"
+        );
+    }
+
     assert_eq!(
-        supported_reasoning_efforts_for_model("gpt-5.6", UpstreamResponseProtocol::Responses,),
-        vec!["minimal", "low", "medium", "high", "xhigh", "max"]
-    );
-    assert_eq!(
-        supported_reasoning_efforts_for_model(
-            "openai/gpt-5.6-custom",
-            UpstreamResponseProtocol::ChatCompletions,
-        ),
-        vec!["minimal", "low", "medium", "high", "xhigh", "max"]
+        responses_to_chat_completions(json!({
+            "model": "gpt-5.6-sol",
+            "reasoning": { "effort": "ultra" },
+            "input": "hi"
+        }))
+        .unwrap()["reasoning_effort"],
+        "ultra"
     );
 }
 

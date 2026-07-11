@@ -2506,6 +2506,7 @@ fn reasoning_effort_description(effort: &str) -> &'static str {
         "high" => "High reasoning",
         "xhigh" => "Extra high reasoning",
         "max" => "Max reasoning",
+        "ultra" => "Maximum reasoning with automatic task delegation",
         _ => "Reasoning",
     }
 }
@@ -2521,6 +2522,7 @@ pub(crate) fn catalog_reasoning_effort(config_text: &str) -> String {
         "high" => "high".to_string(),
         "xhigh" => "xhigh".to_string(),
         "max" => "max".to_string(),
+        "ultra" => "ultra".to_string(),
         _ => "medium".to_string(),
     }
 }
@@ -3598,6 +3600,23 @@ mod tests {
 
         assert!(packaged_model_catalog_entry("gpt-5.6-custom").is_none());
         assert!(packaged_model_catalog_entry("qwen3-coder").is_none());
+
+        let sol = packaged_model_catalog_entry("gpt-5.6-sol").unwrap();
+        assert!(
+            sol["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|level| level.get("effort").and_then(Value::as_str) == Some("ultra"))
+        );
+        let terra = packaged_model_catalog_entry("gpt-5.6-terra").unwrap();
+        assert!(
+            !terra["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|level| level.get("effort").and_then(Value::as_str) == Some("ultra"))
+        );
     }
 
     #[test]
@@ -3798,11 +3817,23 @@ mod tests {
                     context_window: String::new(),
                     protocol: RelayProtocol::Responses,
                 },
+                crate::settings::RelayModelMapping {
+                    request_model: "openai/gpt-5.6-sol-2026-07-09".to_string(),
+                    context_window: String::new(),
+                    protocol: RelayProtocol::Responses,
+                },
+                crate::settings::RelayModelMapping {
+                    request_model: "gpt-5.6-luna".to_string(),
+                    context_window: String::new(),
+                    protocol: RelayProtocol::Responses,
+                },
             ],
             ..RelayProfile::default()
         };
         let rows = relay_profile_catalog_rows(&profile);
-        let catalog = generated_model_catalog_json(&profile, "", rows).unwrap();
+        let catalog =
+            generated_model_catalog_json(&profile, "model_reasoning_effort = \"ultra\"", rows)
+                .unwrap();
         let models = catalog.get("models").and_then(Value::as_array).unwrap();
 
         let gpt54 = models
@@ -3826,6 +3857,51 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|level| level.get("effort").and_then(Value::as_str) == Some("max"))
+        );
+        assert!(
+            !gpt56["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|level| level.get("effort").and_then(Value::as_str) == Some("ultra"))
+        );
+        assert_eq!(gpt56["default_reasoning_level"], "high");
+
+        let sol = models
+            .iter()
+            .find(|model| {
+                model.get("slug").and_then(Value::as_str) == Some("openai/gpt-5.6-sol-2026-07-09")
+            })
+            .expect("应存在 GPT-5.6 Sol 快照模型");
+        assert_eq!(sol["context_window"], 372_000);
+        assert_eq!(sol["default_reasoning_level"], "ultra");
+        assert!(
+            sol["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|level| {
+                    level.get("effort").and_then(Value::as_str) == Some("ultra")
+                        && level.get("description").and_then(Value::as_str)
+                            == Some("Maximum reasoning with automatic task delegation")
+                })
+        );
+
+        let luna = models
+            .iter()
+            .find(|model| model.get("slug").and_then(Value::as_str) == Some("gpt-5.6-luna"))
+            .expect("应存在 GPT-5.6 Luna");
+        assert_eq!(luna["default_reasoning_level"], "high");
+        assert!(
+            !luna["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|level| level.get("effort").and_then(Value::as_str) == Some("ultra"))
+        );
+        assert_eq!(
+            catalog_reasoning_effort("model_reasoning_effort = \"ultra\""),
+            "ultra"
         );
     }
 

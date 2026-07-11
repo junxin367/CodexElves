@@ -39,7 +39,8 @@ const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
 const ERROR_BODY_PREVIEW_LIMIT: usize = 1024;
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_DEFAULT_REASONING_EFFORT: &str = "high";
-const REASONING_EFFORT_ORDER: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
+const REASONING_EFFORT_ORDER: &[&str] =
+    &["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 static PROTOCOL_PROXY_DIAGNOSTIC_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn next_protocol_proxy_diagnostic_id() -> String {
@@ -8449,6 +8450,9 @@ pub fn supported_reasoning_efforts_for_model(
         return levels(&["low", "medium", "high"]);
     }
 
+    if is_gpt56_sol_model(&model) {
+        return levels(&["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+    }
     if model.contains("gpt-5.6") {
         return levels(&["minimal", "low", "medium", "high", "xhigh", "max"]);
     }
@@ -8487,6 +8491,16 @@ fn levels(values: &[&'static str]) -> Vec<&'static str> {
     values.to_vec()
 }
 
+fn is_gpt56_sol_model(model: &str) -> bool {
+    let normalized = model.trim().to_ascii_lowercase();
+    let slug = normalized
+        .rsplit('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(normalized.as_str());
+    slug == "gpt-5.6-sol" || slug.starts_with("gpt-5.6-sol-")
+}
+
 fn clamp_reasoning_effort_for_model(
     effort: &str,
     model: &str,
@@ -8511,6 +8525,7 @@ fn normalize_reasoning_effort(effort: &str) -> Option<&'static str> {
         "high" => Some("high"),
         "xhigh" => Some("xhigh"),
         "max" => Some("max"),
+        "ultra" => Some("ultra"),
         _ => None,
     }
 }
