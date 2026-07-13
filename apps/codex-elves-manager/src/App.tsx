@@ -1364,12 +1364,12 @@ function browserPreviewCodexRadar(): Omit<CodexRadarResult, "status" | "message"
   ];
   const latest = recentDays[recentDays.length - 1];
   return {
-    sourceUrl: "https://codexradar.com/current.json",
+    sourceUrl: "https://codexradar.com/",
     cacheStatus: "refresh",
     cachedUntilMs: Date.now() + (25 * 60 * 1000),
     snapshot: {
-      schemaVersion: "2.0",
-      monitoredAt: "2026-06-24T04:52:00.084111+08:00",
+      schemaVersion: "html-scrape",
+      monitoredAt: "6月24日12:52更新",
       timezone: "Asia/Shanghai",
       links: { html: "https://codexradar.com/", rss: "https://codexradar.com/feed.xml" },
       modelIq: {
@@ -1435,7 +1435,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
     case "startup_options":
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
-      return Promise.resolve(browserPreviewResult({ currentVersion: "0.2.6", updateAvailable: false }) as T);
+      return Promise.resolve(browserPreviewResult({ currentVersion: "0.2.7", updateAvailable: false }) as T);
     case "load_overview":
       return Promise.resolve(browserPreviewResult({
         codex_app: { status: "found", path: settings.codexAppPath },
@@ -1450,7 +1450,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.2.6",
+        current_version: "0.2.7",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -3695,7 +3695,7 @@ function LocalProxyScreen({
                       <strong>{entry.model || "未知模型"}</strong>
                       <small>{formatProtocolRoute(entry)}</small>
                     </span>
-                    <span className="proxy-log-time">{formatTime(entry.timestampMs)}</span>
+                    <span className="proxy-log-time">{formatRequestLogListTime(entry.timestampMs)}</span>
                     <span className="proxy-log-reasoning">
                       <strong>{entry.reasoningEffort || "无推理"}</strong>
                       <small className="proxy-log-reasoning-tokens">
@@ -4547,7 +4547,7 @@ function CodexRadarScreen({ radar, actions }: { radar: CodexRadarResult | null; 
       </Panel>
 
       <Panel>
-        <CardHead title="模型对比" detail={comparisons.length ? "来自 current.json 的 comparisons 字段" : "暂无对比模型"} />
+        <CardHead title="模型对比" detail={comparisons.length ? "来自 codexradar.com 页面数据" : "暂无对比模型"} />
         <CardContent>
           {comparisons.length ? (
             <div className="radar-comparison-list">
@@ -9978,6 +9978,18 @@ function splitLogLines(text: string) {
 function formatTime(value: number) {
   if (!value) return "-";
   return new Date(value).toLocaleString("zh-CN");
+}
+
+function formatRequestLogListTime(value: number) {
+  if (!value) return "-";
+  return new Date(value).toLocaleString("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
 }
 
 function formatIsoTime(value: string) {

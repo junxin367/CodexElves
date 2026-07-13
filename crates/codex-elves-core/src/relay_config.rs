@@ -2276,11 +2276,6 @@ pub(crate) fn generated_model_catalog_json(
         let packaged_model = packaged_model_catalog_entry(&model);
         let (model_base_instructions, model_messages) =
             generated_catalog_prompt_fields(profile, &model, packaged_model.as_ref());
-        let use_responses_lite = packaged_model
-            .as_ref()
-            .and_then(|entry| entry.get("use_responses_lite"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
         let fast_capability = fast_service_tier_capability(&model);
         let protocol = upstream_response_protocol_for_relay(row.protocol);
         let supported_reasoning_levels =
@@ -2337,7 +2332,8 @@ pub(crate) fn generated_model_catalog_json(
             json!({ "mode": "tokens", "limit": 10000 }),
         );
         entry.insert("upgrade".to_string(), Value::Null);
-        entry.insert("use_responses_lite".to_string(), json!(use_responses_lite));
+        // 自定义供应商不具备 OpenAI Codex 后端的提示词注入能力，必须发送完整 instructions。
+        entry.insert("use_responses_lite".to_string(), json!(false));
         entry.insert(
             "default_reasoning_level".to_string(),
             json!(default_reasoning_level),
@@ -3924,7 +3920,7 @@ mod tests {
             model["model_messages"]["instructions_template"],
             "第一行\n第二行"
         );
-        assert_eq!(model["use_responses_lite"], true);
+        assert_eq!(model["use_responses_lite"], false);
     }
 
     #[test]
@@ -3966,8 +3962,8 @@ mod tests {
                 "{requested} 应使用官方 model_messages"
             );
             assert_eq!(
-                generated["use_responses_lite"], packaged["use_responses_lite"],
-                "{requested} 应继承官方 use_responses_lite"
+                generated["use_responses_lite"], false,
+                "{requested} 的自定义供应商目录应关闭 use_responses_lite"
             );
         }
     }

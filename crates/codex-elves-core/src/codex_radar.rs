@@ -1,55 +1,46 @@
 use anyhow::Context;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CODEX_RADAR_CURRENT_URL: &str = "https://codexradar.com/current.json";
 pub const CODEX_RADAR_HTML_URL: &str = "https://codexradar.com/";
 const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexRadarSnapshot {
-    #[serde(alias = "schema_version")]
     pub schema_version: Option<String>,
-    #[serde(alias = "monitored_at")]
     pub monitored_at: Option<String>,
     pub timezone: Option<String>,
     pub links: Option<CodexRadarLinks>,
-    #[serde(alias = "model_iq", default)]
     pub model_iq: CodexRadarModelIq,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexRadarLinks {
     pub html: Option<String>,
     pub rss: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexRadarModelIq {
-    #[serde(default)]
     pub latest: Option<CodexRadarIqRun>,
-    #[serde(alias = "recent_days", default)]
     pub recent_days: Vec<CodexRadarIqRun>,
-    #[serde(default)]
     pub comparisons: std::collections::BTreeMap<String, CodexRadarIqComparison>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexRadarIqComparison {
     pub label: String,
     pub model: Option<String>,
-    #[serde(alias = "reasoning_effort")]
     pub reasoning_effort: Option<String>,
     pub latest: Option<CodexRadarIqRun>,
-    #[serde(alias = "recent_days", default)]
     pub recent_days: Vec<CodexRadarIqRun>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexRadarIqRun {
     pub date: String,
@@ -57,27 +48,16 @@ pub struct CodexRadarIqRun {
     pub status: String,
     pub passed: u32,
     pub tasks: u32,
-    #[serde(default)]
     pub invalid: u32,
-    #[serde(alias = "total_tokens", default)]
     pub total_tokens: u64,
-    #[serde(alias = "input_tokens", default)]
     pub input_tokens: u64,
-    #[serde(alias = "cached_input_tokens", default)]
     pub cached_input_tokens: u64,
-    #[serde(alias = "output_tokens", default)]
     pub output_tokens: u64,
-    #[serde(alias = "wall_seconds", default)]
     pub wall_seconds: u64,
-    #[serde(alias = "wall_time_human", default)]
     pub wall_time_human: String,
-    #[serde(default)]
     pub model: Option<String>,
-    #[serde(alias = "reasoning_effort", default)]
     pub reasoning_effort: Option<String>,
-    #[serde(alias = "valid_tasks", default)]
     pub valid_tasks: Option<u32>,
-    #[serde(alias = "cost_usd", default)]
     pub cost_usd: Option<f64>,
 }
 
@@ -110,21 +90,15 @@ fn parse_snapshot_from_html(html: &str) -> anyhow::Result<CodexRadarSnapshot> {
         .collect::<BTreeMap<_, _>>();
     let mut first_chart_key = None;
     for (raw_key, run) in parse_chart_runs(html) {
-        let key = run
-            .reasoning_effort
-            .as_deref()
-            .and_then(|effort| run.model.as_deref().map(|model| model_key(model, effort)))
-            .unwrap_or_else(|| {
-                if raw_key.is_empty() {
-                    run.model
-                        .clone()
-                        .unwrap_or_else(|| "primary".to_string())
-                        .replace([' ', '.', '-'], "_")
-                        .to_ascii_lowercase()
-                } else {
-                    raw_key.clone()
-                }
-            });
+        let key = if raw_key.is_empty() {
+            run.model
+                .clone()
+                .unwrap_or_else(|| "primary".to_string())
+                .replace([' ', '.', '-'], "_")
+                .to_ascii_lowercase()
+        } else {
+            raw_key
+        };
         if first_chart_key.is_none() {
             first_chart_key = Some(key.clone());
         }
@@ -253,20 +227,40 @@ fn parse_chart_runs(html: &str) -> Vec<(String, CodexRadarIqRun)> {
         };
         let block = &rest[..end];
         if block.contains("model-iq-series-dot")
-            && let (Some(key), Some(title)) = (
-                extract_attr(block, "data-model-key"),
-                extract_tag_text(block, "title"),
-            )
-            && let Some(mut run) = parse_run_title(&title)
+            && let Some(key) = extract_attr(block, "data-model-key")
         {
-            if run.model.is_none() || run.reasoning_effort.is_none() {
-                apply_key_to_run(&key, &mut run);
+            let tooltip_key = extract_attr(block, "data-model-iq-tooltip-key");
+            if tooltip_key
+                .as_deref()
+                .is_some_and(|value| !value.starts_with("iq|"))
+            {
+                rest = &rest[end + "</circle>".len()..];
+                continue;
             }
-            runs.push((key, run));
+            let description =
+                extract_tag_text(block, "title").or_else(|| extract_attr(block, "aria-label"));
+            if let Some(mut run) = description.and_then(|value| parse_run_title(&value)) {
+                if let Some(date) = tooltip_key.as_deref().and_then(parse_tooltip_date) {
+                    run.date = date;
+                }
+                apply_key_to_run(&key, &mut run);
+                runs.push((key, run));
+            }
         }
         rest = &rest[end + "</circle>".len()..];
     }
     runs
+}
+
+fn parse_tooltip_date(value: &str) -> Option<String> {
+    let mut parts = value.split('|');
+    if parts.next()? != "iq" {
+        return None;
+    }
+    parts
+        .next()
+        .filter(|date| !date.is_empty())
+        .map(str::to_string)
 }
 
 fn normalize_recent_runs(runs: Vec<CodexRadarIqRun>) -> Vec<CodexRadarIqRun> {
@@ -364,25 +358,31 @@ fn parse_update_label(html: &str) -> Option<String> {
 }
 
 fn apply_key_to_run(key: &str, run: &mut CodexRadarIqRun) {
-    if run.model.is_none() {
-        run.model = model_from_key(key);
+    if let Some(model) = model_from_key(key) {
+        run.model = Some(model);
     }
-    if run.reasoning_effort.is_none() {
-        run.reasoning_effort = reasoning_effort_from_key(key);
+    if let Some(reasoning_effort) = reasoning_effort_from_key(key) {
+        run.reasoning_effort = Some(reasoning_effort);
     }
 }
 
 fn model_from_key(key: &str) -> Option<String> {
-    let mut parts = key.rsplitn(2, '_');
-    let _effort = parts.next()?;
-    let model_key = parts.next().unwrap_or_default();
+    let (model_key, _effort) = key.rsplit_once('_')?;
     if model_key.is_empty() {
         return None;
     }
-    if let Some(version) = model_key.strip_prefix("gpt_") {
+    if let Some(version_and_variant) = model_key.strip_prefix("gpt_") {
+        let (version, variant) = version_and_variant
+            .split_once('_')
+            .unwrap_or((version_and_variant, ""));
         if version.len() >= 2 && version.chars().all(|ch| ch.is_ascii_digit()) {
             let (major, minor) = version.split_at(1);
-            return Some(format!("gpt-{major}.{minor}"));
+            let mut model = format!("gpt-{major}.{minor}");
+            if !variant.is_empty() {
+                model.push('-');
+                model.push_str(&variant.replace('_', "-"));
+            }
+            return Some(model);
         }
     }
     Some(model_key.replace('_', "-"))
@@ -415,16 +415,6 @@ fn reasoning_effort_from_label(label: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn model_key(model: &str, reasoning_effort: &str) -> String {
-    let mut normalized = model.trim().to_ascii_lowercase();
-    if let Some(rest) = normalized.strip_prefix("gpt-") {
-        normalized = format!("gpt_{}", rest.replace('.', ""));
-    } else {
-        normalized = normalized.replace(['.', '-', ' '], "_");
-    }
-    format!("{}_{}", normalized, reasoning_effort.to_ascii_lowercase())
-}
-
 fn status_for_score(score: f64) -> &'static str {
     if score >= 100.0 {
         "green"
@@ -450,115 +440,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_deserializes_snake_case_recent_days_from_current_json() {
-        let snapshot: CodexRadarSnapshot = serde_json::from_str(
-            r#"{
-              "schema_version": "2.0",
-              "monitored_at": "2026-06-24T04:52:00.084111+08:00",
-              "model_iq": {
-                "latest": {
-                  "date": "2026-06-24-am",
-                  "score": 87.5,
-                  "status": "yellow",
-                  "passed": 7,
-                  "tasks": 12
-                },
-                "recent_days": [
-                  {
-                    "date": "2026-06-23",
-                    "score": 125.0,
-                    "status": "green",
-                    "passed": 10,
-                    "tasks": 12
-                  }
-                ],
-                "comparisons": {
-                  "gpt_55_high": {
-                    "label": "GPT-5.5 high",
-                    "model": "gpt-5.5",
-                    "reasoning_effort": "high",
-                    "latest": {
-                      "date": "2026-06-24-am",
-                      "score": 100.0,
-                      "status": "green",
-                      "passed": 8,
-                      "tasks": 12
-                    },
-                    "recent_days": [
-                      {
-                        "date": "2026-06-23",
-                        "score": 87.5,
-                        "status": "yellow",
-                        "passed": 7,
-                        "tasks": 12
-                      }
-                    ]
-                  }
-                }
-              }
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.model_iq.recent_days.len(), 1);
-        assert_eq!(snapshot.model_iq.recent_days[0].date, "2026-06-23");
-        let comparison = snapshot.model_iq.comparisons.get("gpt_55_high").unwrap();
-        assert_eq!(comparison.recent_days.len(), 1);
-        assert_eq!(comparison.recent_days[0].score, 87.5);
-    }
-
-    #[test]
     fn snapshot_serializes_recent_days_for_manager_camel_case_payload() {
-        let snapshot: CodexRadarSnapshot = serde_json::from_str(
-            r#"{
-              "model_iq": {
-                "latest": null,
-                "recent_days": [
-                  {
-                    "date": "2026-06-24-am",
-                    "score": 87.5,
-                    "status": "yellow",
-                    "passed": 7,
-                    "tasks": 12
-                  }
-                ],
-                "comparisons": {}
-              }
-            }"#,
-        )
-        .unwrap();
+        let snapshot = CodexRadarSnapshot {
+            schema_version: Some("html-scrape".to_string()),
+            monitored_at: Some("6月24日12:52更新".to_string()),
+            timezone: Some("Asia/Shanghai".to_string()),
+            links: None,
+            model_iq: CodexRadarModelIq {
+                latest: None,
+                recent_days: vec![CodexRadarIqRun {
+                    date: "2026-06-24-am".to_string(),
+                    score: 87.5,
+                    status: "yellow".to_string(),
+                    passed: 7,
+                    tasks: 12,
+                    invalid: 0,
+                    total_tokens: 0,
+                    input_tokens: 0,
+                    cached_input_tokens: 0,
+                    output_tokens: 0,
+                    wall_seconds: 0,
+                    wall_time_human: String::new(),
+                    model: Some("gpt-5.5".to_string()),
+                    reasoning_effort: Some("xhigh".to_string()),
+                    valid_tasks: Some(12),
+                    cost_usd: None,
+                }],
+                comparisons: BTreeMap::new(),
+            },
+        };
 
         let value = serde_json::to_value(snapshot).unwrap();
 
         assert_eq!(value["modelIq"]["recentDays"].as_array().unwrap().len(), 1);
         assert!(value["modelIq"].get("recent_days").is_none());
-    }
-
-    #[test]
-    fn snapshot_deserializes_public_summary_without_model_iq() {
-        let snapshot: CodexRadarSnapshot = serde_json::from_str(
-            r#"{
-              "schema_version": "2.0",
-              "service": "codex-reset-radar",
-              "type": "public_summary",
-              "monitored_at": "2026-06-30T09:17:16.847471+08:00",
-              "timezone": "Asia/Shanghai",
-              "links": {
-                "html": "https://codexradar.com/",
-                "rss": "https://codexradar.com/feed.xml",
-                "full_api": "https://codexradar.com/api/v1/current"
-              },
-              "api_access": {
-                "status": "public_summary"
-              }
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.schema_version.as_deref(), Some("2.0"));
-        assert!(snapshot.model_iq.latest.is_none());
-        assert!(snapshot.model_iq.recent_days.is_empty());
-        assert!(snapshot.model_iq.comparisons.is_empty());
     }
 
     #[test]
@@ -589,6 +504,47 @@ mod tests {
         assert_eq!(latest.wall_seconds, 6540);
         assert_eq!(latest.cost_usd, Some(31.05));
         assert!(snapshot.model_iq.comparisons.contains_key("gpt_55_xhigh"));
+    }
+
+    #[test]
+    fn snapshot_scrapes_current_aria_label_and_tooltip_key_markup() {
+        let snapshot = parse_snapshot_from_html(
+            r#"
+            <section class="model-iq">
+              <h2>降智雷达 <span>7月13日09:16更新</span></h2>
+              <div class="model-iq-score-chip model-iq-score-chip-primary" data-model-key="gpt_56_sol_max">
+                <span>Sol max</span>
+                <div class="model-iq-score-metrics"><strong>150.0</strong></div>
+              </div>
+              <svg>
+                <circle
+                  class="model-iq-series-dot"
+                  data-model-key="gpt_56_sol_max"
+                  data-model-iq-tooltip-key="iq|2026-07-13-am|150.000000"
+                  aria-label="7.13_am Sol max: IQ指数 150.0, 10/10, 费用 $34.94, 耗时 166分钟, cache命中率 95.6%"
+                ></circle>
+                <circle
+                  class="model-iq-series-dot"
+                  data-model-key="gpt_56_sol_max"
+                  data-model-iq-tooltip-key="cost|2026-07-13-am|34.940000"
+                  aria-label="7.13_am Sol max: IQ指数 150.0, 10/10, 费用 $34.94, 耗时 166分钟, cache命中率 95.6%"
+                ></circle>
+              </svg>
+            </section>
+            "#,
+        )
+        .unwrap();
+
+        let latest = snapshot.model_iq.latest.unwrap();
+        assert_eq!(snapshot.monitored_at.as_deref(), Some("7月13日09:16更新"));
+        assert_eq!(latest.date, "2026-07-13-am");
+        assert_eq!(latest.score, 150.0);
+        assert_eq!(latest.passed, 10);
+        assert_eq!(latest.tasks, 10);
+        assert_eq!(latest.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(latest.reasoning_effort.as_deref(), Some("max"));
+        assert_eq!(snapshot.model_iq.recent_days.len(), 1);
+        assert_eq!(snapshot.model_iq.comparisons.len(), 1);
     }
 
     #[test]
@@ -655,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn model_and_effort_fall_back_to_data_model_key_consistently() {
+    fn model_and_effort_use_data_model_key_consistently() {
         let mut run = CodexRadarIqRun {
             date: "6-29_pm".to_string(),
             score: 75.0,
@@ -669,16 +625,16 @@ mod tests {
             output_tokens: 0,
             wall_seconds: 0,
             wall_time_human: String::new(),
-            model: None,
-            reasoning_effort: None,
+            model: Some("Sol".to_string()),
+            reasoning_effort: Some("medium".to_string()),
             valid_tasks: Some(12),
             cost_usd: None,
         };
 
-        apply_key_to_run("gpt_55_xhigh", &mut run);
+        apply_key_to_run("gpt_56_sol_max", &mut run);
 
-        assert_eq!(run.model.as_deref(), Some("gpt-5.5"));
-        assert_eq!(run.reasoning_effort.as_deref(), Some("xhigh"));
+        assert_eq!(run.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(run.reasoning_effort.as_deref(), Some("max"));
     }
 
     #[test]

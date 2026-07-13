@@ -3775,7 +3775,18 @@
   let codexModelCatalogPromise = null;
   let codexModelWhitelistRefreshTimer = 0;
   let codexModelWhitelistRefreshUntil = 0;
+  let codexModelStatsigWaitUntil = 0;
+  let codexModelStatsigReady = false;
+  let codexModelStatsigWaitDiagnosticStarted = false;
+  let codexModelQueryInvalidationPromise = null;
+  let codexModelUiRefreshTimer = 0;
+  const codexModelUiRefreshSources = new Set();
+  const codexModelUnlockDiagnosticSources = new Set();
   const codexElvesModelListRequestIds = new Set();
+  let codexAppServerModelPatchPromise = null;
+  let codexAppServerModelPatchFailureCount = 0;
+  let codexAppServerModelPatchNextAttemptAt = 0;
+  let codexAppServerModelPatchFailureSignature = "";
 
   if (window.__CODEX_ELVES_TEST_SERVICE_TIER__) {
     window.__codexElvesServiceTierTest = {
@@ -3802,6 +3813,16 @@
       modelMatchesText: (slug, text) => codexServiceTierModelMatchesText(slug, text),
       patchModelArray: (models, allowEmpty = false) => patchModelArray(models, allowEmpty),
       patchModelContainer: (value) => patchModelContainer(value),
+      patchAppServerModelResult: (method, result) => patchAppServerModelResult(method, result),
+      appServerModelPatchBackoffMs: (failureCount) => {
+        const previousFailureCount = codexAppServerModelPatchFailureCount;
+        codexAppServerModelPatchFailureCount = failureCount;
+        try {
+          return codexAppServerModelPatchBackoffMs();
+        } finally {
+          codexAppServerModelPatchFailureCount = previousFailureCount;
+        }
+      },
       setServiceTierState: (state = {}) => {
         codexServiceTierState = { ...codexServiceTierState, ...state };
       },
@@ -3842,6 +3863,64 @@
     ]);
   }
 
+  function recordCodexModelUnlockPath(source, detail = {}) {
+    if (!source || codexModelUnlockDiagnosticSources.has(source)) return;
+    codexModelUnlockDiagnosticSources.add(source);
+    sendCodexElvesDiagnostic("model_unlock_path_applied", {
+      source,
+      modelCount: codexElvesModelNames().length,
+      ...detail,
+    });
+  }
+
+  function scheduleCodexModelUiRefresh(source, detail = {}) {
+    if (source) codexModelUiRefreshSources.add(source);
+    if (codexModelUiRefreshTimer) return;
+    codexModelUiRefreshTimer = window.setTimeout(() => {
+      codexModelUiRefreshTimer = 0;
+      const sources = Array.from(codexModelUiRefreshSources);
+      codexModelUiRefreshSources.clear();
+      window.dispatchEvent(new CustomEvent("codex-elves-model-catalog-updated", {
+        detail: {
+          sources,
+          modelCount: codexElvesModelNames().length,
+          ...detail,
+        },
+      }));
+      // Codex 的模型菜单可能已在注入前建立 React 状态。resize 会触发布局订阅重新渲染，
+      // 使已经修补的 Statsig / React 模型状态在首次打开菜单时即可生效。
+      window.dispatchEvent(new Event("resize"));
+    }, 0);
+  }
+
+  async function invalidateCodexModelQueryCache(source) {
+    if (codexModelQueryInvalidationPromise) return codexModelQueryInvalidationPromise;
+    codexModelQueryInvalidationPromise = Promise.resolve().then(async () => {
+      const dispatcher = codexServiceTierDispatcher || await findCodexServiceTierDispatcher();
+      if (!dispatcher || typeof dispatcher.dispatchMessage !== "function") {
+        sendCodexElvesDiagnostic("model_query_cache_invalidate_unavailable", { source });
+        return false;
+      }
+      codexServiceTierDispatcher = dispatcher;
+      dispatcher.dispatchMessage("query-cache-invalidate", {
+        queryKey: ["models", "list"],
+      });
+      recordCodexModelUnlockPath("model-query-cache");
+      scheduleCodexModelUiRefresh("model-query-cache", { source });
+      return true;
+    }).catch((error) => {
+      sendCodexElvesDiagnostic("model_query_cache_invalidate_failed", {
+        source,
+        errorName: error?.name || "",
+        errorMessage: error?.message || String(error),
+      });
+      return false;
+    }).finally(() => {
+      codexModelQueryInvalidationPromise = null;
+    });
+    return codexModelQueryInvalidationPromise;
+  }
+
   async function loadCodexModelCatalog(force = false) {
     if (!force && codexModelCatalogPromise) return codexModelCatalogPromise;
     if (!force && codexModelCatalogLoadedAt && Date.now() - codexModelCatalogLoadedAt < 10000) return codexModelCatalog;
@@ -3851,6 +3930,7 @@
         codexModelCatalogLoadedAt = Date.now();
         renderCodexElvesMenu();
         scheduleCodexModelWhitelistRefresh();
+        scheduleCodexModelUiRefresh("catalog-loaded");
         return codexModelCatalog;
       })
       .catch((error) => {
@@ -4218,8 +4298,13 @@
     try {
       config.value = nextValue;
     } catch {
-      return { ...config, value: nextValue };
+      const patched = { ...config, value: nextValue };
+      recordCodexModelUnlockPath("statsig", { availableModelCount: availableModels.length });
+      scheduleCodexModelUiRefresh("statsig");
+      return patched;
     }
+    recordCodexModelUnlockPath("statsig", { availableModelCount: availableModels.length });
+    scheduleCodexModelUiRefresh("statsig");
     return config;
   }
 
@@ -4232,6 +4317,8 @@
   }
 
   function patchStatsigModelWhitelist() {
+    const names = codexElvesModelNames();
+    let ready = false;
     statsigClients().forEach((client) => {
       if (typeof client.getDynamicConfig !== "function") return;
       if (!client.__codexElvesModelWhitelistPatched) {
@@ -4243,10 +4330,19 @@
         client.__codexElvesModelWhitelistPatched = true;
       }
       try {
-        patchStatsigModelDynamicConfig(client.getDynamicConfig("107580212", { disableExposureLog: true }));
+        const config = patchStatsigModelDynamicConfig(client.getDynamicConfig("107580212", { disableExposureLog: true }));
+        const availableModels = Array.isArray(config?.value?.available_models) ? config.value.available_models : [];
+        if (names.length > 0 && names.every((name) => availableModels.includes(name))) ready = true;
       } catch {
       }
     });
+    if (ready && !codexModelStatsigReady) {
+      codexModelStatsigReady = true;
+      recordCodexModelUnlockPath("statsig-ready");
+      scheduleCodexModelUiRefresh("statsig-ready");
+      void invalidateCodexModelQueryCache("statsig-ready");
+    }
+    return ready;
   }
 
   function patchObjectGraphForModels(root, visited, depth = 0) {
@@ -4324,6 +4420,10 @@
         if (patchObjectGraphForModels(node[key], visited)) changed = true;
       }
     }
+    if (changed) {
+      recordCodexModelUnlockPath("react-state");
+      scheduleCodexModelUiRefresh("react-state");
+    }
     return changed;
   }
 
@@ -4363,7 +4463,12 @@
     const requestId = message?.id != null ? String(message.id) : "";
     if (codexElvesModelListRequestIds.size > 0 && !codexElvesModelListRequestIds.has(requestId)) return false;
     codexElvesModelListRequestIds.delete(requestId);
-    return patchModelContainer(data) || patchModelContainer(message) || patchModelContainer(message?.result) || patchModelContainer(message?.result?.data);
+    const changed = patchModelContainer(data) || patchModelContainer(message) || patchModelContainer(message?.result) || patchModelContainer(message?.result?.data);
+    if (changed) {
+      recordCodexModelUnlockPath("model-list-message");
+      scheduleCodexModelUiRefresh("model-list-message");
+    }
+    return changed;
   }
 
   function appServerModelRequestMethod(method, params) {
@@ -4378,13 +4483,18 @@
   }
 
   function patchAppServerModelResult(method, result) {
-    if (method !== "list-models-for-host") return result;
+    if (method !== "list-models-for-host" && method !== "model/list") return result;
     try {
-      if (Array.isArray(result)) patchModelArray(result, true);
-      if (Array.isArray(result?.data)) patchModelArray(result.data, true);
-      if (Array.isArray(result?.models)) patchModelArray(result.models, true);
-      patchModelContainer(result);
-      patchObjectGraphForModels(result, new WeakSet(), 0);
+      let changed = false;
+      if (Array.isArray(result) && patchModelArray(result, true)) changed = true;
+      if (Array.isArray(result?.data) && patchModelArray(result.data, true)) changed = true;
+      if (Array.isArray(result?.models) && patchModelArray(result.models, true)) changed = true;
+      if (patchModelContainer(result)) changed = true;
+      if (patchObjectGraphForModels(result, new WeakSet(), 0)) changed = true;
+      if (changed) {
+        recordCodexModelUnlockPath("app-server");
+        scheduleCodexModelUiRefresh("app-server");
+      }
       sendCodexElvesDiagnostic("model_app_server_result_patched", {
         method,
         modelCount: Array.isArray(result?.data) ? result.data.length : Array.isArray(result?.models) ? result.models.length : Array.isArray(result) ? result.length : null,
@@ -4411,15 +4521,39 @@
     return true;
   }
 
-  function installAppServerModelRequestPatch() {
+  function patchAppServerModelRequestClientClass(clientClass) {
+    if (typeof clientClass !== "function") return false;
+    const prototype = clientClass.prototype;
+    if (!prototype || typeof prototype.sendRequest !== "function") return false;
+    if (prototype.__codexElvesModelRequestPatch === codexAppServerModelRequestPatchVersion) return true;
+    const originalSendRequest = prototype.__codexElvesModelOriginalSendRequest || prototype.sendRequest;
+    prototype.__codexElvesModelOriginalSendRequest = originalSendRequest;
+    prototype.sendRequest = async function codexElvesModelPatchedPrototypeSendRequest(method, params, options) {
+      const result = await originalSendRequest.call(this, method, params, options);
+      if (!codexElvesModelUnlockEnabled()) return result;
+      if (!codexElvesModelNames().length) await loadCodexModelCatalog();
+      return patchAppServerModelResult(appServerModelRequestMethod(String(method || ""), params), result);
+    };
+    prototype.__codexElvesModelRequestPatch = codexAppServerModelRequestPatchVersion;
+    return true;
+  }
+
+  function codexAppServerModelPatchBackoffMs() {
+    return Math.min(30000, 1000 * (2 ** Math.min(Math.max(codexAppServerModelPatchFailureCount - 1, 0), 5)));
+  }
+
+  function installAppServerModelRequestPatch(force = false) {
     if (window.__codexElvesAppServerModelRequestPatchInstalled === codexAppServerModelRequestPatchVersion) return;
+    if (codexAppServerModelPatchPromise) return codexAppServerModelPatchPromise;
+    if (!force && Date.now() < codexAppServerModelPatchNextAttemptAt) return null;
     const patch = async () => {
       try {
         const module = await loadCodexAppModule("app-server-manager-signals-");
-        const candidates = Object.values(module).filter((value) => value && typeof value === "object");
+        const candidates = Object.values(module).filter((value) => value && (typeof value === "object" || typeof value === "function"));
         let patchedCount = 0;
         for (const candidate of candidates) {
           if (patchAppServerModelRequestClient(candidate)) patchedCount += 1;
+          if (patchAppServerModelRequestClientClass(candidate)) patchedCount += 1;
           if (typeof candidate.sendRequest !== "function" && typeof candidate.get === "function") {
             try {
               if (patchAppServerModelRequestClient(candidate.get())) patchedCount += 1;
@@ -4429,24 +4563,50 @@
         }
         if (patchedCount > 0) {
           window.__codexElvesAppServerModelRequestPatchInstalled = codexAppServerModelRequestPatchVersion;
+          codexAppServerModelPatchFailureCount = 0;
+          codexAppServerModelPatchNextAttemptAt = 0;
+          codexAppServerModelPatchFailureSignature = "";
           sendCodexElvesDiagnostic("model_app_server_request_patch_installed", {
             candidateCount: candidates.length,
             patchedCount,
           });
         } else {
-          sendCodexElvesDiagnostic("model_app_server_request_patch_not_found", {
-            exportCount: Object.keys(module || {}).length,
-            candidateCount: candidates.length,
-          });
+          codexAppServerModelPatchFailureCount += 1;
+          const retryAfterMs = codexAppServerModelPatchBackoffMs();
+          codexAppServerModelPatchNextAttemptAt = Date.now() + retryAfterMs;
+          const exportCount = Object.keys(module || {}).length;
+          const failureSignature = `${exportCount}:${candidates.length}`;
+          if (codexAppServerModelPatchFailureSignature !== failureSignature) {
+            codexAppServerModelPatchFailureSignature = failureSignature;
+            sendCodexElvesDiagnostic("model_app_server_request_patch_not_found", {
+              exportCount,
+              candidateCount: candidates.length,
+              retryAfterMs,
+            });
+          }
         }
       } catch (error) {
-        sendCodexElvesDiagnostic("model_app_server_request_patch_failed", {
-          errorName: error?.name || "",
-          errorMessage: error?.message || String(error),
-        });
+        codexAppServerModelPatchFailureCount += 1;
+        const retryAfterMs = codexAppServerModelPatchBackoffMs();
+        codexAppServerModelPatchNextAttemptAt = Date.now() + retryAfterMs;
+        const errorName = error?.name || "";
+        const errorMessage = error?.message || String(error);
+        const failureSignature = `error:${errorName}:${errorMessage}`;
+        if (codexAppServerModelPatchFailureSignature !== failureSignature) {
+          codexAppServerModelPatchFailureSignature = failureSignature;
+          sendCodexElvesDiagnostic("model_app_server_request_patch_failed", {
+            errorName,
+            errorMessage,
+            retryAfterMs,
+          });
+        }
       }
     };
-    void patch();
+    codexAppServerModelPatchPromise = patch().finally(() => {
+      codexAppServerModelPatchPromise = null;
+    });
+    void codexAppServerModelPatchPromise;
+    return codexAppServerModelPatchPromise;
   }
 
   function ensureCodexModelWhitelistInstalls() {
@@ -4472,14 +4632,27 @@
 
   function scheduleCodexModelWhitelistRefresh(durationMs = 2500) {
     if (!codexElvesModelUnlockEnabled()) return;
-    codexModelWhitelistRefreshUntil = Math.max(codexModelWhitelistRefreshUntil, Date.now() + durationMs);
+    const now = Date.now();
+    codexModelWhitelistRefreshUntil = Math.max(codexModelWhitelistRefreshUntil, now + durationMs);
+    if (!codexModelStatsigReady) {
+      codexModelStatsigWaitUntil = Math.max(codexModelStatsigWaitUntil, now + 60000);
+      if (!codexModelStatsigWaitDiagnosticStarted) {
+        codexModelStatsigWaitDiagnosticStarted = true;
+        sendCodexElvesDiagnostic("model_statsig_wait_started", { maxWaitMs: 60000 });
+      }
+    }
     if (codexModelWhitelistRefreshTimer) return;
-    sendCodexElvesDiagnostic("model_whitelist_refresh_scheduled", { durationMs });
+    sendCodexElvesDiagnostic("model_whitelist_refresh_scheduled", {
+      durationMs,
+      waitingForStatsig: !codexModelStatsigReady,
+    });
     const tick = () => {
       codexModelWhitelistRefreshTimer = 0;
       runCodexModelWhitelistRefreshPass();
-      if (Date.now() < codexModelWhitelistRefreshUntil) {
-        codexModelWhitelistRefreshTimer = window.setTimeout(tick, 120);
+      const tickNow = Date.now();
+      const waitingForStatsig = !codexModelStatsigReady && tickNow < codexModelStatsigWaitUntil;
+      if (tickNow < codexModelWhitelistRefreshUntil || waitingForStatsig) {
+        codexModelWhitelistRefreshTimer = window.setTimeout(tick, waitingForStatsig ? 250 : 120);
       }
     };
     tick();

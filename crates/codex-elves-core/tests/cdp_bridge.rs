@@ -510,6 +510,25 @@ fn injection_script_unlocks_custom_model_catalog() {
     assert!(script.contains("looksLikeModelPayload(payload)"));
     assert!(script.contains("scheduleCodexModelWhitelistRefresh"));
     assert!(script.contains("runCodexModelWhitelistRefreshPass"));
+    assert!(script.contains("codexModelStatsigWaitUntil"));
+    assert!(script.contains("codexModelStatsigReady"));
+    assert!(script.contains("model_statsig_wait_started"));
+    assert!(script.contains("maxWaitMs: 60000"));
+    assert!(script.contains("waitingForStatsig ? 250 : 120"));
+    assert!(script.contains("invalidateCodexModelQueryCache"));
+    assert!(script.contains(r#"dispatcher.dispatchMessage("query-cache-invalidate""#));
+    assert!(script.contains(r#"queryKey: ["models", "list"]"#));
+    assert!(script.contains("model_query_cache_invalidate_failed"));
+    assert!(script.contains("scheduleCodexModelUiRefresh"));
+    assert!(script.contains("codex-elves-model-catalog-updated"));
+    assert!(script.contains("recordCodexModelUnlockPath"));
+    assert!(script.contains("model_unlock_path_applied"));
+    assert!(script.contains("codexAppServerModelPatchPromise"));
+    assert!(script.contains("codexAppServerModelPatchNextAttemptAt"));
+    assert!(script.contains("codexAppServerModelPatchBackoffMs"));
+    assert!(script.contains("retryAfterMs"));
+    assert!(script.contains("patchAppServerModelRequestClientClass"));
+    assert!(script.contains(r#"method !== "model/list""#));
     assert!(
         script.contains("headerDirty || conversationDirty || shouldScheduleReactModelStatePatch")
     );
@@ -758,6 +777,16 @@ fn injection_script_applies_fast_service_tier_contract() {
         json!(["first-model", "second-model", "current-model"])
     );
     assert_eq!(
+        cases["relayAppServerModelOrder"],
+        json!([
+            {"model": "first-model", "hidden": false},
+            {"model": "second-model", "hidden": false},
+            {"model": "current-model", "hidden": false},
+            {"model": "built-in-model", "hidden": true}
+        ])
+    );
+    assert_eq!(cases["modelPatchBackoffMs"], json!([1000, 2000, 30000]));
+    assert_eq!(
         cases["badgeTooltip"]["dataCodexTooltip"],
         serde_json::Value::Null
     );
@@ -807,6 +836,18 @@ function node() {{
 }}
 globalThis.window = globalThis;
 window.__CODEX_ELVES_TEST_SERVICE_TIER__ = true;
+window.dispatchEvent = () => true;
+globalThis.CustomEvent = class CustomEvent {{
+  constructor(type, options = {{}}) {{
+    this.type = type;
+    this.detail = options.detail;
+  }}
+}};
+globalThis.Event = class Event {{
+  constructor(type) {{
+    this.type = type;
+  }}
+}};
 globalThis.document = {{
   scripts: [],
   documentElement: node(),
@@ -974,6 +1015,19 @@ const relayModelContainer = {{
   available_models: ["built-in-model", "second-model"],
 }};
 api.patchModelContainer(relayModelContainer);
+const relayAppServerModels = [
+  {{ model: "built-in-model", hidden: false }},
+];
+api.patchAppServerModelResult("model/list", relayAppServerModels);
+const relayAppServerModelOrder = relayAppServerModels.map((item) => ({{
+  model: item.model,
+  hidden: item.hidden,
+}}));
+const modelPatchBackoffMs = [
+  api.appServerModelPatchBackoffMs(1),
+  api.appServerModelPatchBackoffMs(2),
+  api.appServerModelPatchBackoffMs(10),
+];
 
 const badgeNode = {{
   dataset: {{ codexTooltip: "stale custom tooltip" }},
@@ -1012,6 +1066,8 @@ process.stdout.write(JSON.stringify({{
   relayModelNames,
   relayModelArrayOrder,
   relayModelContainer,
+  relayAppServerModelOrder,
+  modelPatchBackoffMs,
   badgeTooltip,
 }}));
 "#,
