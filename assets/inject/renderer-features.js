@@ -25,13 +25,13 @@
   const chatsSortRefreshIntervalMs = 1500;
   const chatsSortDbRefreshIntervalMs = 5000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "19";
+  const codexDeleteStyleVersion = "21";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
   const codexDeleteVersion = "7";
   const codexExportVersion = "1";
   const codexProjectMoveVersion = "1";
-  const codexActionGroupVersion = "5";
+  const codexActionGroupVersion = "6";
   const codexArchiveRowActionsVersion = "1";
   const codexArchiveDeleteAllVersion = "2";
   const codexConversationViewVersion = "1";
@@ -40,7 +40,6 @@
   const codexRouteFeatureRefreshDelaysMs = [0, 120, 360, 900, 1600];
   const codexThreadServiceTierVersion = "1";
   const codexServiceTierBadgeClass = "codex-service-tier-badge";
-  const codexComposerOverflowGuardClass = "codex-elves-composer-overflow-guard";
   const codexLegacyServiceTierComposerSurfaceClass = "codex-elves-service-tier-composer-surface";
   const codexServiceTierBadgeVersion = "3";
   let codexElvesVersion = window.__CODEX_ELVES_VERSION__ || "unknown";
@@ -205,7 +204,23 @@
         gap: 6px;
         background: transparent;
       }
-      .${actionButtonClass} {
+      .${actionGroupClass}[data-codex-action-placement="native"] {
+        position: static;
+        inset: auto;
+        transform: none;
+        z-index: auto;
+        opacity: 1;
+        pointer-events: auto;
+        flex: 0 0 auto;
+        gap: 8px;
+      }
+      [data-codex-session-action-host="true"] {
+        width: auto !important;
+        min-width: 52px !important;
+        padding-left: 14px !important;
+        background: transparent !important;
+      }
+      .${actionGroupClass}:not([data-codex-action-placement="native"]) .${actionButtonClass} {
         width: 26px;
         height: 26px;
         display: inline-flex;
@@ -220,13 +235,13 @@
         cursor: default;
         text-align: center;
       }
-      .${actionButtonClass} svg {
+      .${actionGroupClass}:not([data-codex-action-placement="native"]) .${actionButtonClass} svg {
         display: block;
         width: 16px;
         height: 16px;
       }
-      .${actionButtonClass}:hover,
-      .${actionButtonClass}:focus-visible {
+      .${actionGroupClass}:not([data-codex-action-placement="native"]) .${actionButtonClass}:hover,
+      .${actionGroupClass}:not([data-codex-action-placement="native"]) .${actionButtonClass}:focus-visible {
         background: #363839;
         color: #f4f4f5;
         outline: none;
@@ -297,6 +312,12 @@
         opacity: 1;
         pointer-events: auto;
         z-index: 2147483201;
+      }
+      [data-codex-delete-row="true"]:hover [data-thread-title],
+      [data-codex-delete-row="true"]:focus-within [data-thread-title],
+      [data-codex-delete-row="true"].codex-session-more-open [data-thread-title] {
+        max-width: var(--codex-session-title-max-width) !important;
+        flex: 0 1 auto !important;
       }
       [data-codex-delete-row="true"].codex-archive-confirm-visible .${actionGroupClass} {
         right: max(66px, var(--codex-session-actions-right, 28px));
@@ -792,7 +813,11 @@
       .${codexServiceTierBadgeClass}[data-tier="failed"] { border-color: rgba(248,113,113,.42); background: rgba(248,113,113,.12); color: #fca5a5; }
       .${codexServiceTierBadgeClass}[data-tier="unsupported"] { border-color: rgba(251,191,36,.48); background: rgba(251,191,36,.13); color: #fbbf24; }
       .${codexServiceTierBadgeClass}[data-disabled="true"] { cursor: not-allowed; opacity: .78; }
-      .${codexComposerOverflowGuardClass} { overflow: clip !important; }
+      .composer-surface-chrome [class*="_WorkTriggerMeasurement_"][aria-hidden="true"],
+      [class*="_multilineSurface_"] [class*="_WorkTriggerMeasurement_"][aria-hidden="true"] {
+        block-size: 0 !important;
+        overflow: clip !important;
+      }
       .codex-elves-about { color: #a1a1aa; line-height: 1.5; }
       .codex-elves-tabs { display: flex; gap: 8px; padding: 0 20px 6px; flex: 0 0 auto; }
       .codex-elves-tab-button { border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: transparent; color: #d1d5db; font: 12px system-ui, sans-serif; padding: 5px 10px; }
@@ -6653,6 +6678,36 @@
     return row.querySelector(`.${actionGroupClass}`);
   }
 
+  function nativeActionContentsFromRow(row) {
+    return Array.from(row?.children || []).find((node) =>
+      node.matches?.('div.contents[data-hover-card-open-immediately="true"]')
+    ) || null;
+  }
+
+  function nativeActionHostFromRow(row) {
+    const contents = nativeActionContentsFromRow(row);
+    if (!contents) return null;
+    return Array.from(contents.children).find((node) => {
+      if (!(node instanceof HTMLElement) || !node.querySelector("button")) return false;
+      const style = getComputedStyle(node);
+      return style.position === "absolute" && (style.right === "0px" || classNameText(node).includes("right-0"));
+    }) || null;
+  }
+
+  function nativeActionButtonClassFromHost(host) {
+    const nativeButton = Array.from(host?.querySelectorAll?.("button") || [])
+      .find((button) => !button.closest(`.${actionGroupClass}`));
+    return String(nativeButton?.className || "").trim();
+  }
+
+  function sessionActionButtonClassName(nativeHost, featureClass) {
+    return [
+      nativeActionButtonClassFromHost(nativeHost),
+      actionButtonClass,
+      featureClass,
+    ].filter(Boolean).join(" ");
+  }
+
   function nativeActionButtonsFromRow(row) {
     return [...row.querySelectorAll('button,[role="button"],a')]
       .filter((node) => !node.closest(`.${actionGroupClass}`))
@@ -6676,8 +6731,34 @@
 
   function syncActionGroupLayout(row, group) {
     if (!row || !group) return;
-    if (group.dataset.codexActionLayoutStable === "true") return;
     const rowRect = row.getBoundingClientRect();
+    const nativePlacement = group.dataset.codexActionPlacement === "native";
+    const nativeHost = nativePlacement ? group.parentElement : null;
+    const layoutKey = nativePlacement
+      ? `native:${nativeHost?.children?.length || 0}:${Math.round(rowRect.width)}`
+      : `fallback:${Math.round(rowRect.width)}`;
+    if (
+      group.dataset.codexActionLayoutStable === "true" &&
+      group.dataset.codexActionLayoutKey === layoutKey
+    ) return;
+
+    const titleNode = row.querySelector(selectors.threadTitle);
+    const titleRect = titleNode?.getBoundingClientRect();
+    if (nativePlacement && nativeHost) {
+      const hostRect = nativeHost.getBoundingClientRect();
+      if (titleRect && hostRect.width > 0) {
+        const maxTitleWidth = Math.max(24, Math.floor(hostRect.left - titleRect.left));
+        row.style.setProperty("--codex-session-title-max-width", `${maxTitleWidth}px`);
+      } else {
+        row.style.removeProperty("--codex-session-title-max-width");
+      }
+      row.style.removeProperty("--codex-session-title-mask");
+      group.style.removeProperty("--codex-session-actions-right");
+      group.dataset.codexActionLayoutKey = layoutKey;
+      group.dataset.codexActionLayoutStable = "true";
+      return;
+    }
+
     const nativeButtons = nativeActionButtonsFromRow(row);
     const leftmostNative = nativeButtons
       .map((button) => button.getBoundingClientRect())
@@ -6689,13 +6770,12 @@
       ? Math.max(fallbackRight, Math.round(rowRect.right - leftmostNative.left + gap))
       : fallbackRight;
     const groupWidth = Math.ceil(group.getBoundingClientRect().width || 96);
-    const titleNode = row.querySelector(selectors.threadTitle);
-    const titleRect = titleNode?.getBoundingClientRect();
     const titleLeft = titleRect?.left || rowRect.left + 40;
     const maxTitleWidth = Math.max(24, Math.round(rowRect.width - (titleLeft - rowRect.left) - right - groupWidth - 14));
     group.style.setProperty("--codex-session-actions-right", `${right}px`);
     row.style.setProperty("--codex-session-title-mask", `${right + groupWidth + 12}px`);
     row.style.setProperty("--codex-session-title-max-width", `${maxTitleWidth}px`);
+    group.dataset.codexActionLayoutKey = layoutKey;
     group.dataset.codexActionLayoutStable = "true";
   }
 
@@ -6707,7 +6787,15 @@
   }
 
   function removeActionGroups(row) {
-    row.querySelectorAll(`.${actionGroupClass}`).forEach((group) => group.remove());
+    row.querySelectorAll(`.${actionGroupClass}`).forEach((group) => {
+      const host = group.parentElement;
+      if (host?.dataset?.codexSessionActionHost === "true") {
+        delete host.dataset.codexSessionActionHost;
+      }
+      group.remove();
+    });
+    row.style.removeProperty("--codex-session-title-mask");
+    row.style.removeProperty("--codex-session-title-max-width");
   }
 
   function stopActionButtonEvent(row, button, event) {
@@ -6877,6 +6965,7 @@
       row.dataset.codexProjectMoveRow = "false";
       return;
     }
+    const nativeActionHost = nativeActionHostFromRow(row);
     const existingGroup = actionGroupFromRow(row);
     const existingDeleteButton = existingGroup?.querySelector(`.${buttonClass}`);
     const existingMoreButton = existingGroup?.querySelector(`.${moreButtonClass}`);
@@ -6891,7 +6980,11 @@
     const missingMore = needsMoreMenu && !existingMoreButton;
     const deleteReady = !settings.sessionDelete || existingDeleteButton?.dataset.codexDeleteVersion === codexDeleteVersion;
     const groupReady = existingGroup?.dataset.codexActionGroupVersion === codexActionGroupVersion;
-    if (groupReady && deleteReady && !hasUnexpectedDelete && !hasUnexpectedMore && !hasUnexpectedExport && !hasUnexpectedMove && !missingDelete && !missingMore) {
+    const expectedPlacement = nativeActionHost ? "native" : "fallback";
+    const placementReady = existingGroup?.dataset.codexActionPlacement === expectedPlacement &&
+      (expectedPlacement === "native" ? existingGroup?.parentElement === nativeActionHost : existingGroup?.parentElement === row);
+    if (groupReady && placementReady && deleteReady && !hasUnexpectedDelete && !hasUnexpectedMore && !hasUnexpectedExport && !hasUnexpectedMove && !missingDelete && !missingMore) {
+      syncActionGroupLayout(row, existingGroup);
       return;
     }
     removeActionGroups(row);
@@ -6904,10 +6997,11 @@
     const group = document.createElement("div");
     group.className = actionGroupClass;
     group.dataset.codexActionGroupVersion = codexActionGroupVersion;
+    group.dataset.codexActionPlacement = expectedPlacement;
     if (settings.markdownExport || settings.projectMove) {
       const moreButton = document.createElement("button");
       moreButton.type = "button";
-      moreButton.className = `${actionButtonClass} ${moreButtonClass}`;
+      moreButton.className = sessionActionButtonClassName(nativeActionHost, moreButtonClass);
       moreButton.setAttribute("aria-haspopup", "menu");
       moreButton.setAttribute("aria-expanded", "false");
       configureActionButton(moreButton, "更多操作", "…");
@@ -6948,7 +7042,7 @@
     if (settings.sessionDelete) {
       const deleteButton = document.createElement("button");
       deleteButton.type = "button";
-      deleteButton.className = `${actionButtonClass} ${buttonClass}`;
+      deleteButton.className = sessionActionButtonClassName(nativeActionHost, buttonClass);
       deleteButton.dataset.codexDeleteVersion = codexDeleteVersion;
       configureSvgActionButton(deleteButton, "删除", trashIconSvg());
       const openDeleteConfirm = (event) => openDeleteConfirmForRow(row, deleteButton, ref, event);
@@ -6956,7 +7050,12 @@
       group.appendChild(deleteButton);
       setTimeout(() => refreshActionButton(deleteButton, row, openDeleteConfirm), 0);
     }
-    row.appendChild(group);
+    if (nativeActionHost) {
+      nativeActionHost.dataset.codexSessionActionHost = "true";
+      nativeActionHost.prepend(group);
+    } else {
+      row.appendChild(group);
+    }
     syncActionGroupLayout(row, group);
   }
 
@@ -7147,37 +7246,12 @@
       .filter(codexServiceTierBadgeVisibleElement);
   }
 
-  function codexComposerOverflowSurfaces() {
-    return Array.from(new Set([
-      ...document.querySelectorAll(".composer-surface-chrome"),
-      ...document.querySelectorAll('[class*="_multilineSurface_"]'),
-    ]))
-      .filter(codexServiceTierBadgeVisibleElement)
-      .filter((surface) => codexServiceTierComposerInputs(surface).length > 0);
-  }
-
-  function codexComposerHiddenMeasurementOverflows(surface) {
-    if (!(surface instanceof HTMLElement) || surface.scrollHeight <= surface.clientHeight + 1) return false;
-    return Array.from(surface.querySelectorAll('[aria-hidden="true"]')).some((node) => {
-      if (!(node instanceof HTMLElement)) return false;
-      const style = getComputedStyle(node);
-      const rect = node.getBoundingClientRect();
-      return style.position === "absolute"
-        && style.visibility === "hidden"
-        && rect.height > surface.clientHeight;
-    });
-  }
-
-  function syncCodexComposerOverflowGuard(enabled = codexElvesBackendSettings.enhancementsEnabled !== false) {
-    document.querySelectorAll(`.${codexComposerOverflowGuardClass}, .${codexLegacyServiceTierComposerSurfaceClass}`)
+  function cleanupLegacyCodexComposerOverflowGuards() {
+    document.querySelectorAll(`.codex-elves-composer-overflow-guard, .${codexLegacyServiceTierComposerSurfaceClass}`)
       .forEach((surface) => {
-        surface.classList.remove(codexComposerOverflowGuardClass);
+        surface.classList.remove("codex-elves-composer-overflow-guard");
         surface.classList.remove(codexLegacyServiceTierComposerSurfaceClass);
       });
-    if (!enabled) return;
-    codexComposerOverflowSurfaces()
-      .filter(codexComposerHiddenMeasurementOverflows)
-      .forEach((surface) => surface.classList.add(codexComposerOverflowGuardClass));
   }
 
   function codexServiceTierRectHorizontalOverlap(left, right) {
@@ -7744,7 +7818,7 @@
 
   function scanLightweight() {
     installStyle();
-    syncCodexComposerOverflowGuard();
+    cleanupLegacyCodexComposerOverflowGuards();
     installCodexServiceTierDispatcherPatch();
     installCodexServiceTierRequestClientPatch();
     installCodexElvesMenu();
@@ -7956,7 +8030,11 @@
       document.querySelector("main, [role='main']");
     const headerRoot = document.querySelector(selectors.appHeader)?.closest?.("header, [role='banner']") ||
       document.querySelector("header, [role='banner']");
-    push("shell", document.body || document.documentElement, { childList: true, subtree: false });
+    const scopedRootsReady = !!sidebarRoot && !!conversationRoot && !!headerRoot;
+    push("shell", document.body || document.documentElement, {
+      childList: true,
+      subtree: !scopedRootsReady,
+    });
     push("sidebar", sidebarRoot, {
       childList: true,
       subtree: true,

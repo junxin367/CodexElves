@@ -81,6 +81,12 @@ fn renderer_features_reuses_scan_observers_when_roots_are_unchanged() {
     assert!(script.contains("function sameScanObserverRoots"));
     assert!(script.contains("if (sameScanObserverRoots(roots)) return;"));
     assert!(script.contains("window.__codexSessionDeleteObserverConfigs"));
+    assert!(
+        script.contains(
+            "const scopedRootsReady = !!sidebarRoot && !!conversationRoot && !!headerRoot;"
+        )
+    );
+    assert!(script.contains("subtree: !scopedRootsReady"));
 }
 
 #[test]
@@ -442,10 +448,15 @@ fn injection_script_removes_timeline_and_sidebar_thread_id_badge_controls() {
 }
 
 #[test]
-fn injection_script_keeps_session_action_buttons_in_pr_style() {
+fn injection_script_reuses_native_session_action_button_style_with_fallback() {
     let script = assets::injection_script(45221);
 
     assert!(script.contains("actionButtonClass = \"codex-session-action-button\""));
+    assert!(script.contains("nativeActionButtonClassFromHost"));
+    assert!(script.contains("sessionActionButtonClassName"));
+    assert!(script.contains(
+        ".${actionGroupClass}:not([data-codex-action-placement=\"native\"]) .${actionButtonClass}"
+    ));
     assert!(script.contains("background: transparent;"));
     assert!(script.contains("background: #363839;"));
     assert!(script.contains("cursor: default;"));
@@ -474,6 +485,21 @@ fn injection_script_moves_export_and_project_move_into_more_menu() {
     assert!(script.contains(".${actionGroupClass} {"));
     assert!(script.contains("position: absolute;"));
     assert!(script.contains("pointer-events: none;"));
+    assert!(
+        script
+            .contains("node.matches?.('div.contents[data-hover-card-open-immediately=\"true\"]')")
+    );
+    assert!(script.contains("function nativeActionHostFromRow(row)"));
+    assert!(script.contains("group.dataset.codexActionPlacement = expectedPlacement"));
+    assert!(script.contains("nativeActionHost.dataset.codexSessionActionHost = \"true\""));
+    assert!(script.contains("nativeActionHost.prepend(group)"));
+    assert!(script.contains("row.appendChild(group)"));
+    assert!(script.contains("width: auto !important;"));
+    assert!(script.contains(
+        "const maxTitleWidth = Math.max(24, Math.floor(hostRect.left - titleRect.left));"
+    ));
+    assert!(script.contains("max-width: var(--codex-session-title-max-width) !important;"));
+    assert!(script.contains("[data-codex-delete-row=\"true\"]:focus-within [data-thread-title]"));
     assert!(script.contains("[data-codex-delete-row=\"true\"]:hover .${actionGroupClass} {\n        opacity: 1;\n        pointer-events: auto;\n      }"));
     assert!(script.contains("[data-codex-delete-row=\"true\"].codex-session-more-open .${actionGroupClass} {\n        opacity: 1;\n        pointer-events: auto;\n        z-index: 2147483201;"));
     assert!(!script.contains("installActionButtonEvents(row, moreButton, openMoreMenu)"));
@@ -640,19 +666,18 @@ fn injection_script_exposes_fast_service_tier_control() {
 }
 
 #[test]
-fn injection_script_clips_native_composer_measurement_overflow_without_fast_dependency() {
+fn injection_script_constrains_native_composer_measurement_without_clipping_surface() {
     let script = assets::injection_script(45221);
 
-    assert!(script.contains("codex-elves-composer-overflow-guard"));
     assert!(script.contains("codex-elves-service-tier-composer-surface"));
+    assert!(script.contains("[class*=\"_WorkTriggerMeasurement_\"][aria-hidden=\"true\"]"));
+    assert!(script.contains("block-size: 0 !important;"));
     assert!(script.contains("overflow: clip !important;"));
-    assert!(script.contains("codexComposerOverflowSurfaces"));
-    assert!(script.contains("codexComposerHiddenMeasurementOverflows"));
-    assert!(script.contains("syncCodexComposerOverflowGuard"));
-    assert!(script.contains("enabled = codexElvesBackendSettings.enhancementsEnabled !== false"));
-    assert!(script.contains("syncCodexComposerOverflowGuard();"));
-    assert!(script.contains("style.position === \"absolute\""));
-    assert!(script.contains("style.visibility === \"hidden\""));
+    assert!(script.contains("cleanupLegacyCodexComposerOverflowGuards"));
+    assert!(script.contains("cleanupLegacyCodexComposerOverflowGuards();"));
+    assert!(!script.contains("codexComposerOverflowSurfaces"));
+    assert!(!script.contains("codexComposerHiddenMeasurementOverflows"));
+    assert!(!script.contains("syncCodexComposerOverflowGuard"));
     assert!(!script.contains(
         "syncCodexServiceTierComposerOverflowGuard(enabled = codexElvesSettings().serviceTierControls)"
     ));
