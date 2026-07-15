@@ -621,6 +621,24 @@ async fn reasoning_continuation_reuses_the_same_websocket_and_only_returns_the_f
             serde_json::from_str(first_request.as_str()).unwrap();
         assert_eq!(first_request["type"], "response.create");
         assert_eq!(first_request["model"], "gpt-websocket-test");
+        assert_eq!(first_request["previous_response_id"], "resp_parent");
+        assert_eq!(first_request["store"], false);
+
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "response.created",
+                    "response": {
+                        "id": "resp_short",
+                        "status": "in_progress"
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
 
         socket
             .send(Message::Text(
@@ -656,22 +674,17 @@ async fn reasoning_continuation_reuses_the_same_websocket_and_only_returns_the_f
             serde_json::from_str(continue_request.as_str()).unwrap();
         assert_eq!(continue_request["type"], "response.create");
         assert_eq!(continue_request["model"], "gpt-websocket-test");
+        assert_eq!(continue_request["previous_response_id"], "resp_short");
         assert!(continue_request.get("stream").is_none());
+        assert!(continue_request.get("stream_options").is_none());
         assert!(continue_request.get("background").is_none());
-        assert!(
-            continue_request["input"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|item| item["name"] == "continue_thinking")
-        );
-        assert!(
-            continue_request["input"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|item| item["encrypted_content"] == "encrypted-short")
-        );
+        assert!(continue_request.get("conversation").is_none());
+        assert!(continue_request.get("conversation_id").is_none());
+        let continue_input = continue_request["input"].as_array().unwrap();
+        assert_eq!(continue_input.len(), 1);
+        assert_eq!(continue_input[0]["role"], "developer");
+        assert!(!continue_request.to_string().contains("think carefully"));
+        assert!(!continue_request.to_string().contains("encrypted-short"));
 
         socket
             .send(Message::Text(
@@ -726,11 +739,16 @@ async fn reasoning_continuation_reuses_the_same_websocket_and_only_returns_the_f
             serde_json::json!({
                 "type": "response.create",
                 "model": "gpt-websocket-test",
+                "store": false,
+                "previous_response_id": "resp_parent",
                 "input": [{
                     "role": "user",
                     "content": "think carefully"
                 }],
                 "stream": true,
+                "stream_options": {
+                    "include_usage": true
+                },
                 "background": false
             })
             .to_string()
@@ -759,6 +777,16 @@ async fn reasoning_continuation_reuses_the_same_websocket_and_only_returns_the_f
         .expect("websocket continuation request should be recorded");
     assert_eq!(summary.transport, ProxyRequestTransport::Ws);
     assert_eq!(summary.state, ProxyRequestState::Completed);
+    let first_token_ms = summary
+        .first_token_ms
+        .expect("websocket first response event should record first token latency");
+    let duration_ms = summary
+        .duration_ms
+        .expect("websocket terminal event should record full duration");
+    assert!(
+        duration_ms >= first_token_ms.saturating_add(50),
+        "first token latency {first_token_ms}ms should be lower than duration {duration_ms}ms"
+    );
     let detail = codex_elves_core::proxy_log::find_record(&summary.id)
         .unwrap()
         .expect("websocket continuation request detail should exist");
@@ -769,7 +797,10 @@ async fn reasoning_continuation_reuses_the_same_websocket_and_only_returns_the_f
         detail
             .continue_thinking_request_body
             .as_deref()
-            .is_some_and(|body| body.contains("continue_thinking"))
+            .is_some_and(|body| {
+                body.contains("\"previous_response_id\": \"resp_short\"")
+                    && body.contains("unpublished, incomplete draft")
+            })
     );
     assert!(
         detail

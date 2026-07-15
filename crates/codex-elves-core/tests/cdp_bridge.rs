@@ -48,6 +48,7 @@ fn injection_script_prefixes_helper_url_and_version() {
     assert!(script.contains("http://127.0.0.1:45221"));
     assert!(script.contains("window.__CODEX_ELVES_VERSION__"));
     assert!(script.contains(codex_elves_core::version::VERSION));
+    assert!(script.contains("window.__CODEX_ELVES_LAUNCH_CYCLE__"));
 }
 
 #[test]
@@ -593,6 +594,9 @@ fn injection_script_exposes_fast_service_tier_control() {
     assert!(script.contains("service_tier_native_thread_setting_synced"));
     assert!(script.contains("service_tier_request_client_patch_installed"));
     assert!(script.contains("installCodexServiceTierRequestClientPatch"));
+    assert!(script.contains("__codexServiceTierRequestClientPatchPromise"));
+    assert!(script.contains("__codexServiceTierRequestClientPatchNextAttemptAt"));
+    assert!(script.contains("codexServiceTierRequestClientPatchRetryMaxMs"));
     assert!(script.contains("codexAppAssetUrl"));
     assert!(script.contains("codexThreadServiceTierOverrides"));
     assert!(script.contains("setCodexThreadServiceTierMode"));
@@ -845,7 +849,34 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
 
     assert!(script.contains("@keyframes codex-session-prewarm-shimmer"));
     assert!(script.contains("data-codex-session-prewarming"));
-    assert!(script.contains("@media (prefers-reduced-motion: reduce)"));
+    assert!(script.contains("-webkit-mask-size: 42% 100%"));
+    assert!(script.contains("mask-position: 170% 0"));
+    assert!(!script.contains("@media (prefers-reduced-motion: reduce)"));
+    assert!(script.contains("session_prewarm_launch_cycle_reset"));
+    assert!(script.contains("\"launch-cycle-refresh\""));
+    assert!(script.contains("session_prewarm_recent_refresh_timeout"));
+    assert!(script.contains("session_prewarm_skipped"));
+    assert!(script.contains("const codexSessionPrewarmVersion = \"2\";"));
+    assert!(script.contains("const codexSessionPrewarmStartupDelayMs = 200;"));
+    let runtime_refresh = script
+        .find("window.__codexElvesRefreshRuntime();")
+        .expect("same-build reinjection should refresh the existing runtime");
+    let runtime_increment = script
+        .find("window.__codexSessionPrewarmRuntimeId =")
+        .expect("new runtime installation should allocate a prewarm runtime id");
+    assert!(
+        runtime_refresh < runtime_increment,
+        "same-build reinjection must return before invalidating the existing prewarm runtime"
+    );
+    assert_eq!(
+        prewarm["defaultPrewarmSettings"],
+        json!({
+            "enabled": true,
+            "fullCount": 3,
+            "contentCount": 3,
+            "concurrency": 4
+        })
+    );
     assert_eq!(
         prewarm["taskTypes"],
         json!([
@@ -877,22 +908,28 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
     assert_eq!(prewarm["maxActiveResumes"], 4);
     assert_eq!(prewarm["maxActiveIndicators"], 4);
     assert_eq!(prewarm["activeIndicatorsAfterQueue"], json!([]));
+    assert_eq!(prewarm["limitedMaxActiveResumes"], 2);
+    assert_eq!(prewarm["limitedConcurrencySummary"]["completed"], 5);
+    assert_eq!(prewarm["limitedConcurrencySummary"]["failed"], 0);
+    assert_eq!(prewarm["zeroConcurrencyResumeCalls"], 1);
+    assert_eq!(prewarm["zeroConcurrencySummary"]["completed"], 1);
     assert_eq!(
         prewarm["resumeCalls"]
             .as_array()
             .expect("resumeCalls should be an array")
             .len(),
-        10
+        4
     );
     assert_eq!(
         prewarm["unsubscribeCalls"]
             .as_array()
             .expect("unsubscribeCalls should be an array")
             .len(),
-        6
+        0
     );
     assert_eq!(prewarm["duplicateResumeCalls"], 1);
-    assert_eq!(prewarm["promotedResumeCalls"], 1);
+    assert_eq!(prewarm["promotedResumeCalls"], 0);
+    assert_eq!(prewarm["promotedHydrationCalls"], 1);
     assert_eq!(prewarm["promotedUnsubscribeCalls"], 0);
     assert_eq!(prewarm["promotedIndicatorActiveDuring"], true);
     assert_eq!(prewarm["promotedIndicatorActiveAfter"], false);
@@ -923,23 +960,18 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
         prewarm["fallbackHydrationCalls"],
         json!([{
             "threadIds": ["prewarm-thread-fallback"],
-            "options": {"includeTurns": false}
+            "options": {"includeTurns": true}
         }])
     );
-    assert_eq!(prewarm["fallbackResult"]["result"], "metadata-only");
-    assert_eq!(prewarm["compensationFirstResult"]["result"], "failed");
+    assert_eq!(prewarm["fallbackResult"]["result"], "content-hydrated");
+    assert_eq!(prewarm["phasedSummary"]["completed"], 3);
+    assert_eq!(prewarm["phasedSummary"]["failed"], 0);
+    assert_eq!(prewarm["phasedHydrationOptions"], json!([true, true, true]));
     assert_eq!(
-        prewarm["compensationPendingAfterFailure"],
-        json!(["prewarm-thread-compensation"])
+        prewarm["phasedResumeIds"],
+        json!(["prewarm-thread-phase-full-a", "prewarm-thread-phase-full-b"])
     );
-    assert_eq!(
-        prewarm["compensationSecondResult"]["result"],
-        "already-resumed"
-    );
-    assert_eq!(prewarm["compensationPendingAfterRetry"], json!([]));
-    assert_eq!(prewarm["compensationResumeCalls"], 1);
-    assert_eq!(prewarm["compensationReleaseCalls"], 2);
-    assert_eq!(prewarm["compensationOwnerHeld"], false);
+    assert_eq!(prewarm["phasedContentCompletedBeforeOwner"], true);
     assert_eq!(prewarm["failureSummary"]["completed"], 2);
     assert_eq!(prewarm["failureSummary"]["failed"], 1);
     assert_eq!(
@@ -976,6 +1008,17 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
             .is_some_and(|value| value > 0)
     );
     assert_eq!(prewarm["emptyWorkspaceRoots"], json!([]));
+    assert_eq!(prewarm["launchCycleReset"], true);
+    assert_eq!(prewarm["launchCycleResetRepeated"], false);
+    assert_eq!(prewarm["completedSignatureAfterLaunchCycleReset"], "");
+    assert_eq!(prewarm["refreshTimeoutStatus"], "timeout");
+    assert_eq!(prewarm["refreshTimeoutResumeCalls"], 1);
+    assert_eq!(prewarm["refreshStartedAfterResumeCompleted"], true);
+    assert!(
+        prewarm["refreshTimeoutDurationMs"]
+            .as_u64()
+            .is_some_and(|value| value < 1000)
+    );
 }
 
 #[test]
@@ -983,6 +1026,10 @@ fn injection_script_defaults_session_prewarm_to_disabled() {
     let script = assets::injection_script(45221);
 
     assert!(script.contains("sessionPrewarmEnabled: false"));
+    assert!(script.contains("sessionPrewarmFullCount: 3"));
+    assert!(script.contains("sessionPrewarmContentCount: 3"));
+    assert!(script.contains("sessionPrewarmConcurrency: codexSessionPrewarmDefaultConcurrency"));
+    assert!(script.contains("sessionPrewarmConcurrency: \"codexAppSessionPrewarmConcurrency\""));
     assert!(
         script
             .contains("settings.sessionPrewarmEnabled = settings.sessionPrewarmEnabled === true;")
@@ -1246,6 +1293,7 @@ const badgeTooltip = {{
 
 async function runSessionPrewarmCases() {{
   const prewarmApi = window.__codexElvesSessionPrewarmTest;
+  const defaultPrewarmSettings = prewarmApi.settingsSnapshot();
   const nestedReadOnlyManager = {{
     getHostId() {{
       return "local";
@@ -1370,6 +1418,36 @@ async function runSessionPrewarmCases() {{
   }};
   const queueSummary = await prewarmApi.runQueue(queueManager, tasks);
   const activeIndicatorsAfterQueue = prewarmApi.activeIndicatorIds();
+  let limitedActiveResumes = 0;
+  let limitedMaxActiveResumes = 0;
+  const limitedConcurrencySummary = await prewarmApi.runQueue({{
+    needsResume() {{
+      return true;
+    }},
+    async resumeConversationForUnavailableOwner() {{
+      limitedActiveResumes += 1;
+      limitedMaxActiveResumes = Math.max(limitedMaxActiveResumes, limitedActiveResumes);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      limitedActiveResumes -= 1;
+    }},
+  }}, Array.from({{ length: 5 }}, (_, index) => ({{
+    type: "full",
+    threadId: `prewarm-thread-limited-${{index + 1}}`,
+    conversation: {{ id: `prewarm-thread-limited-${{index + 1}}` }},
+  }})), 2);
+  let zeroConcurrencyResumeCalls = 0;
+  const zeroConcurrencySummary = await prewarmApi.runQueue({{
+    needsResume() {{
+      return true;
+    }},
+    async resumeConversationForUnavailableOwner() {{
+      zeroConcurrencyResumeCalls += 1;
+    }},
+  }}, [{{
+    type: "full",
+    threadId: "prewarm-thread-paused",
+    conversation: {{ id: "prewarm-thread-paused" }},
+  }}], 0);
 
   let duplicateResumeCalls = 0;
   const duplicateManager = {{
@@ -1392,6 +1470,7 @@ async function runSessionPrewarmCases() {{
   ]);
 
   let promotedResumeCalls = 0;
+  let promotedHydrationCalls = 0;
   let promotedUnsubscribeCalls = 0;
   let releasePromotedResume;
   const promotedResumeGate = new Promise((resolve) => {{
@@ -1403,6 +1482,9 @@ async function runSessionPrewarmCases() {{
     }},
     async resumeConversationForUnavailableOwner() {{
       promotedResumeCalls += 1;
+    }},
+    async hydrateBackgroundThreads() {{
+      promotedHydrationCalls += 1;
       await promotedResumeGate;
     }},
     async unsubscribeInactiveConversation() {{
@@ -1444,32 +1526,46 @@ async function runSessionPrewarmCases() {{
     conversation: {{ id: "prewarm-thread-fallback", cwd: "C:/workspace/fallback" }},
   }});
 
-  let compensationOwnerHeld = false;
-  let compensationResumeCalls = 0;
-  let compensationReleaseCalls = 0;
-  const compensationManager = {{
+  const phasedEvents = [];
+  const phasedHydrationOptions = [];
+  const phasedResumeIds = [];
+  const phasedManager = {{
+    async hydrateBackgroundThreads(threadIds, options) {{
+      phasedHydrationOptions.push(options.includeTurns);
+      phasedEvents.push(`hydrate:${{threadIds[0]}}`);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }},
     needsResume() {{
-      return !compensationOwnerHeld;
+      return true;
     }},
-    async resumeConversationForUnavailableOwner() {{
-      compensationResumeCalls += 1;
-      compensationOwnerHeld = true;
-    }},
-    async unsubscribeInactiveConversation() {{
-      compensationReleaseCalls += 1;
-      if (compensationReleaseCalls === 1) throw new Error("transient owner release failure");
-      compensationOwnerHeld = false;
+    async resumeConversationForUnavailableOwner(params) {{
+      phasedResumeIds.push(params.conversationId);
+      phasedEvents.push(`resume:${{params.conversationId}}`);
     }},
   }};
-  const compensationTask = {{
-    type: "content",
-    threadId: "prewarm-thread-compensation",
-    conversation: {{ id: "prewarm-thread-compensation", cwd: "C:/workspace/compensation" }},
-  }};
-  const compensationFirstResult = await prewarmApi.runTask(compensationManager, compensationTask);
-  const compensationPendingAfterFailure = prewarmApi.pendingOwnerReleases();
-  const compensationSecondResult = await prewarmApi.runTask(compensationManager, compensationTask);
-  const compensationPendingAfterRetry = prewarmApi.pendingOwnerReleases();
+  const phasedSummary = await prewarmApi.runPhasedQueue(phasedManager, [
+    {{
+      type: "full",
+      threadId: "prewarm-thread-phase-full-a",
+      conversation: {{ id: "prewarm-thread-phase-full-a" }},
+    }},
+    {{
+      type: "content",
+      threadId: "prewarm-thread-phase-content",
+      conversation: {{ id: "prewarm-thread-phase-content" }},
+    }},
+    {{
+      type: "full",
+      threadId: "prewarm-thread-phase-full-b",
+      conversation: {{ id: "prewarm-thread-phase-full-b" }},
+    }},
+  ], 2);
+  const phasedLastHydrationIndex = Math.max(
+    ...phasedEvents.map((event, index) => event.startsWith("hydrate:") ? index : -1),
+  );
+  const phasedFirstResumeIndex = phasedEvents.findIndex((event) => event.startsWith("resume:"));
+  const phasedContentCompletedBeforeOwner =
+    phasedFirstResumeIndex > phasedLastHydrationIndex;
 
   const failureCalls = [];
   const failureManager = {{
@@ -1572,6 +1668,39 @@ async function runSessionPrewarmCases() {{
   prewarmApi.setManager(null);
 
   delete window.__codexSessionPrewarmCompletedSignature;
+  let refreshTimeoutResumeCalls = 0;
+  let refreshStartedAfterResumeCompleted = false;
+  let refreshResumeCompleted = false;
+  const refreshTimeoutManager = {{
+    async refreshRecentConversations() {{
+      refreshStartedAfterResumeCompleted = refreshResumeCompleted;
+      await new Promise(() => {{}});
+    }},
+    getRecentConversations() {{
+      return [{{
+        id: "prewarm-thread-refresh-timeout",
+        cwd: "C:/workspace/refresh-timeout",
+      }}];
+    }},
+    needsResume() {{
+      return true;
+    }},
+    async resumeConversationForUnavailableOwner() {{
+      refreshTimeoutResumeCalls += 1;
+      refreshResumeCompleted = true;
+    }},
+  }};
+  prewarmApi.setManager(refreshTimeoutManager);
+  const refreshTimeoutStartedAt = Date.now();
+  await prewarmApi.run(5);
+  const refreshTimeoutDurationMs = Date.now() - refreshTimeoutStartedAt;
+  const refreshTimeoutStatus = (
+    await prewarmApi.refreshRecent(refreshTimeoutManager, 5)
+  ).status;
+  prewarmApi.clearScheduledRun();
+  prewarmApi.setManager(null);
+
+  delete window.__codexSessionPrewarmCompletedSignature;
   let releasePendingManagerRun;
   const pendingManagerGate = new Promise((resolve) => {{
     releasePendingManagerRun = resolve;
@@ -1619,8 +1748,15 @@ async function runSessionPrewarmCases() {{
     threadId: "prewarm-thread-no-cwd",
     conversation: {{ id: "prewarm-thread-no-cwd", cwd: "" }},
   }}).workspaceRoots;
+  window.__codexSessionPrewarmCompletedSignature = "completed-before-restart";
+  const previousLaunchCycle = String(window.__CODEX_ELVES_LAUNCH_CYCLE__ || "launch-cycle");
+  window.__CODEX_ELVES_LAUNCH_CYCLE__ = `${{previousLaunchCycle}}-restart`;
+  const launchCycleReset = prewarmApi.resetLaunchCycle();
+  const completedSignatureAfterLaunchCycleReset = prewarmApi.completedSignature();
+  const launchCycleResetRepeated = prewarmApi.resetLaunchCycle();
 
   return {{
+    defaultPrewarmSettings,
     nestedManagerFound,
     nestedManagerHasResume,
     nestedManagerScanned,
@@ -1635,10 +1771,15 @@ async function runSessionPrewarmCases() {{
     maxActiveResumes,
     maxActiveIndicators,
     activeIndicatorsAfterQueue,
+    limitedMaxActiveResumes,
+    limitedConcurrencySummary,
+    zeroConcurrencyResumeCalls,
+    zeroConcurrencySummary,
     resumeCalls,
     unsubscribeCalls,
     duplicateResumeCalls,
     promotedResumeCalls,
+    promotedHydrationCalls,
     promotedUnsubscribeCalls,
     promotedResult,
     promotedIndicatorActiveDuring,
@@ -1647,13 +1788,10 @@ async function runSessionPrewarmCases() {{
     fallbackResumeCalls,
     fallbackHydrationCalls,
     fallbackResult,
-    compensationFirstResult,
-    compensationSecondResult,
-    compensationPendingAfterFailure,
-    compensationPendingAfterRetry,
-    compensationResumeCalls,
-    compensationReleaseCalls,
-    compensationOwnerHeld,
+    phasedSummary,
+    phasedHydrationOptions,
+    phasedResumeIds,
+    phasedContentCompletedBeforeOwner,
     failureCalls,
     failureSummary,
     currentThreadResumeCalls,
@@ -1668,6 +1806,13 @@ async function runSessionPrewarmCases() {{
     firstManagerResumeCalls,
     secondManagerResumeCalls,
     emptyWorkspaceRoots,
+    launchCycleReset,
+    launchCycleResetRepeated,
+    completedSignatureAfterLaunchCycleReset,
+    refreshTimeoutStatus,
+    refreshTimeoutResumeCalls,
+    refreshStartedAfterResumeCompleted,
+    refreshTimeoutDurationMs,
   }};
 }}
 
@@ -1815,6 +1960,41 @@ fn manager_ui_exposes_pure_api_relay_mode_button() {
     assert!(source.contains("纯 API"));
     assert!(source.contains("apply_pure_api_injection"));
     assert!(commands.contains("commands::apply_pure_api_injection"));
+}
+
+#[test]
+fn manager_ui_exposes_session_prewarm_performance_controls() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("core crate should live under crates/codex-elves-core");
+    let source =
+        std::fs::read_to_string(repo.join("apps/codex-elves-manager/src/App.tsx")).unwrap();
+    let styles =
+        std::fs::read_to_string(repo.join("apps/codex-elves-manager/src/styles.css")).unwrap();
+
+    assert!(source.contains("codexAppSessionPrewarmFullCount: 3"));
+    assert!(source.contains("codexAppSessionPrewarmContentCount: 3"));
+    assert!(source.contains("codexAppSessionPrewarmConcurrency: 4"));
+    assert!(source.contains("<Field label=\"并发数\">"));
+    assert!(source.contains("1-4，数值越高同时预热的会话越多。"));
+    assert!(source.contains("0-6，仅加载会话内容，不获取 Owner。"));
+    assert!(source.contains("可能出现短暂卡顿"));
+    assert!(styles.contains("grid-template-columns: repeat(3, minmax(0, 1fr));"));
+    let full_field = source
+        .split("<Field label=\"完整恢复数量\">")
+        .nth(1)
+        .and_then(|value| value.split("</Field>").next())
+        .expect("full prewarm field should exist");
+    assert!(full_field.contains("min={0}"));
+    assert!(full_field.contains("codexAppSessionPrewarmFullCount: clampNumber("));
+    let concurrency_field = source
+        .split("<Field label=\"并发数\">")
+        .nth(1)
+        .and_then(|value| value.split("</Field>").next())
+        .expect("prewarm concurrency field should exist");
+    assert!(concurrency_field.contains("min={1}"));
+    assert!(concurrency_field.contains("codexAppSessionPrewarmConcurrency: clampNumber("));
 }
 
 #[test]

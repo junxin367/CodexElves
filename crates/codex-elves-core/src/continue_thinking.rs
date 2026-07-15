@@ -22,6 +22,29 @@ pub const MAX_CONTINUE_ROUNDS: u32 = 3;
 
 const CONTINUE_TOOL_NAME: &str = "continue_thinking";
 const CONTINUE_TOOL_OUTPUT: &str = "Please continue thinking about the query.";
+const WEBSOCKET_CONTINUE_DRAFT_INSTRUCTION: &str = "The previous assistant response is an \
+unpublished, incomplete draft generated inside the proxy. Continue reasoning from the available \
+context and produce a complete replacement answer. Do not mention, quote, or defer to the draft.";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebSocketContinueMode {
+    StatelessReplay,
+    LatestResponse,
+}
+
+impl WebSocketContinueMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StatelessReplay => "stateless_replay",
+            Self::LatestResponse => "latest_response",
+        }
+    }
+}
+
+pub struct WebSocketContinueRequest {
+    pub request: Value,
+    pub mode: WebSocketContinueMode,
+}
 
 /// 计算 reasoning_tokens 落在网格上的倍数 n；不在网格上返回 None。
 pub fn grid_multiple(reasoning_tokens: u64) -> Option<u64> {
@@ -204,16 +227,88 @@ pub fn should_continue_response(response_object: &Value) -> bool {
         && !response_contains_tool_call(response_object)
 }
 
-/// 把 HTTP 风格的续写请求整理为 Responses WebSocket 的 `response.create` 事件。
-///
-/// WebSocket 模式隐式流式返回，不能携带 `stream`；`background` 同样不受支持。
-pub fn prepare_websocket_continue_request(mut request: Value) -> Value {
+fn remove_websocket_transport_fields(request: &mut Value) {
+    let Some(object) = request.as_object_mut() else {
+        return;
+    };
+    object.remove("stream");
+    object.remove("stream_options");
+    object.remove("background");
+}
+
+fn request_uses_server_managed_context(request: &Value) -> bool {
+    request
+        .get("previous_response_id")
+        .is_some_and(|value| !value.is_null())
+        || request
+            .get("conversation")
+            .is_some_and(|value| !value.is_null())
+        || request
+            .get("conversation_id")
+            .is_some_and(|value| !value.is_null())
+}
+
+fn prepare_websocket_stateless_continue_request(mut request: Value) -> Value {
     request["type"] = Value::String("response.create".to_string());
     if let Some(object) = request.as_object_mut() {
-        object.remove("stream");
-        object.remove("background");
+        object.remove("previous_response_id");
+        object.remove("conversation");
+        object.remove("conversation_id");
     }
+    remove_websocket_transport_fields(&mut request);
     request
+}
+
+fn build_websocket_latest_response_request(original_request: &Value, response_id: &str) -> Value {
+    let mut request = original_request.clone();
+    request["type"] = Value::String("response.create".to_string());
+    request["previous_response_id"] = Value::String(response_id.to_string());
+    request["input"] = json!([{
+        "type": "message",
+        "role": "developer",
+        "content": [{
+            "type": "input_text",
+            "text": WEBSOCKET_CONTINUE_DRAFT_INSTRUCTION
+        }]
+    }]);
+    if let Some(object) = request.as_object_mut() {
+        object.remove("conversation");
+        object.remove("conversation_id");
+    }
+    remove_websocket_transport_fields(&mut request);
+    request
+}
+
+/// 构造 Responses WebSocket 自动推理续接请求。
+///
+/// - 原请求不依赖服务端会话状态时，重放原始输入和 encrypted reasoning，并丢弃草稿答案。
+/// - 原请求只携带增量 input 时，必须使用刚完成的 response ID，避免旧 ID 已从连接缓存淘汰，
+///   同时不能删除 ID 后丢失此前会话上下文。
+pub fn build_websocket_continue_request(
+    original_request: &Value,
+    response_object: &Value,
+    round_index: u32,
+) -> Option<WebSocketContinueRequest> {
+    if request_uses_server_managed_context(original_request) {
+        let response_id = response_object
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())?;
+        return Some(WebSocketContinueRequest {
+            request: build_websocket_latest_response_request(original_request, response_id),
+            mode: WebSocketContinueMode::LatestResponse,
+        });
+    }
+
+    let request = build_continue_request(
+        original_request,
+        &extract_output_items(response_object),
+        round_index,
+    );
+    Some(WebSocketContinueRequest {
+        request: prepare_websocket_stateless_continue_request(request),
+        mode: WebSocketContinueMode::StatelessReplay,
+    })
 }
 
 /// 从一段完整的 Responses SSE 文本中提取终止事件（response.completed /
@@ -298,17 +393,96 @@ mod tests {
     }
 
     #[test]
-    fn websocket_continue_request_removes_unsupported_fields() {
-        let request = prepare_websocket_continue_request(json!({
+    fn websocket_stateless_continue_request_replays_reasoning_without_session_fields() {
+        let original = json!({
             "model": "gpt-test",
-            "input": [],
+            "input": [{"type": "message", "role": "user", "content": []}],
             "stream": true,
-            "background": false
-        }));
+            "stream_options": {"include_usage": true},
+            "background": false,
+            "include": ["reasoning.encrypted_content"]
+        });
+        let response = json!({
+            "id": "resp_short",
+            "output": [{
+                "id": "rs_short",
+                "type": "reasoning",
+                "encrypted_content": "encrypted-short"
+            }]
+        });
+        let continued = build_websocket_continue_request(&original, &response, 1).unwrap();
+        let request = continued.request;
 
+        assert_eq!(continued.mode, WebSocketContinueMode::StatelessReplay);
         assert_eq!(request["type"], "response.create");
         assert!(request.get("stream").is_none());
+        assert!(request.get("stream_options").is_none());
         assert!(request.get("background").is_none());
+        assert!(request.get("previous_response_id").is_none());
+        assert!(request.get("conversation").is_none());
+        assert!(request.get("conversation_id").is_none());
+        assert!(
+            request["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["encrypted_content"] == "encrypted-short")
+        );
+    }
+
+    #[test]
+    fn websocket_stateful_continue_request_uses_latest_response_without_replaying_user_input() {
+        let original = json!({
+            "model": "gpt-test",
+            "instructions": "keep the original behavior",
+            "previous_response_id": "resp_parent",
+            "conversation_id": "legacy-conversation",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "current user turn"}]
+            }],
+            "stream": true,
+            "stream_options": {"include_usage": true},
+            "background": false,
+            "include": ["reasoning.encrypted_content"]
+        });
+        let response = json!({
+            "id": "resp_short",
+            "output": [{
+                "id": "rs_short",
+                "type": "reasoning",
+                "encrypted_content": "encrypted-short"
+            }]
+        });
+        let continued = build_websocket_continue_request(&original, &response, 1).unwrap();
+        let request = continued.request;
+        let input = request["input"].as_array().unwrap();
+
+        assert_eq!(continued.mode, WebSocketContinueMode::LatestResponse);
+        assert_eq!(request["type"], "response.create");
+        assert_eq!(request["previous_response_id"], "resp_short");
+        assert_eq!(request["instructions"], "keep the original behavior");
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "developer");
+        assert!(!request.to_string().contains("current user turn"));
+        assert!(!request.to_string().contains("encrypted-short"));
+        assert!(request.get("conversation").is_none());
+        assert!(request.get("conversation_id").is_none());
+        assert!(request.get("stream").is_none());
+        assert!(request.get("stream_options").is_none());
+        assert!(request.get("background").is_none());
+    }
+
+    #[test]
+    fn websocket_stateful_continue_request_requires_latest_response_id() {
+        let original = json!({
+            "model": "gpt-test",
+            "previous_response_id": "resp_parent",
+            "input": []
+        });
+
+        assert!(build_websocket_continue_request(&original, &json!({}), 1).is_none());
     }
 
     #[test]

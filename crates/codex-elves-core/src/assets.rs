@@ -2,6 +2,8 @@ use base64::Engine;
 use serde_json::Map;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 use toml_edit::Item;
 
 use crate::settings::BackendSettings;
@@ -51,14 +53,29 @@ fn injection_script_source_with_settings(
     let codex_home = crate::codex_home::codex_home_dir_for_settings(settings);
     let plugin_marketplaces = local_plugin_marketplaces_from_home(&codex_home);
     format!(
-        "window.__CODEX_SESSION_DELETE_HELPER__ = {};\nwindow.__CODEX_ELVES_VERSION__ = {};\nwindow.__CODEX_ELVES_BUILD__ = {};\nwindow.__CODEX_ELVES_IMAGE_OVERLAY__ = {};\nwindow.__CODEX_ELVES_PLUGIN_MARKETPLACES__ = {};\n{}",
+        "window.__CODEX_SESSION_DELETE_HELPER__ = {};\nwindow.__CODEX_ELVES_VERSION__ = {};\nwindow.__CODEX_ELVES_BUILD__ = {};\nwindow.__CODEX_ELVES_LAUNCH_CYCLE__ = {};\nwindow.__CODEX_ELVES_IMAGE_OVERLAY__ = {};\nwindow.__CODEX_ELVES_PLUGIN_MARKETPLACES__ = {};\n{}",
         serde_json::to_string(&helper_url).expect("helper URL should serialize"),
         serde_json::to_string(crate::version::VERSION).expect("version should serialize"),
         serde_json::to_string(DIAGNOSTIC_BUILD_ID).expect("build id should serialize"),
+        serde_json::to_string(injection_launch_cycle_id())
+            .expect("launch cycle id should serialize"),
         serde_json::to_string(&image_overlay).expect("image overlay config should serialize"),
         serde_json::to_string(&plugin_marketplaces).expect("plugin marketplaces should serialize"),
         source,
     )
+}
+
+fn injection_launch_cycle_id() -> &'static str {
+    static LAUNCH_CYCLE_ID: OnceLock<String> = OnceLock::new();
+    LAUNCH_CYCLE_ID
+        .get_or_init(|| {
+            let started_at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            format!("{}-{started_at}", std::process::id())
+        })
+        .as_str()
 }
 
 fn local_plugin_marketplaces_from_home(home: &Path) -> Value {

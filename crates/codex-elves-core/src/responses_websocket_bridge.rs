@@ -284,6 +284,7 @@ async fn bridge_responses_websockets(
         while let Some(message) = upstream_stream.next().await {
             let message = message.context("读取上游 Responses WebSocket 消息失败")?;
             let is_close = matches!(message, Message::Close(_));
+            upstream_request_logger.record_first_response_event(&message);
             match upstream_continuation.handle_upstream_message(message)? {
                 WebSocketContinuationAction::Forward(message) => {
                     upstream_request_logger.record_response(&message);
@@ -501,27 +502,41 @@ impl WebSocketContinuationCoordinator {
                 .is_some_and(crate::continue_thinking::should_continue_response)
             && active.round < active.max_rounds;
         if should_continue {
-            active.round += 1;
-            if active.before_response_body.is_none() {
-                active.before_response_body = response_object
-                    .as_ref()
-                    .and_then(|response| serde_json::to_string_pretty(response).ok());
-            }
+            let next_round = active.round + 1;
             let response_object = response_object
                 .as_ref()
                 .expect("continuation requires a terminal response object");
-            let continue_request = crate::continue_thinking::build_continue_request(
+            let Some(continue_request) = crate::continue_thinking::build_websocket_continue_request(
                 &active.original_request,
-                &crate::continue_thinking::extract_output_items(response_object),
-                active.round,
-            );
-            let continue_request =
-                crate::continue_thinking::prepare_websocket_continue_request(continue_request);
+                response_object,
+                next_round,
+            ) else {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "continue_thinking.round_skipped",
+                    serde_json::json!({
+                        "transport": "ws",
+                        "reason": "missing_latest_response_id",
+                        "round": next_round
+                    }),
+                );
+                let active = state.active.take().expect("active continuation must exist");
+                return Ok(WebSocketContinuationAction::Flush {
+                    messages: active.buffered_messages.clone(),
+                    metadata: websocket_continue_metadata(&active, None),
+                });
+            };
+            active.round = next_round;
+            if active.before_response_body.is_none() {
+                active.before_response_body = response_object
+                    .as_object()
+                    .and_then(|_| serde_json::to_string_pretty(response_object).ok());
+            }
             active.continue_requests.push(serde_json::json!({
                 "round": active.round,
-                "request": continue_request.clone()
+                "mode": continue_request.mode.as_str(),
+                "request": continue_request.request.clone()
             }));
-            let request_text = serde_json::to_string(&continue_request)
+            let request_text = serde_json::to_string(&continue_request.request)
                 .context("序列化 Responses WebSocket 续接请求失败")?;
             active.fallback_messages = std::mem::take(&mut active.buffered_messages);
             active.fallback_response_body = serde_json::to_string_pretty(response_object).ok();
@@ -535,6 +550,7 @@ impl WebSocketContinuationCoordinator {
                         .get("model")
                         .and_then(Value::as_str)
                         .unwrap_or_default(),
+                    "mode": continue_request.mode.as_str(),
                     "round": active.round,
                     "reasoningTokens": reasoning_tokens,
                     "gridMultiple": reasoning_tokens
@@ -701,6 +717,47 @@ impl WebSocketRequestLogger {
 
     fn record_response(&self, message: &Message) {
         self.record_response_for(message, None);
+    }
+
+    fn record_first_response_event(&self, message: &Message) {
+        let Message::Text(text) = message else {
+            return;
+        };
+        let Ok(payload) = serde_json::from_str::<Value>(text.as_str()) else {
+            return;
+        };
+        let Some(event_type) = payload.get("type").and_then(Value::as_str) else {
+            return;
+        };
+        if !event_type.starts_with("response.") && event_type != "error" {
+            return;
+        }
+
+        let response_id = websocket_response_id(&payload);
+        let mut update = None;
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        let Some(log_id) = resolve_websocket_log_id(&mut state, response_id.as_deref()) else {
+            return;
+        };
+        if let Some(response_id) = response_id.as_deref() {
+            state
+                .response_ids
+                .insert(response_id.to_string(), log_id.clone());
+        }
+        let Some(tracked) = state.requests.get_mut(&log_id) else {
+            return;
+        };
+        if tracked.record.first_token_ms.is_none() {
+            tracked.record.first_token_ms = Some(tracked.started_at.elapsed().as_millis() as u64);
+            tracked.record.status_code = Some(200);
+            update = Some(tracked.record.clone());
+        }
+        drop(state);
+        if let Some(record) = update {
+            append_websocket_proxy_log_record(&record);
+        }
     }
 
     fn record_response_for(&self, message: &Message, preferred_log_id: Option<&str>) {
