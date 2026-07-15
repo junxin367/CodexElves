@@ -47,6 +47,28 @@ pub struct RelayModelMapping {
     pub context_window: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ResponsesWebsocketCapabilityState {
+    #[default]
+    Unknown,
+    Supported,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ResponsesWebsocketCapability {
+    #[serde(default)]
+    pub state: ResponsesWebsocketCapabilityState,
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub checked_at_ms: Option<u64>,
+    #[serde(default)]
+    pub message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RelayProfile {
@@ -104,6 +126,8 @@ pub struct RelayProfile {
     pub chat_completions_model_list: String,
     #[serde(rename = "anthropicModelList", default)]
     pub anthropic_model_list: String,
+    #[serde(rename = "responsesWebsocket", default)]
+    pub responses_websocket: ResponsesWebsocketCapability,
     #[serde(
         rename = "userAgent",
         default,
@@ -175,6 +199,7 @@ impl Default for RelayProfile {
             responses_model_list: String::new(),
             chat_completions_model_list: String::new(),
             anthropic_model_list: String::new(),
+            responses_websocket: ResponsesWebsocketCapability::default(),
             user_agent: String::new(),
             system_prompt_override: String::new(),
         }
@@ -428,6 +453,7 @@ impl BackendSettings {
                 responses_model_list: String::new(),
                 chat_completions_model_list: String::new(),
                 anthropic_model_list: String::new(),
+                responses_websocket: ResponsesWebsocketCapability::default(),
                 user_agent: String::new(),
                 system_prompt_override: String::new(),
             };
@@ -478,6 +504,7 @@ impl BackendSettings {
             responses_model_list: String::new(),
             chat_completions_model_list: String::new(),
             anthropic_model_list: String::new(),
+            responses_websocket: ResponsesWebsocketCapability::default(),
             user_agent: String::new(),
             system_prompt_override: String::new(),
         }
@@ -801,6 +828,10 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
         let mut profiles = serde_json::from_value::<Vec<RelayProfile>>(Value::Array(value.clone()))
             .unwrap_or_default();
         preserve_official_mix_bearer_tokens(&mut profiles, target);
+        for profile in &mut profiles {
+            let _ = crate::relay_config::normalize_relay_profile_for_storage(profile);
+            crate::responses_websocket::normalize_responses_websocket_capability(profile);
+        }
         target.insert(
             "relayProfiles".to_string(),
             serde_json::to_value(profiles).unwrap_or_else(|_| Value::Array(Vec::new())),
@@ -993,6 +1024,7 @@ fn normalize_settings_config_sections(mut settings: BackendSettings) -> BackendS
     settings.relay_context_config_contents = crate::relay_config::normalize_config_text(&context);
     for profile in &mut settings.relay_profiles {
         let _ = crate::relay_config::normalize_relay_profile_for_storage(profile);
+        crate::responses_websocket::normalize_responses_websocket_capability(profile);
     }
     settings.codex_home_path = normalize_codex_home_path(&settings.codex_home_path);
     settings.codex_app_image_overlay_opacity =
@@ -1387,6 +1419,75 @@ base_url = "http://127.0.0.1:45221/v1"
                 .as_str()
                 .unwrap()
                 .contains("codex_elves_chat_base_url")
+        );
+    }
+
+    #[test]
+    fn responses_websocket_cache_roundtrip_resets_after_base_url_change() {
+        let dir = temp_dir();
+        let store = SettingsStore::new(dir.join("settings.json"));
+        let mut settings = BackendSettings {
+            relay_profiles: vec![RelayProfile {
+                id: "relay-responses".to_string(),
+                name: "Responses".to_string(),
+                relay_mode: RelayMode::PureApi,
+                protocol: RelayProtocol::Responses,
+                upstream_base_url: "https://relay-a.example/v1".to_string(),
+                api_key: "sk-test".to_string(),
+                auth_contents: r#"{"OPENAI_API_KEY":"sk-test"}"#.to_string(),
+                config_contents: r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://relay-a.example/v1"
+"#
+                .to_string(),
+                responses_websocket: ResponsesWebsocketCapability {
+                    state: ResponsesWebsocketCapabilityState::Supported,
+                    endpoint: "wss://relay-a.example/v1/responses".to_string(),
+                    checked_at_ms: Some(1_720_000_000_000),
+                    message: "握手成功".to_string(),
+                },
+                ..RelayProfile::default()
+            }],
+            active_relay_id: "relay-responses".to_string(),
+            ..BackendSettings::default()
+        };
+
+        store.save(&settings).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(
+            loaded.relay_profiles[0].responses_websocket.state,
+            ResponsesWebsocketCapabilityState::Supported
+        );
+
+        settings = loaded;
+        settings.relay_profiles[0].upstream_base_url = "https://relay-b.example/v1".to_string();
+        settings.relay_profiles[0].config_contents = settings.relay_profiles[0]
+            .config_contents
+            .replace("https://relay-a.example/v1", "https://relay-b.example/v1");
+        store.save(&settings).unwrap();
+
+        let changed = store.load().unwrap();
+        assert_eq!(
+            changed.relay_profiles[0].responses_websocket.state,
+            ResponsesWebsocketCapabilityState::Unknown
+        );
+        assert_eq!(
+            changed.relay_profiles[0].responses_websocket.endpoint,
+            "wss://relay-b.example/v1/responses"
+        );
+        assert_eq!(
+            changed.relay_profiles[0].responses_websocket.checked_at_ms,
+            None
+        );
+        assert!(
+            changed.relay_profiles[0]
+                .responses_websocket
+                .message
+                .is_empty()
         );
     }
 

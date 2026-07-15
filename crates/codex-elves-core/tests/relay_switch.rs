@@ -110,6 +110,55 @@ base_url = "https://old.example/v1"
 }
 
 #[test]
+fn switch_overwrites_stale_supports_websockets_true_with_false() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("codex");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(
+        home.join("config.toml"),
+        r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = true
+base_url = "https://old.example/v1"
+"#,
+    )
+    .unwrap();
+    let store = SettingsStore::new(temp.path().join("settings.json"));
+    let original = BackendSettings {
+        active_relay_id: "a".to_string(),
+        relay_profiles: vec![pure_profile("a", "https://old.example/v1", "sk-a")],
+        ..BackendSettings::default()
+    };
+    store.save(&original).unwrap();
+    let target = RelayProfile {
+        id: "b".to_string(),
+        name: "B".to_string(),
+        relay_mode: RelayMode::PureApi,
+        base_url: "https://new.example/v1".to_string(),
+        upstream_base_url: "https://new.example/v1".to_string(),
+        api_key: "sk-b".to_string(),
+        config_contents: "model_provider = \"custom\"\n".to_string(),
+        auth_contents: r#"{"OPENAI_API_KEY":"sk-b"}"#.to_string(),
+        ..RelayProfile::default()
+    };
+    let next = BackendSettings {
+        active_relay_id: "b".to_string(),
+        relay_profiles: vec![original.relay_profiles[0].clone(), target],
+        ..BackendSettings::default()
+    };
+
+    switch_relay_profile_in_home(&store, &home, next, "a").unwrap();
+
+    let live = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    assert!(live.contains("supports_websockets = false"));
+    assert!(!live.contains("supports_websockets = true"));
+}
+
+#[test]
 fn switch_backfills_previous_profile_from_live_before_selecting_target() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex");

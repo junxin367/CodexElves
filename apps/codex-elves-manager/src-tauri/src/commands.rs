@@ -546,8 +546,13 @@ pub fn load_settings() -> CommandResult<SettingsPayload> {
 }
 
 #[tauri::command]
-pub fn save_settings(settings: BackendSettings) -> CommandResult<SettingsPayload> {
-    let settings = normalize_settings_before_save(settings);
+pub async fn save_settings(settings: BackendSettings) -> CommandResult<SettingsPayload> {
+    let _guard = settings_write_mutex().lock().await;
+    let store = SettingsStore::default();
+    let mut settings = normalize_settings_before_save(settings);
+    if let Ok(saved_settings) = store.load() {
+        merge_saved_responses_websocket_capabilities(&mut settings, &saved_settings);
+    }
     if let Err(error) = ensure_codex_home_path_ready(&settings) {
         return failed(
             &format!("保存设置失败：{error}"),
@@ -563,12 +568,13 @@ pub fn save_settings(settings: BackendSettings) -> CommandResult<SettingsPayload
             },
         );
     }
-    match SettingsStore::default().save(&settings) {
+    match store.save(&settings) {
         Ok(()) => {
             let wrapper_message = refresh_cli_wrapper_after_settings_save(&settings);
             let catalog_message = sync_applied_model_catalog_after_settings_save(&settings);
+            let websocket_message = sync_applied_websocket_after_settings_save(&settings);
             settings_payload(
-                &format!("设置已保存。{wrapper_message}{catalog_message}"),
+                &format!("设置已保存。{wrapper_message}{catalog_message}{websocket_message}"),
                 "设置保存后重新读取失败",
             )
         }
@@ -2194,24 +2200,30 @@ pub struct RelayProfileSwitchRequest {
 }
 
 #[tauri::command]
-pub fn switch_relay_profile(
+pub async fn switch_relay_profile(
     request: RelayProfileSwitchRequest,
 ) -> CommandResult<RelaySwitchPayload> {
-    let Ok(_guard) = relay_switch_mutex().lock() else {
-        let status = codex_elves_core::relay_config::default_relay_status();
-        return failed(
-            "供应商切换锁已损坏，请重启管理器后再试。",
-            relay_switch_payload(
-                SettingsStore::default().load().unwrap_or_default(),
-                status,
-                None,
-            ),
-        );
-    };
+    let _guard = settings_write_mutex().lock().await;
     let store = SettingsStore::default();
     let previous_active_relay_id = request.previous_active_relay_id;
-    let settings = normalize_settings_before_save(request.settings);
+    let mut settings = normalize_settings_before_save(request.settings);
+    if let Ok(saved_settings) = store.load() {
+        merge_saved_responses_websocket_capabilities(&mut settings, &saved_settings);
+    }
+    codex_elves_core::responses_websocket::probe_active_relay_responses_websocket_if_needed(
+        &mut settings,
+    )
+    .await;
+
     let home = codex_elves_core::codex_home::codex_home_dir_for_settings(&settings);
+    if let Err(error) = persist_active_responses_websocket_capability(&store, &settings) {
+        let status = codex_elves_core::relay_config::relay_status_from_home(&home);
+        let persisted_settings = store.load().unwrap_or_default();
+        return failed(
+            &format!("保存 Responses WebSocket 探测结果失败：{error}"),
+            relay_switch_payload(persisted_settings, status, None),
+        );
+    }
     log_manager_event(
         "manager.switch_relay_profile.start",
         json!({
@@ -2969,6 +2981,25 @@ fn sync_applied_model_catalog_after_settings_save(settings: &BackendSettings) ->
     }
 }
 
+fn sync_applied_websocket_after_settings_save(settings: &BackendSettings) -> String {
+    if !settings.relay_profiles_enabled || settings.active_aggregate_relay_profile().is_some() {
+        return String::new();
+    }
+    let relay = settings.active_relay_profile();
+    if relay.relay_mode == codex_elves_core::settings::RelayMode::Official
+        && !relay.official_mix_api_key
+    {
+        return String::new();
+    }
+    let home = codex_elves_core::codex_home::codex_home_dir_for_settings(settings);
+    match codex_elves_core::relay_config::sync_applied_relay_profile_websocket_to_home(
+        &home, &relay,
+    ) {
+        Ok(_) => String::new(),
+        Err(error) => format!(" 但 WebSocket 配置同步失败：{error}。"),
+    }
+}
+
 fn relay_payload(
     status: codex_elves_core::relay_config::RelayStatus,
     backup_path: Option<String>,
@@ -3004,9 +3035,62 @@ fn relay_switch_payload(
     }
 }
 
-fn relay_switch_mutex() -> &'static Mutex<()> {
-    static RELAY_SWITCH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    RELAY_SWITCH_LOCK.get_or_init(|| Mutex::new(()))
+fn settings_write_mutex() -> &'static tokio::sync::Mutex<()> {
+    static SETTINGS_WRITE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    SETTINGS_WRITE_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn merge_saved_responses_websocket_capabilities(
+    settings: &mut BackendSettings,
+    saved_settings: &BackendSettings,
+) {
+    for target in &mut settings.relay_profiles {
+        let explicitly_reset = target.responses_websocket.state
+            == codex_elves_core::settings::ResponsesWebsocketCapabilityState::Unknown
+            && target.responses_websocket.endpoint.trim().is_empty();
+        codex_elves_core::responses_websocket::normalize_responses_websocket_capability(target);
+        if explicitly_reset {
+            continue;
+        }
+        let Some(saved) = saved_settings
+            .relay_profiles
+            .iter()
+            .find(|profile| profile.id == target.id)
+        else {
+            continue;
+        };
+        let mut saved = saved.clone();
+        codex_elves_core::responses_websocket::normalize_responses_websocket_capability(&mut saved);
+        if saved.responses_websocket.endpoint == target.responses_websocket.endpoint {
+            target.responses_websocket = saved.responses_websocket;
+        }
+    }
+}
+
+fn persist_active_responses_websocket_capability(
+    store: &SettingsStore,
+    probed_settings: &BackendSettings,
+) -> anyhow::Result<()> {
+    let Some(probed) = probed_settings
+        .relay_profiles
+        .iter()
+        .find(|profile| profile.id == probed_settings.active_relay_id)
+    else {
+        return Ok(());
+    };
+    let mut saved = store.load().unwrap_or_default();
+    let Some(target) = saved
+        .relay_profiles
+        .iter_mut()
+        .find(|profile| profile.id == probed.id)
+    else {
+        return Ok(());
+    };
+    if target.responses_websocket == probed.responses_websocket {
+        return Ok(());
+    }
+    target.responses_websocket = probed.responses_websocket.clone();
+    store.save(&saved)
 }
 
 fn empty_context_entries() -> codex_elves_core::relay_config::CodexContextEntries {
@@ -3379,6 +3463,150 @@ fn default_log_lines() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn websocket_cache_profile(
+        state: codex_elves_core::settings::ResponsesWebsocketCapabilityState,
+        endpoint: &str,
+    ) -> RelayProfile {
+        RelayProfile {
+            id: "relay-ws".to_string(),
+            relay_mode: codex_elves_core::settings::RelayMode::PureApi,
+            protocol: codex_elves_core::settings::RelayProtocol::Responses,
+            base_url: "https://relay.example/v1".to_string(),
+            upstream_base_url: "https://relay.example/v1".to_string(),
+            responses_websocket: codex_elves_core::settings::ResponsesWebsocketCapability {
+                state,
+                endpoint: endpoint.to_string(),
+                checked_at_ms: Some(1),
+                message: "cached".to_string(),
+            },
+            ..RelayProfile::default()
+        }
+    }
+
+    #[test]
+    fn explicit_websocket_probe_reset_is_not_overwritten_by_saved_cache() {
+        let mut incoming = BackendSettings {
+            active_relay_id: "relay-ws".to_string(),
+            relay_profiles: vec![websocket_cache_profile(
+                codex_elves_core::settings::ResponsesWebsocketCapabilityState::Unknown,
+                "",
+            )],
+            ..BackendSettings::default()
+        };
+        let saved = BackendSettings {
+            active_relay_id: "relay-ws".to_string(),
+            relay_profiles: vec![websocket_cache_profile(
+                codex_elves_core::settings::ResponsesWebsocketCapabilityState::Supported,
+                "wss://relay.example/v1/responses",
+            )],
+            ..BackendSettings::default()
+        };
+
+        merge_saved_responses_websocket_capabilities(&mut incoming, &saved);
+
+        assert_eq!(
+            incoming.relay_profiles[0].responses_websocket.state,
+            codex_elves_core::settings::ResponsesWebsocketCapabilityState::Unknown
+        );
+    }
+
+    #[test]
+    fn saved_websocket_cache_overrides_untrusted_request_state() {
+        let mut incoming = BackendSettings {
+            active_relay_id: "relay-ws".to_string(),
+            relay_profiles: vec![websocket_cache_profile(
+                codex_elves_core::settings::ResponsesWebsocketCapabilityState::Supported,
+                "wss://relay.example/v1/responses",
+            )],
+            ..BackendSettings::default()
+        };
+        let saved = BackendSettings {
+            active_relay_id: "relay-ws".to_string(),
+            relay_profiles: vec![websocket_cache_profile(
+                codex_elves_core::settings::ResponsesWebsocketCapabilityState::Unknown,
+                "wss://relay.example/v1/responses",
+            )],
+            ..BackendSettings::default()
+        };
+
+        merge_saved_responses_websocket_capabilities(&mut incoming, &saved);
+
+        assert_eq!(
+            incoming.relay_profiles[0].responses_websocket.state,
+            codex_elves_core::settings::ResponsesWebsocketCapabilityState::Unknown
+        );
+    }
+
+    #[test]
+    fn saved_websocket_cache_is_preserved_for_non_active_profiles() {
+        let mut incoming_active = websocket_cache_profile(
+            codex_elves_core::settings::ResponsesWebsocketCapabilityState::Unknown,
+            "wss://relay.example/v1/responses",
+        );
+        incoming_active.id = "relay-active".to_string();
+        let mut incoming_other = incoming_active.clone();
+        incoming_other.id = "relay-other".to_string();
+        let mut saved_other = incoming_other.clone();
+        saved_other.responses_websocket.state =
+            codex_elves_core::settings::ResponsesWebsocketCapabilityState::Supported;
+        saved_other.responses_websocket.message = "disk truth".to_string();
+        let mut incoming = BackendSettings {
+            active_relay_id: "relay-active".to_string(),
+            relay_profiles: vec![incoming_active, incoming_other],
+            ..BackendSettings::default()
+        };
+        let saved = BackendSettings {
+            active_relay_id: "relay-active".to_string(),
+            relay_profiles: vec![saved_other],
+            ..BackendSettings::default()
+        };
+
+        merge_saved_responses_websocket_capabilities(&mut incoming, &saved);
+
+        let other = incoming
+            .relay_profiles
+            .iter()
+            .find(|profile| profile.id == "relay-other")
+            .unwrap();
+        assert_eq!(
+            other.responses_websocket.state,
+            codex_elves_core::settings::ResponsesWebsocketCapabilityState::Supported
+        );
+        assert_eq!(other.responses_websocket.message, "disk truth");
+    }
+
+    #[test]
+    fn probed_websocket_capability_is_persisted_independently_from_switch() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(temp.path().join("settings.json"));
+        let saved = BackendSettings {
+            active_relay_id: "relay-ws".to_string(),
+            relay_profiles: vec![websocket_cache_profile(
+                codex_elves_core::settings::ResponsesWebsocketCapabilityState::Unknown,
+                "wss://relay.example/v1/responses",
+            )],
+            ..BackendSettings::default()
+        };
+        store.save(&saved).unwrap();
+        let mut probed = store.load().unwrap();
+        probed.relay_profiles[0].responses_websocket.state =
+            codex_elves_core::settings::ResponsesWebsocketCapabilityState::Supported;
+        probed.relay_profiles[0].responses_websocket.checked_at_ms = Some(2);
+        probed.relay_profiles[0].responses_websocket.message = "probed".to_string();
+
+        persist_active_responses_websocket_capability(&store, &probed).unwrap();
+
+        let persisted = store.load().unwrap();
+        assert_eq!(
+            persisted.relay_profiles[0].responses_websocket.state,
+            codex_elves_core::settings::ResponsesWebsocketCapabilityState::Supported
+        );
+        assert_eq!(
+            persisted.relay_profiles[0].responses_websocket.message,
+            "probed"
+        );
+    }
 
     #[test]
     fn backend_version_returns_structured_payload() {

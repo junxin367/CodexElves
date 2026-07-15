@@ -25,7 +25,7 @@
   const chatsSortRefreshIntervalMs = 1500;
   const chatsSortDbRefreshIntervalMs = 5000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "21";
+  const codexDeleteStyleVersion = "22";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
   const codexDeleteVersion = "7";
@@ -323,18 +323,9 @@
         right: max(66px, var(--codex-session-actions-right, 28px));
       }
       .${actionTooltipClass} {
-        position: fixed;
+        position: fixed !important;
         z-index: 2147483201;
-        max-width: min(220px, calc(100vw - 32px));
-        border: 1px solid rgba(255,255,255,.1);
-        border-radius: 12px;
-        background: #242628;
-        color: #f4f4f5;
-        font: 14px/20px system-ui, sans-serif;
-        padding: 9px 12px;
-        box-shadow: 0 14px 40px rgba(0,0,0,.28);
         pointer-events: none;
-        white-space: nowrap;
       }
       .${projectMoveOverlayClass} {
         position: fixed;
@@ -6905,20 +6896,28 @@
     if (!label) return;
     hideActionButtonTooltip();
     const tooltip = document.createElement("div");
-    tooltip.className = actionTooltipClass;
-    tooltip.textContent = label;
+    tooltip.className = `${actionTooltipClass} z-50 w-fit select-none text-sm whitespace-normal break-words bg-token-dropdown-background text-token-foreground border-token-border rounded-lg border px-2 py-1`;
+    tooltip.setAttribute("role", "tooltip");
+    const content = document.createElement("div");
+    content.className = "flex items-center gap-2";
+    const text = document.createElement("div");
+    text.className = "min-w-0";
+    text.textContent = label;
+    content.appendChild(text);
+    tooltip.appendChild(content);
     document.body.appendChild(tooltip);
     const buttonRect = button.getBoundingClientRect();
     const tooltipRect = tooltip.getBoundingClientRect();
-    const gap = 8;
+    const gap = 3;
     const left = Math.min(
       window.innerWidth - tooltipRect.width - 8,
       Math.max(8, buttonRect.left + buttonRect.width / 2 - tooltipRect.width / 2),
     );
-    const top = Math.min(
-      window.innerHeight - tooltipRect.height - 8,
-      buttonRect.bottom + gap,
-    );
+    const aboveTop = buttonRect.top - tooltipRect.height - gap;
+    const top = aboveTop >= 8
+      ? aboveTop
+      : Math.min(window.innerHeight - tooltipRect.height - 8, buttonRect.bottom + gap);
+    tooltip.dataset.side = aboveTop >= 8 ? "top" : "bottom";
     tooltip.style.left = `${left}px`;
     tooltip.style.top = `${Math.max(8, top)}px`;
   }

@@ -210,6 +210,15 @@ type BackendSettings = {
 
 type LaunchMode = "patch" | "relay";
 
+type ResponsesWebsocketCapabilityState = "unknown" | "supported" | "unsupported";
+
+type ResponsesWebsocketCapability = {
+  state: ResponsesWebsocketCapabilityState;
+  endpoint: string;
+  checkedAtMs: number | null;
+  message: string;
+};
+
 type RelayProfile = {
   id: string;
   name: string;
@@ -234,6 +243,7 @@ type RelayProfile = {
   responsesModelList: string;
   chatCompletionsModelList: string;
   anthropicModelList: string;
+  responsesWebsocket: ResponsesWebsocketCapability;
   userAgent: string;
   systemPromptOverride: string;
   aggregate?: RelayAggregateConfig | null;
@@ -807,6 +817,7 @@ const defaultSettings: BackendSettings = {
       responsesModelList: "",
       chatCompletionsModelList: "",
       anthropicModelList: "",
+      responsesWebsocket: emptyResponsesWebsocketCapability(),
       userAgent: "",
       systemPromptOverride: "",
     },
@@ -1435,7 +1446,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
     case "startup_options":
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
-      return Promise.resolve(browserPreviewResult({ currentVersion: "0.2.7", updateAvailable: false }) as T);
+      return Promise.resolve(browserPreviewResult({ currentVersion: "0.2.8", updateAvailable: false }) as T);
     case "load_overview":
       return Promise.resolve(browserPreviewResult({
         codex_app: { status: "found", path: settings.codexAppPath },
@@ -1450,7 +1461,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.2.7",
+        current_version: "0.2.8",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -1741,6 +1752,7 @@ export function App() {
   const [selectedProviderSyncTarget, setSelectedProviderSyncTarget] = useState("");
   const [removeOwnedData, setRemoveOwnedData] = useState(false);
   const [relaySwitching, setRelaySwitching] = useState(false);
+  const relaySwitchingRef = useRef(false);
 
   const call = <T,>(command: string, args?: Record<string, unknown>) =>
     isBrowserPreview() ? browserPreviewCommand<T>(command, args) : invoke<T>(command, args);
@@ -2627,7 +2639,7 @@ export function App() {
   };
 
   const switchRelayProfile = async (next: BackendSettings, previousActiveRelayId = settingsForm.activeRelayId) => {
-    if (relaySwitching) {
+    if (relaySwitchingRef.current) {
       showNotice("供应商切换中", "上一次切换还没有完成，请稍后再试。", "failed");
       return;
     }
@@ -2654,18 +2666,19 @@ export function App() {
       showNotice("供应商配置可能不正确", validationError, "failed");
       return;
     }
-    switchSettings = await snapshotActiveRelayFilesBeforeSwitch(switchSettings, previousActiveRelayId);
-    const selectedAfterSave = activeRelayProfile(switchSettings);
-    const command = relayProfileSwitchCommand(selectedAfterSave);
-
-    logDiagnostic("switchRelayProfile.apply_start", {
-      targetRelayId: selectedAfterSave.id,
-      targetRelayName: selectedAfterSave.name,
-      previousActiveRelayId,
-      command,
-    });
+    relaySwitchingRef.current = true;
     setRelaySwitching(true);
     try {
+      switchSettings = await snapshotActiveRelayFilesBeforeSwitch(switchSettings, previousActiveRelayId);
+      const selectedAfterSave = activeRelayProfile(switchSettings);
+      const command = relayProfileSwitchCommand(selectedAfterSave);
+
+      logDiagnostic("switchRelayProfile.apply_start", {
+        targetRelayId: selectedAfterSave.id,
+        targetRelayName: selectedAfterSave.name,
+        previousActiveRelayId,
+        command,
+      });
       const result = await run(() =>
         call<RelaySwitchResult>("switch_relay_profile", {
           request: { settings: switchSettings, previousActiveRelayId },
@@ -2711,6 +2724,7 @@ export function App() {
       });
       showNotice("供应商切换", relayProfileModeSwitchedText(currentSelected), result.status);
     } finally {
+      relaySwitchingRef.current = false;
       setRelaySwitching(false);
     }
   };
@@ -5595,6 +5609,34 @@ function RelayProfileEditor({
   }
 
   const showApiFields = profile.relayMode !== "official" || profile.officialMixApiKey;
+  const responsesWebsocketApplicable = relayCanProbeNativeResponsesWebsocket(profile);
+  const responsesWebsocketState: ResponsesWebsocketCapabilityState =
+    responsesWebsocketApplicable
+      ? profile.responsesWebsocket.state
+      : "unsupported";
+  const responsesWebsocketLabel =
+    !responsesWebsocketApplicable
+      ? "当前配置不适用"
+      : responsesWebsocketState === "supported"
+      ? "已支持"
+      : responsesWebsocketState === "unsupported"
+        ? "不支持"
+        : "待探测";
+  const responsesWebsocketMessage =
+    !responsesWebsocketApplicable
+      ? "当前协议、模型映射或系统提示词配置不满足原生 Responses WebSocket 条件。"
+      : profile.responsesWebsocket.message
+    || (responsesWebsocketState === "unsupported"
+      ? "当前协议、模型映射或系统提示词配置不满足原生 Responses WebSocket 条件。"
+      : responsesWebsocketState === "supported"
+        ? "下次设为当前时会继续使用已缓存的探测结果。"
+        : "下次设为当前供应商时自动探测。");
+  const responsesWebsocketCheckedAt =
+    responsesWebsocketApplicable
+    && profile.responsesWebsocket.checkedAtMs
+    && profile.responsesWebsocket.checkedAtMs > 0
+      ? new Date(profile.responsesWebsocket.checkedAtMs).toLocaleString("zh-CN")
+      : "";
   const updateDraft = (patch: Partial<RelayProfile>) => {
     onProfileChange(applyRelayProfilePatchToFiles(profile, patch, { allowGenerateFiles: isNew }));
   };
@@ -5812,6 +5854,27 @@ function RelayProfileEditor({
         <div className="hint-line relay-protocol-hint">
           <MessageCircle className="h-4 w-4" />
           <span>本地代理优先按模型列表分流；未列入模型时按当前供应商协议转发，不再拒绝请求。</span>
+        </div>
+      ) : null}
+      {showApiFields ? (
+        <div className="hint-line relay-protocol-hint">
+          <Network className="h-4 w-4" />
+          <span>
+            <strong>Responses WebSocket：{responsesWebsocketLabel}</strong>
+            {" · "}
+            {responsesWebsocketMessage}
+            {responsesWebsocketCheckedAt ? ` · 最近探测：${responsesWebsocketCheckedAt}` : ""}
+          </span>
+          <Button
+            onClick={() => updateDraft({ responsesWebsocket: emptyResponsesWebsocketCapability() })}
+            size="sm"
+            title="只重置为待探测；下次设为当前供应商时重新探测"
+            type="button"
+            variant="secondary"
+          >
+            <RefreshCw className="h-4 w-4" />
+            重新探测
+          </Button>
         </div>
       ) : null}
       <div className="hint-line relay-protocol-hint">
@@ -6980,6 +7043,13 @@ function AggregateRelayImpactPanel({ profile, form, isNew = false }: { profile: 
     },
     {
       file: "设为当前后",
+      field: "[model_providers.custom].supports_websockets",
+      value: "false",
+      detail: "聚合供应商固定不启用原生 Responses WebSocket，避免沿用上一供应商的 true。",
+      tone: "write",
+    },
+    {
+      file: "设为当前后",
       field: "auth.json",
       value: "codex-elves-aggregate",
       detail: "回列表点击“使用”后会写入聚合代理占位 Key；不会复制任何成员供应商的真实 Key。",
@@ -7606,6 +7676,13 @@ function relayActivationImpactRows(profile: RelayProfile): RelayActivationImpact
       field: `${providerTable}.requires_openai_auth`,
       value: "true",
       detail: "沿用 Codex 对 provider auth 的要求。",
+      tone: "write",
+    },
+    {
+      file: "config.toml",
+      field: `${providerTable}.supports_websockets`,
+      value: relaySupportsNativeResponsesWebsocket(profile) ? "true" : "false",
+      detail: "仅在探测已支持且配置满足原生 Responses WebSocket 条件时写入 true。",
       tone: "write",
     },
     {
@@ -8963,6 +9040,7 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
             responsesModelList: "",
             chatCompletionsModelList: "",
             anthropicModelList: "",
+            responsesWebsocket: emptyResponsesWebsocketCapability(),
             userAgent: "",
             systemPromptOverride: "",
           },
@@ -9022,6 +9100,7 @@ function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = 
         contextWindow: "",
         autoCompactLimit: "",
         modelList: "",
+        responsesWebsocket: emptyResponsesWebsocketCapability(),
         systemPromptOverride: "",
       },
       null,
@@ -9062,6 +9141,7 @@ function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = 
     responsesModelList,
     chatCompletionsModelList,
     anthropicModelList,
+    responsesWebsocket: normalizeResponsesWebsocketCapability(profile),
     userAgent: profile.userAgent || "",
     systemPromptOverride: profile.systemPromptOverride || "",
     aggregate: null,
@@ -9246,6 +9326,63 @@ function relayProfileModeSwitchedText(profile: RelayProfile): string {
   return "已按此供应商切回官方登录；页面增强已设为兼容增强。";
 }
 
+function emptyResponsesWebsocketCapability(): ResponsesWebsocketCapability {
+  return {
+    state: "unknown",
+    endpoint: "",
+    checkedAtMs: null,
+    message: "",
+  };
+}
+
+function normalizeResponsesWebsocketCapability(
+  profile: Pick<RelayProfile, "responsesWebsocket">,
+): ResponsesWebsocketCapability {
+  const capability = profile.responsesWebsocket;
+  const state: ResponsesWebsocketCapabilityState =
+    capability?.state === "supported" || capability?.state === "unsupported"
+      ? capability.state
+      : "unknown";
+  return {
+    state,
+    endpoint: capability?.endpoint || "",
+    checkedAtMs: typeof capability?.checkedAtMs === "number" ? capability.checkedAtMs : null,
+    message: capability?.message || "",
+  };
+}
+
+function relayCanProbeNativeResponsesWebsocket(profile: RelayProfile): boolean {
+  return (
+    !isAggregateRelayProfile(profile)
+    && (profile.relayMode !== "official" || profile.officialMixApiKey)
+    && profile.protocol === "responses"
+    && profile.modelMappings.every((mapping) => mapping.protocol === "responses")
+    && !splitRelayModelList(profile.chatCompletionsModelList).length
+    && !splitRelayModelList(profile.anthropicModelList).length
+    && !profile.systemPromptOverride.trim()
+  );
+}
+
+function relaySupportsNativeResponsesWebsocket(profile: RelayProfile): boolean {
+  return relayCanProbeNativeResponsesWebsocket(profile)
+    && profile.responsesWebsocket.state === "supported";
+}
+
+function responsesWebsocketInputsChanged(
+  profile: RelayProfile,
+  patch: Partial<RelayProfile>,
+): boolean {
+  if ("baseUrl" in patch && (patch.baseUrl || "") !== profile.baseUrl) return true;
+  if ("upstreamBaseUrl" in patch && (patch.upstreamBaseUrl || "") !== profile.upstreamBaseUrl) return true;
+  if ("protocol" in patch && patch.protocol !== profile.protocol) return true;
+  if (
+    "modelMappings" in patch
+    && JSON.stringify(normalizeRelayModelMappings(patch.modelMappings)) !== JSON.stringify(profile.modelMappings)
+  ) return true;
+  return "systemPromptOverride" in patch
+    && (patch.systemPromptOverride || "") !== profile.systemPromptOverride;
+}
+
 function withGeneratedRelayFiles(profile: RelayProfile): RelayProfile {
   if (isAggregateRelayProfile(profile)) {
     return { ...profile, configContents: "", authContents: "", aggregate: normalizeAggregateConfig(profile.aggregate, []) };
@@ -9265,7 +9402,23 @@ function withGeneratedRelayFiles(profile: RelayProfile): RelayProfile {
 }
 
 function buildRelayConfigToml(
-  profile: Pick<RelayProfile, "model" | "baseUrl" | "upstreamBaseUrl" | "apiKey" | "protocol" | "localProxyEnabled">,
+  profile: Pick<
+    RelayProfile,
+    | "model"
+    | "baseUrl"
+    | "upstreamBaseUrl"
+    | "apiKey"
+    | "protocol"
+    | "localProxyEnabled"
+    | "relayMode"
+    | "officialMixApiKey"
+    | "modelMappings"
+    | "chatCompletionsModelList"
+    | "anthropicModelList"
+    | "systemPromptOverride"
+    | "responsesWebsocket"
+    | "aggregate"
+  >,
   options: { includeBearerToken: boolean },
 ): string {
   const baseUrl = profile.localProxyEnabled ? PROTOCOL_PROXY_BASE_URL : profile.baseUrl.trim();
@@ -9281,6 +9434,7 @@ function buildRelayConfigToml(
     'name = "custom"',
     'wire_api = "responses"',
     "requires_openai_auth = true",
+    `supports_websockets = ${relaySupportsNativeResponsesWebsocket(profile as RelayProfile) ? "true" : "false"}`,
     `base_url = "${tomlString(baseUrl)}"`,
     options.includeBearerToken && apiKey ? `experimental_bearer_token = "${tomlString(apiKey)}"` : null,
     "",
@@ -9315,7 +9469,7 @@ function deriveRelayProfileFromFiles(profile: RelayProfile): RelayProfile {
   const isProxyConfig = configBaseUrl === PROTOCOL_PROXY_BASE_URL;
   const upstreamBaseUrl = profile.upstreamBaseUrl || chatUpstreamBaseUrl || (configBaseUrl && !isProxyConfig ? configBaseUrl : profile.baseUrl || "");
   const configApiKey = codexExperimentalBearerTokenFromConfig(configContents);
-  return {
+  const derived = {
     ...profile,
     model: codexModelFromConfig(configContents),
     baseUrl: upstreamBaseUrl,
@@ -9329,6 +9483,10 @@ function deriveRelayProfileFromFiles(profile: RelayProfile): RelayProfile {
     configContents,
     authContents,
   };
+  return {
+    ...derived,
+    responsesWebsocket: normalizeResponsesWebsocketCapability(derived),
+  };
 }
 
 function applyRelayProfilePatchToFiles(
@@ -9337,6 +9495,11 @@ function applyRelayProfilePatchToFiles(
   options: { allowGenerateFiles?: boolean } = {},
 ): RelayProfile {
   let next: RelayProfile = { ...profile, ...patch };
+  if (responsesWebsocketInputsChanged(profile, patch)) {
+    next.responsesWebsocket = emptyResponsesWebsocketCapability();
+  } else {
+    next.responsesWebsocket = normalizeResponsesWebsocketCapability(next);
+  }
   if (isAggregateRelayProfile(next)) {
     return normalizeAggregateRelayProfile(next, null);
   }
@@ -9390,6 +9553,13 @@ function applyRelayProfilePatchToFiles(
     } else if (options.allowGenerateFiles && (!next.configContents.trim() || (next.relayMode === "pureApi" && !next.authContents.trim()))) {
       next = withGeneratedRelayFiles(next);
     }
+  }
+  if (next.configContents.trim()) {
+    next.configContents = setCodexProviderBoolKey(
+      next.configContents,
+      "supports_websockets",
+      relaySupportsNativeResponsesWebsocket(next),
+    );
   }
 
   return deriveRelayProfileFromFiles(next);
@@ -9522,6 +9692,16 @@ function setCodexProviderStringKey(contents: string, key: string, value: string)
   }
   next = ensureCodexProviderDefaults(next, provider);
   return setTomlSectionStringKey(next, `model_providers.${provider}`, key, value);
+}
+
+function setCodexProviderBoolKey(contents: string, key: string, value: boolean): string {
+  const provider = rootTomlStringValue(contents, "model_provider") || "custom";
+  let next = contents;
+  if (!rootTomlStringValue(next, "model_provider")) {
+    next = setRootTomlStringKey(next, "model_provider", provider);
+  }
+  next = ensureCodexProviderDefaults(next, provider);
+  return setTomlSectionBoolKey(next, `model_providers.${provider}`, key, value);
 }
 
 function setCodexExperimentalBearerToken(contents: string, apiKey: string): string {
@@ -9699,7 +9879,7 @@ function updateRelayProfile(settings: BackendSettings, id: string, patch: Partia
     ...settings,
     relayProfiles: settings.relayProfiles.map((profile) => {
       if (profile.id !== id) return profile;
-      return deriveRelayProfileFromFiles({ ...profile, ...patch });
+      return applyRelayProfilePatchToFiles(profile, patch);
     }),
   });
 }
@@ -9731,6 +9911,7 @@ function createRelayProfile(settings: BackendSettings): RelayProfile {
     responsesModelList: "",
     chatCompletionsModelList: "",
     anthropicModelList: "",
+    responsesWebsocket: emptyResponsesWebsocketCapability(),
     userAgent: "",
     systemPromptOverride: "",
   };
@@ -9766,6 +9947,7 @@ function createAggregateRelayProfile(settings: BackendSettings): RelayProfile {
       responsesModelList: "",
       chatCompletionsModelList: "",
       anthropicModelList: "",
+      responsesWebsocket: emptyResponsesWebsocketCapability(),
       userAgent: "",
       systemPromptOverride: "",
       aggregate: {
@@ -9801,6 +9983,7 @@ function duplicateRelayProfile(settings: BackendSettings, id: string): BackendSe
     ...source,
     id: nextId,
     name: `${source.name || "未命名供应商"} 副本`,
+    responsesWebsocket: emptyResponsesWebsocketCapability(),
   };
   const normalizedNext = isAggregateRelayProfile(next) ? normalizeAggregateRelayProfile(next, settings) : next;
   const relayProfiles = [...settings.relayProfiles];
@@ -9910,6 +10093,7 @@ function normalizeAggregateRelayProfile(profile: RelayProfile, settings: Backend
     officialMixApiKey: false,
     configContents: "",
     authContents: "",
+    responsesWebsocket: emptyResponsesWebsocketCapability(),
     systemPromptOverride: "",
     aggregate,
   };

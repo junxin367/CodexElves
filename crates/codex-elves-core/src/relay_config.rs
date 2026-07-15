@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use toml_edit::{DocumentMut, Item, Table, TableLike};
 
+use crate::responses_websocket::relay_supports_native_responses_websocket;
 use crate::settings::{RelayContextSelection, RelayProfile, RelayProtocol};
 
 const RELAY_PROVIDER: &str = "custom";
@@ -459,6 +460,16 @@ fn apply_relay_profile_owned_fields_to_config(
     updated = set_table_toml_string_line(&updated, &provider_table, "name", &provider_id);
     updated = set_table_toml_string_line(&updated, &provider_table, "wire_api", "responses");
     updated = set_table_toml_raw_line(&updated, &provider_table, "requires_openai_auth", "true");
+    updated = set_table_toml_raw_line(
+        &updated,
+        &provider_table,
+        "supports_websockets",
+        if relay_supports_native_responses_websocket(profile) {
+            "true"
+        } else {
+            "false"
+        },
+    );
     updated = set_table_toml_string_line(&updated, &provider_table, "base_url", &codex_base_url);
     if profile.relay_mode == crate::settings::RelayMode::PureApi {
         updated = remove_table_key(&updated, &provider_table, "experimental_bearer_token");
@@ -538,6 +549,34 @@ pub fn sync_applied_relay_profile_model_catalog_to_home(
     std::fs::create_dir_all(home)?;
     let bytes = serde_json::to_vec_pretty(&catalog)?;
     crate::settings::atomic_write(&path, &bytes).context("写入模型目录失败")?;
+    Ok(true)
+}
+
+pub fn sync_applied_relay_profile_websocket_to_home(
+    home: &Path,
+    profile: &RelayProfile,
+) -> anyhow::Result<bool> {
+    let live_config = read_optional_text(&home.join("config.toml"))?;
+    let live_provider = root_key_string(&live_config, "model_provider").unwrap_or_default();
+    let profile_provider = relay_profile_provider_id(profile)?;
+    if live_provider.trim() != profile_provider.trim() {
+        return Ok(false);
+    }
+
+    let provider_table = format!("model_providers.{live_provider}");
+    let updated = set_table_toml_raw_line(
+        &live_config,
+        &provider_table,
+        "supports_websockets",
+        if relay_supports_native_responses_websocket(profile) {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    if updated != live_config {
+        write_codex_live_atomic(home, Some(&updated), None, false)?;
+    }
     Ok(true)
 }
 
@@ -3051,6 +3090,8 @@ fn complete_relay_profile_config(profile: &RelayProfile) -> anyhow::Result<Strin
     {
         provider["requires_openai_auth"] = toml_edit::value(true);
     }
+    provider["supports_websockets"] =
+        toml_edit::value(relay_supports_native_responses_websocket(profile));
     let provider_base_url = codex_base_url_for_proxy(
         base_url.trim(),
         profile.local_proxy_enabled(),
@@ -4337,6 +4378,7 @@ fn upsert_model_provider_config(
     updated = set_table_toml_string_line(&updated, &provider_table, "name", &provider_id);
     updated = set_table_toml_string_line(&updated, &provider_table, "wire_api", "responses");
     updated = set_table_toml_raw_line(&updated, &provider_table, "requires_openai_auth", "true");
+    updated = set_table_toml_raw_line(&updated, &provider_table, "supports_websockets", "false");
     updated = set_table_toml_string_line(&updated, &provider_table, "base_url", base_url);
     updated = set_table_toml_string_line(
         &updated,

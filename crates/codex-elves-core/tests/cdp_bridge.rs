@@ -460,6 +460,15 @@ fn injection_script_reuses_native_session_action_button_style_with_fallback() {
     assert!(script.contains("background: transparent;"));
     assert!(script.contains("background: #363839;"));
     assert!(script.contains("cursor: default;"));
+    assert!(script.contains(
+        "bg-token-dropdown-background text-token-foreground border-token-border rounded-lg border px-2 py-1"
+    ));
+    assert!(script.contains("tooltip.setAttribute(\"role\", \"tooltip\")"));
+    assert!(script.contains("content.className = \"flex items-center gap-2\""));
+    assert!(script.contains("text.className = \"min-w-0\""));
+    assert!(script.contains("const gap = 3;"));
+    assert!(script.contains("const aboveTop = buttonRect.top - tooltipRect.height - gap;"));
+    assert!(script.contains("tooltip.dataset.side = aboveTop >= 8 ? \"top\" : \"bottom\""));
 }
 
 #[test]

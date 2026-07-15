@@ -792,6 +792,14 @@ async fn handle_helper_connection(
     remote_addr: Option<SocketAddr>,
 ) -> anyhow::Result<()> {
     let request_bytes = read_http_request(&mut stream).await?;
+    if crate::responses_websocket_bridge::is_responses_websocket_upgrade(&request_bytes) {
+        return crate::responses_websocket_bridge::handle_responses_websocket_connection(
+            stream,
+            request_bytes,
+            remote_addr,
+        )
+        .await;
+    }
     let request = String::from_utf8_lossy(&request_bytes);
     let request_line = request.lines().next().unwrap_or_default();
     let mut parts = request_line.split_whitespace();

@@ -11,11 +11,12 @@ use codex_elves_core::relay_config::{
     list_context_entries_from_common_config, normalize_relay_profile_for_storage,
     relay_config_status_from_home, sanitize_common_config_contents,
     set_codex_goals_feature_in_home, strip_common_config_from_config,
-    sync_live_config_context_entries, sync_live_config_context_entry,
-    upsert_context_entry_in_common_config,
+    sync_applied_relay_profile_websocket_to_home, sync_live_config_context_entries,
+    sync_live_config_context_entry, upsert_context_entry_in_common_config,
 };
 use codex_elves_core::settings::{
     RelayContextSelection, RelayMode, RelayModelMapping, RelayProfile, RelayProtocol,
+    ResponsesWebsocketCapability, ResponsesWebsocketCapabilityState,
 };
 
 fn write_remote_plugin_marketplace_snapshot(home: &std::path::Path) {
@@ -323,6 +324,7 @@ model = "gpt-5-mini"
     assert!(updated.contains(r#"name = "custom1""#));
     assert!(updated.contains(r#"wire_api = "responses""#));
     assert!(updated.contains("requires_openai_auth = true"));
+    assert!(updated.contains("supports_websockets = false"));
     assert!(updated.contains(r#"base_url = "https://relay.example.test/v1""#));
     assert!(updated.contains(r#"experimental_bearer_token = "sk-test-redacted""#));
 }
@@ -1446,6 +1448,113 @@ experimental_bearer_token = "sk-new"
             { "effort": "max", "description": "Max reasoning" }
         ])
     );
+}
+
+#[test]
+fn normalize_relay_profile_writes_supports_websockets_true_for_supported_responses_provider() {
+    let mut profile = RelayProfile {
+        relay_mode: RelayMode::PureApi,
+        base_url: "https://relay.example".to_string(),
+        upstream_base_url: "https://relay.example".to_string(),
+        api_key: "sk-test".to_string(),
+        responses_websocket: ResponsesWebsocketCapability {
+            state: ResponsesWebsocketCapabilityState::Supported,
+            endpoint: "wss://relay.example/v1/responses".to_string(),
+            checked_at_ms: Some(1),
+            message: "supported".to_string(),
+        },
+        ..RelayProfile::default()
+    };
+
+    normalize_relay_profile_for_storage(&mut profile).unwrap();
+
+    assert!(
+        profile
+            .config_contents
+            .contains("supports_websockets = true")
+    );
+}
+
+#[test]
+fn normalize_relay_profile_writes_supports_websockets_false_when_system_prompt_is_overridden() {
+    let mut profile = RelayProfile {
+        relay_mode: RelayMode::PureApi,
+        base_url: "https://relay.example".to_string(),
+        upstream_base_url: "https://relay.example".to_string(),
+        api_key: "sk-test".to_string(),
+        system_prompt_override: "custom prompt".to_string(),
+        responses_websocket: ResponsesWebsocketCapability {
+            state: ResponsesWebsocketCapabilityState::Supported,
+            endpoint: "wss://relay.example/v1/responses".to_string(),
+            checked_at_ms: Some(1),
+            message: "supported".to_string(),
+        },
+        config_contents: r#"model_provider = "custom"
+
+[model_providers.custom]
+supports_websockets = true
+"#
+        .to_string(),
+        ..RelayProfile::default()
+    };
+
+    normalize_relay_profile_for_storage(&mut profile).unwrap();
+
+    assert!(
+        profile
+            .config_contents
+            .contains("supports_websockets = false")
+    );
+    assert!(
+        !profile
+            .config_contents
+            .contains("supports_websockets = true")
+    );
+}
+
+#[test]
+fn sync_applied_relay_profile_websocket_updates_only_the_live_provider_flag() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    std::fs::write(
+        home.join("config.toml"),
+        r#"model_provider = "custom"
+model = "gpt-test"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = true
+base_url = "http://127.0.0.1:45221/v1"
+"#,
+    )
+    .unwrap();
+    let mut profile = RelayProfile {
+        relay_mode: RelayMode::PureApi,
+        protocol: RelayProtocol::Responses,
+        base_url: "https://relay.example/v1".to_string(),
+        upstream_base_url: "https://relay.example/v1".to_string(),
+        api_key: "sk-test".to_string(),
+        config_contents: "model_provider = \"custom\"\n".to_string(),
+        ..RelayProfile::default()
+    };
+
+    assert!(sync_applied_relay_profile_websocket_to_home(home, &profile).unwrap());
+    let disabled = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    assert!(disabled.contains("supports_websockets = false"));
+    assert!(disabled.contains("model = \"gpt-test\""));
+
+    profile.responses_websocket = ResponsesWebsocketCapability {
+        state: ResponsesWebsocketCapabilityState::Supported,
+        endpoint: "wss://relay.example/v1/responses".to_string(),
+        checked_at_ms: Some(1),
+        message: "supported".to_string(),
+    };
+    assert!(sync_applied_relay_profile_websocket_to_home(home, &profile).unwrap());
+    let enabled = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    assert!(enabled.contains("supports_websockets = true"));
+    assert!(enabled.contains("model = \"gpt-test\""));
 }
 
 #[test]
