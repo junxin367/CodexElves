@@ -49,7 +49,11 @@
   const codexThreadServiceTierMaxEntries = 120;
   const codexThreadServiceTierDraftBindWindowMs = 60 * 1000;
   const codexServiceTierRequestOverrideVersion = "3";
-  const codexAppServerModelRequestPatchVersion = "1";
+  const codexAppServerModelRequestPatchVersion = "2";
+  const codexSessionPrewarmVersion = "1";
+  const codexSessionPrewarmConcurrency = 2;
+  const codexSessionPrewarmStartupDelayMs = 2500;
+  const codexSessionPrewarmInteractionPauseMs = 1200;
   const codexPluginMarketplaceUnlockVersion = "12";
   const codexPluginAutoExpandVersion = "1";
   const codexPluginAutoExpandMaxClicks = 24;
@@ -62,6 +66,10 @@
   clearTimeout(window.__codexProjectMoveChatsSortTimer);
   window.__codexProjectMoveProjectionTimer = null;
   window.__codexProjectMoveChatsSortTimer = null;
+  window.__codexSessionPrewarmRuntimeId = (window.__codexSessionPrewarmRuntimeId || 0) + 1;
+  const codexSessionPrewarmRuntimeId = window.__codexSessionPrewarmRuntimeId;
+  clearTimeout(window.__codexSessionPrewarmTimer);
+  window.__codexSessionPrewarmTimer = null;
   (window.__codexConversationViewRouteTimers || []).forEach((timer) => clearTimeout(timer));
   window.__codexConversationViewRouteTimers = [];
   (window.__codexRouteFeatureRefreshTimers || []).forEach((timer) => clearTimeout(timer));
@@ -868,7 +876,22 @@
   }
 
   function defaultCodexElvesSettings() {
-    return { pluginEntryUnlock: true, pluginMarketplaceUnlock: true, pluginAutoExpand: true, sessionDelete: true, markdownExport: true, projectMove: true, conversationView: false, conversationViewMaxWidth: conversationViewDefaultWidth, upstreamWorktreeCreate: true, nativeMenuPlacement: true, serviceTierControls: false };
+    return {
+      pluginEntryUnlock: true,
+      pluginMarketplaceUnlock: true,
+      pluginAutoExpand: true,
+      sessionDelete: true,
+      sessionPrewarmEnabled: true,
+      sessionPrewarmFullCount: 4,
+      sessionPrewarmContentCount: 6,
+      markdownExport: true,
+      projectMove: true,
+      conversationView: false,
+      conversationViewMaxWidth: conversationViewDefaultWidth,
+      upstreamWorktreeCreate: true,
+      nativeMenuPlacement: true,
+      serviceTierControls: false,
+    };
   }
 
   const codexElvesBackendSettingMap = {
@@ -876,6 +899,9 @@
     pluginMarketplaceUnlock: "codexAppPluginMarketplaceUnlock",
     pluginAutoExpand: "codexAppPluginAutoExpand",
     sessionDelete: "codexAppSessionDelete",
+    sessionPrewarmEnabled: "codexAppSessionPrewarmEnabled",
+    sessionPrewarmFullCount: "codexAppSessionPrewarmFullCount",
+    sessionPrewarmContentCount: "codexAppSessionPrewarmContentCount",
     markdownExport: "codexAppMarkdownExport",
     projectMove: "codexAppProjectMove",
     conversationView: "codexAppConversationView",
@@ -888,10 +914,22 @@
   function backendCodexElvesSettings() {
     const settings = {};
     Object.entries(codexElvesBackendSettingMap).forEach(([localKey, backendKey]) => {
-      if (typeof codexElvesBackendSettings[backendKey] === "boolean") {
-        settings[localKey] = codexElvesBackendSettings[backendKey];
-      }
+      const value = codexElvesBackendSettings[backendKey];
+      if (typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) settings[localKey] = value;
     });
+    return settings;
+  }
+
+  function clampSessionPrewarmCount(value, fallback, max) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return fallback;
+    return Math.min(max, Math.max(0, Math.round(numeric)));
+  }
+
+  function normalizeSessionPrewarmSettings(settings) {
+    settings.sessionPrewarmEnabled = settings.sessionPrewarmEnabled !== false;
+    settings.sessionPrewarmFullCount = clampSessionPrewarmCount(settings.sessionPrewarmFullCount, 4, 4);
+    settings.sessionPrewarmContentCount = clampSessionPrewarmCount(settings.sessionPrewarmContentCount, 6, 20);
     return settings;
   }
 
@@ -903,6 +941,9 @@
         pluginMarketplaceUnlock: false,
         pluginAutoExpand: false,
         sessionDelete: false,
+        sessionPrewarmEnabled: false,
+        sessionPrewarmFullCount: 0,
+        sessionPrewarmContentCount: 0,
         markdownExport: false,
         projectMove: false,
         conversationView: false,
@@ -920,7 +961,7 @@
         settings.pluginMarketplaceUnlock = false;
         settings.pluginAutoExpand = false;
       }
-      return settings;
+      return normalizeSessionPrewarmSettings(settings);
     } catch {
       const settings = { ...defaultCodexElvesSettings(), ...backendCodexElvesSettings() };
       if (relayPatchDisabled) {
@@ -928,7 +969,7 @@
         settings.pluginMarketplaceUnlock = false;
         settings.pluginAutoExpand = false;
       }
-      return settings;
+      return normalizeSessionPrewarmSettings(settings);
     }
   }
 
@@ -2088,6 +2129,7 @@
       codexElvesBackendSettingsLoaded = true;
       refreshCodexElvesBackendToggles();
       refreshCodexServiceTierFeatureState();
+      scheduleCodexSessionPrewarm(codexSessionPrewarmStartupDelayMs, "settings-loaded");
       return true;
     } catch (_) {
       refreshCodexElvesBackendToggles();
@@ -3803,6 +3845,323 @@
   let codexAppServerModelPatchFailureCount = 0;
   let codexAppServerModelPatchNextAttemptAt = 0;
   let codexAppServerModelPatchFailureSignature = "";
+  let codexSessionPrewarmManager = window.__codexElvesSessionPrewarmManager || null;
+  let codexSessionPrewarmRunPromise = null;
+  let codexSessionPrewarmManagerSequence = window.__codexSessionPrewarmManagerSequence || 0;
+  const codexSessionPrewarmTaskPromises = new Map();
+  const codexSessionPrewarmForegroundIds = new Set();
+
+  function codexSessionPrewarmSettingsSnapshot() {
+    const settings = codexElvesSettings();
+    return {
+      enabled: settings.sessionPrewarmEnabled !== false,
+      fullCount: clampSessionPrewarmCount(settings.sessionPrewarmFullCount, 4, 4),
+      contentCount: clampSessionPrewarmCount(settings.sessionPrewarmContentCount, 6, 20),
+    };
+  }
+
+  function codexSessionPrewarmManagerId(manager) {
+    if (!manager || (typeof manager !== "object" && typeof manager !== "function")) return "";
+    if (!manager.__codexElvesSessionPrewarmManagerId) {
+      codexSessionPrewarmManagerSequence += 1;
+      window.__codexSessionPrewarmManagerSequence = codexSessionPrewarmManagerSequence;
+      try {
+        Object.defineProperty(manager, "__codexElvesSessionPrewarmManagerId", {
+          configurable: true,
+          value: `${codexElvesBuild}:${codexSessionPrewarmManagerSequence}`,
+        });
+      } catch {
+        manager.__codexElvesSessionPrewarmManagerId = `${codexElvesBuild}:${codexSessionPrewarmManagerSequence}`;
+      }
+    }
+    return String(manager.__codexElvesSessionPrewarmManagerId || "");
+  }
+
+  function isCodexSessionPrewarmManager(candidate) {
+    if (!candidate || (typeof candidate !== "object" && typeof candidate !== "function")) return false;
+    return typeof candidate.getHostId === "function" &&
+      typeof candidate.getRecentConversations === "function" &&
+      typeof candidate.sendRequest === "function";
+  }
+
+  function captureCodexSessionPrewarmManager(candidate) {
+    if (!isCodexSessionPrewarmManager(candidate)) return false;
+    let hostId = "";
+    try {
+      hostId = String(candidate.getHostId() || "");
+    } catch {
+      return false;
+    }
+    if (hostId !== "local") return false;
+    const changed = codexSessionPrewarmManager !== candidate;
+    codexSessionPrewarmManager = candidate;
+    window.__codexElvesSessionPrewarmManager = candidate;
+    codexSessionPrewarmManagerId(candidate);
+    if (changed) {
+      sendCodexElvesDiagnostic("session_prewarm_manager_captured", {
+        version: codexSessionPrewarmVersion,
+        hasResume: typeof candidate.resumeConversationForUnavailableOwner === "function",
+        hasUnsubscribe: typeof candidate.unsubscribeInactiveConversation === "function",
+        hasBackgroundHydration: typeof candidate.hydrateBackgroundThreads === "function",
+      });
+    }
+    scheduleCodexSessionPrewarm(codexSessionPrewarmStartupDelayMs, "manager-captured");
+    return true;
+  }
+
+  function codexSessionPrewarmConversationId(conversation) {
+    return validThreadSessionKey(
+      conversation?.id ||
+      conversation?.threadId ||
+      conversation?.conversationId ||
+      conversation?.thread?.id ||
+      ""
+    );
+  }
+
+  function codexSessionPrewarmConversationIsBusy(conversation) {
+    if (conversation?.ephemeral === true || conversation?.sideConversation === true || conversation?.archived === true) return true;
+    if (conversation?.threadRuntimeStatus?.type === "active") return true;
+    const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
+    return turns.some((turn) => turn?.status === "inProgress");
+  }
+
+  function buildCodexSessionPrewarmTasks(conversations, settings, activeThreadId = "") {
+    const activeId = validThreadSessionKey(activeThreadId);
+    const seen = new Set();
+    const eligible = [];
+    for (const conversation of Array.isArray(conversations) ? conversations : []) {
+      const threadId = codexSessionPrewarmConversationId(conversation);
+      if (!threadId || threadId === activeId || seen.has(threadId) || codexSessionPrewarmConversationIsBusy(conversation)) continue;
+      seen.add(threadId);
+      eligible.push({ conversation, threadId });
+    }
+    const full = eligible.slice(0, settings.fullCount).map((entry) => ({ ...entry, type: "full" }));
+    const content = eligible
+      .slice(settings.fullCount, settings.fullCount + settings.contentCount)
+      .map((entry) => ({ ...entry, type: "content" }));
+    return [...full, ...content];
+  }
+
+  function codexSessionPrewarmResumeParams(task) {
+    const cwd = String(task.conversation?.cwd || "").trim();
+    return {
+      conversationId: task.threadId,
+      model: null,
+      serviceTier: null,
+      reasoningEffort: null,
+      workspaceRoots: [cwd || "/"],
+      permissions: null,
+      collaborationMode: null,
+      showThreadGoalResumeConfirmation: false,
+    };
+  }
+
+  async function ensureCodexSessionPrewarmResumed(manager, task) {
+    if (typeof manager.needsResume === "function") {
+      try {
+        if (!manager.needsResume(task.threadId)) return "already-resumed";
+      } catch {
+      }
+    }
+    if (typeof manager.resumeConversationForUnavailableOwner !== "function") {
+      if (typeof manager.hydrateBackgroundThreads === "function") {
+        await manager.hydrateBackgroundThreads([task.threadId], { includeTurns: false });
+        return "metadata-only";
+      }
+      if (typeof manager.readThread === "function") {
+        await manager.readThread(task.threadId, { includeTurns: false });
+        return "metadata-only";
+      }
+      throw new Error("Codex session resume entry unavailable");
+    }
+    await manager.resumeConversationForUnavailableOwner(codexSessionPrewarmResumeParams(task));
+    return "resumed";
+  }
+
+  async function runCodexSessionPrewarmTask(manager, task) {
+    const existing = codexSessionPrewarmTaskPromises.get(task.threadId);
+    if (existing) return existing.promise;
+    const startedAt = Date.now();
+    const entry = { type: task.type, promise: null };
+    const promise = Promise.resolve().then(async () => {
+      const promoted = codexSessionPrewarmForegroundIds.has(task.threadId);
+      const effectiveType = promoted ? "full" : task.type;
+      const resumeResult = await ensureCodexSessionPrewarmResumed(manager, task);
+      if (
+        effectiveType === "content" &&
+        resumeResult === "resumed" &&
+        typeof manager.unsubscribeInactiveConversation === "function"
+      ) {
+        if (!codexSessionPrewarmForegroundIds.has(task.threadId) && validThreadSessionKey(currentSessionRef().session_id) !== task.threadId) {
+          await manager.unsubscribeInactiveConversation(task.threadId);
+        }
+        if (codexSessionPrewarmForegroundIds.has(task.threadId) || validThreadSessionKey(currentSessionRef().session_id) === task.threadId) {
+          await ensureCodexSessionPrewarmResumed(manager, { ...task, type: "full" });
+        }
+      }
+      sendCodexElvesDiagnostic("session_prewarm_task_completed", {
+        type: effectiveType,
+        result: resumeResult,
+        durationMs: Date.now() - startedAt,
+      });
+      return { type: effectiveType, result: resumeResult };
+    }).catch((error) => {
+      sendCodexElvesDiagnostic("session_prewarm_task_failed", {
+        type: task.type,
+        durationMs: Date.now() - startedAt,
+        errorName: error?.name || "",
+        errorMessage: error?.message || String(error),
+      });
+      return { type: task.type, result: "failed" };
+    }).finally(() => {
+      if (codexSessionPrewarmTaskPromises.get(task.threadId) === entry) {
+        codexSessionPrewarmTaskPromises.delete(task.threadId);
+      }
+    });
+    entry.promise = promise;
+    codexSessionPrewarmTaskPromises.set(task.threadId, entry);
+    return promise;
+  }
+
+  async function waitForCodexSessionPrewarmIdle() {
+    while (codexSessionPrewarmRuntimeId === window.__codexSessionPrewarmRuntimeId) {
+      const visible = !document.visibilityState || document.visibilityState === "visible";
+      const lastInteractionAt = Number(window.__codexSessionPrewarmLastInteractionAt || 0);
+      const remainingPause = codexSessionPrewarmInteractionPauseMs - (Date.now() - lastInteractionAt);
+      if (visible && remainingPause <= 0) return true;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(500, Math.max(100, remainingPause))));
+    }
+    return false;
+  }
+
+  async function runCodexSessionPrewarmQueue(manager, tasks) {
+    let nextIndex = 0;
+    let completed = 0;
+    const workers = Array.from({ length: Math.min(codexSessionPrewarmConcurrency, tasks.length) }, async () => {
+      while (nextIndex < tasks.length) {
+        if (!await waitForCodexSessionPrewarmIdle()) return;
+        const index = nextIndex;
+        nextIndex += 1;
+        const task = tasks[index];
+        if (!task) return;
+        await runCodexSessionPrewarmTask(manager, task);
+        completed += 1;
+      }
+    });
+    await Promise.all(workers);
+    return completed;
+  }
+
+  async function runCodexSessionPrewarm() {
+    const manager = codexSessionPrewarmManager;
+    const settings = codexSessionPrewarmSettingsSnapshot();
+    if (!manager || !settings.enabled || settings.fullCount + settings.contentCount === 0) return;
+    if (codexSessionPrewarmRunPromise) return codexSessionPrewarmRunPromise;
+    const signature = [
+      codexSessionPrewarmVersion,
+      codexSessionPrewarmManagerId(manager),
+      settings.fullCount,
+      settings.contentCount,
+    ].join(":");
+    if (window.__codexSessionPrewarmCompletedSignature === signature) return;
+    const run = Promise.resolve().then(async () => {
+      try {
+        if (typeof manager.refreshRecentConversations === "function") {
+          await manager.refreshRecentConversations({ mode: "routine" });
+        }
+      } catch (error) {
+        sendCodexElvesDiagnostic("session_prewarm_recent_refresh_failed", {
+          errorName: error?.name || "",
+          errorMessage: error?.message || String(error),
+        });
+      }
+      const conversations = manager.getRecentConversations();
+      const tasks = buildCodexSessionPrewarmTasks(conversations, settings, currentSessionRef().session_id);
+      if (!tasks.length) {
+        sendCodexElvesDiagnostic("session_prewarm_no_tasks", {
+          recentCount: Array.isArray(conversations) ? conversations.length : 0,
+        });
+        return;
+      }
+      sendCodexElvesDiagnostic("session_prewarm_started", {
+        fullCount: tasks.filter((task) => task.type === "full").length,
+        contentCount: tasks.filter((task) => task.type === "content").length,
+        concurrency: codexSessionPrewarmConcurrency,
+      });
+      const completed = await runCodexSessionPrewarmQueue(manager, tasks);
+      if (codexSessionPrewarmRuntimeId === window.__codexSessionPrewarmRuntimeId) {
+        window.__codexSessionPrewarmCompletedSignature = signature;
+      }
+      sendCodexElvesDiagnostic("session_prewarm_completed", {
+        completed,
+        taskCount: tasks.length,
+      });
+    }).finally(() => {
+      if (codexSessionPrewarmRunPromise === run) codexSessionPrewarmRunPromise = null;
+    });
+    codexSessionPrewarmRunPromise = run;
+    return run;
+  }
+
+  function scheduleCodexSessionPrewarm(delayMs = codexSessionPrewarmStartupDelayMs, reason = "scheduled") {
+    clearTimeout(window.__codexSessionPrewarmTimer);
+    window.__codexSessionPrewarmTimer = null;
+    const settings = codexSessionPrewarmSettingsSnapshot();
+    if (!settings.enabled || settings.fullCount + settings.contentCount === 0 || !codexSessionPrewarmManager) return;
+    const runtimeId = codexSessionPrewarmRuntimeId;
+    window.__codexSessionPrewarmTimer = setTimeout(() => {
+      window.__codexSessionPrewarmTimer = null;
+      if (runtimeId !== window.__codexSessionPrewarmRuntimeId) return;
+      sendCodexElvesDiagnostic("session_prewarm_scheduled_run", { reason, delayMs });
+      void runCodexSessionPrewarm();
+    }, Math.max(0, delayMs));
+  }
+
+  function markCodexSessionPrewarmInteraction(event) {
+    window.__codexSessionPrewarmLastInteractionAt = Date.now();
+    const target =
+      typeof Element !== "undefined" && event?.target instanceof Element
+        ? event.target
+        : event?.target?.parentElement;
+    const row = target?.closest?.(selectors.sidebarThread);
+    if (!row) return;
+    const threadId = validThreadSessionKey(sessionRefFromRow(row).session_id);
+    if (!threadId) return;
+    codexSessionPrewarmForegroundIds.add(threadId);
+    const active = codexSessionPrewarmTaskPromises.get(threadId);
+    if (active?.promise && active.type === "content" && codexSessionPrewarmManager) {
+      void active.promise.finally(() => {
+        const conversation = codexSessionPrewarmManager?.getConversation?.(threadId) || { id: threadId, cwd: "" };
+        return runCodexSessionPrewarmTask(codexSessionPrewarmManager, {
+          type: "full",
+          threadId,
+          conversation,
+        });
+      });
+    }
+  }
+
+  function installCodexSessionPrewarmInteractionHooks() {
+    document.removeEventListener("pointerdown", window.__codexSessionPrewarmPointerHandler, true);
+    document.removeEventListener("keydown", window.__codexSessionPrewarmKeyboardHandler, true);
+    window.__codexSessionPrewarmPointerHandler = markCodexSessionPrewarmInteraction;
+    window.__codexSessionPrewarmKeyboardHandler = markCodexSessionPrewarmInteraction;
+    document.addEventListener("pointerdown", window.__codexSessionPrewarmPointerHandler, true);
+    document.addEventListener("keydown", window.__codexSessionPrewarmKeyboardHandler, true);
+  }
+
+  if (window.__CODEX_ELVES_TEST_SESSION_PREWARM__) {
+    window.__codexElvesSessionPrewarmTest = {
+      buildTasks: (conversations, settings, activeThreadId = "") =>
+        buildCodexSessionPrewarmTasks(conversations, settings, activeThreadId),
+      captureManager: (manager) => captureCodexSessionPrewarmManager(manager),
+      markForeground: (threadId) => codexSessionPrewarmForegroundIds.add(validThreadSessionKey(threadId)),
+      runQueue: (manager, tasks) => runCodexSessionPrewarmQueue(manager, tasks),
+      runTask: (manager, task) => runCodexSessionPrewarmTask(manager, task),
+      settingsSnapshot: () => codexSessionPrewarmSettingsSnapshot(),
+    };
+  }
 
   if (window.__CODEX_ELVES_TEST_SERVICE_TIER__) {
     window.__codexElvesServiceTierTest = {
@@ -4567,17 +4926,21 @@
         const module = await loadCodexAppModule("app-server-manager-signals-");
         const candidates = Object.values(module).filter((value) => value && (typeof value === "object" || typeof value === "function"));
         let patchedCount = 0;
+        let managerCount = 0;
         for (const candidate of candidates) {
+          if (captureCodexSessionPrewarmManager(candidate)) managerCount += 1;
           if (patchAppServerModelRequestClient(candidate)) patchedCount += 1;
           if (patchAppServerModelRequestClientClass(candidate)) patchedCount += 1;
-          if (typeof candidate.sendRequest !== "function" && typeof candidate.get === "function") {
+          if (typeof candidate.get === "function") {
             try {
-              if (patchAppServerModelRequestClient(candidate.get())) patchedCount += 1;
+              const resolved = candidate.get();
+              if (captureCodexSessionPrewarmManager(resolved)) managerCount += 1;
+              if (patchAppServerModelRequestClient(resolved)) patchedCount += 1;
             } catch {
             }
           }
         }
-        if (patchedCount > 0) {
+        if (patchedCount > 0 || managerCount > 0) {
           window.__codexElvesAppServerModelRequestPatchInstalled = codexAppServerModelRequestPatchVersion;
           codexAppServerModelPatchFailureCount = 0;
           codexAppServerModelPatchNextAttemptAt = 0;
@@ -4585,6 +4948,7 @@
           sendCodexElvesDiagnostic("model_app_server_request_patch_installed", {
             candidateCount: candidates.length,
             patchedCount,
+            managerCount,
           });
         } else {
           codexAppServerModelPatchFailureCount += 1;
@@ -7820,6 +8184,8 @@
     cleanupLegacyCodexComposerOverflowGuards();
     installCodexServiceTierDispatcherPatch();
     installCodexServiceTierRequestClientPatch();
+    installAppServerModelRequestPatch();
+    installCodexSessionPrewarmInteractionHooks();
     installCodexElvesMenu();
     scheduleBackendHeartbeat();
     installDeleteButtonEventDelegation();
@@ -8116,5 +8482,6 @@
     void loadCodexServiceTierState();
     scan();
     installScanObservers();
+    scheduleCodexSessionPrewarm(codexSessionPrewarmStartupDelayMs, "runtime-refresh");
   };
 })();

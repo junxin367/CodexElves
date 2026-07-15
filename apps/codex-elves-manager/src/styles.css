@@ -2852,11 +2852,135 @@ body {
 }
 
 .provider-sync-target-field {
-  margin-top: 12px;
+  margin: 0;
 }
 
 .session-delete-hint {
+  margin-bottom: 0;
+}
+
+.session-prewarm-settings {
+  display: grid;
+  gap: 10px;
+}
+
+.session-prewarm-settings .form-row {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 8px;
+}
+
+.session-prewarm-settings .field {
+  margin-bottom: 0;
+}
+
+.session-prewarm-counts input[type="number"] {
+  appearance: textfield;
+}
+
+.session-prewarm-counts input[type="number"]::-webkit-inner-spin-button,
+.session-prewarm-counts input[type="number"]::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+.session-summary-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(220px, 40%);
+  gap: 8px;
   margin-bottom: 12px;
+}
+
+.session-summary-grid > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 3px;
+  align-content: center;
+  min-height: 62px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--background));
+  padding: 9px 11px;
+}
+
+.session-summary-grid > div span {
+  font-size: 12px;
+}
+
+.session-summary-grid > div strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 16px;
+  line-height: 1.25;
+}
+
+.session-summary-grid > div:last-child strong {
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.session-management-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: stretch;
+}
+
+.session-control-section {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  min-width: 0;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--card));
+  padding: 12px;
+}
+
+.session-section-head {
+  display: grid;
+  gap: 2px;
+}
+
+.session-section-head strong {
+  font-size: 14px;
+}
+
+.session-section-head small {
+  color: hsl(var(--muted-foreground));
+  line-height: 1.4;
+}
+
+.session-sync-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.session-management-grid .provider-sync-progress {
+  margin-top: 0;
+}
+
+.session-management-grid .hint-line {
+  margin-top: 0;
+  font-size: 12px;
+}
+
+.session-management-grid .switch-row {
+  margin-bottom: 0;
+  padding: 10px;
+}
+
+.session-save-row {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.field .field-help {
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.45;
 }
 
 .task-progress {
@@ -3312,7 +3436,7 @@ body {
   grid-template-columns: minmax(140px, 170px) 132px minmax(120px, 150px) 58px 104px 72px;
   justify-content: space-between;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   min-height: 48px;
   border: 1px solid hsl(var(--border));
   border-radius: 8px;
@@ -4574,6 +4698,16 @@ body {
 @media (max-width: 1000px) {
   .proxy-detail-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .session-management-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .session-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

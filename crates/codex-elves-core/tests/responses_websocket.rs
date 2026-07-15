@@ -1,3 +1,4 @@
+use codex_elves_core::proxy_log::{ProxyRequestState, ProxyRequestTransport};
 use codex_elves_core::responses_websocket::{
     normalize_responses_websocket_capability, probe_active_relay_responses_websocket_if_needed,
     probe_responses_websocket, relay_supports_native_responses_websocket, responses_websocket_url,
@@ -333,6 +334,7 @@ async fn local_proxy_bridges_responses_websocket_messages_and_authentication() {
 
     let temp = tempfile::tempdir().unwrap();
     let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
     let mut profile = RelayProfile {
         id: "relay-bridge".to_string(),
         name: "Bridge".to_string(),
@@ -394,6 +396,28 @@ async fn local_proxy_bridges_responses_websocket_messages_and_authentication() {
 
     local_server.await.unwrap();
     upstream.await.unwrap();
+
+    let summaries = codex_elves_core::proxy_log::read_summaries(10).unwrap();
+    let summary = summaries
+        .iter()
+        .find(|entry| entry.model.as_deref() == Some("gpt-bridge"))
+        .expect("websocket request should be recorded");
+    assert_eq!(summary.state, ProxyRequestState::Completed);
+    assert_eq!(summary.transport, ProxyRequestTransport::Ws);
+    assert_eq!(summary.response_protocol.as_deref(), Some("responses"));
+    assert_eq!(summary.status_code, Some(200));
+    assert!(summary.first_token_ms.is_some());
+    assert!(summary.duration_ms.is_some());
+
+    let detail = codex_elves_core::proxy_log::find_record(&summary.id)
+        .unwrap()
+        .expect("websocket request detail should exist");
+    assert!(detail.request_body.contains("\"type\":\"response.create\""));
+    assert!(
+        detail
+            .response_body
+            .contains("\"type\":\"response.completed\"")
+    );
 }
 
 #[tokio::test]
@@ -419,6 +443,7 @@ async fn local_proxy_preserves_a_websocket_frame_read_with_the_upgrade_request()
 
     let temp = tempfile::tempdir().unwrap();
     let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
     save_supported_websocket_settings(upstream_address, false);
 
     let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -574,6 +599,24 @@ impl SettingsPathGuard {
 impl Drop for SettingsPathGuard {
     fn drop(&mut self) {
         codex_elves_core::paths::set_settings_path_for_tests(self.previous.take());
+    }
+}
+
+struct ProxyLogPathGuard {
+    previous: Option<PathBuf>,
+}
+
+impl ProxyLogPathGuard {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            previous: codex_elves_core::paths::set_proxy_log_path_for_tests(Some(path)),
+        }
+    }
+}
+
+impl Drop for ProxyLogPathGuard {
+    fn drop(&mut self) {
+        codex_elves_core::paths::set_proxy_log_path_for_tests(self.previous.take());
     }
 }
 

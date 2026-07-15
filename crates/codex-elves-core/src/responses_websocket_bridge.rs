@@ -1,5 +1,7 @@
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use futures_util::{Sink, SinkExt, StreamExt};
@@ -137,6 +139,7 @@ pub async fn handle_responses_websocket_connection(
             return Ok(());
         }
     };
+    let request_path = request.uri().path().to_string();
     let mut response_bytes = Vec::new();
     write_response(&mut response_bytes, &response)?;
     stream.write_all(&response_bytes).await?;
@@ -149,7 +152,8 @@ pub async fn handle_responses_websocket_connection(
         remote_addr.as_deref(),
         None,
     );
-    let result = bridge_responses_websockets(downstream, upstream, &relay).await;
+    let request_logger = WebSocketRequestLogger::new(&relay, remote_addr.clone(), request_path);
+    let result = bridge_responses_websockets(downstream, upstream, &relay, request_logger).await;
     log_websocket_event(
         if result.is_ok() {
             "helper.responses_websocket_closed"
@@ -171,6 +175,7 @@ async fn bridge_responses_websockets(
     downstream: WebSocketStream<TcpStream>,
     upstream: crate::responses_websocket::UpstreamResponsesWebsocket,
     relay: &crate::settings::RelayProfile,
+    request_logger: WebSocketRequestLogger,
 ) -> anyhow::Result<()> {
     let (mut downstream_sink, mut downstream_stream) = downstream.split();
     let (mut upstream_sink, mut upstream_stream) = upstream.split();
@@ -224,18 +229,25 @@ async fn bridge_responses_websockets(
     let relay = relay.clone();
     let downstream_close_tx = to_downstream_tx.clone();
     let upstream_close_tx = to_upstream_tx.clone();
+    let downstream_request_logger = request_logger.clone();
     let downstream_reader = async move {
         let mut received_close = false;
         while let Some(message) = downstream_stream.next().await {
             let message = message.context("读取本地 Responses WebSocket 消息失败")?;
-            if let Err(error) = validate_downstream_message(&message, &relay) {
-                let close = Message::Close(Some(CloseFrame {
-                    code: CloseCode::Policy,
-                    reason: error.to_string().into(),
-                }));
-                let _ = downstream_close_tx.send(close.clone()).await;
-                let _ = upstream_close_tx.send(close).await;
-                return Ok::<(), anyhow::Error>(());
+            let payload = match validate_downstream_message(&message, &relay) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    let close = Message::Close(Some(CloseFrame {
+                        code: CloseCode::Policy,
+                        reason: error.to_string().into(),
+                    }));
+                    let _ = downstream_close_tx.send(close.clone()).await;
+                    let _ = upstream_close_tx.send(close).await;
+                    return Ok::<(), anyhow::Error>(());
+                }
+            };
+            if let (Some(payload), Message::Text(text)) = (payload.as_ref(), &message) {
+                downstream_request_logger.record_request(payload, text.as_str());
             }
             let is_close = matches!(message, Message::Close(_));
             if to_upstream_tx.send(message).await.is_err() {
@@ -255,10 +267,12 @@ async fn bridge_responses_websockets(
         Ok::<(), anyhow::Error>(())
     };
 
+    let upstream_request_logger = request_logger.clone();
     let upstream_reader = async move {
         let mut received_close = false;
         while let Some(message) = upstream_stream.next().await {
             let message = message.context("读取上游 Responses WebSocket 消息失败")?;
+            upstream_request_logger.record_response(&message);
             let is_close = matches!(message, Message::Close(_));
             if to_downstream_tx.send(message).await.is_err() {
                 if is_close {
@@ -277,13 +291,300 @@ async fn bridge_responses_websockets(
         Ok::<(), anyhow::Error>(())
     };
 
-    tokio::try_join!(
+    let result = tokio::try_join!(
         upstream_writer,
         downstream_writer,
         downstream_reader,
         upstream_reader
-    )?;
+    );
+    match &result {
+        Ok(_) => request_logger.finish_pending("Responses WebSocket 连接在响应完成前关闭", 499),
+        Err(error) => request_logger.finish_pending(&error.to_string(), 502),
+    }
+    result?;
     Ok(())
+}
+
+#[derive(Clone)]
+struct WebSocketRequestLogger {
+    state: Arc<Mutex<WebSocketRequestLogState>>,
+}
+
+struct WebSocketRequestLogState {
+    remote_addr: Option<String>,
+    path: String,
+    relay_id: String,
+    relay_name: String,
+    endpoint: Option<String>,
+    requests: HashMap<String, TrackedWebSocketRequest>,
+    active_order: VecDeque<String>,
+    unassigned_order: VecDeque<String>,
+    response_ids: HashMap<String, String>,
+}
+
+struct TrackedWebSocketRequest {
+    record: crate::proxy_log::ProxyRequestRecord,
+    started_at: Instant,
+    response_capture: Vec<u8>,
+    response_bytes: usize,
+    response_truncated: bool,
+}
+
+impl WebSocketRequestLogger {
+    fn new(
+        relay: &crate::settings::RelayProfile,
+        remote_addr: Option<String>,
+        path: String,
+    ) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(WebSocketRequestLogState {
+                remote_addr,
+                path,
+                relay_id: relay.id.clone(),
+                relay_name: relay.name.clone(),
+                endpoint: crate::responses_websocket::responses_websocket_url(
+                    crate::responses_websocket::relay_responses_base_url(relay),
+                ),
+                requests: HashMap::new(),
+                active_order: VecDeque::new(),
+                unassigned_order: VecDeque::new(),
+                response_ids: HashMap::new(),
+            })),
+        }
+    }
+
+    fn record_request(&self, payload: &Value, request_body: &str) {
+        let metadata = crate::proxy_log::extract_request_metadata(Some(payload));
+        let id = format!("local-{}", uuid::Uuid::new_v4());
+        let timestamp_ms = crate::proxy_log::current_timestamp_ms();
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        let record = crate::proxy_log::ProxyRequestRecord {
+            id: id.clone(),
+            state: crate::proxy_log::ProxyRequestState::Pending,
+            transport: crate::proxy_log::ProxyRequestTransport::Ws,
+            timestamp_ms,
+            method: "WS".to_string(),
+            path: state.path.clone(),
+            remote_addr: state.remote_addr.clone(),
+            model: metadata.model,
+            reasoning_tokens: None,
+            reasoning_effort: metadata.reasoning_effort,
+            reasoning_source: metadata.reasoning_source,
+            continue_thinking_triggered: false,
+            continue_thinking_rounds: 0,
+            continue_thinking_request_body: None,
+            continue_thinking_before_response_body: None,
+            continue_thinking_after_response_body: None,
+            service_tier: metadata.service_tier,
+            relay_id: Some(state.relay_id.clone()),
+            relay_name: Some(state.relay_name.clone()),
+            endpoint: state.endpoint.clone(),
+            response_protocol: Some("responses".to_string()),
+            status_code: None,
+            first_token_ms: None,
+            duration_ms: None,
+            stream: true,
+            request_bytes: request_body.len(),
+            response_bytes: None,
+            response_captured_bytes: None,
+            response_truncated: false,
+            request_body: request_body.to_string(),
+            response_body: String::new(),
+            error: None,
+        };
+        state.requests.insert(
+            id.clone(),
+            TrackedWebSocketRequest {
+                record: record.clone(),
+                started_at: Instant::now(),
+                response_capture: Vec::new(),
+                response_bytes: 0,
+                response_truncated: false,
+            },
+        );
+        state.active_order.push_back(id.clone());
+        state.unassigned_order.push_back(id);
+        drop(state);
+        append_websocket_proxy_log_record(&record);
+    }
+
+    fn record_response(&self, message: &Message) {
+        let Message::Text(text) = message else {
+            return;
+        };
+        let Ok(payload) = serde_json::from_str::<Value>(text.as_str()) else {
+            return;
+        };
+        let Some(event_type) = payload.get("type").and_then(Value::as_str) else {
+            return;
+        };
+        if !event_type.starts_with("response.") && event_type != "error" {
+            return;
+        }
+        let response_id = websocket_response_id(&payload);
+        let terminal = is_terminal_websocket_response_event(event_type);
+        let failed = matches!(event_type, "response.failed" | "error");
+        let mut update = None;
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        let Some(log_id) = resolve_websocket_log_id(&mut state, response_id.as_deref()) else {
+            return;
+        };
+        let Some(tracked) = state.requests.get_mut(&log_id) else {
+            return;
+        };
+        let first_response_event = tracked.record.first_token_ms.is_none();
+        if first_response_event {
+            tracked.record.first_token_ms = Some(tracked.started_at.elapsed().as_millis() as u64);
+            tracked.record.status_code = Some(200);
+        }
+        tracked.response_bytes = tracked
+            .response_bytes
+            .saturating_add(text.len().saturating_add(1));
+        tracked.response_truncated |=
+            crate::proxy_log::append_capture(&mut tracked.response_capture, text.as_bytes());
+        tracked.response_truncated |=
+            crate::proxy_log::append_capture(&mut tracked.response_capture, b"\n");
+
+        if terminal {
+            tracked.record.state = crate::proxy_log::ProxyRequestState::Completed;
+            tracked.record.status_code = Some(if failed { 500 } else { 200 });
+            tracked.record.duration_ms = Some(tracked.started_at.elapsed().as_millis() as u64);
+            tracked.record.response_bytes = Some(tracked.response_bytes);
+            tracked.record.response_captured_bytes = Some(tracked.response_capture.len());
+            tracked.record.response_truncated = tracked.response_truncated;
+            tracked.record.response_body =
+                String::from_utf8_lossy(&tracked.response_capture).into_owned();
+            tracked.record.reasoning_tokens =
+                crate::proxy_log::extract_reasoning_tokens_from_response_body(
+                    &tracked.response_capture,
+                );
+            tracked.record.error = websocket_response_error(&payload, event_type);
+            update = Some(tracked.record.clone());
+        } else if first_response_event {
+            update = Some(tracked.record.clone());
+        }
+
+        if terminal {
+            state.requests.remove(&log_id);
+            state.active_order.retain(|id| id != &log_id);
+            state.unassigned_order.retain(|id| id != &log_id);
+            state.response_ids.retain(|_, id| id != &log_id);
+        }
+        drop(state);
+        if let Some(record) = update {
+            append_websocket_proxy_log_record(&record);
+        }
+    }
+
+    fn finish_pending(&self, error: &str, status_code: u16) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        let mut records = Vec::with_capacity(state.requests.len());
+        for (_, mut tracked) in state.requests.drain() {
+            tracked.record.state = crate::proxy_log::ProxyRequestState::Completed;
+            tracked.record.status_code = Some(status_code);
+            tracked.record.duration_ms = Some(tracked.started_at.elapsed().as_millis() as u64);
+            tracked.record.response_bytes = Some(tracked.response_bytes);
+            tracked.record.response_captured_bytes = Some(tracked.response_capture.len());
+            tracked.record.response_truncated = tracked.response_truncated;
+            tracked.record.response_body =
+                String::from_utf8_lossy(&tracked.response_capture).into_owned();
+            tracked.record.reasoning_tokens =
+                crate::proxy_log::extract_reasoning_tokens_from_response_body(
+                    &tracked.response_capture,
+                );
+            tracked.record.error = Some(error.to_string());
+            records.push(tracked.record);
+        }
+        state.active_order.clear();
+        state.unassigned_order.clear();
+        state.response_ids.clear();
+        drop(state);
+        for record in records {
+            append_websocket_proxy_log_record(&record);
+        }
+    }
+}
+
+fn resolve_websocket_log_id(
+    state: &mut WebSocketRequestLogState,
+    response_id: Option<&str>,
+) -> Option<String> {
+    if let Some(response_id) = response_id {
+        if let Some(log_id) = state.response_ids.get(response_id) {
+            return Some(log_id.clone());
+        }
+        while let Some(log_id) = state.unassigned_order.pop_front() {
+            if state.requests.contains_key(&log_id) {
+                state
+                    .response_ids
+                    .insert(response_id.to_string(), log_id.clone());
+                return Some(log_id);
+            }
+        }
+    }
+
+    let mut active = state
+        .active_order
+        .iter()
+        .filter(|id| state.requests.contains_key(*id));
+    let only = active.next()?.clone();
+    if active.next().is_none() {
+        Some(only)
+    } else {
+        None
+    }
+}
+
+fn websocket_response_id(payload: &Value) -> Option<String> {
+    payload
+        .get("response_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .get("response")
+                .and_then(|response| response.get("id"))
+                .and_then(Value::as_str)
+        })
+        .map(ToString::to_string)
+}
+
+fn is_terminal_websocket_response_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "response.completed" | "response.incomplete" | "response.failed" | "error"
+    )
+}
+
+fn websocket_response_error(payload: &Value, event_type: &str) -> Option<String> {
+    if !matches!(event_type, "response.failed" | "error") {
+        return None;
+    }
+    payload
+        .pointer("/response/error/message")
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/error/message").and_then(Value::as_str))
+        .or_else(|| payload.get("message").and_then(Value::as_str))
+        .map(ToString::to_string)
+        .or_else(|| Some(format!("Responses WebSocket 返回 {event_type}")))
+}
+
+fn append_websocket_proxy_log_record(record: &crate::proxy_log::ProxyRequestRecord) {
+    if let Err(error) = crate::proxy_log::append_record(record) {
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "helper.local_proxy_log_failed",
+            serde_json::json!({
+                "id": record.id,
+                "transport": "ws",
+                "error": error.to_string()
+            }),
+        );
+    }
 }
 
 async fn forward_websocket_message<S>(
@@ -346,9 +647,9 @@ fn is_expected_websocket_close_error(error: &WebSocketError) -> bool {
 fn validate_downstream_message(
     message: &Message,
     relay: &crate::settings::RelayProfile,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<Value>> {
     let Message::Text(text) = message else {
-        return Ok(());
+        return Ok(None);
     };
     ensure_websocket_relay_still_current(relay)?;
     let payload: Value =
@@ -378,7 +679,7 @@ fn validate_downstream_message(
             "model": model,
         }),
     );
-    Ok(())
+    Ok(Some(payload))
 }
 
 fn ensure_websocket_relay_still_current(

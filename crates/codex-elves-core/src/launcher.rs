@@ -2578,6 +2578,7 @@ fn append_pending_local_proxy_record(
     let record = crate::proxy_log::ProxyRequestRecord {
         id: id.to_string(),
         state: crate::proxy_log::ProxyRequestState::Pending,
+        transport: crate::proxy_log::ProxyRequestTransport::Http,
         timestamp_ms,
         method: method.to_string(),
         path: path.to_string(),
@@ -2631,6 +2632,7 @@ fn append_local_proxy_first_token_record(
     let record = crate::proxy_log::ProxyRequestRecord {
         id: id.to_string(),
         state: crate::proxy_log::ProxyRequestState::Pending,
+        transport: crate::proxy_log::ProxyRequestTransport::Http,
         timestamp_ms,
         method: method.to_string(),
         path: path.to_string(),
@@ -2733,6 +2735,7 @@ fn append_local_proxy_record_with_continue_thinking(
     let record = crate::proxy_log::ProxyRequestRecord {
         id,
         state: crate::proxy_log::ProxyRequestState::Completed,
+        transport: crate::proxy_log::ProxyRequestTransport::Http,
         timestamp_ms,
         method: method.to_string(),
         path: path.to_string(),

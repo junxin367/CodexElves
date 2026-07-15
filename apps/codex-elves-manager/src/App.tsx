@@ -180,6 +180,9 @@ type BackendSettings = {
   codexAppPluginMarketplaceUnlock: boolean;
   codexAppPluginAutoExpand: boolean;
   codexAppSessionDelete: boolean;
+  codexAppSessionPrewarmEnabled: boolean;
+  codexAppSessionPrewarmFullCount: number;
+  codexAppSessionPrewarmContentCount: number;
   codexAppMarkdownExport: boolean;
   codexAppProjectMove: boolean;
   codexAppConversationView: boolean;
@@ -520,6 +523,7 @@ type LocalProxyStatusResult = CommandResult<{
 type LocalProxyLogEntry = {
   id: string;
   state?: "pending" | "completed" | null;
+  transport?: "http" | "ws" | null;
   timestampMs: number;
   method: string;
   path: string;
@@ -777,6 +781,9 @@ const defaultSettings: BackendSettings = {
   codexAppPluginMarketplaceUnlock: true,
   codexAppPluginAutoExpand: true,
   codexAppSessionDelete: true,
+  codexAppSessionPrewarmEnabled: true,
+  codexAppSessionPrewarmFullCount: 4,
+  codexAppSessionPrewarmContentCount: 6,
   codexAppMarkdownExport: false,
   codexAppProjectMove: false,
   codexAppConversationView: true,
@@ -1734,6 +1741,8 @@ export function App() {
     message: "尚未运行历史会话修复。",
     result: null,
   });
+  const [providerSyncProgressVisible, setProviderSyncProgressVisible] = useState(false);
+  const providerSyncProgressHideTimerRef = useRef<number | null>(null);
   const [pluginMarketplaceProgress, setPluginMarketplaceProgress] = useState<TaskProgress>({
     active: false,
     percent: 0,
@@ -2450,6 +2459,11 @@ export function App() {
 
   const syncProvidersNow = async () => {
     if (providerSyncProgress.active) return;
+    if (providerSyncProgressHideTimerRef.current !== null) {
+      window.clearTimeout(providerSyncProgressHideTimerRef.current);
+      providerSyncProgressHideTimerRef.current = null;
+    }
+    setProviderSyncProgressVisible(true);
     setProviderSyncProgress({
       active: true,
       percent: 12,
@@ -2500,6 +2514,10 @@ export function App() {
       }
     } finally {
       window.clearInterval(progressTimer);
+      providerSyncProgressHideTimerRef.current = window.setTimeout(() => {
+        setProviderSyncProgressVisible(false);
+        providerSyncProgressHideTimerRef.current = null;
+      }, 5000);
     }
   };
 
@@ -2827,6 +2845,14 @@ export function App() {
     }, 10000);
     return () => window.clearInterval(timer);
   }, [route]);
+
+  useEffect(() => {
+    return () => {
+      if (providerSyncProgressHideTimerRef.current !== null) {
+        window.clearTimeout(providerSyncProgressHideTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -3196,6 +3222,7 @@ export function App() {
               form={settingsForm}
               sessions={localSessions}
               providerSyncProgress={providerSyncProgress}
+              providerSyncProgressVisible={providerSyncProgressVisible}
               providerSyncTargets={providerSyncTargets}
               selectedProviderSyncTarget={selectedProviderSyncTarget}
               onFormChange={setSettingsForm}
@@ -4649,6 +4676,7 @@ function SessionsScreen({
   form,
   sessions,
   providerSyncProgress,
+  providerSyncProgressVisible,
   providerSyncTargets,
   selectedProviderSyncTarget,
   onFormChange,
@@ -4658,6 +4686,7 @@ function SessionsScreen({
   form: BackendSettings;
   sessions: LocalSessionsResult | null;
   providerSyncProgress: ProviderSyncProgress;
+  providerSyncProgressVisible: boolean;
   providerSyncTargets: ProviderSyncTargetsResult | null;
   selectedProviderSyncTarget: string;
   onFormChange: (value: BackendSettings) => void;
@@ -4718,74 +4747,155 @@ function SessionsScreen({
       <Panel>
         <CardHead title="会话管理" detail="读取 Codex 本地 SQLite 会话库，会删除数据库记录和对应 rollout 文件" />
         <CardContent>
-          <div className="metric-list">
+          <div className="metric-list session-summary-grid">
             <Metric label="会话总数" value={`${items.length} 个`} />
             <Metric label="未归档" value={`${activeCount} 个`} />
             <Metric label="已归档" value={`${archivedCount} 个`} />
             <Metric label="数据库" value={sessions?.dbPath ?? "~/.codex/sqlite/*.db"} />
           </div>
-          <div className="form-row">
-            <Field className="provider-sync-target-field" label="同步目标">
-              <SelectMenu
-                disabled={providerSyncProgress.active || !(providerSyncTargets?.targets ?? []).length}
-                value={selectedProviderSyncTarget}
-                placeholder="当前配置 provider"
-                options={
-                  (providerSyncTargets?.targets ?? []).length
-                    ? (providerSyncTargets?.targets ?? []).map((target) => ({
-                        value: target.id,
-                        label: `${target.id}（${providerSyncTargetLabel(target)}）`,
-                      }))
-                    : [{ value: "", label: "当前配置 provider" }]
-                }
-                onChange={(next) => actions.setProviderSyncTarget(next)}
-              />
-            </Field>
+          <div className="session-management-grid">
+            <section className="session-control-section session-sync-section">
+              <div className="session-section-head">
+                <strong>历史会话修复</strong>
+                <small>刷新本地会话，或将旧会话归属同步到指定 provider。</small>
+              </div>
+              <Field className="provider-sync-target-field" label="同步目标">
+                <SelectMenu
+                  disabled={providerSyncProgress.active || !(providerSyncTargets?.targets ?? []).length}
+                  value={selectedProviderSyncTarget}
+                  placeholder="当前配置 provider"
+                  options={
+                    (providerSyncTargets?.targets ?? []).length
+                      ? (providerSyncTargets?.targets ?? []).map((target) => ({
+                          value: target.id,
+                          label: `${target.id}（${providerSyncTargetLabel(target)}）`,
+                        }))
+                      : [{ value: "", label: "当前配置 provider" }]
+                  }
+                  onChange={(next) => actions.setProviderSyncTarget(next)}
+                />
+              </Field>
+              <div className="session-sync-actions">
+                <Button onClick={() => void actions.refreshLocalSessions()}>
+                  <RefreshCw className="h-4 w-4" />
+                  刷新会话
+                </Button>
+                <Button disabled={providerSyncProgress.active} onClick={() => void actions.syncProvidersNow()} variant="outline">
+                  <RefreshCw className="h-4 w-4" />
+                  {providerSyncProgress.active ? "正在修复…" : "立刻修复历史会话"}
+                </Button>
+              </div>
+              {providerSyncProgressVisible ? (
+                <div className="provider-sync-progress" data-active={providerSyncProgress.active}>
+                  <div className="provider-sync-progress-head">
+                    <strong>{providerSyncProgress.active ? "正在修复历史会话" : "历史会话修复进度"}</strong>
+                    <span>{providerSyncProgress.percent}%</span>
+                  </div>
+                  <div
+                    aria-valuemax={100}
+                    aria-valuemin={0}
+                    aria-valuenow={providerSyncProgress.percent}
+                    className="provider-sync-progress-bar"
+                    role="progressbar"
+                  >
+                    <div className="provider-sync-progress-fill" style={{ width: `${providerSyncProgress.percent}%` }} />
+                  </div>
+                </div>
+              ) : null}
+              <label className="switch-row compact">
+                <input
+                  checked={form.providerSyncEnabled}
+                  onChange={(event) => onFormChange({ ...form, providerSyncEnabled: event.currentTarget.checked })}
+                  type="checkbox"
+                />
+                <span>
+                  <strong>启动前自动修复历史会话</strong>
+                  <small>启动 ChatGPT/Codex 前自动整理一次旧对话归属。</small>
+                </span>
+              </label>
+              <div className="hint-line session-delete-hint">
+                <Info className="h-4 w-4" />
+                <span>删除会创建本地备份；正在使用的会话建议先关闭对应窗口。</span>
+              </div>
+            </section>
+            <section className="session-control-section session-automation-section">
+              <div className="session-section-head">
+                <strong>会话热加载</strong>
+                <small>控制启动后的最近会话预热范围。</small>
+              </div>
+              <div className="session-prewarm-settings">
+                <label className="switch-row compact">
+                  <input
+                    checked={form.codexAppSessionPrewarmEnabled}
+                    disabled={!form.enhancementsEnabled}
+                    onChange={(event) =>
+                      onFormChange({ ...form, codexAppSessionPrewarmEnabled: event.currentTarget.checked })
+                    }
+                    type="checkbox"
+                  />
+                  <span>
+                    <strong>启动后预热最近会话</strong>
+                    <small>首屏稳定后静默恢复，减少首次打开历史会话的等待。</small>
+                  </span>
+                </label>
+                <div className="form-row session-prewarm-counts">
+                  <Field label="完整恢复数量">
+                    <Input
+                      aria-label="完整恢复会话数量"
+                      disabled={!form.enhancementsEnabled || !form.codexAppSessionPrewarmEnabled}
+                      inputMode="numeric"
+                      max={4}
+                      min={0}
+                      onChange={(event) =>
+                        onFormChange({
+                          ...form,
+                          codexAppSessionPrewarmFullCount: clampNumber(
+                            Number.parseInt(event.currentTarget.value || "0", 10),
+                            0,
+                            4,
+                          ),
+                        })
+                      }
+                      type="number"
+                      value={String(form.codexAppSessionPrewarmFullCount)}
+                    />
+                    <span className="field-help">0-4，保留 Owner。</span>
+                  </Field>
+                  <Field label="内容预加载数量">
+                    <Input
+                      aria-label="额外内容预加载会话数量"
+                      disabled={!form.enhancementsEnabled || !form.codexAppSessionPrewarmEnabled}
+                      inputMode="numeric"
+                      max={20}
+                      min={0}
+                      onChange={(event) =>
+                        onFormChange({
+                          ...form,
+                          codexAppSessionPrewarmContentCount: clampNumber(
+                            Number.parseInt(event.currentTarget.value || "0", 10),
+                            0,
+                            20,
+                          ),
+                        })
+                      }
+                      type="number"
+                      value={String(form.codexAppSessionPrewarmContentCount)}
+                    />
+                    <span className="field-help">0-20，加载后释放 Owner。</span>
+                  </Field>
+                </div>
+                {!form.enhancementsEnabled ? (
+                  <div className="hint-line">
+                    <Info className="h-4 w-4" />
+                    <span>总增强开关关闭时，会话预热不会运行。</span>
+                  </div>
+                ) : null}
+              </div>
+              <div className="session-save-row">
+                <Button onClick={() => void actions.saveSettings()}>保存会话设置</Button>
+              </div>
+            </section>
           </div>
-          <Toolbar>
-            <Button onClick={() => void actions.refreshLocalSessions()}>
-              <RefreshCw className="h-4 w-4" />
-              刷新会话
-            </Button>
-            <Button disabled={providerSyncProgress.active} onClick={() => void actions.syncProvidersNow()} variant="outline">
-              <RefreshCw className="h-4 w-4" />
-              {providerSyncProgress.active ? "正在修复…" : "立刻修复历史会话"}
-            </Button>
-          </Toolbar>
-          <div className="provider-sync-progress" data-active={providerSyncProgress.active}>
-            <div className="provider-sync-progress-head">
-              <strong>{providerSyncProgress.active ? "正在修复历史会话" : "历史会话修复进度"}</strong>
-              <span>{providerSyncProgress.percent}%</span>
-            </div>
-            <div
-              aria-valuemax={100}
-              aria-valuemin={0}
-              aria-valuenow={providerSyncProgress.percent}
-              className="provider-sync-progress-bar"
-              role="progressbar"
-            >
-              <div className="provider-sync-progress-fill" style={{ width: `${providerSyncProgress.percent}%` }} />
-            </div>
-            <small>{providerSyncProgress.message}</small>
-          </div>
-          <div className="hint-line session-delete-hint">
-            <Info className="h-4 w-4" />
-            <span>删除会创建本地备份；如果 ChatGPT 的 Codex 工作区正在使用该会话，建议先关闭对应会话窗口再操作。</span>
-          </div>
-          <label className="switch-row">
-            <input
-              checked={form.providerSyncEnabled}
-              onChange={(event) => onFormChange({ ...form, providerSyncEnabled: event.currentTarget.checked })}
-              type="checkbox"
-            />
-            <span>
-              <strong>启动前自动修复历史会话</strong>
-              <small>开启后，通过 CodexElves 启动 ChatGPT/Codex 前自动整理一次旧对话的归属标记。</small>
-            </span>
-          </label>
-          <Toolbar>
-            <Button onClick={() => void actions.saveSettings()}>保存自动修复设置</Button>
-          </Toolbar>
         </CardContent>
       </Panel>
       <Panel>
@@ -8953,11 +9063,15 @@ function formatRequestLatencyTitle(entry: Pick<LocalProxyLogEntry, "firstTokenMs
   return `首字 ${formatOptionalRequestDurationMs(entry.firstTokenMs)} | 耗时 ${formatOptionalRequestDurationMs(entry.durationMs)}`;
 }
 
-function formatProtocolRoute(entry: Pick<LocalProxyLogEntry, "responseProtocol">) {
-  return `协议 ${entry.responseProtocol || "未记录"} · ${formatTransportMode(entry)}`;
+function formatProtocolRoute(entry: Pick<LocalProxyLogEntry, "responseProtocol" | "transport">) {
+  return `${entry.responseProtocol || "未记录"} · ${formatRequestTransport(entry)} · ${formatProtocolMode(entry)}`;
 }
 
-function formatTransportMode(entry: Pick<LocalProxyLogEntry, "responseProtocol">) {
+function formatRequestTransport(entry: Pick<LocalProxyLogEntry, "transport">) {
+  return entry.transport === "ws" ? "WS" : "HTTP";
+}
+
+function formatProtocolMode(entry: Pick<LocalProxyLogEntry, "responseProtocol">) {
   if (!entry.responseProtocol) return "未记录";
   return entry.responseProtocol !== "responses" ? "转换" : "直连";
 }
@@ -9054,6 +9168,8 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
     codexHomePath: (settings.codexHomePath || "").trim(),
     relayProfilesEnabled: settings.relayProfilesEnabled !== false,
     computerUseGuardEnabled: settings.computerUseGuardEnabled !== false,
+    codexAppSessionPrewarmFullCount: clampNumber(settings.codexAppSessionPrewarmFullCount ?? 4, 0, 4),
+    codexAppSessionPrewarmContentCount: clampNumber(settings.codexAppSessionPrewarmContentCount ?? 6, 0, 20),
     codexAppImageOverlayOpacity: clampNumber(settings.codexAppImageOverlayOpacity || 35, 1, 100),
     gptReasoningContinuationMaxRounds: clampNumber(settings.gptReasoningContinuationMaxRounds || 3, 1, 9),
     relayCommonConfigContents,

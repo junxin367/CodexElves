@@ -300,6 +300,20 @@ pub struct BackendSettings {
     pub codex_app_plugin_auto_expand: bool,
     #[serde(rename = "codexAppSessionDelete", default = "default_true")]
     pub codex_app_session_delete: bool,
+    #[serde(rename = "codexAppSessionPrewarmEnabled", default = "default_true")]
+    pub codex_app_session_prewarm_enabled: bool,
+    #[serde(
+        rename = "codexAppSessionPrewarmFullCount",
+        default = "default_session_prewarm_full_count",
+        deserialize_with = "deserialize_session_prewarm_full_count"
+    )]
+    pub codex_app_session_prewarm_full_count: u8,
+    #[serde(
+        rename = "codexAppSessionPrewarmContentCount",
+        default = "default_session_prewarm_content_count",
+        deserialize_with = "deserialize_session_prewarm_content_count"
+    )]
+    pub codex_app_session_prewarm_content_count: u8,
     #[serde(rename = "codexAppMarkdownExport", default)]
     pub codex_app_markdown_export: bool,
     #[serde(rename = "codexAppProjectMove", default)]
@@ -383,6 +397,9 @@ impl Default for BackendSettings {
             codex_app_plugin_marketplace_unlock: true,
             codex_app_plugin_auto_expand: true,
             codex_app_session_delete: true,
+            codex_app_session_prewarm_enabled: true,
+            codex_app_session_prewarm_full_count: default_session_prewarm_full_count(),
+            codex_app_session_prewarm_content_count: default_session_prewarm_content_count(),
             codex_app_markdown_export: false,
             codex_app_project_move: false,
             codex_app_conversation_view: true,
@@ -550,6 +567,22 @@ fn default_image_overlay_opacity() -> u8 {
     35
 }
 
+fn default_session_prewarm_full_count() -> u8 {
+    4
+}
+
+fn clamp_session_prewarm_full_count(value: u64) -> u8 {
+    value.min(4) as u8
+}
+
+fn default_session_prewarm_content_count() -> u8 {
+    6
+}
+
+fn clamp_session_prewarm_content_count(value: u64) -> u8 {
+    value.min(20) as u8
+}
+
 fn clamp_image_overlay_opacity(value: u8) -> u8 {
     value.clamp(1, 100)
 }
@@ -603,6 +636,24 @@ where
     Ok(Option::<u8>::deserialize(deserializer)?
         .map(clamp_image_overlay_opacity)
         .unwrap_or_else(default_image_overlay_opacity))
+}
+
+fn deserialize_session_prewarm_full_count<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?
+        .map(clamp_session_prewarm_full_count)
+        .unwrap_or_else(default_session_prewarm_full_count))
+}
+
+fn deserialize_session_prewarm_content_count<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?
+        .map(clamp_session_prewarm_content_count)
+        .unwrap_or_else(default_session_prewarm_content_count))
 }
 
 fn deserialize_gpt_reasoning_continuation_max_rounds<'de, D>(
@@ -772,6 +823,29 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
     merge_bool_setting(target, source, "codexAppPluginMarketplaceUnlock");
     merge_bool_setting(target, source, "codexAppPluginAutoExpand");
     merge_bool_setting(target, source, "codexAppSessionDelete");
+    merge_bool_setting(target, source, "codexAppSessionPrewarmEnabled");
+    if let Some(value) = source
+        .get("codexAppSessionPrewarmFullCount")
+        .and_then(Value::as_u64)
+    {
+        target.insert(
+            "codexAppSessionPrewarmFullCount".to_string(),
+            Value::Number(serde_json::Number::from(clamp_session_prewarm_full_count(
+                value,
+            ))),
+        );
+    }
+    if let Some(value) = source
+        .get("codexAppSessionPrewarmContentCount")
+        .and_then(Value::as_u64)
+    {
+        target.insert(
+            "codexAppSessionPrewarmContentCount".to_string(),
+            Value::Number(serde_json::Number::from(
+                clamp_session_prewarm_content_count(value),
+            )),
+        );
+    }
     merge_bool_setting(target, source, "codexAppMarkdownExport");
     merge_bool_setting(target, source, "codexAppProjectMove");
     merge_bool_setting(target, source, "codexAppConversationView");
@@ -1027,6 +1101,11 @@ fn normalize_settings_config_sections(mut settings: BackendSettings) -> BackendS
         crate::responses_websocket::normalize_responses_websocket_capability(profile);
     }
     settings.codex_home_path = normalize_codex_home_path(&settings.codex_home_path);
+    settings.codex_app_session_prewarm_full_count =
+        clamp_session_prewarm_full_count(u64::from(settings.codex_app_session_prewarm_full_count));
+    settings.codex_app_session_prewarm_content_count = clamp_session_prewarm_content_count(
+        u64::from(settings.codex_app_session_prewarm_content_count),
+    );
     settings.codex_app_image_overlay_opacity =
         clamp_image_overlay_opacity(settings.codex_app_image_overlay_opacity);
     settings.gpt_reasoning_continuation_max_rounds = clamp_gpt_reasoning_continuation_max_rounds(
@@ -1141,6 +1220,9 @@ mod tests {
         assert!(settings.codex_app_plugin_marketplace_unlock);
         assert!(settings.codex_app_plugin_auto_expand);
         assert!(settings.codex_app_session_delete);
+        assert!(settings.codex_app_session_prewarm_enabled);
+        assert_eq!(settings.codex_app_session_prewarm_full_count, 4);
+        assert_eq!(settings.codex_app_session_prewarm_content_count, 6);
         assert!(!settings.codex_app_markdown_export);
         assert!(!settings.codex_app_project_move);
         assert!(settings.codex_app_conversation_view);
@@ -1189,6 +1271,32 @@ mod tests {
         let high: BackendSettings =
             serde_json::from_str(r#"{"gptReasoningContinuationMaxRounds":999}"#).unwrap();
         assert_eq!(high.gpt_reasoning_continuation_max_rounds, 9);
+    }
+
+    #[test]
+    fn settings_clamps_session_prewarm_counts() {
+        let settings: BackendSettings = serde_json::from_str(
+            r#"{
+                "codexAppSessionPrewarmEnabled": false,
+                "codexAppSessionPrewarmFullCount": 99,
+                "codexAppSessionPrewarmContentCount": 999
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!settings.codex_app_session_prewarm_enabled);
+        assert_eq!(settings.codex_app_session_prewarm_full_count, 4);
+        assert_eq!(settings.codex_app_session_prewarm_content_count, 20);
+
+        let disabled_counts: BackendSettings = serde_json::from_str(
+            r#"{
+                "codexAppSessionPrewarmFullCount": 0,
+                "codexAppSessionPrewarmContentCount": 0
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(disabled_counts.codex_app_session_prewarm_full_count, 0);
+        assert_eq!(disabled_counts.codex_app_session_prewarm_content_count, 0);
     }
 
     #[test]
@@ -1833,6 +1941,9 @@ experimental_bearer_token = "sk-existing""#
             "enhancementsEnabled": false,
             "codexAppPluginEntryUnlock": false,
             "codexAppSessionDelete": false,
+            "codexAppSessionPrewarmEnabled": false,
+            "codexAppSessionPrewarmFullCount": 99,
+            "codexAppSessionPrewarmContentCount": 999,
             "codexAppConversationView": true,
             "codexAppServiceTierControls": true,
             "codexGoalsEnabled": true,
@@ -1850,6 +1961,9 @@ experimental_bearer_token = "sk-existing""#
         assert!(!updated.enhancements_enabled);
         assert!(!updated.codex_app_plugin_entry_unlock);
         assert!(!updated.codex_app_session_delete);
+        assert!(!updated.codex_app_session_prewarm_enabled);
+        assert_eq!(updated.codex_app_session_prewarm_full_count, 4);
+        assert_eq!(updated.codex_app_session_prewarm_content_count, 20);
         assert!(updated.codex_app_conversation_view);
         assert!(updated.codex_app_service_tier_controls);
         assert!(updated.codex_goals_enabled);

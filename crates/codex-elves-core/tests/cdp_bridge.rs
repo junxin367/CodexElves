@@ -698,7 +698,9 @@ fn injection_script_refreshes_fast_state_after_backend_load_and_route_entry() {
 
     assert!(script.contains("refreshCodexServiceTierFeatureState"));
     assert!(script.contains("if (key === codexElvesBackendSettingMap.serviceTierControls)"));
-    assert!(script.contains("refreshCodexServiceTierFeatureState();\n      return true;"));
+    assert!(script.contains(
+        "refreshCodexServiceTierFeatureState();\n      scheduleCodexSessionPrewarm(codexSessionPrewarmStartupDelayMs, \"settings-loaded\");\n      return true;"
+    ));
     assert!(script.contains(
         "scheduleConversationViewRouteRefresh();\n    refreshCodexServiceTierFeatureState();"
     ));
@@ -835,6 +837,54 @@ fn injection_script_applies_fast_service_tier_contract() {
     );
 }
 
+#[test]
+fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication() {
+    let cases = run_service_tier_contract_harness();
+    let prewarm = &cases["sessionPrewarm"];
+
+    assert_eq!(
+        prewarm["taskTypes"],
+        json!([
+            "full", "full", "full", "full", "content", "content", "content", "content", "content",
+            "content"
+        ])
+    );
+    assert_eq!(
+        prewarm["taskIds"],
+        json!([
+            "prewarm-thread-01",
+            "prewarm-thread-02",
+            "prewarm-thread-03",
+            "prewarm-thread-04",
+            "prewarm-thread-05",
+            "prewarm-thread-06",
+            "prewarm-thread-07",
+            "prewarm-thread-08",
+            "prewarm-thread-09",
+            "prewarm-thread-10"
+        ])
+    );
+    assert_eq!(prewarm["completed"], 10);
+    assert_eq!(prewarm["maxActiveResumes"], 2);
+    assert_eq!(
+        prewarm["resumeCalls"]
+            .as_array()
+            .expect("resumeCalls should be an array")
+            .len(),
+        10
+    );
+    assert_eq!(
+        prewarm["unsubscribeCalls"]
+            .as_array()
+            .expect("unsubscribeCalls should be an array")
+            .len(),
+        6
+    );
+    assert_eq!(prewarm["duplicateResumeCalls"], 1);
+    assert_eq!(prewarm["promotedResumeCalls"], 1);
+    assert_eq!(prewarm["promotedUnsubscribeCalls"], 0);
+}
+
 fn run_service_tier_contract_harness() -> serde_json::Value {
     let temp = tempfile::tempdir().expect("temp dir should be created");
     let script_path = temp.path().join("renderer-inject.js");
@@ -870,6 +920,7 @@ function node() {{
 }}
 globalThis.window = globalThis;
 window.__CODEX_ELVES_TEST_SERVICE_TIER__ = true;
+window.__CODEX_ELVES_TEST_SESSION_PREWARM__ = true;
 window.dispatchEvent = () => true;
 globalThis.CustomEvent = class CustomEvent {{
   constructor(type, options = {{}}) {{
@@ -1084,26 +1135,137 @@ const badgeTooltip = {{
   ariaLabel: badgeNode.attributes["aria-label"] || "",
 }};
 
-process.stdout.write(JSON.stringify({{
-  supportedFast,
-  unsupportedModel,
-  turnWithoutModel,
-  turnWithoutModelDiagnosticModel,
-  customInheritUnsupported,
-  startConversation,
-  gpt56Fast,
-  gpt56EmptyCatalogFast,
-  displayNameMatches,
-  catalogDrivenFast,
-  catalogDrivenBlocked,
-  patchedCreateRequest,
-  relayModelNames,
-  relayModelArrayOrder,
-  relayModelContainer,
-  relayAppServerModelOrder,
-  modelPatchBackoffMs,
-  badgeTooltip,
-}}));
+async function runSessionPrewarmCases() {{
+  const prewarmApi = window.__codexElvesSessionPrewarmTest;
+  const conversations = Array.from({{ length: 12 }}, (_, index) => ({{
+    id: `prewarm-thread-${{String(index + 1).padStart(2, "0")}}`,
+    cwd: `C:/workspace/${{index + 1}}`,
+  }}));
+  conversations.splice(2, 0, {{ id: "thread-12345678", cwd: "C:/workspace/active" }});
+  conversations.splice(5, 0, {{
+    id: "prewarm-thread-busy",
+    cwd: "C:/workspace/busy",
+    threadRuntimeStatus: {{ type: "active" }},
+  }});
+  const tasks = prewarmApi.buildTasks(
+    conversations,
+    {{ fullCount: 4, contentCount: 6 }},
+    "thread-12345678",
+  );
+
+  let activeResumes = 0;
+  let maxActiveResumes = 0;
+  const resumed = new Set();
+  const resumeCalls = [];
+  const unsubscribeCalls = [];
+  const queueManager = {{
+    needsResume(threadId) {{
+      return !resumed.has(threadId);
+    }},
+    async resumeConversationForUnavailableOwner(params) {{
+      activeResumes += 1;
+      maxActiveResumes = Math.max(maxActiveResumes, activeResumes);
+      resumeCalls.push(params.conversationId);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      resumed.add(params.conversationId);
+      activeResumes -= 1;
+    }},
+    async unsubscribeInactiveConversation(threadId) {{
+      unsubscribeCalls.push(threadId);
+      resumed.delete(threadId);
+    }},
+  }};
+  const completed = await prewarmApi.runQueue(queueManager, tasks);
+
+  let duplicateResumeCalls = 0;
+  const duplicateManager = {{
+    needsResume() {{
+      return true;
+    }},
+    async resumeConversationForUnavailableOwner() {{
+      duplicateResumeCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }},
+  }};
+  const duplicateTask = {{
+    type: "full",
+    threadId: "prewarm-thread-duplicate",
+    conversation: {{ id: "prewarm-thread-duplicate", cwd: "C:/workspace/duplicate" }},
+  }};
+  await Promise.all([
+    prewarmApi.runTask(duplicateManager, duplicateTask),
+    prewarmApi.runTask(duplicateManager, duplicateTask),
+  ]);
+
+  let promotedResumeCalls = 0;
+  let promotedUnsubscribeCalls = 0;
+  let releasePromotedResume;
+  const promotedResumeGate = new Promise((resolve) => {{
+    releasePromotedResume = resolve;
+  }});
+  const promotedManager = {{
+    needsResume() {{
+      return promotedResumeCalls === 0;
+    }},
+    async resumeConversationForUnavailableOwner() {{
+      promotedResumeCalls += 1;
+      await promotedResumeGate;
+    }},
+    async unsubscribeInactiveConversation() {{
+      promotedUnsubscribeCalls += 1;
+    }},
+  }};
+  const promotedTask = {{
+    type: "content",
+    threadId: "prewarm-thread-promoted",
+    conversation: {{ id: "prewarm-thread-promoted", cwd: "C:/workspace/promoted" }},
+  }};
+  const promotedPromise = prewarmApi.runTask(promotedManager, promotedTask);
+  await Promise.resolve();
+  prewarmApi.markForeground(promotedTask.threadId);
+  releasePromotedResume();
+  const promotedResult = await promotedPromise;
+
+  return {{
+    taskTypes: tasks.map((task) => task.type),
+    taskIds: tasks.map((task) => task.threadId),
+    completed,
+    maxActiveResumes,
+    resumeCalls,
+    unsubscribeCalls,
+    duplicateResumeCalls,
+    promotedResumeCalls,
+    promotedUnsubscribeCalls,
+    promotedResult,
+  }};
+}}
+
+runSessionPrewarmCases().then((sessionPrewarm) => {{
+  process.stdout.write(JSON.stringify({{
+    supportedFast,
+    unsupportedModel,
+    turnWithoutModel,
+    turnWithoutModelDiagnosticModel,
+    customInheritUnsupported,
+    startConversation,
+    gpt56Fast,
+    gpt56EmptyCatalogFast,
+    displayNameMatches,
+    catalogDrivenFast,
+    catalogDrivenBlocked,
+    patchedCreateRequest,
+    relayModelNames,
+    relayModelArrayOrder,
+    relayModelContainer,
+    relayAppServerModelOrder,
+    modelPatchBackoffMs,
+    badgeTooltip,
+    sessionPrewarm,
+  }}));
+}}).catch((error) => {{
+  console.error(error);
+  process.exitCode = 1;
+}});
 "#,
         script_path = serde_json::to_string(&script_path.to_string_lossy().to_string())
             .expect("script path should serialize")

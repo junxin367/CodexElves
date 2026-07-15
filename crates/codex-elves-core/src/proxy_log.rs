@@ -25,6 +25,8 @@ pub struct ProxyRequestRecord {
     pub id: String,
     #[serde(default = "default_proxy_request_state")]
     pub state: ProxyRequestState,
+    #[serde(default = "default_proxy_request_transport")]
+    pub transport: ProxyRequestTransport,
     pub timestamp_ms: u64,
     pub method: String,
     pub path: String,
@@ -74,6 +76,8 @@ pub struct ProxyRequestSummary {
     pub id: String,
     #[serde(default = "default_proxy_request_state")]
     pub state: ProxyRequestState,
+    #[serde(default = "default_proxy_request_transport")]
+    pub transport: ProxyRequestTransport,
     pub timestamp_ms: u64,
     pub method: String,
     pub path: String,
@@ -120,6 +124,17 @@ fn default_proxy_request_state() -> ProxyRequestState {
     ProxyRequestState::Completed
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyRequestTransport {
+    Http,
+    Ws,
+}
+
+fn default_proxy_request_transport() -> ProxyRequestTransport {
+    ProxyRequestTransport::Http
+}
+
 #[derive(Debug, Clone)]
 pub struct RequestMetadata {
     pub model: Option<String>,
@@ -133,6 +148,7 @@ impl From<&ProxyRequestRecord> for ProxyRequestSummary {
         Self {
             id: record.id.clone(),
             state: record.state,
+            transport: record.transport,
             timestamp_ms: record.timestamp_ms,
             method: record.method.clone(),
             path: record.path.clone(),
@@ -1246,12 +1262,23 @@ data: [DONE]
     }
 
     #[test]
+    fn legacy_record_without_transport_defaults_to_http() {
+        let mut value = serde_json::to_value(sample_proxy_record("legacy-transport")).unwrap();
+        value.as_object_mut().unwrap().remove("transport");
+
+        let record: ProxyRequestRecord = serde_json::from_value(value).unwrap();
+
+        assert_eq!(record.transport, super::ProxyRequestTransport::Http);
+    }
+
+    #[test]
     fn append_record_writes_locked_jsonl_file() {
         let path = temp_proxy_log_path("append-record");
         let previous = crate::paths::set_proxy_log_path_for_tests(Some(path.clone()));
         let record = ProxyRequestRecord {
             id: "test-record".to_string(),
             state: ProxyRequestState::Completed,
+            transport: super::ProxyRequestTransport::Http,
             timestamp_ms: current_timestamp_ms(),
             method: "POST".to_string(),
             path: "/v1/responses".to_string(),
@@ -1289,6 +1316,7 @@ data: [DONE]
             .expect("record should exist");
 
         assert_eq!(found.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(found.transport, super::ProxyRequestTransport::Http);
         assert_eq!(found.reasoning_tokens, Some(516));
         assert_eq!(found.request_body, "{}");
         assert_eq!(found.response_body, "{}");
@@ -1588,6 +1616,7 @@ data: [DONE]
         ProxyRequestRecord {
             id: id.to_string(),
             state: ProxyRequestState::Completed,
+            transport: super::ProxyRequestTransport::Http,
             timestamp_ms: current_timestamp_ms(),
             method: "POST".to_string(),
             path: "/v1/responses".to_string(),
