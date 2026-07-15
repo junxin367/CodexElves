@@ -147,7 +147,7 @@ pub async fn probe_active_relay_responses_websocket_if_needed(settings: &mut Bac
     };
 
     normalize_responses_websocket_capability(&mut settings.relay_profiles[profile_index]);
-    if !relay_can_use_native_responses_websocket(&settings.relay_profiles[profile_index]) {
+    if !relay_can_probe_native_responses_websocket(&settings.relay_profiles[profile_index]) {
         return;
     }
 
@@ -155,9 +155,9 @@ pub async fn probe_active_relay_responses_websocket_if_needed(settings: &mut Bac
     settings.relay_profiles[profile_index].responses_websocket = result;
 }
 
-/// 仅允许明确支持原生 Responses 的普通供应商启用 WebSocket。
+/// 供应商端点探测成功且至少存在一个原生 Responses 模型时启用 WebSocket。
 pub fn relay_supports_native_responses_websocket(profile: &RelayProfile) -> bool {
-    if !relay_can_use_native_responses_websocket(profile)
+    if !relay_can_probe_native_responses_websocket(profile)
         || profile.responses_websocket.state != ResponsesWebsocketCapabilityState::Supported
     {
         return false;
@@ -170,17 +170,43 @@ pub fn relay_supports_native_responses_websocket(profile: &RelayProfile) -> bool
         == Some(endpoint.as_str())
 }
 
-fn relay_can_use_native_responses_websocket(profile: &RelayProfile) -> bool {
+/// 供应商能力探测成功且用户没有显式关闭时，实际启用 Responses WebSocket。
+pub fn relay_prefers_native_responses_websocket(profile: &RelayProfile) -> bool {
+    profile.responses_websocket_enabled.unwrap_or(true)
+        && relay_supports_native_responses_websocket(profile)
+}
+
+pub fn relay_websocket_enabled_for_settings(
+    _settings: &BackendSettings,
+    profile: &RelayProfile,
+) -> bool {
+    relay_prefers_native_responses_websocket(profile)
+}
+
+pub fn relay_can_probe_native_responses_websocket(profile: &RelayProfile) -> bool {
     profile.relay_mode != RelayMode::Aggregate
         && (profile.relay_mode != RelayMode::Official || profile.official_mix_api_key)
-        && profile.protocol == RelayProtocol::Responses
-        && profile
-            .model_mappings
-            .iter()
-            .all(|mapping| mapping.protocol == RelayProtocol::Responses)
-        && !has_models(&profile.chat_completions_model_list)
-        && !has_models(&profile.anthropic_model_list)
+        && relay_has_native_responses_model(profile)
         && profile.system_prompt_override.trim().is_empty()
+}
+
+fn relay_has_native_responses_model(profile: &RelayProfile) -> bool {
+    if !profile.model_mappings.is_empty() {
+        let mut has_mapping = false;
+        for mapping in &profile.model_mappings {
+            if mapping.request_model.trim().is_empty() {
+                continue;
+            }
+            has_mapping = true;
+            if mapping.protocol == RelayProtocol::Responses {
+                return true;
+            }
+        }
+        if has_mapping {
+            return false;
+        }
+    }
+    has_models(&profile.responses_model_list) || profile.protocol == RelayProtocol::Responses
 }
 
 pub fn relay_responses_base_url(profile: &RelayProfile) -> &str {

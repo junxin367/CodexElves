@@ -51,9 +51,12 @@
   const codexServiceTierRequestOverrideVersion = "3";
   const codexAppServerModelRequestPatchVersion = "2";
   const codexSessionPrewarmVersion = "1";
-  const codexSessionPrewarmConcurrency = 2;
+  const codexSessionPrewarmConcurrency = 4;
   const codexSessionPrewarmStartupDelayMs = 2500;
   const codexSessionPrewarmInteractionPauseMs = 1200;
+  const codexSessionPrewarmMaxRetries = 2;
+  const codexSessionPrewarmRetryBaseDelayMs = 1500;
+  const codexAppServerModelPatchMaxFailures = 12;
   const codexPluginMarketplaceUnlockVersion = "12";
   const codexPluginAutoExpandVersion = "1";
   const codexPluginAutoExpandMaxClicks = 24;
@@ -66,6 +69,8 @@
   clearTimeout(window.__codexProjectMoveChatsSortTimer);
   window.__codexProjectMoveProjectionTimer = null;
   window.__codexProjectMoveChatsSortTimer = null;
+  clearTimeout(window.__codexAppServerModelPatchRetryTimer);
+  window.__codexAppServerModelPatchRetryTimer = null;
   window.__codexSessionPrewarmRuntimeId = (window.__codexSessionPrewarmRuntimeId || 0) + 1;
   const codexSessionPrewarmRuntimeId = window.__codexSessionPrewarmRuntimeId;
   clearTimeout(window.__codexSessionPrewarmTimer);
@@ -326,6 +331,36 @@
       [data-codex-delete-row="true"].codex-session-more-open [data-thread-title] {
         max-width: var(--codex-session-title-max-width) !important;
         flex: 0 1 auto !important;
+      }
+      @keyframes codex-session-prewarm-shimmer {
+        0% { background-position: 140% 0; }
+        100% { background-position: -40% 0; }
+      }
+      [data-codex-session-prewarming="true"] {
+        position: relative !important;
+      }
+      [data-codex-session-prewarming="true"]::after {
+        content: attr(data-codex-session-prewarm-title);
+        position: absolute;
+        inset: 0;
+        overflow: hidden;
+        color: transparent;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        pointer-events: none;
+        background: linear-gradient(100deg, transparent 20%, rgba(59,130,246,.55) 42%, #93c5fd 50%, rgba(59,130,246,.55) 58%, transparent 80%);
+        background-size: 250% 100%;
+        background-position: 140% 0;
+        background-clip: text;
+        -webkit-background-clip: text;
+        animation: codex-session-prewarm-shimmer 1.4s linear infinite;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        [data-codex-session-prewarming="true"]::after {
+          animation: none;
+          background-position: 50% 0;
+          opacity: .55;
+        }
       }
       [data-codex-delete-row="true"].codex-archive-confirm-visible .${actionGroupClass} {
         right: max(66px, var(--codex-session-actions-right, 28px));
@@ -881,7 +916,7 @@
       pluginMarketplaceUnlock: true,
       pluginAutoExpand: true,
       sessionDelete: true,
-      sessionPrewarmEnabled: true,
+      sessionPrewarmEnabled: false,
       sessionPrewarmFullCount: 4,
       sessionPrewarmContentCount: 6,
       markdownExport: true,
@@ -927,7 +962,7 @@
   }
 
   function normalizeSessionPrewarmSettings(settings) {
-    settings.sessionPrewarmEnabled = settings.sessionPrewarmEnabled !== false;
+    settings.sessionPrewarmEnabled = settings.sessionPrewarmEnabled === true;
     settings.sessionPrewarmFullCount = clampSessionPrewarmCount(settings.sessionPrewarmFullCount, 4, 4);
     settings.sessionPrewarmContentCount = clampSessionPrewarmCount(settings.sessionPrewarmContentCount, 6, 20);
     return settings;
@@ -1308,17 +1343,7 @@
   }
 
   function codexServiceTierFastModelListLabel() {
-    // 合并内置白名单与 catalog 中标记支持 fast 的模型，避免写死两个模型名
-    const names = new Set(codexServiceTierSupportedFastModels);
-    const entries = Array.isArray(codexModelCatalog.model_entries) ? codexModelCatalog.model_entries : [];
-    for (const entry of entries) {
-      const slug = String((entry && entry.slug) || "").trim();
-      if (!slug) continue;
-      const supports = entry.supports_fast === true
-        || (Array.isArray(entry.service_tiers) && entry.service_tiers.some((tier) => isFastServiceTierValue(tier && tier.id)));
-      if (supports) names.add(slug);
-    }
-    return Array.from(names).join(" / ");
+    return "gpt-5.4+";
   }
 
   function normalizeCodexServiceTierModelName(model) {
@@ -3845,16 +3870,21 @@
   let codexAppServerModelPatchFailureCount = 0;
   let codexAppServerModelPatchNextAttemptAt = 0;
   let codexAppServerModelPatchFailureSignature = "";
+  let codexAppServerModelPatchRetryExhausted = false;
   let codexSessionPrewarmManager = window.__codexElvesSessionPrewarmManager || null;
   let codexSessionPrewarmRunPromise = null;
+  let codexSessionPrewarmRerunPending = false;
   let codexSessionPrewarmManagerSequence = window.__codexSessionPrewarmManagerSequence || 0;
   const codexSessionPrewarmTaskPromises = new Map();
   const codexSessionPrewarmForegroundIds = new Set();
+  const codexSessionPrewarmActiveIds = new Set();
+  const codexSessionPrewarmPendingOwnerReleases = new Set();
+  const codexSessionPrewarmRetryCounts = new Map();
 
   function codexSessionPrewarmSettingsSnapshot() {
     const settings = codexElvesSettings();
     return {
-      enabled: settings.sessionPrewarmEnabled !== false,
+      enabled: settings.sessionPrewarmEnabled === true,
       fullCount: clampSessionPrewarmCount(settings.sessionPrewarmFullCount, 4, 4),
       contentCount: clampSessionPrewarmCount(settings.sessionPrewarmContentCount, 6, 20),
     };
@@ -3884,6 +3914,121 @@
       typeof candidate.sendRequest === "function";
   }
 
+  function codexSessionPrewarmManagerScore(candidate) {
+    if (!isCodexSessionPrewarmManager(candidate)) return 0;
+    let hostId = "";
+    try {
+      hostId = String(candidate.getHostId() || "");
+    } catch {
+      return 0;
+    }
+    if (hostId !== "local") return 0;
+    let score = 1;
+    if (typeof candidate.readThread === "function") score += 1;
+    if (typeof candidate.hydrateBackgroundThreads === "function") score += 2;
+    if (typeof candidate.unsubscribeInactiveConversation === "function") score += 4;
+    if (typeof candidate.resumeConversationForUnavailableOwner === "function") score += 8;
+    return score;
+  }
+
+  function findCodexSessionPrewarmManagerInObjectGraph(roots, maxNodes = 50000) {
+    const queue = [];
+    const visited = new WeakSet();
+    let cursor = 0;
+    let scanned = 0;
+    let bestManager = null;
+    let bestScore = 0;
+    const enqueue = (value, depth) => {
+      if (!value || (typeof value !== "object" && typeof value !== "function") || visited.has(value)) return;
+      queue.push({ value, depth });
+    };
+    for (const root of Array.isArray(roots) ? roots : []) enqueue(root, 0);
+    while (cursor < queue.length && scanned < maxNodes) {
+      const { value, depth } = queue[cursor];
+      cursor += 1;
+      if (!value || visited.has(value) || depth > 14) continue;
+      visited.add(value);
+      scanned += 1;
+      const score = codexSessionPrewarmManagerScore(value);
+      if (score > bestScore) {
+        bestManager = value;
+        bestScore = score;
+        if (typeof value.resumeConversationForUnavailableOwner === "function") break;
+      }
+      if (
+        value === window ||
+        value === document ||
+        (typeof Element !== "undefined" && value instanceof Element)
+      ) {
+        continue;
+      }
+      if (value instanceof Map) {
+        let entryCount = 0;
+        for (const [key, item] of value) {
+          if (entryCount >= 256) break;
+          entryCount += 1;
+          enqueue(key, depth + 1);
+          enqueue(item, depth + 1);
+        }
+      } else if (value instanceof Set) {
+        let entryCount = 0;
+        for (const item of value) {
+          if (entryCount >= 256) break;
+          entryCount += 1;
+          enqueue(item, depth + 1);
+        }
+      }
+      let propertyNames = [];
+      try {
+        propertyNames = Object.getOwnPropertyNames(value);
+      } catch {
+      }
+      for (const name of propertyNames.slice(0, 256)) {
+        if (["ownerDocument", "parentElement", "parentNode", "children", "childNodes"].includes(name)) continue;
+        try {
+          const descriptor = Object.getOwnPropertyDescriptor(value, name);
+          if (descriptor && Object.prototype.hasOwnProperty.call(descriptor, "value")) {
+            enqueue(descriptor.value, depth + 1);
+          }
+        } catch {
+        }
+      }
+    }
+    return {
+      manager: bestManager,
+      scanned,
+      exhausted: cursor < queue.length,
+    };
+  }
+
+  function codexSessionPrewarmReactObjectRoots() {
+    const nodes = [
+      document.querySelector("aside"),
+      document.querySelector("main"),
+      document.body?.firstElementChild || null,
+    ].filter(Boolean);
+    if (!nodes.some((node) => reactFiberKeys(node).length > 0)) {
+      nodes.push(...Array.from(document.querySelectorAll("aside, main, body > div, body > section")).slice(0, 24));
+    }
+    const roots = [];
+    const seen = new Set();
+    for (const node of nodes) {
+      if (!node || seen.has(node)) continue;
+      seen.add(node);
+      for (const key of reactFiberKeys(node)) {
+        try {
+          if (node[key]) roots.push(node[key]);
+        } catch {
+        }
+      }
+    }
+    return roots;
+  }
+
+  function findCodexSessionPrewarmManagerInReactTree() {
+    return findCodexSessionPrewarmManagerInObjectGraph(codexSessionPrewarmReactObjectRoots());
+  }
+
   function captureCodexSessionPrewarmManager(candidate) {
     if (!isCodexSessionPrewarmManager(candidate)) return false;
     let hostId = "";
@@ -3909,6 +4054,17 @@
     return true;
   }
 
+  function invalidateCodexSessionPrewarmManager(manager, reason) {
+    if (!manager || codexSessionPrewarmManager !== manager) return false;
+    codexSessionPrewarmManager = null;
+    window.__codexElvesSessionPrewarmManager = null;
+    window.__codexSessionPrewarmCompletedSignature = "";
+    sendCodexElvesDiagnostic("session_prewarm_manager_invalidated", { reason });
+    resetCodexAppServerModelPatchDiscovery();
+    void installAppServerModelRequestPatch(true, true);
+    return true;
+  }
+
   function codexSessionPrewarmConversationId(conversation) {
     return validThreadSessionKey(
       conversation?.id ||
@@ -3919,12 +4075,75 @@
     );
   }
 
+  function codexSessionPrewarmConversationIsSubagent(conversation) {
+    return Boolean(
+      conversation?.parentThreadId ||
+      conversation?.source?.parentThreadId ||
+      conversation?.subagentParentThreadId ||
+      conversation?.isSubagentSource === true
+    );
+  }
+
   function codexSessionPrewarmConversationIsBusy(conversation) {
-    if (conversation?.ephemeral === true || conversation?.sideConversation === true || conversation?.archived === true) return true;
+    if (
+      conversation?.ephemeral === true ||
+      conversation?.sideConversation === true ||
+      conversation?.archived === true ||
+      codexSessionPrewarmConversationIsSubagent(conversation)
+    ) return true;
     if (conversation?.threadRuntimeStatus?.type === "active") return true;
     const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
     return turns.some((turn) => turn?.status === "inProgress");
   }
+
+  function codexSessionPrewarmTitleNode(row) {
+    return row?.querySelector?.(`${selectors.threadTitle}, .truncate.select-none, .truncate.text-base`) || null;
+  }
+
+  function clearCodexSessionPrewarmIndicator(titleNode) {
+    if (!titleNode) return;
+    titleNode.removeAttribute?.("data-codex-session-prewarming");
+    titleNode.removeAttribute?.("data-codex-session-prewarm-title");
+  }
+
+  function syncCodexSessionPrewarmIndicators(rows = sessionRows(true)) {
+    const matchedTitles = new Set();
+    for (const row of Array.from(rows || [])) {
+      const titleNode = codexSessionPrewarmTitleNode(row);
+      if (!titleNode) continue;
+      matchedTitles.add(titleNode);
+      const threadId = validThreadSessionKey(sessionRefFromRow(row).session_id);
+      if (!threadId || !codexSessionPrewarmActiveIds.has(threadId)) {
+        clearCodexSessionPrewarmIndicator(titleNode);
+        continue;
+      }
+      titleNode.setAttribute?.("data-codex-session-prewarming", "true");
+      titleNode.setAttribute?.(
+        "data-codex-session-prewarm-title",
+        String(titleNode.textContent || "").trim()
+      );
+    }
+    document.querySelectorAll?.(
+      '[data-codex-session-prewarming], [data-codex-session-prewarm-title]'
+    ).forEach((titleNode) => {
+      if (matchedTitles.has(titleNode)) return;
+      const row = titleNode.closest?.(selectors.sidebarThread);
+      const threadId = row ? validThreadSessionKey(sessionRefFromRow(row).session_id) : "";
+      if (!threadId || !codexSessionPrewarmActiveIds.has(threadId)) {
+        clearCodexSessionPrewarmIndicator(titleNode);
+      }
+    });
+  }
+
+  function setCodexSessionPrewarmIndicatorActive(threadId, active) {
+    const id = validThreadSessionKey(threadId);
+    if (!id) return;
+    if (active) codexSessionPrewarmActiveIds.add(id);
+    else codexSessionPrewarmActiveIds.delete(id);
+    syncCodexSessionPrewarmIndicators();
+  }
+
+  syncCodexSessionPrewarmIndicators();
 
   function buildCodexSessionPrewarmTasks(conversations, settings, activeThreadId = "") {
     const activeId = validThreadSessionKey(activeThreadId);
@@ -3950,11 +4169,23 @@
       model: null,
       serviceTier: null,
       reasoningEffort: null,
-      workspaceRoots: [cwd || "/"],
+      workspaceRoots: cwd ? [cwd] : [],
       permissions: null,
       collaborationMode: null,
       showThreadGoalResumeConfirmation: false,
     };
+  }
+
+  async function hydrateCodexSessionPrewarmMetadata(manager, task) {
+    if (typeof manager.hydrateBackgroundThreads === "function") {
+      await manager.hydrateBackgroundThreads([task.threadId], { includeTurns: false });
+      return "metadata-only";
+    }
+    if (typeof manager.readThread === "function") {
+      await manager.readThread(task.threadId, { includeTurns: false });
+      return "metadata-only";
+    }
+    throw new Error("Codex session metadata hydration entry unavailable");
   }
 
   async function ensureCodexSessionPrewarmResumed(manager, task) {
@@ -3964,16 +4195,10 @@
       } catch {
       }
     }
-    if (typeof manager.resumeConversationForUnavailableOwner !== "function") {
-      if (typeof manager.hydrateBackgroundThreads === "function") {
-        await manager.hydrateBackgroundThreads([task.threadId], { includeTurns: false });
-        return "metadata-only";
-      }
-      if (typeof manager.readThread === "function") {
-        await manager.readThread(task.threadId, { includeTurns: false });
-        return "metadata-only";
-      }
-      throw new Error("Codex session resume entry unavailable");
+    const canResume = typeof manager.resumeConversationForUnavailableOwner === "function";
+    const canReleaseOwner = typeof manager.unsubscribeInactiveConversation === "function";
+    if (!canResume || (task.type === "content" && !canReleaseOwner)) {
+      return hydrateCodexSessionPrewarmMetadata(manager, task);
     }
     await manager.resumeConversationForUnavailableOwner(codexSessionPrewarmResumeParams(task));
     return "resumed";
@@ -3984,19 +4209,27 @@
     if (existing) return existing.promise;
     const startedAt = Date.now();
     const entry = { type: task.type, promise: null };
+    setCodexSessionPrewarmIndicatorActive(task.threadId, true);
     const promise = Promise.resolve().then(async () => {
-      const promoted = codexSessionPrewarmForegroundIds.has(task.threadId);
+      const currentThreadId = validThreadSessionKey(currentSessionRef().session_id);
+      const promoted = codexSessionPrewarmForegroundIds.has(task.threadId) || currentThreadId === task.threadId;
       const effectiveType = promoted ? "full" : task.type;
-      const resumeResult = await ensureCodexSessionPrewarmResumed(manager, task);
+      if (effectiveType === "full") codexSessionPrewarmPendingOwnerReleases.delete(task.threadId);
+      const resumeResult = await ensureCodexSessionPrewarmResumed(manager, { ...task, type: effectiveType });
+      if (effectiveType === "content" && resumeResult === "resumed") {
+        codexSessionPrewarmPendingOwnerReleases.add(task.threadId);
+      }
       if (
         effectiveType === "content" &&
-        resumeResult === "resumed" &&
+        codexSessionPrewarmPendingOwnerReleases.has(task.threadId) &&
         typeof manager.unsubscribeInactiveConversation === "function"
       ) {
         if (!codexSessionPrewarmForegroundIds.has(task.threadId) && validThreadSessionKey(currentSessionRef().session_id) !== task.threadId) {
           await manager.unsubscribeInactiveConversation(task.threadId);
+          codexSessionPrewarmPendingOwnerReleases.delete(task.threadId);
         }
         if (codexSessionPrewarmForegroundIds.has(task.threadId) || validThreadSessionKey(currentSessionRef().session_id) === task.threadId) {
+          codexSessionPrewarmPendingOwnerReleases.delete(task.threadId);
           await ensureCodexSessionPrewarmResumed(manager, { ...task, type: "full" });
         }
       }
@@ -4015,6 +4248,8 @@
       });
       return { type: task.type, result: "failed" };
     }).finally(() => {
+      setCodexSessionPrewarmIndicatorActive(task.threadId, false);
+      codexSessionPrewarmForegroundIds.delete(task.threadId);
       if (codexSessionPrewarmTaskPromises.get(task.threadId) === entry) {
         codexSessionPrewarmTaskPromises.delete(task.threadId);
       }
@@ -4027,9 +4262,10 @@
   async function waitForCodexSessionPrewarmIdle() {
     while (codexSessionPrewarmRuntimeId === window.__codexSessionPrewarmRuntimeId) {
       const visible = !document.visibilityState || document.visibilityState === "visible";
+      if (!visible) return false;
       const lastInteractionAt = Number(window.__codexSessionPrewarmLastInteractionAt || 0);
       const remainingPause = codexSessionPrewarmInteractionPauseMs - (Date.now() - lastInteractionAt);
-      if (visible && remainingPause <= 0) return true;
+      if (remainingPause <= 0) return true;
       await new Promise((resolve) => setTimeout(resolve, Math.min(500, Math.max(100, remainingPause))));
     }
     return false;
@@ -4037,7 +4273,7 @@
 
   async function runCodexSessionPrewarmQueue(manager, tasks) {
     let nextIndex = 0;
-    let completed = 0;
+    const results = new Array(tasks.length);
     const workers = Array.from({ length: Math.min(codexSessionPrewarmConcurrency, tasks.length) }, async () => {
       while (nextIndex < tasks.length) {
         if (!await waitForCodexSessionPrewarmIdle()) return;
@@ -4045,19 +4281,54 @@
         nextIndex += 1;
         const task = tasks[index];
         if (!task) return;
-        await runCodexSessionPrewarmTask(manager, task);
-        completed += 1;
+        if (validThreadSessionKey(currentSessionRef().session_id) === task.threadId) {
+          codexSessionPrewarmPendingOwnerReleases.delete(task.threadId);
+          results[index] = { type: "full", result: "foreground" };
+          continue;
+        }
+        results[index] = await runCodexSessionPrewarmTask(manager, task);
       }
     });
     await Promise.all(workers);
-    return completed;
+    const completedResults = results.filter(Boolean);
+    return {
+      completed: completedResults.length,
+      failed: completedResults.filter((result) => result.result === "failed").length,
+      interrupted: completedResults.length < tasks.length,
+      results: completedResults,
+    };
+  }
+
+  function scheduleCodexSessionPrewarmRetry(signature, reason, detail = {}) {
+    const retryCount = (codexSessionPrewarmRetryCounts.get(signature) || 0) + 1;
+    if (retryCount > codexSessionPrewarmMaxRetries) {
+      codexSessionPrewarmRetryCounts.delete(signature);
+      sendCodexElvesDiagnostic("session_prewarm_retry_exhausted", {
+        reason,
+        ...detail,
+      });
+      return false;
+    }
+    codexSessionPrewarmRetryCounts.set(signature, retryCount);
+    const delayMs = codexSessionPrewarmRetryBaseDelayMs * (2 ** (retryCount - 1));
+    sendCodexElvesDiagnostic("session_prewarm_retry_scheduled", {
+      reason,
+      retryCount,
+      delayMs,
+      ...detail,
+    });
+    scheduleCodexSessionPrewarm(delayMs, `retry-${reason}-${retryCount}`);
+    return true;
   }
 
   async function runCodexSessionPrewarm() {
     const manager = codexSessionPrewarmManager;
     const settings = codexSessionPrewarmSettingsSnapshot();
     if (!manager || !settings.enabled || settings.fullCount + settings.contentCount === 0) return;
-    if (codexSessionPrewarmRunPromise) return codexSessionPrewarmRunPromise;
+    if (codexSessionPrewarmRunPromise) {
+      codexSessionPrewarmRerunPending = true;
+      return codexSessionPrewarmRunPromise;
+    }
     const signature = [
       codexSessionPrewarmVersion,
       codexSessionPrewarmManagerId(manager),
@@ -4065,6 +4336,7 @@
       settings.contentCount,
     ].join(":");
     if (window.__codexSessionPrewarmCompletedSignature === signature) return;
+    codexSessionPrewarmRerunPending = false;
     const run = Promise.resolve().then(async () => {
       try {
         if (typeof manager.refreshRecentConversations === "function") {
@@ -4082,6 +4354,9 @@
         sendCodexElvesDiagnostic("session_prewarm_no_tasks", {
           recentCount: Array.isArray(conversations) ? conversations.length : 0,
         });
+        scheduleCodexSessionPrewarmRetry(signature, "no-tasks", {
+          recentCount: Array.isArray(conversations) ? conversations.length : 0,
+        });
         return;
       }
       sendCodexElvesDiagnostic("session_prewarm_started", {
@@ -4089,16 +4364,49 @@
         contentCount: tasks.filter((task) => task.type === "content").length,
         concurrency: codexSessionPrewarmConcurrency,
       });
-      const completed = await runCodexSessionPrewarmQueue(manager, tasks);
-      if (codexSessionPrewarmRuntimeId === window.__codexSessionPrewarmRuntimeId) {
+      const summary = await runCodexSessionPrewarmQueue(manager, tasks);
+      const fullyCompleted = !summary.interrupted && summary.completed === tasks.length;
+      if (fullyCompleted && summary.failed === 0 && codexSessionPrewarmRuntimeId === window.__codexSessionPrewarmRuntimeId) {
         window.__codexSessionPrewarmCompletedSignature = signature;
+        codexSessionPrewarmRetryCounts.delete(signature);
+      } else if (summary.failed > 0) {
+        const retryScheduled = scheduleCodexSessionPrewarmRetry(signature, "task-failed", {
+          failed: summary.failed,
+          taskCount: tasks.length,
+        });
+        if (!retryScheduled && summary.failed === tasks.length) {
+          invalidateCodexSessionPrewarmManager(manager, "all-tasks-failed");
+        }
+      } else if (summary.interrupted) {
+        sendCodexElvesDiagnostic("session_prewarm_interrupted", {
+          completed: summary.completed,
+          taskCount: tasks.length,
+        });
       }
       sendCodexElvesDiagnostic("session_prewarm_completed", {
-        completed,
+        completed: summary.completed,
+        failed: summary.failed,
         taskCount: tasks.length,
       });
+    }).catch((error) => {
+      const errorName = error?.name || "";
+      const errorMessage = error?.message || String(error);
+      sendCodexElvesDiagnostic("session_prewarm_run_failed", {
+        errorName,
+        errorMessage,
+      });
+      const retryScheduled = scheduleCodexSessionPrewarmRetry(signature, "run-failed", {
+        errorName,
+        errorMessage,
+      });
+      if (!retryScheduled) invalidateCodexSessionPrewarmManager(manager, "run-failed");
     }).finally(() => {
-      if (codexSessionPrewarmRunPromise === run) codexSessionPrewarmRunPromise = null;
+      if (codexSessionPrewarmRunPromise !== run) return;
+      codexSessionPrewarmRunPromise = null;
+      if (codexSessionPrewarmRerunPending && codexSessionPrewarmRuntimeId === window.__codexSessionPrewarmRuntimeId) {
+        codexSessionPrewarmRerunPending = false;
+        scheduleCodexSessionPrewarm(0, "pending-rerun");
+      }
     });
     codexSessionPrewarmRunPromise = run;
     return run;
@@ -4128,9 +4436,13 @@
     if (!row) return;
     const threadId = validThreadSessionKey(sessionRefFromRow(row).session_id);
     if (!threadId) return;
-    codexSessionPrewarmForegroundIds.add(threadId);
+    if (codexSessionPrewarmPendingOwnerReleases.has(threadId)) {
+      codexSessionPrewarmPendingOwnerReleases.delete(threadId);
+      sendCodexElvesDiagnostic("session_prewarm_owner_retained_for_foreground", {});
+    }
     const active = codexSessionPrewarmTaskPromises.get(threadId);
     if (active?.promise && active.type === "content" && codexSessionPrewarmManager) {
+      codexSessionPrewarmForegroundIds.add(threadId);
       void active.promise.finally(() => {
         const conversation = codexSessionPrewarmManager?.getConversation?.(threadId) || { id: threadId, cwd: "" };
         return runCodexSessionPrewarmTask(codexSessionPrewarmManager, {
@@ -4145,21 +4457,52 @@
   function installCodexSessionPrewarmInteractionHooks() {
     document.removeEventListener("pointerdown", window.__codexSessionPrewarmPointerHandler, true);
     document.removeEventListener("keydown", window.__codexSessionPrewarmKeyboardHandler, true);
+    document.removeEventListener("visibilitychange", window.__codexSessionPrewarmVisibilityHandler, true);
     window.__codexSessionPrewarmPointerHandler = markCodexSessionPrewarmInteraction;
     window.__codexSessionPrewarmKeyboardHandler = markCodexSessionPrewarmInteraction;
+    window.__codexSessionPrewarmVisibilityHandler = () => {
+      if (!document.visibilityState || document.visibilityState === "visible") {
+        scheduleCodexSessionPrewarm(0, "visibility-restored");
+      }
+    };
     document.addEventListener("pointerdown", window.__codexSessionPrewarmPointerHandler, true);
     document.addEventListener("keydown", window.__codexSessionPrewarmKeyboardHandler, true);
+    document.addEventListener("visibilitychange", window.__codexSessionPrewarmVisibilityHandler, true);
   }
 
   if (window.__CODEX_ELVES_TEST_SESSION_PREWARM__) {
     window.__codexElvesSessionPrewarmTest = {
+      activeIndicatorIds: () => [...codexSessionPrewarmActiveIds],
       buildTasks: (conversations, settings, activeThreadId = "") =>
         buildCodexSessionPrewarmTasks(conversations, settings, activeThreadId),
       captureManager: (manager) => captureCodexSessionPrewarmManager(manager),
+      clearScheduledRun: () => {
+        clearTimeout(window.__codexSessionPrewarmTimer);
+        window.__codexSessionPrewarmTimer = null;
+      },
+      clearPendingOwnerReleases: () => codexSessionPrewarmPendingOwnerReleases.clear(),
+      clearRetryCounts: () => codexSessionPrewarmRetryCounts.clear(),
+      completedSignature: () => window.__codexSessionPrewarmCompletedSignature || "",
+      findManagerFromRoots: (roots, maxNodes) =>
+        findCodexSessionPrewarmManagerInObjectGraph(roots, maxNodes),
+      isForeground: (threadId) => codexSessionPrewarmForegroundIds.has(validThreadSessionKey(threadId)),
       markForeground: (threadId) => codexSessionPrewarmForegroundIds.add(validThreadSessionKey(threadId)),
+      modelPatchVersion: codexAppServerModelRequestPatchVersion,
+      modelPatchNeeds: () => codexAppServerModelPatchNeeds(),
+      resumeParams: (task) => codexSessionPrewarmResumeParams(task),
+      pendingOwnerReleases: () => [...codexSessionPrewarmPendingOwnerReleases],
+      retryCounts: () => [...codexSessionPrewarmRetryCounts.values()],
+      run: () => runCodexSessionPrewarm(),
       runQueue: (manager, tasks) => runCodexSessionPrewarmQueue(manager, tasks),
       runTask: (manager, task) => runCodexSessionPrewarmTask(manager, task),
+      setIndicatorActive: (threadId, active) =>
+        setCodexSessionPrewarmIndicatorActive(threadId, active),
+      setManager: (manager) => {
+        codexSessionPrewarmManager = manager || null;
+        window.__codexElvesSessionPrewarmManager = codexSessionPrewarmManager;
+      },
       settingsSnapshot: () => codexSessionPrewarmSettingsSnapshot(),
+      syncIndicators: (rows) => syncCodexSessionPrewarmIndicators(rows),
     };
   }
 
@@ -4917,9 +5260,56 @@
     return Math.min(30000, 1000 * (2 ** Math.min(Math.max(codexAppServerModelPatchFailureCount - 1, 0), 5)));
   }
 
-  function installAppServerModelRequestPatch(force = false) {
-    if (window.__codexElvesAppServerModelRequestPatchInstalled === codexAppServerModelRequestPatchVersion) return;
+  function resetCodexAppServerModelPatchDiscovery() {
+    clearTimeout(window.__codexAppServerModelPatchRetryTimer);
+    window.__codexAppServerModelPatchRetryTimer = null;
+    codexAppServerModelPatchFailureCount = 0;
+    codexAppServerModelPatchNextAttemptAt = 0;
+    codexAppServerModelPatchFailureSignature = "";
+    codexAppServerModelPatchRetryExhausted = false;
+  }
+
+  function scheduleCodexAppServerModelPatchRetry(delayMs) {
+    clearTimeout(window.__codexAppServerModelPatchRetryTimer);
+    window.__codexAppServerModelPatchRetryTimer = null;
+    if (codexAppServerModelPatchFailureCount >= codexAppServerModelPatchMaxFailures) {
+      if (!codexAppServerModelPatchRetryExhausted) {
+        codexAppServerModelPatchRetryExhausted = true;
+        sendCodexElvesDiagnostic("model_app_server_request_patch_retry_exhausted", {
+          failureCount: codexAppServerModelPatchFailureCount,
+        });
+      }
+      return false;
+    }
+    const runtimeId = codexSessionPrewarmRuntimeId;
+    window.__codexAppServerModelPatchRetryTimer = setTimeout(() => {
+      window.__codexAppServerModelPatchRetryTimer = null;
+      if (runtimeId !== window.__codexSessionPrewarmRuntimeId) return;
+      void installAppServerModelRequestPatch(true);
+    }, Math.max(0, delayMs));
+    return true;
+  }
+
+  function codexAppServerModelPatchNeeds(rediscoverManager = false) {
+    const prewarmSettings = codexSessionPrewarmSettingsSnapshot();
+    return {
+      manager:
+        prewarmSettings.enabled &&
+        prewarmSettings.fullCount + prewarmSettings.contentCount > 0 &&
+        (rediscoverManager || !codexSessionPrewarmManager),
+      modelPatch:
+        codexElvesModelUnlockEnabled() &&
+        window.__codexElvesAppServerModelRequestPatchInstalled !== codexAppServerModelRequestPatchVersion,
+    };
+  }
+
+  function installAppServerModelRequestPatch(force = false, rediscoverManager = false) {
+    const needs = codexAppServerModelPatchNeeds(rediscoverManager);
+    const needsManager = needs.manager;
+    const needsModelPatch = needs.modelPatch;
+    if (!needsManager && !needsModelPatch) return;
     if (codexAppServerModelPatchPromise) return codexAppServerModelPatchPromise;
+    if (!force && codexAppServerModelPatchFailureCount >= codexAppServerModelPatchMaxFailures) return null;
     if (!force && Date.now() < codexAppServerModelPatchNextAttemptAt) return null;
     const patch = async () => {
       try {
@@ -4927,33 +5317,62 @@
         const candidates = Object.values(module).filter((value) => value && (typeof value === "object" || typeof value === "function"));
         let patchedCount = 0;
         let managerCount = 0;
+        let reactScannedCount = 0;
+        let reactManagerFound = false;
         for (const candidate of candidates) {
-          if (captureCodexSessionPrewarmManager(candidate)) managerCount += 1;
-          if (patchAppServerModelRequestClient(candidate)) patchedCount += 1;
-          if (patchAppServerModelRequestClientClass(candidate)) patchedCount += 1;
+          if (needsManager && captureCodexSessionPrewarmManager(candidate)) managerCount += 1;
+          if (needsModelPatch && patchAppServerModelRequestClient(candidate)) patchedCount += 1;
+          if (needsModelPatch && patchAppServerModelRequestClientClass(candidate)) patchedCount += 1;
           if (typeof candidate.get === "function") {
             try {
               const resolved = candidate.get();
-              if (captureCodexSessionPrewarmManager(resolved)) managerCount += 1;
-              if (patchAppServerModelRequestClient(resolved)) patchedCount += 1;
+              if (needsManager && captureCodexSessionPrewarmManager(resolved)) managerCount += 1;
+              if (needsModelPatch && patchAppServerModelRequestClient(resolved)) patchedCount += 1;
             } catch {
             }
           }
         }
-        if (patchedCount > 0 || managerCount > 0) {
+        if (
+          (needsManager && !codexSessionPrewarmManager) ||
+          (needsModelPatch && patchedCount === 0)
+        ) {
+          const reactResult = findCodexSessionPrewarmManagerInReactTree();
+          reactScannedCount = reactResult.scanned;
+          const reactManager = reactResult.manager;
+          if (reactManager) {
+            reactManagerFound = true;
+            if (needsManager && captureCodexSessionPrewarmManager(reactManager)) managerCount += 1;
+            if (needsModelPatch && patchAppServerModelRequestClient(reactManager)) patchedCount += 1;
+          }
+        }
+        if (patchedCount > 0) {
           window.__codexElvesAppServerModelRequestPatchInstalled = codexAppServerModelRequestPatchVersion;
+        }
+        const managerReady = !needsManager || !!codexSessionPrewarmManager;
+        const modelPatchReady =
+          !needsModelPatch ||
+          window.__codexElvesAppServerModelRequestPatchInstalled === codexAppServerModelRequestPatchVersion;
+        if (managerReady && modelPatchReady) {
+          clearTimeout(window.__codexAppServerModelPatchRetryTimer);
+          window.__codexAppServerModelPatchRetryTimer = null;
           codexAppServerModelPatchFailureCount = 0;
           codexAppServerModelPatchNextAttemptAt = 0;
           codexAppServerModelPatchFailureSignature = "";
+          codexAppServerModelPatchRetryExhausted = false;
           sendCodexElvesDiagnostic("model_app_server_request_patch_installed", {
             candidateCount: candidates.length,
             patchedCount,
             managerCount,
+            managerReady,
+            modelPatchReady,
+            reactScannedCount,
+            reactManagerFound,
           });
         } else {
           codexAppServerModelPatchFailureCount += 1;
           const retryAfterMs = codexAppServerModelPatchBackoffMs();
           codexAppServerModelPatchNextAttemptAt = Date.now() + retryAfterMs;
+          scheduleCodexAppServerModelPatchRetry(retryAfterMs);
           const exportCount = Object.keys(module || {}).length;
           const failureSignature = `${exportCount}:${candidates.length}`;
           if (codexAppServerModelPatchFailureSignature !== failureSignature) {
@@ -4962,6 +5381,10 @@
               exportCount,
               candidateCount: candidates.length,
               retryAfterMs,
+              needsManager: !managerReady,
+              needsModelPatch: !modelPatchReady,
+              reactScannedCount,
+              reactManagerFound,
             });
           }
         }
@@ -4969,6 +5392,7 @@
         codexAppServerModelPatchFailureCount += 1;
         const retryAfterMs = codexAppServerModelPatchBackoffMs();
         codexAppServerModelPatchNextAttemptAt = Date.now() + retryAfterMs;
+        scheduleCodexAppServerModelPatchRetry(retryAfterMs);
         const errorName = error?.name || "";
         const errorMessage = error?.message || String(error);
         const failureSignature = `error:${errorName}:${errorMessage}`;
@@ -8230,6 +8654,7 @@
     if (sidebarDirty) {
       sessionRows().forEach(tryAttachButton);
       updateDeleteButtonOffsets();
+      syncCodexSessionPrewarmIndicators();
       scheduleProjectMoveProjection();
       scheduleChatsSortCorrection();
     }
@@ -8482,6 +8907,8 @@
     void loadCodexServiceTierState();
     scan();
     installScanObservers();
+    resetCodexAppServerModelPatchDiscovery();
+    void installAppServerModelRequestPatch(true, true);
     scheduleCodexSessionPrewarm(codexSessionPrewarmStartupDelayMs, "runtime-refresh");
   };
 })();

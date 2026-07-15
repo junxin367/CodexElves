@@ -159,6 +159,16 @@ base_url = "https://old.example/v1"
 }
 
 #[test]
+fn switch_keeps_supported_websocket_when_reasoning_continuation_is_enabled() {
+    assert_switched_websocket_state(true, true);
+}
+
+#[test]
+fn switch_enables_supported_websocket_when_reasoning_continuation_is_disabled() {
+    assert_switched_websocket_state(false, true);
+}
+
+#[test]
 fn switch_backfills_previous_profile_from_live_before_selecting_target() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex");
@@ -376,4 +386,45 @@ base_url = "{base_url}"
         auth_contents: format!(r#"{{"OPENAI_API_KEY":"{key}"}}"#),
         ..RelayProfile::default()
     }
+}
+
+fn assert_switched_websocket_state(
+    gpt_reasoning_continuation: bool,
+    expected_websocket_enabled: bool,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("codex");
+    std::fs::create_dir(&home).unwrap();
+    let store = SettingsStore::new(temp.path().join("settings.json"));
+    let original = BackendSettings {
+        active_relay_id: "a".to_string(),
+        relay_profiles: vec![pure_profile("a", "https://a.example/v1", "sk-a")],
+        ..BackendSettings::default()
+    };
+    store.save(&original).unwrap();
+    let mut target = pure_profile("b", "https://b.example/v1", "sk-b");
+    target.responses_websocket = codex_elves_core::settings::ResponsesWebsocketCapability {
+        state: codex_elves_core::settings::ResponsesWebsocketCapabilityState::Supported,
+        endpoint: "wss://b.example/v1/responses".to_string(),
+        checked_at_ms: Some(1),
+        message: "握手成功".to_string(),
+    };
+    let next = BackendSettings {
+        active_relay_id: "b".to_string(),
+        relay_profiles: vec![original.relay_profiles[0].clone(), target],
+        gpt_reasoning_continuation,
+        ..BackendSettings::default()
+    };
+
+    switch_relay_profile_in_home(&store, &home, next, "").unwrap();
+
+    let live = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    assert_eq!(
+        live.contains("supports_websockets = true"),
+        expected_websocket_enabled
+    );
+    assert_eq!(
+        live.contains("supports_websockets = false"),
+        !expected_websocket_enabled
+    );
 }

@@ -497,6 +497,11 @@ impl LaunchHooks for DefaultLaunchHooks {
             &common_config,
             settings.computer_use_guard_enabled,
         )?;
+        crate::relay_config::sync_applied_relay_profile_websocket_to_home_with_enabled(
+            &home,
+            &profile,
+            crate::responses_websocket::relay_websocket_enabled_for_settings(settings, &profile),
+        )?;
         Ok(())
     }
 

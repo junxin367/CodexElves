@@ -129,6 +129,12 @@ pub struct RelayProfile {
     #[serde(rename = "responsesWebsocket", default)]
     pub responses_websocket: ResponsesWebsocketCapability,
     #[serde(
+        rename = "responsesWebsocketEnabled",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub responses_websocket_enabled: Option<bool>,
+    #[serde(
         rename = "userAgent",
         default,
         skip_serializing_if = "String::is_empty"
@@ -200,6 +206,7 @@ impl Default for RelayProfile {
             chat_completions_model_list: String::new(),
             anthropic_model_list: String::new(),
             responses_websocket: ResponsesWebsocketCapability::default(),
+            responses_websocket_enabled: None,
             user_agent: String::new(),
             system_prompt_override: String::new(),
         }
@@ -300,7 +307,7 @@ pub struct BackendSettings {
     pub codex_app_plugin_auto_expand: bool,
     #[serde(rename = "codexAppSessionDelete", default = "default_true")]
     pub codex_app_session_delete: bool,
-    #[serde(rename = "codexAppSessionPrewarmEnabled", default = "default_true")]
+    #[serde(rename = "codexAppSessionPrewarmEnabled", default)]
     pub codex_app_session_prewarm_enabled: bool,
     #[serde(
         rename = "codexAppSessionPrewarmFullCount",
@@ -397,7 +404,7 @@ impl Default for BackendSettings {
             codex_app_plugin_marketplace_unlock: true,
             codex_app_plugin_auto_expand: true,
             codex_app_session_delete: true,
-            codex_app_session_prewarm_enabled: true,
+            codex_app_session_prewarm_enabled: false,
             codex_app_session_prewarm_full_count: default_session_prewarm_full_count(),
             codex_app_session_prewarm_content_count: default_session_prewarm_content_count(),
             codex_app_markdown_export: false,
@@ -471,6 +478,7 @@ impl BackendSettings {
                 chat_completions_model_list: String::new(),
                 anthropic_model_list: String::new(),
                 responses_websocket: ResponsesWebsocketCapability::default(),
+                responses_websocket_enabled: None,
                 user_agent: String::new(),
                 system_prompt_override: String::new(),
             };
@@ -522,6 +530,7 @@ impl BackendSettings {
             chat_completions_model_list: String::new(),
             anthropic_model_list: String::new(),
             responses_websocket: ResponsesWebsocketCapability::default(),
+            responses_websocket_enabled: None,
             user_agent: String::new(),
             system_prompt_override: String::new(),
         }
@@ -1220,7 +1229,7 @@ mod tests {
         assert!(settings.codex_app_plugin_marketplace_unlock);
         assert!(settings.codex_app_plugin_auto_expand);
         assert!(settings.codex_app_session_delete);
-        assert!(settings.codex_app_session_prewarm_enabled);
+        assert!(!settings.codex_app_session_prewarm_enabled);
         assert_eq!(settings.codex_app_session_prewarm_full_count, 4);
         assert_eq!(settings.codex_app_session_prewarm_content_count, 6);
         assert!(!settings.codex_app_markdown_export);
@@ -1295,8 +1304,13 @@ mod tests {
             }"#,
         )
         .unwrap();
+        assert!(!disabled_counts.codex_app_session_prewarm_enabled);
         assert_eq!(disabled_counts.codex_app_session_prewarm_full_count, 0);
         assert_eq!(disabled_counts.codex_app_session_prewarm_content_count, 0);
+
+        let explicitly_enabled: BackendSettings =
+            serde_json::from_str(r#"{"codexAppSessionPrewarmEnabled":true}"#).unwrap();
+        assert!(explicitly_enabled.codex_app_session_prewarm_enabled);
     }
 
     #[test]

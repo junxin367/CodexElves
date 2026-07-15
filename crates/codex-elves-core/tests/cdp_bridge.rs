@@ -839,9 +839,13 @@ fn injection_script_applies_fast_service_tier_contract() {
 
 #[test]
 fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication() {
+    let script = assets::injection_script(45221);
     let cases = run_service_tier_contract_harness();
     let prewarm = &cases["sessionPrewarm"];
 
+    assert!(script.contains("@keyframes codex-session-prewarm-shimmer"));
+    assert!(script.contains("data-codex-session-prewarming"));
+    assert!(script.contains("@media (prefers-reduced-motion: reduce)"));
     assert_eq!(
         prewarm["taskTypes"],
         json!([
@@ -864,8 +868,15 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
             "prewarm-thread-10"
         ])
     );
+    assert_eq!(
+        prewarm["subagentFilterTaskIds"],
+        json!(["prewarm-thread-normal", "prewarm-thread-fork"])
+    );
     assert_eq!(prewarm["completed"], 10);
-    assert_eq!(prewarm["maxActiveResumes"], 2);
+    assert_eq!(prewarm["failed"], 0);
+    assert_eq!(prewarm["maxActiveResumes"], 4);
+    assert_eq!(prewarm["maxActiveIndicators"], 4);
+    assert_eq!(prewarm["activeIndicatorsAfterQueue"], json!([]));
     assert_eq!(
         prewarm["resumeCalls"]
             .as_array()
@@ -883,6 +894,100 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
     assert_eq!(prewarm["duplicateResumeCalls"], 1);
     assert_eq!(prewarm["promotedResumeCalls"], 1);
     assert_eq!(prewarm["promotedUnsubscribeCalls"], 0);
+    assert_eq!(prewarm["promotedIndicatorActiveDuring"], true);
+    assert_eq!(prewarm["promotedIndicatorActiveAfter"], false);
+    assert_eq!(prewarm["promotedForegroundRetained"], false);
+    assert_eq!(
+        prewarm["indicatorActiveAttributes"],
+        json!({
+            "prewarming": "true",
+            "title": "正在预热的会话"
+        })
+    );
+    assert_eq!(
+        prewarm["indicatorReusedAttributes"],
+        json!({
+            "prewarming": null,
+            "title": null
+        })
+    );
+    assert_eq!(
+        prewarm["indicatorClearedAttributes"],
+        json!({
+            "prewarming": null,
+            "title": null
+        })
+    );
+    assert_eq!(prewarm["fallbackResumeCalls"], 0);
+    assert_eq!(
+        prewarm["fallbackHydrationCalls"],
+        json!([{
+            "threadIds": ["prewarm-thread-fallback"],
+            "options": {"includeTurns": false}
+        }])
+    );
+    assert_eq!(prewarm["fallbackResult"]["result"], "metadata-only");
+    assert_eq!(prewarm["compensationFirstResult"]["result"], "failed");
+    assert_eq!(
+        prewarm["compensationPendingAfterFailure"],
+        json!(["prewarm-thread-compensation"])
+    );
+    assert_eq!(
+        prewarm["compensationSecondResult"]["result"],
+        "already-resumed"
+    );
+    assert_eq!(prewarm["compensationPendingAfterRetry"], json!([]));
+    assert_eq!(prewarm["compensationResumeCalls"], 1);
+    assert_eq!(prewarm["compensationReleaseCalls"], 2);
+    assert_eq!(prewarm["compensationOwnerHeld"], false);
+    assert_eq!(prewarm["failureSummary"]["completed"], 2);
+    assert_eq!(prewarm["failureSummary"]["failed"], 1);
+    assert_eq!(
+        prewarm["failureCalls"],
+        json!(["prewarm-thread-failure", "prewarm-thread-after-failure"])
+    );
+    assert_eq!(prewarm["currentThreadResumeCalls"], 0);
+    assert_eq!(prewarm["currentThreadSummary"]["completed"], 1);
+    assert_eq!(
+        prewarm["currentThreadSummary"]["results"][0]["result"],
+        "foreground"
+    );
+    assert_eq!(prewarm["hiddenResumeCalls"], 0);
+    assert_eq!(prewarm["hiddenQueueSummary"]["completed"], 0);
+    assert_eq!(prewarm["hiddenQueueSummary"]["interrupted"], true);
+    assert_eq!(
+        prewarm["needsModelPatchOnly"],
+        json!({"manager": false, "modelPatch": true})
+    );
+    assert_eq!(
+        prewarm["needsManagerOnly"],
+        json!({"manager": true, "modelPatch": false})
+    );
+    assert_eq!(prewarm["failedRunCompletedSignature"], "");
+    assert_eq!(prewarm["failedRunRetryCounts"], json!([1]));
+    assert_eq!(prewarm["noTasksRetryCounts"], json!([1]));
+    assert_eq!(prewarm["firstManagerResumeCalls"], 1);
+    assert_eq!(prewarm["secondManagerResumeCalls"], 1);
+    assert_eq!(prewarm["nestedManagerFound"], true);
+    assert_eq!(prewarm["nestedManagerHasResume"], true);
+    assert!(
+        prewarm["nestedManagerScanned"]
+            .as_u64()
+            .is_some_and(|value| value > 0)
+    );
+    assert_eq!(prewarm["emptyWorkspaceRoots"], json!([]));
+}
+
+#[test]
+fn injection_script_defaults_session_prewarm_to_disabled() {
+    let script = assets::injection_script(45221);
+
+    assert!(script.contains("sessionPrewarmEnabled: false"));
+    assert!(
+        script
+            .contains("settings.sessionPrewarmEnabled = settings.sessionPrewarmEnabled === true;")
+    );
+    assert!(script.contains("enabled: settings.sessionPrewarmEnabled === true"));
 }
 
 fn run_service_tier_contract_harness() -> serde_json::Value {
@@ -897,7 +1002,10 @@ fn run_service_tier_contract_harness() -> serde_json::Value {
         r#"
 const scriptPath = {script_path};
 const store = new Map();
-store.set("codexElvesSettings", JSON.stringify({{ serviceTierControls: true }}));
+store.set("codexElvesSettings", JSON.stringify({{
+  serviceTierControls: true,
+  sessionPrewarmEnabled: true,
+}}));
 function node() {{
   return {{
     appendChild() {{}},
@@ -935,6 +1043,7 @@ globalThis.Event = class Event {{
 }};
 globalThis.document = {{
   scripts: [],
+  visibilityState: "visible",
   documentElement: node(),
   body: node(),
   createElement: () => node(),
@@ -1137,6 +1246,39 @@ const badgeTooltip = {{
 
 async function runSessionPrewarmCases() {{
   const prewarmApi = window.__codexElvesSessionPrewarmTest;
+  const nestedReadOnlyManager = {{
+    getHostId() {{
+      return "local";
+    }},
+    getRecentConversations() {{
+      return [];
+    }},
+    async sendRequest() {{}},
+  }};
+  const nestedFullManager = {{
+    getHostId() {{
+      return "local";
+    }},
+    getRecentConversations() {{
+      return [];
+    }},
+    async sendRequest() {{}},
+    async resumeConversationForUnavailableOwner() {{}},
+    async unsubscribeInactiveConversation() {{}},
+  }};
+  const nestedManagerGraph = {{
+    node: {{
+      familyBindings: new Map([
+        ["read-only", {{ atom: {{ init: nestedReadOnlyManager }} }}],
+        ["full", {{ atom: {{ init: nestedFullManager }} }}],
+      ]),
+    }},
+  }};
+  const nestedManagerResult = prewarmApi.findManagerFromRoots([nestedManagerGraph]);
+  const nestedManagerFound = nestedManagerResult.manager === nestedFullManager;
+  const nestedManagerHasResume =
+    typeof nestedManagerResult.manager?.resumeConversationForUnavailableOwner === "function";
+  const nestedManagerScanned = nestedManagerResult.scanned;
   const conversations = Array.from({{ length: 12 }}, (_, index) => ({{
     id: `prewarm-thread-${{String(index + 1).padStart(2, "0")}}`,
     cwd: `C:/workspace/${{index + 1}}`,
@@ -1152,9 +1294,56 @@ async function runSessionPrewarmCases() {{
     {{ fullCount: 4, contentCount: 6 }},
     "thread-12345678",
   );
+  const subagentFilterTasks = prewarmApi.buildTasks([
+    {{ id: "prewarm-thread-normal" }},
+    {{ id: "prewarm-thread-parent", parentThreadId: "parent-thread" }},
+    {{ id: "prewarm-thread-source-parent", source: {{ parentThreadId: "parent-thread" }} }},
+    {{ id: "prewarm-thread-subagent-parent", subagentParentThreadId: "parent-thread" }},
+    {{ id: "prewarm-thread-subagent-source", isSubagentSource: true }},
+    {{ id: "prewarm-thread-fork", forkedFromId: "source-thread" }},
+  ], {{ fullCount: 10, contentCount: 0 }});
+  const indicatorAttributes = {{}};
+  const indicatorTitle = {{
+    textContent: "正在预热的会话",
+    setAttribute(name, value) {{
+      indicatorAttributes[name] = String(value);
+    }},
+    removeAttribute(name) {{
+      delete indicatorAttributes[name];
+    }},
+    closest() {{
+      return indicatorRow;
+    }},
+  }};
+  let indicatorRowThreadId = "prewarm-thread-indicator";
+  const indicatorRow = {{
+    getAttribute(name) {{
+      if (name === "data-app-action-sidebar-thread-id") return indicatorRowThreadId;
+      return "";
+    }},
+    querySelector(selector) {{
+      if (selector === "a") return null;
+      return indicatorTitle;
+    }},
+  }};
+  const indicatorSnapshot = () => ({{
+    prewarming: indicatorAttributes["data-codex-session-prewarming"] ?? null,
+    title: indicatorAttributes["data-codex-session-prewarm-title"] ?? null,
+  }});
+  prewarmApi.setIndicatorActive("prewarm-thread-indicator", true);
+  prewarmApi.syncIndicators([indicatorRow]);
+  const indicatorActiveAttributes = indicatorSnapshot();
+  indicatorRowThreadId = "prewarm-thread-reused";
+  prewarmApi.syncIndicators([indicatorRow]);
+  const indicatorReusedAttributes = indicatorSnapshot();
+  indicatorRowThreadId = "prewarm-thread-indicator";
+  prewarmApi.setIndicatorActive("prewarm-thread-indicator", false);
+  prewarmApi.syncIndicators([indicatorRow]);
+  const indicatorClearedAttributes = indicatorSnapshot();
 
   let activeResumes = 0;
   let maxActiveResumes = 0;
+  let maxActiveIndicators = 0;
   const resumed = new Set();
   const resumeCalls = [];
   const unsubscribeCalls = [];
@@ -1165,6 +1354,10 @@ async function runSessionPrewarmCases() {{
     async resumeConversationForUnavailableOwner(params) {{
       activeResumes += 1;
       maxActiveResumes = Math.max(maxActiveResumes, activeResumes);
+      maxActiveIndicators = Math.max(
+        maxActiveIndicators,
+        prewarmApi.activeIndicatorIds().length,
+      );
       resumeCalls.push(params.conversationId);
       await new Promise((resolve) => setTimeout(resolve, 5));
       resumed.add(params.conversationId);
@@ -1175,7 +1368,8 @@ async function runSessionPrewarmCases() {{
       resumed.delete(threadId);
     }},
   }};
-  const completed = await prewarmApi.runQueue(queueManager, tasks);
+  const queueSummary = await prewarmApi.runQueue(queueManager, tasks);
+  const activeIndicatorsAfterQueue = prewarmApi.activeIndicatorIds();
 
   let duplicateResumeCalls = 0;
   const duplicateManager = {{
@@ -1222,21 +1416,258 @@ async function runSessionPrewarmCases() {{
   }};
   const promotedPromise = prewarmApi.runTask(promotedManager, promotedTask);
   await Promise.resolve();
+  const promotedIndicatorActiveDuring =
+    prewarmApi.activeIndicatorIds().includes(promotedTask.threadId);
   prewarmApi.markForeground(promotedTask.threadId);
   releasePromotedResume();
   const promotedResult = await promotedPromise;
+  const promotedIndicatorActiveAfter =
+    prewarmApi.activeIndicatorIds().includes(promotedTask.threadId);
+  const promotedForegroundRetained = prewarmApi.isForeground(promotedTask.threadId);
+
+  let fallbackResumeCalls = 0;
+  const fallbackHydrationCalls = [];
+  const fallbackManager = {{
+    needsResume() {{
+      return true;
+    }},
+    async resumeConversationForUnavailableOwner() {{
+      fallbackResumeCalls += 1;
+    }},
+    async hydrateBackgroundThreads(threadIds, options) {{
+      fallbackHydrationCalls.push({{ threadIds, options }});
+    }},
+  }};
+  const fallbackResult = await prewarmApi.runTask(fallbackManager, {{
+    type: "content",
+    threadId: "prewarm-thread-fallback",
+    conversation: {{ id: "prewarm-thread-fallback", cwd: "C:/workspace/fallback" }},
+  }});
+
+  let compensationOwnerHeld = false;
+  let compensationResumeCalls = 0;
+  let compensationReleaseCalls = 0;
+  const compensationManager = {{
+    needsResume() {{
+      return !compensationOwnerHeld;
+    }},
+    async resumeConversationForUnavailableOwner() {{
+      compensationResumeCalls += 1;
+      compensationOwnerHeld = true;
+    }},
+    async unsubscribeInactiveConversation() {{
+      compensationReleaseCalls += 1;
+      if (compensationReleaseCalls === 1) throw new Error("transient owner release failure");
+      compensationOwnerHeld = false;
+    }},
+  }};
+  const compensationTask = {{
+    type: "content",
+    threadId: "prewarm-thread-compensation",
+    conversation: {{ id: "prewarm-thread-compensation", cwd: "C:/workspace/compensation" }},
+  }};
+  const compensationFirstResult = await prewarmApi.runTask(compensationManager, compensationTask);
+  const compensationPendingAfterFailure = prewarmApi.pendingOwnerReleases();
+  const compensationSecondResult = await prewarmApi.runTask(compensationManager, compensationTask);
+  const compensationPendingAfterRetry = prewarmApi.pendingOwnerReleases();
+
+  const failureCalls = [];
+  const failureManager = {{
+    needsResume() {{
+      return true;
+    }},
+    async resumeConversationForUnavailableOwner(params) {{
+      failureCalls.push(params.conversationId);
+      if (params.conversationId === "prewarm-thread-failure") throw new Error("transient resume failure");
+    }},
+  }};
+  const failureSummary = await prewarmApi.runQueue(failureManager, [
+    {{
+      type: "full",
+      threadId: "prewarm-thread-failure",
+      conversation: {{ id: "prewarm-thread-failure", cwd: "C:/workspace/failure" }},
+    }},
+    {{
+      type: "full",
+      threadId: "prewarm-thread-after-failure",
+      conversation: {{ id: "prewarm-thread-after-failure", cwd: "C:/workspace/after-failure" }},
+    }},
+  ]);
+
+  const savedLocation = {{ href: location.href, pathname: location.pathname }};
+  location.href = "https://codex.test/thread/prewarm-thread-current";
+  location.pathname = "/thread/prewarm-thread-current";
+  let currentThreadResumeCalls = 0;
+  const currentThreadSummary = await prewarmApi.runQueue({{
+    needsResume() {{
+      return true;
+    }},
+    async resumeConversationForUnavailableOwner() {{
+      currentThreadResumeCalls += 1;
+    }},
+  }}, [{{
+    type: "full",
+    threadId: "prewarm-thread-current",
+    conversation: {{ id: "prewarm-thread-current", cwd: "C:/workspace/current" }},
+  }}]);
+  location.href = savedLocation.href;
+  location.pathname = savedLocation.pathname;
+
+  document.visibilityState = "hidden";
+  let hiddenResumeCalls = 0;
+  const hiddenQueueSummary = await prewarmApi.runQueue({{
+    needsResume() {{
+      return true;
+    }},
+    async resumeConversationForUnavailableOwner() {{
+      hiddenResumeCalls += 1;
+    }},
+  }}, [{{
+    type: "full",
+    threadId: "prewarm-thread-hidden",
+    conversation: {{ id: "prewarm-thread-hidden", cwd: "C:/workspace/hidden" }},
+  }}]);
+  document.visibilityState = "visible";
+
+  prewarmApi.setManager({{}});
+  delete window.__codexElvesAppServerModelRequestPatchInstalled;
+  const needsModelPatchOnly = prewarmApi.modelPatchNeeds();
+  prewarmApi.setManager(null);
+  window.__codexElvesAppServerModelRequestPatchInstalled = prewarmApi.modelPatchVersion;
+  const needsManagerOnly = prewarmApi.modelPatchNeeds();
+  delete window.__codexElvesAppServerModelRequestPatchInstalled;
+
+  delete window.__codexSessionPrewarmCompletedSignature;
+  prewarmApi.clearRetryCounts();
+  const retryManager = {{
+    getRecentConversations() {{
+      return [{{ id: "prewarm-thread-run-failure", cwd: "C:/workspace/run-failure" }}];
+    }},
+    needsResume() {{
+      return true;
+    }},
+    async resumeConversationForUnavailableOwner() {{
+      throw new Error("retryable run failure");
+    }},
+  }};
+  prewarmApi.setManager(retryManager);
+  await prewarmApi.run();
+  const failedRunCompletedSignature = prewarmApi.completedSignature();
+  const failedRunRetryCounts = prewarmApi.retryCounts();
+  prewarmApi.clearScheduledRun();
+  prewarmApi.clearRetryCounts();
+  prewarmApi.setManager(null);
+
+  delete window.__codexSessionPrewarmCompletedSignature;
+  const noTasksManager = {{
+    getRecentConversations() {{
+      return [];
+    }},
+  }};
+  prewarmApi.setManager(noTasksManager);
+  await prewarmApi.run();
+  const noTasksRetryCounts = prewarmApi.retryCounts();
+  prewarmApi.clearScheduledRun();
+  prewarmApi.clearRetryCounts();
+  prewarmApi.setManager(null);
+
+  delete window.__codexSessionPrewarmCompletedSignature;
+  let releasePendingManagerRun;
+  const pendingManagerGate = new Promise((resolve) => {{
+    releasePendingManagerRun = resolve;
+  }});
+  let firstManagerResumeCalls = 0;
+  const firstPendingManager = {{
+    getRecentConversations() {{
+      return [{{ id: "prewarm-thread-manager-a", cwd: "C:/workspace/manager-a" }}];
+    }},
+    needsResume() {{
+      return true;
+    }},
+    async resumeConversationForUnavailableOwner() {{
+      firstManagerResumeCalls += 1;
+      await pendingManagerGate;
+    }},
+  }};
+  let secondManagerResumeCalls = 0;
+  const secondPendingManager = {{
+    getRecentConversations() {{
+      return [{{ id: "prewarm-thread-manager-b", cwd: "C:/workspace/manager-b" }}];
+    }},
+    needsResume() {{
+      return true;
+    }},
+    async resumeConversationForUnavailableOwner() {{
+      secondManagerResumeCalls += 1;
+    }},
+  }};
+  prewarmApi.setManager(firstPendingManager);
+  const firstManagerRun = prewarmApi.run();
+  while (firstManagerResumeCalls === 0) {{
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }}
+  prewarmApi.setManager(secondPendingManager);
+  const joinedManagerRun = prewarmApi.run();
+  releasePendingManagerRun();
+  await Promise.all([firstManagerRun, joinedManagerRun]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  prewarmApi.clearScheduledRun();
+  prewarmApi.setManager(null);
+
+  const emptyWorkspaceRoots = prewarmApi.resumeParams({{
+    type: "full",
+    threadId: "prewarm-thread-no-cwd",
+    conversation: {{ id: "prewarm-thread-no-cwd", cwd: "" }},
+  }}).workspaceRoots;
 
   return {{
+    nestedManagerFound,
+    nestedManagerHasResume,
+    nestedManagerScanned,
     taskTypes: tasks.map((task) => task.type),
     taskIds: tasks.map((task) => task.threadId),
-    completed,
+    subagentFilterTaskIds: subagentFilterTasks.map((task) => task.threadId),
+    indicatorActiveAttributes,
+    indicatorReusedAttributes,
+    indicatorClearedAttributes,
+    completed: queueSummary.completed,
+    failed: queueSummary.failed,
     maxActiveResumes,
+    maxActiveIndicators,
+    activeIndicatorsAfterQueue,
     resumeCalls,
     unsubscribeCalls,
     duplicateResumeCalls,
     promotedResumeCalls,
     promotedUnsubscribeCalls,
     promotedResult,
+    promotedIndicatorActiveDuring,
+    promotedIndicatorActiveAfter,
+    promotedForegroundRetained,
+    fallbackResumeCalls,
+    fallbackHydrationCalls,
+    fallbackResult,
+    compensationFirstResult,
+    compensationSecondResult,
+    compensationPendingAfterFailure,
+    compensationPendingAfterRetry,
+    compensationResumeCalls,
+    compensationReleaseCalls,
+    compensationOwnerHeld,
+    failureCalls,
+    failureSummary,
+    currentThreadResumeCalls,
+    currentThreadSummary,
+    hiddenResumeCalls,
+    hiddenQueueSummary,
+    needsModelPatchOnly,
+    needsManagerOnly,
+    failedRunCompletedSignature,
+    failedRunRetryCounts,
+    noTasksRetryCounts,
+    firstManagerResumeCalls,
+    secondManagerResumeCalls,
+    emptyWorkspaceRoots,
   }};
 }}
 

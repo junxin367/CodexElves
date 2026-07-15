@@ -107,6 +107,7 @@ pub fn relay_profile_from_ccs(
         chat_completions_model_list: String::new(),
         anthropic_model_list: String::new(),
         responses_websocket: Default::default(),
+        responses_websocket_enabled: None,
         user_agent: String::new(),
         system_prompt_override: String::new(),
     }

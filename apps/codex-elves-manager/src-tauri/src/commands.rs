@@ -7,7 +7,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use codex_elves_core::install::SILENT_BINARY;
 use codex_elves_core::models::{DeleteResult, SessionRef};
 use codex_elves_core::script_market::{self, MarketScript, ScriptMarketManifest};
-use codex_elves_core::settings::{BackendSettings, RelayProfile, SettingsStore};
+use codex_elves_core::settings::{
+    BackendSettings, RelayProfile, ResponsesWebsocketCapability, SettingsStore,
+};
 use codex_elves_core::status::{LaunchStatus, StatusStore};
 use codex_elves_core::user_scripts::UserScriptManager;
 use serde::{Deserialize, Serialize};
@@ -224,6 +226,13 @@ pub struct RelayProfileTestPayload {
 pub struct RelayProfileModelsPayload {
     pub models: Vec<String>,
     pub endpoint: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResponsesWebsocketProbePayload {
+    pub profile_id: String,
+    pub capability: ResponsesWebsocketCapability,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -542,7 +551,8 @@ fn spawn_silent_launcher(request: &LaunchRequest) -> anyhow::Result<()> {
 
 #[tauri::command]
 pub fn load_settings() -> CommandResult<SettingsPayload> {
-    settings_payload("设置已加载。", "设置读取失败")
+    let backfill_message = backfill_model_catalog_websocket_preferences_after_load();
+    settings_payload(&format!("设置已加载。{backfill_message}"), "设置读取失败")
 }
 
 #[tauri::command]
@@ -2586,6 +2596,78 @@ pub async fn fetch_relay_profile_models(
 }
 
 #[tauri::command]
+pub async fn probe_relay_profile_responses_websocket(
+    mut profile: RelayProfile,
+) -> CommandResult<ResponsesWebsocketProbePayload> {
+    let _guard = settings_write_mutex().lock().await;
+    let profile_name = if profile.name.trim().is_empty() {
+        "未命名供应商".to_string()
+    } else {
+        profile.name.trim().to_string()
+    };
+    profile.responses_websocket = ResponsesWebsocketCapability::default();
+    codex_elves_core::responses_websocket::normalize_responses_websocket_capability(&mut profile);
+    if !codex_elves_core::responses_websocket::relay_can_probe_native_responses_websocket(&profile)
+    {
+        return failed(
+            "当前供应商没有可直接使用原生 Responses 协议的模型，或配置了系统提示词替换。",
+            ResponsesWebsocketProbePayload {
+                profile_id: profile.id,
+                capability: profile.responses_websocket,
+            },
+        );
+    }
+
+    let capability =
+        codex_elves_core::responses_websocket::probe_responses_websocket(&profile).await;
+    let store = SettingsStore::default();
+    if let Err(error) =
+        persist_relay_profile_responses_websocket_capability(&store, &profile.id, &capability)
+    {
+        return failed(
+            &format!("Responses WebSocket 探测完成，但保存结果失败：{error}"),
+            ResponsesWebsocketProbePayload {
+                profile_id: profile.id,
+                capability,
+            },
+        );
+    }
+    let sync_warning = match sync_active_responses_websocket_after_probe(&store, &profile.id) {
+        Ok(_) => String::new(),
+        Err(error) => format!(" 但实时配置或模型目录同步失败：{error}。"),
+    };
+    let detail = capability.message.trim();
+    let message = match capability.state {
+        codex_elves_core::settings::ResponsesWebsocketCapabilityState::Supported => {
+            format!("「{profile_name}」支持 Responses WebSocket。{detail}{sync_warning}")
+        }
+        codex_elves_core::settings::ResponsesWebsocketCapabilityState::Unsupported => {
+            format!("「{profile_name}」不支持 Responses WebSocket。{detail}{sync_warning}")
+        }
+        codex_elves_core::settings::ResponsesWebsocketCapabilityState::Unknown => {
+            format!(
+                "暂时无法确认「{profile_name}」是否支持 Responses WebSocket。{detail}{sync_warning}"
+            )
+        }
+    };
+    CommandResult {
+        status: if capability.state
+            == codex_elves_core::settings::ResponsesWebsocketCapabilityState::Supported
+        {
+            "ok"
+        } else {
+            "failed"
+        }
+        .to_string(),
+        message,
+        payload: ResponsesWebsocketProbePayload {
+            profile_id: profile.id,
+            capability,
+        },
+    }
+}
+
+#[tauri::command]
 pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
     let settings = SettingsStore::default().load().unwrap_or_default();
     let home = codex_elves_core::codex_home::codex_home_dir_for_settings(&settings);
@@ -2610,6 +2692,22 @@ pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
             preserve_computer_use_guard,
         ) {
             Ok(result) => {
+                if let Err(error) =
+                    sync_relay_websocket_to_home(&home, &settings, &relay)
+                {
+                    let status = codex_elves_core::relay_config::relay_status_from_home(&home);
+                    log_relay_apply_result(
+                        "manager.apply_relay_injection.failed",
+                        &relay,
+                        &status,
+                        result.backup_path.as_ref(),
+                        Some(error.to_string()),
+                    );
+                    return failed(
+                        &format!("供应商配置已写入，但 WebSocket 配置同步失败：{error}"),
+                        relay_payload(status, result.backup_path),
+                    );
+                }
                 let status = codex_elves_core::relay_config::relay_status_from_home(&home);
                 log_relay_apply_result(
                     "manager.apply_relay_injection.ok",
@@ -2669,6 +2767,20 @@ pub fn apply_relay_injection() -> CommandResult<RelayPayload> {
         codex_elves_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
     ) {
         Ok(result) => {
+            if let Err(error) = sync_relay_websocket_to_home(&home, &settings, &relay) {
+                let status = codex_elves_core::relay_config::relay_status_from_home(&home);
+                log_relay_apply_result(
+                    "manager.apply_relay_injection.failed",
+                    &relay,
+                    &status,
+                    result.backup_path.as_ref(),
+                    Some(error.to_string()),
+                );
+                return failed(
+                    &format!("中转配置已写入，但 WebSocket 配置同步失败：{error}"),
+                    relay_payload(status, result.backup_path),
+                );
+            }
             let status = codex_elves_core::relay_config::relay_status_from_home(&home);
             log_relay_apply_result(
                 "manager.apply_relay_injection.ok",
@@ -2748,6 +2860,22 @@ pub fn apply_pure_api_injection() -> CommandResult<RelayPayload> {
             preserve_computer_use_guard,
         ) {
             Ok(result) => {
+                if let Err(error) =
+                    sync_relay_websocket_to_home(&home, &settings, &relay)
+                {
+                    let status = codex_elves_core::relay_config::relay_status_from_home(&home);
+                    log_relay_apply_result(
+                        "manager.apply_pure_api_injection.failed",
+                        &relay,
+                        &status,
+                        result.backup_path.as_ref(),
+                        Some(error.to_string()),
+                    );
+                    return failed(
+                        &format!("纯 API 配置已写入，但 WebSocket 配置同步失败：{error}"),
+                        relay_payload(status, result.backup_path),
+                    );
+                }
                 let status = codex_elves_core::relay_config::relay_status_from_home(&home);
                 log_relay_apply_result(
                     "manager.apply_pure_api_injection.ok",
@@ -2797,6 +2925,20 @@ pub fn apply_pure_api_injection() -> CommandResult<RelayPayload> {
         codex_elves_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
     ) {
         Ok(result) => {
+            if let Err(error) = sync_relay_websocket_to_home(&home, &settings, &relay) {
+                let status = codex_elves_core::relay_config::relay_status_from_home(&home);
+                log_relay_apply_result(
+                    "manager.apply_pure_api_injection.failed",
+                    &relay,
+                    &status,
+                    result.backup_path.as_ref(),
+                    Some(error.to_string()),
+                );
+                return failed(
+                    &format!("纯 API 配置已写入，但 WebSocket 配置同步失败：{error}"),
+                    relay_payload(status, result.backup_path),
+                );
+            }
             let status = codex_elves_core::relay_config::relay_status_from_home(&home);
             log_relay_apply_result(
                 "manager.apply_pure_api_injection.ok",
@@ -2981,6 +3123,22 @@ fn sync_applied_model_catalog_after_settings_save(settings: &BackendSettings) ->
     }
 }
 
+fn backfill_model_catalog_websocket_preferences_after_load() -> String {
+    let settings = SettingsStore::default().load().unwrap_or_default();
+    if !settings.relay_profiles_enabled || settings.active_aggregate_relay_profile().is_some() {
+        return String::new();
+    }
+    let relay = settings.active_relay_profile();
+    let home = codex_elves_core::codex_home::codex_home_dir_for_settings(&settings);
+    match codex_elves_core::relay_config::backfill_applied_model_catalog_websocket_preferences(
+        &home, &relay,
+    ) {
+        Ok(true) => " 已自动补齐模型目录的 WebSocket 偏好。".to_string(),
+        Ok(false) => String::new(),
+        Err(error) => format!(" 但模型目录 WebSocket 偏好补齐失败：{error}。"),
+    }
+}
+
 fn sync_applied_websocket_after_settings_save(settings: &BackendSettings) -> String {
     if !settings.relay_profiles_enabled || settings.active_aggregate_relay_profile().is_some() {
         return String::new();
@@ -2992,12 +3150,24 @@ fn sync_applied_websocket_after_settings_save(settings: &BackendSettings) -> Str
         return String::new();
     }
     let home = codex_elves_core::codex_home::codex_home_dir_for_settings(settings);
-    match codex_elves_core::relay_config::sync_applied_relay_profile_websocket_to_home(
-        &home, &relay,
-    ) {
+    match sync_relay_websocket_to_home(&home, settings, &relay) {
         Ok(_) => String::new(),
         Err(error) => format!(" 但 WebSocket 配置同步失败：{error}。"),
     }
+}
+
+fn sync_relay_websocket_to_home(
+    home: &Path,
+    settings: &BackendSettings,
+    relay: &RelayProfile,
+) -> anyhow::Result<bool> {
+    codex_elves_core::relay_config::sync_applied_relay_profile_websocket_to_home_with_enabled(
+        home,
+        relay,
+        codex_elves_core::responses_websocket::relay_websocket_enabled_for_settings(
+            settings, relay,
+        ),
+    )
 }
 
 fn relay_payload(
@@ -3091,6 +3261,42 @@ fn persist_active_responses_websocket_capability(
     }
     target.responses_websocket = probed.responses_websocket.clone();
     store.save(&saved)
+}
+
+fn persist_relay_profile_responses_websocket_capability(
+    store: &SettingsStore,
+    profile_id: &str,
+    capability: &ResponsesWebsocketCapability,
+) -> anyhow::Result<()> {
+    let mut saved = store.load().unwrap_or_default();
+    let Some(target) = saved
+        .relay_profiles
+        .iter_mut()
+        .find(|profile| profile.id == profile_id)
+    else {
+        return Ok(());
+    };
+    if target.responses_websocket == *capability {
+        return Ok(());
+    }
+    target.responses_websocket = capability.clone();
+    store.save(&saved)
+}
+
+fn sync_active_responses_websocket_after_probe(
+    store: &SettingsStore,
+    profile_id: &str,
+) -> anyhow::Result<bool> {
+    let settings = store.load().unwrap_or_default();
+    if !settings.relay_profiles_enabled
+        || settings.active_relay_id != profile_id
+        || settings.active_aggregate_relay_profile().is_some()
+    {
+        return Ok(false);
+    }
+    let relay = settings.active_relay_profile();
+    let home = codex_elves_core::codex_home::codex_home_dir_for_settings(&settings);
+    sync_relay_websocket_to_home(&home, &settings, &relay)
 }
 
 fn empty_context_entries() -> codex_elves_core::relay_config::CodexContextEntries {
@@ -3606,6 +3812,47 @@ mod tests {
             persisted.relay_profiles[0].responses_websocket.message,
             "probed"
         );
+    }
+
+    #[test]
+    fn direct_websocket_probe_persists_selected_profile_capability() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(temp.path().join("settings.json"));
+        let mut other = websocket_cache_profile(
+            codex_elves_core::settings::ResponsesWebsocketCapabilityState::Unknown,
+            "wss://relay.example/v1/responses",
+        );
+        other.id = "relay-other".to_string();
+        store
+            .save(&BackendSettings {
+                active_relay_id: "relay-ws".to_string(),
+                relay_profiles: vec![
+                    websocket_cache_profile(
+                        codex_elves_core::settings::ResponsesWebsocketCapabilityState::Unknown,
+                        "wss://relay.example/v1/responses",
+                    ),
+                    other,
+                ],
+                ..BackendSettings::default()
+            })
+            .unwrap();
+        let capability = codex_elves_core::settings::ResponsesWebsocketCapability {
+            state: codex_elves_core::settings::ResponsesWebsocketCapabilityState::Supported,
+            endpoint: "wss://relay.example/v1/responses".to_string(),
+            checked_at_ms: Some(2),
+            message: "direct probe".to_string(),
+        };
+
+        persist_relay_profile_responses_websocket_capability(&store, "relay-other", &capability)
+            .unwrap();
+
+        let persisted = store.load().unwrap();
+        let profile = persisted
+            .relay_profiles
+            .iter()
+            .find(|profile| profile.id == "relay-other")
+            .unwrap();
+        assert_eq!(profile.responses_websocket, capability);
     }
 
     #[test]

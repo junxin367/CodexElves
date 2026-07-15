@@ -144,6 +144,7 @@ pub fn run() {
             commands::delete_context_entry,
             commands::test_relay_profile,
             commands::fetch_relay_profile_models,
+            commands::probe_relay_profile_responses_websocket,
             commands::switch_relay_profile,
             commands::apply_relay_injection,
             commands::apply_pure_api_injection,

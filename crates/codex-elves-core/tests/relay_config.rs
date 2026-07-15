@@ -1513,13 +1513,14 @@ supports_websockets = true
 }
 
 #[test]
-fn sync_applied_relay_profile_websocket_updates_only_the_live_provider_flag() {
+fn sync_applied_relay_profile_websocket_updates_provider_and_responses_model_preferences() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();
     std::fs::write(
         home.join("config.toml"),
         r#"model_provider = "custom"
 model = "gpt-test"
+model_catalog_json = "codex-elves-model-catalog.json"
 
 [model_providers.custom]
 name = "custom"
@@ -1530,6 +1531,18 @@ base_url = "http://127.0.0.1:45221/v1"
 "#,
     )
     .unwrap();
+    std::fs::write(
+        home.join("codex-elves-model-catalog.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "models": [
+                {"slug": "gpt-test"},
+                {"slug": "gpt-explicit", "prefer_websockets": false},
+                {"slug": "claude-test"}
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     let mut profile = RelayProfile {
         relay_mode: RelayMode::PureApi,
         protocol: RelayProtocol::Responses,
@@ -1537,6 +1550,23 @@ base_url = "http://127.0.0.1:45221/v1"
         upstream_base_url: "https://relay.example/v1".to_string(),
         api_key: "sk-test".to_string(),
         config_contents: "model_provider = \"custom\"\n".to_string(),
+        model_mappings: vec![
+            RelayModelMapping {
+                request_model: "gpt-test".to_string(),
+                protocol: RelayProtocol::Responses,
+                context_window: String::new(),
+            },
+            RelayModelMapping {
+                request_model: "gpt-explicit".to_string(),
+                protocol: RelayProtocol::Responses,
+                context_window: String::new(),
+            },
+            RelayModelMapping {
+                request_model: "claude-test".to_string(),
+                protocol: RelayProtocol::Anthropic,
+                context_window: String::new(),
+            },
+        ],
         ..RelayProfile::default()
     };
 
@@ -1544,6 +1574,23 @@ base_url = "http://127.0.0.1:45221/v1"
     let disabled = std::fs::read_to_string(home.join("config.toml")).unwrap();
     assert!(disabled.contains("supports_websockets = false"));
     assert!(disabled.contains("model = \"gpt-test\""));
+    let disabled_catalog: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(home.join("codex-elves-model-catalog.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        disabled_catalog["models"][0]["prefer_websockets"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        disabled_catalog["models"][1]["prefer_websockets"],
+        serde_json::json!(false)
+    );
+    assert!(
+        disabled_catalog["models"][2]
+            .get("prefer_websockets")
+            .is_none()
+    );
 
     profile.responses_websocket = ResponsesWebsocketCapability {
         state: ResponsesWebsocketCapabilityState::Supported,
@@ -1555,6 +1602,40 @@ base_url = "http://127.0.0.1:45221/v1"
     let enabled = std::fs::read_to_string(home.join("config.toml")).unwrap();
     assert!(enabled.contains("supports_websockets = true"));
     assert!(enabled.contains("model = \"gpt-test\""));
+    let enabled_catalog: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(home.join("codex-elves-model-catalog.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        enabled_catalog["models"][0]["prefer_websockets"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        enabled_catalog["models"][1]["prefer_websockets"],
+        serde_json::json!(true)
+    );
+    assert!(
+        enabled_catalog["models"][2]
+            .get("prefer_websockets")
+            .is_none()
+    );
+
+    profile.responses_websocket_enabled = Some(false);
+    assert!(sync_applied_relay_profile_websocket_to_home(home, &profile).unwrap());
+    let explicitly_disabled = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    assert!(explicitly_disabled.contains("supports_websockets = false"));
+    let explicitly_disabled_catalog: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(home.join("codex-elves-model-catalog.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        explicitly_disabled_catalog["models"][0]["prefer_websockets"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        explicitly_disabled_catalog["models"][1]["prefer_websockets"],
+        serde_json::json!(false)
+    );
 }
 
 #[test]

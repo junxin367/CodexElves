@@ -1665,6 +1665,85 @@ body {
   margin-top: 12px;
 }
 
+.relay-websocket-panel {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--muted) / 0.28);
+}
+
+.relay-websocket-status {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.relay-websocket-status > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: hsl(var(--primary));
+}
+
+.relay-websocket-status > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.relay-websocket-status strong {
+  color: hsl(var(--foreground));
+  font-size: 13px;
+}
+
+.relay-websocket-status span,
+.relay-websocket-status small {
+  overflow-wrap: anywhere;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.relay-websocket-actions {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 8px;
+  justify-items: end;
+}
+
+.relay-websocket-actions > button {
+  min-width: 104px;
+}
+
+.relay-websocket-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  min-height: 32px;
+  align-items: center;
+  gap: 7px;
+  color: hsl(var(--foreground));
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.relay-websocket-toggle input {
+  width: 16px;
+  height: 16px;
+}
+
+.relay-websocket-toggle.is-disabled {
+  color: hsl(var(--muted-foreground));
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .relay-context-content {
   display: grid;
   gap: 12px;
@@ -2579,6 +2658,18 @@ body {
   margin: 12px 0;
 }
 
+.enhancement-master-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.enhancement-master-grid .switch-row {
+  height: 100%;
+  margin-bottom: 0;
+}
+
 .remote-plugin-marketplace-section {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2675,7 +2766,7 @@ body {
 
 .feature-toggle {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
+  grid-template-columns: 18px minmax(0, 1fr);
   gap: 10px;
   align-items: center;
   border: 1px solid hsl(var(--border));
@@ -4739,6 +4830,7 @@ body {
   .grid.two,
   .form-row,
   .remote-plugin-marketplace-section,
+  .enhancement-master-grid,
   .feature-switch-grid,
   .feature-action-row,
   .relay-fields,

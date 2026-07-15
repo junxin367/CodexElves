@@ -91,6 +91,11 @@ fn apply_selected_relay_profile(
             preserve_computer_use_guard,
         )?
     };
+    crate::relay_config::sync_applied_relay_profile_websocket_to_home_with_enabled(
+        home,
+        &relay,
+        crate::responses_websocket::relay_websocket_enabled_for_settings(settings, &relay),
+    )?;
     let status = relay_config_status_from_home(home);
     if relay.relay_mode == RelayMode::PureApi && !status.configured {
         anyhow::bail!(

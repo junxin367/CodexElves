@@ -1,7 +1,9 @@
 use codex_elves_core::proxy_log::{ProxyRequestState, ProxyRequestTransport};
 use codex_elves_core::responses_websocket::{
     normalize_responses_websocket_capability, probe_active_relay_responses_websocket_if_needed,
-    probe_responses_websocket, relay_supports_native_responses_websocket, responses_websocket_url,
+    probe_responses_websocket, relay_prefers_native_responses_websocket,
+    relay_supports_native_responses_websocket, relay_websocket_enabled_for_settings,
+    responses_websocket_url,
 };
 use codex_elves_core::responses_websocket_bridge::handle_responses_websocket_connection;
 use codex_elves_core::settings::{
@@ -43,6 +45,7 @@ fn capability_cache_defaults_and_serializes_with_camel_case_fields() {
     assert!(profile.responses_websocket.endpoint.is_empty());
     assert_eq!(profile.responses_websocket.checked_at_ms, None);
     assert!(profile.responses_websocket.message.is_empty());
+    assert_eq!(profile.responses_websocket_enabled, None);
 
     let serialized = serde_json::to_value(profile).unwrap();
     assert_eq!(
@@ -53,6 +56,7 @@ fn capability_cache_defaults_and_serializes_with_camel_case_fields() {
         serialized["responsesWebsocket"]["checkedAtMs"],
         serde_json::Value::Null
     );
+    assert!(serialized.get("responsesWebsocketEnabled").is_none());
 }
 
 #[test]
@@ -100,7 +104,7 @@ fn base_url_change_resets_cached_capability_to_unknown() {
 }
 
 #[test]
-fn native_responses_websocket_requires_a_matching_supported_cache_and_homogeneous_protocols() {
+fn native_responses_websocket_supports_mixed_profiles_with_responses_models() {
     let mut profile = native_responses_profile();
     normalize_responses_websocket_capability(&mut profile);
     profile.responses_websocket.state = ResponsesWebsocketCapabilityState::Supported;
@@ -108,8 +112,19 @@ fn native_responses_websocket_requires_a_matching_supported_cache_and_homogeneou
     assert!(relay_supports_native_responses_websocket(&profile));
 
     profile.protocol = RelayProtocol::ChatCompletions;
-    assert!(!relay_supports_native_responses_websocket(&profile));
-    profile.protocol = RelayProtocol::Responses;
+    profile.model_mappings = vec![
+        RelayModelMapping {
+            request_model: "gpt-responses".to_string(),
+            protocol: RelayProtocol::Responses,
+            context_window: String::new(),
+        },
+        RelayModelMapping {
+            request_model: "claude-sonnet".to_string(),
+            protocol: RelayProtocol::Anthropic,
+            context_window: String::new(),
+        },
+    ];
+    assert!(relay_supports_native_responses_websocket(&profile));
 
     profile.model_mappings = vec![RelayModelMapping {
         request_model: "chat-model".to_string(),
@@ -117,19 +132,22 @@ fn native_responses_websocket_requires_a_matching_supported_cache_and_homogeneou
         context_window: String::new(),
     }];
     assert!(!relay_supports_native_responses_websocket(&profile));
-    profile.model_mappings.clear();
-
-    profile.chat_completions_model_list = "chat-model".to_string();
-    assert!(!relay_supports_native_responses_websocket(&profile));
-    profile.chat_completions_model_list.clear();
-
-    profile.anthropic_model_list = "claude-sonnet".to_string();
-    assert!(!relay_supports_native_responses_websocket(&profile));
-    profile.anthropic_model_list.clear();
 
     profile.system_prompt_override = "使用自定义系统提示词".to_string();
     assert!(!relay_supports_native_responses_websocket(&profile));
     profile.system_prompt_override.clear();
+    profile.model_mappings = vec![
+        RelayModelMapping {
+            request_model: "gpt-responses".to_string(),
+            protocol: RelayProtocol::Responses,
+            context_window: String::new(),
+        },
+        RelayModelMapping {
+            request_model: "claude-sonnet".to_string(),
+            protocol: RelayProtocol::Anthropic,
+            context_window: String::new(),
+        },
+    ];
 
     profile.relay_mode = RelayMode::Aggregate;
     assert!(!relay_supports_native_responses_websocket(&profile));
@@ -140,6 +158,44 @@ fn native_responses_websocket_requires_a_matching_supported_cache_and_homogeneou
 
     profile.responses_websocket.endpoint = "wss://other.example.test/v1/responses".to_string();
     assert!(!relay_supports_native_responses_websocket(&profile));
+}
+
+#[test]
+fn reasoning_continuation_keeps_cached_websocket_support_enabled() {
+    let mut profile = native_responses_profile();
+    normalize_responses_websocket_capability(&mut profile);
+    profile.responses_websocket.state = ResponsesWebsocketCapabilityState::Supported;
+    let enabled = BackendSettings::default();
+    let disabled = BackendSettings {
+        gpt_reasoning_continuation: true,
+        ..BackendSettings::default()
+    };
+
+    assert!(relay_websocket_enabled_for_settings(&enabled, &profile));
+    assert!(relay_websocket_enabled_for_settings(&disabled, &profile));
+    assert_eq!(
+        profile.responses_websocket.state,
+        ResponsesWebsocketCapabilityState::Supported
+    );
+}
+
+#[test]
+fn explicit_websocket_preference_disables_usage_without_clearing_capability() {
+    let mut profile = native_responses_profile();
+    normalize_responses_websocket_capability(&mut profile);
+    profile.responses_websocket.state = ResponsesWebsocketCapabilityState::Supported;
+
+    assert!(relay_supports_native_responses_websocket(&profile));
+    assert!(relay_prefers_native_responses_websocket(&profile));
+
+    profile.responses_websocket_enabled = Some(false);
+
+    assert!(relay_supports_native_responses_websocket(&profile));
+    assert!(!relay_prefers_native_responses_websocket(&profile));
+    assert!(!relay_websocket_enabled_for_settings(
+        &BackendSettings::default(),
+        &profile
+    ));
 }
 
 #[tokio::test]
@@ -513,14 +569,18 @@ async fn upstream_connection_failure_rejects_upgrade_before_sending_101() {
 }
 
 #[tokio::test]
-async fn reasoning_continuation_rejects_websocket_without_contacting_upstream() {
+async fn explicitly_disabled_websocket_rejects_upgrade_before_connecting_upstream() {
     let _settings_lock = websocket_settings_test_lock().lock().await;
-    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let upstream_address = upstream_listener.local_addr().unwrap();
+    let unused_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let unused_address = unused_listener.local_addr().unwrap();
+    drop(unused_listener);
 
     let temp = tempfile::tempdir().unwrap();
     let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
-    save_supported_websocket_settings(upstream_address, true);
+    save_supported_websocket_settings(unused_address, false);
+    let mut settings = SettingsStore::default().load().unwrap();
+    settings.relay_profiles[0].responses_websocket_enabled = Some(false);
+    SettingsStore::default().save(&settings).unwrap();
 
     let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_address = local_listener.local_addr().unwrap();
@@ -537,13 +597,194 @@ async fn reasoning_continuation_rejects_websocket_without_contacting_upstream() 
         panic!("expected HTTP rejection before websocket upgrade");
     };
     assert_eq!(response.status().as_u16(), 409);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), upstream_listener.accept())
-            .await
-            .is_err(),
-        "reasoning continuation must not contact websocket upstream"
-    );
     local_server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn reasoning_continuation_reuses_the_same_websocket_and_only_returns_the_final_round() {
+    let _settings_lock = websocket_settings_test_lock().lock().await;
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        let (stream, _) = upstream_listener.accept().await.unwrap();
+        let mut socket = accept_hdr_async(stream, |_request: &Request, response: Response| {
+            Ok(response)
+        })
+        .await
+        .unwrap();
+
+        let first_request = socket.next().await.unwrap().unwrap();
+        let Message::Text(first_request) = first_request else {
+            panic!("expected first response.create");
+        };
+        let first_request: serde_json::Value =
+            serde_json::from_str(first_request.as_str()).unwrap();
+        assert_eq!(first_request["type"], "response.create");
+        assert_eq!(first_request["model"], "gpt-websocket-test");
+
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_short",
+                        "status": "completed",
+                        "output": [{
+                            "id": "rs_short",
+                            "type": "reasoning",
+                            "encrypted_content": "encrypted-short",
+                            "summary": []
+                        }],
+                        "usage": {
+                            "output_tokens_details": {
+                                "reasoning_tokens": 516
+                            }
+                        }
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+
+        let continue_request = socket.next().await.unwrap().unwrap();
+        let Message::Text(continue_request) = continue_request else {
+            panic!("expected websocket continuation response.create");
+        };
+        let continue_request: serde_json::Value =
+            serde_json::from_str(continue_request.as_str()).unwrap();
+        assert_eq!(continue_request["type"], "response.create");
+        assert_eq!(continue_request["model"], "gpt-websocket-test");
+        assert!(continue_request.get("stream").is_none());
+        assert!(continue_request.get("background").is_none());
+        assert!(
+            continue_request["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["name"] == "continue_thinking")
+        );
+        assert!(
+            continue_request["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["encrypted_content"] == "encrypted-short")
+        );
+
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_final",
+                        "status": "completed",
+                        "output": [{
+                            "id": "msg_final",
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{
+                                "type": "output_text",
+                                "text": "final answer"
+                            }]
+                        }],
+                        "usage": {
+                            "output_tokens_details": {
+                                "reasoning_tokens": 1552
+                            }
+                        }
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let _ = socket.close(None).await;
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
+    save_supported_websocket_settings(upstream_address, true);
+
+    let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_address = local_listener.local_addr().unwrap();
+    let local_server = tokio::spawn(async move {
+        let (mut stream, remote_addr) = local_listener.accept().await.unwrap();
+        let request_bytes = read_upgrade_request(&mut stream).await;
+        handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr)).await
+    });
+
+    let (mut client, _) = connect_async(format!("ws://{local_address}/v1/responses"))
+        .await
+        .unwrap();
+    client
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-websocket-test",
+                "input": [{
+                    "role": "user",
+                    "content": "think carefully"
+                }],
+                "stream": true,
+                "background": false
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let response = client.next().await.unwrap().unwrap();
+    let Message::Text(response) = response else {
+        panic!("expected final websocket response");
+    };
+    let response: serde_json::Value = serde_json::from_str(response.as_str()).unwrap();
+    assert_eq!(response["type"], "response.completed");
+    assert_eq!(response["response"]["id"], "resp_final");
+    assert!(!response.to_string().contains("resp_short"));
+
+    let _ = client.close(None).await;
+    local_server.await.unwrap().unwrap();
+    upstream.await.unwrap();
+
+    let summaries = codex_elves_core::proxy_log::read_summaries(10).unwrap();
+    let summary = summaries
+        .iter()
+        .find(|entry| entry.model.as_deref() == Some("gpt-websocket-test"))
+        .expect("websocket continuation request should be recorded");
+    assert_eq!(summary.transport, ProxyRequestTransport::Ws);
+    assert_eq!(summary.state, ProxyRequestState::Completed);
+    let detail = codex_elves_core::proxy_log::find_record(&summary.id)
+        .unwrap()
+        .expect("websocket continuation request detail should exist");
+    assert!(detail.continue_thinking_triggered);
+    assert_eq!(detail.continue_thinking_rounds, 1);
+    assert_eq!(detail.reasoning_tokens, Some(2068));
+    assert!(
+        detail
+            .continue_thinking_request_body
+            .as_deref()
+            .is_some_and(|body| body.contains("continue_thinking"))
+    );
+    assert!(
+        detail
+            .continue_thinking_before_response_body
+            .as_deref()
+            .is_some_and(|body| body.contains("resp_short"))
+    );
+    assert!(
+        detail
+            .continue_thinking_after_response_body
+            .as_deref()
+            .is_some_and(|body| body.contains("resp_final"))
+    );
+    assert!(!detail.response_body.contains("resp_short"));
+    assert!(detail.response_body.contains("resp_final"));
 }
 
 async fn spawn_http_status_server(

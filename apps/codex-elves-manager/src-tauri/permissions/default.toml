@@ -39,6 +39,7 @@ commands.allow = [
   "open_external_url",
   "perform_update",
   "plugin_marketplace_status",
+  "probe_relay_profile_responses_websocket",
   "read_latest_logs",
   "read_local_proxy_log_detail",
   "read_local_proxy_logs",

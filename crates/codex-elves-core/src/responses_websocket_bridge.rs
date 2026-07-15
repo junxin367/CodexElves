@@ -82,9 +82,7 @@ pub async fn handle_responses_websocket_connection(
         Some("聚合供应商暂不支持 Responses WebSocket")
     } else if !relay.local_proxy_enabled() {
         Some("当前供应商未启用本地代理")
-    } else if settings.gpt_reasoning_continuation {
-        Some("GPT 推理续接启用时使用 HTTP/SSE")
-    } else if !crate::responses_websocket::relay_supports_native_responses_websocket(&relay) {
+    } else if !crate::responses_websocket::relay_prefers_native_responses_websocket(&relay) {
         Some("当前供应商没有可用的原生 Responses WebSocket 能力")
     } else {
         None
@@ -181,6 +179,7 @@ async fn bridge_responses_websockets(
     let (mut upstream_sink, mut upstream_stream) = upstream.split();
     let (to_upstream_tx, mut to_upstream_rx) = mpsc::channel::<Message>(64);
     let (to_downstream_tx, mut to_downstream_rx) = mpsc::channel::<Message>(64);
+    let continuation = WebSocketContinuationCoordinator::default();
 
     let upstream_writer = async move {
         while let Some(message) = to_upstream_rx.recv().await {
@@ -229,7 +228,9 @@ async fn bridge_responses_websockets(
     let relay = relay.clone();
     let downstream_close_tx = to_downstream_tx.clone();
     let upstream_close_tx = to_upstream_tx.clone();
+    let continuation_upstream_tx = to_upstream_tx.clone();
     let downstream_request_logger = request_logger.clone();
+    let downstream_continuation = continuation.clone();
     let downstream_reader = async move {
         let mut received_close = false;
         while let Some(message) = downstream_stream.next().await {
@@ -247,7 +248,16 @@ async fn bridge_responses_websockets(
                 }
             };
             if let (Some(payload), Message::Text(text)) = (payload.as_ref(), &message) {
-                downstream_request_logger.record_request(payload, text.as_str());
+                let log_id = downstream_request_logger.record_request(payload, text.as_str());
+                if let Err(error) = downstream_continuation.register_request(payload, log_id) {
+                    let close = Message::Close(Some(CloseFrame {
+                        code: CloseCode::Policy,
+                        reason: error.to_string().into(),
+                    }));
+                    let _ = downstream_close_tx.send(close.clone()).await;
+                    let _ = upstream_close_tx.send(close).await;
+                    return Ok::<(), anyhow::Error>(());
+                }
             }
             let is_close = matches!(message, Message::Close(_));
             if to_upstream_tx.send(message).await.is_err() {
@@ -268,18 +278,44 @@ async fn bridge_responses_websockets(
     };
 
     let upstream_request_logger = request_logger.clone();
+    let upstream_continuation = continuation.clone();
     let upstream_reader = async move {
         let mut received_close = false;
         while let Some(message) = upstream_stream.next().await {
             let message = message.context("读取上游 Responses WebSocket 消息失败")?;
-            upstream_request_logger.record_response(&message);
             let is_close = matches!(message, Message::Close(_));
-            if to_downstream_tx.send(message).await.is_err() {
-                if is_close {
-                    return Ok::<(), anyhow::Error>(());
+            match upstream_continuation.handle_upstream_message(message)? {
+                WebSocketContinuationAction::Forward(message) => {
+                    upstream_request_logger.record_response(&message);
+                    if to_downstream_tx.send(message).await.is_err() {
+                        if is_close {
+                            return Ok::<(), anyhow::Error>(());
+                        }
+                        anyhow::bail!("Responses WebSocket 本地发送队列已关闭");
+                    }
                 }
-                anyhow::bail!("Responses WebSocket 本地发送队列已关闭");
-            }
+                WebSocketContinuationAction::Buffered => {}
+                WebSocketContinuationAction::Continue { request, metadata } => {
+                    upstream_request_logger.record_continue_metadata(&metadata);
+                    if continuation_upstream_tx.send(request).await.is_err() {
+                        anyhow::bail!("Responses WebSocket 续接请求发送队列已关闭");
+                    }
+                }
+                WebSocketContinuationAction::Flush { messages, metadata } => {
+                    upstream_request_logger.record_continue_metadata(&metadata);
+                    for message in messages {
+                        let message_is_close = matches!(message, Message::Close(_));
+                        upstream_request_logger
+                            .record_response_for(&message, metadata.log_id.as_deref());
+                        if to_downstream_tx.send(message).await.is_err() {
+                            if message_is_close {
+                                return Ok::<(), anyhow::Error>(());
+                            }
+                            anyhow::bail!("Responses WebSocket 本地发送队列已关闭");
+                        }
+                    }
+                }
+            };
             if is_close {
                 received_close = true;
                 break;
@@ -303,6 +339,258 @@ async fn bridge_responses_websockets(
     }
     result?;
     Ok(())
+}
+
+#[derive(Clone, Default)]
+struct WebSocketContinuationCoordinator {
+    state: Arc<Mutex<WebSocketContinuationState>>,
+}
+
+#[derive(Default)]
+struct WebSocketContinuationState {
+    active: Option<ActiveWebSocketContinuation>,
+}
+
+struct ActiveWebSocketContinuation {
+    original_request: Value,
+    log_id: Option<String>,
+    max_rounds: u32,
+    round: u32,
+    completed_rounds: u32,
+    accumulated_reasoning_tokens: Option<u64>,
+    buffered_messages: Vec<Message>,
+    fallback_messages: Vec<Message>,
+    fallback_response_body: Option<String>,
+    continue_requests: Vec<Value>,
+    before_response_body: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct WebSocketContinueMetadata {
+    log_id: Option<String>,
+    triggered: bool,
+    rounds: u32,
+    reasoning_tokens: Option<u64>,
+    request_body: Option<String>,
+    before_response_body: Option<String>,
+    after_response_body: Option<String>,
+}
+
+enum WebSocketContinuationAction {
+    Forward(Message),
+    Buffered,
+    Continue {
+        request: Message,
+        metadata: WebSocketContinueMetadata,
+    },
+    Flush {
+        messages: Vec<Message>,
+        metadata: WebSocketContinueMetadata,
+    },
+}
+
+impl WebSocketContinuationCoordinator {
+    fn register_request(&self, payload: &Value, log_id: Option<String>) -> anyhow::Result<()> {
+        let settings = SettingsStore::default()
+            .load()
+            .context("读取自动推理续接设置失败")?;
+        let model = payload
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Responses WebSocket 续接状态锁已损坏"))?;
+        if state.active.is_some() {
+            anyhow::bail!("自动推理续接期间不支持并发 response.create");
+        }
+        if !settings.gpt_reasoning_continuation
+            || !crate::continue_thinking::is_supported_model(model)
+        {
+            return Ok(());
+        }
+
+        state.active = Some(ActiveWebSocketContinuation {
+            original_request: payload.clone(),
+            log_id,
+            max_rounds: u32::from(settings.gpt_reasoning_continuation_max_rounds),
+            round: 0,
+            completed_rounds: 0,
+            accumulated_reasoning_tokens: None,
+            buffered_messages: Vec::new(),
+            fallback_messages: Vec::new(),
+            fallback_response_body: None,
+            continue_requests: Vec::new(),
+            before_response_body: None,
+        });
+        Ok(())
+    }
+
+    fn handle_upstream_message(
+        &self,
+        message: Message,
+    ) -> anyhow::Result<WebSocketContinuationAction> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Responses WebSocket 续接状态锁已损坏"))?;
+        let Some(active) = state.active.as_mut() else {
+            return Ok(WebSocketContinuationAction::Forward(message));
+        };
+
+        if matches!(
+            message,
+            Message::Ping(_) | Message::Pong(_) | Message::Binary(_)
+        ) {
+            return Ok(WebSocketContinuationAction::Forward(message));
+        }
+        if matches!(message, Message::Close(_)) {
+            let mut active = state.active.take().expect("active continuation must exist");
+            let mut messages = if active.round > 0 && !active.fallback_messages.is_empty() {
+                std::mem::take(&mut active.fallback_messages)
+            } else {
+                std::mem::take(&mut active.buffered_messages)
+            };
+            messages.push(message);
+            let metadata =
+                websocket_continue_metadata(&active, active.fallback_response_body.clone());
+            return Ok(WebSocketContinuationAction::Flush { messages, metadata });
+        }
+
+        let Message::Text(text) = &message else {
+            return Ok(WebSocketContinuationAction::Forward(message));
+        };
+        let payload = serde_json::from_str::<Value>(text.as_str()).ok();
+        let event_type = payload
+            .as_ref()
+            .and_then(|payload| payload.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        active.buffered_messages.push(message);
+        if !is_terminal_websocket_response_event(event_type) {
+            return Ok(WebSocketContinuationAction::Buffered);
+        }
+
+        let response_object = payload
+            .as_ref()
+            .and_then(|payload| payload.get("response"))
+            .cloned();
+        let reasoning_tokens = response_object
+            .as_ref()
+            .and_then(crate::continue_thinking::extract_reasoning_tokens);
+        add_websocket_reasoning_tokens(&mut active.accumulated_reasoning_tokens, reasoning_tokens);
+        active.completed_rounds = active.round;
+        if active.round > 0 {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "continue_thinking.round_completed",
+                serde_json::json!({
+                    "transport": "ws",
+                    "round": active.round,
+                    "responseId": response_object
+                        .as_ref()
+                        .and_then(|response| response.get("id"))
+                        .and_then(Value::as_str)
+                }),
+            );
+        }
+
+        let should_continue = matches!(event_type, "response.completed" | "response.incomplete")
+            && response_object
+                .as_ref()
+                .is_some_and(crate::continue_thinking::should_continue_response)
+            && active.round < active.max_rounds;
+        if should_continue {
+            active.round += 1;
+            if active.before_response_body.is_none() {
+                active.before_response_body = response_object
+                    .as_ref()
+                    .and_then(|response| serde_json::to_string_pretty(response).ok());
+            }
+            let response_object = response_object
+                .as_ref()
+                .expect("continuation requires a terminal response object");
+            let continue_request = crate::continue_thinking::build_continue_request(
+                &active.original_request,
+                &crate::continue_thinking::extract_output_items(response_object),
+                active.round,
+            );
+            let continue_request =
+                crate::continue_thinking::prepare_websocket_continue_request(continue_request);
+            active.continue_requests.push(serde_json::json!({
+                "round": active.round,
+                "request": continue_request.clone()
+            }));
+            let request_text = serde_json::to_string(&continue_request)
+                .context("序列化 Responses WebSocket 续接请求失败")?;
+            active.fallback_messages = std::mem::take(&mut active.buffered_messages);
+            active.fallback_response_body = serde_json::to_string_pretty(response_object).ok();
+            let metadata = websocket_continue_metadata(active, None);
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "continue_thinking.round_start",
+                serde_json::json!({
+                    "transport": "ws",
+                    "model": active
+                        .original_request
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    "round": active.round,
+                    "reasoningTokens": reasoning_tokens,
+                    "gridMultiple": reasoning_tokens
+                        .and_then(crate::continue_thinking::grid_multiple)
+                }),
+            );
+            return Ok(WebSocketContinuationAction::Continue {
+                request: Message::Text(request_text.into()),
+                metadata,
+            });
+        }
+
+        let active = state.active.take().expect("active continuation must exist");
+        let after_response_body = if active.round > 0 {
+            response_object
+                .as_ref()
+                .and_then(|response| serde_json::to_string_pretty(response).ok())
+        } else {
+            None
+        };
+        Ok(WebSocketContinuationAction::Flush {
+            messages: active.buffered_messages.clone(),
+            metadata: websocket_continue_metadata(&active, after_response_body),
+        })
+    }
+}
+
+fn add_websocket_reasoning_tokens(total: &mut Option<u64>, reasoning_tokens: Option<u64>) {
+    if let Some(reasoning_tokens) = reasoning_tokens {
+        *total = Some(total.unwrap_or(0).saturating_add(reasoning_tokens));
+    }
+}
+
+fn websocket_continue_metadata(
+    active: &ActiveWebSocketContinuation,
+    after_response_body: Option<String>,
+) -> WebSocketContinueMetadata {
+    WebSocketContinueMetadata {
+        log_id: active.log_id.clone(),
+        triggered: active.round > 0,
+        rounds: active.completed_rounds,
+        reasoning_tokens: active.accumulated_reasoning_tokens,
+        request_body: websocket_continue_request_body(&active.continue_requests),
+        before_response_body: active.before_response_body.clone(),
+        after_response_body,
+    }
+}
+
+fn websocket_continue_request_body(requests: &[Value]) -> Option<String> {
+    match requests {
+        [] => None,
+        [single] => single
+            .get("request")
+            .and_then(|request| serde_json::to_string_pretty(request).ok()),
+        _ => serde_json::to_string_pretty(&serde_json::json!({ "rounds": requests })).ok(),
+    }
 }
 
 #[derive(Clone)]
@@ -353,12 +641,12 @@ impl WebSocketRequestLogger {
         }
     }
 
-    fn record_request(&self, payload: &Value, request_body: &str) {
+    fn record_request(&self, payload: &Value, request_body: &str) -> Option<String> {
         let metadata = crate::proxy_log::extract_request_metadata(Some(payload));
         let id = format!("local-{}", uuid::Uuid::new_v4());
         let timestamp_ms = crate::proxy_log::current_timestamp_ms();
         let Ok(mut state) = self.state.lock() else {
-            return;
+            return None;
         };
         let record = crate::proxy_log::ProxyRequestRecord {
             id: id.clone(),
@@ -405,12 +693,17 @@ impl WebSocketRequestLogger {
             },
         );
         state.active_order.push_back(id.clone());
-        state.unassigned_order.push_back(id);
+        state.unassigned_order.push_back(id.clone());
         drop(state);
         append_websocket_proxy_log_record(&record);
+        Some(id)
     }
 
     fn record_response(&self, message: &Message) {
+        self.record_response_for(message, None);
+    }
+
+    fn record_response_for(&self, message: &Message, preferred_log_id: Option<&str>) {
         let Message::Text(text) = message else {
             return;
         };
@@ -430,9 +723,18 @@ impl WebSocketRequestLogger {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        let Some(log_id) = resolve_websocket_log_id(&mut state, response_id.as_deref()) else {
+        let log_id = preferred_log_id
+            .filter(|log_id| state.requests.contains_key(*log_id))
+            .map(ToString::to_string)
+            .or_else(|| resolve_websocket_log_id(&mut state, response_id.as_deref()));
+        let Some(log_id) = log_id else {
             return;
         };
+        if let Some(response_id) = response_id.as_deref() {
+            state
+                .response_ids
+                .insert(response_id.to_string(), log_id.clone());
+        }
         let Some(tracked) = state.requests.get_mut(&log_id) else {
             return;
         };
@@ -458,10 +760,13 @@ impl WebSocketRequestLogger {
             tracked.record.response_truncated = tracked.response_truncated;
             tracked.record.response_body =
                 String::from_utf8_lossy(&tracked.response_capture).into_owned();
-            tracked.record.reasoning_tokens =
+            let final_reasoning_tokens =
                 crate::proxy_log::extract_reasoning_tokens_from_response_body(
                     &tracked.response_capture,
                 );
+            if tracked.record.reasoning_tokens.is_none() {
+                tracked.record.reasoning_tokens = final_reasoning_tokens;
+            }
             tracked.record.error = websocket_response_error(&payload, event_type);
             update = Some(tracked.record.clone());
         } else if first_response_event {
@@ -480,6 +785,28 @@ impl WebSocketRequestLogger {
         }
     }
 
+    fn record_continue_metadata(&self, metadata: &WebSocketContinueMetadata) {
+        let Some(log_id) = metadata.log_id.as_deref() else {
+            return;
+        };
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        let Some(tracked) = state.requests.get_mut(log_id) else {
+            return;
+        };
+        tracked.record.reasoning_tokens = metadata.reasoning_tokens;
+        tracked.record.continue_thinking_triggered = metadata.triggered;
+        tracked.record.continue_thinking_rounds = metadata.rounds;
+        tracked.record.continue_thinking_request_body = metadata.request_body.clone();
+        tracked.record.continue_thinking_before_response_body =
+            metadata.before_response_body.clone();
+        tracked.record.continue_thinking_after_response_body = metadata.after_response_body.clone();
+        let record = tracked.record.clone();
+        drop(state);
+        append_websocket_proxy_log_record(&record);
+    }
+
     fn finish_pending(&self, error: &str, status_code: u16) {
         let Ok(mut state) = self.state.lock() else {
             return;
@@ -494,10 +821,13 @@ impl WebSocketRequestLogger {
             tracked.record.response_truncated = tracked.response_truncated;
             tracked.record.response_body =
                 String::from_utf8_lossy(&tracked.response_capture).into_owned();
-            tracked.record.reasoning_tokens =
+            let captured_reasoning_tokens =
                 crate::proxy_log::extract_reasoning_tokens_from_response_body(
                     &tracked.response_capture,
                 );
+            if tracked.record.reasoning_tokens.is_none() {
+                tracked.record.reasoning_tokens = captured_reasoning_tokens;
+            }
             tracked.record.error = Some(error.to_string());
             records.push(tracked.record);
         }
@@ -688,16 +1018,13 @@ fn ensure_websocket_relay_still_current(
     let settings = SettingsStore::default()
         .load()
         .context("读取当前供应商设置失败")?;
-    if !settings.relay_profiles_enabled
-        || settings.active_aggregate_relay_profile().is_some()
-        || settings.gpt_reasoning_continuation
-    {
+    if !settings.relay_profiles_enabled || settings.active_aggregate_relay_profile().is_some() {
         anyhow::bail!("当前设置已不再允许 Responses WebSocket");
     }
     let current = settings.active_relay_profile();
     if current.id != connected_relay.id
         || !current.local_proxy_enabled()
-        || !crate::responses_websocket::relay_supports_native_responses_websocket(&current)
+        || !crate::responses_websocket::relay_prefers_native_responses_websocket(&current)
         || crate::responses_websocket::relay_responses_base_url(&current).trim()
             != crate::responses_websocket::relay_responses_base_url(connected_relay).trim()
         || current.api_key != connected_relay.api_key
@@ -794,7 +1121,14 @@ fn log_websocket_event(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_responses_websocket_proxy_path, is_responses_websocket_upgrade};
+    use super::{
+        ActiveWebSocketContinuation, WebSocketContinuationAction, WebSocketContinuationCoordinator,
+        WebSocketContinuationState, is_responses_websocket_proxy_path,
+        is_responses_websocket_upgrade,
+    };
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+    use tokio_tungstenite::tungstenite::Message;
 
     #[test]
     fn only_responses_upgrade_paths_are_accepted() {
@@ -809,5 +1143,74 @@ mod tests {
         request.extend_from_slice(&[0x81, 0x00]);
 
         assert!(is_responses_websocket_upgrade(&request));
+    }
+
+    #[test]
+    fn continuation_close_falls_back_to_last_completed_round() {
+        let first_terminal = Message::Text(
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_short",
+                    "output": [{
+                        "type": "reasoning",
+                        "encrypted_content": "encrypted-short"
+                    }],
+                    "usage": {
+                        "output_tokens_details": {
+                            "reasoning_tokens": 516
+                        }
+                    }
+                }
+            })
+            .to_string()
+            .into(),
+        );
+        let coordinator = WebSocketContinuationCoordinator {
+            state: Arc::new(Mutex::new(WebSocketContinuationState {
+                active: Some(ActiveWebSocketContinuation {
+                    original_request: json!({
+                        "type": "response.create",
+                        "model": "gpt-test",
+                        "input": []
+                    }),
+                    log_id: Some("log-1".to_string()),
+                    max_rounds: 3,
+                    round: 0,
+                    completed_rounds: 0,
+                    accumulated_reasoning_tokens: None,
+                    buffered_messages: Vec::new(),
+                    fallback_messages: Vec::new(),
+                    fallback_response_body: None,
+                    continue_requests: Vec::new(),
+                    before_response_body: None,
+                }),
+            })),
+        };
+
+        let action = coordinator
+            .handle_upstream_message(first_terminal.clone())
+            .unwrap();
+        assert!(matches!(
+            action,
+            WebSocketContinuationAction::Continue { .. }
+        ));
+
+        let action = coordinator
+            .handle_upstream_message(Message::Close(None))
+            .unwrap();
+        let WebSocketContinuationAction::Flush { messages, metadata } = action else {
+            panic!("expected fallback flush");
+        };
+        assert_eq!(messages.first(), Some(&first_terminal));
+        assert!(matches!(messages.last(), Some(Message::Close(_))));
+        assert_eq!(metadata.reasoning_tokens, Some(516));
+        assert_eq!(metadata.rounds, 0);
+        assert!(
+            metadata
+                .after_response_body
+                .as_deref()
+                .is_some_and(|body| body.contains("resp_short"))
+        );
     }
 }

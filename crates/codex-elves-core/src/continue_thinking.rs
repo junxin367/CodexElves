@@ -195,6 +195,27 @@ pub fn response_contains_tool_call(response_object: &Value) -> bool {
         })
 }
 
+/// 是否应对当前终止响应发起下一轮续思考。
+///
+/// HTTP/SSE 与 WebSocket 路径共用同一判定：reasoning token 命中低网格，
+/// 且当前响应不是等待客户端处理的工具调用。
+pub fn should_continue_response(response_object: &Value) -> bool {
+    should_continue_thinking(extract_reasoning_tokens(response_object))
+        && !response_contains_tool_call(response_object)
+}
+
+/// 把 HTTP 风格的续写请求整理为 Responses WebSocket 的 `response.create` 事件。
+///
+/// WebSocket 模式隐式流式返回，不能携带 `stream`；`background` 同样不受支持。
+pub fn prepare_websocket_continue_request(mut request: Value) -> Value {
+    request["type"] = Value::String("response.create".to_string());
+    if let Some(object) = request.as_object_mut() {
+        object.remove("stream");
+        object.remove("background");
+    }
+    request
+}
+
 /// 从一段完整的 Responses SSE 文本中提取终止事件（response.completed /
 /// response.incomplete / response.failed）里的 `response` 对象。取最后一个
 /// 匹配的事件（正常情况下每轮响应只有一个终止事件）。
@@ -254,6 +275,40 @@ mod tests {
         assert!(!should_continue_thinking(Some(2588))); // n=5
         assert!(!should_continue_thinking(Some(1200))); // 不在网格上
         assert!(!should_continue_thinking(None));
+    }
+
+    #[test]
+    fn should_continue_response_skips_tool_calls() {
+        let response = json!({
+            "usage": {"output_tokens_details": {"reasoning_tokens": 516}},
+            "output": []
+        });
+        assert!(should_continue_response(&response));
+
+        let tool_response = json!({
+            "usage": {"output_tokens_details": {"reasoning_tokens": 516}},
+            "output": [{
+                "type": "function_call",
+                "name": "lookup",
+                "call_id": "call_1",
+                "arguments": "{}"
+            }]
+        });
+        assert!(!should_continue_response(&tool_response));
+    }
+
+    #[test]
+    fn websocket_continue_request_removes_unsupported_fields() {
+        let request = prepare_websocket_continue_request(json!({
+            "model": "gpt-test",
+            "input": [],
+            "stream": true,
+            "background": false
+        }));
+
+        assert_eq!(request["type"], "response.create");
+        assert!(request.get("stream").is_none());
+        assert!(request.get("background").is_none());
     }
 
     #[test]

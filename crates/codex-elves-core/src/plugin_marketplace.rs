@@ -857,7 +857,17 @@ fn merge_marketplace_configs_into_text(
     marketplace_names: &[&str],
     marketplace_root: &Path,
 ) -> anyhow::Result<String> {
-    let mut doc = parse_toml_document(config_text)?;
+    let mut doc = match parse_toml_document(config_text) {
+        Ok(doc) => doc,
+        Err(error) => {
+            let normalized = crate::relay_config::normalize_config_text(config_text);
+            if normalized == config_text {
+                return Err(error);
+            }
+            parse_toml_document(&normalized)
+                .with_context(|| "config.toml duplicate entries could not be normalized")?
+        }
+    };
     let marketplaces = table_mut_or_insert(&mut doc, "marketplaces")?;
     for marketplace_name in marketplace_names {
         if marketplaces
@@ -1571,6 +1581,42 @@ enabled = true
         assert!(status.marketplace_root.is_some());
         assert!(status.config_registered);
         assert!(!status.needs_repair());
+    }
+
+    #[test]
+    fn marketplace_config_repairs_duplicate_toml_entries_before_registering() {
+        let config = r#"model = "gpt-5"
+model = "gpt-5.6"
+
+[features]
+goals = true
+
+[features]
+js_repl = true
+"#;
+        let root = Path::new(r"C:\Users\tester\.codex\.tmp\plugins");
+        assert!(parse_toml_document(config).is_err());
+
+        let updated =
+            merge_marketplace_configs_into_text(config, &[OPENAI_CURATED_MARKETPLACE], root)
+                .unwrap();
+
+        let parsed = updated.parse::<DocumentMut>().unwrap();
+        assert_eq!(parsed.get("model").and_then(Item::as_str), Some("gpt-5"));
+        assert_eq!(updated.matches("model =").count(), 1);
+        assert_eq!(updated.matches("[features]").count(), 1);
+        assert_eq!(
+            parsed["marketplaces"][OPENAI_CURATED_MARKETPLACE]["source_type"].as_str(),
+            Some("local")
+        );
+        assert_eq!(
+            normalize_windows_extended_path(
+                parsed["marketplaces"][OPENAI_CURATED_MARKETPLACE]["source"]
+                    .as_str()
+                    .unwrap()
+            ),
+            root.to_string_lossy()
+        );
     }
 
     #[test]

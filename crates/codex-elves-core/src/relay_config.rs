@@ -7,7 +7,9 @@ use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use toml_edit::{DocumentMut, Item, Table, TableLike};
 
-use crate::responses_websocket::relay_supports_native_responses_websocket;
+use crate::responses_websocket::{
+    relay_prefers_native_responses_websocket, relay_supports_native_responses_websocket,
+};
 use crate::settings::{RelayContextSelection, RelayProfile, RelayProtocol};
 
 const RELAY_PROVIDER: &str = "custom";
@@ -464,7 +466,7 @@ fn apply_relay_profile_owned_fields_to_config(
         &updated,
         &provider_table,
         "supports_websockets",
-        if relay_supports_native_responses_websocket(profile) {
+        if relay_prefers_native_responses_websocket(profile) {
             "true"
         } else {
             "false"
@@ -552,9 +554,135 @@ pub fn sync_applied_relay_profile_model_catalog_to_home(
     Ok(true)
 }
 
+/// 为 CodexElves 自己管理的既有模型目录补齐缺失的 `prefer_websockets`。
+///
+/// 只给当前供应商中原生 Responses 模型补 `true`，不覆盖目录里已有的显式值，
+/// 也不修改用户自定义的外部模型目录。
+pub fn backfill_applied_model_catalog_websocket_preferences(
+    home: &Path,
+    profile: &RelayProfile,
+) -> anyhow::Result<bool> {
+    if !relay_supports_native_responses_websocket(profile) {
+        return Ok(false);
+    }
+    let live_config = read_optional_text(&home.join("config.toml"))?;
+    let live_provider = root_key_string(&live_config, "model_provider").unwrap_or_default();
+    let profile_provider = relay_profile_provider_id(profile)?;
+    if live_provider.trim() != profile_provider.trim()
+        || root_key_string(&live_config, "model_catalog_json").as_deref()
+            != Some(GENERATED_MODEL_CATALOG_FILENAME)
+    {
+        return Ok(false);
+    }
+
+    let path = home.join(GENERATED_MODEL_CATALOG_FILENAME);
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let mut catalog: Value =
+        serde_json::from_str(&contents).context("读取 CodexElves 模型目录失败")?;
+    let Some(models) = catalog.get_mut("models").and_then(Value::as_array_mut) else {
+        return Ok(false);
+    };
+
+    let mut changed = false;
+    for model in models {
+        let Some(entry) = model.as_object_mut() else {
+            continue;
+        };
+        if entry.contains_key("prefer_websockets") {
+            continue;
+        }
+        let slug = entry
+            .get("slug")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if slug.is_empty() || profile.protocol_for_model(slug) != RelayProtocol::Responses {
+            continue;
+        }
+        entry.insert("prefer_websockets".to_string(), json!(true));
+        changed = true;
+    }
+    if !changed {
+        return Ok(false);
+    }
+
+    let bytes = serde_json::to_vec_pretty(&catalog)?;
+    crate::settings::atomic_write(&path, &bytes).context("补齐模型目录 WebSocket 偏好失败")?;
+    Ok(true)
+}
+
+fn sync_applied_model_catalog_websocket_preferences(
+    home: &Path,
+    profile: &RelayProfile,
+    enabled: bool,
+) -> anyhow::Result<bool> {
+    let live_config = read_optional_text(&home.join("config.toml"))?;
+    let live_provider = root_key_string(&live_config, "model_provider").unwrap_or_default();
+    let profile_provider = relay_profile_provider_id(profile)?;
+    if live_provider.trim() != profile_provider.trim()
+        || root_key_string(&live_config, "model_catalog_json").as_deref()
+            != Some(GENERATED_MODEL_CATALOG_FILENAME)
+    {
+        return Ok(false);
+    }
+
+    let path = home.join(GENERATED_MODEL_CATALOG_FILENAME);
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let mut catalog: Value =
+        serde_json::from_str(&contents).context("读取 CodexElves 模型目录失败")?;
+    let Some(models) = catalog.get_mut("models").and_then(Value::as_array_mut) else {
+        return Ok(false);
+    };
+
+    let mut changed = false;
+    for model in models {
+        let Some(entry) = model.as_object_mut() else {
+            continue;
+        };
+        let slug = entry
+            .get("slug")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if slug.is_empty() || profile.protocol_for_model(slug) != RelayProtocol::Responses {
+            continue;
+        }
+        if entry.get("prefer_websockets").and_then(Value::as_bool) == Some(enabled) {
+            continue;
+        }
+        entry.insert("prefer_websockets".to_string(), json!(enabled));
+        changed = true;
+    }
+    if !changed {
+        return Ok(false);
+    }
+
+    let bytes = serde_json::to_vec_pretty(&catalog)?;
+    crate::settings::atomic_write(&path, &bytes).context("同步模型目录 WebSocket 偏好失败")?;
+    Ok(true)
+}
+
 pub fn sync_applied_relay_profile_websocket_to_home(
     home: &Path,
     profile: &RelayProfile,
+) -> anyhow::Result<bool> {
+    sync_applied_relay_profile_websocket_to_home_with_enabled(
+        home,
+        profile,
+        relay_prefers_native_responses_websocket(profile),
+    )
+}
+
+pub fn sync_applied_relay_profile_websocket_to_home_with_enabled(
+    home: &Path,
+    profile: &RelayProfile,
+    enabled: bool,
 ) -> anyhow::Result<bool> {
     let live_config = read_optional_text(&home.join("config.toml"))?;
     let live_provider = root_key_string(&live_config, "model_provider").unwrap_or_default();
@@ -568,15 +696,12 @@ pub fn sync_applied_relay_profile_websocket_to_home(
         &live_config,
         &provider_table,
         "supports_websockets",
-        if relay_supports_native_responses_websocket(profile) {
-            "true"
-        } else {
-            "false"
-        },
+        if enabled { "true" } else { "false" },
     );
     if updated != live_config {
         write_codex_live_atomic(home, Some(&updated), None, false)?;
     }
+    sync_applied_model_catalog_websocket_preferences(home, profile, enabled)?;
     Ok(true)
 }
 
@@ -2316,6 +2441,8 @@ pub(crate) fn generated_model_catalog_json(
         let (model_base_instructions, model_messages) =
             generated_catalog_prompt_fields(profile, &model, packaged_model.as_ref());
         let fast_capability = fast_service_tier_capability(&model);
+        let prefer_websockets = row.protocol == RelayProtocol::Responses
+            && crate::responses_websocket::relay_prefers_native_responses_websocket(profile);
         let protocol = upstream_response_protocol_for_relay(row.protocol);
         let supported_reasoning_levels =
             crate::protocol_proxy::supported_reasoning_efforts_for_model(&model, protocol);
@@ -2332,6 +2459,7 @@ pub(crate) fn generated_model_catalog_json(
         entry.insert("priority".to_string(), json!(1000 + index as u64));
         entry.insert("visibility".to_string(), json!("list"));
         entry.insert("supported_in_api".to_string(), json!(true));
+        entry.insert("prefer_websockets".to_string(), json!(prefer_websockets));
         entry.insert(
             "base_instructions".to_string(),
             json!(model_base_instructions),
@@ -3091,7 +3219,7 @@ fn complete_relay_profile_config(profile: &RelayProfile) -> anyhow::Result<Strin
         provider["requires_openai_auth"] = toml_edit::value(true);
     }
     provider["supports_websockets"] =
-        toml_edit::value(relay_supports_native_responses_websocket(profile));
+        toml_edit::value(relay_prefers_native_responses_websocket(profile));
     let provider_base_url = codex_base_url_for_proxy(
         base_url.trim(),
         profile.local_proxy_enabled(),
@@ -3836,6 +3964,49 @@ mod tests {
                 .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("fast"))),
             "GPT-5.6 生成目录应包含 fast speed tier"
         );
+    }
+
+    #[test]
+    fn generated_model_catalog_prefers_websockets_only_for_responses_models() {
+        let profile = RelayProfile {
+            relay_mode: crate::settings::RelayMode::PureApi,
+            protocol: crate::settings::RelayProtocol::ChatCompletions,
+            base_url: "https://relay.example.test/v1".to_string(),
+            model_mappings: vec![
+                crate::settings::RelayModelMapping {
+                    request_model: "gpt-5.6-sol".to_string(),
+                    context_window: "372000".to_string(),
+                    protocol: RelayProtocol::Responses,
+                },
+                crate::settings::RelayModelMapping {
+                    request_model: "claude-sonnet-5".to_string(),
+                    context_window: "1000000".to_string(),
+                    protocol: RelayProtocol::Anthropic,
+                },
+            ],
+            responses_websocket: crate::settings::ResponsesWebsocketCapability {
+                state: crate::settings::ResponsesWebsocketCapabilityState::Supported,
+                endpoint: "wss://relay.example.test/v1/responses".to_string(),
+                checked_at_ms: Some(1),
+                message: "握手成功".to_string(),
+            },
+            ..RelayProfile::default()
+        };
+
+        let rows = relay_profile_catalog_rows(&profile);
+        let catalog = generated_model_catalog_json(&profile, "", rows).unwrap();
+        let models = catalog["models"].as_array().unwrap();
+        let responses = models
+            .iter()
+            .find(|model| model["slug"] == "gpt-5.6-sol")
+            .unwrap();
+        let anthropic = models
+            .iter()
+            .find(|model| model["slug"] == "claude-sonnet-5")
+            .unwrap();
+
+        assert_eq!(responses["prefer_websockets"], true);
+        assert_eq!(anthropic["prefer_websockets"], false);
     }
 
     #[test]

@@ -247,6 +247,7 @@ type RelayProfile = {
   chatCompletionsModelList: string;
   anthropicModelList: string;
   responsesWebsocket: ResponsesWebsocketCapability;
+  responsesWebsocketEnabled: boolean;
   userAgent: string;
   systemPromptOverride: string;
   aggregate?: RelayAggregateConfig | null;
@@ -419,6 +420,11 @@ type RelayProfileTestResult = CommandResult<{
 type RelayProfileModelsResult = CommandResult<{
   models: string[];
   endpoint: string;
+}>;
+
+type ResponsesWebsocketProbeResult = CommandResult<{
+  profileId: string;
+  capability: ResponsesWebsocketCapability;
 }>;
 
 type CcsProviderImport = {
@@ -781,7 +787,7 @@ const defaultSettings: BackendSettings = {
   codexAppPluginMarketplaceUnlock: true,
   codexAppPluginAutoExpand: true,
   codexAppSessionDelete: true,
-  codexAppSessionPrewarmEnabled: true,
+  codexAppSessionPrewarmEnabled: false,
   codexAppSessionPrewarmFullCount: 4,
   codexAppSessionPrewarmContentCount: 6,
   codexAppMarkdownExport: false,
@@ -825,6 +831,7 @@ const defaultSettings: BackendSettings = {
       chatCompletionsModelList: "",
       anthropicModelList: "",
       responsesWebsocket: emptyResponsesWebsocketCapability(),
+      responsesWebsocketEnabled: true,
       userAgent: "",
       systemPromptOverride: "",
     },
@@ -1685,6 +1692,21 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         user_scripts: { enabled: true, scripts: [] },
         relay: browserPreviewRelayPayload(),
       }, "浏览器预览已切换供应商。") as T);
+    }
+    case "probe_relay_profile_responses_websocket": {
+      const profile = args?.profile as RelayProfile | undefined;
+      const baseUrl = profile?.baseUrl || "https://relay.example.test/v1";
+      return Promise.resolve(
+        browserPreviewResult({
+          profileId: profile?.id || "",
+          capability: {
+            state: "supported",
+            endpoint: `${baseUrl.replace(/^http/, "ws").replace(/\/+$/, "")}/responses`,
+            checkedAtMs: Date.now(),
+            message: "Responses WebSocket 握手成功。",
+          },
+        }, "Responses WebSocket 握手成功。") as T,
+      );
     }
     case "write_diagnostic_event":
       return Promise.resolve(browserPreviewResult({}) as T);
@@ -2642,6 +2664,14 @@ export function App() {
     return result && isSuccessStatus(result.status) ? result.models : null;
   };
 
+  const probeRelayProfileResponsesWebsocket = async (profile: RelayProfile) => {
+    const result = await run(() =>
+      call<ResponsesWebsocketProbeResult>("probe_relay_profile_responses_websocket", { profile }),
+    );
+    if (result) showNotice("Responses WebSocket 探测", result.message, result.status);
+    return result?.capability ?? null;
+  };
+
   const switchOfficialMode = async () => {
     const switched = await clearRelayInjection(true);
     if (!switched) return;
@@ -3081,6 +3111,7 @@ export function App() {
       deleteContextEntry,
       testRelayProfile,
       fetchRelayProfileModels,
+      probeRelayProfileResponsesWebsocket,
       switchRelayProfile,
       relaySwitching,
       switchOfficialMode,
@@ -3388,6 +3419,7 @@ type Actions = {
   deleteContextEntry: (settings: BackendSettings, kind: ContextKind, id: string) => Promise<BackendSettings | null>;
   testRelayProfile: (profile: RelayProfile, model?: string) => Promise<RelayProfileTestResult | null>;
   fetchRelayProfileModels: (profile: RelayProfile) => Promise<string[] | null>;
+  probeRelayProfileResponsesWebsocket: (profile: RelayProfile) => Promise<ResponsesWebsocketCapability | null>;
   switchRelayProfile: (settings: BackendSettings, previousActiveRelayId?: string) => Promise<void>;
   relaySwitching: boolean;
   switchOfficialMode: () => Promise<void>;
@@ -4429,28 +4461,30 @@ function EnhanceScreen({
       <Panel>
         <CardHead title="页面功能增强" detail="会话删除、导出、项目移动和用户脚本等界面能力" />
         <CardContent>
-          <label className="switch-row">
-            <input
-              checked={form.enhancementsEnabled}
-              onChange={(event) => onFormChange({ ...form, enhancementsEnabled: event.currentTarget.checked })}
-              type="checkbox"
-            />
-            <span>
-              <strong>启用 CodexElves 页面增强</strong>
-              <small>关闭后会停用删除、导出、项目移动、Fast 按钮、插件相关和菜单位置增强。</small>
-            </span>
-          </label>
-          <label className="switch-row">
-            <input
-              checked={form.computerUseGuardEnabled}
-              onChange={(event) => onFormChange({ ...form, computerUseGuardEnabled: event.currentTarget.checked })}
-              type="checkbox"
-            />
-            <span>
-              <strong>启用 Windows Computer Use Guard</strong>
-              <small>默认关闭；开启后启动 ChatGPT/Codex 时会自动保留官方 Computer Use 插件所需的 config.toml、bundled 插件和 notify 配置。</small>
-            </span>
-          </label>
+          <div className="enhancement-master-grid">
+            <label className="switch-row">
+              <input
+                checked={form.enhancementsEnabled}
+                onChange={(event) => onFormChange({ ...form, enhancementsEnabled: event.currentTarget.checked })}
+                type="checkbox"
+              />
+              <span>
+                <strong>启用 CodexElves 页面增强</strong>
+                <small>关闭后会停用删除、导出、项目移动、Fast 按钮、插件相关和菜单位置增强。</small>
+              </span>
+            </label>
+            <label className="switch-row">
+              <input
+                checked={form.computerUseGuardEnabled}
+                onChange={(event) => onFormChange({ ...form, computerUseGuardEnabled: event.currentTarget.checked })}
+                type="checkbox"
+              />
+              <span>
+                <strong>启用 Windows Computer Use Guard</strong>
+                <small>默认关闭；开启后启动 ChatGPT/Codex 时会自动保留官方 Computer Use 插件所需的 config.toml、bundled 插件和 notify 配置。</small>
+              </span>
+            </label>
+          </div>
           <ModeSelector launchMode={form.launchMode} actions={actions} />
           {form.launchMode === "relay" ? (
             <div className="hint-line">
@@ -4462,7 +4496,7 @@ function EnhanceScreen({
             <FeatureToggle title="插件市场解锁" detail="API Key 模式下扩展插件市场请求，尽量显示完整插件列表；官方/混合模式通常不需要。" checked={form.codexAppPluginMarketplaceUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginMarketplaceUnlock", value)} />
             <FeatureToggle title="强制解锁入口" detail="恢复 1.1.9 的入口解锁方式，强制显示并启用插件入口。" checked={form.codexAppPluginEntryUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginEntryUnlock", value)} />
             <FeatureToggle title="插件列表全量展示" detail="进入插件页后自动连续展开“更多”，尽量一次显示完整插件列表。" checked={form.codexAppPluginAutoExpand} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginAutoExpand", value)} />
-            <FeatureToggle title="Fast 按钮" detail="显示服务模式切换按钮。Fast（service_tier=priority）支持 gpt-5.4、gpt-5.5 和 GPT-5.6 系列；Claude 等其他模型不支持，会按 Standard 发送。" checked={form.codexAppServiceTierControls} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppServiceTierControls", value)} />
+            <FeatureToggle title="Fast 按钮" detail="显示服务模式切换按钮。Fast 仅支持 gpt-5.4+。" checked={form.codexAppServiceTierControls} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppServiceTierControls", value)} />
             <FeatureToggle title="会话删除" detail="在会话列表悬停显示删除按钮，并支持撤销。" checked={form.codexAppSessionDelete} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppSessionDelete", value)} />
             <FeatureToggle title="Markdown 导出" detail="在会话列表显示导出按钮，导出带时间戳的 Markdown。" checked={form.codexAppMarkdownExport} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppMarkdownExport", value)} />
             <FeatureToggle title="会话项目移动" detail="把会话移动到普通对话或其他本地项目。" checked={form.codexAppProjectMove} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppProjectMove", value)} />
@@ -4820,7 +4854,7 @@ function SessionsScreen({
             </section>
             <section className="session-control-section session-automation-section">
               <div className="session-section-head">
-                <strong>会话热加载</strong>
+                <strong>会话预热加载</strong>
                 <small>控制启动后的最近会话预热范围。</small>
               </div>
               <div className="session-prewarm-settings">
@@ -5705,6 +5739,7 @@ function RelayProfileEditor({
     anthropic: [],
   });
   const [fetchingModelChoices, setFetchingModelChoices] = useState(false);
+  const [probingResponsesWebsocket, setProbingResponsesWebsocket] = useState(false);
   const [systemPromptOpen, setSystemPromptOpen] = useState(false);
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   if (isAggregateRelayProfile(profile)) {
@@ -5724,23 +5759,43 @@ function RelayProfileEditor({
     responsesWebsocketApplicable
       ? profile.responsesWebsocket.state
       : "unsupported";
+  const responsesWebsocketToggleEnabled =
+    responsesWebsocketApplicable && responsesWebsocketState === "supported";
+  const responsesWebsocketToggleChecked =
+    responsesWebsocketToggleEnabled && profile.responsesWebsocketEnabled;
   const responsesWebsocketLabel =
-    !responsesWebsocketApplicable
+    probingResponsesWebsocket
+      ? "探测中"
+      : !responsesWebsocketApplicable
       ? "当前配置不适用"
       : responsesWebsocketState === "supported"
       ? "已支持"
       : responsesWebsocketState === "unsupported"
         ? "不支持"
         : "待探测";
-  const responsesWebsocketMessage =
-    !responsesWebsocketApplicable
-      ? "当前协议、模型映射或系统提示词配置不满足原生 Responses WebSocket 条件。"
+  const responsesWebsocketBaseMessage =
+    probingResponsesWebsocket
+      ? "正在连接供应商的 Responses WebSocket 端点并执行真实握手。"
+      : !responsesWebsocketApplicable
+      ? "当前供应商没有配置原生 Responses 模型，或系统提示词替换会改变原始请求。"
       : profile.responsesWebsocket.message
     || (responsesWebsocketState === "unsupported"
-      ? "当前协议、模型映射或系统提示词配置不满足原生 Responses WebSocket 条件。"
+      ? "上次探测确认当前端点不支持 Responses WebSocket。"
       : responsesWebsocketState === "supported"
-        ? "下次设为当前时会继续使用已缓存的探测结果。"
-        : "下次设为当前供应商时自动探测。");
+        ? "上游已支持。"
+        : "点击“重新探测”立即执行真实 WebSocket 握手。");
+  const responsesWebsocketMessage =
+    !probingResponsesWebsocket
+    && responsesWebsocketApplicable
+    && responsesWebsocketState === "supported"
+      ? `${responsesWebsocketBaseMessage} ${
+          !profile.responsesWebsocketEnabled
+            ? "当前已关闭，Responses 模型会使用 HTTP/SSE。"
+            : form.gptReasoningContinuation
+              ? "Responses 模型会使用 WebSocket；触发 GPT 推理续接时会复用同一连接。"
+              : "Responses 模型会使用 WebSocket。"
+        }`
+      : responsesWebsocketBaseMessage;
   const responsesWebsocketCheckedAt =
     responsesWebsocketApplicable
     && profile.responsesWebsocket.checkedAtMs
@@ -5776,6 +5831,19 @@ function RelayProfileEditor({
       }
     } finally {
       setFetchingModelChoices(false);
+    }
+  };
+  const probeResponsesWebsocket = async () => {
+    if (probingResponsesWebsocket || !responsesWebsocketApplicable) return;
+    setProbingResponsesWebsocket(true);
+    try {
+      const capability = await actions.probeRelayProfileResponsesWebsocket({
+        ...profile,
+        responsesWebsocket: emptyResponsesWebsocketCapability(),
+      });
+      if (capability) updateDraft({ responsesWebsocket: capability });
+    } finally {
+      setProbingResponsesWebsocket(false);
     }
   };
   return (
@@ -5967,24 +6035,52 @@ function RelayProfileEditor({
         </div>
       ) : null}
       {showApiFields ? (
-        <div className="hint-line relay-protocol-hint">
-          <Network className="h-4 w-4" />
-          <span>
-            <strong>Responses WebSocket：{responsesWebsocketLabel}</strong>
-            {" · "}
-            {responsesWebsocketMessage}
-            {responsesWebsocketCheckedAt ? ` · 最近探测：${responsesWebsocketCheckedAt}` : ""}
-          </span>
-          <Button
-            onClick={() => updateDraft({ responsesWebsocket: emptyResponsesWebsocketCapability() })}
-            size="sm"
-            title="只重置为待探测；下次设为当前供应商时重新探测"
-            type="button"
-            variant="secondary"
-          >
-            <RefreshCw className="h-4 w-4" />
-            重新探测
-          </Button>
+        <div className="relay-websocket-panel">
+          <div className="relay-websocket-status">
+            <Network className="h-4 w-4" />
+            <div>
+              <strong>Responses WebSocket：{responsesWebsocketLabel}</strong>
+              <span>{responsesWebsocketMessage}</span>
+              {responsesWebsocketCheckedAt ? (
+                <small>最近探测：{responsesWebsocketCheckedAt}</small>
+              ) : null}
+            </div>
+          </div>
+          <div className="relay-websocket-actions">
+            <Button
+              disabled={probingResponsesWebsocket || !responsesWebsocketApplicable}
+              onClick={() => void probeResponsesWebsocket()}
+              size="sm"
+              title={
+                responsesWebsocketApplicable
+                  ? "立即连接上游 Responses WebSocket 端点执行真实握手"
+                  : "当前供应商没有可探测的原生 Responses 模型"
+              }
+              type="button"
+              variant="secondary"
+            >
+              <RefreshCw className="h-4 w-4" />
+              {probingResponsesWebsocket ? "探测中" : "重新探测"}
+            </Button>
+            <label
+              className={`relay-websocket-toggle${responsesWebsocketToggleEnabled ? "" : " is-disabled"}`}
+              title={
+                responsesWebsocketToggleEnabled
+                  ? "控制当前供应商是否实际使用 Responses WebSocket"
+                  : "仅在 Responses WebSocket 探测为已支持时可启用"
+              }
+            >
+              <input
+                checked={responsesWebsocketToggleChecked}
+                disabled={!responsesWebsocketToggleEnabled}
+                onChange={(event) =>
+                  updateDraft({ responsesWebsocketEnabled: event.currentTarget.checked })
+                }
+                type="checkbox"
+              />
+              <span>启用 WebSocket</span>
+            </label>
+          </div>
         </div>
       ) : null}
       <div className="hint-line relay-protocol-hint">
@@ -7791,8 +7887,8 @@ function relayActivationImpactRows(profile: RelayProfile): RelayActivationImpact
     {
       file: "config.toml",
       field: `${providerTable}.supports_websockets`,
-      value: relaySupportsNativeResponsesWebsocket(profile) ? "true" : "false",
-      detail: "仅在探测已支持且配置满足原生 Responses WebSocket 条件时写入 true。",
+      value: relayPrefersNativeResponsesWebsocket(profile) ? "true" : "false",
+      detail: "仅在探测已支持、开关已启用且配置满足原生 Responses WebSocket 条件时写入 true。",
       tone: "write",
     },
     {
@@ -7979,7 +8075,6 @@ function FeatureToggle({
         <strong>{title}</strong>
         <small>{detail}</small>
       </span>
-      <Badge status={!disabled && checked ? "ok" : "disabled"} />
     </label>
   );
 }
@@ -9155,6 +9250,7 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
             chatCompletionsModelList: "",
             anthropicModelList: "",
             responsesWebsocket: emptyResponsesWebsocketCapability(),
+            responsesWebsocketEnabled: true,
             userAgent: "",
             systemPromptOverride: "",
           },
@@ -9217,6 +9313,7 @@ function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = 
         autoCompactLimit: "",
         modelList: "",
         responsesWebsocket: emptyResponsesWebsocketCapability(),
+        responsesWebsocketEnabled: false,
         systemPromptOverride: "",
       },
       null,
@@ -9258,6 +9355,7 @@ function normalizeRelayProfile(profile: RelayProfile, defaultContextSelection = 
     chatCompletionsModelList,
     anthropicModelList,
     responsesWebsocket: normalizeResponsesWebsocketCapability(profile),
+    responsesWebsocketEnabled: profile.responsesWebsocketEnabled !== false,
     userAgent: profile.userAgent || "",
     systemPromptOverride: profile.systemPromptOverride || "",
     aggregate: null,
@@ -9468,13 +9566,14 @@ function normalizeResponsesWebsocketCapability(
 }
 
 function relayCanProbeNativeResponsesWebsocket(profile: RelayProfile): boolean {
+  const mappings = profile.modelMappings.filter((mapping) => mapping.requestModel.trim());
+  const hasResponsesModel = mappings.length
+    ? mappings.some((mapping) => mapping.protocol === "responses")
+    : splitRelayModelList(profile.responsesModelList).length > 0 || profile.protocol === "responses";
   return (
     !isAggregateRelayProfile(profile)
     && (profile.relayMode !== "official" || profile.officialMixApiKey)
-    && profile.protocol === "responses"
-    && profile.modelMappings.every((mapping) => mapping.protocol === "responses")
-    && !splitRelayModelList(profile.chatCompletionsModelList).length
-    && !splitRelayModelList(profile.anthropicModelList).length
+    && hasResponsesModel
     && !profile.systemPromptOverride.trim()
   );
 }
@@ -9482,6 +9581,11 @@ function relayCanProbeNativeResponsesWebsocket(profile: RelayProfile): boolean {
 function relaySupportsNativeResponsesWebsocket(profile: RelayProfile): boolean {
   return relayCanProbeNativeResponsesWebsocket(profile)
     && profile.responsesWebsocket.state === "supported";
+}
+
+function relayPrefersNativeResponsesWebsocket(profile: RelayProfile): boolean {
+  return profile.responsesWebsocketEnabled
+    && relaySupportsNativeResponsesWebsocket(profile);
 }
 
 function responsesWebsocketInputsChanged(
@@ -9533,6 +9637,7 @@ function buildRelayConfigToml(
     | "anthropicModelList"
     | "systemPromptOverride"
     | "responsesWebsocket"
+    | "responsesWebsocketEnabled"
     | "aggregate"
   >,
   options: { includeBearerToken: boolean },
@@ -9550,7 +9655,7 @@ function buildRelayConfigToml(
     'name = "custom"',
     'wire_api = "responses"',
     "requires_openai_auth = true",
-    `supports_websockets = ${relaySupportsNativeResponsesWebsocket(profile as RelayProfile) ? "true" : "false"}`,
+    `supports_websockets = ${relayPrefersNativeResponsesWebsocket(profile as RelayProfile) ? "true" : "false"}`,
     `base_url = "${tomlString(baseUrl)}"`,
     options.includeBearerToken && apiKey ? `experimental_bearer_token = "${tomlString(apiKey)}"` : null,
     "",
@@ -9674,7 +9779,7 @@ function applyRelayProfilePatchToFiles(
     next.configContents = setCodexProviderBoolKey(
       next.configContents,
       "supports_websockets",
-      relaySupportsNativeResponsesWebsocket(next),
+      relayPrefersNativeResponsesWebsocket(next),
     );
   }
 
@@ -10028,6 +10133,7 @@ function createRelayProfile(settings: BackendSettings): RelayProfile {
     chatCompletionsModelList: "",
     anthropicModelList: "",
     responsesWebsocket: emptyResponsesWebsocketCapability(),
+    responsesWebsocketEnabled: true,
     userAgent: "",
     systemPromptOverride: "",
   };
@@ -10064,6 +10170,7 @@ function createAggregateRelayProfile(settings: BackendSettings): RelayProfile {
       chatCompletionsModelList: "",
       anthropicModelList: "",
       responsesWebsocket: emptyResponsesWebsocketCapability(),
+      responsesWebsocketEnabled: true,
       userAgent: "",
       systemPromptOverride: "",
       aggregate: {
@@ -10100,6 +10207,7 @@ function duplicateRelayProfile(settings: BackendSettings, id: string): BackendSe
     id: nextId,
     name: `${source.name || "未命名供应商"} 副本`,
     responsesWebsocket: emptyResponsesWebsocketCapability(),
+    responsesWebsocketEnabled: source.responsesWebsocketEnabled !== false,
   };
   const normalizedNext = isAggregateRelayProfile(next) ? normalizeAggregateRelayProfile(next, settings) : next;
   const relayProfiles = [...settings.relayProfiles];
@@ -10210,6 +10318,7 @@ function normalizeAggregateRelayProfile(profile: RelayProfile, settings: Backend
     configContents: "",
     authContents: "",
     responsesWebsocket: emptyResponsesWebsocketCapability(),
+    responsesWebsocketEnabled: false,
     systemPromptOverride: "",
     aggregate,
   };
