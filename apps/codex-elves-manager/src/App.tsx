@@ -4975,7 +4975,7 @@ function SessionsScreen({
         <span className="session-recovery-setting-copy">
           <strong>异常会话自动恢复</strong>
           <small>
-            提交时若检测到 Codex 会话循环意外退出，将重新恢复当前会话；不会自动重发消息，避免重复执行。
+            提交时若检测到 Codex 会话循环意外退出，将自动恢复或切换到新会话，并继续发送本次消息；若恢复或继续发送失败，会尝试恢复原输入并提示后续操作。
           </small>
         </span>
       </label>

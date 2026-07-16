@@ -852,6 +852,33 @@ fn injection_script_serializes_resume_and_recovers_failed_turn_once() {
     assert!(script.contains("session_recovery_failed"));
     assert!(script.contains("codexThreadRecoveryResumePromises"));
     assert!(script.contains("codexThreadRecoveryWaitForResume"));
+    assert!(script.contains("const codexAppServerModelRequestPatchVersion = \"4\";"));
+    assert!(script.contains("function codexThreadRecoveryRouteUiReady(targetThreadId)"));
+    assert!(script.contains("codexThreadRecoveryRowHasNativeCurrentState(row)"));
+    let navigation_start = script
+        .find("async function codexThreadRecoveryNavigateToTarget")
+        .expect("recovery navigation function should exist");
+    let navigation_end = script[navigation_start..]
+        .find("async function codexThreadRecoveryValidateForkTarget")
+        .map(|offset| navigation_start + offset)
+        .expect("recovery navigation function should have a boundary");
+    let navigation_script = &script[navigation_start..navigation_end];
+    assert!(navigation_script.contains("codexThreadRecoveryRouteUiReady(targetThreadId)"));
+    assert!(!navigation_script.contains("currentSessionRef"));
+    assert!(!navigation_script.contains("isCurrentSessionRow"));
+    let runtime_refresh_install = script
+        .find("window.__codexElvesRefreshRuntime = () => {")
+        .expect("runtime refresh function should be installed");
+    let runtime_generation_commit = script
+        .rfind(
+            "window.__codexElvesRuntimeRequestPatchVersion = \
+             codexAppServerModelRequestPatchVersion;",
+        )
+        .expect("runtime patch generation should be committed");
+    assert!(
+        runtime_generation_commit > runtime_refresh_install,
+        "runtime generation must only be committed after the refreshed runtime is installed"
+    );
     assert!(
         !script.contains("codexThreadRecoveryRun(client, context, draft).then(() => sendRequest")
     );
@@ -863,25 +890,494 @@ fn injection_script_serializes_resume_and_recovers_failed_turn_once() {
         recovery["serializedEvents"],
         json!(["resume:start", "resume:end", "turn:start"])
     );
-    assert_eq!(recovery["recoveryTurnCalls"], 1);
-    assert_eq!(recovery["recoveryResumeCalls"], 1);
-    assert_eq!(recovery["recoveryReadCalls"], 1);
-    assert_eq!(recovery["recoveryUnsubscribeCalls"], 0);
+    let resume_success = &recovery["resumeSuccess"];
+    assert_eq!(resume_success["ownerState"], true);
+    assert_eq!(resume_success["unsubscribeCalls"], 1);
+    assert_eq!(resume_success["resumeCalls"], 1);
     assert_eq!(
-        recovery["recoveryErrorMessage"],
-        "failed to start turn: agent loop died unexpectedly"
+        resume_success["settingsProbeCalls"],
+        json!([{
+            "threadId": "thread-resume-ok-001",
+            "model": "gpt-5.4"
+        }])
     );
-    assert_eq!(recovery["unrelatedResumeCalls"], 0);
-    assert_eq!(recovery["duplicateTurnCalls"], 2);
-    assert_eq!(recovery["duplicateResumeCalls"], 1);
+    assert_eq!(resume_success["readCalls"], json!(["thread-resume-ok-001"]));
+    assert_eq!(resume_success["forkCalls"], 0);
+    assert_eq!(resume_success["turnCalls"].as_array().unwrap().len(), 2);
+    assert_eq!(resume_success["replayedThreadId"], "thread-resume-ok-001");
+    assert_eq!(
+        resume_success["turnResults"],
+        json!([{"status": "fulfilled", "errorMessage": null}])
+    );
+
+    let fork_fallback = &recovery["forkFallback"];
+    assert_eq!(fork_fallback["ownerState"], true);
+    assert_eq!(fork_fallback["unsubscribeCalls"], 1);
+    assert_eq!(fork_fallback["resumeCalls"], 1);
+    assert_eq!(fork_fallback["forkCalls"], 1);
+    assert_eq!(
+        fork_fallback["settingsProbeCalls"],
+        json!([
+            {
+                "threadId": "thread-fork-source-001",
+                "model": "gpt-5.4"
+            },
+            {
+                "threadId": "thread-fork-target-001",
+                "model": "gpt-5.4"
+            }
+        ])
+    );
+    assert_eq!(fork_fallback["replayedThreadId"], "thread-fork-target-001");
+    assert_eq!(fork_fallback["currentThreadId"], "thread-fork-target-001");
+    assert_eq!(fork_fallback["turnCalls"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        fork_fallback["turnResults"],
+        json!([{"status": "fulfilled", "errorMessage": null}])
+    );
+    assert_eq!(
+        fork_fallback["forkSourceThreadId"],
+        "thread-fork-source-001"
+    );
+    assert_eq!(
+        fork_fallback["historyPaths"],
+        json!(["/local/thread-fork-target-001"])
+    );
+    assert_eq!(fork_fallback["popstateEvents"], 1);
+    assert_eq!(
+        fork_fallback["events"],
+        json!([
+            "unsubscribe",
+            "resume",
+            "source probe",
+            "fork(thread-fork-source-001)",
+            "target probe",
+            "navigate(thread-fork-target-001)",
+            "route-ui-ready(thread-fork-target-001)",
+            "replay(thread-fork-target-001)"
+        ])
+    );
+
+    let command_probe_failure = &recovery["commandProbeFailure"];
+    assert_eq!(command_probe_failure["forkCalls"], 1);
+    assert_eq!(
+        command_probe_failure["settingsProbeCalls"],
+        json!([
+            {
+                "threadId": "thread-command-source-001",
+                "model": "gpt-5.4"
+            },
+            {
+                "threadId": "thread-command-target-001",
+                "model": "gpt-5.4"
+            }
+        ])
+    );
+    assert_eq!(
+        command_probe_failure["readCalls"],
+        json!(["thread-command-source-001", "thread-command-target-001"])
+    );
+    assert_eq!(
+        command_probe_failure["replayedThreadId"],
+        "thread-command-target-001"
+    );
+    assert_eq!(
+        command_probe_failure["turnResults"],
+        json!([{"status": "fulfilled", "errorMessage": null}])
+    );
+
+    let unrelated_error = &recovery["unrelatedError"];
+    assert_eq!(unrelated_error["unsubscribeCalls"], 0);
+    assert_eq!(unrelated_error["resumeCalls"], 0);
+    assert_eq!(unrelated_error["forkCalls"], 0);
+    assert_eq!(unrelated_error["turnCalls"].as_array().unwrap().len(), 1);
+    assert_eq!(unrelated_error["replayedThreadId"], serde_json::Value::Null);
+    assert_eq!(
+        unrelated_error["turnResults"],
+        json!([{"status": "rejected", "errorMessage": "network unavailable"}])
+    );
+
+    let concurrent_failure = &recovery["concurrentFailure"];
+    assert_eq!(concurrent_failure["unsubscribeCalls"], 1);
+    assert_eq!(concurrent_failure["resumeCalls"], 1);
+    assert_eq!(concurrent_failure["forkCalls"], 1);
+    assert_eq!(concurrent_failure["turnCalls"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        concurrent_failure["settingsProbeCalls"],
+        json!([
+            {
+                "threadId": "thread-concurrent-source-001",
+                "model": "gpt-5.4"
+            },
+            {
+                "threadId": "thread-concurrent-target-001",
+                "model": "gpt-5.4"
+            }
+        ])
+    );
+    assert_eq!(
+        concurrent_failure["replayedThreadIds"],
+        json!([
+            "thread-concurrent-target-001",
+            "thread-concurrent-target-001"
+        ])
+    );
+    assert_eq!(
+        concurrent_failure["turnResults"],
+        json!([
+            {"status": "fulfilled", "errorMessage": null},
+            {"status": "fulfilled", "errorMessage": null}
+        ])
+    );
+
+    let fork_validation_failure = &recovery["forkValidationFailure"];
+    assert_eq!(fork_validation_failure["forkCalls"], 2);
+    assert_eq!(
+        fork_validation_failure["settingsProbeCalls"],
+        json!([
+            {
+                "threadId": "thread-fork-validation-source-001",
+                "model": "gpt-5.4"
+            },
+            {
+                "threadId": "thread-fork-validation-target-001",
+                "model": "gpt-5.4"
+            },
+            {
+                "threadId": "thread-fork-validation-source-001",
+                "model": "gpt-5.4"
+            },
+            {
+                "threadId": "thread-fork-validation-target-001",
+                "model": "gpt-5.4"
+            }
+        ])
+    );
+    assert_eq!(
+        fork_validation_failure["replayedThreadId"],
+        "thread-fork-validation-target-001"
+    );
+    assert_eq!(
+        fork_validation_failure["turnResults"],
+        json!([
+            {
+                "status": "rejected",
+                "errorMessage": "failed to start turn: agent loop died unexpectedly"
+            },
+            {
+                "status": "fulfilled",
+                "errorMessage": null
+            }
+        ])
+    );
+
+    let cached_target_seed = &recovery["cachedTargetSeed"];
+    assert_eq!(cached_target_seed["forkCalls"], 1);
+    assert_eq!(
+        cached_target_seed["replayedThreadId"],
+        "thread-cached-target-old-001"
+    );
+
+    let cached_target_invalidated = &recovery["cachedTargetInvalidated"];
+    assert_eq!(cached_target_invalidated["forkCalls"], 1);
+    assert_eq!(
+        cached_target_invalidated["settingsProbeCalls"],
+        json!([
+            {
+                "threadId": "thread-cached-target-source-001",
+                "model": "gpt-5.4"
+            },
+            {
+                "threadId": "thread-cached-target-old-001",
+                "model": "gpt-5.4"
+            },
+            {
+                "threadId": "thread-cached-target-new-001",
+                "model": "gpt-5.4"
+            }
+        ])
+    );
+    assert_eq!(
+        cached_target_invalidated["replayedThreadId"],
+        "thread-cached-target-new-001"
+    );
+    assert_eq!(
+        cached_target_invalidated["turnResults"],
+        json!([{"status": "fulfilled", "errorMessage": null}])
+    );
+
+    let delayed_concurrent_failure = &recovery["delayedConcurrentFailure"];
+    assert_eq!(delayed_concurrent_failure["unsubscribeCalls"], 1);
+    assert_eq!(delayed_concurrent_failure["resumeCalls"], 1);
+    assert_eq!(delayed_concurrent_failure["forkCalls"], 1);
+    assert_eq!(
+        delayed_concurrent_failure["blockedReplayCounts"],
+        json!({
+            "unsubscribeCalls": 1,
+            "resumeCalls": 1,
+            "forkCalls": 1
+        })
+    );
+    assert_eq!(
+        delayed_concurrent_failure["replayedThreadIds"],
+        json!([
+            "thread-delayed-concurrent-target-001",
+            "thread-delayed-concurrent-target-001"
+        ])
+    );
+    assert_eq!(
+        delayed_concurrent_failure["replayedTexts"],
+        json!(["延迟并发失败消息一", "延迟并发失败消息二"])
+    );
+    assert_eq!(
+        delayed_concurrent_failure["turnResults"],
+        json!([
+            {"status": "fulfilled", "errorMessage": null},
+            {"status": "fulfilled", "errorMessage": null}
+        ])
+    );
+
+    let transitive_turn_ordering = &recovery["transitiveTurnOrdering"];
+    assert_eq!(transitive_turn_ordering["unsubscribeCalls"], 1);
+    assert_eq!(transitive_turn_ordering["resumeCalls"], 1);
+    assert_eq!(transitive_turn_ordering["forkCalls"], 1);
+    assert_eq!(
+        transitive_turn_ordering["replayedBeforeDelayedRelease"],
+        json!([])
+    );
+    assert_eq!(
+        transitive_turn_ordering["replayedTexts"],
+        json!(["传递顺序消息一", "传递顺序消息三"])
+    );
+    assert_eq!(
+        transitive_turn_ordering["turnResults"],
+        json!([
+            {"status": "fulfilled", "errorMessage": null},
+            {"status": "fulfilled", "errorMessage": null},
+            {"status": "fulfilled", "errorMessage": null}
+        ])
+    );
+
+    let replay_queue_continues = &recovery["replayQueueContinuesAfterFailure"];
+    assert_eq!(replay_queue_continues["unsubscribeCalls"], 1);
+    assert_eq!(replay_queue_continues["resumeCalls"], 1);
+    assert_eq!(replay_queue_continues["forkCalls"], 1);
+    assert_eq!(
+        replay_queue_continues["replayedTexts"],
+        json!(["重放队列失败消息一", "重放队列成功消息二"])
+    );
+    assert_eq!(
+        replay_queue_continues["turnResults"],
+        json!([
+            {"status": "rejected", "errorMessage": "first queued replay failed"},
+            {"status": "fulfilled", "errorMessage": null}
+        ])
+    );
+
+    let replay_failure = &recovery["replayFailure"];
+    assert_eq!(replay_failure["resumeCalls"], 1);
+    assert_eq!(replay_failure["forkCalls"], 1);
+    assert_eq!(replay_failure["turnCalls"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        replay_failure["settingsProbeCalls"],
+        json!([
+            {
+                "threadId": "thread-replay-source-001",
+                "model": "gpt-5.4"
+            },
+            {
+                "threadId": "thread-replay-target-001",
+                "model": "gpt-5.4"
+            }
+        ])
+    );
+    assert_eq!(
+        replay_failure["replayedThreadIds"],
+        json!(["thread-replay-target-001"])
+    );
+    assert_eq!(
+        replay_failure["turnResults"],
+        json!([{
+            "status": "rejected",
+            "errorMessage": "fixed replay error: agent loop died unexpectedly"
+        }])
+    );
+
+    let host_wrapped = &recovery["hostWrapped"];
+    assert_eq!(host_wrapped["forkCalls"], 1);
+    assert_eq!(host_wrapped["forkSourceThreadId"], "thread-host-source-001");
+    assert_eq!(
+        host_wrapped["turnResults"],
+        json!([{"status": "fulfilled", "errorMessage": null}])
+    );
+    let replayed_host_request = &host_wrapped["turnCalls"][1];
+    assert_eq!(replayed_host_request["method"], "send-cli-request-for-host");
+    assert_eq!(
+        replayed_host_request["innerThreadId"],
+        "thread-host-target-001"
+    );
+    assert_eq!(replayed_host_request["hostId"], "host-preserve-001");
+    assert_eq!(
+        replayed_host_request["outerCustom"],
+        json!({"keep": "outer-value"})
+    );
+    assert_eq!(
+        replayed_host_request["innerCustom"],
+        json!({"keep": "inner-value"})
+    );
+    assert_eq!(
+        replayed_host_request["input"],
+        json!([{"type": "text", "text": "host 包装请求"}])
+    );
+    assert_eq!(
+        replayed_host_request["outerThreadId"],
+        serde_json::Value::Null
+    );
+    assert_eq!(host_wrapped["historyPaths"], json!([]));
+    assert_eq!(host_wrapped["popstateEvents"], 0);
+    assert_eq!(
+        host_wrapped["events"],
+        json!([
+            "unsubscribe",
+            "resume",
+            "source probe",
+            "fork(thread-host-source-001)",
+            "target probe",
+            "sidebar-click(thread-host-target-001)",
+            "route-ui-ready(thread-host-target-001)",
+            "replay(thread-host-target-001)"
+        ])
+    );
+
+    let prototype_this_binding = &recovery["prototypeThisBinding"];
+    assert_eq!(prototype_this_binding["resumeCalls"], 1);
+    assert_eq!(prototype_this_binding["forkCalls"], 1);
+    assert_eq!(
+        prototype_this_binding["settingsProbeCalls"],
+        json!([
+            {
+                "threadId": "thread-prototype-source-001",
+                "model": "gpt-5.4"
+            },
+            {
+                "threadId": "thread-prototype-target-001",
+                "model": "gpt-5.4"
+            }
+        ])
+    );
+    assert_eq!(
+        prototype_this_binding["turnCalls"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        prototype_this_binding["thisBindingChecks"],
+        json!([true, true, true, true])
+    );
+    assert_eq!(
+        prototype_this_binding["turnResults"],
+        json!([{"status": "fulfilled", "errorMessage": null}])
+    );
+
+    let legacy_generation_binding = &recovery["legacyGenerationBinding"];
+    assert_eq!(legacy_generation_binding["originalCalls"], 1);
+    assert_eq!(
+        legacy_generation_binding["thisBindingChecks"],
+        json!([true])
+    );
+    assert_eq!(legacy_generation_binding["requestStatus"], "ok");
+
+    let url_only_navigation_timeout = &recovery["urlOnlyNavigationTimeout"];
+    assert_eq!(url_only_navigation_timeout["forkCalls"], 1);
+    assert_eq!(
+        url_only_navigation_timeout["historyPaths"],
+        json!(["/local/thread-url-only-target-001"])
+    );
+    assert_eq!(url_only_navigation_timeout["popstateEvents"], 1);
+    assert_eq!(
+        url_only_navigation_timeout["currentThreadId"],
+        "thread-url-only-target-001"
+    );
+    assert_eq!(
+        url_only_navigation_timeout["activeRouteThreadId"],
+        "thread-url-only-source-001"
+    );
+    assert_eq!(
+        url_only_navigation_timeout["turnCalls"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(url_only_navigation_timeout["replayedThreadIds"], json!([]));
+    assert_eq!(
+        url_only_navigation_timeout["events"],
+        json!([
+            "unsubscribe",
+            "resume",
+            "source probe",
+            "fork(thread-url-only-source-001)",
+            "target probe",
+            "navigate(thread-url-only-target-001)"
+        ])
+    );
+    assert_eq!(
+        url_only_navigation_timeout["turnResults"],
+        json!([{
+            "status": "rejected",
+            "errorMessage": "failed to start turn: agent loop died unexpectedly"
+        }])
+    );
+
+    let url_only_navigation_retry = &recovery["urlOnlyNavigationRetry"];
+    assert_eq!(url_only_navigation_retry["forkCalls"], 0);
+    assert_eq!(
+        url_only_navigation_retry["settingsProbeCalls"],
+        json!([
+            {
+                "threadId": "thread-url-only-source-001",
+                "model": "gpt-5.4"
+            },
+            {
+                "threadId": "thread-url-only-target-001",
+                "model": "gpt-5.4"
+            }
+        ])
+    );
+    assert_eq!(
+        url_only_navigation_retry["replayedThreadId"],
+        "thread-url-only-target-001"
+    );
+    assert_eq!(
+        url_only_navigation_retry["turnResults"],
+        json!([{"status": "fulfilled", "errorMessage": null}])
+    );
+
+    let draft_behavior = &recovery["draftBehavior"];
+    assert_eq!(draft_behavior["sameTextResult"], "input-still-present");
+    assert_eq!(draft_behavior["sameTextPreserved"], true);
+    assert_eq!(
+        draft_behavior["otherTextResult"],
+        "composer-has-other-content"
+    );
+    assert_eq!(draft_behavior["otherTextPreserved"], false);
+    assert_eq!(
+        draft_behavior["otherTextMessage"],
+        "消息自动继续失败，请复制原消息后重试。"
+    );
+
     assert_eq!(recovery["handlesAgentLoopError"], true);
     assert_eq!(recovery["handlesUnrelatedError"], false);
+    assert_eq!(recovery["handlesMetadataOnlyAgentLoop"], false);
     assert_eq!(recovery["wrappedContext"]["method"], "turn/start");
     assert_eq!(
         recovery["wrappedContext"]["threadId"],
         "thread-wrapped-12345678"
     );
     assert_eq!(recovery["trackedResumeCountAfterCompletion"], 0);
+    assert_eq!(recovery["trackedTransactionCountAfterCompletion"], 0);
 }
 
 #[test]
@@ -889,6 +1385,7 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
     let script = assets::injection_script(45221);
     let cases = run_service_tier_contract_harness();
     let prewarm = &cases["sessionPrewarm"];
+    let runtime_generation = run_runtime_request_patch_generation_harness();
 
     assert!(script.contains("@keyframes codex-session-prewarm-shimmer"));
     assert!(script.contains("data-codex-session-prewarming"));
@@ -901,6 +1398,12 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
     assert!(script.contains("session_prewarm_skipped"));
     assert!(script.contains("const codexSessionPrewarmVersion = \"2\";"));
     assert!(script.contains("const codexSessionPrewarmStartupDelayMs = 200;"));
+    assert!(script.contains(
+        "window.__codexElvesRuntimeRequestPatchVersion === codexAppServerModelRequestPatchVersion"
+    ));
+    assert!(script.contains(
+        "window.__codexElvesRuntimeRequestPatchVersion = codexAppServerModelRequestPatchVersion;"
+    ));
     let runtime_refresh = script
         .find("window.__codexElvesRefreshRuntime();")
         .expect("same-build reinjection should refresh the existing runtime");
@@ -910,6 +1413,30 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
     assert!(
         runtime_refresh < runtime_increment,
         "same-build reinjection must return before invalidating the existing prewarm runtime"
+    );
+    assert_eq!(
+        runtime_generation["current"],
+        json!({
+            "refreshCalls": 1,
+            "runtimeId": 10,
+            "requestPatchVersion": "4"
+        })
+    );
+    assert_eq!(
+        runtime_generation["old"],
+        json!({
+            "refreshCalls": 0,
+            "runtimeId": 11,
+            "requestPatchVersion": "3"
+        })
+    );
+    assert_eq!(
+        runtime_generation["missing"],
+        json!({
+            "refreshCalls": 0,
+            "runtimeId": 11,
+            "requestPatchVersion": null
+        })
     );
     assert_eq!(
         prewarm["defaultPrewarmSettings"],
@@ -1082,6 +1609,73 @@ fn injection_script_defaults_session_prewarm_to_disabled() {
     assert!(script.contains("enabled: settings.sessionPrewarmEnabled === true"));
 }
 
+fn run_runtime_request_patch_generation_harness() -> serde_json::Value {
+    let script = assets::injection_script(45221);
+    let bootstrap_end = script
+        .find("  function installCodexElvesImageOverlay()")
+        .expect("runtime bootstrap should precede image overlay installation");
+    let bootstrap = format!("{} }})();", &script[..bootstrap_end]);
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+    let harness_path = temp.path().join("runtime-generation-harness.cjs");
+    let harness = format!(
+        r#"
+const vm = require("node:vm");
+const bootstrap = {bootstrap};
+globalThis.window = globalThis;
+const expectedBuild = JSON.parse(
+  bootstrap.match(/window\.__CODEX_ELVES_BUILD__ = (".*?");/)?.[1] || '""'
+);
+const expectedHelperBase = JSON.parse(
+  bootstrap.match(/window\.__CODEX_SESSION_DELETE_HELPER__ = (".*?");/)?.[1] || '""'
+);
+
+function runScenario(requestPatchVersion) {{
+  window.__codexElvesRuntimeBuild = expectedBuild;
+  window.__codexElvesRuntimeHelperBase = expectedHelperBase;
+  window.__codexSessionPrewarmRuntimeId = 10;
+  window.__codexConversationViewRouteTimers = [];
+  window.__codexRouteFeatureRefreshTimers = [];
+  window.__codexSessionDeleteObservers = [];
+  window.__codexSessionDeleteObserverConfigs = [];
+  let refreshCalls = 0;
+  window.__codexElvesRefreshRuntime = () => {{
+    refreshCalls += 1;
+  }};
+  if (requestPatchVersion == null) {{
+    delete window.__codexElvesRuntimeRequestPatchVersion;
+  }} else {{
+    window.__codexElvesRuntimeRequestPatchVersion = requestPatchVersion;
+  }}
+  vm.runInThisContext(bootstrap);
+  return {{
+    refreshCalls,
+    runtimeId: window.__codexSessionPrewarmRuntimeId,
+    requestPatchVersion: window.__codexElvesRuntimeRequestPatchVersion || null,
+  }};
+}}
+
+process.stdout.write(JSON.stringify({{
+  current: runScenario("4"),
+  old: runScenario("3"),
+  missing: runScenario(null),
+}}));
+"#,
+        bootstrap = serde_json::to_string(&bootstrap).expect("bootstrap should serialize")
+    );
+    std::fs::write(&harness_path, harness).expect("runtime generation harness should be written");
+    let output = Command::new("node")
+        .arg(&harness_path)
+        .output()
+        .expect("node should run runtime generation harness");
+    assert!(
+        output.status.success(),
+        "runtime generation harness failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("runtime generation stdout should be JSON")
+}
+
 fn run_service_tier_contract_harness() -> serde_json::Value {
     let temp = tempfile::tempdir().expect("temp dir should be created");
     let script_path = temp.path().join("renderer-inject.js");
@@ -1118,10 +1712,34 @@ function node() {{
     innerHTML: "",
   }};
 }}
+globalThis.HTMLElement = Object;
+globalThis.getComputedStyle = () => ({{
+  display: "block",
+  visibility: "visible",
+  pointerEvents: "auto",
+}});
 globalThis.window = globalThis;
 window.__CODEX_ELVES_TEST_SERVICE_TIER__ = true;
 window.__CODEX_ELVES_TEST_SESSION_PREWARM__ = true;
-window.dispatchEvent = () => true;
+window.__CODEX_ELVES_TEST_RECOVERY_NAVIGATION_TIMEOUT_MS__ = 100;
+const windowEventListeners = new Map();
+window.addEventListener = (type, listener) => {{
+  const listeners = windowEventListeners.get(type) || new Set();
+  listeners.add(listener);
+  windowEventListeners.set(type, listeners);
+}};
+window.removeEventListener = (type, listener) => {{
+  const listeners = windowEventListeners.get(type);
+  listeners?.delete(listener);
+  if (listeners?.size === 0) windowEventListeners.delete(type);
+}};
+window.dispatchEvent = (event) => {{
+  for (const listener of [...(windowEventListeners.get(event?.type) || [])]) {{
+    if (typeof listener === "function") listener.call(window, event);
+    else listener?.handleEvent?.(event);
+  }}
+  return event?.defaultPrevented !== true;
+}};
 globalThis.CustomEvent = class CustomEvent {{
   constructor(type, options = {{}}) {{
     this.type = type;
@@ -1133,6 +1751,7 @@ globalThis.Event = class Event {{
     this.type = type;
   }}
 }};
+globalThis.PopStateEvent = undefined;
 globalThis.document = {{
   scripts: [],
   visibilityState: "visible",
@@ -1141,7 +1760,9 @@ globalThis.document = {{
   createElement: () => node(),
   getElementById: () => null,
   querySelector: () => null,
-  querySelectorAll: () => [],
+  querySelectorAll: (selector) => selector === "[data-app-action-sidebar-thread-id]"
+    ? [...(window.__codexElvesRecoveryScenarioState?.sidebarRows || [])]
+    : [],
   addEventListener() {{}},
   removeEventListener() {{}},
 }};
@@ -1150,8 +1771,27 @@ globalThis.localStorage = {{
   setItem: (key, value) => store.set(key, String(value)),
   removeItem: (key) => store.delete(key),
 }};
-globalThis.location = {{ href: "https://codex.test/thread/thread-12345678", pathname: "/thread/thread-12345678", search: "", hash: "" }};
+globalThis.location = {{ href: "https://codex.test/local/thread-12345678", pathname: "/local/thread-12345678", search: "", hash: "" }};
 window.location = globalThis.location;
+globalThis.history = {{
+  pushState(_state, _title, path) {{
+    const pathname = String(path);
+    if (!pathname.startsWith("/local/")) {{
+      throw new Error(`unexpected recovery navigation path: ${{pathname}}`);
+    }}
+    const threadId = pathname.split("/").filter(Boolean).at(-1) || "";
+    const recoveryState = window.__codexElvesRecoveryScenarioState;
+    if (recoveryState) {{
+      recoveryState.historyPaths.push(pathname);
+      recoveryState.events.push(`navigate(${{threadId}})`);
+    }}
+    globalThis.location.href = `https://codex.test/local/${{threadId}}`;
+    globalThis.location.pathname = `/local/${{threadId}}`;
+    globalThis.location.search = "";
+    globalThis.location.hash = "";
+  }},
+}};
+window.history = globalThis.history;
 globalThis.navigator = {{ userAgent: "node-test" }};
 globalThis.performance = {{ getEntriesByType: () => [] }};
 require(scriptPath);
@@ -1377,121 +2017,592 @@ async function runSessionRecoveryCases() {{
   releaseSerializedResume();
   await Promise.all([serializedResume, serializedTurn]);
 
-  let recoveryTurnCalls = 0;
-  let recoveryResumeCalls = 0;
-  let recoveryReadCalls = 0;
-  let recoveryUnsubscribeCalls = 0;
-  const recoveryClient = {{
-    getHostId() {{
-      return "local";
-    }},
-    getRecentConversations() {{
-      return [];
-    }},
-    needsResume() {{
-      return true;
-    }},
-    async sendRequest(method) {{
-      if (method === "turn/start") {{
-        recoveryTurnCalls += 1;
-        throw new Error("failed to start turn: agent loop died unexpectedly");
+  function setCurrentThreadId(threadId) {{
+    globalThis.location.href = `https://codex.test/local/${{threadId}}`;
+    globalThis.location.pathname = `/local/${{threadId}}`;
+    globalThis.location.search = "";
+    globalThis.location.hash = "";
+  }}
+
+  function recoveryActiveAttribute(state, threadId, name, marker) {{
+    if (state.activeRouteThreadId !== threadId) return null;
+    if (marker === "data-state" && name === "data-state") return "active";
+    if (marker === "data-selected" && name === "data-selected") return "true";
+    if (marker === "data-active" && name === "data-active") return "true";
+    if (marker === "aria-current" && name === "aria-current") return "page";
+    return null;
+  }}
+
+  function recoverySidebarRow(state, threadId, config) {{
+    const marker = config.routeActiveMarker || "aria-current";
+    const clickable = {{
+      isConnected: true,
+      getAttribute(name) {{
+        if (name === "href") return `/local/${{threadId}}`;
+        return recoveryActiveAttribute(state, threadId, name, marker);
+      }},
+      click() {{
+        state.events.push(`sidebar-click(${{threadId}})`);
+        setCurrentThreadId(threadId);
+        state.scheduleRouteUiReady(threadId);
+      }},
+      querySelectorAll() {{
+        return [];
+      }},
+    }};
+    return {{
+      isConnected: true,
+      textContent: threadId,
+      getAttribute(name) {{
+        if (name === "data-app-action-sidebar-thread-id") return threadId;
+        if (name === "href") return `/local/${{threadId}}`;
+        if (config.routeActiveOnRow === true) {{
+          return recoveryActiveAttribute(state, threadId, name, marker);
+        }}
+        return null;
+      }},
+      matches() {{
+        return false;
+      }},
+      querySelector(selector) {{
+        return selector === "a, button" ? clickable : null;
+      }},
+      querySelectorAll() {{
+        return config.routeActiveOnRow === true ? [] : [clickable];
+      }},
+    }};
+  }}
+
+  function recoveryDeferred() {{
+    let resolve;
+    const promise = new Promise((next) => {{
+      resolve = next;
+    }});
+    return {{ promise, resolve }};
+  }}
+
+  async function runRecoveryScenario(config) {{
+    const state = {{
+      ownerState: false,
+      unsubscribeCalls: 0,
+      resumeCalls: 0,
+      settingsProbeCalls: [],
+      forkCalls: 0,
+      readCalls: [],
+      turnCalls: [],
+      replayedThreadIds: [],
+      replayedTexts: [],
+      failedTurnTexts: new Set(),
+      thisBindingChecks: [],
+      events: [],
+      historyPaths: [],
+      popstateEvents: 0,
+      activeRouteThreadId: "",
+      sidebarRows: [],
+      blockedReplayCounts: null,
+      replayedBeforeDelayedRelease: [],
+      targetSettingsFailuresRemaining: Number(config.targetSettingsFailures || 0),
+    }};
+    const firstReplayStarted = recoveryDeferred();
+    const releaseFirstReplay = recoveryDeferred();
+    const targetRouteReady = recoveryDeferred();
+    const releaseDelayedInitialFailure = recoveryDeferred();
+    const delayedInitialFailureThrown = recoveryDeferred();
+    const sourceThreadId = config.sourceThreadId;
+    const targetThreadId = config.targetThreadId || "";
+    const failedSettingsThreads = new Set(config.failedSettingsThreads || []);
+    const failedReadThreads = new Set(config.failedReadThreads || []);
+    const successfulSourceTexts = new Set(config.successfulSourceTexts || []);
+    setCurrentThreadId(sourceThreadId);
+    state.activeRouteThreadId = sourceThreadId;
+    const ensureSidebarRow = (threadId) => {{
+      let row = state.sidebarRows.find(
+        (candidate) => candidate.getAttribute("data-app-action-sidebar-thread-id") === threadId
+      );
+      if (!row) {{
+        row = recoverySidebarRow(state, threadId, config);
+        state.sidebarRows.push(row);
       }}
-      return {{}};
-    }},
-    async resumeConversationForUnavailableOwner(params) {{
-      recoveryResumeCalls += 1;
-      return {{ conversationId: params.conversationId }};
-    }},
-    async readThread(threadId, options) {{
-      recoveryReadCalls += 1;
-      return {{ threadId, includeTurns: options.includeTurns }};
-    }},
-    async unsubscribeInactiveConversation() {{
-      recoveryUnsubscribeCalls += 1;
-    }},
-  }};
-  api.patchAppServerRequestClient(recoveryClient);
-  let recoveryErrorMessage = "";
-  try {{
-    await recoveryClient.sendRequest("turn/start", {{
-      threadId: "thread-12345678",
-      input: [{{ type: "text", text: "需要恢复的消息" }}],
-    }});
-  }} catch (error) {{
-    recoveryErrorMessage = error.message;
+      return row;
+    }};
+    state.scheduleRouteUiReady = (threadId) => {{
+      if (config.routeUiNeverReady === true) return;
+      Promise.resolve().then(() => {{
+        ensureSidebarRow(threadId);
+        state.activeRouteThreadId = threadId;
+        state.events.push(`route-ui-ready(${{threadId}})`);
+        targetRouteReady.resolve();
+      }});
+    }};
+    ensureSidebarRow(sourceThreadId);
+    if (config.targetRowInitiallyPresent === true && targetThreadId) {{
+      ensureSidebarRow(targetThreadId);
+    }}
+    window.__codexElvesRecoveryScenarioState = state;
+    const recordPopstate = () => {{
+      state.popstateEvents += 1;
+      state.scheduleRouteUiReady(targetThreadId);
+    }};
+    window.addEventListener("popstate", recordPopstate);
+    const clientMethods = {{
+      getHostId() {{
+        return "local";
+      }},
+      getRecentConversations() {{
+        return [];
+      }},
+      getConversation(threadId) {{
+        return {{ id: threadId, model: "gpt-5.4", cwd: "C:/workspace/recovery" }};
+      }},
+      needsResume() {{
+        return state.ownerState;
+      }},
+      async sendRequest(method, params) {{
+        if (method === "turn/start") {{
+          const text = params.input?.[0]?.text || "";
+          state.turnCalls.push({{
+            method,
+            outerThreadId: Object.prototype.hasOwnProperty.call(params || {{}}, "threadId")
+              ? params.threadId
+              : null,
+            hostId: null,
+            outerCustom: null,
+            innerThreadId: params.threadId,
+            threadId: params.threadId,
+            text,
+            input: params.input,
+            innerCustom: params.innerCustom || null,
+          }});
+          if (params.threadId === sourceThreadId && !state.failedTurnTexts.has(text)) {{
+            if (successfulSourceTexts.has(text)) {{
+              state.events.push(`source-success(${{text}})`);
+              return {{ status: "started", threadId: params.threadId }};
+            }}
+            state.failedTurnTexts.add(text);
+            if (
+              (
+                config.delayedConcurrentRecovery === true ||
+                config.transitiveTurnOrderingRecovery === true
+              ) &&
+              text === config.delayedInitialText
+            ) {{
+              await releaseDelayedInitialFailure.promise;
+              state.events.push(`delayed-source-failure(${{text}})`);
+              delayedInitialFailureThrown.resolve();
+            }}
+            throw new Error(config.turnError || "failed to start turn: agent loop died unexpectedly");
+          }}
+          if (
+            params.threadId === targetThreadId &&
+            targetThreadId !== sourceThreadId &&
+            (
+              globalThis.location.pathname !== `/local/${{targetThreadId}}` ||
+              state.activeRouteThreadId !== targetThreadId
+            )
+          ) {{
+            throw new Error("replay-before-route-ui-ready");
+          }}
+          if (
+            config.delayedConcurrentRecovery === true &&
+            text === config.blockedReplayText
+          ) {{
+            state.events.push(`replay-blocked(${{text}})`);
+            firstReplayStarted.resolve();
+            await releaseFirstReplay.promise;
+          }}
+          state.replayedThreadIds.push(params.threadId);
+          state.replayedTexts.push(text);
+          state.events.push(`replay(${{params.threadId}})`);
+          const replayError = config.replayErrorsByText?.[text] || config.replayError;
+          if (params.threadId === targetThreadId && replayError) {{
+            throw new Error(replayError);
+          }}
+          return {{ status: "started", threadId: params.threadId }};
+        }}
+        if (method === "send-cli-request-for-host" && params?.method === "turn/start") {{
+          const innerParams = params.params || {{}};
+          const text = innerParams.input?.[0]?.text || "";
+          state.turnCalls.push({{
+            method,
+            outerThreadId: Object.prototype.hasOwnProperty.call(params, "threadId")
+              ? params.threadId
+              : null,
+            hostId: params.hostId || null,
+            outerCustom: params.outerCustom || null,
+            innerThreadId: innerParams.threadId,
+            threadId: innerParams.threadId,
+            text,
+            input: innerParams.input,
+            innerCustom: innerParams.innerCustom || null,
+          }});
+          if (innerParams.threadId === sourceThreadId && !state.failedTurnTexts.has(text)) {{
+            state.failedTurnTexts.add(text);
+            throw new Error(config.turnError || "failed to start turn: agent loop died unexpectedly");
+          }}
+          if (
+            innerParams.threadId === targetThreadId &&
+            targetThreadId !== sourceThreadId &&
+            (
+              globalThis.location.pathname !== `/local/${{targetThreadId}}` ||
+              state.activeRouteThreadId !== targetThreadId
+            )
+          ) {{
+            throw new Error("replay-before-route-ui-ready");
+          }}
+          state.replayedThreadIds.push(innerParams.threadId);
+          state.replayedTexts.push(text);
+          state.events.push(`replay(${{innerParams.threadId}})`);
+          if (innerParams.threadId === targetThreadId && config.replayError) {{
+            throw new Error(config.replayError);
+          }}
+          return {{ status: "started", threadId: innerParams.threadId }};
+        }}
+        if (method === "thread/settings/update") {{
+          state.settingsProbeCalls.push({{
+            threadId: params.threadId,
+            model: params.model || "",
+          }});
+          state.events.push(
+            params.threadId === sourceThreadId ? "source probe" : "target probe"
+          );
+          if (
+            params.threadId !== sourceThreadId &&
+            state.targetSettingsFailuresRemaining > 0
+          ) {{
+            state.targetSettingsFailuresRemaining -= 1;
+            throw new Error("failed to update fork target settings");
+          }}
+          if (failedSettingsThreads.has(params.threadId)) {{
+            throw new Error("failed to update thread settings: internal error; agent loop died unexpectedly");
+          }}
+          return {{ status: "updated" }};
+        }}
+        return {{}};
+      }},
+      async resumeConversationForUnavailableOwner(params) {{
+        if (!state.ownerState) {{
+          throw new Error("resume-before-owner-release");
+        }}
+        state.resumeCalls += 1;
+        state.events.push("resume");
+        return {{ conversationId: params.conversationId }};
+      }},
+      async readThread(threadId, options) {{
+        state.readCalls.push(threadId);
+        if (failedReadThreads.has(threadId)) {{
+          throw new Error("failed to read thread content");
+        }}
+        return {{ threadId, includeTurns: options.includeTurns }};
+      }},
+      async unsubscribeInactiveConversation() {{
+        state.unsubscribeCalls += 1;
+        state.ownerState = true;
+        state.events.push("unsubscribe");
+      }},
+      async forkConversationFromLatest(params) {{
+        state.forkCalls += 1;
+        state.forkSourceThreadId = params.sourceConversationId;
+        state.events.push(`fork(${{params.sourceConversationId}})`);
+        return targetThreadId;
+      }},
+    }};
+    let client;
+    if (config.prototypeClass === true) {{
+      class RecoveryClient {{
+        constructor() {{
+          this.bindingToken = config.thisBindingToken;
+        }}
+      }}
+      Object.assign(RecoveryClient.prototype, clientMethods);
+      RecoveryClient.prototype.sendRequest = async function sendRequest(method, params, options) {{
+        const bindingPreserved = this.bindingToken === config.thisBindingToken;
+        state.thisBindingChecks.push(bindingPreserved);
+        if (!bindingPreserved) throw new Error("prototype sendRequest lost this binding");
+        return clientMethods.sendRequest.call(this, method, params, options);
+      }};
+      api.patchAppServerRequestClientClass(RecoveryClient);
+      client = new RecoveryClient();
+    }} else {{
+      client = clientMethods;
+      api.patchAppServerRequestClient(client);
+    }}
+    if (config.preReadSource === true) {{
+      await client.readThread(sourceThreadId, {{ includeTurns: true }});
+    }}
+    const sendTurn = (text) => config.hostWrapped === true
+      ? client.sendRequest("send-cli-request-for-host", {{
+          hostId: "host-preserve-001",
+          outerCustom: {{ keep: "outer-value" }},
+          method: "turn/start",
+          params: {{
+            threadId: sourceThreadId,
+            input: [{{ type: "text", text }}],
+            innerCustom: {{ keep: "inner-value" }},
+          }},
+        }})
+      : client.sendRequest("turn/start", {{
+          threadId: sourceThreadId,
+          input: [{{ type: "text", text }}],
+        }});
+    const turnResults = [];
+    if (config.concurrent === true) {{
+      const pendingTurns = (config.turnTexts || ["消息"]).map(sendTurn);
+      if (config.transitiveTurnOrderingRecovery === true) {{
+        await targetRouteReady.promise;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        state.replayedBeforeDelayedRelease = [...state.replayedTexts];
+        releaseDelayedInitialFailure.resolve();
+        await delayedInitialFailureThrown.promise;
+      }} else if (config.delayedConcurrentRecovery === true) {{
+        await targetRouteReady.promise;
+        releaseDelayedInitialFailure.resolve();
+        await delayedInitialFailureThrown.promise;
+        await firstReplayStarted.promise;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        state.blockedReplayCounts = {{
+          unsubscribeCalls: state.unsubscribeCalls,
+          resumeCalls: state.resumeCalls,
+          forkCalls: state.forkCalls,
+        }};
+        releaseFirstReplay.resolve();
+      }}
+      const results = await Promise.allSettled(pendingTurns);
+      turnResults.push(...results.map((result) => ({{
+        status: result.status,
+        errorMessage: result.status === "rejected"
+          ? result.reason?.message || String(result.reason)
+          : null,
+      }})));
+    }} else {{
+      for (const text of config.turnTexts || ["消息"]) {{
+        try {{
+          await sendTurn(text);
+          turnResults.push({{ status: "fulfilled", errorMessage: null }});
+        }} catch (error) {{
+          turnResults.push({{
+            status: "rejected",
+            errorMessage: error?.message || String(error),
+          }});
+        }}
+      }}
+    }}
+    if (window.__codexElvesRecoveryScenarioState === state) {{
+      delete window.__codexElvesRecoveryScenarioState;
+    }}
+    window.removeEventListener("popstate", recordPopstate);
+    return {{
+      ownerState: state.ownerState,
+      unsubscribeCalls: state.unsubscribeCalls,
+      resumeCalls: state.resumeCalls,
+      settingsProbeCalls: state.settingsProbeCalls,
+      forkCalls: state.forkCalls,
+      forkSourceThreadId: state.forkSourceThreadId || null,
+      readCalls: state.readCalls,
+      turnCalls: state.turnCalls,
+      replayedThreadIds: state.replayedThreadIds,
+      replayedTexts: state.replayedTexts,
+      thisBindingChecks: state.thisBindingChecks,
+      events: state.events,
+      historyPaths: state.historyPaths,
+      popstateEvents: state.popstateEvents,
+      activeRouteThreadId: state.activeRouteThreadId,
+      blockedReplayCounts: state.blockedReplayCounts,
+      replayedBeforeDelayedRelease: state.replayedBeforeDelayedRelease,
+      currentThreadId: globalThis.location.pathname.replace(/^\/local\//, ""),
+      replayedThreadId: state.replayedThreadIds[0] || null,
+      turnResults,
+    }};
   }}
 
-  let unrelatedResumeCalls = 0;
-  const unrelatedClient = {{
-    getHostId() {{
-      return "local";
-    }},
-    getRecentConversations() {{
-      return [];
-    }},
-    async sendRequest(method) {{
-      if (method === "turn/start") throw new Error("network unavailable");
-      return {{}};
-    }},
-    async resumeConversationForUnavailableOwner() {{
-      unrelatedResumeCalls += 1;
-    }},
-  }};
-  api.patchAppServerRequestClient(unrelatedClient);
-  try {{
-    await unrelatedClient.sendRequest("turn/start", {{
-      threadId: "thread-12345678",
-    }});
-  }} catch {{
+  async function runLegacyGenerationBindingScenario() {{
+    const bindingToken = "legacy-generation-binding-token";
+    const state = {{
+      originalCalls: 0,
+      thisBindingChecks: [],
+    }};
+    class LegacyGenerationClient {{
+      constructor() {{
+        this.bindingToken = bindingToken;
+      }}
+    }}
+    const originalSendRequest = async function originalSendRequest() {{
+      state.originalCalls += 1;
+      const bindingPreserved = this?.bindingToken === bindingToken;
+      state.thisBindingChecks.push(bindingPreserved);
+      if (!bindingPreserved) throw new Error("legacy generation lost this binding");
+      return {{ status: "ok" }};
+    }};
+    LegacyGenerationClient.prototype.__codexElvesModelOriginalSendRequest =
+      originalSendRequest;
+    LegacyGenerationClient.prototype.__codexElvesModelRequestPatch = "3";
+    LegacyGenerationClient.prototype.sendRequest =
+      async function legacyGenerationThreeSendRequest(method, params, options) {{
+        return originalSendRequest.call(this, method, params, options);
+      }};
+    const client = new LegacyGenerationClient();
+    api.patchAppServerRequestClient(client);
+    const result = await client.sendRequest("thread/list", {{}});
+    return {{
+      originalCalls: state.originalCalls,
+      thisBindingChecks: state.thisBindingChecks,
+      requestStatus: result.status,
+    }};
   }}
 
-  let duplicateTurnCalls = 0;
-  let duplicateResumeCalls = 0;
-  let releaseDuplicateResume;
-  const duplicateResumeGate = new Promise((resolve) => {{
-    releaseDuplicateResume = resolve;
+  const resumeSuccess = await runRecoveryScenario({{
+    sourceThreadId: "thread-resume-ok-001",
+    targetThreadId: "thread-resume-unused-001",
+    turnTexts: ["原会话恢复后继续发送"],
   }});
-  const duplicateClient = {{
-    getHostId() {{
-      return "local";
+  const forkFallback = await runRecoveryScenario({{
+    sourceThreadId: "thread-fork-source-001",
+    targetThreadId: "thread-fork-target-001",
+    failedSettingsThreads: ["thread-fork-source-001"],
+    turnTexts: ["原 Resume 假成功后 Fork"],
+  }});
+  const commandProbeFailure = await runRecoveryScenario({{
+    sourceThreadId: "thread-command-source-001",
+    targetThreadId: "thread-command-target-001",
+    failedSettingsThreads: ["thread-command-source-001"],
+    preReadSource: true,
+    turnTexts: ["readThread 成功不能掩盖命令探测失败"],
+  }});
+  const unrelatedError = await runRecoveryScenario({{
+    sourceThreadId: "thread-network-source-001",
+    targetThreadId: "thread-network-target-001",
+    turnError: "network unavailable",
+    turnTexts: ["网络错误不恢复"],
+  }});
+  const concurrentFailure = await runRecoveryScenario({{
+    sourceThreadId: "thread-concurrent-source-001",
+    targetThreadId: "thread-concurrent-target-001",
+    failedSettingsThreads: ["thread-concurrent-source-001"],
+    concurrent: true,
+    turnTexts: ["并发失败消息一", "并发失败消息二"],
+  }});
+  const delayedConcurrentFailure = await runRecoveryScenario({{
+    sourceThreadId: "thread-delayed-concurrent-source-001",
+    targetThreadId: "thread-delayed-concurrent-target-001",
+    failedSettingsThreads: ["thread-delayed-concurrent-source-001"],
+    concurrent: true,
+    delayedConcurrentRecovery: true,
+    blockedReplayText: "延迟并发失败消息一",
+    delayedInitialText: "延迟并发失败消息一",
+    turnTexts: ["延迟并发失败消息一", "延迟并发失败消息二"],
+  }});
+  const transitiveTurnOrdering = await runRecoveryScenario({{
+    sourceThreadId: "thread-transitive-order-source-001",
+    targetThreadId: "thread-transitive-order-target-001",
+    failedSettingsThreads: ["thread-transitive-order-source-001"],
+    concurrent: true,
+    transitiveTurnOrderingRecovery: true,
+    delayedInitialText: "传递顺序消息一",
+    successfulSourceTexts: ["传递顺序消息二"],
+    turnTexts: ["传递顺序消息一", "传递顺序消息二", "传递顺序消息三"],
+  }});
+  const replayQueueContinuesAfterFailure = await runRecoveryScenario({{
+    sourceThreadId: "thread-replay-queue-source-001",
+    targetThreadId: "thread-replay-queue-target-001",
+    failedSettingsThreads: ["thread-replay-queue-source-001"],
+    concurrent: true,
+    replayErrorsByText: {{
+      "重放队列失败消息一": "first queued replay failed",
     }},
-    getRecentConversations() {{
-      return [];
-    }},
-    needsResume() {{
-      return true;
-    }},
-    async sendRequest(method) {{
-      if (method === "turn/start") {{
-        duplicateTurnCalls += 1;
-        throw new Error("agent loop died unexpectedly");
-      }}
-      return {{}};
-    }},
-    async resumeConversationForUnavailableOwner() {{
-      duplicateResumeCalls += 1;
-      await duplicateResumeGate;
-    }},
-    async readThread() {{
-      return {{}};
+    turnTexts: ["重放队列失败消息一", "重放队列成功消息二"],
+  }});
+  const forkValidationFailure = await runRecoveryScenario({{
+    sourceThreadId: "thread-fork-validation-source-001",
+    targetThreadId: "thread-fork-validation-target-001",
+    failedSettingsThreads: ["thread-fork-validation-source-001"],
+    targetSettingsFailures: 1,
+    turnTexts: ["Fork 验证失败一", "Fork 验证失败二"],
+  }});
+  const cachedTargetSeed = await runRecoveryScenario({{
+    sourceThreadId: "thread-cached-target-source-001",
+    targetThreadId: "thread-cached-target-old-001",
+    failedSettingsThreads: ["thread-cached-target-source-001"],
+    turnTexts: ["先缓存可用 Fork 目标"],
+  }});
+  const cachedTargetInvalidated = await runRecoveryScenario({{
+    sourceThreadId: "thread-cached-target-source-001",
+    targetThreadId: "thread-cached-target-new-001",
+    failedSettingsThreads: [
+      "thread-cached-target-source-001",
+      "thread-cached-target-old-001",
+    ],
+    turnTexts: ["缓存目标失活后重新 Fork"],
+  }});
+  const replayFailure = await runRecoveryScenario({{
+    sourceThreadId: "thread-replay-source-001",
+    targetThreadId: "thread-replay-target-001",
+    failedSettingsThreads: ["thread-replay-source-001"],
+    replayError: "fixed replay error: agent loop died unexpectedly",
+    turnTexts: ["重放失败消息"],
+  }});
+  const hostWrapped = await runRecoveryScenario({{
+    sourceThreadId: "thread-host-source-001",
+    targetThreadId: "thread-host-target-001",
+    failedSettingsThreads: ["thread-host-source-001"],
+    hostWrapped: true,
+    targetRowInitiallyPresent: true,
+    routeActiveMarker: "data-state",
+    turnTexts: ["host 包装请求"],
+  }});
+  const prototypeThisBinding = await runRecoveryScenario({{
+    sourceThreadId: "thread-prototype-source-001",
+    targetThreadId: "thread-prototype-target-001",
+    failedSettingsThreads: ["thread-prototype-source-001"],
+    prototypeClass: true,
+    thisBindingToken: "prototype-this-token",
+    turnTexts: ["原型包装 this 绑定"],
+  }});
+  const legacyGenerationBinding = await runLegacyGenerationBindingScenario();
+  const urlOnlyNavigationTimeout = await runRecoveryScenario({{
+    sourceThreadId: "thread-url-only-source-001",
+    targetThreadId: "thread-url-only-target-001",
+    failedSettingsThreads: ["thread-url-only-source-001"],
+    routeUiNeverReady: true,
+    turnTexts: ["URL 已变化但 UI 未就绪"],
+  }});
+  const urlOnlyNavigationRetry = await runRecoveryScenario({{
+    sourceThreadId: "thread-url-only-source-001",
+    targetThreadId: "thread-url-only-target-001",
+    failedSettingsThreads: ["thread-url-only-source-001"],
+    turnTexts: ["导航超时后复用已验证目标"],
+  }});
+
+  const draftThreadId = "thread-draft-source-001";
+  setCurrentThreadId(draftThreadId);
+  const draftComposer = {{
+    tagName: "TEXTAREA",
+    value: "原草稿内容",
+    isConnected: true,
+    dispatchEvent() {{}},
+    focus() {{}},
+    getBoundingClientRect() {{
+      return {{ width: 320, height: 80 }};
     }},
   }};
-  api.patchAppServerRequestClient(duplicateClient);
-  const duplicateFailures = Promise.allSettled([
-    duplicateClient.sendRequest("turn/start", {{
-      threadId: "thread-12345678",
-      input: [{{ type: "text", text: "第一条失败消息" }}],
-    }}),
-    duplicateClient.sendRequest("turn/start", {{
-      threadId: "thread-12345678",
-      input: [{{ type: "text", text: "第二条失败消息" }}],
-    }}),
-  ]);
-  while (duplicateResumeCalls === 0) {{
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  }}
-  releaseDuplicateResume();
-  await duplicateFailures;
+  const originalDocumentQuerySelectorAll = document.querySelectorAll;
+  const originalDocumentActiveElement = document.activeElement;
+  document.querySelectorAll = (selector) =>
+    selector === '.ProseMirror, textarea, [contenteditable="true"]'
+      ? [draftComposer]
+      : [];
+  document.activeElement = draftComposer;
+  const draftSnapshot = {{ kind: "value", value: "原草稿内容" }};
+  const sameTextResult = api.recoveryRestoreDraft(draftThreadId, draftSnapshot);
+  draftComposer.value = "用户恢复期间输入的新内容";
+  const otherTextResult = api.recoveryRestoreDraft(draftThreadId, draftSnapshot);
+  const draftBehavior = {{
+    sameTextResult,
+    sameTextPreserved: api.recoveryDraftPreserved(sameTextResult),
+    otherTextResult,
+    otherTextPreserved: api.recoveryDraftPreserved(otherTextResult),
+    otherTextMessage: api.recoveryFailedMessage(otherTextResult),
+  }};
+  document.querySelectorAll = originalDocumentQuerySelectorAll;
+  document.activeElement = originalDocumentActiveElement;
 
   const wrappedContext = api.recoveryRequestContext("send-cli-request-for-host", {{
     method: "turn/start",
@@ -1503,20 +2614,37 @@ async function runSessionRecoveryCases() {{
   return {{
     serializedEvents,
     serializedEventsBeforeRelease,
-    recoveryTurnCalls,
-    recoveryResumeCalls,
-    recoveryReadCalls,
-    recoveryUnsubscribeCalls,
-    recoveryErrorMessage,
-    unrelatedResumeCalls,
-    duplicateTurnCalls,
-    duplicateResumeCalls,
+    resumeSuccess,
+    forkFallback,
+    commandProbeFailure,
+    unrelatedError,
+    concurrentFailure,
+    delayedConcurrentFailure,
+    transitiveTurnOrdering,
+    replayQueueContinuesAfterFailure,
+    forkValidationFailure,
+    cachedTargetSeed,
+    cachedTargetInvalidated,
+    replayFailure,
+    hostWrapped,
+    prototypeThisBinding,
+    legacyGenerationBinding,
+    urlOnlyNavigationTimeout,
+    urlOnlyNavigationRetry,
+    draftBehavior,
     handlesAgentLoopError: api.recoveryShouldHandleError(
       new Error("failed to start turn: agent loop died unexpectedly")
     ),
     handlesUnrelatedError: api.recoveryShouldHandleError(new Error("network unavailable")),
+    handlesMetadataOnlyAgentLoop: api.recoveryShouldHandleError({{
+      message: "network unavailable",
+      requestSnapshot: {{
+        historicalError: "failed to start turn: agent loop died unexpectedly",
+      }},
+    }}),
     wrappedContext,
     trackedResumeCountAfterCompletion: api.recoveryResumeCount(),
+    trackedTransactionCountAfterCompletion: api.recoveryTransactionCount(),
   }};
 }}
 
@@ -2208,7 +3336,7 @@ fn manager_ui_exposes_session_prewarm_performance_controls() {
     assert!(source.contains("codexAppSessionPrewarmConcurrency: 4"));
     assert!(source.contains("codexAppSessionRecoveryEnabled: true"));
     assert!(source.contains("异常会话自动恢复"));
-    assert!(source.contains("不会自动重发消息"));
+    assert!(!source.contains("不会自动重发消息"));
     assert!(styles.contains(".session-recovery-setting"));
     assert!(styles.contains(".session-recovery-setting:has(input:checked)"));
     let recovery_setting = source
@@ -2218,6 +3346,9 @@ fn manager_ui_exposes_session_prewarm_performance_controls() {
         .expect("clickable session recovery setting should exist");
     assert!(recovery_setting.contains("<strong>异常会话自动恢复</strong>"));
     assert!(recovery_setting.contains("<small>"));
+    assert!(recovery_setting.contains("并继续发送本次消息"));
+    assert!(recovery_setting.contains("会尝试恢复原输入并提示后续操作"));
+    assert!(!recovery_setting.contains("不会自动重发消息"));
     assert!(!recovery_setting.contains("session-recovery-setting-switch"));
     assert!(!recovery_setting.contains("已启用"));
     assert!(!recovery_setting.contains("未启用"));
