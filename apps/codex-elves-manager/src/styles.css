@@ -3067,6 +3067,51 @@ body {
   justify-content: flex-end;
 }
 
+.session-recovery-setting {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--card));
+  box-shadow: 0 10px 30px hsl(0 0% 0% / 0.18);
+  padding: 12px 14px;
+  cursor: pointer;
+  transition:
+    border-color var(--motion-normal) var(--motion-ease),
+    box-shadow var(--motion-normal) var(--motion-ease);
+}
+
+.session-recovery-setting:has(input:checked) {
+  border-color: hsl(var(--brand-accent) / 0.48);
+}
+
+.session-recovery-setting:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.session-recovery-setting > input {
+  margin-top: 3px;
+}
+
+.session-recovery-setting-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.session-recovery-setting-copy strong {
+  font-size: 14px;
+}
+
+.session-recovery-setting-copy small {
+  color: hsl(var(--muted-foreground));
+  line-height: 1.4;
+}
+
 .field .field-help {
   color: hsl(var(--muted-foreground));
   font-size: 12px;

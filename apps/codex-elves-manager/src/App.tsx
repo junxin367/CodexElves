@@ -180,6 +180,7 @@ type BackendSettings = {
   codexAppPluginMarketplaceUnlock: boolean;
   codexAppPluginAutoExpand: boolean;
   codexAppSessionDelete: boolean;
+  codexAppSessionRecoveryEnabled: boolean;
   codexAppSessionPrewarmEnabled: boolean;
   codexAppSessionPrewarmFullCount: number;
   codexAppSessionPrewarmContentCount: number;
@@ -788,6 +789,7 @@ const defaultSettings: BackendSettings = {
   codexAppPluginMarketplaceUnlock: true,
   codexAppPluginAutoExpand: true,
   codexAppSessionDelete: true,
+  codexAppSessionRecoveryEnabled: true,
   codexAppSessionPrewarmEnabled: false,
   codexAppSessionPrewarmFullCount: 3,
   codexAppSessionPrewarmContentCount: 3,
@@ -4956,6 +4958,27 @@ function SessionsScreen({
           </div>
         </CardContent>
       </Panel>
+      <label className="session-recovery-setting">
+        <input
+          checked={form.codexAppSessionRecoveryEnabled}
+          disabled={!form.enhancementsEnabled}
+          onChange={(event) => {
+            const next = {
+              ...form,
+              codexAppSessionRecoveryEnabled: event.currentTarget.checked,
+            };
+            onFormChange(next);
+            void actions.saveSettingsValue(next, false);
+          }}
+          type="checkbox"
+        />
+        <span className="session-recovery-setting-copy">
+          <strong>异常会话自动恢复</strong>
+          <small>
+            提交时若检测到 Codex 会话循环意外退出，将重新恢复当前会话；不会自动重发消息，避免重复执行。
+          </small>
+        </span>
+      </label>
       <Panel>
         <CardHead title="本地会话" detail={items.length ? "按更新时间倒序显示；可按项目和时间筛选后批量删除" : "点击刷新会话读取本地数据库"} />
         <CardContent>

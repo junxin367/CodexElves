@@ -307,6 +307,8 @@ pub struct BackendSettings {
     pub codex_app_plugin_auto_expand: bool,
     #[serde(rename = "codexAppSessionDelete", default = "default_true")]
     pub codex_app_session_delete: bool,
+    #[serde(rename = "codexAppSessionRecoveryEnabled", default = "default_true")]
+    pub codex_app_session_recovery_enabled: bool,
     #[serde(rename = "codexAppSessionPrewarmEnabled", default)]
     pub codex_app_session_prewarm_enabled: bool,
     #[serde(
@@ -410,6 +412,7 @@ impl Default for BackendSettings {
             codex_app_plugin_marketplace_unlock: true,
             codex_app_plugin_auto_expand: true,
             codex_app_session_delete: true,
+            codex_app_session_recovery_enabled: true,
             codex_app_session_prewarm_enabled: false,
             codex_app_session_prewarm_full_count: default_session_prewarm_full_count(),
             codex_app_session_prewarm_content_count: default_session_prewarm_content_count(),
@@ -856,6 +859,7 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
     merge_bool_setting(target, source, "codexAppPluginMarketplaceUnlock");
     merge_bool_setting(target, source, "codexAppPluginAutoExpand");
     merge_bool_setting(target, source, "codexAppSessionDelete");
+    merge_bool_setting(target, source, "codexAppSessionRecoveryEnabled");
     merge_bool_setting(target, source, "codexAppSessionPrewarmEnabled");
     if let Some(value) = source
         .get("codexAppSessionPrewarmFullCount")
@@ -1267,6 +1271,7 @@ mod tests {
         assert!(settings.codex_app_plugin_marketplace_unlock);
         assert!(settings.codex_app_plugin_auto_expand);
         assert!(settings.codex_app_session_delete);
+        assert!(settings.codex_app_session_recovery_enabled);
         assert!(!settings.codex_app_session_prewarm_enabled);
         assert_eq!(settings.codex_app_session_prewarm_full_count, 3);
         assert_eq!(settings.codex_app_session_prewarm_content_count, 3);
@@ -1300,6 +1305,7 @@ mod tests {
         assert_eq!(settings.codex_app_path, r"C:\Portable\Codex\app");
         assert_eq!(settings.codex_home_path, r"C:\Portable\CodexHome");
         assert!(settings.provider_sync_enabled);
+        assert!(settings.codex_app_session_recovery_enabled);
         assert!(settings.codex_goals_enabled);
         assert!(settings.cli_wrapper_enabled);
         assert_eq!(settings.cli_wrapper_base_url, "https://example.test");
@@ -1998,6 +2004,7 @@ experimental_bearer_token = "sk-existing""#
             "enhancementsEnabled": false,
             "codexAppPluginEntryUnlock": false,
             "codexAppSessionDelete": false,
+            "codexAppSessionRecoveryEnabled": false,
             "codexAppSessionPrewarmEnabled": false,
             "codexAppSessionPrewarmFullCount": 99,
             "codexAppSessionPrewarmContentCount": 999,
@@ -2019,6 +2026,7 @@ experimental_bearer_token = "sk-existing""#
         assert!(!updated.enhancements_enabled);
         assert!(!updated.codex_app_plugin_entry_unlock);
         assert!(!updated.codex_app_session_delete);
+        assert!(!updated.codex_app_session_recovery_enabled);
         assert!(!updated.codex_app_session_prewarm_enabled);
         assert_eq!(updated.codex_app_session_prewarm_full_count, 4);
         assert_eq!(updated.codex_app_session_prewarm_content_count, 6);

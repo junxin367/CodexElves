@@ -51,7 +51,10 @@
   const codexServiceTierRequestOverrideVersion = "3";
   const codexServiceTierRequestClientPatchRetryBaseMs = 1000;
   const codexServiceTierRequestClientPatchRetryMaxMs = 30000;
-  const codexAppServerModelRequestPatchVersion = "2";
+  const codexAppServerModelRequestPatchVersion = "3";
+  const codexThreadRecoveryOwnerSettleTimeoutMs = 1500;
+  const codexThreadRecoveryResumeWaitTimeoutMs = 15000;
+  const codexThreadRecoveryPollIntervalMs = 50;
   const codexSessionPrewarmVersion = "2";
   const codexSessionPrewarmDefaultConcurrency = 4;
   const codexSessionPrewarmStartupDelayMs = 200;
@@ -930,6 +933,7 @@
       pluginMarketplaceUnlock: true,
       pluginAutoExpand: true,
       sessionDelete: true,
+      sessionRecoveryEnabled: true,
       sessionPrewarmEnabled: false,
       sessionPrewarmFullCount: 3,
       sessionPrewarmContentCount: 3,
@@ -949,6 +953,7 @@
     pluginMarketplaceUnlock: "codexAppPluginMarketplaceUnlock",
     pluginAutoExpand: "codexAppPluginAutoExpand",
     sessionDelete: "codexAppSessionDelete",
+    sessionRecoveryEnabled: "codexAppSessionRecoveryEnabled",
     sessionPrewarmEnabled: "codexAppSessionPrewarmEnabled",
     sessionPrewarmFullCount: "codexAppSessionPrewarmFullCount",
     sessionPrewarmContentCount: "codexAppSessionPrewarmContentCount",
@@ -1001,6 +1006,7 @@
         pluginMarketplaceUnlock: false,
         pluginAutoExpand: false,
         sessionDelete: false,
+        sessionRecoveryEnabled: false,
         sessionPrewarmEnabled: false,
         sessionPrewarmFullCount: 0,
         sessionPrewarmContentCount: 0,
@@ -3935,6 +3941,8 @@
   const codexSessionPrewarmForegroundIds = new Set();
   const codexSessionPrewarmActiveIds = new Set();
   const codexSessionPrewarmRetryCounts = new Map();
+  const codexThreadRecoveryResumePromises = new Map();
+  const codexThreadRecoveryPromises = new Map();
 
   function codexSessionPrewarmSettingsSnapshot() {
     const settings = codexElvesSettings();
@@ -4247,6 +4255,341 @@
       collaborationMode: null,
       showThreadGoalResumeConfirmation: false,
     };
+  }
+
+  function codexThreadRecoveryEnabled() {
+    return codexElvesSettings().sessionRecoveryEnabled === true;
+  }
+
+  function codexThreadRecoveryRequestParams(method, params) {
+    if (
+      String(method || "") === "send-cli-request-for-host" &&
+      params?.params &&
+      typeof params.params === "object"
+    ) {
+      return params.params;
+    }
+    return params && typeof params === "object" ? params : {};
+  }
+
+  function codexThreadRecoveryRequestContext(method, params) {
+    const requestMethod = appServerModelRequestMethod(String(method || ""), params);
+    const requestParams = codexThreadRecoveryRequestParams(method, params);
+    const threadId = validThreadSessionKey(
+      requestParams?.threadId ||
+      requestParams?.conversationId ||
+      params?.threadId ||
+      params?.conversationId ||
+      currentSessionRef().session_id
+    );
+    return {
+      method: requestMethod,
+      params: requestParams,
+      threadId,
+    };
+  }
+
+  function codexThreadRecoveryErrorText(error) {
+    const values = [];
+    const seen = new Set();
+    let current = error;
+    for (let depth = 0; current != null && depth < 5; depth += 1) {
+      if ((typeof current === "object" || typeof current === "function") && seen.has(current)) break;
+      if (typeof current === "object" || typeof current === "function") seen.add(current);
+      if (typeof current === "string") values.push(current);
+      else {
+        if (current?.name) values.push(String(current.name));
+        if (current?.message) values.push(String(current.message));
+        if (current?.code) values.push(String(current.code));
+      }
+      current = current?.cause;
+    }
+    try {
+      const serialized = JSON.stringify(error);
+      if (serialized && serialized !== "{}") values.push(serialized);
+    } catch {
+    }
+    return values.join(" ").toLowerCase();
+  }
+
+  function codexThreadRecoveryShouldHandleError(error) {
+    const text = codexThreadRecoveryErrorText(error);
+    return text.includes("agent loop died unexpectedly") || text.includes("failed to start turn");
+  }
+
+  function codexThreadRecoveryExtractText(params) {
+    const parts = [];
+    const visit = (value, depth = 0) => {
+      if (depth > 5 || value == null) return;
+      if (typeof value === "string") {
+        if (value.trim()) parts.push(value);
+        return;
+      }
+      if (Array.isArray(value)) {
+        value.forEach((item) => visit(item, depth + 1));
+        return;
+      }
+      if (typeof value !== "object") return;
+      const type = String(value.type || "").toLowerCase();
+      if (typeof value.text === "string" && (!type || type.includes("text"))) {
+        visit(value.text, depth + 1);
+      }
+      if (type === "message" || type === "user" || type === "user_message") {
+        visit(value.content, depth + 1);
+      }
+    };
+    visit(params?.input);
+    if (!parts.length) visit(params?.prompt);
+    if (!parts.length) visit(params?.message);
+    return parts.join("\n").trim();
+  }
+
+  function codexThreadRecoveryComposerInput() {
+    const inputs = codexServiceTierComposerInputs(document);
+    const active = document.activeElement;
+    if (active && inputs.includes(active)) return active;
+    return inputs[0] || null;
+  }
+
+  function codexThreadRecoveryDraftSnapshot(params) {
+    const input = codexThreadRecoveryComposerInput();
+    const fallbackText = codexThreadRecoveryExtractText(params);
+    if (!input && !fallbackText) return null;
+    const tagName = String(input?.tagName || "").toLowerCase();
+    if (input && (tagName === "textarea" || tagName === "input")) {
+      const value = String(input.value || "");
+      return {
+        kind: "value",
+        value: value || fallbackText,
+      };
+    }
+    if (input) {
+      const html = String(input.innerHTML || "");
+      const text = String(input.textContent || "");
+      return {
+        kind: "html",
+        html,
+        text: text || fallbackText,
+      };
+    }
+    return {
+      kind: "text",
+      text: fallbackText,
+    };
+  }
+
+  function codexThreadRecoveryInputText(input) {
+    const tagName = String(input?.tagName || "").toLowerCase();
+    if (tagName === "textarea" || tagName === "input") return String(input.value || "").trim();
+    return String(input?.textContent || "").trim();
+  }
+
+  function codexThreadRecoveryDispatchInput(input) {
+    try {
+      input.dispatchEvent?.(new Event("input", { bubbles: true }));
+    } catch {
+    }
+  }
+
+  function codexThreadRecoveryRestoreDraft(threadId, snapshot) {
+    if (!snapshot || validThreadSessionKey(currentSessionRef().session_id) !== threadId) return "different-thread";
+    const input = codexThreadRecoveryComposerInput();
+    if (!input) return "composer-unavailable";
+    if (codexThreadRecoveryInputText(input)) return "composer-not-empty";
+    const tagName = String(input.tagName || "").toLowerCase();
+    if (tagName === "textarea" || tagName === "input") {
+      const value = String(snapshot.value || snapshot.text || "");
+      if (!value) return "empty";
+      try {
+        const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value");
+        if (descriptor?.set) descriptor.set.call(input, value);
+        else input.value = value;
+      } catch {
+        input.value = value;
+      }
+      codexThreadRecoveryDispatchInput(input);
+      input.focus?.();
+      return "restored";
+    }
+    if (snapshot.kind === "html" && snapshot.html) {
+      input.innerHTML = snapshot.html;
+    } else {
+      const text = String(snapshot.text || snapshot.value || "");
+      if (!text) return "empty";
+      input.textContent = text;
+    }
+    codexThreadRecoveryDispatchInput(input);
+    input.focus?.();
+    return "restored";
+  }
+
+  function codexThreadRecoveryTrackResume(threadId, promise) {
+    const id = validThreadSessionKey(threadId);
+    if (!id) return Promise.resolve(promise);
+    const entry = {
+      promise: Promise.resolve(promise),
+    };
+    codexThreadRecoveryResumePromises.set(id, entry);
+    const cleanup = () => {
+      if (codexThreadRecoveryResumePromises.get(id) === entry) {
+        codexThreadRecoveryResumePromises.delete(id);
+      }
+    };
+    entry.promise.then(cleanup, cleanup);
+    return entry.promise;
+  }
+
+  async function codexThreadRecoveryWaitForResume(threadId) {
+    const id = validThreadSessionKey(threadId);
+    const entry = id ? codexThreadRecoveryResumePromises.get(id) : null;
+    if (!entry?.promise) return "idle";
+    const startedAt = Date.now();
+    let timeoutId = 0;
+    const result = await Promise.race([
+      entry.promise.then(
+        () => "completed",
+        () => "failed"
+      ),
+      new Promise((resolve) => {
+        timeoutId = setTimeout(() => resolve("timeout"), codexThreadRecoveryResumeWaitTimeoutMs);
+      }),
+    ]);
+    clearTimeout(timeoutId);
+    sendCodexElvesDiagnostic("session_recovery_resume_wait_completed", {
+      threadId: id,
+      result,
+      durationMs: Date.now() - startedAt,
+    });
+    return result;
+  }
+
+  function codexThreadRecoveryWorkspaceRoots(manager, context) {
+    const roots = Array.isArray(context.params?.workspaceRoots)
+      ? context.params.workspaceRoots
+      : Array.isArray(context.params?.workspace_roots)
+        ? context.params.workspace_roots
+        : [];
+    let cwd = String(context.params?.cwd || "").trim();
+    if (!cwd && typeof manager?.getConversation === "function") {
+      try {
+        cwd = String(manager.getConversation(context.threadId)?.cwd || "").trim();
+      } catch {
+      }
+    }
+    return uniqueValues([...roots, cwd]);
+  }
+
+  function codexThreadRecoveryResumeParams(manager, context) {
+    return {
+      conversationId: context.threadId,
+      model: null,
+      serviceTier: null,
+      reasoningEffort: null,
+      workspaceRoots: codexThreadRecoveryWorkspaceRoots(manager, context),
+      permissions: null,
+      collaborationMode: null,
+      showThreadGoalResumeConfirmation: false,
+    };
+  }
+
+  async function codexThreadRecoveryWaitForOwnerRelease(manager, threadId) {
+    if (typeof manager?.needsResume !== "function") return "unavailable";
+    const deadline = Date.now() + codexThreadRecoveryOwnerSettleTimeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        if (manager.needsResume(threadId)) return "ready";
+      } catch {
+        return "unknown";
+      }
+      await new Promise((resolve) => setTimeout(resolve, codexThreadRecoveryPollIntervalMs));
+    }
+    return "timeout";
+  }
+
+  async function codexThreadRecoveryValidate(manager, threadId) {
+    if (typeof manager?.readThread === "function") {
+      await manager.readThread(threadId, { includeTurns: true });
+      return "content-read";
+    }
+    if (typeof manager?.needsResume === "function") {
+      try {
+        if (manager.needsResume(threadId)) throw new Error("会话恢复后仍需要 Resume");
+        return "resume-confirmed";
+      } catch (error) {
+        if (error?.message === "会话恢复后仍需要 Resume") throw error;
+        return "state-unavailable";
+      }
+    }
+    return "resume-returned";
+  }
+
+  async function codexThreadRecoveryRun(client, context, draft) {
+    const id = validThreadSessionKey(context.threadId);
+    if (!id) return { status: "skipped", reason: "thread-id-unavailable" };
+    const existing = codexThreadRecoveryPromises.get(id);
+    if (existing) return existing;
+    const manager = typeof client?.resumeConversationForUnavailableOwner === "function"
+      ? client
+      : codexSessionPrewarmManager || window.__codexElvesSessionPrewarmManager;
+    if (!manager || typeof manager.resumeConversationForUnavailableOwner !== "function") {
+      sendCodexElvesDiagnostic("session_recovery_failed", {
+        threadId: id,
+        reason: "manager-unavailable",
+      });
+      if (!window.__CODEX_ELVES_TEST_SERVICE_TIER__) {
+        showToast("会话自动恢复失败：未找到可用的会话管理器，请重启 Codex 后重试。", null);
+      }
+      return { status: "failed", reason: "manager-unavailable" };
+    }
+    const startedAt = Date.now();
+    const promise = Promise.resolve().then(async () => {
+      const ownerState = await codexThreadRecoveryWaitForOwnerRelease(manager, id);
+      sendCodexElvesDiagnostic("session_recovery_started", {
+        threadId: id,
+        ownerState,
+      });
+      await manager.resumeConversationForUnavailableOwner(
+        codexThreadRecoveryResumeParams(manager, context)
+      );
+      const validation = await codexThreadRecoveryValidate(manager, id);
+      const draftResult = codexThreadRecoveryRestoreDraft(id, draft);
+      sendCodexElvesDiagnostic("session_recovery_completed", {
+        threadId: id,
+        ownerState,
+        validation,
+        draftResult,
+        durationMs: Date.now() - startedAt,
+      });
+      if (!window.__CODEX_ELVES_TEST_SERVICE_TIER__) {
+        showToast("会话已自动恢复，请检查输入内容后手动重发。", null);
+      }
+      return {
+        status: "recovered",
+        ownerState,
+        validation,
+        draftResult,
+      };
+    }).catch((error) => {
+      sendCodexElvesDiagnostic("session_recovery_failed", {
+        threadId: id,
+        errorName: error?.name || "",
+        errorMessage: error?.message || String(error),
+        durationMs: Date.now() - startedAt,
+      });
+      if (!window.__CODEX_ELVES_TEST_SERVICE_TIER__) {
+        showToast("会话自动恢复失败，请重启 Codex 或 Fork 当前会话后继续。", null);
+      }
+      return {
+        status: "failed",
+        reason: error?.message || String(error),
+      };
+    }).finally(() => {
+      if (codexThreadRecoveryPromises.get(id) === promise) {
+        codexThreadRecoveryPromises.delete(id);
+      }
+    });
+    codexThreadRecoveryPromises.set(id, promise);
+    return promise;
   }
 
   async function hydrateCodexSessionPrewarmContent(manager, task) {
@@ -4739,6 +5082,10 @@
       patchModelArray: (models, allowEmpty = false) => patchModelArray(models, allowEmpty),
       patchModelContainer: (value) => patchModelContainer(value),
       patchAppServerModelResult: (method, result) => patchAppServerModelResult(method, result),
+      patchAppServerRequestClient: (client) => patchAppServerModelRequestClient(client),
+      recoveryRequestContext: (method, params) => codexThreadRecoveryRequestContext(method, params),
+      recoveryShouldHandleError: (error) => codexThreadRecoveryShouldHandleError(error),
+      recoveryResumeCount: () => codexThreadRecoveryResumePromises.size,
       appServerModelPatchBackoffMs: (failureCount) => {
         const previousFailureCount = codexAppServerModelPatchFailureCount;
         codexAppServerModelPatchFailureCount = failureCount;
@@ -5431,16 +5778,50 @@
     return result;
   }
 
+  async function runCodexElvesPatchedAppServerRequest(client, sendRequest, method, params) {
+    const context = codexThreadRecoveryRequestContext(method, params);
+    const recoveryEnabled = codexThreadRecoveryEnabled();
+    const isTurnStart = context.method === "turn/start" && !!context.threadId;
+    const draft = recoveryEnabled && isTurnStart
+      ? codexThreadRecoveryDraftSnapshot(context.params)
+      : null;
+    if (recoveryEnabled && isTurnStart) {
+      await codexThreadRecoveryWaitForResume(context.threadId);
+    }
+    let result;
+    try {
+      const requestPromise = Promise.resolve().then(sendRequest);
+      result = recoveryEnabled && context.method === "thread/resume" && context.threadId
+        ? await codexThreadRecoveryTrackResume(context.threadId, requestPromise)
+        : await requestPromise;
+    } catch (error) {
+      if (recoveryEnabled && isTurnStart && codexThreadRecoveryShouldHandleError(error)) {
+        sendCodexElvesDiagnostic("session_recovery_error_detected", {
+          threadId: context.threadId,
+          errorName: error?.name || "",
+          errorMessage: error?.message || String(error),
+        });
+        await codexThreadRecoveryRun(client, context, draft);
+      }
+      throw error;
+    }
+    if (!codexElvesModelUnlockEnabled()) return result;
+    if (!codexElvesModelNames().length) await loadCodexModelCatalog();
+    return patchAppServerModelResult(context.method, result);
+  }
+
   function patchAppServerModelRequestClient(client) {
     if (!client || typeof client.sendRequest !== "function") return false;
     if (client.__codexElvesModelRequestPatch === codexAppServerModelRequestPatchVersion) return true;
     const originalSendRequest = client.__codexElvesModelOriginalSendRequest || client.sendRequest.bind(client);
     client.__codexElvesModelOriginalSendRequest = originalSendRequest;
     client.sendRequest = async function codexElvesModelPatchedSendRequest(method, params, options) {
-      const result = await originalSendRequest(method, params, options);
-      if (!codexElvesModelUnlockEnabled()) return result;
-      if (!codexElvesModelNames().length) await loadCodexModelCatalog();
-      return patchAppServerModelResult(appServerModelRequestMethod(String(method || ""), params), result);
+      return runCodexElvesPatchedAppServerRequest(
+        client,
+        () => originalSendRequest(method, params, options),
+        method,
+        params
+      );
     };
     client.__codexElvesModelRequestPatch = codexAppServerModelRequestPatchVersion;
     return true;
@@ -5454,10 +5835,12 @@
     const originalSendRequest = prototype.__codexElvesModelOriginalSendRequest || prototype.sendRequest;
     prototype.__codexElvesModelOriginalSendRequest = originalSendRequest;
     prototype.sendRequest = async function codexElvesModelPatchedPrototypeSendRequest(method, params, options) {
-      const result = await originalSendRequest.call(this, method, params, options);
-      if (!codexElvesModelUnlockEnabled()) return result;
-      if (!codexElvesModelNames().length) await loadCodexModelCatalog();
-      return patchAppServerModelResult(appServerModelRequestMethod(String(method || ""), params), result);
+      return runCodexElvesPatchedAppServerRequest(
+        this,
+        () => originalSendRequest.call(this, method, params, options),
+        method,
+        params
+      );
     };
     prototype.__codexElvesModelRequestPatch = codexAppServerModelRequestPatchVersion;
     return true;
@@ -5499,10 +5882,16 @@
 
   function codexAppServerModelPatchNeeds(rediscoverManager = false) {
     const prewarmSettings = codexSessionPrewarmSettingsSnapshot();
+    const recoveryEnabled = codexThreadRecoveryEnabled();
     return {
       manager:
-        prewarmSettings.enabled &&
-        prewarmSettings.fullCount + prewarmSettings.contentCount > 0 &&
+        (
+          recoveryEnabled ||
+          (
+            prewarmSettings.enabled &&
+            prewarmSettings.fullCount + prewarmSettings.contentCount > 0
+          )
+        ) &&
         (rediscoverManager || !codexSessionPrewarmManager),
       modelPatch:
         codexElvesModelUnlockEnabled() &&

@@ -842,6 +842,49 @@ fn injection_script_applies_fast_service_tier_contract() {
 }
 
 #[test]
+fn injection_script_serializes_resume_and_recovers_failed_turn_once() {
+    let script = assets::injection_script(45221);
+    let cases = run_service_tier_contract_harness();
+    let recovery = &cases["sessionRecovery"];
+
+    assert!(script.contains("session_recovery_error_detected"));
+    assert!(script.contains("session_recovery_completed"));
+    assert!(script.contains("session_recovery_failed"));
+    assert!(script.contains("codexThreadRecoveryResumePromises"));
+    assert!(script.contains("codexThreadRecoveryWaitForResume"));
+    assert!(
+        !script.contains("codexThreadRecoveryRun(client, context, draft).then(() => sendRequest")
+    );
+    assert_eq!(
+        recovery["serializedEventsBeforeRelease"],
+        json!(["resume:start"])
+    );
+    assert_eq!(
+        recovery["serializedEvents"],
+        json!(["resume:start", "resume:end", "turn:start"])
+    );
+    assert_eq!(recovery["recoveryTurnCalls"], 1);
+    assert_eq!(recovery["recoveryResumeCalls"], 1);
+    assert_eq!(recovery["recoveryReadCalls"], 1);
+    assert_eq!(recovery["recoveryUnsubscribeCalls"], 0);
+    assert_eq!(
+        recovery["recoveryErrorMessage"],
+        "failed to start turn: agent loop died unexpectedly"
+    );
+    assert_eq!(recovery["unrelatedResumeCalls"], 0);
+    assert_eq!(recovery["duplicateTurnCalls"], 2);
+    assert_eq!(recovery["duplicateResumeCalls"], 1);
+    assert_eq!(recovery["handlesAgentLoopError"], true);
+    assert_eq!(recovery["handlesUnrelatedError"], false);
+    assert_eq!(recovery["wrappedContext"]["method"], "turn/start");
+    assert_eq!(
+        recovery["wrappedContext"]["threadId"],
+        "thread-wrapped-12345678"
+    );
+    assert_eq!(recovery["trackedResumeCountAfterCompletion"], 0);
+}
+
+#[test]
 fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication() {
     let script = assets::injection_script(45221);
     let cases = run_service_tier_contract_harness();
@@ -1025,6 +1068,8 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
 fn injection_script_defaults_session_prewarm_to_disabled() {
     let script = assets::injection_script(45221);
 
+    assert!(script.contains("sessionRecoveryEnabled: true"));
+    assert!(script.contains("sessionRecoveryEnabled: \"codexAppSessionRecoveryEnabled\""));
     assert!(script.contains("sessionPrewarmEnabled: false"));
     assert!(script.contains("sessionPrewarmFullCount: 3"));
     assert!(script.contains("sessionPrewarmContentCount: 3"));
@@ -1290,6 +1335,190 @@ const badgeTooltip = {{
   title: badgeNode.title || "",
   ariaLabel: badgeNode.attributes["aria-label"] || "",
 }};
+
+async function runSessionRecoveryCases() {{
+  const serializedEvents = [];
+  let releaseSerializedResume;
+  const serializedResumeGate = new Promise((resolve) => {{
+    releaseSerializedResume = resolve;
+  }});
+  const serializedClient = {{
+    getHostId() {{
+      return "local";
+    }},
+    getRecentConversations() {{
+      return [];
+    }},
+    async sendRequest(method, params) {{
+      if (method === "thread/resume") {{
+        serializedEvents.push("resume:start");
+        await serializedResumeGate;
+        serializedEvents.push("resume:end");
+        return {{ status: "resumed" }};
+      }}
+      if (method === "turn/start") {{
+        serializedEvents.push("turn:start");
+        return {{ status: "started" }};
+      }}
+      return {{}};
+    }},
+  }};
+  api.patchAppServerRequestClient(serializedClient);
+  const serializedResume = serializedClient.sendRequest("thread/resume", {{
+    conversationId: "thread-12345678",
+  }});
+  await Promise.resolve();
+  const serializedTurn = serializedClient.sendRequest("turn/start", {{
+    threadId: "thread-12345678",
+    input: [{{ type: "text", text: "等待 Resume 后提交" }}],
+  }});
+  await Promise.resolve();
+  const serializedEventsBeforeRelease = [...serializedEvents];
+  releaseSerializedResume();
+  await Promise.all([serializedResume, serializedTurn]);
+
+  let recoveryTurnCalls = 0;
+  let recoveryResumeCalls = 0;
+  let recoveryReadCalls = 0;
+  let recoveryUnsubscribeCalls = 0;
+  const recoveryClient = {{
+    getHostId() {{
+      return "local";
+    }},
+    getRecentConversations() {{
+      return [];
+    }},
+    needsResume() {{
+      return true;
+    }},
+    async sendRequest(method) {{
+      if (method === "turn/start") {{
+        recoveryTurnCalls += 1;
+        throw new Error("failed to start turn: agent loop died unexpectedly");
+      }}
+      return {{}};
+    }},
+    async resumeConversationForUnavailableOwner(params) {{
+      recoveryResumeCalls += 1;
+      return {{ conversationId: params.conversationId }};
+    }},
+    async readThread(threadId, options) {{
+      recoveryReadCalls += 1;
+      return {{ threadId, includeTurns: options.includeTurns }};
+    }},
+    async unsubscribeInactiveConversation() {{
+      recoveryUnsubscribeCalls += 1;
+    }},
+  }};
+  api.patchAppServerRequestClient(recoveryClient);
+  let recoveryErrorMessage = "";
+  try {{
+    await recoveryClient.sendRequest("turn/start", {{
+      threadId: "thread-12345678",
+      input: [{{ type: "text", text: "需要恢复的消息" }}],
+    }});
+  }} catch (error) {{
+    recoveryErrorMessage = error.message;
+  }}
+
+  let unrelatedResumeCalls = 0;
+  const unrelatedClient = {{
+    getHostId() {{
+      return "local";
+    }},
+    getRecentConversations() {{
+      return [];
+    }},
+    async sendRequest(method) {{
+      if (method === "turn/start") throw new Error("network unavailable");
+      return {{}};
+    }},
+    async resumeConversationForUnavailableOwner() {{
+      unrelatedResumeCalls += 1;
+    }},
+  }};
+  api.patchAppServerRequestClient(unrelatedClient);
+  try {{
+    await unrelatedClient.sendRequest("turn/start", {{
+      threadId: "thread-12345678",
+    }});
+  }} catch {{
+  }}
+
+  let duplicateTurnCalls = 0;
+  let duplicateResumeCalls = 0;
+  let releaseDuplicateResume;
+  const duplicateResumeGate = new Promise((resolve) => {{
+    releaseDuplicateResume = resolve;
+  }});
+  const duplicateClient = {{
+    getHostId() {{
+      return "local";
+    }},
+    getRecentConversations() {{
+      return [];
+    }},
+    needsResume() {{
+      return true;
+    }},
+    async sendRequest(method) {{
+      if (method === "turn/start") {{
+        duplicateTurnCalls += 1;
+        throw new Error("agent loop died unexpectedly");
+      }}
+      return {{}};
+    }},
+    async resumeConversationForUnavailableOwner() {{
+      duplicateResumeCalls += 1;
+      await duplicateResumeGate;
+    }},
+    async readThread() {{
+      return {{}};
+    }},
+  }};
+  api.patchAppServerRequestClient(duplicateClient);
+  const duplicateFailures = Promise.allSettled([
+    duplicateClient.sendRequest("turn/start", {{
+      threadId: "thread-12345678",
+      input: [{{ type: "text", text: "第一条失败消息" }}],
+    }}),
+    duplicateClient.sendRequest("turn/start", {{
+      threadId: "thread-12345678",
+      input: [{{ type: "text", text: "第二条失败消息" }}],
+    }}),
+  ]);
+  while (duplicateResumeCalls === 0) {{
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }}
+  releaseDuplicateResume();
+  await duplicateFailures;
+
+  const wrappedContext = api.recoveryRequestContext("send-cli-request-for-host", {{
+    method: "turn/start",
+    params: {{
+      threadId: "thread-wrapped-12345678",
+    }},
+  }});
+
+  return {{
+    serializedEvents,
+    serializedEventsBeforeRelease,
+    recoveryTurnCalls,
+    recoveryResumeCalls,
+    recoveryReadCalls,
+    recoveryUnsubscribeCalls,
+    recoveryErrorMessage,
+    unrelatedResumeCalls,
+    duplicateTurnCalls,
+    duplicateResumeCalls,
+    handlesAgentLoopError: api.recoveryShouldHandleError(
+      new Error("failed to start turn: agent loop died unexpectedly")
+    ),
+    handlesUnrelatedError: api.recoveryShouldHandleError(new Error("network unavailable")),
+    wrappedContext,
+    trackedResumeCountAfterCompletion: api.recoveryResumeCount(),
+  }};
+}}
 
 async function runSessionPrewarmCases() {{
   const prewarmApi = window.__codexElvesSessionPrewarmTest;
@@ -1816,7 +2045,7 @@ async function runSessionPrewarmCases() {{
   }};
 }}
 
-runSessionPrewarmCases().then((sessionPrewarm) => {{
+Promise.all([runSessionRecoveryCases(), runSessionPrewarmCases()]).then(([sessionRecovery, sessionPrewarm]) => {{
   process.stdout.write(JSON.stringify({{
     supportedFast,
     unsupportedModel,
@@ -1836,6 +2065,7 @@ runSessionPrewarmCases().then((sessionPrewarm) => {{
     relayAppServerModelOrder,
     modelPatchBackoffMs,
     badgeTooltip,
+    sessionRecovery,
     sessionPrewarm,
   }}));
 }}).catch((error) => {{
@@ -1976,6 +2206,21 @@ fn manager_ui_exposes_session_prewarm_performance_controls() {
     assert!(source.contains("codexAppSessionPrewarmFullCount: 3"));
     assert!(source.contains("codexAppSessionPrewarmContentCount: 3"));
     assert!(source.contains("codexAppSessionPrewarmConcurrency: 4"));
+    assert!(source.contains("codexAppSessionRecoveryEnabled: true"));
+    assert!(source.contains("异常会话自动恢复"));
+    assert!(source.contains("不会自动重发消息"));
+    assert!(styles.contains(".session-recovery-setting"));
+    assert!(styles.contains(".session-recovery-setting:has(input:checked)"));
+    let recovery_setting = source
+        .split("<label className=\"session-recovery-setting\">")
+        .nth(1)
+        .and_then(|value| value.split("</label>").next())
+        .expect("clickable session recovery setting should exist");
+    assert!(recovery_setting.contains("<strong>异常会话自动恢复</strong>"));
+    assert!(recovery_setting.contains("<small>"));
+    assert!(!recovery_setting.contains("session-recovery-setting-switch"));
+    assert!(!recovery_setting.contains("已启用"));
+    assert!(!recovery_setting.contains("未启用"));
     assert!(source.contains("<Field label=\"并发数\">"));
     assert!(source.contains("1-4，数值越高同时预热的会话越多。"));
     assert!(source.contains("0-6，仅加载会话内容，不获取 Owner。"));
