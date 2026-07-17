@@ -37,7 +37,25 @@ fn bridge_script_defines_expected_globals_and_binding() {
     assert!(script.contains("window.__codexSessionDeleteBridge"));
     assert!(script.contains("window.__codexSessionDeleteResolve"));
     assert!(script.contains("window.__codexSessionDeleteReject"));
+    assert!(script.contains("__codexSessionDeleteBridgeGeneration"));
+    assert!(script.contains("path, payload, generation"));
     assert!(script.contains("codexSessionDeleteV2"));
+}
+
+#[test]
+fn bridge_binding_generation_ignores_stale_message_pumps() {
+    assert!(bridge::bridge_payload_matches_generation(
+        &json!({"id": "1", "generation": "active"}),
+        "active"
+    ));
+    assert!(!bridge::bridge_payload_matches_generation(
+        &json!({"id": "1", "generation": "stale"}),
+        "active"
+    ));
+    assert!(bridge::bridge_payload_matches_generation(
+        &json!({"id": "1"}),
+        "active"
+    ));
 }
 
 #[test]
@@ -683,8 +701,13 @@ fn injection_script_constrains_native_composer_measurement_without_clipping_surf
     let script = assets::injection_script(45221);
 
     assert!(script.contains("codex-elves-service-tier-composer-surface"));
+    assert!(script.contains(".composer-surface-chrome {"));
+    assert!(script.contains("scrollbar-width: none !important;"));
+    assert!(script.contains(".composer-surface-chrome::-webkit-scrollbar"));
     assert!(script.contains("[class*=\"_WorkTriggerMeasurement_\"][aria-hidden=\"true\"]"));
+    assert!(script.contains("[class*=\"_ModelPickerTriggerMeasurement_\"][aria-hidden=\"true\"]"));
     assert!(script.contains("block-size: 0 !important;"));
+    assert!(script.contains("max-block-size: 0 !important;"));
     assert!(script.contains("overflow: clip !important;"));
     assert!(script.contains("cleanupLegacyCodexComposerOverflowGuards"));
     assert!(script.contains("cleanupLegacyCodexComposerOverflowGuards();"));
@@ -694,6 +717,35 @@ fn injection_script_constrains_native_composer_measurement_without_clipping_surf
     assert!(!script.contains(
         "syncCodexServiceTierComposerOverflowGuard(enabled = codexElvesSettings().serviceTierControls)"
     ));
+}
+
+#[test]
+fn injection_script_portals_fast_badge_outside_react_owned_composer() {
+    let script = assets::injection_script(45221);
+
+    assert!(script.contains("data-codex-service-tier-portal"));
+    assert!(script.contains("codexServiceTierPositionPortalBadge"));
+    assert!(script.contains("codexServiceTierPlacementRowRect"));
+    assert!(script.contains("codexServiceTierPortalBadgeLeft"));
+    assert!(script.contains("const controlPadding = 6"));
+    assert!(script.contains("rect.left - cursor >= badgeWidth"));
+    assert!(script.contains(
+        "const left = codexServiceTierPortalBadgeLeft(footer, verticalAnchorRect, badgeWidth, desiredLeft)"
+    ));
+    assert!(script.contains(
+        "const verticalAnchorRect = codexServiceTierPlacementRowRect(placement, footer, beforeRect)"
+    ));
+    assert!(
+        script.contains("verticalAnchorRect.top + (verticalAnchorRect.height - badgeHeight) / 2")
+    );
+    assert!(!script.contains("footerRect.top + (footerRect.height - badgeHeight) / 2"));
+    assert!(script.contains("portalRoot.appendChild(badge)"));
+    assert!(script.contains("codexServiceTierKeepPortalBadgeDuringTransientLayout"));
+    assert!(script.contains("codexServiceTierBadgePlacementGraceMs"));
+    assert!(script.contains("codexServiceTierBadgeRetryMaxAttempts"));
+    assert!(script.contains("codexServiceTierBadgeRetryMaxDelayMs"));
+    assert!(script.contains("scheduleCodexServiceTierBadgeLayout"));
+    assert!(!script.contains("placement.parent.insertBefore(badge, before)"));
 }
 
 #[test]
@@ -852,7 +904,10 @@ fn injection_script_serializes_resume_and_recovers_failed_turn_once() {
     assert!(script.contains("session_recovery_failed"));
     assert!(script.contains("codexThreadRecoveryResumePromises"));
     assert!(script.contains("codexThreadRecoveryWaitForResume"));
-    assert!(script.contains("const codexAppServerModelRequestPatchVersion = \"4\";"));
+    assert!(script.contains("const codexAppServerModelRequestPatchVersion = \"5\";"));
+    assert!(script.contains("codexThreadRecoveryModelFromConversation"));
+    assert!(script.contains("conversation.latestModel"));
+    assert!(script.contains("conversation.latestThreadSettings?.model"));
     assert!(script.contains("function codexThreadRecoveryRouteUiReady(targetThreadId)"));
     assert!(script.contains("codexThreadRecoveryRowHasNativeCurrentState(row)"));
     let navigation_start = script
@@ -1419,7 +1474,7 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
         json!({
             "refreshCalls": 1,
             "runtimeId": 10,
-            "requestPatchVersion": "4"
+            "requestPatchVersion": "5"
         })
     );
     assert_eq!(
@@ -1427,7 +1482,7 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
         json!({
             "refreshCalls": 0,
             "runtimeId": 11,
-            "requestPatchVersion": "3"
+            "requestPatchVersion": "4"
         })
     );
     assert_eq!(
@@ -1655,8 +1710,8 @@ function runScenario(requestPatchVersion) {{
 }}
 
 process.stdout.write(JSON.stringify({{
-  current: runScenario("4"),
-  old: runScenario("3"),
+  current: runScenario("5"),
+  old: runScenario("4"),
   missing: runScenario(null),
 }}));
 "#,
@@ -2152,6 +2207,14 @@ async function runSessionRecoveryCases() {{
         return [];
       }},
       getConversation(threadId) {{
+        if (config.latestModelOnly === true) {{
+          return {{
+            id: threadId,
+            latestModel: "gpt-5.4",
+            latestThreadSettings: {{ model: "gpt-5.4" }},
+            cwd: "C:/workspace/recovery",
+          }};
+        }}
         return {{ id: threadId, model: "gpt-5.4", cwd: "C:/workspace/recovery" }};
       }},
       needsResume() {{
@@ -2452,6 +2515,7 @@ async function runSessionRecoveryCases() {{
   const resumeSuccess = await runRecoveryScenario({{
     sourceThreadId: "thread-resume-ok-001",
     targetThreadId: "thread-resume-unused-001",
+    latestModelOnly: true,
     turnTexts: ["原会话恢复后继续发送"],
   }});
   const forkFallback = await runRecoveryScenario({{

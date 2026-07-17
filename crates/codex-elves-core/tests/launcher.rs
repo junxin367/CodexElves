@@ -1425,6 +1425,7 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
             chat_completions_model_list: String::new(),
             anthropic_model_list: String::new(),
             responses_websocket: Default::default(),
+            responses_websocket_enabled: None,
             user_agent: String::new(),
             system_prompt_override: String::new(),
         }],

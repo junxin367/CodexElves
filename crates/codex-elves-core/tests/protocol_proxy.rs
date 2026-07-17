@@ -4826,7 +4826,12 @@ async fn aggregate_proxy_fails_over_to_next_member_in_same_request() {
         .await
         .unwrap();
 
-    assert_eq!(result.status_code, 200);
+    assert_eq!(
+        result.status_code,
+        200,
+        "aggregate failover response: {}",
+        String::from_utf8_lossy(&body)
+    );
     assert_eq!(body.as_ref(), br#"{"id":"resp_1","object":"response"}"#);
     first_server.await.unwrap();
     second_server.await.unwrap();

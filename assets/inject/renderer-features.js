@@ -25,7 +25,7 @@
   const chatsSortRefreshIntervalMs = 1500;
   const chatsSortDbRefreshIntervalMs = 5000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "22";
+  const codexDeleteStyleVersion = "24";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
   const codexDeleteVersion = "7";
@@ -41,7 +41,10 @@
   const codexThreadServiceTierVersion = "1";
   const codexServiceTierBadgeClass = "codex-service-tier-badge";
   const codexLegacyServiceTierComposerSurfaceClass = "codex-elves-service-tier-composer-surface";
-  const codexServiceTierBadgeVersion = "3";
+  const codexServiceTierBadgeVersion = "6";
+  const codexServiceTierBadgePlacementGraceMs = 1200;
+  const codexServiceTierBadgeRetryMaxAttempts = 8;
+  const codexServiceTierBadgeRetryMaxDelayMs = 1000;
   let codexElvesVersion = window.__CODEX_ELVES_VERSION__ || "unknown";
   const codexElvesBuild = window.__CODEX_ELVES_BUILD__ || "unknown";
   const codexElvesSettingsKey = "codexElvesSettings";
@@ -51,7 +54,7 @@
   const codexServiceTierRequestOverrideVersion = "3";
   const codexServiceTierRequestClientPatchRetryBaseMs = 1000;
   const codexServiceTierRequestClientPatchRetryMaxMs = 30000;
-  const codexAppServerModelRequestPatchVersion = "4";
+  const codexAppServerModelRequestPatchVersion = "5";
   const codexThreadRecoveryOwnerSettleTimeoutMs = 1500;
   const codexThreadRecoveryResumeWaitTimeoutMs = 15000;
   const codexThreadRecoveryNavigationTimeoutMs = 3000;
@@ -85,6 +88,15 @@
   (window.__codexSessionDeleteObservers || []).forEach((observer) => observer.disconnect());
   window.__codexSessionDeleteObservers = [];
   window.__codexSessionDeleteObserverConfigs = [];
+  if (typeof cancelAnimationFrame === "function") {
+    cancelAnimationFrame(window.__codexServiceTierBadgeLayoutRafId);
+  } else {
+    clearTimeout(window.__codexServiceTierBadgeLayoutRafId);
+  }
+  window.__codexServiceTierBadgeLayoutRafId = 0;
+  clearTimeout(window.__codexServiceTierBadgeRetryTimer);
+  window.__codexServiceTierBadgeRetryTimer = null;
+  window.__codexServiceTierBadgeRetryAttempt = 0;
   function cleanupLegacyForcePluginInstallRuntime() {
     window.__codexForcePluginInstallObserver?.disconnect?.();
     window.__codexForcePluginInstallObserver = null;
@@ -864,9 +876,27 @@
       .${codexServiceTierBadgeClass}[data-tier="failed"] { border-color: rgba(248,113,113,.42); background: rgba(248,113,113,.12); color: #fca5a5; }
       .${codexServiceTierBadgeClass}[data-tier="unsupported"] { border-color: rgba(251,191,36,.48); background: rgba(251,191,36,.13); color: #fbbf24; }
       .${codexServiceTierBadgeClass}[data-disabled="true"] { cursor: not-allowed; opacity: .78; }
+      .${codexServiceTierBadgeClass}[data-codex-service-tier-portal="true"] {
+        position: fixed;
+        z-index: 2147483000;
+        margin: 0;
+        pointer-events: auto;
+      }
+      .composer-surface-chrome {
+        scrollbar-width: none !important;
+        -ms-overflow-style: none !important;
+      }
+      .composer-surface-chrome::-webkit-scrollbar {
+        width: 0 !important;
+        height: 0 !important;
+        display: none !important;
+      }
       .composer-surface-chrome [class*="_WorkTriggerMeasurement_"][aria-hidden="true"],
-      [class*="_multilineSurface_"] [class*="_WorkTriggerMeasurement_"][aria-hidden="true"] {
+      [class*="_multilineSurface_"] [class*="_WorkTriggerMeasurement_"][aria-hidden="true"],
+      .composer-surface-chrome [class*="_ModelPickerTriggerMeasurement_"][aria-hidden="true"],
+      [class*="_multilineSurface_"] [class*="_ModelPickerTriggerMeasurement_"][aria-hidden="true"] {
         block-size: 0 !important;
+        max-block-size: 0 !important;
         overflow: clip !important;
       }
       .codex-elves-about { color: #a1a1aa; line-height: 1.5; }
@@ -4612,13 +4642,46 @@
     };
   }
 
+  function codexThreadRecoveryModelFromConversation(conversation) {
+    if (!conversation || typeof conversation !== "object") return "";
+    const candidates = [
+      conversation.model,
+      conversation.modelSlug,
+      conversation.model_slug,
+      conversation.latestModel,
+      conversation.latest_model,
+      conversation.previousTurnModel,
+      conversation.previous_turn_model,
+      conversation.latestThreadSettings?.model,
+      conversation.latestThreadSettings?.modelSlug,
+      conversation.latest_thread_settings?.model,
+      conversation.thread?.model,
+    ];
+    return candidates
+      .map((value) => String(value || "").trim())
+      .find(Boolean) || "";
+  }
+
+  function codexThreadRecoveryModel(manager, threadId, context) {
+    const requestModel = [
+      context.params?.model,
+      context.params?.modelSlug,
+      context.params?.model_slug,
+      context.params?.requestModel,
+      context.params?.request_model,
+    ].map((value) => String(value || "").trim()).find(Boolean);
+    if (requestModel) return requestModel;
+    let conversation = null;
+    try {
+      conversation = manager.getConversation?.(threadId) || null;
+    } catch {
+    }
+    return codexThreadRecoveryModelFromConversation(conversation) ||
+      String(codexModelCatalog.model || codexModelCatalog.default_model || "").trim();
+  }
+
   async function codexThreadRecoveryValidate(manager, threadId, context) {
-    const model = String(
-      context.params?.model ||
-      manager.getConversation?.(threadId)?.model ||
-      manager.getConversation?.(threadId)?.modelSlug ||
-      ""
-    ).trim();
+    const model = codexThreadRecoveryModel(manager, threadId, context);
     if (!model) {
       return codexThreadRecoveryValidationFailed("model-unavailable");
     }
@@ -9350,6 +9413,166 @@
     return codexServiceTierLooksLikeComposerFooter(footer) ? footer : null;
   }
 
+  function codexServiceTierPlacementRowRect(placement, footer, beforeRect = null) {
+    if (beforeRect) return beforeRect;
+    const footerRect = footer.getBoundingClientRect();
+    const parent = placement?.parent;
+    if (parent instanceof HTMLElement) {
+      const parentRect = parent.getBoundingClientRect();
+      const overlapsFooter = parentRect.bottom > footerRect.top && parentRect.top < footerRect.bottom;
+      if (overlapsFooter && parentRect.height > 0 && parentRect.height <= 48) return parentRect;
+    }
+    const bottomControl = Array.from(footer.querySelectorAll("button, [role='button']"))
+      .filter(codexServiceTierBadgeVisibleElement)
+      .sort((left, right) => {
+        const leftRect = left.getBoundingClientRect();
+        const rightRect = right.getBoundingClientRect();
+        return (rightRect.bottom - leftRect.bottom) || (leftRect.left - rightRect.left);
+      })[0];
+    return bottomControl?.getBoundingClientRect() || footerRect;
+  }
+
+  function codexServiceTierPortalBadgeLeft(footer, rowRect, badgeWidth, desiredLeft) {
+    const footerRect = footer.getBoundingClientRect();
+    const contentLeft = footerRect.left + 4;
+    const contentRight = footerRect.right - 4;
+    const maxLeft = Math.max(contentLeft, contentRight - badgeWidth);
+    const preferredLeft = Number.isFinite(desiredLeft)
+      ? Math.min(maxLeft, Math.max(contentLeft, desiredLeft))
+      : contentLeft;
+    const rowCenter = rowRect.top + rowRect.height / 2;
+    const controlPadding = 6;
+    const occupied = [];
+    Array.from(footer.querySelectorAll("button, [role='button']"))
+      .filter(codexServiceTierBadgeVisibleElement)
+      .map((control) => control.getBoundingClientRect())
+      .filter((rect) => rowCenter >= rect.top - 2 && rowCenter <= rect.bottom + 2)
+      .map((rect) => ({
+        left: Math.max(contentLeft, rect.left - controlPadding),
+        right: Math.min(contentRight, rect.right + controlPadding),
+      }))
+      .filter((rect) => rect.right > rect.left)
+      .sort((left, right) => left.left - right.left)
+      .forEach((rect) => {
+        const previous = occupied[occupied.length - 1];
+        if (previous && rect.left <= previous.right) {
+          previous.right = Math.max(previous.right, rect.right);
+        } else {
+          occupied.push(rect);
+        }
+      });
+    const gaps = [];
+    let cursor = contentLeft;
+    occupied.forEach((rect) => {
+      if (rect.left - cursor >= badgeWidth) gaps.push({ left: cursor, right: rect.left });
+      cursor = Math.max(cursor, rect.right);
+    });
+    if (contentRight - cursor >= badgeWidth) gaps.push({ left: cursor, right: contentRight });
+    if (!gaps.length) return preferredLeft;
+    return gaps
+      .map((gap) => {
+        const left = Math.min(gap.right - badgeWidth, Math.max(gap.left, preferredLeft));
+        return { left, distance: Math.abs(left - preferredLeft) };
+      })
+      .sort((left, right) => (left.distance - right.distance) || (left.left - right.left))[0].left;
+  }
+
+  function codexServiceTierClearBadgeRetry(resetAttempt = false) {
+    clearTimeout(window.__codexServiceTierBadgeRetryTimer);
+    window.__codexServiceTierBadgeRetryTimer = null;
+    if (resetAttempt) window.__codexServiceTierBadgeRetryAttempt = 0;
+  }
+
+  function scheduleCodexServiceTierBadgeLayout() {
+    if (typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(window.__codexServiceTierBadgeLayoutRafId);
+    } else {
+      clearTimeout(window.__codexServiceTierBadgeLayoutRafId);
+    }
+    const scheduleFrame = typeof requestAnimationFrame === "function"
+      ? requestAnimationFrame
+      : (callback) => setTimeout(callback, 16);
+    window.__codexServiceTierBadgeLayoutRafId = scheduleFrame(() => {
+      window.__codexServiceTierBadgeLayoutRafId = 0;
+      installCodexServiceTierBadge();
+    });
+  }
+
+  function scheduleCodexServiceTierBadgeRetry(delayMs = 80) {
+    codexServiceTierClearBadgeRetry();
+    const attempt = Number(window.__codexServiceTierBadgeRetryAttempt || 0) + 1;
+    window.__codexServiceTierBadgeRetryAttempt = attempt;
+    if (attempt > codexServiceTierBadgeRetryMaxAttempts) return;
+    const retryDelayMs = Math.min(
+      codexServiceTierBadgeRetryMaxDelayMs,
+      Math.max(delayMs, 80 * (2 ** Math.min(attempt - 1, 4)))
+    );
+    window.__codexServiceTierBadgeRetryTimer = setTimeout(() => {
+      window.__codexServiceTierBadgeRetryTimer = null;
+      installCodexServiceTierBadge();
+    }, retryDelayMs);
+  }
+
+  function codexServiceTierHasVisibleComposerInput() {
+    return codexServiceTierComposerInputs(document).length > 0;
+  }
+
+  function codexServiceTierPositionPortalBadge(badge, placement) {
+    const footer = codexServiceTierPlacementFooter(placement);
+    const portalRoot = document.body || document.documentElement;
+    if (!badge || !footer || !portalRoot) return false;
+    badge.dataset.codexServiceTierPortal = "true";
+    badge.style.visibility = "hidden";
+    if (badge.parentElement !== portalRoot) portalRoot.appendChild(badge);
+    const parentRect = placement.parent.getBoundingClientRect();
+    const before = placement.before?.parentElement === placement.parent ? placement.before : null;
+    const beforeRect = before && codexServiceTierBadgeVisibleElement(before)
+      ? before.getBoundingClientRect()
+      : null;
+    const badgeRect = badge.getBoundingClientRect();
+    const badgeWidth = badgeRect.width || 54;
+    const badgeHeight = badgeRect.height || 24;
+    let desiredLeft;
+    if (beforeRect) {
+      desiredLeft = beforeRect.left - badgeWidth - 6;
+    } else if (parentRect.width >= badgeWidth) {
+      desiredLeft = parentRect.left + (parentRect.width - badgeWidth) / 2;
+    } else {
+      const previous = placement.parent.previousElementSibling;
+      const previousRect = previous instanceof HTMLElement && codexServiceTierBadgeVisibleElement(previous)
+        ? previous.getBoundingClientRect()
+        : null;
+      desiredLeft = previousRect ? previousRect.right + 6 : parentRect.left;
+    }
+    const verticalAnchorRect = codexServiceTierPlacementRowRect(placement, footer, beforeRect);
+    const left = codexServiceTierPortalBadgeLeft(footer, verticalAnchorRect, badgeWidth, desiredLeft);
+    const top = verticalAnchorRect.top + (verticalAnchorRect.height - badgeHeight) / 2;
+    badge.style.left = `${Math.round(left)}px`;
+    badge.style.top = `${Math.round(top)}px`;
+    badge.style.visibility = "visible";
+    badge.dataset.codexServiceTierPlacementValidAt = String(Date.now());
+    return true;
+  }
+
+  function codexServiceTierKeepPortalBadgeDuringTransientLayout(existingBadges) {
+    const badge = existingBadges.find((node) => node.dataset.codexServiceTierPortal === "true");
+    const lastValidAt = Number(badge?.dataset.codexServiceTierPlacementValidAt || 0);
+    if (
+      badge &&
+      codexServiceTierHasVisibleComposerInput() &&
+      lastValidAt > 0 &&
+      Date.now() - lastValidAt <= codexServiceTierBadgePlacementGraceMs
+    ) {
+      scheduleCodexServiceTierBadgeRetry();
+      return true;
+    }
+    existingBadges.forEach((node) => {
+      node.style.visibility = "hidden";
+    });
+    if (codexServiceTierHasVisibleComposerInput()) scheduleCodexServiceTierBadgeRetry(160);
+    return false;
+  }
+
   function wireCodexServiceTierBadge(badge) {
     if (!badge || badge.dataset.codexServiceTierBadgeWired === codexServiceTierBadgeVersion) return;
     badge.dataset.codexServiceTierBadgeWired = codexServiceTierBadgeVersion;
@@ -9379,10 +9602,11 @@
     const placement = composer ? codexServiceTierBadgePlacement(composer) : null;
     const existingBadges = Array.from(document.querySelectorAll(`[data-codex-service-tier-badge="true"]`));
     if (!composer || !placement?.parent || !codexServiceTierPlacementFooter(placement)) {
-      existingBadges.forEach((badge) => badge.remove());
+      codexServiceTierKeepPortalBadgeDuringTransientLayout(existingBadges);
       return;
     }
-    let badge = existingBadges.find((node) => node.closest?.(".composer-footer") || node.closest?.("button") == null) || existingBadges[0];
+    codexServiceTierClearBadgeRetry(true);
+    let badge = existingBadges.find((node) => node.dataset.codexServiceTierPortal === "true") || existingBadges[0];
     existingBadges.forEach((node) => {
       if (node !== badge) node.remove();
     });
@@ -9394,14 +9618,18 @@
       badge.dataset.codexServiceTierBadgeVersion = codexServiceTierBadgeVersion;
     }
     wireCodexServiceTierBadge(badge);
-    const before = placement.before?.parentElement === placement.parent ? placement.before : null;
-    if (badge.parentElement !== placement.parent || badge.nextSibling !== before) {
-      placement.parent.insertBefore(badge, before);
-    }
+    codexServiceTierPositionPortalBadge(badge, placement);
     refreshCodexServiceTierBadges();
   }
 
   function removeCodexServiceTierBadges() {
+    codexServiceTierClearBadgeRetry(true);
+    if (typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(window.__codexServiceTierBadgeLayoutRafId);
+    } else {
+      clearTimeout(window.__codexServiceTierBadgeLayoutRafId);
+    }
+    window.__codexServiceTierBadgeLayoutRafId = 0;
     document.querySelectorAll(`[data-codex-service-tier-badge="true"]`).forEach((badge) => badge.remove());
   }
 
@@ -10009,9 +10237,13 @@
       syncActionGroupsLayout();
       updateFloatingCodexElvesMenuPosition(document.getElementById(codexElvesMenuId));
       runScanStep(refreshConversationView);
+      scheduleCodexServiceTierBadgeLayout();
     });
   };
   window.addEventListener("resize", window.__codexElvesResizeHandler);
+  window.removeEventListener("scroll", window.__codexServiceTierBadgeScrollHandler, true);
+  window.__codexServiceTierBadgeScrollHandler = scheduleCodexServiceTierBadgeLayout;
+  window.addEventListener("scroll", window.__codexServiceTierBadgeScrollHandler, true);
   window.__codexSessionDeleteObserver?.disconnect();
   window.__codexSessionDeleteObserver = null;
   installScanObservers();

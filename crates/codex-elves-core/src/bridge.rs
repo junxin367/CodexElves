@@ -23,11 +23,17 @@ pub type BridgeHandler = Arc<
 >;
 
 static NEXT_MESSAGE_ID: AtomicU64 = AtomicU64::new(100);
+static NEXT_BRIDGE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 pub fn build_bridge_script(binding_name: &str) -> String {
+    build_bridge_script_with_generation(binding_name, "legacy")
+}
+
+pub fn build_bridge_script_with_generation(binding_name: &str, generation: &str) -> String {
     format!(
         r#"
 (() => {{
+  window.__codexSessionDeleteBridgeGeneration = {generation};
   window.__codexSessionDeleteCallbacks = new Map();
   window.__codexSessionDeleteSeq = 0;
   window.__codexSessionDeleteResolve = (id, result) => {{
@@ -45,10 +51,12 @@ pub fn build_bridge_script(binding_name: &str) -> String {
   window.__codexSessionDeleteBridge = (path, payload) => new Promise((resolve) => {{
     const id = String(++window.__codexSessionDeleteSeq);
     window.__codexSessionDeleteCallbacks.set(id, {{ resolve }});
-    window.{binding_name}(JSON.stringify({{ id, path, payload }}));
+    const generation = window.__codexSessionDeleteBridgeGeneration;
+    window.{binding_name}(JSON.stringify({{ id, path, payload, generation }}));
   }});
 }})();
-"#
+"#,
+        generation = serde_json::to_string(generation).expect("bridge generation should serialize")
     )
 }
 
@@ -111,7 +119,10 @@ pub async fn install_bridge(
     new_document_scripts: &[String],
 ) -> anyhow::Result<()> {
     let socket = connect_cdp_websocket(websocket_url).await?;
-    let mut session = CdpSession::new(socket).with_handler(handler);
+    let generation = next_bridge_generation();
+    let mut session = CdpSession::new(socket)
+        .with_handler(handler)
+        .with_bridge_generation(generation.clone());
 
     session.send_command(1, "Runtime.enable", json!({})).await?;
     session
@@ -121,7 +132,7 @@ pub async fn install_bridge(
         .send_command(3, "Runtime.addBinding", json!({ "name": binding_name }))
         .await?;
 
-    let bridge_script = build_bridge_script(binding_name);
+    let bridge_script = build_bridge_script_with_generation(binding_name, &generation);
     session
         .send_command(
             4,
@@ -223,6 +234,7 @@ struct CdpSession<S> {
     responses: HashMap<u64, Value>,
     binding_calls: VecDeque<Value>,
     handler: Option<BridgeHandler>,
+    bridge_generation: Option<String>,
 }
 
 impl<S> CdpSession<S>
@@ -239,11 +251,17 @@ where
             responses: HashMap::new(),
             binding_calls: VecDeque::new(),
             handler: None,
+            bridge_generation: None,
         }
     }
 
     fn with_handler(mut self, handler: BridgeHandler) -> Self {
         self.handler = Some(handler);
+        self
+    }
+
+    fn with_bridge_generation(mut self, generation: String) -> Self {
+        self.bridge_generation = Some(generation);
         self
     }
 
@@ -382,6 +400,12 @@ where
         handler: &BridgeHandler,
         parsed: Value,
     ) -> anyhow::Result<()> {
+        if !bridge_payload_matches_generation(
+            &parsed,
+            self.bridge_generation.as_deref().unwrap_or_default(),
+        ) {
+            return Ok(());
+        }
         let Some(request_id) = parsed.get("id").and_then(Value::as_str) else {
             return Ok(());
         };
@@ -545,4 +569,20 @@ fn extract_string_field(input: &str, field: &str) -> Option<String> {
 
 fn next_message_id() -> u64 {
     NEXT_MESSAGE_ID.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+fn next_bridge_generation() -> String {
+    format!(
+        "{}-{}",
+        std::process::id(),
+        NEXT_BRIDGE_GENERATION.fetch_add(1, Ordering::Relaxed) + 1
+    )
+}
+
+#[doc(hidden)]
+pub fn bridge_payload_matches_generation(payload: &Value, expected: &str) -> bool {
+    payload
+        .get("generation")
+        .and_then(Value::as_str)
+        .is_none_or(|generation| generation == expected)
 }
