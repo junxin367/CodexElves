@@ -33,6 +33,11 @@ pub struct VersionPayload {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct LayeredCompactionDefaultPromptPayload {
+    pub prompt: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PathState {
     pub status: String,
     pub path: Option<String>,
@@ -405,6 +410,16 @@ pub fn backend_version() -> CommandResult<VersionPayload> {
         "后端版本已读取。",
         VersionPayload {
             version: codex_elves_core::version::VERSION.to_string(),
+        },
+    )
+}
+
+#[tauri::command]
+pub fn layered_compaction_default_prompt() -> CommandResult<LayeredCompactionDefaultPromptPayload> {
+    ok(
+        "默认压缩提示词已读取。",
+        LayeredCompactionDefaultPromptPayload {
+            prompt: codex_elves_core::layered_compaction::DEFAULT_COMPACTION_PROMPT.to_string(),
         },
     )
 }

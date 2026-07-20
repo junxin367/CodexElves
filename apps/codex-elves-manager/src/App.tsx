@@ -48,6 +48,7 @@ import {
   Settings,
   ShieldCheck,
   ShieldAlert,
+  Shrink,
   Sparkles,
   Sun,
   TestTube,
@@ -197,6 +198,9 @@ type BackendSettings = {
   codexGoalsEnabled: boolean;
   gptReasoningContinuation: boolean;
   gptReasoningContinuationMaxRounds: number;
+  layeredCompactionEnabled: boolean;
+  layeredCompactionRetainTokens: number;
+  layeredCompactionPromptOverride: string;
   launchMode: LaunchMode;
   relayBaseUrl: string;
   relayApiKey: string;
@@ -542,6 +546,10 @@ type LocalProxyLogEntry = {
   reasoningSource?: string | null;
   continueThinkingTriggered?: boolean | null;
   continueThinkingRounds?: number | null;
+  layeredCompactionTriggered?: boolean | null;
+  layeredCompactionRetainTokens?: number | null;
+  layeredCompactionRetainedItems?: number | null;
+  layeredCompactionRetainedChars?: number | null;
   serviceTier?: string | null;
   relayId?: string | null;
   relayName?: string | null;
@@ -564,6 +572,7 @@ type LocalProxyLogDetail = LocalProxyLogEntry & {
   continueThinkingRequestBody?: string | null;
   continueThinkingBeforeResponseBody?: string | null;
   continueThinkingAfterResponseBody?: string | null;
+  layeredCompactionBeforeResponseBody?: string | null;
 };
 
 type LocalProxyLogsResult = CommandResult<{
@@ -579,6 +588,10 @@ type LocalProxyLogDetailResult = CommandResult<{
 
 type DiagnosticsResult = CommandResult<{
   report: string;
+}>;
+
+type LayeredCompactionDefaultPromptResult = CommandResult<{
+  prompt: string;
 }>;
 
 type WatcherResult = CommandResult<{
@@ -806,6 +819,9 @@ const defaultSettings: BackendSettings = {
   codexGoalsEnabled: false,
   gptReasoningContinuation: false,
   gptReasoningContinuationMaxRounds: 3,
+  layeredCompactionEnabled: false,
+  layeredCompactionRetainTokens: 10000,
+  layeredCompactionPromptOverride: "",
   launchMode: "patch",
   relayBaseUrl: "",
   relayApiKey: "",
@@ -3146,6 +3162,16 @@ export function App() {
       enableWatcher: () => watcherAction("enable_watcher"),
       disableWatcher: () => watcherAction("disable_watcher"),
       toggleTheme: () => setTheme((current) => (current === "dark" ? "light" : "dark")),
+      loadLayeredCompactionDefaultPrompt: async () => {
+        try {
+          const result = await call<LayeredCompactionDefaultPromptResult>(
+            "layered_compaction_default_prompt",
+          );
+          return result.status === "ok" ? result.prompt : "";
+        } catch {
+          return "";
+        }
+      },
     }),
     [route, launchForm, settingsForm, settings, removeOwnedData, update, logs, localProxyDetail, diagnostics, theme, relayFiles, localSessions, pluginCacheInfos, remotePluginMarketplaceProgress, selectedProviderSyncTarget, envConflicts, ccsProviders],
   );
@@ -3447,6 +3473,7 @@ type Actions = {
   disableWatcher: () => Promise<void>;
   toggleTheme: () => void;
   checkHealth: () => Promise<void>;
+  loadLayeredCompactionDefaultPrompt: () => Promise<string>;
 };
 
 function OverviewScreen({
@@ -3796,6 +3823,20 @@ function LocalProxyScreen({
                             ) : null}
                           </span>
                         ) : null}
+                        {entry.layeredCompactionTriggered ? (
+                          <span
+                            aria-label={formatLayeredCompactionTitle(entry)}
+                            className="proxy-layered-compaction-badge"
+                            data-tooltip={formatLayeredCompactionTitle(entry)}
+                          >
+                            <Shrink aria-hidden="true" className="proxy-layered-compaction-icon" />
+                            {typeof entry.layeredCompactionRetainedItems === "number" ? (
+                              <span className="proxy-continue-thinking-count">
+                                {entry.layeredCompactionRetainedItems}
+                              </span>
+                            ) : null}
+                          </span>
+                        ) : null}
                       </small>
                     </span>
                     <span className={localProxyStatusCodeClass(entry)}>
@@ -3899,19 +3940,23 @@ function LocalProxyLogDetailDialog({
   onCopyResponse: (text?: string) => Promise<void>;
 }) {
   const [requestView, setRequestView] = useState<"full" | "continue">("full");
-  const [responseView, setResponseView] = useState<"full" | "before" | "after">("full");
+  const [responseView, setResponseView] = useState<"full" | "before" | "after" | "precompaction">("full");
   const continueRequestBody = entry.continueThinkingRequestBody?.trim() || "";
   const continueBeforeBody = entry.continueThinkingBeforeResponseBody?.trim() || "";
   const continueAfterBody = entry.continueThinkingAfterResponseBody?.trim() || "";
   const hasContinueThinkingRequest = entry.continueThinkingTriggered && continueRequestBody;
   const hasContinueThinkingViews = entry.continueThinkingTriggered && (continueBeforeBody || continueAfterBody);
+  const layeredCompactionBeforeBody = entry.layeredCompactionBeforeResponseBody?.trim() || "";
+  const hasLayeredCompactionView = entry.layeredCompactionTriggered && layeredCompactionBeforeBody;
   const requestViewBody = requestView === "continue" ? continueRequestBody : entry.requestBody;
   const responseViewBody =
     responseView === "before"
       ? continueBeforeBody
       : responseView === "after"
         ? continueAfterBody
-        : entry.responseBody;
+        : responseView === "precompaction"
+          ? layeredCompactionBeforeBody
+          : entry.responseBody;
   const formattedRequestViewBody = formatProxyBody(requestViewBody);
   const formattedResponseViewBody = formatProxyResponseBody(responseViewBody);
 
@@ -3961,6 +4006,23 @@ function LocalProxyLogDetailDialog({
             {entry.responseTruncated ? <span>返回内容已截断</span> : null}
             {entry.error ? <span>{entry.error}</span> : null}
           </div>
+          {entry.layeredCompactionTriggered ? (
+            <div className="proxy-detail-meta proxy-layered-compaction-meta">
+              <span>
+                <Shrink className="h-4 w-4" />
+                已触发分层压缩
+              </span>
+              {typeof entry.layeredCompactionRetainedItems === "number" ? (
+                <span>保留 {entry.layeredCompactionRetainedItems} 条原始记录</span>
+              ) : null}
+              {typeof entry.layeredCompactionRetainedChars === "number" ? (
+                <span>约 {Math.round(entry.layeredCompactionRetainedChars / 4).toLocaleString()} token</span>
+              ) : null}
+              {typeof entry.layeredCompactionRetainTokens === "number" ? (
+                <span>预算上限 {entry.layeredCompactionRetainTokens.toLocaleString()} token</span>
+              ) : null}
+            </div>
+          ) : null}
         </div>
         <div className="proxy-log-detail">
           <div className="proxy-detail-grid">
@@ -3990,6 +4052,32 @@ function LocalProxyLogDetailDialog({
                       variant="secondary"
                     >
                       续接后
+                    </Button>
+                  </span>
+                ) : null}
+                {hasLayeredCompactionView ? (
+                  <span className="proxy-detail-response-tabs" aria-label="压缩返回视图">
+                    <Button
+                      aria-pressed={responseView === "full"}
+                      className={`proxy-detail-copy-button proxy-detail-view-button ${responseView === "full" ? "active" : ""}`}
+                      onClick={() => setResponseView("full")}
+                      size="sm"
+                      title="查看分层压缩注入后的最终返回"
+                      type="button"
+                      variant="secondary"
+                    >
+                      压缩后
+                    </Button>
+                    <Button
+                      aria-pressed={responseView === "precompaction"}
+                      className={`proxy-detail-copy-button proxy-detail-view-button ${responseView === "precompaction" ? "active" : ""}`}
+                      onClick={() => setResponseView("precompaction")}
+                      size="sm"
+                      title="查看上游返回的原始纯摘要（分层压缩注入前）"
+                      type="button"
+                      variant="secondary"
+                    >
+                      压缩前（纯摘要）
                     </Button>
                   </span>
                 ) : null}
@@ -4738,6 +4826,15 @@ function SessionsScreen({
   const [startMs, setStartMs] = useState<number | null>(null);
   const [endMs, setEndMs] = useState<number | null>(null);
   const [batchDeleting, setBatchDeleting] = useState(false);
+  const [localSessionPage, setLocalSessionPage] = useState(1);
+  const [layeredCompactionRetainTokensInput, setLayeredCompactionRetainTokensInput] = useState(
+    () => String(form.layeredCompactionRetainTokens),
+  );
+  const [compactionPromptOpen, setCompactionPromptOpen] = useState(false);
+
+  useEffect(() => {
+    setLayeredCompactionRetainTokensInput(String(form.layeredCompactionRetainTokens));
+  }, [form.layeredCompactionRetainTokens]);
 
   // 项目（cwd）筛选选项：去重后的项目路径列表，附带会话数量
   const projectOptions = useMemo(() => {
@@ -4765,6 +4862,18 @@ function SessionsScreen({
     });
   }, [items, projectFilter, startMs, endCutoffMs]);
 
+  const localSessionPageSize = 100;
+  const localSessionTotalPages = Math.max(1, Math.ceil(filteredItems.length / localSessionPageSize));
+  const currentLocalSessionPage = Math.min(localSessionPage, localSessionTotalPages);
+  const visibleSessionItems = useMemo(() => {
+    const start = (currentLocalSessionPage - 1) * localSessionPageSize;
+    return filteredItems.slice(start, start + localSessionPageSize);
+  }, [currentLocalSessionPage, filteredItems]);
+
+  useEffect(() => {
+    setLocalSessionPage((current) => Math.min(Math.max(current, 1), localSessionTotalPages));
+  }, [localSessionTotalPages]);
+
   const hasFilter = Boolean(projectFilter) || hasTimeFilter;
   const batchDeleteDisabled = !hasFilter || batchDeleting || filteredItems.length === 0;
 
@@ -4776,9 +4885,21 @@ function SessionsScreen({
       setProjectFilter("");
       setStartMs(null);
       setEndMs(null);
+      setLocalSessionPage(1);
     } finally {
       setBatchDeleting(false);
     }
+  };
+  const saveLayeredCompactionRetainTokens = () => {
+    const parsed = Number.parseInt(layeredCompactionRetainTokensInput, 10);
+    const retainTokens = Number.isFinite(parsed)
+      ? clampNumber(parsed, 10000, 64000)
+      : form.layeredCompactionRetainTokens;
+    setLayeredCompactionRetainTokensInput(String(retainTokens));
+    if (retainTokens === form.layeredCompactionRetainTokens) return;
+    const next = { ...form, layeredCompactionRetainTokens: retainTokens };
+    onFormChange(next);
+    void actions.saveSettingsValue(next, true);
   };
   return (
     <>
@@ -4958,27 +5079,85 @@ function SessionsScreen({
           </div>
         </CardContent>
       </Panel>
-      <label className="session-recovery-setting">
-        <input
-          checked={form.codexAppSessionRecoveryEnabled}
-          disabled={!form.enhancementsEnabled}
-          onChange={(event) => {
-            const next = {
-              ...form,
-              codexAppSessionRecoveryEnabled: event.currentTarget.checked,
-            };
-            onFormChange(next);
-            void actions.saveSettingsValue(next, false);
-          }}
-          type="checkbox"
-        />
-        <span className="session-recovery-setting-copy">
-          <strong>异常会话自动恢复</strong>
-          <small>
-            提交时若检测到 Codex 会话循环意外退出，将自动恢复或切换到新会话，并继续发送本次消息；若恢复或继续发送失败，会尝试恢复原输入并提示后续操作。
-          </small>
-        </span>
-      </label>
+      <div className="session-recovery-settings">
+        <label className="session-recovery-setting">
+          <input
+            checked={form.codexAppSessionRecoveryEnabled}
+            disabled={!form.enhancementsEnabled}
+            onChange={(event) => {
+              const next = {
+                ...form,
+                codexAppSessionRecoveryEnabled: event.currentTarget.checked,
+              };
+              onFormChange(next);
+              void actions.saveSettingsValue(next, false);
+            }}
+            type="checkbox"
+          />
+          <span className="session-recovery-setting-copy">
+            <strong>异常会话自动恢复</strong>
+            <small>
+              提交时若检测到 Codex 会话循环意外退出，将自动恢复或切换到新会话，并继续发送本次消息；若恢复或继续发送失败，会尝试恢复原输入并提示后续操作。
+            </small>
+          </span>
+        </label>
+        <div className="session-recovery-setting session-context-compaction-setting">
+          <input
+            checked={form.layeredCompactionEnabled}
+            id="context-compaction-enabled"
+            onChange={(event) => {
+              const next = {
+                ...form,
+                layeredCompactionEnabled: event.currentTarget.checked,
+              };
+              onFormChange(next);
+              void actions.saveSettingsValue(next, false);
+            }}
+            type="checkbox"
+          />
+          <div className="session-recovery-setting-copy session-context-compaction-copy">
+            <label className="session-context-compaction-toggle" htmlFor="context-compaction-enabled">
+              <strong>上下文压缩</strong>
+              <small>在 Codex 触发上下文压缩时保留最近的原始对话与工具调用，减少压缩后断片。</small>
+            </label>
+            <div className="session-context-compaction-limit-row">
+              <label htmlFor="context-compaction-retain-tokens">保留 token</label>
+              <Input
+                aria-label="上下文压缩保留 token 预算"
+                className="session-context-compaction-limit"
+                disabled={!form.layeredCompactionEnabled}
+                id="context-compaction-retain-tokens"
+                inputMode="numeric"
+                maxLength={5}
+                onBlur={saveLayeredCompactionRetainTokens}
+                onChange={(event) =>
+                  setLayeredCompactionRetainTokensInput(event.currentTarget.value.replace(/[^0-9]/g, "").slice(0, 5))
+                }
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") event.currentTarget.blur();
+                }}
+                pattern="[0-9]*"
+                value={layeredCompactionRetainTokensInput}
+              />
+              <small>范围 10,000–64,000。</small>
+            </div>
+            <div className="session-context-compaction-limit-row">
+              <Button
+                disabled={!form.layeredCompactionEnabled}
+                onClick={() => setCompactionPromptOpen(true)}
+                size="sm"
+                title="自定义分层压缩的 LLM 摘要提示词"
+                type="button"
+                variant="secondary"
+              >
+                <MessageCircle className="h-4 w-4" />
+                替换压缩提示词
+              </Button>
+              {form.layeredCompactionPromptOverride.trim() ? <small>已使用自定义提示词</small> : null}
+            </div>
+          </div>
+        </div>
+      </div>
       <Panel>
         <CardHead title="本地会话" detail={items.length ? "按更新时间倒序显示；可按项目和时间筛选后批量删除" : "点击刷新会话读取本地数据库"} />
         <CardContent>
@@ -4987,7 +5166,14 @@ function SessionsScreen({
               <div className="session-filter-bar">
                 <div className="session-filter-field">
                   <span className="session-filter-label">项目</span>
-                  <SessionProjectSelect value={projectFilter} options={projectOptions} onChange={setProjectFilter} />
+                  <SessionProjectSelect
+                    value={projectFilter}
+                    options={projectOptions}
+                    onChange={(next) => {
+                      setProjectFilter(next);
+                      setLocalSessionPage(1);
+                    }}
+                  />
                 </div>
                 <div className="session-filter-field">
                   <span className="session-filter-label">时间范围（按更新时间）</span>
@@ -4997,6 +5183,7 @@ function SessionsScreen({
                     onChange={(nextStart, nextEnd) => {
                       setStartMs(nextStart);
                       setEndMs(nextEnd);
+                      setLocalSessionPage(1);
                     }}
                   />
                 </div>
@@ -5016,26 +5203,57 @@ function SessionsScreen({
                   : `共 ${items.length} 个会话；选择项目或时间范围后可批量删除`}
               </div>
               {filteredItems.length ? (
-                <div className="session-list">
-                  {filteredItems.map((session) => (
-                    <div className="session-row" key={session.id}>
-                      <div className="session-main">
-                        <strong>{session.title || "未命名会话"}</strong>
-                        <span>{session.id}</span>
-                        <small data-tooltip={session.cwd || undefined}>{sessionProjectLabel(session.cwd) || "未记录项目路径"}</small>
+                <>
+                  <div className="session-list">
+                    {visibleSessionItems.map((session) => (
+                      <div className="session-row" key={session.id}>
+                        <div className="session-main">
+                          <strong>{session.title || "未命名会话"}</strong>
+                          <span>{session.id}</span>
+                          <small data-tooltip={session.cwd || undefined}>{sessionProjectLabel(session.cwd) || "未记录项目路径"}</small>
+                        </div>
+                        <div className="session-meta">
+                          <Badge status={session.archived ? "archived" : "ok"} />
+                          <span>{session.modelProvider || "provider 未记录"}</span>
+                          <span>{formatTime(session.updatedAtMs ?? 0)}</span>
+                        </div>
+                        <Button variant="outline" onClick={() => void actions.deleteLocalSession(session)}>
+                          <Trash2 className="h-4 w-4" />
+                          删除
+                        </Button>
                       </div>
-                      <div className="session-meta">
-                        <Badge status={session.archived ? "archived" : "ok"} />
-                        <span>{session.modelProvider || "provider 未记录"}</span>
-                        <span>{formatTime(session.updatedAtMs ?? 0)}</span>
-                      </div>
-                      <Button variant="outline" onClick={() => void actions.deleteLocalSession(session)}>
-                        <Trash2 className="h-4 w-4" />
-                        删除
+                    ))}
+                  </div>
+                  {localSessionTotalPages > 1 ? (
+                    <div className="session-pagination" aria-label="本地会话分页">
+                      <span>{`每页 ${localSessionPageSize} 条 · 第 ${currentLocalSessionPage} / ${localSessionTotalPages} 页`}</span>
+                      <Button
+                        disabled={currentLocalSessionPage <= 1}
+                        onClick={() => setLocalSessionPage(1)}
+                        size="sm"
+                        variant="outline"
+                      >
+                        首页
+                      </Button>
+                      <Button
+                        disabled={currentLocalSessionPage <= 1}
+                        onClick={() => setLocalSessionPage((current) => Math.max(1, current - 1))}
+                        size="sm"
+                        variant="outline"
+                      >
+                        上一页
+                      </Button>
+                      <Button
+                        disabled={currentLocalSessionPage >= localSessionTotalPages}
+                        onClick={() => setLocalSessionPage((current) => Math.min(localSessionTotalPages, current + 1))}
+                        size="sm"
+                        variant="outline"
+                      >
+                        下一页
                       </Button>
                     </div>
-                  ))}
-                </div>
+                  ) : null}
+                </>
               ) : (
                 <div className="empty">没有符合筛选条件的会话。</div>
               )}
@@ -5045,6 +5263,19 @@ function SessionsScreen({
           )}
         </CardContent>
       </Panel>
+      {compactionPromptOpen ? (
+        <LayeredCompactionPromptModal
+          loadDefaultPrompt={actions.loadLayeredCompactionDefaultPrompt}
+          onClose={() => setCompactionPromptOpen(false)}
+          onSave={(value) => {
+            const next = { ...form, layeredCompactionPromptOverride: value };
+            onFormChange(next);
+            void actions.saveSettingsValue(next, false);
+            setCompactionPromptOpen(false);
+          }}
+          value={form.layeredCompactionPromptOverride}
+        />
+      ) : null}
     </>
   );
 }
@@ -6191,6 +6422,97 @@ function SystemPromptOverrideModal({
             保存
           </Button>
           <Button onClick={() => onSave("")} variant="secondary">清空</Button>
+          <Button onClick={onClose} variant="secondary">取消</Button>
+        </Toolbar>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function LayeredCompactionPromptModal({
+  value,
+  loadDefaultPrompt,
+  onClose,
+  onSave,
+}: {
+  value: string;
+  loadDefaultPrompt: () => Promise<string>;
+  onClose: () => void;
+  onSave: (value: string) => void;
+}) {
+  const [defaultPrompt, setDefaultPrompt] = useState("");
+  const [draft, setDraft] = useState(value);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadDefaultPrompt().then((prompt) => {
+      if (cancelled) return;
+      setDefaultPrompt(prompt);
+      // 未自定义时默认展示 Codex 内置提示词，便于用户在其基础上修改。
+      if (!value.trim()) setDraft(prompt);
+      setLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return createPortal(
+    <div
+      className="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="layered-compaction-prompt-title"
+      onClick={onClose}
+    >
+      <div className="modal-card system-prompt-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-head">
+          <div>
+            <h2 id="layered-compaction-prompt-title">替换压缩提示词</h2>
+            <p>
+              Codex 触发上下文压缩时用于生成 LLM 摘要的指令。默认显示 Codex
+              内置提示词，可直接修改后保存；保存内容与默认提示词完全一致时等同于不替换。
+            </p>
+          </div>
+          <Button onClick={onClose} size="icon" title="关闭" variant="ghost">
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+        <Textarea
+          autoFocus
+          className="system-prompt-textarea"
+          disabled={loading}
+          onChange={(event) => setDraft(event.currentTarget.value)}
+          placeholder={loading ? "正在读取 Codex 默认压缩提示词…" : "输入自定义压缩提示词"}
+          value={draft}
+        />
+        <Toolbar>
+          <Button
+            disabled={loading}
+            onClick={() => onSave(draft.trim() === defaultPrompt.trim() ? "" : draft)}
+          >
+            <Save className="h-4 w-4" />
+            保存
+          </Button>
+          <Button
+            disabled={loading}
+            onClick={() => setDraft(defaultPrompt)}
+            title="回退到 Codex 内置默认提示词"
+            variant="secondary"
+          >
+            重置提示词
+          </Button>
           <Button onClick={onClose} variant="secondary">取消</Button>
         </Toolbar>
       </div>
@@ -9170,6 +9492,25 @@ function formatContinueThinkingTitle(entry: Pick<LocalProxyLogEntry, "continueTh
     : "已触发 GPT 推理续接";
 }
 
+function formatLayeredCompactionTitle(
+  entry: Pick<
+    LocalProxyLogEntry,
+    "layeredCompactionRetainTokens" | "layeredCompactionRetainedItems" | "layeredCompactionRetainedChars"
+  >,
+) {
+  const parts = ["已触发分层压缩"];
+  if (typeof entry.layeredCompactionRetainedItems === "number") {
+    parts.push(`保留 ${entry.layeredCompactionRetainedItems} 条原始记录`);
+  }
+  if (typeof entry.layeredCompactionRetainedChars === "number") {
+    parts.push(`约 ${Math.round(entry.layeredCompactionRetainedChars / 4).toLocaleString()} token`);
+  }
+  if (typeof entry.layeredCompactionRetainTokens === "number") {
+    parts.push(`预算 ${entry.layeredCompactionRetainTokens.toLocaleString()} token`);
+  }
+  return parts.join(" · ");
+}
+
 function reasoningTokenTone(value?: number | null) {
   if (value === 516) return "low";
   if (typeof value === "number" && value > 516) return "high";
@@ -9316,6 +9657,11 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
     codexAppSessionPrewarmConcurrency: clampNumber(settings.codexAppSessionPrewarmConcurrency ?? 4, 1, 4),
     codexAppImageOverlayOpacity: clampNumber(settings.codexAppImageOverlayOpacity || 35, 1, 100),
     gptReasoningContinuationMaxRounds: clampNumber(settings.gptReasoningContinuationMaxRounds || 3, 1, 9),
+    layeredCompactionRetainTokens: clampNumber(
+      settings.layeredCompactionRetainTokens || 10000,
+      10000,
+      64000,
+    ),
     relayCommonConfigContents,
     relayContextConfigContents,
     relayProfiles: profiles,

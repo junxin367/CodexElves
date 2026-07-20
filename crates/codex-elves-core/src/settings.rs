@@ -266,8 +266,8 @@ pub enum RelayProtocol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum RelayMode {
-    Official,
     #[default]
+    Official,
     MixedApi,
     PureApi,
     Aggregate,
@@ -361,6 +361,20 @@ pub struct BackendSettings {
         deserialize_with = "deserialize_gpt_reasoning_continuation_max_rounds"
     )]
     pub gpt_reasoning_continuation_max_rounds: u8,
+    #[serde(rename = "layeredCompactionEnabled", default)]
+    pub layered_compaction_enabled: bool,
+    #[serde(
+        rename = "layeredCompactionRetainTokens",
+        default = "default_layered_compaction_retain_tokens",
+        deserialize_with = "deserialize_layered_compaction_retain_tokens"
+    )]
+    pub layered_compaction_retain_tokens: u32,
+    #[serde(
+        rename = "layeredCompactionPromptOverride",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub layered_compaction_prompt_override: String,
     #[serde(rename = "launchMode", default)]
     pub launch_mode: LaunchMode,
     #[serde(rename = "relayBaseUrl", default = "default_relay_base_url")]
@@ -429,6 +443,9 @@ impl Default for BackendSettings {
             codex_goals_enabled: false,
             gpt_reasoning_continuation: false,
             gpt_reasoning_continuation_max_rounds: default_gpt_reasoning_continuation_max_rounds(),
+            layered_compaction_enabled: false,
+            layered_compaction_retain_tokens: default_layered_compaction_retain_tokens(),
+            layered_compaction_prompt_override: String::new(),
             launch_mode: LaunchMode::Patch,
             relay_base_url: default_relay_base_url(),
             relay_api_key: String::new(),
@@ -622,6 +639,17 @@ fn clamp_gpt_reasoning_continuation_max_rounds(value: u64) -> u8 {
     value.clamp(1, 9) as u8
 }
 
+fn default_layered_compaction_retain_tokens() -> u32 {
+    crate::layered_compaction::DEFAULT_RETAIN_TOKENS
+}
+
+fn clamp_layered_compaction_retain_tokens(value: u64) -> u32 {
+    value.clamp(
+        crate::layered_compaction::MIN_RETAIN_TOKENS as u64,
+        crate::layered_compaction::MAX_RETAIN_TOKENS as u64,
+    ) as u32
+}
+
 pub fn default_true() -> bool {
     true
 }
@@ -701,6 +729,15 @@ where
     Ok(Option::<u64>::deserialize(deserializer)?
         .map(clamp_gpt_reasoning_continuation_max_rounds)
         .unwrap_or_else(default_gpt_reasoning_continuation_max_rounds))
+}
+
+fn deserialize_layered_compaction_retain_tokens<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?
+        .map(clamp_layered_compaction_retain_tokens)
+        .unwrap_or_else(default_layered_compaction_retain_tokens))
 }
 
 fn deserialize_profile_api_key<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -2136,6 +2173,7 @@ experimental_bearer_token = "sk-existing""#
                     {
                         "id": "relay-a",
                         "name": "供应商 A",
+                        "relayMode": "pureApi",
                         "model": "gpt-5.4",
                         "baseUrl": "https://relay.example/v1",
                         "apiKey": "sk-a",
@@ -2157,7 +2195,10 @@ experimental_bearer_token = "sk-existing""#
         assert!(saved_profile.get("model").is_none());
         assert!(saved_profile.get("baseUrl").is_none());
         assert!(saved_profile.get("apiKey").is_none());
-        assert_eq!(saved_profile["configContents"], "model = \"gpt-5.4\"\n");
+        // pureApi 模式下，configContents 会被补全为完整可用配置（新增 provider 必需字段），
+        // 但用户手写的关键信息（model）不应丢失。
+        let saved_config_contents = saved_profile["configContents"].as_str().unwrap_or_default();
+        assert!(saved_config_contents.contains("model = \"gpt-5.4\""));
         assert_eq!(
             saved_profile["authContents"],
             "{\"OPENAI_API_KEY\":\"sk-a\"}"

@@ -1426,6 +1426,19 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
 ) -> anyhow::Result<UpstreamProxyResponse> {
     let diagnostic_id = next_protocol_proxy_diagnostic_id();
     let request_json: Value = serde_json::from_str(body)?;
+    let request_json = if settings.layered_compaction_enabled
+        && !settings
+            .layered_compaction_prompt_override
+            .trim()
+            .is_empty()
+    {
+        crate::layered_compaction::apply_custom_compaction_prompt(
+            &request_json,
+            &settings.layered_compaction_prompt_override,
+        )
+    } else {
+        request_json
+    };
     let is_stream = request_json
         .get("stream")
         .and_then(Value::as_bool)
@@ -3479,6 +3492,7 @@ struct AnthropicSseState {
     diagnostic_id: Option<String>,
     blocks: BTreeMap<usize, AnthropicBlockKind>,
     text_buffers: BTreeMap<usize, String>,
+    inline_cite_remainders: BTreeMap<usize, String>,
     usage: Value,
     text_block_count: usize,
     thinking_block_count: usize,
@@ -3501,6 +3515,7 @@ impl AnthropicSseState {
             diagnostic_id: diagnostic_id.map(ToString::to_string),
             blocks: BTreeMap::new(),
             text_buffers: BTreeMap::new(),
+            inline_cite_remainders: BTreeMap::new(),
             usage: json!({}),
             text_block_count: 0,
             thinking_block_count: 0,
@@ -3702,6 +3717,9 @@ impl AnthropicSseState {
         let index = chunk.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
         let kind = self.blocks.remove(&index);
         if matches!(kind, Some(AnthropicBlockKind::Text)) {
+            if let Some(remainder) = self.inline_cite_remainders.remove(&index) {
+                self.handle_normalized_text_delta_into(index, &remainder, output);
+            }
             if let Some(text) = self.text_buffers.remove(&index) {
                 self.flush_buffered_text_block_into(index, &text, output);
             }
@@ -3709,6 +3727,34 @@ impl AnthropicSseState {
     }
 
     fn handle_text_delta_into(&mut self, index: usize, text: &str, output: &mut String) {
+        let text = self.normalize_inline_cite_delta(index, text);
+        if text.is_empty() {
+            return;
+        }
+        self.handle_normalized_text_delta_into(index, &text, output);
+    }
+
+    fn normalize_inline_cite_delta(&mut self, index: usize, text: &str) -> String {
+        let mut combined = self
+            .inline_cite_remainders
+            .remove(&index)
+            .unwrap_or_default();
+        combined.push_str(text);
+
+        let remainder_len = anthropic_inline_cite_tag_prefix_suffix_len(&combined);
+        let remainder = if remainder_len == 0 {
+            String::new()
+        } else {
+            combined.split_off(combined.len() - remainder_len)
+        };
+        if !remainder.is_empty() {
+            self.inline_cite_remainders.insert(index, remainder);
+        }
+
+        strip_anthropic_inline_cite_tags(&combined)
+    }
+
+    fn handle_normalized_text_delta_into(&mut self, index: usize, text: &str, output: &mut String) {
         let buffer = self.text_buffers.entry(index).or_default();
         buffer.push_str(text);
         // 缓冲区已出现 `<invoke`：进入工具调用区，不再透传，等 block 结束后统一切分。
@@ -6844,7 +6890,8 @@ fn anthropic_content_to_response_output_items(
             }
             "text" => {
                 if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    if let Some((leading, calls)) = split_text_into_message_and_tool_calls(text) {
+                    let text = strip_anthropic_inline_cite_tags(text);
+                    if let Some((leading, calls)) = split_text_into_message_and_tool_calls(&text) {
                         if !leading.is_empty() {
                             message_content.push(json!({
                                 "type": "output_text",
@@ -7366,6 +7413,26 @@ fn textual_invoke_safe_passthrough_len(buffer: &str) -> usize {
         }
     }
     buffer.len()
+}
+
+const ANTHROPIC_INLINE_CITE_TAGS: [&str; 2] = ["<cite>", "</cite>"];
+
+fn strip_anthropic_inline_cite_tags(text: &str) -> String {
+    ANTHROPIC_INLINE_CITE_TAGS
+        .iter()
+        .fold(text.to_string(), |normalized, tag| {
+            normalized.replace(tag, "")
+        })
+}
+
+fn anthropic_inline_cite_tag_prefix_suffix_len(text: &str) -> usize {
+    ANTHROPIC_INLINE_CITE_TAGS
+        .iter()
+        .flat_map(|tag| (1..tag.len()).map(move |length| &tag[..length]))
+        .filter(|prefix| text.ends_with(prefix))
+        .map(|prefix| prefix.len())
+        .max()
+        .unwrap_or(0)
 }
 
 /// 尾部子串是否可能是一个尚未输完的工具调用起点（`<invoke` 或 marker 前缀）。

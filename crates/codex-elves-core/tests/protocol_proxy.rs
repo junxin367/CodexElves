@@ -494,6 +494,34 @@ fn anthropic_message_response_converts_to_responses() {
 }
 
 #[test]
+fn anthropic_message_response_strips_inline_cite_wrappers() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_cite",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [{
+                "type": "text",
+                "text": "规则：<cite>将回答作为新输入回到 EXPAND</cite>。"
+            }],
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-4-8",
+            "input": "确认规则"
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(
+        converted["output"][0]["content"][0]["text"],
+        "规则：将回答作为新输入回到 EXPAND。"
+    );
+}
+
+#[test]
 fn anthropic_request_declares_web_search_as_server_side_tool_without_fallback() {
     // 无 MCP 搜索 fallback 时，web_search 应声明为 Anthropic 原生 server-side 工具，
     // 由 Claude 服务端自己执行搜索，避免被当客户端工具导致空结果死循环。
@@ -3731,6 +3759,50 @@ data: {"type":"message_stop"}
         "sig_stream"
     );
     assert!(converted.contains("data: [DONE]"));
+}
+
+#[test]
+fn anthropic_sse_strips_fragmented_inline_cite_wrappers() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_cite_stream","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"规则：<ci"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"te>将回答作为新输入回到 EXPAND</ci"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"te>。"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-opus-4-8"
+        }),
+    );
+
+    let text = parse_response_sse_events(&converted)
+        .into_iter()
+        .filter(|event| event.event == "response.output_text.delta")
+        .filter_map(|event| event.data["delta"].as_str().map(ToString::to_string))
+        .collect::<String>();
+
+    assert_eq!(text, "规则：将回答作为新输入回到 EXPAND。");
+    assert!(!converted.contains("<cite>"));
+    assert!(!converted.contains("</cite>"));
 }
 
 #[test]

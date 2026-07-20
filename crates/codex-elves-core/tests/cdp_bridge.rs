@@ -3402,7 +3402,7 @@ fn manager_ui_exposes_session_prewarm_performance_controls() {
     assert!(source.contains("异常会话自动恢复"));
     assert!(!source.contains("不会自动重发消息"));
     assert!(styles.contains(".session-recovery-setting"));
-    assert!(styles.contains(".session-recovery-setting:has(input:checked)"));
+    assert!(styles.contains(".session-recovery-setting:has(> input:checked)"));
     let recovery_setting = source
         .split("<label className=\"session-recovery-setting\">")
         .nth(1)

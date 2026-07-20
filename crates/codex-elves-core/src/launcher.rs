@@ -1197,6 +1197,48 @@ fn should_defer_protocol_stream(request_json: Option<&serde_json::Value>) -> boo
     )
 }
 
+// 分层压缩：若命中 Codex 上下文压缩请求且功能已启用，则在 LLM 摘要
+// 之上追加“最近原始对话 / 工具调用记录”，避免纯摘要压缩导致的断片。
+// 作用于已经转换为 Responses 协议的 SSE 文本，与上游协议无关。
+fn apply_layered_compaction_if_enabled(
+    request_json: Option<&serde_json::Value>,
+    sse_text: String,
+) -> (String, LocalLayeredCompactionLog) {
+    let Some(request) = request_json else {
+        return (sse_text, LocalLayeredCompactionLog::default());
+    };
+    if !crate::layered_compaction::is_compaction_request(Some(request)) {
+        return (sse_text, LocalLayeredCompactionLog::default());
+    }
+    let settings = SettingsStore::default().load().unwrap_or_default();
+    let result = crate::layered_compaction::apply_layered_compaction_to_responses_sse(
+        request,
+        settings.layered_compaction_enabled,
+        settings.layered_compaction_retain_tokens,
+        sse_text.clone(),
+    );
+    if !result.triggered {
+        return (sse_text, LocalLayeredCompactionLog::default());
+    }
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "layered_compaction.applied",
+        serde_json::json!({
+            "retainedItems": result.retained_items,
+            "retainedChars": result.retained_chars,
+            "retainTokens": settings.layered_compaction_retain_tokens
+        }),
+    );
+    let log = LocalLayeredCompactionLog {
+        triggered: true,
+        retain_tokens: Some(settings.layered_compaction_retain_tokens),
+        retained_items: Some(result.retained_items),
+        retained_chars: Some(result.retained_chars),
+        // 改写前的原始上游响应（纯摘要），供日志详情对比。
+        before_response_body: Some(sse_text),
+    };
+    (result.sse_text, log)
+}
+
 fn deferred_stream_target_protocol(
     request: &serde_json::Value,
 ) -> Option<crate::protocol_proxy::UpstreamResponseProtocol> {
@@ -1481,6 +1523,7 @@ async fn handle_protocol_proxy_connection(
             let mut response_bytes = 0_usize;
             let mut response_truncated = false;
             let mut continue_thinking_log = LocalContinueThinkingLog::default();
+            let mut layered_compaction_log = LocalLayeredCompactionLog::default();
             if upstream.body_override.is_some() {
                 let body = upstream.into_body_bytes().await?;
                 response_bytes += body.len();
@@ -1568,6 +1611,11 @@ async fn handle_protocol_proxy_connection(
                 } else {
                     first_round_sse_text
                 };
+                let (final_sse_text, compaction_log) = apply_layered_compaction_if_enabled(
+                    logged_request_json.as_ref(),
+                    final_sse_text,
+                );
+                layered_compaction_log = compaction_log;
                 let final_bytes = final_sse_text.into_bytes();
                 response_bytes += final_bytes.len();
                 response_truncated |=
@@ -1601,6 +1649,7 @@ async fn handle_protocol_proxy_connection(
                 response_truncated,
                 None,
                 continue_thinking_log,
+                layered_compaction_log,
             );
             stream.shutdown().await?;
             return Ok(());
@@ -1735,6 +1784,7 @@ async fn handle_protocol_proxy_connection(
                 first_token_ms,
                 ..Default::default()
             },
+            LocalLayeredCompactionLog::default(),
         );
         stream.shutdown().await?;
         return Ok(());
@@ -1899,6 +1949,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     let mut response_bytes = 0_usize;
     let mut response_truncated = false;
     let mut first_token_ms = None;
+    let mut layered_compaction_log = LocalLayeredCompactionLog::default();
 
     let upstream_open =
         crate::protocol_proxy::open_responses_proxy_request_with_stream_header_timeout(
@@ -2176,6 +2227,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                 first_token_ms,
                 ..Default::default()
             },
+            LocalLayeredCompactionLog::default(),
         );
         stream.shutdown().await?;
         return Ok(());
@@ -2212,6 +2264,10 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     let mut bytes_stream = upstream.into_response()?.bytes_stream();
     let mut stream_failed = false;
     let mut stream_error = None;
+    // 分层压缩：命中压缩请求时，缓冲完整的转换后 SSE，最后改写再一次性写出。
+    // keepalive 仍在缓冲期间发出（SSE 注释），保持连接活性。
+    let is_compaction = crate::layered_compaction::is_compaction_request(request_json.as_ref());
+    let mut compaction_buffer = String::new();
 
     while let Some(chunk) = next_deferred_stream_chunk_with_keepalive(
         &mut bytes_stream,
@@ -2247,10 +2303,14 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                             elapsed_ms,
                         );
                     }
-                    response_bytes += converted.len();
-                    response_truncated |=
-                        crate::proxy_log::append_capture(&mut response_capture, &converted);
-                    stream.write_all(&converted).await?;
+                    if is_compaction {
+                        compaction_buffer.push_str(&String::from_utf8_lossy(&converted));
+                    } else {
+                        response_bytes += converted.len();
+                        response_truncated |=
+                            crate::proxy_log::append_capture(&mut response_capture, &converted);
+                        stream.write_all(&converted).await?;
+                    }
                 }
             }
             Err(error) => {
@@ -2272,7 +2332,17 @@ async fn handle_deferred_protocol_proxy_stream_connection(
 
     if !stream_failed {
         let tail = converter.finish();
-        if !tail.is_empty() {
+        if is_compaction {
+            compaction_buffer.push_str(&String::from_utf8_lossy(&tail));
+            let (rewritten, log) =
+                apply_layered_compaction_if_enabled(request_json.as_ref(), compaction_buffer);
+            layered_compaction_log = log;
+            let rewritten = rewritten.into_bytes();
+            response_bytes += rewritten.len();
+            response_truncated |=
+                crate::proxy_log::append_capture(&mut response_capture, &rewritten);
+            stream.write_all(&rewritten).await?;
+        } else if !tail.is_empty() {
             response_bytes += tail.len();
             response_truncated |= crate::proxy_log::append_capture(&mut response_capture, &tail);
             stream.write_all(&tail).await?;
@@ -2312,6 +2382,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
             first_token_ms,
             ..Default::default()
         },
+        layered_compaction_log,
     );
     stream.shutdown().await?;
     Ok(())
@@ -2504,6 +2575,7 @@ async fn handle_chat_completions_proxy_connection(
                 first_token_ms,
                 ..Default::default()
             },
+            LocalLayeredCompactionLog::default(),
         );
         stream.shutdown().await?;
         return Ok(());
@@ -2561,6 +2633,15 @@ struct LocalContinueThinkingLog {
     after_response_body: Option<String>,
 }
 
+#[derive(Default)]
+struct LocalLayeredCompactionLog {
+    triggered: bool,
+    retain_tokens: Option<u32>,
+    retained_items: Option<u32>,
+    retained_chars: Option<u32>,
+    before_response_body: Option<String>,
+}
+
 fn next_local_proxy_log_id() -> String {
     format!("local-{}", uuid::Uuid::new_v4())
 }
@@ -2597,6 +2678,11 @@ fn append_pending_local_proxy_record(
         continue_thinking_request_body: None,
         continue_thinking_before_response_body: None,
         continue_thinking_after_response_body: None,
+        layered_compaction_triggered: false,
+        layered_compaction_retain_tokens: None,
+        layered_compaction_retained_items: None,
+        layered_compaction_retained_chars: None,
+        layered_compaction_before_response_body: None,
         service_tier: request_metadata.service_tier.clone(),
         relay_id: None,
         relay_name: None,
@@ -2651,6 +2737,11 @@ fn append_local_proxy_first_token_record(
         continue_thinking_request_body: None,
         continue_thinking_before_response_body: None,
         continue_thinking_after_response_body: None,
+        layered_compaction_triggered: false,
+        layered_compaction_retain_tokens: None,
+        layered_compaction_retained_items: None,
+        layered_compaction_retained_chars: None,
+        layered_compaction_before_response_body: None,
         service_tier: request_metadata.service_tier.clone(),
         relay_id,
         relay_name,
@@ -2712,6 +2803,7 @@ fn append_local_proxy_record(
         response_truncated,
         error,
         LocalContinueThinkingLog::default(),
+        LocalLayeredCompactionLog::default(),
     )
 }
 
@@ -2736,6 +2828,7 @@ fn append_local_proxy_record_with_continue_thinking(
     response_truncated: bool,
     error: Option<String>,
     continue_thinking: LocalContinueThinkingLog,
+    layered_compaction: LocalLayeredCompactionLog,
 ) {
     let record = crate::proxy_log::ProxyRequestRecord {
         id,
@@ -2756,6 +2849,11 @@ fn append_local_proxy_record_with_continue_thinking(
         continue_thinking_request_body: continue_thinking.request_body,
         continue_thinking_before_response_body: continue_thinking.before_response_body,
         continue_thinking_after_response_body: continue_thinking.after_response_body,
+        layered_compaction_triggered: layered_compaction.triggered,
+        layered_compaction_retain_tokens: layered_compaction.retain_tokens,
+        layered_compaction_retained_items: layered_compaction.retained_items,
+        layered_compaction_retained_chars: layered_compaction.retained_chars,
+        layered_compaction_before_response_body: layered_compaction.before_response_body,
         service_tier: request_metadata.service_tier.clone(),
         relay_id,
         relay_name,

@@ -46,6 +46,16 @@ pub struct ProxyRequestRecord {
     pub continue_thinking_before_response_body: Option<String>,
     #[serde(default)]
     pub continue_thinking_after_response_body: Option<String>,
+    #[serde(default)]
+    pub layered_compaction_triggered: bool,
+    #[serde(default)]
+    pub layered_compaction_retain_tokens: Option<u32>,
+    #[serde(default)]
+    pub layered_compaction_retained_items: Option<u32>,
+    #[serde(default)]
+    pub layered_compaction_retained_chars: Option<u32>,
+    #[serde(default)]
+    pub layered_compaction_before_response_body: Option<String>,
     pub service_tier: Option<String>,
     pub relay_id: Option<String>,
     pub relay_name: Option<String>,
@@ -91,6 +101,14 @@ pub struct ProxyRequestSummary {
     pub continue_thinking_triggered: bool,
     #[serde(default)]
     pub continue_thinking_rounds: u32,
+    #[serde(default)]
+    pub layered_compaction_triggered: bool,
+    #[serde(default)]
+    pub layered_compaction_retain_tokens: Option<u32>,
+    #[serde(default)]
+    pub layered_compaction_retained_items: Option<u32>,
+    #[serde(default)]
+    pub layered_compaction_retained_chars: Option<u32>,
     pub service_tier: Option<String>,
     pub relay_id: Option<String>,
     pub relay_name: Option<String>,
@@ -161,6 +179,10 @@ impl From<&ProxyRequestRecord> for ProxyRequestSummary {
             reasoning_source: record.reasoning_source.clone(),
             continue_thinking_triggered: record.continue_thinking_triggered,
             continue_thinking_rounds: record.continue_thinking_rounds,
+            layered_compaction_triggered: record.layered_compaction_triggered,
+            layered_compaction_retain_tokens: record.layered_compaction_retain_tokens,
+            layered_compaction_retained_items: record.layered_compaction_retained_items,
+            layered_compaction_retained_chars: record.layered_compaction_retained_chars,
             service_tier: record.service_tier.clone(),
             relay_id: record.relay_id.clone(),
             relay_name: record.relay_name.clone(),
@@ -1292,6 +1314,11 @@ data: [DONE]
             continue_thinking_request_body: None,
             continue_thinking_before_response_body: None,
             continue_thinking_after_response_body: None,
+            layered_compaction_triggered: false,
+            layered_compaction_retain_tokens: None,
+            layered_compaction_retained_items: None,
+            layered_compaction_retained_chars: None,
+            layered_compaction_before_response_body: None,
             service_tier: Some("auto".to_string()),
             relay_id: Some("relay-test".to_string()),
             relay_name: Some("Test".to_string()),
@@ -1630,6 +1657,11 @@ data: [DONE]
             continue_thinking_request_body: None,
             continue_thinking_before_response_body: None,
             continue_thinking_after_response_body: None,
+            layered_compaction_triggered: false,
+            layered_compaction_retain_tokens: None,
+            layered_compaction_retained_items: None,
+            layered_compaction_retained_chars: None,
+            layered_compaction_before_response_body: None,
             service_tier: None,
             relay_id: Some("relay-test".to_string()),
             relay_name: Some("Test".to_string()),
