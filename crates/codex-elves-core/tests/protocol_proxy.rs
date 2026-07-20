@@ -475,6 +475,7 @@ fn anthropic_message_response_converts_to_responses() {
     assert_eq!(converted["output"][0]["type"], "reasoning");
     assert_eq!(converted["output"][0]["reasoning_content"], "plan");
     assert_eq!(converted["output"][1]["type"], "message");
+    assert_eq!(converted["output"][1]["id"], "msg_test");
     assert_eq!(converted["output"][1]["content"][0]["text"], "answer");
     assert_eq!(converted["output"][2]["type"], "function_call");
     assert_eq!(converted["output"][2]["name"], "lookup");
@@ -3713,6 +3714,8 @@ data: {"type":"message_stop"}
         .iter()
         .find(|event| event.event == "response.completed")
         .unwrap();
+    assert_eq!(completed.data["response"]["id"], "resp_msg_stream");
+    assert_eq!(completed.data["response"]["output"][1]["id"], "msg_stream");
     assert_eq!(completed.data["response"]["usage"]["input_tokens"], 7);
     assert_eq!(completed.data["response"]["usage"]["output_tokens"], 9);
     assert_eq!(
@@ -5298,6 +5301,86 @@ async fn responses_proxy_replaces_system_prompt_for_responses_upstream() {
     assert_eq!(body["instructions"], "新的 Responses 提示词");
     assert_eq!(body["input"].as_array().unwrap().len(), 1);
     assert_eq!(body["input"][0]["role"], "user");
+}
+
+#[tokio::test]
+async fn responses_proxy_accepts_anthropic_history_after_switching_to_responses_model() {
+    let server = spawn_chat_server();
+    let settings = BackendSettings {
+        relay_profiles: vec![RelayProfile {
+            id: "responses".to_string(),
+            name: "Responses".to_string(),
+            base_url: server.base_url.clone(),
+            upstream_base_url: server.base_url.clone(),
+            api_key: "sk-test".to_string(),
+            protocol: RelayProtocol::Responses,
+            relay_mode: RelayMode::MixedApi,
+            model_mappings: vec![RelayModelMapping {
+                request_model: "gpt-responses".to_string(),
+                protocol: RelayProtocol::Responses,
+                context_window: "200000".to_string(),
+            }],
+            ..RelayProfile::default()
+        }],
+        active_relay_id: "responses".to_string(),
+        ..BackendSettings::default()
+    };
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_current",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4",
+            "content": [{ "type": "text", "text": "current answer" }],
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 8, "output_tokens": 3 }
+        }),
+        &json!({
+            "model": "claude-sonnet-4",
+            "input": "current question"
+        }),
+    )
+    .unwrap();
+    let current_message = converted["output"][0].clone();
+    let legacy_message = json!({
+        "id": "resp_msg_legacy_msg",
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{ "type": "output_text", "text": "legacy answer", "annotations": [] }]
+    });
+    let request_body = json!({
+        "model": "gpt-responses",
+        "input": [
+            legacy_message,
+            current_message,
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "continue" }]
+            }
+        ],
+        "stream": false
+    })
+    .to_string();
+
+    let upstream = open_responses_proxy_request_with_settings(&request_body, settings)
+        .await
+        .unwrap();
+    assert_eq!(
+        upstream.response_protocol,
+        UpstreamResponseProtocol::Responses
+    );
+
+    let logged_body: Value = serde_json::from_str(&upstream.request_body).unwrap();
+    assert_eq!(logged_body["input"][0]["id"], "msg_legacy");
+    assert_eq!(logged_body["input"][1]["id"], "msg_current");
+
+    let forwarded = server.finish();
+    assert_eq!(forwarded.path, "/v1/responses");
+    let forwarded_body: Value = serde_json::from_str(&forwarded.body).unwrap();
+    assert_eq!(forwarded_body["input"][0]["id"], "msg_legacy");
+    assert_eq!(forwarded_body["input"][1]["id"], "msg_current");
 }
 
 #[tokio::test]

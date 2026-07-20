@@ -1712,7 +1712,9 @@ fn responses_upstream_request_for_protocol(
     diagnostic_id: &str,
 ) -> anyhow::Result<Value> {
     match response_protocol {
-        UpstreamResponseProtocol::Responses => Ok(request_json.clone()),
+        UpstreamResponseProtocol::Responses => {
+            Ok(normalize_native_responses_message_item_ids(request_json))
+        }
         UpstreamResponseProtocol::ChatCompletions => {
             responses_to_chat_completions(responses_request_with_stream(request_json, is_stream))
         }
@@ -2616,6 +2618,61 @@ pub fn response_id_from_chat_id(id: Option<&str>) -> String {
     }
 }
 
+/// Responses 顶层响应 ID 与 message item ID 属于不同命名空间。
+/// 转换 Chat/Anthropic 响应时保留 `resp_` 顶层 ID，同时为文本消息生成 `msg` 前缀 ID。
+pub(crate) fn response_message_item_id(response_id: &str) -> String {
+    let source_id = response_id.strip_prefix("resp_").unwrap_or(response_id);
+    if source_id.starts_with("msg") {
+        source_id.to_string()
+    } else {
+        format!("msg_{source_id}")
+    }
+}
+
+/// 兼容旧版本生成的 `{response_id}_msg`，例如
+/// `resp_msg_xxx_msg -> msg_xxx`。未知格式返回 None，由调用方移除非法 ID。
+pub(crate) fn normalize_responses_message_item_id(id: &str) -> Option<String> {
+    if id.starts_with("msg") {
+        return Some(id.to_string());
+    }
+    id.strip_suffix("_msg")
+        .filter(|response_id| response_id.starts_with("resp_"))
+        .map(response_message_item_id)
+}
+
+fn normalize_native_responses_message_item_ids(request_json: &Value) -> Value {
+    let mut request = request_json.clone();
+    let Some(input) = request.get_mut("input").and_then(Value::as_array_mut) else {
+        return request;
+    };
+
+    for item in input {
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
+        if object.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        let Some(id) = object
+            .get("id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+        else {
+            continue;
+        };
+        match normalize_responses_message_item_id(&id) {
+            Some(normalized) => {
+                object.insert("id".to_string(), Value::String(normalized));
+            }
+            None => {
+                object.remove("id");
+            }
+        }
+    }
+
+    request
+}
+
 fn push_sse(output: &mut String, event: &str, mut data: Value, next_sequence_number: &mut u64) {
     if let Some(object) = data.as_object_mut() {
         object
@@ -2996,7 +3053,7 @@ impl ChatSseState {
         }
         if !self.text.added {
             let output_index = self.next_output_index();
-            let item_id = format!("{}_msg", self.response_id);
+            let item_id = response_message_item_id(&self.response_id);
             self.text.output_index = Some(output_index);
             self.text.item_id = item_id.clone();
             self.text.content_kind = content_kind;
@@ -6373,7 +6430,7 @@ fn chat_message_to_response_output_item(message: &Value, response_id: &str) -> O
     }
 
     Some(json!({
-        "id": format!("{response_id}_msg"),
+        "id": response_message_item_id(response_id),
         "type": "message",
         "status": "completed",
         "role": "assistant",
@@ -6841,7 +6898,7 @@ fn anthropic_content_to_response_output_items(
     }
     if !message_content.is_empty() {
         output.push(json!({
-            "id": format!("{response_id}_msg"),
+            "id": response_message_item_id(response_id),
             "type": "message",
             "status": "completed",
             "role": "assistant",
