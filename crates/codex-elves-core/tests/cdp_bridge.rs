@@ -352,12 +352,6 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
     ));
     assert!(!script.contains("marketplace.name = alias"));
     assert!(script.contains("if (name === \"openai-curated\" || name === \"codex-elves-openai-curated\") return \"OpenAI插件2(CodexElves)\""));
-    assert!(
-        script.contains("if (name === \"openai-curated\") return \"codex-elves-openai-curated\"")
-    );
-    assert!(script.contains(
-        "if (name === \"openai-primary-runtime\") return \"codex-elves-openai-primary-runtime\""
-    ));
     assert!(script.contains("OpenAI插件1(CodexElves)"));
     assert!(script.contains("OpenAI插件2(CodexElves)"));
     assert!(script.contains("OpenAI插件3(CodexElves)"));
@@ -598,7 +592,7 @@ fn injection_script_unlocks_custom_model_catalog() {
 
 #[test]
 fn injection_script_exposes_fast_service_tier_control() {
-    let script = assets::injection_script(45221);
+    let script = assets::injection_script(45221).replace("\r\n", "\n");
 
     assert!(script.contains("default-service-tier"));
     assert!(script.contains("setting-storage-"));
@@ -750,7 +744,7 @@ fn injection_script_portals_fast_badge_outside_react_owned_composer() {
 
 #[test]
 fn injection_script_refreshes_fast_state_after_backend_load_and_route_entry() {
-    let script = assets::injection_script(45221);
+    let script = assets::injection_script(45221).replace("\r\n", "\n");
 
     assert!(script.contains("refreshCodexServiceTierFeatureState"));
     assert!(script.contains("if (key === codexElvesBackendSettingMap.serviceTierControls)"));
@@ -2157,7 +2151,6 @@ fn injection_script_installs_upstream_branch_dropdown_adapter() {
     assert!(script.contains("readUpstreamBranchSelection"));
     assert!(script.contains("writeUpstreamBranchSelection(null)"));
     assert!(script.contains("currentProjectRepoPathFromSelectedProjectButton"));
-    assert!(script.contains("currentProjectRepoPathFromStartButton"));
     assert!(script.contains("Start new chat in"));
     assert!(script.contains("codexUpstreamProjectContext"));
     assert!(script.contains("rememberStartNewChatProjectContext"));
@@ -2212,8 +2205,6 @@ fn injection_script_prevents_switching_to_branches_used_by_other_worktrees() {
 fn injection_script_rebuilds_upstream_options_for_each_project_branch_menu() {
     let script = assets::injection_script(45221);
 
-    assert!(script.contains("currentProjectRepoPathForBranchMenu"));
-    assert!(script.contains("repoPathFromProjectLabel"));
     assert!(script.contains("projectContextFromProjectLabel"));
     assert!(script.contains("upstreamBranchOptionsMatchRefs"));
     assert!(script.contains("upstreamBranchDefaultsCache = new Map()"));

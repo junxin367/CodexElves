@@ -29,12 +29,8 @@
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
   const codexDeleteVersion = "7";
-  const codexExportVersion = "1";
-  const codexProjectMoveVersion = "1";
   const codexActionGroupVersion = "6";
   const codexArchiveRowActionsVersion = "1";
-  const codexArchiveDeleteAllVersion = "2";
-  const codexConversationViewVersion = "1";
   const codexConversationViewRouteHooksVersion = "2";
   const codexConversationViewRouteRefreshDelaysMs = [0, 80, 220, 500, 1000, 1800, 3000];
   const codexRouteFeatureRefreshDelaysMs = [0, 120, 360, 900, 1600];
@@ -55,10 +51,6 @@
   const codexServiceTierRequestClientPatchRetryBaseMs = 1000;
   const codexServiceTierRequestClientPatchRetryMaxMs = 30000;
   const codexAppServerModelRequestPatchVersion = "6";
-
-
-
-
   const codexSessionPrewarmVersion = "3";
   const codexSessionPrewarmDefaultConcurrency = 4;
   const codexSessionPrewarmStartupDelayMs = 200;
@@ -219,7 +211,6 @@
     pluginNavButton: 'nav[role="navigation"] button.h-token-nav-row.w-full',
     pluginSvgPath: 'svg path[d^="M7.94562 14.0277"]',
   };
-  const headerContextButtonClass = "border-token-border user-select-none no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-lg border-token-border text-token-button-tertiary-foreground bg-token-bg-fog enabled:hover:bg-token-list-hover-background data-[state=open]:bg-token-list-hover-background border h-token-button-composer px-2 py-0 text-base leading-[18px]";
   const headerIconTextButtonClass = "border-token-border no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-lg text-token-text-tertiary enabled:hover:bg-token-list-hover-background data-[state=open]:bg-token-list-hover-background border-transparent h-token-button-composer px-2 py-0 text-base leading-[18px]";
 
   function installStyle() {
@@ -333,11 +324,6 @@
         padding: 3px 8px;
         cursor: pointer;
       }
-      .codex-archive-row-button.${buttonClass} {
-        border-color: #ef4444;
-        background: #fee2e2;
-        color: #991b1b;
-      }
       .codex-archive-row-button.${exportButtonClass} {
         border-color: #93c5fd;
         background: #dbeafe;
@@ -448,13 +434,6 @@
         line-height: 16px;
         padding: 3px 8px;
         cursor: pointer;
-      }
-      .codex-archive-action-bar {
-        position: fixed;
-        right: 28px;
-        top: 86px;
-        z-index: 2147482999;
-        box-shadow: 0 8px 24px rgba(0,0,0,.18);
       }
       .codex-delete-toast {
         position: fixed;
@@ -1613,12 +1592,6 @@
     if (controlMode === "global-standard") return "standard";
     if (controlMode === "inherit") return "inherit";
     return normalizeCodexThreadServiceTierMode(fallback);
-  }
-
-  function codexServiceTierControlModeForDefaultMode(defaultMode) {
-    if (defaultMode === "fast") return "global-fast";
-    if (defaultMode === "standard") return "global-standard";
-    return "inherit";
   }
 
   function codexServiceTierEffectiveThreadMode(threadMode = "inherit", defaultMode = "inherit") {
@@ -2921,14 +2894,6 @@
     return fallback;
   }
 
-  function codexPluginMarketplaceRemoteAliasForName(name) {
-    if (name === "openai-curated") return "codex-elves-openai-curated";
-    if (name === "openai-primary-runtime") return "codex-elves-openai-primary-runtime";
-    if (name === "openai-api-curated") return "codex-elves-openai-api-curated";
-    if (name === "openai-curated-remote") return "codex-elves-openai-curated-remote";
-    return name;
-  }
-
   function patchPluginMarketplaceObject(marketplace) {
     if (!marketplace || typeof marketplace !== "object" || marketplace.__codexElvesMarketplaceUnlockPatched) return false;
     const displayName = displayNameForPluginMarketplaceName(marketplace.name, marketplace.displayName || marketplace.title || marketplace.label || marketplace.name);
@@ -3658,7 +3623,7 @@
 
   function archivePageHintVisible() {
     if (window.location.href.includes("archive")) return true;
-    if (document.querySelector('[data-codex-archive-page-row="true"], [data-codex-archive-delete-all]')) return true;
+    if (document.querySelector('[data-codex-archive-page-row="true"]')) return true;
     const archiveNav = document.querySelector(selectors.archiveNav);
     if (archiveNav?.className?.includes?.("bg-token-list-hover-background")) return true;
     return !!Array.from(document.querySelectorAll("h1, h2, h3")).find((element) => (element.textContent || "").trim() === "已归档对话");
@@ -3679,20 +3644,6 @@
       row.setAttribute("data-codex-archive-page-row", "true");
     });
     return rows;
-  }
-
-  function archivedSessionRows() {
-    if (!archivePageHintVisible()) return [];
-    return sessionRows().filter((row) => row.querySelector('button[aria-label="取消归档对话"]') || row.outerHTML.includes("取消归档") || row.outerHTML.includes("unarchive"));
-  }
-
-  function archivedRows() {
-    if (!archivePageHintVisible()) return [];
-    return [...archivedSessionRows(), ...archivedPageRows()];
-  }
-
-  function archivedPageVisible() {
-    return archivePageHintVisible() && archivedRows().length > 0;
   }
 
   function sessionRefFromRow(row) {
@@ -5427,17 +5378,6 @@
     });
   }
 
-  function schedulePatchReactModelState() {
-    if (window.__codexElvesReactModelStatePatchPending) return;
-    window.__codexElvesReactModelStatePatchPending = true;
-    clearTimeout(window.__codexElvesReactModelStatePatchTimer);
-    window.__codexElvesReactModelStatePatchTimer = setTimeout(() => {
-      window.__codexElvesReactModelStatePatchPending = false;
-      window.__codexElvesReactModelStatePatchTimer = null;
-      patchReactModelState();
-    }, 120);
-  }
-
   function patchReactModelState() {
     const visited = new WeakSet();
     const nodes = patchReactModelStateNodes();
@@ -5778,15 +5718,6 @@
       }
     };
     tick();
-  }
-
-  function patchCodexModelWhitelist() {
-    ensureCodexModelWhitelistInstalls();
-    if (!codexElvesModelNames().length) {
-      loadCodexModelCatalog();
-      return;
-    }
-    runCodexModelWhitelistRefreshPass();
   }
 
   function refreshCodexModelWhitelistFromScan(mutations) {
@@ -6771,25 +6702,6 @@
     return sidebarProjectRows().filter((row) => visibleElement(row));
   }
 
-  function currentProjectRepoPathFromStartButton() {
-    const startButtons = [...document.querySelectorAll('button[aria-label^="Start new chat in "]')]
-      .filter((button) => visibleElement(button));
-    const bottomHalf = window.innerHeight * 0.5;
-    startButtons.sort((left, right) => {
-      const leftRect = left.getBoundingClientRect();
-      const rightRect = right.getBoundingClientRect();
-      const leftScore = Math.abs(leftRect.y - bottomHalf) + Math.max(0, bottomHalf - leftRect.y) * 0.5;
-      const rightScore = Math.abs(rightRect.y - bottomHalf) + Math.max(0, bottomHalf - rightRect.y) * 0.5;
-      return leftScore - rightScore;
-    });
-    for (const button of startButtons) {
-      const row = button.closest('[data-app-action-sidebar-project-row][data-app-action-sidebar-project-id]');
-      const path = projectRowPath(row);
-      if (path?.startsWith?.("/")) return path;
-    }
-    return "";
-  }
-
   function currentProjectContextFromStartButton() {
     const startButtons = [...document.querySelectorAll('button[aria-label^="Start new chat in "]')]
       .filter((button) => visibleElement(button));
@@ -6842,10 +6754,6 @@
     return context.projectId ? { ...remoteProjectContextFromGlobalState(context.projectId), label: context.label } : context;
   }
 
-  function repoPathFromProjectLabel(label) {
-    return projectContextFromProjectLabel(label)?.repoPath || "";
-  }
-
   function contextMatchesProjectLabel(context, label) {
     const expected = normalizeProjectLabel(label);
     if (!expected) return true;
@@ -6876,21 +6784,11 @@
       || currentProjectContext();
   }
 
-  function currentProjectRepoPathForBranchMenu(menu, trigger = branchMenuTriggerFromMenu(menu)) {
-    return currentProjectContextForBranchMenu(menu, trigger)?.repoPath || "";
-  }
-
   function currentProjectRepoPathFromExpandedRows() {
     const expandedRows = visibleProjectRows().filter((row) => row.getAttribute("data-app-action-sidebar-project-collapsed") === "false");
     const pathRows = expandedRows.filter((row) => projectRowPath(row).startsWith("/"));
     if (pathRows.length === 1) return projectRowPath(pathRows[0]);
     return "";
-  }
-
-  function currentProjectRepoPath() {
-    return currentProjectRepoPathFromSelectedProjectButton()
-      || currentProjectRepoPathFromStartButton()
-      || currentProjectRepoPathFromExpandedRows();
   }
 
   function currentProjectContext() {
@@ -8279,18 +8177,6 @@
     event.stopImmediatePropagation?.();
   }
 
-  function isArchiveTitleText(value) {
-    return value === "已归档对话" || value === "Archived conversations";
-  }
-
-  function archiveTitleContainer() {
-    const heading = Array.from(document.querySelectorAll("h1, h2, h3"))
-      .find((element) => isArchiveTitleText((element.textContent || "").trim()));
-    if (heading) return heading;
-    return Array.from(document.querySelectorAll("h1, h2, h3, div, span"))
-      .find((element) => isArchiveTitleText((element.textContent || "").trim()) && element.getBoundingClientRect().x > 350);
-  }
-
   function attachArchivedPageDeleteButton(row) {
     const settings = codexElvesSettings();
     row.querySelectorAll("[data-codex-archive-row-action]").forEach((button) => button.remove());
@@ -9274,7 +9160,6 @@
       '[data-app-action-sidebar-section-heading="Projects"]',
       '[data-codex-project-move-row="true"]',
       '[data-codex-archive-page-row="true"]',
-      "[data-codex-archive-delete-all]",
       '[data-message-author-role]',
       '[data-testid="conversation-turn"]',
       '[class*="user-message"]',
