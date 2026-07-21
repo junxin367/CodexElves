@@ -6569,7 +6569,7 @@
     return result;
   }
 
-  function showToast(message, undoToken) {
+  function showToast(message, undoToken, undoRef) {
     document.querySelectorAll(".codex-delete-toast").forEach((node) => node.remove());
     const toast = document.createElement("div");
     toast.className = "codex-delete-toast";
@@ -6579,6 +6579,7 @@
       undo.textContent = "撤销";
       undo.addEventListener("click", async () => {
         const result = await postJson("/undo", { undo_token: undoToken });
+        if (result.status === "undone" && undoRef) restoreSessionToCodexAppStore(undoRef);
         toast.textContent = result.message || "撤销完成";
         setTimeout(() => toast.remove(), 5000);
       });
@@ -7547,9 +7548,63 @@
     }
   }
 
+  function codexAppStoreManager() {
+    const manager = codexSessionPrewarmManager || window.__codexElvesSessionPrewarmManager || null;
+    return manager && typeof manager === "object" ? manager : null;
+  }
+
+  // 让 Codex App 走它自己的删除内存态清理：把会话加入抑制集、从 recentConversations
+  // 缓存与 thread summary 中移除，并触发侧边栏重渲染。否则 App 内存态仍保留该会话，
+  // 折叠/展开项目重渲染时会把已删除的行恢复出来。
+  function evictSessionFromCodexAppStore(ref) {
+    const threadId = validThreadSessionKey(ref?.session_id);
+    if (!threadId) return false;
+    const manager = codexAppStoreManager();
+    if (!manager) return false;
+    const ids = uniqueValues(threadIdVariants(threadId));
+    let evicted = false;
+    try {
+      if (typeof manager.handleThreadDeletion === "function") {
+        manager.handleThreadDeletion(ids);
+        evicted = true;
+      }
+    } catch (error) {
+      window.__codexSessionDeleteEvictFailures = window.__codexSessionDeleteEvictFailures || [];
+      window.__codexSessionDeleteEvictFailures.push(String(error?.stack || error));
+    }
+    sendCodexElvesDiagnostic("session_delete_store_evicted", { threadId, evicted });
+    return evicted;
+  }
+
+  // 撤销删除时抵消 evict 的副作用：把会话从 App 抑制集中移除并刷新
+  // 最近会话列表，否则恢复本地记录后会话仍被 App 抑制集过滤、不显示。
+  function restoreSessionToCodexAppStore(ref) {
+    const threadId = validThreadSessionKey(ref?.session_id);
+    if (!threadId) return false;
+    const manager = codexAppStoreManager();
+    if (!manager) return false;
+    const ids = uniqueValues(threadIdVariants(threadId));
+    let restored = false;
+    try {
+      if (typeof manager.handleThreadUnarchived === "function") {
+        ids.forEach((id) => manager.handleThreadUnarchived(id));
+        restored = true;
+      }
+      if (typeof manager.refreshRecentConversations === "function") {
+        Promise.resolve(manager.refreshRecentConversations({ mode: "expanded" })).catch(() => {});
+      }
+    } catch (error) {
+      window.__codexSessionDeleteRestoreFailures = window.__codexSessionDeleteRestoreFailures || [];
+      window.__codexSessionDeleteRestoreFailures.push(String(error?.stack || error));
+    }
+    sendCodexElvesDiagnostic("session_delete_store_restored", { threadId, restored });
+    return restored;
+  }
+
   function removeDeletedRow(row, button, ref) {
     releaseDeleteFocus(row, button);
     const shouldReload = isCurrentSessionRow(row, ref);
+    evictSessionFromCodexAppStore(ref);
     row.remove();
     if (shouldReload) {
       window.location.reload();
@@ -7580,7 +7635,7 @@
       const result = await postJson("/delete", ref);
       if (result.status === "server_deleted" || result.status === "local_deleted") {
         removeDeletedRow(row, button, ref);
-        showToast(result.message || "删除成功", result.undo_token);
+        showToast(result.message || "删除成功", result.undo_token, ref);
       } else if (result.status === "not_found") {
         // 会话在本地存储中已不存在，目标（会话不存在）已达成，直接移除残留的列表行
         removeDeletedRow(row, button, ref);
