@@ -18,6 +18,7 @@ pub const DEFAULT_PROTOCOL_PROXY_PORT: u16 = 45221;
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const UPSTREAM_MODELS_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(900);
+const REMOTE_COMPACTION_CANDIDATE_BODY_TIMEOUT: Duration = Duration::from_secs(900);
 const MODEL_CAPACITY_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(2)];
 const THINK_OPEN_TAG: &str = "<think>";
 const THINK_CLOSE_TAG: &str = "</think>";
@@ -520,6 +521,7 @@ fn prompt_model_name(model: &str) -> String {
 }
 
 pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
+    let body = crate::layered_compaction::prepare_remote_compaction_v2_bridge_request(&body);
     let mut result = json!({});
 
     if let Some(model) = body.get("model") {
@@ -629,12 +631,62 @@ pub fn chat_completion_to_response(body: Value) -> anyhow::Result<Value> {
     chat_completion_to_response_with_context(body, &CodexToolContext::default(), None)
 }
 
+fn current_layered_compaction_options() -> LayeredCompactionOptions {
+    let settings = SettingsStore::default().load().unwrap_or_default();
+    LayeredCompactionOptions::from_settings(&settings)
+}
+
+fn rewrite_remote_compaction_v2_response_with_options(
+    original_request: &Value,
+    response: &Value,
+    options: LayeredCompactionOptions,
+) -> Option<Value> {
+    crate::layered_compaction::rewrite_remote_compaction_v2_response_with_layered_compaction(
+        original_request,
+        response,
+        options.enabled,
+        options.retain_tokens,
+    )
+    .map(|result| result.response)
+}
+
+fn rewrite_remote_compaction_v2_sse_with_options(
+    original_request: &Value,
+    sse_text: String,
+    options: LayeredCompactionOptions,
+) -> Option<String> {
+    crate::layered_compaction::rewrite_remote_compaction_v2_responses_sse_with_layered_compaction(
+        original_request,
+        options.enabled,
+        options.retain_tokens,
+        sse_text,
+    )
+    .map(|result| result.sse_text)
+}
+
 pub fn chat_completion_to_response_with_request(
     body: Value,
     original_request: &Value,
 ) -> anyhow::Result<Value> {
+    chat_completion_to_response_with_request_and_options(
+        body,
+        original_request,
+        current_layered_compaction_options(),
+    )
+}
+
+pub(crate) fn chat_completion_to_response_with_request_and_options(
+    body: Value,
+    original_request: &Value,
+    options: LayeredCompactionOptions,
+) -> anyhow::Result<Value> {
     let context = build_codex_tool_context_for_request(original_request);
-    chat_completion_to_response_with_context(body, &context, Some(original_request))
+    let response =
+        chat_completion_to_response_with_context(body, &context, Some(original_request))?;
+    Ok(
+        rewrite_remote_compaction_v2_response_with_options(original_request, &response, options)
+            .unwrap_or(response),
+    )
 }
 
 fn chat_completion_to_response_with_context(
@@ -692,6 +744,7 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
     body: Value,
     diagnostic_id: Option<&str>,
 ) -> anyhow::Result<Value> {
+    let body = crate::layered_compaction::prepare_remote_compaction_v2_bridge_request(&body);
     let mut result = json!({});
 
     if let Some(model) = body.get("model") {
@@ -803,12 +856,30 @@ pub fn anthropic_message_to_response_with_request_and_diagnostic_id(
     original_request: &Value,
     diagnostic_id: Option<&str>,
 ) -> anyhow::Result<Value> {
+    anthropic_message_to_response_with_request_diagnostic_id_and_options(
+        body,
+        original_request,
+        diagnostic_id,
+        current_layered_compaction_options(),
+    )
+}
+
+pub(crate) fn anthropic_message_to_response_with_request_diagnostic_id_and_options(
+    body: Value,
+    original_request: &Value,
+    diagnostic_id: Option<&str>,
+    options: LayeredCompactionOptions,
+) -> anyhow::Result<Value> {
     let context = build_codex_tool_context_for_request(original_request);
-    anthropic_message_to_response_with_context(
+    let response = anthropic_message_to_response_with_context(
         body,
         &context,
         Some(original_request),
         diagnostic_id,
+    )?;
+    Ok(
+        rewrite_remote_compaction_v2_response_with_options(original_request, &response, options)
+            .unwrap_or(response),
     )
 }
 
@@ -851,6 +922,30 @@ pub struct ProxyHttpResponse {
     pub body: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LayeredCompactionOptions {
+    pub enabled: bool,
+    pub retain_tokens: u32,
+}
+
+impl LayeredCompactionOptions {
+    fn from_settings(settings: &crate::settings::BackendSettings) -> Self {
+        Self {
+            enabled: settings.layered_compaction_enabled,
+            retain_tokens: settings.layered_compaction_retain_tokens,
+        }
+    }
+}
+
+impl Default for LayeredCompactionOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            retain_tokens: crate::layered_compaction::DEFAULT_RETAIN_TOKENS,
+        }
+    }
+}
+
 pub struct UpstreamProxyResponse {
     pub status_code: u16,
     pub content_type: String,
@@ -863,6 +958,7 @@ pub struct UpstreamProxyResponse {
     pub request_body: String,
     pub response: Option<reqwest::Response>,
     pub body_override: Option<Vec<u8>>,
+    pub(crate) layered_compaction_options: LayeredCompactionOptions,
 }
 
 #[derive(Debug, Clone)]
@@ -894,6 +990,112 @@ pub enum UpstreamResponseProtocol {
     Responses,
     ChatCompletions,
     Anthropic,
+}
+
+/// 仅 `gpt-* + Responses` 直接使用原生 Remote Compaction V2。
+/// 其他模型或协议都将 `compaction_trigger` 降级为普通摘要请求。
+pub(crate) fn should_bridge_remote_compaction_v2(
+    request_json: &Value,
+    response_protocol: UpstreamResponseProtocol,
+) -> bool {
+    if !crate::layered_compaction::is_remote_compaction_v2_request(Some(request_json)) {
+        return false;
+    }
+    let model = request_json
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    response_protocol != UpstreamResponseProtocol::Responses
+        || !crate::layered_compaction::model_supports_native_remote_compaction_v2(model)
+}
+
+pub(crate) fn should_bridge_remote_compaction_v2_after_failure(
+    request_json: &Value,
+    response_protocol: Option<UpstreamResponseProtocol>,
+) -> bool {
+    response_protocol.map_or_else(
+        || crate::layered_compaction::is_remote_compaction_v2_request(Some(request_json)),
+        |protocol| should_bridge_remote_compaction_v2(request_json, protocol),
+    )
+}
+
+fn validate_remote_compaction_v2_bridge_candidate(
+    request_json: &Value,
+    response_protocol: UpstreamResponseProtocol,
+    is_stream: bool,
+    diagnostic_id: &str,
+    body: &[u8],
+    options: LayeredCompactionOptions,
+) -> anyhow::Result<()> {
+    let response = if is_stream {
+        let upstream_sse = String::from_utf8_lossy(body);
+        let rewritten = match response_protocol {
+            UpstreamResponseProtocol::Responses => rewrite_remote_compaction_v2_sse_with_options(
+                request_json,
+                upstream_sse.into_owned(),
+                options,
+            )
+            .context("Responses V2 候选响应无法改写")?,
+            UpstreamResponseProtocol::ChatCompletions => {
+                chat_sse_to_responses_sse_with_request_and_options(
+                    &upstream_sse,
+                    request_json,
+                    options,
+                )
+            }
+            UpstreamResponseProtocol::Anthropic => {
+                anthropic_sse_to_responses_sse_with_request_diagnostic_id_and_options(
+                    &upstream_sse,
+                    request_json,
+                    Some(diagnostic_id),
+                    options,
+                )
+            }
+        };
+        crate::continue_thinking::extract_terminal_response_object(&rewritten)
+            .context("V2 候选流缺少终止响应")?
+    } else {
+        let upstream_json: Value =
+            serde_json::from_slice(body).context("V2 候选响应不是有效 JSON")?;
+        match response_protocol {
+            UpstreamResponseProtocol::Responses => {
+                rewrite_remote_compaction_v2_response_with_options(
+                    request_json,
+                    &upstream_json,
+                    options,
+                )
+                .context("Responses V2 候选响应无法改写")?
+            }
+            UpstreamResponseProtocol::ChatCompletions => {
+                chat_completion_to_response_with_request_and_options(
+                    upstream_json,
+                    request_json,
+                    options,
+                )?
+            }
+            UpstreamResponseProtocol::Anthropic => {
+                anthropic_message_to_response_with_request_diagnostic_id_and_options(
+                    upstream_json,
+                    request_json,
+                    Some(diagnostic_id),
+                    options,
+                )?
+            }
+        }
+    };
+    anyhow::ensure!(
+        response.get("status").and_then(Value::as_str) == Some("completed"),
+        "V2 候选响应未成功完成"
+    );
+    let output = response
+        .get("output")
+        .and_then(Value::as_array)
+        .context("V2 候选响应缺少 output")?;
+    anyhow::ensure!(
+        output.len() == 1 && output[0].get("type").and_then(Value::as_str) == Some("compaction"),
+        "V2 候选响应没有且仅有一个 compaction item"
+    );
+    Ok(())
 }
 
 impl UpstreamProxyResponse {
@@ -1426,15 +1628,12 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
 ) -> anyhow::Result<UpstreamProxyResponse> {
     let diagnostic_id = next_protocol_proxy_diagnostic_id();
     let request_json: Value = serde_json::from_str(body)?;
-    let request_json = if settings.layered_compaction_enabled
-        && !settings
-            .layered_compaction_prompt_override
-            .trim()
-            .is_empty()
-    {
+    let request_json = if settings.layered_compaction_enabled {
         crate::layered_compaction::apply_custom_compaction_prompt(
             &request_json,
-            &settings.layered_compaction_prompt_override,
+            crate::layered_compaction::effective_compaction_prompt(
+                &settings.layered_compaction_prompt_override,
+            ),
         )
     } else {
         request_json
@@ -1453,7 +1652,7 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
         &settings, &relay.id,
     )?);
     let relay_count = relays.len();
-    for (attempt, relay) in relays.into_iter().enumerate() {
+    'relay_attempts: for (attempt, relay) in relays.into_iter().enumerate() {
         validate_upstream(&relay)?;
         let request_json = apply_system_prompt_override_to_responses_request(&request_json, &relay);
         let response_protocol = responses_proxy_target_protocol(&relay, &request_json)?;
@@ -1506,6 +1705,7 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
             &client,
             &relay,
             &request_json,
+            &settings,
             response_protocol,
             upstream_is_stream,
             &diagnostic_id,
@@ -1567,30 +1767,90 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
             .unwrap_or("")
             .to_string();
         if response_protocol == UpstreamResponseProtocol::Anthropic {
-            let mut anthropic_request = responses_to_anthropic_messages_with_diagnostic_id(
-                request_json.clone(),
-                Some(&diagnostic_id),
-            )?;
+            let mut anthropic_request = upstream_request_json.clone();
             apply_cached_anthropic_reasoning_compatibility(&mut anthropic_request);
             if should_retry_anthropic_max_effort(status_code, &content_type, &anthropic_request) {
                 let response = upstream_response
                     .take()
                     .expect("anthropic response is present before retry inspection");
-                let error_body = response.bytes().await?.to_vec();
+                let error_body = match response.bytes().await {
+                    Ok(body) => body.to_vec(),
+                    Err(error) => {
+                        let _ = crate::diagnostic_log::append_diagnostic_log(
+                            "protocol_proxy.anthropic_retry_error_body_failed",
+                            json!({
+                                "diagnosticId": diagnostic_id.as_str(),
+                                "relayId": relay.id,
+                                "relayName": relay.name,
+                                "endpoint": endpoint,
+                                "attempt": attempt + 1,
+                                "candidateCount": relay_count,
+                                "willFailover": has_more_candidates,
+                                "error": error.to_string()
+                            }),
+                        );
+                        crate::relay_rotation::record_relay_request_failure(&settings);
+                        if has_more_candidates {
+                            continue 'relay_attempts;
+                        }
+                        let failure_context = UpstreamFailureContext {
+                            diagnostic_id: diagnostic_id.clone(),
+                            relay_id: Some(relay.id.clone()),
+                            relay_name: Some(relay.name.clone()),
+                            endpoint: Some(endpoint.clone()),
+                            response_protocol: Some(response_protocol),
+                        };
+                        return Err(error)
+                            .context("读取 Anthropic max effort 兼容重试错误体失败")
+                            .context(failure_context);
+                    }
+                };
                 if let Some(fallback_effort) =
                     anthropic_effort_fallback_from_error(&error_body, "max")
                 {
                     remember_anthropic_reasoning_compatibility(&anthropic_request, fallback_effort);
                     let mut retry_request = anthropic_request.clone();
                     apply_cached_anthropic_reasoning_compatibility(&mut retry_request);
-                    let retry = send_anthropic_messages_request(
+                    let retry = match send_anthropic_messages_request(
                         &client,
                         &relay,
                         &retry_request,
                         upstream_is_stream,
                         header_timeout,
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(retry) => retry,
+                        Err(error) => {
+                            let _ = crate::diagnostic_log::append_diagnostic_log(
+                                "protocol_proxy.anthropic_retry_request_failed",
+                                json!({
+                                    "diagnosticId": diagnostic_id.as_str(),
+                                    "relayId": relay.id,
+                                    "relayName": relay.name,
+                                    "endpoint": endpoint,
+                                    "attempt": attempt + 1,
+                                    "candidateCount": relay_count,
+                                    "willFailover": has_more_candidates,
+                                    "error": error.to_string()
+                                }),
+                            );
+                            crate::relay_rotation::record_relay_request_failure(&settings);
+                            if has_more_candidates {
+                                continue 'relay_attempts;
+                            }
+                            let failure_context = UpstreamFailureContext {
+                                diagnostic_id: diagnostic_id.clone(),
+                                relay_id: Some(relay.id.clone()),
+                                relay_name: Some(relay.name.clone()),
+                                endpoint: Some(endpoint.clone()),
+                                response_protocol: Some(response_protocol),
+                            };
+                            return Err(error)
+                                .context("Anthropic max effort 兼容重试请求失败")
+                                .context(failure_context);
+                        }
+                    };
                     status_code = retry.status().as_u16();
                     content_type = retry
                         .headers()
@@ -1604,6 +1864,88 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
                     body_override = Some(error_body);
                 }
             }
+        }
+        let layered_compaction_options = LayeredCompactionOptions::from_settings(&settings);
+        if (200..300).contains(&status_code)
+            && has_more_candidates
+            && should_bridge_remote_compaction_v2(&request_json, response_protocol)
+        {
+            let candidate_body = if let Some(body) = body_override.take() {
+                Ok(body)
+            } else {
+                let response = upstream_response
+                    .take()
+                    .expect("successful V2 bridge candidate must include a response body");
+                if upstream_is_stream {
+                    match tokio::time::timeout(
+                        header_timeout.unwrap_or(REMOTE_COMPACTION_CANDIDATE_BODY_TIMEOUT),
+                        response.bytes(),
+                    )
+                    .await
+                    {
+                        Ok(result) => result.map(|body| body.to_vec()).map_err(Into::into),
+                        Err(_) => Err(anyhow::anyhow!(
+                            "V2 聚合候选响应体读取超时（{} 秒）",
+                            header_timeout
+                                .unwrap_or(REMOTE_COMPACTION_CANDIDATE_BODY_TIMEOUT)
+                                .as_secs()
+                        )),
+                    }
+                } else {
+                    response
+                        .bytes()
+                        .await
+                        .map(|body| body.to_vec())
+                        .map_err(Into::into)
+                }
+            };
+            let candidate_body = match candidate_body {
+                Ok(body) => body,
+                Err(error) => {
+                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                        "protocol_proxy.remote_compaction_candidate_body_failed",
+                        json!({
+                            "diagnosticId": diagnostic_id.as_str(),
+                            "relayId": relay.id,
+                            "relayName": relay.name,
+                            "endpoint": endpoint,
+                            "responseProtocol": response_protocol,
+                            "attempt": attempt + 1,
+                            "candidateCount": relay_count,
+                            "willFailover": true,
+                            "error": error.to_string()
+                        }),
+                    );
+                    crate::relay_rotation::record_relay_request_failure(&settings);
+                    continue 'relay_attempts;
+                }
+            };
+            if let Err(error) = validate_remote_compaction_v2_bridge_candidate(
+                &request_json,
+                response_protocol,
+                upstream_is_stream,
+                &diagnostic_id,
+                &candidate_body,
+                layered_compaction_options,
+            ) {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "protocol_proxy.remote_compaction_candidate_invalid",
+                    json!({
+                        "diagnosticId": diagnostic_id.as_str(),
+                        "relayId": relay.id,
+                        "relayName": relay.name,
+                        "endpoint": endpoint,
+                        "responseProtocol": response_protocol,
+                        "attempt": attempt + 1,
+                        "candidateCount": relay_count,
+                        "willFailover": true,
+                        "error": error.to_string()
+                    }),
+                );
+                crate::relay_rotation::record_relay_request_failure(&settings);
+                continue 'relay_attempts;
+            }
+            body_override = Some(candidate_body);
         }
         let _ = crate::diagnostic_log::append_diagnostic_log(
             "protocol_proxy.upstream_response",
@@ -1643,6 +1985,7 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
                 request_body: logged_request_body,
                 response: upstream_response,
                 body_override,
+                layered_compaction_options,
             });
         }
         let _ = crate::diagnostic_log::append_diagnostic_log(
@@ -1669,6 +2012,7 @@ async fn send_responses_upstream_request(
     client: &reqwest::Client,
     relay: &crate::settings::RelayProfile,
     request_json: &Value,
+    settings: &crate::settings::BackendSettings,
     response_protocol: UpstreamResponseProtocol,
     is_stream: bool,
     diagnostic_id: &str,
@@ -1676,6 +2020,7 @@ async fn send_responses_upstream_request(
 ) -> anyhow::Result<(reqwest::Response, Value)> {
     let upstream_request = responses_upstream_request_for_protocol(
         request_json,
+        settings,
         response_protocol,
         is_stream,
         diagnostic_id,
@@ -1720,20 +2065,31 @@ async fn send_responses_upstream_request(
 
 fn responses_upstream_request_for_protocol(
     request_json: &Value,
+    settings: &crate::settings::BackendSettings,
     response_protocol: UpstreamResponseProtocol,
     is_stream: bool,
     diagnostic_id: &str,
 ) -> anyhow::Result<Value> {
+    let request_json = if should_bridge_remote_compaction_v2(request_json, response_protocol) {
+        crate::layered_compaction::prepare_remote_compaction_v2_bridge_request_with_prompt(
+            request_json,
+            settings
+                .layered_compaction_enabled
+                .then_some(settings.layered_compaction_prompt_override.as_str()),
+        )
+    } else {
+        request_json.clone()
+    };
     match response_protocol {
         UpstreamResponseProtocol::Responses => {
-            Ok(normalize_native_responses_message_item_ids(request_json))
+            Ok(normalize_native_responses_request(&request_json))
         }
         UpstreamResponseProtocol::ChatCompletions => {
-            responses_to_chat_completions(responses_request_with_stream(request_json, is_stream))
+            responses_to_chat_completions(responses_request_with_stream(&request_json, is_stream))
         }
         UpstreamResponseProtocol::Anthropic => {
             let mut request = responses_to_anthropic_messages_with_diagnostic_id(
-                responses_request_with_stream(request_json, is_stream),
+                responses_request_with_stream(&request_json, is_stream),
                 Some(diagnostic_id),
             )?;
             apply_cached_anthropic_reasoning_compatibility(&mut request);
@@ -1907,6 +2263,7 @@ pub async fn open_models_proxy_request(
         request_body: String::new(),
         response: Some(upstream),
         body_override: None,
+        layered_compaction_options: LayeredCompactionOptions::from_settings(&settings),
     })
 }
 
@@ -1964,6 +2321,7 @@ pub async fn open_chat_completions_proxy_request(
         request_body,
         response: Some(upstream),
         body_override: None,
+        layered_compaction_options: LayeredCompactionOptions::from_settings(&settings),
     })
 }
 
@@ -2395,17 +2753,100 @@ fn effective_user_agent(configured_user_agent: &str, original_user_agent: Option
         .to_string()
 }
 
+fn remote_compaction_v2_proxy_failure(
+    request_json: &Value,
+    is_stream: bool,
+    code: &str,
+    message: &str,
+) -> anyhow::Result<ProxyHttpResponse> {
+    if is_stream {
+        return Ok(ProxyHttpResponse {
+            status: "200 OK".to_string(),
+            content_type: "text/event-stream; charset=utf-8".to_string(),
+            body: crate::layered_compaction::remote_compaction_v2_failure_sse(
+                request_json,
+                code,
+                message,
+            )
+            .into_bytes(),
+        });
+    }
+    let response = crate::layered_compaction::remote_compaction_v2_failure_response(
+        request_json,
+        None,
+        code,
+        message,
+    );
+    Ok(ProxyHttpResponse {
+        status: "200 OK".to_string(),
+        content_type: "application/json; charset=utf-8".to_string(),
+        body: serde_json::to_vec(&response)?,
+    })
+}
+
 pub async fn handle_responses_proxy_request(body: &str) -> anyhow::Result<ProxyHttpResponse> {
     let request_json: Value = serde_json::from_str(body)?;
-    let upstream = open_responses_proxy_request(body, None).await?;
+    let request_is_stream = request_json
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let upstream = match open_responses_proxy_request(body, None).await {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            let failure_context = upstream_failure_context(&error);
+            if should_bridge_remote_compaction_v2_after_failure(
+                &request_json,
+                failure_context.and_then(|context| context.response_protocol),
+            ) {
+                return remote_compaction_v2_proxy_failure(
+                    &request_json,
+                    request_is_stream,
+                    "remote_compaction_upstream_request_failed",
+                    "Remote Compaction V2 upstream request failed.",
+                );
+            }
+            return Err(error);
+        }
+    };
+    let layered_compaction_options = upstream.layered_compaction_options;
     let status_code = upstream.status_code;
     let upstream_content_type = upstream.content_type.clone();
     let is_stream = upstream.is_stream;
     let response_protocol = upstream.response_protocol;
     let diagnostic_id = upstream.diagnostic_id.clone();
-    let upstream_body = upstream.into_body_bytes().await?;
+    let bridge_remote_compaction_v2 =
+        should_bridge_remote_compaction_v2(&request_json, response_protocol);
+    let upstream_body = match upstream.into_body_bytes().await {
+        Ok(body) => body,
+        Err(error) if bridge_remote_compaction_v2 => {
+            let message = format!(
+                "Remote Compaction V2 bridge could not read the upstream response: {error}"
+            );
+            return remote_compaction_v2_proxy_failure(
+                &request_json,
+                is_stream,
+                "remote_compaction_response_read_failed",
+                &message,
+            );
+        }
+        Err(error) => return Err(error),
+    };
 
     if !(200..300).contains(&status_code) {
+        if bridge_remote_compaction_v2 {
+            let error =
+                responses_error_from_upstream(status_code, &upstream_content_type, &upstream_body);
+            let message = error
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .unwrap_or("Remote Compaction V2 upstream returned a non-success status.");
+            return remote_compaction_v2_proxy_failure(
+                &request_json,
+                is_stream,
+                "remote_compaction_upstream_http_error",
+                message,
+            );
+        }
         if response_protocol == UpstreamResponseProtocol::Responses {
             return Ok(ProxyHttpResponse {
                 status: http_status_line(status_code),
@@ -2428,6 +2869,21 @@ pub async fn handle_responses_proxy_request(body: &str) -> anyhow::Result<ProxyH
 
     if is_stream {
         if response_protocol == UpstreamResponseProtocol::Responses {
+            if bridge_remote_compaction_v2 {
+                let text = String::from_utf8_lossy(&upstream_body).into_owned();
+                let body = rewrite_remote_compaction_v2_sse_with_options(
+                    &request_json,
+                    text,
+                    layered_compaction_options,
+                )
+                .expect("Remote Compaction V2 bridge request must produce a terminal SSE")
+                .into_bytes();
+                return Ok(ProxyHttpResponse {
+                    status: "200 OK".to_string(),
+                    content_type: "text/event-stream; charset=utf-8".to_string(),
+                    body,
+                });
+            }
             return Ok(ProxyHttpResponse {
                 status: "200 OK".to_string(),
                 content_type: upstream_content_type,
@@ -2437,13 +2893,19 @@ pub async fn handle_responses_proxy_request(body: &str) -> anyhow::Result<ProxyH
         let text = String::from_utf8_lossy(&upstream_body);
         let body = match response_protocol {
             UpstreamResponseProtocol::ChatCompletions => {
-                chat_sse_to_responses_sse_with_request(&text, &request_json).into_bytes()
+                chat_sse_to_responses_sse_with_request_and_options(
+                    &text,
+                    &request_json,
+                    layered_compaction_options,
+                )
+                .into_bytes()
             }
             UpstreamResponseProtocol::Anthropic => {
-                anthropic_sse_to_responses_sse_with_request_and_diagnostic_id(
+                anthropic_sse_to_responses_sse_with_request_diagnostic_id_and_options(
                     &text,
                     &request_json,
                     Some(&diagnostic_id),
+                    layered_compaction_options,
                 )
                 .into_bytes()
             }
@@ -2457,26 +2919,86 @@ pub async fn handle_responses_proxy_request(body: &str) -> anyhow::Result<ProxyH
     }
 
     if response_protocol == UpstreamResponseProtocol::Responses {
+        if bridge_remote_compaction_v2 {
+            let response_json = match serde_json::from_slice::<Value>(&upstream_body) {
+                Ok(upstream_json) => rewrite_remote_compaction_v2_response_with_options(
+                    &request_json,
+                    &upstream_json,
+                    layered_compaction_options,
+                )
+                .expect("Remote Compaction V2 bridge request must produce a terminal response"),
+                Err(error) => crate::layered_compaction::remote_compaction_v2_failure_response(
+                    &request_json,
+                    None,
+                    "remote_compaction_response_parse_failed",
+                    &format!(
+                        "Remote Compaction V2 bridge could not parse the upstream response: {error}"
+                    ),
+                ),
+            };
+            return Ok(ProxyHttpResponse {
+                status: "200 OK".to_string(),
+                content_type: "application/json; charset=utf-8".to_string(),
+                body: serde_json::to_vec(&response_json)?,
+            });
+        }
         return Ok(ProxyHttpResponse {
-            status: "200 OK".to_string(),
+            status: http_status_line(status_code),
             content_type: upstream_content_type,
             body: upstream_body,
         });
     }
 
-    let upstream_json: Value = serde_json::from_slice(&upstream_body)?;
-    let response_json = match response_protocol {
-        UpstreamResponseProtocol::ChatCompletions => {
-            chat_completion_to_response_with_request(upstream_json, &request_json)?
+    let response_result = match serde_json::from_slice::<Value>(&upstream_body) {
+        Ok(upstream_json) => match response_protocol {
+            UpstreamResponseProtocol::ChatCompletions => {
+                chat_completion_to_response_with_request_and_options(
+                    upstream_json,
+                    &request_json,
+                    layered_compaction_options,
+                )
+            }
+            UpstreamResponseProtocol::Anthropic => {
+                anthropic_message_to_response_with_request_diagnostic_id_and_options(
+                    upstream_json,
+                    &request_json,
+                    Some(&diagnostic_id),
+                    layered_compaction_options,
+                )
+            }
+            UpstreamResponseProtocol::Responses => unreachable!(),
+        },
+        Err(error)
+            if crate::layered_compaction::is_remote_compaction_v2_request(Some(&request_json)) =>
+        {
+            Ok(
+                crate::layered_compaction::remote_compaction_v2_failure_response(
+                    &request_json,
+                    None,
+                    "remote_compaction_response_parse_failed",
+                    &format!(
+                        "Remote Compaction V2 bridge could not parse the upstream response: {error}"
+                    ),
+                ),
+            )
         }
-        UpstreamResponseProtocol::Anthropic => {
-            anthropic_message_to_response_with_request_and_diagnostic_id(
-                upstream_json,
+        Err(error) => Err(error.into()),
+    };
+    let response_json = match response_result {
+        Ok(response) => response,
+        Err(error)
+            if crate::layered_compaction::is_remote_compaction_v2_request(Some(&request_json)) =>
+        {
+            crate::layered_compaction::remote_compaction_v2_failure_response(
                 &request_json,
-                Some(&diagnostic_id),
-            )?
+                None,
+                "remote_compaction_response_conversion_failed",
+                &format!(
+                    "Remote Compaction V2 bridge could not convert the upstream response: {error}"
+                ),
+            )
         }
-        UpstreamResponseProtocol::Responses => unreachable!(),
+        Err(error) => return Err(error),
     };
     Ok(ProxyHttpResponse {
         status: "200 OK".to_string(),
@@ -2588,10 +3110,24 @@ pub fn chat_sse_to_responses_sse(input: &str) -> String {
 }
 
 pub fn chat_sse_to_responses_sse_with_request(input: &str, original_request: &Value) -> String {
+    chat_sse_to_responses_sse_with_request_and_options(
+        input,
+        original_request,
+        current_layered_compaction_options(),
+    )
+}
+
+fn chat_sse_to_responses_sse_with_request_and_options(
+    input: &str,
+    original_request: &Value,
+    options: LayeredCompactionOptions,
+) -> String {
     let mut converter = ChatSseToResponsesConverter::with_request(original_request);
     let mut output = converter.push_bytes(input.as_bytes());
     output.extend(converter.finish());
-    String::from_utf8(output).unwrap_or_default()
+    let converted = String::from_utf8(output).unwrap_or_default();
+    rewrite_remote_compaction_v2_sse_with_options(original_request, converted.clone(), options)
+        .unwrap_or(converted)
 }
 
 pub fn anthropic_sse_to_responses_sse(input: &str) -> String {
@@ -2613,13 +3149,29 @@ pub fn anthropic_sse_to_responses_sse_with_request_and_diagnostic_id(
     original_request: &Value,
     diagnostic_id: Option<&str>,
 ) -> String {
+    anthropic_sse_to_responses_sse_with_request_diagnostic_id_and_options(
+        input,
+        original_request,
+        diagnostic_id,
+        current_layered_compaction_options(),
+    )
+}
+
+fn anthropic_sse_to_responses_sse_with_request_diagnostic_id_and_options(
+    input: &str,
+    original_request: &Value,
+    diagnostic_id: Option<&str>,
+    options: LayeredCompactionOptions,
+) -> String {
     let mut converter = AnthropicSseToResponsesConverter::with_request_and_diagnostic_id(
         original_request,
         diagnostic_id,
     );
     let mut output = converter.push_bytes(input.as_bytes());
     output.extend(converter.finish());
-    String::from_utf8(output).unwrap_or_default()
+    let converted = String::from_utf8(output).unwrap_or_default();
+    rewrite_remote_compaction_v2_sse_with_options(original_request, converted.clone(), options)
+        .unwrap_or(converted)
 }
 
 pub fn response_id_from_chat_id(id: Option<&str>) -> String {
@@ -2653,13 +3205,25 @@ pub(crate) fn normalize_responses_message_item_id(id: &str) -> Option<String> {
         .map(response_message_item_id)
 }
 
-fn normalize_native_responses_message_item_ids(request_json: &Value) -> Value {
+pub(crate) fn normalize_native_responses_request(request_json: &Value) -> Value {
     let mut request = request_json.clone();
     let Some(input) = request.get_mut("input").and_then(Value::as_array_mut) else {
         return request;
     };
 
     for item in input {
+        if let Some(text) =
+            crate::layered_compaction::synthetic_remote_compaction_history_text(item)
+        {
+            *item = json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": text
+                }]
+            });
+        }
         let Some(object) = item.as_object_mut() else {
             continue;
         };
@@ -3972,18 +4536,14 @@ fn extract_chat_sse_error(value: &Value) -> (String, Option<String>) {
 }
 
 fn http_status_line(status: u16) -> String {
-    match status {
-        200 => "200 OK".to_string(),
-        400 => "400 Bad Request".to_string(),
-        401 => "401 Unauthorized".to_string(),
-        403 => "403 Forbidden".to_string(),
-        404 => "404 Not Found".to_string(),
-        429 => "429 Too Many Requests".to_string(),
-        500 => "500 Internal Server Error".to_string(),
-        502 => "502 Bad Gateway".to_string(),
-        503 => "503 Service Unavailable".to_string(),
-        _ => format!("{status} Upstream"),
-    }
+    reqwest::StatusCode::from_u16(status)
+        .ok()
+        .and_then(|status_code| {
+            status_code
+                .canonical_reason()
+                .map(|reason| format!("{status} {reason}"))
+        })
+        .unwrap_or_else(|| format!("{status} Upstream"))
 }
 
 pub fn responses_error_from_upstream(status_code: u16, content_type: &str, body: &[u8]) -> Value {
@@ -4341,6 +4901,27 @@ fn append_responses_item_to_anthropic(
         Some("reasoning") => {
             if let Some(block) = responses_reasoning_to_anthropic_thinking_block(item) {
                 push_anthropic_message(messages, "assistant", vec![block]);
+            }
+        }
+        Some("compaction") => {
+            if let Some(text) =
+                crate::layered_compaction::synthetic_remote_compaction_history_text(item)
+            {
+                if messages.is_empty() {
+                    push_anthropic_message(
+                        messages,
+                        "user",
+                        vec![json!({
+                            "type": "text",
+                            "text": "The next assistant message is historical context restored from an earlier compacted conversation."
+                        })],
+                    );
+                }
+                push_anthropic_message(
+                    messages,
+                    "assistant",
+                    vec![json!({ "type": "text", "text": text })],
+                );
             }
         }
         Some("web_search_call") | Some("web_search_output") => {
@@ -4898,6 +5479,18 @@ fn append_responses_item(
                 if !text.is_empty() {
                     pending_reasoning.push(text);
                 }
+            }
+        }
+        Some("compaction") => {
+            flush_tool_calls(messages, pending_tool_calls, pending_reasoning);
+            flush_reasoning(messages, pending_reasoning);
+            if let Some(text) =
+                crate::layered_compaction::synthetic_remote_compaction_history_text(item)
+            {
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": text
+                }));
             }
         }
         _ => {
@@ -8793,6 +9386,174 @@ fn is_openai_o_series(model: &str) -> bool {
             .as_bytes()
             .get(1)
             .is_some_and(|byte| byte.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod remote_compaction_v2_tests {
+    use super::{
+        UpstreamResponseProtocol, normalize_native_responses_request,
+        responses_upstream_request_for_protocol, should_bridge_remote_compaction_v2,
+        should_bridge_remote_compaction_v2_after_failure,
+    };
+    use crate::settings::BackendSettings;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn native_responses_replays_synthetic_compaction_as_assistant_history() {
+        let compaction_request = json!({
+            "model": "claude-sonnet-5",
+            "input": [{ "type": "compaction_trigger" }]
+        });
+        let source_response = json!({
+            "id": "resp_bridge",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "BRIDGED SUMMARY" }]
+            }]
+        });
+        let compacted = crate::layered_compaction::rewrite_remote_compaction_v2_response(
+            &compaction_request,
+            &source_response,
+        )
+        .expect("bridge should create a compaction response");
+        let compaction_item = compacted["output"][0].clone();
+
+        let normalized = normalize_native_responses_request(&json!({
+            "model": "gpt-5.6",
+            "input": [
+                compaction_item,
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "continue" }]
+                }
+            ]
+        }));
+        let input = normalized["input"].as_array().unwrap();
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[0]["role"], "assistant");
+        assert!(
+            input[0]["content"]
+                .as_array()
+                .and_then(|parts| parts.first())
+                .and_then(|part| part.get("text"))
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.contains("BRIDGED SUMMARY"))
+        );
+    }
+
+    #[test]
+    fn native_responses_preserves_real_remote_compaction_trigger() {
+        let request = json!({
+            "type": "response.create",
+            "model": "gpt-5.6",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "compact this" }]
+                },
+                { "type": "compaction_trigger" }
+            ]
+        });
+        let normalized = normalize_native_responses_request(&request);
+        assert_eq!(normalized["input"][1]["type"], "compaction_trigger");
+        assert_eq!(normalized["type"], "response.create");
+    }
+
+    #[test]
+    fn only_gpt_responses_uses_native_remote_compaction() {
+        let gpt = json!({
+            "model": "gpt-5.6",
+            "input": [{ "type": "compaction_trigger" }]
+        });
+        let claude = json!({
+            "model": "claude-sonnet-5",
+            "input": [{ "type": "compaction_trigger" }]
+        });
+        assert!(!should_bridge_remote_compaction_v2(
+            &gpt,
+            UpstreamResponseProtocol::Responses
+        ));
+        assert!(should_bridge_remote_compaction_v2(
+            &claude,
+            UpstreamResponseProtocol::Responses
+        ));
+        assert!(should_bridge_remote_compaction_v2(
+            &gpt,
+            UpstreamResponseProtocol::ChatCompletions
+        ));
+    }
+
+    #[test]
+    fn v2_failure_without_known_protocol_fails_closed_for_all_models() {
+        let gpt = json!({
+            "model": "gpt-5.6",
+            "input": [{ "type": "compaction_trigger" }]
+        });
+        let ordinary = json!({
+            "model": "gpt-5.6",
+            "input": [{ "type": "message", "role": "user", "content": "hello" }]
+        });
+        assert!(should_bridge_remote_compaction_v2_after_failure(&gpt, None));
+        assert!(!should_bridge_remote_compaction_v2_after_failure(
+            &ordinary, None
+        ));
+    }
+
+    #[test]
+    fn non_gpt_responses_replaces_trigger_and_uses_layered_prompt_override() {
+        let mut settings = BackendSettings {
+            layered_compaction_enabled: true,
+            layered_compaction_prompt_override: "CUSTOM V2 PROMPT".to_string(),
+            ..Default::default()
+        };
+        let request = json!({
+            "model": "claude-sonnet-5",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "context" }]
+                },
+                { "type": "compaction_trigger" }
+            ],
+            "tools": [{ "type": "function", "name": "exec_command" }]
+        });
+        let bridged = responses_upstream_request_for_protocol(
+            &request,
+            &settings,
+            UpstreamResponseProtocol::Responses,
+            false,
+            "test",
+        )
+        .unwrap();
+        assert_eq!(bridged["input"][1]["type"], "message");
+        assert_eq!(
+            bridged["input"][1]["content"][0]["text"],
+            "CUSTOM V2 PROMPT"
+        );
+        assert!(bridged.get("tools").is_none());
+
+        settings.layered_compaction_enabled = false;
+        let plain = responses_upstream_request_for_protocol(
+            &request,
+            &settings,
+            UpstreamResponseProtocol::Responses,
+            false,
+            "test",
+        )
+        .unwrap();
+        assert!(
+            plain["input"][1]["content"][0]["text"]
+                .as_str()
+                .is_some_and(
+                    |text| text.starts_with(crate::layered_compaction::COMPACTION_PROMPT_PREFIX)
+                )
+        );
+    }
 }
 
 #[cfg(test)]

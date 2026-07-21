@@ -454,12 +454,13 @@ fn apply_relay_profile_owned_fields_to_config(
 
     updated = remove_root_key(&updated, CHAT_UPSTREAM_BASE_URL_KEY);
     let provider_table = model_provider_table_name(&provider_id);
+    let provider_name = relay_profile_provider_name(profile, &provider_id);
     let codex_base_url = codex_base_url_for_proxy(
         base_url.trim(),
         profile.local_proxy_enabled(),
         crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
     );
-    updated = set_table_toml_string_line(&updated, &provider_table, "name", &provider_id);
+    updated = set_table_toml_string_line(&updated, &provider_table, "name", &provider_name);
     updated = set_table_toml_string_line(&updated, &provider_table, "wire_api", "responses");
     updated = set_table_toml_raw_line(&updated, &provider_table, "requires_openai_auth", "true");
     updated = set_table_toml_raw_line(
@@ -677,6 +678,26 @@ pub fn sync_applied_relay_profile_websocket_to_home(
         profile,
         relay_prefers_native_responses_websocket(profile),
     )
+}
+
+pub fn sync_applied_relay_profile_provider_name_to_home(
+    home: &Path,
+    profile: &RelayProfile,
+) -> anyhow::Result<bool> {
+    let live_config = read_optional_text(&home.join("config.toml"))?;
+    let live_provider = root_key_string(&live_config, "model_provider").unwrap_or_default();
+    let profile_provider = relay_profile_provider_id(profile)?;
+    if live_provider.trim() != profile_provider.trim() {
+        return Ok(false);
+    }
+
+    let provider_table = format!("model_providers.{live_provider}");
+    let provider_name = relay_profile_provider_name(profile, &profile_provider);
+    let updated = set_table_toml_string_line(&live_config, &provider_table, "name", &provider_name);
+    if updated != live_config {
+        write_codex_live_atomic(home, Some(&updated), None, false)?;
+    }
+    Ok(true)
 }
 
 pub fn sync_applied_relay_profile_websocket_to_home_with_enabled(
@@ -4564,6 +4585,16 @@ fn upsert_model_provider_config(
 fn relay_profile_provider_id(profile: &RelayProfile) -> anyhow::Result<String> {
     let doc = parse_toml_document(&profile.config_contents)?;
     Ok(active_or_default_provider_id(&doc))
+}
+
+fn relay_profile_provider_name(profile: &RelayProfile, provider_id: &str) -> String {
+    if provider_string_from_config(&profile.config_contents, "name")
+        .is_some_and(|value| value.trim() == "OpenAI")
+    {
+        "OpenAI".to_string()
+    } else {
+        provider_id.to_string()
+    }
 }
 
 fn relay_profile_owned_model(profile: &RelayProfile) -> String {

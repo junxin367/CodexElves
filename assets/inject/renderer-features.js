@@ -54,11 +54,11 @@
   const codexServiceTierRequestOverrideVersion = "3";
   const codexServiceTierRequestClientPatchRetryBaseMs = 1000;
   const codexServiceTierRequestClientPatchRetryMaxMs = 30000;
-  const codexAppServerModelRequestPatchVersion = "5";
-  const codexThreadRecoveryOwnerSettleTimeoutMs = 1500;
-  const codexThreadRecoveryResumeWaitTimeoutMs = 15000;
-  const codexThreadRecoveryNavigationTimeoutMs = 3000;
-  const codexThreadRecoveryPollIntervalMs = 50;
+  const codexAppServerModelRequestPatchVersion = "6";
+
+
+
+
   const codexSessionPrewarmVersion = "2";
   const codexSessionPrewarmDefaultConcurrency = 4;
   const codexSessionPrewarmStartupDelayMs = 200;
@@ -963,7 +963,7 @@
       pluginMarketplaceUnlock: true,
       pluginAutoExpand: true,
       sessionDelete: true,
-      sessionRecoveryEnabled: true,
+
       sessionPrewarmEnabled: false,
       sessionPrewarmFullCount: 3,
       sessionPrewarmContentCount: 3,
@@ -983,7 +983,7 @@
     pluginMarketplaceUnlock: "codexAppPluginMarketplaceUnlock",
     pluginAutoExpand: "codexAppPluginAutoExpand",
     sessionDelete: "codexAppSessionDelete",
-    sessionRecoveryEnabled: "codexAppSessionRecoveryEnabled",
+
     sessionPrewarmEnabled: "codexAppSessionPrewarmEnabled",
     sessionPrewarmFullCount: "codexAppSessionPrewarmFullCount",
     sessionPrewarmContentCount: "codexAppSessionPrewarmContentCount",
@@ -1036,7 +1036,7 @@
         pluginMarketplaceUnlock: false,
         pluginAutoExpand: false,
         sessionDelete: false,
-        sessionRecoveryEnabled: false,
+
         sessionPrewarmEnabled: false,
         sessionPrewarmFullCount: 0,
         sessionPrewarmContentCount: 0,
@@ -3972,9 +3972,9 @@
   const codexSessionPrewarmForegroundIds = new Set();
   const codexSessionPrewarmActiveIds = new Set();
   const codexSessionPrewarmRetryCounts = new Map();
-  const codexThreadRecoveryResumePromises = new Map();
-  const codexThreadRecoveryPromises = new Map();
-  const codexThreadRecoveryTargets = new Map();
+
+
+
 
   function codexSessionPrewarmSettingsSnapshot() {
     const settings = codexElvesSettings();
@@ -4287,767 +4287,6 @@
       collaborationMode: null,
       showThreadGoalResumeConfirmation: false,
     };
-  }
-
-  function codexThreadRecoveryEnabled() {
-    return codexElvesSettings().sessionRecoveryEnabled === true;
-  }
-
-  function codexThreadRecoveryRequestParams(method, params) {
-    if (
-      String(method || "") === "send-cli-request-for-host" &&
-      params?.params &&
-      typeof params.params === "object"
-    ) {
-      return params.params;
-    }
-    return params && typeof params === "object" ? params : {};
-  }
-
-  function codexThreadRecoveryRequestContext(method, params) {
-    const requestMethod = appServerModelRequestMethod(String(method || ""), params);
-    const requestParams = codexThreadRecoveryRequestParams(method, params);
-    const threadId = validThreadSessionKey(
-      requestParams?.threadId ||
-      requestParams?.conversationId ||
-      params?.threadId ||
-      params?.conversationId ||
-      currentSessionRef().session_id
-    );
-    return {
-      method: requestMethod,
-      params: requestParams,
-      threadId,
-    };
-  }
-
-  function codexThreadRecoveryErrorText(error) {
-    const values = [];
-    const seen = new Set();
-    const queue = [error];
-    while (queue.length > 0 && seen.size < 16) {
-      const current = queue.shift();
-      if (current == null) continue;
-      if ((typeof current === "object" || typeof current === "function") && seen.has(current)) continue;
-      if (typeof current === "object" || typeof current === "function") seen.add(current);
-      if (typeof current === "string") values.push(current);
-      else {
-        if (current?.name) values.push(String(current.name));
-        if (current?.message) values.push(String(current.message));
-        if (current?.code) values.push(String(current.code));
-        queue.push(
-          current?.cause,
-          current?.error,
-          current?.rpcError,
-          current?.response?.error,
-          current?.data?.error
-        );
-      }
-    }
-    return values.join(" ").toLowerCase();
-  }
-
-  function codexThreadRecoveryShouldHandleError(error) {
-    return codexThreadRecoveryErrorText(error).includes("agent loop died unexpectedly");
-  }
-
-  function codexThreadRecoveryExtractText(params) {
-    const parts = [];
-    const visit = (value, depth = 0) => {
-      if (depth > 5 || value == null) return;
-      if (typeof value === "string") {
-        if (value.trim()) parts.push(value);
-        return;
-      }
-      if (Array.isArray(value)) {
-        value.forEach((item) => visit(item, depth + 1));
-        return;
-      }
-      if (typeof value !== "object") return;
-      const type = String(value.type || "").toLowerCase();
-      if (typeof value.text === "string" && (!type || type.includes("text"))) {
-        visit(value.text, depth + 1);
-      }
-      if (type === "message" || type === "user" || type === "user_message") {
-        visit(value.content, depth + 1);
-      }
-    };
-    visit(params?.input);
-    if (!parts.length) visit(params?.prompt);
-    if (!parts.length) visit(params?.message);
-    return parts.join("\n").trim();
-  }
-
-  function codexThreadRecoveryComposerInput() {
-    const inputs = codexServiceTierComposerInputs(document);
-    const active = document.activeElement;
-    if (active && inputs.includes(active)) return active;
-    return inputs[0] || null;
-  }
-
-  function codexThreadRecoveryDraftSnapshot(params) {
-    const input = codexThreadRecoveryComposerInput();
-    const fallbackText = codexThreadRecoveryExtractText(params);
-    if (!input && !fallbackText) return null;
-    const tagName = String(input?.tagName || "").toLowerCase();
-    if (input && (tagName === "textarea" || tagName === "input")) {
-      const value = String(input.value || "");
-      return {
-        kind: "value",
-        value: value || fallbackText,
-      };
-    }
-    if (input) {
-      const html = String(input.innerHTML || "");
-      const text = String(input.textContent || "");
-      return {
-        kind: "html",
-        html,
-        text: text || fallbackText,
-      };
-    }
-    return {
-      kind: "text",
-      text: fallbackText,
-    };
-  }
-
-  function codexThreadRecoveryInputText(input) {
-    const tagName = String(input?.tagName || "").toLowerCase();
-    if (tagName === "textarea" || tagName === "input") return String(input.value || "");
-    return String(input?.textContent || "");
-  }
-
-  function codexThreadRecoverySnapshotText(snapshot) {
-    return String(snapshot?.value || snapshot?.text || "");
-  }
-
-  function codexThreadRecoveryDispatchInput(input) {
-    try {
-      input.dispatchEvent?.(new Event("input", { bubbles: true }));
-    } catch {
-    }
-  }
-
-  function codexThreadRecoveryRestoreDraft(threadId, snapshot) {
-    if (!snapshot || validThreadSessionKey(currentSessionRef().session_id) !== threadId) return "different-thread";
-    const input = codexThreadRecoveryComposerInput();
-    if (!input) return "composer-unavailable";
-    const currentText = codexThreadRecoveryInputText(input);
-    if (currentText.trim()) {
-      return currentText === codexThreadRecoverySnapshotText(snapshot)
-        ? "input-still-present"
-        : "composer-has-other-content";
-    }
-    const tagName = String(input.tagName || "").toLowerCase();
-    if (tagName === "textarea" || tagName === "input") {
-      const value = String(snapshot.value || snapshot.text || "");
-      if (!value) return "empty";
-      try {
-        const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value");
-        if (descriptor?.set) descriptor.set.call(input, value);
-        else input.value = value;
-      } catch {
-        input.value = value;
-      }
-      codexThreadRecoveryDispatchInput(input);
-      input.focus?.();
-      return "restored";
-    }
-    if (snapshot.kind === "html" && snapshot.html) {
-      input.innerHTML = snapshot.html;
-    } else {
-      const text = String(snapshot.text || snapshot.value || "");
-      if (!text) return "empty";
-      input.textContent = text;
-    }
-    codexThreadRecoveryDispatchInput(input);
-    input.focus?.();
-    return "restored";
-  }
-
-  function codexThreadRecoveryTrackResume(threadId, promise) {
-    const id = validThreadSessionKey(threadId);
-    if (!id) return Promise.resolve(promise);
-    const entry = {
-      promise: Promise.resolve(promise),
-    };
-    codexThreadRecoveryResumePromises.set(id, entry);
-    const cleanup = () => {
-      if (codexThreadRecoveryResumePromises.get(id) === entry) {
-        codexThreadRecoveryResumePromises.delete(id);
-      }
-    };
-    entry.promise.then(cleanup, cleanup);
-    return entry.promise;
-  }
-
-  function codexThreadRecoveryTransaction(threadId, create = false) {
-    const id = validThreadSessionKey(threadId);
-    if (!id) return null;
-    let transaction = codexThreadRecoveryPromises.get(id) || null;
-    if (!transaction && create) {
-      transaction = {
-        activeTurnCount: 0,
-        recoveryPromise: null,
-        recoverySettled: true,
-        replayPendingCount: 0,
-        nextTurnSequence: 0,
-        lastTurnCompletion: Promise.resolve(),
-      };
-      codexThreadRecoveryPromises.set(id, transaction);
-    }
-    return transaction;
-  }
-
-  function codexThreadRecoveryCleanupTransaction(threadId, transaction) {
-    const id = validThreadSessionKey(threadId);
-    if (
-      !id ||
-      !transaction ||
-      transaction.activeTurnCount > 0 ||
-      transaction.recoverySettled !== true ||
-      transaction.replayPendingCount > 0
-    ) {
-      return;
-    }
-    if (codexThreadRecoveryPromises.get(id) === transaction) {
-      codexThreadRecoveryPromises.delete(id);
-    }
-  }
-
-  function codexThreadRecoveryTrackTurn(threadId) {
-    const transaction = codexThreadRecoveryTransaction(threadId, true);
-    if (!transaction) return null;
-    const previousCompletion = transaction.lastTurnCompletion;
-    let completeTurn;
-    const ownCompletion = new Promise((resolve) => {
-      completeTurn = resolve;
-    });
-    const completion = Promise.resolve(previousCompletion)
-      .then(() => ownCompletion);
-    const turn = {
-      transaction,
-      sequence: transaction.nextTurnSequence,
-      previousCompletion,
-      completion,
-      completeTurn,
-      completed: false,
-    };
-    transaction.nextTurnSequence += 1;
-    transaction.lastTurnCompletion = completion;
-    transaction.activeTurnCount += 1;
-    return turn;
-  }
-
-  function codexThreadRecoveryReleaseTurn(threadId, turn) {
-    if (!turn?.transaction) return;
-    const transaction = turn.transaction;
-    if (!turn.completed) {
-      turn.completed = true;
-      turn.completeTurn();
-    }
-    transaction.activeTurnCount = Math.max(0, transaction.activeTurnCount - 1);
-    codexThreadRecoveryCleanupTransaction(threadId, transaction);
-  }
-
-  function codexThreadRecoveryQueueReplay(threadId, turn, replay) {
-    const activeTransaction = turn?.transaction || codexThreadRecoveryTransaction(threadId, true);
-    if (!activeTransaction) return Promise.resolve().then(replay);
-    activeTransaction.replayPendingCount += 1;
-    const replayPromise = Promise.resolve(turn?.previousCompletion)
-      .then(() => Promise.resolve().then(replay));
-    return replayPromise.finally(() => {
-      activeTransaction.replayPendingCount = Math.max(
-        0,
-        activeTransaction.replayPendingCount - 1
-      );
-      codexThreadRecoveryCleanupTransaction(threadId, activeTransaction);
-    });
-  }
-
-  async function codexThreadRecoveryWaitForResume(threadId) {
-    const id = validThreadSessionKey(threadId);
-    const entry = id ? codexThreadRecoveryResumePromises.get(id) : null;
-    if (!entry?.promise) return "idle";
-    const startedAt = Date.now();
-    let timeoutId = 0;
-    const result = await Promise.race([
-      entry.promise.then(
-        () => "completed",
-        () => "failed"
-      ),
-      new Promise((resolve) => {
-        timeoutId = setTimeout(() => resolve("timeout"), codexThreadRecoveryResumeWaitTimeoutMs);
-      }),
-    ]);
-    clearTimeout(timeoutId);
-    sendCodexElvesDiagnostic("session_recovery_resume_wait_completed", {
-      threadId: id,
-      result,
-      durationMs: Date.now() - startedAt,
-    });
-    return result;
-  }
-
-  function codexThreadRecoveryWorkspaceRoots(manager, context) {
-    const roots = Array.isArray(context.params?.workspaceRoots)
-      ? context.params.workspaceRoots
-      : Array.isArray(context.params?.workspace_roots)
-        ? context.params.workspace_roots
-        : [];
-    let cwd = String(context.params?.cwd || "").trim();
-    if (!cwd && typeof manager?.getConversation === "function") {
-      try {
-        cwd = String(manager.getConversation(context.threadId)?.cwd || "").trim();
-      } catch {
-      }
-    }
-    return uniqueValues([...roots, cwd]);
-  }
-
-  function codexThreadRecoveryResumeParams(manager, context) {
-    return {
-      conversationId: context.threadId,
-      model: null,
-      serviceTier: null,
-      reasoningEffort: null,
-      workspaceRoots: codexThreadRecoveryWorkspaceRoots(manager, context),
-      permissions: null,
-      collaborationMode: null,
-      showThreadGoalResumeConfirmation: false,
-    };
-  }
-
-  async function codexThreadRecoveryWaitForOwnerRelease(manager, threadId) {
-    if (typeof manager?.needsResume !== "function") return "unavailable";
-    const deadline = Date.now() + codexThreadRecoveryOwnerSettleTimeoutMs;
-    while (Date.now() < deadline) {
-      try {
-        if (manager.needsResume(threadId) === true) return "ready";
-      } catch {
-        return "unavailable";
-      }
-      await new Promise((resolve) => setTimeout(resolve, codexThreadRecoveryPollIntervalMs));
-    }
-    return "timeout";
-  }
-
-  function codexThreadRecoveryValidationFailed(reason, command = "not-attempted", content = "not-attempted") {
-    return {
-      status: "failed",
-      reason,
-      command,
-      content,
-    };
-  }
-
-  function codexThreadRecoveryModelFromConversation(conversation) {
-    if (!conversation || typeof conversation !== "object") return "";
-    const candidates = [
-      conversation.model,
-      conversation.modelSlug,
-      conversation.model_slug,
-      conversation.latestModel,
-      conversation.latest_model,
-      conversation.previousTurnModel,
-      conversation.previous_turn_model,
-      conversation.latestThreadSettings?.model,
-      conversation.latestThreadSettings?.modelSlug,
-      conversation.latest_thread_settings?.model,
-      conversation.thread?.model,
-    ];
-    return candidates
-      .map((value) => String(value || "").trim())
-      .find(Boolean) || "";
-  }
-
-  function codexThreadRecoveryModel(manager, threadId, context) {
-    const requestModel = [
-      context.params?.model,
-      context.params?.modelSlug,
-      context.params?.model_slug,
-      context.params?.requestModel,
-      context.params?.request_model,
-    ].map((value) => String(value || "").trim()).find(Boolean);
-    if (requestModel) return requestModel;
-    let conversation = null;
-    try {
-      conversation = manager.getConversation?.(threadId) || null;
-    } catch {
-    }
-    return codexThreadRecoveryModelFromConversation(conversation) ||
-      String(codexModelCatalog.model || codexModelCatalog.default_model || "").trim();
-  }
-
-  async function codexThreadRecoveryValidate(manager, threadId, context) {
-    const model = codexThreadRecoveryModel(manager, threadId, context);
-    if (!model) {
-      return codexThreadRecoveryValidationFailed("model-unavailable");
-    }
-    if (typeof manager?.sendRequest !== "function") {
-      return codexThreadRecoveryValidationFailed("settings-update-unavailable");
-    }
-    if (typeof manager?.readThread !== "function") {
-      return codexThreadRecoveryValidationFailed("content-read-unavailable");
-    }
-    try {
-      await manager.sendRequest("thread/settings/update", {
-        threadId,
-        model,
-      });
-    } catch (error) {
-      return codexThreadRecoveryValidationFailed(
-        error?.message || String(error),
-        "failed"
-      );
-    }
-    try {
-      await manager.readThread(threadId, { includeTurns: true });
-    } catch (error) {
-      return codexThreadRecoveryValidationFailed(
-        error?.message || String(error),
-        "thread-settings-update",
-        "failed"
-      );
-    }
-    return {
-      status: "validated",
-      command: "thread-settings-update",
-      content: "content-read",
-    };
-  }
-
-  function codexThreadRecoveryResult(
-    status,
-    sourceThreadId,
-    targetThreadId,
-    recoveryMode,
-    validation,
-    details = {}
-  ) {
-    return {
-      status,
-      sourceThreadId,
-      targetThreadId,
-      recoveryMode,
-      validation,
-      ...details,
-    };
-  }
-
-  function codexThreadRecoveryManager(client) {
-    const candidates = [
-      codexSessionPrewarmManager,
-      window.__codexElvesSessionPrewarmManager,
-      client,
-    ];
-    const canResume = (candidate) =>
-      candidate &&
-      typeof candidate.resumeConversationForUnavailableOwner === "function";
-    return candidates.find((candidate) =>
-      canResume(candidate) &&
-      typeof candidate.sendRequest === "function" &&
-      typeof candidate.readThread === "function" &&
-      typeof candidate.forkConversationFromLatest === "function"
-    ) || candidates.find((candidate) =>
-      canResume(candidate) &&
-      typeof candidate.sendRequest === "function" &&
-      typeof candidate.readThread === "function"
-    ) || candidates.find(canResume) || null;
-  }
-
-  function codexThreadRecoveryForkContext(manager, sourceThreadId, context) {
-    const workspaceRoots = codexThreadRecoveryWorkspaceRoots(manager, context);
-    let cwd = String(context.params?.cwd || "").trim();
-    if (!cwd) {
-      try {
-        cwd = String(manager.getConversation?.(sourceThreadId)?.cwd || "").trim();
-      } catch {
-      }
-    }
-    if (!cwd) cwd = String(workspaceRoots[0] || "").trim();
-    return { cwd, workspaceRoots };
-  }
-
-  function codexThreadRecoveryNavigationWaitTimeoutMs() {
-    if (window.__CODEX_ELVES_TEST_SERVICE_TIER__) {
-      const override = Number(window.__CODEX_ELVES_TEST_RECOVERY_NAVIGATION_TIMEOUT_MS__);
-      if (Number.isFinite(override) && override >= 0) return override;
-    }
-    return codexThreadRecoveryNavigationTimeoutMs;
-  }
-
-  function codexThreadRecoveryNativeActiveState(node) {
-    if (!node || typeof node.getAttribute !== "function") return false;
-    const ariaCurrent = String(node.getAttribute("aria-current") || "").toLowerCase();
-    if (ariaCurrent === "page" || ariaCurrent === "true") return true;
-    const dataState = String(node.getAttribute("data-state") || "").toLowerCase();
-    if (dataState === "active" || dataState === "selected" || dataState === "current") return true;
-    const dataSelected = String(node.getAttribute("data-selected") || "").toLowerCase();
-    if (dataSelected === "true" || dataSelected === "selected") return true;
-    const dataActive = String(node.getAttribute("data-active") || "").toLowerCase();
-    return dataActive === "true" || dataActive === "active";
-  }
-
-  function codexThreadRecoveryRowHasNativeCurrentState(row) {
-    if (codexThreadRecoveryNativeActiveState(row)) return true;
-    const stateNodes = Array.from(row?.querySelectorAll?.(
-      'a, button, [role="link"], [role="button"], [aria-current], [data-state], [data-selected], [data-active]'
-    ) || []);
-    return stateNodes.some(codexThreadRecoveryNativeActiveState);
-  }
-
-  function codexThreadRecoveryTargetRow(targetThreadId) {
-    return Array.from(document.querySelectorAll(selectors.sidebarThread))
-      .find((candidate) =>
-        validThreadSessionKey(sessionRefFromRow(candidate).session_id) === targetThreadId
-      ) || null;
-  }
-
-  function codexThreadRecoveryRouteUiReady(targetThreadId) {
-    if (validThreadSessionKey(locationThreadId()) !== targetThreadId) return false;
-    const row = codexThreadRecoveryTargetRow(targetThreadId);
-    return !!row && codexThreadRecoveryRowHasNativeCurrentState(row);
-  }
-
-  async function codexThreadRecoveryNavigateToTarget(targetThreadId) {
-    if (codexThreadRecoveryRouteUiReady(targetThreadId)) {
-      return "already-current";
-    }
-    const row = codexThreadRecoveryTargetRow(targetThreadId);
-    const navigationTarget = row?.matches?.("a, button") ? row : row?.querySelector?.("a, button");
-    let navigation = "history";
-    if (navigationTarget) {
-      navigationTarget.click?.();
-      navigation = "sidebar";
-    } else {
-      window.history.pushState({}, "", `/local/${encodeURIComponent(targetThreadId)}`);
-      const popStateEvent = typeof PopStateEvent === "function"
-        ? new PopStateEvent("popstate")
-        : new Event("popstate");
-      window.dispatchEvent(popStateEvent);
-    }
-    await Promise.resolve();
-    const sessionDeadline = Date.now() + codexThreadRecoveryNavigationWaitTimeoutMs();
-    while (Date.now() < sessionDeadline) {
-      if (codexThreadRecoveryRouteUiReady(targetThreadId)) {
-        return navigation;
-      }
-      await new Promise((resolve) => setTimeout(resolve, codexThreadRecoveryPollIntervalMs));
-    }
-    if (codexThreadRecoveryRouteUiReady(targetThreadId)) return navigation;
-    return "timeout";
-  }
-
-  async function codexThreadRecoveryValidateForkTarget(manager, sourceThreadId, targetThreadId, context, recoveryMode) {
-    const validation = await codexThreadRecoveryValidate(manager, targetThreadId, context);
-    if (validation.status !== "validated") {
-      return codexThreadRecoveryResult(
-        "failed",
-        sourceThreadId,
-        targetThreadId,
-        recoveryMode,
-        validation
-      );
-    }
-    const navigation = sourceThreadId === targetThreadId
-      ? "not-required"
-      : await codexThreadRecoveryNavigateToTarget(targetThreadId);
-    if (navigation === "timeout") {
-      return codexThreadRecoveryResult(
-        "failed",
-        sourceThreadId,
-        targetThreadId,
-        recoveryMode,
-        validation,
-        {
-          navigation,
-          reason: "navigation-timeout",
-        }
-      );
-    }
-    return codexThreadRecoveryResult(
-      "recovered",
-      sourceThreadId,
-      targetThreadId,
-      recoveryMode,
-      validation,
-      { navigation }
-    );
-  }
-
-  async function codexThreadRecoveryForkFallback(manager, sourceThreadId, context) {
-    const mappedTargetThreadId = validThreadSessionKey(codexThreadRecoveryTargets.get(sourceThreadId));
-    if (mappedTargetThreadId) {
-      const mappedResult = await codexThreadRecoveryValidateForkTarget(
-        manager,
-        sourceThreadId,
-        mappedTargetThreadId,
-        context,
-        "fork-existing"
-      );
-      if (
-        mappedResult.status === "recovered" ||
-        mappedResult.validation?.status === "validated"
-      ) {
-        return mappedResult;
-      }
-      if (codexThreadRecoveryTargets.get(sourceThreadId) === mappedTargetThreadId) {
-        codexThreadRecoveryTargets.delete(sourceThreadId);
-      }
-    }
-    if (typeof manager?.forkConversationFromLatest !== "function") {
-      return codexThreadRecoveryResult(
-        "failed",
-        sourceThreadId,
-        "",
-        "fork",
-        codexThreadRecoveryValidationFailed("fork-unavailable")
-      );
-    }
-    const { cwd, workspaceRoots } = codexThreadRecoveryForkContext(manager, sourceThreadId, context);
-    const targetThreadId = validThreadSessionKey(await manager.forkConversationFromLatest({
-      sourceConversationId: sourceThreadId,
-      cwd,
-      workspaceRoots,
-      collaborationMode: context.params?.collaborationMode ?? null,
-      addForkedSyntheticItem: true,
-    }));
-    if (!targetThreadId) {
-      return codexThreadRecoveryResult(
-        "failed",
-        sourceThreadId,
-        "",
-        "fork",
-        codexThreadRecoveryValidationFailed("fork-target-unavailable")
-      );
-    }
-    const result = await codexThreadRecoveryValidateForkTarget(
-      manager,
-      sourceThreadId,
-      targetThreadId,
-      context,
-      "fork"
-    );
-    if (result.validation?.status === "validated") {
-      codexThreadRecoveryTargets.set(sourceThreadId, targetThreadId);
-    } else if (codexThreadRecoveryTargets.get(sourceThreadId) === targetThreadId) {
-      codexThreadRecoveryTargets.delete(sourceThreadId);
-    }
-    return result;
-  }
-
-  async function codexThreadRecoveryRun(
-    client,
-    originalSendRequest,
-    context,
-    draft,
-    recoveryTransaction
-  ) {
-    const id = validThreadSessionKey(context.threadId);
-    if (!id) {
-      return codexThreadRecoveryResult(
-        "skipped",
-        "",
-        "",
-        "none",
-        codexThreadRecoveryValidationFailed("thread-id-unavailable")
-      );
-    }
-    const transaction = recoveryTransaction || codexThreadRecoveryTransaction(id, true);
-    if (transaction?.recoveryPromise) return transaction.recoveryPromise;
-    const manager = codexThreadRecoveryManager(client);
-    if (!manager) {
-      sendCodexElvesDiagnostic("session_recovery_failed", {
-        threadId: id,
-        reason: "manager-unavailable",
-      });
-      return codexThreadRecoveryResult(
-        "failed",
-        id,
-        "",
-        "none",
-        codexThreadRecoveryValidationFailed("manager-unavailable")
-      );
-    }
-    const startedAt = Date.now();
-    if (transaction) transaction.recoverySettled = false;
-    const promise = Promise.resolve().then(async () => {
-      let unsubscribeState = "unavailable";
-      if (typeof manager.unsubscribeInactiveConversation === "function") {
-        try {
-          await manager.unsubscribeInactiveConversation(id);
-          unsubscribeState = "completed";
-        } catch (error) {
-          unsubscribeState = error?.message || String(error);
-        }
-      }
-      const ownerState = await codexThreadRecoveryWaitForOwnerRelease(manager, id);
-      sendCodexElvesDiagnostic("session_recovery_started", {
-        threadId: id,
-        ownerState,
-        unsubscribeState,
-        hasOriginalRequestExecutor: typeof originalSendRequest === "function",
-      });
-      let validation;
-      try {
-        await manager.resumeConversationForUnavailableOwner(
-          codexThreadRecoveryResumeParams(manager, context)
-        );
-        validation = await codexThreadRecoveryValidate(manager, id, context);
-      } catch (error) {
-        validation = codexThreadRecoveryValidationFailed(
-          error?.message || String(error)
-        );
-      }
-      const result = validation.status === "validated"
-        ? codexThreadRecoveryResult(
-            "recovered",
-            id,
-            id,
-            "resume",
-            validation,
-            {
-              ownerState,
-              unsubscribeState,
-            }
-          )
-        : await codexThreadRecoveryForkFallback(manager, id, context);
-      sendCodexElvesDiagnostic(
-        result.status === "recovered" ? "session_recovery_completed" : "session_recovery_failed",
-        {
-          threadId: id,
-          targetThreadId: result.targetThreadId,
-          recoveryMode: result.recoveryMode,
-          ownerState,
-          unsubscribeState,
-          validation: result.validation,
-          durationMs: Date.now() - startedAt,
-        }
-      );
-      return result;
-    }).catch((error) => {
-      sendCodexElvesDiagnostic("session_recovery_failed", {
-        threadId: id,
-        errorName: error?.name || "",
-        errorMessage: error?.message || String(error),
-        durationMs: Date.now() - startedAt,
-      });
-      return codexThreadRecoveryResult(
-        "failed",
-        id,
-        validThreadSessionKey(codexThreadRecoveryTargets.get(id)),
-        "none",
-        codexThreadRecoveryValidationFailed(error?.message || String(error))
-      );
-    }).finally(() => {
-      if (!transaction) return;
-      transaction.recoverySettled = true;
-      codexThreadRecoveryCleanupTransaction(id, transaction);
-    });
-    if (transaction) transaction.recoveryPromise = promise;
-    return promise;
   }
 
   async function hydrateCodexSessionPrewarmContent(manager, task) {
@@ -5542,13 +4781,13 @@
       patchAppServerModelResult: (method, result) => patchAppServerModelResult(method, result),
       patchAppServerRequestClient: (client) => patchAppServerModelRequestClient(client),
       patchAppServerRequestClientClass: (clientClass) => patchAppServerModelRequestClientClass(clientClass),
-      recoveryDraftPreserved: (draftResult) => codexThreadRecoveryDraftPreserved(draftResult),
-      recoveryFailedMessage: (draftResult) => codexThreadRecoveryFailedMessage(draftResult),
-      recoveryRequestContext: (method, params) => codexThreadRecoveryRequestContext(method, params),
-      recoveryRestoreDraft: (threadId, snapshot) => codexThreadRecoveryRestoreDraft(threadId, snapshot),
-      recoveryShouldHandleError: (error) => codexThreadRecoveryShouldHandleError(error),
-      recoveryResumeCount: () => codexThreadRecoveryResumePromises.size,
-      recoveryTransactionCount: () => codexThreadRecoveryPromises.size,
+
+
+
+
+
+
+
       appServerModelPatchBackoffMs: (failureCount) => {
         const previousFailureCount = codexAppServerModelPatchFailureCount;
         codexAppServerModelPatchFailureCount = failureCount;
@@ -6241,149 +5480,6 @@
     return result;
   }
 
-  function codexThreadRecoveryReplayRequestParams(method, params, context, targetThreadId) {
-    const replayParams = {
-      ...context.params,
-      threadId: targetThreadId,
-    };
-    if (String(method || "") === "send-cli-request-for-host") {
-      return {
-        ...(params || {}),
-        params: replayParams,
-      };
-    }
-    return replayParams;
-  }
-
-  function codexThreadRecoveryRestoreFailedDraft(threadId, draft) {
-    return codexThreadRecoveryRestoreDraft(threadId, draft);
-  }
-
-  function codexThreadRecoveryDraftPreserved(draftResult) {
-    return draftResult === "restored" ||
-      draftResult === "input-still-present";
-  }
-
-  function codexThreadRecoveryFailedMessage(draftResult) {
-    return codexThreadRecoveryDraftPreserved(draftResult)
-      ? "会话自动恢复失败，输入内容已保留。"
-      : "消息自动继续失败，请复制原消息后重试。";
-  }
-
-  async function runCodexElvesPatchedAppServerRequest(
-    client,
-    originalSendRequest,
-    method,
-    params,
-    options
-  ) {
-    const context = codexThreadRecoveryRequestContext(method, params);
-    const recoveryEnabled = codexThreadRecoveryEnabled();
-    const isTurnStart = context.method === "turn/start" && !!context.threadId;
-    const recoveryTurn = recoveryEnabled && isTurnStart
-      ? codexThreadRecoveryTrackTurn(context.threadId)
-      : null;
-    try {
-      const draft = recoveryEnabled && isTurnStart
-        ? codexThreadRecoveryDraftSnapshot(context.params)
-        : null;
-      if (recoveryEnabled && isTurnStart) {
-        await codexThreadRecoveryWaitForResume(context.threadId);
-      }
-      let result;
-      try {
-        const requestPromise = Promise.resolve().then(() =>
-          originalSendRequest(method, params, options)
-        );
-        result = recoveryEnabled && context.method === "thread/resume" && context.threadId
-          ? await codexThreadRecoveryTrackResume(context.threadId, requestPromise)
-          : await requestPromise;
-      } catch (error) {
-        if (recoveryEnabled && isTurnStart && codexThreadRecoveryShouldHandleError(error)) {
-          sendCodexElvesDiagnostic("session_recovery_error_detected", {
-            threadId: context.threadId,
-            errorName: error?.name || "",
-            errorMessage: error?.message || String(error),
-          });
-          const recovery = await codexThreadRecoveryRun(
-            client,
-            originalSendRequest,
-            context,
-            draft,
-            recoveryTurn?.transaction
-          );
-          if (recovery.status !== "recovered" || !recovery.targetThreadId) {
-            const draftResult = codexThreadRecoveryRestoreFailedDraft(context.threadId, draft);
-            sendCodexElvesDiagnostic("session_recovery_failed", {
-              threadId: context.threadId,
-              targetThreadId: recovery.targetThreadId || "",
-              recoveryMode: recovery.recoveryMode || "none",
-              reason: "recovery-incomplete",
-              draftResult,
-              draftPreserved: codexThreadRecoveryDraftPreserved(draftResult),
-            });
-            if (!window.__CODEX_ELVES_TEST_SERVICE_TIER__) {
-              showToast(codexThreadRecoveryFailedMessage(draftResult), null);
-            }
-            throw error;
-          }
-          const replayRequestParams = codexThreadRecoveryReplayRequestParams(
-            method,
-            params,
-            context,
-            recovery.targetThreadId
-          );
-          try {
-            const replayResult = await codexThreadRecoveryQueueReplay(
-              context.threadId,
-              recoveryTurn,
-              () => originalSendRequest(method, replayRequestParams, options)
-            );
-            result = replayResult;
-            sendCodexElvesDiagnostic("session_recovery_replay_completed", {
-              threadId: context.threadId,
-              targetThreadId: recovery.targetThreadId,
-              recoveryMode: recovery.recoveryMode,
-            });
-            if (!window.__CODEX_ELVES_TEST_SERVICE_TIER__) {
-              showToast(
-                recovery.targetThreadId === context.threadId
-                  ? "会话已恢复，消息已继续发送。"
-                  : "原会话已异常，已恢复到新会话并继续发送。",
-                null
-              );
-            }
-          } catch (replayError) {
-            const draftResult = codexThreadRecoveryRestoreFailedDraft(
-              recovery.targetThreadId,
-              draft
-            );
-            sendCodexElvesDiagnostic("session_recovery_replay_failed", {
-              threadId: context.threadId,
-              targetThreadId: recovery.targetThreadId,
-              recoveryMode: recovery.recoveryMode,
-              errorName: replayError?.name || "",
-              errorMessage: replayError?.message || String(replayError),
-              draftResult,
-              draftPreserved: codexThreadRecoveryDraftPreserved(draftResult),
-            });
-            if (!window.__CODEX_ELVES_TEST_SERVICE_TIER__) {
-              showToast(codexThreadRecoveryFailedMessage(draftResult), null);
-            }
-            throw replayError;
-          }
-        } else {
-          throw error;
-        }
-      }
-      if (!codexElvesModelUnlockEnabled()) return result;
-      if (!codexElvesModelNames().length) await loadCodexModelCatalog();
-      return patchAppServerModelResult(context.method, result);
-    } finally {
-      codexThreadRecoveryReleaseTurn(context.threadId, recoveryTurn);
-    }
-  }
-
   function patchAppServerModelRequestClient(client) {
     if (!client || typeof client.sendRequest !== "function") return false;
     if (client.__codexElvesModelRequestPatch === codexAppServerModelRequestPatchVersion) return true;
@@ -6393,13 +5489,12 @@
       : client.sendRequest.bind(client);
     client.__codexElvesModelOriginalSendRequest = originalSendRequest;
     client.sendRequest = async function codexElvesModelPatchedSendRequest(method, params, options) {
-      return runCodexElvesPatchedAppServerRequest(
-        client,
-        (retryMethod, retryParams, retryOptions) =>
-          originalSendRequest(retryMethod, retryParams, retryOptions),
-        method,
-        params,
-        options
+      const result = await originalSendRequest(method, params, options);
+      if (!codexElvesModelUnlockEnabled()) return result;
+      if (!codexElvesModelNames().length) await loadCodexModelCatalog();
+      return patchAppServerModelResult(
+        appServerModelRequestMethod(String(method || ""), params),
+        result
       );
     };
     client.__codexElvesModelRequestPatch = codexAppServerModelRequestPatchVersion;
@@ -6414,13 +5509,12 @@
     const originalSendRequest = prototype.__codexElvesModelOriginalSendRequest || prototype.sendRequest;
     prototype.__codexElvesModelOriginalSendRequest = originalSendRequest;
     prototype.sendRequest = async function codexElvesModelPatchedPrototypeSendRequest(method, params, options) {
-      return runCodexElvesPatchedAppServerRequest(
-        this,
-        (retryMethod, retryParams, retryOptions) =>
-          originalSendRequest.call(this, retryMethod, retryParams, retryOptions),
-        method,
-        params,
-        options
+      const result = await originalSendRequest.call(this, method, params, options);
+      if (!codexElvesModelUnlockEnabled()) return result;
+      if (!codexElvesModelNames().length) await loadCodexModelCatalog();
+      return patchAppServerModelResult(
+        appServerModelRequestMethod(String(method || ""), params),
+        result
       );
     };
     prototype.__codexElvesModelRequestPatch = codexAppServerModelRequestPatchVersion;
@@ -6463,16 +5557,10 @@
 
   function codexAppServerModelPatchNeeds(rediscoverManager = false) {
     const prewarmSettings = codexSessionPrewarmSettingsSnapshot();
-    const recoveryEnabled = codexThreadRecoveryEnabled();
     return {
       manager:
-        (
-          recoveryEnabled ||
-          (
-            prewarmSettings.enabled &&
-            prewarmSettings.fullCount + prewarmSettings.contentCount > 0
-          )
-        ) &&
+        prewarmSettings.enabled &&
+        prewarmSettings.fullCount + prewarmSettings.contentCount > 0 &&
         (rediscoverManager || !codexSessionPrewarmManager),
       modelPatch:
         codexElvesModelUnlockEnabled() &&

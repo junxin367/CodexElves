@@ -86,7 +86,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::backend_version,
-            commands::layered_compaction_default_prompt,
             commands::startup_options,
             commands::load_overview,
             commands::launch_codex_elves,

@@ -247,9 +247,33 @@ async fn bridge_responses_websockets(
                     return Ok::<(), anyhow::Error>(());
                 }
             };
-            if let (Some(payload), Message::Text(text)) = (payload.as_ref(), &message) {
-                let log_id = downstream_request_logger.record_request(payload, text.as_str());
-                if let Err(error) = downstream_continuation.register_request(payload, log_id) {
+            let (message, request_payload, layered_compaction_options) =
+                if let Some(payload) = payload {
+                    let (request_payload, forwarded_payload, layered_compaction_options) =
+                        prepare_downstream_response_create_payload(&payload)?;
+                    let message = if forwarded_payload == payload {
+                        message
+                    } else {
+                        Message::Text(
+                            serde_json::to_string(&forwarded_payload)
+                                .context("序列化处理后的 Responses WebSocket 请求失败")?
+                                .into(),
+                        )
+                    };
+                    (message, Some(request_payload), layered_compaction_options)
+                } else {
+                    (message, None, None)
+                };
+            if let (Some(request_payload), Message::Text(text)) =
+                (request_payload.as_ref(), &message)
+            {
+                let log_id =
+                    downstream_request_logger.record_request(request_payload, text.as_str());
+                if let Err(error) = downstream_continuation.register_request(
+                    request_payload,
+                    log_id,
+                    layered_compaction_options,
+                ) {
                     let close = Message::Close(Some(CloseFrame {
                         code: CloseCode::Policy,
                         reason: error.to_string().into(),
@@ -282,7 +306,38 @@ async fn bridge_responses_websockets(
     let upstream_reader = async move {
         let mut received_close = false;
         while let Some(message) = upstream_stream.next().await {
-            let message = message.context("读取上游 Responses WebSocket 消息失败")?;
+            let message = match message {
+                Ok(message) => message,
+                Err(error) => {
+                    let error_message = format!("upstream WebSocket read failed: {error}");
+                    let mut compaction_failed_closed = false;
+                    if let Some(WebSocketContinuationAction::Flush { messages, metadata }) =
+                        upstream_continuation
+                            .fail_active_compaction("websocket_read_failed", &error_message)?
+                    {
+                        upstream_request_logger.record_continue_metadata(&metadata);
+                        for message in messages {
+                            let message_is_close = matches!(message, Message::Close(_));
+                            upstream_request_logger
+                                .record_response_for(&message, metadata.log_id.as_deref());
+                            if to_downstream_tx.send(message).await.is_err() {
+                                if message_is_close {
+                                    return Ok::<(), anyhow::Error>(());
+                                }
+                                anyhow::bail!("Responses WebSocket 本地发送队列已关闭");
+                            }
+                        }
+                        compaction_failed_closed = true;
+                    }
+                    if compaction_failed_closed {
+                        // 返回 Err 会让 try_join! 立即取消 downstream_writer，刚入队的
+                        // response.failed 可能来不及发出；压缩请求已规范终结后按正常关闭处理。
+                        received_close = true;
+                        break;
+                    }
+                    return Err(error).context("读取上游 Responses WebSocket 消息失败");
+                }
+            };
             let is_close = matches!(message, Message::Close(_));
             upstream_request_logger.record_first_response_event(&message);
             match upstream_continuation.handle_upstream_message(message)? {
@@ -304,6 +359,9 @@ async fn bridge_responses_websockets(
                 }
                 WebSocketContinuationAction::Flush { messages, metadata } => {
                     upstream_request_logger.record_continue_metadata(&metadata);
+                    let closes_connection = messages
+                        .iter()
+                        .any(|message| matches!(message, Message::Close(_)));
                     for message in messages {
                         let message_is_close = matches!(message, Message::Close(_));
                         upstream_request_logger
@@ -315,6 +373,10 @@ async fn bridge_responses_websockets(
                             anyhow::bail!("Responses WebSocket 本地发送队列已关闭");
                         }
                     }
+                    if closes_connection {
+                        received_close = true;
+                        break;
+                    }
                 }
             };
             if is_close {
@@ -323,7 +385,27 @@ async fn bridge_responses_websockets(
             }
         }
         if !received_close {
-            let _ = to_downstream_tx.send(Message::Close(None)).await;
+            if let Some(WebSocketContinuationAction::Flush { messages, metadata }) =
+                upstream_continuation.fail_active_compaction(
+                    "websocket_ended",
+                    "upstream WebSocket ended before a terminal response.",
+                )?
+            {
+                upstream_request_logger.record_continue_metadata(&metadata);
+                for message in messages {
+                    let message_is_close = matches!(message, Message::Close(_));
+                    upstream_request_logger
+                        .record_response_for(&message, metadata.log_id.as_deref());
+                    if to_downstream_tx.send(message).await.is_err() {
+                        if message_is_close {
+                            return Ok::<(), anyhow::Error>(());
+                        }
+                        anyhow::bail!("Responses WebSocket 本地发送队列已关闭");
+                    }
+                }
+            } else {
+                let _ = to_downstream_tx.send(Message::Close(None)).await;
+            }
         }
         Ok::<(), anyhow::Error>(())
     };
@@ -350,9 +432,11 @@ struct WebSocketContinuationCoordinator {
 #[derive(Default)]
 struct WebSocketContinuationState {
     active: Option<ActiveWebSocketContinuation>,
+    discarded_response_ids: VecDeque<String>,
 }
 
 struct ActiveWebSocketContinuation {
+    mode: ActiveWebSocketMode,
     original_request: Value,
     log_id: Option<String>,
     max_rounds: u32,
@@ -366,6 +450,18 @@ struct ActiveWebSocketContinuation {
     before_response_body: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+enum ActiveWebSocketMode {
+    ContinueThinking,
+    LegacyLayeredCompaction {
+        retain_tokens: u32,
+    },
+    RemoteCompactionV2 {
+        layered_enabled: bool,
+        retain_tokens: u32,
+    },
+}
+
 #[derive(Clone, Default)]
 struct WebSocketContinueMetadata {
     log_id: Option<String>,
@@ -375,6 +471,11 @@ struct WebSocketContinueMetadata {
     request_body: Option<String>,
     before_response_body: Option<String>,
     after_response_body: Option<String>,
+    layered_compaction_triggered: bool,
+    layered_compaction_retain_tokens: Option<u32>,
+    layered_compaction_retained_items: Option<u32>,
+    layered_compaction_retained_chars: Option<u32>,
+    layered_compaction_before_response_body: Option<String>,
 }
 
 enum WebSocketContinuationAction {
@@ -391,10 +492,12 @@ enum WebSocketContinuationAction {
 }
 
 impl WebSocketContinuationCoordinator {
-    fn register_request(&self, payload: &Value, log_id: Option<String>) -> anyhow::Result<()> {
-        let settings = SettingsStore::default()
-            .load()
-            .context("读取自动推理续接设置失败")?;
+    fn register_request(
+        &self,
+        payload: &Value,
+        log_id: Option<String>,
+        layered_compaction_options: Option<crate::protocol_proxy::LayeredCompactionOptions>,
+    ) -> anyhow::Result<()> {
         let model = payload
             .get("model")
             .and_then(Value::as_str)
@@ -406,6 +509,55 @@ impl WebSocketContinuationCoordinator {
         if state.active.is_some() {
             anyhow::bail!("自动推理续接期间不支持并发 response.create");
         }
+        if crate::layered_compaction::is_remote_compaction_v2_request(Some(payload))
+            && !crate::layered_compaction::model_supports_native_remote_compaction_v2(model)
+        {
+            let options = layered_compaction_options
+                .context("Responses WebSocket V2 降级请求缺少上下文压缩配置快照")?;
+            state.active = Some(ActiveWebSocketContinuation {
+                mode: ActiveWebSocketMode::RemoteCompactionV2 {
+                    layered_enabled: options.enabled,
+                    retain_tokens: options.retain_tokens,
+                },
+                original_request: payload.clone(),
+                log_id,
+                max_rounds: 0,
+                round: 0,
+                completed_rounds: 0,
+                accumulated_reasoning_tokens: None,
+                buffered_messages: Vec::new(),
+                fallback_messages: Vec::new(),
+                fallback_response_body: None,
+                continue_requests: Vec::new(),
+                before_response_body: None,
+            });
+            return Ok(());
+        }
+        if crate::layered_compaction::is_compaction_request(Some(payload)) {
+            let options = layered_compaction_options
+                .filter(|options| options.enabled)
+                .context("Responses WebSocket 传统压缩请求缺少已启用的上下文压缩配置快照")?;
+            state.active = Some(ActiveWebSocketContinuation {
+                mode: ActiveWebSocketMode::LegacyLayeredCompaction {
+                    retain_tokens: options.retain_tokens,
+                },
+                original_request: payload.clone(),
+                log_id,
+                max_rounds: 0,
+                round: 0,
+                completed_rounds: 0,
+                accumulated_reasoning_tokens: None,
+                buffered_messages: Vec::new(),
+                fallback_messages: Vec::new(),
+                fallback_response_body: None,
+                continue_requests: Vec::new(),
+                before_response_body: None,
+            });
+            return Ok(());
+        }
+        let settings = SettingsStore::default()
+            .load()
+            .context("读取自动推理续接设置失败")?;
         if !settings.gpt_reasoning_continuation
             || !crate::continue_thinking::is_supported_model(model)
         {
@@ -413,6 +565,7 @@ impl WebSocketContinuationCoordinator {
         }
 
         state.active = Some(ActiveWebSocketContinuation {
+            mode: ActiveWebSocketMode::ContinueThinking,
             original_request: payload.clone(),
             log_id,
             max_rounds: u32::from(settings.gpt_reasoning_continuation_max_rounds),
@@ -436,15 +589,44 @@ impl WebSocketContinuationCoordinator {
             .state
             .lock()
             .map_err(|_| anyhow::anyhow!("Responses WebSocket 续接状态锁已损坏"))?;
+        if let Message::Text(text) = &message {
+            if let Ok(payload) = serde_json::from_str::<Value>(text.as_str()) {
+                if websocket_response_id(&payload).is_some_and(|response_id| {
+                    state
+                        .discarded_response_ids
+                        .iter()
+                        .any(|discarded| discarded == &response_id)
+                }) {
+                    return Ok(WebSocketContinuationAction::Buffered);
+                }
+            }
+        }
         let Some(active) = state.active.as_mut() else {
             return Ok(WebSocketContinuationAction::Forward(message));
         };
 
-        if matches!(
-            message,
-            Message::Ping(_) | Message::Pong(_) | Message::Binary(_)
-        ) {
+        if matches!(message, Message::Ping(_) | Message::Pong(_)) {
             return Ok(WebSocketContinuationAction::Forward(message));
+        }
+        let mode = active.mode;
+        if let ActiveWebSocketMode::RemoteCompactionV2 {
+            layered_enabled,
+            retain_tokens,
+        } = mode
+        {
+            return handle_remote_compaction_v2_websocket_message(
+                &mut state,
+                message,
+                layered_enabled,
+                retain_tokens,
+            );
+        }
+        if let ActiveWebSocketMode::LegacyLayeredCompaction { retain_tokens } = mode {
+            return handle_legacy_layered_compaction_websocket_message(
+                &mut state,
+                message,
+                retain_tokens,
+            );
         }
         if matches!(message, Message::Close(_)) {
             let mut active = state.active.take().expect("active continuation must exist");
@@ -576,6 +758,438 @@ impl WebSocketContinuationCoordinator {
             metadata: websocket_continue_metadata(&active, after_response_body),
         })
     }
+
+    fn fail_active_compaction(
+        &self,
+        failure_suffix: &str,
+        detail: &str,
+    ) -> anyhow::Result<Option<WebSocketContinuationAction>> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Responses WebSocket 续接状态锁已损坏"))?;
+        let mode = state.active.as_ref().map(|active| active.mode);
+        let (code_prefix, label) = match mode {
+            Some(ActiveWebSocketMode::LegacyLayeredCompaction { .. }) => {
+                ("layered_compaction", "Layered compaction")
+            }
+            Some(ActiveWebSocketMode::RemoteCompactionV2 { .. }) => {
+                ("remote_compaction", "Remote Compaction V2")
+            }
+            _ => return Ok(None),
+        };
+        let active = state.active.take().expect("active compaction must exist");
+        let code = format!("{code_prefix}_{failure_suffix}");
+        let message = format!("{label} {detail}");
+        let failure_sse = crate::layered_compaction::compaction_failure_sse(
+            &active.original_request,
+            None,
+            &code,
+            &message,
+        );
+        let mut messages = responses_sse_to_websocket_messages(&failure_sse);
+        messages.push(Message::Close(None));
+        Ok(Some(WebSocketContinuationAction::Flush {
+            messages,
+            metadata: WebSocketContinueMetadata {
+                log_id: active.log_id,
+                ..Default::default()
+            },
+        }))
+    }
+}
+
+fn handle_remote_compaction_v2_websocket_message(
+    state: &mut WebSocketContinuationState,
+    message: Message,
+    layered_enabled: bool,
+    retain_tokens: u32,
+) -> anyhow::Result<WebSocketContinuationAction> {
+    if let Message::Close(close_frame) = message {
+        let active = state
+            .active
+            .take()
+            .expect("active remote compaction must exist");
+        let failure_sse = crate::layered_compaction::remote_compaction_v2_failure_sse(
+            &active.original_request,
+            "remote_compaction_websocket_closed",
+            "Remote Compaction V2 upstream WebSocket closed before a terminal response.",
+        );
+        let mut messages = responses_sse_to_websocket_messages(&failure_sse);
+        messages.push(Message::Close(close_frame));
+        return Ok(WebSocketContinuationAction::Flush {
+            messages,
+            metadata: WebSocketContinueMetadata {
+                log_id: active.log_id,
+                ..Default::default()
+            },
+        });
+    }
+
+    if matches!(message, Message::Binary(_)) {
+        let active = state
+            .active
+            .take()
+            .expect("active remote compaction must exist");
+        let failure_sse = crate::layered_compaction::remote_compaction_v2_failure_sse(
+            &active.original_request,
+            "remote_compaction_websocket_binary_frame",
+            "Remote Compaction V2 bridge received an unsupported binary WebSocket frame.",
+        );
+        let mut messages = responses_sse_to_websocket_messages(&failure_sse);
+        messages.push(Message::Close(None));
+        return Ok(WebSocketContinuationAction::Flush {
+            messages,
+            metadata: WebSocketContinueMetadata {
+                log_id: active.log_id,
+                ..Default::default()
+            },
+        });
+    }
+
+    let Message::Text(text) = &message else {
+        return Ok(WebSocketContinuationAction::Forward(message));
+    };
+    let payload = match serde_json::from_str::<Value>(text.as_str()) {
+        Ok(payload) => payload,
+        Err(error) => {
+            let active = state
+                .active
+                .take()
+                .expect("active remote compaction must exist");
+            let failure_sse = crate::layered_compaction::remote_compaction_v2_failure_sse(
+                &active.original_request,
+                "remote_compaction_websocket_event_parse_failed",
+                &format!(
+                    "Remote Compaction V2 bridge could not parse an upstream WebSocket event: {error}"
+                ),
+            );
+            let mut messages = responses_sse_to_websocket_messages(&failure_sse);
+            messages.push(Message::Close(None));
+            return Ok(WebSocketContinuationAction::Flush {
+                messages,
+                metadata: WebSocketContinueMetadata {
+                    log_id: active.log_id,
+                    ..Default::default()
+                },
+            });
+        }
+    };
+    let event_type = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let active = state
+        .active
+        .as_mut()
+        .expect("active remote compaction must exist");
+    active.buffered_messages.push(message);
+    if !is_terminal_websocket_response_event(event_type) {
+        return Ok(WebSocketContinuationAction::Buffered);
+    }
+
+    let active = state
+        .active
+        .take()
+        .expect("active remote compaction must exist");
+    let source_sse = websocket_messages_to_responses_sse(&active.buffered_messages);
+    let rewritten =
+        crate::layered_compaction::rewrite_remote_compaction_v2_responses_sse_with_layered_compaction(
+            &active.original_request,
+            layered_enabled,
+            retain_tokens,
+            source_sse.clone(),
+        )
+        .expect("Remote Compaction V2 WebSocket request must produce a terminal bridge result");
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "remote_compaction_v2.websocket_bridge_response",
+        serde_json::json!({
+            "layeredCompactionTriggered": rewritten.triggered,
+            "retainedItems": rewritten.retained_items,
+            "retainedChars": rewritten.retained_chars,
+            "retainTokens": retain_tokens
+        }),
+    );
+    let bridge_failed =
+        crate::continue_thinking::extract_terminal_response_object(&rewritten.sse_text)
+            .and_then(|response| {
+                response
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .as_deref()
+            == Some("failed");
+    let failed_response_id = bridge_failed
+        .then(|| websocket_response_id(&payload))
+        .flatten();
+    if let Some(response_id) = failed_response_id.as_ref() {
+        remember_discarded_websocket_response_id(state, response_id.clone());
+    }
+    let mut messages = responses_sse_to_websocket_messages(&rewritten.sse_text);
+    if bridge_failed && failed_response_id.is_none() {
+        messages.push(Message::Close(None));
+    }
+    Ok(WebSocketContinuationAction::Flush {
+        messages,
+        metadata: WebSocketContinueMetadata {
+            log_id: active.log_id,
+            layered_compaction_triggered: rewritten.triggered,
+            layered_compaction_retain_tokens: rewritten.triggered.then_some(retain_tokens),
+            layered_compaction_retained_items: rewritten
+                .triggered
+                .then_some(rewritten.retained_items),
+            layered_compaction_retained_chars: rewritten
+                .triggered
+                .then_some(rewritten.retained_chars),
+            layered_compaction_before_response_body: rewritten.triggered.then_some(source_sse),
+            ..Default::default()
+        },
+    })
+}
+
+fn handle_legacy_layered_compaction_websocket_message(
+    state: &mut WebSocketContinuationState,
+    message: Message,
+    retain_tokens: u32,
+) -> anyhow::Result<WebSocketContinuationAction> {
+    if let Message::Close(close_frame) = message {
+        let active = state
+            .active
+            .take()
+            .expect("active layered compaction must exist");
+        let failure_sse = crate::layered_compaction::compaction_failure_sse(
+            &active.original_request,
+            None,
+            "layered_compaction_websocket_closed",
+            "Layered compaction upstream WebSocket closed before a terminal response.",
+        );
+        let mut messages = responses_sse_to_websocket_messages(&failure_sse);
+        messages.push(Message::Close(close_frame));
+        return Ok(WebSocketContinuationAction::Flush {
+            messages,
+            metadata: WebSocketContinueMetadata {
+                log_id: active.log_id,
+                ..Default::default()
+            },
+        });
+    }
+
+    if matches!(message, Message::Binary(_)) {
+        let active = state
+            .active
+            .take()
+            .expect("active layered compaction must exist");
+        let failure_sse = crate::layered_compaction::compaction_failure_sse(
+            &active.original_request,
+            None,
+            "layered_compaction_websocket_binary_frame",
+            "Layered compaction received an unsupported binary WebSocket frame.",
+        );
+        let mut messages = responses_sse_to_websocket_messages(&failure_sse);
+        messages.push(Message::Close(None));
+        return Ok(WebSocketContinuationAction::Flush {
+            messages,
+            metadata: WebSocketContinueMetadata {
+                log_id: active.log_id,
+                ..Default::default()
+            },
+        });
+    }
+
+    let Message::Text(text) = &message else {
+        return Ok(WebSocketContinuationAction::Forward(message));
+    };
+    let payload = match serde_json::from_str::<Value>(text.as_str()) {
+        Ok(payload) => payload,
+        Err(error) => {
+            let active = state
+                .active
+                .take()
+                .expect("active layered compaction must exist");
+            let failure_sse = crate::layered_compaction::compaction_failure_sse(
+                &active.original_request,
+                None,
+                "layered_compaction_websocket_event_parse_failed",
+                &format!("Layered compaction could not parse an upstream WebSocket event: {error}"),
+            );
+            let mut messages = responses_sse_to_websocket_messages(&failure_sse);
+            messages.push(Message::Close(None));
+            return Ok(WebSocketContinuationAction::Flush {
+                messages,
+                metadata: WebSocketContinueMetadata {
+                    log_id: active.log_id,
+                    ..Default::default()
+                },
+            });
+        }
+    };
+    let event_type = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let active = state
+        .active
+        .as_mut()
+        .expect("active layered compaction must exist");
+    active.buffered_messages.push(message);
+    if !is_terminal_websocket_response_event(event_type) {
+        return Ok(WebSocketContinuationAction::Buffered);
+    }
+
+    let response_object = payload
+        .get("response")
+        .filter(|response| response.is_object());
+    let response_id = websocket_response_id(&payload);
+    let terminal_error = match event_type {
+        "response.completed"
+            if response_object
+                .is_some_and(crate::layered_compaction::has_completed_compaction_summary) =>
+        {
+            None
+        }
+        "response.completed" => Some((
+            "layered_compaction_summary_missing",
+            "Layered compaction received no valid assistant summary text.",
+        )),
+        "response.incomplete" => Some((
+            "layered_compaction_upstream_incomplete",
+            "Layered compaction received an incomplete upstream response.",
+        )),
+        "response.failed" | "error" => Some((
+            "layered_compaction_upstream_failed",
+            "Layered compaction received a failed upstream response.",
+        )),
+        _ => Some((
+            "layered_compaction_terminal_response_invalid",
+            "Layered compaction received an invalid terminal upstream response.",
+        )),
+    };
+    if let Some((code, message)) = terminal_error {
+        let active = state
+            .active
+            .take()
+            .expect("active layered compaction must exist");
+        if let Some(response_id) = response_id.as_ref() {
+            remember_discarded_websocket_response_id(state, response_id.clone());
+        }
+        let failure_sse = crate::layered_compaction::compaction_failure_sse(
+            &active.original_request,
+            response_object,
+            code,
+            message,
+        );
+        let mut messages = responses_sse_to_websocket_messages(&failure_sse);
+        if response_id.is_none() {
+            messages.push(Message::Close(None));
+        }
+        return Ok(WebSocketContinuationAction::Flush {
+            messages,
+            metadata: WebSocketContinueMetadata {
+                log_id: active.log_id,
+                ..Default::default()
+            },
+        });
+    }
+
+    let active = state
+        .active
+        .take()
+        .expect("active layered compaction must exist");
+    let source_sse = websocket_messages_to_responses_sse(&active.buffered_messages);
+    let rewritten = crate::layered_compaction::apply_layered_compaction_to_responses_sse(
+        &active.original_request,
+        true,
+        retain_tokens,
+        source_sse.clone(),
+    );
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "layered_compaction.websocket_response",
+        serde_json::json!({
+            "layeredCompactionTriggered": rewritten.triggered,
+            "retainedItems": rewritten.retained_items,
+            "retainedChars": rewritten.retained_chars,
+            "retainTokens": retain_tokens
+        }),
+    );
+    let messages = responses_sse_to_websocket_messages(&rewritten.sse_text);
+    Ok(WebSocketContinuationAction::Flush {
+        messages,
+        metadata: WebSocketContinueMetadata {
+            log_id: active.log_id,
+            layered_compaction_triggered: rewritten.triggered,
+            layered_compaction_retain_tokens: rewritten.triggered.then_some(retain_tokens),
+            layered_compaction_retained_items: rewritten
+                .triggered
+                .then_some(rewritten.retained_items),
+            layered_compaction_retained_chars: rewritten
+                .triggered
+                .then_some(rewritten.retained_chars),
+            layered_compaction_before_response_body: rewritten.triggered.then_some(source_sse),
+            ..Default::default()
+        },
+    })
+}
+
+fn remember_discarded_websocket_response_id(
+    state: &mut WebSocketContinuationState,
+    response_id: String,
+) {
+    const MAX_DISCARDED_RESPONSE_IDS: usize = 64;
+    if state
+        .discarded_response_ids
+        .iter()
+        .any(|discarded| discarded == &response_id)
+    {
+        return;
+    }
+    if state.discarded_response_ids.len() >= MAX_DISCARDED_RESPONSE_IDS {
+        state.discarded_response_ids.pop_front();
+    }
+    state.discarded_response_ids.push_back(response_id);
+}
+
+fn websocket_messages_to_responses_sse(messages: &[Message]) -> String {
+    let mut sse = String::new();
+    for message in messages {
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let Ok(payload) = serde_json::from_str::<Value>(text.as_str()) else {
+            continue;
+        };
+        let event_type = payload
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if event_type.is_empty() {
+            continue;
+        }
+        sse.push_str("event: ");
+        sse.push_str(event_type);
+        sse.push_str("\ndata: ");
+        sse.push_str(text.as_str());
+        sse.push_str("\n\n");
+    }
+    sse
+}
+
+fn responses_sse_to_websocket_messages(sse_text: &str) -> Vec<Message> {
+    sse_text
+        .split("\n\n")
+        .filter_map(|block| {
+            let data = block
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if data.is_empty() || data == "[DONE]" {
+                return None;
+            }
+            serde_json::from_str::<Value>(&data).ok()?;
+            Some(Message::Text(data.into()))
+        })
+        .collect()
 }
 
 fn add_websocket_reasoning_tokens(total: &mut Option<u64>, reasoning_tokens: Option<u64>) {
@@ -596,6 +1210,7 @@ fn websocket_continue_metadata(
         request_body: websocket_continue_request_body(&active.continue_requests),
         before_response_body: active.before_response_body.clone(),
         after_response_body,
+        ..Default::default()
     }
 }
 
@@ -681,6 +1296,9 @@ impl WebSocketRequestLogger {
             continue_thinking_request_body: None,
             continue_thinking_before_response_body: None,
             continue_thinking_after_response_body: None,
+            remote_compaction_triggered: crate::proxy_log::request_uses_remote_compaction_v2(Some(
+                payload,
+            )),
             layered_compaction_triggered: false,
             layered_compaction_retain_tokens: None,
             layered_compaction_retained_items: None,
@@ -864,6 +1482,14 @@ impl WebSocketRequestLogger {
         tracked.record.continue_thinking_before_response_body =
             metadata.before_response_body.clone();
         tracked.record.continue_thinking_after_response_body = metadata.after_response_body.clone();
+        tracked.record.layered_compaction_triggered = metadata.layered_compaction_triggered;
+        tracked.record.layered_compaction_retain_tokens = metadata.layered_compaction_retain_tokens;
+        tracked.record.layered_compaction_retained_items =
+            metadata.layered_compaction_retained_items;
+        tracked.record.layered_compaction_retained_chars =
+            metadata.layered_compaction_retained_chars;
+        tracked.record.layered_compaction_before_response_body =
+            metadata.layered_compaction_before_response_body.clone();
         let record = tracked.record.clone();
         drop(state);
         append_websocket_proxy_log_record(&record);
@@ -1074,6 +1700,83 @@ fn validate_downstream_message(
     Ok(Some(payload))
 }
 
+fn prepare_downstream_response_create_payload(
+    payload: &Value,
+) -> anyhow::Result<(
+    Value,
+    Value,
+    Option<crate::protocol_proxy::LayeredCompactionOptions>,
+)> {
+    let normalized = crate::protocol_proxy::normalize_native_responses_request(payload);
+    let model = normalized
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let remote_compaction_v2_bridge =
+        crate::layered_compaction::is_remote_compaction_v2_request(Some(&normalized))
+            && !crate::layered_compaction::model_supports_native_remote_compaction_v2(model);
+    let legacy_compaction = crate::layered_compaction::is_compaction_request(Some(&normalized));
+    if !remote_compaction_v2_bridge && !legacy_compaction {
+        return Ok((normalized.clone(), normalized, None));
+    }
+    let settings = SettingsStore::default()
+        .load()
+        .context("读取 Responses WebSocket 上下文压缩设置失败")?;
+    Ok(prepare_downstream_response_create_payload_with_settings(
+        normalized, &settings,
+    ))
+}
+
+fn prepare_downstream_response_create_payload_with_settings(
+    normalized: Value,
+    settings: &crate::settings::BackendSettings,
+) -> (
+    Value,
+    Value,
+    Option<crate::protocol_proxy::LayeredCompactionOptions>,
+) {
+    let model = normalized
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if crate::layered_compaction::is_remote_compaction_v2_request(Some(&normalized))
+        && !crate::layered_compaction::model_supports_native_remote_compaction_v2(model)
+    {
+        let forwarded =
+            crate::layered_compaction::prepare_remote_compaction_v2_bridge_request_with_prompt(
+                &normalized,
+                settings
+                    .layered_compaction_enabled
+                    .then_some(settings.layered_compaction_prompt_override.as_str()),
+            );
+        return (
+            normalized,
+            forwarded,
+            Some(crate::protocol_proxy::LayeredCompactionOptions {
+                enabled: settings.layered_compaction_enabled,
+                retain_tokens: settings.layered_compaction_retain_tokens,
+            }),
+        );
+    }
+    if crate::layered_compaction::is_compaction_request(Some(&normalized))
+        && settings.layered_compaction_enabled
+    {
+        let forwarded = crate::layered_compaction::prepare_legacy_layered_compaction_request(
+            &normalized,
+            &settings.layered_compaction_prompt_override,
+        );
+        return (
+            normalized,
+            forwarded,
+            Some(crate::protocol_proxy::LayeredCompactionOptions {
+                enabled: true,
+                retain_tokens: settings.layered_compaction_retain_tokens,
+            }),
+        );
+    }
+    (normalized.clone(), normalized, None)
+}
+
 fn ensure_websocket_relay_still_current(
     connected_relay: &crate::settings::RelayProfile,
 ) -> anyhow::Result<()> {
@@ -1184,10 +1887,13 @@ fn log_websocket_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveWebSocketContinuation, WebSocketContinuationAction, WebSocketContinuationCoordinator,
-        WebSocketContinuationState, is_responses_websocket_proxy_path,
-        is_responses_websocket_upgrade,
+        ActiveWebSocketContinuation, ActiveWebSocketMode, WebSocketContinuationAction,
+        WebSocketContinuationCoordinator, WebSocketContinuationState,
+        is_responses_websocket_proxy_path, is_responses_websocket_upgrade,
+        prepare_downstream_response_create_payload,
+        prepare_downstream_response_create_payload_with_settings,
     };
+    use crate::settings::BackendSettings;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
     use tokio_tungstenite::tungstenite::Message;
@@ -1205,6 +1911,779 @@ mod tests {
         request.extend_from_slice(&[0x81, 0x00]);
 
         assert!(is_responses_websocket_upgrade(&request));
+    }
+
+    #[test]
+    fn websocket_restores_synthetic_compaction_and_preserves_real_trigger() {
+        let compaction_request = json!({
+            "model": "claude-sonnet-5",
+            "input": [{ "type": "compaction_trigger" }]
+        });
+        let source_response = json!({
+            "id": "resp_bridge",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "WEBSOCKET SUMMARY" }]
+            }]
+        });
+        let compacted = crate::layered_compaction::rewrite_remote_compaction_v2_response(
+            &compaction_request,
+            &source_response,
+        )
+        .expect("bridge should create a synthetic compaction");
+        let payload = json!({
+            "type": "response.create",
+            "model": "gpt-5.6",
+            "input": [
+                compacted["output"][0].clone(),
+                { "type": "compaction_trigger" }
+            ]
+        });
+        let (normalized_payload, forwarded_payload, _) =
+            prepare_downstream_response_create_payload(&payload).unwrap();
+
+        assert_eq!(normalized_payload["input"][0]["type"], "message");
+        assert_eq!(normalized_payload["input"][0]["role"], "assistant");
+        assert!(
+            normalized_payload["input"][0]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("WEBSOCKET SUMMARY"))
+        );
+        assert_eq!(normalized_payload["input"][1]["type"], "compaction_trigger");
+        assert_eq!(forwarded_payload["input"][1]["type"], "compaction_trigger");
+        assert!(forwarded_payload.to_string().contains("WEBSOCKET SUMMARY"));
+        assert!(
+            !forwarded_payload
+                .to_string()
+                .contains("codex-elves-compaction-v1:")
+        );
+    }
+
+    #[test]
+    fn websocket_non_gpt_remote_compaction_uses_summary_bridge() {
+        let payload = json!({
+            "type": "response.create",
+            "model": "claude-sonnet-5",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "keep this context" }]
+                },
+                { "type": "compaction_trigger" }
+            ],
+            "tools": [{ "type": "function", "name": "exec_command" }]
+        });
+        let (request_payload, forwarded_payload, options) =
+            prepare_downstream_response_create_payload(&payload).unwrap();
+        assert_eq!(request_payload["input"][1]["type"], "compaction_trigger");
+        assert_eq!(forwarded_payload["input"][1]["type"], "message");
+        assert!(forwarded_payload.get("tools").is_none());
+        assert!(options.is_some());
+    }
+
+    #[test]
+    fn websocket_legacy_compaction_uses_project_default_prompt_and_removes_tools() {
+        let settings = BackendSettings {
+            layered_compaction_enabled: true,
+            layered_compaction_prompt_override: String::new(),
+            layered_compaction_retain_tokens: 23_456,
+            ..Default::default()
+        };
+        let payload = json!({
+            "type": "response.create",
+            "model": "gpt-5.6",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "keep this context" }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a summary."
+                    }]
+                }
+            ],
+            "tools": [{ "type": "function", "name": "exec_command" }],
+            "tool_choice": "auto",
+            "parallel_tool_calls": true
+        });
+        let (request_payload, forwarded_payload, options) =
+            prepare_downstream_response_create_payload_with_settings(payload, &settings);
+
+        assert!(
+            request_payload["input"][1]["content"][0]["text"]
+                .as_str()
+                .is_some_and(
+                    |text| text.starts_with(crate::layered_compaction::COMPACTION_PROMPT_PREFIX)
+                )
+        );
+        assert_eq!(
+            forwarded_payload["input"][1]["content"][0]["text"],
+            crate::layered_compaction::DEFAULT_COMPACTION_PROMPT
+        );
+        assert!(forwarded_payload.get("tools").is_none());
+        assert!(forwarded_payload.get("tool_choice").is_none());
+        assert!(forwarded_payload.get("parallel_tool_calls").is_none());
+        let options = options.expect("legacy compaction should capture settings");
+        assert!(options.enabled);
+        assert_eq!(options.retain_tokens, 23_456);
+    }
+
+    #[test]
+    fn websocket_legacy_compaction_uses_custom_prompt() {
+        let settings = BackendSettings {
+            layered_compaction_enabled: true,
+            layered_compaction_prompt_override: "CUSTOM LEGACY PROMPT".to_string(),
+            ..Default::default()
+        };
+        let payload = json!({
+            "type": "response.create",
+            "model": "gpt-5.6",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a summary."
+            }]
+        });
+        let (_, forwarded_payload, options) =
+            prepare_downstream_response_create_payload_with_settings(payload, &settings);
+
+        assert_eq!(
+            forwarded_payload["input"][0]["content"],
+            "CUSTOM LEGACY PROMPT"
+        );
+        assert!(options.is_some());
+    }
+
+    #[test]
+    fn websocket_non_gpt_remote_compaction_uses_request_config_snapshot() {
+        let coordinator = WebSocketContinuationCoordinator::default();
+        coordinator
+            .register_request(
+                &json!({
+                    "type": "response.create",
+                    "model": "claude-sonnet-5",
+                    "input": [{ "type": "compaction_trigger" }]
+                }),
+                Some("log-snapshot".to_string()),
+                Some(crate::protocol_proxy::LayeredCompactionOptions {
+                    enabled: true,
+                    retain_tokens: 12_345,
+                }),
+            )
+            .unwrap();
+        let state = coordinator.state.lock().unwrap();
+        let active = state
+            .active
+            .as_ref()
+            .expect("V2 bridge mode should be active");
+        assert!(matches!(
+            active.mode,
+            ActiveWebSocketMode::RemoteCompactionV2 {
+                layered_enabled: true,
+                retain_tokens: 12_345
+            }
+        ));
+    }
+
+    #[test]
+    fn websocket_non_gpt_summary_response_becomes_compaction_events() {
+        let coordinator = WebSocketContinuationCoordinator {
+            state: Arc::new(Mutex::new(WebSocketContinuationState {
+                active: Some(ActiveWebSocketContinuation {
+                    mode: ActiveWebSocketMode::RemoteCompactionV2 {
+                        layered_enabled: true,
+                        retain_tokens: crate::layered_compaction::DEFAULT_RETAIN_TOKENS,
+                    },
+                    original_request: json!({
+                        "type": "response.create",
+                        "model": "claude-sonnet-5",
+                        "input": [
+                            {
+                                "type": "message",
+                                "role": "user",
+                                "content": [{ "type": "input_text", "text": "keep this context" }]
+                            },
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{ "type": "output_text", "text": "assistant reply to keep" }]
+                            },
+                            { "type": "compaction_trigger" }
+                        ]
+                    }),
+                    log_id: Some("log-compaction".to_string()),
+                    max_rounds: 0,
+                    round: 0,
+                    completed_rounds: 0,
+                    accumulated_reasoning_tokens: None,
+                    buffered_messages: Vec::new(),
+                    fallback_messages: Vec::new(),
+                    fallback_response_body: None,
+                    continue_requests: Vec::new(),
+                    before_response_body: None,
+                }),
+                ..Default::default()
+            })),
+        };
+        let action = coordinator
+            .handle_upstream_message(Message::Text(
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_ws_compact",
+                        "object": "response",
+                        "status": "completed",
+                        "model": "claude-sonnet-5",
+                        "output": [{
+                            "id": "msg_ws_compact",
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{
+                                "type": "output_text",
+                                "text": "WEBSOCKET COMPACTED SUMMARY"
+                            }]
+                        }]
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        let WebSocketContinuationAction::Flush { messages, .. } = action else {
+            panic!("remote compaction terminal response should flush rewritten messages");
+        };
+        let payloads = messages
+            .iter()
+            .filter_map(|message| {
+                let Message::Text(text) = message else {
+                    return None;
+                };
+                serde_json::from_str::<serde_json::Value>(text.as_str()).ok()
+            })
+            .collect::<Vec<_>>();
+        let done = payloads
+            .iter()
+            .filter(|payload| {
+                payload.get("type").and_then(serde_json::Value::as_str)
+                    == Some("response.output_item.done")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0]["item"]["type"], "compaction");
+        let restored =
+            crate::layered_compaction::synthetic_remote_compaction_history_text(&done[0]["item"])
+                .expect("websocket compaction should be decodable");
+        assert!(restored.contains("WEBSOCKET COMPACTED SUMMARY"));
+        // 最近一轮完整保留：user 消息 + 其后的 assistant 回复。
+        assert!(restored.contains("assistant reply to keep"));
+        assert!(restored.contains("keep this context"));
+        assert!(
+            !payloads
+                .iter()
+                .any(|payload| payload["item"]["type"] == "message")
+        );
+    }
+
+    fn websocket_legacy_compaction_coordinator() -> WebSocketContinuationCoordinator {
+        WebSocketContinuationCoordinator {
+            state: Arc::new(Mutex::new(WebSocketContinuationState {
+                active: Some(ActiveWebSocketContinuation {
+                    mode: ActiveWebSocketMode::LegacyLayeredCompaction {
+                        retain_tokens: crate::layered_compaction::DEFAULT_RETAIN_TOKENS,
+                    },
+                    original_request: json!({
+                        "type": "response.create",
+                        "model": "gpt-5.6",
+                        "input": [
+                            {
+                                "type": "message",
+                                "role": "user",
+                                "content": [{
+                                    "type": "input_text",
+                                    "text": "KEEP THIS LEGACY CONTEXT"
+                                }]
+                            },
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{
+                                    "type": "output_text",
+                                    "text": "KEEP THIS LEGACY ASSISTANT REPLY"
+                                }]
+                            },
+                            {
+                                "type": "message",
+                                "role": "user",
+                                "content": [{
+                                    "type": "input_text",
+                                    "text": "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a summary."
+                                }]
+                            }
+                        ]
+                    }),
+                    log_id: Some("log-legacy-compaction".to_string()),
+                    max_rounds: 0,
+                    round: 0,
+                    completed_rounds: 0,
+                    accumulated_reasoning_tokens: None,
+                    buffered_messages: Vec::new(),
+                    fallback_messages: Vec::new(),
+                    fallback_response_body: None,
+                    continue_requests: Vec::new(),
+                    before_response_body: None,
+                }),
+                ..Default::default()
+            })),
+        }
+    }
+
+    #[test]
+    fn websocket_legacy_compaction_registers_layered_mode() {
+        let coordinator = WebSocketContinuationCoordinator::default();
+        coordinator
+            .register_request(
+                &json!({
+                    "type": "response.create",
+                    "model": "gpt-5.6",
+                    "input": [{
+                        "type": "message",
+                        "role": "user",
+                        "content": "You are performing a CONTEXT CHECKPOINT COMPACTION."
+                    }]
+                }),
+                Some("log-legacy-snapshot".to_string()),
+                Some(crate::protocol_proxy::LayeredCompactionOptions {
+                    enabled: true,
+                    retain_tokens: 24_000,
+                }),
+            )
+            .unwrap();
+        let state = coordinator.state.lock().unwrap();
+        let active = state
+            .active
+            .as_ref()
+            .expect("legacy layered mode should be active");
+        assert!(matches!(
+            active.mode,
+            ActiveWebSocketMode::LegacyLayeredCompaction {
+                retain_tokens: 24_000
+            }
+        ));
+    }
+
+    #[test]
+    fn websocket_legacy_compaction_completed_response_appends_recent_context() {
+        let coordinator = websocket_legacy_compaction_coordinator();
+        let action = coordinator
+            .handle_upstream_message(Message::Text(
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_ws_legacy",
+                        "object": "response",
+                        "status": "completed",
+                        "model": "gpt-5.6",
+                        "output": [{
+                            "id": "msg_ws_legacy",
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{
+                                "type": "output_text",
+                                "text": "LEGACY LLM SUMMARY"
+                            }]
+                        }]
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        let WebSocketContinuationAction::Flush { messages, metadata } = action else {
+            panic!("legacy compaction terminal response should flush rewritten messages");
+        };
+        let payloads = messages
+            .iter()
+            .filter_map(|message| {
+                let Message::Text(text) = message else {
+                    return None;
+                };
+                serde_json::from_str::<serde_json::Value>(text.as_str()).ok()
+            })
+            .collect::<Vec<_>>();
+        let done = payloads
+            .iter()
+            .find(|payload| {
+                payload.get("type").and_then(serde_json::Value::as_str)
+                    == Some("response.output_item.done")
+            })
+            .expect("rewritten legacy response should contain a done message item");
+        let text = done["item"]["content"][0]["text"]
+            .as_str()
+            .expect("rewritten message should contain text");
+
+        assert_eq!(done["item"]["type"], "message");
+        assert!(text.contains("LEGACY LLM SUMMARY"));
+        // 最近一轮完整保留：user 消息 + 其后的 assistant 回复。
+        assert!(text.contains("KEEP THIS LEGACY ASSISTANT REPLY"));
+        assert!(text.contains("KEEP THIS LEGACY CONTEXT"));
+        assert!(metadata.layered_compaction_triggered);
+        assert_eq!(
+            metadata.layered_compaction_retain_tokens,
+            Some(crate::layered_compaction::DEFAULT_RETAIN_TOKENS)
+        );
+        // 最近一轮 = [user, assistant]，共 2 条。
+        assert_eq!(metadata.layered_compaction_retained_items, Some(2));
+        assert!(
+            metadata
+                .layered_compaction_before_response_body
+                .as_deref()
+                .is_some_and(|body| body.contains("LEGACY LLM SUMMARY"))
+        );
+    }
+
+    #[test]
+    fn websocket_legacy_compaction_incomplete_response_fails_closed() {
+        let coordinator = websocket_legacy_compaction_coordinator();
+        let action = coordinator
+            .handle_upstream_message(Message::Text(
+                json!({
+                    "type": "response.incomplete",
+                    "response": {
+                        "id": "resp_ws_legacy_incomplete",
+                        "object": "response",
+                        "status": "incomplete",
+                        "model": "gpt-5.6",
+                        "output": [{
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{
+                                "type": "output_text",
+                                "text": "PARTIAL LEGACY SUMMARY MUST NOT LEAK"
+                            }]
+                        }]
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        let WebSocketContinuationAction::Flush { messages, .. } = action else {
+            panic!("incomplete legacy response should flush a failure");
+        };
+        let payload_text = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(payload_text.contains("\"type\":\"response.failed\""));
+        assert!(payload_text.contains("layered_compaction_upstream_incomplete"));
+        assert!(!payload_text.contains("PARTIAL LEGACY SUMMARY MUST NOT LEAK"));
+        assert!(!payload_text.contains("\"type\":\"response.output_item.done\""));
+    }
+
+    #[test]
+    fn websocket_legacy_compaction_close_discards_partial_output_and_fails() {
+        let coordinator = websocket_legacy_compaction_coordinator();
+        let action = coordinator
+            .handle_upstream_message(Message::Text(
+                json!({
+                    "type": "response.output_text.delta",
+                    "delta": "PARTIAL LEGACY OUTPUT MUST NOT LEAK"
+                })
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        assert!(matches!(action, WebSocketContinuationAction::Buffered));
+
+        let action = coordinator
+            .handle_upstream_message(Message::Close(None))
+            .unwrap();
+        let WebSocketContinuationAction::Flush { messages, .. } = action else {
+            panic!("early legacy close should flush a failure");
+        };
+        let payload_text = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(payload_text.contains("\"type\":\"response.failed\""));
+        assert!(payload_text.contains("layered_compaction_websocket_closed"));
+        assert!(!payload_text.contains("PARTIAL LEGACY OUTPUT MUST NOT LEAK"));
+        assert!(matches!(messages.last(), Some(Message::Close(_))));
+    }
+
+    fn websocket_remote_compaction_coordinator() -> WebSocketContinuationCoordinator {
+        WebSocketContinuationCoordinator {
+            state: Arc::new(Mutex::new(WebSocketContinuationState {
+                active: Some(ActiveWebSocketContinuation {
+                    mode: ActiveWebSocketMode::RemoteCompactionV2 {
+                        layered_enabled: false,
+                        retain_tokens: crate::layered_compaction::DEFAULT_RETAIN_TOKENS,
+                    },
+                    original_request: json!({
+                        "type": "response.create",
+                        "model": "claude-sonnet-5",
+                        "input": [{ "type": "compaction_trigger" }]
+                    }),
+                    log_id: Some("log-compaction-failure".to_string()),
+                    max_rounds: 0,
+                    round: 0,
+                    completed_rounds: 0,
+                    accumulated_reasoning_tokens: None,
+                    buffered_messages: Vec::new(),
+                    fallback_messages: Vec::new(),
+                    fallback_response_body: None,
+                    continue_requests: Vec::new(),
+                    before_response_body: None,
+                }),
+                ..Default::default()
+            })),
+        }
+    }
+
+    #[test]
+    fn websocket_remote_compaction_incomplete_response_fails_closed() {
+        let coordinator = websocket_remote_compaction_coordinator();
+        let action = coordinator
+            .handle_upstream_message(Message::Text(
+                json!({
+                    "type": "response.incomplete",
+                    "response": {
+                        "id": "resp_ws_incomplete",
+                        "object": "response",
+                        "status": "incomplete",
+                        "model": "claude-sonnet-5",
+                        "output": [{
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{
+                                "type": "output_text",
+                                "text": "PARTIAL SUMMARY MUST NOT LEAK"
+                            }]
+                        }]
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        let WebSocketContinuationAction::Flush { messages, .. } = action else {
+            panic!("incomplete V2 response should flush a failure");
+        };
+        let payload_text = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(payload_text.contains("\"type\":\"response.failed\""));
+        assert!(payload_text.contains("remote_compaction_upstream_incomplete"));
+        assert!(!payload_text.contains("PARTIAL SUMMARY MUST NOT LEAK"));
+        assert!(!payload_text.contains("\"type\":\"response.output_item.done\""));
+
+        let late_completed = coordinator
+            .handle_upstream_message(Message::Text(
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_ws_incomplete",
+                        "status": "completed",
+                        "output": [{
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{
+                                "type": "output_text",
+                                "text": "LATE COMPLETED MUST NOT LEAK"
+                            }]
+                        }]
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        assert!(matches!(
+            late_completed,
+            WebSocketContinuationAction::Buffered
+        ));
+    }
+
+    #[test]
+    fn websocket_remote_compaction_failure_without_response_id_closes_connection() {
+        let coordinator = websocket_remote_compaction_coordinator();
+        let action = coordinator
+            .handle_upstream_message(Message::Text(
+                json!({
+                    "type": "error",
+                    "error": {
+                        "message": "upstream failed without a response id"
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        let WebSocketContinuationAction::Flush { messages, .. } = action else {
+            panic!("unidentified V2 failure should flush failure and close");
+        };
+        let payload_text = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(payload_text.contains("\"type\":\"response.failed\""));
+        assert!(payload_text.contains("remote_compaction_upstream_failed"));
+        assert!(matches!(messages.last(), Some(Message::Close(_))));
+    }
+
+    #[test]
+    fn websocket_remote_compaction_close_discards_buffered_output_and_fails() {
+        let coordinator = websocket_remote_compaction_coordinator();
+        let action = coordinator
+            .handle_upstream_message(Message::Text(
+                json!({
+                    "type": "response.output_text.delta",
+                    "delta": "PARTIAL OUTPUT MUST NOT LEAK"
+                })
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        assert!(matches!(action, WebSocketContinuationAction::Buffered));
+
+        let action = coordinator
+            .handle_upstream_message(Message::Close(None))
+            .unwrap();
+        let WebSocketContinuationAction::Flush { messages, .. } = action else {
+            panic!("early close should flush a V2 failure");
+        };
+        let payload_text = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(payload_text.contains("\"type\":\"response.failed\""));
+        assert!(payload_text.contains("remote_compaction_websocket_closed"));
+        assert!(!payload_text.contains("PARTIAL OUTPUT MUST NOT LEAK"));
+        assert!(matches!(messages.last(), Some(Message::Close(_))));
+    }
+
+    #[test]
+    fn websocket_remote_compaction_transport_failure_emits_failed_before_close() {
+        let coordinator = websocket_remote_compaction_coordinator();
+        let action = coordinator
+            .fail_active_compaction("websocket_read_failed", "upstream read failed")
+            .unwrap()
+            .expect("active V2 bridge should be failed closed");
+        let WebSocketContinuationAction::Flush { messages, .. } = action else {
+            panic!("transport failure should flush a V2 failure");
+        };
+        let payload_text = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(payload_text.contains("\"type\":\"response.failed\""));
+        assert!(payload_text.contains("remote_compaction_websocket_read_failed"));
+        assert!(matches!(messages.last(), Some(Message::Close(_))));
+    }
+
+    #[test]
+    fn websocket_remote_compaction_eof_emits_failed_before_close() {
+        let coordinator = websocket_remote_compaction_coordinator();
+        let action = coordinator
+            .fail_active_compaction("websocket_ended", "upstream ended without a close frame")
+            .unwrap()
+            .expect("active V2 bridge should be failed closed on EOF");
+        let WebSocketContinuationAction::Flush { messages, .. } = action else {
+            panic!("EOF should flush a V2 failure");
+        };
+        let payload_text = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(payload_text.contains("\"type\":\"response.failed\""));
+        assert!(payload_text.contains("remote_compaction_websocket_ended"));
+        assert!(matches!(messages.last(), Some(Message::Close(_))));
+    }
+
+    #[test]
+    fn websocket_remote_compaction_malformed_event_fails_immediately() {
+        let coordinator = websocket_remote_compaction_coordinator();
+        let action = coordinator
+            .handle_upstream_message(Message::Text("{malformed-json}".into()))
+            .unwrap();
+        let WebSocketContinuationAction::Flush { messages, .. } = action else {
+            panic!("malformed WebSocket event should flush a V2 failure");
+        };
+        let payload_text = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(payload_text.contains("\"type\":\"response.failed\""));
+        assert!(payload_text.contains("remote_compaction_websocket_event_parse_failed"));
+        assert!(!payload_text.contains("\"type\":\"response.output_item.done\""));
+        assert!(matches!(messages.last(), Some(Message::Close(_))));
+        assert!(coordinator.state.lock().unwrap().active.is_none());
+    }
+
+    #[test]
+    fn websocket_remote_compaction_binary_frame_fails_and_closes() {
+        let coordinator = websocket_remote_compaction_coordinator();
+        let action = coordinator
+            .handle_upstream_message(Message::Binary(vec![1, 2, 3].into()))
+            .unwrap();
+        let WebSocketContinuationAction::Flush { messages, .. } = action else {
+            panic!("binary V2 frame should flush failure and close");
+        };
+        let payload_text = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(payload_text.contains("\"type\":\"response.failed\""));
+        assert!(payload_text.contains("remote_compaction_websocket_binary_frame"));
+        assert!(matches!(messages.last(), Some(Message::Close(_))));
+        assert!(coordinator.state.lock().unwrap().active.is_none());
     }
 
     #[test]
@@ -1231,6 +2710,7 @@ mod tests {
         let coordinator = WebSocketContinuationCoordinator {
             state: Arc::new(Mutex::new(WebSocketContinuationState {
                 active: Some(ActiveWebSocketContinuation {
+                    mode: ActiveWebSocketMode::ContinueThinking,
                     original_request: json!({
                         "type": "response.create",
                         "model": "gpt-test",
@@ -1247,6 +2727,7 @@ mod tests {
                     continue_requests: Vec::new(),
                     before_response_body: None,
                 }),
+                ..Default::default()
             })),
         };
 

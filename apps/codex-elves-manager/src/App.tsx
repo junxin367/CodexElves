@@ -23,6 +23,7 @@ import {
   CheckCircle2,
   CircleArrowUp,
   ChevronDown,
+  Cloud,
   Copy,
   Download,
   Edit3,
@@ -181,7 +182,6 @@ type BackendSettings = {
   codexAppPluginMarketplaceUnlock: boolean;
   codexAppPluginAutoExpand: boolean;
   codexAppSessionDelete: boolean;
-  codexAppSessionRecoveryEnabled: boolean;
   codexAppSessionPrewarmEnabled: boolean;
   codexAppSessionPrewarmFullCount: number;
   codexAppSessionPrewarmContentCount: number;
@@ -315,6 +315,71 @@ type RelayMode = "official" | "mixedApi" | "pureApi" | "aggregate";
 const PROTOCOL_PROXY_BASE_URL = "http://127.0.0.1:45221/v1";
 const CHAT_UPSTREAM_BASE_URL_KEY = "codex_elves_chat_base_url";
 const SCRIPT_MARKET_REPOSITORY_URL = "https://github.com/BigPizzaV3/CodexElvesScriptMarket";
+const REMOTE_COMPACTION_V2_PROVIDER_NAME = "OpenAI";
+
+// 会话管理中使用的默认上下文压缩提示词。
+const LAYERED_COMPACTION_DEFAULT_PROMPT = `You are creating a structured context checkpoint for another LLM that will continue the current task.
+
+Do not continue the conversation or solve the task. Summarize only the information required to resume the work accurately.
+
+Use exactly this structure:
+
+## Goal
+
+* Describe what the user is trying to accomplish.
+* Preserve multiple goals separately when the session contains more than one task.
+
+## Constraints & Preferences
+
+* List all user requirements, technical constraints, workflow rules, and preferences.
+* Preserve the user's latest corrections and overrides.
+* Write “(none)” when no constraints were established.
+
+## Progress
+
+### Done
+
+* [x] List only work that was actually completed.
+* Include relevant verification evidence when available.
+
+### In Progress
+
+* [ ] Identify the exact task currently being performed.
+* State the current file, symbol, command, investigation point, or operation when known.
+* Do not describe planned work as completed.
+
+### Blocked
+
+* List unresolved errors, failed commands, missing information, dependencies, or decisions.
+* Remove blockers that were subsequently resolved.
+
+## Key Decisions
+
+* **Decision**: Give the reason and relevant consequences.
+* Preserve rejected approaches when retrying them would waste work.
+
+## Next Steps
+
+1. Give the immediate concrete action that should be performed after restoration.
+2. List subsequent actions in execution order.
+3. Distinguish required work from optional follow-up work.
+
+## Critical Context
+
+* Preserve facts, examples, identifiers, references, and technical discoveries needed to continue.
+* Preserve exact file paths, function names, commands, error messages, configuration keys, URLs, and IDs.
+* Write “(none)” when no additional context is needed.
+
+When updating an existing checkpoint:
+
+* Preserve all still-valid information.
+* Add newly discovered information.
+* Move completed items from “In Progress” to “Done”.
+* Update blockers and next steps from the latest evidence.
+* Remove only information that is demonstrably stale or superseded.
+* Never allow an older summary to override newer user instructions or tool results.
+
+Be concise, factual, and operationally precise.`;
 
 const emptyContextSelection = (): RelayContextSelection => ({
   mcpServers: [],
@@ -546,6 +611,7 @@ type LocalProxyLogEntry = {
   reasoningSource?: string | null;
   continueThinkingTriggered?: boolean | null;
   continueThinkingRounds?: number | null;
+  remoteCompactionTriggered?: boolean | null;
   layeredCompactionTriggered?: boolean | null;
   layeredCompactionRetainTokens?: number | null;
   layeredCompactionRetainedItems?: number | null;
@@ -588,10 +654,6 @@ type LocalProxyLogDetailResult = CommandResult<{
 
 type DiagnosticsResult = CommandResult<{
   report: string;
-}>;
-
-type LayeredCompactionDefaultPromptResult = CommandResult<{
-  prompt: string;
 }>;
 
 type WatcherResult = CommandResult<{
@@ -802,7 +864,6 @@ const defaultSettings: BackendSettings = {
   codexAppPluginMarketplaceUnlock: true,
   codexAppPluginAutoExpand: true,
   codexAppSessionDelete: true,
-  codexAppSessionRecoveryEnabled: true,
   codexAppSessionPrewarmEnabled: false,
   codexAppSessionPrewarmFullCount: 3,
   codexAppSessionPrewarmContentCount: 3,
@@ -820,7 +881,7 @@ const defaultSettings: BackendSettings = {
   gptReasoningContinuation: false,
   gptReasoningContinuationMaxRounds: 3,
   layeredCompactionEnabled: false,
-  layeredCompactionRetainTokens: 10000,
+  layeredCompactionRetainTokens: 20000,
   layeredCompactionPromptOverride: "",
   launchMode: "patch",
   relayBaseUrl: "",
@@ -1253,6 +1314,8 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
     const protocol = protocols[index % protocols.length];
     const success = index % 7 !== 5;
     const continueThinkingTriggered = protocol === "responses" && index === 0;
+    const layeredCompactionTriggered = index === 1;
+    const remoteCompactionTriggered = index === 4;
     const reasoningTokens = continueThinkingTriggered ? 2376 : browserPreviewReasoningTokens(index);
     return {
       id: `ppx-preview-${23 - index}`,
@@ -1266,6 +1329,11 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
       reasoningSource: typeof reasoningTokens === "number" ? "reasoning.effort" : null,
       continueThinkingTriggered,
       continueThinkingRounds: continueThinkingTriggered ? 2 : 0,
+      remoteCompactionTriggered,
+      layeredCompactionTriggered,
+      layeredCompactionRetainTokens: layeredCompactionTriggered ? 20000 : null,
+      layeredCompactionRetainedItems: layeredCompactionTriggered ? 6 : null,
+      layeredCompactionRetainedChars: layeredCompactionTriggered ? 18400 : null,
       serviceTier: index % 2 === 0 ? "auto" : null,
       relayId: "preview-pure-api",
       relayName: "浏览器预览供应商",
@@ -1319,14 +1387,57 @@ function browserPreviewLocalProxyDetail(id: string): LocalProxyLogDetail | null 
         reasoning: { effort: entry.reasoningEffort },
         service_tier: entry.serviceTier,
         stream: entry.stream,
-        input: [{ role: "user", content: "浏览器预览请求内容" }],
+        input: entry.remoteCompactionTriggered
+          ? [
+              { role: "user", content: "浏览器预览原生远程压缩请求" },
+              { type: "compaction_trigger" },
+            ]
+          : entry.layeredCompactionTriggered
+            ? [
+                { role: "user", content: "浏览器预览上下文压缩前的历史记录" },
+                {
+                  role: "user",
+                  content: "You are performing a CONTEXT CHECKPOINT COMPACTION.",
+                },
+              ]
+          : [{ role: "user", content: "浏览器预览请求内容" }],
       },
       null,
       2,
     ),
-    responseBody: entry.stream
-      ? 'event: response.output_text.delta\ndata: {"delta":"浏览器预览响应"}\n\n'
-      : JSON.stringify({ id: entry.id, status: "completed", output_text: "浏览器预览响应" }, null, 2),
+    responseBody: entry.remoteCompactionTriggered
+      ? JSON.stringify(
+          {
+            id: entry.id,
+            status: "completed",
+            output: [{
+              type: "compaction",
+              encrypted_content: "codex-elves-compaction-v1:YnJvd3Nlci1wcmV2aWV3",
+            }],
+          },
+          null,
+          2,
+        )
+      : entry.layeredCompactionTriggered
+        ? JSON.stringify(
+            {
+              id: entry.id,
+              status: "completed",
+              output: [{
+                type: "message",
+                role: "assistant",
+                content: [{
+                  type: "output_text",
+                  text: "浏览器预览上下文压缩摘要，并在标签内补回最近一轮原始记录。",
+                }],
+              }],
+            },
+            null,
+            2,
+          )
+      : entry.stream
+        ? 'event: response.output_text.delta\ndata: {"delta":"浏览器预览响应"}\n\n'
+        : JSON.stringify({ id: entry.id, status: "completed", output_text: "浏览器预览响应" }, null, 2),
     continueThinkingRequestBody: entry.continueThinkingTriggered
       ? JSON.stringify(
           {
@@ -1377,6 +1488,24 @@ function browserPreviewLocalProxyDetail(id: string): LocalProxyLogDetail | null 
             status: "completed",
             output: [{ type: "message", content: [{ type: "output_text", text: "续接后汇总响应" }] }],
             usage: { output_tokens_details: { reasoning_tokens: 2376 } },
+          },
+          null,
+          2,
+        )
+      : null,
+    layeredCompactionBeforeResponseBody: entry.layeredCompactionTriggered
+      ? JSON.stringify(
+          {
+            id: "resp_preview_before_context_compaction",
+            status: "completed",
+            output: [{
+              type: "message",
+              role: "assistant",
+              content: [{
+                type: "output_text",
+                text: "浏览器预览纯摘要；上下文压缩处理后会在标签内追加最近一轮原始记录。",
+              }],
+            }],
           },
           null,
           2,
@@ -3162,16 +3291,6 @@ export function App() {
       enableWatcher: () => watcherAction("enable_watcher"),
       disableWatcher: () => watcherAction("disable_watcher"),
       toggleTheme: () => setTheme((current) => (current === "dark" ? "light" : "dark")),
-      loadLayeredCompactionDefaultPrompt: async () => {
-        try {
-          const result = await call<LayeredCompactionDefaultPromptResult>(
-            "layered_compaction_default_prompt",
-          );
-          return result.status === "ok" ? result.prompt : "";
-        } catch {
-          return "";
-        }
-      },
     }),
     [route, launchForm, settingsForm, settings, removeOwnedData, update, logs, localProxyDetail, diagnostics, theme, relayFiles, localSessions, pluginCacheInfos, remotePluginMarketplaceProgress, selectedProviderSyncTarget, envConflicts, ccsProviders],
   );
@@ -3473,7 +3592,6 @@ type Actions = {
   disableWatcher: () => Promise<void>;
   toggleTheme: () => void;
   checkHealth: () => Promise<void>;
-  loadLayeredCompactionDefaultPrompt: () => Promise<string>;
 };
 
 function OverviewScreen({
@@ -3796,7 +3914,26 @@ function LocalProxyScreen({
                 {visibleEntries.map((entry) => (
                   <div className={`proxy-log-row ${selectedId === entry.id ? "active" : ""}`} key={entry.id}>
                     <span className="proxy-log-main">
-                      <strong>{entry.model || "未知模型"}</strong>
+                      <strong className="proxy-log-model-title">
+                        <span>{entry.model || "未知模型"}</span>
+                        {entry.remoteCompactionTriggered ? (
+                          <span
+                            aria-label="Remote Compaction V2 请求"
+                            className="proxy-remote-compaction-badge"
+                            data-tooltip="Remote Compaction V2 请求"
+                          >
+                            <Cloud aria-hidden="true" className="proxy-remote-compaction-icon" />
+                          </span>
+                        ) : entry.layeredCompactionTriggered ? (
+                          <span
+                            aria-label={formatLayeredCompactionTitle(entry)}
+                            className="proxy-context-compaction-badge"
+                            data-tooltip={formatLayeredCompactionTitle(entry)}
+                          >
+                            <Shrink aria-hidden="true" className="proxy-context-compaction-icon" />
+                          </span>
+                        ) : null}
+                      </strong>
                       <small>{formatProtocolRoute(entry)}</small>
                     </span>
                     <span className="proxy-log-time">{formatRequestLogListTime(entry.timestampMs)}</span>
@@ -3819,20 +3956,6 @@ function LocalProxyScreen({
                             {typeof entry.continueThinkingRounds === "number" && entry.continueThinkingRounds > 0 ? (
                               <span className="proxy-continue-thinking-count">
                                 {entry.continueThinkingRounds}
-                              </span>
-                            ) : null}
-                          </span>
-                        ) : null}
-                        {entry.layeredCompactionTriggered ? (
-                          <span
-                            aria-label={formatLayeredCompactionTitle(entry)}
-                            className="proxy-layered-compaction-badge"
-                            data-tooltip={formatLayeredCompactionTitle(entry)}
-                          >
-                            <Shrink aria-hidden="true" className="proxy-layered-compaction-icon" />
-                            {typeof entry.layeredCompactionRetainedItems === "number" ? (
-                              <span className="proxy-continue-thinking-count">
-                                {entry.layeredCompactionRetainedItems}
                               </span>
                             ) : null}
                           </span>
@@ -4006,11 +4129,27 @@ function LocalProxyLogDetailDialog({
             {entry.responseTruncated ? <span>返回内容已截断</span> : null}
             {entry.error ? <span>{entry.error}</span> : null}
           </div>
-          {entry.layeredCompactionTriggered ? (
+          {entry.remoteCompactionTriggered ? (
+            <div className="proxy-detail-meta proxy-layered-compaction-meta proxy-remote-compaction-meta">
+              <span>
+                <Cloud className="h-4 w-4" />
+                Remote Compaction V2
+              </span>
+              {entry.layeredCompactionTriggered && typeof entry.layeredCompactionRetainedItems === "number" ? (
+                <span>保留 {entry.layeredCompactionRetainedItems} 条原始记录</span>
+              ) : null}
+              {entry.layeredCompactionTriggered && typeof entry.layeredCompactionRetainedChars === "number" ? (
+                <span>约 {Math.round(entry.layeredCompactionRetainedChars / 4).toLocaleString()} token</span>
+              ) : null}
+              {entry.layeredCompactionTriggered && typeof entry.layeredCompactionRetainTokens === "number" ? (
+                <span>预算上限 {entry.layeredCompactionRetainTokens.toLocaleString()} token</span>
+              ) : null}
+            </div>
+          ) : entry.layeredCompactionTriggered ? (
             <div className="proxy-detail-meta proxy-layered-compaction-meta">
               <span>
                 <Shrink className="h-4 w-4" />
-                已触发分层压缩
+                已触发上下文压缩
               </span>
               {typeof entry.layeredCompactionRetainedItems === "number" ? (
                 <span>保留 {entry.layeredCompactionRetainedItems} 条原始记录</span>
@@ -4052,32 +4191,6 @@ function LocalProxyLogDetailDialog({
                       variant="secondary"
                     >
                       续接后
-                    </Button>
-                  </span>
-                ) : null}
-                {hasLayeredCompactionView ? (
-                  <span className="proxy-detail-response-tabs" aria-label="压缩返回视图">
-                    <Button
-                      aria-pressed={responseView === "full"}
-                      className={`proxy-detail-copy-button proxy-detail-view-button ${responseView === "full" ? "active" : ""}`}
-                      onClick={() => setResponseView("full")}
-                      size="sm"
-                      title="查看分层压缩注入后的最终返回"
-                      type="button"
-                      variant="secondary"
-                    >
-                      压缩后
-                    </Button>
-                    <Button
-                      aria-pressed={responseView === "precompaction"}
-                      className={`proxy-detail-copy-button proxy-detail-view-button ${responseView === "precompaction" ? "active" : ""}`}
-                      onClick={() => setResponseView("precompaction")}
-                      size="sm"
-                      title="查看上游返回的原始纯摘要（分层压缩注入前）"
-                      type="button"
-                      variant="secondary"
-                    >
-                      压缩前（纯摘要）
                     </Button>
                   </span>
                 ) : null}
@@ -4123,6 +4236,32 @@ function LocalProxyLogDetailDialog({
                       variant="secondary"
                     >
                       续接后
+                    </Button>
+                  </span>
+                ) : null}
+                {hasLayeredCompactionView ? (
+                  <span className="proxy-detail-response-tabs" aria-label="压缩返回视图">
+                    <Button
+                      aria-pressed={responseView === "full"}
+                      className={`proxy-detail-copy-button proxy-detail-view-button ${responseView === "full" ? "active" : ""}`}
+                      onClick={() => setResponseView("full")}
+                      size="sm"
+                      title="查看上下文压缩处理后的最终返回"
+                      type="button"
+                      variant="secondary"
+                    >
+                      压缩后
+                    </Button>
+                    <Button
+                      aria-pressed={responseView === "precompaction"}
+                      className={`proxy-detail-copy-button proxy-detail-view-button ${responseView === "precompaction" ? "active" : ""}`}
+                      onClick={() => setResponseView("precompaction")}
+                      size="sm"
+                      title="查看上游返回的原始纯摘要（上下文压缩处理前）"
+                      type="button"
+                      variant="secondary"
+                    >
+                      压缩前（纯摘要）
                     </Button>
                   </span>
                 ) : null}
@@ -4893,7 +5032,7 @@ function SessionsScreen({
   const saveLayeredCompactionRetainTokens = () => {
     const parsed = Number.parseInt(layeredCompactionRetainTokensInput, 10);
     const retainTokens = Number.isFinite(parsed)
-      ? clampNumber(parsed, 10000, 64000)
+      ? clampNumber(parsed, 20000, 64000)
       : form.layeredCompactionRetainTokens;
     setLayeredCompactionRetainTokensInput(String(retainTokens));
     if (retainTokens === form.layeredCompactionRetainTokens) return;
@@ -5079,29 +5218,8 @@ function SessionsScreen({
           </div>
         </CardContent>
       </Panel>
-      <div className="session-recovery-settings">
-        <label className="session-recovery-setting">
-          <input
-            checked={form.codexAppSessionRecoveryEnabled}
-            disabled={!form.enhancementsEnabled}
-            onChange={(event) => {
-              const next = {
-                ...form,
-                codexAppSessionRecoveryEnabled: event.currentTarget.checked,
-              };
-              onFormChange(next);
-              void actions.saveSettingsValue(next, false);
-            }}
-            type="checkbox"
-          />
-          <span className="session-recovery-setting-copy">
-            <strong>异常会话自动恢复</strong>
-            <small>
-              提交时若检测到 Codex 会话循环意外退出，将自动恢复或切换到新会话，并继续发送本次消息；若恢复或继续发送失败，会尝试恢复原输入并提示后续操作。
-            </small>
-          </span>
-        </label>
-        <div className="session-recovery-setting session-context-compaction-setting">
+      <div className="session-runtime-settings">
+        <div className="session-runtime-setting session-context-compaction-setting">
           <input
             checked={form.layeredCompactionEnabled}
             id="context-compaction-enabled"
@@ -5115,15 +5233,17 @@ function SessionsScreen({
             }}
             type="checkbox"
           />
-          <div className="session-recovery-setting-copy session-context-compaction-copy">
+          <div className="session-runtime-setting-copy session-context-compaction-copy">
             <label className="session-context-compaction-toggle" htmlFor="context-compaction-enabled">
               <strong>上下文压缩</strong>
-              <small>在 Codex 触发上下文压缩时保留最近的原始对话与工具调用，减少压缩后断片。</small>
+              <small>
+                Codex 原生压缩只保留你的历史消息 + 一段摘要，会丢弃最近的助手回复和工具调用，导致“忘记上一秒在做什么”。开启后本地代理会在摘要后补回“最近一轮”的原始记录（user 请求 + 助手回复 + 工具调用/输出），并可替换压缩提示词。
+              </small>
             </label>
             <div className="session-context-compaction-limit-row">
-              <label htmlFor="context-compaction-retain-tokens">保留 token</label>
+              <label htmlFor="context-compaction-retain-tokens">补回上限 token</label>
               <Input
-                aria-label="上下文压缩保留 token 预算"
+                aria-label="上下文压缩补回上限 token"
                 className="session-context-compaction-limit"
                 disabled={!form.layeredCompactionEnabled}
                 id="context-compaction-retain-tokens"
@@ -5139,14 +5259,14 @@ function SessionsScreen({
                 pattern="[0-9]*"
                 value={layeredCompactionRetainTokensInput}
               />
-              <small>范围 10,000–64,000。</small>
+              <small>安全上限，防止异常巨大的一轮占满上下文；正常只保留最近一轮，不会刻意填满。范围 20,000–64,000。</small>
             </div>
             <div className="session-context-compaction-limit-row">
               <Button
                 disabled={!form.layeredCompactionEnabled}
                 onClick={() => setCompactionPromptOpen(true)}
                 size="sm"
-                title="自定义分层压缩的 LLM 摘要提示词"
+                title="自定义上下文压缩的 LLM 摘要提示词"
                 type="button"
                 variant="secondary"
               >
@@ -5265,7 +5385,6 @@ function SessionsScreen({
       </Panel>
       {compactionPromptOpen ? (
         <LayeredCompactionPromptModal
-          loadDefaultPrompt={actions.loadLayeredCompactionDefaultPrompt}
           onClose={() => setCompactionPromptOpen(false)}
           onSave={(value) => {
             const next = { ...form, layeredCompactionPromptOverride: value };
@@ -6041,6 +6160,7 @@ function RelayProfileEditor({
     responsesWebsocketApplicable && responsesWebsocketState === "supported";
   const responsesWebsocketToggleChecked =
     responsesWebsocketToggleEnabled && profile.responsesWebsocketEnabled;
+  const remoteCompactionV2Enabled = relayRemoteCompactionV2Enabled(profile);
   const responsesWebsocketLabel =
     probingResponsesWebsocket
       ? "探测中"
@@ -6313,6 +6433,35 @@ function RelayProfileEditor({
         </div>
       ) : null}
       {showApiFields ? (
+        <div className="relay-remote-compaction-panel">
+          <div className="relay-remote-compaction-copy">
+            <strong>Remote Compaction V2</strong>
+            <span>
+              开启后，保存供应商配置会将
+              {" "}
+              <code>[model_providers.{relayProfileProviderId(profile)}].name</code>
+              {" "}
+              写为 OpenAI，以启用 Codex 远程上下文压缩 V2。
+            </span>
+          </div>
+          <label className="relay-remote-compaction-toggle">
+            <input
+              checked={remoteCompactionV2Enabled}
+              onChange={(event) =>
+                updateDraft({
+                  configContents: setRelayRemoteCompactionV2Enabled(
+                    profile.configContents,
+                    event.currentTarget.checked,
+                  ),
+                })
+              }
+              type="checkbox"
+            />
+            <span>启用压缩</span>
+          </label>
+        </div>
+      ) : null}
+      {showApiFields ? (
         <div className="relay-websocket-panel">
           <div className="relay-websocket-status">
             <Network className="h-4 w-4" />
@@ -6432,33 +6581,15 @@ function SystemPromptOverrideModal({
 
 function LayeredCompactionPromptModal({
   value,
-  loadDefaultPrompt,
   onClose,
   onSave,
 }: {
   value: string;
-  loadDefaultPrompt: () => Promise<string>;
   onClose: () => void;
   onSave: (value: string) => void;
 }) {
-  const [defaultPrompt, setDefaultPrompt] = useState("");
-  const [draft, setDraft] = useState(value);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    void loadDefaultPrompt().then((prompt) => {
-      if (cancelled) return;
-      setDefaultPrompt(prompt);
-      // 未自定义时默认展示 Codex 内置提示词，便于用户在其基础上修改。
-      if (!value.trim()) setDraft(prompt);
-      setLoading(false);
-    });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // 未自定义时展示默认提示词，便于用户在其基础上修改。
+  const [draft, setDraft] = useState(value.trim() ? value : LAYERED_COMPACTION_DEFAULT_PROMPT);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -6492,23 +6623,22 @@ function LayeredCompactionPromptModal({
         <Textarea
           autoFocus
           className="system-prompt-textarea"
-          disabled={loading}
           onChange={(event) => setDraft(event.currentTarget.value)}
-          placeholder={loading ? "正在读取 Codex 默认压缩提示词…" : "输入自定义压缩提示词"}
+          placeholder="输入自定义压缩提示词"
           value={draft}
         />
         <Toolbar>
           <Button
-            disabled={loading}
-            onClick={() => onSave(draft.trim() === defaultPrompt.trim() ? "" : draft)}
+            onClick={() =>
+              onSave(draft.trim() === LAYERED_COMPACTION_DEFAULT_PROMPT.trim() ? "" : draft)
+            }
           >
             <Save className="h-4 w-4" />
             保存
           </Button>
           <Button
-            disabled={loading}
-            onClick={() => setDraft(defaultPrompt)}
-            title="回退到 Codex 内置默认提示词"
+            onClick={() => setDraft(LAYERED_COMPACTION_DEFAULT_PROMPT)}
+            title="回退到默认压缩提示词"
             variant="secondary"
           >
             重置提示词
@@ -8212,6 +8342,7 @@ function relayActivationImpactRows(profile: RelayProfile): RelayActivationImpact
   }
 
   const providerId = relayProfileProviderId(profile);
+  const providerName = relayProfileProviderName(profile);
   const providerTable = `[model_providers.${providerId}]`;
   const baseUrl = profile.localProxyEnabled ? PROTOCOL_PROXY_BASE_URL : relayProfileEffectiveBaseUrl(profile);
   const apiKey = relayProfileEffectiveApiKey(profile);
@@ -8235,8 +8366,10 @@ function relayActivationImpactRows(profile: RelayProfile): RelayActivationImpact
     {
       file: "config.toml",
       field: `${providerTable}.name`,
-      value: providerId,
-      detail: "保证 provider 表可被 Codex 识别。",
+      value: providerName,
+      detail: relayRemoteCompactionV2Enabled(profile)
+        ? "写入 OpenAI，以启用 Codex Remote Compaction V2。"
+        : "保证 provider 表可被 Codex 识别。",
       tone: "write",
     },
     {
@@ -8332,6 +8465,27 @@ function relayAuthArchiveSummary(profile: RelayProfile, isActive: boolean): stri
 
 function relayProfileProviderId(profile: RelayProfile): string {
   return rootTomlStringValue(profile.configContents, "model_provider").trim() || "custom";
+}
+
+function relayProfileProviderName(profile: RelayProfile): string {
+  const provider = relayProfileProviderId(profile);
+  return codexProviderStringFromConfig(profile.configContents, "name").trim()
+    === REMOTE_COMPACTION_V2_PROVIDER_NAME
+    ? REMOTE_COMPACTION_V2_PROVIDER_NAME
+    : provider;
+}
+
+function relayRemoteCompactionV2Enabled(profile: RelayProfile): boolean {
+  return relayProfileProviderName(profile) === REMOTE_COMPACTION_V2_PROVIDER_NAME;
+}
+
+function setRelayRemoteCompactionV2Enabled(contents: string, enabled: boolean): string {
+  const provider = rootTomlStringValue(contents, "model_provider").trim() || "custom";
+  return setCodexProviderStringKey(
+    contents,
+    "name",
+    enabled ? REMOTE_COMPACTION_V2_PROVIDER_NAME : provider,
+  );
 }
 
 function relayProfileEffectiveBaseUrl(profile: RelayProfile): string {
@@ -9498,7 +9652,7 @@ function formatLayeredCompactionTitle(
     "layeredCompactionRetainTokens" | "layeredCompactionRetainedItems" | "layeredCompactionRetainedChars"
   >,
 ) {
-  const parts = ["已触发分层压缩"];
+  const parts = ["已触发上下文压缩"];
   if (typeof entry.layeredCompactionRetainedItems === "number") {
     parts.push(`保留 ${entry.layeredCompactionRetainedItems} 条原始记录`);
   }
@@ -9658,8 +9812,8 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
     codexAppImageOverlayOpacity: clampNumber(settings.codexAppImageOverlayOpacity || 35, 1, 100),
     gptReasoningContinuationMaxRounds: clampNumber(settings.gptReasoningContinuationMaxRounds || 3, 1, 9),
     layeredCompactionRetainTokens: clampNumber(
-      settings.layeredCompactionRetainTokens || 10000,
-      10000,
+      settings.layeredCompactionRetainTokens || 20000,
+      20000,
       64000,
     ),
     relayCommonConfigContents,
@@ -10334,7 +10488,9 @@ function removeCodexExperimentalBearerToken(contents: string): string {
 function ensureCodexProviderDefaults(contents: string, provider: string): string {
   let next = contents;
   const section = `model_providers.${provider}`;
-  next = setTomlSectionStringKey(next, section, "name", provider);
+  if (!codexProviderStringFromConfig(next, "name").trim()) {
+    next = setTomlSectionStringKey(next, section, "name", provider);
+  }
   next = setTomlSectionStringKey(next, section, "wire_api", "responses");
   return setTomlSectionBoolKey(next, section, "requires_openai_auth", true);
 }

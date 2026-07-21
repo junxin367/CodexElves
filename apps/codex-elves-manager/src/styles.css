@@ -1665,6 +1665,59 @@ body {
   margin-top: 12px;
 }
 
+.relay-remote-compaction-panel {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--muted) / 0.28);
+}
+
+.relay-remote-compaction-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.relay-remote-compaction-copy strong {
+  color: hsl(var(--foreground));
+  font-size: 13px;
+}
+
+.relay-remote-compaction-copy span {
+  overflow-wrap: anywhere;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.relay-remote-compaction-copy code {
+  color: hsl(var(--foreground));
+  font-size: 11px;
+}
+
+.relay-remote-compaction-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  min-height: 32px;
+  align-items: center;
+  gap: 7px;
+  color: hsl(var(--foreground));
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.relay-remote-compaction-toggle input {
+  width: 16px;
+  height: 16px;
+}
+
 .relay-websocket-panel {
   display: flex;
   gap: 16px;
@@ -1710,10 +1763,10 @@ body {
 }
 
 .relay-websocket-actions {
-  display: grid;
+  display: flex;
   flex: 0 0 auto;
   gap: 8px;
-  justify-items: end;
+  align-items: center;
 }
 
 .relay-websocket-actions > button {
@@ -3067,13 +3120,13 @@ body {
   justify-content: flex-end;
 }
 
-.session-recovery-settings {
+.session-runtime-settings {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
 }
 
-.session-recovery-setting {
+.session-runtime-setting {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: start;
@@ -3090,30 +3143,30 @@ body {
     box-shadow var(--motion-normal) var(--motion-ease);
 }
 
-.session-recovery-setting:has(> input:checked) {
+.session-runtime-setting:has(> input:checked) {
   border-color: hsl(var(--brand-accent) / 0.48);
 }
 
-.session-recovery-setting:has(> input:disabled) {
+.session-runtime-setting:has(> input:disabled) {
   cursor: not-allowed;
   opacity: 0.72;
 }
 
-.session-recovery-setting > input {
+.session-runtime-setting > input {
   margin-top: 3px;
 }
 
-.session-recovery-setting-copy {
+.session-runtime-setting-copy {
   display: grid;
   min-width: 0;
   gap: 3px;
 }
 
-.session-recovery-setting-copy strong {
+.session-runtime-setting-copy strong {
   font-size: 14px;
 }
 
-.session-recovery-setting-copy small {
+.session-runtime-setting-copy small {
   color: hsl(var(--muted-foreground));
   line-height: 1.4;
 }
@@ -3679,6 +3732,47 @@ body {
   font-family: Consolas, "SFMono-Regular", monospace;
 }
 
+.proxy-log-model-title {
+  align-items: center;
+  display: flex;
+  gap: 5px;
+  overflow: visible;
+}
+
+.proxy-log-model-title > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proxy-remote-compaction-badge,
+.proxy-context-compaction-badge {
+  align-items: center;
+  border-radius: 5px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 16px;
+  justify-content: center;
+  width: 16px;
+}
+
+.proxy-remote-compaction-badge {
+  background: rgb(75 130 255 / 0.11);
+  color: rgb(75 130 255);
+}
+
+.proxy-context-compaction-badge {
+  background: hsl(var(--brand-accent) / 0.1);
+  color: hsl(var(--brand-accent));
+}
+
+.proxy-remote-compaction-icon,
+.proxy-context-compaction-icon {
+  height: 11px;
+  width: 11px;
+}
+
 .proxy-log-reasoning-tokens {
   align-items: center;
   display: flex;
@@ -3904,6 +3998,32 @@ body {
   color: hsl(var(--muted-foreground));
   padding: 3px 8px;
   font-size: 12px;
+}
+
+.proxy-remote-compaction-meta > span:first-child {
+  background: rgb(75 130 255 / 0.08);
+  border-color: rgb(75 130 255 / 0.24);
+  color: rgb(55 105 220);
+}
+
+.proxy-layered-compaction-meta {
+  flex: 1 0 100%;
+  width: 100%;
+}
+
+.proxy-layered-compaction-meta > span {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.proxy-layered-compaction-meta > span > svg {
+  display: block;
+  flex: 0 0 auto;
+  position: relative;
+  top: -1px;
 }
 
 .proxy-detail-grid {
@@ -4898,7 +5018,7 @@ body {
     grid-template-columns: 1fr;
   }
 
-  .session-recovery-settings {
+  .session-runtime-settings {
     grid-template-columns: 1fr;
   }
 

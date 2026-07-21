@@ -11,8 +11,9 @@ use codex_elves_core::relay_config::{
     list_context_entries_from_common_config, normalize_relay_profile_for_storage,
     relay_config_status_from_home, sanitize_common_config_contents,
     set_codex_goals_feature_in_home, strip_common_config_from_config,
-    sync_applied_relay_profile_websocket_to_home, sync_live_config_context_entries,
-    sync_live_config_context_entry, upsert_context_entry_in_common_config,
+    sync_applied_relay_profile_provider_name_to_home, sync_applied_relay_profile_websocket_to_home,
+    sync_live_config_context_entries, sync_live_config_context_entry,
+    upsert_context_entry_in_common_config,
 };
 use codex_elves_core::settings::{
     RelayContextSelection, RelayMode, RelayModelMapping, RelayProfile, RelayProtocol,
@@ -1513,6 +1514,41 @@ supports_websockets = true
 }
 
 #[test]
+fn sync_applied_relay_profile_provider_name_updates_remote_compaction_v2_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    std::fs::write(
+        home.join("config.toml"),
+        r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://relay.example/v1"
+"#,
+    )
+    .unwrap();
+    let profile = RelayProfile {
+        relay_mode: RelayMode::PureApi,
+        config_contents: r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "OpenAI"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://relay.example/v1"
+"#
+        .to_string(),
+        ..RelayProfile::default()
+    };
+
+    assert!(sync_applied_relay_profile_provider_name_to_home(home, &profile).unwrap());
+    let updated = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    assert!(updated.contains("name = \"OpenAI\""));
+}
+
+#[test]
 fn sync_applied_relay_profile_websocket_updates_provider_and_responses_model_preferences() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();
@@ -2858,6 +2894,33 @@ base_url = "https://relay.example/v1"
     assert!(!config.contains("experimental_bearer_token"));
     assert!(config.contains(r#"model_provider = "custom""#));
     assert!(config.contains("[model_providers.custom]"));
+}
+
+#[test]
+fn apply_relay_profile_to_home_with_switch_rules_preserves_remote_compaction_v2_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = RelayProfile {
+        id: "relay-a".to_string(),
+        relay_mode: RelayMode::PureApi,
+        config_contents: r#"model = "gpt-5.4"
+model_provider = "custom"
+
+[model_providers.custom]
+name = "OpenAI"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://relay.example/v1"
+"#
+        .to_string(),
+        auth_contents: r#"{"OPENAI_API_KEY":"sk-new"}"#.to_string(),
+        ..RelayProfile::default()
+    };
+
+    apply_relay_profile_to_home_with_switch_rules(temp.path(), &profile, "").unwrap();
+
+    let config = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(config.contains("[model_providers.custom]"));
+    assert!(config.contains(r#"name = "OpenAI""#));
 }
 
 #[test]

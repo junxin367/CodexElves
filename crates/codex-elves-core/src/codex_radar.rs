@@ -1,9 +1,11 @@
 use anyhow::Context;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 pub const CODEX_RADAR_HTML_URL: &str = "https://codexradar.com/";
 const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+const FETCH_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,7 +64,8 @@ pub struct CodexRadarIqRun {
 }
 
 pub async fn fetch_current_snapshot() -> anyhow::Result<CodexRadarSnapshot> {
-    let client = crate::http_client::proxied_client(BROWSER_USER_AGENT)?;
+    let client =
+        crate::http_client::proxied_client_with_timeout(BROWSER_USER_AGENT, FETCH_TIMEOUT)?;
     let html = client
         .get(CODEX_RADAR_HTML_URL)
         .header(

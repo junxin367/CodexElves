@@ -47,6 +47,8 @@ pub struct ProxyRequestRecord {
     #[serde(default)]
     pub continue_thinking_after_response_body: Option<String>,
     #[serde(default)]
+    pub remote_compaction_triggered: bool,
+    #[serde(default)]
     pub layered_compaction_triggered: bool,
     #[serde(default)]
     pub layered_compaction_retain_tokens: Option<u32>,
@@ -101,6 +103,8 @@ pub struct ProxyRequestSummary {
     pub continue_thinking_triggered: bool,
     #[serde(default)]
     pub continue_thinking_rounds: u32,
+    #[serde(default)]
+    pub remote_compaction_triggered: bool,
     #[serde(default)]
     pub layered_compaction_triggered: bool,
     #[serde(default)]
@@ -179,6 +183,7 @@ impl From<&ProxyRequestRecord> for ProxyRequestSummary {
             reasoning_source: record.reasoning_source.clone(),
             continue_thinking_triggered: record.continue_thinking_triggered,
             continue_thinking_rounds: record.continue_thinking_rounds,
+            remote_compaction_triggered: record.remote_compaction_triggered,
             layered_compaction_triggered: record.layered_compaction_triggered,
             layered_compaction_retain_tokens: record.layered_compaction_retain_tokens,
             layered_compaction_retained_items: record.layered_compaction_retained_items,
@@ -202,6 +207,17 @@ impl From<&ProxyRequestRecord> for ProxyRequestSummary {
                 .map(|error| truncate_to_utf8_byte_limit(error, MAX_SUMMARY_ERROR_BYTES)),
         }
     }
+}
+
+pub fn request_uses_remote_compaction_v2(request_json: Option<&Value>) -> bool {
+    crate::layered_compaction::is_remote_compaction_v2_request(request_json)
+}
+
+pub fn request_body_uses_remote_compaction_v2(request_body: &str) -> bool {
+    serde_json::from_str::<Value>(request_body)
+        .ok()
+        .as_ref()
+        .is_some_and(|request| request_uses_remote_compaction_v2(Some(request)))
 }
 
 fn infer_reasoning_tokens_for_summary(record: &ProxyRequestRecord) -> Option<u64> {
@@ -1294,6 +1310,24 @@ data: [DONE]
     }
 
     #[test]
+    fn detects_remote_compaction_v2_from_request_body() {
+        let request = serde_json::json!({
+            "model": "gpt-5.4",
+            "input": [
+                { "role": "user", "content": "compact this context" },
+                { "type": "compaction_trigger" }
+            ]
+        });
+
+        assert!(super::request_body_uses_remote_compaction_v2(
+            &request.to_string()
+        ));
+        assert!(!super::request_body_uses_remote_compaction_v2(
+            r#"{"model":"gpt-5.4","input":[]}"#
+        ));
+    }
+
+    #[test]
     fn append_record_writes_locked_jsonl_file() {
         let path = temp_proxy_log_path("append-record");
         let previous = crate::paths::set_proxy_log_path_for_tests(Some(path.clone()));
@@ -1314,6 +1348,7 @@ data: [DONE]
             continue_thinking_request_body: None,
             continue_thinking_before_response_body: None,
             continue_thinking_after_response_body: None,
+            remote_compaction_triggered: false,
             layered_compaction_triggered: false,
             layered_compaction_retain_tokens: None,
             layered_compaction_retained_items: None,
@@ -1657,6 +1692,7 @@ data: [DONE]
             continue_thinking_request_body: None,
             continue_thinking_before_response_body: None,
             continue_thinking_after_response_body: None,
+            remote_compaction_triggered: false,
             layered_compaction_triggered: false,
             layered_compaction_retain_tokens: None,
             layered_compaction_retained_items: None,

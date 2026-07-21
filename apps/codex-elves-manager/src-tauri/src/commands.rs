@@ -33,11 +33,6 @@ pub struct VersionPayload {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct LayeredCompactionDefaultPromptPayload {
-    pub prompt: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct PathState {
     pub status: String,
     pub path: Option<String>,
@@ -415,16 +410,6 @@ pub fn backend_version() -> CommandResult<VersionPayload> {
 }
 
 #[tauri::command]
-pub fn layered_compaction_default_prompt() -> CommandResult<LayeredCompactionDefaultPromptPayload> {
-    ok(
-        "默认压缩提示词已读取。",
-        LayeredCompactionDefaultPromptPayload {
-            prompt: codex_elves_core::layered_compaction::DEFAULT_COMPACTION_PROMPT.to_string(),
-        },
-    )
-}
-
-#[tauri::command]
 pub fn startup_options() -> CommandResult<StartupPayload> {
     ok(
         "启动参数已读取。",
@@ -596,10 +581,13 @@ pub async fn save_settings(settings: BackendSettings) -> CommandResult<SettingsP
     match store.save(&settings) {
         Ok(()) => {
             let wrapper_message = refresh_cli_wrapper_after_settings_save(&settings);
+            let provider_name_message = sync_applied_provider_name_after_settings_save(&settings);
             let catalog_message = sync_applied_model_catalog_after_settings_save(&settings);
             let websocket_message = sync_applied_websocket_after_settings_save(&settings);
             settings_payload(
-                &format!("设置已保存。{wrapper_message}{catalog_message}{websocket_message}"),
+                &format!(
+                    "设置已保存。{wrapper_message}{provider_name_message}{catalog_message}{websocket_message}"
+                ),
                 "设置保存后重新读取失败",
             )
         }
@@ -3120,6 +3108,25 @@ fn refresh_cli_wrapper_after_settings_save(settings: &BackendSettings) -> String
         ),
         Ok(None) => String::new(),
         Err(error) => format!(" 但命令包装器更新失败：{error}。"),
+    }
+}
+
+fn sync_applied_provider_name_after_settings_save(settings: &BackendSettings) -> String {
+    if !settings.relay_profiles_enabled || settings.active_aggregate_relay_profile().is_some() {
+        return String::new();
+    }
+    let relay = settings.active_relay_profile();
+    if relay.relay_mode == codex_elves_core::settings::RelayMode::Official
+        && !relay.official_mix_api_key
+    {
+        return String::new();
+    }
+    let home = codex_elves_core::codex_home::codex_home_dir_for_settings(settings);
+    match codex_elves_core::relay_config::sync_applied_relay_profile_provider_name_to_home(
+        &home, &relay,
+    ) {
+        Ok(_) => String::new(),
+        Err(error) => format!(" 但 Remote Compaction V2 配置同步失败：{error}。"),
     }
 }
 
