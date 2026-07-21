@@ -1609,7 +1609,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
     case "startup_options":
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
-      return Promise.resolve(browserPreviewResult({ currentVersion: "0.2.9", updateAvailable: false }) as T);
+      return Promise.resolve(browserPreviewResult({ currentVersion: "0.3.0", updateAvailable: false }) as T);
     case "load_overview":
       return Promise.resolve(browserPreviewResult({
         codex_app: { status: "found", path: settings.codexAppPath },
@@ -1624,7 +1624,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.2.9",
+        current_version: "0.3.0",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
