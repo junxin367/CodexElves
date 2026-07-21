@@ -59,11 +59,12 @@
 
 
 
-  const codexSessionPrewarmVersion = "2";
+  const codexSessionPrewarmVersion = "3";
   const codexSessionPrewarmDefaultConcurrency = 4;
   const codexSessionPrewarmStartupDelayMs = 200;
   const codexSessionPrewarmInteractionPauseMs = 1200;
   const codexSessionPrewarmRecentRefreshTimeoutMs = 5000;
+  const codexSessionPrewarmMaxAgeMs = 24 * 60 * 60 * 1000;
   const codexSessionPrewarmMaxRetries = 2;
   const codexSessionPrewarmRetryBaseDelayMs = 1500;
   const codexAppServerModelPatchMaxFailures = 12;
@@ -4209,6 +4210,30 @@
     return turns.some((turn) => turn?.status === "inProgress");
   }
 
+  function codexSessionPrewarmConversationUpdatedAtMs(conversation) {
+    const candidates = [
+      conversation?.updatedAt,
+      conversation?.updatedAtMs,
+      conversation?.updated_at_ms,
+      conversation?.updated_at,
+      conversation?.thread?.updatedAt,
+      conversation?.thread?.updatedAtMs,
+      conversation?.thread?.updated_at_ms,
+      conversation?.thread?.updated_at,
+    ];
+    for (const candidate of candidates) {
+      const timestampMs = timestampValueToMs(candidate);
+      if (timestampMs) return timestampMs;
+    }
+    return 0;
+  }
+
+  function codexSessionPrewarmConversationIsRecent(conversation, nowMs = Date.now()) {
+    const updatedAtMs = codexSessionPrewarmConversationUpdatedAtMs(conversation);
+    if (!updatedAtMs) return false;
+    return Math.max(0, numericTimestamp(nowMs) - updatedAtMs) <= codexSessionPrewarmMaxAgeMs;
+  }
+
   function codexSessionPrewarmTitleNode(row) {
     return row?.querySelector?.(`${selectors.threadTitle}, .truncate.select-none, .truncate.text-base`) || null;
   }
@@ -4258,13 +4283,24 @@
 
   syncCodexSessionPrewarmIndicators();
 
-  function buildCodexSessionPrewarmTasks(conversations, settings, activeThreadId = "") {
+  function buildCodexSessionPrewarmTasks(
+    conversations,
+    settings,
+    activeThreadId = "",
+    nowMs = Date.now()
+  ) {
     const activeId = validThreadSessionKey(activeThreadId);
     const seen = new Set();
     const eligible = [];
     for (const conversation of Array.isArray(conversations) ? conversations : []) {
       const threadId = codexSessionPrewarmConversationId(conversation);
-      if (!threadId || threadId === activeId || seen.has(threadId) || codexSessionPrewarmConversationIsBusy(conversation)) continue;
+      if (
+        !threadId ||
+        threadId === activeId ||
+        seen.has(threadId) ||
+        codexSessionPrewarmConversationIsBusy(conversation) ||
+        !codexSessionPrewarmConversationIsRecent(conversation, nowMs)
+      ) continue;
       seen.add(threadId);
       eligible.push({ conversation, threadId });
     }
@@ -4577,11 +4613,28 @@
     codexSessionPrewarmRerunPending = false;
     const run = Promise.resolve().then(async () => {
       const conversations = manager.getRecentConversations();
-      const tasks = buildCodexSessionPrewarmTasks(conversations, settings, currentSessionRef().session_id);
+      const prewarmNow = Date.now();
+      const recentConversationCount = Array.isArray(conversations)
+        ? conversations.filter((conversation) =>
+            codexSessionPrewarmConversationIsRecent(conversation, prewarmNow)
+          ).length
+        : 0;
+      const tasks = buildCodexSessionPrewarmTasks(
+        conversations,
+        settings,
+        currentSessionRef().session_id,
+        prewarmNow
+      );
       if (!tasks.length) {
         sendCodexElvesDiagnostic("session_prewarm_no_tasks", {
           recentCount: Array.isArray(conversations) ? conversations.length : 0,
+          recentWithinWindowCount: recentConversationCount,
         });
+        if (Array.isArray(conversations) && conversations.length > 0 && recentConversationCount === 0) {
+          window.__codexSessionPrewarmCompletedSignature = signature;
+          codexSessionPrewarmRetryCounts.delete(signature);
+          return;
+        }
         void refreshCodexSessionPrewarmRecentConversations(
           manager,
           recentRefreshTimeoutMs
@@ -4715,8 +4768,8 @@
   if (window.__CODEX_ELVES_TEST_SESSION_PREWARM__) {
     window.__codexElvesSessionPrewarmTest = {
       activeIndicatorIds: () => [...codexSessionPrewarmActiveIds],
-      buildTasks: (conversations, settings, activeThreadId = "") =>
-        buildCodexSessionPrewarmTasks(conversations, settings, activeThreadId),
+      buildTasks: (conversations, settings, activeThreadId = "", nowMs = Date.now()) =>
+        buildCodexSessionPrewarmTasks(conversations, settings, activeThreadId, nowMs),
       captureManager: (manager) => captureCodexSessionPrewarmManager(manager),
       clearScheduledRun: () => {
         clearTimeout(window.__codexSessionPrewarmTimer);

@@ -922,8 +922,9 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
     assert!(script.contains("\"launch-cycle-refresh\""));
     assert!(script.contains("session_prewarm_recent_refresh_timeout"));
     assert!(script.contains("session_prewarm_skipped"));
-    assert!(script.contains("const codexSessionPrewarmVersion = \"2\";"));
+    assert!(script.contains("const codexSessionPrewarmVersion = \"3\";"));
     assert!(script.contains("const codexSessionPrewarmStartupDelayMs = 200;"));
+    assert!(script.contains("const codexSessionPrewarmMaxAgeMs = 24 * 60 * 60 * 1000;"));
     assert!(script.contains(
         "window.__codexElvesRuntimeRequestPatchVersion === codexAppServerModelRequestPatchVersion"
     ));
@@ -998,6 +999,10 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
     assert_eq!(
         prewarm["subagentFilterTaskIds"],
         json!(["prewarm-thread-normal", "prewarm-thread-fork"])
+    );
+    assert_eq!(
+        prewarm["ageFilterTaskIds"],
+        json!(["prewarm-thread-recent", "prewarm-thread-boundary"])
     );
     assert_eq!(prewarm["completed"], 10);
     assert_eq!(prewarm["failed"], 0);
@@ -1094,6 +1099,13 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
     assert_eq!(prewarm["failedRunCompletedSignature"], "");
     assert_eq!(prewarm["failedRunRetryCounts"], json!([1]));
     assert_eq!(prewarm["noTasksRetryCounts"], json!([1]));
+    assert_eq!(prewarm["expiredResumeCalls"], 0);
+    assert!(
+        prewarm["expiredCompletedSignature"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    assert_eq!(prewarm["expiredRetryCounts"], json!([]));
     assert_eq!(prewarm["firstManagerResumeCalls"], 1);
     assert_eq!(prewarm["secondManagerResumeCalls"], 1);
     assert_eq!(prewarm["nestedManagerFound"], true);
@@ -1534,29 +1546,43 @@ async function runSessionPrewarmCases() {{
   const nestedManagerHasResume =
     typeof nestedManagerResult.manager?.resumeConversationForUnavailableOwner === "function";
   const nestedManagerScanned = nestedManagerResult.scanned;
+  const prewarmNow = Date.now();
   const conversations = Array.from({{ length: 12 }}, (_, index) => ({{
     id: `prewarm-thread-${{String(index + 1).padStart(2, "0")}}`,
     cwd: `C:/workspace/${{index + 1}}`,
+    updatedAt: prewarmNow - (index * 60 * 60 * 1000),
   }}));
-  conversations.splice(2, 0, {{ id: "thread-12345678", cwd: "C:/workspace/active" }});
+  conversations.splice(2, 0, {{
+    id: "thread-12345678",
+    cwd: "C:/workspace/active",
+    updatedAt: prewarmNow,
+  }});
   conversations.splice(5, 0, {{
     id: "prewarm-thread-busy",
     cwd: "C:/workspace/busy",
+    updatedAt: prewarmNow,
     threadRuntimeStatus: {{ type: "active" }},
   }});
   const tasks = prewarmApi.buildTasks(
     conversations,
     {{ fullCount: 4, contentCount: 6 }},
     "thread-12345678",
+    prewarmNow,
   );
   const subagentFilterTasks = prewarmApi.buildTasks([
-    {{ id: "prewarm-thread-normal" }},
-    {{ id: "prewarm-thread-parent", parentThreadId: "parent-thread" }},
-    {{ id: "prewarm-thread-source-parent", source: {{ parentThreadId: "parent-thread" }} }},
-    {{ id: "prewarm-thread-subagent-parent", subagentParentThreadId: "parent-thread" }},
-    {{ id: "prewarm-thread-subagent-source", isSubagentSource: true }},
-    {{ id: "prewarm-thread-fork", forkedFromId: "source-thread" }},
-  ], {{ fullCount: 10, contentCount: 0 }});
+    {{ id: "prewarm-thread-normal", updatedAt: prewarmNow }},
+    {{ id: "prewarm-thread-parent", updatedAt: prewarmNow, parentThreadId: "parent-thread" }},
+    {{ id: "prewarm-thread-source-parent", updatedAt: prewarmNow, source: {{ parentThreadId: "parent-thread" }} }},
+    {{ id: "prewarm-thread-subagent-parent", updatedAt: prewarmNow, subagentParentThreadId: "parent-thread" }},
+    {{ id: "prewarm-thread-subagent-source", updatedAt: prewarmNow, isSubagentSource: true }},
+    {{ id: "prewarm-thread-fork", updatedAt: prewarmNow, forkedFromId: "source-thread" }},
+  ], {{ fullCount: 10, contentCount: 0 }}, "", prewarmNow);
+  const ageFilterTasks = prewarmApi.buildTasks([
+    {{ id: "prewarm-thread-recent", updatedAt: prewarmNow - ((24 * 60 * 60 * 1000) - 1) }},
+    {{ id: "prewarm-thread-boundary", updatedAt: prewarmNow - (24 * 60 * 60 * 1000) }},
+    {{ id: "prewarm-thread-expired", updatedAt: prewarmNow - ((24 * 60 * 60 * 1000) + 1) }},
+    {{ id: "prewarm-thread-missing-time" }},
+  ], {{ fullCount: 10, contentCount: 0 }}, "", prewarmNow);
   const indicatorAttributes = {{}};
   const indicatorTitle = {{
     textContent: "正在预热的会话",
@@ -1844,7 +1870,11 @@ async function runSessionPrewarmCases() {{
   prewarmApi.clearRetryCounts();
   const retryManager = {{
     getRecentConversations() {{
-      return [{{ id: "prewarm-thread-run-failure", cwd: "C:/workspace/run-failure" }}];
+      return [{{
+        id: "prewarm-thread-run-failure",
+        cwd: "C:/workspace/run-failure",
+        updatedAt: prewarmNow,
+      }}];
     }},
     needsResume() {{
       return true;
@@ -1875,6 +1905,31 @@ async function runSessionPrewarmCases() {{
   prewarmApi.setManager(null);
 
   delete window.__codexSessionPrewarmCompletedSignature;
+  let expiredResumeCalls = 0;
+  const expiredOnlyManager = {{
+    getRecentConversations() {{
+      return [{{
+        id: "prewarm-thread-expired-only",
+        cwd: "C:/workspace/expired-only",
+        updatedAt: prewarmNow - ((24 * 60 * 60 * 1000) + 1),
+      }}];
+    }},
+    needsResume() {{
+      return true;
+    }},
+    async resumeConversationForUnavailableOwner() {{
+      expiredResumeCalls += 1;
+    }},
+  }};
+  prewarmApi.setManager(expiredOnlyManager);
+  await prewarmApi.run();
+  const expiredCompletedSignature = prewarmApi.completedSignature();
+  const expiredRetryCounts = prewarmApi.retryCounts();
+  prewarmApi.clearScheduledRun();
+  prewarmApi.clearRetryCounts();
+  prewarmApi.setManager(null);
+
+  delete window.__codexSessionPrewarmCompletedSignature;
   let refreshTimeoutResumeCalls = 0;
   let refreshStartedAfterResumeCompleted = false;
   let refreshResumeCompleted = false;
@@ -1887,6 +1942,7 @@ async function runSessionPrewarmCases() {{
       return [{{
         id: "prewarm-thread-refresh-timeout",
         cwd: "C:/workspace/refresh-timeout",
+        updatedAt: prewarmNow,
       }}];
     }},
     needsResume() {{
@@ -1915,7 +1971,11 @@ async function runSessionPrewarmCases() {{
   let firstManagerResumeCalls = 0;
   const firstPendingManager = {{
     getRecentConversations() {{
-      return [{{ id: "prewarm-thread-manager-a", cwd: "C:/workspace/manager-a" }}];
+      return [{{
+        id: "prewarm-thread-manager-a",
+        cwd: "C:/workspace/manager-a",
+        updatedAt: prewarmNow,
+      }}];
     }},
     needsResume() {{
       return true;
@@ -1928,7 +1988,11 @@ async function runSessionPrewarmCases() {{
   let secondManagerResumeCalls = 0;
   const secondPendingManager = {{
     getRecentConversations() {{
-      return [{{ id: "prewarm-thread-manager-b", cwd: "C:/workspace/manager-b" }}];
+      return [{{
+        id: "prewarm-thread-manager-b",
+        cwd: "C:/workspace/manager-b",
+        updatedAt: prewarmNow,
+      }}];
     }},
     needsResume() {{
       return true;
@@ -1970,6 +2034,7 @@ async function runSessionPrewarmCases() {{
     taskTypes: tasks.map((task) => task.type),
     taskIds: tasks.map((task) => task.threadId),
     subagentFilterTaskIds: subagentFilterTasks.map((task) => task.threadId),
+    ageFilterTaskIds: ageFilterTasks.map((task) => task.threadId),
     indicatorActiveAttributes,
     indicatorReusedAttributes,
     indicatorClearedAttributes,
@@ -2010,6 +2075,9 @@ async function runSessionPrewarmCases() {{
     failedRunCompletedSignature,
     failedRunRetryCounts,
     noTasksRetryCounts,
+    expiredResumeCalls,
+    expiredCompletedSignature,
+    expiredRetryCounts,
     firstManagerResumeCalls,
     secondManagerResumeCalls,
     emptyWorkspaceRoots,
