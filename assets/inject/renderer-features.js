@@ -117,6 +117,9 @@
   window.__codexTokenUsagePinnedSummaryObserver?.disconnect?.();
   window.__codexTokenUsagePinnedSummaryObserver = null;
   window.__codexTokenUsagePinnedSummaryObserverTarget = null;
+  window.__codexTokenUsagePinnedSummaryLifecycleObserver?.disconnect?.();
+  window.__codexTokenUsagePinnedSummaryLifecycleObserver = null;
+  window.__codexTokenUsagePinnedSummaryLifecycleObserverRoot = null;
   if (typeof document !== "undefined") {
     document.removeEventListener(
       "visibilitychange",
@@ -4537,13 +4540,54 @@
     }
   }
 
+  function installCodexTokenUsagePinnedSummaryLifecycleObserver() {
+    const root = document.getElementById("root") || document.body;
+    if (!root || typeof MutationObserver !== "function") return false;
+    if (
+      window.__codexTokenUsagePinnedSummaryLifecycleObserver
+      && window.__codexTokenUsagePinnedSummaryLifecycleObserverRoot === root
+    ) {
+      return true;
+    }
+    window.__codexTokenUsagePinnedSummaryLifecycleObserver?.disconnect?.();
+    const observer = new MutationObserver(() => {
+      if (!codexElvesSettings().tokenUsage) return;
+      const observedToggle = window.__codexTokenUsagePinnedSummaryObserverTarget;
+      if (window.__codexTokenUsagePinnedSummaryObserverTarget?.isConnected) {
+        if (observedToggle.getAttribute("aria-pressed") !== "true") return;
+        const card = document.querySelector(`.${codexTokenUsageCardClass}`);
+        if (card && !card.hidden) return;
+        if (!document.querySelector(selectors.pinnedSummaryPanel)) return;
+        syncCodexTokenUsageWithPinnedSummaryState();
+        return;
+      }
+      installCodexTokenUsagePinnedSummaryObserver();
+    });
+    observer.observe(root, {
+      childList: true,
+      subtree: true,
+    });
+    window.__codexTokenUsagePinnedSummaryLifecycleObserver = observer;
+    window.__codexTokenUsagePinnedSummaryLifecycleObserverRoot = root;
+    return true;
+  }
+
   function installCodexTokenUsagePinnedSummaryObserver() {
+    installCodexTokenUsagePinnedSummaryLifecycleObserver();
     const toggle = document.querySelector(selectors.pinnedSummaryToggle);
-    if (window.__codexTokenUsagePinnedSummaryObserverTarget === toggle) return;
+    if (window.__codexTokenUsagePinnedSummaryObserverTarget === toggle) {
+      if (toggle && !syncCodexTokenUsageWithPinnedSummaryState()) {
+        scheduleCodexTokenUsagePinnedSummarySync();
+      }
+      return;
+    }
     window.__codexTokenUsagePinnedSummaryObserver?.disconnect?.();
     window.__codexTokenUsagePinnedSummaryObserver = null;
     window.__codexTokenUsagePinnedSummaryObserverTarget = toggle || null;
-    if (!toggle || typeof MutationObserver !== "function") return;
+    if (!toggle || typeof MutationObserver !== "function") {
+      pauseCodexTokenUsageForHiddenPinnedSummary();
+      return;
+    }
     const observer = new MutationObserver((mutations) => {
       if (!mutations.some((mutation) => mutation.attributeName === "aria-pressed")) return;
       if (!syncCodexTokenUsageWithPinnedSummaryState()) {

@@ -496,6 +496,9 @@ fn injection_script_exposes_compact_per_thread_token_usage_summary() {
     assert!(script.contains("refreshCodexTokenUsageCard"));
     assert!(script.contains("function syncCodexTokenUsageWithPinnedSummaryState()"));
     assert!(script.contains("function installCodexTokenUsagePinnedSummaryObserver()"));
+    assert!(script.contains("function installCodexTokenUsagePinnedSummaryLifecycleObserver()"));
+    assert!(script.contains("window.__codexTokenUsagePinnedSummaryObserverTarget?.isConnected"));
+    assert!(script.contains("document.getElementById(\"root\") || document.body"));
     assert!(script.contains("attributeFilter: [\"aria-pressed\"]"));
     assert!(script.contains("function hideCodexTokenUsageCards()"));
     assert!(script.contains("function pauseCodexTokenUsageForHiddenPinnedSummary()"));

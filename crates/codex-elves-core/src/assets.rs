@@ -10,7 +10,7 @@ use crate::settings::BackendSettings;
 
 const RENDERER_BOOTSTRAP_SCRIPT: &str = include_str!("../../../assets/inject/renderer-inject.js");
 const RENDERER_FEATURES_SCRIPT: &str = include_str!("../../../assets/inject/renderer-features.js");
-pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20260722-3";
+pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20260722-4";
 
 pub fn renderer_script() -> &'static str {
     RENDERER_FEATURES_SCRIPT

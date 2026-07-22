@@ -1611,7 +1611,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
     case "startup_options":
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
-      return Promise.resolve(browserPreviewResult({ currentVersion: "0.3.1", updateAvailable: false }) as T);
+      return Promise.resolve(browserPreviewResult({ currentVersion: "0.3.2", updateAvailable: false }) as T);
     case "load_overview":
       return Promise.resolve(browserPreviewResult({
         codex_app: { status: "found", path: settings.codexAppPath },
@@ -1626,7 +1626,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.3.1",
+        current_version: "0.3.2",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -6223,21 +6223,45 @@ function RelayProfileEditor({
       modelList: "",
     });
   };
+  const applyFetchedModelChoices = (models: string[]) => {
+    const normalized = uniqueStrings(models.map((item) => item.trim()).filter(Boolean)).sort((a, b) =>
+      a.localeCompare(b),
+    );
+    setModelChoices({
+      responses: normalized,
+      chatCompletions: normalized,
+      anthropic: normalized,
+    });
+    return normalized;
+  };
   const fetchModelChoices = async () => {
     if (fetchingModelChoices) return;
     setFetchingModelChoices(true);
     try {
       const models = await actions.fetchRelayProfileModels(profile);
-      if (models?.length) {
-        const normalized = uniqueStrings(models.map((item) => item.trim()).filter(Boolean)).sort((a, b) =>
-          a.localeCompare(b),
-        );
-        setModelChoices({
-          responses: normalized,
-          chatCompletions: normalized,
-          anthropic: normalized,
-        });
-      }
+      if (models?.length) applyFetchedModelChoices(models);
+    } finally {
+      setFetchingModelChoices(false);
+    }
+  };
+  const autoAddModels = async () => {
+    if (fetchingModelChoices) return;
+    setFetchingModelChoices(true);
+    try {
+      const models = await actions.fetchRelayProfileModels(profile);
+      if (!models?.length) return;
+      const fetchedModels = applyFetchedModelChoices(models);
+      const existingModels = new Set(
+        profile.modelMappings.map((mapping) => mapping.requestModel.trim()).filter(Boolean),
+      );
+      const additions = fetchedModels
+        .filter((model) => !existingModels.has(model))
+        .map((requestModel) => ({
+          requestModel,
+          protocol: profile.protocol,
+          contextWindow: knownModelContextWindow(requestModel),
+        }));
+      if (additions.length) updateModelMappings([...profile.modelMappings, ...additions]);
     } finally {
       setFetchingModelChoices(false);
     }
@@ -6413,6 +6437,17 @@ function RelayProfileEditor({
                   {fetchingModelChoices ? "获取中" : "获取模型列表"}
                 </Button>
                 <Button
+                  disabled={fetchingModelChoices}
+                  onClick={autoAddModels}
+                  size="sm"
+                  title="从供应商的模型接口拉取模型，并按当前供应商协议自动加入列表；已有模型不会重复添加。"
+                  type="button"
+                  variant="secondary"
+                >
+                  <Download className="h-4 w-4" />
+                  {fetchingModelChoices ? "自动添加中" : "自动添加模型"}
+                </Button>
+                <Button
                   onClick={() =>
                     updateModelMappings([
                       ...profile.modelMappings,
@@ -6424,7 +6459,7 @@ function RelayProfileEditor({
                   variant="secondary"
                 >
                   <Plus className="h-4 w-4" />
-                  添加模型
+                  手动添加模型
                 </Button>
               </>
             }
