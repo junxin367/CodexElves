@@ -446,6 +446,65 @@ fn injection_script_exposes_conversation_view_width_control() {
 }
 
 #[test]
+fn injection_script_exposes_compact_per_thread_token_usage_summary() {
+    let script = assets::injection_script(45221);
+
+    assert!(script.contains("tokenUsage: false"));
+    assert!(script.contains("tokenUsage: \"codexAppTokenUsage\""));
+    assert!(script.contains("data-codex-elves-setting=\"tokenUsage\""));
+    assert!(script.contains("会话 Token 统计"));
+    assert!(script.contains("[data-pip-obstacle=\"thread-summary-panel\"]"));
+    assert!(script.contains("aria-pressed"));
+    assert!(script.contains("/thread-usage-history"));
+    assert!(script.contains("turnId === latestTurnId"));
+    assert!(script.contains("最近一轮"));
+    assert!(script.contains("formatCodexTokenCount"));
+    assert!(script.contains("const thousand = 1000"));
+    assert!(script.contains("let unit = \"K\""));
+    assert!(script.contains("codex-token-usage-metrics"));
+    assert!(script.contains("codex-token-usage-agent-count"));
+    assert!(script.contains("codex-token-usage-host"));
+    assert!(script.contains("flex-direction: column !important"));
+    assert!(script.contains("--codex-token-usage-panel-end-gap"));
+    assert!(script.contains("var(--color-token-dropdown-background"));
+    assert!(script.contains("pointer-events: none"));
+    assert!(script.contains("子智能体 ${descendantCount}"));
+    assert!(script.contains("card.removeAttribute(\"title\")"));
+    assert!(script.contains("window.__codexTokenUsageSummaryCache instanceof Map"));
+    assert!(script.contains("cacheCodexTokenUsageSummary"));
+    assert!(script.contains("renderCachedCodexTokenUsage"));
+    assert!(script.contains("emptyCodexTokenUsageSummary"));
+    assert!(script.contains("renderCodexTokenUsagePlaceholder"));
+    assert!(script.contains("card.dataset.status = \"placeholder\""));
+    assert!(script.contains("panel.insertAdjacentElement(\"afterend\", card)"));
+    assert!(script.contains("codexTokenUsageRefreshIntervalMs = 2500"));
+    assert!(script.contains("codexTokenUsageSettleDelayMs = 500"));
+    assert!(script.contains("codexTokenUsageCompletionSettleDelayMs = 2500"));
+    assert!(script.contains("codexTokenUsageRetryDelaysMs = [1000, 2500, 5000]"));
+    assert!(!script.contains("codexTokenUsageHiddenRefreshIntervalMs"));
+    assert!(script.contains("function scheduleCodexTokenUsageRefresh(delayMs = 0)"));
+    assert!(script.contains("\"thread/tokenUsage/updated\""));
+    assert!(script.contains("method === \"turn/started\""));
+    assert!(script.contains("method === \"turn/completed\""));
+    assert!(script.contains("addNotificationCallback"));
+    assert!(script.contains("installCodexTokenUsageVisibilityListener"));
+    assert!(script.contains("window.__codexTokenUsageRefreshPending = true"));
+    assert!(script.contains("summary.isRunning && document.visibilityState !== \"hidden\""));
+    assert!(!script.contains("执行中 · 已结算至最近模型响应"));
+    assert!(script.contains("descendantCount"));
+    assert!(script.contains("window.__codexTokenUsageRequestSeq"));
+    assert!(script.contains("refreshCodexTokenUsageCard"));
+    assert!(script.contains("function syncCodexTokenUsageWithPinnedSummaryState()"));
+    assert!(script.contains("function installCodexTokenUsagePinnedSummaryObserver()"));
+    assert!(script.contains("attributeFilter: [\"aria-pressed\"]"));
+    assert!(script.contains("function hideCodexTokenUsageCards()"));
+    assert!(script.contains("function pauseCodexTokenUsageForHiddenPinnedSummary()"));
+    assert!(script.contains("pauseCodexTokenUsageForHiddenPinnedSummary();"));
+    assert!(!script.contains("syncCodexTokenUsageWithPinnedSummaryToggle"));
+    assert!(!script.contains("scheduleCodexTokenUsageRefresh(120)"));
+}
+
+#[test]
 fn injection_script_removes_timeline_and_sidebar_thread_id_badge_controls() {
     let script = assets::injection_script(45221);
 
@@ -749,7 +808,7 @@ fn injection_script_refreshes_fast_state_after_backend_load_and_route_entry() {
     assert!(script.contains("refreshCodexServiceTierFeatureState"));
     assert!(script.contains("if (key === codexElvesBackendSettingMap.serviceTierControls)"));
     assert!(script.contains(
-        "refreshCodexServiceTierFeatureState();\n      scheduleCodexSessionPrewarm(codexSessionPrewarmStartupDelayMs, \"settings-loaded\");\n      return true;"
+        "refreshCodexServiceTierFeatureState();\n      refreshCodexTokenUsageFeatureState();\n      scheduleCodexSessionPrewarm(codexSessionPrewarmStartupDelayMs, \"settings-loaded\");\n      return true;"
     ));
     assert!(script.contains(
         "scheduleConversationViewRouteRefresh();\n    refreshCodexServiceTierFeatureState();"

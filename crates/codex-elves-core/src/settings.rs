@@ -333,6 +333,8 @@ pub struct BackendSettings {
     pub codex_app_project_move: bool,
     #[serde(rename = "codexAppConversationView", default = "default_true")]
     pub codex_app_conversation_view: bool,
+    #[serde(rename = "codexAppTokenUsage", default)]
+    pub codex_app_token_usage: bool,
     #[serde(rename = "codexAppUpstreamWorktreeCreate", default)]
     pub codex_app_upstream_worktree_create: bool,
     #[serde(rename = "codexAppNativeMenuPlacement", default = "default_true")]
@@ -431,6 +433,7 @@ impl Default for BackendSettings {
             codex_app_markdown_export: false,
             codex_app_project_move: false,
             codex_app_conversation_view: true,
+            codex_app_token_usage: false,
             codex_app_upstream_worktree_create: false,
             codex_app_native_menu_placement: true,
             codex_app_service_tier_controls: false,
@@ -930,6 +933,7 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
     merge_bool_setting(target, source, "codexAppMarkdownExport");
     merge_bool_setting(target, source, "codexAppProjectMove");
     merge_bool_setting(target, source, "codexAppConversationView");
+    merge_bool_setting(target, source, "codexAppTokenUsage");
     merge_bool_setting(target, source, "codexAppUpstreamWorktreeCreate");
     merge_bool_setting(target, source, "codexAppNativeMenuPlacement");
     merge_bool_setting(target, source, "codexAppServiceTierControls");
@@ -1311,6 +1315,7 @@ mod tests {
         assert!(!settings.codex_app_markdown_export);
         assert!(!settings.codex_app_project_move);
         assert!(settings.codex_app_conversation_view);
+        assert!(!settings.codex_app_token_usage);
         assert!(!settings.codex_app_upstream_worktree_create);
         assert!(settings.codex_app_native_menu_placement);
         assert!(!settings.codex_goals_enabled);
@@ -2052,6 +2057,7 @@ experimental_bearer_token = "sk-existing""#
             "codexAppSessionPrewarmContentCount": 999,
             "codexAppSessionPrewarmConcurrency": 999,
             "codexAppConversationView": true,
+            "codexAppTokenUsage": true,
             "codexAppServiceTierControls": true,
             "codexGoalsEnabled": true,
             "relayBaseUrl": "https://relay.example.test/v1",
@@ -2073,6 +2079,7 @@ experimental_bearer_token = "sk-existing""#
         assert_eq!(updated.codex_app_session_prewarm_content_count, 6);
         assert_eq!(updated.codex_app_session_prewarm_concurrency, 4);
         assert!(updated.codex_app_conversation_view);
+        assert!(updated.codex_app_token_usage);
         assert!(updated.codex_app_service_tier_controls);
         assert!(updated.codex_goals_enabled);
         assert_eq!(updated.relay_base_url, "https://relay.example.test/v1");

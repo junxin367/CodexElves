@@ -25,7 +25,7 @@
   const chatsSortRefreshIntervalMs = 1500;
   const chatsSortDbRefreshIntervalMs = 5000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "24";
+  const codexDeleteStyleVersion = "27";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
   const codexDeleteVersion = "7";
@@ -66,6 +66,18 @@
   const codexPluginAutoExpandClickDelayMs = 180;
   const codexBackendHeartbeatIntervalMs = 30000;
   const codexElvesImageOverlayId = "codex-elves-image-overlay";
+  const codexTokenUsageCardClass = "codex-token-usage-card";
+  const codexTokenUsageHostClass = "codex-token-usage-host";
+  const codexTokenUsageRefreshIntervalMs = 2500;
+  const codexTokenUsageSettleDelayMs = 500;
+  const codexTokenUsageCompletionSettleDelayMs = 2500;
+  const codexTokenUsageRetryDelaysMs = [1000, 2500, 5000];
+  const codexTokenUsageRequestTimeoutMs = 5000;
+  const codexTokenUsageNotificationMethods = [
+    "thread/tokenUsage/updated",
+    "turn/started",
+    "turn/completed",
+  ];
   window.__codexProjectMoveRuntimeId = (window.__codexProjectMoveRuntimeId || 0) + 1;
   const codexProjectMoveRuntimeId = window.__codexProjectMoveRuntimeId;
   clearTimeout(window.__codexProjectMoveProjectionTimer);
@@ -90,6 +102,41 @@
   clearTimeout(window.__codexServiceTierBadgeRetryTimer);
   window.__codexServiceTierBadgeRetryTimer = null;
   window.__codexServiceTierBadgeRetryAttempt = 0;
+  clearTimeout(window.__codexTokenUsageRefreshTimer);
+  window.__codexTokenUsageRefreshTimer = null;
+  clearTimeout(window.__codexTokenUsageSettleTimer);
+  window.__codexTokenUsageSettleTimer = null;
+  clearTimeout(window.__codexTokenUsageCompletionSettleTimer);
+  window.__codexTokenUsageCompletionSettleTimer = null;
+  clearTimeout(window.__codexTokenUsageRetryTimer);
+  window.__codexTokenUsageRetryTimer = null;
+  if (typeof cancelAnimationFrame === "function") {
+    cancelAnimationFrame(window.__codexTokenUsagePinnedSummarySyncRafId);
+  }
+  window.__codexTokenUsagePinnedSummarySyncRafId = 0;
+  window.__codexTokenUsagePinnedSummaryObserver?.disconnect?.();
+  window.__codexTokenUsagePinnedSummaryObserver = null;
+  window.__codexTokenUsagePinnedSummaryObserverTarget = null;
+  if (typeof document !== "undefined") {
+    document.removeEventListener(
+      "visibilitychange",
+      window.__codexTokenUsageVisibilityHandler,
+      true
+    );
+  }
+  window.__codexTokenUsageVisibilityHandler = null;
+  window.__codexTokenUsageRetryCount = 0;
+  window.__codexTokenUsageRefreshPending = false;
+  if (!(window.__codexTokenUsageSummaryCache instanceof Map)) {
+    window.__codexTokenUsageSummaryCache = new Map();
+  }
+  window.__codexTokenUsageRequestSeq = (window.__codexTokenUsageRequestSeq || 0) + 1;
+  try {
+    window.__codexTokenUsageNotificationUnsubscribe?.();
+  } catch {
+  }
+  window.__codexTokenUsageNotificationUnsubscribe = null;
+  window.__codexTokenUsageNotificationManager = null;
   function cleanupLegacyForcePluginInstallRuntime() {
     window.__codexForcePluginInstallObserver?.disconnect?.();
     window.__codexForcePluginInstallObserver = null;
@@ -207,6 +254,8 @@
     appHeader: ".app-header-tint",
     nativeMenuBar: "[class*=\"ms-auto\"][class*=\"flex\"][class*=\"items-center\"]",
     headerContextMenuSurface: '[data-testid="app-shell-header-context-menu-surface"]',
+    pinnedSummaryPanel: '[data-pip-obstacle="thread-summary-panel"]',
+    pinnedSummaryToggle: 'button[aria-label="切换置顶摘要"], button[title="切换置顶摘要"], button[aria-label="Toggle Pinned Summary"], button[title="Toggle Pinned Summary"]',
     archiveNav: 'button[aria-label="已归档对话"], button[aria-label="Archived conversations"]',
     pluginNavButton: 'nav[role="navigation"] button.h-token-nav-row.w-full',
     pluginSvgPath: 'svg path[d^="M7.94562 14.0277"]',
@@ -933,6 +982,137 @@
       .codex-elves-user-script-error { margin-top: 2px; color: #f87171; font-size: 11px; word-break: break-all; }
       .codex-elves-user-script-actions { display: grid; justify-items: end; gap: 8px; min-width: 120px; }
       .codex-elves-user-script-reload { border: 1px solid rgba(255,255,255,.18); border-radius: 7px; background: #3f3f46; color: #f3f4f6; font: 12px system-ui, sans-serif; padding: 6px 8px; }
+      .${codexTokenUsageCardClass} {
+        box-sizing: border-box;
+        display: block;
+        width: 100%;
+        margin-top: 10px;
+        padding: 11px 14px;
+        overflow: hidden;
+        border: 0;
+        border-radius: 18px;
+        background: var(--color-token-dropdown-background, rgb(47,47,47));
+        box-shadow: none;
+        color: inherit;
+        font-family: system-ui, sans-serif;
+        pointer-events: none;
+        cursor: default;
+      }
+      .${codexTokenUsageHostClass} {
+        flex-direction: column !important;
+        align-items: flex-start !important;
+      }
+      .${codexTokenUsageHostClass} > .${codexTokenUsageCardClass} {
+        width: calc(100% - var(--codex-token-usage-panel-end-gap, 0px));
+        min-height: 0;
+        height: auto;
+        flex: 0 0 auto;
+        align-self: flex-start;
+      }
+      .codex-token-usage-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        min-width: 0;
+        padding-bottom: 9px;
+      }
+      .codex-token-usage-title {
+        color: currentColor;
+        font-size: 14px;
+        font-weight: 445;
+        line-height: 21px;
+        opacity: .66;
+      }
+      .codex-token-usage-agent-count {
+        flex: 0 0 auto;
+        padding: 1px 6px;
+        border-radius: 999px;
+        background: color-mix(in srgb, currentColor 8%, transparent);
+        color: currentColor;
+        font-size: 10px;
+        font-weight: 445;
+        line-height: 16px;
+        opacity: .62;
+      }
+      .codex-token-usage-section {
+        display: grid;
+        gap: 6px;
+      }
+      .codex-token-usage-section + .codex-token-usage-section {
+        margin-top: 9px;
+        padding-top: 9px;
+        border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+      }
+      .codex-token-usage-section-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+        min-width: 0;
+      }
+      .codex-token-usage-label {
+        min-width: 0;
+        color: currentColor;
+        font-size: 12px;
+        font-weight: 445;
+        line-height: 18px;
+        opacity: .58;
+      }
+      .codex-token-usage-value {
+        color: currentColor;
+        font-size: 15px;
+        font-weight: 600;
+        line-height: 18px;
+        letter-spacing: -.01em;
+        font-variant-numeric: tabular-nums;
+      }
+      .codex-token-usage-section:last-child .codex-token-usage-value {
+        font-size: 13px;
+        font-weight: 560;
+        opacity: .88;
+      }
+      .codex-token-usage-metrics {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
+      .codex-token-usage-metric {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 3px;
+        min-width: 0;
+        white-space: nowrap;
+      }
+      .codex-token-usage-metric:nth-child(2) {
+        justify-content: center;
+      }
+      .codex-token-usage-metric:nth-child(3) {
+        justify-content: flex-end;
+      }
+      .codex-token-usage-metric-label {
+        color: currentColor;
+        font-size: 10.5px;
+        line-height: 16px;
+        opacity: .48;
+      }
+      .codex-token-usage-metric-value {
+        color: currentColor;
+        font-size: 11.5px;
+        font-weight: 520;
+        line-height: 16px;
+        font-variant-numeric: tabular-nums;
+        opacity: .82;
+      }
+      .codex-token-usage-status {
+        margin-top: 6px;
+        color: currentColor;
+        font-size: 12px;
+        line-height: 18px;
+        opacity: .58;
+      }
     `;
     document.documentElement.appendChild(style);
   }
@@ -951,6 +1131,7 @@
       markdownExport: true,
       projectMove: true,
       conversationView: false,
+      tokenUsage: false,
       conversationViewMaxWidth: conversationViewDefaultWidth,
       upstreamWorktreeCreate: true,
       nativeMenuPlacement: true,
@@ -971,6 +1152,7 @@
     markdownExport: "codexAppMarkdownExport",
     projectMove: "codexAppProjectMove",
     conversationView: "codexAppConversationView",
+    tokenUsage: "codexAppTokenUsage",
 
     upstreamWorktreeCreate: "codexAppUpstreamWorktreeCreate",
     nativeMenuPlacement: "codexAppNativeMenuPlacement",
@@ -1024,6 +1206,7 @@
         markdownExport: false,
         projectMove: false,
         conversationView: false,
+        tokenUsage: false,
         conversationViewMaxWidth: conversationViewDefaultWidth,
 
         upstreamWorktreeCreate: false,
@@ -2220,6 +2403,7 @@
       codexElvesBackendSettingsLoaded = true;
       refreshCodexElvesBackendToggles();
       refreshCodexServiceTierFeatureState();
+      refreshCodexTokenUsageFeatureState();
       scheduleCodexSessionPrewarm(codexSessionPrewarmStartupDelayMs, "settings-loaded");
       return true;
     } catch (_) {
@@ -2250,6 +2434,9 @@
       refreshCodexElvesBackendToggles();
       if (key === codexElvesBackendSettingMap.serviceTierControls) {
         refreshCodexServiceTierFeatureState();
+      }
+      if (key === codexElvesBackendSettingMap.tokenUsage) {
+        refreshCodexTokenUsageFeatureState();
       }
     }
   }
@@ -2501,6 +2688,10 @@
                 <input class="codex-elves-width-input" data-codex-elves-conversation-view-width="true" min="${conversationViewMinWidth}" max="${conversationViewMaxAllowedWidth}" step="10" type="number" value="${conversationViewWidth()}">
                 <button type="button" class="codex-elves-toggle" data-codex-elves-setting="conversationView"><span></span></button>
               </div>
+            </div>
+            <div class="codex-elves-row">
+              <div><div class="codex-elves-row-title">会话 Token 统计</div><div class="codex-elves-row-description">在右上角置顶摘要底部紧凑显示当前会话（含递归子代理）的总消耗和最近一轮输入、输出、缓存；默认关闭。</div></div>
+              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="tokenUsage"><span></span></button>
             </div>
             <div class="codex-elves-row">
               <div><div class="codex-elves-row-title">Upstream worktree</div><div class="codex-elves-row-description">Create a Git worktree from a fresh upstream branch, equivalent to git worktree add -b branch path upstream/base.</div></div>
@@ -3821,6 +4012,667 @@
     }
   }
 
+  function normalizeCodexTokenUsage(value) {
+    const inputTokens = finiteNonNegativeNumber(value?.inputTokens);
+    const outputTokens = finiteNonNegativeNumber(value?.outputTokens);
+    const cachedTokens = finiteNonNegativeNumber(value?.cachedTokens);
+    const cacheCreationTokens = finiteNonNegativeNumber(value?.cacheCreationTokens);
+    return {
+      inputTokens,
+      outputTokens,
+      totalTokens: Math.max(
+        finiteNonNegativeNumber(value?.totalTokens),
+        inputTokens + outputTokens
+      ),
+      cachedTokens,
+      cacheCreationTokens,
+      cacheTokens: Math.max(
+        finiteNonNegativeNumber(value?.cacheTokens),
+        cachedTokens + cacheCreationTokens
+      ),
+    };
+  }
+
+  function addCodexTokenUsage(left, right) {
+    const next = normalizeCodexTokenUsage(left);
+    const addition = normalizeCodexTokenUsage(right);
+    next.inputTokens += addition.inputTokens;
+    next.outputTokens += addition.outputTokens;
+    next.totalTokens += addition.totalTokens;
+    next.cachedTokens += addition.cachedTokens;
+    next.cacheCreationTokens += addition.cacheCreationTokens;
+    next.cacheTokens += addition.cacheTokens;
+    return next;
+  }
+
+  function codexTokenUsageSummaryFromResult(result) {
+    const provided = result?.summary;
+    if (provided?.totalUsage && provided?.lastTurnUsage) {
+      return {
+        totalUsage: normalizeCodexTokenUsage(provided.totalUsage),
+        lastTurnUsage: normalizeCodexTokenUsage(provided.lastTurnUsage),
+        lastTurnId: String(provided.lastTurnId || ""),
+        observedAt: String(provided.observedAt || ""),
+        turnCount: finiteNonNegativeNumber(provided.turnCount),
+        descendantCount: finiteNonNegativeNumber(provided.descendantCount),
+        lastTurnDescendantCount: finiteNonNegativeNumber(provided.lastTurnDescendantCount),
+        unassociatedDescendantCount: finiteNonNegativeNumber(provided.unassociatedDescendantCount),
+        isRunning: provided.isRunning === true,
+        activeThreadCount: finiteNonNegativeNumber(provided.activeThreadCount),
+        lastTurnRunning: provided.lastTurnRunning === true,
+      };
+    }
+    const history = Array.isArray(result?.history) ? result.history : [];
+    const latestTurnId = String(history[history.length - 1]?.turn_id || "");
+    let totalUsage = normalizeCodexTokenUsage(null);
+    let lastTurnUsage = normalizeCodexTokenUsage(null);
+    const turnIds = new Set();
+    let observedAt = "";
+    history.forEach((entry) => {
+      const turnId = String(entry?.turn_id || "");
+      const usage = normalizeCodexTokenUsage(entry?.usage);
+      totalUsage = addCodexTokenUsage(totalUsage, usage);
+      if (turnId === latestTurnId) lastTurnUsage = addCodexTokenUsage(lastTurnUsage, usage);
+      if (turnId) turnIds.add(turnId);
+      observedAt = String(entry?.observed_at || observedAt);
+    });
+    return {
+      totalUsage,
+      lastTurnUsage,
+      lastTurnId: latestTurnId,
+      observedAt,
+      turnCount: turnIds.size,
+      descendantCount: 0,
+      lastTurnDescendantCount: 0,
+      unassociatedDescendantCount: 0,
+      isRunning: false,
+      activeThreadCount: 0,
+      lastTurnRunning: false,
+    };
+  }
+
+  function codexTokenUsageHasData(usage) {
+    const normalized = normalizeCodexTokenUsage(usage);
+    return normalized.totalTokens > 0
+      || normalized.inputTokens > 0
+      || normalized.outputTokens > 0
+      || normalized.cacheTokens > 0;
+  }
+
+  function formatCodexTokenCount(value) {
+    const numeric = finiteNonNegativeNumber(value);
+    const billion = 1000 * 1000 * 1000;
+    const million = 1000 * 1000;
+    const thousand = 1000;
+    let divisor = thousand;
+    let unit = "K";
+    if (numeric >= billion) {
+      divisor = billion;
+      unit = "B";
+    } else if (numeric >= million) {
+      divisor = million;
+      unit = "M";
+    }
+    const scaled = numeric / divisor;
+    const decimals = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+    const compact = scaled
+      .toFixed(decimals)
+      .replace(/\.0+$/, "")
+      .replace(/(\.\d*[1-9])0+$/, "$1");
+    return `${compact}${unit}`;
+  }
+
+  function codexTokenUsageMetrics(usage) {
+    const normalized = normalizeCodexTokenUsage(usage);
+    return `
+      <div class="codex-token-usage-metrics">
+        <span class="codex-token-usage-metric">
+          <span class="codex-token-usage-metric-label">输入</span>
+          <span class="codex-token-usage-metric-value">${formatCodexTokenCount(normalized.inputTokens)}</span>
+        </span>
+        <span class="codex-token-usage-metric">
+          <span class="codex-token-usage-metric-label">输出</span>
+          <span class="codex-token-usage-metric-value">${formatCodexTokenCount(normalized.outputTokens)}</span>
+        </span>
+        <span class="codex-token-usage-metric">
+          <span class="codex-token-usage-metric-label">缓存</span>
+          <span class="codex-token-usage-metric-value">${formatCodexTokenCount(normalized.cacheTokens)}</span>
+        </span>
+      </div>
+    `;
+  }
+
+  function codexPinnedSummaryMount() {
+    const toggle = document.querySelector(selectors.pinnedSummaryToggle);
+    if (toggle && toggle.getAttribute("aria-pressed") !== "true") return null;
+    const panel = document.querySelector(selectors.pinnedSummaryPanel);
+    if (!panel?.parentElement) return null;
+    const rect = panel.getBoundingClientRect();
+    if (rect.width < 240 || rect.width > 420 || rect.height <= 0) return null;
+    return { panel, host: panel.parentElement };
+  }
+
+  function removeCodexTokenUsageCards() {
+    document.querySelectorAll(`.${codexTokenUsageCardClass}`).forEach((card) => {
+      const host = card.parentElement;
+      card.remove();
+      host?.classList.remove(codexTokenUsageHostClass);
+      host?.style.removeProperty("--codex-token-usage-panel-end-gap");
+    });
+  }
+
+  function hideCodexTokenUsageCards() {
+    document.querySelectorAll(`.${codexTokenUsageCardClass}`).forEach((card) => {
+      card.hidden = true;
+    });
+  }
+
+  function pauseCodexTokenUsageForHiddenPinnedSummary() {
+    clearTimeout(window.__codexTokenUsageRefreshTimer);
+    window.__codexTokenUsageRefreshTimer = null;
+    clearTimeout(window.__codexTokenUsageSettleTimer);
+    window.__codexTokenUsageSettleTimer = null;
+    clearTimeout(window.__codexTokenUsageCompletionSettleTimer);
+    window.__codexTokenUsageCompletionSettleTimer = null;
+    clearTimeout(window.__codexTokenUsageRetryTimer);
+    window.__codexTokenUsageRetryTimer = null;
+    window.__codexTokenUsageRetryCount = 0;
+    window.__codexTokenUsageRefreshPending = false;
+    window.__codexTokenUsageRequestSeq = (window.__codexTokenUsageRequestSeq || 0) + 1;
+    window.__codexTokenUsageRequestSession = "";
+    hideCodexTokenUsageCards();
+  }
+
+  function cachedCodexTokenUsageSummary(sessionSignature) {
+    return window.__codexTokenUsageSummaryCache?.get?.(sessionSignature) || null;
+  }
+
+  function cacheCodexTokenUsageSummary(sessionSignature, summary, resolvedSessionId = "") {
+    const cache = window.__codexTokenUsageSummaryCache;
+    if (!(cache instanceof Map) || !sessionSignature || !summary) return;
+    cache.delete(sessionSignature);
+    cache.set(sessionSignature, {
+      summary,
+      resolvedSessionId: String(resolvedSessionId || ""),
+      cachedAt: Date.now(),
+    });
+    while (cache.size > 20) {
+      const oldestKey = cache.keys().next().value;
+      if (oldestKey == null) break;
+      cache.delete(oldestKey);
+    }
+  }
+
+  function stopCodexTokenUsageRuntime() {
+    clearTimeout(window.__codexTokenUsageRefreshTimer);
+    window.__codexTokenUsageRefreshTimer = null;
+    clearTimeout(window.__codexTokenUsageSettleTimer);
+    window.__codexTokenUsageSettleTimer = null;
+    clearTimeout(window.__codexTokenUsageCompletionSettleTimer);
+    window.__codexTokenUsageCompletionSettleTimer = null;
+    clearTimeout(window.__codexTokenUsageRetryTimer);
+    window.__codexTokenUsageRetryTimer = null;
+    window.__codexTokenUsageRetryCount = 0;
+    window.__codexTokenUsageRefreshPending = false;
+    window.__codexTokenUsageRequestSeq = (window.__codexTokenUsageRequestSeq || 0) + 1;
+    window.__codexTokenUsageRequestSession = "";
+    removeCodexTokenUsageCards();
+  }
+
+  function scheduleCodexTokenUsageCalibration(delayMs, timerKey) {
+    clearTimeout(window[timerKey]);
+    window[timerKey] = null;
+    if (!codexElvesSettings().tokenUsage) return;
+    window[timerKey] = setTimeout(() => {
+      window[timerKey] = null;
+      scheduleCodexTokenUsageRefresh(0);
+    }, Math.max(0, delayMs));
+  }
+
+  function resetCodexTokenUsageRetry() {
+    clearTimeout(window.__codexTokenUsageRetryTimer);
+    window.__codexTokenUsageRetryTimer = null;
+    window.__codexTokenUsageRetryCount = 0;
+  }
+
+  function scheduleCodexTokenUsageRetry() {
+    if (document.visibilityState === "hidden") return false;
+    const retryIndex = Math.max(0, Math.round(
+      finiteNonNegativeNumber(window.__codexTokenUsageRetryCount)
+    ));
+    if (retryIndex >= codexTokenUsageRetryDelaysMs.length) return false;
+    clearTimeout(window.__codexTokenUsageRetryTimer);
+    window.__codexTokenUsageRetryCount = retryIndex + 1;
+    window.__codexTokenUsageRetryTimer = setTimeout(() => {
+      window.__codexTokenUsageRetryTimer = null;
+      scheduleCodexTokenUsageRefresh(0);
+    }, codexTokenUsageRetryDelaysMs[retryIndex]);
+    return true;
+  }
+
+  function installCodexTokenUsageVisibilityListener() {
+    document.removeEventListener(
+      "visibilitychange",
+      window.__codexTokenUsageVisibilityHandler,
+      true
+    );
+    window.__codexTokenUsageVisibilityHandler = () => {
+      if (document.visibilityState === "hidden") {
+        clearTimeout(window.__codexTokenUsageRefreshTimer);
+        window.__codexTokenUsageRefreshTimer = null;
+        return;
+      }
+      if (codexElvesSettings().tokenUsage) {
+        resetCodexTokenUsageRetry();
+        scheduleCodexTokenUsageRefresh(0);
+      }
+    };
+    document.addEventListener(
+      "visibilitychange",
+      window.__codexTokenUsageVisibilityHandler,
+      true
+    );
+  }
+
+  function removeCodexTokenUsageNotificationListener() {
+    try {
+      window.__codexTokenUsageNotificationUnsubscribe?.();
+    } catch {
+    }
+    window.__codexTokenUsageNotificationUnsubscribe = null;
+    window.__codexTokenUsageNotificationManager = null;
+  }
+
+  function installCodexTokenUsageNotificationListener(
+    manager = codexSessionPrewarmManager || window.__codexElvesSessionPrewarmManager || null
+  ) {
+    if (!codexElvesSettings().tokenUsage) {
+      removeCodexTokenUsageNotificationListener();
+      return false;
+    }
+    if (!manager || typeof manager.addNotificationCallback !== "function") return false;
+    if (
+      window.__codexTokenUsageNotificationManager === manager
+      && typeof window.__codexTokenUsageNotificationUnsubscribe === "function"
+    ) {
+      return true;
+    }
+    removeCodexTokenUsageNotificationListener();
+    try {
+      const callback = (notification) => {
+        const method = String(notification?.method || "");
+        window.__codexTokenUsageLastNotificationAt = Date.now();
+        window.__codexTokenUsageLastNotificationMethod = method;
+        resetCodexTokenUsageRetry();
+        if (method === "turn/started") {
+          clearTimeout(window.__codexTokenUsageCompletionSettleTimer);
+          window.__codexTokenUsageCompletionSettleTimer = null;
+          scheduleCodexTokenUsageRefresh(0);
+          scheduleCodexTokenUsageCalibration(
+            codexTokenUsageSettleDelayMs,
+            "__codexTokenUsageSettleTimer"
+          );
+          scheduleCodexTokenUsageCalibration(
+            codexTokenUsageCompletionSettleDelayMs,
+            "__codexTokenUsageCompletionSettleTimer"
+          );
+          return;
+        }
+        if (method === "turn/completed") {
+          scheduleCodexTokenUsageRefresh(0);
+          scheduleCodexTokenUsageCalibration(
+            codexTokenUsageCompletionSettleDelayMs,
+            "__codexTokenUsageCompletionSettleTimer"
+          );
+          return;
+        }
+        scheduleCodexTokenUsageRefresh(0);
+        scheduleCodexTokenUsageCalibration(
+          codexTokenUsageSettleDelayMs,
+          "__codexTokenUsageSettleTimer"
+        );
+      };
+      const unsubscribe = manager.addNotificationCallback(
+        codexTokenUsageNotificationMethods,
+        callback
+      );
+      if (typeof unsubscribe !== "function") return false;
+      window.__codexTokenUsageNotificationManager = manager;
+      window.__codexTokenUsageNotificationUnsubscribe = unsubscribe;
+      sendCodexElvesDiagnostic("token_usage_notification_listener_installed", {
+        methods: codexTokenUsageNotificationMethods,
+      });
+      scheduleCodexTokenUsageRefresh(0);
+      return true;
+    } catch (error) {
+      sendCodexElvesDiagnostic("token_usage_notification_listener_failed", {
+        errorName: error?.name || "",
+        errorMessage: error?.message || String(error),
+      });
+      return false;
+    }
+  }
+
+  function refreshCodexTokenUsageFeatureState() {
+    if (!codexElvesSettings().tokenUsage) {
+      removeCodexTokenUsageNotificationListener();
+      stopCodexTokenUsageRuntime();
+      return;
+    }
+    resetCodexTokenUsageRetry();
+    scheduleCodexTokenUsageRefresh(0);
+    if (installCodexTokenUsageNotificationListener()) return;
+    resetCodexAppServerModelPatchDiscovery();
+    void installAppServerModelRequestPatch(true, true);
+  }
+
+  function ensureCodexTokenUsageCard(mount) {
+    const { panel, host } = mount;
+    document.querySelectorAll(`.${codexTokenUsageCardClass}`).forEach((card) => {
+      if (card.parentElement === host) return;
+      const previousHost = card.parentElement;
+      card.remove();
+      previousHost?.classList.remove(codexTokenUsageHostClass);
+      previousHost?.style.removeProperty("--codex-token-usage-panel-end-gap");
+    });
+    document.querySelectorAll(`.${codexTokenUsageHostClass}`).forEach((candidate) => {
+      if (candidate === host) return;
+      candidate.classList.remove(codexTokenUsageHostClass);
+      candidate.style.removeProperty("--codex-token-usage-panel-end-gap");
+    });
+    const panelStyle = getComputedStyle(panel);
+    const panelEndGap = panelStyle.paddingInlineEnd || panelStyle.paddingRight || "0px";
+    host.classList.add(codexTokenUsageHostClass);
+    host.style.setProperty("--codex-token-usage-panel-end-gap", panelEndGap);
+    let card = Array.from(host.children).find((node) =>
+      node.classList?.contains(codexTokenUsageCardClass)
+    );
+    if (card) {
+      card.className = `${codexTokenUsageCardClass} bg-token-dropdown-background text-token-foreground`;
+      card.hidden = false;
+      if (panel.nextElementSibling !== card) {
+        panel.insertAdjacentElement("afterend", card);
+      }
+      return card;
+    }
+    card = document.createElement("section");
+    card.className = `${codexTokenUsageCardClass} bg-token-dropdown-background text-token-foreground`;
+    card.dataset.codexTokenUsageCard = "true";
+    card.setAttribute("aria-label", "会话 Token 统计");
+    renderCodexTokenUsagePlaceholder(card);
+    panel.insertAdjacentElement("afterend", card);
+    return card;
+  }
+
+  function renderCodexTokenUsageStatus(card, status, text) {
+    card.dataset.status = status;
+    card.dataset.running = "false";
+    card.removeAttribute("title");
+    card.hidden = false;
+    card.innerHTML = `
+      <div class="codex-token-usage-header">
+        <div class="codex-token-usage-title">Token 用量</div>
+      </div>
+      <div class="codex-token-usage-status">${text}</div>
+    `;
+  }
+
+  function renderCodexTokenUsageSummary(card, summary) {
+    const totalUsage = normalizeCodexTokenUsage(summary.totalUsage);
+    const lastTurnUsage = normalizeCodexTokenUsage(summary.lastTurnUsage);
+    const descendantCount = Math.round(finiteNonNegativeNumber(summary.descendantCount));
+    const descendantLabel = descendantCount > 0
+      ? `<span class="codex-token-usage-agent-count">子智能体 ${descendantCount}</span>`
+      : "";
+    card.dataset.status = "ready";
+    card.dataset.running = String(summary.isRunning === true);
+    card.removeAttribute("title");
+    card.hidden = false;
+    card.innerHTML = `
+      <div class="codex-token-usage-header">
+        <span class="codex-token-usage-title">Token 用量</span>
+        ${descendantLabel}
+      </div>
+      <div class="codex-token-usage-section">
+        <div class="codex-token-usage-section-head">
+          <span class="codex-token-usage-label">累计</span>
+          <strong class="codex-token-usage-value">${formatCodexTokenCount(totalUsage.totalTokens)}</strong>
+        </div>
+        ${codexTokenUsageMetrics(totalUsage)}
+      </div>
+      <div class="codex-token-usage-section">
+        <div class="codex-token-usage-section-head">
+          <span class="codex-token-usage-label">最近一轮</span>
+          <strong class="codex-token-usage-value">${formatCodexTokenCount(lastTurnUsage.totalTokens)}</strong>
+        </div>
+        ${codexTokenUsageMetrics(lastTurnUsage)}
+      </div>
+    `;
+  }
+
+  function emptyCodexTokenUsageSummary() {
+    const usage = normalizeCodexTokenUsage(null);
+    return {
+      totalUsage: usage,
+      lastTurnUsage: usage,
+      lastTurnId: "",
+      observedAt: "",
+      turnCount: 0,
+      descendantCount: 0,
+      lastTurnDescendantCount: 0,
+      unassociatedDescendantCount: 0,
+      isRunning: false,
+      activeThreadCount: 0,
+      lastTurnRunning: false,
+    };
+  }
+
+  function renderCodexTokenUsagePlaceholder(card) {
+    renderCodexTokenUsageSummary(card, emptyCodexTokenUsageSummary());
+    card.dataset.status = "placeholder";
+  }
+
+  function renderCachedCodexTokenUsage(card, cacheEntry) {
+    const summary = cacheEntry?.summary;
+    if (!summary) return false;
+    if (cacheEntry.resolvedSessionId) {
+      card.dataset.codexTokenUsageResolvedSession = cacheEntry.resolvedSessionId;
+    }
+    renderCodexTokenUsageSummary(card, summary);
+    return true;
+  }
+
+  function scheduleCodexTokenUsageRefresh(delayMs = 0) {
+    clearTimeout(window.__codexTokenUsageRefreshTimer);
+    window.__codexTokenUsageRefreshTimer = null;
+    if (!codexElvesSettings().tokenUsage) return;
+    const toggle = document.querySelector(selectors.pinnedSummaryToggle);
+    if (!toggle || toggle.getAttribute("aria-pressed") !== "true") return;
+    window.__codexTokenUsageRefreshTimer = setTimeout(() => {
+      window.__codexTokenUsageRefreshTimer = null;
+      refreshCodexTokenUsageCard();
+    }, Math.max(0, delayMs));
+  }
+
+  function syncCodexTokenUsageWithPinnedSummaryState() {
+    if (!codexElvesSettings().tokenUsage) return true;
+    const toggle = document.querySelector(selectors.pinnedSummaryToggle);
+    if (!toggle || toggle.getAttribute("aria-pressed") !== "true") {
+      pauseCodexTokenUsageForHiddenPinnedSummary();
+      return true;
+    }
+    refreshCodexTokenUsageCard();
+    return !!document.querySelector(`.${codexTokenUsageCardClass}`);
+  }
+
+  function scheduleCodexTokenUsagePinnedSummarySync(previousPressed = "") {
+    if (typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(window.__codexTokenUsagePinnedSummarySyncRafId);
+    }
+    window.__codexTokenUsagePinnedSummarySyncRafId = 0;
+    let remainingFrames = 16;
+    const syncBeforePaint = () => {
+      window.__codexTokenUsagePinnedSummarySyncRafId = 0;
+      if (!codexElvesSettings().tokenUsage) return;
+      const toggle = document.querySelector(selectors.pinnedSummaryToggle);
+      const currentPressed = toggle?.getAttribute("aria-pressed") || "";
+      if (currentPressed !== previousPressed) {
+        if (!syncCodexTokenUsageWithPinnedSummaryState()) {
+          remainingFrames -= 1;
+          if (remainingFrames > 0 && typeof requestAnimationFrame === "function") {
+            window.__codexTokenUsagePinnedSummarySyncRafId =
+              requestAnimationFrame(syncBeforePaint);
+          }
+        }
+        return;
+      }
+      remainingFrames -= 1;
+      if (remainingFrames <= 0 || typeof requestAnimationFrame !== "function") return;
+      window.__codexTokenUsagePinnedSummarySyncRafId = requestAnimationFrame(syncBeforePaint);
+    };
+    if (typeof requestAnimationFrame === "function") {
+      window.__codexTokenUsagePinnedSummarySyncRafId = requestAnimationFrame(syncBeforePaint);
+    } else {
+      syncCodexTokenUsageWithPinnedSummaryState();
+    }
+  }
+
+  function installCodexTokenUsagePinnedSummaryObserver() {
+    const toggle = document.querySelector(selectors.pinnedSummaryToggle);
+    if (window.__codexTokenUsagePinnedSummaryObserverTarget === toggle) return;
+    window.__codexTokenUsagePinnedSummaryObserver?.disconnect?.();
+    window.__codexTokenUsagePinnedSummaryObserver = null;
+    window.__codexTokenUsagePinnedSummaryObserverTarget = toggle || null;
+    if (!toggle || typeof MutationObserver !== "function") return;
+    const observer = new MutationObserver((mutations) => {
+      if (!mutations.some((mutation) => mutation.attributeName === "aria-pressed")) return;
+      if (!syncCodexTokenUsageWithPinnedSummaryState()) {
+        scheduleCodexTokenUsagePinnedSummarySync();
+      }
+    });
+    observer.observe(toggle, {
+      attributes: true,
+      attributeFilter: ["aria-pressed"],
+    });
+    window.__codexTokenUsagePinnedSummaryObserver = observer;
+    if (!syncCodexTokenUsageWithPinnedSummaryState()) {
+      scheduleCodexTokenUsagePinnedSummarySync();
+    }
+  }
+
+  function refreshCodexTokenUsageCard() {
+    if (!codexElvesSettings().tokenUsage) {
+      stopCodexTokenUsageRuntime();
+      return;
+    }
+    const ref = currentSessionRef();
+    const sessionId = String(ref?.session_id || "").trim();
+    const sessionTitle = String(ref?.title || "").trim();
+    const sessionSignature = `${sessionId}\n${sessionTitle}`;
+    const mount = codexPinnedSummaryMount();
+    let card = null;
+    let sessionChanged = false;
+    if (mount) {
+      card = ensureCodexTokenUsageCard(mount);
+      sessionChanged = card.dataset.codexTokenUsageSession !== sessionSignature;
+      card.dataset.codexTokenUsageSession = sessionSignature;
+      if (sessionChanged) resetCodexTokenUsageRetry();
+      const cacheEntry = cachedCodexTokenUsageSummary(sessionSignature);
+      if (cacheEntry) {
+        renderCachedCodexTokenUsage(card, cacheEntry);
+      } else if (sessionChanged || !card.dataset.status) {
+        renderCodexTokenUsagePlaceholder(card);
+      }
+    } else {
+      pauseCodexTokenUsageForHiddenPinnedSummary();
+      return;
+    }
+    if (!sessionId) {
+      if (card) renderCodexTokenUsageStatus(card, "empty", "当前页面尚未识别到会话。");
+      return;
+    }
+    if (document.visibilityState === "hidden") {
+      return;
+    }
+    if (
+      window.__codexTokenUsageRequestPromise
+      && window.__codexTokenUsageRequestSession === sessionSignature
+    ) {
+      window.__codexTokenUsageRefreshPending = true;
+      return;
+    }
+    const requestSeq = (window.__codexTokenUsageRequestSeq || 0) + 1;
+    window.__codexTokenUsageRequestSeq = requestSeq;
+    window.__codexTokenUsageRequestSession = sessionSignature;
+    let timeoutId = null;
+    const requestPromise = Promise.race([
+      postJson("/thread-usage-history", { session_id: sessionId, title: sessionTitle }),
+      new Promise((resolve) => {
+        timeoutId = setTimeout(
+          () => resolve({ status: "failed", message: "读取超时", timeout: true }),
+          codexTokenUsageRequestTimeoutMs
+        );
+      }),
+    ]).then((result) => {
+      if (requestSeq !== window.__codexTokenUsageRequestSeq) return;
+      const activeRef = currentSessionRef();
+      if (`${activeRef?.session_id || ""}\n${activeRef?.title || ""}` !== sessionSignature) return;
+      const activeMount = codexPinnedSummaryMount();
+      const activeCard = activeMount ? ensureCodexTokenUsageCard(activeMount) : null;
+      if (activeCard) activeCard.dataset.codexTokenUsageSession = sessionSignature;
+      if (result?.status !== "ok") {
+        scheduleCodexTokenUsageRetry();
+        if (
+          activeCard
+          && activeCard.dataset.status !== "ready"
+          && activeCard.dataset.status !== "placeholder"
+        ) {
+          renderCodexTokenUsageStatus(activeCard, "empty", "当前会话暂无 Token 记录。");
+        }
+        return;
+      }
+      resetCodexTokenUsageRetry();
+      const summary = codexTokenUsageSummaryFromResult(result);
+      cacheCodexTokenUsageSummary(
+        sessionSignature,
+        summary,
+        String(result.session_id || sessionId)
+      );
+      if (!codexTokenUsageHasData(summary.totalUsage)) {
+        if (activeCard) renderCodexTokenUsageSummary(activeCard, summary);
+        if (activeCard && summary.isRunning && document.visibilityState !== "hidden") {
+          scheduleCodexTokenUsageRefresh(codexTokenUsageRefreshIntervalMs);
+        }
+        return;
+      }
+      if (activeCard) {
+        activeCard.dataset.codexTokenUsageResolvedSession = String(result.session_id || sessionId);
+        renderCodexTokenUsageSummary(activeCard, summary);
+      }
+      if (activeCard && summary.isRunning && document.visibilityState !== "hidden") {
+        scheduleCodexTokenUsageRefresh(codexTokenUsageRefreshIntervalMs);
+      }
+    }).catch(() => {
+      if (requestSeq !== window.__codexTokenUsageRequestSeq) return;
+      scheduleCodexTokenUsageRetry();
+      const activeCard = document.querySelector(`.${codexTokenUsageCardClass}`);
+      if (activeCard && activeCard.dataset.status !== "ready") {
+        renderCodexTokenUsageStatus(activeCard, "failed", "Token 统计暂不可用。");
+      }
+    }).finally(() => {
+      if (timeoutId) clearTimeout(timeoutId);
+      if (window.__codexTokenUsageRequestPromise === requestPromise) {
+        window.__codexTokenUsageRequestPromise = null;
+        window.__codexTokenUsageRequestSession = "";
+      }
+      if (window.__codexTokenUsageRefreshPending) {
+        window.__codexTokenUsageRefreshPending = false;
+        scheduleCodexTokenUsageRefresh(0);
+      }
+    });
+    window.__codexTokenUsageRequestPromise = requestPromise;
+  }
+
   function downloadMarkdownFallback(filename, markdown) {
     if (!filename || typeof markdown !== "string") {
       throw new Error("导出结果不完整");
@@ -4115,6 +4967,7 @@
         hasBackgroundHydration: typeof candidate.hydrateBackgroundThreads === "function",
       });
     }
+    installCodexTokenUsageNotificationListener(candidate);
     scheduleCodexSessionPrewarm(codexSessionPrewarmStartupDelayMs, "manager-captured");
     return true;
   }
@@ -4123,6 +4976,9 @@
     if (!manager || codexSessionPrewarmManager !== manager) return false;
     codexSessionPrewarmManager = null;
     window.__codexElvesSessionPrewarmManager = null;
+    if (window.__codexTokenUsageNotificationManager === manager) {
+      removeCodexTokenUsageNotificationListener();
+    }
     window.__codexSessionPrewarmCompletedSignature = "";
     sendCodexElvesDiagnostic("session_prewarm_manager_invalidated", { reason });
     resetCodexAppServerModelPatchDiscovery();
@@ -5550,10 +6406,14 @@
 
   function codexAppServerModelPatchNeeds(rediscoverManager = false) {
     const prewarmSettings = codexSessionPrewarmSettingsSnapshot();
+    const tokenUsageEnabled = codexElvesSettings().tokenUsage;
     return {
       manager:
-        prewarmSettings.enabled &&
-        prewarmSettings.fullCount + prewarmSettings.contentCount > 0 &&
+        (
+          prewarmSettings.enabled &&
+          prewarmSettings.fullCount + prewarmSettings.contentCount > 0
+          || tokenUsageEnabled
+        ) &&
         (rediscoverManager || !codexSessionPrewarmManager),
       modelPatch:
         codexElvesModelUnlockEnabled() &&
@@ -8988,7 +9848,12 @@
       return true;
     };
     const clickHandler = (event) => {
-      if (event.target?.closest?.(selectors.sidebarThread)) scheduleCodexRouteFeatureRefresh();
+      const toggle = event.target?.closest?.(selectors.pinnedSummaryToggle);
+      if (toggle) {
+        scheduleCodexTokenUsagePinnedSummarySync(
+          toggle.getAttribute("aria-pressed") || ""
+        );
+      } else if (event.target?.closest?.(selectors.sidebarThread)) scheduleCodexRouteFeatureRefresh();
       else if (shouldRefreshConversationViewForControl(event)) scheduleConversationViewRouteRefresh();
     };
     const keyboardHandler = (event) => {
@@ -9039,6 +9904,7 @@
     installDeleteButtonEventDelegation();
     installConversationViewRouteHooks();
     installCodexRouteFeatureRefreshEvents();
+    installCodexTokenUsagePinnedSummaryObserver();
     refreshCodexServiceTierControls();
   }
 
@@ -9092,6 +9958,7 @@
     const modelUiDirty = headerDirty || conversationDirty || shouldScheduleReactModelStatePatch(lastMutations);
     if (headerDirty || conversationDirty) {
       installCodexServiceTierBadge();
+      refreshCodexTokenUsageCard();
     }
     if (modelUiDirty) {
       refreshCodexModelWhitelistFromScan(lastMutations);
@@ -9150,7 +10017,7 @@
   }
 
   function isExtensionUiNode(node) {
-    return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-elves-modal-overlay, .${projectMoveOverlayClass}, .codex-conversation-timeline, .${codexServiceTierBadgeClass}, #codex-elves-menu`);
+    return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-elves-modal-overlay, .${projectMoveOverlayClass}, .codex-conversation-timeline, .${codexServiceTierBadgeClass}, .${codexTokenUsageCardClass}, #codex-elves-menu`);
   }
 
   function scanRelevantSelector() {
@@ -9168,6 +10035,8 @@
       '[class*="_footer_"]',
       ".ProseMirror",
       selectors.appHeader,
+      selectors.pinnedSummaryPanel,
+      selectors.pinnedSummaryToggle,
       selectors.archiveNav,
     ].join(", ");
   }
@@ -9255,7 +10124,7 @@
       attributeFilter: ["aria-current", "data-state", "data-selected", "data-active"],
     });
     push("conversation", conversationRoot);
-    push("header", headerRoot, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style", "hidden", "aria-expanded", "data-state"] });
+    push("header", headerRoot, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style", "hidden", "aria-expanded", "aria-pressed", "data-state"] });
     return roots;
   }
 
@@ -9301,11 +10170,13 @@
   void loadCodexServiceTierState();
   installUpstreamBranchDropdownAdapter();
   installUpstreamWorktreeNativeAdapter();
+  installCodexTokenUsageVisibilityListener();
   scan();
   window.__codexProjectMoveApplyProjection = applyProjectMoveProjection;
   window.__codexProjectMoveReadProjection = readProjectMoveProjection;
   window.__codexProjectMoveTargets = projectMoveTargets;
   window.__codexProjectMoveSortChats = applyChatsSortCorrection;
+  window.__codexTokenUsageRefresh = refreshCodexTokenUsageCard;
   window.removeEventListener("resize", window.__codexElvesResizeHandler);
   let codexElvesResizeRafId = 0;
   window.__codexElvesResizeHandler = () => {
@@ -9334,6 +10205,7 @@
     void loadBackendSettingsForStartup();
     void loadCodexServiceTierState();
     scan();
+    refreshCodexTokenUsageFeatureState();
     installScanObservers();
     resetCodexAppServerModelPatchDiscovery();
     void installAppServerModelRequestPatch(true, true);

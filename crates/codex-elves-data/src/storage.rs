@@ -4,7 +4,7 @@ use rusqlite::types::{ToSqlOutput, Value as SqlValue, ValueRef};
 use rusqlite::{Connection, OptionalExtension, ToSql};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -53,6 +53,44 @@ pub fn move_codex_thread_workspace_from_paths(
         result = candidate_result;
     }
     result
+}
+
+pub fn codex_thread_usage_history_from_paths(
+    db_paths: impl IntoIterator<Item = PathBuf>,
+    backup_store: BackupStore,
+    session: &SessionRef,
+) -> Value {
+    let mut result = json!({
+        "status": "failed",
+        "session_id": session.session_id,
+        "message": "会话在本地存储中已不存在",
+        "history": []
+    });
+    let mut best: Option<(bool, i64, Value)> = None;
+    for db_path in db_paths {
+        let adapter = SQLiteStorageAdapter::new(db_path, backup_store.clone());
+        let candidate = adapter.codex_thread_usage_history(session);
+        if candidate.get("status").and_then(Value::as_str) != Some("ok") {
+            result = candidate;
+            continue;
+        }
+        let matched_by_id = candidate.get("matched_by").and_then(Value::as_str) == Some("id");
+        let updated_at_ms = candidate
+            .get("thread_updated_at_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        let replace = best
+            .as_ref()
+            .map(|(best_id, best_updated, _)| {
+                matched_by_id && !best_id
+                    || matched_by_id == *best_id && updated_at_ms > *best_updated
+            })
+            .unwrap_or(true);
+        if replace {
+            best = Some((matched_by_id, updated_at_ms, candidate));
+        }
+    }
+    best.map(|(_, _, value)| value).unwrap_or(result)
 }
 
 #[derive(Debug, Clone)]
@@ -459,18 +497,23 @@ impl SQLiteStorageAdapter {
                     "history": []
                 }));
             }
-            let thread_id = normalize_codex_thread_id(&session.session_id);
-            let rollout_path: Option<String> = db
-                .query_row(
-                    "SELECT rollout_path FROM threads WHERE id = ?1",
-                    [&thread_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let Some(rollout_path) = rollout_path.filter(|path| !path.trim().is_empty()) else {
+            let requested_thread_id = normalize_codex_thread_id(&session.session_id);
+            let Some(thread) = resolve_thread_usage_record(&db, session)? else {
                 return Ok(json!({
                     "status": "failed",
-                    "session_id": thread_id,
+                    "session_id": requested_thread_id,
+                    "message": "Thread not found in local storage",
+                    "history": []
+                }));
+            };
+            let Some(rollout_path) = thread
+                .rollout_path
+                .clone()
+                .filter(|path| !path.trim().is_empty())
+            else {
+                return Ok(json!({
+                    "status": "failed",
+                    "session_id": thread.id,
                     "message": "Thread rollout path is empty",
                     "history": []
                 }));
@@ -479,17 +522,166 @@ impl SQLiteStorageAdapter {
             if !rollout.is_file() {
                 return Ok(json!({
                     "status": "failed",
-                    "session_id": thread_id,
+                    "session_id": thread.id,
                     "message": format!("rollout file not found: {rollout_path}"),
                     "history": []
                 }));
             }
-            let history = read_rollout_usage_history(&rollout, &thread_id)?;
+            let graph = thread_usage_graph(&db, &thread)?;
+            let mut reports = HashMap::new();
+            reports.insert(
+                thread.id.clone(),
+                read_rollout_usage_history(&rollout, &thread.id)?,
+            );
+            let mut partial_errors = Vec::new();
+            for node in graph.iter().skip(1) {
+                let Some(record) = &node.record else {
+                    continue;
+                };
+                let Some(path) = record
+                    .rollout_path
+                    .as_deref()
+                    .filter(|path| !path.trim().is_empty())
+                else {
+                    partial_errors.push(json!({
+                        "threadId": record.id,
+                        "message": "Thread rollout path is empty",
+                    }));
+                    continue;
+                };
+                let path = PathBuf::from(path);
+                if !path.is_file() {
+                    partial_errors.push(json!({
+                        "threadId": record.id,
+                        "message": format!("rollout file not found: {}", path.to_string_lossy()),
+                    }));
+                    continue;
+                }
+                match read_rollout_usage_history(&path, &record.id) {
+                    Ok(report) => {
+                        reports.insert(record.id.clone(), report);
+                    }
+                    Err(error) => partial_errors.push(json!({
+                        "threadId": record.id,
+                        "message": error.to_string(),
+                    })),
+                }
+            }
+
+            let root_usage = reports
+                .get(&thread.id)
+                .expect("root rollout report must be available");
+            let mut total_usage = root_usage.total_usage;
+            let mut descendant_total_usage = TokenUsageTotals::default();
+            let mut last_turn_usage = root_usage.last_turn_usage;
+            let root_last_turn_id = root_usage.last_turn_id.clone();
+            let mut root_turn_by_thread = HashMap::<String, Option<String>>::new();
+            root_turn_by_thread.insert(thread.id.clone(), None);
+            let mut included_thread_ids = vec![thread.id.clone()];
+            let mut descendant_count = 0usize;
+            let mut last_turn_descendant_count = 0usize;
+            let mut unassociated_descendant_count = 0usize;
+            let mut active_thread_count = usize::from(root_usage.task_running);
+            let mut last_turn_running = root_usage.task_running;
+            let mut observed_at = root_usage.observed_at.clone();
+
+            for node in graph.iter().skip(1) {
+                let root_turn_id = if node.depth == 1 {
+                    root_usage
+                        .spawned_child_turns
+                        .get(&node.id)
+                        .cloned()
+                        .or_else(|| {
+                            (root_usage.turn_count <= 1 && !root_last_turn_id.is_empty())
+                                .then(|| root_last_turn_id.clone())
+                        })
+                } else {
+                    node.parent_id
+                        .as_ref()
+                        .and_then(|parent_id| root_turn_by_thread.get(parent_id))
+                        .cloned()
+                        .flatten()
+                };
+                root_turn_by_thread.insert(node.id.clone(), root_turn_id.clone());
+                let Some(report) = reports.get(&node.id) else {
+                    continue;
+                };
+                included_thread_ids.push(node.id.clone());
+                descendant_count += 1;
+                total_usage.add(report.total_usage);
+                descendant_total_usage.add(report.total_usage);
+                if report.task_running {
+                    active_thread_count += 1;
+                }
+                if report.observed_at > observed_at {
+                    observed_at = report.observed_at.clone();
+                }
+                if root_turn_id.as_deref() == Some(root_last_turn_id.as_str())
+                    && !root_last_turn_id.is_empty()
+                {
+                    last_turn_usage.add(report.total_usage);
+                    last_turn_descendant_count += 1;
+                    if report.task_running {
+                        last_turn_running = true;
+                    }
+                } else if root_turn_id.is_none() {
+                    unassociated_descendant_count += 1;
+                }
+            }
+
+            let mut summary = serde_json::Map::new();
+            summary.insert(
+                "totalUsage".to_string(),
+                token_usage_summary_value(total_usage),
+            );
+            summary.insert(
+                "lastTurnUsage".to_string(),
+                token_usage_summary_value(last_turn_usage),
+            );
+            summary.insert("lastTurnId".to_string(), json!(root_last_turn_id));
+            summary.insert("observedAt".to_string(), json!(observed_at));
+            summary.insert("turnCount".to_string(), json!(root_usage.turn_count));
+            if descendant_count > 0 {
+                summary.insert(
+                    "ownTotalUsage".to_string(),
+                    token_usage_summary_value(root_usage.total_usage),
+                );
+                summary.insert(
+                    "descendantTotalUsage".to_string(),
+                    token_usage_summary_value(descendant_total_usage),
+                );
+                summary.insert("descendantCount".to_string(), json!(descendant_count));
+                summary.insert(
+                    "lastTurnDescendantCount".to_string(),
+                    json!(last_turn_descendant_count),
+                );
+                summary.insert("includedThreadIds".to_string(), json!(included_thread_ids));
+                if unassociated_descendant_count > 0 {
+                    summary.insert(
+                        "unassociatedDescendantCount".to_string(),
+                        json!(unassociated_descendant_count),
+                    );
+                }
+            }
+            if active_thread_count > 0 {
+                summary.insert("isRunning".to_string(), json!(true));
+                summary.insert("activeThreadCount".to_string(), json!(active_thread_count));
+                summary.insert("lastTurnRunning".to_string(), json!(last_turn_running));
+            }
+            if !partial_errors.is_empty() {
+                summary.insert("partialErrors".to_string(), json!(partial_errors));
+            }
             Ok(json!({
                 "status": "ok",
-                "session_id": thread_id,
+                "session_id": thread.id,
+                "requested_session_id": requested_thread_id,
+                "title": thread.title,
+                "matched_by": thread.matched_by,
+                "thread_updated_at_ms": thread.updated_at_ms,
+                "db_path": self.db_path.to_string_lossy().to_string(),
                 "rollout_path": rollout_path,
-                "history": history,
+                "history": root_usage.history,
+                "summary": Value::Object(summary),
             }))
         })();
         result.unwrap_or_else(|err| {
@@ -724,6 +916,174 @@ impl SQLiteStorageAdapter {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ThreadUsageRecord {
+    id: String,
+    title: String,
+    rollout_path: Option<String>,
+    updated_at_ms: i64,
+    matched_by: &'static str,
+}
+
+#[derive(Debug)]
+struct ThreadUsageGraphNode {
+    id: String,
+    parent_id: Option<String>,
+    depth: usize,
+    record: Option<ThreadUsageRecord>,
+}
+
+fn thread_usage_graph(
+    db: &Connection,
+    root: &ThreadUsageRecord,
+) -> anyhow::Result<Vec<ThreadUsageGraphNode>> {
+    let mut nodes = vec![ThreadUsageGraphNode {
+        id: root.id.clone(),
+        parent_id: None,
+        depth: 0,
+        record: Some(root.clone()),
+    }];
+    if !has_table(db, "thread_spawn_edges")?
+        || !has_columns(
+            db,
+            "thread_spawn_edges",
+            &["parent_thread_id", "child_thread_id"],
+        )?
+    {
+        return Ok(nodes);
+    }
+    let columns = table_columns(db, "threads")?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let updated_at_ms = if columns.contains("updated_at_ms") {
+        "t.updated_at_ms"
+    } else if columns.contains("updated_at") {
+        "t.updated_at * 1000"
+    } else if columns.contains("created_at_ms") {
+        "t.created_at_ms"
+    } else {
+        "NULL"
+    };
+    let query = format!(
+        "SELECT e.child_thread_id, t.id, t.title, t.rollout_path, {updated_at_ms}
+         FROM thread_spawn_edges AS e
+         LEFT JOIN threads AS t ON t.id = e.child_thread_id
+         WHERE e.parent_thread_id = ?1
+         ORDER BY e.child_thread_id"
+    );
+    let mut queue = VecDeque::from([(root.id.clone(), 0usize)]);
+    let mut visited = HashSet::from([root.id.clone()]);
+    while let Some((parent_id, depth)) = queue.pop_front() {
+        if depth >= 64 {
+            continue;
+        }
+        let mut statement = db.prepare(&query)?;
+        let children = statement.query_map([parent_id.as_str()], |row| {
+            let child_id: String = row.get(0)?;
+            let record_id: Option<String> = row.get(1)?;
+            let record = match record_id {
+                Some(id) => Some(ThreadUsageRecord {
+                    id,
+                    title: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    rollout_path: row.get(3)?,
+                    updated_at_ms: row.get::<_, Option<i64>>(4)?.unwrap_or_default(),
+                    matched_by: "descendant",
+                }),
+                None => None,
+            };
+            Ok((child_id, record))
+        })?;
+        for child in children {
+            let (child_id, record) = child?;
+            if !visited.insert(child_id.clone()) {
+                continue;
+            }
+            let child_depth = depth + 1;
+            nodes.push(ThreadUsageGraphNode {
+                id: child_id.clone(),
+                parent_id: Some(parent_id.clone()),
+                depth: child_depth,
+                record,
+            });
+            queue.push_back((child_id, child_depth));
+        }
+    }
+    Ok(nodes)
+}
+
+fn resolve_thread_usage_record(
+    db: &Connection,
+    session: &SessionRef,
+) -> anyhow::Result<Option<ThreadUsageRecord>> {
+    let columns = table_columns(db, "threads")?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let updated_at_ms = if columns.contains("updated_at_ms") {
+        "updated_at_ms"
+    } else if columns.contains("updated_at") {
+        "updated_at * 1000"
+    } else if columns.contains("created_at_ms") {
+        "created_at_ms"
+    } else {
+        "NULL"
+    };
+    let select =
+        format!("SELECT id, title, rollout_path, {updated_at_ms} AS sort_value FROM threads");
+    let thread_id = normalize_codex_thread_id(&session.session_id);
+    let exact = db
+        .query_row(&format!("{select} WHERE id = ?1"), [&thread_id], |row| {
+            Ok(ThreadUsageRecord {
+                id: row.get(0)?,
+                title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                rollout_path: row.get(2)?,
+                updated_at_ms: row.get::<_, Option<i64>>(3)?.unwrap_or_default(),
+                matched_by: "id",
+            })
+        })
+        .optional()?;
+    if exact.is_some() {
+        return Ok(exact);
+    }
+    if !is_temporary_codex_thread_id(&thread_id) {
+        return Ok(None);
+    }
+    let title = session.title.trim();
+    let title_prefix = title.trim_end_matches('…').trim_end_matches("...").trim();
+    if title_prefix.chars().count() < 8 {
+        return Ok(None);
+    }
+    let fallback = db
+        .query_row(
+            &format!(
+                "{select}
+                 WHERE COALESCE(title, '') <> ''
+                   AND (
+                     title = ?1
+                     OR substr(title, 1, length(?2)) = ?2
+                     OR instr(?1, title) = 1
+                   )
+                 ORDER BY sort_value DESC, id DESC
+                 LIMIT 1"
+            ),
+            (title, title_prefix),
+            |row| {
+                Ok(ThreadUsageRecord {
+                    id: row.get(0)?,
+                    title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    rollout_path: row.get(2)?,
+                    updated_at_ms: row.get::<_, Option<i64>>(3)?.unwrap_or_default(),
+                    matched_by: "title",
+                })
+            },
+        )
+        .optional()?;
+    Ok(fallback)
+}
+
+fn is_temporary_codex_thread_id(thread_id: &str) -> bool {
+    thread_id.starts_with("client-new-thread:") || thread_id.starts_with("new-thread:")
+}
+
 fn optional_column_expression<'a>(
     columns: &HashSet<String>,
     column: &'a str,
@@ -769,11 +1129,159 @@ fn local_deleted(session_id: &str, token: &str, backup_path: &Path) -> DeleteRes
     }
 }
 
-fn read_rollout_usage_history(rollout_path: &Path, thread_id: &str) -> anyhow::Result<Vec<Value>> {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct TokenUsageTotals {
+    input_tokens: u64,
+    output_tokens: u64,
+    total_tokens: u64,
+    cached_tokens: u64,
+    cache_creation_tokens: u64,
+}
+
+impl TokenUsageTotals {
+    fn from_json(value: Option<&Value>) -> Self {
+        let input_tokens = usage_u64(value, "input_tokens");
+        let output_tokens = usage_u64(value, "output_tokens");
+        let total_tokens =
+            usage_u64(value, "total_tokens").max(input_tokens.saturating_add(output_tokens));
+        let cached_tokens = value
+            .and_then(|usage| {
+                usage
+                    .get("cached_input_tokens")
+                    .or_else(|| usage.get("cache_read_input_tokens"))
+            })
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        let cache_creation_tokens = value
+            .and_then(|usage| {
+                usage
+                    .get("cache_write_input_tokens")
+                    .or_else(|| usage.get("cache_creation_input_tokens"))
+            })
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        Self {
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            cached_tokens,
+            cache_creation_tokens,
+        }
+    }
+
+    fn add(&mut self, other: Self) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
+        self.cached_tokens = self.cached_tokens.saturating_add(other.cached_tokens);
+        self.cache_creation_tokens = self
+            .cache_creation_tokens
+            .saturating_add(other.cache_creation_tokens);
+    }
+
+    fn fill_missing_from(&mut self, fallback: Self) {
+        if self.input_tokens == 0 {
+            self.input_tokens = fallback.input_tokens;
+        }
+        if self.output_tokens == 0 {
+            self.output_tokens = fallback.output_tokens;
+        }
+        if self.total_tokens == 0 {
+            self.total_tokens = fallback.total_tokens;
+        }
+        if self.cached_tokens == 0 {
+            self.cached_tokens = fallback.cached_tokens;
+        }
+        if self.cache_creation_tokens == 0 {
+            self.cache_creation_tokens = fallback.cache_creation_tokens;
+        }
+    }
+
+    fn has_usage(self) -> bool {
+        self.input_tokens > 0
+            || self.output_tokens > 0
+            || self.total_tokens > 0
+            || self.cached_tokens > 0
+            || self.cache_creation_tokens > 0
+    }
+}
+
+#[derive(Debug)]
+struct RolloutUsageReport {
+    history: Vec<Value>,
+    total_usage: TokenUsageTotals,
+    last_turn_usage: TokenUsageTotals,
+    last_turn_id: String,
+    observed_at: String,
+    turn_count: usize,
+    task_running: bool,
+    spawned_child_turns: HashMap<String, String>,
+}
+
+fn usage_u64(value: Option<&Value>, key: &str) -> u64 {
+    value
+        .and_then(|usage| usage.get(key))
+        .and_then(Value::as_u64)
+        .unwrap_or_default()
+}
+
+fn token_usage_summary_value(usage: TokenUsageTotals) -> Value {
+    json!({
+        "inputTokens": usage.input_tokens,
+        "outputTokens": usage.output_tokens,
+        "totalTokens": usage.total_tokens,
+        "cachedTokens": usage.cached_tokens,
+        "cacheCreationTokens": usage.cache_creation_tokens,
+        "cacheTokens": usage.cached_tokens.saturating_add(usage.cache_creation_tokens),
+    })
+}
+
+fn spawned_child_thread_id(payload: &Value) -> Option<String> {
+    fn from_value(value: &Value) -> Option<String> {
+        [
+            "agent_id",
+            "agentId",
+            "thread_id",
+            "threadId",
+            "child_thread_id",
+            "childThreadId",
+        ]
+        .into_iter()
+        .find_map(|key| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+    }
+
+    let output = payload.get("output")?;
+    if let Some(thread_id) = from_value(output) {
+        return Some(thread_id);
+    }
+    let text = output.as_str()?.trim();
+    let parsed = serde_json::from_str::<Value>(text).ok()?;
+    from_value(&parsed)
+}
+
+fn read_rollout_usage_history(
+    rollout_path: &Path,
+    thread_id: &str,
+) -> anyhow::Result<RolloutUsageReport> {
     let file = File::open(rollout_path)?;
     let reader = BufReader::new(file);
     let mut current_turn_id = String::new();
     let mut history = Vec::new();
+    let mut turn_ids = HashSet::new();
+    let mut turn_usage = HashMap::<String, TokenUsageTotals>::new();
+    let mut active_task_turns = HashSet::new();
+    let mut spawned_child_turns = HashMap::new();
+    let mut accumulated_total = TokenUsageTotals::default();
+    let mut latest_cumulative_total = None;
+    let mut latest_turn_id = String::new();
+    let mut latest_observed_at = String::new();
 
     for line in reader.lines() {
         let line = line?;
@@ -796,16 +1304,48 @@ fn read_rollout_usage_history(rollout_path: &Path, thread_id: &str) -> anyhow::R
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
+                if !current_turn_id.is_empty() {
+                    latest_turn_id = current_turn_id.clone();
+                }
             }
             "event_msg" => {
-                let payload = match value.get("payload") {
-                    Some(payload)
-                        if payload.get("type").and_then(Value::as_str) == Some("token_count") =>
-                    {
-                        payload
-                    }
-                    _ => continue,
+                let Some(payload) = value.get("payload") else {
+                    continue;
                 };
+                let event_type = payload
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if event_type == "task_started" {
+                    let turn_id = payload
+                        .get("turn_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    if !turn_id.is_empty() {
+                        active_task_turns.insert(turn_id.clone());
+                        latest_turn_id = turn_id;
+                    }
+                    continue;
+                }
+                if matches!(
+                    event_type,
+                    "task_complete" | "task_completed" | "task_aborted" | "turn_aborted"
+                ) {
+                    let turn_id = payload
+                        .get("turn_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if turn_id.is_empty() {
+                        active_task_turns.clear();
+                    } else {
+                        active_task_turns.remove(turn_id);
+                    }
+                    continue;
+                }
+                if event_type != "token_count" {
+                    continue;
+                }
                 let info = match payload.get("info") {
                     Some(info) => info,
                     None => continue,
@@ -814,60 +1354,101 @@ fn read_rollout_usage_history(rollout_path: &Path, thread_id: &str) -> anyhow::R
                 let total = info.get("total_token_usage");
                 let model_context_window = info
                     .get("model_context_window")
-                    .and_then(Value::as_i64)
+                    .and_then(Value::as_u64)
                     .unwrap_or(0);
-                let input_tokens = last
-                    .and_then(|usage| usage.get("input_tokens"))
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0);
-                let output_tokens = last
-                    .and_then(|usage| usage.get("output_tokens"))
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0);
-                let total_tokens = last
-                    .and_then(|usage| usage.get("total_tokens"))
-                    .and_then(Value::as_i64)
-                    .unwrap_or_else(|| {
-                        total
-                            .and_then(|usage| usage.get("total_tokens"))
-                            .and_then(Value::as_i64)
-                            .unwrap_or(0)
-                    });
-                let cached_tokens = last
-                    .and_then(|usage| usage.get("cached_input_tokens"))
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0);
-                let context_used = total
-                    .and_then(|usage| usage.get("total_tokens"))
-                    .and_then(Value::as_i64)
-                    .unwrap_or(total_tokens);
-                if input_tokens <= 0 && output_tokens <= 0 && total_tokens <= 0 && context_used <= 0
-                {
+                let last_usage = TokenUsageTotals::from_json(last);
+                let total_usage = TokenUsageTotals::from_json(total);
+                let context_used = total_usage.total_tokens.max(last_usage.total_tokens);
+                if !last_usage.has_usage() && !total_usage.has_usage() {
                     continue;
                 }
+                if total_usage.has_usage() && latest_cumulative_total == Some(total_usage) {
+                    continue;
+                }
+                accumulated_total.add(last_usage);
+                if total_usage.has_usage() {
+                    latest_cumulative_total = Some(total_usage);
+                }
+                let usage_turn_id = if current_turn_id.is_empty() {
+                    latest_turn_id.clone()
+                } else {
+                    current_turn_id.clone()
+                };
+                if !usage_turn_id.is_empty() {
+                    turn_usage
+                        .entry(usage_turn_id.clone())
+                        .or_default()
+                        .add(last_usage);
+                    turn_ids.insert(usage_turn_id.clone());
+                    if latest_turn_id.is_empty() {
+                        latest_turn_id = usage_turn_id.clone();
+                    }
+                }
+                latest_observed_at = value
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
                 history.push(json!({
                     "source": "rollout-history",
                     "conversation_id": format!("local:{thread_id}"),
-                    "turn_id": current_turn_id,
-                    "observed_at": value.get("timestamp").and_then(Value::as_str).unwrap_or_default(),
+                    "turn_id": usage_turn_id,
+                    "observed_at": latest_observed_at,
                     "usage": {
-                        "inputTokens": input_tokens,
-                        "outputTokens": output_tokens,
-                        "totalTokens": total_tokens,
-                        "cachedTokens": cached_tokens,
-                        "cacheReadTokens": 0,
-                        "cacheCreationTokens": 0,
+                        "inputTokens": last_usage.input_tokens,
+                        "outputTokens": last_usage.output_tokens,
+                        "totalTokens": last_usage.total_tokens,
+                        "cachedTokens": last_usage.cached_tokens,
+                        "cacheReadTokens": last_usage.cached_tokens,
+                        "cacheCreationTokens": last_usage.cache_creation_tokens,
                         "contextUsed": context_used,
                         "contextLimit": model_context_window,
-                        "hasBreakdown": input_tokens > 0 || output_tokens > 0 || cached_tokens > 0,
+                        "hasBreakdown": last_usage.input_tokens > 0
+                            || last_usage.output_tokens > 0
+                            || last_usage.cached_tokens > 0
+                            || last_usage.cache_creation_tokens > 0,
                     }
                 }));
+            }
+            "response_item" => {
+                let Some(payload) = value.get("payload") else {
+                    continue;
+                };
+                if payload.get("type").and_then(Value::as_str) != Some("function_call_output") {
+                    continue;
+                }
+                let Some(child_thread_id) = spawned_child_thread_id(payload) else {
+                    continue;
+                };
+                let turn_id = payload
+                    .get("internal_chat_message_metadata_passthrough")
+                    .and_then(|metadata| metadata.get("turn_id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or(current_turn_id.as_str())
+                    .trim();
+                if !turn_id.is_empty() {
+                    spawned_child_turns
+                        .entry(child_thread_id)
+                        .or_insert_with(|| turn_id.to_string());
+                }
             }
             _ => {}
         }
     }
 
-    Ok(history)
+    let mut total_usage = latest_cumulative_total.unwrap_or(accumulated_total);
+    total_usage.fill_missing_from(accumulated_total);
+    let last_turn_usage = turn_usage.remove(&latest_turn_id).unwrap_or_default();
+    Ok(RolloutUsageReport {
+        history,
+        total_usage,
+        last_turn_usage,
+        last_turn_id: latest_turn_id,
+        observed_at: latest_observed_at,
+        turn_count: turn_ids.len(),
+        task_running: !active_task_turns.is_empty(),
+        spawned_child_turns,
+    })
 }
 
 fn failed_with_undo(

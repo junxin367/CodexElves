@@ -189,6 +189,7 @@ type BackendSettings = {
   codexAppMarkdownExport: boolean;
   codexAppProjectMove: boolean;
   codexAppConversationView: boolean;
+  codexAppTokenUsage: boolean;
   codexAppUpstreamWorktreeCreate: boolean;
   codexAppNativeMenuPlacement: boolean;
   codexAppServiceTierControls: boolean;
@@ -871,6 +872,7 @@ const defaultSettings: BackendSettings = {
   codexAppMarkdownExport: false,
   codexAppProjectMove: false,
   codexAppConversationView: true,
+  codexAppTokenUsage: false,
   codexAppUpstreamWorktreeCreate: false,
   codexAppNativeMenuPlacement: true,
   codexAppServiceTierControls: false,
@@ -1609,7 +1611,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
     case "startup_options":
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
-      return Promise.resolve(browserPreviewResult({ currentVersion: "0.3.0", updateAvailable: false }) as T);
+      return Promise.resolve(browserPreviewResult({ currentVersion: "0.3.1", updateAvailable: false }) as T);
     case "load_overview":
       return Promise.resolve(browserPreviewResult({
         codex_app: { status: "found", path: settings.codexAppPath },
@@ -1624,7 +1626,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.3.0",
+        current_version: "0.3.1",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -2103,7 +2105,7 @@ export function App() {
     }
   };
 
-  const refreshCodexRadar = async (silent = false, forceRefresh = false) => {
+  const refreshCodexRadar = async (forceRefresh = false) => {
     const result = await run(() =>
       call<CodexRadarResult>(
         "fetch_codex_radar",
@@ -2112,7 +2114,6 @@ export function App() {
     );
     if (result) {
       setCodexRadar(result);
-      if (!silent || !isSuccessStatus(result.status)) showResultNotice("降智雷达", result, { silentSuccess: true });
     }
   };
 
@@ -2327,7 +2328,7 @@ export function App() {
       await refreshSettings(true);
       await refreshScriptMarket(true);
     }
-    if (next === "radar") await refreshCodexRadar(true);
+    if (next === "radar") await refreshCodexRadar();
     if (next === "about") {
       await refreshOverview(true);
       await refreshLogs(true);
@@ -2991,7 +2992,7 @@ export function App() {
       await refreshProviderSyncTargets(true);
       await refreshLocalProxyStatus(true);
       if (route === "localProxy") await refreshLocalProxyLogs(true);
-      if (route === "radar") await refreshCodexRadar(true);
+      if (route === "radar") await refreshCodexRadar();
       if (route === "context") {
         await refreshPluginCacheInfos(true);
         await refreshRemoteContextOptions(true);
@@ -3105,7 +3106,7 @@ export function App() {
 
   const actions = useMemo(
     () => ({
-      refreshCurrent: () => (route === "radar" ? refreshCodexRadar(false, true) : navigate(route)),
+      refreshCurrent: () => (route === "radar" ? refreshCodexRadar(true) : navigate(route)),
       launch,
       restart,
       repairBackend,
@@ -3244,7 +3245,7 @@ export function App() {
       forceRefreshPluginCache,
       syncLiveContextEntries,
       refreshScriptMarket,
-      refreshCodexRadar: () => refreshCodexRadar(false, true),
+      refreshCodexRadar: () => refreshCodexRadar(true),
       installMarketScript,
       setUserScriptEnabled,
       deleteUserScript,
@@ -4732,6 +4733,7 @@ function EnhanceScreen({
             <FeatureToggle title="Markdown 导出" detail="在会话列表显示导出按钮，导出带时间戳的 Markdown。" checked={form.codexAppMarkdownExport} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppMarkdownExport", value)} />
             <FeatureToggle title="会话项目移动" detail="把会话移动到普通对话或其他本地项目。" checked={form.codexAppProjectMove} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppProjectMove", value)} />
             <FeatureToggle title="对话居中宽度" detail="把主对话和输入框限制到固定最大宽度，适合大屏阅读。" checked={form.codexAppConversationView} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppConversationView", value)} />
+            <FeatureToggle title="会话 Token 统计" detail="在右上角置顶摘要底部紧凑显示当前会话（含递归子代理）的总消耗和最近一轮输入、输出、缓存；默认关闭。" checked={form.codexAppTokenUsage} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppTokenUsage", value)} />
             <FeatureToggle title="Upstream worktree" detail="从最新 upstream 分支创建 Git worktree。" checked={form.codexAppUpstreamWorktreeCreate} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppUpstreamWorktreeCreate", value)} />
             <FeatureToggle title="原生菜单栏位置" detail="把 CodexElves 菜单插入 Codex 顶部原生菜单栏。" checked={form.codexAppNativeMenuPlacement} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppNativeMenuPlacement", value)} />
           </div>
@@ -4818,6 +4820,15 @@ function CodexRadarScreen({ radar, actions }: { radar: CodexRadarResult | null; 
   const snapshot = radar?.snapshot;
   const modelIq = snapshot?.modelIq;
   const latest = modelIq?.latest ?? null;
+  const radarFailed = radar?.status === "failed";
+  const radarTitle = radarFailed
+    ? "降智雷达读取失败"
+    : `${latest?.model || "模型未记录"} · ${latest?.reasoningEffort || "推理档位未记录"}`;
+  const radarSummary = radarFailed
+    ? radar?.message ?? "请稍后重试。"
+    : latest
+      ? `最近样本 ${latest.date}，通过 ${latest.passed}/${latest.tasks} 项，耗时 ${latest.wallTimeHuman || "-"}`
+      : "点击刷新读取 codexradar.com 的最新模型 IQ 数据。";
   const recentDays = modelIq?.recentDays ?? [];
   const comparisons = Object.entries(modelIq?.comparisons ?? {})
     .map(([key, comparison]) => ({ key, ...comparison }))
@@ -4835,8 +4846,8 @@ function CodexRadarScreen({ radar, actions }: { radar: CodexRadarResult | null; 
           </div>
           <div className="radar-hero-main">
             <div>
-              <h2>{latest?.model || "模型未记录"} · {latest?.reasoningEffort || "推理档位未记录"}</h2>
-              <p>{latest ? `最近样本 ${latest.date}，通过 ${latest.passed}/${latest.tasks} 项，耗时 ${latest.wallTimeHuman || "-"}` : "点击刷新读取 codexradar.com 的最新模型 IQ 数据。"}</p>
+              <h2>{radarTitle}</h2>
+              <p className={radarFailed ? "radar-error-message" : undefined}>{radarSummary}</p>
             </div>
             <Toolbar>
               <Button onClick={() => void actions.refreshCodexRadar()} variant="secondary">
@@ -9559,7 +9570,7 @@ function formatProxyBody(text: string) {
 }
 
 function formatProxyResponseBody(text: string) {
-  return formatProxyBody(extractProxySseJsonBody(text) ?? text);
+  return formatProxyBody(extractProxySseJsonBody(text) ?? extractProxyJsonLinesBody(text) ?? text);
 }
 
 function extractProxySseJsonBody(text: string) {
@@ -9567,7 +9578,6 @@ function extractProxySseJsonBody(text: string) {
   if (!trimmed.includes("data:")) return null;
 
   const events: unknown[] = [];
-  let terminalResponse: unknown = null;
   trimmed.split(/\n\s*\n/).forEach((block) => {
     const dataLines = block
       .split(/\r?\n/)
@@ -9578,17 +9588,46 @@ function extractProxySseJsonBody(text: string) {
     if (!dataLines.length) return;
     const rawData = dataLines.join("\n");
     try {
-      const parsed = JSON.parse(rawData) as { type?: unknown; response?: unknown };
-      if (
-        typeof parsed.type === "string" &&
-        ["response.completed", "response.incomplete", "response.failed"].includes(parsed.type) &&
-        parsed.response
-      ) {
-        terminalResponse = parsed.response;
-      }
-      events.push(parsed);
+      events.push(JSON.parse(rawData));
     } catch {
       events.push(rawData);
+    }
+  });
+
+  return serializeProxyEventBody(events);
+}
+
+function extractProxyJsonLinesBody(text: string) {
+  const lines = text
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length < 2) return null;
+
+  const events: unknown[] = [];
+  for (const line of lines) {
+    try {
+      events.push(JSON.parse(line));
+    } catch {
+      return null;
+    }
+  }
+
+  return serializeProxyEventBody(events);
+}
+
+function serializeProxyEventBody(events: unknown[]) {
+  let terminalResponse: unknown = null;
+  events.forEach((event) => {
+    if (!event || typeof event !== "object" || Array.isArray(event)) return;
+    const parsed = event as { type?: unknown; response?: unknown };
+    if (
+      typeof parsed.type === "string" &&
+      ["response.completed", "response.incomplete", "response.failed"].includes(parsed.type) &&
+      parsed.response
+    ) {
+      terminalResponse = parsed.response;
     }
   });
 

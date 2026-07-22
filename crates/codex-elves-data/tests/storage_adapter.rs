@@ -1,7 +1,7 @@
 use codex_elves_core::models::{DeleteStatus, SessionRef};
 use codex_elves_data::{
-    BackupStore, SQLiteStorageAdapter, delete_local_from_paths,
-    move_codex_thread_workspace_from_paths,
+    BackupStore, SQLiteStorageAdapter, codex_thread_usage_history_from_paths,
+    delete_local_from_paths, move_codex_thread_workspace_from_paths,
 };
 use rusqlite::Connection;
 use serde_json::json;
@@ -827,8 +827,34 @@ fn archived_lookup_workspace_move_and_sort_keys_match_expected_shape() {
         json!({
             "status": "ok",
             "session_id": "t1",
+            "requested_session_id": "t1",
+            "title": "Codex Thread",
+            "matched_by": "id",
+            "thread_updated_at_ms": 100000,
+            "db_path": db_path.to_string_lossy().to_string(),
             "rollout_path": rollout_path.to_string_lossy().to_string(),
-            "history": []
+            "history": [],
+            "summary": {
+                "totalUsage": {
+                    "inputTokens": 0,
+                    "outputTokens": 0,
+                    "totalTokens": 0,
+                    "cachedTokens": 0,
+                    "cacheCreationTokens": 0,
+                    "cacheTokens": 0
+                },
+                "lastTurnUsage": {
+                    "inputTokens": 0,
+                    "outputTokens": 0,
+                    "totalTokens": 0,
+                    "cachedTokens": 0,
+                    "cacheCreationTokens": 0,
+                    "cacheTokens": 0
+                },
+                "lastTurnId": "",
+                "observedAt": "",
+                "turnCount": 0
+            }
         })
     );
 }
@@ -857,6 +883,11 @@ fn thread_usage_history_reads_rollout_token_count_events() {
         json!({
             "status": "ok",
             "session_id": "t1",
+            "requested_session_id": "t1",
+            "title": "Codex Thread",
+            "matched_by": "id",
+            "thread_updated_at_ms": 100000,
+            "db_path": db_path.to_string_lossy().to_string(),
             "rollout_path": rollout_path.to_string_lossy().to_string(),
             "history": [
                 {
@@ -869,7 +900,7 @@ fn thread_usage_history_reads_rollout_token_count_events() {
                         "outputTokens": 120,
                         "totalTokens": 1320,
                         "cachedTokens": 900,
-                        "cacheReadTokens": 0,
+                        "cacheReadTokens": 900,
                         "cacheCreationTokens": 0,
                         "contextUsed": 5500,
                         "contextLimit": 258400,
@@ -886,14 +917,218 @@ fn thread_usage_history_reads_rollout_token_count_events() {
                         "outputTokens": 250,
                         "totalTokens": 2250,
                         "cachedTokens": 1200,
-                        "cacheReadTokens": 0,
+                        "cacheReadTokens": 1200,
                         "cacheCreationTokens": 0,
                         "contextUsed": 7750,
                         "contextLimit": 258400,
                         "hasBreakdown": true
                     }
                 }
-            ]
+            ],
+            "summary": {
+                "totalUsage": {
+                    "inputTokens": 7000,
+                    "outputTokens": 750,
+                    "totalTokens": 7750,
+                    "cachedTokens": 2500,
+                    "cacheCreationTokens": 0,
+                    "cacheTokens": 2500
+                },
+                "lastTurnUsage": {
+                    "inputTokens": 2000,
+                    "outputTokens": 250,
+                    "totalTokens": 2250,
+                    "cachedTokens": 1200,
+                    "cacheCreationTokens": 0,
+                    "cacheTokens": 1200
+                },
+                "lastTurnId": "turn-2",
+                "observedAt": "2026-06-02T05:01:00Z",
+                "turnCount": 2
+            }
         })
+    );
+}
+
+#[test]
+fn thread_usage_history_groups_all_calls_in_latest_turn() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let rollout_path = tmp.path().join("rollout.jsonl");
+    fs::write(
+        &rollout_path,
+        concat!(
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"turn-1\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":100,\"total_tokens\":1100},\"last_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":100,\"total_tokens\":1100}}}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"turn-2\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:01:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":3000,\"cached_input_tokens\":1400,\"output_tokens\":300,\"total_tokens\":3300},\"last_token_usage\":{\"input_tokens\":2000,\"cached_input_tokens\":1000,\"output_tokens\":200,\"total_tokens\":2200}}}}\n",
+            "{\"timestamp\":\"2026-06-02T05:01:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":3000,\"cached_input_tokens\":1400,\"output_tokens\":300,\"total_tokens\":3300},\"last_token_usage\":{\"input_tokens\":2000,\"cached_input_tokens\":1000,\"output_tokens\":200,\"total_tokens\":2200}}}}\n",
+            "{\"timestamp\":\"2026-06-02T05:02:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":6000,\"cached_input_tokens\":2900,\"output_tokens\":650,\"total_tokens\":6650},\"last_token_usage\":{\"input_tokens\":3000,\"cached_input_tokens\":1500,\"output_tokens\":350,\"total_tokens\":3350}}}}\n"
+        ),
+    )
+    .unwrap();
+    create_codex_thread_db(&db_path, &rollout_path);
+    let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")));
+
+    let result = adapter.codex_thread_usage_history(&session("local:t1", "Codex Thread"));
+
+    assert_eq!(result["summary"]["lastTurnId"], "turn-2");
+    assert_eq!(result["summary"]["turnCount"], 2);
+    assert_eq!(result["summary"]["totalUsage"]["totalTokens"], 6650);
+    assert_eq!(result["summary"]["totalUsage"]["cachedTokens"], 2900);
+    assert_eq!(result["summary"]["lastTurnUsage"]["inputTokens"], 5000);
+    assert_eq!(result["summary"]["lastTurnUsage"]["outputTokens"], 550);
+    assert_eq!(result["summary"]["lastTurnUsage"]["totalTokens"], 5550);
+    assert_eq!(result["summary"]["lastTurnUsage"]["cachedTokens"], 2500);
+}
+
+#[test]
+fn thread_usage_history_searches_all_databases_and_resolves_temporary_id_by_title() {
+    let tmp = tempdir().unwrap();
+    let unsupported_path = tmp.path().join("automation.sqlite");
+    let supported_path = tmp.path().join("state_5.sqlite");
+    let rollout_path = tmp.path().join("rollout.jsonl");
+    let db = Connection::open(&unsupported_path).unwrap();
+    db.execute(
+        "CREATE TABLE automation_runs (thread_id TEXT PRIMARY KEY)",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    fs::write(
+        &rollout_path,
+        "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"turn-1\"}}\n{\"timestamp\":\"2026-06-02T05:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":100,\"total_tokens\":1100},\"last_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":100,\"total_tokens\":1100}}}}\n",
+    )
+    .unwrap();
+    create_codex_thread_db(&supported_path, &rollout_path);
+
+    let result = codex_thread_usage_history_from_paths(
+        vec![unsupported_path, supported_path.clone()],
+        BackupStore::new(tmp.path().join("backups")),
+        &session("local:client-new-thread:temporary-123", "Codex Thread"),
+    );
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["session_id"], "t1");
+    assert_eq!(
+        result["requested_session_id"],
+        "client-new-thread:temporary-123"
+    );
+    assert_eq!(result["matched_by"], "title");
+    assert_eq!(
+        result["db_path"],
+        supported_path.to_string_lossy().to_string()
+    );
+    assert_eq!(result["summary"]["totalUsage"]["totalTokens"], 1100);
+}
+
+#[test]
+fn thread_usage_history_includes_recursive_subagents_in_parent_totals_and_latest_turn() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let root_rollout = tmp.path().join("root-rollout.jsonl");
+    let old_child_rollout = tmp.path().join("old-child-rollout.jsonl");
+    let child_rollout = tmp.path().join("child-rollout.jsonl");
+    let grandchild_rollout = tmp.path().join("grandchild-rollout.jsonl");
+    fs::write(
+        &root_rollout,
+        concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-1\"}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"turn-1\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":100,\"total_tokens\":1100},\"last_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":100,\"total_tokens\":1100}}}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"output\":\"{\\\"agent_id\\\":\\\"old-child\\\"}\",\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"turn-1\"}}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-1\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-2\"}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"turn-2\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:01:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":3000,\"cached_input_tokens\":1400,\"output_tokens\":300,\"total_tokens\":3300},\"last_token_usage\":{\"input_tokens\":2000,\"cached_input_tokens\":1000,\"output_tokens\":200,\"total_tokens\":2200}}}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"output\":\"{\\\"agent_id\\\":\\\"child\\\"}\",\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"turn-2\"}}}\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &old_child_rollout,
+        concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"old-turn\"}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"old-turn\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:00:30Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":200,\"cached_input_tokens\":50,\"output_tokens\":20,\"total_tokens\":220},\"last_token_usage\":{\"input_tokens\":200,\"cached_input_tokens\":50,\"output_tokens\":20,\"total_tokens\":220}}}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"old-turn\"}}\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &child_rollout,
+        concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"child-turn\"}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"child-turn\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:02:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":500,\"output_tokens\":100,\"total_tokens\":1100},\"last_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":500,\"output_tokens\":100,\"total_tokens\":1100}}}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"output\":\"{\\\"agent_id\\\":\\\"grandchild\\\"}\",\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"child-turn\"}}}\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &grandchild_rollout,
+        concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"grandchild-turn\"}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"grandchild-turn\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:03:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":500,\"cached_input_tokens\":200,\"output_tokens\":50,\"total_tokens\":550},\"last_token_usage\":{\"input_tokens\":500,\"cached_input_tokens\":200,\"output_tokens\":50,\"total_tokens\":550}}}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"grandchild-turn\"}}\n"
+        ),
+    )
+    .unwrap();
+    create_codex_thread_db(&db_path, &root_rollout);
+    let db = Connection::open(&db_path).unwrap();
+    db.execute(
+        "INSERT INTO threads (id, rollout_path, title, cwd, archived, archived_at, updated_at, updated_at_ms) VALUES ('old-child', ?1, 'Old child', '/old/project', 0, NULL, 101, 101000)",
+        [old_child_rollout.to_string_lossy().to_string()],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO threads (id, rollout_path, title, cwd, archived, archived_at, updated_at, updated_at_ms) VALUES ('child', ?1, 'Child', '/old/project', 0, NULL, 102, 102000)",
+        [child_rollout.to_string_lossy().to_string()],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO threads (id, rollout_path, title, cwd, archived, archived_at, updated_at, updated_at_ms) VALUES ('grandchild', ?1, 'Grandchild', '/old/project', 0, NULL, 103, 103000)",
+        [grandchild_rollout.to_string_lossy().to_string()],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id, status) VALUES ('t1', 'old-child', 'cancelled')",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id, status) VALUES ('child', 'grandchild', 'unknown')",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")));
+
+    let result = adapter.codex_thread_usage_history(&session("local:t1", "Codex Thread"));
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["summary"]["totalUsage"]["totalTokens"], 5170);
+    assert_eq!(result["summary"]["ownTotalUsage"]["totalTokens"], 3300);
+    assert_eq!(
+        result["summary"]["descendantTotalUsage"]["totalTokens"],
+        1870
+    );
+    assert_eq!(result["summary"]["lastTurnId"], "turn-2");
+    assert_eq!(result["summary"]["lastTurnUsage"]["totalTokens"], 3850);
+    assert_eq!(result["summary"]["descendantCount"], 3);
+    assert_eq!(result["summary"]["lastTurnDescendantCount"], 2);
+    assert_eq!(result["summary"]["isRunning"], true);
+    assert_eq!(result["summary"]["activeThreadCount"], 2);
+    assert_eq!(result["summary"]["lastTurnRunning"], true);
+    assert_eq!(result["summary"]["observedAt"], "2026-06-02T05:03:00Z");
+    assert_eq!(
+        result["summary"]["includedThreadIds"],
+        json!(["t1", "child", "old-child", "grandchild"])
+    );
+    assert!(
+        result["summary"]
+            .get("unassociatedDescendantCount")
+            .is_none()
     );
 }

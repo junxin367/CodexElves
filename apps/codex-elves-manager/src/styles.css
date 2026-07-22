@@ -4540,6 +4540,11 @@ body {
   line-height: 1.5;
 }
 
+.radar-hero-main p.radar-error-message {
+  color: hsl(var(--destructive));
+  font-weight: 700;
+}
+
 .radar-hero-main .toolbar {
   margin-top: 0;
 }
