@@ -1058,19 +1058,37 @@ fn thread_usage_history_includes_recursive_subagents_in_parent_totals_and_latest
     fs::write(
         &child_rollout,
         concat!(
-            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"child-turn\"}}\n",
-            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"child-turn\"}}\n",
-            "{\"timestamp\":\"2026-06-02T05:02:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":500,\"output_tokens\":100,\"total_tokens\":1100},\"last_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":500,\"output_tokens\":100,\"total_tokens\":1100}}}}\n",
-            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"output\":\"{\\\"agent_id\\\":\\\"grandchild\\\"}\",\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"child-turn\"}}}\n"
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"child\",\"forked_from_id\":\"t1\"}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"turn-1\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":100,\"total_tokens\":1100},\"last_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":100,\"total_tokens\":1100}}}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"turn-2\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:01:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":3000,\"cached_input_tokens\":1400,\"output_tokens\":300,\"total_tokens\":3300},\"last_token_usage\":{\"input_tokens\":2000,\"cached_input_tokens\":1000,\"output_tokens\":200,\"total_tokens\":2200}}}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"child-turn-1\"}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"child-turn-1\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:01:30Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":3550,\"cached_input_tokens\":1700,\"output_tokens\":350,\"total_tokens\":3900},\"last_token_usage\":{\"input_tokens\":550,\"cached_input_tokens\":300,\"output_tokens\":50,\"total_tokens\":600}}}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"child-turn-1\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"child-turn-2\"}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"child-turn-2\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:02:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":4000,\"cached_input_tokens\":1900,\"output_tokens\":400,\"total_tokens\":4400},\"last_token_usage\":{\"input_tokens\":450,\"cached_input_tokens\":200,\"output_tokens\":50,\"total_tokens\":500}}}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"output\":\"{\\\"agent_id\\\":\\\"grandchild\\\"}\",\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"child-turn-2\"}}}\n"
         ),
     )
     .unwrap();
     fs::write(
         &grandchild_rollout,
         concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"grandchild\",\"forked_from_id\":\"child\"}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"turn-1\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":100,\"total_tokens\":1100},\"last_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":100,\"total_tokens\":1100}}}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"turn-2\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:01:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":3000,\"cached_input_tokens\":1400,\"output_tokens\":300,\"total_tokens\":3300},\"last_token_usage\":{\"input_tokens\":2000,\"cached_input_tokens\":1000,\"output_tokens\":200,\"total_tokens\":2200}}}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"child-turn-1\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:01:30Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":3550,\"cached_input_tokens\":1700,\"output_tokens\":350,\"total_tokens\":3900},\"last_token_usage\":{\"input_tokens\":550,\"cached_input_tokens\":300,\"output_tokens\":50,\"total_tokens\":600}}}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"child-turn-2\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:02:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":4000,\"cached_input_tokens\":1900,\"output_tokens\":400,\"total_tokens\":4400},\"last_token_usage\":{\"input_tokens\":450,\"cached_input_tokens\":200,\"output_tokens\":50,\"total_tokens\":500}}}}\n",
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"grandchild-turn\"}}\n",
             "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"grandchild-turn\"}}\n",
-            "{\"timestamp\":\"2026-06-02T05:03:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":500,\"cached_input_tokens\":200,\"output_tokens\":50,\"total_tokens\":550},\"last_token_usage\":{\"input_tokens\":500,\"cached_input_tokens\":200,\"output_tokens\":50,\"total_tokens\":550}}}}\n",
+            "{\"timestamp\":\"2026-06-02T05:03:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":4500,\"cached_input_tokens\":2100,\"output_tokens\":450,\"total_tokens\":4950},\"last_token_usage\":{\"input_tokens\":500,\"cached_input_tokens\":200,\"output_tokens\":50,\"total_tokens\":550}}}}\n",
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"grandchild-turn\"}}\n"
         ),
     )

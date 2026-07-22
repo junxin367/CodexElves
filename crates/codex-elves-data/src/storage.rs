@@ -606,10 +606,28 @@ impl SQLiteStorageAdapter {
                 let Some(report) = reports.get(&node.id) else {
                     continue;
                 };
+                let parent_report = node
+                    .parent_id
+                    .as_ref()
+                    .and_then(|parent_id| reports.get(parent_id));
+                let descendant_usage = match rollout_own_usage(
+                    report,
+                    parent_report,
+                    node.parent_id.as_deref(),
+                ) {
+                    Some(usage) => usage,
+                    None => {
+                        partial_errors.push(json!({
+                            "threadId": node.id,
+                            "message": "Forked thread usage was excluded because its inherited parent usage could not be isolated",
+                        }));
+                        TokenUsageTotals::default()
+                    }
+                };
                 included_thread_ids.push(node.id.clone());
                 descendant_count += 1;
-                total_usage.add(report.total_usage);
-                descendant_total_usage.add(report.total_usage);
+                total_usage.add(descendant_usage);
+                descendant_total_usage.add(descendant_usage);
                 if report.task_running {
                     active_thread_count += 1;
                 }
@@ -619,7 +637,7 @@ impl SQLiteStorageAdapter {
                 if root_turn_id.as_deref() == Some(root_last_turn_id.as_str())
                     && !root_last_turn_id.is_empty()
                 {
-                    last_turn_usage.add(report.total_usage);
+                    last_turn_usage.add(descendant_usage);
                     last_turn_descendant_count += 1;
                     if report.task_running {
                         last_turn_running = true;
@@ -1210,12 +1228,35 @@ impl TokenUsageTotals {
 struct RolloutUsageReport {
     history: Vec<Value>,
     total_usage: TokenUsageTotals,
+    turn_usage: HashMap<String, TokenUsageTotals>,
     last_turn_usage: TokenUsageTotals,
     last_turn_id: String,
     observed_at: String,
     turn_count: usize,
     task_running: bool,
     spawned_child_turns: HashMap<String, String>,
+    forked_from_id: Option<String>,
+}
+
+fn rollout_own_usage(
+    report: &RolloutUsageReport,
+    parent_report: Option<&RolloutUsageReport>,
+    parent_id: Option<&str>,
+) -> Option<TokenUsageTotals> {
+    let Some(forked_from_id) = report.forked_from_id.as_deref() else {
+        return Some(report.total_usage);
+    };
+    if parent_id != Some(forked_from_id) {
+        return None;
+    }
+    let parent_report = parent_report?;
+    let mut own_usage = TokenUsageTotals::default();
+    for (turn_id, usage) in &report.turn_usage {
+        if !parent_report.turn_usage.contains_key(turn_id) {
+            own_usage.add(*usage);
+        }
+    }
+    Some(own_usage)
 }
 
 fn usage_u64(value: Option<&Value>, key: &str) -> u64 {
@@ -1282,6 +1323,8 @@ fn read_rollout_usage_history(
     let mut latest_cumulative_total = None;
     let mut latest_turn_id = String::new();
     let mut latest_observed_at = String::new();
+    let mut forked_from_id = None;
+    let mut own_session_meta_seen = false;
 
     for line in reader.lines() {
         let line = line?;
@@ -1297,6 +1340,24 @@ fn read_rollout_usage_history(
             .and_then(Value::as_str)
             .unwrap_or_default()
         {
+            "session_meta" => {
+                let Some(payload) = value.get("payload") else {
+                    continue;
+                };
+                let session_id = payload
+                    .get("id")
+                    .or_else(|| payload.get("session_id"))
+                    .and_then(Value::as_str);
+                if !own_session_meta_seen && session_id == Some(thread_id) {
+                    own_session_meta_seen = true;
+                    forked_from_id = payload
+                        .get("forked_from_id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string);
+                }
+            }
             "turn_context" => {
                 current_turn_id = value
                     .get("payload")
@@ -1438,16 +1499,18 @@ fn read_rollout_usage_history(
 
     let mut total_usage = latest_cumulative_total.unwrap_or(accumulated_total);
     total_usage.fill_missing_from(accumulated_total);
-    let last_turn_usage = turn_usage.remove(&latest_turn_id).unwrap_or_default();
+    let last_turn_usage = turn_usage.get(&latest_turn_id).copied().unwrap_or_default();
     Ok(RolloutUsageReport {
         history,
         total_usage,
+        turn_usage,
         last_turn_usage,
         last_turn_id: latest_turn_id,
         observed_at: latest_observed_at,
         turn_count: turn_ids.len(),
         task_running: !active_task_turns.is_empty(),
         spawned_child_turns,
+        forked_from_id,
     })
 }
 
