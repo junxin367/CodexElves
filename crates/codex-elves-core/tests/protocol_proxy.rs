@@ -1697,36 +1697,36 @@ fn deepseek_reasoning_efforts_match_official_levels() {
 }
 
 #[test]
-fn gpt_reasoning_efforts_never_exceed_xhigh() {
-    let expected = vec!["minimal", "low", "medium", "high", "xhigh"];
+fn gpt56_reasoning_efforts_match_snapshot_capabilities() {
+    // gpt-5.6-sol 快照支持到 ultra；其它 gpt-5.6 支持到 max；普通 gpt 最高 xhigh。
     for model in [
         "gpt-5.6-sol",
         "openai/gpt-5.6-sol",
         "gpt-5.6-sol-2026-07-09",
+    ] {
+        assert_eq!(
+            supported_reasoning_efforts_for_model(model, UpstreamResponseProtocol::Responses),
+            vec!["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+            "{model} 应支持到 ultra"
+        );
+    }
+    for model in [
         "gpt-5.6",
         "gpt-5.6-terra",
         "gpt-5.6-luna-2026-07-09",
         "openai/gpt-5.6-custom",
-        "gpt-5.5",
     ] {
         assert_eq!(
             supported_reasoning_efforts_for_model(model, UpstreamResponseProtocol::Responses),
-            expected,
-            "{model} 最高只能支持 xhigh"
+            vec!["minimal", "low", "medium", "high", "xhigh", "max"],
+            "{model} 应支持到 max"
         );
     }
-
-    for requested in ["max", "ultra"] {
-        assert_eq!(
-            responses_to_chat_completions(json!({
-                "model": "gpt-5.6-sol",
-                "reasoning": { "effort": requested },
-                "input": "hi"
-            }))
-            .unwrap()["reasoning_effort"],
-            "xhigh"
-        );
-    }
+    assert_eq!(
+        supported_reasoning_efforts_for_model("gpt-5.5", UpstreamResponseProtocol::Responses),
+        vec!["minimal", "low", "medium", "high", "xhigh"],
+        "普通 gpt 最高 xhigh"
+    );
 }
 
 #[test]
@@ -5875,7 +5875,7 @@ async fn responses_proxy_directs_responses_models_to_responses_upstream() {
 }
 
 #[tokio::test]
-async fn responses_proxy_clamps_native_gpt_reasoning_to_xhigh() {
+async fn responses_proxy_clamps_unsupported_gpt_reasoning_to_model_max() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));

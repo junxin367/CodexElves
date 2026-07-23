@@ -4081,15 +4081,20 @@ mod tests {
             gpt56_levels
                 .last()
                 .and_then(|level| level["effort"].as_str()),
-            Some("xhigh")
+            Some("max")
         );
-        assert!(gpt56_levels.iter().all(|level| {
-            !matches!(
-                level.get("effort").and_then(Value::as_str),
-                Some("max" | "ultra")
-            )
-        }));
-        assert_eq!(gpt56["default_reasoning_level"], "xhigh");
+        assert!(
+            gpt56_levels
+                .iter()
+                .any(|level| { level.get("effort").and_then(Value::as_str) == Some("max") })
+        );
+        assert!(
+            gpt56_levels
+                .iter()
+                .all(|level| { level.get("effort").and_then(Value::as_str) != Some("ultra") })
+        );
+        // configured=ultra 时，gpt-5.6-custom 不支持 ultra，默认降到其上限 max。
+        assert_eq!(gpt56["default_reasoning_level"], "max");
 
         let sol = models
             .iter()
@@ -4098,20 +4103,20 @@ mod tests {
             })
             .expect("应存在 GPT-5.6 Sol 快照模型");
         assert_eq!(sol["context_window"], 372_000);
-        assert_eq!(sol["default_reasoning_level"], "xhigh");
         assert_eq!(
             sol["supported_reasoning_levels"]
                 .as_array()
                 .and_then(|levels| levels.last())
                 .and_then(|level| level["effort"].as_str()),
-            Some("xhigh")
+            Some("ultra")
         );
+        // sol 快照支持 ultra，configured=ultra 时默认保持 ultra。
+        assert_eq!(sol["default_reasoning_level"], "ultra");
 
         let luna = models
             .iter()
             .find(|model| model.get("slug").and_then(Value::as_str) == Some("gpt-5.6-luna"))
             .expect("应存在 GPT-5.6 Luna");
-        assert_eq!(luna["default_reasoning_level"], "xhigh");
         assert!(
             !luna["supported_reasoning_levels"]
                 .as_array()

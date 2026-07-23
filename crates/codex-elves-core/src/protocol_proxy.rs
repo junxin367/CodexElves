@@ -3257,26 +3257,50 @@ fn clamp_native_gpt_reasoning_effort(request: &mut Value) {
         return;
     }
 
+    // 按模型实际支持的推理等级降级：仅当请求的 effort 超出该模型能力时才降级。
+    // gpt-5.6 系列支持 max/ultra，不应被降到 xhigh；普通 gpt 仍降级到各自上限。
+    let supported =
+        supported_reasoning_efforts_for_model(model, UpstreamResponseProtocol::Responses);
     if let Some(effort) = request.pointer_mut("/reasoning/effort") {
-        clamp_gpt_reasoning_effort_value(effort);
+        clamp_gpt_reasoning_effort_value(effort, &supported);
     }
     for key in ["model_reasoning_effort", "reasoning_effort"] {
         if let Some(effort) = request.get_mut(key) {
-            clamp_gpt_reasoning_effort_value(effort);
+            clamp_gpt_reasoning_effort_value(effort, &supported);
         }
     }
     if request.get("reasoning").is_some_and(Value::is_string)
         && let Some(effort) = request.get_mut("reasoning")
     {
-        clamp_gpt_reasoning_effort_value(effort);
+        clamp_gpt_reasoning_effort_value(effort, &supported);
     }
 }
 
-fn clamp_gpt_reasoning_effort_value(value: &mut Value) {
-    if value.as_str().is_some_and(|effort| {
-        matches!(effort.trim().to_ascii_lowercase().as_str(), "max" | "ultra")
-    }) {
-        *value = json!("xhigh");
+fn clamp_gpt_reasoning_effort_value(value: &mut Value, supported: &[&'static str]) {
+    let Some(requested) = value
+        .as_str()
+        .map(|effort| effort.trim().to_ascii_lowercase())
+    else {
+        return;
+    };
+    if supported.iter().any(|effort| *effort == requested) {
+        return;
+    }
+    let effort_rank = |effort: &str| {
+        REASONING_EFFORT_ORDER
+            .iter()
+            .position(|item| *item == effort)
+    };
+    let Some(requested_rank) = effort_rank(&requested) else {
+        return;
+    };
+    if let Some(clamped) = supported
+        .iter()
+        .copied()
+        .filter(|effort| effort_rank(effort).is_some_and(|rank| rank <= requested_rank))
+        .max_by_key(|effort| effort_rank(effort).unwrap_or(0))
+    {
+        *value = json!(clamped);
     }
 }
 
@@ -9197,6 +9221,12 @@ pub fn supported_reasoning_efforts_for_model(
         return levels(&["low", "medium", "high"]);
     }
 
+    if is_gpt56_sol_model(&model) {
+        return levels(&["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+    }
+    if model.contains("gpt-5.6") {
+        return levels(&["minimal", "low", "medium", "high", "xhigh", "max"]);
+    }
     if model.contains("gpt-") || is_openai_o_series(&model) {
         return levels(&["minimal", "low", "medium", "high", "xhigh"]);
     }
@@ -9230,6 +9260,16 @@ pub fn supported_reasoning_efforts_for_model(
 
 fn levels(values: &[&'static str]) -> Vec<&'static str> {
     values.to_vec()
+}
+
+fn is_gpt56_sol_model(model: &str) -> bool {
+    let normalized = model.trim().to_ascii_lowercase();
+    let slug = normalized
+        .rsplit('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(normalized.as_str());
+    slug == "gpt-5.6-sol" || slug.starts_with("gpt-5.6-sol-")
 }
 
 fn clamp_reasoning_effort_for_model(
