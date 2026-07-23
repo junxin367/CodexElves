@@ -8342,6 +8342,29 @@
     return manager && typeof manager === "object" ? manager : null;
   }
 
+  // 走 Codex App 原生归档：archiveConversation 会把会话真正归档（持久化到 app-server）
+  // 并加入 App 的抑制集，从根本上避免折叠/展开项目重渲染时恢复已删除行。
+  // 返回 { ok, reason }：ok 为 true 表示原生归档成功；失败时由调用方降级并提示。
+  async function archiveSessionViaCodexApp(ref) {
+    const threadId = validThreadSessionKey(ref?.session_id);
+    if (!threadId) return { ok: false, reason: "invalid_session_id" };
+    const manager = codexAppStoreManager();
+    if (!manager) return { ok: false, reason: "manager_unavailable" };
+    if (typeof manager.archiveConversation !== "function") {
+      return { ok: false, reason: "archive_api_missing" };
+    }
+    const conversationId = projectMoveSessionKey(threadId);
+    try {
+      await manager.archiveConversation(conversationId, { cleanupWorktree: false });
+      sendCodexElvesDiagnostic("session_delete_native_archived", { threadId, ok: true });
+      return { ok: true, reason: "archived" };
+    } catch (error) {
+      appendCodexElvesFailure("__codexSessionDeleteArchiveFailures", error);
+      sendCodexElvesDiagnostic("session_delete_native_archived", { threadId, ok: false, error: String(error?.message || error) });
+      return { ok: false, reason: "archive_failed" };
+    }
+  }
+
   // 让 Codex App 走它自己的删除内存态清理：把会话加入抑制集、从 recentConversations
   // 缓存与 thread summary 中移除，并触发侧边栏重渲染。否则 App 内存态仍保留该会话，
   // 折叠/展开项目重渲染时会把已删除的行恢复出来。
@@ -8388,10 +8411,14 @@
     return restored;
   }
 
-  function removeDeletedRow(row, button, ref) {
+  function removeDeletedRow(row, button, ref, archived = false) {
     releaseDeleteFocus(row, button);
     const shouldReload = isCurrentSessionRow(row, ref);
-    evictSessionFromCodexAppStore(ref);
+    // 原生归档成功时，App 已把会话加入抑制集并持久化归档，无需再走不可靠的
+    // handleThreadDeletion 降级；仅归档失败时才回退到内存态抑制。
+    if (!archived) {
+      evictSessionFromCodexAppStore(ref);
+    }
     row.remove();
     if (shouldReload) {
       window.location.reload();
@@ -8423,13 +8450,20 @@
     confirmDelete(ref.title).then(async (confirmed) => {
       if (!confirmed) return;
       releaseDeleteFocus(row, button);
+      // A1：先走 Codex 原生归档（把会话加入抑制集并持久化），再删数据。
+      // 归档失败不中断删除（降级为内存态抑制），但在右下角明确提示，便于后续定位根因。
+      const archiveResult = await archiveSessionViaCodexApp(ref);
       const result = await postJson("/delete", ref);
       if (result.status === "server_deleted" || result.status === "local_deleted") {
-        removeDeletedRow(row, button, ref);
-        showToast(result.message || "删除成功", result.undo_token, ref);
+        removeDeletedRow(row, button, ref, archiveResult.ok);
+        if (archiveResult.ok) {
+          showToast(result.message || "删除成功", result.undo_token, ref);
+        } else {
+          showToast(`已删除，但原生归档未生效（${archiveResult.reason}），若会话重现请反馈`, result.undo_token, ref);
+        }
       } else if (result.status === "not_found") {
         // 会话在本地存储中已不存在，目标（会话不存在）已达成，直接移除残留的列表行
-        removeDeletedRow(row, button, ref);
+        removeDeletedRow(row, button, ref, archiveResult.ok);
         showToast(result.message || "会话已不存在，已从列表移除", null);
       } else {
         showToast(result.message || "删除失败", null);

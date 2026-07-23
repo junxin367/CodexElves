@@ -6,3 +6,9 @@
 
 *.sh text eol=lf
 .github/workflows/*.yml text eol=lf
+
+# 注入脚本与构建脚本依赖稳定的 LF 行尾：
+# 部分测试对 renderer-features.js 做跨行字面量断言，若随 core.autocrlf 变为 CRLF 会失败。
+*.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
