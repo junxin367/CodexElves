@@ -752,6 +752,12 @@ impl SQLiteStorageAdapter {
                 token_usage_summary_value(last_turn_usage),
             );
             summary.insert("lastTurnId".to_string(), json!(root_last_turn_id));
+            if let Some(started_at) = root_usage.last_turn_started_at.as_deref() {
+                summary.insert("lastTurnStartedAt".to_string(), json!(started_at));
+            }
+            if let Some(completed_at) = root_usage.last_turn_completed_at.as_deref() {
+                summary.insert("lastTurnCompletedAt".to_string(), json!(completed_at));
+            }
             summary.insert("observedAt".to_string(), json!(observed_at));
             summary.insert("turnCount".to_string(), json!(root_usage.turn_count));
             if descendant_count > 0 {
@@ -1326,6 +1332,8 @@ struct RolloutUsageReport {
     turn_usage: HashMap<String, TokenUsageTotals>,
     last_turn_usage: TokenUsageTotals,
     last_turn_id: String,
+    last_turn_started_at: Option<String>,
+    last_turn_completed_at: Option<String>,
     observed_at: String,
     turn_count: usize,
     task_running: bool,
@@ -1340,6 +1348,8 @@ struct RolloutUsageParser {
     turn_ids: HashSet<String>,
     turn_usage: HashMap<String, TokenUsageTotals>,
     active_task_turns: HashSet<String>,
+    turn_started_at: HashMap<String, String>,
+    turn_completed_at: HashMap<String, String>,
     spawned_child_turns: HashMap<String, String>,
     accumulated_total: TokenUsageTotals,
     latest_cumulative_total: Option<TokenUsageTotals>,
@@ -1366,6 +1376,8 @@ impl RolloutUsageParser {
             turn_usage: self.turn_usage.clone(),
             last_turn_usage,
             last_turn_id: self.latest_turn_id.clone(),
+            last_turn_started_at: self.turn_started_at.get(&self.latest_turn_id).cloned(),
+            last_turn_completed_at: self.turn_completed_at.get(&self.latest_turn_id).cloned(),
             observed_at: self.latest_observed_at.clone(),
             turn_count: self.turn_ids.len(),
             task_running: !self.active_task_turns.is_empty(),
@@ -1431,6 +1443,11 @@ impl RolloutUsageParser {
                         .unwrap_or_default()
                         .to_string();
                     if !turn_id.is_empty() {
+                        if let Some(timestamp) = rollout_event_timestamp(&value) {
+                            self.turn_started_at
+                                .entry(turn_id.clone())
+                                .or_insert(timestamp);
+                        }
                         self.active_task_turns.insert(turn_id.clone());
                         self.latest_turn_id = turn_id;
                     }
@@ -1447,6 +1464,10 @@ impl RolloutUsageParser {
                     if turn_id.is_empty() {
                         self.active_task_turns.clear();
                     } else {
+                        if let Some(timestamp) = rollout_event_timestamp(&value) {
+                            self.turn_completed_at
+                                .insert(turn_id.to_string(), timestamp);
+                        }
                         self.active_task_turns.remove(turn_id);
                     }
                     return;
@@ -1542,6 +1563,15 @@ impl RolloutUsageParser {
             _ => {}
         }
     }
+}
+
+fn rollout_event_timestamp(value: &Value) -> Option<String> {
+    value
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|timestamp| !timestamp.is_empty())
+        .map(str::to_string)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

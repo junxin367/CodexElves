@@ -1315,6 +1315,36 @@ fn thread_usage_history_groups_all_calls_in_latest_turn() {
 }
 
 #[test]
+fn thread_usage_history_includes_latest_turn_execution_window() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let rollout_path = tmp.path().join("rollout.jsonl");
+    fs::write(
+        &rollout_path,
+        concat!(
+            "{\"timestamp\":\"2026-06-02T05:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-1\"}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"turn-1\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:00:05Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":100,\"total_tokens\":1100},\"last_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":100,\"total_tokens\":1100}}}}\n",
+            "{\"timestamp\":\"2026-06-02T05:00:22Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-1\"}}\n"
+        ),
+    )
+    .unwrap();
+    create_codex_thread_db(&db_path, &rollout_path);
+    let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")));
+
+    let result = adapter.codex_thread_usage_history(&session("local:t1", "Codex Thread"));
+
+    assert_eq!(
+        result["summary"]["lastTurnStartedAt"],
+        "2026-06-02T05:00:00Z"
+    );
+    assert_eq!(
+        result["summary"]["lastTurnCompletedAt"],
+        "2026-06-02T05:00:22Z"
+    );
+}
+
+#[test]
 fn thread_usage_history_searches_all_databases_and_resolves_temporary_id_by_title() {
     let tmp = tempdir().unwrap();
     let unsupported_path = tmp.path().join("automation.sqlite");

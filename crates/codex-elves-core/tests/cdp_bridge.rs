@@ -555,6 +555,14 @@ fn injection_script_exposes_compact_per_thread_token_usage_summary() {
     assert!(script.contains("turnId === latestTurnId"));
     assert!(script.contains("最近一轮"));
     assert!(script.contains("formatCodexTokenCount"));
+    assert!(script.contains("formatCodexTurnDuration"));
+    assert!(script.contains("lastTurnStartedAt"));
+    assert!(script.contains("lastTurnCompletedAt"));
+    assert!(script.contains("最近一轮执行时长"));
+    assert!(script.contains("data-codex-token-usage-duration"));
+    assert!(script.contains("syncCodexTokenUsageDurationTicker"));
+    assert!(script.contains("codexTokenUsageDurationTickIntervalMs = 1000"));
+    assert!(script.contains("setInterval("));
     assert!(script.contains("const thousand = 1000"));
     assert!(script.contains("let unit = \"K\""));
     assert!(script.contains("codex-token-usage-metrics"));

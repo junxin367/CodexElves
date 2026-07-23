@@ -75,6 +75,7 @@
   const codexTokenUsageCardClass = "codex-token-usage-card";
   const codexTokenUsageHostClass = "codex-token-usage-host";
   const codexTokenUsageRefreshIntervalMs = 2500;
+  const codexTokenUsageDurationTickIntervalMs = 1000;
   const codexTokenUsageSettleDelayMs = 500;
   const codexTokenUsageCompletionSettleDelayMs = 2500;
   const codexTokenUsageRetryDelaysMs = [1000, 2500, 5000];
@@ -121,6 +122,8 @@
   window.__codexServiceTierBadgeRetryAttempt = 0;
   clearTimeout(window.__codexTokenUsageRefreshTimer);
   window.__codexTokenUsageRefreshTimer = null;
+  clearInterval(window.__codexTokenUsageDurationTimer);
+  window.__codexTokenUsageDurationTimer = null;
   clearTimeout(window.__codexTokenUsageSettleTimer);
   window.__codexTokenUsageSettleTimer = null;
   clearTimeout(window.__codexTokenUsageCompletionSettleTimer);
@@ -1083,6 +1086,18 @@
         font-weight: 445;
         line-height: 18px;
         opacity: .58;
+      }
+      .codex-token-usage-last-turn-label {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 5px;
+      }
+      .codex-token-usage-duration {
+        color: currentColor;
+        font-size: 12px;
+        font-weight: 520;
+        font-variant-numeric: tabular-nums;
+        opacity: .8;
       }
       .codex-token-usage-value {
         color: currentColor;
@@ -4290,6 +4305,8 @@
         totalUsage: normalizeCodexTokenUsage(provided.totalUsage),
         lastTurnUsage: normalizeCodexTokenUsage(provided.lastTurnUsage),
         lastTurnId: String(provided.lastTurnId || ""),
+        lastTurnStartedAt: String(provided.lastTurnStartedAt || ""),
+        lastTurnCompletedAt: String(provided.lastTurnCompletedAt || ""),
         observedAt: String(provided.observedAt || ""),
         turnCount: finiteNonNegativeNumber(provided.turnCount),
         descendantCount: finiteNonNegativeNumber(provided.descendantCount),
@@ -4318,6 +4335,8 @@
       totalUsage,
       lastTurnUsage,
       lastTurnId: latestTurnId,
+      lastTurnStartedAt: "",
+      lastTurnCompletedAt: "",
       observedAt,
       turnCount: turnIds.size,
       descendantCount: 0,
@@ -4358,6 +4377,68 @@
       .replace(/\.0+$/, "")
       .replace(/(\.\d*[1-9])0+$/, "$1");
     return `${compact}${unit}`;
+  }
+
+  function formatCodexTurnDuration(summary) {
+    const startedAt = Date.parse(String(summary?.lastTurnStartedAt || ""));
+    if (!Number.isFinite(startedAt)) return "";
+    const completedAt = Date.parse(String(summary?.lastTurnCompletedAt || ""));
+    const endedAt = Number.isFinite(completedAt)
+      ? completedAt
+      : summary?.lastTurnRunning === true
+        ? Date.now()
+        : NaN;
+    if (!Number.isFinite(endedAt) || endedAt < startedAt) return "";
+    const seconds = Math.max(0, Math.floor((endedAt - startedAt) / 1000));
+    const hours = Math.floor(seconds / (60 * 60));
+    const minutes = Math.floor((seconds % (60 * 60)) / 60);
+    const secondsPart = seconds % 60;
+    if (hours > 0) return `${hours}h ${minutes}m ${secondsPart}s`;
+    if (minutes > 0) return `${minutes}m ${secondsPart}s`;
+    return `${secondsPart}s`;
+  }
+
+  function stopCodexTokenUsageDurationTicker() {
+    clearInterval(window.__codexTokenUsageDurationTimer);
+    window.__codexTokenUsageDurationTimer = null;
+  }
+
+  function syncCodexTokenUsageDurationTicker(card, summary) {
+    stopCodexTokenUsageDurationTicker();
+    if (
+      !card
+      || card.hidden
+      || document.visibilityState === "hidden"
+      || summary?.lastTurnRunning !== true
+      || !formatCodexTurnDuration(summary)
+    ) {
+      return;
+    }
+    const updateDuration = () => {
+      const durationNode = card.querySelector("[data-codex-token-usage-duration]");
+      if (
+        !card.isConnected
+        || card.hidden
+        || card.dataset.status !== "ready"
+        || document.visibilityState === "hidden"
+        || !durationNode
+      ) {
+        stopCodexTokenUsageDurationTicker();
+        return;
+      }
+      const duration = formatCodexTurnDuration(summary);
+      if (!duration) {
+        stopCodexTokenUsageDurationTicker();
+        return;
+      }
+      durationNode.textContent = duration;
+      durationNode.title = `最近一轮执行时长：${duration}`;
+    };
+    updateDuration();
+    window.__codexTokenUsageDurationTimer = setInterval(
+      updateDuration,
+      codexTokenUsageDurationTickIntervalMs
+    );
   }
 
   function codexTokenUsageMetrics(usage) {
@@ -4408,6 +4489,7 @@
   function pauseCodexTokenUsageForHiddenPinnedSummary() {
     clearTimeout(window.__codexTokenUsageRefreshTimer);
     window.__codexTokenUsageRefreshTimer = null;
+    stopCodexTokenUsageDurationTicker();
     clearTimeout(window.__codexTokenUsageSettleTimer);
     window.__codexTokenUsageSettleTimer = null;
     clearTimeout(window.__codexTokenUsageCompletionSettleTimer);
@@ -4444,6 +4526,7 @@
   function stopCodexTokenUsageRuntime() {
     clearTimeout(window.__codexTokenUsageRefreshTimer);
     window.__codexTokenUsageRefreshTimer = null;
+    stopCodexTokenUsageDurationTicker();
     clearTimeout(window.__codexTokenUsageSettleTimer);
     window.__codexTokenUsageSettleTimer = null;
     clearTimeout(window.__codexTokenUsageCompletionSettleTimer);
@@ -4515,6 +4598,7 @@
       if (document.visibilityState === "hidden") {
         clearTimeout(window.__codexTokenUsageRefreshTimer);
         window.__codexTokenUsageRefreshTimer = null;
+        stopCodexTokenUsageDurationTicker();
         return;
       }
       if (codexElvesSettings().tokenUsage) {
@@ -4679,6 +4763,10 @@
   function renderCodexTokenUsageSummary(card, summary) {
     const totalUsage = normalizeCodexTokenUsage(summary.totalUsage);
     const lastTurnUsage = normalizeCodexTokenUsage(summary.lastTurnUsage);
+    const lastTurnDuration = formatCodexTurnDuration(summary);
+    const lastTurnLabel = lastTurnDuration
+      ? `<span class="codex-token-usage-label codex-token-usage-last-turn-label">最近一轮 <span class="codex-token-usage-duration" data-codex-token-usage-duration="true" title="最近一轮执行时长：${lastTurnDuration}">${lastTurnDuration}</span></span>`
+      : `<span class="codex-token-usage-label">最近一轮</span>`;
     const descendantCount = Math.round(finiteNonNegativeNumber(summary.descendantCount));
     const descendantLabel = descendantCount > 0
       ? `<span class="codex-token-usage-agent-count">子智能体 ${descendantCount}</span>`
@@ -4701,12 +4789,13 @@
       </div>
       <div class="codex-token-usage-section">
         <div class="codex-token-usage-section-head">
-          <span class="codex-token-usage-label">最近一轮</span>
+          ${lastTurnLabel}
           <strong class="codex-token-usage-value">${formatCodexTokenCount(lastTurnUsage.totalTokens)}</strong>
         </div>
         ${codexTokenUsageMetrics(lastTurnUsage)}
       </div>
     `;
+    syncCodexTokenUsageDurationTicker(card, summary);
   }
 
   function emptyCodexTokenUsageSummary() {
@@ -4715,6 +4804,8 @@
       totalUsage: usage,
       lastTurnUsage: usage,
       lastTurnId: "",
+      lastTurnStartedAt: "",
+      lastTurnCompletedAt: "",
       observedAt: "",
       turnCount: 0,
       descendantCount: 0,
