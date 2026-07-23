@@ -3290,56 +3290,6 @@
     };
   }
 
-  function displayNameForPluginMarketplaceName(name, fallback) {
-    if (name === "openai-bundled" || name === "codex-elves-openai-bundled") return "OpenAI插件1(CodexElves)";
-    if (name === "openai-curated" || name === "codex-elves-openai-curated") return "OpenAI插件2(CodexElves)";
-    if (name === "openai-primary-runtime" || name === "codex-elves-openai-primary-runtime") return "OpenAI插件3(CodexElves)";
-    if (name === "openai-api-curated" || name === "codex-elves-openai-api-curated") return "OpenAI插件4(CodexElves)";
-    if (name === "openai-curated-remote" || name === "codex-elves-openai-curated-remote") return "OpenAI插件5(CodexElves)";
-    return fallback;
-  }
-
-  function codexPluginMarketplaceAliasForName(name) {
-    const restored = restorePluginMarketplaceName(name);
-    if (restored === "openai-curated-remote") return restored;
-    return codexPluginOfficialMarketplaceName(restored)
-      ? `codex-elves-${restored}`
-      : name;
-  }
-
-  function patchPluginMarketplaceObject(marketplace) {
-    if (!marketplace || typeof marketplace !== "object") return false;
-    const originalName = restorePluginMarketplaceName(marketplace.name || "");
-    const alias = codexPluginMarketplaceAliasForName(originalName);
-    const displayName = displayNameForPluginMarketplaceName(originalName, marketplace.displayName || marketplace.title || marketplace.label || originalName);
-    if (!displayName || displayName === originalName) return false;
-    marketplace.name = alias;
-    marketplace.displayName = displayName;
-    marketplace.title = displayName;
-    marketplace.label = displayName;
-    if (Array.isArray(marketplace.plugins)) {
-      marketplace.plugins.forEach((plugin) => {
-        if (!plugin || typeof plugin !== "object") return;
-        if (restorePluginMarketplaceName(plugin.marketplaceName || originalName) === originalName) {
-          plugin.marketplaceName = alias;
-        }
-      });
-    }
-    if (marketplace.interface && typeof marketplace.interface === "object") {
-      marketplace.interface = {
-        ...marketplace.interface,
-        displayName,
-        name: displayName,
-        title: displayName,
-        label: displayName,
-      };
-    } else {
-      marketplace.interface = { displayName, name: displayName, title: displayName, label: displayName };
-    }
-    marketplace.__codexElvesMarketplaceUnlockPatched = true;
-    return true;
-  }
-
   function cloneCodexPluginMarketplace(value) {
     if (!value || typeof value !== "object") return null;
     try {
@@ -3435,15 +3385,6 @@
     return name;
   }
 
-  function codexPluginOfficialMarketplaceName(name) {
-    const restored = restorePluginMarketplaceName(name);
-    return restored === "openai-bundled"
-      || restored === "openai-curated"
-      || restored === "openai-primary-runtime"
-      || restored === "openai-api-curated"
-      || restored === "openai-curated-remote";
-  }
-
   function restorePluginMarketplaceRequestParams(params, method = "") {
     if (!params || typeof params !== "object") return params;
     let next = params;
@@ -3468,7 +3409,6 @@
 
   function patchPluginMarketplaceResult(method, result) {
     if (method !== "list-plugins") return result;
-    let patchedCount = 0;
     try {
       const pluginMarketplaceCounts = {};
       if (Array.isArray(result?.marketplaces)) {
@@ -3480,7 +3420,6 @@
               if (name) pluginMarketplaceCounts[name] = (pluginMarketplaceCounts[name] || 0) + 1;
             });
           }
-          if (patchPluginMarketplaceObject(marketplace)) patchedCount += 1;
         });
         sendCodexElvesDiagnostic("plugin_marketplace_response_debug", {
           marketplaces: result.marketplaces.map((marketplace) => ({
@@ -3492,9 +3431,6 @@
           })),
           pluginMarketplaceCounts,
         });
-      }
-      if (patchedCount > 0) {
-        sendCodexElvesDiagnostic("plugin_marketplace_response_expanded", { patchedCount });
       }
     } catch (error) {
       sendCodexElvesDiagnostic("plugin_marketplace_response_patch_failed", {

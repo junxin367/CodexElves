@@ -310,7 +310,6 @@ fn injection_script_keeps_plugin_marketplace_unlock_separate_from_entry_unlock()
     assert!(script.contains("pluginMarketplaceUnlock: true"));
     assert!(script.contains("pluginMarketplaceUnlock: \"codexAppPluginMarketplaceUnlock\""));
     assert!(script.contains("if (!codexElvesSettings().pluginMarketplaceUnlock) return"));
-    assert!(script.contains("codexPluginMarketplaceAliasForName"));
     assert!(script.contains("installPluginMarketplaceRequestPatch"));
 }
 
@@ -326,14 +325,14 @@ fn injection_script_does_not_unlock_disabled_plugin_install_buttons() {
 }
 
 #[test]
-fn injection_script_aliases_official_marketplaces_but_preserves_ready_identity() {
+fn injection_script_preserves_official_marketplace_literal_names() {
     let script = assets::injection_script(45221);
 
     assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"19\""));
-    assert!(script.contains("function codexPluginMarketplaceAliasForName(name)"));
-    assert!(script.contains("if (restored === \"openai-curated-remote\") return restored;"));
-    assert!(script.contains("marketplace.name = alias"));
-    assert!(script.contains("if (name === \"openai-bundled\" || name === \"codex-elves-openai-bundled\") return \"OpenAI插件1(CodexElves)\""));
+    // 不再重命名官方 marketplace，保留字面名以恢复原生浏览器 / 电脑操控面板。
+    assert!(!script.contains("codexPluginMarketplaceAliasForName"));
+    assert!(!script.contains("marketplace.name = alias"));
+    assert!(!script.contains("OpenAI插件1(CodexElves)"));
 }
 
 #[test]
@@ -361,8 +360,8 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
     assert!(script.contains("return emptyPluginMarketplaceResult();"));
     assert!(!script.contains("Array.prototype.filter = patchedFilter"));
     assert!(!script.contains("installPluginBuildFlavorFilterPatch"));
-    assert!(script.contains("codexPluginMarketplaceAliasForName"));
-    assert!(script.contains("marketplace.name = alias"));
+    assert!(!script.contains("codexPluginMarketplaceAliasForName"));
+    assert!(!script.contains("marketplace.name = alias"));
     assert!(script.contains("method === \"list-plugins\""));
     assert!(script.contains("method === \"vscode://codex/list-plugins\""));
     assert!(script.contains("message.type === \"fetch\""));
@@ -384,14 +383,8 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
     assert!(script.contains(
         "next.remoteMarketplaceName = restorePluginMarketplaceName(next.remoteMarketplaceName)"
     ));
-    assert!(script.contains("if (name === \"openai-curated\" || name === \"codex-elves-openai-curated\") return \"OpenAI插件2(CodexElves)\""));
-    assert!(script.contains("OpenAI插件1(CodexElves)"));
-    assert!(script.contains("OpenAI插件2(CodexElves)"));
-    assert!(script.contains("OpenAI插件3(CodexElves)"));
-    assert!(script.contains("OpenAI插件4(CodexElves)"));
-    assert!(script.contains("OpenAI插件5(CodexElves)"));
+    assert!(!script.contains("OpenAI插件1(CodexElves)"));
     assert!(script.contains("method === \"install-plugin\""));
-    assert!(script.contains("plugin_marketplace_response_expanded"));
     assert!(script.contains("plugin_install_request_debug"));
     assert!(script.contains("plugin_install_request_failed"));
     assert!(!script.contains("marketplace.path ="));
@@ -401,13 +394,18 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
         cases["pluginScopedFilters"]["pluginCount"],
         cases["pluginScopedFilters"]["pluginTotal"]
     );
-    assert_eq!(
-        cases["pluginScopedFilters"]["marketplaceCount"],
-        cases["pluginScopedFilters"]["marketplaceTotal"]
-    );
+    // 保留字面 openai-bundled 后，Codex 原生“隐藏 marketplace”过滤会把 bundled
+    // 从插件市场列表隐藏（原生默认行为）；bundled 插件由原生面板承载。
+    let marketplace_count = cases["pluginScopedFilters"]["marketplaceCount"]
+        .as_i64()
+        .unwrap();
+    let marketplace_total = cases["pluginScopedFilters"]["marketplaceTotal"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(marketplace_count + 1, marketplace_total);
     assert_eq!(
         cases["pluginScopedFilters"]["officialMarketplaceName"],
-        "codex-elves-openai-bundled"
+        "openai-bundled"
     );
     assert_eq!(
         cases["pluginScopedFilters"]["curatedRemoteMarketplaceName"],
