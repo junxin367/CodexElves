@@ -179,23 +179,46 @@ fn start_log_writer() -> SyncSender<LogWrite> {
                 let Some(write) = write else {
                     continue;
                 };
-                if current_path.as_ref() != Some(&write.path) {
-                    if let Some(file) = current_file.as_mut() {
-                        let _ = file.flush();
+                let mut batch = vec![write];
+                while batch.len() < 64 {
+                    match rx.try_recv() {
+                        Ok(write) => batch.push(write),
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => break,
                     }
-                    current_file = open_log_file(&write.path).ok().map(std::io::BufWriter::new);
-                    current_path = Some(write.path.clone());
                 }
-                if let Some(file) = current_file.as_mut() {
-                    let incoming_bytes = write.line.len() as u64 + 1;
+                let mut index = 0;
+                while index < batch.len() {
+                    let path = batch[index].path.clone();
+                    let end = batch[index..]
+                        .iter()
+                        .position(|write| write.path != path)
+                        .map_or(batch.len(), |offset| index + offset);
+                    if current_path.as_ref() != Some(&path) {
+                        if let Some(file) = current_file.as_mut() {
+                            let _ = file.flush();
+                        }
+                        current_file = open_log_file(&path).ok().map(std::io::BufWriter::new);
+                        current_path = Some(path);
+                    }
+                    let Some(file) = current_file.as_mut() else {
+                        index = end;
+                        continue;
+                    };
                     let result = (|| -> std::io::Result<()> {
                         file.flush()?;
-                        file.get_mut().lock_exclusive()?;
+                        lock_log_file(file.get_mut())?;
+                        let incoming_bytes = batch[index..end]
+                            .iter()
+                            .map(|write| write.line.len() as u64 + 1)
+                            .sum();
                         crate::log_limits::clear_if_append_would_exceed(
                             file.get_mut(),
                             incoming_bytes,
                         )?;
-                        writeln!(file, "{}", write.line)?;
+                        for write in &batch[index..end] {
+                            writeln!(file, "{}", write.line)?;
+                        }
                         file.flush()?;
                         file.get_mut().unlock()?;
                         Ok(())
@@ -205,6 +228,7 @@ fn start_log_writer() -> SyncSender<LogWrite> {
                         current_file = None;
                         current_path = None;
                     }
+                    index = end;
                 }
             }
             if let Some(file) = current_file.as_mut() {
@@ -217,11 +241,25 @@ fn start_log_writer() -> SyncSender<LogWrite> {
 
 fn write_log_line(path: &PathBuf, line: &str) -> std::io::Result<()> {
     let mut file = open_log_file(path)?;
-    file.lock_exclusive()?;
+    lock_log_file(&file)?;
     crate::log_limits::clear_if_append_would_exceed(&mut file, line.len() as u64 + 1)?;
     writeln!(file, "{line}")?;
     file.unlock()?;
     Ok(())
+}
+
+fn lock_log_file(file: &std::fs::File) -> std::io::Result<()> {
+    let mut last_error = None;
+    for _ in 0..500 {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| std::io::Error::other("diagnostic log lock failed")))
 }
 
 fn open_log_file(path: &PathBuf) -> std::io::Result<std::fs::File> {

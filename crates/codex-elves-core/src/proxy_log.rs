@@ -1,7 +1,10 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
@@ -10,6 +13,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub const MAX_CAPTURED_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+const DEFAULT_CAPTURED_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const CAPTURE_HEAD_BYTES: usize = 64 * 1024;
+const FULL_CAPTURE_ENV: &str = "CODEX_ELVES_FULL_PROXY_CAPTURE";
 pub const STARTUP_RETAINED_RECORDS: usize = 10;
 pub const RUNTIME_RETAINED_RECORDS: usize = 500;
 const PROXY_INDEX_HEADER: &str = r#"{"format":"codex-elves-proxy-index","version":1}"#;
@@ -18,6 +24,28 @@ const MAX_PROXY_INDEX_UPDATES: usize = RUNTIME_RETAINED_RECORDS * 3;
 const LARGE_LOG_RECORD_SAFETY_BYTES: usize = 1024;
 const MAX_RETAINED_REQUEST_BODY_BYTES: usize = 64 * 1024;
 const MAX_SUMMARY_ERROR_BYTES: usize = 4 * 1024;
+const PROXY_LOG_QUEUE_CAPACITY: usize = 512;
+const PROXY_LOG_BATCH_SIZE: usize = 64;
+
+static PROXY_LOG_SENDER: OnceLock<SyncSender<ProxyLogCommand>> = OnceLock::new();
+static PROXY_LOG_DROPPED_INTERMEDIATE: AtomicU64 = AtomicU64::new(0);
+static PROXY_LOG_WORKER_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static PROXY_LOG_COMPLETED_ENQUEUE_FENCE: OnceLock<(Mutex<CompletedEnqueueFence>, Condvar)> =
+    OnceLock::new();
+
+#[derive(Default)]
+struct CompletedEnqueueFence {
+    pending_before_flush: usize,
+    flushing: bool,
+}
+
+enum ProxyLogCommand {
+    Record {
+        path: PathBuf,
+        record: ProxyRequestRecord,
+    },
+    Flush(std::sync::mpsc::Sender<std::io::Result<()>>),
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -302,13 +330,66 @@ pub fn extract_request_metadata(request_json: Option<&Value>) -> RequestMetadata
 }
 
 pub fn append_capture(buffer: &mut Vec<u8>, bytes: &[u8]) -> bool {
-    if buffer.len() >= MAX_CAPTURED_RESPONSE_BYTES {
-        return !bytes.is_empty();
+    append_capture_with_limit(buffer, bytes, captured_response_limit())
+}
+
+fn captured_response_limit() -> usize {
+    static CAPTURE_LIMIT: OnceLock<usize> = OnceLock::new();
+    *CAPTURE_LIMIT.get_or_init(|| {
+        std::env::var(FULL_CAPTURE_ENV)
+            .ok()
+            .filter(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .map(|_| MAX_CAPTURED_RESPONSE_BYTES)
+            .unwrap_or(DEFAULT_CAPTURED_RESPONSE_BYTES)
+    })
+}
+
+fn append_capture_with_limit(buffer: &mut Vec<u8>, bytes: &[u8], limit: usize) -> bool {
+    if bytes.is_empty() {
+        return false;
     }
-    let remaining = MAX_CAPTURED_RESPONSE_BYTES - buffer.len();
-    let take = remaining.min(bytes.len());
-    buffer.extend_from_slice(&bytes[..take]);
-    take < bytes.len()
+    if limit == 0 {
+        return true;
+    }
+    if buffer.len().saturating_add(bytes.len()) <= limit {
+        buffer.extend_from_slice(bytes);
+        return false;
+    }
+
+    let head_limit = CAPTURE_HEAD_BYTES.min(limit / 2);
+    let mut remaining_bytes = bytes;
+    if buffer.len() < head_limit {
+        let head_take = (head_limit - buffer.len()).min(remaining_bytes.len());
+        buffer.extend_from_slice(&remaining_bytes[..head_take]);
+        remaining_bytes = &remaining_bytes[head_take..];
+    }
+
+    let tail_limit = limit.saturating_sub(head_limit);
+    if tail_limit == 0 {
+        buffer.truncate(head_limit);
+        return true;
+    }
+    if remaining_bytes.len() >= tail_limit {
+        buffer.truncate(head_limit);
+        buffer.extend_from_slice(&remaining_bytes[remaining_bytes.len() - tail_limit..]);
+        return true;
+    }
+
+    let retained_old_tail = tail_limit.saturating_sub(remaining_bytes.len());
+    let old_tail_start = buffer
+        .len()
+        .saturating_sub(retained_old_tail)
+        .max(head_limit);
+    let old_tail = buffer[old_tail_start..].to_vec();
+    buffer.truncate(head_limit);
+    buffer.extend_from_slice(&old_tail);
+    buffer.extend_from_slice(remaining_bytes);
+    true
 }
 
 pub fn extract_reasoning_tokens_from_response_body(body: &[u8]) -> Option<u64> {
@@ -353,6 +434,142 @@ pub fn append_record(record: &ProxyRequestRecord) -> std::io::Result<()> {
     append_record_at_path(&path, record)
 }
 
+pub fn enqueue_record(record: &ProxyRequestRecord) -> std::io::Result<()> {
+    if crate::paths::proxy_log_path_for_tests().is_some() {
+        return append_record(record);
+    }
+    let command = ProxyLogCommand::Record {
+        path: default_log_path(),
+        record: record.clone(),
+    };
+    let sender = proxy_log_sender();
+    if record.state == ProxyRequestState::Completed {
+        sender
+            .send(command)
+            .map_err(|_| std::io::Error::other("proxy log worker stopped"))
+    } else {
+        match sender.try_send(command) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                let dropped = PROXY_LOG_DROPPED_INTERMEDIATE.fetch_add(1, Ordering::Relaxed) + 1;
+                if dropped.is_power_of_two() {
+                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                        "helper.local_proxy_log_intermediate_dropped",
+                        serde_json::json!({
+                            "dropped_intermediate": dropped,
+                            "queue_capacity": PROXY_LOG_QUEUE_CAPACITY
+                        }),
+                    );
+                }
+                Ok(())
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                Err(std::io::Error::other("proxy log worker stopped"))
+            }
+        }
+    }
+}
+
+pub fn enqueue_record_nonblocking(record: &ProxyRequestRecord) -> std::io::Result<()> {
+    if let Some(path) = crate::paths::proxy_log_path_for_tests() {
+        return append_record_at_path(&path, record);
+    }
+    enqueue_record_nonblocking_at_path(record, default_log_path())
+}
+
+fn enqueue_record_nonblocking_at_path(
+    record: &ProxyRequestRecord,
+    path: PathBuf,
+) -> std::io::Result<()> {
+    if record.state != ProxyRequestState::Completed {
+        return enqueue_record(record);
+    }
+    let record = record.clone();
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return enqueue_record(&record);
+    };
+    let sender = proxy_log_sender();
+    let tracked_before_flush = {
+        let (lock, _) = completed_enqueue_fence();
+        let mut fence = lock.lock().unwrap();
+        if fence.flushing {
+            false
+        } else {
+            fence.pending_before_flush += 1;
+            true
+        }
+    };
+    runtime.spawn_blocking(move || {
+        let result = sender
+            .send(ProxyLogCommand::Record {
+                path,
+                record: record.clone(),
+            })
+            .map_err(|_| std::io::Error::other("proxy log worker stopped"));
+        if tracked_before_flush {
+            complete_completed_enqueue_fence();
+        }
+        if let Err(error) = result {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "helper.local_proxy_log_background_enqueue_failed",
+                serde_json::json!({
+                    "id": record.id,
+                    "error": error.to_string()
+                }),
+            );
+        }
+    });
+    Ok(())
+}
+
+pub fn dropped_intermediate_record_count() -> u64 {
+    PROXY_LOG_DROPPED_INTERMEDIATE.load(Ordering::Relaxed)
+}
+
+pub fn flush_pending_records() -> std::io::Result<()> {
+    let Some(sender) = PROXY_LOG_SENDER.get() else {
+        return Ok(());
+    };
+    wait_for_completed_enqueue_fence();
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    let send_result = sender
+        .send(ProxyLogCommand::Flush(reply_tx))
+        .map_err(|_| std::io::Error::other("proxy log worker stopped"));
+    release_completed_enqueue_fence();
+    send_result?;
+    reply_rx
+        .recv()
+        .map_err(|_| std::io::Error::other("proxy log worker stopped"))?
+}
+
+fn completed_enqueue_fence() -> &'static (Mutex<CompletedEnqueueFence>, Condvar) {
+    PROXY_LOG_COMPLETED_ENQUEUE_FENCE
+        .get_or_init(|| (Mutex::new(CompletedEnqueueFence::default()), Condvar::new()))
+}
+
+fn complete_completed_enqueue_fence() {
+    let (lock, ready) = completed_enqueue_fence();
+    let mut fence = lock.lock().unwrap();
+    fence.pending_before_flush = fence.pending_before_flush.saturating_sub(1);
+    ready.notify_all();
+}
+
+fn wait_for_completed_enqueue_fence() {
+    let (lock, ready) = completed_enqueue_fence();
+    let mut fence = lock.lock().unwrap();
+    while fence.flushing || fence.pending_before_flush > 0 {
+        fence = ready.wait(fence).unwrap();
+    }
+    fence.flushing = true;
+}
+
+fn release_completed_enqueue_fence() {
+    let (lock, ready) = completed_enqueue_fence();
+    let mut fence = lock.lock().unwrap();
+    fence.flushing = false;
+    ready.notify_all();
+}
+
 fn append_record_at_path(path: &Path, record: &ProxyRequestRecord) -> std::io::Result<()> {
     let mut index_file = open_index_file(path)?;
     index_file.lock_exclusive()?;
@@ -384,17 +601,52 @@ fn append_record_at_path(path: &Path, record: &ProxyRequestRecord) -> std::io::R
     unlock_result
 }
 
+fn append_records_at_path(path: &Path, records: &[ProxyRequestRecord]) -> std::io::Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    if records.len() == 1 {
+        return append_record_at_path(path, &records[0]);
+    }
+    let mut index_file = open_index_file(path)?;
+    index_file.lock_exclusive()?;
+    let result: std::io::Result<()> = (|| {
+        ensure_index_format_locked(path, &mut index_file)?;
+        let mut updates = read_summaries_from_locked_index(&mut index_file)?;
+        for record in records {
+            write_detail_record(path, record)?;
+            updates.push(ProxyRequestSummary::from(record));
+        }
+        let mut summaries = dedupe_summaries(updates);
+        sort_summaries(&mut summaries);
+        let removed = if summaries.len() > RUNTIME_RETAINED_RECORDS {
+            summaries.split_off(RUNTIME_RETAINED_RECORDS)
+        } else {
+            Vec::new()
+        };
+        write_summaries_to_locked_index(&mut index_file, &summaries)?;
+        remove_detail_records(path, &removed)?;
+        Ok(())
+    })();
+    let unlock_result = index_file.unlock();
+    result?;
+    unlock_result
+}
+
 pub fn read_summaries(limit: usize) -> std::io::Result<Vec<ProxyRequestSummary>> {
+    flush_pending_records()?;
     let path = default_log_path();
     read_summaries_at_path(&path, limit)
 }
 
 pub fn find_record(id: &str) -> std::io::Result<Option<ProxyRequestRecord>> {
+    flush_pending_records()?;
     let path = default_log_path();
     find_record_at_path(&path, id)
 }
 
 pub fn clear_records() -> std::io::Result<()> {
+    flush_pending_records()?;
     let path = default_log_path();
     clear_records_at_path(&path)
 }
@@ -412,11 +664,88 @@ fn clear_records_at_path(path: &Path) -> std::io::Result<()> {
 }
 
 pub fn retain_recent_records(limit: usize) -> std::io::Result<()> {
+    flush_pending_records()?;
     let path = default_log_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     retain_recent_records_at_path(&path, limit)
+}
+
+fn proxy_log_sender() -> &'static SyncSender<ProxyLogCommand> {
+    PROXY_LOG_SENDER.get_or_init(|| {
+        let (sender, receiver) = sync_channel(PROXY_LOG_QUEUE_CAPACITY);
+        std::thread::Builder::new()
+            .name("codex-elves-proxy-log".to_string())
+            .spawn(move || run_proxy_log_worker(receiver))
+            .expect("proxy log worker should start");
+        sender
+    })
+}
+
+fn run_proxy_log_worker(receiver: Receiver<ProxyLogCommand>) {
+    while let Ok(command) = receiver.recv() {
+        match command {
+            ProxyLogCommand::Record { path, record } => {
+                let mut batch = vec![(path, record)];
+                let mut flush_replies = Vec::new();
+                while batch.len() < PROXY_LOG_BATCH_SIZE {
+                    match receiver.try_recv() {
+                        Ok(ProxyLogCommand::Record { path, record }) => {
+                            batch.push((path, record));
+                        }
+                        Ok(ProxyLogCommand::Flush(reply)) => flush_replies.push(reply),
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => break,
+                    }
+                }
+                let result = write_proxy_log_batch(batch);
+                if let Err(error) = &result {
+                    *proxy_log_worker_error().lock().unwrap() = Some(error.to_string());
+                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                        "helper.local_proxy_log_worker_failed",
+                        serde_json::json!({ "error": error.to_string() }),
+                    );
+                }
+                for reply in flush_replies {
+                    let _ = reply.send(clone_io_result(&result));
+                }
+            }
+            ProxyLogCommand::Flush(reply) => {
+                let result = proxy_log_worker_error()
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .map_or(Ok(()), |error| Err(std::io::Error::other(error)));
+                let _ = reply.send(result);
+            }
+        }
+    }
+}
+
+fn write_proxy_log_batch(batch: Vec<(PathBuf, ProxyRequestRecord)>) -> std::io::Result<()> {
+    let mut grouped = BTreeMap::<PathBuf, HashMap<String, ProxyRequestRecord>>::new();
+    for (path, record) in batch {
+        grouped
+            .entry(path)
+            .or_default()
+            .insert(record.id.clone(), record);
+    }
+    for (path, records) in grouped {
+        append_records_at_path(&path, &records.into_values().collect::<Vec<_>>())?;
+    }
+    Ok(())
+}
+
+fn proxy_log_worker_error() -> &'static Mutex<Option<String>> {
+    PROXY_LOG_WORKER_ERROR.get_or_init(|| Mutex::new(None))
+}
+
+fn clone_io_result(result: &std::io::Result<()>) -> std::io::Result<()> {
+    result
+        .as_ref()
+        .map(|_| ())
+        .map_err(|error| std::io::Error::new(error.kind(), error.to_string()))
 }
 
 pub fn default_log_path() -> PathBuf {
@@ -1128,6 +1457,27 @@ mod tests {
     }
 
     #[test]
+    fn bounded_capture_retains_response_head_and_tail() {
+        let mut capture = Vec::new();
+        let limit = 16;
+
+        assert!(!super::append_capture_with_limit(
+            &mut capture,
+            b"abcdefgh",
+            limit
+        ));
+        assert!(super::append_capture_with_limit(
+            &mut capture,
+            b"ijklmnopqrstuvwxyz",
+            limit
+        ));
+
+        assert_eq!(capture.len(), limit);
+        assert_eq!(&capture[..8], b"abcdefgh");
+        assert_eq!(&capture[8..], b"stuvwxyz");
+    }
+
+    #[test]
     fn extracts_reasoning_tokens_from_responses_usage() {
         let body = br#"{
             "id": "resp_1",
@@ -1496,6 +1846,60 @@ data: [DONE]
             .expect("read proxy log detail")
             .expect("detail should exist");
         assert_eq!(detail.response_body, "");
+
+        remove_proxy_log_artifacts(&path);
+    }
+
+    #[test]
+    fn proxy_log_batch_coalesces_intermediate_updates_to_final_state() {
+        let path = temp_proxy_log_path("batch-coalesce");
+        let mut pending = sample_proxy_record("batched-request");
+        pending.state = ProxyRequestState::Pending;
+        pending.status_code = None;
+        pending.duration_ms = None;
+        pending.response_body.clear();
+        let mut first_token = pending.clone();
+        first_token.status_code = Some(200);
+        first_token.first_token_ms = Some(25);
+        let mut completed = first_token.clone();
+        completed.state = ProxyRequestState::Completed;
+        completed.duration_ms = Some(100);
+        completed.response_body = "{}".to_string();
+
+        super::write_proxy_log_batch(vec![
+            (path.clone(), pending),
+            (path.clone(), first_token),
+            (path.clone(), completed),
+        ])
+        .expect("write batched proxy records");
+
+        let summaries = read_summaries_at_path(&path, 10).expect("read batched summaries");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].state, ProxyRequestState::Completed);
+        assert_eq!(summaries[0].first_token_ms, Some(25));
+        assert_eq!(summaries[0].duration_ms, Some(100));
+        let detail = find_record_at_path(&path, "batched-request")
+            .expect("read batched detail")
+            .expect("batched detail should exist");
+        assert_eq!(detail.state, ProxyRequestState::Completed);
+        assert_eq!(detail.response_body, "{}");
+
+        remove_proxy_log_artifacts(&path);
+    }
+
+    #[tokio::test]
+    async fn completed_nonblocking_enqueue_is_visible_after_flush_fence() {
+        let path = temp_proxy_log_path("completed-enqueue-fence");
+        let record = sample_proxy_record("completed-enqueue-fence");
+
+        super::enqueue_record_nonblocking_at_path(&record, path.clone())
+            .expect("schedule completed proxy log record");
+        super::flush_pending_records().expect("flush completed proxy log record");
+
+        let detail = find_record_at_path(&path, "completed-enqueue-fence")
+            .expect("read completed proxy log record")
+            .expect("completed proxy log record should be visible after flush");
+        assert_eq!(detail.state, ProxyRequestState::Completed);
 
         remove_proxy_log_artifacts(&path);
     }

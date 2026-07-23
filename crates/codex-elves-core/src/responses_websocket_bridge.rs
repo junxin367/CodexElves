@@ -247,10 +247,12 @@ async fn bridge_responses_websockets(
                     return Ok::<(), anyhow::Error>(());
                 }
             };
-            let (message, request_payload, layered_compaction_options) =
-                if let Some(payload) = payload {
+            let (message, request_payload, layered_compaction_options, request_settings) =
+                if let Some((payload, settings)) = payload {
                     let (request_payload, forwarded_payload, layered_compaction_options) =
-                        prepare_downstream_response_create_payload(&payload)?;
+                        prepare_downstream_response_create_payload_with_snapshot(
+                            &payload, &settings,
+                        );
                     let message = if forwarded_payload == payload {
                         message
                     } else {
@@ -260,19 +262,27 @@ async fn bridge_responses_websockets(
                                 .into(),
                         )
                     };
-                    (message, Some(request_payload), layered_compaction_options)
+                    (
+                        message,
+                        Some(request_payload),
+                        layered_compaction_options,
+                        Some(settings),
+                    )
                 } else {
-                    (message, None, None)
+                    (message, None, None, None)
                 };
             if let (Some(request_payload), Message::Text(text)) =
                 (request_payload.as_ref(), &message)
             {
                 let log_id =
                     downstream_request_logger.record_request(request_payload, text.as_str());
-                if let Err(error) = downstream_continuation.register_request(
+                if let Err(error) = downstream_continuation.register_request_with_settings(
                     request_payload,
                     log_id,
                     layered_compaction_options,
+                    request_settings
+                        .as_ref()
+                        .expect("response.create should include a settings snapshot"),
                 ) {
                     let close = Message::Close(Some(CloseFrame {
                         code: CloseCode::Policy,
@@ -492,11 +502,25 @@ enum WebSocketContinuationAction {
 }
 
 impl WebSocketContinuationCoordinator {
+    #[cfg(test)]
     fn register_request(
         &self,
         payload: &Value,
         log_id: Option<String>,
         layered_compaction_options: Option<crate::protocol_proxy::LayeredCompactionOptions>,
+    ) -> anyhow::Result<()> {
+        let settings = SettingsStore::default()
+            .load()
+            .context("读取自动推理续接设置失败")?;
+        self.register_request_with_settings(payload, log_id, layered_compaction_options, &settings)
+    }
+
+    fn register_request_with_settings(
+        &self,
+        payload: &Value,
+        log_id: Option<String>,
+        layered_compaction_options: Option<crate::protocol_proxy::LayeredCompactionOptions>,
+        settings: &crate::settings::BackendSettings,
     ) -> anyhow::Result<()> {
         let model = payload
             .get("model")
@@ -555,9 +579,6 @@ impl WebSocketContinuationCoordinator {
             });
             return Ok(());
         }
-        let settings = SettingsStore::default()
-            .load()
-            .context("读取自动推理续接设置失败")?;
         if !settings.gpt_reasoning_continuation
             || !crate::continue_thinking::is_supported_model(model)
         {
@@ -1593,12 +1614,13 @@ fn websocket_response_error(payload: &Value, event_type: &str) -> Option<String>
 }
 
 fn append_websocket_proxy_log_record(record: &crate::proxy_log::ProxyRequestRecord) {
-    if let Err(error) = crate::proxy_log::append_record(record) {
+    if let Err(error) = crate::proxy_log::enqueue_record_nonblocking(record) {
         let _ = crate::diagnostic_log::append_diagnostic_log(
             "helper.local_proxy_log_failed",
             serde_json::json!({
                 "id": record.id,
                 "transport": "ws",
+                "dropped_intermediate": crate::proxy_log::dropped_intermediate_record_count(),
                 "error": error.to_string()
             }),
         );
@@ -1665,11 +1687,11 @@ fn is_expected_websocket_close_error(error: &WebSocketError) -> bool {
 fn validate_downstream_message(
     message: &Message,
     relay: &crate::settings::RelayProfile,
-) -> anyhow::Result<Option<Value>> {
+) -> anyhow::Result<Option<(Value, crate::settings::BackendSettings)>> {
     let Message::Text(text) = message else {
         return Ok(None);
     };
-    ensure_websocket_relay_still_current(relay)?;
+    let settings = current_websocket_settings(relay)?;
     let payload: Value =
         serde_json::from_str(text.as_str()).context("Responses WebSocket 请求不是有效 JSON")?;
     if payload.get("type").and_then(Value::as_str) != Some("response.create") {
@@ -1683,7 +1705,11 @@ fn validate_downstream_message(
     if model.is_empty() {
         anyhow::bail!("Responses WebSocket 请求缺少 model");
     }
-    if relay.protocol_for_model(model) != RelayProtocol::Responses {
+    if settings
+        .active_relay_profile()
+        .resolve_protocol_for_model(model)?
+        != RelayProtocol::Responses
+    {
         anyhow::bail!("当前模型不是原生 Responses 协议");
     }
     let _ = crate::diagnostic_log::append_diagnostic_log(
@@ -1697,9 +1723,10 @@ fn validate_downstream_message(
             "model": model,
         }),
     );
-    Ok(Some(payload))
+    Ok(Some((payload, settings)))
 }
 
+#[cfg(test)]
 fn prepare_downstream_response_create_payload(
     payload: &Value,
 ) -> anyhow::Result<(
@@ -1725,6 +1752,20 @@ fn prepare_downstream_response_create_payload(
     Ok(prepare_downstream_response_create_payload_with_settings(
         normalized, &settings,
     ))
+}
+
+fn prepare_downstream_response_create_payload_with_snapshot(
+    payload: &Value,
+    settings: &crate::settings::BackendSettings,
+) -> (
+    Value,
+    Value,
+    Option<crate::protocol_proxy::LayeredCompactionOptions>,
+) {
+    prepare_downstream_response_create_payload_with_settings(
+        crate::protocol_proxy::normalize_native_responses_request(payload),
+        settings,
+    )
 }
 
 fn prepare_downstream_response_create_payload_with_settings(
@@ -1780,6 +1821,12 @@ fn prepare_downstream_response_create_payload_with_settings(
 fn ensure_websocket_relay_still_current(
     connected_relay: &crate::settings::RelayProfile,
 ) -> anyhow::Result<()> {
+    current_websocket_settings(connected_relay).map(|_| ())
+}
+
+fn current_websocket_settings(
+    connected_relay: &crate::settings::RelayProfile,
+) -> anyhow::Result<crate::settings::BackendSettings> {
     let settings = SettingsStore::default()
         .load()
         .context("读取当前供应商设置失败")?;
@@ -1797,7 +1844,7 @@ fn ensure_websocket_relay_still_current(
     {
         anyhow::bail!("当前供应商已变化，请重新建立 Responses WebSocket");
     }
-    Ok(())
+    Ok(settings)
 }
 
 fn parse_websocket_upgrade_request(request_bytes: &[u8]) -> anyhow::Result<(Request, Vec<u8>)> {

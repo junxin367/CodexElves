@@ -97,6 +97,9 @@ fn renderer_features_diagnostics_prefer_bridge_before_http_fallback() {
 fn renderer_features_reuses_scan_observers_when_roots_are_unchanged() {
     let script = assets::renderer_features_script();
 
+    assert!(script.contains("function installCodexElvesRuntimeOnce()"));
+    assert!(script.contains("window.__codexElvesRuntimeOnceInstalled === codexElvesBuild"));
+    assert!(!script.contains("function scanLightweight()"));
     assert!(script.contains("function sameScanObserverRoots"));
     assert!(script.contains("if (sameScanObserverRoots(roots)) return;"));
     assert!(script.contains("window.__codexSessionDeleteObserverConfigs"));
@@ -106,6 +109,38 @@ fn renderer_features_reuses_scan_observers_when_roots_are_unchanged() {
         )
     );
     assert!(script.contains("subtree: !scopedRootsReady"));
+    assert!(script.contains("[sidebarRoot, conversationRoot, headerRoot].forEach((root) =>"));
+    assert!(script.contains("push(\"shell\", root.parentElement"));
+    assert!(script.contains("function scanRelevantSelectorForDomain(domain)"));
+    assert!(script.contains("function shouldScheduleScan(mutations, domain)"));
+    assert!(script.contains(
+        "if (!shouldScheduleScan(mutations, domain)) return;\n    if (domain === \"sidebar\") collectPendingSessionRows(mutations)"
+    ));
+    assert!(script.contains(
+        "if (dirty.shell) requestAnimationFrame(() => runScanStep(installScanObservers))"
+    ));
+    assert!(script.contains("if (headerDirty) installCodexElvesMenu()"));
+    assert!(script.contains("if (shellDirty) cleanupDisconnectedSessionArtifacts()"));
+}
+
+#[test]
+fn injection_script_batches_session_row_refresh_and_layout() {
+    let script = assets::renderer_features_script();
+
+    assert!(script.contains("const pendingSessionRows = new Set()"));
+    assert!(script.contains("const pendingSessionRowLayouts = new Set()"));
+    assert!(script.contains("function collectPendingSessionRows(mutations)"));
+    assert!(script.contains("function takePendingSessionRows()"));
+    assert!(script.contains("function resetPendingSessionRowsForFullRefresh()"));
+    assert!(script.contains("scan(dirty, { sidebarIncremental: !dirty.shell })"));
+    assert!(script.contains("pending.rows.forEach(tryAttachButton)"));
+    assert!(!script.contains("sessionRows().forEach(tryAttachButton)"));
+    assert!(script.contains("function measureActionGroupLayout(row, group)"));
+    assert!(script.contains("function applyActionGroupLayout(measurement)"));
+    assert!(script.contains("measurements.forEach(applyActionGroupLayout)"));
+    assert!(script.contains("function scheduleSessionRowLayout(rows)"));
+    assert!(script.contains("pendingSessionRowLayoutRafId = requestAnimationFrame"));
+    assert!(script.contains("updateDeleteButtonOffsets(pending.rows)"));
 }
 
 #[test]
@@ -192,14 +227,15 @@ fn injection_script_exposes_plugin_list_auto_expand_switch() {
     assert!(script.contains("codexPluginAutoExpandVersion = \"1\""));
     assert!(script.contains("pluginAutoExpand: true"));
     assert!(script.contains("pluginAutoExpand: \"codexAppPluginAutoExpand\""));
+    assert!(script.contains("function pluginAutoExpandPageActive()"));
+    assert!(script.contains("pluginButton?.getAttribute(\"aria-current\") === \"page\""));
+    assert!(script.contains("document.querySelector(\"main, [role='main']\")"));
     assert!(script.contains("function pluginAutoExpandButtonLooksLikeMore"));
+    assert!(!script.contains(r#"/^(另有|还有)\s*\d+\s*个(?:插件)?$/i"#));
     assert!(script.contains("function schedulePluginAutoExpand"));
     assert!(script.contains("plugins: pluginAutoExpandPageLooksRelevant()"));
-    assert!(
-        script.contains(
-            "codexElvesSettings().pluginAutoExpand && pluginAutoExpandPageLooksRelevant()"
-        )
-    );
+    assert!(script.contains("codexElvesSettings().pluginAutoExpand"));
+    assert!(script.contains("&& pluginAutoExpandPageLooksRelevant()"));
     assert!(script.contains("if (pluginAutoExpandPageLooksRelevant()) dirty.plugins = true"));
     assert!(script.contains("plugin_auto_expand_finished"));
     assert!(script.contains("插件列表全量展示"));
@@ -274,7 +310,7 @@ fn injection_script_keeps_plugin_marketplace_unlock_separate_from_entry_unlock()
     assert!(script.contains("pluginMarketplaceUnlock: true"));
     assert!(script.contains("pluginMarketplaceUnlock: \"codexAppPluginMarketplaceUnlock\""));
     assert!(script.contains("if (!codexElvesSettings().pluginMarketplaceUnlock) return"));
-    assert!(script.contains("installPluginBuildFlavorFilterPatch"));
+    assert!(script.contains("codexPluginMarketplaceAliasForName"));
     assert!(script.contains("installPluginMarketplaceRequestPatch"));
 }
 
@@ -290,14 +326,13 @@ fn injection_script_does_not_unlock_disabled_plugin_install_buttons() {
 }
 
 #[test]
-fn injection_script_keeps_bundled_marketplace_name_for_default_filter() {
+fn injection_script_aliases_official_marketplaces_but_preserves_ready_identity() {
     let script = assets::injection_script(45221);
 
-    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"12\""));
-    assert!(!script.contains("function pluginMarketplaceAliasForName"));
-    assert!(
-        !script.contains("if (name === \"openai-bundled\") return \"codex-elves-openai-bundled\"")
-    );
+    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"19\""));
+    assert!(script.contains("function codexPluginMarketplaceAliasForName(name)"));
+    assert!(script.contains("if (restored === \"openai-curated-remote\") return restored;"));
+    assert!(script.contains("marketplace.name = alias"));
     assert!(script.contains("if (name === \"openai-bundled\" || name === \"codex-elves-openai-bundled\") return \"OpenAI插件1(CodexElves)\""));
 }
 
@@ -305,40 +340,39 @@ fn injection_script_keeps_bundled_marketplace_name_for_default_filter() {
 fn injection_script_does_not_bypass_plugin_marketplace_search_filters() {
     let script = assets::injection_script(45221);
 
-    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"12\""));
-    assert!(script.contains("isCodexPluginBuildFlavorFilter"));
-    assert!(script.contains("source.includes(\"!u(e.marketplaceName)||e.marketplaceName===r\")"));
-    assert!(script.contains("source.includes(\"!t.includes(e.name)\")"));
-    assert!(!script.contains("if (!source.includes(\"marketplaceName\")) return false"));
-    assert!(!script.contains("if (!source.includes(\"name\")) return false"));
+    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"19\""));
+    assert!(!script.contains("Array.prototype.filter = patchedFilter"));
+    assert!(!script.contains("Object.defineProperty(items, \"filter\""));
 }
 
 #[test]
 fn injection_script_expands_api_key_plugin_marketplace_requests() {
     let script = assets::injection_script(45221);
+    let cases = run_service_tier_contract_harness();
 
-    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"12\""));
+    assert!(script.contains("codexPluginMarketplaceUnlockVersion = \"19\""));
     assert!(script.contains("installPluginMarketplaceRequestPatch"));
     assert!(script.contains("installPluginMarketplaceBridgePatch"));
-    assert!(script.contains("installPluginBuildFlavorFilterPatch"));
-    assert!(script.contains("Array.prototype.filter"));
-    assert!(script.contains("codexPluginBuildFlavorFilterPatch"));
-    assert!(script.contains("isCodexPluginBuildFlavorFilter"));
-    assert!(script.contains(
-        "codexPluginOfficialMarketplaceName(plugin?.marketplaceName) && !callback(plugin)"
-    ));
-    assert!(script.contains("isCodexPluginMarketplaceHiddenFilter"));
-    assert!(script.contains(
-        "codexPluginOfficialMarketplaceName(marketplace?.name) && !callback(marketplace)"
-    ));
-    assert!(script.contains("plugin_marketplace_hidden_filter_bypassed"));
+    assert!(script.contains("return \"client\";"));
+    assert!(script.contains("manager = findCodexSessionPrewarmManagerInReactTree(true).manager"));
+    assert!(script.contains("patchPluginMarketplaceRequestClient(manager?.requestClient)"));
+    assert!(script.contains("plugin_marketplace_bridge_patch_not_writable"));
+    assert!(script.contains("plugin_marketplace_request_skipped_unsupported_auth"));
+    assert!(script.contains("return emptyPluginMarketplaceResult();"));
+    assert!(!script.contains("Array.prototype.filter = patchedFilter"));
+    assert!(!script.contains("installPluginBuildFlavorFilterPatch"));
+    assert!(script.contains("codexPluginMarketplaceAliasForName"));
+    assert!(script.contains("marketplace.name = alias"));
     assert!(script.contains("method === \"list-plugins\""));
     assert!(script.contains("method === \"vscode://codex/list-plugins\""));
     assert!(script.contains("message.type === \"fetch\""));
     assert!(script.contains("data?.type === \"fetch-response\""));
     assert!(script.contains("__codexPluginMarketplaceFetchRequestIds"));
     assert!(script.contains("if (hadMarketplaceKinds && Array.isArray(next.marketplaceKinds))"));
-    assert!(script.contains("if (!nextKinds.includes(\"vertical\")) nextKinds.push(\"vertical\")"));
+    assert!(script.contains("codexPluginApiKeyUnsupportedMarketplaceKinds.has(kind)"));
+    assert!(script.contains(
+        "if (unsupportedMarketplaceKinds.length === 0 && !nextKinds.includes(\"vertical\"))"
+    ));
     assert!(script.contains("next.marketplaceKinds = Array.from(new Set(nextKinds));"));
     assert!(script.contains("patchPluginMarketplaceResult"));
     assert!(script.contains("__CODEX_ELVES_PLUGIN_MARKETPLACES__"));
@@ -350,7 +384,6 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
     assert!(script.contains(
         "next.remoteMarketplaceName = restorePluginMarketplaceName(next.remoteMarketplaceName)"
     ));
-    assert!(!script.contains("marketplace.name = alias"));
     assert!(script.contains("if (name === \"openai-curated\" || name === \"codex-elves-openai-curated\") return \"OpenAI插件2(CodexElves)\""));
     assert!(script.contains("OpenAI插件1(CodexElves)"));
     assert!(script.contains("OpenAI插件2(CodexElves)"));
@@ -359,29 +392,94 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
     assert!(script.contains("OpenAI插件5(CodexElves)"));
     assert!(script.contains("method === \"install-plugin\""));
     assert!(script.contains("plugin_marketplace_response_expanded"));
-    assert!(script.contains("plugin_build_flavor_filter_bypassed"));
     assert!(script.contains("plugin_install_request_debug"));
     assert!(script.contains("plugin_install_request_failed"));
     assert!(!script.contains("marketplace.path ="));
     assert!(!script.contains("codexPluginMarketplacePathAliasForName"));
     assert!(!script.contains("spoofAnyCodexAuthContext"));
+    assert_eq!(
+        cases["pluginScopedFilters"]["pluginCount"],
+        cases["pluginScopedFilters"]["pluginTotal"]
+    );
+    assert_eq!(
+        cases["pluginScopedFilters"]["marketplaceCount"],
+        cases["pluginScopedFilters"]["marketplaceTotal"]
+    );
+    assert_eq!(
+        cases["pluginScopedFilters"]["officialMarketplaceName"],
+        "codex-elves-openai-bundled"
+    );
+    assert_eq!(
+        cases["pluginScopedFilters"]["curatedRemoteMarketplaceName"],
+        "openai-curated-remote"
+    );
+    assert_eq!(cases["pluginScopedFilters"]["catalogReady"], true);
+    assert_eq!(cases["pluginScopedFilters"]["pluginFilterIsOwn"], false);
+    assert_eq!(
+        cases["pluginScopedFilters"]["marketplaceFilterIsOwn"],
+        false
+    );
+    assert_eq!(
+        cases["pluginScopedFilters"]["ordinaryFilter"],
+        json!([2, 3])
+    );
+    assert_eq!(
+        cases["pluginMarketplaceRequestParams"]["personal"]["marketplaceKinds"],
+        json!(["created-by-me-remote"])
+    );
+    assert_eq!(
+        cases["pluginMarketplaceRequestParams"]["mixed"]["marketplaceKinds"],
+        json!(["created-by-me-remote", "workspace"])
+    );
+    assert_eq!(
+        cases["pluginMarketplaceRequestParams"]["original"]["marketplaceKinds"],
+        json!(["created-by-me-remote"])
+    );
+    assert_eq!(
+        cases["pluginMarketplaceRequestClient"]["calls"][0]["method"],
+        "plugin/list"
+    );
+    assert_eq!(
+        cases["pluginMarketplaceRequestClient"]["calls"][0]["params"]["marketplaceKinds"],
+        json!(["workspace", "vertical"])
+    );
+    assert_eq!(
+        cases["pluginMarketplaceRequestClient"]["unsupportedCount"],
+        0
+    );
+    assert_eq!(
+        cases["pluginMarketplaceRequestClient"]["calls"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
-fn injection_script_keeps_marketplace_kinds_and_adds_vertical_catalog() {
+fn injection_script_skips_api_key_incompatible_marketplace_queries_and_expands_supported_catalogs()
+{
     let script = assets::injection_script(45221);
 
     assert!(script.contains("const hadMarketplaceKinds = Object.prototype.hasOwnProperty.call(next, \"marketplaceKinds\")"));
     assert!(script.contains("if (hadMarketplaceKinds && Array.isArray(next.marketplaceKinds))"));
+    assert!(script.contains(".map((kind) => restorePluginMarketplaceName(kind))"));
     assert!(script.contains(
-        "const nextKinds = next.marketplaceKinds.map((kind) => restorePluginMarketplaceName(kind));"
+        "const codexPluginApiKeyUnsupportedMarketplaceKinds = new Set([\"created-by-me-remote\"]);"
     ));
-    assert!(script.contains("if (!nextKinds.includes(\"vertical\")) nextKinds.push(\"vertical\")"));
+    assert!(script.contains("codexPluginApiKeyUnsupportedMarketplaceKinds.has(kind)"));
+    assert!(script.contains("unsupportedMarketplaceKinds.push(kind)"));
+    assert!(script.contains("function unsupportedPluginMarketplaceKinds(method, params)"));
+    assert!(script.contains("function emptyPluginMarketplaceResult()"));
+    assert!(script.contains(
+        "if (unsupportedMarketplaceKinds.length === 0 && !nextKinds.includes(\"vertical\"))"
+    ));
     assert!(script.contains("next.marketplaceKinds = Array.from(new Set(nextKinds));"));
     assert!(script.contains("plugin_marketplace_request_expanded"));
     assert!(script.contains(
         "marketplaceKinds: Array.isArray(next.marketplaceKinds) ? next.marketplaceKinds : null"
     ));
+    assert!(script.contains("unsupportedMarketplaceKinds"));
     assert!(!script.contains("delete next.marketplaceKinds"));
     assert!(!script.contains("codexPluginAllowedMarketplaceKinds"));
     assert!(!script.contains("codexPluginExpandedMarketplaceKinds"));
@@ -579,9 +677,8 @@ fn injection_script_moves_export_and_project_move_into_more_menu() {
     assert!(script.contains("nativeActionHost.prepend(group)"));
     assert!(script.contains("row.appendChild(group)"));
     assert!(script.contains("width: auto !important;"));
-    assert!(script.contains(
-        "const maxTitleWidth = Math.max(24, Math.floor(hostRect.left - titleRect.left));"
-    ));
+    assert!(script.contains("maxTitleWidth: titleRect && hostRect.width > 0"));
+    assert!(script.contains("Math.max(24, Math.floor(hostRect.left - titleRect.left))"));
     assert!(script.contains("max-width: var(--codex-session-title-max-width) !important;"));
     assert!(script.contains("[data-codex-delete-row=\"true\"]:focus-within [data-thread-title]"));
     assert!(script.contains("[data-codex-delete-row=\"true\"]:hover .${actionGroupClass} {\n        opacity: 1;\n        pointer-events: auto;\n      }"));
@@ -604,51 +701,38 @@ fn injection_script_does_not_add_delete_controls_on_archived_page() {
 }
 
 #[test]
-fn injection_script_unlocks_custom_model_catalog() {
+fn injection_script_uses_codex_native_model_catalog_without_model_list_patching() {
     let script = assets::injection_script(45221);
 
     assert!(script.contains("/codex-model-catalog"));
     assert!(script.contains("codexModelCatalog"));
-    assert!(script.contains("patchModelArray"));
-    assert!(script.contains("patchStatsigModelDynamicConfig"));
-    assert!(script.contains("patchModelJsonResponse"));
-    assert!(script.contains("installAppServerModelRequestPatch"));
-    assert!(script.contains("list-models-for-host"));
-    assert!(script.contains("appServerModelRequestMethod"));
-    assert!(script.contains("send-cli-request-for-host"));
-    assert!(script.contains("Response.prototype.json"));
-    assert!(script.contains("looksLikeModelPayload(payload)"));
-    assert!(script.contains("scheduleCodexModelWhitelistRefresh"));
-    assert!(script.contains("runCodexModelWhitelistRefreshPass"));
-    assert!(script.contains("codexModelStatsigWaitUntil"));
-    assert!(script.contains("codexModelStatsigReady"));
-    assert!(script.contains("model_statsig_wait_started"));
-    assert!(script.contains("maxWaitMs: 60000"));
-    assert!(script.contains("waitingForStatsig ? 250 : 120"));
-    assert!(script.contains("invalidateCodexModelQueryCache"));
-    assert!(script.contains(r#"dispatcher.dispatchMessage("query-cache-invalidate""#));
+    assert!(script.contains("codexElvesModelNames"));
+    assert!(script.contains("installAppServerManagerDiscovery"));
+    assert!(script.contains("installStatsigModelVisibilityPatch"));
+    assert!(script.contains("use_hidden_models: false"));
+    assert!(script.contains("appServerRequestMethod"));
+    assert!(!script.contains("patchModelArray"));
+    assert!(!script.contains("patchModelContainer"));
+    assert!(!script.contains("patchAppServerModelResult"));
+    assert!(!script.contains("patchAppServerModelRequestClient"));
+    assert!(!script.contains("patchStatsigModelDynamicConfig"));
+    assert!(!script.contains("installStatsigModelConfigPatch"));
+    assert!(!script.contains("available_models: availableModels"));
+    assert!(!script.contains("ensureCodexModelIntegration"));
+    assert!(!script.contains("model/list"));
+    assert!(!script.contains("list-models-for-host"));
     assert!(script.contains(r#"queryKey: ["models", "list"]"#));
-    assert!(script.contains("model_query_cache_invalidate_failed"));
-    assert!(script.contains("scheduleCodexModelUiRefresh"));
-    assert!(script.contains("codex-elves-model-catalog-updated"));
-    assert!(script.contains("recordCodexModelUnlockPath"));
-    assert!(script.contains("model_unlock_path_applied"));
-    assert!(script.contains("codexAppServerModelPatchPromise"));
-    assert!(script.contains("codexAppServerModelPatchNextAttemptAt"));
-    assert!(script.contains("codexAppServerModelPatchBackoffMs"));
-    assert!(script.contains("retryAfterMs"));
-    assert!(script.contains("patchAppServerModelRequestClientClass"));
-    assert!(script.contains(r#"method !== "model/list""#));
-    assert!(
-        script.contains("headerDirty || conversationDirty || shouldScheduleReactModelStatePatch")
-    );
-    assert!(script.contains("model_whitelist_refresh_scheduled"));
-    assert!(script.contains("available_models"));
+    assert!(!script.contains("model_unlock_path_applied"));
+    assert!(!script.contains("Response.prototype.json"));
+    assert!(!script.contains("patchObjectGraphForModels"));
+    assert!(!script.contains("patchReactModelState"));
+    assert!(!script.contains("shouldScheduleReactModelStatePatch"));
+    assert!(!script.contains("scheduleCodexModelWhitelistRefresh"));
+    assert!(!script.contains("model_whitelist_refresh_scheduled"));
+    assert!(!script.contains("model_statsig_wait_started"));
     assert!(!script.contains("modelWhitelistUnlock"));
     assert!(!script.contains("codexAppModelWhitelistUnlock"));
     assert!(!script.contains("模型白名单解锁"));
-    assert!(script.contains("isWorkspaceChromeNode"));
-    assert!(script.contains("refreshCodexModelWhitelistFromScan"));
     assert!(!script.contains("querySelectorAll(\"button, [role='menu']"));
 }
 
@@ -810,9 +894,15 @@ fn injection_script_refreshes_fast_state_after_backend_load_and_route_entry() {
 
     assert!(script.contains("refreshCodexServiceTierFeatureState"));
     assert!(script.contains("if (key === codexElvesBackendSettingMap.serviceTierControls)"));
-    assert!(script.contains(
-        "refreshCodexServiceTierFeatureState();\n      refreshCodexTokenUsageFeatureState();\n      scheduleCodexSessionPrewarm(codexSessionPrewarmStartupDelayMs, \"settings-loaded\");\n      return true;"
-    ));
+    assert!(script.contains("refreshCodexServiceTierFeatureState();"));
+    assert!(script.contains("refreshCodexTokenUsageFeatureState();"));
+    assert!(script.contains("void applyLoadedBackendSettings(settings, \"settings-loaded\")"));
+    assert!(script.contains("return refreshCodexSessionPrewarmFeatureState(reason);"));
+    assert!(script.contains("refreshCodexSessionPrewarmFeatureState(`setting-${localKey}`)"));
+    assert!(script.contains("installCodexServiceTierDispatcherPatch();"));
+    assert!(script.contains("installCodexServiceTierRequestClientPatch();"));
+    assert!(script.contains("refreshUpstreamBranchDropdownAdapter();"));
+    assert!(script.contains("syncChatsSortVisibilityListener();"));
     assert!(script.contains(
         "scheduleConversationViewRouteRefresh();\n    refreshCodexServiceTierFeatureState();"
     ));
@@ -904,36 +994,24 @@ fn injection_script_applies_fast_service_tier_contract() {
         json!(["first-model", "second-model", "current-model"])
     );
     assert_eq!(
-        cases["relayModelArrayOrder"],
-        json!([
-            {"model": "first-model", "hidden": false},
-            {"model": "second-model", "hidden": false},
-            {"model": "current-model", "hidden": false},
-            {"model": "built-in-model", "hidden": true}
-        ])
+        cases["modelVisibilityConfig"],
+        json!({
+            "default_model": "gpt-5.4",
+            "use_hidden_models": false,
+            "available_models": ["gpt-5.4"]
+        })
     );
     assert_eq!(
-        cases["relayModelContainer"]["models"],
-        json!(["first-model", "second-model", "current-model"])
+        cases["managerDiscoveryBackoffMs"],
+        json!([1000, 2000, 30000])
     );
+    assert_eq!(cases["pluginAutoExpandLabels"]["latestChinese"], false);
     assert_eq!(
-        cases["relayModelContainer"]["availableModels"],
-        json!(["first-model", "second-model", "current-model"])
+        cases["pluginAutoExpandLabels"]["latestChineseCompact"],
+        false
     );
-    assert_eq!(
-        cases["relayModelContainer"]["available_models"],
-        json!(["first-model", "second-model", "current-model"])
-    );
-    assert_eq!(
-        cases["relayAppServerModelOrder"],
-        json!([
-            {"model": "first-model", "hidden": false},
-            {"model": "second-model", "hidden": false},
-            {"model": "current-model", "hidden": false},
-            {"model": "built-in-model", "hidden": true}
-        ])
-    );
-    assert_eq!(cases["modelPatchBackoffMs"], json!([1000, 2000, 30000]));
+    assert_eq!(cases["pluginAutoExpandLabels"]["legacyChinese"], true);
+    assert_eq!(cases["pluginAutoExpandLabels"]["unrelatedCount"], false);
     assert_eq!(
         cases["badgeTooltip"]["dataCodexTooltip"],
         serde_json::Value::Null
@@ -947,19 +1025,24 @@ fn injection_script_applies_fast_service_tier_contract() {
             .as_str()
             .is_some_and(|value| value.contains("服务模式"))
     );
+    assert_eq!(cases["serviceTierRetry"]["dispatcherAttempts"], 3);
+    assert_eq!(cases["serviceTierRetry"]["requestClientAttempts"], 2);
+    assert_eq!(cases["serviceTierRetry"]["dispatcherInstalled"], true);
+    assert_eq!(cases["serviceTierRetry"]["requestClientInstalled"], true);
+    assert_eq!(cases["serviceTierRetry"]["dispatcherRetryPending"], false);
+    assert_eq!(
+        cases["serviceTierRetry"]["requestClientRetryPending"],
+        false
+    );
 }
 
 #[test]
-fn injection_script_preserves_app_server_request_client_binding() {
+fn injection_script_does_not_patch_app_server_model_requests() {
     let script = assets::injection_script(45221);
-    let cases = run_service_tier_contract_harness();
-    let request_patch = &cases["appServerRequestPatch"];
-
-    assert!(script.contains("const codexAppServerModelRequestPatchVersion = \"6\";"));
-    assert_eq!(request_patch["originalCalls"], 1);
-    assert_eq!(request_patch["thisBindingChecks"], json!([true]));
-    assert_eq!(request_patch["requestStatus"], "ok");
-    assert_eq!(request_patch["patchVersion"], "6");
+    assert!(script.contains("const codexAppServerManagerDiscoveryVersion = \"1\";"));
+    assert!(!script.contains("__codexElvesModelOriginalSendRequest"));
+    assert!(!script.contains("__codexElvesModelRequestPatch"));
+    assert!(!script.contains("codexElvesModelPatchedSendRequest"));
 }
 
 #[test]
@@ -967,7 +1050,7 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
     let script = assets::injection_script(45221);
     let cases = run_service_tier_contract_harness();
     let prewarm = &cases["sessionPrewarm"];
-    let runtime_generation = run_runtime_request_patch_generation_harness();
+    let runtime_generation = run_runtime_manager_discovery_generation_harness();
 
     assert!(script.contains("@keyframes codex-session-prewarm-shimmer"));
     assert!(script.contains("data-codex-session-prewarming"));
@@ -982,10 +1065,10 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
     assert!(script.contains("const codexSessionPrewarmStartupDelayMs = 200;"));
     assert!(script.contains("const codexSessionPrewarmMaxAgeMs = 24 * 60 * 60 * 1000;"));
     assert!(script.contains(
-        "window.__codexElvesRuntimeRequestPatchVersion === codexAppServerModelRequestPatchVersion"
+        "window.__codexElvesRuntimeManagerDiscoveryVersion === codexAppServerManagerDiscoveryVersion"
     ));
     assert!(script.contains(
-        "window.__codexElvesRuntimeRequestPatchVersion = codexAppServerModelRequestPatchVersion;"
+        "window.__codexElvesRuntimeManagerDiscoveryVersion = codexAppServerManagerDiscoveryVersion;"
     ));
     let runtime_refresh = script
         .find("window.__codexElvesRefreshRuntime();")
@@ -1002,7 +1085,7 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
         json!({
             "refreshCalls": 1,
             "runtimeId": 10,
-            "requestPatchVersion": "6"
+            "managerDiscoveryVersion": "1"
         })
     );
     assert_eq!(
@@ -1010,7 +1093,7 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
         json!({
             "refreshCalls": 0,
             "runtimeId": 11,
-            "requestPatchVersion": "5"
+            "managerDiscoveryVersion": "0"
         })
     );
     assert_eq!(
@@ -1018,7 +1101,7 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
         json!({
             "refreshCalls": 0,
             "runtimeId": 11,
-            "requestPatchVersion": null
+            "managerDiscoveryVersion": null
         })
     );
     assert_eq!(
@@ -1144,14 +1227,8 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
     assert_eq!(prewarm["hiddenResumeCalls"], 0);
     assert_eq!(prewarm["hiddenQueueSummary"]["completed"], 0);
     assert_eq!(prewarm["hiddenQueueSummary"]["interrupted"], true);
-    assert_eq!(
-        prewarm["needsModelPatchOnly"],
-        json!({"manager": false, "modelPatch": true})
-    );
-    assert_eq!(
-        prewarm["needsManagerOnly"],
-        json!({"manager": true, "modelPatch": false})
-    );
+    assert_eq!(prewarm["managerDiscoveryNeededWithManager"], json!(false));
+    assert_eq!(prewarm["managerDiscoveryNeededWithoutManager"], json!(true));
     assert_eq!(prewarm["failedRunCompletedSignature"], "");
     assert_eq!(prewarm["failedRunRetryCounts"], json!([1]));
     assert_eq!(prewarm["noTasksRetryCounts"], json!([1]));
@@ -1166,11 +1243,20 @@ fn injection_script_prewarms_sessions_with_bounded_concurrency_and_deduplication
     assert_eq!(prewarm["secondManagerResumeCalls"], 1);
     assert_eq!(prewarm["nestedManagerFound"], true);
     assert_eq!(prewarm["nestedManagerHasResume"], true);
+    assert_eq!(prewarm["latestManagerFound"], true);
+    assert!(
+        prewarm["latestManagerScanned"]
+            .as_u64()
+            .is_some_and(|value| value < 1000)
+    );
     assert!(
         prewarm["nestedManagerScanned"]
             .as_u64()
             .is_some_and(|value| value > 0)
     );
+    assert_eq!(prewarm["coldStartManagerReady"], true);
+    assert_eq!(prewarm["coldStartManagerLoadCalls"], 1);
+    assert_eq!(prewarm["coldStartResumeCalls"], 1);
     assert_eq!(prewarm["emptyWorkspaceRoots"], json!([]));
     assert_eq!(prewarm["launchCycleReset"], true);
     assert_eq!(prewarm["launchCycleResetRepeated"], false);
@@ -1201,7 +1287,19 @@ fn injection_script_defaults_session_prewarm_to_disabled() {
     assert!(script.contains("enabled: settings.sessionPrewarmEnabled === true"));
 }
 
-fn run_runtime_request_patch_generation_harness() -> serde_json::Value {
+#[test]
+fn injection_script_visible_sort_fallback_refreshes_backend_sort_keys() {
+    let script = assets::injection_script(45221).replace("\r\n", "\n");
+    let fallback = script
+        .split("function armChatsSortVisibleFallback()")
+        .nth(1)
+        .and_then(|tail| tail.split("function stopChatsSortRuntime()").next())
+        .expect("visible sort fallback function should exist");
+
+    assert!(fallback.contains("scheduleChatsSortCorrection(0, { refreshKeys: true });"));
+}
+
+fn run_runtime_manager_discovery_generation_harness() -> serde_json::Value {
     let script = assets::injection_script(45221);
     let bootstrap_end = script
         .find("  function installCodexElvesImageOverlay()")
@@ -1221,7 +1319,7 @@ const expectedHelperBase = JSON.parse(
   bootstrap.match(/window\.__CODEX_SESSION_DELETE_HELPER__ = (".*?");/)?.[1] || '""'
 );
 
-function runScenario(requestPatchVersion) {{
+function runScenario(managerDiscoveryVersion) {{
   window.__codexElvesRuntimeBuild = expectedBuild;
   window.__codexElvesRuntimeHelperBase = expectedHelperBase;
   window.__codexSessionPrewarmRuntimeId = 10;
@@ -1233,22 +1331,22 @@ function runScenario(requestPatchVersion) {{
   window.__codexElvesRefreshRuntime = () => {{
     refreshCalls += 1;
   }};
-  if (requestPatchVersion == null) {{
-    delete window.__codexElvesRuntimeRequestPatchVersion;
+  if (managerDiscoveryVersion == null) {{
+    delete window.__codexElvesRuntimeManagerDiscoveryVersion;
   }} else {{
-    window.__codexElvesRuntimeRequestPatchVersion = requestPatchVersion;
+    window.__codexElvesRuntimeManagerDiscoveryVersion = managerDiscoveryVersion;
   }}
   vm.runInThisContext(bootstrap);
   return {{
     refreshCalls,
     runtimeId: window.__codexSessionPrewarmRuntimeId,
-    requestPatchVersion: window.__codexElvesRuntimeRequestPatchVersion || null,
+    managerDiscoveryVersion: window.__codexElvesRuntimeManagerDiscoveryVersion || null,
   }};
 }}
 
 process.stdout.write(JSON.stringify({{
-  current: runScenario("6"),
-  old: runScenario("5"),
+  current: runScenario("1"),
+  old: runScenario("0"),
   missing: runScenario(null),
 }}));
 "#,
@@ -1305,6 +1403,13 @@ function node() {{
   }};
 }}
 globalThis.HTMLElement = Object;
+globalThis.MutationObserver = class MutationObserver {{
+  constructor(callback) {{
+    this.callback = callback;
+  }}
+  observe() {{}}
+  disconnect() {{}}
+}};
 globalThis.getComputedStyle = () => ({{
   display: "block",
   visibility: "visible",
@@ -1313,6 +1418,7 @@ globalThis.getComputedStyle = () => ({{
 globalThis.window = globalThis;
 window.__CODEX_ELVES_TEST_SERVICE_TIER__ = true;
 window.__CODEX_ELVES_TEST_SESSION_PREWARM__ = true;
+window.__CODEX_ELVES_TEST_PLUGIN_AUTO_EXPAND__ = true;
 window.dispatchEvent = () => true;
 globalThis.CustomEvent = class CustomEvent {{
   constructor(type, options = {{}}) {{
@@ -1348,6 +1454,13 @@ globalThis.navigator = {{ userAgent: "node-test" }};
 globalThis.performance = {{ getEntriesByType: () => [] }};
 require(scriptPath);
 const api = window.__codexElvesServiceTierTest;
+const pluginAutoExpandApi = window.__codexElvesPluginAutoExpandTest;
+const pluginAutoExpandLabels = {{
+  latestChinese: pluginAutoExpandApi.matchesText("另有 4 个"),
+  latestChineseCompact: pluginAutoExpandApi.matchesText("另有4个插件"),
+  legacyChinese: pluginAutoExpandApi.matchesText("显示更多"),
+  unrelatedCount: pluginAutoExpandApi.matchesText("已安装 4 个"),
+}};
 api.setServiceTierState({{ serviceTier: "priority", fastTierValue: "priority" }});
 api.setModelCatalog({{ status: "ok", model: "gpt-5.4", default_model: "gpt-5.4", models: ["gpt-5.4", "gpt-5.5"] }});
 const displayNameMatches = {{
@@ -1477,35 +1590,120 @@ api.setModelCatalog({{
   models: ["first-model", "second-model", "current-model"],
 }});
 const relayModelNames = api.modelNames();
-const relayModelArray = [
-  {{ model: "current-model", hidden: true }},
-  {{ model: "built-in-model", hidden: false }},
-  {{ model: "second-model", hidden: true }},
+const modelVisibilityConfig = api.patchStatsigModelVisibilityConfig({{
+  value: {{
+    default_model: "gpt-5.4",
+    use_hidden_models: true,
+    available_models: ["gpt-5.4"],
+  }},
+}}).value;
+const managerDiscoveryBackoffMs = [
+  api.appServerManagerDiscoveryBackoffMs(1),
+  api.appServerManagerDiscoveryBackoffMs(2),
+  api.appServerManagerDiscoveryBackoffMs(10),
 ];
-api.patchModelArray(relayModelArray, true);
-const relayModelArrayOrder = relayModelArray.map((item) => ({{
-  model: item.model,
-  hidden: item.hidden,
-}}));
-const relayModelContainer = {{
-  models: ["built-in-model", "current-model"],
-  availableModels: ["built-in-model", "current-model"],
-  available_models: ["built-in-model", "second-model"],
+
+const pluginMarketplaceResult = {{
+  marketplaces: [
+    {{
+      name: "openai-bundled",
+      plugins: [
+        {{ name: "official-plugin", marketplaceName: "openai-bundled" }},
+        {{ name: "local-plugin", marketplaceName: "local-marketplace" }},
+      ],
+    }},
+    {{
+      name: "openai-curated-remote",
+      interface: {{ displayName: "OpenAI Curated Remote" }},
+      plugins: [
+        {{ name: "remote-plugin", marketplaceName: "openai-curated-remote" }},
+      ],
+    }},
+    {{ name: "local-marketplace", plugins: [] }},
+  ],
 }};
-api.patchModelContainer(relayModelContainer);
-const relayAppServerModels = [
-  {{ model: "built-in-model", hidden: false }},
-];
-api.patchAppServerModelResult("model/list", relayAppServerModels);
-const relayAppServerModelOrder = relayAppServerModels.map((item) => ({{
-  model: item.model,
-  hidden: item.hidden,
-}}));
-const modelPatchBackoffMs = [
-  api.appServerModelPatchBackoffMs(1),
-  api.appServerModelPatchBackoffMs(2),
-  api.appServerModelPatchBackoffMs(10),
-];
+api.patchPluginMarketplaceResult("list-plugins", pluginMarketplaceResult);
+const originalPluginMarketplaceRequestParams = {{
+  marketplaceKinds: ["created-by-me-remote"],
+}};
+const pluginMarketplaceRequestParams = {{
+  personal: api.patchPluginMarketplaceRequestParams(
+    "list-plugins",
+    originalPluginMarketplaceRequestParams,
+  ),
+  mixed: api.patchPluginMarketplaceRequestParams("list-plugins", {{
+    marketplaceKinds: ["created-by-me-remote", "workspace"],
+  }}),
+  original: originalPluginMarketplaceRequestParams,
+}};
+async function runPluginMarketplaceRequestClientCase() {{
+  const calls = [];
+  const client = {{
+    async sendRequest(method, params, options) {{
+      calls.push({{ method, params, options }});
+      return {{ marketplaces: [{{ name: "local-marketplace", plugins: [] }}] }};
+    }},
+  }};
+  api.patchPluginMarketplaceRequestClient(client);
+  const unsupportedResult = await client.sendRequest(
+    "plugin/list",
+    {{ marketplaceKinds: ["created-by-me-remote"] }},
+    {{ timeoutMs: 123 }},
+  );
+  const supportedResult = await client.sendRequest(
+    "plugin/list",
+    {{ marketplaceKinds: ["workspace"] }},
+    {{ timeoutMs: 123 }},
+  );
+  return {{
+    calls,
+    unsupportedCount: unsupportedResult.marketplaces.length,
+    supportedCount: supportedResult.marketplaces.length,
+  }};
+}}
+const u = (name) => String(name || "") === "openai-bundled";
+const r = "openai-bundled";
+const t = ["openai-bundled"];
+const buildFlavorFilter=(e)=>!u(e.marketplaceName)||e.marketplaceName===r;
+const hiddenMarketplaceFilter=(e)=>!t.includes(e.name);
+const visibleMarketplaces = pluginMarketplaceResult.marketplaces.filter(hiddenMarketplaceFilter);
+const derivedPlugins = [];
+for (const marketplace of visibleMarketplaces) {{
+  for (const plugin of marketplace.plugins) {{
+    derivedPlugins.push({{ ...plugin, marketplaceName: marketplace.name }});
+  }}
+}}
+const visiblePlugins = derivedPlugins.filter(buildFlavorFilter);
+const pluginScopedFilters = {{
+  pluginCount: visiblePlugins.length,
+  pluginTotal: derivedPlugins.length,
+  marketplaceCount: visibleMarketplaces.length,
+  marketplaceTotal: pluginMarketplaceResult.marketplaces.length,
+  officialMarketplaceName: pluginMarketplaceResult.marketplaces[0].name,
+  curatedRemoteMarketplaceName: pluginMarketplaceResult.marketplaces[1].name,
+  catalogReady: derivedPlugins.some((plugin) => {{
+    const normalize = (value) => String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[_-]+/g, " ");
+    const recognized = new Set([
+      "codex official",
+      "openai curated",
+      "openai curated remote",
+    ]);
+    return recognized.has(normalize(plugin.marketplaceName))
+      || recognized.has(normalize(plugin.marketplaceDisplayName));
+  }}),
+  pluginFilterIsOwn: Object.prototype.hasOwnProperty.call(
+    pluginMarketplaceResult.marketplaces[0].plugins,
+    "filter",
+  ),
+  marketplaceFilterIsOwn: Object.prototype.hasOwnProperty.call(
+    pluginMarketplaceResult.marketplaces,
+    "filter",
+  ),
+  ordinaryFilter: [1, 2, 3].filter((value) => value > 1),
+}};
 
 const badgeNode = {{
   dataset: {{ codexTooltip: "stale custom tooltip" }},
@@ -1528,41 +1726,59 @@ const badgeTooltip = {{
   ariaLabel: badgeNode.attributes["aria-label"] || "",
 }};
 
-async function runAppServerRequestPatchCase() {{
-  const bindingToken = "request-client-binding-token";
-  const state = {{
-    originalCalls: 0,
-    thisBindingChecks: [],
-  }};
-  class RequestClient {{
-    constructor() {{
-      this.bindingToken = bindingToken;
-    }}
+async function waitForCondition(predicate, timeoutMs = 6000) {{
+  const startedAt = Date.now();
+  while (!predicate()) {{
+    if (Date.now() - startedAt > timeoutMs) throw new Error("condition wait timed out");
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }}
-  const originalSendRequest = async function originalSendRequest() {{
-    state.originalCalls += 1;
-    const bindingPreserved = this?.bindingToken === bindingToken;
-    state.thisBindingChecks.push(bindingPreserved);
-    if (!bindingPreserved) throw new Error("request client lost this binding");
-    return {{ status: "ok" }};
+}}
+
+async function runServiceTierRetryCase() {{
+  api.resetServiceTierInstallState();
+  let dispatcherAttempts = 0;
+  let requestClientAttempts = 0;
+  const dispatcher = {{
+    dispatchMessage() {{}},
   }};
-  RequestClient.prototype.__codexElvesModelOriginalSendRequest = originalSendRequest;
-  RequestClient.prototype.__codexElvesModelRequestPatch = "5";
-  RequestClient.prototype.sendRequest = async function previousGenerationSendRequest(
-    method,
-    params,
-    options
-  ) {{
-    return originalSendRequest.call(this, method, params, options);
-  }};
-  api.patchAppServerRequestClientClass(RequestClient);
-  const client = new RequestClient();
-  const result = await client.sendRequest("thread/list", {{}});
+  function DispatcherFactory() {{
+    return "dispatchMessage";
+  }}
+  DispatcherFactory.getInstance = () => dispatcher;
+  class RetryRequestClient {{
+    createRequest(method, params, options) {{
+      return {{ request: {{ method, params, options }}, promise: Promise.resolve(null) }};
+    }}
+    sendRequest() {{}}
+    prewarmThreadStart() {{}}
+  }}
+  api.setModuleLoader(async (namePart) => {{
+    if (namePart === "thread-context-inputs-") {{
+      requestClientAttempts += 1;
+      if (requestClientAttempts === 1) throw new Error("request client module not ready");
+      return {{ RetryRequestClient }};
+    }}
+    if (namePart === "vscode-api-" || namePart === "setting-storage-") {{
+      dispatcherAttempts += 1;
+      if (dispatcherAttempts <= 2) throw new Error("dispatcher module not ready");
+      return {{ DispatcherFactory }};
+    }}
+    throw new Error(`unexpected module: ${{namePart}}`);
+  }});
+  await Promise.allSettled([
+    api.installDispatcherPatch(),
+    api.installRequestClientPatch(),
+  ]);
+  await waitForCondition(() => {{
+    const state = api.serviceTierInstallState();
+    return state.dispatcherInstalled && state.requestClientInstalled;
+  }});
+  const state = api.serviceTierInstallState();
+  api.setModuleLoader(null);
   return {{
-    originalCalls: state.originalCalls,
-    thisBindingChecks: state.thisBindingChecks,
-    requestStatus: result.status,
-    patchVersion: RequestClient.prototype.__codexElvesModelRequestPatch,
+    dispatcherAttempts,
+    requestClientAttempts,
+    ...state,
   }};
 }}
 
@@ -1602,6 +1818,29 @@ async function runSessionPrewarmCases() {{
   const nestedManagerHasResume =
     typeof nestedManagerResult.manager?.resumeConversationForUnavailableOwner === "function";
   const nestedManagerScanned = nestedManagerResult.scanned;
+  const latestManagerScope = {{
+    familyBindings: new Map([
+      ["manager", {{ atom: {{ init: nestedFullManager }} }}],
+    ]),
+  }};
+  const latestManagerGraph = {{}};
+  for (let index = 0; index < 255; index += 1) {{
+    const branch = {{}};
+    for (let childIndex = 0; childIndex < 64; childIndex += 1) {{
+      branch[`child-${{childIndex}}`] = {{}};
+    }}
+    latestManagerGraph[`noise-${{index}}`] = branch;
+  }}
+  latestManagerGraph.child = {{
+    dependencies: {{
+      firstContext: {{
+        memoizedValue: new Map([["scope", latestManagerScope]]),
+      }},
+    }},
+  }};
+  const latestManagerResult = prewarmApi.findManagerFromRoots([latestManagerGraph]);
+  const latestManagerFound = latestManagerResult.manager === nestedFullManager;
+  const latestManagerScanned = latestManagerResult.scanned;
   const prewarmNow = Date.now();
   const conversations = Array.from({{ length: 12 }}, (_, index) => ({{
     id: `prewarm-thread-${{String(index + 1).padStart(2, "0")}}`,
@@ -1915,12 +2154,9 @@ async function runSessionPrewarmCases() {{
   document.visibilityState = "visible";
 
   prewarmApi.setManager({{}});
-  delete window.__codexElvesAppServerModelRequestPatchInstalled;
-  const needsModelPatchOnly = prewarmApi.modelPatchNeeds();
+  const managerDiscoveryNeededWithManager = prewarmApi.managerDiscoveryNeeded();
   prewarmApi.setManager(null);
-  window.__codexElvesAppServerModelRequestPatchInstalled = prewarmApi.modelPatchVersion;
-  const needsManagerOnly = prewarmApi.modelPatchNeeds();
-  delete window.__codexElvesAppServerModelRequestPatchInstalled;
+  const managerDiscoveryNeededWithoutManager = prewarmApi.managerDiscoveryNeeded();
 
   delete window.__codexSessionPrewarmCompletedSignature;
   prewarmApi.clearRetryCounts();
@@ -2082,11 +2318,62 @@ async function runSessionPrewarmCases() {{
   const completedSignatureAfterLaunchCycleReset = prewarmApi.completedSignature();
   const launchCycleResetRepeated = prewarmApi.resetLaunchCycle();
 
+  prewarmApi.clearScheduledRun();
+  prewarmApi.setManager(null);
+  let coldStartManagerLoadCalls = 0;
+  let coldStartResumeCalls = 0;
+  const coldStartManager = {{
+    getHostId() {{
+      return "local";
+    }},
+    getRecentConversations() {{
+      return [{{
+        id: "prewarm-thread-cold-start",
+        cwd: "C:/workspace/cold-start",
+        updatedAt: Date.now(),
+      }}];
+    }},
+    async sendRequest() {{}},
+    async hydrateBackgroundThreads() {{}},
+    needsResume() {{
+      return true;
+    }},
+    async resumeConversationForUnavailableOwner() {{
+      coldStartResumeCalls += 1;
+    }},
+  }};
+  api.setModuleLoader(async (namePart) => {{
+    if (namePart !== "app-server-manager-signals-") {{
+      throw new Error(`unexpected prewarm module: ${{namePart}}`);
+    }}
+    coldStartManagerLoadCalls += 1;
+    return {{ coldStartManager }};
+  }});
+  await api.applyBackendSettings({{
+    launchMode: "patch",
+    enhancementsEnabled: true,
+    providerSyncEnabled: false,
+    codexAppSessionPrewarmEnabled: true,
+    codexAppSessionPrewarmFullCount: 1,
+    codexAppSessionPrewarmContentCount: 0,
+    codexAppSessionPrewarmConcurrency: 1,
+    codexAppServiceTierControls: false,
+    codexAppTokenUsage: false,
+    codexAppProjectMove: false,
+  }}, "settings-loaded");
+  await waitForCondition(() => coldStartResumeCalls === 1);
+  const coldStartManagerReady = prewarmApi.managerReady();
+  prewarmApi.clearScheduledRun();
+  prewarmApi.setManager(null);
+  api.setModuleLoader(null);
+
   return {{
     defaultPrewarmSettings,
     nestedManagerFound,
     nestedManagerHasResume,
     nestedManagerScanned,
+    latestManagerFound,
+    latestManagerScanned,
     taskTypes: tasks.map((task) => task.type),
     taskIds: tasks.map((task) => task.threadId),
     subagentFilterTaskIds: subagentFilterTasks.map((task) => task.threadId),
@@ -2126,8 +2413,8 @@ async function runSessionPrewarmCases() {{
     currentThreadSummary,
     hiddenResumeCalls,
     hiddenQueueSummary,
-    needsModelPatchOnly,
-    needsManagerOnly,
+    managerDiscoveryNeededWithManager,
+    managerDiscoveryNeededWithoutManager,
     failedRunCompletedSignature,
     failedRunRetryCounts,
     noTasksRetryCounts,
@@ -2144,10 +2431,16 @@ async function runSessionPrewarmCases() {{
     refreshTimeoutResumeCalls,
     refreshStartedAfterResumeCompleted,
     refreshTimeoutDurationMs,
+    coldStartManagerReady,
+    coldStartManagerLoadCalls,
+    coldStartResumeCalls,
   }};
 }}
 
-Promise.all([runAppServerRequestPatchCase(), runSessionPrewarmCases()]).then(([appServerRequestPatch, sessionPrewarm]) => {{
+(async () => {{
+  const serviceTierRetry = await runServiceTierRetryCase();
+  const sessionPrewarm = await runSessionPrewarmCases();
+  const pluginMarketplaceRequestClientCase = await runPluginMarketplaceRequestClientCase();
   process.stdout.write(JSON.stringify({{
     supportedFast,
     unsupportedModel,
@@ -2162,15 +2455,17 @@ Promise.all([runAppServerRequestPatchCase(), runSessionPrewarmCases()]).then(([a
     catalogDrivenBlocked,
     patchedCreateRequest,
     relayModelNames,
-    relayModelArrayOrder,
-    relayModelContainer,
-    relayAppServerModelOrder,
-    modelPatchBackoffMs,
+    modelVisibilityConfig,
+    managerDiscoveryBackoffMs,
+    pluginMarketplaceRequestParams,
+    pluginMarketplaceRequestClient: pluginMarketplaceRequestClientCase,
+    pluginScopedFilters,
+    pluginAutoExpandLabels,
     badgeTooltip,
-    appServerRequestPatch,
     sessionPrewarm,
+    serviceTierRetry,
   }}));
-}}).catch((error) => {{
+}})().catch((error) => {{
   console.error(error);
   process.exitCode = 1;
 }});
@@ -2721,7 +3016,7 @@ async fn install_bridge_routes_binding_while_waiting_for_command_response() {
         })
     };
 
-    tokio::time::timeout(
+    let _runtime = tokio::time::timeout(
         Duration::from_secs(2),
         bridge::install_bridge(&url, BRIDGE_BINDING_NAME, handler, &[]),
     )
@@ -2777,7 +3072,7 @@ async fn install_bridge_immediately_evaluates_new_document_scripts() {
     })
     .await;
 
-    tokio::time::timeout(
+    let _runtime = tokio::time::timeout(
         Duration::from_secs(2),
         bridge::install_bridge(
             &url,
@@ -2861,7 +3156,7 @@ async fn install_bridge_returns_after_installing_and_keeps_message_pump_alive() 
         })
     };
 
-    tokio::time::timeout(
+    let _runtime = tokio::time::timeout(
         Duration::from_secs(2),
         bridge::install_bridge(
             &url,
@@ -2988,7 +3283,7 @@ async fn install_bridge_rejects_bad_payload_with_id_and_continues_after_unparsea
     })
     .await;
 
-    tokio::time::timeout(
+    let _runtime = tokio::time::timeout(
         Duration::from_secs(2),
         bridge::install_bridge(&url, BRIDGE_BINDING_NAME, noop_handler(), &[]),
     )
@@ -3049,13 +3344,70 @@ async fn install_bridge_queues_consecutive_bindings_without_recursive_dispatch()
             as Pin<Box<dyn Future<Output = anyhow::Result<serde_json::Value>> + Send>>
     });
 
-    tokio::time::timeout(
+    let _runtime = tokio::time::timeout(
         Duration::from_secs(2),
         bridge::install_bridge(&url, BRIDGE_BINDING_NAME, handler, &[]),
     )
     .await
     .expect("bridge should not hang while draining queued binding calls")
     .expect("bridge should process queued binding calls");
+    request_rx
+        .await
+        .expect("server task should finish without panicking");
+}
+
+#[tokio::test]
+async fn install_bridge_does_not_block_fast_request_behind_slow_handler() {
+    let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
+        for expected_id in 1..=5 {
+            let command = recv_json(&mut socket).await;
+            assert_eq!(command["id"], expected_id);
+            send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
+        }
+
+        for (request_id, delay_ms) in [("slow", 250_u64), ("fast", 0_u64)] {
+            send_json(
+                &mut socket,
+                json!({
+                    "method": "Runtime.bindingCalled",
+                    "params": {
+                        "payload": serde_json::to_string(&json!({
+                            "id": request_id,
+                            "path": "/backend/test",
+                            "payload": { "delayMs": delay_ms },
+                        })).unwrap(),
+                    },
+                }),
+            )
+            .await;
+        }
+
+        let first = tokio::time::timeout(Duration::from_millis(150), recv_json(&mut socket))
+            .await
+            .expect("fast request should resolve before slow handler finishes");
+        assert_expression_contains_request(&first, "fast");
+
+        let second = tokio::time::timeout(Duration::from_millis(500), recv_json(&mut socket))
+            .await
+            .expect("slow request should eventually resolve");
+        assert_expression_contains_request(&second, "slow");
+        close_socket(&mut socket).await;
+    })
+    .await;
+
+    let handler = Arc::new(|_path: String, payload: serde_json::Value| {
+        Box::pin(async move {
+            let delay_ms = payload["delayMs"].as_u64().unwrap_or_default();
+            if delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            Ok(json!({ "status": "ok" }))
+        }) as Pin<Box<dyn Future<Output = anyhow::Result<serde_json::Value>> + Send>>
+    });
+
+    let _runtime = bridge::install_bridge(&url, BRIDGE_BINDING_NAME, handler, &[])
+        .await
+        .expect("bridge should install");
     request_rx
         .await
         .expect("server task should finish without panicking");
@@ -3119,7 +3471,7 @@ async fn install_bridge_does_not_wait_for_resolve_runtime_evaluate_ack() {
             as Pin<Box<dyn Future<Output = anyhow::Result<serde_json::Value>> + Send>>
     });
 
-    tokio::time::timeout(
+    let _runtime = tokio::time::timeout(
         Duration::from_secs(2),
         bridge::install_bridge(&url, BRIDGE_BINDING_NAME, handler, &[]),
     )
@@ -3129,6 +3481,118 @@ async fn install_bridge_does_not_wait_for_resolve_runtime_evaluate_ack() {
     request_rx
         .await
         .expect("server task should finish without panicking");
+}
+
+#[tokio::test]
+async fn bridge_runtime_shutdown_removes_registered_scripts_and_binding() {
+    let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
+        for expected_id in 1..=3 {
+            let command = recv_json(&mut socket).await;
+            assert_eq!(command["id"], expected_id);
+            send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
+        }
+
+        let add_bridge = recv_json(&mut socket).await;
+        assert_eq!(
+            add_bridge["method"],
+            "Page.addScriptToEvaluateOnNewDocument"
+        );
+        send_json(
+            &mut socket,
+            json!({
+                "id": add_bridge["id"],
+                "result": { "identifier": "bridge-script" },
+            }),
+        )
+        .await;
+
+        let eval_bridge = recv_json(&mut socket).await;
+        assert_eq!(eval_bridge["method"], "Runtime.evaluate");
+        send_json(
+            &mut socket,
+            json!({ "id": eval_bridge["id"], "result": {} }),
+        )
+        .await;
+
+        let add_feature = recv_json(&mut socket).await;
+        assert_eq!(
+            add_feature["method"],
+            "Page.addScriptToEvaluateOnNewDocument"
+        );
+        send_json(
+            &mut socket,
+            json!({
+                "id": add_feature["id"],
+                "result": { "identifier": "feature-script" },
+            }),
+        )
+        .await;
+
+        let eval_feature = recv_json(&mut socket).await;
+        assert_eq!(eval_feature["method"], "Runtime.evaluate");
+        send_json(
+            &mut socket,
+            json!({ "id": eval_feature["id"], "result": {} }),
+        )
+        .await;
+
+        let remove_bridge = recv_json(&mut socket).await;
+        assert_eq!(
+            remove_bridge["method"],
+            "Page.removeScriptToEvaluateOnNewDocument"
+        );
+        assert_eq!(remove_bridge["params"]["identifier"], "bridge-script");
+
+        let remove_feature = recv_json(&mut socket).await;
+        assert_eq!(
+            remove_feature["method"],
+            "Page.removeScriptToEvaluateOnNewDocument"
+        );
+        assert_eq!(remove_feature["params"]["identifier"], "feature-script");
+
+        let ownership_check = recv_json(&mut socket).await;
+        assert_eq!(ownership_check["method"], "Runtime.evaluate");
+        assert!(
+            ownership_check["params"]["expression"]
+                .as_str()
+                .expect("ownership expression should be string")
+                .contains("__codexSessionDeleteBridgeGeneration")
+        );
+        assert!(
+            ownership_check["params"]["expression"]
+                .as_str()
+                .expect("ownership expression should be string")
+                .contains("CodexElves Bridge 已重启，请重试")
+        );
+        send_json(
+            &mut socket,
+            json!({
+                "id": ownership_check["id"],
+                "result": { "result": { "value": true } },
+            }),
+        )
+        .await;
+
+        let remove_binding = recv_json(&mut socket).await;
+        assert_eq!(remove_binding["method"], "Runtime.removeBinding");
+        assert_eq!(remove_binding["params"]["name"], BRIDGE_BINDING_NAME);
+        close_socket(&mut socket).await;
+    })
+    .await;
+
+    let runtime = bridge::install_bridge(
+        &url,
+        BRIDGE_BINDING_NAME,
+        noop_handler(),
+        &["window.featureInjected = true;".to_string()],
+    )
+    .await
+    .expect("bridge should install");
+    runtime.shutdown().await;
+
+    request_rx
+        .await
+        .expect("server task should observe bridge cleanup");
 }
 
 type TestSocket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;

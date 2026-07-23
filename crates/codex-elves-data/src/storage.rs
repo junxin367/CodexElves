@@ -1,14 +1,17 @@
 use crate::BackupStore;
+use anyhow::Context;
 use codex_elves_core::models::{DeleteResult, DeleteStatus, SessionRef};
 use rusqlite::types::{ToSqlOutput, Value as SqlValue, ValueRef};
-use rusqlite::{Connection, OptionalExtension, ToSql};
+use rusqlite::{Connection, OptionalExtension, ToSql, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 pub fn delete_local_from_paths(
     db_paths: impl IntoIterator<Item = PathBuf>,
@@ -17,20 +20,107 @@ pub fn delete_local_from_paths(
 ) -> DeleteResult {
     let mut result = not_found(&session.session_id, "会话在本地存储中已不存在".to_string());
     let mut deleted_count = 0usize;
+    let mut undo_tokens = Vec::new();
     for db_path in db_paths {
         let adapter = SQLiteStorageAdapter::new(db_path, backup_store.clone());
         let candidate_result = adapter.delete_local(session);
         if matches!(candidate_result.status, DeleteStatus::LocalDeleted) {
             deleted_count += 1;
+            if let Some(token) = candidate_result.undo_token.clone() {
+                undo_tokens.push(token);
+            }
             result = candidate_result;
         } else if deleted_count == 0 {
             result = candidate_result;
         }
     }
     if deleted_count > 1 {
-        result.message = format!("已从 {deleted_count} 个本地存储删除");
+        match backup_store.write_multi_database_undo(&session.session_id, &undo_tokens) {
+            Ok(token) => {
+                result.message = format!("已从 {deleted_count} 个本地存储删除");
+                result.undo_token = Some(token.clone());
+                result.backup_path =
+                    Some(backup_store.path_for(&token).to_string_lossy().to_string());
+            }
+            Err(error) => {
+                result.status = DeleteStatus::Failed;
+                result.message =
+                    format!("已从 {deleted_count} 个本地存储删除，但无法创建完整撤销清单：{error}");
+            }
+        }
     }
     result
+}
+
+pub fn undo_local_from_backup(
+    allowed_db_paths: impl IntoIterator<Item = PathBuf>,
+    backup_store: BackupStore,
+    token: &str,
+) -> DeleteResult {
+    let result = (|| -> anyhow::Result<DeleteResult> {
+        let allowed_db_paths = allowed_db_paths
+            .into_iter()
+            .filter(|path| path.is_file())
+            .map(|path| {
+                fs::canonicalize(&path).with_context(|| {
+                    format!(
+                        "failed to normalize allowed source database: {}",
+                        path.to_string_lossy()
+                    )
+                })
+            })
+            .collect::<anyhow::Result<HashSet<_>>>()?;
+        let plan = backup_store.undo_plan(token)?;
+        let adapters = plan
+            .targets
+            .iter()
+            .map(|target| {
+                let source_db = fs::canonicalize(&target.source_db).with_context(|| {
+                    format!(
+                        "backup source database not found: {}",
+                        target.source_db.to_string_lossy()
+                    )
+                })?;
+                if !allowed_db_paths.contains(&source_db) {
+                    anyhow::bail!(
+                        "backup source database is outside the allowed database paths: {}",
+                        source_db.to_string_lossy()
+                    );
+                }
+                Ok((
+                    SQLiteStorageAdapter::new(source_db, backup_store.clone()),
+                    target,
+                ))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        for (adapter, target) in &adapters {
+            adapter.validate_undo(target.token.as_str())?;
+        }
+
+        let multiple = adapters.len() > 1;
+        let mut restored = None;
+        for (adapter, target) in adapters {
+            let result = adapter.undo(target.token.as_str());
+            if result.status != DeleteStatus::Undone {
+                return Ok(failed_with_undo(
+                    &plan.session_id,
+                    format!("本地会话恢复不完整：{}", result.message),
+                    token,
+                    None,
+                ));
+            }
+            restored = Some(result);
+        }
+        let mut restored = restored.context("backup has no restore targets")?;
+        if multiple {
+            restored.session_id = plan.session_id;
+            restored.message = format!("已从 {} 个本地存储恢复", plan.targets.len());
+            restored.undo_token = Some(token.to_string());
+        }
+        Ok(restored)
+    })();
+    result.unwrap_or_else(|error| failed_with_undo("", error.to_string(), token, None))
 }
 
 pub fn move_codex_thread_workspace_from_paths(
@@ -253,10 +343,8 @@ impl SQLiteStorageAdapter {
             let backup = self.backup_store.read_backup(token)?;
             let session_id = backup["session_id"].as_str().unwrap_or("").to_string();
             let mut db = Connection::open(&self.db_path)?;
+            validate_restore_backup(&db, &backup)?;
             if let Some(tables) = backup["tables"].as_object() {
-                validate_restore_tables(tables)?;
-                detect_restore_conflicts(&db, tables)?;
-                detect_file_restore_conflicts(tables)?;
                 let tx = db.transaction()?;
                 for (table, rows) in tables {
                     if table.starts_with("__") {
@@ -305,6 +393,12 @@ impl SQLiteStorageAdapter {
             })
         })();
         result.unwrap_or_else(|err| failed_with_undo("", err.to_string(), token, None))
+    }
+
+    fn validate_undo(&self, token: &str) -> anyhow::Result<()> {
+        let backup = self.backup_store.read_backup(token)?;
+        let db = Connection::open(&self.db_path)?;
+        validate_restore_backup(&db, &backup)
     }
 
     pub fn find_archived_thread_by_title(&self, title: &str) -> Option<SessionRef> {
@@ -462,9 +556,10 @@ impl SQLiteStorageAdapter {
                     json!({"status": "failed", "message": "Unsupported local storage schema", "sort_keys": []}),
                 );
             }
+            let timestamp_payloads = fetch_thread_timestamp_payloads(&db, &thread_ids)?;
             let mut sort_keys = Vec::new();
             for thread_id in thread_ids {
-                if let Some(mut payload) = fetch_thread_timestamp_payload(&db, &thread_id)? {
+                if let Some(mut payload) = timestamp_payloads.get(&thread_id).cloned() {
                     payload.insert("session_id".to_string(), json!(thread_id));
                     sort_keys.push(Value::Object(payload));
                 }
@@ -1224,7 +1319,7 @@ impl TokenUsageTotals {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RolloutUsageReport {
     history: Vec<Value>,
     total_usage: TokenUsageTotals,
@@ -1236,6 +1331,312 @@ struct RolloutUsageReport {
     task_running: bool,
     spawned_child_turns: HashMap<String, String>,
     forked_from_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RolloutUsageParser {
+    current_turn_id: String,
+    history: Vec<Value>,
+    turn_ids: HashSet<String>,
+    turn_usage: HashMap<String, TokenUsageTotals>,
+    active_task_turns: HashSet<String>,
+    spawned_child_turns: HashMap<String, String>,
+    accumulated_total: TokenUsageTotals,
+    latest_cumulative_total: Option<TokenUsageTotals>,
+    latest_turn_id: String,
+    latest_observed_at: String,
+    forked_from_id: Option<String>,
+    own_session_meta_seen: bool,
+}
+
+impl RolloutUsageParser {
+    fn report(&self) -> RolloutUsageReport {
+        let mut total_usage = self
+            .latest_cumulative_total
+            .unwrap_or(self.accumulated_total);
+        total_usage.fill_missing_from(self.accumulated_total);
+        let last_turn_usage = self
+            .turn_usage
+            .get(&self.latest_turn_id)
+            .copied()
+            .unwrap_or_default();
+        RolloutUsageReport {
+            history: self.history.clone(),
+            total_usage,
+            turn_usage: self.turn_usage.clone(),
+            last_turn_usage,
+            last_turn_id: self.latest_turn_id.clone(),
+            observed_at: self.latest_observed_at.clone(),
+            turn_count: self.turn_ids.len(),
+            task_running: !self.active_task_turns.is_empty(),
+            spawned_child_turns: self.spawned_child_turns.clone(),
+            forked_from_id: self.forked_from_id.clone(),
+        }
+    }
+
+    fn consume_line(&mut self, line: &str, thread_id: &str) {
+        if line.trim().is_empty() {
+            return;
+        }
+        let value: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(_) => return,
+        };
+        match value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
+            "session_meta" => {
+                let Some(payload) = value.get("payload") else {
+                    return;
+                };
+                let session_id = payload
+                    .get("id")
+                    .or_else(|| payload.get("session_id"))
+                    .and_then(Value::as_str);
+                if !self.own_session_meta_seen && session_id == Some(thread_id) {
+                    self.own_session_meta_seen = true;
+                    self.forked_from_id = payload
+                        .get("forked_from_id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string);
+                }
+            }
+            "turn_context" => {
+                self.current_turn_id = value
+                    .get("payload")
+                    .and_then(|payload| payload.get("turn_id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if !self.current_turn_id.is_empty() {
+                    self.latest_turn_id = self.current_turn_id.clone();
+                }
+            }
+            "event_msg" => {
+                let Some(payload) = value.get("payload") else {
+                    return;
+                };
+                let event_type = payload
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if event_type == "task_started" {
+                    let turn_id = payload
+                        .get("turn_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    if !turn_id.is_empty() {
+                        self.active_task_turns.insert(turn_id.clone());
+                        self.latest_turn_id = turn_id;
+                    }
+                    return;
+                }
+                if matches!(
+                    event_type,
+                    "task_complete" | "task_completed" | "task_aborted" | "turn_aborted"
+                ) {
+                    let turn_id = payload
+                        .get("turn_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if turn_id.is_empty() {
+                        self.active_task_turns.clear();
+                    } else {
+                        self.active_task_turns.remove(turn_id);
+                    }
+                    return;
+                }
+                if event_type != "token_count" {
+                    return;
+                }
+                let Some(info) = payload.get("info") else {
+                    return;
+                };
+                let last = info.get("last_token_usage");
+                let total = info.get("total_token_usage");
+                let model_context_window = info
+                    .get("model_context_window")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let last_usage = TokenUsageTotals::from_json(last);
+                let total_usage = TokenUsageTotals::from_json(total);
+                let context_used = total_usage.total_tokens.max(last_usage.total_tokens);
+                if !last_usage.has_usage() && !total_usage.has_usage() {
+                    return;
+                }
+                if total_usage.has_usage() && self.latest_cumulative_total == Some(total_usage) {
+                    return;
+                }
+                self.accumulated_total.add(last_usage);
+                if total_usage.has_usage() {
+                    self.latest_cumulative_total = Some(total_usage);
+                }
+                let usage_turn_id = if self.current_turn_id.is_empty() {
+                    self.latest_turn_id.clone()
+                } else {
+                    self.current_turn_id.clone()
+                };
+                if !usage_turn_id.is_empty() {
+                    self.turn_usage
+                        .entry(usage_turn_id.clone())
+                        .or_default()
+                        .add(last_usage);
+                    self.turn_ids.insert(usage_turn_id.clone());
+                    if self.latest_turn_id.is_empty() {
+                        self.latest_turn_id = usage_turn_id.clone();
+                    }
+                }
+                self.latest_observed_at = value
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                self.history.push(json!({
+                    "source": "rollout-history",
+                    "conversation_id": format!("local:{thread_id}"),
+                    "turn_id": usage_turn_id,
+                    "observed_at": self.latest_observed_at,
+                    "usage": {
+                        "inputTokens": last_usage.input_tokens,
+                        "outputTokens": last_usage.output_tokens,
+                        "totalTokens": last_usage.total_tokens,
+                        "cachedTokens": last_usage.cached_tokens,
+                        "cacheReadTokens": last_usage.cached_tokens,
+                        "cacheCreationTokens": last_usage.cache_creation_tokens,
+                        "contextUsed": context_used,
+                        "contextLimit": model_context_window,
+                        "hasBreakdown": last_usage.input_tokens > 0
+                            || last_usage.output_tokens > 0
+                            || last_usage.cached_tokens > 0
+                            || last_usage.cache_creation_tokens > 0,
+                    }
+                }));
+            }
+            "response_item" => {
+                let Some(payload) = value.get("payload") else {
+                    return;
+                };
+                if payload.get("type").and_then(Value::as_str) != Some("function_call_output") {
+                    return;
+                }
+                let Some(child_thread_id) = spawned_child_thread_id(payload) else {
+                    return;
+                };
+                let turn_id = payload
+                    .get("internal_chat_message_metadata_passthrough")
+                    .and_then(|metadata| metadata.get("turn_id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or(self.current_turn_id.as_str())
+                    .trim();
+                if !turn_id.is_empty() {
+                    self.spawned_child_turns
+                        .entry(child_thread_id)
+                        .or_insert_with(|| turn_id.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RolloutFileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+    created: Option<SystemTime>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedRolloutUsage {
+    observed_len: u64,
+    parsed_offset: u64,
+    stamp: RolloutFileStamp,
+    tail: Vec<u8>,
+    parser: RolloutUsageParser,
+    last_access: u64,
+}
+
+type RolloutUsageCacheKey = (PathBuf, String);
+
+#[derive(Default)]
+struct RolloutUsageCache {
+    entries: HashMap<RolloutUsageCacheKey, CachedRolloutUsage>,
+    access_tick: u64,
+}
+
+const ROLLOUT_USAGE_CACHE_CAPACITY: usize = 128;
+const ROLLOUT_USAGE_CACHE_TAIL_BYTES: u64 = 4096;
+
+fn rollout_usage_cache() -> &'static Mutex<RolloutUsageCache> {
+    static CACHE: OnceLock<Mutex<RolloutUsageCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(RolloutUsageCache::default()))
+}
+
+fn rollout_file_stamp(rollout_path: &Path) -> anyhow::Result<RolloutFileStamp> {
+    let metadata = fs::metadata(rollout_path)?;
+    Ok(RolloutFileStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        created: metadata.created().ok(),
+    })
+}
+
+fn rollout_tail_matches(
+    rollout_path: &Path,
+    parsed_offset: u64,
+    expected_tail: &[u8],
+) -> anyhow::Result<bool> {
+    if parsed_offset == 0 || expected_tail.is_empty() {
+        return Ok(true);
+    }
+    let mut file = File::open(rollout_path)?;
+    file.seek(SeekFrom::Start(
+        parsed_offset.saturating_sub(expected_tail.len() as u64),
+    ))?;
+    let mut actual_tail = Vec::with_capacity(expected_tail.len());
+    file.take(expected_tail.len() as u64)
+        .read_to_end(&mut actual_tail)?;
+    Ok(actual_tail == expected_tail)
+}
+
+fn rollout_tail(rollout_path: &Path, parsed_offset: u64) -> anyhow::Result<Vec<u8>> {
+    if parsed_offset == 0 {
+        return Ok(Vec::new());
+    }
+    let start = parsed_offset.saturating_sub(ROLLOUT_USAGE_CACHE_TAIL_BYTES);
+    let mut file = File::open(rollout_path)?;
+    file.seek(SeekFrom::Start(start))?;
+    let mut tail = Vec::with_capacity((parsed_offset - start) as usize);
+    file.take(parsed_offset - start).read_to_end(&mut tail)?;
+    Ok(tail)
+}
+
+fn insert_rollout_usage_cache(cache_key: RolloutUsageCacheKey, entry: CachedRolloutUsage) {
+    let mut cache = rollout_usage_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.access_tick = cache.access_tick.saturating_add(1);
+    let access_tick = cache.access_tick;
+    let mut entry = entry;
+    entry.last_access = access_tick;
+    if !cache.entries.contains_key(&cache_key)
+        && cache.entries.len() >= ROLLOUT_USAGE_CACHE_CAPACITY
+    {
+        if let Some(oldest_key) = cache
+            .entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_access)
+            .map(|(path, _)| path.clone())
+        {
+            cache.entries.remove(&oldest_key);
+        }
+    }
+    cache.entries.insert(cache_key, entry);
 }
 
 fn rollout_own_usage(
@@ -1311,207 +1712,70 @@ fn read_rollout_usage_history(
     rollout_path: &Path,
     thread_id: &str,
 ) -> anyhow::Result<RolloutUsageReport> {
-    let file = File::open(rollout_path)?;
-    let reader = BufReader::new(file);
-    let mut current_turn_id = String::new();
-    let mut history = Vec::new();
-    let mut turn_ids = HashSet::new();
-    let mut turn_usage = HashMap::<String, TokenUsageTotals>::new();
-    let mut active_task_turns = HashSet::new();
-    let mut spawned_child_turns = HashMap::new();
-    let mut accumulated_total = TokenUsageTotals::default();
-    let mut latest_cumulative_total = None;
-    let mut latest_turn_id = String::new();
-    let mut latest_observed_at = String::new();
-    let mut forked_from_id = None;
-    let mut own_session_meta_seen = false;
+    let stamp = rollout_file_stamp(rollout_path)?;
+    let cache_key = (rollout_path.to_path_buf(), thread_id.to_string());
+    let cached_entry = {
+        let mut cache = rollout_usage_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.access_tick = cache.access_tick.saturating_add(1);
+        let access_tick = cache.access_tick;
+        if let Some(entry) = cache.entries.get_mut(&cache_key) {
+            entry.last_access = access_tick;
+            Some(entry.clone())
+        } else {
+            None
+        }
+    };
+    let (mut parser, start_offset) = if let Some(entry) = cached_entry {
+        if entry.stamp == stamp {
+            return Ok(entry.parser.report());
+        }
+        let can_continue = stamp.len > entry.observed_len
+            && entry.stamp.created == stamp.created
+            && rollout_tail_matches(rollout_path, entry.parsed_offset, &entry.tail)?;
+        if can_continue {
+            (entry.parser, entry.parsed_offset)
+        } else {
+            (RolloutUsageParser::default(), 0)
+        }
+    } else {
+        (RolloutUsageParser::default(), 0)
+    };
 
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
+    let mut file = File::open(rollout_path)?;
+    let remaining = stamp.len.saturating_sub(start_offset);
+    file.seek(SeekFrom::Start(start_offset))?;
+    let mut reader = BufReader::new(file.take(remaining));
+    let mut parsed_offset = start_offset;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let bytes_read = reader.read_until(b'\n', &mut line)?;
+        if bytes_read == 0 {
+            break;
         }
-        let value: Value = match serde_json::from_str(&line) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        match value
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-        {
-            "session_meta" => {
-                let Some(payload) = value.get("payload") else {
-                    continue;
-                };
-                let session_id = payload
-                    .get("id")
-                    .or_else(|| payload.get("session_id"))
-                    .and_then(Value::as_str);
-                if !own_session_meta_seen && session_id == Some(thread_id) {
-                    own_session_meta_seen = true;
-                    forked_from_id = payload
-                        .get("forked_from_id")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_string);
-                }
-            }
-            "turn_context" => {
-                current_turn_id = value
-                    .get("payload")
-                    .and_then(|payload| payload.get("turn_id"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                if !current_turn_id.is_empty() {
-                    latest_turn_id = current_turn_id.clone();
-                }
-            }
-            "event_msg" => {
-                let Some(payload) = value.get("payload") else {
-                    continue;
-                };
-                let event_type = payload
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if event_type == "task_started" {
-                    let turn_id = payload
-                        .get("turn_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    if !turn_id.is_empty() {
-                        active_task_turns.insert(turn_id.clone());
-                        latest_turn_id = turn_id;
-                    }
-                    continue;
-                }
-                if matches!(
-                    event_type,
-                    "task_complete" | "task_completed" | "task_aborted" | "turn_aborted"
-                ) {
-                    let turn_id = payload
-                        .get("turn_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    if turn_id.is_empty() {
-                        active_task_turns.clear();
-                    } else {
-                        active_task_turns.remove(turn_id);
-                    }
-                    continue;
-                }
-                if event_type != "token_count" {
-                    continue;
-                }
-                let info = match payload.get("info") {
-                    Some(info) => info,
-                    None => continue,
-                };
-                let last = info.get("last_token_usage");
-                let total = info.get("total_token_usage");
-                let model_context_window = info
-                    .get("model_context_window")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                let last_usage = TokenUsageTotals::from_json(last);
-                let total_usage = TokenUsageTotals::from_json(total);
-                let context_used = total_usage.total_tokens.max(last_usage.total_tokens);
-                if !last_usage.has_usage() && !total_usage.has_usage() {
-                    continue;
-                }
-                if total_usage.has_usage() && latest_cumulative_total == Some(total_usage) {
-                    continue;
-                }
-                accumulated_total.add(last_usage);
-                if total_usage.has_usage() {
-                    latest_cumulative_total = Some(total_usage);
-                }
-                let usage_turn_id = if current_turn_id.is_empty() {
-                    latest_turn_id.clone()
-                } else {
-                    current_turn_id.clone()
-                };
-                if !usage_turn_id.is_empty() {
-                    turn_usage
-                        .entry(usage_turn_id.clone())
-                        .or_default()
-                        .add(last_usage);
-                    turn_ids.insert(usage_turn_id.clone());
-                    if latest_turn_id.is_empty() {
-                        latest_turn_id = usage_turn_id.clone();
-                    }
-                }
-                latest_observed_at = value
-                    .get("timestamp")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                history.push(json!({
-                    "source": "rollout-history",
-                    "conversation_id": format!("local:{thread_id}"),
-                    "turn_id": usage_turn_id,
-                    "observed_at": latest_observed_at,
-                    "usage": {
-                        "inputTokens": last_usage.input_tokens,
-                        "outputTokens": last_usage.output_tokens,
-                        "totalTokens": last_usage.total_tokens,
-                        "cachedTokens": last_usage.cached_tokens,
-                        "cacheReadTokens": last_usage.cached_tokens,
-                        "cacheCreationTokens": last_usage.cache_creation_tokens,
-                        "contextUsed": context_used,
-                        "contextLimit": model_context_window,
-                        "hasBreakdown": last_usage.input_tokens > 0
-                            || last_usage.output_tokens > 0
-                            || last_usage.cached_tokens > 0
-                            || last_usage.cache_creation_tokens > 0,
-                    }
-                }));
-            }
-            "response_item" => {
-                let Some(payload) = value.get("payload") else {
-                    continue;
-                };
-                if payload.get("type").and_then(Value::as_str) != Some("function_call_output") {
-                    continue;
-                }
-                let Some(child_thread_id) = spawned_child_thread_id(payload) else {
-                    continue;
-                };
-                let turn_id = payload
-                    .get("internal_chat_message_metadata_passthrough")
-                    .and_then(|metadata| metadata.get("turn_id"))
-                    .and_then(Value::as_str)
-                    .unwrap_or(current_turn_id.as_str())
-                    .trim();
-                if !turn_id.is_empty() {
-                    spawned_child_turns
-                        .entry(child_thread_id)
-                        .or_insert_with(|| turn_id.to_string());
-                }
-            }
-            _ => {}
+        if line.last().copied() != Some(b'\n') {
+            break;
         }
+        let line = std::str::from_utf8(&line)?;
+        parser.consume_line(line.trim_end_matches(['\r', '\n']), thread_id);
+        parsed_offset = parsed_offset.saturating_add(bytes_read as u64);
     }
 
-    let mut total_usage = latest_cumulative_total.unwrap_or(accumulated_total);
-    total_usage.fill_missing_from(accumulated_total);
-    let last_turn_usage = turn_usage.get(&latest_turn_id).copied().unwrap_or_default();
-    Ok(RolloutUsageReport {
-        history,
-        total_usage,
-        turn_usage,
-        last_turn_usage,
-        last_turn_id: latest_turn_id,
-        observed_at: latest_observed_at,
-        turn_count: turn_ids.len(),
-        task_running: !active_task_turns.is_empty(),
-        spawned_child_turns,
-        forked_from_id,
-    })
+    let report = parser.report();
+    insert_rollout_usage_cache(
+        cache_key,
+        CachedRolloutUsage {
+            observed_len: stamp.len,
+            parsed_offset,
+            stamp,
+            tail: rollout_tail(rollout_path, parsed_offset)?,
+            parser,
+            last_access: 0,
+        },
+    );
+    Ok(report)
 }
 
 fn failed_with_undo(
@@ -1611,6 +1875,15 @@ fn validate_restore_tables(tables: &Map<String, Value>) -> anyhow::Result<()> {
         if !allowed.contains(&table.as_str()) {
             anyhow::bail!("unknown restore table: {table}");
         }
+    }
+    Ok(())
+}
+
+fn validate_restore_backup(db: &Connection, backup: &Value) -> anyhow::Result<()> {
+    if let Some(tables) = backup["tables"].as_object() {
+        validate_restore_tables(tables)?;
+        detect_restore_conflicts(db, tables)?;
+        detect_file_restore_conflicts(tables)?;
     }
     Ok(())
 }
@@ -1885,27 +2158,54 @@ fn fetch_thread_timestamp_payload(
     db: &Connection,
     thread_id: &str,
 ) -> anyhow::Result<Option<Map<String, Value>>> {
+    let mut payloads = fetch_thread_timestamp_payloads(db, &[thread_id.to_string()])?;
+    Ok(payloads.remove(thread_id))
+}
+
+fn fetch_thread_timestamp_payloads(
+    db: &Connection,
+    thread_ids: &[String],
+) -> anyhow::Result<HashMap<String, Map<String, Value>>> {
+    if thread_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
     let timestamp_columns = codex_thread_timestamp_columns(db)?;
     let mut columns = vec!["id".to_string()];
     columns.extend(timestamp_columns);
-    let sql = format!("SELECT {} FROM threads WHERE id = ?1", columns.join(", "));
-    let mut stmt = db.prepare(&sql)?;
-    let row = stmt.query_row([thread_id], |row| {
-        let mut selected = Map::new();
-        for (index, column) in columns.iter().enumerate() {
-            selected.insert(column.clone(), sql_value_to_json(row.get_ref(index)?));
-        }
-        Ok(selected)
-    });
-    match row {
-        Ok(row) => {
+    let mut payloads = HashMap::new();
+    for thread_ids in thread_ids.chunks(200) {
+        let placeholders = std::iter::repeat("?")
+            .take(thread_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT {} FROM threads WHERE id IN ({placeholders})",
+            columns.join(", ")
+        );
+        let mut statement = db.prepare(&sql)?;
+        let rows = statement.query_map(
+            params_from_iter(thread_ids.iter()),
+            |row| -> rusqlite::Result<(String, Map<String, Value>)> {
+                let mut selected = Map::new();
+                for (index, column) in columns.iter().enumerate() {
+                    selected.insert(column.clone(), sql_value_to_json(row.get_ref(index)?));
+                }
+                let thread_id = selected
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                Ok((thread_id, selected))
+            },
+        )?;
+        for row in rows {
+            let (thread_id, selected) = row?;
             let mut payload = Map::new();
-            add_timestamp_payload(&mut payload, &row);
-            Ok(Some(payload))
+            add_timestamp_payload(&mut payload, &selected);
+            payloads.insert(thread_id, payload);
         }
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(err) => Err(err.into()),
     }
+    Ok(payloads)
 }
 
 fn add_timestamp_payload(payload: &mut Map<String, Value>, row: &Map<String, Value>) {

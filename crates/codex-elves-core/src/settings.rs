@@ -231,18 +231,102 @@ impl RelayProfile {
         self.context_window.trim().to_string()
     }
 
-    pub fn protocol_for_model(&self, model: &str) -> RelayProtocol {
+    pub fn resolve_protocol_for_model(&self, model: &str) -> anyhow::Result<RelayProtocol> {
         let model = model.trim();
-        if !model.is_empty() && !self.model_mappings.is_empty() {
-            if let Some(mapping) = self
+        if model.is_empty() {
+            anyhow::bail!("模型不能为空，无法确定协议归属");
+        }
+        self.validate_model_protocol_assignments()?;
+
+        if !self.model_mappings.is_empty() {
+            return self
                 .model_mappings
                 .iter()
                 .find(|mapping| mapping.request_model.trim() == model)
-            {
-                return mapping.protocol;
+                .map(|mapping| mapping.protocol)
+                .with_context(|| format!("模型「{model}」没有明确协议归属"));
+        }
+
+        let mut resolved = None;
+        for (protocol, model_list) in [
+            (RelayProtocol::Responses, self.responses_model_list.as_str()),
+            (
+                RelayProtocol::ChatCompletions,
+                self.chat_completions_model_list.as_str(),
+            ),
+            (RelayProtocol::Anthropic, self.anthropic_model_list.as_str()),
+        ] {
+            if split_relay_model_ids(model_list).any(|candidate| candidate == model) {
+                resolved = Some(protocol);
+                break;
             }
         }
-        self.protocol
+        resolved.with_context(|| format!("模型「{model}」没有明确协议归属"))
+    }
+
+    pub fn validate_model_protocol_assignments(&self) -> anyhow::Result<()> {
+        let mut assignments = HashMap::<String, RelayProtocol>::new();
+        if !self.model_mappings.is_empty() {
+            for mapping in &self.model_mappings {
+                insert_model_protocol_assignment(
+                    &mut assignments,
+                    mapping.request_model.trim(),
+                    mapping.protocol,
+                )?;
+            }
+            return Ok(());
+        }
+
+        for (protocol, model_list) in [
+            (RelayProtocol::Responses, self.responses_model_list.as_str()),
+            (
+                RelayProtocol::ChatCompletions,
+                self.chat_completions_model_list.as_str(),
+            ),
+            (RelayProtocol::Anthropic, self.anthropic_model_list.as_str()),
+        ] {
+            for model in split_relay_model_ids(model_list) {
+                insert_model_protocol_assignment(&mut assignments, model, protocol)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn split_relay_model_ids(value: &str) -> impl Iterator<Item = &str> {
+    value
+        .split(['\r', '\n', ','])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn insert_model_protocol_assignment(
+    assignments: &mut HashMap<String, RelayProtocol>,
+    model: &str,
+    protocol: RelayProtocol,
+) -> anyhow::Result<()> {
+    if model.is_empty() {
+        return Ok(());
+    }
+    if let Some(existing) = assignments.get(model) {
+        if *existing != protocol {
+            anyhow::bail!(
+                "模型「{model}」存在冲突协议归属：{} 与 {}",
+                relay_protocol_label(*existing),
+                relay_protocol_label(protocol)
+            );
+        }
+        return Ok(());
+    }
+    assignments.insert(model.to_string(), protocol);
+    Ok(())
+}
+
+fn relay_protocol_label(protocol: RelayProtocol) -> &'static str {
+    match protocol {
+        RelayProtocol::Responses => "Responses API",
+        RelayProtocol::ChatCompletions => "Chat Completions",
+        RelayProtocol::Anthropic => "Anthropic",
     }
 }
 
@@ -796,15 +880,17 @@ impl SettingsStore {
             }
         };
 
-        Ok(normalize_settings_config_sections(
-            serde_json::from_str(&contents).unwrap_or_default(),
-        ))
+        let settings =
+            normalize_settings_config_sections(serde_json::from_str(&contents).unwrap_or_default());
+        validate_relay_model_protocol_assignments(&settings)?;
+        Ok(settings)
     }
 
     pub fn save(&self, settings: &BackendSettings) -> anyhow::Result<()> {
         let mut settings = normalize_settings_config_sections(settings.clone());
         settings.codex_home_path = normalize_codex_home_path(&settings.codex_home_path);
         settings.codex_extra_args = normalize_codex_extra_args(&settings.codex_extra_args);
+        validate_relay_model_protocol_assignments(&settings)?;
         let bytes = serde_json::to_vec_pretty(&settings)?;
         atomic_write(&self.path, &bytes)
     }
@@ -819,6 +905,7 @@ impl SettingsStore {
         let settings = normalize_settings_config_sections(
             serde_json::from_value(Value::Object(raw.clone())).unwrap_or_default(),
         );
+        validate_relay_model_protocol_assignments(&settings)?;
         raw.insert(
             "relayCommonConfigContents".to_string(),
             Value::String(settings.relay_common_config_contents.clone()),
@@ -849,6 +936,15 @@ impl SettingsStore {
             Ok(_) | Err(_) => Ok(settings_to_object(&BackendSettings::default())),
         }
     }
+}
+
+fn validate_relay_model_protocol_assignments(settings: &BackendSettings) -> anyhow::Result<()> {
+    for profile in &settings.relay_profiles {
+        profile
+            .validate_model_protocol_assignments()
+            .with_context(|| format!("供应商「{}」模型协议配置无效", profile.name))?;
+    }
+    Ok(())
 }
 
 fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<String, Value>) {
@@ -1529,7 +1625,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_profile_protocol_for_model_uses_model_mapping() {
+    fn relay_profile_protocol_resolution_requires_explicit_model_mapping() {
         let profile = RelayProfile {
             protocol: RelayProtocol::Responses,
             model_mappings: vec![
@@ -1548,17 +1644,52 @@ mod tests {
         };
 
         assert_eq!(
-            profile.protocol_for_model("gpt-chat"),
+            profile.resolve_protocol_for_model("gpt-chat").unwrap(),
             RelayProtocol::ChatCompletions
         );
         assert_eq!(
-            profile.protocol_for_model("claude-sonnet-4"),
+            profile
+                .resolve_protocol_for_model("claude-sonnet-4")
+                .unwrap(),
             RelayProtocol::Anthropic
         );
-        assert_eq!(
-            profile.protocol_for_model("gpt-other"),
-            RelayProtocol::Responses
-        );
+        let error = profile.resolve_protocol_for_model("gpt-other").unwrap_err();
+        assert!(error.to_string().contains("没有明确协议归属"), "{error:#}");
+    }
+
+    #[test]
+    fn relay_profile_rejects_conflicting_duplicate_model_mappings() {
+        let profile = RelayProfile {
+            model_mappings: vec![
+                RelayModelMapping {
+                    request_model: "gpt-conflict".to_string(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "200000".to_string(),
+                },
+                RelayModelMapping {
+                    request_model: "gpt-conflict".to_string(),
+                    protocol: RelayProtocol::ChatCompletions,
+                    context_window: "200000".to_string(),
+                },
+            ],
+            ..RelayProfile::default()
+        };
+
+        let error = profile.validate_model_protocol_assignments().unwrap_err();
+        assert!(error.to_string().contains("冲突协议归属"), "{error:#}");
+        assert!(profile.resolve_protocol_for_model("gpt-conflict").is_err());
+    }
+
+    #[test]
+    fn relay_profile_rejects_model_list_protocol_conflicts() {
+        let profile = RelayProfile {
+            responses_model_list: "shared-model".to_string(),
+            anthropic_model_list: "shared-model".to_string(),
+            ..RelayProfile::default()
+        };
+
+        let error = profile.validate_model_protocol_assignments().unwrap_err();
+        assert!(error.to_string().contains("冲突协议归属"), "{error:#}");
     }
 
     #[test]
@@ -1957,6 +2088,38 @@ experimental_bearer_token = "sk-existing""#
         store.save(&settings).unwrap();
 
         assert_eq!(store.load().unwrap(), settings);
+    }
+
+    #[test]
+    fn settings_store_rejects_conflicting_model_protocols_before_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::new(path.clone());
+        let settings = BackendSettings {
+            relay_profiles: vec![RelayProfile {
+                id: "conflict".to_string(),
+                name: "冲突供应商".to_string(),
+                model_mappings: vec![
+                    RelayModelMapping {
+                        request_model: "shared-model".to_string(),
+                        protocol: RelayProtocol::Responses,
+                        context_window: String::new(),
+                    },
+                    RelayModelMapping {
+                        request_model: "shared-model".to_string(),
+                        protocol: RelayProtocol::Anthropic,
+                        context_window: String::new(),
+                    },
+                ],
+                ..RelayProfile::default()
+            }],
+            active_relay_id: "conflict".to_string(),
+            ..BackendSettings::default()
+        };
+
+        let error = store.save(&settings).unwrap_err();
+        assert!(error.to_string().contains("模型协议配置无效"), "{error:#}");
+        assert!(!path.exists(), "校验失败时不得写入设置文件");
     }
 
     #[test]

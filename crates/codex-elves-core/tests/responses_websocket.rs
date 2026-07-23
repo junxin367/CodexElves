@@ -20,6 +20,7 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::accept_hdr_async;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 
 fn native_responses_profile() -> RelayProfile {
@@ -401,6 +402,11 @@ async fn local_proxy_bridges_responses_websocket_messages_and_authentication() {
         upstream_base_url: format!("http://{upstream_address}"),
         api_key: "sk-bridge-secret".to_string(),
         auth_contents: r#"{"OPENAI_API_KEY":"sk-bridge-secret"}"#.to_string(),
+        model_mappings: vec![RelayModelMapping {
+            request_model: "gpt-bridge".to_string(),
+            protocol: RelayProtocol::Responses,
+            context_window: String::new(),
+        }],
         config_contents: format!(
             "model_provider = \"custom\"\n\n[model_providers.custom]\nname = \"custom\"\nwire_api = \"responses\"\nrequires_openai_auth = true\nbase_url = \"http://127.0.0.1:45221/v1\"\n"
         ),
@@ -500,7 +506,7 @@ async fn local_proxy_preserves_a_websocket_frame_read_with_the_upgrade_request()
     let temp = tempfile::tempdir().unwrap();
     let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
     let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
-    save_supported_websocket_settings(upstream_address, false);
+    save_supported_websocket_settings(upstream_address, false, "gpt-trailing-frame");
 
     let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_address = local_listener.local_addr().unwrap();
@@ -540,6 +546,72 @@ async fn local_proxy_preserves_a_websocket_frame_read_with_the_upgrade_request()
 }
 
 #[tokio::test]
+async fn unassigned_model_is_rejected_with_explicit_websocket_error() {
+    let _settings_lock = websocket_settings_test_lock().lock().await;
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        let (stream, _) = upstream_listener.accept().await.unwrap();
+        let mut socket = accept_hdr_async(stream, |_request: &Request, response: Response| {
+            Ok(response)
+        })
+        .await
+        .unwrap();
+        while let Some(message) = socket.next().await {
+            if matches!(message.unwrap(), Message::Close(_)) {
+                socket.flush().await.unwrap();
+                return;
+            }
+        }
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
+    save_supported_websocket_settings(upstream_address, false, "gpt-assigned");
+
+    let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_address = local_listener.local_addr().unwrap();
+    let local_server = tokio::spawn(async move {
+        let (mut stream, remote_addr) = local_listener.accept().await.unwrap();
+        let request_bytes = read_upgrade_request(&mut stream).await;
+        handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr)).await
+    });
+
+    let (mut client, _) = connect_async(format!("ws://{local_address}/v1/responses"))
+        .await
+        .unwrap();
+    client
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-unassigned",
+                "input": [{"role": "user", "content": "hi"}]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let message = client.next().await.unwrap().unwrap();
+    let Message::Close(Some(close)) = message else {
+        panic!("未归属模型应收到带具体原因的 Policy Close");
+    };
+    assert_eq!(close.code, CloseCode::Policy);
+    assert!(
+        close
+            .reason
+            .contains("模型「gpt-unassigned」没有明确协议归属"),
+        "{}",
+        close.reason
+    );
+
+    local_server.await.unwrap().unwrap();
+    upstream.await.unwrap();
+}
+
+#[tokio::test]
 async fn upstream_connection_failure_rejects_upgrade_before_sending_101() {
     let _settings_lock = websocket_settings_test_lock().lock().await;
     let unused_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -548,7 +620,7 @@ async fn upstream_connection_failure_rejects_upgrade_before_sending_101() {
 
     let temp = tempfile::tempdir().unwrap();
     let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
-    save_supported_websocket_settings(unused_address, false);
+    save_supported_websocket_settings(unused_address, false, "gpt-websocket-test");
 
     let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_address = local_listener.local_addr().unwrap();
@@ -577,7 +649,7 @@ async fn explicitly_disabled_websocket_rejects_upgrade_before_connecting_upstrea
 
     let temp = tempfile::tempdir().unwrap();
     let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
-    save_supported_websocket_settings(unused_address, false);
+    save_supported_websocket_settings(unused_address, false, "gpt-websocket-test");
     let mut settings = SettingsStore::default().load().unwrap();
     settings.relay_profiles[0].responses_websocket_enabled = Some(false);
     SettingsStore::default().save(&settings).unwrap();
@@ -721,7 +793,7 @@ async fn reasoning_continuation_reuses_the_same_websocket_and_only_returns_the_f
     let temp = tempfile::tempdir().unwrap();
     let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
     let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
-    save_supported_websocket_settings(upstream_address, true);
+    save_supported_websocket_settings(upstream_address, true, "gpt-websocket-test");
 
     let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_address = local_listener.local_addr().unwrap();
@@ -895,6 +967,7 @@ impl Drop for ProxyLogPathGuard {
 fn save_supported_websocket_settings(
     upstream_address: std::net::SocketAddr,
     reasoning_continuation: bool,
+    request_model: &str,
 ) {
     let mut profile = RelayProfile {
         id: "relay-websocket-test".to_string(),
@@ -906,6 +979,11 @@ fn save_supported_websocket_settings(
         upstream_base_url: format!("http://{upstream_address}"),
         api_key: "sk-websocket-test".to_string(),
         auth_contents: r#"{"OPENAI_API_KEY":"sk-websocket-test"}"#.to_string(),
+        model_mappings: vec![RelayModelMapping {
+            request_model: request_model.to_string(),
+            protocol: RelayProtocol::Responses,
+            context_window: String::new(),
+        }],
         config_contents: "model_provider = \"custom\"\n".to_string(),
         ..RelayProfile::default()
     };

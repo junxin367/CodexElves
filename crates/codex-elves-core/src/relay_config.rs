@@ -486,7 +486,7 @@ fn apply_relay_profile_owned_fields_to_config(
     }
 
     let context_window = profile.context_window_for_active_model();
-    if !context_window.trim().is_empty() && relay_profile_catalog_rows(profile).is_empty() {
+    if !context_window.trim().is_empty() && relay_profile_catalog_rows(profile)?.is_empty() {
         updated = set_root_toml_raw_line(&updated, "model_context_window", context_window.trim());
     }
     if !profile.auto_compact_limit.trim().is_empty() {
@@ -505,7 +505,7 @@ fn apply_owned_model_catalog_to_config(
     config_text: &str,
     profile: &RelayProfile,
 ) -> anyhow::Result<String> {
-    let rows = relay_profile_catalog_rows(profile);
+    let rows = relay_profile_catalog_rows(profile)?;
     if rows.is_empty() {
         return Ok(ensure_trailing_newline(config_text.trim_end().to_string()));
     }
@@ -534,7 +534,7 @@ pub fn sync_applied_relay_profile_model_catalog_to_home(
         return Ok(false);
     }
 
-    let rows = relay_profile_catalog_rows(profile);
+    let rows = relay_profile_catalog_rows(profile)?;
     let config_with_catalog = if rows.is_empty() {
         live_config.clone()
     } else {
@@ -600,7 +600,8 @@ pub fn backfill_applied_model_catalog_websocket_preferences(
             .get("slug")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if slug.is_empty() || profile.protocol_for_model(slug) != RelayProtocol::Responses {
+        if slug.is_empty() || profile.resolve_protocol_for_model(slug)? != RelayProtocol::Responses
+        {
             continue;
         }
         entry.insert("prefer_websockets".to_string(), json!(true));
@@ -651,7 +652,8 @@ fn sync_applied_model_catalog_websocket_preferences(
             .get("slug")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if slug.is_empty() || profile.protocol_for_model(slug) != RelayProtocol::Responses {
+        if slug.is_empty() || profile.resolve_protocol_for_model(slug)? != RelayProtocol::Responses
+        {
             continue;
         }
         if entry.get("prefer_websockets").and_then(Value::as_bool) == Some(enabled) {
@@ -819,7 +821,7 @@ pub async fn test_relay_profile(
         anyhow::bail!("测试模型不能为空");
     }
 
-    let protocol = profile.protocol_for_model(test_model);
+    let protocol = profile.resolve_protocol_for_model(test_model)?;
     let client = crate::http_client::proxied_client("CodexElves/RelayTest")?;
     let endpoint = match protocol {
         RelayProtocol::Responses => format!("{base_url}/responses"),
@@ -2133,7 +2135,7 @@ fn apply_generated_model_catalog_to_config(
     config_text: &str,
     profile: &RelayProfile,
 ) -> anyhow::Result<String> {
-    let rows = relay_profile_catalog_rows(profile);
+    let rows = relay_profile_catalog_rows(profile)?;
     let mut doc = parse_toml_document(config_text)?;
     if rows.is_empty() {
         doc.as_table_mut().remove("model_catalog_json");
@@ -2451,6 +2453,7 @@ pub(crate) fn generated_model_catalog_json(
     config_text: &str,
     rows: Vec<CatalogModelRow>,
 ) -> anyhow::Result<Value> {
+    profile.validate_model_protocol_assignments()?;
     let reasoning_effort = catalog_reasoning_effort(config_text);
     let auto_compact_limit =
         parse_optional_positive_u64(&profile.auto_compact_limit, "压缩上下文大小")?;
@@ -2553,7 +2556,10 @@ pub(crate) fn generated_model_catalog_json(
     Ok(json!({ "models": models }))
 }
 
-pub(crate) fn relay_profile_catalog_rows(profile: &RelayProfile) -> Vec<CatalogModelRow> {
+pub(crate) fn relay_profile_catalog_rows(
+    profile: &RelayProfile,
+) -> anyhow::Result<Vec<CatalogModelRow>> {
+    profile.validate_model_protocol_assignments()?;
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
     if !profile.model_mappings.is_empty() {
@@ -2568,7 +2574,7 @@ pub(crate) fn relay_profile_catalog_rows(profile: &RelayProfile) -> Vec<CatalogM
                 protocol: mapping.protocol,
             });
         }
-        return rows;
+        return Ok(rows);
     }
 
     let active_model = relay_profile_model(profile);
@@ -2607,7 +2613,7 @@ pub(crate) fn relay_profile_catalog_rows(profile: &RelayProfile) -> Vec<CatalogM
             });
         }
     }
-    rows
+    Ok(rows)
 }
 
 fn upstream_response_protocol_for_relay(
@@ -2639,6 +2645,13 @@ fn catalog_default_reasoning_effort(
             .copied()
             .find(|effort| *effort == configured)
             .unwrap_or("medium");
+    }
+    if let Some(configured_index) = reasoning_effort_rank(configured)
+        && let Some(clamped) = supported.iter().rev().copied().find(|effort| {
+            reasoning_effort_rank(effort).is_some_and(|index| index <= configured_index)
+        })
+    {
+        return clamped;
     }
     for fallback in ["high", "medium", "low", "minimal"] {
         if supported.iter().any(|effort| *effort == fallback) {
@@ -3786,23 +3799,6 @@ mod tests {
 
         assert!(packaged_model_catalog_entry("gpt-5.6-custom").is_none());
         assert!(packaged_model_catalog_entry("qwen3-coder").is_none());
-
-        let sol = packaged_model_catalog_entry("gpt-5.6-sol").unwrap();
-        assert!(
-            sol["supported_reasoning_levels"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|level| level.get("effort").and_then(Value::as_str) == Some("ultra"))
-        );
-        let terra = packaged_model_catalog_entry("gpt-5.6-terra").unwrap();
-        assert!(
-            !terra["supported_reasoning_levels"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|level| level.get("effort").and_then(Value::as_str) == Some("ultra"))
-        );
     }
 
     #[test]
@@ -3931,7 +3927,7 @@ mod tests {
             ],
             ..RelayProfile::default()
         };
-        let rows = relay_profile_catalog_rows(&profile);
+        let rows = relay_profile_catalog_rows(&profile).unwrap();
         let catalog = generated_model_catalog_json(&profile, "", rows).unwrap();
         let models = catalog.get("models").and_then(Value::as_array).unwrap();
 
@@ -4014,7 +4010,7 @@ mod tests {
             ..RelayProfile::default()
         };
 
-        let rows = relay_profile_catalog_rows(&profile);
+        let rows = relay_profile_catalog_rows(&profile).unwrap();
         let catalog = generated_model_catalog_json(&profile, "", rows).unwrap();
         let models = catalog["models"].as_array().unwrap();
         let responses = models
@@ -4059,7 +4055,7 @@ mod tests {
             ],
             ..RelayProfile::default()
         };
-        let rows = relay_profile_catalog_rows(&profile);
+        let rows = relay_profile_catalog_rows(&profile).unwrap();
         let catalog =
             generated_model_catalog_json(&profile, "model_reasoning_effort = \"ultra\"", rows)
                 .unwrap();
@@ -4080,21 +4076,20 @@ mod tests {
             .expect("应存在 gpt-5.6 自定义模型");
         assert_eq!(gpt56["context_window"], 372_000);
         assert_eq!(gpt56["max_context_window"], 372_000);
-        assert!(
-            gpt56["supported_reasoning_levels"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|level| level.get("effort").and_then(Value::as_str) == Some("max"))
+        let gpt56_levels = gpt56["supported_reasoning_levels"].as_array().unwrap();
+        assert_eq!(
+            gpt56_levels
+                .last()
+                .and_then(|level| level["effort"].as_str()),
+            Some("xhigh")
         );
-        assert!(
-            !gpt56["supported_reasoning_levels"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|level| level.get("effort").and_then(Value::as_str) == Some("ultra"))
-        );
-        assert_eq!(gpt56["default_reasoning_level"], "high");
+        assert!(gpt56_levels.iter().all(|level| {
+            !matches!(
+                level.get("effort").and_then(Value::as_str),
+                Some("max" | "ultra")
+            )
+        }));
+        assert_eq!(gpt56["default_reasoning_level"], "xhigh");
 
         let sol = models
             .iter()
@@ -4103,24 +4098,20 @@ mod tests {
             })
             .expect("应存在 GPT-5.6 Sol 快照模型");
         assert_eq!(sol["context_window"], 372_000);
-        assert_eq!(sol["default_reasoning_level"], "ultra");
-        assert!(
+        assert_eq!(sol["default_reasoning_level"], "xhigh");
+        assert_eq!(
             sol["supported_reasoning_levels"]
                 .as_array()
-                .unwrap()
-                .iter()
-                .any(|level| {
-                    level.get("effort").and_then(Value::as_str) == Some("ultra")
-                        && level.get("description").and_then(Value::as_str)
-                            == Some("Maximum reasoning with automatic task delegation")
-                })
+                .and_then(|levels| levels.last())
+                .and_then(|level| level["effort"].as_str()),
+            Some("xhigh")
         );
 
         let luna = models
             .iter()
             .find(|model| model.get("slug").and_then(Value::as_str) == Some("gpt-5.6-luna"))
             .expect("应存在 GPT-5.6 Luna");
-        assert_eq!(luna["default_reasoning_level"], "high");
+        assert_eq!(luna["default_reasoning_level"], "xhigh");
         assert!(
             !luna["supported_reasoning_levels"]
                 .as_array()
@@ -4135,6 +4126,28 @@ mod tests {
     }
 
     #[test]
+    fn generated_model_catalog_rejects_conflicting_model_protocols() {
+        let profile = RelayProfile {
+            model_mappings: vec![
+                crate::settings::RelayModelMapping {
+                    request_model: "shared-model".to_string(),
+                    context_window: "200000".to_string(),
+                    protocol: RelayProtocol::Responses,
+                },
+                crate::settings::RelayModelMapping {
+                    request_model: "shared-model".to_string(),
+                    context_window: "200000".to_string(),
+                    protocol: RelayProtocol::Anthropic,
+                },
+            ],
+            ..RelayProfile::default()
+        };
+
+        let error = relay_profile_catalog_rows(&profile).unwrap_err();
+        assert!(error.to_string().contains("冲突协议归属"), "{error:#}");
+    }
+
+    #[test]
     fn generated_model_catalog_uses_system_prompt_override() {
         let profile = RelayProfile {
             model: "gpt-5.6-sol".to_string(),
@@ -4142,7 +4155,7 @@ mod tests {
             system_prompt_override: "第一行\n第二行".to_string(),
             ..RelayProfile::default()
         };
-        let rows = relay_profile_catalog_rows(&profile);
+        let rows = relay_profile_catalog_rows(&profile).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].model, "gpt-5.6-sol");
 
@@ -4177,7 +4190,7 @@ mod tests {
             ..RelayProfile::default()
         };
 
-        let rows = relay_profile_catalog_rows(&profile);
+        let rows = relay_profile_catalog_rows(&profile).unwrap();
         let catalog = generated_model_catalog_json(&profile, "", rows).unwrap();
         let models = catalog["models"].as_array().unwrap();
         for requested in requested_models {
@@ -4213,7 +4226,7 @@ mod tests {
             ..RelayProfile::default()
         };
 
-        let rows = relay_profile_catalog_rows(&profile);
+        let rows = relay_profile_catalog_rows(&profile).unwrap();
         let catalog = generated_model_catalog_json(&profile, "", rows).unwrap();
         let model = &catalog["models"][0];
         let prompt = model["base_instructions"].as_str().unwrap();
@@ -4585,6 +4598,12 @@ fn upsert_model_provider_config(
 fn relay_profile_provider_id(profile: &RelayProfile) -> anyhow::Result<String> {
     let doc = parse_toml_document(&profile.config_contents)?;
     Ok(active_or_default_provider_id(&doc))
+}
+
+fn reasoning_effort_rank(effort: &str) -> Option<usize> {
+    ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+        .iter()
+        .position(|candidate| *candidate == effort)
 }
 
 fn relay_profile_provider_name(profile: &RelayProfile, provider_id: &str) -> String {

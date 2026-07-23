@@ -1,11 +1,12 @@
 use codex_elves_core::models::{DeleteStatus, SessionRef};
 use codex_elves_data::{
     BackupStore, SQLiteStorageAdapter, codex_thread_usage_history_from_paths,
-    delete_local_from_paths, move_codex_thread_workspace_from_paths,
+    delete_local_from_paths, move_codex_thread_workspace_from_paths, undo_local_from_backup,
 };
 use rusqlite::Connection;
 use serde_json::json;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use tempfile::tempdir;
 
@@ -86,6 +87,13 @@ fn create_codex_thread_db(path: &Path, rollout_path: &Path) {
     .unwrap();
 }
 
+fn overwrite_backup_source_db(backup_store: &BackupStore, token: &str, source_db: &Path) {
+    let backup_path = backup_store.path_for(token);
+    let mut backup = backup_store.read_backup(token).unwrap();
+    backup["source_db"] = json!(source_db.to_string_lossy().to_string());
+    fs::write(backup_path, serde_json::to_string_pretty(&backup).unwrap()).unwrap();
+}
+
 fn thread_count(path: &Path, id: &str) -> i64 {
     let db = Connection::open(path).unwrap();
     db.query_row("SELECT COUNT(*) FROM threads WHERE id = ?1", [id], |row| {
@@ -123,7 +131,8 @@ fn delete_local_session_creates_backup_and_undo_restores_rows() {
     let tmp = tempdir().unwrap();
     let db_path = tmp.path().join("codex.sqlite");
     create_supported_db(&db_path);
-    let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")));
+    let backup_store = BackupStore::new(tmp.path().join("backups"));
+    let adapter = SQLiteStorageAdapter::new(&db_path, backup_store.clone());
 
     let deleted = adapter.delete_local(&session("s1", "First"));
 
@@ -144,9 +153,14 @@ fn delete_local_session_creates_backup_and_undo_restores_rows() {
     );
     drop(db);
 
-    let restored = adapter.undo(deleted.undo_token.as_deref().unwrap());
+    let restored = undo_local_from_backup(
+        vec![db_path.clone()],
+        backup_store,
+        deleted.undo_token.as_deref().unwrap(),
+    );
 
     assert_eq!(restored.status, DeleteStatus::Undone);
+    assert_eq!(restored.message, "Local session restored from backup");
     let db = Connection::open(&db_path).unwrap();
     assert_eq!(
         db.query_row("SELECT title FROM sessions WHERE id = 's1'", [], |row| {
@@ -449,6 +463,225 @@ fn delete_local_from_paths_removes_duplicate_threads_from_all_databases() {
     assert_eq!(thread_count(&second_db, "t1"), 0);
     assert!(!first_rollout.exists());
     assert!(!second_rollout.exists());
+}
+
+#[test]
+fn multi_database_delete_undo_restores_all_source_databases() {
+    let tmp = tempdir().unwrap();
+    let first_db = tmp.path().join("first.sqlite");
+    let second_db = tmp.path().join("second.sqlite");
+    let first_rollout = tmp.path().join("first.jsonl");
+    let second_rollout = tmp.path().join("second.jsonl");
+    fs::write(
+        &first_rollout,
+        "{\"type\":\"message\",\"source\":\"first\"}\n",
+    )
+    .unwrap();
+    fs::write(
+        &second_rollout,
+        "{\"type\":\"message\",\"source\":\"second\"}\n",
+    )
+    .unwrap();
+    create_codex_thread_db(&first_db, &first_rollout);
+    create_codex_thread_db(&second_db, &second_rollout);
+    let backup_store = BackupStore::new(tmp.path().join("backups"));
+
+    let deleted = delete_local_from_paths(
+        vec![first_db.clone(), second_db.clone()],
+        backup_store.clone(),
+        &session("t1", "Codex Thread"),
+    );
+
+    assert_eq!(deleted.status, DeleteStatus::LocalDeleted);
+    assert_eq!(deleted.message, "已从 2 个本地存储删除");
+    let undo_token = deleted.undo_token.as_deref().unwrap();
+    assert_eq!(
+        backup_store.read_backup(undo_token).unwrap()["kind"],
+        "multi_database_delete"
+    );
+    assert_eq!(thread_count(&first_db, "t1"), 0);
+    assert_eq!(thread_count(&second_db, "t1"), 0);
+    assert!(!first_rollout.exists());
+    assert!(!second_rollout.exists());
+
+    let restored = undo_local_from_backup(
+        vec![first_db.clone(), second_db.clone()],
+        backup_store,
+        undo_token,
+    );
+
+    assert_eq!(restored.status, DeleteStatus::Undone);
+    assert_eq!(restored.message, "已从 2 个本地存储恢复");
+    assert_eq!(restored.undo_token.as_deref(), Some(undo_token));
+    assert_eq!(thread_count(&first_db, "t1"), 1);
+    assert_eq!(thread_count(&second_db, "t1"), 1);
+    assert_eq!(
+        fs::read_to_string(&first_rollout).unwrap(),
+        "{\"type\":\"message\",\"source\":\"first\"}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&second_rollout).unwrap(),
+        "{\"type\":\"message\",\"source\":\"second\"}\n"
+    );
+}
+
+#[test]
+fn multi_database_undo_preflight_conflict_restores_neither_database() {
+    let tmp = tempdir().unwrap();
+    let first_db = tmp.path().join("first.sqlite");
+    let second_db = tmp.path().join("second.sqlite");
+    let first_rollout = tmp.path().join("first.jsonl");
+    let second_rollout = tmp.path().join("second.jsonl");
+    fs::write(
+        &first_rollout,
+        "{\"type\":\"message\",\"source\":\"first\"}\n",
+    )
+    .unwrap();
+    fs::write(
+        &second_rollout,
+        "{\"type\":\"message\",\"source\":\"second\"}\n",
+    )
+    .unwrap();
+    create_codex_thread_db(&first_db, &first_rollout);
+    create_codex_thread_db(&second_db, &second_rollout);
+    let backup_store = BackupStore::new(tmp.path().join("backups"));
+
+    let deleted = delete_local_from_paths(
+        vec![first_db.clone(), second_db.clone()],
+        backup_store.clone(),
+        &session("t1", "Codex Thread"),
+    );
+    let undo_token = deleted.undo_token.as_deref().unwrap();
+    let db = Connection::open(&second_db).unwrap();
+    db.execute(
+        "INSERT INTO threads (id, rollout_path, title, cwd, archived, archived_at, updated_at, updated_at_ms)
+         VALUES ('t1', ?1, 'Conflict', '/conflict', 0, NULL, 1, 1000)",
+        [second_rollout.to_string_lossy().to_string()],
+    )
+    .unwrap();
+    drop(db);
+
+    let restored = undo_local_from_backup(
+        vec![first_db.clone(), second_db.clone()],
+        backup_store,
+        undo_token,
+    );
+
+    assert_eq!(restored.status, DeleteStatus::Failed);
+    assert_eq!(thread_count(&first_db, "t1"), 0);
+    assert_eq!(thread_count(&second_db, "t1"), 1);
+    assert!(!first_rollout.exists());
+    assert!(!second_rollout.exists());
+}
+
+#[test]
+fn single_database_undo_rejects_source_outside_allowed_paths_without_writes() {
+    let tmp = tempdir().unwrap();
+    let allowed_db = tmp.path().join("allowed.sqlite");
+    let external_db = tmp.path().join("external.sqlite");
+    let allowed_rollout = tmp.path().join("allowed.jsonl");
+    let external_rollout = tmp.path().join("external.jsonl");
+    fs::write(
+        &allowed_rollout,
+        "{\"type\":\"message\",\"source\":\"allowed\"}\n",
+    )
+    .unwrap();
+    fs::write(
+        &external_rollout,
+        "{\"type\":\"message\",\"source\":\"external\"}\n",
+    )
+    .unwrap();
+    create_codex_thread_db(&allowed_db, &allowed_rollout);
+    create_codex_thread_db(&external_db, &external_rollout);
+    let backup_store = BackupStore::new(tmp.path().join("backups"));
+    let external_adapter = SQLiteStorageAdapter::new(&external_db, backup_store.clone());
+    assert_eq!(
+        external_adapter
+            .delete_local(&session("t1", "Codex Thread"))
+            .status,
+        DeleteStatus::LocalDeleted
+    );
+    let allowed_adapter = SQLiteStorageAdapter::new(&allowed_db, backup_store.clone());
+    let deleted = allowed_adapter.delete_local(&session("t1", "Codex Thread"));
+    let undo_token = deleted.undo_token.as_deref().unwrap();
+    overwrite_backup_source_db(&backup_store, undo_token, &external_db);
+
+    let restored = undo_local_from_backup(vec![allowed_db.clone()], backup_store, undo_token);
+
+    assert_eq!(restored.status, DeleteStatus::Failed);
+    assert_eq!(thread_count(&allowed_db, "t1"), 0);
+    assert_eq!(thread_count(&external_db, "t1"), 0);
+    assert!(!allowed_rollout.exists());
+    assert!(!external_rollout.exists());
+}
+
+#[test]
+fn multi_database_undo_rejects_source_outside_allowed_paths_without_writes() {
+    let tmp = tempdir().unwrap();
+    let first_db = tmp.path().join("first.sqlite");
+    let second_db = tmp.path().join("second.sqlite");
+    let external_db = tmp.path().join("external.sqlite");
+    let first_rollout = tmp.path().join("first.jsonl");
+    let second_rollout = tmp.path().join("second.jsonl");
+    let external_rollout = tmp.path().join("external.jsonl");
+    fs::write(
+        &first_rollout,
+        "{\"type\":\"message\",\"source\":\"first\"}\n",
+    )
+    .unwrap();
+    fs::write(
+        &second_rollout,
+        "{\"type\":\"message\",\"source\":\"second\"}\n",
+    )
+    .unwrap();
+    fs::write(
+        &external_rollout,
+        "{\"type\":\"message\",\"source\":\"external\"}\n",
+    )
+    .unwrap();
+    create_codex_thread_db(&first_db, &first_rollout);
+    create_codex_thread_db(&second_db, &second_rollout);
+    create_codex_thread_db(&external_db, &external_rollout);
+    let backup_store = BackupStore::new(tmp.path().join("backups"));
+    let external_adapter = SQLiteStorageAdapter::new(&external_db, backup_store.clone());
+    assert_eq!(
+        external_adapter
+            .delete_local(&session("t1", "Codex Thread"))
+            .status,
+        DeleteStatus::LocalDeleted
+    );
+    let deleted = delete_local_from_paths(
+        vec![first_db.clone(), second_db.clone()],
+        backup_store.clone(),
+        &session("t1", "Codex Thread"),
+    );
+    let undo_token = deleted.undo_token.as_deref().unwrap().to_string();
+    let mut aggregate = backup_store.read_backup(&undo_token).unwrap();
+    let child_token = aggregate["targets"][0]["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    overwrite_backup_source_db(&backup_store, &child_token, &external_db);
+    aggregate["targets"][0]["source_db"] = json!(external_db.to_string_lossy().to_string());
+    fs::write(
+        backup_store.path_for(&undo_token),
+        serde_json::to_string_pretty(&aggregate).unwrap(),
+    )
+    .unwrap();
+
+    let restored = undo_local_from_backup(
+        vec![first_db.clone(), second_db.clone()],
+        backup_store,
+        &undo_token,
+    );
+
+    assert_eq!(restored.status, DeleteStatus::Failed);
+    assert_eq!(thread_count(&first_db, "t1"), 0);
+    assert_eq!(thread_count(&second_db, "t1"), 0);
+    assert_eq!(thread_count(&external_db, "t1"), 0);
+    assert!(!first_rollout.exists());
+    assert!(!second_rollout.exists());
+    assert!(!external_rollout.exists());
 }
 
 #[test]
@@ -860,6 +1093,46 @@ fn archived_lookup_workspace_move_and_sort_keys_match_expected_shape() {
 }
 
 #[test]
+fn thread_sort_keys_preserves_request_order_for_two_hundred_ids() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let rollout_path = tmp.path().join("rollout.jsonl");
+    fs::write(&rollout_path, "{\"type\":\"message\"}\n").unwrap();
+    create_codex_thread_db(&db_path, &rollout_path);
+    let db = Connection::open(&db_path).unwrap();
+    for index in 2..=200 {
+        db.execute(
+            "INSERT INTO threads (id, rollout_path, title, cwd, archived, archived_at, updated_at, updated_at_ms)
+             VALUES (?1, ?2, ?3, '/project', 0, NULL, ?4, ?5)",
+            (
+                format!("t{index}"),
+                rollout_path.to_string_lossy().to_string(),
+                format!("Thread {index}"),
+                index as i64,
+                (index * 1000) as i64,
+            ),
+        )
+        .unwrap();
+    }
+    drop(db);
+    let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")));
+    let sessions = (1..=200)
+        .rev()
+        .map(|index| session(&format!("local:t{index}"), &format!("Thread {index}")))
+        .collect::<Vec<_>>();
+
+    let result = adapter.codex_thread_sort_keys(&sessions);
+
+    assert_eq!(result["status"], "ok");
+    let sort_keys = result["sort_keys"].as_array().unwrap();
+    assert_eq!(sort_keys.len(), 200);
+    assert_eq!(sort_keys[0]["session_id"], "t200");
+    assert_eq!(sort_keys[0]["updated_at_ms"], 200000);
+    assert_eq!(sort_keys[199]["session_id"], "t1");
+    assert_eq!(sort_keys[199]["updated_at_ms"], 100000);
+}
+
+#[test]
 fn thread_usage_history_reads_rollout_token_count_events() {
     let tmp = tempdir().unwrap();
     let db_path = tmp.path().join("state_5.sqlite");
@@ -948,6 +1221,65 @@ fn thread_usage_history_reads_rollout_token_count_events() {
             }
         })
     );
+}
+
+#[test]
+fn thread_usage_history_handles_appended_partial_lines_and_replaced_rollouts() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let rollout_path = tmp.path().join("rollout.jsonl");
+    fs::write(
+        &rollout_path,
+        concat!(
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"turn-1\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":100,\"total_tokens\":1100},\"last_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":100,\"total_tokens\":1100}}}}\n"
+        ),
+    )
+    .unwrap();
+    create_codex_thread_db(&db_path, &rollout_path);
+    let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")));
+
+    assert_eq!(
+        adapter.codex_thread_usage_history(&session("local:t1", "Codex Thread"))["summary"]["totalUsage"]
+            ["totalTokens"],
+        1100
+    );
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&rollout_path)
+        .unwrap()
+        .write_all(
+            b"{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"turn-2\"}}\n{\"timestamp\":\"2026-06-02T05:01:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":3000,\"cached_input_tokens\":1400,\"output_tokens\":300,\"total_tokens\":3300},\"last_token_usage\":{\"input_tokens\":2000,\"cached_input_tokens\":1000,\"output_tokens\":200,\"total_tokens\":2200}}}}",
+        )
+        .unwrap();
+    assert_eq!(
+        adapter.codex_thread_usage_history(&session("local:t1", "Codex Thread"))["summary"]["totalUsage"]
+            ["totalTokens"],
+        1100
+    );
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&rollout_path)
+        .unwrap()
+        .write_all(b"\n")
+        .unwrap();
+    let appended = adapter.codex_thread_usage_history(&session("local:t1", "Codex Thread"));
+    assert_eq!(appended["summary"]["totalUsage"]["totalTokens"], 3300);
+    assert_eq!(appended["summary"]["lastTurnId"], "turn-2");
+
+    fs::write(
+        &rollout_path,
+        concat!(
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"replacement\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:02:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":700,\"cached_input_tokens\":200,\"output_tokens\":70,\"total_tokens\":770},\"last_token_usage\":{\"input_tokens\":700,\"cached_input_tokens\":200,\"output_tokens\":70,\"total_tokens\":770}}}}\n"
+        ),
+    )
+    .unwrap();
+    let replaced = adapter.codex_thread_usage_history(&session("local:t1", "Codex Thread"));
+    assert_eq!(replaced["summary"]["totalUsage"]["totalTokens"], 770);
+    assert_eq!(replaced["summary"]["lastTurnId"], "replacement");
 }
 
 #[test]

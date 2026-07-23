@@ -12,12 +12,19 @@ use futures_util::{Stream, StreamExt};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 use crate::settings::{BackendSettings, RelayProtocol, SettingsStore, normalize_codex_extra_args};
 use crate::status::{LaunchStatus, StatusStore};
 
 static BRIDGE_TARGET_CACHE: OnceLock<std::sync::Mutex<HashMap<u16, String>>> = OnceLock::new();
+const BRIDGE_WATCHDOG_HEALTHY_INTERVAL: Duration = Duration::from_secs(30);
+const BRIDGE_WATCHDOG_RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_CONCURRENT_HELPER_CONNECTIONS: usize = 64;
+const HELPER_REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_HELPER_REQUEST_BYTES: usize = 32 * 1024 * 1024;
+const MAX_HELPER_HEADER_BYTES: usize = 64 * 1024;
+type BridgeRuntimeSlot = Arc<Mutex<Option<crate::bridge::BridgeRuntime>>>;
 
 #[cfg(windows)]
 const POST_LAUNCH_COMPUTER_USE_GUARD_SECONDS: &[u64] = &[0, 5, 15, 30, 60, 120, 180, 240, 300];
@@ -216,6 +223,7 @@ pub trait LaunchHooks: Send + Sync {
 pub struct DefaultLaunchHooks {
     child: Mutex<Option<Child>>,
     helper: Mutex<Option<HelperRuntime>>,
+    bridge_runtime: BridgeRuntimeSlot,
     bridge_watchdog: Mutex<Option<BridgeWatchdogRuntime>>,
     computer_use_guard_watchdog: Mutex<Option<ComputerUseGuardWatchdogRuntime>>,
     computer_use_guard_artifacts: Mutex<Option<crate::computer_use_guard::GuardArtifacts>>,
@@ -229,6 +237,13 @@ struct HelperRuntime {
 struct BridgeWatchdogRuntime {
     shutdown: tokio::sync::oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeWatchdogStatus {
+    Healthy,
+    Reinjected,
+    Unhealthy,
 }
 
 struct ComputerUseGuardWatchdogRuntime {
@@ -528,15 +543,43 @@ impl LaunchHooks for DefaultLaunchHooks {
             }),
         );
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let connection_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_HELPER_CONNECTIONS));
         let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => break,
                     accepted = listener.accept() => {
-                        if let Ok((stream, addr)) = accepted {
-                            tokio::spawn(async move {
-                                let _ = handle_helper_connection(stream, Some(addr)).await;
-                            });
+                        if let Ok((mut stream, addr)) = accepted {
+                            let permit = connection_permits.clone().try_acquire_owned();
+                            match permit {
+                                Ok(permit) => {
+                                    tokio::spawn(async move {
+                                        let _permit = permit;
+                                        let _ = handle_helper_connection(stream, Some(addr)).await;
+                                    });
+                                }
+                                Err(_) => {
+                                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                                        "helper.connection_rejected",
+                                        serde_json::json!({
+                                            "remote_addr": addr.to_string(),
+                                            "reason": "connection_limit",
+                                            "limit": MAX_CONCURRENT_HELPER_CONNECTIONS
+                                        }),
+                                    );
+                                    let _ = tokio::time::timeout(
+                                        Duration::from_secs(1),
+                                        write_http_response(
+                                            &mut stream,
+                                            "503 Service Unavailable",
+                                            "application/json; charset=utf-8",
+                                            r#"{"status":"busy","message":"CodexElves helper 连接数已达上限"}"#
+                                                .as_bytes(),
+                                        ),
+                                    )
+                                    .await;
+                                }
+                            }
                         }
                     }
                 }
@@ -628,18 +671,25 @@ impl LaunchHooks for DefaultLaunchHooks {
     }
 
     async fn inject(&self, debug_port: u16, helper_port: u16) -> anyhow::Result<()> {
-        retry_injection(debug_port, helper_port).await
+        retry_injection_with_runtime(debug_port, helper_port, self.bridge_runtime.clone()).await
     }
 
     async fn start_bridge_watchdog(&self, debug_port: u16, helper_port: u16) -> anyhow::Result<()> {
         let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let bridge_runtime = self.bridge_runtime.clone();
         let task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            let mut delay = BRIDGE_WATCHDOG_HEALTHY_INTERVAL;
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => break,
-                    _ = interval.tick() => {
-                        let _ = check_and_reinject_bridge(debug_port, helper_port).await;
+                    _ = tokio::time::sleep(delay) => {
+                        let runtime = bridge_runtime.clone();
+                        let outcome = check_and_reinject_bridge_status_with(
+                            debug_port,
+                            helper_port,
+                            move || retry_injection_with_runtime(debug_port, helper_port, runtime.clone()),
+                        ).await;
+                        delay = bridge_watchdog_delay(outcome);
                     }
                 }
             }
@@ -750,6 +800,10 @@ impl LaunchHooks for DefaultLaunchHooks {
         if let Some(runtime) = self.bridge_watchdog.lock().await.take() {
             let _ = runtime.shutdown.send(());
             let _ = runtime.task.await;
+        }
+        let bridge_runtime = { self.bridge_runtime.lock().await.take() };
+        if let Some(runtime) = bridge_runtime {
+            runtime.shutdown().await;
         }
         if let Some(runtime) = self.helper.lock().await.take() {
             let _ = runtime.shutdown.send(());
@@ -1179,28 +1233,26 @@ impl EitherResponsesStreamConverter<'_> {
 const DEFERRED_STREAM_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const DEFERRED_STREAM_KEEPALIVE_BYTES: &[u8] = b": codex-elves waiting for upstream\n\n";
 
-fn should_defer_protocol_stream(request_json: Option<&serde_json::Value>) -> bool {
+fn should_defer_protocol_stream(request_json: Option<&serde_json::Value>) -> anyhow::Result<bool> {
     let Some(request) = request_json else {
-        return false;
+        return Ok(false);
     };
     if request.get("stream").and_then(serde_json::Value::as_bool) != Some(true) {
-        return false;
+        return Ok(false);
     }
     // Remote Compaction V2 的正确性不能依赖请求前的供应商协议预测：
     // 聚合供应商可能在实际请求中从 Responses failover 到 Chat/Anthropic。
     // 因此所有流式 V2 请求统一进入 deferred，打开上游后再按实际协议透传或桥接。
     if crate::layered_compaction::is_remote_compaction_v2_request(Some(request)) {
-        return true;
+        return Ok(true);
     }
     // Responses 直连流保留原处理逻辑；deferred 只用于需要协议转换的
     // Chat Completions / Anthropic 上游，避免伪流式供应商迟迟不返回响应头。
-    matches!(
-        deferred_stream_target_protocol(request),
-        Some(
-            crate::protocol_proxy::UpstreamResponseProtocol::ChatCompletions
-                | crate::protocol_proxy::UpstreamResponseProtocol::Anthropic
-        )
-    )
+    Ok(matches!(
+        deferred_stream_target_protocol(request)?,
+        crate::protocol_proxy::UpstreamResponseProtocol::ChatCompletions
+            | crate::protocol_proxy::UpstreamResponseProtocol::Anthropic
+    ))
 }
 
 fn is_native_remote_compaction_v2_response(
@@ -1302,33 +1354,21 @@ fn apply_remote_compaction_v2_bridge(
 
 fn deferred_stream_target_protocol(
     request: &serde_json::Value,
-) -> Option<crate::protocol_proxy::UpstreamResponseProtocol> {
+) -> anyhow::Result<crate::protocol_proxy::UpstreamResponseProtocol> {
     let model = request
         .get("model")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .trim();
     if model.is_empty() {
-        return None;
+        anyhow::bail!("请求缺少 model，无法确定 deferred stream 上游协议");
     }
 
-    let settings = SettingsStore::default().load().unwrap_or_default();
-    let relay = crate::relay_rotation::select_relay_for_probe(&settings)
-        .unwrap_or_else(|_| settings.active_relay_profile());
-    let responses_models = crate::model_catalog::relay_profile_responses_model_ids(&relay);
-    if responses_models.iter().any(|item| item == model) {
-        return Some(crate::protocol_proxy::UpstreamResponseProtocol::Responses);
-    }
-    let chat_models = crate::model_catalog::relay_profile_chat_completions_model_ids(&relay);
-    if chat_models.iter().any(|item| item == model) {
-        return Some(crate::protocol_proxy::UpstreamResponseProtocol::ChatCompletions);
-    }
-    let anthropic_models = crate::model_catalog::relay_profile_anthropic_model_ids(&relay);
-    if anthropic_models.iter().any(|item| item == model) {
-        return Some(crate::protocol_proxy::UpstreamResponseProtocol::Anthropic);
-    }
-
-    Some(match relay.protocol_for_model(model) {
+    let settings = SettingsStore::default()
+        .load()
+        .context("读取 deferred stream 供应商设置失败")?;
+    let relay = crate::relay_rotation::select_relay_for_probe(&settings)?;
+    Ok(match relay.resolve_protocol_for_model(model)? {
         RelayProtocol::Responses => crate::protocol_proxy::UpstreamResponseProtocol::Responses,
         RelayProtocol::ChatCompletions => {
             crate::protocol_proxy::UpstreamResponseProtocol::ChatCompletions
@@ -1390,7 +1430,7 @@ async fn handle_protocol_proxy_connection(
         request_body,
         request_json.as_ref(),
     );
-    if should_defer_protocol_stream(request_json.as_ref()) {
+    if should_defer_protocol_stream(request_json.as_ref())? {
         return handle_deferred_protocol_proxy_stream_connection(
             stream,
             request_body,
@@ -2249,13 +2289,53 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     let mut response_truncated = false;
     let mut first_token_ms = None;
     let mut layered_compaction_log = LocalLayeredCompactionLog::default();
+    // Only a request explicitly assigned to the native Responses protocol may
+    // preserve a non-SSE upstream body and status. Chat Completions / Anthropic
+    // Remote Compaction V2 requests still need an immediate local SSE response.
+    let preserve_native_remote_compaction_response = match request_json.as_ref() {
+        Some(request)
+            if crate::layered_compaction::is_remote_compaction_v2_request(Some(request)) =>
+        {
+            deferred_stream_target_protocol(request)?
+                == crate::protocol_proxy::UpstreamResponseProtocol::Responses
+        }
+        _ => false,
+    };
+    let mut downstream_stream_headers_sent = false;
+    if !preserve_native_remote_compaction_response {
+        write_http_stream_headers_once(
+            stream,
+            &mut downstream_stream_headers_sent,
+            "200 OK",
+            "text/event-stream; charset=utf-8",
+        )
+        .await?;
+    }
 
-    let upstream = crate::protocol_proxy::open_responses_proxy_request_with_stream_header_timeout(
-        request_body,
-        request_user_agent,
-        crate::protocol_proxy::upstream_deferred_stream_header_timeout(),
-    )
-    .await;
+    let upstream_request =
+        crate::protocol_proxy::open_responses_proxy_request_with_stream_header_timeout(
+            request_body,
+            request_user_agent,
+            crate::protocol_proxy::upstream_deferred_stream_header_timeout(),
+        );
+    tokio::pin!(upstream_request);
+    let upstream = if downstream_stream_headers_sent {
+        loop {
+            tokio::select! {
+                result = &mut upstream_request => break result,
+                _ = tokio::time::sleep(DEFERRED_STREAM_KEEPALIVE_INTERVAL) => {
+                    write_deferred_stream_keepalive(
+                        stream,
+                        &mut response_capture,
+                        &mut response_bytes,
+                        &mut response_truncated,
+                    ).await?;
+                }
+            }
+        }
+    } else {
+        upstream_request.await
+    };
 
     let upstream = match upstream {
         Ok(upstream) => upstream,
@@ -2284,7 +2364,13 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                     Some("upstream_error".to_string()),
                 )
             };
-            write_http_stream_headers(stream, "200 OK", "text/event-stream; charset=utf-8").await?;
+            write_http_stream_headers_once(
+                stream,
+                &mut downstream_stream_headers_sent,
+                "200 OK",
+                "text/event-stream; charset=utf-8",
+            )
+            .await?;
             response_bytes += failed.len();
             response_truncated |= crate::proxy_log::append_capture(&mut response_capture, &failed);
             stream.write_all(&failed).await?;
@@ -2352,8 +2438,8 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     let bridge_remote_compaction_v2 = request_json.as_ref().is_some_and(|request| {
         crate::protocol_proxy::should_bridge_remote_compaction_v2(request, response_protocol)
     });
-    let native_remote_compaction_v2 =
-        is_native_remote_compaction_v2_response(request_json.as_ref(), response_protocol);
+    let native_remote_compaction_v2 = preserve_native_remote_compaction_response
+        && is_native_remote_compaction_v2_response(request_json.as_ref(), response_protocol);
 
     if !upstream.is_success() {
         let upstream_body = match upstream.into_body_bytes().await {
@@ -2368,8 +2454,13 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                     &message,
                 )
                 .into_bytes();
-                write_http_stream_headers(stream, "200 OK", "text/event-stream; charset=utf-8")
-                    .await?;
+                write_http_stream_headers_once(
+                    stream,
+                    &mut downstream_stream_headers_sent,
+                    "200 OK",
+                    "text/event-stream; charset=utf-8",
+                )
+                .await?;
                 response_bytes += failed.len();
                 response_truncated |=
                     crate::proxy_log::append_capture(&mut response_capture, &failed);
@@ -2465,7 +2556,13 @@ async fn handle_deferred_protocol_proxy_stream_connection(
             message.clone(),
             error_type,
         );
-        write_http_stream_headers(stream, "200 OK", "text/event-stream; charset=utf-8").await?;
+        write_http_stream_headers_once(
+            stream,
+            &mut downstream_stream_headers_sent,
+            "200 OK",
+            "text/event-stream; charset=utf-8",
+        )
+        .await?;
         response_bytes += failed.len();
         response_truncated |= crate::proxy_log::append_capture(&mut response_capture, &failed);
         stream.write_all(&failed).await?;
@@ -2511,7 +2608,13 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     } else {
         "text/event-stream; charset=utf-8"
     };
-    write_http_stream_headers(stream, response_status, response_content_type).await?;
+    write_http_stream_headers_once(
+        stream,
+        &mut downstream_stream_headers_sent,
+        response_status,
+        response_content_type,
+    )
+    .await?;
 
     if response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses {
         let mut remote_compaction_stream_error = None;
@@ -3465,11 +3568,12 @@ fn append_local_proxy_record_with_continue_thinking(
 }
 
 fn append_local_proxy_log_record(record: &crate::proxy_log::ProxyRequestRecord) {
-    if let Err(error) = crate::proxy_log::append_record(record) {
+    if let Err(error) = crate::proxy_log::enqueue_record_nonblocking(record) {
         let _ = crate::diagnostic_log::append_diagnostic_log(
             "helper.local_proxy_log_failed",
             serde_json::json!({
                 "id": record.id,
+                "dropped_intermediate": crate::proxy_log::dropped_intermediate_record_count(),
                 "error": error.to_string()
             }),
         );
@@ -3507,6 +3611,21 @@ async fn write_http_stream_headers(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nCache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(response.as_bytes()).await?;
+    Ok(())
+}
+
+async fn write_http_stream_headers_once(
+    stream: &mut tokio::net::TcpStream,
+    headers_sent: &mut bool,
+    status: &str,
+    content_type: &str,
+) -> anyhow::Result<()> {
+    if *headers_sent {
+        return Ok(());
+    }
+    write_http_stream_headers(stream, status, content_type).await?;
+    stream.flush().await?;
+    *headers_sent = true;
     Ok(())
 }
 
@@ -3566,17 +3685,26 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) -> anyhow::Result
     let mut chunk = vec![0_u8; 4096];
     let mut header_end = None;
     let mut content_length = 0_usize;
+    let deadline = tokio::time::Instant::now() + HELPER_REQUEST_READ_TIMEOUT;
 
     loop {
-        let read = stream.read(&mut chunk).await?;
+        let read = tokio::time::timeout_at(deadline, stream.read(&mut chunk))
+            .await
+            .context("读取 HTTP 请求超时")??;
         if read == 0 {
             break;
         }
         buffer.extend_from_slice(&chunk[..read]);
         if header_end.is_none() {
+            if buffer.len() > MAX_HELPER_HEADER_BYTES && find_header_end(&buffer).is_none() {
+                anyhow::bail!("HTTP 请求头过大");
+            }
             header_end = find_header_end(&buffer);
             if let Some(end) = header_end {
                 content_length = content_length_from_headers(&buffer[..end]).unwrap_or(0);
+                if content_length > MAX_HELPER_REQUEST_BYTES {
+                    anyhow::bail!("HTTP 请求体过大");
+                }
             }
         }
         if let Some(end) = header_end {
@@ -3584,7 +3712,7 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) -> anyhow::Result
                 break;
             }
         }
-        if buffer.len() > 32 * 1024 * 1024 {
+        if buffer.len() > MAX_HELPER_REQUEST_BYTES + MAX_HELPER_HEADER_BYTES {
             anyhow::bail!("HTTP 请求过大");
         }
     }
@@ -3680,7 +3808,11 @@ pub fn build_packaged_activation(
     })
 }
 
-async fn retry_injection(debug_port: u16, helper_port: u16) -> anyhow::Result<()> {
+async fn retry_injection_with_runtime(
+    debug_port: u16,
+    helper_port: u16,
+    bridge_runtime: BridgeRuntimeSlot,
+) -> anyhow::Result<()> {
     let mut last_error = None;
     let retry_delays = [
         std::time::Duration::from_millis(200),
@@ -3692,7 +3824,7 @@ async fn retry_injection(debug_port: u16, helper_port: u16) -> anyhow::Result<()
     ];
     let retry_attempts = retry_delays.len();
     for (attempt, delay) in retry_delays.into_iter().enumerate() {
-        match try_inject(debug_port, helper_port).await {
+        match try_inject(debug_port, helper_port, bridge_runtime.clone()).await {
             Ok(()) => return Ok(()),
             Err(error) => {
                 last_error = Some(error);
@@ -3705,18 +3837,26 @@ async fn retry_injection(debug_port: u16, helper_port: u16) -> anyhow::Result<()
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("ChatGPT/Codex injection failed")))
 }
 
-pub async fn check_and_reinject_bridge(debug_port: u16, helper_port: u16) -> bool {
-    check_and_reinject_bridge_with(debug_port, helper_port, || {
-        retry_injection(debug_port, helper_port)
-    })
-    .await
-}
-
 pub async fn check_and_reinject_bridge_with<F, Fut>(
     debug_port: u16,
     helper_port: u16,
     reinject: F,
 ) -> bool
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    matches!(
+        check_and_reinject_bridge_status_with(debug_port, helper_port, reinject).await,
+        BridgeWatchdogStatus::Reinjected
+    )
+}
+
+pub async fn check_and_reinject_bridge_status_with<F, Fut>(
+    debug_port: u16,
+    helper_port: u16,
+    reinject: F,
+) -> BridgeWatchdogStatus
 where
     F: Fn() -> Fut,
     Fut: Future<Output = anyhow::Result<()>>,
@@ -3736,7 +3876,7 @@ where
         }
     };
     if healthy {
-        return false;
+        return BridgeWatchdogStatus::Healthy;
     }
 
     let _ = crate::diagnostic_log::append_diagnostic_log(
@@ -3755,7 +3895,7 @@ where
                     "helper_port": helper_port
                 }),
             );
-            true
+            BridgeWatchdogStatus::Reinjected
         }
         Err(error) => {
             let _ = crate::diagnostic_log::append_diagnostic_log(
@@ -3766,8 +3906,17 @@ where
                     "message": error.to_string()
                 }),
             );
-            false
+            BridgeWatchdogStatus::Unhealthy
         }
+    }
+}
+
+pub fn bridge_watchdog_delay(outcome: BridgeWatchdogStatus) -> Duration {
+    match outcome {
+        BridgeWatchdogStatus::Healthy | BridgeWatchdogStatus::Reinjected => {
+            BRIDGE_WATCHDOG_HEALTHY_INTERVAL
+        }
+        BridgeWatchdogStatus::Unhealthy => BRIDGE_WATCHDOG_RECOVERY_INTERVAL,
     }
 }
 
@@ -3840,7 +3989,11 @@ fn runtime_evaluate_result_is_true(result: &Value) -> bool {
         .unwrap_or(false)
 }
 
-async fn try_inject(debug_port: u16, helper_port: u16) -> anyhow::Result<()> {
+async fn try_inject(
+    debug_port: u16,
+    helper_port: u16,
+    bridge_runtime: BridgeRuntimeSlot,
+) -> anyhow::Result<()> {
     let targets = crate::cdp::list_targets(debug_port).await?;
     let target = crate::cdp::pick_injectable_codex_page_target(&targets)?;
     let websocket_url = target
@@ -3853,7 +4006,11 @@ async fn try_inject(debug_port: u16, helper_port: u16) -> anyhow::Result<()> {
         crate::routes::CoreRuntimeService::new(debug_port, StatusStore::default())
             .with_websocket_url(websocket_url),
     ));
-    crate::bridge::install_bridge(
+    let mut bridge_runtime = bridge_runtime.lock().await;
+    if let Some(previous_runtime) = bridge_runtime.take() {
+        previous_runtime.shutdown().await;
+    }
+    let runtime = crate::bridge::install_bridge(
         websocket_url,
         crate::bridge::BRIDGE_BINDING_NAME,
         Arc::new(move |path, payload| {
@@ -3865,6 +4022,7 @@ async fn try_inject(debug_port: u16, helper_port: u16) -> anyhow::Result<()> {
         &[script],
     )
     .await?;
+    *bridge_runtime = Some(runtime);
     cache_bridge_websocket_url(debug_port, websocket_url);
     Ok(())
 }
@@ -4265,6 +4423,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bridge_watchdog_uses_slow_healthy_checks_and_fast_recovery() {
+        assert_eq!(
+            bridge_watchdog_delay(BridgeWatchdogStatus::Healthy),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            bridge_watchdog_delay(BridgeWatchdogStatus::Reinjected),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            bridge_watchdog_delay(BridgeWatchdogStatus::Unhealthy),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
     fn post_launch_guard_stops_after_stable_ready_artifacts() {
         let artifacts = crate::computer_use_guard::GuardArtifacts {
             notify_exe: Some(PathBuf::from("codex-computer-use.exe")),
@@ -4326,7 +4500,7 @@ mod tests {
                 { "type": "compaction_trigger" }
             ]
         });
-        assert!(should_defer_protocol_stream(Some(&request)));
+        assert!(should_defer_protocol_stream(Some(&request)).unwrap());
     }
 
     #[test]

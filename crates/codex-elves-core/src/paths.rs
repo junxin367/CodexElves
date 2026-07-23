@@ -56,7 +56,7 @@ pub fn set_settings_path_for_tests(path: Option<PathBuf>) -> Option<PathBuf> {
         .and_then(|mut current| std::mem::replace(&mut *current, path))
 }
 
-fn proxy_log_path_for_tests() -> Option<PathBuf> {
+pub(crate) fn proxy_log_path_for_tests() -> Option<PathBuf> {
     PROXY_LOG_PATH_FOR_TESTS
         .get_or_init(|| Mutex::new(None))
         .lock()

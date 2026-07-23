@@ -1697,43 +1697,36 @@ fn deepseek_reasoning_efforts_match_official_levels() {
 }
 
 #[test]
-fn gpt56_sol_reasoning_efforts_include_ultra_only_for_sol() {
-    let sol_efforts = vec!["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+fn gpt_reasoning_efforts_never_exceed_xhigh() {
+    let expected = vec!["minimal", "low", "medium", "high", "xhigh"];
     for model in [
         "gpt-5.6-sol",
         "openai/gpt-5.6-sol",
         "gpt-5.6-sol-2026-07-09",
-    ] {
-        assert_eq!(
-            supported_reasoning_efforts_for_model(model, UpstreamResponseProtocol::Responses),
-            sol_efforts,
-            "{model} 应支持 ultra"
-        );
-    }
-
-    let standard_efforts = vec!["minimal", "low", "medium", "high", "xhigh", "max"];
-    for model in [
         "gpt-5.6",
         "gpt-5.6-terra",
         "gpt-5.6-luna-2026-07-09",
         "openai/gpt-5.6-custom",
+        "gpt-5.5",
     ] {
         assert_eq!(
             supported_reasoning_efforts_for_model(model, UpstreamResponseProtocol::Responses),
-            standard_efforts,
-            "{model} 不应支持 ultra"
+            expected,
+            "{model} 最高只能支持 xhigh"
         );
     }
 
-    assert_eq!(
-        responses_to_chat_completions(json!({
-            "model": "gpt-5.6-sol",
-            "reasoning": { "effort": "ultra" },
-            "input": "hi"
-        }))
-        .unwrap()["reasoning_effort"],
-        "ultra"
-    );
+    for requested in ["max", "ultra"] {
+        assert_eq!(
+            responses_to_chat_completions(json!({
+                "model": "gpt-5.6-sol",
+                "reasoning": { "effort": requested },
+                "input": "hi"
+            }))
+            .unwrap()["reasoning_effort"],
+            "xhigh"
+        );
+    }
 }
 
 #[test]
@@ -5882,6 +5875,71 @@ async fn responses_proxy_directs_responses_models_to_responses_upstream() {
 }
 
 #[tokio::test]
+async fn responses_proxy_clamps_native_gpt_reasoning_to_xhigh() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let server = spawn_chat_server();
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+
+    let upstream = open_responses_proxy_request(
+        r#"{"model":"gpt-responses","input":"hello","stream":false,"reasoning":{"effort":"ultra"},"model_reasoning_effort":"max","reasoning_effort":"ultra"}"#,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        upstream.response_protocol,
+        UpstreamResponseProtocol::Responses
+    );
+
+    let request = server.finish();
+    let body: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["reasoning"]["effort"], "xhigh");
+    assert_eq!(body["model_reasoning_effort"], "xhigh");
+    assert_eq!(body["reasoning_effort"], "xhigh");
+}
+
+#[tokio::test]
+async fn responses_proxy_rejects_conflicting_duplicate_model_mappings() {
+    let settings = BackendSettings {
+        relay_profiles: vec![RelayProfile {
+            id: "conflict".to_string(),
+            name: "Conflict".to_string(),
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            relay_mode: RelayMode::PureApi,
+            model_mappings: vec![
+                RelayModelMapping {
+                    request_model: "shared-model".to_string(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "200000".to_string(),
+                },
+                RelayModelMapping {
+                    request_model: "shared-model".to_string(),
+                    protocol: RelayProtocol::ChatCompletions,
+                    context_window: "200000".to_string(),
+                },
+            ],
+            ..RelayProfile::default()
+        }],
+        active_relay_id: "conflict".to_string(),
+        ..BackendSettings::default()
+    };
+
+    let error = match open_responses_proxy_request_with_settings(
+        r#"{"model":"shared-model","input":"hello","stream":false}"#,
+        settings,
+    )
+    .await
+    {
+        Ok(_) => panic!("冲突协议归属应拒绝请求"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("冲突协议归属"), "{error:#}");
+}
+
+#[tokio::test]
 async fn native_remote_compaction_non_stream_preserves_success_status() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -6964,77 +7022,60 @@ async fn responses_proxy_directs_anthropic_models_to_anthropic_upstream() {
 }
 
 #[tokio::test]
-async fn responses_proxy_falls_back_to_relay_protocol_for_models_missing_from_protocol_lists() {
+async fn responses_proxy_rejects_models_missing_from_protocol_mappings() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
-    let server = spawn_chat_server();
-    write_mixed_relay_settings(temp.path(), &server.base_url);
+    write_mixed_relay_settings(temp.path(), "http://127.0.0.1:9/v1");
 
-    let upstream = open_responses_proxy_request(
+    let error = match open_responses_proxy_request(
         r#"{"model":"gpt-unlisted","input":"hello","stream":false}"#,
         Some("Original-Codex-UA/1.0"),
     )
     .await
-    .unwrap();
-
-    assert_eq!(upstream.status_code, 200);
-    assert_eq!(
-        upstream.response_protocol,
-        codex_elves_core::protocol_proxy::UpstreamResponseProtocol::Responses
-    );
-    let request = server.finish();
-    assert_eq!(request.path, "/v1/responses");
+    {
+        Ok(_) => panic!("无协议归属模型应拒绝请求"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("没有明确协议归属"), "{error:#}");
 }
 
 #[tokio::test]
-async fn responses_proxy_falls_back_to_chat_protocol_for_unlisted_chat_relay_models() {
+async fn responses_proxy_rejects_unlisted_models_for_chat_relay() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
-    let server = spawn_chat_server();
-    write_chat_relay_settings(temp.path(), &server.base_url, "");
+    write_chat_relay_settings(temp.path(), "http://127.0.0.1:9/v1", "");
 
-    let upstream = open_responses_proxy_request(
+    let error = match open_responses_proxy_request(
         r#"{"model":"gpt-unlisted","input":"hello","stream":false}"#,
         Some("Original-Codex-UA/1.0"),
     )
     .await
-    .unwrap();
-
-    assert_eq!(upstream.status_code, 200);
-    assert_eq!(
-        upstream.response_protocol,
-        codex_elves_core::protocol_proxy::UpstreamResponseProtocol::ChatCompletions
-    );
-    let request = server.finish();
-    assert_eq!(request.path, "/v1/chat/completions");
+    {
+        Ok(_) => panic!("Chat relay 中无协议归属模型应拒绝请求"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("没有明确协议归属"), "{error:#}");
 }
 
 #[tokio::test]
-async fn responses_proxy_falls_back_to_anthropic_protocol_for_unlisted_anthropic_relay_models() {
+async fn responses_proxy_rejects_unlisted_models_for_anthropic_relay() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
-    let server = spawn_chat_server();
-    write_anthropic_relay_settings(temp.path(), &server.base_url);
+    write_anthropic_relay_settings(temp.path(), "http://127.0.0.1:9/v1");
 
-    let upstream = open_responses_proxy_request(
+    let error = match open_responses_proxy_request(
         r#"{"model":"claude-unlisted","input":"hello","stream":false}"#,
         Some("Original-Codex-UA/1.0"),
     )
     .await
-    .unwrap();
-
-    assert_eq!(upstream.status_code, 200);
-    assert_eq!(
-        upstream.response_protocol,
-        codex_elves_core::protocol_proxy::UpstreamResponseProtocol::Anthropic
-    );
-    let request = server.finish();
-    assert_eq!(request.path, "/v1/messages");
-    assert_eq!(request.x_api_key, "sk-test");
-    assert_eq!(request.anthropic_version, "2023-06-01");
+    {
+        Ok(_) => panic!("Anthropic relay 中无协议归属模型应拒绝请求"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("没有明确协议归属"), "{error:#}");
 }
 
 #[tokio::test]

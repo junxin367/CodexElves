@@ -735,6 +735,65 @@ data: [DONE]
 }
 
 #[tokio::test]
+async fn native_remote_compaction_preserves_upstream_non_sse_status_and_content_type() {
+    let _lock = launcher_settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
+    let upstream = spawn_launcher_upstream_with_status_response(
+        "429 Too Many Requests",
+        "application/json; charset=utf-8",
+        r#"{"error":{"message":"upstream is busy"}}"#.to_string(),
+        std::time::Duration::from_secs(2),
+    );
+    write_launcher_mixed_relay_settings(temp.path(), &upstream.base_url);
+
+    let hooks = DefaultLaunchHooks::default();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    hooks.start_helper(port).await.unwrap();
+
+    let started = std::time::Instant::now();
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .json(&serde_json::json!({
+            "model": "gpt-responses",
+            "input": [
+                { "role": "user", "content": "compact this context" },
+                { "type": "compaction_trigger" }
+            ],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    let header_elapsed = started.elapsed();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    hooks.shutdown_helper(port).await;
+    let requests = upstream.finish_all();
+
+    assert!(
+        header_elapsed >= std::time::Duration::from_millis(1500),
+        "native remote compaction must wait for upstream response semantics: {header_elapsed:?}"
+    );
+    assert_eq!(status, reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert!(content_type.contains("application/json"));
+    assert!(body.contains("upstream is busy"));
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/v1/responses");
+}
+
+#[tokio::test]
 async fn helper_retries_same_responses_request_when_model_is_overloaded() {
     let _lock = launcher_settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -864,6 +923,69 @@ data: [DONE]
     assert!(body.contains("event: response.output_text.delta"));
     assert!(body.contains("event: response.completed"));
     assert!(body.contains("data: [DONE]"));
+}
+
+#[tokio::test]
+async fn chat_remote_compaction_stream_establishes_local_sse_before_upstream_headers() {
+    let _lock = launcher_settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
+    let upstream = spawn_launcher_upstream_with_delayed_response(
+        "text/event-stream",
+        r#"data: {"id":"chatcmpl_compact","object":"chat.completion.chunk","created":0,"model":"gpt-chat","choices":[{"index":0,"delta":{"content":"summary"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_compact","object":"chat.completion.chunk","created":0,"model":"gpt-chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"#
+        .to_string(),
+        std::time::Duration::from_secs(2),
+    );
+    write_launcher_mixed_relay_settings(temp.path(), &upstream.base_url);
+
+    let hooks = DefaultLaunchHooks::default();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    hooks.start_helper(port).await.unwrap();
+
+    let started = std::time::Instant::now();
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .json(&serde_json::json!({
+            "model": "gpt-chat",
+            "input": [
+                { "role": "user", "content": "compact this context" },
+                { "type": "compaction_trigger" }
+            ],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    let header_elapsed = started.elapsed();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let body = response.text().await.unwrap();
+    hooks.shutdown_helper(port).await;
+    let requests = upstream.finish_all();
+
+    assert!(
+        header_elapsed < std::time::Duration::from_secs(1),
+        "chat remote compaction should establish local SSE promptly: {header_elapsed:?}"
+    );
+    assert!(content_type.contains("text/event-stream"));
+    assert!(body.contains("event: response.completed"));
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/v1/chat/completions");
 }
 
 #[tokio::test]
@@ -1892,6 +2014,60 @@ fn spawn_launcher_upstream_with_delayed_response(
         response_body,
         response_delay,
     )])
+}
+
+fn spawn_launcher_upstream_with_status_response(
+    status: &str,
+    content_type: &str,
+    response_body: String,
+    response_delay: std::time::Duration,
+) -> LauncherUpstream {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let base_url = format!("http://{address}/v1");
+    listener.set_nonblocking(true).unwrap();
+    let status = status.to_string();
+    let content_type = content_type.to_string();
+
+    let handle = std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        started.elapsed() < std::time::Duration::from_secs(10),
+                        "test upstream did not receive a request"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("failed to accept test request: {error}"),
+            }
+        };
+        let request = read_launcher_upstream_request(&mut stream);
+        let path = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or_default()
+            .to_string();
+        let body = request
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body.to_string())
+            .unwrap_or_default();
+        if !response_delay.is_zero() {
+            std::thread::sleep(response_delay);
+        }
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        vec![LauncherUpstreamRequest { path, body }]
+    });
+
+    LauncherUpstream { base_url, handle }
 }
 
 fn spawn_launcher_upstream_with_response_specs(

@@ -2156,19 +2156,9 @@ fn responses_proxy_target_protocol(
     if model.is_empty() {
         anyhow::bail!("请求缺少 model，无法按模型列表选择上游协议");
     }
-    let responses_models = crate::model_catalog::relay_profile_responses_model_ids(relay);
-    if responses_models.iter().any(|item| item == model) {
-        return Ok(UpstreamResponseProtocol::Responses);
-    }
-    let chat_models = crate::model_catalog::relay_profile_chat_completions_model_ids(relay);
-    if chat_models.iter().any(|item| item == model) {
-        return Ok(UpstreamResponseProtocol::ChatCompletions);
-    }
-    let anthropic_models = crate::model_catalog::relay_profile_anthropic_model_ids(relay);
-    if anthropic_models.iter().any(|item| item == model) {
-        return Ok(UpstreamResponseProtocol::Anthropic);
-    }
-    Ok(response_protocol_for_relay_protocol(relay.protocol))
+    relay
+        .resolve_protocol_for_model(model)
+        .map(response_protocol_for_relay_protocol)
 }
 
 fn response_protocol_for_relay_protocol(
@@ -3207,6 +3197,7 @@ pub(crate) fn normalize_responses_message_item_id(id: &str) -> Option<String> {
 
 pub(crate) fn normalize_native_responses_request(request_json: &Value) -> Value {
     let mut request = request_json.clone();
+    clamp_native_gpt_reasoning_effort(&mut request);
     let Some(input) = request.get_mut("input").and_then(Value::as_array_mut) else {
         return request;
     };
@@ -3248,6 +3239,45 @@ pub(crate) fn normalize_native_responses_request(request_json: &Value) -> Value 
     }
 
     request
+}
+
+fn clamp_native_gpt_reasoning_effort(request: &mut Value) {
+    let model = request
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let model = model
+        .rsplit('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(model.as_str());
+    if !model.starts_with("gpt-") {
+        return;
+    }
+
+    if let Some(effort) = request.pointer_mut("/reasoning/effort") {
+        clamp_gpt_reasoning_effort_value(effort);
+    }
+    for key in ["model_reasoning_effort", "reasoning_effort"] {
+        if let Some(effort) = request.get_mut(key) {
+            clamp_gpt_reasoning_effort_value(effort);
+        }
+    }
+    if request.get("reasoning").is_some_and(Value::is_string)
+        && let Some(effort) = request.get_mut("reasoning")
+    {
+        clamp_gpt_reasoning_effort_value(effort);
+    }
+}
+
+fn clamp_gpt_reasoning_effort_value(value: &mut Value) {
+    if value.as_str().is_some_and(|effort| {
+        matches!(effort.trim().to_ascii_lowercase().as_str(), "max" | "ultra")
+    }) {
+        *value = json!("xhigh");
+    }
 }
 
 fn push_sse(output: &mut String, event: &str, mut data: Value, next_sequence_number: &mut u64) {
@@ -9167,12 +9197,6 @@ pub fn supported_reasoning_efforts_for_model(
         return levels(&["low", "medium", "high"]);
     }
 
-    if is_gpt56_sol_model(&model) {
-        return levels(&["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
-    }
-    if model.contains("gpt-5.6") {
-        return levels(&["minimal", "low", "medium", "high", "xhigh", "max"]);
-    }
     if model.contains("gpt-") || is_openai_o_series(&model) {
         return levels(&["minimal", "low", "medium", "high", "xhigh"]);
     }
@@ -9206,16 +9230,6 @@ pub fn supported_reasoning_efforts_for_model(
 
 fn levels(values: &[&'static str]) -> Vec<&'static str> {
     values.to_vec()
-}
-
-fn is_gpt56_sol_model(model: &str) -> bool {
-    let normalized = model.trim().to_ascii_lowercase();
-    let slug = normalized
-        .rsplit('/')
-        .next()
-        .filter(|value| !value.is_empty())
-        .unwrap_or(normalized.as_str());
-    slug == "gpt-5.6-sol" || slug.starts_with("gpt-5.6-sol-")
 }
 
 fn clamp_reasoning_effort_for_model(

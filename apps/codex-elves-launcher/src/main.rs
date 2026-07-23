@@ -19,6 +19,7 @@ struct LauncherHooks {
     data: Arc<LauncherDataService>,
     runtime: Arc<LauncherRuntimeService>,
     app_dir: Arc<Mutex<Option<PathBuf>>>,
+    bridge_runtime: Arc<tokio::sync::Mutex<Option<codex_elves_core::bridge::BridgeRuntime>>>,
     bridge_watchdog: Arc<tokio::sync::Mutex<Option<LauncherBridgeWatchdogRuntime>>>,
 }
 
@@ -32,6 +33,7 @@ impl Default for LauncherHooks {
                 default_user_script_manager(),
             )),
             app_dir: Arc::new(Mutex::new(None)),
+            bridge_runtime: Arc::new(tokio::sync::Mutex::new(None)),
             bridge_watchdog: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
@@ -142,9 +144,6 @@ async fn activate_existing_codex_app(options: &LaunchOptions) -> anyhow::Result<
     let launch_result = hooks
         .launch_codex(&app_dir, options.debug_port, &settings.codex_extra_args)
         .await;
-    if settings.enhancements_enabled {
-        hooks.start_helper(options.helper_port).await?;
-    }
     let process_ids = codex_elves_core::watcher::find_codex_processes();
     let mut activated = false;
     #[cfg(windows)]
@@ -156,21 +155,6 @@ async fn activate_existing_codex_app(options: &LaunchOptions) -> anyhow::Result<
             }
         }
     }
-    let injection_ready = if settings.enhancements_enabled {
-        hooks
-            .ensure_injection(options.debug_port, options.helper_port, &app_dir)
-            .await
-    } else {
-        false
-    };
-    if injection_ready {
-        hooks
-            .start_bridge_watchdog(options.debug_port, options.helper_port)
-            .await?;
-        hooks.write_status("running").await;
-    } else if settings.enhancements_enabled {
-        hooks.write_status("running_degraded").await;
-    }
     let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
         "launcher.activate_existing_codex",
         json!({
@@ -179,7 +163,6 @@ async fn activate_existing_codex_app(options: &LaunchOptions) -> anyhow::Result<
             "helper_port": options.helper_port,
             "process_ids": process_ids,
             "activated": activated,
-            "injection_ready": injection_ready,
             "launch_ok": launch_result.is_ok(),
             "launch_error": launch_result.as_ref().err().map(|error| error.to_string())
         }),
@@ -345,7 +328,14 @@ impl LaunchHooks for LauncherHooks {
         helper_port: u16,
         ctx: BridgeContext,
     ) -> anyhow::Result<()> {
-        inject_with_context(debug_port, helper_port, ctx, self.runtime.clone()).await
+        inject_with_context(
+            debug_port,
+            helper_port,
+            ctx,
+            self.runtime.clone(),
+            self.bridge_runtime.clone(),
+        )
+        .await
     }
 
     async fn inject(&self, debug_port: u16, helper_port: u16) -> anyhow::Result<()> {
@@ -357,22 +347,25 @@ impl LaunchHooks for LauncherHooks {
         let runtime = self.runtime.clone();
         let data = self.data.clone();
         let app_dir = self.app_dir.clone();
+        let bridge_runtime = self.bridge_runtime.clone();
         let task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            let mut delay = std::time::Duration::from_secs(30);
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => break,
-                    _ = interval.tick() => {
+                    _ = tokio::time::sleep(delay) => {
                         let runtime = runtime.clone();
                         let data = data.clone();
                         let app_dir = app_dir.clone();
-                        let _ = codex_elves_core::launcher::check_and_reinject_bridge_with(
+                        let bridge_runtime = bridge_runtime.clone();
+                        let outcome = codex_elves_core::launcher::check_and_reinject_bridge_status_with(
                             debug_port,
                             helper_port,
                             move || {
                                 let runtime = runtime.clone();
                                 let data = data.clone();
                                 let app_dir = app_dir.clone();
+                                let bridge_runtime = bridge_runtime.clone();
                                 async move {
                                     let app_dir = app_dir
                                         .lock()
@@ -385,11 +378,19 @@ impl LaunchHooks for LauncherHooks {
                                         data.clone(),
                                         app_dir,
                                     );
-                                    inject_with_context(debug_port, helper_port, ctx, runtime).await
+                                    inject_with_context(
+                                        debug_port,
+                                        helper_port,
+                                        ctx,
+                                        runtime,
+                                        bridge_runtime,
+                                    )
+                                    .await
                                 }
                             },
                         )
                         .await;
+                        delay = codex_elves_core::launcher::bridge_watchdog_delay(outcome);
                     }
                 }
             }
@@ -425,6 +426,14 @@ impl LaunchHooks for LauncherHooks {
     }
 
     async fn shutdown_helper(&self, helper_port: u16) {
+        if let Some(runtime) = self.bridge_watchdog.lock().await.take() {
+            let _ = runtime.shutdown.send(());
+            let _ = runtime.task.await;
+        }
+        let bridge_runtime = { self.bridge_runtime.lock().await.take() };
+        if let Some(runtime) = bridge_runtime {
+            runtime.shutdown().await;
+        }
         self.core.shutdown_helper(helper_port).await;
     }
 
@@ -461,10 +470,13 @@ impl BridgeDataService for LauncherDataService {
     }
 
     async fn undo(&self, undo_token: String) -> anyhow::Result<DeleteResult> {
-        let adapter = self.storage_adapter();
-        tokio::task::spawn_blocking(move || adapter.undo(&undo_token))
-            .await
-            .map_err(|error| anyhow::anyhow!("undo task failed: {error}"))
+        let db_paths = self.candidate_db_paths();
+        let backup_store = codex_elves_data::BackupStore::new(self.backup_dir.clone());
+        tokio::task::spawn_blocking(move || {
+            codex_elves_data::undo_local_from_backup(db_paths, backup_store, &undo_token)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("undo task failed: {error}"))
     }
 
     async fn export_markdown(&self, session: SessionRef) -> anyhow::Result<ExportResult> {
@@ -717,10 +729,19 @@ async fn inject_with_context(
     helper_port: u16,
     ctx: BridgeContext,
     runtime: Arc<LauncherRuntimeService>,
+    bridge_runtime: Arc<tokio::sync::Mutex<Option<codex_elves_core::bridge::BridgeRuntime>>>,
 ) -> anyhow::Result<()> {
     let mut last_error = None;
     for _ in 0..20 {
-        match try_inject_with_context(debug_port, helper_port, ctx.clone(), runtime.clone()).await {
+        match try_inject_with_context(
+            debug_port,
+            helper_port,
+            ctx.clone(),
+            runtime.clone(),
+            bridge_runtime.clone(),
+        )
+        .await
+        {
             Ok(()) => return Ok(()),
             Err(error) => {
                 last_error = Some(error);
@@ -736,6 +757,7 @@ async fn try_inject_with_context(
     helper_port: u16,
     ctx: BridgeContext,
     runtime: Arc<LauncherRuntimeService>,
+    bridge_runtime: Arc<tokio::sync::Mutex<Option<codex_elves_core::bridge::BridgeRuntime>>>,
 ) -> anyhow::Result<()> {
     let targets = codex_elves_core::cdp::list_targets(debug_port).await?;
     let target = codex_elves_core::cdp::pick_injectable_codex_page_target(&targets)?;
@@ -749,7 +771,11 @@ async fn try_inject_with_context(
         .unwrap_or_default();
     let script =
         codex_elves_core::assets::bootstrap_injection_script_with_settings(helper_port, &settings);
-    codex_elves_core::bridge::install_bridge(
+    let mut bridge_runtime = bridge_runtime.lock().await;
+    if let Some(previous_runtime) = bridge_runtime.take() {
+        previous_runtime.shutdown().await;
+    }
+    let installed_runtime = codex_elves_core::bridge::install_bridge(
         websocket_url,
         codex_elves_core::bridge::BRIDGE_BINDING_NAME,
         Arc::new(move |path, payload| {
@@ -760,7 +786,9 @@ async fn try_inject_with_context(
         }),
         &[script],
     )
-    .await
+    .await?;
+    *bridge_runtime = Some(installed_runtime);
+    Ok(())
 }
 
 fn default_codex_db_path() -> PathBuf {
@@ -865,17 +893,43 @@ mod tests {
     #[test]
     fn launcher_hooks_use_context_preserving_bridge_watchdog() {
         let source = include_str!("main.rs");
+        let function_name = ["async fn start_bridge_", "watchdog"].concat();
+        let start = source
+            .find(&function_name)
+            .expect("bridge watchdog function should exist");
+        let next_function = ["\n    async fn start_computer_use_guard_", "watchdog"].concat();
+        let end = source[start..]
+            .find(&next_function)
+            .map(|offset| start + offset)
+            .expect("bridge watchdog function should have a following function");
+        let watchdog = &source[start..end];
+        let watchdog_status_call = ["check_and_reinject_bridge_status", "_with"].concat();
+        let bridge_context = ["BridgeContext::core_with_data", "_and_app_dir"].concat();
+        let contextual_injection = ["inject_with_", "context("].concat();
 
-        assert!(
-            source.contains(
-                "async fn start_bridge_watchdog(&self, debug_port: u16, helper_port: u16)"
-            )
-        );
-        assert!(source.contains("check_and_reinject_bridge_with"));
-        assert!(source.contains("BridgeContext::core_with_data_and_app_dir"));
-        assert!(
-            source.contains("inject_with_context(debug_port, helper_port, ctx, runtime).await")
-        );
+        assert!(watchdog.contains(&watchdog_status_call));
+        assert!(watchdog.contains(&bridge_context));
+        assert!(watchdog.contains(&contextual_injection));
+    }
+
+    #[test]
+    fn existing_launcher_activation_does_not_replace_active_bridge() {
+        let source = include_str!("main.rs");
+        let start = source
+            .find("async fn activate_existing_codex_app")
+            .expect("activation function should exist");
+        let end = source[start..]
+            .find("\nfn log_launcher_already_running")
+            .map(|offset| start + offset)
+            .expect("activation function should have a following function");
+        let activation = &source[start..end];
+        let helper_start = [".start_", "helper("].concat();
+        let injection = [".ensure_", "injection("].concat();
+        let watchdog = [".start_bridge_", "watchdog("].concat();
+
+        assert!(!activation.contains(&helper_start));
+        assert!(!activation.contains(&injection));
+        assert!(!activation.contains(&watchdog));
     }
 
     #[test]

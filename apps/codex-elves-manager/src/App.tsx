@@ -1638,6 +1638,22 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         codex_home: browserPreviewCodexHome(settings),
         user_scripts: { enabled: true, scripts: [] },
       }) as T);
+    case "set_user_scripts_enabled":
+    case "set_user_script_enabled":
+    case "delete_user_script":
+      return Promise.resolve(browserPreviewResult({
+        settings,
+        settings_path: "浏览器预览 mock",
+        codex_home: browserPreviewCodexHome(settings),
+        user_scripts: { enabled: true, scripts: [] },
+      }, "浏览器预览已保存脚本设置。") as T);
+    case "reload_user_scripts":
+      return Promise.resolve(browserPreviewResult({
+        settings,
+        settings_path: "浏览器预览 mock",
+        codex_home: browserPreviewCodexHome(settings),
+        user_scripts: { enabled: true, scripts: [] },
+      }, "浏览器预览已重新加载启用脚本。") as T);
     case "save_settings": {
       const next = (args?.settings as BackendSettings | undefined) || settings;
       const normalized = updateBrowserPreviewSettings(next);
@@ -2003,6 +2019,28 @@ export function App() {
 
   const setUserScriptEnabled = async (key: string, enabled: boolean) => {
     const result = await run(() => call<SettingsResult>("set_user_script_enabled", { key, enabled }));
+    if (result) {
+      setSettings(result);
+      setScriptMarket((current) => syncMarketInstalledState(current, result.user_scripts));
+      showNotice(
+        "本地脚本",
+        isSuccessStatus(result.status) ? "已保存；点击“立即重载”应用。" : result.message,
+        result.status,
+      );
+    }
+  };
+
+  const setUserScriptsEnabled = async (enabled: boolean) => {
+    const result = await run(() => call<SettingsResult>("set_user_scripts_enabled", { enabled }));
+    if (result) {
+      setSettings(result);
+      setScriptMarket((current) => syncMarketInstalledState(current, result.user_scripts));
+      showResultNotice("本地脚本", result);
+    }
+  };
+
+  const reloadUserScripts = async () => {
+    const result = await run(() => call<SettingsResult>("reload_user_scripts"));
     if (result) {
       setSettings(result);
       setScriptMarket((current) => syncMarketInstalledState(current, result.user_scripts));
@@ -3247,7 +3285,9 @@ export function App() {
       refreshScriptMarket,
       refreshCodexRadar: () => refreshCodexRadar(true),
       installMarketScript,
+      setUserScriptsEnabled,
       setUserScriptEnabled,
+      reloadUserScripts,
       deleteUserScript,
       refreshLocalSessions,
       deleteLocalSession,
@@ -3550,7 +3590,9 @@ type Actions = {
   refreshScriptMarket: () => Promise<void>;
   refreshCodexRadar: () => Promise<void>;
   installMarketScript: (id: string) => Promise<void>;
+  setUserScriptsEnabled: (enabled: boolean) => Promise<void>;
   setUserScriptEnabled: (key: string, enabled: boolean) => Promise<void>;
+  reloadUserScripts: () => Promise<void>;
   deleteUserScript: (key: string) => Promise<void>;
   refreshLocalSessions: () => Promise<LocalSessionsResult | null>;
   deleteLocalSession: (session: LocalSession) => Promise<void>;
@@ -4763,6 +4805,7 @@ function UserScriptsScreen({ settings, market, actions }: { settings: SettingsRe
   const scripts = inventory?.scripts ?? [];
   const marketScripts = market?.market.scripts ?? [];
   const installedCount = marketScripts.filter((script) => script.installed).length;
+  const globallyEnabled = inventory?.enabled !== false;
   return (
     <>
       <Panel>
@@ -4787,7 +4830,16 @@ function UserScriptsScreen({ settings, market, actions }: { settings: SettingsRe
               <RefreshCw className="h-4 w-4" />
               刷新本地
             </Button>
+            <Button onClick={() => void actions.setUserScriptsEnabled(!globallyEnabled)} variant="secondary">
+              {globallyEnabled ? <PowerOff className="h-4 w-4" /> : <Power className="h-4 w-4" />}
+              {globallyEnabled ? "关闭全部" : "启用全部"}
+            </Button>
+            <Button onClick={() => void actions.reloadUserScripts()} variant="secondary">
+              <RefreshCw className="h-4 w-4" />
+              立即重载
+            </Button>
           </Toolbar>
+          <div className="hint-line">修改后点击“立即重载”；禁用或删除已执行脚本仍需重载 Codex 页面。</div>
         </CardContent>
       </Panel>
       <Panel>

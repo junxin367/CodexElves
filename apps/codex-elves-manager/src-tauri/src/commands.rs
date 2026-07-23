@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use anyhow::Context;
 use codex_elves_core::install::SILENT_BINARY;
 use codex_elves_core::models::{DeleteResult, SessionRef};
 use codex_elves_core::script_market::{self, MarketScript, ScriptMarketManifest};
@@ -1399,6 +1400,37 @@ pub fn set_user_script_enabled(key: String, enabled: bool) -> CommandResult<Sett
         ),
         Err(error) => failed(
             &format!("脚本启停失败：{error}"),
+            fallback_settings_payload(),
+        ),
+    }
+}
+
+#[tauri::command]
+pub fn set_user_scripts_enabled(enabled: bool) -> CommandResult<SettingsPayload> {
+    let manager = default_user_script_manager();
+    match set_user_scripts_enabled_with(&manager, enabled) {
+        Ok(()) => settings_payload(
+            if enabled {
+                "已启用全部脚本。点击“立即重载”应用。"
+            } else {
+                "已关闭全部脚本。已执行效果需重载 Codex 页面才会移除。"
+            },
+            "全局脚本开关失败",
+        ),
+        Err(error) => failed(
+            &format!("全局脚本开关失败：{error}"),
+            fallback_settings_payload(),
+        ),
+    }
+}
+
+#[tauri::command]
+pub async fn reload_user_scripts() -> CommandResult<SettingsPayload> {
+    let manager = default_user_script_manager();
+    match reload_user_scripts_into_running_codex(&manager).await {
+        Ok(message) => settings_payload(&message, "重载后重新读取脚本失败"),
+        Err(error) => failed(
+            &format!("立即重载失败：{error:#}"),
             fallback_settings_payload(),
         ),
     }
@@ -3530,6 +3562,49 @@ fn default_user_script_manager() -> UserScriptManager {
     )
 }
 
+fn set_user_scripts_enabled_with(manager: &UserScriptManager, enabled: bool) -> anyhow::Result<()> {
+    manager.set_global_enabled(enabled)?;
+    Ok(())
+}
+
+fn user_script_reload_debug_port(latest: Option<LaunchStatus>) -> anyhow::Result<u16> {
+    let latest = latest
+        .ok_or_else(|| anyhow::anyhow!("未找到 CodexElves 运行状态，请先启动 ChatGPT/Codex"))?;
+    if latest.status != "running" {
+        anyhow::bail!(
+            "ChatGPT/Codex 当前状态为 {}：{}",
+            latest.status,
+            latest.message
+        );
+    }
+    latest
+        .debug_port
+        .ok_or_else(|| anyhow::anyhow!("运行状态缺少调试端口，请重启 CodexElves"))
+}
+
+async fn reload_user_scripts_into_running_codex(
+    manager: &UserScriptManager,
+) -> anyhow::Result<String> {
+    let debug_port = user_script_reload_debug_port(StatusStore::default().load_latest()?)?;
+    let targets = codex_elves_core::cdp::list_targets(debug_port)
+        .await
+        .with_context(|| format!("无法连接 Codex 调试端口 {debug_port}"))?;
+    let target = codex_elves_core::cdp::pick_injectable_codex_page_target(&targets)
+        .context("未找到可注入的 ChatGPT/Codex 页面")?;
+    let websocket_url = target
+        .web_socket_debugger_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("目标页面缺少调试 WebSocket 地址"))?;
+    let bundle = manager.build_enabled_bundle()?;
+    if bundle.trim().is_empty() {
+        return Ok("当前没有启用脚本；禁用或删除后的已执行效果需重载 Codex 页面。".to_string());
+    }
+    codex_elves_core::bridge::evaluate_script(websocket_url, &bundle)
+        .await
+        .context("向 Codex 页面执行用户脚本失败")?;
+    Ok("已重新执行启用脚本；禁用或删除后的已执行效果需重载 Codex 页面。".to_string())
+}
+
 fn user_scripts_config_dir() -> PathBuf {
     if cfg!(windows) {
         if let Some(roaming) = std::env::var_os("APPDATA") {
@@ -3691,6 +3766,15 @@ fn default_log_lines() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static PROCESS_STATE_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn process_state_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        PROCESS_STATE_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("process state test lock")
+    }
 
     fn websocket_cache_profile(
         state: codex_elves_core::settings::ResponsesWebsocketCapabilityState,
@@ -3886,6 +3970,48 @@ mod tests {
     }
 
     #[test]
+    fn manager_global_user_script_toggle_persists() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = UserScriptManager::new(
+            temp.path().join("builtin"),
+            temp.path().join("user"),
+            temp.path().join("user_scripts.json"),
+        );
+
+        set_user_scripts_enabled_with(&manager, false).unwrap();
+
+        assert!(!manager.load_config().enabled);
+    }
+
+    #[test]
+    fn user_script_reload_requires_running_debug_target() {
+        assert!(user_script_reload_debug_port(None).is_err());
+        assert!(
+            user_script_reload_debug_port(Some(LaunchStatus {
+                status: "stopped".to_string(),
+                message: "已停止".to_string(),
+                started_at_ms: 1,
+                debug_port: Some(9229),
+                helper_port: Some(45221),
+                codex_app: None,
+            }))
+            .is_err()
+        );
+        assert_eq!(
+            user_script_reload_debug_port(Some(LaunchStatus {
+                status: "running".to_string(),
+                message: "运行中".to_string(),
+                started_at_ms: 1,
+                debug_port: Some(9229),
+                helper_port: Some(45221),
+                codex_app: None,
+            }))
+            .unwrap(),
+            9229
+        );
+    }
+
+    #[test]
     fn startup_options_returns_structured_payload() {
         let result = startup_options();
 
@@ -3894,6 +4020,7 @@ mod tests {
 
     #[test]
     fn startup_options_honors_show_update_environment() {
+        let _process_state = process_state_test_guard();
         unsafe {
             std::env::set_var("CODEX_ELVES_SHOW_UPDATE", "1");
         }
@@ -4019,6 +4146,7 @@ mod tests {
         relay_mode: codex_elves_core::settings::RelayMode,
         command: fn() -> CommandResult<RelayPayload>,
     ) {
+        let _process_state = process_state_test_guard();
         let temp = tempfile::tempdir().unwrap();
         let codex_home = temp.path().join("codex-home");
         std::fs::create_dir_all(&codex_home).unwrap();
@@ -4096,6 +4224,7 @@ base_url = "https://manual.example/v1"
 
     #[test]
     fn env_conflict_commands_ignore_codex_home_and_remove_openai_vars() {
+        let _process_state = process_state_test_guard();
         let test_openai_name = "OPENAI_CODEX_ELVES_ENV_CONFLICT_TEST";
         let previous_openai = std::env::var_os(test_openai_name);
         let previous_codex_home = std::env::var_os("CODEX_HOME");
@@ -4147,6 +4276,7 @@ base_url = "https://manual.example/v1"
 
     #[test]
     fn delete_local_session_falls_back_when_requested_db_no_longer_contains_thread() {
+        let _process_state = process_state_test_guard();
         let temp = tempfile::tempdir().unwrap();
         let previous_codex_home = std::env::var_os("CODEX_HOME");
         let codex_home = temp.path().join("codex-home");
@@ -4213,6 +4343,7 @@ base_url = "https://manual.example/v1"
 
     #[test]
     fn list_local_sessions_deduplicates_threads_across_current_and_legacy_dbs() {
+        let _process_state = process_state_test_guard();
         let temp = tempfile::tempdir().unwrap();
         let previous_codex_home = std::env::var_os("CODEX_HOME");
         let codex_home = temp.path().join("codex-home");
@@ -4241,6 +4372,7 @@ base_url = "https://manual.example/v1"
 
     #[test]
     fn delete_local_session_removes_duplicate_threads_from_all_candidate_dbs() {
+        let _process_state = process_state_test_guard();
         let temp = tempfile::tempdir().unwrap();
         let previous_codex_home = std::env::var_os("CODEX_HOME");
         let codex_home = temp.path().join("codex-home");
@@ -4378,6 +4510,7 @@ base_url = "https://manual.example/v1"
 
     #[test]
     fn reset_image_overlay_settings_preserves_supplier_settings() {
+        let _process_state = process_state_test_guard();
         let temp = tempfile::tempdir().unwrap();
         let settings_path = temp.path().join("settings.json");
         let previous = codex_elves_core::paths::set_settings_path_for_tests(Some(settings_path));

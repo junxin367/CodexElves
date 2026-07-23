@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use futures_util::stream::FuturesUnordered;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio_tungstenite::connect_async;
@@ -15,12 +16,53 @@ use tokio_tungstenite::tungstenite::Message;
 pub const BRIDGE_BINDING_NAME: &str = "codexSessionDeleteV2";
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_CONCURRENT_BRIDGE_REQUESTS: usize = 8;
+const MAX_QUEUED_BRIDGE_REQUESTS: usize = 64;
 
 pub type BridgeHandler = Arc<
     dyn Fn(String, Value) -> Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>>
         + Send
         + Sync,
 >;
+
+type BridgeHandlerFuture = Pin<Box<dyn Future<Output = BridgeHandlerCompletion> + Send + 'static>>;
+
+struct BridgeHandlerCompletion {
+    request_id: String,
+    result: Result<Value, String>,
+}
+
+enum PreparedBridgeCall {
+    Ignore,
+    Reject {
+        request_id: String,
+        message: String,
+    },
+    Execute {
+        request_id: String,
+        path: String,
+        payload: Value,
+    },
+}
+
+#[derive(Debug)]
+pub struct BridgeRuntime {
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl BridgeRuntime {
+    pub async fn shutdown(mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let _ = self.task.await;
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+}
 
 static NEXT_MESSAGE_ID: AtomicU64 = AtomicU64::new(100);
 static NEXT_BRIDGE_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -117,70 +159,158 @@ pub async fn install_bridge(
     binding_name: &str,
     handler: BridgeHandler,
     new_document_scripts: &[String],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<BridgeRuntime> {
     let socket = connect_cdp_websocket(websocket_url).await?;
     let generation = next_bridge_generation();
     let mut session = CdpSession::new(socket)
         .with_handler(handler)
         .with_bridge_generation(generation.clone());
-
-    session.send_command(1, "Runtime.enable", json!({})).await?;
-    session
-        .send_command(2, "Runtime.removeBinding", json!({ "name": binding_name }))
-        .await?;
-    session
-        .send_command(3, "Runtime.addBinding", json!({ "name": binding_name }))
-        .await?;
-
-    let bridge_script = build_bridge_script_with_generation(binding_name, &generation);
-    session
-        .send_command(
-            4,
-            "Page.addScriptToEvaluateOnNewDocument",
-            json!({ "source": bridge_script }),
-        )
-        .await?;
-    session
-        .send_command(
-            5,
-            "Runtime.evaluate",
-            runtime_evaluate_params(&bridge_script),
-        )
-        .await?;
-
-    for script in new_document_scripts {
-        let message_id = next_message_id();
+    let binding_name = binding_name.to_string();
+    let mut script_identifiers = Vec::with_capacity(new_document_scripts.len() + 1);
+    let install_result: anyhow::Result<()> = async {
+        session.send_command(1, "Runtime.enable", json!({})).await?;
         session
+            .send_command(2, "Runtime.removeBinding", json!({ "name": binding_name }))
+            .await?;
+        session
+            .send_command(3, "Runtime.addBinding", json!({ "name": binding_name }))
+            .await?;
+
+        let bridge_script = build_bridge_script_with_generation(&binding_name, &generation);
+        let add_bridge = session
             .send_command(
-                message_id,
+                4,
                 "Page.addScriptToEvaluateOnNewDocument",
-                json!({ "source": script }),
+                json!({ "source": bridge_script }),
             )
             .await?;
-        let message_id = next_message_id();
+        if let Some(identifier) = script_identifier(&add_bridge) {
+            script_identifiers.push(identifier);
+        }
         session
             .send_command(
-                message_id,
+                5,
                 "Runtime.evaluate",
-                runtime_evaluate_params(script),
+                runtime_evaluate_params(&bridge_script),
             )
             .await?;
+
+        for script in new_document_scripts {
+            let message_id = next_message_id();
+            let add_script = session
+                .send_command(
+                    message_id,
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    json!({ "source": script }),
+                )
+                .await?;
+            if let Some(identifier) = script_identifier(&add_script) {
+                script_identifiers.push(identifier);
+            }
+            let message_id = next_message_id();
+            session
+                .send_command(
+                    message_id,
+                    "Runtime.evaluate",
+                    runtime_evaluate_params(script),
+                )
+                .await?;
+        }
+
+        Ok(())
+    }
+    .await;
+    if let Err(error) = install_result {
+        cleanup_bridge_registration(
+            &mut session,
+            &binding_name,
+            &generation,
+            &script_identifiers,
+        )
+        .await;
+        return Err(error);
     }
 
-    session.drain_binding_queue().await?;
-    tokio::spawn(async move {
+    let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let mut in_flight = FuturesUnordered::<BridgeHandlerFuture>::new();
         loop {
-            if session.drain_binding_queue().await.is_err() {
-                break;
+            while in_flight.len() < MAX_CONCURRENT_BRIDGE_REQUESTS {
+                let Some(message) = session.binding_calls.pop_front() else {
+                    break;
+                };
+                match session.prepare_binding_call(message) {
+                    PreparedBridgeCall::Ignore => {}
+                    PreparedBridgeCall::Reject {
+                        request_id,
+                        message,
+                    } => {
+                        if session
+                            .reject_bridge_request(&request_id, &message)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    PreparedBridgeCall::Execute {
+                        request_id,
+                        path,
+                        payload,
+                    } => {
+                        let Some(handler) = session.handler.clone() else {
+                            continue;
+                        };
+                        in_flight.push(Box::pin(async move {
+                            let result = handler(path, payload)
+                                .await
+                                .map_err(|error| error.to_string());
+                            BridgeHandlerCompletion { request_id, result }
+                        }));
+                    }
+                }
             }
-            match session.next_message().await {
-                Ok(Some(_)) => {}
-                Ok(None) | Err(_) => break,
+
+            let can_read_more = session.binding_calls.len() < MAX_QUEUED_BRIDGE_REQUESTS;
+            tokio::select! {
+                _ = &mut shutdown_rx => break,
+                completion = in_flight.next(), if !in_flight.is_empty() => {
+                    let Some(completion) = completion else {
+                        continue;
+                    };
+                    let result = match completion.result {
+                        Ok(result) => session
+                            .resolve_bridge_request(&completion.request_id, &result)
+                            .await,
+                        Err(error) => session
+                            .reject_bridge_request(&completion.request_id, &error)
+                            .await,
+                    };
+                    if result.is_err() {
+                        break;
+                    }
+                }
+                message = session.next_message(), if can_read_more => {
+                    match message {
+                        Ok(Some(_)) => {}
+                        Ok(None) | Err(_) => break,
+                    }
+                }
             }
         }
+        cleanup_bridge_registration(
+            &mut session,
+            &binding_name,
+            &generation,
+            &script_identifiers,
+        )
+        .await;
     });
 
-    Ok(())
+    Ok(BridgeRuntime {
+        shutdown: Some(shutdown),
+        task,
+    })
 }
 
 pub fn runtime_evaluate_params(script: &str) -> Value {
@@ -354,60 +484,34 @@ where
         Ok(Some(value))
     }
 
-    async fn drain_binding_queue(&mut self) -> anyhow::Result<()> {
-        while let Some(message) = self.binding_calls.pop_front() {
-            self.route_binding_call(message).await?;
-        }
-        Ok(())
-    }
-
-    fn route_binding_call(
-        &mut self,
-        message: Value,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>> {
-        Box::pin(async move {
-            let Some(handler) = self.handler.clone() else {
-                return Ok(());
-            };
-
-            let Some(payload_text) = message
-                .get("params")
-                .and_then(|params| params.get("payload"))
-                .and_then(Value::as_str)
-            else {
-                return Ok(());
-            };
-
-            let parsed: Value = match serde_json::from_str(payload_text) {
-                Ok(parsed) => parsed,
-                Err(error) => {
-                    if let Some(request_id) = extract_string_field(payload_text, "id") {
-                        self.reject_bridge_request(
-                            &request_id,
-                            &format!("failed to parse bridge payload: {error}"),
-                        )
-                        .await?;
-                    }
-                    return Ok(());
-                }
-            };
-            self.route_parsed_binding_call(&handler, parsed).await
-        })
-    }
-
-    async fn route_parsed_binding_call(
-        &mut self,
-        handler: &BridgeHandler,
-        parsed: Value,
-    ) -> anyhow::Result<()> {
+    fn prepare_binding_call(&self, message: Value) -> PreparedBridgeCall {
+        let Some(payload_text) = message
+            .get("params")
+            .and_then(|params| params.get("payload"))
+            .and_then(Value::as_str)
+        else {
+            return PreparedBridgeCall::Ignore;
+        };
+        let parsed: Value = match serde_json::from_str(payload_text) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                return extract_string_field(payload_text, "id").map_or(
+                    PreparedBridgeCall::Ignore,
+                    |request_id| PreparedBridgeCall::Reject {
+                        request_id,
+                        message: format!("failed to parse bridge payload: {error}"),
+                    },
+                );
+            }
+        };
         if !bridge_payload_matches_generation(
             &parsed,
             self.bridge_generation.as_deref().unwrap_or_default(),
         ) {
-            return Ok(());
+            return PreparedBridgeCall::Ignore;
         }
         let Some(request_id) = parsed.get("id").and_then(Value::as_str) else {
-            return Ok(());
+            return PreparedBridgeCall::Ignore;
         };
         let path = parsed
             .get("path")
@@ -415,18 +519,14 @@ where
             .unwrap_or_default()
             .to_string();
         let payload = parsed.get("payload").cloned().unwrap_or_else(|| json!({}));
-
-        match handler(path, payload).await {
-            Ok(result) => {
-                self.resolve_bridge_request(request_id, &result).await?;
-            }
-            Err(error) => {
-                self.reject_bridge_request(request_id, &error.to_string())
-                    .await?;
-            }
+        if self.handler.is_none() {
+            return PreparedBridgeCall::Ignore;
         }
-
-        Ok(())
+        PreparedBridgeCall::Execute {
+            request_id: request_id.to_string(),
+            path,
+            payload,
+        }
     }
 
     async fn resolve_bridge_request(
@@ -527,6 +627,97 @@ fn command_result(response: Value, method: &str, message_id: u64) -> anyhow::Res
         bail!("CDP command {method} id {message_id} failed: {error}");
     }
     Ok(response)
+}
+
+fn script_identifier(response: &Value) -> Option<String> {
+    response
+        .get("result")
+        .and_then(|result| result.get("identifier"))
+        .or_else(|| response.get("identifier"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+async fn cleanup_bridge_registration<S>(
+    session: &mut CdpSession<S>,
+    binding_name: &str,
+    generation: &str,
+    script_identifiers: &[String],
+) where
+    S: SinkExt<Message>
+        + StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + Unpin
+        + Send,
+    <S as futures_util::Sink<Message>>::Error: std::error::Error + Send + Sync + 'static,
+{
+    for identifier in script_identifiers {
+        let _ = session
+            .send_command_without_wait(
+                next_message_id(),
+                "Page.removeScriptToEvaluateOnNewDocument",
+                json!({ "identifier": identifier }),
+            )
+            .await;
+    }
+    let ownership = session
+        .send_command(
+            next_message_id(),
+            "Runtime.evaluate",
+            runtime_evaluate_params(&bridge_cleanup_ownership_expression(generation)),
+        )
+        .await;
+    if ownership
+        .as_ref()
+        .is_ok_and(runtime_evaluate_result_is_true)
+    {
+        let _ = session
+            .send_command_without_wait(
+                next_message_id(),
+                "Runtime.removeBinding",
+                json!({ "name": binding_name }),
+            )
+            .await;
+    }
+}
+
+fn bridge_cleanup_ownership_expression(generation: &str) -> String {
+    format!(
+        r#"
+(() => {{
+  const generation = {generation};
+  const current = window.__codexSessionDeleteBridgeGeneration;
+  if (current != null && current !== generation) return false;
+  if (current === generation) {{
+    const callbacks = window.__codexSessionDeleteCallbacks;
+    if (callbacks && typeof callbacks.values === "function") {{
+      for (const callback of callbacks.values()) {{
+        try {{
+          callback?.resolve?.({{ status: "failed", message: "CodexElves Bridge 已重启，请重试" }});
+        }} catch (_) {{}}
+      }}
+      callbacks.clear?.();
+    }}
+    delete window.__codexSessionDeleteBridge;
+    delete window.__codexSessionDeleteResolve;
+    delete window.__codexSessionDeleteReject;
+    delete window.__codexSessionDeleteCallbacks;
+    delete window.__codexSessionDeleteSeq;
+    delete window.__codexSessionDeleteBridgeGeneration;
+  }}
+  return true;
+}})()
+"#,
+        generation = serde_json::to_string(generation).expect("bridge generation should serialize")
+    )
+}
+
+fn runtime_evaluate_result_is_true(result: &Value) -> bool {
+    result
+        .get("result")
+        .and_then(|result| result.get("result"))
+        .and_then(|result| result.get("value"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn extract_string_field(input: &str, field: &str) -> Option<String> {

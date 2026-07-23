@@ -380,7 +380,7 @@ fn relay_settings_uses_structured_config_and_isolated_auth() {
 
     assert!(app_tsx.contains("switch_relay_profile"));
     assert!(app_tsx.contains("previousActiveRelayId"));
-    assert!(app_tsx.contains("relayProfileSwitchValidation(selectedBeforeSave)"));
+    assert!(app_tsx.contains("relayProfileSwitchValidation(selectedBeforeSave, switchSettings)"));
     assert!(app_tsx.contains("RelayActivationPanel"));
     assert!(app_tsx.contains("启用后会修改"));
     assert!(app_tsx.contains("auth.json 存档"));
@@ -392,6 +392,28 @@ fn relay_settings_uses_structured_config_and_isolated_auth() {
     assert!(commands_rs.contains("供应商配置不再支持直接保存 config.toml"));
     assert!(commands_rs.contains("backfill_relay_profile_from_live"));
     assert!(commands_rs.contains("switch_relay_profile_in_home"));
+}
+
+#[test]
+fn manager_user_script_controls_are_registered_and_visible() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let app_tsx = manifest_dir.parent().unwrap().join("src/App.tsx");
+    let app_tsx = std::fs::read_to_string(&app_tsx).expect("read manager App.tsx");
+    let commands_rs = manifest_dir.join("src/commands.rs");
+    let commands_rs = std::fs::read_to_string(&commands_rs).expect("read manager commands.rs");
+    let lib_rs =
+        std::fs::read_to_string(manifest_dir.join("src/lib.rs")).expect("read manager lib.rs");
+
+    assert!(app_tsx.contains("setUserScriptsEnabled"));
+    assert!(app_tsx.contains("reloadUserScripts"));
+    assert!(app_tsx.contains("关闭全部"));
+    assert!(app_tsx.contains("立即重载"));
+    assert!(app_tsx.contains("禁用或删除已执行脚本仍需重载 Codex 页面"));
+    assert!(commands_rs.contains("pub fn set_user_scripts_enabled"));
+    assert!(commands_rs.contains("pub async fn reload_user_scripts"));
+    assert!(commands_rs.contains("reload_user_scripts_into_running_codex"));
+    assert!(lib_rs.contains("commands::set_user_scripts_enabled"));
+    assert!(lib_rs.contains("commands::reload_user_scripts"));
 }
 
 #[test]
