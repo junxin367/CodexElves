@@ -702,6 +702,41 @@ pub fn sync_applied_relay_profile_provider_name_to_home(
     Ok(true)
 }
 
+/// 把当前活跃供应商的 Base URL（含本地代理地址切换）回写到 live `config.toml`。
+///
+/// 只在 live 的 `model_provider` 与该供应商一致时才写，避免误改其它供应商；
+/// 写入值由 `codex_base_url_for_proxy` 按是否启用本地代理计算，
+/// 保证「保存已在使用的供应商配置」时本地代理地址同步生效。
+pub fn sync_applied_relay_profile_base_url_to_home(
+    home: &Path,
+    profile: &RelayProfile,
+) -> anyhow::Result<bool> {
+    let live_config = read_optional_text(&home.join("config.toml"))?;
+    let live_provider = root_key_string(&live_config, "model_provider").unwrap_or_default();
+    let profile_provider = relay_profile_provider_id(profile)?;
+    if live_provider.trim() != profile_provider.trim() {
+        return Ok(false);
+    }
+
+    let base_url = relay_profile_owned_base_url(profile);
+    if base_url.trim().is_empty() {
+        return Ok(false);
+    }
+    let codex_base_url = codex_base_url_for_proxy(
+        base_url.trim(),
+        profile.local_proxy_enabled(),
+        crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+    );
+
+    let provider_table = format!("model_providers.{live_provider}");
+    let updated =
+        set_table_toml_string_line(&live_config, &provider_table, "base_url", &codex_base_url);
+    if updated != live_config {
+        write_codex_live_atomic(home, Some(&updated), None, false)?;
+    }
+    Ok(true)
+}
+
 pub fn sync_applied_relay_profile_websocket_to_home_with_enabled(
     home: &Path,
     profile: &RelayProfile,
@@ -4364,6 +4399,129 @@ base_url = "http://127.0.0.1:45221/v1"
             vec!["claude-opus-4.6", "qwen3-coder", "deepseek-coder"]
         );
         assert_eq!(updated_catalog["models"][0]["context_window"], 1_000_000);
+    }
+
+    #[test]
+    fn sync_applied_relay_profile_base_url_updates_active_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        std::fs::write(
+            home.join("config.toml"),
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://old.example.test/v1"
+"#,
+        )
+        .unwrap();
+
+        let profile = RelayProfile {
+            relay_mode: crate::settings::RelayMode::PureApi,
+            protocol: RelayProtocol::Responses,
+            base_url: "https://new.example.test/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            local_proxy_enabled: Some(false),
+            config_contents: r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://new.example.test/v1"
+"#
+            .to_string(),
+            ..RelayProfile::default()
+        };
+
+        assert!(sync_applied_relay_profile_base_url_to_home(home, &profile).unwrap());
+        let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        assert!(config.contains(r#"base_url = "https://new.example.test/v1""#));
+        assert!(!config.contains("old.example.test"));
+    }
+
+    #[test]
+    fn sync_applied_relay_profile_base_url_writes_local_proxy_address_when_enabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        std::fs::write(
+            home.join("config.toml"),
+            r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://direct.example.test/v1"
+"#,
+        )
+        .unwrap();
+
+        let profile = RelayProfile {
+            relay_mode: crate::settings::RelayMode::PureApi,
+            protocol: RelayProtocol::Responses,
+            base_url: "https://upstream.example.test/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            local_proxy_enabled: Some(true),
+            config_contents: r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://upstream.example.test/v1"
+"#
+            .to_string(),
+            ..RelayProfile::default()
+        };
+
+        assert!(sync_applied_relay_profile_base_url_to_home(home, &profile).unwrap());
+        let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        let expected = crate::protocol_proxy::local_responses_proxy_base_url(
+            crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+        );
+        assert!(config.contains(&format!("base_url = \"{expected}\"")));
+    }
+
+    #[test]
+    fn sync_applied_relay_profile_base_url_skips_when_provider_not_active() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let original = r#"model_provider = "other"
+
+[model_providers.other]
+name = "other"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://other.example.test/v1"
+"#;
+        std::fs::write(home.join("config.toml"), original).unwrap();
+
+        let profile = RelayProfile {
+            relay_mode: crate::settings::RelayMode::PureApi,
+            protocol: RelayProtocol::Responses,
+            base_url: "https://new.example.test/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            local_proxy_enabled: Some(false),
+            config_contents: r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://new.example.test/v1"
+"#
+            .to_string(),
+            ..RelayProfile::default()
+        };
+
+        assert!(!sync_applied_relay_profile_base_url_to_home(home, &profile).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(home.join("config.toml")).unwrap(),
+            original
+        );
     }
 
     fn count_live_backups(home: &Path) -> usize {

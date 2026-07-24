@@ -583,11 +583,12 @@ pub async fn save_settings(settings: BackendSettings) -> CommandResult<SettingsP
         Ok(()) => {
             let wrapper_message = refresh_cli_wrapper_after_settings_save(&settings);
             let provider_name_message = sync_applied_provider_name_after_settings_save(&settings);
+            let base_url_message = sync_applied_base_url_after_settings_save(&settings);
             let catalog_message = sync_applied_model_catalog_after_settings_save(&settings);
             let websocket_message = sync_applied_websocket_after_settings_save(&settings);
             settings_payload(
                 &format!(
-                    "设置已保存。{wrapper_message}{provider_name_message}{catalog_message}{websocket_message}"
+                    "设置已保存。{wrapper_message}{provider_name_message}{base_url_message}{catalog_message}{websocket_message}"
                 ),
                 "设置保存后重新读取失败",
             )
@@ -3159,6 +3160,24 @@ fn sync_applied_provider_name_after_settings_save(settings: &BackendSettings) ->
     ) {
         Ok(_) => String::new(),
         Err(error) => format!(" 但 Remote Compaction V2 配置同步失败：{error}。"),
+    }
+}
+
+fn sync_applied_base_url_after_settings_save(settings: &BackendSettings) -> String {
+    if !settings.relay_profiles_enabled || settings.active_aggregate_relay_profile().is_some() {
+        return String::new();
+    }
+    let relay = settings.active_relay_profile();
+    if relay.relay_mode == codex_elves_core::settings::RelayMode::Official
+        && !relay.official_mix_api_key
+    {
+        return String::new();
+    }
+    let home = codex_elves_core::codex_home::codex_home_dir_for_settings(settings);
+    match codex_elves_core::relay_config::sync_applied_relay_profile_base_url_to_home(&home, &relay)
+    {
+        Ok(_) => String::new(),
+        Err(error) => format!(" 但本地代理地址同步失败：{error}。"),
     }
 }
 
