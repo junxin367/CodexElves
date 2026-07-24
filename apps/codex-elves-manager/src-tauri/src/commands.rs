@@ -561,8 +561,10 @@ pub async fn save_settings(settings: BackendSettings) -> CommandResult<SettingsP
     let _guard = settings_write_mutex().lock().await;
     let store = SettingsStore::default();
     let mut settings = normalize_settings_before_save(settings);
+    let mut previous_overlay: Option<ImageOverlaySnapshot> = None;
     if let Ok(saved_settings) = store.load() {
         merge_saved_responses_websocket_capabilities(&mut settings, &saved_settings);
+        previous_overlay = Some(ImageOverlaySnapshot::from(&saved_settings));
     }
     if let Err(error) = ensure_codex_home_path_ready(&settings) {
         return failed(
@@ -586,9 +588,17 @@ pub async fn save_settings(settings: BackendSettings) -> CommandResult<SettingsP
             let base_url_message = sync_applied_base_url_after_settings_save(&settings);
             let catalog_message = sync_applied_model_catalog_after_settings_save(&settings);
             let websocket_message = sync_applied_websocket_after_settings_save(&settings);
+            let overlay_changed = previous_overlay
+                .map(|previous| previous != ImageOverlaySnapshot::from(&settings))
+                .unwrap_or(true);
+            let overlay_message = if overlay_changed {
+                push_image_overlay_into_running_codex(&settings).await
+            } else {
+                String::new()
+            };
             settings_payload(
                 &format!(
-                    "设置已保存。{wrapper_message}{provider_name_message}{base_url_message}{catalog_message}{websocket_message}"
+                    "设置已保存。{wrapper_message}{provider_name_message}{base_url_message}{catalog_message}{websocket_message}{overlay_message}"
                 ),
                 "设置保存后重新读取失败",
             )
@@ -2125,7 +2135,7 @@ pub fn reset_settings() -> CommandResult<SettingsPayload> {
 }
 
 #[tauri::command]
-pub fn reset_image_overlay_settings() -> CommandResult<SettingsPayload> {
+pub async fn reset_image_overlay_settings() -> CommandResult<SettingsPayload> {
     let store = SettingsStore::default();
     let mut settings = store.load().unwrap_or_default();
     let defaults = BackendSettings::default();
@@ -2134,7 +2144,13 @@ pub fn reset_image_overlay_settings() -> CommandResult<SettingsPayload> {
     settings.codex_app_image_overlay_opacity = defaults.codex_app_image_overlay_opacity;
     let settings = normalize_settings_before_save(settings);
     match store.save(&settings) {
-        Ok(()) => settings_payload("图片覆盖层设置已重置。", "图片覆盖层重置后重新读取失败"),
+        Ok(()) => {
+            let overlay_message = push_image_overlay_into_running_codex(&settings).await;
+            settings_payload(
+                &format!("图片覆盖层设置已重置。{overlay_message}"),
+                "图片覆盖层重置后重新读取失败",
+            )
+        }
         Err(error) => failed(
             &format!("重置图片覆盖层失败：{error}"),
             SettingsPayload {
@@ -3622,6 +3638,66 @@ async fn reload_user_scripts_into_running_codex(
         .await
         .context("向 Codex 页面执行用户脚本失败")?;
     Ok("已重新执行启用脚本；禁用或删除后的已执行效果需重载 Codex 页面。".to_string())
+}
+
+/// 把最新图片覆盖层配置推送给已运行的 Codex 页面并立即重装，
+/// 使保存/重置后无需重启 Codex 即可生效。
+///
+/// Codex 未运行、未注入或推送失败时仅返回提示，不影响设置保存结果。
+#[derive(Clone, PartialEq, Eq)]
+struct ImageOverlaySnapshot {
+    enabled: bool,
+    path: String,
+    opacity: u8,
+}
+
+impl From<&BackendSettings> for ImageOverlaySnapshot {
+    fn from(settings: &BackendSettings) -> Self {
+        Self {
+            enabled: settings.codex_app_image_overlay_enabled,
+            path: settings.codex_app_image_overlay_path.clone(),
+            opacity: settings.codex_app_image_overlay_opacity,
+        }
+    }
+}
+
+/// 把最新图片覆盖层配置推送给已运行的 Codex 页面并立即重装，
+/// 使保存/重置后无需重启 Codex 即可生效。
+///
+/// Codex 未运行、未注入或推送失败时仅返回提示，不影响设置保存结果。
+async fn push_image_overlay_into_running_codex(settings: &BackendSettings) -> String {
+    let latest = match StatusStore::default().load_latest() {
+        Ok(Some(latest)) if latest.status == "running" => latest,
+        Ok(_) => return String::new(),
+        Err(_) => return String::new(),
+    };
+    let Some(debug_port) = latest.debug_port else {
+        return String::new();
+    };
+    let helper_port = latest
+        .helper_port
+        .unwrap_or(codex_elves_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT);
+    let overlay = codex_elves_core::assets::image_overlay_config(helper_port, settings);
+    let Ok(overlay_json) = serde_json::to_string(&overlay) else {
+        return String::new();
+    };
+    let script = format!(
+        "(() => {{ window.__CODEX_ELVES_IMAGE_OVERLAY__ = {overlay_json}; if (typeof window.__codexElvesApplyImageOverlay === 'function') {{ window.__codexElvesApplyImageOverlay(); }} }})();"
+    );
+    let targets = match codex_elves_core::cdp::list_targets(debug_port).await {
+        Ok(targets) => targets,
+        Err(_) => return String::new(),
+    };
+    let Ok(target) = codex_elves_core::cdp::pick_injectable_codex_page_target(&targets) else {
+        return String::new();
+    };
+    let Some(websocket_url) = target.web_socket_debugger_url.as_deref() else {
+        return String::new();
+    };
+    match codex_elves_core::bridge::evaluate_script(websocket_url, &script).await {
+        Ok(_) => " 图片覆盖层已对已运行的 Codex 即时生效。".to_string(),
+        Err(_) => " 但图片覆盖层未能对已运行的 Codex 即时生效，重启后可恢复。".to_string(),
+    }
 }
 
 fn user_scripts_config_dir() -> PathBuf {

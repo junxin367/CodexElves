@@ -173,6 +173,12 @@ pub async fn handle_bridge_request(
         }
         "/upstream-worktree/create" => ctx.runtime.upstream_worktree_create(payload.clone()).await,
         "/delete" => result_value(ctx.data.delete(session_from_payload(&payload)).await),
+        "/session/suppress" => suppress_thread_value(&payload, true),
+        "/session/unsuppress" => suppress_thread_value(&payload, false),
+        "/session/suppressed" => Ok(json!({
+            "status": "ok",
+            "ids": crate::suppressed_threads::load_suppressed_ids(),
+        })),
         "/undo" => {
             let undo_token = payload
                 .get("undo_token")
@@ -618,6 +624,23 @@ where
     T: serde::Serialize,
 {
     Ok(serde_json::to_value(result?)?)
+}
+
+fn suppress_thread_value(payload: &Value, suppress: bool) -> anyhow::Result<Value> {
+    let raw_id = payload
+        .get("thread_id")
+        .or_else(|| payload.get("session_id"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let ids = if suppress {
+        crate::suppressed_threads::suppress_thread(raw_id)
+    } else {
+        crate::suppressed_threads::unsuppress_thread(raw_id)
+    };
+    Ok(json!({
+        "status": "ok",
+        "ids": ids,
+    }))
 }
 
 fn diagnostic_log_value(payload: Value) -> anyhow::Result<Value> {

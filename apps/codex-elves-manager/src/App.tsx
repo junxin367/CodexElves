@@ -182,10 +182,6 @@ type BackendSettings = {
   codexAppPluginMarketplaceUnlock: boolean;
   codexAppPluginAutoExpand: boolean;
   codexAppSessionDelete: boolean;
-  codexAppSessionPrewarmEnabled: boolean;
-  codexAppSessionPrewarmFullCount: number;
-  codexAppSessionPrewarmContentCount: number;
-  codexAppSessionPrewarmConcurrency: number;
   codexAppMarkdownExport: boolean;
   codexAppProjectMove: boolean;
   codexAppConversationView: boolean;
@@ -865,10 +861,6 @@ const defaultSettings: BackendSettings = {
   codexAppPluginMarketplaceUnlock: true,
   codexAppPluginAutoExpand: true,
   codexAppSessionDelete: true,
-  codexAppSessionPrewarmEnabled: false,
-  codexAppSessionPrewarmFullCount: 3,
-  codexAppSessionPrewarmContentCount: 3,
-  codexAppSessionPrewarmConcurrency: 4,
   codexAppMarkdownExport: false,
   codexAppProjectMove: false,
   codexAppConversationView: true,
@@ -5177,102 +5169,6 @@ function SessionsScreen({
               <div className="hint-line session-delete-hint">
                 <Info className="h-4 w-4" />
                 <span>删除会创建本地备份；正在使用的会话建议先关闭对应窗口。</span>
-              </div>
-            </section>
-            <section className="session-control-section session-automation-section">
-              <div className="session-section-head">
-                <strong>会话预热加载</strong>
-                <small>缩短最近会话首次打开的等待；预热数量或并发越高，启动阶段的资源占用越大，可能出现短暂卡顿。</small>
-              </div>
-              <div className="session-prewarm-settings">
-                <label className="switch-row compact">
-                  <input
-                    checked={form.codexAppSessionPrewarmEnabled}
-                    disabled={!form.enhancementsEnabled}
-                    onChange={(event) =>
-                      onFormChange({ ...form, codexAppSessionPrewarmEnabled: event.currentTarget.checked })
-                    }
-                    type="checkbox"
-                  />
-                  <span>
-                    <strong>启动后预热最近会话</strong>
-                    <small>首屏稳定后静默恢复，减少首次打开历史会话的等待。</small>
-                  </span>
-                </label>
-                <div className="form-row session-prewarm-counts">
-                  <Field label="完整恢复数量">
-                    <Input
-                      aria-label="完整恢复会话数量"
-                      disabled={!form.enhancementsEnabled || !form.codexAppSessionPrewarmEnabled}
-                      inputMode="numeric"
-                      max={4}
-                      min={0}
-                      onChange={(event) =>
-                        onFormChange({
-                          ...form,
-                          codexAppSessionPrewarmFullCount: clampNumber(
-                            Number.parseInt(event.currentTarget.value || "0", 10),
-                            0,
-                            4,
-                          ),
-                        })
-                      }
-                      type="number"
-                      value={String(form.codexAppSessionPrewarmFullCount)}
-                    />
-                    <span className="field-help">0-4，保留 Owner。</span>
-                  </Field>
-                  <Field label="内容预加载数量">
-                    <Input
-                      aria-label="额外内容预加载会话数量"
-                      disabled={!form.enhancementsEnabled || !form.codexAppSessionPrewarmEnabled}
-                      inputMode="numeric"
-                      max={6}
-                      min={0}
-                      onChange={(event) =>
-                        onFormChange({
-                          ...form,
-                          codexAppSessionPrewarmContentCount: clampNumber(
-                            Number.parseInt(event.currentTarget.value || "0", 10),
-                            0,
-                            6,
-                          ),
-                        })
-                      }
-                      type="number"
-                      value={String(form.codexAppSessionPrewarmContentCount)}
-                    />
-                    <span className="field-help">0-6，仅加载会话内容，不获取 Owner。</span>
-                  </Field>
-                  <Field label="并发数">
-                    <Input
-                      aria-label="会话预热并发数"
-                      disabled={!form.enhancementsEnabled || !form.codexAppSessionPrewarmEnabled}
-                      inputMode="numeric"
-                      max={4}
-                      min={1}
-                      onChange={(event) =>
-                        onFormChange({
-                          ...form,
-                          codexAppSessionPrewarmConcurrency: clampNumber(
-                            Number.parseInt(event.currentTarget.value || "0", 10),
-                            1,
-                            4,
-                          ),
-                        })
-                      }
-                      type="number"
-                      value={String(form.codexAppSessionPrewarmConcurrency)}
-                    />
-                    <span className="field-help">1-4，数值越高同时预热的会话越多。</span>
-                  </Field>
-                </div>
-                {!form.enhancementsEnabled ? (
-                  <div className="hint-line">
-                    <Info className="h-4 w-4" />
-                    <span>总增强开关关闭时，会话预热不会运行。</span>
-                  </div>
-                ) : null}
               </div>
               <div className="session-save-row">
                 <Button onClick={() => void actions.saveSettings()}>保存会话设置</Button>
@@ -9932,9 +9828,6 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
     codexHomePath: (settings.codexHomePath || "").trim(),
     relayProfilesEnabled: settings.relayProfilesEnabled !== false,
     computerUseGuardEnabled: settings.computerUseGuardEnabled !== false,
-    codexAppSessionPrewarmFullCount: clampNumber(settings.codexAppSessionPrewarmFullCount ?? 3, 0, 4),
-    codexAppSessionPrewarmContentCount: clampNumber(settings.codexAppSessionPrewarmContentCount ?? 3, 0, 6),
-    codexAppSessionPrewarmConcurrency: clampNumber(settings.codexAppSessionPrewarmConcurrency ?? 4, 1, 4),
     codexAppImageOverlayOpacity: clampNumber(settings.codexAppImageOverlayOpacity || 35, 1, 100),
     gptReasoningContinuationMaxRounds: clampNumber(settings.gptReasoningContinuationMaxRounds || 3, 1, 9),
     layeredCompactionRetainTokens: clampNumber(

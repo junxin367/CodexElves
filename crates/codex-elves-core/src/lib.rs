@@ -34,6 +34,7 @@ pub mod routes;
 pub mod script_market;
 pub mod settings;
 pub mod status;
+pub mod suppressed_threads;
 pub mod update;
 pub mod upstream_worktree;
 pub mod user_scripts;

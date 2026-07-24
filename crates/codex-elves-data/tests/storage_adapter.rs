@@ -1223,6 +1223,71 @@ fn thread_usage_history_reads_rollout_token_count_events() {
     );
 }
 
+// Codex 升级后换了 SQLite schema（threads 表不存在）时，token 统计应回退到
+// 按 session_id 直接扫 sessions 目录定位 rollout 文件，不依赖 db schema。
+#[test]
+fn thread_usage_history_falls_back_to_rollout_file_when_db_schema_unsupported() {
+    let tmp = tempdir().unwrap();
+    let codex_home = tmp.path().join(".codex");
+    let sqlite_dir = codex_home.join("sqlite");
+    let sessions_dir = codex_home
+        .join("sessions")
+        .join("2026")
+        .join("07")
+        .join("24");
+    fs::create_dir_all(&sqlite_dir).unwrap();
+    fs::create_dir_all(&sessions_dir).unwrap();
+
+    // 新版 db：只有 local_thread_catalog，没有 threads / sessions 表 -> schema_kind 不匹配。
+    let db_path = sqlite_dir.join("codex-dev.db");
+    {
+        let db = Connection::open(&db_path).unwrap();
+        db.execute(
+            "CREATE TABLE local_thread_catalog (thread_id TEXT PRIMARY KEY, cwd TEXT)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let uuid = "019f9213-a261-7810-ab6e-201f0ab6b2ff";
+    let rollout_path = sessions_dir.join(format!("rollout-2026-07-24T11-00-00-{uuid}.jsonl"));
+    fs::write(
+        &rollout_path,
+        concat!(
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"turn-1\"}}\n",
+            "{\"timestamp\":\"2026-07-24T05:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":5000,\"cached_input_tokens\":1500,\"output_tokens\":500,\"total_tokens\":5500},\"last_token_usage\":{\"input_tokens\":1200,\"cached_input_tokens\":900,\"output_tokens\":120,\"total_tokens\":1320},\"model_context_window\":258400}}}\n"
+        ),
+    )
+    .unwrap();
+
+    let value = codex_thread_usage_history_from_paths(
+        vec![db_path.clone()],
+        BackupStore::new(tmp.path().join("backups")),
+        &session(uuid, ""),
+    );
+
+    assert_eq!(value.get("status").and_then(|v| v.as_str()), Some("ok"));
+    assert_eq!(
+        value.get("matched_by").and_then(|v| v.as_str()),
+        Some("rollout_file")
+    );
+    let summary = value.get("summary").expect("summary present");
+    assert_eq!(
+        summary
+            .get("totalUsage")
+            .and_then(|u| u.get("totalTokens"))
+            .and_then(|v| v.as_u64()),
+        Some(5500)
+    );
+    assert_eq!(
+        summary
+            .get("lastTurnUsage")
+            .and_then(|u| u.get("totalTokens"))
+            .and_then(|v| v.as_u64()),
+        Some(1320)
+    );
+}
+
 #[test]
 fn thread_usage_history_handles_appended_partial_lines_and_replaced_rollouts() {
     let tmp = tempdir().unwrap();

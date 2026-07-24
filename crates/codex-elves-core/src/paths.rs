@@ -6,6 +6,7 @@ const SETTINGS_FILE: &str = "settings.json";
 const LATEST_STATUS_FILE: &str = "latest-status.json";
 const DIAGNOSTIC_LOG_FILE: &str = "codex-elves.log";
 const PROXY_LOG_FILE: &str = "proxy-requests.jsonl";
+const SUPPRESSED_THREADS_FILE: &str = "suppressed-threads.json";
 
 pub fn default_app_state_dir() -> PathBuf {
     if let Some(home_dir) = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()) {
@@ -28,6 +29,10 @@ pub fn default_latest_status_path() -> PathBuf {
 
 pub fn default_diagnostic_log_path() -> PathBuf {
     default_app_state_dir().join(DIAGNOSTIC_LOG_FILE)
+}
+
+pub fn default_suppressed_threads_path() -> PathBuf {
+    default_app_state_dir().join(SUPPRESSED_THREADS_FILE)
 }
 
 pub fn default_proxy_log_path() -> PathBuf {

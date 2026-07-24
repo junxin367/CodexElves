@@ -56,15 +56,6 @@
   const codexStatsigModelVisibilityPatchVersion = "1";
   const codexStatsigModelVisibilityRetryDelayMs = 50;
   const codexStatsigModelVisibilityMaxWaitMs = 60000;
-  const codexSessionPrewarmVersion = "3";
-  const codexSessionPrewarmDefaultConcurrency = 4;
-  const codexSessionPrewarmStartupDelayMs = 200;
-  const codexSessionPrewarmInteractionPauseMs = 1200;
-  const codexSessionPrewarmRecentRefreshTimeoutMs = 5000;
-  const codexSessionPrewarmMaxAgeMs = 24 * 60 * 60 * 1000;
-  const codexSessionPrewarmMaxRetries = 2;
-  const codexSessionPrewarmRetryBaseDelayMs = 1500;
-  const codexAppServerManagerDiscoveryMaxFailures = 12;
   const codexPluginMarketplaceUnlockVersion = "19";
   const codexPluginApiKeyUnsupportedMarketplaceKinds = new Set(["created-by-me-remote"]);
   const codexPluginAutoExpandVersion = "1";
@@ -85,11 +76,6 @@
   const codexPluginRequestIdMaxEntries = 256;
   const codexFailureHistoryMaxEntries = 64;
   const codexManagerReactDiscoveryCooldownMs = 15000;
-  const codexTokenUsageNotificationMethods = [
-    "thread/tokenUsage/updated",
-    "turn/started",
-    "turn/completed",
-  ];
   window.__codexProjectMoveRuntimeId = (window.__codexProjectMoveRuntimeId || 0) + 1;
   const codexProjectMoveRuntimeId = window.__codexProjectMoveRuntimeId;
   clearTimeout(window.__codexProjectMoveProjectionTimer);
@@ -98,8 +84,6 @@
   window.__codexProjectMoveProjectionTimer = null;
   window.__codexProjectMoveChatsSortTimer = null;
   window.__codexProjectMoveChatsSortFallbackTimer = null;
-  clearTimeout(window.__codexAppServerManagerDiscoveryRetryTimer);
-  window.__codexAppServerManagerDiscoveryRetryTimer = null;
   clearTimeout(window.__codexServiceTierDispatcherPatchRetryTimer);
   window.__codexServiceTierDispatcherPatchRetryTimer = null;
   clearTimeout(window.__codexServiceTierRequestClientPatchRetryTimer);
@@ -175,12 +159,6 @@
   cleanupLegacyForcePluginInstallRuntime();
   const codexElvesInjectedLaunchCycle = String(window.__CODEX_ELVES_LAUNCH_CYCLE__ || "").trim();
   if (
-    codexElvesInjectedLaunchCycle &&
-    window.__codexSessionPrewarmLaunchCycle !== codexElvesInjectedLaunchCycle
-  ) {
-    window.__codexSessionPrewarmCompletedSignature = "";
-  }
-  if (
     window.__codexElvesRuntimeBuild === codexElvesBuild &&
     window.__codexElvesRuntimeHelperBase === helperBase &&
     window.__codexElvesRuntimeManagerDiscoveryVersion === codexAppServerManagerDiscoveryVersion &&
@@ -191,8 +169,6 @@
   }
   window.__codexSessionPrewarmRuntimeId = (window.__codexSessionPrewarmRuntimeId || 0) + 1;
   const codexSessionPrewarmRuntimeId = window.__codexSessionPrewarmRuntimeId;
-  clearTimeout(window.__codexSessionPrewarmTimer);
-  window.__codexSessionPrewarmTimer = null;
 
   function installCodexElvesImageOverlay() {
     const config = window.__CODEX_ELVES_IMAGE_OVERLAY__ || {};
@@ -244,6 +220,8 @@
     installCodexElvesImageOverlay();
     setTimeout(installCodexElvesImageOverlay, 250);
   }
+
+  window.__codexElvesApplyImageOverlay = installCodexElvesImageOverlay;
 
   scheduleCodexElvesImageOverlay();
   let upstreamBranchDefaultsCache = new Map();
@@ -1163,11 +1141,6 @@
       pluginMarketplaceUnlock: true,
       pluginAutoExpand: true,
       sessionDelete: true,
-
-      sessionPrewarmEnabled: false,
-      sessionPrewarmFullCount: 3,
-      sessionPrewarmContentCount: 3,
-      sessionPrewarmConcurrency: codexSessionPrewarmDefaultConcurrency,
       markdownExport: true,
       projectMove: true,
       conversationView: false,
@@ -1184,11 +1157,6 @@
     pluginMarketplaceUnlock: "codexAppPluginMarketplaceUnlock",
     pluginAutoExpand: "codexAppPluginAutoExpand",
     sessionDelete: "codexAppSessionDelete",
-
-    sessionPrewarmEnabled: "codexAppSessionPrewarmEnabled",
-    sessionPrewarmFullCount: "codexAppSessionPrewarmFullCount",
-    sessionPrewarmContentCount: "codexAppSessionPrewarmContentCount",
-    sessionPrewarmConcurrency: "codexAppSessionPrewarmConcurrency",
     markdownExport: "codexAppMarkdownExport",
     projectMove: "codexAppProjectMove",
     conversationView: "codexAppConversationView",
@@ -1208,31 +1176,6 @@
     return settings;
   }
 
-  function clampSessionPrewarmCount(value, fallback, max) {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return fallback;
-    return Math.min(max, Math.max(0, Math.round(numeric)));
-  }
-
-  function clampSessionPrewarmConcurrency(value) {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return codexSessionPrewarmDefaultConcurrency;
-    return Math.min(4, Math.max(1, Math.round(numeric)));
-  }
-
-  function normalizeSessionPrewarmSettings(settings) {
-    settings.sessionPrewarmEnabled = settings.sessionPrewarmEnabled === true;
-    settings.sessionPrewarmFullCount = clampSessionPrewarmCount(settings.sessionPrewarmFullCount, 3, 4);
-    settings.sessionPrewarmContentCount = clampSessionPrewarmCount(settings.sessionPrewarmContentCount, 3, 6);
-    settings.sessionPrewarmConcurrency = clampSessionPrewarmConcurrency(
-      settings.sessionPrewarmConcurrency
-    );
-    return settings;
-  }
-
-  let codexElvesSettingsCache = null;
-  let codexThreadServiceTierStateCache = null;
-
   function invalidateCodexElvesSettingsCache() {
     codexElvesSettingsCache = null;
   }
@@ -1243,10 +1186,6 @@
       pluginMarketplaceUnlock: false,
       pluginAutoExpand: false,
       sessionDelete: false,
-      sessionPrewarmEnabled: false,
-      sessionPrewarmFullCount: 0,
-      sessionPrewarmContentCount: 0,
-      sessionPrewarmConcurrency: 0,
       markdownExport: false,
       projectMove: false,
       conversationView: false,
@@ -1257,6 +1196,9 @@
       serviceTierControls: false,
     };
   }
+
+  let codexElvesSettingsCache = null;
+  let codexThreadServiceTierStateCache = null;
 
   function codexElvesSettings() {
     if (codexElvesSettingsCache) return codexElvesSettingsCache;
@@ -1272,7 +1214,7 @@
         settings.pluginMarketplaceUnlock = false;
         settings.pluginAutoExpand = false;
       }
-      codexElvesSettingsCache = normalizeSessionPrewarmSettings(settings);
+      codexElvesSettingsCache = settings;
     } catch {
       const settings = { ...defaultCodexElvesSettings(), ...backendCodexElvesSettings() };
       if (relayPatchDisabled) {
@@ -1280,7 +1222,7 @@
         settings.pluginMarketplaceUnlock = false;
         settings.pluginAutoExpand = false;
       }
-      codexElvesSettingsCache = normalizeSessionPrewarmSettings(settings);
+      codexElvesSettingsCache = settings;
     }
     return codexElvesSettingsCache;
   }
@@ -1326,10 +1268,6 @@
     }
     if ([
       "sessionDelete",
-      "sessionPrewarmEnabled",
-      "sessionPrewarmFullCount",
-      "sessionPrewarmContentCount",
-      "sessionPrewarmConcurrency",
       "markdownExport",
       "projectMove",
     ].includes(key)) {
@@ -2577,7 +2515,6 @@
     refreshUpstreamBranchDropdownAdapter();
     syncChatsSortVisibilityListener();
     if (!codexElvesSettings().projectMove) stopChatsSortRuntime();
-    return refreshCodexSessionPrewarmFeatureState(reason);
   }
 
   async function loadBackendSettings() {
@@ -2627,14 +2564,6 @@
       if (localKey === "projectMove" && !codexElvesSettings().projectMove) stopChatsSortRuntime();
       if (localKey === "projectMove") syncChatsSortVisibilityListener();
       if (localKey === "upstreamWorktreeCreate") refreshUpstreamBranchDropdownAdapter();
-      if ([
-        "sessionPrewarmEnabled",
-        "sessionPrewarmFullCount",
-        "sessionPrewarmContentCount",
-        "sessionPrewarmConcurrency",
-      ].includes(localKey)) {
-        void refreshCodexSessionPrewarmFeatureState(`setting-${localKey}`);
-      }
       scan(scanDirtyForSetting(localKey));
     }
   }
@@ -4146,6 +4075,9 @@
     build: codexElvesBuild,
   });
 
+  // 记录首次注入时间（跨 refresh 保留），作为“启动早期窗口”基准。
+  window.__codexElvesScriptLoadedAt = window.__codexElvesScriptLoadedAt || Date.now();
+
   function locationThreadId() {
     const source = `${window.location.pathname}${window.location.search}${window.location.hash}`;
     const match = source.match(/\/local\/([A-Za-z0-9_.-]{8,128})(?:[/?#]|$)/i)
@@ -4175,22 +4107,43 @@
     return { session_id: locationThreadId(), title: "" };
   }
 
+  // 启动早期 bridge binding 可能尚未就绪。在启动窗口（首次注入后 8s）内，
+  // 短暂轮询等 bridge 就绪（最多 ~2s）；超出启动窗口则不再等待，直接视为故障。
+  async function waitForCodexSessionDeleteBridgeReady() {
+    if (typeof window.__codexSessionDeleteBridge === "function") return true;
+    const startupWindowMs = 8000;
+    const loadedAt = window.__codexElvesScriptLoadedAt || Date.now();
+    if (Date.now() - loadedAt > startupWindowMs) return false;
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (typeof window.__codexSessionDeleteBridge === "function") return true;
+    }
+    return typeof window.__codexSessionDeleteBridge === "function";
+  }
+
   async function postJson(path, payload) {
     if (!window.__codexSessionDeleteBridge) {
-      if (path === "/backend/status" || path === "/backend/repair") {
-        try {
-          const response = await fetch(`${helperBase}${path}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload || {}),
-          });
-          return await response.json();
-        } catch (error) {
-          return { status: "failed", message: "未连接" };
+      // 启动早期存在“CDP 注入已成功但渲染端 bridge binding 尚未就绪”的瞬态窗口。
+      // 在启动窗口内先短暂轮询等 bridge 就绪，避免误弹“桥接不可用”；
+      // 超过启动窗口仍未就绪才视为真正故障，返回明确提示。
+      const bridgeReady = await waitForCodexSessionDeleteBridgeReady();
+      if (!bridgeReady) {
+        if (path === "/backend/status" || path === "/backend/repair") {
+          try {
+            const response = await fetch(`${helperBase}${path}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload || {}),
+            });
+            return await response.json();
+          } catch (error) {
+            return { status: "failed", message: "未连接" };
+          }
         }
+        sendCodexElvesDiagnostic("bridge_missing_for_route", { path });
+        return { status: "failed", message: "桥接不可用，请重启启动器" };
       }
-      sendCodexElvesDiagnostic("bridge_missing_for_route", { path });
-      return { status: "failed", message: "桥接不可用，请重启启动器" };
     }
     function bridgeWithBackendTimeout(path, payload) {
       return Promise.race([
@@ -4622,76 +4575,6 @@
     window.__codexTokenUsageNotificationManager = null;
   }
 
-  function installCodexTokenUsageNotificationListener(
-    manager = codexSessionPrewarmManager || window.__codexElvesSessionPrewarmManager || null
-  ) {
-    if (!codexElvesSettings().tokenUsage) {
-      removeCodexTokenUsageNotificationListener();
-      return false;
-    }
-    if (!manager || typeof manager.addNotificationCallback !== "function") return false;
-    if (
-      window.__codexTokenUsageNotificationManager === manager
-      && typeof window.__codexTokenUsageNotificationUnsubscribe === "function"
-    ) {
-      return true;
-    }
-    removeCodexTokenUsageNotificationListener();
-    try {
-      const callback = (notification) => {
-        const method = String(notification?.method || "");
-        window.__codexTokenUsageLastNotificationAt = Date.now();
-        window.__codexTokenUsageLastNotificationMethod = method;
-        resetCodexTokenUsageRetry();
-        if (method === "turn/started") {
-          clearTimeout(window.__codexTokenUsageCompletionSettleTimer);
-          window.__codexTokenUsageCompletionSettleTimer = null;
-          scheduleCodexTokenUsageRefresh(0);
-          scheduleCodexTokenUsageCalibration(
-            codexTokenUsageSettleDelayMs,
-            "__codexTokenUsageSettleTimer"
-          );
-          scheduleCodexTokenUsageCalibration(
-            codexTokenUsageCompletionSettleDelayMs,
-            "__codexTokenUsageCompletionSettleTimer"
-          );
-          return;
-        }
-        if (method === "turn/completed") {
-          scheduleCodexTokenUsageRefresh(0);
-          scheduleCodexTokenUsageCalibration(
-            codexTokenUsageCompletionSettleDelayMs,
-            "__codexTokenUsageCompletionSettleTimer"
-          );
-          return;
-        }
-        scheduleCodexTokenUsageRefresh(0);
-        scheduleCodexTokenUsageCalibration(
-          codexTokenUsageSettleDelayMs,
-          "__codexTokenUsageSettleTimer"
-        );
-      };
-      const unsubscribe = manager.addNotificationCallback(
-        codexTokenUsageNotificationMethods,
-        callback
-      );
-      if (typeof unsubscribe !== "function") return false;
-      window.__codexTokenUsageNotificationManager = manager;
-      window.__codexTokenUsageNotificationUnsubscribe = unsubscribe;
-      sendCodexElvesDiagnostic("token_usage_notification_listener_installed", {
-        methods: codexTokenUsageNotificationMethods,
-      });
-      scheduleCodexTokenUsageRefresh(0);
-      return true;
-    } catch (error) {
-      sendCodexElvesDiagnostic("token_usage_notification_listener_failed", {
-        errorName: error?.name || "",
-        errorMessage: error?.message || String(error),
-      });
-      return false;
-    }
-  }
-
   function refreshCodexTokenUsageFeatureState() {
     if (!codexElvesSettings().tokenUsage) {
       removeCodexTokenUsageNotificationListener();
@@ -4704,9 +4587,6 @@
     installCodexTokenUsagePinnedSummaryObserver();
     resetCodexTokenUsageRetry();
     scheduleCodexTokenUsageRefresh(0);
-    if (installCodexTokenUsageNotificationListener()) return;
-    resetCodexAppServerManagerDiscovery();
-    void installAppServerManagerDiscovery(true, true);
   }
 
   function ensureCodexTokenUsageCard(mount) {
@@ -5163,67 +5043,9 @@
   let codexModelCatalogLoadedAt = 0;
   let codexModelCatalogPromise = null;
   let codexStatsigModelVisibilityPatchPromise = null;
-  let codexAppServerManagerDiscoveryPromise = null;
-  let codexAppServerManagerDiscoveryFailureCount = 0;
-  let codexAppServerManagerDiscoveryNextAttemptAt = 0;
-  let codexAppServerManagerDiscoveryFailureSignature = "";
-  let codexAppServerManagerDiscoveryRetryExhausted = false;
   let codexSessionPrewarmManager = window.__codexElvesSessionPrewarmManager || null;
-  let codexSessionPrewarmRunPromise = null;
-  let codexSessionPrewarmRerunPending = false;
-  let codexSessionPrewarmFeatureRefreshPromise = null;
-  let codexSessionPrewarmManagerSequence = window.__codexSessionPrewarmManagerSequence || 0;
-  const codexSessionPrewarmTaskPromises = new Map();
-  const codexSessionPrewarmForegroundIds = new Set();
-  const codexSessionPrewarmActiveIds = new Set();
-  const codexSessionPrewarmRetryCounts = new Map();
 
 
-
-
-  function codexSessionPrewarmSettingsSnapshot() {
-    const settings = codexElvesSettings();
-    return {
-      enabled: settings.sessionPrewarmEnabled === true,
-      fullCount: clampSessionPrewarmCount(settings.sessionPrewarmFullCount, 3, 4),
-      contentCount: clampSessionPrewarmCount(settings.sessionPrewarmContentCount, 3, 6),
-      concurrency: clampSessionPrewarmConcurrency(settings.sessionPrewarmConcurrency),
-    };
-  }
-
-  function resetCodexSessionPrewarmForLaunchCycle() {
-    const launchCycle = String(window.__CODEX_ELVES_LAUNCH_CYCLE__ || "").trim();
-    if (!launchCycle || window.__codexSessionPrewarmLaunchCycle === launchCycle) return false;
-    const previousLaunchCycle = String(window.__codexSessionPrewarmLaunchCycle || "");
-    window.__codexSessionPrewarmLaunchCycle = launchCycle;
-    window.__codexSessionPrewarmCompletedSignature = "";
-    codexSessionPrewarmRetryCounts.clear();
-    codexSessionPrewarmRerunPending = true;
-    sendCodexElvesDiagnostic("session_prewarm_launch_cycle_reset", {
-      previousLaunchCycle,
-      launchCycle,
-    });
-    return true;
-  }
-
-  resetCodexSessionPrewarmForLaunchCycle();
-
-  function codexSessionPrewarmManagerId(manager) {
-    if (!manager || (typeof manager !== "object" && typeof manager !== "function")) return "";
-    if (!manager.__codexElvesSessionPrewarmManagerId) {
-      codexSessionPrewarmManagerSequence += 1;
-      window.__codexSessionPrewarmManagerSequence = codexSessionPrewarmManagerSequence;
-      try {
-        Object.defineProperty(manager, "__codexElvesSessionPrewarmManagerId", {
-          configurable: true,
-          value: `${codexElvesBuild}:${codexSessionPrewarmManagerSequence}`,
-        });
-      } catch {
-        manager.__codexElvesSessionPrewarmManagerId = `${codexElvesBuild}:${codexSessionPrewarmManagerSequence}`;
-      }
-    }
-    return String(manager.__codexElvesSessionPrewarmManagerId || "");
-  }
 
   function isCodexSessionPrewarmManager(candidate) {
     if (!candidate || (typeof candidate !== "object" && typeof candidate !== "function")) return false;
@@ -5406,676 +5228,6 @@
     return result;
   }
 
-  function captureCodexSessionPrewarmManager(candidate) {
-    if (!isCodexSessionPrewarmManager(candidate)) return false;
-    let hostId = "";
-    try {
-      hostId = String(candidate.getHostId() || "");
-    } catch {
-      return false;
-    }
-    if (hostId !== "local") return false;
-    const changed = codexSessionPrewarmManager !== candidate;
-    codexSessionPrewarmManager = candidate;
-    window.__codexElvesSessionPrewarmManager = candidate;
-    window.__codexSessionPrewarmReactManagerDiscovery = null;
-    codexSessionPrewarmManagerId(candidate);
-    if (changed) {
-      sendCodexElvesDiagnostic("session_prewarm_manager_captured", {
-        version: codexSessionPrewarmVersion,
-        hasResume: typeof candidate.resumeConversationForUnavailableOwner === "function",
-        hasUnsubscribe: typeof candidate.unsubscribeInactiveConversation === "function",
-        hasBackgroundHydration: typeof candidate.hydrateBackgroundThreads === "function",
-      });
-    }
-    installCodexTokenUsageNotificationListener(candidate);
-    scheduleCodexSessionPrewarm(codexSessionPrewarmStartupDelayMs, "manager-captured");
-    return true;
-  }
-
-  function invalidateCodexSessionPrewarmManager(manager, reason) {
-    if (!manager || codexSessionPrewarmManager !== manager) return false;
-    codexSessionPrewarmManager = null;
-    window.__codexElvesSessionPrewarmManager = null;
-    if (window.__codexTokenUsageNotificationManager === manager) {
-      removeCodexTokenUsageNotificationListener();
-    }
-    window.__codexSessionPrewarmCompletedSignature = "";
-    window.__codexSessionPrewarmReactManagerDiscovery = null;
-    sendCodexElvesDiagnostic("session_prewarm_manager_invalidated", { reason });
-    resetCodexAppServerManagerDiscovery();
-    void installAppServerManagerDiscovery(true, true);
-    return true;
-  }
-
-  function codexSessionPrewarmConversationId(conversation) {
-    return validThreadSessionKey(
-      conversation?.id ||
-      conversation?.threadId ||
-      conversation?.conversationId ||
-      conversation?.thread?.id ||
-      ""
-    );
-  }
-
-  function codexSessionPrewarmConversationIsSubagent(conversation) {
-    return Boolean(
-      conversation?.parentThreadId ||
-      conversation?.source?.parentThreadId ||
-      conversation?.subagentParentThreadId ||
-      conversation?.isSubagentSource === true
-    );
-  }
-
-  function codexSessionPrewarmConversationIsBusy(conversation) {
-    if (
-      conversation?.ephemeral === true ||
-      conversation?.sideConversation === true ||
-      conversation?.archived === true ||
-      codexSessionPrewarmConversationIsSubagent(conversation)
-    ) return true;
-    if (conversation?.threadRuntimeStatus?.type === "active") return true;
-    const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
-    return turns.some((turn) => turn?.status === "inProgress");
-  }
-
-  function codexSessionPrewarmConversationUpdatedAtMs(conversation) {
-    const candidates = [
-      conversation?.updatedAt,
-      conversation?.updatedAtMs,
-      conversation?.updated_at_ms,
-      conversation?.updated_at,
-      conversation?.thread?.updatedAt,
-      conversation?.thread?.updatedAtMs,
-      conversation?.thread?.updated_at_ms,
-      conversation?.thread?.updated_at,
-    ];
-    for (const candidate of candidates) {
-      const timestampMs = timestampValueToMs(candidate);
-      if (timestampMs) return timestampMs;
-    }
-    return 0;
-  }
-
-  function codexSessionPrewarmConversationIsRecent(conversation, nowMs = Date.now()) {
-    const updatedAtMs = codexSessionPrewarmConversationUpdatedAtMs(conversation);
-    if (!updatedAtMs) return false;
-    return Math.max(0, numericTimestamp(nowMs) - updatedAtMs) <= codexSessionPrewarmMaxAgeMs;
-  }
-
-  function codexSessionPrewarmTitleNode(row) {
-    return row?.querySelector?.(`${selectors.threadTitle}, .truncate.select-none, .truncate.text-base`) || null;
-  }
-
-  function clearCodexSessionPrewarmIndicator(titleNode) {
-    if (!titleNode) return;
-    titleNode.removeAttribute?.("data-codex-session-prewarming");
-    titleNode.removeAttribute?.("data-codex-session-prewarm-title");
-  }
-
-  function syncCodexSessionPrewarmIndicators(rows = sessionRows(true)) {
-    const matchedTitles = new Set();
-    for (const row of Array.from(rows || [])) {
-      const titleNode = codexSessionPrewarmTitleNode(row);
-      if (!titleNode) continue;
-      matchedTitles.add(titleNode);
-      const threadId = validThreadSessionKey(sessionRefFromRow(row).session_id);
-      if (!threadId || !codexSessionPrewarmActiveIds.has(threadId)) {
-        clearCodexSessionPrewarmIndicator(titleNode);
-        continue;
-      }
-      titleNode.setAttribute?.("data-codex-session-prewarming", "true");
-      titleNode.setAttribute?.(
-        "data-codex-session-prewarm-title",
-        String(titleNode.textContent || "").trim()
-      );
-    }
-    document.querySelectorAll?.(
-      '[data-codex-session-prewarming], [data-codex-session-prewarm-title]'
-    ).forEach((titleNode) => {
-      if (matchedTitles.has(titleNode)) return;
-      const row = titleNode.closest?.(selectors.sidebarThread);
-      const threadId = row ? validThreadSessionKey(sessionRefFromRow(row).session_id) : "";
-      if (!threadId || !codexSessionPrewarmActiveIds.has(threadId)) {
-        clearCodexSessionPrewarmIndicator(titleNode);
-      }
-    });
-  }
-
-  function setCodexSessionPrewarmIndicatorActive(threadId, active) {
-    const id = validThreadSessionKey(threadId);
-    if (!id) return;
-    if (active) codexSessionPrewarmActiveIds.add(id);
-    else codexSessionPrewarmActiveIds.delete(id);
-    syncCodexSessionPrewarmIndicators();
-  }
-
-  syncCodexSessionPrewarmIndicators();
-
-  function buildCodexSessionPrewarmTasks(
-    conversations,
-    settings,
-    activeThreadId = "",
-    nowMs = Date.now()
-  ) {
-    const activeId = validThreadSessionKey(activeThreadId);
-    const seen = new Set();
-    const eligible = [];
-    for (const conversation of Array.isArray(conversations) ? conversations : []) {
-      const threadId = codexSessionPrewarmConversationId(conversation);
-      if (
-        !threadId ||
-        threadId === activeId ||
-        seen.has(threadId) ||
-        codexSessionPrewarmConversationIsBusy(conversation) ||
-        !codexSessionPrewarmConversationIsRecent(conversation, nowMs)
-      ) continue;
-      seen.add(threadId);
-      eligible.push({ conversation, threadId });
-    }
-    const full = eligible.slice(0, settings.fullCount).map((entry) => ({ ...entry, type: "full" }));
-    const content = eligible
-      .slice(settings.fullCount, settings.fullCount + settings.contentCount)
-      .map((entry) => ({ ...entry, type: "content" }));
-    return [...full, ...content];
-  }
-
-  function codexSessionPrewarmResumeParams(task) {
-    const cwd = String(task.conversation?.cwd || "").trim();
-    return {
-      conversationId: task.threadId,
-      model: null,
-      serviceTier: null,
-      reasoningEffort: null,
-      workspaceRoots: cwd ? [cwd] : [],
-      permissions: null,
-      collaborationMode: null,
-      showThreadGoalResumeConfirmation: false,
-    };
-  }
-
-  async function hydrateCodexSessionPrewarmContent(manager, task) {
-    if (typeof manager.hydrateBackgroundThreads === "function") {
-      await manager.hydrateBackgroundThreads([task.threadId], { includeTurns: true });
-      return "content-hydrated";
-    }
-    if (typeof manager.readThread === "function") {
-      await manager.readThread(task.threadId, { includeTurns: true });
-      return "content-read";
-    }
-    return "content-unavailable";
-  }
-
-  async function ensureCodexSessionPrewarmResumed(manager, task) {
-    if (typeof manager.needsResume === "function") {
-      try {
-        if (!manager.needsResume(task.threadId)) return "already-resumed";
-      } catch {
-      }
-    }
-    const canResume = typeof manager.resumeConversationForUnavailableOwner === "function";
-    if (!canResume) {
-      return hydrateCodexSessionPrewarmContent(manager, task);
-    }
-    await manager.resumeConversationForUnavailableOwner(codexSessionPrewarmResumeParams(task));
-    return "resumed";
-  }
-
-  async function runCodexSessionPrewarmTask(manager, task) {
-    const existing = codexSessionPrewarmTaskPromises.get(task.threadId);
-    if (existing) return existing.promise;
-    const startedAt = Date.now();
-    const entry = { type: task.type, promise: null };
-    setCodexSessionPrewarmIndicatorActive(task.threadId, true);
-    const promise = Promise.resolve().then(async () => {
-      const currentThreadId = validThreadSessionKey(currentSessionRef().session_id);
-      const promoted = codexSessionPrewarmForegroundIds.has(task.threadId) || currentThreadId === task.threadId;
-      const effectiveType = promoted ? "full" : task.type;
-      const phase = effectiveType === "content" ? "content" : "owner";
-      const phaseStartedAt = Date.now();
-      const result = effectiveType === "content"
-        ? await hydrateCodexSessionPrewarmContent(manager, task)
-        : await ensureCodexSessionPrewarmResumed(manager, { ...task, type: "full" });
-      const phaseDurationMs = Date.now() - phaseStartedAt;
-      sendCodexElvesDiagnostic("session_prewarm_task_phase_completed", {
-        type: effectiveType,
-        phase,
-        result,
-        durationMs: phaseDurationMs,
-      });
-      sendCodexElvesDiagnostic("session_prewarm_task_completed", {
-        type: effectiveType,
-        phase,
-        result,
-        durationMs: Date.now() - startedAt,
-      });
-      return { type: effectiveType, phase, result, durationMs: phaseDurationMs };
-    }).catch((error) => {
-      sendCodexElvesDiagnostic("session_prewarm_task_failed", {
-        type: task.type,
-        durationMs: Date.now() - startedAt,
-        errorName: error?.name || "",
-        errorMessage: error?.message || String(error),
-      });
-      return { type: task.type, result: "failed" };
-    }).finally(() => {
-      setCodexSessionPrewarmIndicatorActive(task.threadId, false);
-      codexSessionPrewarmForegroundIds.delete(task.threadId);
-      if (codexSessionPrewarmTaskPromises.get(task.threadId) === entry) {
-        codexSessionPrewarmTaskPromises.delete(task.threadId);
-      }
-    });
-    entry.promise = promise;
-    codexSessionPrewarmTaskPromises.set(task.threadId, entry);
-    return promise;
-  }
-
-  async function waitForCodexSessionPrewarmIdle() {
-    while (codexSessionPrewarmRuntimeId === window.__codexSessionPrewarmRuntimeId) {
-      const visible = !document.visibilityState || document.visibilityState === "visible";
-      if (!visible) return false;
-      const lastInteractionAt = Number(window.__codexSessionPrewarmLastInteractionAt || 0);
-      const remainingPause = codexSessionPrewarmInteractionPauseMs - (Date.now() - lastInteractionAt);
-      if (remainingPause <= 0) return true;
-      await new Promise((resolve) => setTimeout(resolve, Math.min(500, Math.max(100, remainingPause))));
-    }
-    return false;
-  }
-
-  async function runCodexSessionPrewarmQueue(
-    manager,
-    tasks,
-    concurrency = codexSessionPrewarmDefaultConcurrency,
-    taskRunner = runCodexSessionPrewarmTask
-  ) {
-    let nextIndex = 0;
-    const results = new Array(tasks.length);
-    const workerCount = Math.min(
-      clampSessionPrewarmConcurrency(concurrency),
-      tasks.length
-    );
-    const workers = Array.from({ length: workerCount }, async () => {
-      while (nextIndex < tasks.length) {
-        if (!await waitForCodexSessionPrewarmIdle()) return;
-        const index = nextIndex;
-        nextIndex += 1;
-        const task = tasks[index];
-        if (!task) return;
-        if (validThreadSessionKey(currentSessionRef().session_id) === task.threadId) {
-          results[index] = { type: "full", result: "foreground" };
-          continue;
-        }
-        results[index] = await taskRunner(manager, task);
-      }
-    });
-    await Promise.all(workers);
-    const completedResults = results.filter(Boolean);
-    return {
-      completed: completedResults.length,
-      failed: completedResults.filter((result) => result.result === "failed").length,
-      interrupted: completedResults.length < tasks.length,
-      results: completedResults,
-      indexedResults: results,
-    };
-  }
-
-  async function runCodexSessionPrewarmPhasedQueue(
-    manager,
-    tasks,
-    concurrency = codexSessionPrewarmDefaultConcurrency
-  ) {
-    const contentTasks = tasks.map((task) => ({ ...task, type: "content" }));
-    const contentSummary = await runCodexSessionPrewarmQueue(
-      manager,
-      contentTasks,
-      concurrency
-    );
-    const contentResultsByThreadId = new Map();
-    for (let index = 0; index < contentTasks.length; index += 1) {
-      const result = contentSummary.indexedResults[index];
-      if (result) contentResultsByThreadId.set(contentTasks[index].threadId, result);
-    }
-    const fullTasks = tasks.filter((task) => {
-      if (task.type !== "full") return false;
-      const contentResult = contentResultsByThreadId.get(task.threadId);
-      return contentResult && contentResult.result !== "failed";
-    });
-    const ownerSummary = contentSummary.interrupted
-      ? {
-          completed: 0,
-          failed: 0,
-          interrupted: fullTasks.length > 0,
-          results: [],
-          indexedResults: [],
-        }
-      : await runCodexSessionPrewarmQueue(manager, fullTasks, concurrency);
-    const ownerResultsByThreadId = new Map();
-    for (let index = 0; index < fullTasks.length; index += 1) {
-      const result = ownerSummary.indexedResults[index];
-      if (result) ownerResultsByThreadId.set(fullTasks[index].threadId, result);
-    }
-    const finalResults = [];
-    for (const task of tasks) {
-      const contentResult = contentResultsByThreadId.get(task.threadId);
-      if (!contentResult) continue;
-      if (contentResult.result === "failed" || task.type === "content") {
-        finalResults.push(contentResult);
-        continue;
-      }
-      const ownerResult = ownerResultsByThreadId.get(task.threadId);
-      if (ownerResult) finalResults.push(ownerResult);
-    }
-    return {
-      completed: finalResults.length,
-      failed: finalResults.filter((result) => result.result === "failed").length,
-      interrupted:
-        contentSummary.interrupted ||
-        ownerSummary.interrupted ||
-        finalResults.length < tasks.length,
-      results: finalResults,
-      contentSummary,
-      ownerSummary,
-    };
-  }
-
-  function scheduleCodexSessionPrewarmRetry(signature, reason, detail = {}) {
-    const retryCount = (codexSessionPrewarmRetryCounts.get(signature) || 0) + 1;
-    if (retryCount > codexSessionPrewarmMaxRetries) {
-      codexSessionPrewarmRetryCounts.delete(signature);
-      sendCodexElvesDiagnostic("session_prewarm_retry_exhausted", {
-        reason,
-        ...detail,
-      });
-      return false;
-    }
-    codexSessionPrewarmRetryCounts.set(signature, retryCount);
-    const delayMs = codexSessionPrewarmRetryBaseDelayMs * (2 ** (retryCount - 1));
-    sendCodexElvesDiagnostic("session_prewarm_retry_scheduled", {
-      reason,
-      retryCount,
-      delayMs,
-      ...detail,
-    });
-    scheduleCodexSessionPrewarm(delayMs, `retry-${reason}-${retryCount}`);
-    return true;
-  }
-
-  async function refreshCodexSessionPrewarmRecentConversations(
-    manager,
-    timeoutMs = codexSessionPrewarmRecentRefreshTimeoutMs
-  ) {
-    if (typeof manager?.refreshRecentConversations !== "function") {
-      return { status: "unavailable", durationMs: 0 };
-    }
-    const startedAt = Date.now();
-    const boundedTimeoutMs = Math.max(0, Number(timeoutMs) || 0);
-    let timeoutId = 0;
-    sendCodexElvesDiagnostic("session_prewarm_recent_refresh_started", {
-      timeoutMs: boundedTimeoutMs,
-    });
-    const refresh = Promise.resolve()
-      .then(() => manager.refreshRecentConversations({ mode: "routine" }))
-      .then(
-        () => ({ status: "completed" }),
-        (error) => ({
-          status: "failed",
-          errorName: error?.name || "",
-          errorMessage: error?.message || String(error),
-        })
-      );
-    const timeout = new Promise((resolve) => {
-      timeoutId = setTimeout(
-        () => resolve({ status: "timeout" }),
-        boundedTimeoutMs
-      );
-    });
-    const result = await Promise.race([refresh, timeout]);
-    clearTimeout(timeoutId);
-    const detail = {
-      ...result,
-      timeoutMs: boundedTimeoutMs,
-      durationMs: Date.now() - startedAt,
-    };
-    if (result.status === "completed") {
-      sendCodexElvesDiagnostic("session_prewarm_recent_refresh_completed", detail);
-    } else if (result.status === "timeout") {
-      sendCodexElvesDiagnostic("session_prewarm_recent_refresh_timeout", detail);
-    } else {
-      sendCodexElvesDiagnostic("session_prewarm_recent_refresh_failed", detail);
-    }
-    return detail;
-  }
-
-  async function runCodexSessionPrewarm(
-    recentRefreshTimeoutMs = codexSessionPrewarmRecentRefreshTimeoutMs
-  ) {
-    const manager = codexSessionPrewarmManager;
-    const settings = codexSessionPrewarmSettingsSnapshot();
-    if (!manager) {
-      sendCodexElvesDiagnostic("session_prewarm_skipped", { reason: "manager-unavailable" });
-      return;
-    }
-    if (!settings.enabled) {
-      sendCodexElvesDiagnostic("session_prewarm_skipped", { reason: "disabled" });
-      return;
-    }
-    if (settings.fullCount + settings.contentCount === 0) {
-      sendCodexElvesDiagnostic("session_prewarm_skipped", { reason: "empty-range" });
-      return;
-    }
-    if (codexSessionPrewarmRunPromise) {
-      codexSessionPrewarmRerunPending = true;
-      sendCodexElvesDiagnostic("session_prewarm_skipped", { reason: "run-in-progress" });
-      return codexSessionPrewarmRunPromise;
-    }
-    const signature = [
-      codexSessionPrewarmVersion,
-      codexSessionPrewarmManagerId(manager),
-      settings.fullCount,
-      settings.contentCount,
-      settings.concurrency,
-    ].join(":");
-    if (window.__codexSessionPrewarmCompletedSignature === signature) {
-      sendCodexElvesDiagnostic("session_prewarm_skipped", { reason: "already-completed" });
-      return;
-    }
-    codexSessionPrewarmRerunPending = false;
-    const run = Promise.resolve().then(async () => {
-      const conversations = manager.getRecentConversations();
-      const prewarmNow = Date.now();
-      const recentConversationCount = Array.isArray(conversations)
-        ? conversations.filter((conversation) =>
-            codexSessionPrewarmConversationIsRecent(conversation, prewarmNow)
-          ).length
-        : 0;
-      const tasks = buildCodexSessionPrewarmTasks(
-        conversations,
-        settings,
-        currentSessionRef().session_id,
-        prewarmNow
-      );
-      if (!tasks.length) {
-        sendCodexElvesDiagnostic("session_prewarm_no_tasks", {
-          recentCount: Array.isArray(conversations) ? conversations.length : 0,
-          recentWithinWindowCount: recentConversationCount,
-        });
-        if (Array.isArray(conversations) && conversations.length > 0 && recentConversationCount === 0) {
-          window.__codexSessionPrewarmCompletedSignature = signature;
-          codexSessionPrewarmRetryCounts.delete(signature);
-          return;
-        }
-        void refreshCodexSessionPrewarmRecentConversations(
-          manager,
-          recentRefreshTimeoutMs
-        ).then(() => {
-          scheduleCodexSessionPrewarmRetry(signature, "no-tasks", {
-            recentCount: Array.isArray(conversations) ? conversations.length : 0,
-          });
-        });
-        return;
-      }
-      sendCodexElvesDiagnostic("session_prewarm_started", {
-        fullCount: tasks.filter((task) => task.type === "full").length,
-        contentCount: tasks.filter((task) => task.type === "content").length,
-        concurrency: settings.concurrency,
-        strategy: "content-first",
-      });
-      const summary = await runCodexSessionPrewarmPhasedQueue(
-        manager,
-        tasks,
-        settings.concurrency
-      );
-      void refreshCodexSessionPrewarmRecentConversations(
-        manager,
-        recentRefreshTimeoutMs
-      );
-      const fullyCompleted = !summary.interrupted && summary.completed === tasks.length;
-      if (fullyCompleted && summary.failed === 0 && codexSessionPrewarmRuntimeId === window.__codexSessionPrewarmRuntimeId) {
-        window.__codexSessionPrewarmCompletedSignature = signature;
-        codexSessionPrewarmRetryCounts.delete(signature);
-      } else if (summary.failed > 0) {
-        const retryScheduled = scheduleCodexSessionPrewarmRetry(signature, "task-failed", {
-          failed: summary.failed,
-          taskCount: tasks.length,
-        });
-        if (!retryScheduled && summary.failed === tasks.length) {
-          invalidateCodexSessionPrewarmManager(manager, "all-tasks-failed");
-        }
-      } else if (summary.interrupted) {
-        sendCodexElvesDiagnostic("session_prewarm_interrupted", {
-          completed: summary.completed,
-          taskCount: tasks.length,
-        });
-      }
-      sendCodexElvesDiagnostic("session_prewarm_completed", {
-        completed: summary.completed,
-        failed: summary.failed,
-        taskCount: tasks.length,
-      });
-    }).catch((error) => {
-      const errorName = error?.name || "";
-      const errorMessage = error?.message || String(error);
-      sendCodexElvesDiagnostic("session_prewarm_run_failed", {
-        errorName,
-        errorMessage,
-      });
-      const retryScheduled = scheduleCodexSessionPrewarmRetry(signature, "run-failed", {
-        errorName,
-        errorMessage,
-      });
-      if (!retryScheduled) invalidateCodexSessionPrewarmManager(manager, "run-failed");
-    }).finally(() => {
-      if (codexSessionPrewarmRunPromise !== run) return;
-      codexSessionPrewarmRunPromise = null;
-      if (codexSessionPrewarmRerunPending && codexSessionPrewarmRuntimeId === window.__codexSessionPrewarmRuntimeId) {
-        codexSessionPrewarmRerunPending = false;
-        scheduleCodexSessionPrewarm(0, "pending-rerun");
-      }
-    });
-    codexSessionPrewarmRunPromise = run;
-    return run;
-  }
-
-  function scheduleCodexSessionPrewarm(delayMs = codexSessionPrewarmStartupDelayMs, reason = "scheduled") {
-    clearTimeout(window.__codexSessionPrewarmTimer);
-    window.__codexSessionPrewarmTimer = null;
-    const settings = codexSessionPrewarmSettingsSnapshot();
-    if (
-      !settings.enabled ||
-      settings.fullCount + settings.contentCount === 0 ||
-      !codexSessionPrewarmManager
-    ) return;
-    const runtimeId = codexSessionPrewarmRuntimeId;
-    window.__codexSessionPrewarmTimer = setTimeout(() => {
-      window.__codexSessionPrewarmTimer = null;
-      if (runtimeId !== window.__codexSessionPrewarmRuntimeId) return;
-      sendCodexElvesDiagnostic("session_prewarm_scheduled_run", { reason, delayMs });
-      void runCodexSessionPrewarm();
-    }, Math.max(0, delayMs));
-  }
-
-  function markCodexSessionPrewarmInteraction(event) {
-    window.__codexSessionPrewarmLastInteractionAt = Date.now();
-    const target =
-      typeof Element !== "undefined" && event?.target instanceof Element
-        ? event.target
-        : event?.target?.parentElement;
-    const row = target?.closest?.(selectors.sidebarThread);
-    if (!row) return;
-    const threadId = validThreadSessionKey(sessionRefFromRow(row).session_id);
-    if (!threadId) return;
-    const active = codexSessionPrewarmTaskPromises.get(threadId);
-    if (active?.promise && active.type === "content" && codexSessionPrewarmManager) {
-      codexSessionPrewarmForegroundIds.add(threadId);
-      void active.promise.finally(() => {
-        const conversation = codexSessionPrewarmManager?.getConversation?.(threadId) || { id: threadId, cwd: "" };
-        return runCodexSessionPrewarmTask(codexSessionPrewarmManager, {
-          type: "full",
-          threadId,
-          conversation,
-        });
-      });
-    }
-  }
-
-  function installCodexSessionPrewarmInteractionHooks() {
-    document.removeEventListener("pointerdown", window.__codexSessionPrewarmPointerHandler, true);
-    document.removeEventListener("keydown", window.__codexSessionPrewarmKeyboardHandler, true);
-    document.removeEventListener("visibilitychange", window.__codexSessionPrewarmVisibilityHandler, true);
-    window.__codexSessionPrewarmPointerHandler = markCodexSessionPrewarmInteraction;
-    window.__codexSessionPrewarmKeyboardHandler = markCodexSessionPrewarmInteraction;
-    window.__codexSessionPrewarmVisibilityHandler = () => {
-      if (!document.visibilityState || document.visibilityState === "visible") {
-        scheduleCodexSessionPrewarm(0, "visibility-restored");
-      }
-    };
-    document.addEventListener("pointerdown", window.__codexSessionPrewarmPointerHandler, true);
-    document.addEventListener("keydown", window.__codexSessionPrewarmKeyboardHandler, true);
-    document.addEventListener("visibilitychange", window.__codexSessionPrewarmVisibilityHandler, true);
-  }
-
-  if (window.__CODEX_ELVES_TEST_SESSION_PREWARM__) {
-    window.__codexElvesSessionPrewarmTest = {
-      activeIndicatorIds: () => [...codexSessionPrewarmActiveIds],
-      buildTasks: (conversations, settings, activeThreadId = "", nowMs = Date.now()) =>
-        buildCodexSessionPrewarmTasks(conversations, settings, activeThreadId, nowMs),
-      captureManager: (manager) => captureCodexSessionPrewarmManager(manager),
-      clearScheduledRun: () => {
-        clearTimeout(window.__codexSessionPrewarmTimer);
-        window.__codexSessionPrewarmTimer = null;
-      },
-      clearRetryCounts: () => codexSessionPrewarmRetryCounts.clear(),
-      completedSignature: () => window.__codexSessionPrewarmCompletedSignature || "",
-      managerReady: () => !!codexSessionPrewarmManager,
-      findManagerFromRoots: (roots, maxNodes) =>
-        findCodexSessionPrewarmManagerInObjectGraph(roots, maxNodes),
-      isForeground: (threadId) => codexSessionPrewarmForegroundIds.has(validThreadSessionKey(threadId)),
-      markForeground: (threadId) => codexSessionPrewarmForegroundIds.add(validThreadSessionKey(threadId)),
-      managerDiscoveryVersion: codexAppServerManagerDiscoveryVersion,
-      managerDiscoveryNeeded: () => codexAppServerManagerDiscoveryNeeded(),
-      resumeParams: (task) => codexSessionPrewarmResumeParams(task),
-      retryCounts: () => [...codexSessionPrewarmRetryCounts.values()],
-      refreshRecent: (manager, timeoutMs) =>
-        refreshCodexSessionPrewarmRecentConversations(manager, timeoutMs),
-      resetLaunchCycle: () => resetCodexSessionPrewarmForLaunchCycle(),
-      run: (recentRefreshTimeoutMs) =>
-        runCodexSessionPrewarm(recentRefreshTimeoutMs),
-      runQueue: (manager, tasks, concurrency) =>
-        runCodexSessionPrewarmQueue(manager, tasks, concurrency),
-      runPhasedQueue: (manager, tasks, concurrency) =>
-        runCodexSessionPrewarmPhasedQueue(manager, tasks, concurrency),
-      runTask: (manager, task) => runCodexSessionPrewarmTask(manager, task),
-      setIndicatorActive: (threadId, active) =>
-        setCodexSessionPrewarmIndicatorActive(threadId, active),
-      setManager: (manager) => {
-        codexSessionPrewarmManager = manager || null;
-        window.__codexElvesSessionPrewarmManager = codexSessionPrewarmManager;
-      },
-      settingsSnapshot: () => codexSessionPrewarmSettingsSnapshot(),
-      syncIndicators: (rows) => syncCodexSessionPrewarmIndicators(rows),
-    };
-  }
-
   if (window.__CODEX_ELVES_TEST_PLUGIN_AUTO_EXPAND__) {
     window.__codexElvesPluginAutoExpandTest = {
       matchesText: (text) =>
@@ -6138,15 +5290,6 @@
       patchPluginMarketplaceRequestParams: (method, params) => patchPluginMarketplaceRequestParams(method, params),
       patchPluginMarketplaceRequestClient: (client) => patchPluginMarketplaceRequestClient(client),
       patchPluginMarketplaceResult: (method, result) => patchPluginMarketplaceResult(method, result),
-      appServerManagerDiscoveryBackoffMs: (failureCount) => {
-        const previousFailureCount = codexAppServerManagerDiscoveryFailureCount;
-        codexAppServerManagerDiscoveryFailureCount = failureCount;
-        try {
-          return codexAppServerManagerDiscoveryBackoffMs();
-        } finally {
-          codexAppServerManagerDiscoveryFailureCount = previousFailureCount;
-        }
-      },
       setServiceTierState: (state = {}) => {
         codexServiceTierState = { ...codexServiceTierState, ...state };
       },
@@ -6326,176 +5469,6 @@
     return String(method || "");
   }
 
-  function codexAppServerManagerDiscoveryBackoffMs() {
-    return Math.min(30000, 1000 * (2 ** Math.min(Math.max(codexAppServerManagerDiscoveryFailureCount - 1, 0), 5)));
-  }
-
-  function resetCodexAppServerManagerDiscovery() {
-    clearTimeout(window.__codexAppServerManagerDiscoveryRetryTimer);
-    window.__codexAppServerManagerDiscoveryRetryTimer = null;
-    codexAppServerManagerDiscoveryFailureCount = 0;
-    codexAppServerManagerDiscoveryNextAttemptAt = 0;
-    codexAppServerManagerDiscoveryFailureSignature = "";
-    codexAppServerManagerDiscoveryRetryExhausted = false;
-  }
-
-  function scheduleCodexAppServerManagerDiscoveryRetry(delayMs) {
-    clearTimeout(window.__codexAppServerManagerDiscoveryRetryTimer);
-    window.__codexAppServerManagerDiscoveryRetryTimer = null;
-    if (codexAppServerManagerDiscoveryFailureCount >= codexAppServerManagerDiscoveryMaxFailures) {
-      if (!codexAppServerManagerDiscoveryRetryExhausted) {
-        codexAppServerManagerDiscoveryRetryExhausted = true;
-        sendCodexElvesDiagnostic("app_server_manager_discovery_retry_exhausted", {
-          failureCount: codexAppServerManagerDiscoveryFailureCount,
-        });
-      }
-      return false;
-    }
-    const runtimeId = codexSessionPrewarmRuntimeId;
-    window.__codexAppServerManagerDiscoveryRetryTimer = setTimeout(() => {
-      window.__codexAppServerManagerDiscoveryRetryTimer = null;
-      if (runtimeId !== window.__codexSessionPrewarmRuntimeId) return;
-      void installAppServerManagerDiscovery(true);
-    }, Math.max(0, delayMs));
-    return true;
-  }
-
-  function codexAppServerManagerDiscoveryNeeded(rediscoverManager = false) {
-    const prewarmSettings = codexSessionPrewarmSettingsSnapshot();
-    const tokenUsageEnabled = codexElvesSettings().tokenUsage;
-    return (
-      prewarmSettings.enabled &&
-      prewarmSettings.fullCount + prewarmSettings.contentCount > 0
-      || tokenUsageEnabled
-    ) && (rediscoverManager || !codexSessionPrewarmManager);
-  }
-
-  function installAppServerManagerDiscovery(force = false, rediscoverManager = false) {
-    if (!codexAppServerManagerDiscoveryNeeded(rediscoverManager)) return;
-    if (codexAppServerManagerDiscoveryPromise) return codexAppServerManagerDiscoveryPromise;
-    if (!force && codexAppServerManagerDiscoveryFailureCount >= codexAppServerManagerDiscoveryMaxFailures) return null;
-    if (!force && Date.now() < codexAppServerManagerDiscoveryNextAttemptAt) return null;
-    const discovery = async () => {
-      try {
-        const module = await loadCodexAppModule("app-server-manager-signals-");
-        const candidates = Object.values(module).filter((value) => value && (typeof value === "object" || typeof value === "function"));
-        let managerCount = 0;
-        let reactScannedCount = 0;
-        let reactManagerFound = false;
-        for (const candidate of candidates) {
-          if (captureCodexSessionPrewarmManager(candidate)) managerCount += 1;
-          if (typeof candidate.get === "function") {
-            try {
-              const resolved = candidate.get();
-              if (captureCodexSessionPrewarmManager(resolved)) managerCount += 1;
-            } catch {
-            }
-          }
-        }
-        if (!codexSessionPrewarmManager) {
-          const reactResult = findCodexSessionPrewarmManagerInReactTree(rediscoverManager);
-          reactScannedCount = reactResult.scanned;
-          const reactManager = reactResult.manager;
-          if (reactManager) {
-            reactManagerFound = true;
-            if (captureCodexSessionPrewarmManager(reactManager)) managerCount += 1;
-          }
-        }
-        const managerReady = !!codexSessionPrewarmManager;
-        if (managerReady) {
-          clearTimeout(window.__codexAppServerManagerDiscoveryRetryTimer);
-          window.__codexAppServerManagerDiscoveryRetryTimer = null;
-          codexAppServerManagerDiscoveryFailureCount = 0;
-          codexAppServerManagerDiscoveryNextAttemptAt = 0;
-          codexAppServerManagerDiscoveryFailureSignature = "";
-          codexAppServerManagerDiscoveryRetryExhausted = false;
-          sendCodexElvesDiagnostic("app_server_manager_discovery_completed", {
-            candidateCount: candidates.length,
-            managerCount,
-            managerReady,
-            reactScannedCount,
-            reactManagerFound,
-          });
-        } else {
-          codexAppServerManagerDiscoveryFailureCount += 1;
-          const retryAfterMs = codexAppServerManagerDiscoveryBackoffMs();
-          codexAppServerManagerDiscoveryNextAttemptAt = Date.now() + retryAfterMs;
-          scheduleCodexAppServerManagerDiscoveryRetry(retryAfterMs);
-          const exportCount = Object.keys(module || {}).length;
-          const failureSignature = `${exportCount}:${candidates.length}`;
-          if (codexAppServerManagerDiscoveryFailureSignature !== failureSignature) {
-            codexAppServerManagerDiscoveryFailureSignature = failureSignature;
-            sendCodexElvesDiagnostic("app_server_manager_discovery_not_found", {
-              exportCount,
-              candidateCount: candidates.length,
-              retryAfterMs,
-              reactScannedCount,
-              reactManagerFound,
-            });
-          }
-        }
-      } catch (error) {
-        codexAppServerManagerDiscoveryFailureCount += 1;
-        const retryAfterMs = codexAppServerManagerDiscoveryBackoffMs();
-        codexAppServerManagerDiscoveryNextAttemptAt = Date.now() + retryAfterMs;
-        scheduleCodexAppServerManagerDiscoveryRetry(retryAfterMs);
-        const errorName = error?.name || "";
-        const errorMessage = error?.message || String(error);
-        const failureSignature = `error:${errorName}:${errorMessage}`;
-        if (codexAppServerManagerDiscoveryFailureSignature !== failureSignature) {
-          codexAppServerManagerDiscoveryFailureSignature = failureSignature;
-          sendCodexElvesDiagnostic("app_server_manager_discovery_failed", {
-            errorName,
-            errorMessage,
-            retryAfterMs,
-          });
-        }
-      }
-    };
-    codexAppServerManagerDiscoveryPromise = discovery().finally(() => {
-      codexAppServerManagerDiscoveryPromise = null;
-    });
-    void codexAppServerManagerDiscoveryPromise;
-    return codexAppServerManagerDiscoveryPromise;
-  }
-
-  function refreshCodexSessionPrewarmFeatureState(reason = "settings-changed") {
-    const settings = codexSessionPrewarmSettingsSnapshot();
-    if (!settings.enabled || settings.fullCount + settings.contentCount === 0) {
-      clearTimeout(window.__codexSessionPrewarmTimer);
-      window.__codexSessionPrewarmTimer = null;
-      return Promise.resolve(false);
-    }
-    if (reason === "setting-sessionPrewarmEnabled") {
-      window.__codexSessionPrewarmCompletedSignature = "";
-    }
-    if (codexSessionPrewarmManager) {
-      scheduleCodexSessionPrewarm(codexSessionPrewarmStartupDelayMs, reason);
-      return Promise.resolve(true);
-    }
-    if (codexSessionPrewarmFeatureRefreshPromise) {
-      return codexSessionPrewarmFeatureRefreshPromise;
-    }
-    const refresh = Promise.resolve().then(async () => {
-      if (codexAppServerManagerDiscoveryPromise) {
-        await codexAppServerManagerDiscoveryPromise;
-      }
-      if (!codexSessionPrewarmManager) {
-        resetCodexAppServerManagerDiscovery();
-        await installAppServerManagerDiscovery(true, true);
-      }
-      if (!codexSessionPrewarmManager) return false;
-      scheduleCodexSessionPrewarm(codexSessionPrewarmStartupDelayMs, reason);
-      return true;
-    }).finally(() => {
-      if (codexSessionPrewarmFeatureRefreshPromise === refresh) {
-        codexSessionPrewarmFeatureRefreshPromise = null;
-      }
-    });
-    codexSessionPrewarmFeatureRefreshPromise = refresh;
-    return refresh;
-  }
-
   function threadIdVariants(sessionId) {
     if (typeof sessionId !== "string" || !sessionId.trim()) return [];
     const id = sessionId.trim();
@@ -6507,6 +5480,132 @@
     const variants = threadIdVariants(sessionId);
     const bareId = variants.find((id) => !id.startsWith("local:"));
     return bareId || variants[0] || "";
+  }
+
+  // ── 已删除会话的持久抑制（不依赖 Codex 内部 manager）──
+  // Codex App 升级后原生归档 manager 可能不可用，导致删除后展开项目会话复现。
+  // 这里维护一份持久化的“已删除 thread ID 集合”，在 DOM 层拦截并移除任何复现的会话行，
+  // 无论 App 如何重渲染或后续更新都能兵底。
+  function normalizeSuppressedThreadId(raw) {
+    if (typeof raw !== "string") return "";
+    const trimmed = raw.trim();
+    const bare = trimmed.startsWith("local:") ? trimmed.slice("local:".length) : trimmed;
+    return bare.trim().toLowerCase();
+  }
+
+  if (!(window.__codexElvesSuppressedThreadIds instanceof Set)) {
+    const initial = Array.isArray(window.__CODEX_ELVES_SUPPRESSED_THREADS__)
+      ? window.__CODEX_ELVES_SUPPRESSED_THREADS__
+      : [];
+    window.__codexElvesSuppressedThreadIds = new Set(initial.map(normalizeSuppressedThreadId).filter(Boolean));
+  }
+
+  function suppressedThreadIds() {
+    return window.__codexElvesSuppressedThreadIds;
+  }
+
+  function isThreadSuppressed(rawId) {
+    const id = normalizeSuppressedThreadId(rawId);
+    return !!id && suppressedThreadIds().has(id);
+  }
+
+  // 移除所有命中抑制集的侧边栏会话行。只在非归档页生效，避免误伤归档列表。
+  function removeSuppressedThreadRows(root) {
+    if (suppressedThreadIds().size === 0) return;
+    if (typeof archivePageHintVisible === "function" && archivePageHintVisible()) return;
+    const scope = root && typeof root.querySelectorAll === "function" ? root : document;
+    let nodes;
+    try {
+      nodes = scope.querySelectorAll(selectors.sidebarThread);
+    } catch {
+      return;
+    }
+    nodes.forEach((node) => {
+      const tid = node.getAttribute && node.getAttribute("data-app-action-sidebar-thread-id");
+      if (tid && isThreadSuppressed(tid) && node.isConnected) {
+        node.remove();
+      }
+    });
+  }
+
+  function installSuppressedThreadObserver() {
+    removeSuppressedThreadRows();
+    // 从后端拉一次最新抑制集并合并（启动注入前缀只是快照，这里补齐增量）。
+    void postJson("/session/suppressed", {}).then((result) => {
+      if (!result || !Array.isArray(result.ids)) return;
+      let changed = false;
+      result.ids.forEach((raw) => {
+        const id = normalizeSuppressedThreadId(raw);
+        if (id && !suppressedThreadIds().has(id)) {
+          suppressedThreadIds().add(id);
+          changed = true;
+        }
+      });
+    if (changed) removeSuppressedThreadRows();
+    }).catch(() => {});
+    // 监听根优先收窄到侧边栏容器，避免主对话区流式输出时的大量 DOM 变更白白触发回调；
+    // 侧边栏尚未渲染时回退到 documentElement 兵底。根变化时重连。
+    // 依次尝试包含会话行的侧边栏根（必须真正包住会话行，否则会漏拦截）。
+    const sidebarRoot = [
+      document.querySelector("nav[role='navigation']"),
+      document.querySelector("aside"),
+      document.querySelector("nav"),
+      document.querySelector(selectors.sidebarThread)?.closest?.("nav, aside, [role='navigation']"),
+    ].find((candidate) => {
+      try {
+        return candidate && candidate.querySelector(selectors.sidebarThread);
+      } catch {
+        return false;
+      }
+    });
+    const observerRoot = sidebarRoot || document.documentElement;
+    if (window.__codexElvesSuppressedThreadObserver) {
+      if (window.__codexElvesSuppressedThreadObserverRoot === observerRoot) return;
+      window.__codexElvesSuppressedThreadObserver.disconnect();
+    }
+    const observer = new MutationObserver((mutations) => {
+      if (suppressedThreadIds().size === 0) return;
+      for (const mutation of mutations) {
+        if (mutation.type === "attributes" && mutation.target instanceof Element) {
+          const tid = mutation.target.getAttribute("data-app-action-sidebar-thread-id");
+          if (tid && isThreadSuppressed(tid) && mutation.target.isConnected
+            && !(typeof archivePageHintVisible === "function" && archivePageHintVisible())) {
+            mutation.target.remove();
+          }
+        }
+        for (const node of mutation.addedNodes || []) {
+          if (node instanceof Element) removeSuppressedThreadRows(node);
+        }
+      }
+    });
+    observer.observe(observerRoot, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["data-app-action-sidebar-thread-id"],
+    });
+    window.__codexElvesSuppressedThreadObserver = observer;
+    window.__codexElvesSuppressedThreadObserverRoot = observerRoot;
+  }
+
+  // 把 thread 加入抑制集（内存立即生效 + 后端持久化），并立即清除现有行。
+  function suppressThreadEverywhere(rawId) {
+    threadIdVariants(rawId).forEach((variant) => {
+      const id = normalizeSuppressedThreadId(variant);
+      if (id) suppressedThreadIds().add(id);
+    });
+    removeSuppressedThreadRows();
+    installSuppressedThreadObserver();
+    void postJson("/session/suppress", { thread_id: rawId }).catch(() => {});
+  }
+
+  // 撤销删除时从抑制集移除（内存 + 后端），使会话可重新显示。
+  function unsuppressThreadEverywhere(rawId) {
+    threadIdVariants(rawId).forEach((variant) => {
+      const id = normalizeSuppressedThreadId(variant);
+      if (id) suppressedThreadIds().delete(id);
+    });
+    void postJson("/session/unsuppress", { thread_id: rawId }).catch(() => {});
   }
 
   function uuidV7TimestampMs(sessionId) {
@@ -8337,88 +7436,21 @@
     }
   }
 
-  function codexAppStoreManager() {
-    const manager = codexSessionPrewarmManager || window.__codexElvesSessionPrewarmManager || null;
-    return manager && typeof manager === "object" ? manager : null;
-  }
-
-  // 走 Codex App 原生归档：archiveConversation 会把会话真正归档（持久化到 app-server）
-  // 并加入 App 的抑制集，从根本上避免折叠/展开项目重渲染时恢复已删除行。
-  // 返回 { ok, reason }：ok 为 true 表示原生归档成功；失败时由调用方降级并提示。
-  async function archiveSessionViaCodexApp(ref) {
-    const threadId = validThreadSessionKey(ref?.session_id);
-    if (!threadId) return { ok: false, reason: "invalid_session_id" };
-    const manager = codexAppStoreManager();
-    if (!manager) return { ok: false, reason: "manager_unavailable" };
-    if (typeof manager.archiveConversation !== "function") {
-      return { ok: false, reason: "archive_api_missing" };
-    }
-    const conversationId = projectMoveSessionKey(threadId);
-    try {
-      await manager.archiveConversation(conversationId, { cleanupWorktree: false });
-      sendCodexElvesDiagnostic("session_delete_native_archived", { threadId, ok: true });
-      return { ok: true, reason: "archived" };
-    } catch (error) {
-      appendCodexElvesFailure("__codexSessionDeleteArchiveFailures", error);
-      sendCodexElvesDiagnostic("session_delete_native_archived", { threadId, ok: false, error: String(error?.message || error) });
-      return { ok: false, reason: "archive_failed" };
-    }
-  }
-
-  // 让 Codex App 走它自己的删除内存态清理：把会话加入抑制集、从 recentConversations
-  // 缓存与 thread summary 中移除，并触发侧边栏重渲染。否则 App 内存态仍保留该会话，
-  // 折叠/展开项目重渲染时会把已删除的行恢复出来。
-  function evictSessionFromCodexAppStore(ref) {
-    const threadId = validThreadSessionKey(ref?.session_id);
-    if (!threadId) return false;
-    const manager = codexAppStoreManager();
-    if (!manager) return false;
-    const ids = uniqueValues(threadIdVariants(threadId));
-    let evicted = false;
-    try {
-      if (typeof manager.handleThreadDeletion === "function") {
-        manager.handleThreadDeletion(ids);
-        evicted = true;
-      }
-    } catch (error) {
-      appendCodexElvesFailure("__codexSessionDeleteEvictFailures", error);
-    }
-    sendCodexElvesDiagnostic("session_delete_store_evicted", { threadId, evicted });
-    return evicted;
-  }
-
-  // 撤销删除时抵消 evict 的副作用：把会话从 App 抑制集中移除并刷新
-  // 最近会话列表，否则恢复本地记录后会话仍被 App 抑制集过滤、不显示。
+  // 撤销删除：从持久抑制集移除（不依赖 Codex 内部 manager），
+  // 否则撤销后会话仍被 DOM 抑制层拦截、不显示。
   function restoreSessionToCodexAppStore(ref) {
     const threadId = validThreadSessionKey(ref?.session_id);
     if (!threadId) return false;
-    const manager = codexAppStoreManager();
-    if (!manager) return false;
-    const ids = uniqueValues(threadIdVariants(threadId));
-    let restored = false;
-    try {
-      if (typeof manager.handleThreadUnarchived === "function") {
-        ids.forEach((id) => manager.handleThreadUnarchived(id));
-        restored = true;
-      }
-      if (typeof manager.refreshRecentConversations === "function") {
-        Promise.resolve(manager.refreshRecentConversations({ mode: "expanded" })).catch(() => {});
-      }
-    } catch (error) {
-      appendCodexElvesFailure("__codexSessionDeleteRestoreFailures", error);
-    }
-    sendCodexElvesDiagnostic("session_delete_store_restored", { threadId, restored });
-    return restored;
+    unsuppressThreadEverywhere(ref.session_id);
+    return true;
   }
 
   function removeDeletedRow(row, button, ref, archived = false) {
     releaseDeleteFocus(row, button);
     const shouldReload = isCurrentSessionRow(row, ref);
-    // 原生归档成功时，App 已把会话加入抑制集并持久化归档，无需再走不可靠的
-    // handleThreadDeletion 降级；仅归档失败时才回退到内存态抑制。
-    if (!archived) {
-      evictSessionFromCodexAppStore(ref);
-    }
+    // 把会话加入持久抑制集（不依赖 Codex 内部 manager），
+    // 确保展开项目、折叠/展开重渲染时不复现已删除会话。
+    if (ref && ref.session_id) suppressThreadEverywhere(ref.session_id);
     row.remove();
     if (shouldReload) {
       window.location.reload();
@@ -8450,20 +7482,15 @@
     confirmDelete(ref.title).then(async (confirmed) => {
       if (!confirmed) return;
       releaseDeleteFocus(row, button);
-      // A1：先走 Codex 原生归档（把会话加入抑制集并持久化），再删数据。
-      // 归档失败不中断删除（降级为内存态抑制），但在右下角明确提示，便于后续定位根因。
-      const archiveResult = await archiveSessionViaCodexApp(ref);
+      // 先删数据，再由 removeDeletedRow 加入持久抑制集（不依赖 Codex 内部 manager）。
       const result = await postJson("/delete", ref);
       if (result.status === "server_deleted" || result.status === "local_deleted") {
-        removeDeletedRow(row, button, ref, archiveResult.ok);
-        if (archiveResult.ok) {
-          showToast(result.message || "删除成功", result.undo_token, ref);
-        } else {
-          showToast(`已删除，但原生归档未生效（${archiveResult.reason}），若会话重现请反馈`, result.undo_token, ref);
-        }
+        removeDeletedRow(row, button, ref);
+        // 持久抑制集已保证不复现，提示删除成功。
+        showToast(result.message || "删除成功", result.undo_token, ref);
       } else if (result.status === "not_found") {
         // 会话在本地存储中已不存在，目标（会话不存在）已达成，直接移除残留的列表行
-        removeDeletedRow(row, button, ref, archiveResult.ok);
+        removeDeletedRow(row, button, ref);
         showToast(result.message || "会话已不存在，已从列表移除", null);
       } else {
         showToast(result.message || "删除失败", null);
@@ -9987,8 +9014,7 @@
     void loadCodexModelCatalog();
     installCodexServiceTierDispatcherPatch();
     installCodexServiceTierRequestClientPatch();
-    installAppServerManagerDiscovery();
-    installCodexSessionPrewarmInteractionHooks();
+    installSuppressedThreadObserver();
     scheduleBackendHeartbeat();
     installDeleteButtonEventDelegation();
     installConversationViewRouteHooks();
@@ -10037,7 +9063,6 @@
       pending.rows.forEach(tryAttachButton);
       updateDeleteButtonOffsets(pending.rows);
       scheduleSessionRowLayout(pending.rows);
-      syncCodexSessionPrewarmIndicators(pending.rows);
       scheduleProjectMoveProjection();
       scheduleChatsSortCorrection(chatsSortEventDelayMs, { refreshKeys: true });
       if (!chatsSortFallbackArmed) armChatsSortVisibleFallback();
@@ -10412,8 +9437,8 @@
   installScanObservers();
   window.__codexElvesRefreshRuntime = () => {
     cleanupLegacyForcePluginInstallRuntime();
-    const launchCycleChanged = resetCodexSessionPrewarmForLaunchCycle();
     void loadBackendSettingsForStartup();
+    installCodexElvesImageOverlay();
     void loadCodexServiceTierState();
     void loadCodexModelCatalog();
     scan();
@@ -10422,12 +9447,7 @@
     refreshUpstreamBranchDropdownAdapter();
     syncChatsSortVisibilityListener();
     installScanObservers();
-    resetCodexAppServerManagerDiscovery();
-    void installAppServerManagerDiscovery(true, true);
-    scheduleCodexSessionPrewarm(
-      codexSessionPrewarmStartupDelayMs,
-      launchCycleChanged ? "launch-cycle-refresh" : "runtime-refresh"
-    );
+    installSuppressedThreadObserver();
   };
   window.__codexElvesRuntimeBuild = codexElvesBuild;
   window.__codexElvesRuntimeHelperBase = helperBase;

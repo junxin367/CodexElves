@@ -572,15 +572,15 @@ impl SQLiteStorageAdapter {
     }
 
     pub fn codex_thread_usage_history(&self, session: &SessionRef) -> serde_json::Value {
-        if !self.db_path.exists() {
-            return json!({
-                "status": "failed",
-                "session_id": session.session_id,
-                "message": format!("Database not found: {}", self.db_path.to_string_lossy()),
-                "history": []
-            });
-        }
         let result = (|| -> anyhow::Result<Value> {
+            if !self.db_path.exists() {
+                return Ok(json!({
+                    "status": "failed",
+                    "session_id": session.session_id,
+                    "message": format!("Database not found: {}", self.db_path.to_string_lossy()),
+                    "history": []
+                }));
+            }
             let db = Connection::open(&self.db_path)?;
             if schema_kind(&db)? != Some(SchemaKind::CodexThreads)
                 || !has_columns(&db, "threads", &["rollout_path"])?
@@ -803,14 +803,30 @@ impl SQLiteStorageAdapter {
                 "summary": Value::Object(summary),
             }))
         })();
-        result.unwrap_or_else(|err| {
+        let db_value = result.unwrap_or_else(|err| {
             json!({
                 "status": "failed",
                 "session_id": session.session_id,
                 "message": err.to_string(),
                 "history": []
             })
-        })
+        });
+        if db_value.get("status").and_then(Value::as_str) == Some("ok") {
+            return db_value;
+        }
+        // db 路径失败（常见于 Codex 升级后换了 SQLite schema）时，不依赖 db，
+        // 直接按 session_id 在 sessions 目录定位 rollout 文件兵底统计。
+        if let Some(sessions_dir) = codex_sessions_dir_from_db_path(&self.db_path) {
+            if let Some(rollout) =
+                find_rollout_path_by_session_id(&sessions_dir, &session.session_id)
+            {
+                match rollout_only_usage_history_value(&session.session_id, &rollout) {
+                    Ok(value) => return value,
+                    Err(_) => return db_value,
+                }
+            }
+        }
+        db_value
     }
 
     fn delete_generic_session(
@@ -1706,6 +1722,104 @@ fn token_usage_summary_value(usage: TokenUsageTotals) -> Value {
         "cacheCreationTokens": usage.cache_creation_tokens,
         "cacheTokens": usage.cached_tokens.saturating_add(usage.cache_creation_tokens),
     })
+}
+
+/// 从 db_path 推导 Codex 会话 rollout 目录（`~/.codex/sqlite/x.db` -> `~/.codex/sessions`）。
+fn codex_sessions_dir_from_db_path(db_path: &Path) -> Option<PathBuf> {
+    // db 可能在 `~/.codex/sqlite/x.db`（两层）或 `~/.codex/state_5.sqlite`（一层）。
+    // 若父目录名为 `sqlite` 则 codex_home = 父.父，否则 codex_home = 父。
+    let parent = db_path.parent()?;
+    let codex_home = if parent.file_name().and_then(|name| name.to_str()) == Some("sqlite") {
+        parent.parent()?
+    } else {
+        parent
+    };
+    let dir = codex_home.join("sessions");
+    dir.is_dir().then_some(dir)
+}
+
+/// 不依赖 SQLite schema，直接按 session_id 在 sessions 目录递归定位 rollout 文件。
+///
+/// Codex rollout 命名规则稳定：`rollout-<时间戳>-<uuid>.jsonl`，文件名含会话 uuid。
+/// 这样无论 Codex 如何改 db 表结构，只要 rollout 文件在就能统计 token。
+fn find_rollout_path_by_session_id(sessions_dir: &Path, session_id: &str) -> Option<PathBuf> {
+    let needle = normalize_codex_thread_id(session_id);
+    if needle.is_empty() {
+        return None;
+    }
+    // 递归扫描（广度优先 + 深度上限），避免异常目录结构导致无限递归。
+    let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
+    queue.push_back((sessions_dir.to_path_buf(), 0));
+    while let Some((dir, depth)) = queue.pop_front() {
+        if depth > 6 {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                queue.push_back((path, depth + 1));
+            } else if file_type.is_file() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("rollout-")
+                    && name.ends_with(".jsonl")
+                    && name.contains(&needle)
+                {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 基于单个 rollout 文件组装 token 统计（不含子会话图，用于 db schema 不兼容时的兵底）。
+///
+/// 输出 shape 与成功路径一致（只少 descendant 相关字段），前端无需区分。
+fn rollout_only_usage_history_value(
+    session_id: &str,
+    rollout_path: &Path,
+) -> anyhow::Result<Value> {
+    let thread_id = normalize_codex_thread_id(session_id);
+    let report = read_rollout_usage_history(rollout_path, &thread_id)?;
+    let mut summary = serde_json::Map::new();
+    summary.insert(
+        "totalUsage".to_string(),
+        token_usage_summary_value(report.total_usage),
+    );
+    summary.insert(
+        "lastTurnUsage".to_string(),
+        token_usage_summary_value(report.last_turn_usage),
+    );
+    summary.insert("lastTurnId".to_string(), json!(report.last_turn_id));
+    if let Some(started_at) = report.last_turn_started_at.as_deref() {
+        summary.insert("lastTurnStartedAt".to_string(), json!(started_at));
+    }
+    if let Some(completed_at) = report.last_turn_completed_at.as_deref() {
+        summary.insert("lastTurnCompletedAt".to_string(), json!(completed_at));
+    }
+    summary.insert("observedAt".to_string(), json!(report.observed_at));
+    summary.insert("turnCount".to_string(), json!(report.turn_count));
+    if report.task_running {
+        summary.insert("isRunning".to_string(), json!(true));
+        summary.insert("activeThreadCount".to_string(), json!(1));
+        summary.insert("lastTurnRunning".to_string(), json!(true));
+    }
+    Ok(json!({
+        "status": "ok",
+        "session_id": thread_id,
+        "requested_session_id": thread_id,
+        "matched_by": "rollout_file",
+        "rollout_path": rollout_path.to_string_lossy().to_string(),
+        "history": report.history,
+        "summary": Value::Object(summary),
+    }))
 }
 
 fn spawned_child_thread_id(payload: &Value) -> Option<String> {

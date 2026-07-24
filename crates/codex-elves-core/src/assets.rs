@@ -52,8 +52,9 @@ fn injection_script_source_with_settings(
     let image_overlay = image_overlay_config(helper_port, settings);
     let codex_home = crate::codex_home::codex_home_dir_for_settings(settings);
     let plugin_marketplaces = local_plugin_marketplaces_from_home(&codex_home);
+    let suppressed_threads = crate::suppressed_threads::load_suppressed_ids();
     format!(
-        "window.__CODEX_SESSION_DELETE_HELPER__ = {};\nwindow.__CODEX_ELVES_VERSION__ = {};\nwindow.__CODEX_ELVES_BUILD__ = {};\nwindow.__CODEX_ELVES_LAUNCH_CYCLE__ = {};\nwindow.__CODEX_ELVES_IMAGE_OVERLAY__ = {};\nwindow.__CODEX_ELVES_PLUGIN_MARKETPLACES__ = {};\n{}",
+        "window.__CODEX_SESSION_DELETE_HELPER__ = {};\nwindow.__CODEX_ELVES_VERSION__ = {};\nwindow.__CODEX_ELVES_BUILD__ = {};\nwindow.__CODEX_ELVES_LAUNCH_CYCLE__ = {};\nwindow.__CODEX_ELVES_IMAGE_OVERLAY__ = {};\nwindow.__CODEX_ELVES_PLUGIN_MARKETPLACES__ = {};\nwindow.__CODEX_ELVES_SUPPRESSED_THREADS__ = {};\n{}",
         serde_json::to_string(&helper_url).expect("helper URL should serialize"),
         serde_json::to_string(crate::version::VERSION).expect("version should serialize"),
         serde_json::to_string(DIAGNOSTIC_BUILD_ID).expect("build id should serialize"),
@@ -61,6 +62,7 @@ fn injection_script_source_with_settings(
             .expect("launch cycle id should serialize"),
         serde_json::to_string(&image_overlay).expect("image overlay config should serialize"),
         serde_json::to_string(&plugin_marketplaces).expect("plugin marketplaces should serialize"),
+        serde_json::to_string(&suppressed_threads).expect("suppressed threads should serialize"),
         source,
     )
 }
