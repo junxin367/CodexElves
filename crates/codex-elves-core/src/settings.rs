@@ -415,6 +415,8 @@ pub struct BackendSettings {
         deserialize_with = "deserialize_image_overlay_opacity"
     )]
     pub codex_app_image_overlay_opacity: u8,
+    #[serde(rename = "codexAppActiveSkinId", default)]
+    pub codex_app_active_skin_id: String,
     #[serde(rename = "codexGoalsEnabled", default)]
     pub codex_goals_enabled: bool,
     #[serde(rename = "gptReasoningContinuation", default)]
@@ -500,6 +502,7 @@ impl Default for BackendSettings {
             codex_app_image_overlay_enabled: false,
             codex_app_image_overlay_path: String::new(),
             codex_app_image_overlay_opacity: default_image_overlay_opacity(),
+            codex_app_active_skin_id: String::new(),
             codex_goals_enabled: false,
             gpt_reasoning_continuation: false,
             gpt_reasoning_continuation_max_rounds: default_gpt_reasoning_continuation_max_rounds(),
@@ -942,6 +945,12 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
         target.insert(
             "codexAppImageOverlayOpacity".to_string(),
             Value::Number(serde_json::Number::from(clamp_image_overlay_opacity(value))),
+        );
+    }
+    if let Some(value) = source.get("codexAppActiveSkinId").and_then(Value::as_str) {
+        target.insert(
+            "codexAppActiveSkinId".to_string(),
+            Value::String(value.to_string()),
         );
     }
     if let Some(value) = source.get("codexGoalsEnabled").and_then(Value::as_bool) {

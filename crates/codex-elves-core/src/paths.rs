@@ -7,8 +7,12 @@ const LATEST_STATUS_FILE: &str = "latest-status.json";
 const DIAGNOSTIC_LOG_FILE: &str = "codex-elves.log";
 const PROXY_LOG_FILE: &str = "proxy-requests.jsonl";
 const SUPPRESSED_THREADS_FILE: &str = "suppressed-threads.json";
+const SKINS_FILE: &str = "skins.json";
 
 pub fn default_app_state_dir() -> PathBuf {
+    if let Some(path) = app_state_dir_for_tests() {
+        return path;
+    }
     if let Some(home_dir) = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()) {
         return home_dir.join(APP_STATE_DIR);
     }
@@ -35,6 +39,13 @@ pub fn default_suppressed_threads_path() -> PathBuf {
     default_app_state_dir().join(SUPPRESSED_THREADS_FILE)
 }
 
+pub fn default_skins_path() -> PathBuf {
+    if let Some(path) = skins_path_for_tests() {
+        return path;
+    }
+    default_app_state_dir().join(SKINS_FILE)
+}
+
 pub fn default_proxy_log_path() -> PathBuf {
     if let Some(path) = proxy_log_path_for_tests() {
         return path;
@@ -51,10 +62,44 @@ fn settings_path_for_tests() -> Option<PathBuf> {
 }
 
 static SETTINGS_PATH_FOR_TESTS: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+static APP_STATE_DIR_FOR_TESTS: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+static SKINS_PATH_FOR_TESTS: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 static PROXY_LOG_PATH_FOR_TESTS: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+fn app_state_dir_for_tests() -> Option<PathBuf> {
+    APP_STATE_DIR_FOR_TESTS
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|path| path.clone())
+}
+
+pub fn set_app_state_dir_for_tests(path: Option<PathBuf>) -> Option<PathBuf> {
+    APP_STATE_DIR_FOR_TESTS
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|mut current| std::mem::replace(&mut *current, path))
+}
 
 pub fn set_settings_path_for_tests(path: Option<PathBuf>) -> Option<PathBuf> {
     SETTINGS_PATH_FOR_TESTS
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|mut current| std::mem::replace(&mut *current, path))
+}
+
+fn skins_path_for_tests() -> Option<PathBuf> {
+    SKINS_PATH_FOR_TESTS
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|path| path.clone())
+}
+
+pub fn set_skins_path_for_tests(path: Option<PathBuf>) -> Option<PathBuf> {
+    SKINS_PATH_FOR_TESTS
         .get_or_init(|| Mutex::new(None))
         .lock()
         .ok()

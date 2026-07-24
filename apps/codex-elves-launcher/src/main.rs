@@ -349,7 +349,9 @@ impl LaunchHooks for LauncherHooks {
         let app_dir = self.app_dir.clone();
         let bridge_runtime = self.bridge_runtime.clone();
         let task = tokio::spawn(async move {
-            let mut delay = std::time::Duration::from_secs(30);
+            let mut delay = codex_elves_core::launcher::bridge_watchdog_delay(
+                codex_elves_core::launcher::BridgeWatchdogStatus::Healthy,
+            );
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => break,
@@ -765,6 +767,17 @@ async fn try_inject_with_context(
         .web_socket_debugger_url
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("selected CDP target has no websocket URL"))?;
+    let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+        "bridge.inject_target_selected",
+        json!({
+            "debug_port": debug_port,
+            "helper_port": helper_port,
+            "target_id": target.id,
+            "target_title": target.title,
+            "target_url": target.url,
+            "target_count": targets.len()
+        }),
+    );
     runtime.set_websocket_url(websocket_url);
     let settings = codex_elves_core::settings::SettingsStore::default()
         .load()

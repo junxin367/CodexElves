@@ -1515,8 +1515,7 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
         .map(|index| format!("stale-request-{index}"))
         .collect::<Vec<_>>();
     std::fs::write(&proxy_log_path, format!("{}\n", old_proxy_log.join("\n"))).unwrap();
-    let previous_proxy_log_path =
-        codex_elves_core::paths::set_proxy_log_path_for_tests(Some(proxy_log_path.clone()));
+    let _proxy_log_guard = LauncherProxyLogPathGuard::set(proxy_log_path.clone());
     let status_store = StatusStore::new(temp.path().join("latest-status.json"));
     let events = Arc::new(Mutex::new(Vec::<String>::new()));
     let settings = BackendSettings {
@@ -1572,13 +1571,14 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
     assert!(before_stop.contains(&"select-helper:58000".to_string()));
     assert!(before_stop.contains(&"start-helper:45221".to_string()));
     assert!(!before_stop.contains(&"inject:9229:45221".to_string()));
+    let proxy_log = std::fs::read_to_string(&proxy_log_path).unwrap();
     assert_eq!(
-        std::fs::read_to_string(&proxy_log_path).unwrap(),
-        "{\"format\":\"codex-elves-proxy-index\",\"version\":1}\n"
+        proxy_log.lines().next(),
+        Some(r#"{"format":"codex-elves-proxy-index","version":1}"#)
     );
+    assert!(!proxy_log.contains("stale-request-"));
 
     handle.wait_for_codex_exit().await.unwrap();
-    codex_elves_core::paths::set_proxy_log_path_for_tests(previous_proxy_log_path);
 
     let after_stop = events.lock().unwrap().clone();
     assert!(after_stop.contains(&"wait-codex".to_string()));
@@ -1969,6 +1969,23 @@ impl LauncherSettingsPathGuard {
 impl Drop for LauncherSettingsPathGuard {
     fn drop(&mut self) {
         codex_elves_core::paths::set_settings_path_for_tests(self.previous.take());
+    }
+}
+
+struct LauncherProxyLogPathGuard {
+    previous: Option<PathBuf>,
+}
+
+impl LauncherProxyLogPathGuard {
+    fn set(path: PathBuf) -> Self {
+        let previous = codex_elves_core::paths::set_proxy_log_path_for_tests(Some(path));
+        Self { previous }
+    }
+}
+
+impl Drop for LauncherProxyLogPathGuard {
+    fn drop(&mut self) {
+        codex_elves_core::paths::set_proxy_log_path_for_tests(self.previous.take());
     }
 }
 

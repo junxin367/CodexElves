@@ -14,12 +14,13 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
   Calendar,
   Bell,
+  Check,
   CheckCircle2,
   CircleArrowUp,
   ChevronDown,
@@ -54,6 +55,7 @@ import {
   Sun,
   TestTube,
   Trash2,
+  Palette,
   Wrench,
   X,
   type LucideIcon,
@@ -72,6 +74,9 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { TooltipLayer } from "@/components/ui/tooltip-layer";
 import appIconUrl from "../src-tauri/icons/icon.png";
+import arinaHashimotoSkinUrl from "../../../assets/skins/builtin/arina-hashimoto.png";
+import dilrabaSkinUrl from "../../../assets/skins/builtin/dilraba.png";
+import jacksonYeeSkinUrl from "../../../assets/skins/builtin/jackson-yee.png";
 
 type Status = "ok" | "failed" | "not_implemented" | "not_checked" | string;
 
@@ -192,6 +197,7 @@ type BackendSettings = {
   codexAppImageOverlayEnabled: boolean;
   codexAppImageOverlayPath: string;
   codexAppImageOverlayOpacity: number;
+  codexAppActiveSkinId: string;
   codexGoalsEnabled: boolean;
   gptReasoningContinuation: boolean;
   gptReasoningContinuationMaxRounds: number;
@@ -406,6 +412,29 @@ type SettingsResult = CommandResult<{
   settings_path: string;
   codex_home: string;
   user_scripts: UserScriptInventory;
+}>;
+
+type Skin = {
+  id: string;
+  name: string;
+  kind: "image" | "color" | "gradient";
+  imagePath: string;
+  backgroundColor: string;
+  gradientFrom: string;
+  gradientTo: string;
+  gradientAngle: number;
+  opacity: number;
+  appearance: "auto" | "light" | "dark";
+  fit: "cover" | "contain";
+};
+
+type SkinsResult = CommandResult<{
+  skins: Skin[];
+  activeSkinId: string;
+}>;
+
+type SkinExportResult = CommandResult<{
+  json: string;
 }>;
 
 type RelayResult = CommandResult<{
@@ -795,7 +824,7 @@ type StartupResult = CommandResult<{
   showUpdate: boolean;
 }>;
 
-type Route = "overview" | "relay" | "localProxy" | "sessions" | "context" | "enhance" | "userScripts" | "radar" | "maintenance" | "about" | "settings";
+type Route = "overview" | "relay" | "localProxy" | "sessions" | "context" | "enhance" | "skins" | "userScripts" | "radar" | "maintenance" | "about" | "settings";
 type Theme = "dark" | "light";
 
 const routes: Array<{ id: Route; label: string; icon: LucideIcon; badge?: string }> = [
@@ -805,6 +834,7 @@ const routes: Array<{ id: Route; label: string; icon: LucideIcon; badge?: string
   { id: "sessions", label: "会话管理", icon: MessageCircle },
   { id: "context", label: "工具与插件", icon: Network },
   { id: "enhance", label: "页面增强", icon: Hammer },
+  { id: "skins", label: "皮肤管理", icon: Palette },
   { id: "userScripts", label: "脚本市场", icon: FileCode2 },
   { id: "maintenance", label: "安装维护", icon: Wrench },
   { id: "radar", label: "降智雷达", icon: TestTube },
@@ -871,6 +901,7 @@ const defaultSettings: BackendSettings = {
   codexAppImageOverlayEnabled: false,
   codexAppImageOverlayPath: "",
   codexAppImageOverlayOpacity: 35,
+  codexAppActiveSkinId: "",
   codexGoalsEnabled: false,
   gptReasoningContinuation: false,
   gptReasoningContinuationMaxRounds: 3,
@@ -1002,6 +1033,76 @@ function browserPreviewSettings(): BackendSettings {
 function updateBrowserPreviewSettings(settings: BackendSettings): BackendSettings {
   browserPreviewSettingsState = normalizeSettings(settings);
   return browserPreviewSettingsState;
+}
+
+let browserPreviewSkinsState: Skin[] | null = null;
+
+function builtinSkinBase(id: string, name: string): Skin {
+  return {
+    id,
+    name,
+    kind: "image",
+    imagePath: "",
+    backgroundColor: "",
+    gradientFrom: "",
+    gradientTo: "",
+    gradientAngle: 135,
+    opacity: 100,
+    appearance: "auto",
+    fit: "cover",
+  };
+}
+
+function builtinSkinColor(id: string, name: string, color: string): Skin {
+  return { ...builtinSkinBase(id, name), kind: "color", backgroundColor: color };
+}
+
+function builtinSkinGradient(id: string, name: string, from: string, to: string, angle: number): Skin {
+  return { ...builtinSkinBase(id, name), kind: "gradient", gradientFrom: from, gradientTo: to, gradientAngle: angle };
+}
+
+function builtinSkinImage(id: string, name: string, imagePath: string, opacity: number): Skin {
+  return { ...builtinSkinBase(id, name), imagePath, opacity };
+}
+
+// 与后端 crates/codex-elves-core/src/skin.rs 的 builtin_presets() 保持一致，仅供浏览器预览模式使用。
+function createBrowserPreviewBuiltinSkins(): Skin[] {
+  return [
+    builtinSkinImage("builtin-arina-hashimoto", "桥本有菜专属定制皮肤", arinaHashimotoSkinUrl, 35),
+    builtinSkinImage("builtin-jackson-yee", "易烊千玺专属定制皮肤", jacksonYeeSkinUrl, 32),
+    builtinSkinImage("builtin-dilraba", "迪丽热巴专属定制皮肤", dilrabaSkinUrl, 32),
+    builtinSkinColor("builtin-slate", "墨墨灰", "#1e293b"),
+    builtinSkinColor("builtin-ink", "深葡黑", "#170b26"),
+    builtinSkinGradient("builtin-aurora", "极光紫", "#4338ca", "#0ea5e9", 135),
+    builtinSkinGradient("builtin-sunset", "日落橘", "#f97316", "#7c3aed", 120),
+    builtinSkinGradient("builtin-forest", "深林绿", "#065f46", "#134e4a", 150),
+  ];
+}
+
+function browserPreviewSkins(): Skin[] {
+  if (!browserPreviewSkinsState) {
+    browserPreviewSkinsState = createBrowserPreviewBuiltinSkins();
+  }
+  return browserPreviewSkinsState;
+}
+
+function browserPreviewEnsureBuiltinSkins(): Skin[] {
+  const current = browserPreviewSkins();
+  const presets = createBrowserPreviewBuiltinSkins();
+  const presetIds = new Set(presets.map((skin) => skin.id));
+  const merged = [...current.filter((skin) => !presetIds.has(skin.id)), ...presets];
+  browserPreviewSkinsState = merged;
+  return merged;
+}
+
+function browserPreviewSkinsResult(message = "浏览器预览 mock 数据。"): CommandResult<{ skins: Skin[]; activeSkinId: string }> {
+  return browserPreviewResult(
+    {
+      skins: browserPreviewSkins(),
+      activeSkinId: browserPreviewSettings().codexAppActiveSkinId,
+    },
+    message,
+  );
 }
 
 function browserPreviewContextEntries(settings = browserPreviewSettings()): CodexContextEntries {
@@ -1603,7 +1704,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
     case "startup_options":
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
-      return Promise.resolve(browserPreviewResult({ currentVersion: "0.3.3", updateAvailable: false }) as T);
+      return Promise.resolve(browserPreviewResult({ currentVersion: "0.3.4", updateAvailable: false }) as T);
     case "load_overview":
       return Promise.resolve(browserPreviewResult({
         codex_app: { status: "found", path: settings.codexAppPath },
@@ -1618,7 +1719,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.3.3",
+        current_version: "0.3.4",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -1656,6 +1757,53 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         user_scripts: { enabled: true, scripts: [] },
       }, "浏览器预览已保存到内存。") as T);
     }
+    case "list_skins":
+      return Promise.resolve(browserPreviewSkinsResult("已读取皮肤列表。") as unknown as T);
+    case "install_builtin_skin_presets":
+      browserPreviewEnsureBuiltinSkins();
+      return Promise.resolve(browserPreviewSkinsResult("内置预设已同步。") as unknown as T);
+    case "save_skin": {
+      const skin = args?.skin as Skin | undefined;
+      if (skin && skin.id) {
+        const current = browserPreviewSkins();
+        const index = current.findIndex((item) => item.id === skin.id);
+        browserPreviewSkinsState = index >= 0
+          ? current.map((item, itemIndex) => (itemIndex === index ? skin : item))
+          : [...current, skin];
+      }
+      return Promise.resolve(browserPreviewSkinsResult("皮肤已保存。") as unknown as T);
+    }
+    case "delete_skin": {
+      const id = typeof args?.id === "string" ? args.id : "";
+      browserPreviewSkinsState = browserPreviewSkins().filter((item) => item.id !== id);
+      if (browserPreviewSettings().codexAppActiveSkinId === id) {
+        updateBrowserPreviewSettings({ ...browserPreviewSettings(), codexAppActiveSkinId: "" });
+      }
+      return Promise.resolve(browserPreviewSkinsResult("皮肤已删除。") as unknown as T);
+    }
+    case "activate_skin": {
+      const id = typeof args?.id === "string" ? args.id : "";
+      const normalized = updateBrowserPreviewSettings({ ...browserPreviewSettings(), codexAppActiveSkinId: id });
+      return Promise.resolve(browserPreviewResult({
+        settings: normalized,
+        settings_path: "浏览器预览 mock",
+        codex_home: browserPreviewCodexHome(normalized),
+        user_scripts: { enabled: true, scripts: [] },
+      }, id ? "皮肤已切换。" : "已关闭皮肤。") as T);
+    }
+    case "clone_skin": {
+      const id = typeof args?.id === "string" ? args.id : "";
+      const source = browserPreviewSkins().find((item) => item.id === id);
+      if (source) {
+        const cloned: Skin = { ...source, id: `skin-${Date.now()}`, name: `${source.name} 副本` };
+        browserPreviewSkinsState = [...browserPreviewSkins(), cloned];
+      }
+      return Promise.resolve(browserPreviewSkinsResult("皮肤已克隆。") as unknown as T);
+    }
+    case "export_skin_to_path":
+      return Promise.resolve(browserPreviewResult({}, "浏览器预览不支持导出到文件。") as T);
+    case "import_skin_from_path":
+      return Promise.resolve(browserPreviewSkinsResult("浏览器预览不支持从文件导入。") as unknown as T);
     case "relay_status":
       return Promise.resolve(browserPreviewResult(browserPreviewRelayPayload()) as T);
     case "local_proxy_status":
@@ -1838,7 +1986,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           httpStatus: 200,
           endpoint: `${profile?.baseUrl || active.baseUrl || active.upstreamBaseUrl}/responses`,
           responsePreview: `hi from ${model}`,
-        }, `已向「${profile?.name || active.name}」用模型「${model}」发送 hi，HTTP 200。响应：hi from ${model}`) as T,
+        }, `已向「${profile?.name || active.name}」用模型「${model}」发送 hi，HTTP 200。`) as T,
       );
     }
     case "switch_relay_profile": {
@@ -1908,6 +2056,7 @@ export function App() {
   const [watcher, setWatcher] = useState<WatcherResult | null>(null);
   const [update, setUpdate] = useState<UpdateResult | null>(null);
   const [scriptMarket, setScriptMarket] = useState<ScriptMarketResult | null>(null);
+  const [skins, setSkins] = useState<SkinsResult | null>(null);
   const [codexRadar, setCodexRadar] = useState<CodexRadarResult | null>(null);
   const [launchForm, setLaunchForm] = useState({
     appPath: "",
@@ -2353,6 +2502,11 @@ export function App() {
     if (next === "enhance") {
       await refreshRemotePluginMarketplace(true);
     }
+    if (next === "skins") {
+      await refreshSkins(true);
+      await refreshSettings(true);
+      await installBuiltinSkinPresets(true);
+    }
     if (next === "settings") await refreshSettings(true);
     if (next === "userScripts") {
       await refreshSettings(true);
@@ -2642,6 +2796,120 @@ export function App() {
     }
   };
 
+  const refreshSkins = async (silent = true) => {
+    const result = await run(() => call<SkinsResult>("list_skins"));
+    if (result) {
+      setSkins(result);
+      if (!silent) showNotice("皮肤管理", result.message, result.status);
+    }
+    return result;
+  };
+
+  const saveSkin = async (skin: Skin, silent = false) => {
+    const result = await run(() => call<SkinsResult>("save_skin", { skin }));
+    if (result) {
+      setSkins(result);
+      if (!silent) showNotice("皮肤管理", result.message, result.status);
+    }
+    return result;
+  };
+
+  const deleteSkin = async (id: string) => {
+    const result = await run(() => call<SkinsResult>("delete_skin", { id }));
+    if (result) {
+      setSkins(result);
+      showNotice("皮肤管理", result.message, result.status);
+      void refreshSettings(true);
+    }
+    return result;
+  };
+
+  const activateSkin = async (id: string) => {
+    const result = await run(() => call<SettingsResult>("activate_skin", { id }));
+    if (result) {
+      setSettings(result);
+      setSettingsForm(normalizeSettings(result.settings));
+      showNotice("皮肤管理", result.message, result.status);
+      void refreshSkins(true);
+    }
+    return result;
+  };
+
+  const cloneSkin = async (id: string) => {
+    const result = await run(() => call<SkinsResult>("clone_skin", { id }));
+    if (result) {
+      setSkins(result);
+      showNotice("皮肤管理", result.message, result.status);
+    }
+    return result;
+  };
+
+  const installBuiltinSkinPresets = async (silent = true) => {
+    const result = await run(() => call<SkinsResult>("install_builtin_skin_presets"));
+    if (result) {
+      setSkins(result);
+      if (!silent) showNotice("皮肤管理", result.message, result.status);
+    }
+    return result;
+  };
+
+  const exportSkin = async (id: string, name: string) => {
+    let target: unknown;
+    try {
+      target = await save({
+        title: "导出皮肤",
+        defaultPath: `${name || "skin"}.json`,
+        filters: [{ name: "皮肤配置", extensions: ["json"] }],
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      showNotice("皮肤管理", `打开保存对话框失败：${message}`, "failed");
+      return;
+    }
+    if (typeof target !== "string" || !target.trim()) return;
+    const result = await run(() => call<CommandResult<Record<string, never>>>("export_skin_to_path", { id, path: target }));
+    if (result) showNotice("皮肤管理", result.message, result.status);
+  };
+
+  const importSkin = async () => {
+    let selected: unknown;
+    try {
+      selected = await open({
+        directory: false,
+        multiple: false,
+        title: "导入皮肤",
+        filters: [{ name: "皮肤配置", extensions: ["json"] }],
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      showNotice("皮肤管理", `打开选择器失败：${message}`, "failed");
+      return;
+    }
+    if (typeof selected !== "string" || !selected.trim()) return;
+    const result = await run(() => call<SkinsResult>("import_skin_from_path", { path: selected }));
+    if (result) {
+      setSkins(result);
+      showNotice("皮肤管理", result.message, result.status);
+    }
+  };
+
+  const chooseSkinImage = async (): Promise<string | null> => {
+    let selected: unknown;
+    try {
+      selected = await open({
+        directory: false,
+        multiple: false,
+        title: "选择皮肤背景图片",
+        filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"] }],
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      showNotice("皮肤管理", `打开选择器失败：${message}`, "failed");
+      return null;
+    }
+    return typeof selected === "string" && selected.trim() ? selected.trim() : null;
+  };
+
   const refreshProviderSyncTargets = async (silent = false) => {
     const result = await run(() => call<ProviderSyncTargetsResult>("load_provider_sync_targets"));
     if (result) {
@@ -2838,9 +3106,11 @@ export function App() {
     return run(() => call<RelayProfileTestResult>("test_relay_profile", { profile, model }));
   };
 
-  const fetchRelayProfileModels = async (profile: RelayProfile) => {
+  const fetchRelayProfileModels = async (profile: RelayProfile, silent = false) => {
     const result = await run(() => call<RelayProfileModelsResult>("fetch_relay_profile_models", { profile }));
-    if (result) showNotice("模型列表", result.message, result.status);
+    if (result && (!silent || !isSuccessStatus(result.status))) {
+      showNotice("模型列表", result.message, result.status);
+    }
     return result && isSuccessStatus(result.status) ? result.models : null;
   };
 
@@ -3155,6 +3425,15 @@ export function App() {
       refreshSettings,
       resetSettings,
       resetImageOverlaySettings,
+      refreshSkins,
+      saveSkin,
+      deleteSkin,
+      activateSkin,
+      cloneSkin,
+      exportSkin,
+      importSkin,
+      installBuiltinSkinPresets,
+      chooseSkinImage,
       chooseCodexAppPath: async (mode: "folder" | "file") => {
         let selected: unknown;
         try {
@@ -3464,6 +3743,7 @@ export function App() {
             />
           ) : null}
           {route === "userScripts" ? <UserScriptsScreen settings={settings} market={scriptMarket} actions={actions} /> : null}
+          {route === "skins" ? <SkinsScreen skins={skins} activeSkinId={settingsForm.codexAppActiveSkinId} actions={actions} /> : null}
           {route === "radar" ? <CodexRadarScreen radar={codexRadar} actions={actions} /> : null}
           {route === "maintenance" ? (
             <MaintenanceScreen
@@ -3553,6 +3833,15 @@ type Actions = {
   refreshSettings: (silent?: boolean) => Promise<BackendSettings | null>;
   resetSettings: () => Promise<void>;
   resetImageOverlaySettings: () => Promise<void>;
+  refreshSkins: (silent?: boolean) => Promise<SkinsResult | null>;
+  saveSkin: (skin: Skin, silent?: boolean) => Promise<SkinsResult | null>;
+  deleteSkin: (id: string) => Promise<SkinsResult | null>;
+  activateSkin: (id: string) => Promise<SettingsResult | null>;
+  cloneSkin: (id: string) => Promise<SkinsResult | null>;
+  exportSkin: (id: string, name: string) => Promise<void>;
+  importSkin: () => Promise<void>;
+  installBuiltinSkinPresets: (silent?: boolean) => Promise<SkinsResult | null>;
+  chooseSkinImage: () => Promise<string | null>;
   chooseCodexAppPath: (mode: "folder" | "file") => Promise<void>;
   clearCodexAppPath: () => Promise<void>;
   chooseCodexHomePath: () => Promise<void>;
@@ -3602,7 +3891,7 @@ type Actions = {
   ) => Promise<BackendSettings | null>;
   deleteContextEntry: (settings: BackendSettings, kind: ContextKind, id: string) => Promise<BackendSettings | null>;
   testRelayProfile: (profile: RelayProfile, model?: string) => Promise<RelayProfileTestResult | null>;
-  fetchRelayProfileModels: (profile: RelayProfile) => Promise<string[] | null>;
+  fetchRelayProfileModels: (profile: RelayProfile, silent?: boolean) => Promise<string[] | null>;
   probeRelayProfileResponsesWebsocket: (profile: RelayProfile) => Promise<ResponsesWebsocketCapability | null>;
   switchRelayProfile: (settings: BackendSettings, previousActiveRelayId?: string) => Promise<void>;
   relaySwitching: boolean;
@@ -4524,18 +4813,18 @@ function RelayProfileTestDialog({
   onClose: () => void;
   actions: Actions;
 }) {
-  const initialModel = relayProfileDefaultTestModel(profile, form);
-  const [model, setModel] = useState(initialModel);
-  const [choices, setChoices] = useState<string[]>(() => relayProfileKnownModels(profile, initialModel));
+  const fallbackModel = relayProfileDefaultTestModel(profile, form);
+  const [model, setModel] = useState("");
+  const [choices, setChoices] = useState<string[]>(() => relayProfileKnownModels(profile, fallbackModel));
   const [fetchingModels, setFetchingModels] = useState(false);
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState<RelayProfileTestResult | null>(null);
 
   useEffect(() => {
-    setModel(initialModel);
-    setChoices(relayProfileKnownModels(profile, initialModel));
+    setModel("");
+    setChoices(relayProfileKnownModels(profile, fallbackModel));
     setResult(null);
-  }, [profile.id, initialModel]);
+  }, [profile.id, fallbackModel]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -4550,9 +4839,9 @@ function RelayProfileTestDialog({
     const loadModels = async () => {
       setFetchingModels(true);
       try {
-        const models = await actions.fetchRelayProfileModels(profile);
+        const models = await actions.fetchRelayProfileModels(profile, true);
         if (!cancelled && models?.length) {
-          setChoices(uniqueStrings([...relayProfileKnownModels(profile, initialModel), ...models]));
+          setChoices(uniqueStrings([...relayProfileKnownModels(profile, fallbackModel), ...models]));
         }
       } finally {
         if (!cancelled) setFetchingModels(false);
@@ -4562,15 +4851,15 @@ function RelayProfileTestDialog({
     return () => {
       cancelled = true;
     };
-  }, [actions, profile.id, initialModel]);
+  }, [actions, profile.id, fallbackModel]);
 
   const sendTest = async () => {
     const testModel = model.trim();
-    if (!testModel || sending) return;
+    if (sending) return;
     setSending(true);
     setResult(null);
     try {
-      const nextResult = await actions.testRelayProfile(profile, testModel);
+      const nextResult = await actions.testRelayProfile(profile, testModel || undefined);
       setResult(nextResult);
     } finally {
       setSending(false);
@@ -4589,18 +4878,17 @@ function RelayProfileTestDialog({
             <X className="h-4 w-4" />
           </Button>
         </div>
-        <Field label="发送模型">
+        <Field label="发送模型（可选）">
           <ModelChoiceInput
             choices={choices}
             onChange={(value) => {
               setModel(value);
               setResult(null);
             }}
-            placeholder={fetchingModels ? "正在读取模型列表，可直接输入模型" : "选择或输入模型"}
+            placeholder={fetchingModels ? "正在读取模型列表" : "点击选择模型，留空使用默认模型"}
             value={model}
           />
         </Field>
-        {fetchingModels ? <p className="field-hint">正在读取模型列表；也可以直接输入模型。</p> : null}
         {result ? (
           <div className={`relay-test-result ${isSuccessStatus(result.status) ? "ok" : "bad"}`}>
             <strong>{result.message}</strong>
@@ -4610,7 +4898,7 @@ function RelayProfileTestDialog({
         ) : null}
         <div className="relay-test-actions">
           <Toolbar>
-            <Button disabled={sending || !model.trim()} onClick={() => void sendTest()}>
+            <Button disabled={sending} onClick={() => void sendTest()}>
               <TestTube className="h-4 w-4" />
               {sending ? "发送中" : "发送"}
             </Button>
@@ -4987,6 +5275,279 @@ function RadarTrend({ runs }: { runs: CodexRadarIqRun[] }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function skinPreviewSrc(path: string): string {
+  if (!path) return "";
+  if (/^(?:data:|blob:|https?:|\/)/i.test(path)) return path;
+  try {
+    return convertFileSrc(path);
+  } catch {
+    return "";
+  }
+}
+
+function newSkinDraft(): Skin {
+  const id = typeof crypto?.randomUUID === "function" ? crypto.randomUUID() : `skin-${Date.now()}`;
+  return {
+    id,
+    name: "新皮肤",
+    kind: "image",
+    imagePath: "",
+    backgroundColor: "#1e293b",
+    gradientFrom: "#4338ca",
+    gradientTo: "#0ea5e9",
+    gradientAngle: 135,
+    opacity: 35,
+    appearance: "auto",
+    fit: "cover",
+  };
+}
+
+function skinThumbStyle(skin: Skin): React.CSSProperties {
+  if (skin.kind === "color") return { background: skin.backgroundColor || "#1e293b" };
+  if (skin.kind === "gradient") {
+    return { background: `linear-gradient(${skin.gradientAngle}deg, ${skin.gradientFrom || "#4338ca"}, ${skin.gradientTo || "#0ea5e9"})` };
+  }
+  return {};
+}
+
+function SkinEditorPreview({ skin }: { skin: Skin }) {
+  const preview = skin.kind === "image" ? skinPreviewSrc(skin.imagePath) : "";
+
+  return (
+    <div className="skin-editor-preview" data-appearance={skin.appearance}>
+      <div className="skin-preview-shell" aria-hidden="true">
+        <div className="skin-preview-sidebar">
+          <div className="skin-preview-brand">
+            <span />
+            <i />
+          </div>
+          <div className="skin-preview-nav">
+            <span className="is-active" />
+            <span />
+            <span />
+            <span />
+            <span />
+          </div>
+        </div>
+        <div className="skin-preview-main">
+          <div className="skin-preview-header">
+            <span />
+            <div>
+              <i />
+              <i />
+            </div>
+          </div>
+          <div className="skin-preview-conversation">
+            <div className="skin-preview-message is-user">
+              <span />
+              <span />
+            </div>
+            <div className="skin-preview-message is-assistant">
+              <span />
+              <span />
+              <span />
+            </div>
+          </div>
+          <div className="skin-preview-composer">
+            <span />
+            <i />
+          </div>
+        </div>
+      </div>
+      <div
+        className="skin-preview-visual"
+        style={{ opacity: skin.opacity / 100, ...skinThumbStyle(skin) }}
+        aria-hidden="true"
+      >
+        {skin.kind === "image" && preview ? (
+          <img src={preview} alt="" style={{ objectFit: skin.fit }} />
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function SkinsScreen({
+  skins,
+  activeSkinId,
+  actions,
+}: {
+  skins: SkinsResult | null;
+  activeSkinId: string;
+  actions: Actions;
+}) {
+  const list = skins?.skins ?? [];
+  const builtinList = list.filter((skin) => skin.id.startsWith("builtin-"));
+  const userList = list.filter((skin) => !skin.id.startsWith("builtin-"));
+  const [draft, setDraft] = useState<Skin | null>(null);
+  const isNew = !!draft && !list.some((skin) => skin.id === draft.id);
+  const updateDraft = (patch: Partial<Skin>) => setDraft((current) => (current ? { ...current, ...patch } : current));
+
+  const saveDraft = async () => {
+    if (!draft) return;
+    if (draft.kind === "image" && !draft.imagePath.trim()) {
+      void actions.showMessage("皮肤管理", "请先选择背景图片。", "failed");
+      return;
+    }
+    const result = await actions.saveSkin(draft);
+    if (result && isSuccessStatus(result.status)) setDraft(null);
+  };
+
+  const renderCard = (skin: Skin) => {
+    const active = skin.id === activeSkinId;
+    const preview = skin.kind === "image" ? skinPreviewSrc(skin.imagePath) : "";
+    const isBuiltin = skin.id.startsWith("builtin-");
+    return (
+      <div className={`skin-card${active ? " skin-card-active" : ""}`} key={skin.id}>
+        {active ? (
+          <span className="skin-active-indicator" aria-label="使用中" title="使用中">
+            <Check aria-hidden="true" strokeWidth={3} />
+          </span>
+        ) : null}
+        <div className="skin-card-thumb">
+          <div className="skin-card-visual" style={{ opacity: skin.opacity / 100, ...skinThumbStyle(skin) }}>
+            {skin.kind === "image" ? (
+              preview ? (
+                <img
+                  src={preview}
+                  alt={skin.name}
+                  style={{ objectFit: skin.fit }}
+                />
+              ) : (
+                <span>无预览</span>
+              )
+            ) : null}
+          </div>
+        </div>
+        <div className="skin-card-body">
+          <strong>{skin.name || "未命名"}</strong>
+        </div>
+        <div className="skin-card-actions">
+          <Button size="sm" onClick={() => void actions.activateSkin(skin.id)} disabled={active}>
+            {active ? "已启用" : "启用"}
+          </Button>
+          {isBuiltin ? (
+            <Button size="sm" variant="secondary" onClick={() => void actions.cloneSkin(skin.id)}>克隆</Button>
+          ) : (
+            <Button size="sm" variant="secondary" onClick={() => setDraft({ ...skin })}>编辑</Button>
+          )}
+          <Button size="sm" variant="secondary" onClick={() => void actions.exportSkin(skin.id, skin.name)}>导出</Button>
+          {isBuiltin ? null : (
+            <Button size="sm" variant="ghost" onClick={() => void actions.deleteSkin(skin.id)}>
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="skins-screen">
+      <Panel>
+        <CardHead title="皮肤管理" detail="为 Codex 界面设置背景主题（图片覆盖的升级），可保存多套并一键切换。" />
+        <CardContent>
+          <div className="skins-toolbar">
+            <Button onClick={() => setDraft(newSkinDraft())}>新建皮肤</Button>
+            <Button variant="secondary" onClick={() => void actions.importSkin()}>导入皮肤</Button>
+            <Button variant="secondary" onClick={() => void actions.activateSkin("")} disabled={!activeSkinId}>
+              关闭皮肤
+            </Button>
+          </div>
+          {userList.length === 0 ? (
+            <div className="empty">还没有自定义皮肤，点“新建皮肤”或先使用下方内置预设。</div>
+          ) : (
+            <div className="skins-grid">{userList.map(renderCard)}</div>
+          )}
+        </CardContent>
+      </Panel>
+      {builtinList.length > 0 ? (
+        <Panel className={draft ? "is-hidden" : ""}>
+          <CardHead title="内置预设" detail="图片皮肤优先展示；“克隆”可基于任一预设创建可编辑的新皮肤。" />
+          <CardContent>
+            <div className="skins-grid">{builtinList.map(renderCard)}</div>
+          </CardContent>
+        </Panel>
+      ) : null}
+      {draft ? (
+        <Panel>
+          <CardHead title={isNew ? "新建皮肤" : "编辑皮肤"} detail="调整后保存；当前使用中的皮肤会同步到已运行的 Codex。" />
+          <CardContent>
+            <div className="skin-editor">
+              <div className="skin-editor-controls">
+                <div className="form-row">
+                  <Field label="名称">
+                    <Input value={draft.name} onChange={(event) => updateDraft({ name: event.currentTarget.value })} />
+                  </Field>
+                  <Field label="背景类型">
+                    <SelectMenu
+                      value={draft.kind}
+                      options={[{ value: "image", label: "图片" }, { value: "color", label: "纯色" }, { value: "gradient", label: "渐变" }]}
+                      onChange={(next) => updateDraft({ kind: next as Skin["kind"] })}
+                    />
+                  </Field>
+                </div>
+                {draft.kind === "image" ? (
+                  <Field label="背景图片">
+                    <div className="skin-image-row">
+                      <Input value={draft.imagePath} onChange={(event) => updateDraft({ imagePath: event.currentTarget.value })} placeholder="图片本地路径" />
+                      <Button variant="secondary" onClick={async () => { const path = await actions.chooseSkinImage(); if (path) updateDraft({ imagePath: path }); }}>选择图片</Button>
+                    </div>
+                  </Field>
+                ) : draft.kind === "color" ? (
+                  <Field label="背景色">
+                    <input type="color" value={draft.backgroundColor || "#1e293b"} onChange={(event) => updateDraft({ backgroundColor: event.currentTarget.value })} />
+                  </Field>
+                ) : (
+                  <div className="form-row">
+                    <Field label="起始色">
+                      <input type="color" value={draft.gradientFrom || "#4338ca"} onChange={(event) => updateDraft({ gradientFrom: event.currentTarget.value })} />
+                    </Field>
+                    <Field label="终止色">
+                      <input type="color" value={draft.gradientTo || "#0ea5e9"} onChange={(event) => updateDraft({ gradientTo: event.currentTarget.value })} />
+                    </Field>
+                    <Field label={`角度 ${draft.gradientAngle}°`}>
+                      <input type="range" min={0} max={360} value={draft.gradientAngle} onChange={(event) => updateDraft({ gradientAngle: clampNumber(Number(event.currentTarget.value), 0, 360) })} />
+                    </Field>
+                  </div>
+                )}
+                <Field label={`透明度 ${draft.opacity}%`}>
+                  <input type="range" min={1} max={100} value={draft.opacity} onChange={(event) => updateDraft({ opacity: clampNumber(Number(event.currentTarget.value), 1, 100) })} />
+                </Field>
+                <div className="form-row">
+                  <Field label="界面外观">
+                    <SelectMenu
+                      value={draft.appearance}
+                      options={[{ value: "auto", label: "跟随系统" }, { value: "light", label: "浅色" }, { value: "dark", label: "深色" }]}
+                      onChange={(next) => updateDraft({ appearance: next as Skin["appearance"] })}
+                    />
+                  </Field>
+                  {draft.kind === "image" ? (
+                    <Field label="铺法">
+                      <SelectMenu
+                        value={draft.fit}
+                        options={[{ value: "cover", label: "铺满裁切" }, { value: "contain", label: "完整不裁" }]}
+                        onChange={(next) => updateDraft({ fit: next as Skin["fit"] })}
+                      />
+                    </Field>
+                  ) : null}
+                </div>
+                <div className="skin-editor-actions">
+                  <Button onClick={() => void saveDraft()}>保存皮肤</Button>
+                  <Button variant="secondary" onClick={() => setDraft(null)}>取消</Button>
+                </div>
+              </div>
+              <div className="skin-editor-preview-column">
+                <SkinEditorPreview skin={draft} />
+              </div>
+            </div>
+          </CardContent>
+        </Panel>
+      ) : null}
     </div>
   );
 }
@@ -5617,51 +6178,12 @@ function SettingsScreen({
               onChange={(event) => onFormChange({ ...form, cliWrapperApiKey: event.currentTarget.value })}
             />
           </Field>
-          <div className="settings-block">
-            <label className="check-row">
-              <input
-                checked={form.codexAppImageOverlayEnabled}
-                onChange={(event) =>
-                  onFormChange({ ...form, codexAppImageOverlayEnabled: event.currentTarget.checked })
-                }
-                type="checkbox"
-              />
-              <span>启用 Codex 图片覆盖层</span>
-            </label>
-            <div className="form-row">
-              <Field label="覆盖图片">
-                <Input
-                  value={form.codexAppImageOverlayPath}
-                  onChange={(event) => onFormChange({ ...form, codexAppImageOverlayPath: event.currentTarget.value })}
-                  placeholder="选择 png / jpg / webp / gif / bmp"
-                />
-              </Field>
-              <Toolbar>
-                <Button variant="secondary" onClick={() => void actions.chooseImageOverlayPath()}>
-                  选择图片
-                </Button>
-              </Toolbar>
-            </div>
-            <Field label={`透明度 ${form.codexAppImageOverlayOpacity}%`}>
-              <Input
-                min={1}
-                max={100}
-                type="range"
-                value={form.codexAppImageOverlayOpacity}
-                onChange={(event) =>
-                  onFormChange({
-                    ...form,
-                    codexAppImageOverlayOpacity: clampNumber(Number(event.currentTarget.value), 1, 100),
-                  })
-                }
-              />
-            </Field>
+          <div className="hint-line">
+            <Palette className="h-4 w-4" />
+            <span>界面背景主题已升级为“皮肤管理”，请到左侧“皮肤管理”页创建和切换。</span>
           </div>
           <Toolbar>
             <Button onClick={() => void actions.saveSettings()}>保存设置</Button>
-            <Button variant="secondary" onClick={() => void actions.resetImageOverlaySettings()}>
-              重置背景
-            </Button>
           </Toolbar>
         </CardContent>
       </Panel>
@@ -8969,6 +9491,7 @@ function routeSubtitle(route: Route) {
     sessions: "查看、删除和修复 Codex 本地会话",
     context: "独立管理 MCP、Skills、Plugins",
     enhance: "会话删除、导出、项目移动和脚本能力",
+    skins: "为 Codex 界面设置背景主题与切换",
     userScripts: "内置和用户自定义脚本清单",
     radar: "读取 codexradar.com 的模型 IQ 与近日报告",
     maintenance: "入口安装、修复、Watcher 与手动启动",
@@ -10155,19 +10678,13 @@ function relayPrefersNativeResponsesWebsocket(profile: RelayProfile): boolean {
     && relaySupportsNativeResponsesWebsocket(profile);
 }
 
-function responsesWebsocketInputsChanged(
+function responsesWebsocketEndpointChanged(
   profile: RelayProfile,
   patch: Partial<RelayProfile>,
 ): boolean {
   if ("baseUrl" in patch && (patch.baseUrl || "") !== profile.baseUrl) return true;
-  if ("upstreamBaseUrl" in patch && (patch.upstreamBaseUrl || "") !== profile.upstreamBaseUrl) return true;
-  if ("protocol" in patch && patch.protocol !== profile.protocol) return true;
-  if (
-    "modelMappings" in patch
-    && JSON.stringify(normalizeRelayModelMappings(patch.modelMappings)) !== JSON.stringify(profile.modelMappings)
-  ) return true;
-  return "systemPromptOverride" in patch
-    && (patch.systemPromptOverride || "") !== profile.systemPromptOverride;
+  return "upstreamBaseUrl" in patch
+    && (patch.upstreamBaseUrl || "") !== profile.upstreamBaseUrl;
 }
 
 function withGeneratedRelayFiles(profile: RelayProfile): RelayProfile {
@@ -10283,7 +10800,7 @@ function applyRelayProfilePatchToFiles(
   options: { allowGenerateFiles?: boolean } = {},
 ): RelayProfile {
   let next: RelayProfile = { ...profile, ...patch };
-  if (responsesWebsocketInputsChanged(profile, patch)) {
+  if (responsesWebsocketEndpointChanged(profile, patch)) {
     next.responsesWebsocket = emptyResponsesWebsocketCapability();
   } else {
     next.responsesWebsocket = normalizeResponsesWebsocketCapability(next);

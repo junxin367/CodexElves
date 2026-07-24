@@ -18,7 +18,7 @@ use crate::settings::{BackendSettings, RelayProtocol, SettingsStore, normalize_c
 use crate::status::{LaunchStatus, StatusStore};
 
 static BRIDGE_TARGET_CACHE: OnceLock<std::sync::Mutex<HashMap<u16, String>>> = OnceLock::new();
-const BRIDGE_WATCHDOG_HEALTHY_INTERVAL: Duration = Duration::from_secs(30);
+const BRIDGE_WATCHDOG_HEALTHY_INTERVAL: Duration = Duration::from_secs(5);
 const BRIDGE_WATCHDOG_RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_HELPER_CONNECTIONS: usize = 64;
 const HELPER_REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(15);
@@ -4000,6 +4000,17 @@ async fn try_inject(
         .web_socket_debugger_url
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("selected CDP target has no websocket URL"))?;
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "bridge.inject_target_selected",
+        serde_json::json!({
+            "debug_port": debug_port,
+            "helper_port": helper_port,
+            "target_id": target.id,
+            "target_title": target.title,
+            "target_url": target.url,
+            "target_count": targets.len()
+        }),
+    );
     let settings = SettingsStore::default().load().unwrap_or_default();
     let script = crate::assets::bootstrap_injection_script_with_settings(helper_port, &settings);
     let ctx = crate::routes::BridgeContext::core(Arc::new(
@@ -4423,14 +4434,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bridge_watchdog_uses_slow_healthy_checks_and_fast_recovery() {
+    fn bridge_watchdog_checks_every_five_seconds() {
         assert_eq!(
             bridge_watchdog_delay(BridgeWatchdogStatus::Healthy),
-            Duration::from_secs(30)
+            Duration::from_secs(5)
         );
         assert_eq!(
             bridge_watchdog_delay(BridgeWatchdogStatus::Reinjected),
-            Duration::from_secs(30)
+            Duration::from_secs(5)
         );
         assert_eq!(
             bridge_watchdog_delay(BridgeWatchdogStatus::Unhealthy),

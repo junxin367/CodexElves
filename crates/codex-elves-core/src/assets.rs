@@ -10,7 +10,7 @@ use crate::settings::BackendSettings;
 
 const RENDERER_BOOTSTRAP_SCRIPT: &str = include_str!("../../../assets/inject/renderer-inject.js");
 const RENDERER_FEATURES_SCRIPT: &str = include_str!("../../../assets/inject/renderer-features.js");
-pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20260722-11";
+pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20260724-12";
 
 pub fn renderer_script() -> &'static str {
     RENDERER_FEATURES_SCRIPT
@@ -381,24 +381,87 @@ fn installed_plugins_from_config(home: &Path) -> std::collections::BTreeSet<Stri
 }
 
 pub fn image_overlay_config(helper_port: u16, settings: &BackendSettings) -> Value {
-    let has_path = !settings.codex_app_image_overlay_path.trim().is_empty();
-    let enabled = settings.codex_app_image_overlay_enabled && has_path;
-    let data_url = if enabled {
-        image_file_data_uri(Path::new(settings.codex_app_image_overlay_path.trim()))
-            .unwrap_or_default()
+    // 优先用激活皮肤；无激活皮肤时回退到旧图片覆盖三字段（兼容旧配置）。
+    let active = resolve_active_skin_visual(settings);
+    let has_path = !active.image_path.trim().is_empty();
+    let data_url = if has_path {
+        image_file_data_uri(Path::new(active.image_path.trim())).unwrap_or_default()
     } else {
         String::new()
     };
+    let enabled = has_path && !data_url.is_empty();
+    // 非图片背景（纯色/渐变）无需图片路径即可启用，由前端直接用 CSS 绘制。
+    let is_non_image_kind = matches!(active.kind.as_str(), "color" | "gradient");
+    let enabled = enabled || is_non_image_kind;
     json!({
-        "enabled": enabled && !data_url.is_empty(),
-        "opacity": f64::from(settings.codex_app_image_overlay_opacity.clamp(1, 100)) / 100.0,
+        "enabled": enabled,
+        "opacity": f64::from(active.opacity.clamp(1, 100)) / 100.0,
         "dataUrl": data_url,
-        "imageUrl": if enabled {
+        "appearanceEnabled": active.appearance_enabled,
+        "appearance": active.appearance,
+        "fit": active.fit,
+        "kind": active.kind,
+        "backgroundColor": active.background_color,
+        "gradientFrom": active.gradient_from,
+        "gradientTo": active.gradient_to,
+        "gradientAngle": active.gradient_angle,
+        "imageUrl": if has_path && !data_url.is_empty() {
             format!("http://127.0.0.1:{helper_port}/overlay/image")
         } else {
             String::new()
         },
     })
+}
+
+struct ActiveSkinVisual {
+    image_path: String,
+    opacity: u8,
+    appearance_enabled: bool,
+    appearance: String,
+    fit: String,
+    kind: String,
+    background_color: String,
+    gradient_from: String,
+    gradient_to: String,
+    gradient_angle: u16,
+}
+
+/// 解析当前应生效的背景视觉：有激活皮肤则用皮肤，否则回退到旧 overlay 字段。
+fn resolve_active_skin_visual(settings: &BackendSettings) -> ActiveSkinVisual {
+    let active_id = settings.codex_app_active_skin_id.trim();
+    if !active_id.is_empty() {
+        if let Some(skin) = crate::skin::find_skin(active_id) {
+            return ActiveSkinVisual {
+                image_path: skin.image_path,
+                opacity: skin.opacity,
+                appearance_enabled: true,
+                appearance: skin.appearance,
+                fit: skin.fit,
+                kind: skin.kind,
+                background_color: skin.background_color,
+                gradient_from: skin.gradient_from,
+                gradient_to: skin.gradient_to,
+                gradient_angle: skin.gradient_angle,
+            };
+        }
+    }
+    // 回退：旧版图片覆盖（未启用则 image_path 为空，自然不显示）。
+    ActiveSkinVisual {
+        image_path: if settings.codex_app_image_overlay_enabled {
+            settings.codex_app_image_overlay_path.clone()
+        } else {
+            String::new()
+        },
+        opacity: settings.codex_app_image_overlay_opacity,
+        appearance_enabled: false,
+        appearance: "auto".to_string(),
+        fit: "contain".to_string(),
+        kind: "image".to_string(),
+        background_color: String::new(),
+        gradient_from: String::new(),
+        gradient_to: String::new(),
+        gradient_angle: 135,
+    }
 }
 
 fn image_data_uri(mime_type: &str, bytes: &[u8]) -> String {
@@ -412,6 +475,11 @@ fn image_file_data_uri(path: &Path) -> Option<String> {
     let mime_type = image_content_type(path)?;
     let bytes = std::fs::read(path).ok()?;
     Some(image_data_uri(mime_type, &bytes))
+}
+
+/// 供 skin 模块导出皮肤时复用，将本地图片转为 data URI。
+pub(crate) fn image_file_data_uri_public(path: &Path) -> Option<String> {
+    image_file_data_uri(path)
 }
 
 fn image_content_type(path: &Path) -> Option<&'static str> {
@@ -603,5 +671,50 @@ enabled = true
         assert!(script.contains("openai-curated-remote"));
         assert!(script.contains("Product Design"));
         assert!(script.contains("remote:openai-curated-remote"));
+    }
+
+    // 最小 1x1 PNG（用于验证 image_file_data_uri 能读出 data-uri）。
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x62, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    // 无激活皮肤时，image_overlay_config 回退到旧版图片覆盖字段（老配置兼容）。
+    #[test]
+    fn image_overlay_config_falls_back_to_legacy_overlay_without_active_skin() {
+        let temp = tempfile::tempdir().unwrap();
+        let image_path = temp.path().join("bg.png");
+        std::fs::write(&image_path, TINY_PNG).unwrap();
+        let settings = BackendSettings {
+            codex_app_active_skin_id: String::new(),
+            codex_app_image_overlay_enabled: true,
+            codex_app_image_overlay_path: image_path.to_string_lossy().to_string(),
+            codex_app_image_overlay_opacity: 50,
+            ..BackendSettings::default()
+        };
+
+        let config = image_overlay_config(45221, &settings);
+        assert_eq!(config["enabled"], serde_json::json!(true));
+        assert_eq!(config["opacity"], serde_json::json!(0.5));
+        assert_eq!(config["fit"], serde_json::json!("contain"));
+        assert_eq!(config["appearanceEnabled"], serde_json::json!(false));
+        assert_eq!(config["appearance"], serde_json::json!("auto"));
+        assert!(
+            config["dataUrl"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("data:image/png;base64,")
+        );
+    }
+
+    // 图片覆盖未启用且无激活皮肤时，输出 disabled。
+    #[test]
+    fn image_overlay_config_disabled_without_skin_or_legacy_overlay() {
+        let settings = BackendSettings::default();
+        let config = image_overlay_config(45221, &settings);
+        assert_eq!(config["enabled"], serde_json::json!(false));
     }
 }

@@ -856,8 +856,88 @@ pub async fn test_relay_profile(
         anyhow::bail!("测试模型不能为空");
     }
 
-    let protocol = profile.resolve_protocol_for_model(test_model)?;
+    let protocols = relay_profile_test_protocols(profile, test_model)?;
     let client = crate::http_client::proxied_client("CodexElves/RelayTest")?;
+    let mut failures = Vec::new();
+
+    for (index, protocol) in protocols.iter().copied().enumerate() {
+        match send_relay_profile_test_attempt(&client, base_url, api_key, test_model, protocol)
+            .await
+        {
+            Ok(mut result) if result.http_status < 400 => {
+                if !failures.is_empty() {
+                    result.response_preview = format!(
+                        "（{}；已回退到 {}）{}",
+                        failures.join("；"),
+                        relay_profile_test_protocol_label(protocol),
+                        result.response_preview
+                    );
+                }
+                return Ok(result);
+            }
+            Ok(mut result) => {
+                failures.push(format!(
+                    "{} HTTP {}",
+                    relay_profile_test_protocol_label(protocol),
+                    result.http_status
+                ));
+                if index + 1 == protocols.len() {
+                    if failures.len() > 1 {
+                        result.response_preview = format!(
+                            "（协议探测：{}）{}",
+                            failures.join("；"),
+                            result.response_preview
+                        );
+                    }
+                    return Ok(result);
+                }
+            }
+            Err(error) => {
+                failures.push(format!(
+                    "{} 请求失败：{error}",
+                    relay_profile_test_protocol_label(protocol)
+                ));
+                if index + 1 == protocols.len() {
+                    anyhow::bail!("协议探测失败：{}", failures.join("；"));
+                }
+            }
+        }
+    }
+
+    anyhow::bail!("没有可用的测试协议")
+}
+
+fn relay_profile_test_protocols(
+    profile: &RelayProfile,
+    model: &str,
+) -> anyhow::Result<Vec<RelayProtocol>> {
+    if let Ok(protocol) = profile.resolve_protocol_for_model(model) {
+        return Ok(vec![protocol]);
+    }
+    profile.validate_model_protocol_assignments()?;
+
+    let normalized = model.trim().to_ascii_lowercase();
+    let primary = if normalized.starts_with("gpt") {
+        RelayProtocol::Responses
+    } else if normalized.starts_with("claude") {
+        RelayProtocol::Anthropic
+    } else {
+        profile.protocol
+    };
+    let mut protocols = vec![primary];
+    if primary != RelayProtocol::ChatCompletions {
+        protocols.push(RelayProtocol::ChatCompletions);
+    }
+    Ok(protocols)
+}
+
+async fn send_relay_profile_test_attempt(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    test_model: &str,
+    protocol: RelayProtocol,
+) -> anyhow::Result<RelayProfileTestResult> {
     let endpoint = match protocol {
         RelayProtocol::Responses => format!("{base_url}/responses"),
         RelayProtocol::ChatCompletions => format!("{base_url}/chat/completions"),
@@ -904,6 +984,14 @@ pub async fn test_relay_profile(
         endpoint,
         response_preview: response_text.chars().take(320).collect(),
     })
+}
+
+fn relay_profile_test_protocol_label(protocol: RelayProtocol) -> &'static str {
+    match protocol {
+        RelayProtocol::Responses => "Responses API",
+        RelayProtocol::ChatCompletions => "Chat Completions",
+        RelayProtocol::Anthropic => "Anthropic",
+    }
 }
 
 fn relay_profile_test_payload(protocol: RelayProtocol, model: &str) -> Value {
@@ -3766,6 +3854,53 @@ fn account_label_from_jwt(token: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
+    use std::time::Duration;
+
+    fn read_test_http_request(stream: &mut TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or_default();
+            if request.len() >= header_end + 4 + content_length {
+                break;
+            }
+        }
+        String::from_utf8(request).unwrap()
+    }
+
+    fn write_test_http_response(stream: &mut TcpStream, status: &str, body: &str) {
+        write!(
+            stream,
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        stream.flush().unwrap();
+    }
 
     #[test]
     fn generated_catalog_prompt_replaces_gpt_identity_tokens_with_model() {
@@ -3890,6 +4025,130 @@ mod tests {
             ..RelayProfile::default()
         };
         assert!(relay_profile_model(&empty).trim().is_empty());
+    }
+
+    #[test]
+    fn relay_profile_test_protocols_infer_only_when_model_is_unassigned() {
+        let explicit = RelayProfile {
+            model_mappings: vec![crate::settings::RelayModelMapping {
+                request_model: "gpt-5.4".to_string(),
+                protocol: RelayProtocol::Anthropic,
+                context_window: String::new(),
+            }],
+            ..RelayProfile::default()
+        };
+        assert_eq!(
+            relay_profile_test_protocols(&explicit, "gpt-5.4").unwrap(),
+            vec![RelayProtocol::Anthropic]
+        );
+
+        let default_profile = RelayProfile::default();
+        assert_eq!(
+            relay_profile_test_protocols(&default_profile, "gpt-5.4").unwrap(),
+            vec![RelayProtocol::Responses, RelayProtocol::ChatCompletions]
+        );
+        assert_eq!(
+            relay_profile_test_protocols(&default_profile, "claude-sonnet-4").unwrap(),
+            vec![RelayProtocol::Anthropic, RelayProtocol::ChatCompletions]
+        );
+        assert_eq!(
+            relay_profile_test_protocols(&default_profile, "deepseek-v3").unwrap(),
+            vec![RelayProtocol::Responses, RelayProtocol::ChatCompletions]
+        );
+
+        let chat_profile = RelayProfile {
+            protocol: RelayProtocol::ChatCompletions,
+            ..RelayProfile::default()
+        };
+        assert_eq!(
+            relay_profile_test_protocols(&chat_profile, "deepseek-v3").unwrap(),
+            vec![RelayProtocol::ChatCompletions]
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_profile_test_falls_back_from_responses_to_chat_completions() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut request_lines = Vec::new();
+            for (status, body) in [
+                ("404 Not Found", r#"{"error":"responses unsupported"}"#),
+                ("200 OK", r#"{"choices":[{"message":{"content":"hi"}}]}"#),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_test_http_request(&mut stream);
+                request_lines.push(request.lines().next().unwrap_or_default().to_string());
+                write_test_http_response(&mut stream, status, body);
+            }
+            request_lines
+        });
+
+        let profile = RelayProfile {
+            base_url: format!("http://{address}/v1"),
+            api_key: "sk-test".to_string(),
+            protocol: RelayProtocol::Responses,
+            ..RelayProfile::default()
+        };
+        let result = test_relay_profile(&profile, "gpt-5.4").await.unwrap();
+        let request_lines = server.join().unwrap();
+
+        assert_eq!(result.http_status, 200);
+        assert!(result.endpoint.ends_with("/v1/chat/completions"));
+        assert!(
+            result
+                .response_preview
+                .contains("Responses API HTTP 404；已回退到 Chat Completions")
+        );
+        assert_eq!(
+            request_lines,
+            vec![
+                "POST /v1/responses HTTP/1.1",
+                "POST /v1/chat/completions HTTP/1.1"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_profile_test_falls_back_from_anthropic_to_chat_completions() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for (status, body) in [
+                ("400 Bad Request", r#"{"error":"messages unsupported"}"#),
+                ("200 OK", r#"{"choices":[{"message":{"content":"hi"}}]}"#),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                requests.push(read_test_http_request(&mut stream));
+                write_test_http_response(&mut stream, status, body);
+            }
+            requests
+        });
+
+        let profile = RelayProfile {
+            base_url: format!("http://{address}/v1"),
+            api_key: "sk-test".to_string(),
+            protocol: RelayProtocol::Responses,
+            ..RelayProfile::default()
+        };
+        let result = test_relay_profile(&profile, "claude-sonnet-4")
+            .await
+            .unwrap();
+        let requests = server.join().unwrap();
+
+        assert_eq!(result.http_status, 200);
+        assert!(result.endpoint.ends_with("/v1/chat/completions"));
+        assert!(
+            result
+                .response_preview
+                .contains("Anthropic HTTP 400；已回退到 Chat Completions")
+        );
+        assert!(requests[0].starts_with("POST /v1/messages HTTP/1.1"));
+        assert!(requests[0].contains("\r\nx-api-key: sk-test\r\n"));
+        assert!(requests[0].contains("\r\nanthropic-version: 2023-06-01\r\n"));
+        assert!(requests[1].starts_with("POST /v1/chat/completions HTTP/1.1"));
+        assert!(requests[1].contains("\r\nauthorization: Bearer sk-test\r\n"));
     }
 
     #[test]

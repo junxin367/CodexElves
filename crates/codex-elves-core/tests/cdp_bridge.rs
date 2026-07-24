@@ -174,8 +174,18 @@ fn injection_script_installs_image_overlay_from_data_uri() {
     let script = assets::injection_script(45221);
 
     assert!(script.contains("const source = config.dataUrl || \"\""));
-    assert!(script.contains("image.src = source"));
+    assert!(script.contains("element.src = source"));
     assert!(script.contains("image_overlay_installed"));
+}
+
+#[test]
+fn injection_script_switches_skin_appearance_through_codex_native_action() {
+    let script = assets::injection_script(45221);
+
+    assert!(script.contains("register-app-actions-"));
+    assert!(script.contains("app.appearance.set_mode"));
+    assert!(script.contains("__codexElvesApplySkinAppearance"));
+    assert!(!script.contains("data-codex-elves-skin-appearance"));
 }
 
 #[test]
@@ -195,6 +205,9 @@ fn injection_script_times_out_backend_bridge_calls_and_falls_back_to_helper() {
     assert!(script.contains("bridgeWithBackendTimeout"));
     assert!(script.contains("backend_bridge_timeout"));
     assert!(script.contains("/backend/repair"));
+    assert!(script.contains("waitForBackendBridgeRecovery"));
+    assert!(script.contains("location.protocol === \"app:\""));
+    assert!(script.contains("bridgeMissing: true"));
     assert!(script.contains("backend_status_bridge_failed_http_fallback_ok"));
     assert!(script.contains("backend_status_bridge_and_http_failed"));
 }
@@ -1799,6 +1812,51 @@ fn pick_page_target_prefers_explicit_workspace_over_generic_app_shell() {
         pick_injectable_codex_page_target(&targets).expect("explicit workspace target should win");
 
     assert_eq!(picked.id, "workspace");
+}
+
+#[test]
+fn pick_injectable_codex_page_target_ignores_avatar_overlay_window() {
+    let targets = vec![
+        target(
+            "avatar-overlay",
+            "page",
+            "Codex",
+            "app://-/index.html?initialRoute=%2Favatar-overlay",
+            Some("ws://avatar-overlay"),
+        ),
+        target(
+            "workspace",
+            "page",
+            "Codex",
+            "app://-/index.html",
+            Some("ws://workspace"),
+        ),
+    ];
+
+    let picked = pick_injectable_codex_page_target(&targets)
+        .expect("main Codex window should be selected instead of avatar overlay");
+
+    assert_eq!(picked.id, "workspace");
+}
+
+#[test]
+fn pick_injectable_codex_page_target_rejects_avatar_overlay_only() {
+    let targets = vec![target(
+        "avatar-overlay",
+        "page",
+        "Codex",
+        "app://-/index.html?initialRoute=/avatar-overlay",
+        Some("ws://avatar-overlay"),
+    )];
+
+    let error = pick_injectable_codex_page_target(&targets)
+        .expect_err("avatar overlay must not receive the Codex bridge");
+
+    assert!(
+        error
+            .to_string()
+            .contains("No injectable ChatGPT/Codex page target found")
+    );
 }
 
 #[test]

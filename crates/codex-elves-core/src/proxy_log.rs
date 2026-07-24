@@ -664,6 +664,12 @@ fn clear_records_at_path(path: &Path) -> std::io::Result<()> {
 }
 
 pub fn retain_recent_records(limit: usize) -> std::io::Result<()> {
+    if let Some(path) = crate::paths::proxy_log_path_for_tests() {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        return retain_recent_records_at_path(&path, limit);
+    }
     flush_pending_records()?;
     let path = default_log_path();
     if let Some(parent) = path.parent() {

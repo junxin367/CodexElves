@@ -161,6 +161,7 @@ pub async fn install_bridge(
     new_document_scripts: &[String],
 ) -> anyhow::Result<BridgeRuntime> {
     let socket = connect_cdp_websocket(websocket_url).await?;
+    let diagnostic_websocket_url = websocket_url.to_string();
     let generation = next_bridge_generation();
     let mut session = CdpSession::new(socket)
         .with_handler(handler)
@@ -231,10 +232,18 @@ pub async fn install_bridge(
         return Err(error);
     }
 
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "bridge.runtime_started",
+        json!({
+            "generation": generation,
+            "websocket_url": diagnostic_websocket_url,
+            "script_count": new_document_scripts.len()
+        }),
+    );
     let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
         let mut in_flight = FuturesUnordered::<BridgeHandlerFuture>::new();
-        loop {
+        let stop_reason = 'runtime: loop {
             while in_flight.len() < MAX_CONCURRENT_BRIDGE_REQUESTS {
                 let Some(message) = session.binding_calls.pop_front() else {
                     break;
@@ -245,12 +254,10 @@ pub async fn install_bridge(
                         request_id,
                         message,
                     } => {
-                        if session
-                            .reject_bridge_request(&request_id, &message)
-                            .await
-                            .is_err()
+                        if let Err(error) =
+                            session.reject_bridge_request(&request_id, &message).await
                         {
-                            break;
+                            break 'runtime format!("reject_request_failed: {error}");
                         }
                     }
                     PreparedBridgeCall::Execute {
@@ -273,7 +280,7 @@ pub async fn install_bridge(
 
             let can_read_more = session.binding_calls.len() < MAX_QUEUED_BRIDGE_REQUESTS;
             tokio::select! {
-                _ = &mut shutdown_rx => break,
+                _ = &mut shutdown_rx => break 'runtime "shutdown_requested".to_string(),
                 completion = in_flight.next(), if !in_flight.is_empty() => {
                     let Some(completion) = completion else {
                         continue;
@@ -286,18 +293,27 @@ pub async fn install_bridge(
                             .reject_bridge_request(&completion.request_id, &error)
                             .await,
                     };
-                    if result.is_err() {
-                        break;
+                    if let Err(error) = result {
+                        break 'runtime format!("complete_request_failed: {error}");
                     }
                 }
                 message = session.next_message(), if can_read_more => {
                     match message {
                         Ok(Some(_)) => {}
-                        Ok(None) | Err(_) => break,
+                        Ok(None) => break 'runtime "cdp_websocket_closed".to_string(),
+                        Err(error) => break 'runtime format!("cdp_websocket_read_failed: {error}"),
                     }
                 }
             }
-        }
+        };
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "bridge.runtime_stopped",
+            json!({
+                "generation": generation,
+                "websocket_url": diagnostic_websocket_url,
+                "reason": stop_reason
+            }),
+        );
         cleanup_bridge_registration(
             &mut session,
             &binding_name,

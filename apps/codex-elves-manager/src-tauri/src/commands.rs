@@ -2167,6 +2167,144 @@ pub async fn reset_image_overlay_settings() -> CommandResult<SettingsPayload> {
     }
 }
 
+#[derive(Serialize)]
+pub struct SkinsPayload {
+    pub skins: Vec<codex_elves_core::skin::Skin>,
+    #[serde(rename = "activeSkinId")]
+    pub active_skin_id: String,
+}
+
+fn skins_payload(message: &str) -> CommandResult<SkinsPayload> {
+    let active_skin_id = SettingsStore::default()
+        .load()
+        .map(|settings| settings.codex_app_active_skin_id)
+        .unwrap_or_default();
+    ok(
+        message,
+        SkinsPayload {
+            skins: codex_elves_core::skin::load_skins(),
+            active_skin_id,
+        },
+    )
+}
+
+#[tauri::command]
+pub fn list_skins() -> CommandResult<SkinsPayload> {
+    codex_elves_core::skin::ensure_builtin_presets_installed();
+    skins_payload("已读取皮肤列表。")
+}
+
+#[tauri::command]
+pub async fn save_skin(skin: codex_elves_core::skin::Skin) -> CommandResult<SkinsPayload> {
+    if skin.id.trim().is_empty() {
+        return skins_payload("皮肤 id 不能为空，未保存。");
+    }
+    let skin_id = skin.id.trim().to_string();
+    codex_elves_core::skin::upsert_skin(skin);
+    let store = SettingsStore::default();
+    let overlay_message = match store.load() {
+        Ok(settings) if settings.codex_app_active_skin_id.trim() == skin_id => {
+            push_image_overlay_into_running_codex(&settings).await
+        }
+        _ => String::new(),
+    };
+    skins_payload(&format!("皮肤已保存。{overlay_message}"))
+}
+
+#[tauri::command]
+pub async fn delete_skin(id: String) -> CommandResult<SkinsPayload> {
+    codex_elves_core::skin::delete_skin(&id);
+    // 若删除的是当前激活皮肤，清空激活态并推送（背景回退/消失）。
+    let store = SettingsStore::default();
+    if let Ok(mut settings) = store.load() {
+        if settings.codex_app_active_skin_id.trim() == id.trim() {
+            settings.codex_app_active_skin_id = String::new();
+            let settings = normalize_settings_before_save(settings);
+            if store.save(&settings).is_ok() {
+                let _ = push_image_overlay_into_running_codex(&settings).await;
+            }
+        }
+    }
+    skins_payload("皮肤已删除。")
+}
+
+#[tauri::command]
+pub async fn activate_skin(id: String) -> CommandResult<SettingsPayload> {
+    let store = SettingsStore::default();
+    let mut settings = store.load().unwrap_or_default();
+    let trimmed = id.trim();
+    // 空 id = 关闭皮肤（回退无背景）；非空则必须是已存在的皮肤。
+    if !trimmed.is_empty() && codex_elves_core::skin::find_skin(trimmed).is_none() {
+        return settings_payload("未找到指定皮肤，未切换。", "皮肤切换后重新读取失败");
+    }
+    settings.codex_app_active_skin_id = trimmed.to_string();
+    let settings = normalize_settings_before_save(settings);
+    match store.save(&settings) {
+        Ok(()) => {
+            let overlay_message = push_image_overlay_into_running_codex(&settings).await;
+            let hint = if trimmed.is_empty() {
+                "已关闭皮肤。"
+            } else {
+                "皮肤已切换。"
+            };
+            settings_payload(
+                &format!("{hint}{overlay_message}"),
+                "皮肤切换后重新读取失败",
+            )
+        }
+        Err(error) => failed(
+            &format!("切换皮肤失败：{error}"),
+            SettingsPayload {
+                codex_home: codex_elves_core::codex_home::codex_home_dir_for_settings(&settings)
+                    .to_string_lossy()
+                    .to_string(),
+                settings,
+                settings_path: codex_elves_core::paths::default_settings_path()
+                    .to_string_lossy()
+                    .to_string(),
+                user_scripts: user_script_inventory(),
+            },
+        ),
+    }
+}
+
+#[tauri::command]
+pub fn clone_skin(id: String) -> CommandResult<SkinsPayload> {
+    match codex_elves_core::skin::clone_skin(&id) {
+        Some(_) => skins_payload("皮肤已克隆。"),
+        None => skins_payload("未找到要克隆的皮肤。"),
+    }
+}
+
+#[tauri::command]
+pub fn export_skin_to_path(id: String, path: String) -> CommandResult<Value> {
+    let Some(json) = codex_elves_core::skin::export_skin_json(&id) else {
+        return failed("未找到要导出的皮肤。", json!({}));
+    };
+    match std::fs::write(&path, json) {
+        Ok(()) => ok("皮肤已导出。", json!({})),
+        Err(error) => failed(&format!("导出失败：{error}"), json!({})),
+    }
+}
+
+#[tauri::command]
+pub fn import_skin_from_path(path: String) -> CommandResult<SkinsPayload> {
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => return skins_payload(&format!("读取文件失败：{error}")),
+    };
+    match codex_elves_core::skin::import_skin_json(&text) {
+        Ok(_) => skins_payload("皮肤已导入。"),
+        Err(error) => skins_payload(&format!("导入失败：{error}")),
+    }
+}
+
+#[tauri::command]
+pub fn install_builtin_skin_presets() -> CommandResult<SkinsPayload> {
+    codex_elves_core::skin::ensure_builtin_presets_installed();
+    skins_payload("内置预设已同步。")
+}
+
 #[tauri::command]
 pub fn relay_status() -> CommandResult<RelayPayload> {
     let status = codex_elves_core::relay_config::default_relay_status();
@@ -2593,16 +2731,10 @@ pub async fn test_relay_profile(
             } else {
                 "failed"
             };
-            let preview = result.response_preview.trim();
-            let detail = if preview.is_empty() {
-                "响应内容为空".to_string()
-            } else {
-                format!("响应：{preview}")
-            };
             CommandResult {
                 status: status.to_string(),
                 message: format!(
-                    "已向「{profile_name}」用模型「{test_model}」发送 hi，HTTP {}。{detail}",
+                    "已向「{profile_name}」用模型「{test_model}」发送 hi，HTTP {}。",
                     result.http_status
                 ),
                 payload: RelayProfileTestPayload {
@@ -3681,8 +3813,14 @@ async fn push_image_overlay_into_running_codex(settings: &BackendSettings) -> St
     let Ok(overlay_json) = serde_json::to_string(&overlay) else {
         return String::new();
     };
+    let Ok(build_id_json) = serde_json::to_string(codex_elves_core::assets::DIAGNOSTIC_BUILD_ID)
+    else {
+        return String::new();
+    };
+    let full_injection =
+        codex_elves_core::assets::injection_script_with_settings(helper_port, settings);
     let script = format!(
-        "(() => {{ window.__CODEX_ELVES_IMAGE_OVERLAY__ = {overlay_json}; if (typeof window.__codexElvesApplyImageOverlay === 'function') {{ window.__codexElvesApplyImageOverlay(); }} }})();"
+        "(() => {{ if (window.__codexElvesRuntimeBuild !== {build_id_json} || typeof window.__codexElvesApplySkinAppearance !== 'function') {{ {full_injection} }} else {{ window.__CODEX_ELVES_IMAGE_OVERLAY__ = {overlay_json}; if (typeof window.__codexElvesApplyImageOverlay === 'function') {{ window.__codexElvesApplyImageOverlay(); }} }} }})();"
     );
     let targets = match codex_elves_core::cdp::list_targets(debug_port).await {
         Ok(targets) => targets,
@@ -3695,8 +3833,8 @@ async fn push_image_overlay_into_running_codex(settings: &BackendSettings) -> St
         return String::new();
     };
     match codex_elves_core::bridge::evaluate_script(websocket_url, &script).await {
-        Ok(_) => " 图片覆盖层已对已运行的 Codex 即时生效。".to_string(),
-        Err(_) => " 但图片覆盖层未能对已运行的 Codex 即时生效，重启后可恢复。".to_string(),
+        Ok(_) => " 皮肤已对运行中的 Codex 即时生效。".to_string(),
+        Err(_) => " 但皮肤未能对运行中的 Codex 即时生效，重启后可恢复。".to_string(),
     }
 }
 
@@ -3864,11 +4002,42 @@ mod tests {
 
     static PROCESS_STATE_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-    fn process_state_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        PROCESS_STATE_TEST_LOCK
+    struct ProcessStateTestGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _temp: tempfile::TempDir,
+        previous_app_state_dir: Option<PathBuf>,
+        previous_settings_path: Option<PathBuf>,
+    }
+
+    impl Drop for ProcessStateTestGuard {
+        fn drop(&mut self) {
+            codex_elves_core::paths::set_settings_path_for_tests(
+                self.previous_settings_path.take(),
+            );
+            codex_elves_core::paths::set_app_state_dir_for_tests(
+                self.previous_app_state_dir.take(),
+            );
+        }
+    }
+
+    fn process_state_test_guard() -> ProcessStateTestGuard {
+        let lock = PROCESS_STATE_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
-            .expect("process state test lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempfile::tempdir().expect("process state test temp dir");
+        let previous_app_state_dir = codex_elves_core::paths::set_app_state_dir_for_tests(Some(
+            temp.path().join("app-state"),
+        ));
+        let previous_settings_path = codex_elves_core::paths::set_settings_path_for_tests(Some(
+            temp.path().join("settings.json"),
+        ));
+        ProcessStateTestGuard {
+            _lock: lock,
+            _temp: temp,
+            previous_app_state_dir,
+            previous_settings_path,
+        }
     }
 
     fn websocket_cache_profile(
@@ -4603,8 +4772,8 @@ base_url = "https://manual.example/v1"
         );
     }
 
-    #[test]
-    fn reset_image_overlay_settings_preserves_supplier_settings() {
+    #[tokio::test]
+    async fn reset_image_overlay_settings_preserves_supplier_settings() {
         let _process_state = process_state_test_guard();
         let temp = tempfile::tempdir().unwrap();
         let settings_path = temp.path().join("settings.json");
@@ -4626,7 +4795,7 @@ base_url = "https://manual.example/v1"
         };
         SettingsStore::default().save(&settings).unwrap();
 
-        let result = reset_image_overlay_settings();
+        let result = reset_image_overlay_settings().await;
         codex_elves_core::paths::set_settings_path_for_tests(previous);
 
         assert_eq!(result.status, "ok");

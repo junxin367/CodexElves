@@ -169,13 +169,166 @@
   }
   window.__codexSessionPrewarmRuntimeId = (window.__codexSessionPrewarmRuntimeId || 0) + 1;
   const codexSessionPrewarmRuntimeId = window.__codexSessionPrewarmRuntimeId;
+  let codexElvesAppearanceRegistryPromise = null;
+  let codexElvesDesiredAppearanceMode = "";
+  let codexElvesAppliedAppearanceMode = "";
+  let codexElvesAppearanceApplyRunning = false;
+  let codexElvesAppearanceRetryCount = 0;
+  let codexElvesAppearanceRetryTimer = null;
+  const codexElvesAppearanceRetryDelaysMs = [500, 1500, 5000, 15000];
+
+  async function readCodexSourcePrefix(url, maxBytes = 256 * 1024) {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`无法读取 Codex 脚本：${response.status}`);
+    }
+    if (!response.body?.getReader) {
+      return (await response.text()).slice(0, maxBytes);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let source = "";
+    try {
+      while (source.length < maxBytes) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        source += decoder.decode(value, { stream: true });
+      }
+      source += decoder.decode();
+      return source;
+    } finally {
+      try {
+        await reader.cancel();
+      } catch {
+      }
+    }
+  }
+
+  async function resolveCodexAppearanceRegistry() {
+    if (codexElvesAppearanceRegistryPromise) {
+      return codexElvesAppearanceRegistryPromise;
+    }
+    codexElvesAppearanceRegistryPromise = (async () => {
+      if (location.protocol !== "app:") {
+        throw new Error("当前页面不是 Codex App");
+      }
+      let entryUrl = "";
+      for (let attempt = 0; attempt < 20 && !entryUrl; attempt += 1) {
+        entryUrl = Array.from(document.scripts)
+          .map((script) => script.src)
+          .find((url) => /\/assets\/index-[^/]+\.js(?:\?|$)/.test(url)) || "";
+        if (!entryUrl) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
+      if (!entryUrl) {
+        throw new Error("未找到 Codex 入口脚本");
+      }
+      const entrySource = await readCodexSourcePrefix(entryUrl, 64 * 1024);
+      const initialMatch = entrySource.match(/["'`](\.\/app-initial-[^"'`]+\.js)["'`]/);
+      if (!initialMatch) {
+        throw new Error("未找到 Codex 初始化脚本");
+      }
+      const initialUrl = new URL(initialMatch[1], entryUrl).href;
+      let initialSource = await readCodexSourcePrefix(initialUrl);
+      let actionsMatch = initialSource.match(/["'`](\.\/register-app-actions-[^"'`]+\.js)["'`]/);
+      if (!actionsMatch) {
+        initialSource = await fetch(initialUrl).then((response) => response.text());
+        actionsMatch = initialSource.match(/["'`](\.\/register-app-actions-[^"'`]+\.js)["'`]/);
+      }
+      if (!actionsMatch) {
+        throw new Error("当前 Codex 版本未暴露外观动作");
+      }
+      const actionsUrl = new URL(actionsMatch[1], initialUrl).href;
+      const module = await import(actionsUrl);
+      const registry = module?.appActionRegistry;
+      if (!(registry instanceof Map)) {
+        throw new Error("Codex 外观动作注册表不可用");
+      }
+      return registry;
+    })().catch((error) => {
+      codexElvesAppearanceRegistryPromise = null;
+      throw error;
+    });
+    return codexElvesAppearanceRegistryPromise;
+  }
+
+  function applyCodexElvesSkinAppearance(appearance, enabled) {
+    const hadManagedAppearance = Boolean(
+      codexElvesDesiredAppearanceMode ||
+      codexElvesAppliedAppearanceMode ||
+      codexElvesAppearanceApplyRunning
+    );
+    const mode = enabled
+      ? appearance === "light" || appearance === "dark" ? appearance : "system"
+      : hadManagedAppearance ? "system" : "";
+    if (codexElvesDesiredAppearanceMode !== mode) {
+      codexElvesAppearanceRetryCount = 0;
+      clearTimeout(codexElvesAppearanceRetryTimer);
+      codexElvesAppearanceRetryTimer = null;
+    }
+    codexElvesDesiredAppearanceMode = mode;
+    if (!mode || codexElvesAppearanceApplyRunning) {
+      return;
+    }
+    codexElvesAppearanceApplyRunning = true;
+    void (async () => {
+      try {
+        const registry = await resolveCodexAppearanceRegistry();
+        const handler = registry.get("app.appearance.set_mode");
+        if (typeof handler !== "function") {
+          throw new Error("Codex 外观切换动作不可用");
+        }
+        while (
+          codexElvesDesiredAppearanceMode &&
+          codexElvesAppliedAppearanceMode !== codexElvesDesiredAppearanceMode
+        ) {
+          const nextMode = codexElvesDesiredAppearanceMode;
+          await handler(
+            { type: "app.appearance.set_mode", mode: nextMode },
+            {}
+          );
+          codexElvesAppliedAppearanceMode = nextMode;
+          codexElvesAppearanceRetryCount = 0;
+          sendCodexElvesDiagnostic("skin_appearance_applied", { mode: nextMode });
+        }
+      } catch (error) {
+        codexElvesAppearanceRetryCount += 1;
+        sendCodexElvesDiagnostic("skin_appearance_failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        codexElvesAppearanceApplyRunning = false;
+        if (
+          codexElvesDesiredAppearanceMode &&
+          codexElvesAppliedAppearanceMode !== codexElvesDesiredAppearanceMode &&
+          codexElvesAppearanceRetryCount <= codexElvesAppearanceRetryDelaysMs.length
+        ) {
+          const retryDelay = codexElvesAppearanceRetryDelaysMs[
+            Math.max(0, codexElvesAppearanceRetryCount - 1)
+          ];
+          codexElvesAppearanceRetryTimer = setTimeout(
+            () => applyCodexElvesSkinAppearance(
+              codexElvesDesiredAppearanceMode,
+              true
+            ),
+            retryDelay
+          );
+        }
+      }
+    })();
+  }
 
   function installCodexElvesImageOverlay() {
     const config = window.__CODEX_ELVES_IMAGE_OVERLAY__ || {};
     const canQueryById = typeof document?.getElementById === "function";
     const existing = canQueryById ? document.getElementById(codexElvesImageOverlayId) : null;
     const source = config.dataUrl || "";
-    if (!config.enabled || !source) {
+    const kind = ["image", "color", "gradient"].includes(config.kind) ? config.kind : "image";
+    const appearance = ["light", "dark", "auto"].includes(config.appearance) ? config.appearance : "auto";
+    applyCodexElvesSkinAppearance(appearance, config.appearanceEnabled === true);
+    const hasVisual = kind === "image" ? !!source : true;
+    if (!config.enabled || !hasVisual) {
       if (window.__codexElvesImageOverlayBlobUrl) {
         URL.revokeObjectURL(window.__codexElvesImageOverlayBlobUrl);
         window.__codexElvesImageOverlayBlobUrl = "";
@@ -188,27 +341,61 @@
       return;
     }
     const opacity = Math.min(1, Math.max(0.01, Number(config.opacity) || 0.35));
-    const image = existing || document.createElement("img");
-    image.id = codexElvesImageOverlayId;
-    image.src = source;
-    image.alt = "";
-    image.setAttribute("aria-hidden", "true");
-    Object.assign(image.style, {
+    // 皮肤字段：铺法(fit) / 外观(appearance)。
+    const fit = config.fit === "cover" ? "cover" : config.fit === "contain" ? "contain" : "contain";
+    // 非图片背景(纯色/渐变)用 div 直接绘制，无需加载图片；图片背景用 img 展示并支持铺法。
+    const wantedTag = kind === "image" ? "IMG" : "DIV";
+    if (existing && existing.tagName !== wantedTag) {
+      existing.remove();
+    }
+    const reused = canQueryById ? document.getElementById(codexElvesImageOverlayId) : null;
+    const element = reused || document.createElement(wantedTag === "IMG" ? "img" : "div");
+    element.id = codexElvesImageOverlayId;
+    element.setAttribute("aria-hidden", "true");
+    const baseStyle = {
       position: "fixed",
       inset: "0",
       width: "100vw",
       height: "100vh",
-      objectFit: "contain",
-      objectPosition: "center center",
       opacity: String(opacity),
       pointerEvents: "none",
       zIndex: "2147483646",
       userSelect: "none",
-    });
-    if (!existing) root.appendChild(image);
+    };
+    let sourceKind = "unknown";
+    if (kind === "image") {
+      element.alt = "";
+      element.src = source;
+      element.style.background = "";
+      Object.assign(element.style, {
+        ...baseStyle,
+        objectFit: fit,
+        objectPosition: "50% 50%",
+      });
+      sourceKind = source.startsWith("data:") ? "data-uri" : "unknown";
+    } else if (kind === "color") {
+      const color = typeof config.backgroundColor === "string" && config.backgroundColor.trim() ? config.backgroundColor.trim() : "#1e293b";
+      Object.assign(element.style, { ...baseStyle, background: color, objectFit: "", objectPosition: "" });
+      sourceKind = "color";
+    } else {
+      const from = typeof config.gradientFrom === "string" && config.gradientFrom.trim() ? config.gradientFrom.trim() : "#4338ca";
+      const to = typeof config.gradientTo === "string" && config.gradientTo.trim() ? config.gradientTo.trim() : "#0ea5e9";
+      const angle = Number.isFinite(Number(config.gradientAngle)) ? Number(config.gradientAngle) : 135;
+      Object.assign(element.style, {
+        ...baseStyle,
+        background: `linear-gradient(${angle}deg, ${from}, ${to})`,
+        objectFit: "",
+        objectPosition: "",
+      });
+      sourceKind = "gradient";
+    }
+    if (!reused) root.appendChild(element);
     sendCodexElvesDiagnostic("image_overlay_installed", {
       opacity,
-      sourceKind: source.startsWith("data:") ? "data-uri" : "unknown",
+      fit,
+      appearance,
+      kind,
+      sourceKind,
     });
   }
 
@@ -221,6 +408,7 @@
     setTimeout(installCodexElvesImageOverlay, 250);
   }
 
+  window.__codexElvesApplySkinAppearance = applyCodexElvesSkinAppearance;
   window.__codexElvesApplyImageOverlay = installCodexElvesImageOverlay;
 
   scheduleCodexElvesImageOverlay();
@@ -2667,11 +2855,32 @@
     codexElvesBackendStatus = { status: "checking", message: "正在修复后端…" };
     renderBackendStatus();
     try {
-      codexElvesBackendStatus = await postJson("/backend/repair", {});
+      const recoveredStatus = await waitForBackendBridgeRecovery();
+      if (!recoveredStatus) {
+        codexElvesBackendStatus = { status: "failed", message: "自动修复超时，请重启启动器" };
+        renderBackendStatus();
+        return;
+      }
+      codexElvesBackendStatus = recoveredStatus;
     } catch (error) {
       codexElvesBackendStatus = { status: "failed", message: "后端修复失败" };
     }
     renderBackendStatus();
+  }
+
+  async function waitForBackendBridgeRecovery(timeoutMs = 10000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (typeof window.__codexSessionDeleteBridge === "function") {
+        const result = await Promise.race([
+          Promise.resolve(window.__codexSessionDeleteBridge("/backend/status", {})).catch(() => null),
+          new Promise((resolve) => setTimeout(() => resolve(null), 1000)),
+        ]);
+        if (result?.status === "ok") return result;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    return null;
   }
 
   async function openManagerFromCodex() {
@@ -4130,6 +4339,9 @@
       const bridgeReady = await waitForCodexSessionDeleteBridgeReady();
       if (!bridgeReady) {
         if (path === "/backend/status" || path === "/backend/repair") {
+          if (location.protocol === "app:") {
+            return { status: "failed", message: "桥接不可用，等待自动修复", bridgeMissing: true };
+          }
           try {
             const response = await fetch(`${helperBase}${path}`, {
               method: "POST",
@@ -4152,6 +4364,9 @@
       ]);
     }
     async function fetchBackendStatusFromHelper(path, payload) {
+      if (location.protocol === "app:") {
+        return { status: "failed", message: "桥接不可用，等待自动修复", bridgeMissing: true };
+      }
       try {
         const response = await fetch(`${helperBase}${path}`, {
           method: "POST",

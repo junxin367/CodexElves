@@ -119,8 +119,11 @@ fn codex_page_target_score(target: &CdpTarget) -> u8 {
     if target.target_type != "page" {
         return 0;
     }
-    let title = target.title.to_lowercase();
-    let url = target.url.to_lowercase();
+    let title = target.title.to_ascii_lowercase();
+    let url = target.url.to_ascii_lowercase();
+    if is_auxiliary_codex_page_url(&url) {
+        return 0;
+    }
     if title.contains("codex") || url.contains("codex") {
         4
     } else if title.contains("chatgpt") || url.contains("chatgpt") {
@@ -130,4 +133,10 @@ fn codex_page_target_score(target: &CdpTarget) -> u8 {
     } else {
         0
     }
+}
+
+fn is_auxiliary_codex_page_url(url: &str) -> bool {
+    url.contains("initialroute=%2favatar-overlay")
+        || url.contains("initialroute=/avatar-overlay")
+        || url.contains("/avatar-overlay")
 }
