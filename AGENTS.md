@@ -66,7 +66,7 @@
 
 合并后必须保持以下本地行为：
 
-- 版本号保持 `0.1.0`，除非用户明确要求改版本。
+- 版本号以根 `Cargo.toml` 的 `workspace.package.version` 为准，不得因合并上游而被上游版本覆盖；除非用户明确要求，否则不主动改版本。
 - 默认本地代理端口保持当前项目端口，不恢复旧端口 `57321`。
 - 管理器关闭按钮默认最小化到托盘；再次打开 manager 时如果在托盘中，必须显示主窗口。
 - manager 打开时保持上一次窗口位置，不能跨显示器跳回旧位置。
@@ -113,7 +113,7 @@
 - `target/release/codex-elves-manager.exe`
 - `dist/windows/app/codex-elves.exe`
 - `dist/windows/app/codex-elves-manager.exe`
-- `dist/windows/CodexElves-0.1.0-windows-x64-setup.exe`
+- `dist/windows/CodexElves-<version>-windows-x64-setup.exe`（`<version>` 取自根 `Cargo.toml` 的 `workspace.package.version`）
 
 不要改回手工 NSIS 命令作为默认流程。需要修改构建流程时，优先更新 `build.ps1` 和 `scripts/build-windows-installer.ps1`。
 
