@@ -1769,7 +1769,7 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
         if response_protocol == UpstreamResponseProtocol::Anthropic {
             let mut anthropic_request = upstream_request_json.clone();
             apply_cached_anthropic_reasoning_compatibility(&mut anthropic_request);
-            if should_retry_anthropic_max_effort(status_code, &content_type, &anthropic_request) {
+            if should_retry_anthropic_effort(status_code, &content_type, &anthropic_request) {
                 let response = upstream_response
                     .take()
                     .expect("anthropic response is present before retry inspection");
@@ -1805,8 +1805,11 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
                             .context(failure_context);
                     }
                 };
+                let rejected_effort = anthropic_requested_effort(&anthropic_request)
+                    .unwrap_or_default()
+                    .to_string();
                 if let Some(fallback_effort) =
-                    anthropic_effort_fallback_from_error(&error_body, "max")
+                    anthropic_effort_fallback_from_error(&error_body, &rejected_effort)
                 {
                     remember_anthropic_reasoning_compatibility(&anthropic_request, fallback_effort);
                     let mut retry_request = anthropic_request.clone();
@@ -9153,7 +9156,7 @@ fn infer_chat_reasoning_style(model: &str) -> ChatReasoningStyle {
     if model.contains("siliconflow") {
         return ChatReasoningStyle::EnableThinking;
     }
-    if model.contains("stepfun") || model.contains("step-3.5-flash-2603") {
+    if is_stepfun_model(&model) {
         return ChatReasoningStyle::LowHigh;
     }
     ChatReasoningStyle::Default
@@ -9206,28 +9209,13 @@ pub fn supported_reasoning_efforts_for_model(
 ) -> Vec<&'static str> {
     let model = model.trim().to_ascii_lowercase();
     if model.contains("claude") {
-        if model.contains("opus-4-7") || model.contains("opus-4-8") || model.contains("fable-5") {
-            return levels(&["low", "medium", "high", "xhigh", "max"]);
-        }
-        if model.contains("opus-4-6") {
-            return levels(&["low", "medium", "high", "max"]);
-        }
-        if model.contains("sonnet-5") {
-            return levels(&["low", "medium", "high", "xhigh", "max"]);
-        }
-        if model.contains("sonnet-4-6") {
-            return levels(&["low", "medium", "high"]);
-        }
-        return levels(&["low", "medium", "high"]);
+        return claude_reasoning_efforts(&model);
     }
 
-    if is_gpt56_sol_model(&model) {
-        return levels(&["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+    if model.contains("gpt-") {
+        return gpt_reasoning_efforts(&model);
     }
-    if model.contains("gpt-5.6") {
-        return levels(&["minimal", "low", "medium", "high", "xhigh", "max"]);
-    }
-    if model.contains("gpt-") || is_openai_o_series(&model) {
+    if is_openai_o_series(&model) {
         return levels(&["minimal", "low", "medium", "high", "xhigh"]);
     }
     if model.contains("deepseek") {
@@ -9239,16 +9227,21 @@ pub fn supported_reasoning_efforts_for_model(
     if model.contains("grok") || model.contains("xai") {
         return levels(&["low", "medium", "high"]);
     }
-    if model.contains("gemini-3.1-pro") {
-        return levels(&["low", "medium", "high"]);
-    }
-    if model.contains("gemini-3-pro") {
-        return levels(&["low", "high"]);
-    }
-    if model.contains("gemini-3") {
+    // gemini 3 代起按版本推导；gemini-2 及更早仍走协议默认档位。
+    if let Some(version) =
+        model_family_version(&model, "gemini").filter(|version| *version >= (3, 0))
+    {
+        if model.contains("pro") {
+            // gemini-3-pro 只有 low/high，3.1 起补齐 medium，更新版本继承该能力。
+            return if version >= (3, 1) {
+                levels(&["low", "medium", "high"])
+            } else {
+                levels(&["low", "high"])
+            };
+        }
         return levels(&["minimal", "low", "medium", "high"]);
     }
-    if model.contains("stepfun") || model.contains("step-3.5-flash-2603") {
+    if is_stepfun_model(&model) {
         return levels(&["low", "high"]);
     }
 
@@ -9262,14 +9255,87 @@ fn levels(values: &[&'static str]) -> Vec<&'static str> {
     values.to_vec()
 }
 
-fn is_gpt56_sol_model(model: &str) -> bool {
+/// 按 Claude 家族与版本号推导思考深度能力，避免新模型（如 claude-opus-5）
+/// 因不在硬编码名单里被降到最保守的 high。
+fn claude_reasoning_efforts(model: &str) -> Vec<&'static str> {
+    let Some((family, version)) = claude_family_version(model) else {
+        return levels(&["low", "medium", "high"]);
+    };
+    // Claude 5 代起各家族均支持 xhigh/max，新版本默认继承该能力。
+    if version >= (5, 0) {
+        return levels(&["low", "medium", "high", "xhigh", "max"]);
+    }
+    if family == "opus" {
+        if version >= (4, 7) {
+            return levels(&["low", "medium", "high", "xhigh", "max"]);
+        }
+        if version >= (4, 6) {
+            return levels(&["low", "medium", "high", "max"]);
+        }
+    }
+    levels(&["low", "medium", "high"])
+}
+
+/// 按 GPT 版本号推导思考深度能力，避免新模型（如 gpt-5.7）因不在名单里被降到 xhigh。
+fn gpt_reasoning_efforts(model: &str) -> Vec<&'static str> {
+    // ultra 目前仅 gpt-5.6-sol 快照线具备。
+    if is_gpt_sol_model(model) {
+        return levels(&["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+    }
+    // gpt-5.6 起支持 max，更新版本默认继承。
+    if gpt_version_at_least(model, (5, 6)) {
+        return levels(&["minimal", "low", "medium", "high", "xhigh", "max"]);
+    }
+    levels(&["minimal", "low", "medium", "high", "xhigh"])
+}
+
+/// 从 claude 模型名中解析家族和 (major, minor) 版本，
+/// 兼容 `claude-opus-4-8`、`claude-opus-4.8`、`claude-opus-5-20260301` 等写法。
+fn claude_family_version(model: &str) -> Option<(&'static str, (u32, u32))> {
+    for family in ["opus", "sonnet", "haiku", "fable"] {
+        if let Some(version) = model_family_version(model, family) {
+            return Some((family, version));
+        }
+    }
+    None
+}
+
+/// 解析 `<family><sep><major>[<sep><minor>]` 形式的模型版本号。
+/// 兼容 `gpt-5.6`、`claude-opus-4-8`、`claude-opus-5-20260301`、`openai/gpt-5.6-sol` 等写法。
+fn model_family_version(model: &str, family: &str) -> Option<(u32, u32)> {
+    let rest = model.split_once(family).map(|(_, rest)| rest)?;
+    let rest = rest.trim_start_matches(['-', '.', '_']);
+    let mut parts = rest.split(['-', '.', '_']).filter(|part| !part.is_empty());
+    let major = parts.next()?.parse::<u32>().ok()?;
+    // 版本号后面可能直接跟日期快照（如 4-8-20260301），日期段不能当作 minor。
+    let minor = parts
+        .next()
+        .filter(|part| part.len() <= 2)
+        .and_then(|part| part.parse::<u32>().ok())
+        .unwrap_or(0);
+    Some((major, minor))
+}
+
+/// 判断 gpt 模型版本是否不低于给定基线，供能力与上下文窗口推导共用。
+pub(crate) fn gpt_version_at_least(model: &str, baseline: (u32, u32)) -> bool {
+    model_family_version(&model.trim().to_ascii_lowercase(), "gpt")
+        .is_some_and(|version| version >= baseline)
+}
+
+/// sol 是 GPT 的高算力快照线，从 gpt-5.6-sol 起具备 ultra；
+/// 后续版本（如 gpt-5.7-sol）默认继承，不再写死在 5.6。
+fn is_gpt_sol_model(model: &str) -> bool {
     let normalized = model.trim().to_ascii_lowercase();
     let slug = normalized
         .rsplit('/')
         .next()
         .filter(|value| !value.is_empty())
         .unwrap_or(normalized.as_str());
-    slug == "gpt-5.6-sol" || slug.starts_with("gpt-5.6-sol-")
+    if !gpt_version_at_least(slug, (5, 6)) {
+        return false;
+    }
+    // 按分隔符比对完整段，避免 gpt-5.7-solar 这类名字被误判为 sol。
+    slug.split(['-', '.', '_']).any(|part| part == "sol")
 }
 
 fn clamp_reasoning_effort_for_model(
@@ -9334,11 +9400,15 @@ fn apply_cached_anthropic_reasoning_compatibility(request: &mut Value) {
     if request.pointer("/thinking/type").and_then(Value::as_str) != Some("adaptive") {
         return;
     }
-    if request
+    // 缓存记录的是上游实际支持的最高档，任何高于它的请求都需钳住。
+    let Some(requested) = request
         .pointer("/output_config/effort")
         .and_then(Value::as_str)
-        == Some("max")
-    {
+        .and_then(reasoning_effort_index)
+    else {
+        return;
+    };
+    if reasoning_effort_index(&fallback).is_some_and(|supported| supported < requested) {
         request["output_config"]["effort"] = json!(fallback);
     }
 }
@@ -9362,18 +9432,21 @@ pub fn clear_anthropic_reasoning_compatibility_cache_for_tests() {
     }
 }
 
-fn should_retry_anthropic_max_effort(
-    status_code: u16,
-    content_type: &str,
-    request: &Value,
-) -> bool {
+/// 取出本次实际发送给 Anthropic 上游的思考档位。
+fn anthropic_requested_effort(request: &Value) -> Option<&str> {
+    request
+        .pointer("/output_config/effort")
+        .and_then(Value::as_str)
+}
+
+fn should_retry_anthropic_effort(status_code: u16, content_type: &str, request: &Value) -> bool {
     status_code == 400
         && content_type.to_ascii_lowercase().contains("json")
         && request.pointer("/thinking/type").and_then(Value::as_str) == Some("adaptive")
-        && request
-            .pointer("/output_config/effort")
-            .and_then(Value::as_str)
-            == Some("max")
+        // 最低档被拒绝时无法再降，不必重试。
+        && anthropic_requested_effort(request)
+            .and_then(reasoning_effort_index)
+            .is_some_and(|index| index > 0)
 }
 
 fn anthropic_effort_fallback_from_error(
@@ -9396,16 +9469,22 @@ fn anthropic_effort_fallback_from_error(
     {
         return None;
     }
-    highest_anthropic_effort_in_message(&message)
+    highest_anthropic_effort_in_message(&message, &unsupported_effort)
 }
 
-fn highest_anthropic_effort_in_message(message: &str) -> Option<&'static str> {
-    for candidate in ["high", "medium", "low"] {
-        if message.contains(candidate) {
-            return Some(candidate);
-        }
-    }
-    None
+/// 从上游错误文案里取出低于被拒档位的最高可用档位。
+/// 候选按档位从高到低匹配，使 `xhigh` 不会被 `high` 子串误命中。
+fn highest_anthropic_effort_in_message(
+    message: &str,
+    unsupported_effort: &str,
+) -> Option<&'static str> {
+    let unsupported_index = reasoning_effort_index(unsupported_effort)?;
+    REASONING_EFFORT_ORDER
+        .iter()
+        .take(unsupported_index)
+        .rev()
+        .find(|candidate| message.contains(**candidate))
+        .copied()
 }
 
 fn supports_reasoning_effort(model: &str) -> bool {
@@ -9440,6 +9519,18 @@ fn is_openai_o_series(model: &str) -> bool {
             .as_bytes()
             .get(1)
             .is_some_and(|byte| byte.is_ascii_digit())
+}
+
+/// StepFun step 系列按家族前缀识别，覆盖 `step-3.5-flash`、`step-3.5-flash-2603`
+/// 及后续版本，不再绑定单个日期快照名。
+fn is_stepfun_model(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    let slug = model
+        .rsplit('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(model.as_str());
+    model.contains("stepfun") || slug.starts_with("step-") || slug == "step"
 }
 
 #[cfg(test)]

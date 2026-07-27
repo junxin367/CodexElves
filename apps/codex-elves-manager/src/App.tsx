@@ -6728,7 +6728,7 @@ function RelayProfileEditor({
         .filter((model) => !existingModels.has(model))
         .map((requestModel) => ({
           requestModel,
-          protocol: profile.protocol,
+          protocol: defaultProtocolForModel(requestModel),
           contextWindow: knownModelContextWindow(requestModel),
         }));
       if (additions.length) updateModelMappings([...profile.modelMappings, ...additions]);
@@ -6921,7 +6921,7 @@ function RelayProfileEditor({
                   onClick={() =>
                     updateModelMappings([
                       ...profile.modelMappings,
-                      { requestModel: "", protocol: "responses", contextWindow: "" },
+                      { requestModel: "", protocol: defaultProtocolForModel(""), contextWindow: "" },
                     ])
                   }
                   size="sm"
@@ -7178,7 +7178,7 @@ function RelayModelMappingTable({
 }) {
   const displayRows = mappings.length
     ? mappings
-    : [{ requestModel: "", protocol: "responses" as RelayProtocol, contextWindow: "" }];
+    : [{ requestModel: "", protocol: defaultProtocolForModel("") as RelayProtocol, contextWindow: "" }];
   const canSort = mappings.length > 1;
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -7191,7 +7191,7 @@ function RelayModelMappingTable({
   const updateRow = (index: number, patch: Partial<RelayModelMapping>) => {
     const next = mappings.length
       ? [...mappings]
-      : [{ requestModel: "", protocol: "responses" as RelayProtocol, contextWindow: "" }];
+      : [{ requestModel: "", protocol: defaultProtocolForModel("") as RelayProtocol, contextWindow: "" }];
     next[index] = {
       ...next[index],
       ...patch,
@@ -7204,9 +7204,14 @@ function RelayModelMappingTable({
     const previousContextWindow = knownModelContextWindow(row.requestModel);
     const shouldFillContextWindow =
       !!nextContextWindow && (!currentContextWindow || (!!previousContextWindow && currentContextWindow === previousContextWindow));
+    // 模型名为空时行上协议还是默认值，选定模型后按模型归属自动纠正；
+    // 已手动改过协议的行不覆盖，避免覆盖用户选择。
+    const shouldFillProtocol =
+      !row.requestModel.trim() || row.protocol === defaultProtocolForModel(row.requestModel);
     updateRow(index, {
       requestModel,
       ...(shouldFillContextWindow ? { contextWindow: nextContextWindow } : {}),
+      ...(shouldFillProtocol ? { protocol: defaultProtocolForModel(requestModel) } : {}),
     });
   };
   const removeRow = (index: number) => {
@@ -10489,6 +10494,14 @@ function normalizeRelayModelMappings(mappings: RelayModelMapping[] | undefined):
 function normalizeRelayProtocol(protocol: RelayProtocol | undefined): RelayProtocol {
   if (protocol === "chatCompletions" || protocol === "anthropic") return protocol;
   return "responses";
+}
+
+// 只有 GPT / OpenAI o 系列走 Responses，其余模型默认优先 Anthropic 协议。
+export function defaultProtocolForModel(model: string): RelayProtocol {
+  const slug = (model.trim().toLowerCase().split("/").filter(Boolean).pop() || "").trim();
+  if (!slug) return "anthropic";
+  if (slug.startsWith("gpt-") || slug === "gpt" || /^o\d/.test(slug)) return "responses";
+  return "anthropic";
 }
 
 function uniqueStrings(values: string[]): string[] {

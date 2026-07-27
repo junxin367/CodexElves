@@ -1771,6 +1771,93 @@ fn sonnet5_reasoning_efforts_include_max() {
 }
 
 #[test]
+fn future_models_inherit_top_reasoning_efforts_across_families() {
+    // GPT：5.6 起支持 max，更新版本不得被降到 xhigh。
+    for model in ["gpt-5.7", "gpt-5.6-terra", "gpt-6", "openai/gpt-5.9-custom"] {
+        assert_eq!(
+            supported_reasoning_efforts_for_model(model, UpstreamResponseProtocol::Responses),
+            vec!["minimal", "low", "medium", "high", "xhigh", "max"],
+            "{model} 应支持到 max"
+        );
+    }
+    // sol 快照线的 ultra 能力同样按版本继承。
+    for model in ["gpt-5.6-sol", "gpt-5.7-sol", "openai/gpt-6-sol-2026-09-01"] {
+        assert_eq!(
+            supported_reasoning_efforts_for_model(model, UpstreamResponseProtocol::Responses),
+            vec!["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+            "{model} 应支持到 ultra"
+        );
+    }
+    // 名字里含 sol 前缀的其它模型不得被误判为 sol 快照。
+    assert!(
+        !supported_reasoning_efforts_for_model(
+            "gpt-5.7-solar",
+            UpstreamResponseProtocol::Responses
+        )
+        .contains(&"ultra")
+    );
+    // 旧代 GPT 仍保持 xhigh 上限。
+    assert_eq!(
+        supported_reasoning_efforts_for_model("gpt-5.5", UpstreamResponseProtocol::Responses),
+        vec!["minimal", "low", "medium", "high", "xhigh"]
+    );
+
+    // Gemini：3.1 起 pro 补齐 medium，更新版本继承。
+    assert_eq!(
+        supported_reasoning_efforts_for_model(
+            "gemini-3.2-pro",
+            UpstreamResponseProtocol::Responses
+        ),
+        vec!["low", "medium", "high"]
+    );
+    assert_eq!(
+        supported_reasoning_efforts_for_model("gemini-3-pro", UpstreamResponseProtocol::Responses),
+        vec!["low", "high"]
+    );
+
+    // StepFun：能力按家族前缀识别，不绑定单个日期快照名。
+    for model in ["step-3.5-flash", "step-3.5-flash-2603", "step-4-flash"] {
+        assert_eq!(
+            supported_reasoning_efforts_for_model(model, UpstreamResponseProtocol::ChatCompletions),
+            vec!["low", "high"],
+            "{model} 应命中 stepfun 能力表"
+        );
+    }
+}
+#[test]
+fn future_claude_models_inherit_top_reasoning_efforts() {
+    // 能力按家族+版本推导，未列入名单的新模型不得被降到 high。
+    for model in [
+        "claude-opus-5",
+        "claude-opus-5-20260301",
+        "claude-opus-5.1",
+        "anthropic/claude-sonnet-6",
+    ] {
+        assert_eq!(
+            supported_reasoning_efforts_for_model(model, UpstreamResponseProtocol::Anthropic),
+            vec!["low", "medium", "high", "xhigh", "max"],
+            "{model} 应支持到 max"
+        );
+    }
+    // 点分隔版本写法与连字符写法能力必须一致。
+    assert_eq!(
+        supported_reasoning_efforts_for_model(
+            "claude-opus-4.6",
+            UpstreamResponseProtocol::Anthropic
+        ),
+        vec!["low", "medium", "high", "max"]
+    );
+    // 旧代低能力模型仍保持保守档位。
+    assert_eq!(
+        supported_reasoning_efforts_for_model(
+            "claude-sonnet-4-6",
+            UpstreamResponseProtocol::Anthropic
+        ),
+        vec!["low", "medium", "high"]
+    );
+}
+
+#[test]
 fn responses_request_maps_developer_role_to_system_for_chat_upstream() {
     let converted = responses_to_chat_completions(json!({
         "model": "deepseek-chat",

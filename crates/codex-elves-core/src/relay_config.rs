@@ -919,10 +919,9 @@ fn relay_profile_test_protocols(
     let normalized = model.trim().to_ascii_lowercase();
     let primary = if normalized.starts_with("gpt") {
         RelayProtocol::Responses
-    } else if normalized.starts_with("claude") {
-        RelayProtocol::Anthropic
     } else {
-        profile.protocol
+        // 除 GPT 外的模型默认优先 Anthropic 协议，与管理器添加模型时的默认一致。
+        RelayProtocol::Anthropic
     };
     let mut protocols = vec![primary];
     if primary != RelayProtocol::ChatCompletions {
@@ -2303,7 +2302,7 @@ fn fast_service_tier_capability(slug: &str) -> Option<(Value, Value)> {
             Value::Array(speed_tiers),
         ));
     }
-    is_gpt56_fast_service_tier_model(slug).then(|| {
+    is_gpt_fast_service_tier_model(slug).then(|| {
         (
             json!([{
                 "id": "priority",
@@ -2315,13 +2314,27 @@ fn fast_service_tier_capability(slug: &str) -> Option<(Value, Value)> {
     })
 }
 
-fn is_gpt56_fast_service_tier_model(slug: &str) -> bool {
-    matches!(
-        slug,
-        "gpt-5.6" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
-    ) || ["gpt-5.6-sol-", "gpt-5.6-terra-", "gpt-5.6-luna-"]
-        .iter()
-        .any(|prefix| slug.starts_with(prefix))
+/// 仅用于打包目录未收录的新机型推导：已在目录里的模型（如 gpt-5.5、gpt-5.4）
+/// 会先从打包数据读到真实 tiers，不会进入本函数。
+/// 目录快照当前最新为 5.6 代，故以此为推导起点向后继承；
+/// 产品线仍需在已知集合内，避免任意自定义名（如 gpt-5.6-custom）谎称具备 fast。
+fn is_gpt_fast_service_tier_model(slug: &str) -> bool {
+    if !crate::protocol_proxy::gpt_version_at_least(slug, (5, 6)) {
+        return false;
+    }
+    // 取版本号之后的第一段作为产品线名；没有则为主线。
+    // 兼容 gpt-5.7-sol（点分隔）与 gpt-6-terra（无 minor）两种形式。
+    let Some(rest) = slug.split_once("gpt").map(|(_, rest)| rest) else {
+        return false;
+    };
+    let line = rest
+        .trim_start_matches(['-', '.', '_'])
+        .split(['-', '.', '_'])
+        .find(|part| !part.is_empty() && part.parse::<u32>().is_err());
+    match line {
+        None => true,
+        Some(line) => matches!(line, "sol" | "terra" | "luna"),
+    }
 }
 
 const PACKAGED_CATALOG_FALLBACK_MODEL_SLUG: &str = "gpt-5.5";
@@ -2345,14 +2358,19 @@ fn packaged_model_catalog_entry(slug: &str) -> Option<Value> {
     let source = packaged_model_catalog()?;
     let models = source.get("models").and_then(Value::as_array)?;
 
-    let exact_slug = if normalized == "gpt-5.6" {
-        "gpt-5.6-sol"
-    } else {
-        normalized
-    };
     if let Some(model) = models
         .iter()
-        .find(|model| model.get("slug").and_then(Value::as_str) == Some(exact_slug))
+        .find(|model| model.get("slug").and_then(Value::as_str) == Some(normalized))
+    {
+        return Some(model.clone());
+    }
+
+    // 主线名（如 gpt-5.6）在快照目录里没有独立条目，回退到同版本的 sol 快照，
+    // 不把版本写死，新版本（如 gpt-5.7）只要快照入库就能自动命中。
+    let sol_alias = format!("{normalized}-sol");
+    if let Some(model) = models
+        .iter()
+        .find(|model| model.get("slug").and_then(Value::as_str) == Some(sol_alias.as_str()))
     {
         return Some(model.clone());
     }
@@ -2804,7 +2822,8 @@ fn default_catalog_context_window(model: &str) -> Option<&'static str> {
     if model == "gpt-5.4" {
         return Some("1000000");
     }
-    if model == "gpt-5.6" || model.starts_with("gpt-5.6-") {
+    // gpt-5.6 起上下文提升到 372k，后续版本默认继承，不写死在 5.6。
+    if crate::protocol_proxy::gpt_version_at_least(model, (5, 6)) {
         return Some("372000");
     }
     None
@@ -4051,9 +4070,10 @@ mod tests {
             relay_profile_test_protocols(&default_profile, "claude-sonnet-4").unwrap(),
             vec![RelayProtocol::Anthropic, RelayProtocol::ChatCompletions]
         );
+        // 非 GPT 模型默认优先 Anthropic，不再跟随供应商协议。
         assert_eq!(
             relay_profile_test_protocols(&default_profile, "deepseek-v3").unwrap(),
-            vec![RelayProtocol::Responses, RelayProtocol::ChatCompletions]
+            vec![RelayProtocol::Anthropic, RelayProtocol::ChatCompletions]
         );
 
         let chat_profile = RelayProfile {
@@ -4062,7 +4082,7 @@ mod tests {
         };
         assert_eq!(
             relay_profile_test_protocols(&chat_profile, "deepseek-v3").unwrap(),
-            vec![RelayProtocol::ChatCompletions]
+            vec![RelayProtocol::Anthropic, RelayProtocol::ChatCompletions]
         );
     }
 
@@ -4191,6 +4211,35 @@ mod tests {
             );
         }
 
+        // fast 能力按版本继承，新版本官方产品线不应掉档。
+        for slug in [
+            "gpt-5.7",
+            "gpt-5.7-sol",
+            "gpt-6-terra",
+            "openai/gpt-5.9-luna-2027-01-01",
+        ] {
+            assert!(
+                fast_service_tier_capability(slug).is_some(),
+                "{slug} 应支持 fast"
+            );
+        }
+        // 5.6 之前的 fast 能力来自打包目录的真实 tiers，不依赖版本推导分支；
+        // 这里锁定分层关系，避免后续误把 5.6 当成 fast 的全局最低版本。
+        for slug in ["gpt-5.5", "gpt-5.4"] {
+            assert!(
+                fast_service_tier_capability(slug).is_some(),
+                "{slug} 应从打包目录取得 fast"
+            );
+            assert!(
+                !is_gpt_fast_service_tier_model(slug),
+                "{slug} 不应命中版本推导分支"
+            );
+        }
+        // 打包目录中无 priority 的模型不得被推导分支意外放行。
+        assert!(fast_service_tier_capability("gpt-5.4-mini").is_none());
+
+        // 非官方产品线后缀仍不得谎称具备 fast。
+        assert!(fast_service_tier_capability("gpt-5.7-custom").is_none());
         assert!(fast_service_tier_capability("gpt-5.2").is_none());
         assert!(fast_service_tier_capability("gpt-5.6-custom").is_none());
         assert!(fast_service_tier_capability("claude-sonnet-4.5").is_none());

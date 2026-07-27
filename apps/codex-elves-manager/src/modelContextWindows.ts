@@ -54,14 +54,19 @@ const COMMON_MODEL_CONTEXT_WINDOWS: Record<string, string> = {
 };
 
 const COMMON_MODEL_CONTEXT_PATTERNS: Array<{ pattern: RegExp; contextWindow: string }> = [
-  { pattern: /^gpt-5\.6(?:[.-]|$)/, contextWindow: "372000" },
+  // gpt-5.6 起上下文提升到 372k，后续版本默认继承
+  { pattern: /^gpt-5\.(?:[6-9]|\d{2,})(?:[.-]|$)/, contextWindow: "372000" },
+  { pattern: /^gpt-(?:[6-9]|\d{2,})(?:[.-]|$)/, contextWindow: "372000" },
   { pattern: /^gpt-5(?:[.-]|$)/, contextWindow: "272000" },
   { pattern: /^gpt-4\.1(?:[.-]|$)/, contextWindow: "1047576" },
   { pattern: /^gpt-4o(?:[.-]|$)/, contextWindow: "128000" },
   { pattern: /^o[34](?:[.-]|$)/, contextWindow: "200000" },
+  // Claude 5 代起默认继承百万上下文，避免新模型落回 200k 兵底
+  { pattern: /^claude-(?:opus|sonnet|haiku)-(?:[5-9]|\d{2,})(?:[.-]|$)/, contextWindow: "1000000" },
   { pattern: /^claude-(?:opus-4-[678]|sonnet-4-6)(?:[.-]|$)/, contextWindow: "1000000" },
   { pattern: /^claude-/, contextWindow: "200000" },
-  { pattern: /^deepseek-v4-/, contextWindow: "1000000" },
+  // deepseek v4 起为百万上下文，后续大版本默认继承
+  { pattern: /^deepseek-v(?:[4-9]|\d{2,})(?:[.-]|$)/, contextWindow: "1000000" },
   { pattern: /^deepseek-/, contextWindow: "128000" },
   { pattern: /^qwen3-coder-(?:plus|flash)(?:[.-]|$)/, contextWindow: "1000000" },
   { pattern: /^qwen3\.7-max(?:[.-]|$)/, contextWindow: "1000000" },
