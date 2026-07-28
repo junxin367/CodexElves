@@ -116,8 +116,15 @@ Do not call tools.";
 /// 代理生成的 Remote Compaction V2 命名空间载荷前缀。
 ///
 /// 官方 `encrypted_content` 是供应商私有的不透明数据。跨协议桥无法伪造该加密格式，
-/// 因此使用带版本前缀的 URL-safe Base64 保存摘要。该前缀用于格式识别，不提供来源认证。
-const REMOTE_COMPACTION_V2_SYNTHETIC_PREFIX: &str = "codex-elves-compaction-v1:";
+/// 因此使用带版本前缀的自有载荷保存摘要。该前缀用于格式识别，不提供来源认证。
+///
+/// v2 直接存明文摘要：JSON 已能安全携带换行、引号和中文，Base64 只会让载荷膨胀约 1/3。
+const REMOTE_COMPACTION_V2_SYNTHETIC_PREFIX: &str = "codex-elves-compaction-v2:";
+
+/// 旧版 URL-safe Base64 载荷前缀，仅用于解码历史会话里已写入的 compaction。
+///
+/// v2 明文自 0.3.5 起启用。TODO(0.3.7): 再迭代两个版本后删除该兼容分支及 `base64` 解码依赖。
+const REMOTE_COMPACTION_V2_LEGACY_BASE64_PREFIX: &str = "codex-elves-compaction-v1:";
 
 const MAX_REMOTE_COMPACTION_V2_SYNTHETIC_BYTES: usize = 2 * 1024 * 1024;
 
@@ -217,20 +224,13 @@ fn remote_compaction_v2_bridge_prompt_item(prompt: &str) -> Value {
 /// 将本项目生成的合成 compaction item 恢复为可发送给普通模型的 assistant 历史。
 ///
 /// 真实 OpenAI `encrypted_content` 没有本项目前缀，不会被误解码。
+/// 同时兼容 v2 明文与 v1 Base64 载荷，避免压缩过的历史会话在升级后失效。
 pub fn synthetic_remote_compaction_history_text(item: &Value) -> Option<String> {
     if item.get("type").and_then(Value::as_str) != Some("compaction") {
         return None;
     }
-    let encoded = item.get("encrypted_content")?.as_str()?;
-    let payload = encoded.strip_prefix(REMOTE_COMPACTION_V2_SYNTHETIC_PREFIX)?;
-    if payload.len() > MAX_REMOTE_COMPACTION_V2_SYNTHETIC_BYTES.saturating_mul(4) / 3 + 4 {
-        return None;
-    }
-    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
-    if decoded.len() > MAX_REMOTE_COMPACTION_V2_SYNTHETIC_BYTES {
-        return None;
-    }
-    let summary = String::from_utf8(decoded).ok()?;
+    let encrypted_content = item.get("encrypted_content")?.as_str()?;
+    let summary = synthetic_remote_compaction_summary(encrypted_content)?;
     let summary = summary.trim();
     if summary.is_empty() {
         return None;
@@ -238,6 +238,26 @@ pub fn synthetic_remote_compaction_history_text(item: &Value) -> Option<String> 
     Some(format!(
         "{REMOTE_COMPACTION_V2_HISTORY_HEADER}\n\n{summary}"
     ))
+}
+
+/// 解出合成 compaction 的摘要正文：优先 v2 明文，其次回退 v1 Base64。
+fn synthetic_remote_compaction_summary(encrypted_content: &str) -> Option<String> {
+    if let Some(payload) = encrypted_content.strip_prefix(REMOTE_COMPACTION_V2_SYNTHETIC_PREFIX) {
+        if payload.len() > MAX_REMOTE_COMPACTION_V2_SYNTHETIC_BYTES {
+            return None;
+        }
+        return Some(payload.to_string());
+    }
+    // TODO(0.3.7): 兼容期结束后删除该 Base64 分支。
+    let payload = encrypted_content.strip_prefix(REMOTE_COMPACTION_V2_LEGACY_BASE64_PREFIX)?;
+    if payload.len() > MAX_REMOTE_COMPACTION_V2_SYNTHETIC_BYTES.saturating_mul(4) / 3 + 4 {
+        return None;
+    }
+    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    if decoded.len() > MAX_REMOTE_COMPACTION_V2_SYNTHETIC_BYTES {
+        return None;
+    }
+    String::from_utf8(decoded).ok()
 }
 
 /// 把非 Responses 上游生成的普通 Responses 响应改写为 Remote Compaction V2 响应。
@@ -514,10 +534,9 @@ fn apply_layered_tail_to_summary(
 fn synthetic_remote_compaction_item(summary: &str) -> Value {
     let summary =
         truncate_utf8_to_byte_limit(summary.trim(), MAX_REMOTE_COMPACTION_V2_SYNTHETIC_BYTES);
-    let encoded = URL_SAFE_NO_PAD.encode(summary.as_bytes());
     json!({
         "type": "compaction",
-        "encrypted_content": format!("{REMOTE_COMPACTION_V2_SYNTHETIC_PREFIX}{encoded}")
+        "encrypted_content": format!("{REMOTE_COMPACTION_V2_SYNTHETIC_PREFIX}{summary}")
     })
 }
 
@@ -1605,6 +1624,31 @@ mod tests {
 
         assert!(restored.ends_with('x'));
         assert!(!restored.ends_with('界'));
+    }
+
+    #[test]
+    fn synthetic_remote_compaction_writes_plain_text_and_reads_legacy_base64() {
+        let item = synthetic_remote_compaction_item("中文摘要\n带换行与\"引号\"");
+        let encrypted_content = item["encrypted_content"].as_str().unwrap();
+        // 新写入一律为 v2 明文，不再携带 Base64 膨胀。
+        assert!(encrypted_content.starts_with(REMOTE_COMPACTION_V2_SYNTHETIC_PREFIX));
+        assert!(encrypted_content.contains("中文摘要\n带换行与\"引号\""));
+        let restored = synthetic_remote_compaction_history_text(&item)
+            .expect("v2 plain-text compaction should be readable");
+        assert!(restored.contains("中文摘要"));
+        assert!(restored.contains("带换行与\"引号\""));
+
+        // TODO(0.3.7): 兼容期结束后连同该断言一并删除。
+        let legacy = json!({
+            "type": "compaction",
+            "encrypted_content": format!(
+                "{REMOTE_COMPACTION_V2_LEGACY_BASE64_PREFIX}{}",
+                URL_SAFE_NO_PAD.encode("LEGACY SUMMARY".as_bytes())
+            )
+        });
+        let restored_legacy = synthetic_remote_compaction_history_text(&legacy)
+            .expect("v1 base64 compaction should stay readable");
+        assert!(restored_legacy.contains("LEGACY SUMMARY"));
     }
 
     #[test]

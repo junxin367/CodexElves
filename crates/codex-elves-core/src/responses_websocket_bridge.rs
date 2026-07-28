@@ -2004,7 +2004,7 @@ mod tests {
         assert!(
             !forwarded_payload
                 .to_string()
-                .contains("codex-elves-compaction-v1:")
+                .contains("codex-elves-compaction-v2:")
         );
     }
 
