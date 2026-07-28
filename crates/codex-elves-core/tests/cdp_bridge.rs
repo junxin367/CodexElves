@@ -757,9 +757,11 @@ fn injection_script_exposes_fast_service_tier_control() {
     assert!(script.contains("default-service-tier"));
     assert!(script.contains("setting-storage-"));
     assert!(script.contains("vscode-api-"));
+    assert!(script.contains("app-initial-"));
     assert!(script.contains("thread-context-inputs-"));
     assert!(script.contains("findCodexServiceTierDispatcher"));
     assert!(script.contains("codexServiceTierDispatcherFromModule"));
+    assert!(script.contains("codexServiceTierSettingReaderFromModule"));
     assert!(script.contains("codexServiceTierRequestClientClassFromModule"));
     assert!(script.contains("patchCodexServiceTierRequestClientPrototype"));
     assert!(script.contains("update-thread-settings-for-next-turn"));
@@ -1040,6 +1042,31 @@ fn injection_script_applies_fast_service_tier_contract() {
     assert_eq!(cases["serviceTierRetry"]["dispatcherRetryPending"], false);
     assert_eq!(
         cases["serviceTierRetry"]["requestClientRetryPending"],
+        false
+    );
+    assert_eq!(cases["modernServiceTierModule"]["setting"], "priority");
+    assert_eq!(
+        cases["modernServiceTierModule"]["turnMessage"]["type"],
+        "start-turn-for-host"
+    );
+    assert_eq!(
+        cases["modernServiceTierModule"]["turnMessage"]["payload"]["params"]["serviceTier"],
+        "priority"
+    );
+    assert_eq!(
+        cases["modernServiceTierModule"]["dispatcherInstalled"],
+        true
+    );
+    assert_eq!(
+        cases["modernServiceTierModule"]["requestClientInstalled"],
+        true
+    );
+    assert_eq!(
+        cases["modernServiceTierModule"]["dispatcherRetryPending"],
+        false
+    );
+    assert_eq!(
+        cases["modernServiceTierModule"]["requestClientRetryPending"],
         false
     );
 }
@@ -1473,8 +1500,57 @@ async function runServiceTierRetryCase() {{
   }};
 }}
 
+async function runModernServiceTierModuleCase() {{
+  api.resetServiceTierInstallState();
+  api.setModelCatalog({{ status: "ok", model: "gpt-5.4", default_model: "gpt-5.4", models: ["gpt-5.4"] }});
+  api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
+  const dispatched = [];
+  const dispatcher = {{
+    handlers: new Map(),
+    dispatchMessage(type, payload) {{
+      dispatched.push({{ type, payload }});
+    }},
+    handleMessage() {{}},
+  }};
+  async function modernSettingReader(setting) {{
+    const request = {{ method: "get-setting", params: {{ key: setting.key }} }};
+    const result = {{
+      value: request.params.key === "default-service-tier" ? "priority" : setting.default,
+    }};
+    return result.value ?? setting.default;
+  }}
+  api.setModuleLoader(async (namePart) => {{
+    if (namePart === "app-initial-") {{
+      return {{ modernSettingReader, dispatcher }};
+    }}
+    throw new Error(`legacy module unavailable: ${{namePart}}`);
+  }});
+  const setting = await api.readServiceTierSetting();
+  await Promise.all([
+    api.installDispatcherPatch(),
+    api.installRequestClientPatch(),
+  ]);
+  dispatcher.dispatchMessage("start-turn-for-host", {{
+    conversationId: "thread-12345678",
+    params: {{
+      model: "gpt-5.4",
+      serviceTier: null,
+    }},
+  }});
+  const state = api.serviceTierInstallState();
+  const turnMessage = dispatched.find((message) => message.type === "start-turn-for-host");
+  api.setModuleLoader(null);
+  return {{
+    setting,
+    dispatched,
+    turnMessage,
+    ...state,
+  }};
+}}
+
 (async () => {{
   const serviceTierRetry = await runServiceTierRetryCase();
+  const modernServiceTierModule = await runModernServiceTierModuleCase();
   const pluginMarketplaceRequestClientCase = await runPluginMarketplaceRequestClientCase();
   process.stdout.write(JSON.stringify({{
     supportedFast,
@@ -1497,6 +1573,7 @@ async function runServiceTierRetryCase() {{
     pluginAutoExpandLabels,
     badgeTooltip,
     serviceTierRetry,
+    modernServiceTierModule,
   }}));
 }})().catch((error) => {{
   console.error(error);

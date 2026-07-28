@@ -48,7 +48,7 @@
   const codexThreadServiceTierKey = "codexThreadServiceTierOverrides";
   const codexThreadServiceTierMaxEntries = 120;
   const codexThreadServiceTierDraftBindWindowMs = 60 * 1000;
-  const codexServiceTierRequestOverrideVersion = "3";
+  const codexServiceTierRequestOverrideVersion = "4";
   const codexServiceTierRequestClientPatchRetryBaseMs = 1000;
   const codexServiceTierRequestClientPatchRetryMaxMs = 30000;
   const codexAppServerManagerDiscoveryVersion = "1";
@@ -1596,6 +1596,9 @@
   const codexServiceTierFallbackFastValue = "priority";
   const codexServiceTierModulePromises = new Map();
   let codexAppModuleLoaderForTest = null;
+  const codexServiceTierModernModulePart = "app-initial-";
+  const codexServiceTierSettingModuleParts = ["setting-storage-", codexServiceTierModernModulePart];
+  const codexServiceTierRequestClientModuleParts = ["thread-context-inputs-", codexServiceTierModernModulePart];
   const codexServiceTierSupportedFastModels = new Set([
     "gpt-5.4",
     "gpt-5.5",
@@ -1655,10 +1658,9 @@
     return await codexServiceTierModulePromises.get(namePart);
   }
 
-  // Codex App 升级后会重排 chunk：dispatcher 类的归属模块与导出名都可能变化。
-  // 历史上它在 setting-storage-*.js 的 module.v；新版迁移到 vscode-api-*.js 的 module.d。
-  // 这里不写死模块名/导出名，按特征（含 dispatchMessage + getInstance）在候选模块里嗅探。
-  const codexServiceTierDispatcherModuleParts = ["vscode-api-", "setting-storage-"];
+  // Codex App 升级后会重排 chunk：dispatcher 的归属模块与导出形态都可能变化。
+  // 历史版本导出 getInstance 类；新版 app-initial 直接导出带 handlers/dispatchMessage 的对象。
+  const codexServiceTierDispatcherModuleParts = ["vscode-api-", "setting-storage-", codexServiceTierModernModulePart];
   let codexServiceTierDispatcher = null;
   let codexServiceTierNativeThreadSyncKey = "";
 
@@ -1694,6 +1696,19 @@
 
   function codexServiceTierDispatcherFromModule(module) {
     if (!module || typeof module !== "object") return null;
+    for (const value of Object.values(module)) {
+      if (!value || (typeof value !== "object" && typeof value !== "function")) continue;
+      try {
+        if (
+          value.handlers instanceof Map &&
+          typeof value.dispatchMessage === "function" &&
+          typeof value.handleMessage === "function"
+        ) {
+          return value;
+        }
+      } catch {
+      }
+    }
     for (const value of Object.values(module)) {
       if (typeof value !== "function" || typeof value.getInstance !== "function") continue;
       let source = "";
@@ -1760,22 +1775,54 @@
     }
   }
 
-  async function codexSettingStorageModule() {
-    const module = await loadCodexAppModule("setting-storage-");
-    if (typeof module.n !== "function" || typeof module.s !== "function") {
-      throw new Error("Codex setting-storage 接口不可用");
+  function codexServiceTierSettingReaderFromModule(module) {
+    if (!module || typeof module !== "object") return null;
+    if (typeof module.n === "function" && typeof module.s === "function") return module.n;
+    for (const value of Object.values(module)) {
+      if (typeof value !== "function") continue;
+      let source = "";
+      try {
+        source = String(value);
+      } catch {
+        continue;
+      }
+      if (
+        source.includes("get-setting") &&
+        source.includes("key") &&
+        source.includes(".value")
+      ) {
+        return value;
+      }
     }
-    return module;
+    return null;
+  }
+
+  async function codexServiceTierSettingReader() {
+    let lastError = null;
+    for (const namePart of codexServiceTierSettingModuleParts) {
+      try {
+        const module = await loadCodexAppModule(namePart);
+        const reader = codexServiceTierSettingReaderFromModule(module);
+        if (reader) return reader;
+        lastError = new Error(`Codex 设置读取接口不可用: ${namePart}`);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError || new Error("Codex 设置读取接口不可用");
   }
 
   async function getCodexServiceTierSetting() {
     try {
-      const settingStorage = await codexSettingStorageModule();
-      return await settingStorage.n(codexDefaultServiceTierSetting);
+      const readSetting = await codexServiceTierSettingReader();
+      return await readSetting(codexDefaultServiceTierSetting);
     } catch (error) {
       if (typeof codexStateCall === "function") {
-        const result = await codexStateCall("get-setting", { params: { key: codexDefaultServiceTierSetting.key } });
-        return result && Object.prototype.hasOwnProperty.call(result, "value") ? result.value : codexDefaultServiceTierSetting.default;
+        try {
+          const result = await codexStateCall("get-setting", { params: { key: codexDefaultServiceTierSetting.key } });
+          return result && Object.prototype.hasOwnProperty.call(result, "value") ? result.value : codexDefaultServiceTierSetting.default;
+        } catch {
+        }
       }
       throw error;
     }
@@ -2650,9 +2697,34 @@
     if (now < nextAttemptAt) return;
     const patch = async () => {
       try {
-        const module = await loadCodexAppModule("thread-context-inputs-");
-        const requestClientClass = codexServiceTierRequestClientClassFromModule(module);
-        if (!requestClientClass) throw new Error("Codex AppServerRequestClient unavailable");
+        let requestClientClass = null;
+        let modernModuleLoaded = false;
+        let lastError = null;
+        for (const namePart of codexServiceTierRequestClientModuleParts) {
+          try {
+            const module = await loadCodexAppModule(namePart);
+            requestClientClass = codexServiceTierRequestClientClassFromModule(module);
+            modernModuleLoaded ||= namePart === codexServiceTierModernModulePart;
+            if (requestClientClass) break;
+            lastError = new Error(`Codex AppServerRequestClient unavailable: ${namePart}`);
+          } catch (error) {
+            lastError = error;
+          }
+        }
+        if (!requestClientClass && modernModuleLoaded) {
+          const dispatcherInstalled = await installCodexServiceTierDispatcherPatch();
+          if (!dispatcherInstalled) throw lastError || new Error("Codex dispatcher fallback unavailable");
+          window.__codexServiceTierRequestClientPatchInstalled = codexServiceTierRequestOverrideVersion;
+          window.__codexServiceTierRequestClientPatchFailureCount = 0;
+          window.__codexServiceTierRequestClientPatchNextAttemptAt = 0;
+          window.__codexServiceTierRequestClientPatchFailureSignature = "";
+          clearCodexServiceTierRequestClientPatchRetry(true);
+          sendCodexElvesDiagnostic("service_tier_request_client_patch_skipped", {
+            reason: "modern_dispatcher_covers_host_requests",
+          });
+          return true;
+        }
+        if (!requestClientClass) throw lastError || new Error("Codex AppServerRequestClient unavailable");
         if (!patchCodexServiceTierRequestClientPrototype(requestClientClass)) {
           throw new Error("Codex AppServerRequestClient patch rejected");
         }
@@ -5458,6 +5530,7 @@
       applyServiceTierOverride: (method, params, threadIdHint = "") => applyCodexServiceTierRequestOverride(method, params, threadIdHint),
       requestOverride: (message) => codexServiceTierRequestOverride(message),
       patchRequestClientPrototype: (klass) => patchCodexServiceTierRequestClientPrototype(klass),
+      readServiceTierSetting: () => getCodexServiceTierSetting(),
       installDispatcherPatch: () => installCodexServiceTierDispatcherPatch(),
       installRequestClientPatch: () => installCodexServiceTierRequestClientPatch(),
       resetServiceTierInstallState: () => {
