@@ -449,6 +449,128 @@ fn responses_request_converts_to_anthropic_messages() {
 }
 
 #[test]
+fn anthropic_tool_result_keeps_images_as_image_blocks() {
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-5",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "look" }]
+            },
+            {
+                "type": "function_call",
+                "name": "view_image",
+                "call_id": "call-1",
+                "arguments": "{\"path\":\"shot.png\"}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": [
+                    { "type": "input_text", "text": "screenshot" },
+                    {
+                        "type": "input_image",
+                        "detail": "high",
+                        "image_url": "data:image/png;base64,aGVsbG8="
+                    }
+                ]
+            }
+        ]
+    }))
+    .unwrap();
+
+    let tool_result = &converted["messages"][2]["content"][0];
+    assert_eq!(tool_result["type"], "tool_result");
+    assert_eq!(tool_result["tool_use_id"], "call-1");
+    assert_eq!(
+        tool_result["content"],
+        json!([
+            { "type": "text", "text": "screenshot" },
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": "aGVsbG8="
+                }
+            }
+        ])
+    );
+}
+
+#[test]
+fn anthropic_tool_result_keeps_plain_text_as_string() {
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-5",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "run" }]
+            },
+            {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call-2",
+                "arguments": "{}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call-2",
+                "output": "exit code 0"
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert_eq!(
+        converted["messages"][2]["content"][0]["content"],
+        json!("exit code 0")
+    );
+}
+
+#[test]
+fn anthropic_orphan_tool_output_keeps_images_as_image_blocks() {
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-5",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "look" }]
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "orphan-1",
+                "output": [
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,aGVsbG8="
+                    }
+                ]
+            }
+        ]
+    }))
+    .unwrap();
+
+    let content = &converted["messages"][0]["content"];
+    assert_eq!(content[1]["type"], "text");
+    assert_eq!(content[1]["text"], "Function call output (orphan-1):");
+    assert_eq!(
+        content[2],
+        json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "aGVsbG8="
+            }
+        })
+    );
+}
+
+#[test]
 fn anthropic_tool_schema_flattens_top_level_union() {
     let converted = responses_to_anthropic_messages(json!({
         "model": "claude-opus-4-8",

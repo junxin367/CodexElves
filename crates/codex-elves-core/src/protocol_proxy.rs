@@ -4800,7 +4800,7 @@ fn append_responses_item_to_anthropic(
                     vec![json!({
                         "type": "tool_result",
                         "tool_use_id": call_id,
-                        "content": response_output_text(item.get("output").unwrap_or(&Value::Null))
+                        "content": anthropic_tool_result_content(item.get("output").unwrap_or(&Value::Null))
                     })],
                 );
             }
@@ -4855,7 +4855,7 @@ fn append_responses_item_to_anthropic(
                     vec![json!({
                         "type": "tool_result",
                         "tool_use_id": call_id,
-                        "content": response_output_text(item.get("output").unwrap_or(&Value::Null))
+                        "content": anthropic_tool_result_content(item.get("output").unwrap_or(&Value::Null))
                     })],
                 );
             }
@@ -5203,17 +5203,41 @@ fn push_anthropic_orphan_tool_output_message(
     call_id: &str,
     output: &Value,
 ) {
-    push_anthropic_message(
-        messages,
-        "user",
-        vec![json!({
+    let prefix = format!("Function call output ({call_id}): ");
+    let content = match anthropic_tool_result_content(output) {
+        // 降级成普通 user 消息时，图片仍须保留为原生 image 块。
+        Value::Array(blocks) => {
+            let mut content = vec![json!({ "type": "text", "text": prefix.trim_end() })];
+            content.extend(blocks);
+            content
+        }
+        other => vec![json!({
             "type": "text",
-            "text": format!(
-                "Function call output ({call_id}): {}",
-                response_output_text(output)
-            )
+            "text": format!("{prefix}{}", response_output_text(&other))
         })],
-    );
+    };
+    push_anthropic_message(messages, "user", content);
+}
+
+/// 把 Responses 工具输出转换成 Anthropic `tool_result.content`。
+///
+/// 纯文本输出保持字符串形态；含图片时必须转成内容块数组，
+/// 否则 base64 会被序列化成正文文本发给上游，把一张图片放大成几十万 token。
+fn anthropic_tool_result_content(output: &Value) -> Value {
+    match output {
+        Value::Array(parts) if parts.iter().any(is_responses_image_part) => {
+            let blocks = responses_content_to_anthropic_content(output);
+            if blocks.is_empty() {
+                return Value::String(response_output_text(output));
+            }
+            Value::Array(blocks)
+        }
+        other => Value::String(response_output_text(other)),
+    }
+}
+
+fn is_responses_image_part(part: &Value) -> bool {
+    part.get("type").and_then(Value::as_str) == Some("input_image")
 }
 
 fn responses_content_to_anthropic_content(content: &Value) -> Vec<Value> {
