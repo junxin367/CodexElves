@@ -4673,6 +4673,7 @@ fn append_responses_input(input: &Value, messages: &mut Vec<Value>) {
         Value::Array(items) => {
             let mut pending_tool_calls = Vec::new();
             let mut pending_reasoning = Vec::new();
+            let mut pending_tool_images = Vec::new();
             let mut seen_tool_call_ids = BTreeSet::new();
             let mut ignored_tool_call_ids = BTreeSet::new();
             for item in items {
@@ -4681,16 +4682,19 @@ fn append_responses_input(input: &Value, messages: &mut Vec<Value>) {
                     messages,
                     &mut pending_tool_calls,
                     &mut pending_reasoning,
+                    &mut pending_tool_images,
                     &mut seen_tool_call_ids,
                     &mut ignored_tool_call_ids,
                 );
             }
             flush_tool_calls(messages, &mut pending_tool_calls, &mut pending_reasoning);
             flush_reasoning(messages, &mut pending_reasoning);
+            flush_chat_tool_output_images(messages, &mut pending_tool_images);
         }
         Value::Object(_) => {
             let mut pending_tool_calls = Vec::new();
             let mut pending_reasoning = Vec::new();
+            let mut pending_tool_images = Vec::new();
             let mut seen_tool_call_ids = BTreeSet::new();
             let mut ignored_tool_call_ids = BTreeSet::new();
             append_responses_item(
@@ -4698,11 +4702,13 @@ fn append_responses_input(input: &Value, messages: &mut Vec<Value>) {
                 messages,
                 &mut pending_tool_calls,
                 &mut pending_reasoning,
+                &mut pending_tool_images,
                 &mut seen_tool_call_ids,
                 &mut ignored_tool_call_ids,
             );
             flush_tool_calls(messages, &mut pending_tool_calls, &mut pending_reasoning);
             flush_reasoning(messages, &mut pending_reasoning);
+            flush_chat_tool_output_images(messages, &mut pending_tool_images);
         }
         _ => {}
     }
@@ -5356,10 +5362,16 @@ fn append_responses_item(
     messages: &mut Vec<Value>,
     pending_tool_calls: &mut Vec<Value>,
     pending_reasoning: &mut Vec<String>,
+    pending_tool_images: &mut Vec<Value>,
     seen_tool_call_ids: &mut BTreeSet<String>,
     ignored_tool_call_ids: &mut BTreeSet<String>,
 ) {
-    match item.get("type").and_then(Value::as_str) {
+    let item_type = item.get("type").and_then(Value::as_str);
+    // 连续的 tool 消息段一结束，就把缓冲的图片以 user 消息补在后面。
+    if !is_responses_tool_output_item(item_type) {
+        flush_chat_tool_output_images(messages, pending_tool_images);
+    }
+    match item_type {
         Some("function_call") => {
             let name = responses_history_function_name(item);
             if name.is_empty() {
@@ -5404,12 +5416,14 @@ fn append_responses_item(
                 ));
                 return;
             }
+            let (text, images) = split_chat_tool_output(item.get("output").unwrap_or(&Value::Null));
             flush_tool_calls(messages, pending_tool_calls, pending_reasoning);
             messages.push(json!({
                 "role": "tool",
                 "tool_call_id": call_id,
-                "content": response_output_text(item.get("output").unwrap_or(&Value::Null))
+                "content": text
             }));
+            pending_tool_images.extend(images);
         }
         Some("custom_tool_call") => {
             let raw_name = item.get("name").and_then(Value::as_str).unwrap_or("");
@@ -5457,12 +5471,14 @@ fn append_responses_item(
                 ));
                 return;
             }
+            let (text, images) = split_chat_tool_output(item.get("output").unwrap_or(&Value::Null));
             flush_tool_calls(messages, pending_tool_calls, pending_reasoning);
             messages.push(json!({
                 "role": "tool",
                 "tool_call_id": call_id,
-                "content": response_output_text(item.get("output").unwrap_or(&Value::Null))
+                "content": text
             }));
+            pending_tool_images.extend(images);
         }
         Some("tool_search_call") => {
             let call_id = item
@@ -5549,11 +5565,13 @@ fn append_responses_item(
                 messages.push(orphan_tool_output_message(call_id, output));
                 return;
             }
+            let (text, images) = split_chat_tool_output(output);
             messages.push(json!({
                 "role": "tool",
                 "tool_call_id": call_id,
-                "content": response_output_text(output)
+                "content": text
             }));
+            pending_tool_images.extend(images);
         }
         Some("reasoning") => {
             if let Some(text) = responses_reasoning_text(item) {
@@ -5601,13 +5619,79 @@ fn append_responses_item(
 }
 
 fn orphan_tool_output_message(call_id: &str, output: &Value) -> Value {
-    json!({
+    let (text, images) = split_chat_tool_output(output);
+    let text = format!("Function call output ({call_id}): {text}");
+    if images.is_empty() {
+        return json!({ "role": "user", "content": text });
+    }
+    // 已经是 user 消息，图片可以直接内联。
+    let mut content = vec![json!({ "type": "text", "text": text })];
+    content.extend(images);
+    json!({ "role": "user", "content": content })
+}
+
+/// 拆分 Responses 工具输出，返回 (文本, Chat 图片内容块)。
+///
+/// Chat Completions 的 `role:"tool"` 消息只接受纯文本，图片必须另发 user 消息；
+/// 否则 base64 会被序列化成正文文本发给上游，把一张图片放大成几十万 token。
+fn split_chat_tool_output(output: &Value) -> (String, Vec<Value>) {
+    let has_image = output
+        .as_array()
+        .is_some_and(|parts| parts.iter().any(is_responses_image_part));
+    if !has_image {
+        return (response_output_text(output), Vec::new());
+    }
+    let converted = responses_content_to_chat_content("tool", output);
+    let Some(parts) = converted.as_array() else {
+        return (response_output_text(output), Vec::new());
+    };
+    let mut texts = Vec::new();
+    let mut images = Vec::new();
+    for part in parts {
+        match part.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                    texts.push(text.to_string());
+                }
+            }
+            _ => images.push(part.clone()),
+        }
+    }
+    if images.is_empty() {
+        return (response_output_text(output), Vec::new());
+    }
+    let text = if texts.is_empty() {
+        "[image output in the following message]".to_string()
+    } else {
+        texts.join("\n")
+    };
+    (text, images)
+}
+
+/// 工具输出里的图片先缓冲，等连续的 tool 消息段结束后再合并成一条 user 消息。
+///
+/// 否则并行工具调用场景下，user 消息会插在两条 tool 消息中间，
+/// 破坏 assistant.tool_calls 与 tool 消息的配对。
+fn flush_chat_tool_output_images(messages: &mut Vec<Value>, pending_tool_images: &mut Vec<Value>) {
+    if pending_tool_images.is_empty() {
+        return;
+    }
+    messages.push(json!({
         "role": "user",
-        "content": format!(
-            "Function call output ({call_id}): {}",
-            response_output_text(output)
+        "content": std::mem::take(pending_tool_images)
+    }));
+}
+
+fn is_responses_tool_output_item(item_type: Option<&str>) -> bool {
+    matches!(
+        item_type,
+        Some(
+            "function_call_output"
+                | "custom_tool_call_output"
+                | "tool_search_output"
+                | "tool_result"
         )
-    })
+    )
 }
 
 fn normalize_chat_messages(messages: &mut [Value]) {

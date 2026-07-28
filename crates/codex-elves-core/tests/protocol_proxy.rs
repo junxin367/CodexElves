@@ -571,6 +571,122 @@ fn anthropic_orphan_tool_output_keeps_images_as_image_blocks() {
 }
 
 #[test]
+fn chat_tool_output_moves_images_into_following_user_message() {
+    let converted = responses_to_chat_completions(json!({
+        "model": "gpt-5",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "look" }]
+            },
+            {
+                "type": "function_call",
+                "name": "view_image",
+                "call_id": "call-1",
+                "arguments": "{}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": [
+                    { "type": "input_text", "text": "screenshot" },
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,aGVsbG8="
+                    }
+                ]
+            }
+        ]
+    }))
+    .unwrap();
+
+    let messages = converted["messages"].as_array().unwrap();
+    let tool = messages.iter().find(|m| m["role"] == "tool").unwrap();
+    // tool 消息只能是纯文本，不能包含 base64。
+    assert_eq!(tool["content"], json!("screenshot"));
+    assert_eq!(tool["tool_call_id"], "call-1");
+
+    // 图片另起一条 user 消息，且紧跟在 tool 消息之后。
+    let tool_index = messages.iter().position(|m| m["role"] == "tool").unwrap();
+    let image_message = &messages[tool_index + 1];
+    assert_eq!(image_message["role"], "user");
+    assert_eq!(
+        image_message["content"][0],
+        json!({
+            "type": "image_url",
+            "image_url": { "url": "data:image/png;base64,aGVsbG8=" }
+        })
+    );
+}
+
+#[test]
+fn chat_parallel_tool_outputs_keep_tool_messages_contiguous() {
+    let converted = responses_to_chat_completions(json!({
+        "model": "gpt-5",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "look" }]
+            },
+            { "type": "function_call", "name": "view_image", "call_id": "call-1", "arguments": "{}" },
+            { "type": "function_call", "name": "exec_command", "call_id": "call-2", "arguments": "{}" },
+            {
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": [{
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,aGVsbG8="
+                }]
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call-2",
+                "output": "exit 0"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let messages = converted["messages"].as_array().unwrap();
+    let roles = messages
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    // 两条 tool 消息必须相邻，图片 user 消息只能排在它们之后。
+    assert_eq!(roles, vec!["user", "assistant", "tool", "tool", "user"]);
+    assert_eq!(messages[4]["content"][0]["type"], "image_url");
+}
+
+#[test]
+fn chat_tool_output_keeps_plain_text_as_string() {
+    let converted = responses_to_chat_completions(json!({
+        "model": "gpt-5",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "run" }]
+            },
+            { "type": "function_call", "name": "exec_command", "call_id": "call-9", "arguments": "{}" },
+            {
+                "type": "function_call_output",
+                "call_id": "call-9",
+                "output": "exit code 0"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let messages = converted["messages"].as_array().unwrap();
+    let tool = messages.iter().find(|m| m["role"] == "tool").unwrap();
+    assert_eq!(tool["content"], json!("exit code 0"));
+    // 无图片时不得凭空多出 user 消息。
+    assert_eq!(messages.len(), 3);
+}
+
+#[test]
 fn anthropic_tool_schema_flattens_top_level_union() {
     let converted = responses_to_anthropic_messages(json!({
         "model": "claude-opus-4-8",
