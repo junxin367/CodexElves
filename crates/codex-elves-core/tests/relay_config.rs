@@ -1,24 +1,29 @@
 use codex_elves_core::codex_sqlite::codex_session_db_path_from_home;
 use codex_elves_core::relay_config::{
-    apply_pure_api_config_to_home, apply_relay_config_file_to_home, apply_relay_config_to_home,
-    apply_relay_files_to_home, apply_relay_files_to_home_with_common,
-    apply_relay_profile_files_to_home_with_context, apply_relay_profile_to_home_with_switch_rules,
+    LOCAL_PROXY_CODEX_STREAM_IDLE_TIMEOUT_MS, apply_pure_api_config_to_home,
+    apply_relay_config_file_to_home, apply_relay_config_to_home, apply_relay_files_to_home,
+    apply_relay_files_to_home_with_common, apply_relay_profile_files_to_home_with_context,
+    apply_relay_profile_to_home_with_switch_rules,
     apply_relay_profile_to_home_with_switch_rules_and_computer_use_guard,
     backfill_relay_profile_from_home, backfill_relay_profile_from_home_with_common,
     chatgpt_auth_status_from_home, clear_relay_config_to_home,
     clear_relay_config_to_home_with_auth, delete_context_entry_from_common_config,
-    extract_common_config_from_config, filter_common_config_for_selection,
-    list_context_entries_from_common_config, normalize_relay_profile_for_storage,
-    relay_config_status_from_home, sanitize_common_config_contents,
-    set_codex_goals_feature_in_home, strip_common_config_from_config,
-    sync_applied_relay_profile_provider_name_to_home, sync_applied_relay_profile_websocket_to_home,
-    sync_live_config_context_entries, sync_live_config_context_entry,
-    upsert_context_entry_in_common_config,
+    ensure_applied_local_proxy_stream_idle_timeout_to_home, extract_common_config_from_config,
+    filter_common_config_for_selection, list_context_entries_from_common_config,
+    normalize_relay_profile_for_storage, relay_config_status_from_home,
+    sanitize_common_config_contents, set_codex_goals_feature_in_home,
+    strip_common_config_from_config, sync_applied_relay_profile_provider_name_to_home,
+    sync_applied_relay_profile_websocket_to_home, sync_live_config_context_entries,
+    sync_live_config_context_entry, upsert_context_entry_in_common_config,
 };
 use codex_elves_core::settings::{
     RelayContextSelection, RelayMode, RelayModelMapping, RelayProfile, RelayProtocol,
     ResponsesWebsocketCapability, ResponsesWebsocketCapabilityState,
 };
+
+fn local_proxy_stream_idle_timeout_line() -> String {
+    format!("stream_idle_timeout_ms = {LOCAL_PROXY_CODEX_STREAM_IDLE_TIMEOUT_MS}")
+}
 
 fn write_remote_plugin_marketplace_snapshot(home: &std::path::Path) {
     let root = home.join(".tmp").join("plugins-remote");
@@ -328,11 +333,46 @@ model = "gpt-5-mini"
     assert!(updated.contains("supports_websockets = false"));
     assert!(updated.contains(r#"base_url = "https://relay.example.test/v1""#));
     assert!(updated.contains(r#"experimental_bearer_token = "sk-test-redacted""#));
+    assert!(!updated.contains("stream_idle_timeout_ms"));
+}
+
+#[test]
+fn direct_responses_relay_preserves_existing_stream_idle_timeout() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+base_url = "https://old.example.test/v1"
+stream_idle_timeout_ms = 7200000
+"#,
+    )
+    .unwrap();
+
+    apply_relay_config_to_home(
+        temp.path(),
+        "https://new.example.test/v1",
+        "sk-test-redacted",
+    )
+    .unwrap();
+    let updated = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+
+    assert!(updated.contains(r#"base_url = "https://new.example.test/v1""#));
+    assert!(updated.contains("stream_idle_timeout_ms = 7200000"));
+    assert!(!updated.contains(&local_proxy_stream_idle_timeout_line()));
 }
 
 #[test]
 fn apply_chat_protocol_relay_points_codex_to_local_responses_proxy() {
     let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "model_reasoning_effort = \"xhigh\"\n",
+    )
+    .unwrap();
 
     let result = codex_elves_core::relay_config::apply_relay_config_to_home_with_protocol(
         temp.path(),
@@ -347,6 +387,7 @@ fn apply_chat_protocol_relay_points_codex_to_local_responses_proxy() {
     assert!(result.configured);
     assert!(updated.contains(r#"wire_api = "responses""#));
     assert!(updated.contains(r#"base_url = "http://127.0.0.1:45221/v1""#));
+    assert!(updated.contains(&local_proxy_stream_idle_timeout_line()));
     assert!(updated.contains(r#"experimental_bearer_token = "sk-test-redacted""#));
     assert!(!updated.contains("codex_elves_chat_base_url"));
 }
@@ -369,6 +410,7 @@ fn apply_aggregate_relay_points_codex_to_local_responses_proxy_without_snapshot(
     assert!(result.configured);
     assert!(updated.contains(r#"wire_api = "responses""#));
     assert!(updated.contains(r#"base_url = "http://127.0.0.1:45221/v1""#));
+    assert!(updated.contains(&local_proxy_stream_idle_timeout_line()));
     assert!(updated.contains(r#"experimental_bearer_token = "codex-elves-aggregate""#));
 }
 
@@ -384,6 +426,7 @@ fn chat_protocol_profile_keeps_upstream_base_url_separate_from_codex_proxy() {
         relay_mode: RelayMode::PureApi,
         config_contents: r#"model = "deepseek-chat"
 model_provider = "custom"
+model_reasoning_effort = "max"
 
 [model_providers.custom]
 name = "custom"
@@ -410,11 +453,109 @@ base_url = "http://127.0.0.1:45221/v1"
             .config_contents
             .contains(r#"base_url = "http://127.0.0.1:45221/v1""#)
     );
+    assert!(
+        profile
+            .config_contents
+            .contains(&local_proxy_stream_idle_timeout_line())
+    );
 
     apply_relay_profile_to_home_with_switch_rules(temp.path(), &profile, "").unwrap();
     let live = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
     assert!(!live.contains("codex_elves_chat_base_url"));
     assert!(live.contains(r#"base_url = "http://127.0.0.1:45221/v1""#));
+    assert!(live.contains(&local_proxy_stream_idle_timeout_line()));
+}
+
+#[test]
+fn startup_backfills_missing_stream_idle_timeout_for_applied_local_proxy() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+base_url = "http://127.0.0.1:45221/v1"
+"#,
+    )
+    .unwrap();
+    let profile = RelayProfile {
+        id: "relay-local".to_string(),
+        local_proxy_enabled: Some(true),
+        config_contents: r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "http://127.0.0.1:45221/v1"
+"#
+        .to_string(),
+        ..RelayProfile::default()
+    };
+
+    assert!(ensure_applied_local_proxy_stream_idle_timeout_to_home(temp.path(), &profile).unwrap());
+    let updated = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(updated.contains(&local_proxy_stream_idle_timeout_line()));
+}
+
+#[test]
+fn startup_preserves_existing_stream_idle_timeout_for_applied_local_proxy() {
+    let temp = tempfile::tempdir().unwrap();
+    let original = r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "http://127.0.0.1:45221/v1"
+stream_idle_timeout_ms = 7200000
+"#;
+    std::fs::write(temp.path().join("config.toml"), original).unwrap();
+    let profile = RelayProfile {
+        id: "relay-local".to_string(),
+        local_proxy_enabled: Some(true),
+        config_contents: r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "http://127.0.0.1:45221/v1"
+"#
+        .to_string(),
+        ..RelayProfile::default()
+    };
+
+    assert!(
+        !ensure_applied_local_proxy_stream_idle_timeout_to_home(temp.path(), &profile).unwrap()
+    );
+    let updated = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(updated.contains("stream_idle_timeout_ms = 7200000"));
+    assert!(!updated.contains(&local_proxy_stream_idle_timeout_line()));
+}
+
+#[test]
+fn startup_does_not_add_stream_idle_timeout_for_direct_provider() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://relay.example.test/v1"
+"#,
+    )
+    .unwrap();
+    let profile = RelayProfile {
+        id: "relay-direct".to_string(),
+        local_proxy_enabled: Some(false),
+        config_contents: r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://relay.example.test/v1"
+"#
+        .to_string(),
+        ..RelayProfile::default()
+    };
+
+    assert!(
+        !ensure_applied_local_proxy_stream_idle_timeout_to_home(temp.path(), &profile).unwrap()
+    );
+    let updated = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(!updated.contains("stream_idle_timeout_ms"));
 }
 
 #[test]
@@ -2894,6 +3035,7 @@ base_url = "https://relay.example/v1"
     assert!(!config.contains("experimental_bearer_token"));
     assert!(config.contains(r#"model_provider = "custom""#));
     assert!(config.contains("[model_providers.custom]"));
+    assert!(!config.contains("stream_idle_timeout_ms"));
 }
 
 #[test]

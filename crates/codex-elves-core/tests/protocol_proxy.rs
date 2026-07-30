@@ -9,9 +9,10 @@ use codex_elves_core::protocol_proxy::{
     open_chat_completions_proxy_request, open_models_proxy_request, open_responses_proxy_request,
     open_responses_proxy_request_with_settings, responses_error_from_upstream,
     responses_to_anthropic_messages, responses_to_chat_completions,
-    send_upstream_request_with_header_timeout, supported_reasoning_efforts_for_model,
-    upstream_deferred_stream_header_timeout, upstream_deferred_stream_header_timeout_for_request,
-    upstream_http_client, upstream_models_header_timeout,
+    send_upstream_request_with_header_timeout, stream_idle_timeout_for_reasoning_effort,
+    stream_idle_timeout_for_request, stream_idle_timeout_ms_for_reasoning_effort,
+    supported_reasoning_efforts_for_model, upstream_error_is_timeout, upstream_http_client,
+    upstream_models_header_timeout,
 };
 use codex_elves_core::settings::{
     AggregateRelayMember, AggregateRelayProfile, AggregateRelayStrategy, BackendSettings,
@@ -5543,12 +5544,28 @@ fn models_proxy_path_matches_v1_models() {
 }
 
 #[test]
-fn retained_upstream_header_timeouts_match_proxy_policy() {
+fn stream_idle_timeouts_match_proxy_policy() {
     assert_eq!(upstream_models_header_timeout(), Duration::from_secs(30));
     assert_eq!(
-        upstream_deferred_stream_header_timeout(),
+        stream_idle_timeout_for_reasoning_effort(None),
         Duration::from_secs(900)
     );
+    for (effort, expected_ms) in [
+        (None, 900_000),
+        (Some("minimal"), 900_000),
+        (Some("low"), 900_000),
+        (Some("medium"), 900_000),
+        (Some("high"), 900_000),
+        (Some("xhigh"), 1_500_000),
+        (Some("max"), 1_800_000),
+        (Some("ultra"), 1_800_000),
+    ] {
+        assert_eq!(
+            stream_idle_timeout_ms_for_reasoning_effort(effort),
+            expected_ms,
+            "推理级别对应的流空闲超时错误: {effort:?}"
+        );
+    }
     for (request, expected) in [
         (json!({}), Duration::from_secs(900)),
         (
@@ -5569,7 +5586,7 @@ fn retained_upstream_header_timeouts_match_proxy_policy() {
         ),
     ] {
         assert_eq!(
-            upstream_deferred_stream_header_timeout_for_request(Some(&request)),
+            stream_idle_timeout_for_request(Some(&request)),
             expected,
             "推理级别对应的流式响应头超时错误: {request}"
         );
@@ -5599,6 +5616,7 @@ async fn upstream_request_returns_when_provider_accepts_but_never_sends_headers(
     .await;
 
     assert!(result.is_err());
+    assert!(upstream_error_is_timeout(&result.unwrap_err()));
     assert!(started.elapsed() < Duration::from_secs(1));
     server.abort();
 }

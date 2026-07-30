@@ -586,6 +586,8 @@ pub async fn save_settings(settings: BackendSettings) -> CommandResult<SettingsP
             let wrapper_message = refresh_cli_wrapper_after_settings_save(&settings);
             let provider_name_message = sync_applied_provider_name_after_settings_save(&settings);
             let base_url_message = sync_applied_base_url_after_settings_save(&settings);
+            let stream_idle_timeout_message =
+                sync_applied_stream_idle_timeout_after_settings_save(&settings);
             let catalog_message = sync_applied_model_catalog_after_settings_save(&settings);
             let websocket_message = sync_applied_websocket_after_settings_save(&settings);
             let overlay_changed = previous_overlay
@@ -598,7 +600,7 @@ pub async fn save_settings(settings: BackendSettings) -> CommandResult<SettingsP
             };
             settings_payload(
                 &format!(
-                    "设置已保存。{wrapper_message}{provider_name_message}{base_url_message}{catalog_message}{websocket_message}{overlay_message}"
+                    "设置已保存。{wrapper_message}{provider_name_message}{base_url_message}{stream_idle_timeout_message}{catalog_message}{websocket_message}{overlay_message}"
                 ),
                 "设置保存后重新读取失败",
             )
@@ -3329,6 +3331,28 @@ fn sync_applied_base_url_after_settings_save(settings: &BackendSettings) -> Stri
     }
 }
 
+fn sync_applied_stream_idle_timeout_after_settings_save(settings: &BackendSettings) -> String {
+    let home = codex_elves_core::codex_home::codex_home_dir_for_settings(settings);
+    match sync_applied_stream_idle_timeout_after_settings_save_in_home(&home, settings) {
+        Ok(true) => " 本地代理流式空闲超时已同步。".to_string(),
+        Ok(false) => String::new(),
+        Err(error) => format!(" 但本地代理流式空闲超时同步失败：{error}。"),
+    }
+}
+
+fn sync_applied_stream_idle_timeout_after_settings_save_in_home(
+    home: &Path,
+    settings: &BackendSettings,
+) -> anyhow::Result<bool> {
+    if !settings.active_relay_uses_protocol_proxy() {
+        return Ok(false);
+    }
+    let relay = settings.active_relay_profile();
+    codex_elves_core::relay_config::ensure_applied_local_proxy_stream_idle_timeout_to_home(
+        home, &relay,
+    )
+}
+
 fn sync_applied_model_catalog_after_settings_save(settings: &BackendSettings) -> String {
     if !settings.relay_profiles_enabled || settings.active_aggregate_relay_profile().is_some() {
         return String::new();
@@ -4732,6 +4756,43 @@ base_url = "https://manual.example/v1"
         );
         assert!(save_relay_file_in_home(temp.path(), "config", "model = \"gpt-5\"\n").is_err());
         assert!(save_relay_file_in_home(temp.path(), "../bad", "").is_err());
+    }
+
+    #[test]
+    fn saving_active_local_proxy_profile_backfills_stream_idle_timeout() {
+        let temp = tempfile::tempdir().unwrap();
+        let proxy_base_url = codex_elves_core::protocol_proxy::local_responses_proxy_base_url(
+            codex_elves_core::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+        );
+        std::fs::write(
+            temp.path().join("config.toml"),
+            format!(
+                "model_provider = \"custom\"\n\n[model_providers.custom]\nbase_url = \"{proxy_base_url}\"\n"
+            ),
+        )
+        .unwrap();
+        let settings = BackendSettings {
+            active_relay_id: "supplier-a".to_string(),
+            relay_profiles: vec![RelayProfile {
+                id: "supplier-a".to_string(),
+                relay_mode: codex_elves_core::settings::RelayMode::PureApi,
+                local_proxy_enabled: Some(true),
+                config_contents: "model_provider = \"custom\"\n".to_string(),
+                ..RelayProfile::default()
+            }],
+            ..BackendSettings::default()
+        };
+
+        assert!(
+            sync_applied_stream_idle_timeout_after_settings_save_in_home(temp.path(), &settings)
+                .unwrap()
+        );
+
+        let live = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+        assert!(live.contains(&format!(
+            "stream_idle_timeout_ms = {}",
+            codex_elves_core::relay_config::LOCAL_PROXY_CODEX_STREAM_IDLE_TIMEOUT_MS
+        )));
     }
 
     #[test]

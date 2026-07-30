@@ -17,9 +17,9 @@ use crate::settings::SettingsStore;
 pub const DEFAULT_PROTOCOL_PROXY_PORT: u16 = 45221;
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const UPSTREAM_MODELS_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
-const UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT_HIGH_OR_LOWER: Duration = Duration::from_secs(900);
-const UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT_XHIGH: Duration = Duration::from_secs(1500);
-const UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT_MAX: Duration = Duration::from_secs(1800);
+const STREAM_IDLE_TIMEOUT_HIGH_OR_LOWER: Duration = Duration::from_secs(900);
+const STREAM_IDLE_TIMEOUT_XHIGH: Duration = Duration::from_secs(1500);
+const STREAM_IDLE_TIMEOUT_MAX: Duration = Duration::from_secs(1800);
 const REMOTE_COMPACTION_CANDIDATE_BODY_TIMEOUT: Duration = Duration::from_secs(900);
 const MODEL_CAPACITY_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(2)];
 const THINK_OPEN_TAG: &str = "<think>";
@@ -1122,6 +1122,19 @@ impl UpstreamProxyResponse {
         Ok(response.bytes().await?.to_vec())
     }
 
+    pub async fn into_body_bytes_with_idle_timeout(
+        mut self,
+        idle_timeout: Duration,
+    ) -> anyhow::Result<Vec<u8>> {
+        if let Some(body) = self.body_override.take() {
+            return Ok(body);
+        }
+        let Some(response) = self.response.take() else {
+            anyhow::bail!("上游响应体已被本地代理消费");
+        };
+        read_upstream_response_body_with_idle_timeout(response, idle_timeout).await
+    }
+
     pub fn into_response(mut self) -> anyhow::Result<reqwest::Response> {
         let Some(response) = self.response.take() else {
             anyhow::bail!("上游响应已被本地代理消费");
@@ -1134,20 +1147,23 @@ pub fn upstream_models_header_timeout() -> Duration {
     UPSTREAM_MODELS_HEADER_TIMEOUT
 }
 
-pub fn upstream_deferred_stream_header_timeout() -> Duration {
-    UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT_HIGH_OR_LOWER
+pub fn stream_idle_timeout_for_reasoning_effort(reasoning_effort: Option<&str>) -> Duration {
+    match reasoning_effort.and_then(normalize_reasoning_effort) {
+        Some("xhigh") => STREAM_IDLE_TIMEOUT_XHIGH,
+        Some("max" | "ultra") => STREAM_IDLE_TIMEOUT_MAX,
+        _ => STREAM_IDLE_TIMEOUT_HIGH_OR_LOWER,
+    }
 }
 
-pub fn upstream_deferred_stream_header_timeout_for_request(request: Option<&Value>) -> Duration {
-    match request
-        .and_then(extract_requested_reasoning_effort)
-        .as_deref()
-        .and_then(normalize_reasoning_effort)
-    {
-        Some("xhigh") => UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT_XHIGH,
-        Some("max" | "ultra") => UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT_MAX,
-        _ => UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT_HIGH_OR_LOWER,
-    }
+pub fn stream_idle_timeout_ms_for_reasoning_effort(reasoning_effort: Option<&str>) -> u64 {
+    stream_idle_timeout_for_reasoning_effort(reasoning_effort)
+        .as_secs()
+        .saturating_mul(1000)
+}
+
+pub fn stream_idle_timeout_for_request(request: Option<&Value>) -> Duration {
+    let reasoning_effort = request.and_then(extract_requested_reasoning_effort);
+    stream_idle_timeout_for_reasoning_effort(reasoning_effort.as_deref())
 }
 
 pub fn upstream_http_client() -> anyhow::Result<reqwest::Client> {
@@ -1183,6 +1199,34 @@ pub async fn send_upstream_request_with_header_timeout(
         .await
         .with_context(|| format!("上游请求超过 {} 秒未返回响应头", timeout.as_secs()))?
         .context("上游请求失败")
+}
+
+pub fn upstream_error_is_timeout(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<tokio::time::error::Elapsed>()
+            .is_some()
+            || cause
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(reqwest::Error::is_timeout)
+    })
+}
+
+async fn read_upstream_response_body_with_idle_timeout(
+    mut response: reqwest::Response,
+    idle_timeout: Duration,
+) -> anyhow::Result<Vec<u8>> {
+    let mut body = Vec::new();
+    loop {
+        let chunk = tokio::time::timeout(idle_timeout, response.chunk())
+            .await
+            .with_context(|| format!("上游响应流超过 {} 秒没有返回数据", idle_timeout.as_secs()))?
+            .context("读取上游响应流失败")?;
+        let Some(chunk) = chunk else {
+            return Ok(body);
+        };
+        body.extend_from_slice(&chunk);
+    }
 }
 
 pub struct ChatSseToResponsesConverter {
@@ -2509,6 +2553,7 @@ async fn retry_model_capacity_responses_stream(
         return first_round_sse_text;
     };
     let mut current_sse_text = first_round_sse_text;
+    let stream_idle_timeout = stream_idle_timeout_for_request(Some(original_request));
 
     for (retry_index, delay) in MODEL_CAPACITY_RETRY_DELAYS.into_iter().enumerate() {
         let _ = crate::diagnostic_log::append_diagnostic_log(
@@ -2522,11 +2567,13 @@ async fn retry_model_capacity_responses_stream(
         );
         tokio::time::sleep(delay).await;
 
+        // 部分 GPT 上游会在模型完成推理后才返回 HTTP 响应头；这里有意让
+        // 响应头等待与当前请求的业务空闲预算一致，避免短头超时提前关闭请求。
         let upstream = match open_responses_proxy_request_with_settings_user_agent_and_timeout(
             &request_body,
             settings.clone(),
             original_user_agent,
-            None,
+            Some(stream_idle_timeout),
         )
         .await
         {
@@ -2542,8 +2589,22 @@ async fn retry_model_capacity_responses_stream(
             break;
         }
 
-        let Ok(body) = upstream.into_body_bytes().await else {
-            break;
+        let body = match upstream
+            .into_body_bytes_with_idle_timeout(stream_idle_timeout)
+            .await
+        {
+            Ok(body) => body,
+            Err(error) => {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "protocol_proxy.model_capacity_retry_stream_failed",
+                    json!({
+                        "model": model,
+                        "attempt": retry_index + 1,
+                        "error": error.to_string()
+                    }),
+                );
+                break;
+            }
         };
         current_sse_text = String::from_utf8_lossy(&body).into_owned();
         if !responses_stream_has_retryable_model_capacity_error(&current_sse_text) {
@@ -2594,6 +2655,7 @@ pub async fn apply_continue_thinking_to_responses_stream(
     let mut accumulated_reasoning_tokens = None;
     let mut continue_requests = Vec::new();
     let mut before_response_body = None;
+    let stream_idle_timeout = stream_idle_timeout_for_request(Some(original_request));
     loop {
         let Some(response_object) =
             crate::continue_thinking::extract_terminal_response_object(&current_sse_text)
@@ -2687,11 +2749,13 @@ pub async fn apply_continue_thinking_to_responses_stream(
             }),
         );
 
+        // 续接轮次与首轮遵循同一规则：响应头可能就是首个业务进展，
+        // 因此继续按请求推理等级使用业务空闲预算。
         let upstream = match open_responses_proxy_request_with_settings_user_agent_and_timeout(
             &continue_body,
             settings.clone(),
             original_user_agent,
-            None,
+            Some(stream_idle_timeout),
         )
         .await
         {
@@ -2721,25 +2785,25 @@ pub async fn apply_continue_thinking_to_responses_stream(
                 before_response_body,
             );
         }
-        let Ok(response) = upstream.into_response() else {
-            return ContinueThinkingResult::from_state(
-                current_sse_text,
-                triggered,
-                completed_rounds,
-                accumulated_reasoning_tokens,
-                continue_request_body(&continue_requests),
-                before_response_body,
-            );
-        };
-        let Ok(bytes) = response.bytes().await else {
-            return ContinueThinkingResult::from_state(
-                current_sse_text,
-                triggered,
-                completed_rounds,
-                accumulated_reasoning_tokens,
-                continue_request_body(&continue_requests),
-                before_response_body,
-            );
+        let bytes = match upstream
+            .into_body_bytes_with_idle_timeout(stream_idle_timeout)
+            .await
+        {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "continue_thinking.round_stream_failed",
+                    json!({ "round": round, "error": error.to_string() }),
+                );
+                return ContinueThinkingResult::from_state(
+                    current_sse_text,
+                    triggered,
+                    completed_rounds,
+                    accumulated_reasoning_tokens,
+                    continue_request_body(&continue_requests),
+                    before_response_body,
+                );
+            }
         };
         let round_sse_text = String::from_utf8_lossy(&bytes).into_owned();
         let _ = crate::diagnostic_log::append_diagnostic_log(

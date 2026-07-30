@@ -272,6 +272,15 @@ impl LaunchHooks for LauncherHooks {
         Ok(())
     }
 
+    async fn ensure_active_relay_stream_idle_timeout(
+        &self,
+        settings: &codex_elves_core::settings::BackendSettings,
+    ) -> anyhow::Result<()> {
+        self.core
+            .ensure_active_relay_stream_idle_timeout(settings)
+            .await
+    }
+
     async fn apply_active_relay_profile(
         &self,
         settings: &codex_elves_core::settings::BackendSettings,

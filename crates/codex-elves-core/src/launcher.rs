@@ -140,6 +140,12 @@ pub trait LaunchHooks: Send + Sync {
     fn select_helper_port(&self, requested: u16) -> u16;
     async fn load_settings(&self) -> anyhow::Result<BackendSettings>;
     async fn run_provider_sync(&self) -> anyhow::Result<()>;
+    async fn ensure_active_relay_stream_idle_timeout(
+        &self,
+        _settings: &BackendSettings,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
     async fn apply_active_relay_profile(&self, _settings: &BackendSettings) -> anyhow::Result<()> {
         Ok(())
     }
@@ -275,6 +281,11 @@ where
     let result: anyhow::Result<LaunchHandle> = async {
         if settings.provider_sync_enabled {
             hooks.run_provider_sync().await?;
+        }
+        if settings.active_relay_uses_protocol_proxy() {
+            hooks
+                .ensure_active_relay_stream_idle_timeout(&settings)
+                .await?;
         }
         if let Err(error) = hooks.ensure_plugin_marketplace_config(&settings).await {
             let _ = crate::diagnostic_log::append_diagnostic_log(
@@ -444,6 +455,21 @@ impl LaunchHooks for DefaultLaunchHooks {
 
     async fn run_provider_sync(&self) -> anyhow::Result<()> {
         anyhow::bail!("provider sync requires launcher hooks with codex-elves-data integration")
+    }
+
+    async fn ensure_active_relay_stream_idle_timeout(
+        &self,
+        settings: &BackendSettings,
+    ) -> anyhow::Result<()> {
+        if !settings.active_relay_uses_protocol_proxy() {
+            return Ok(());
+        }
+        let home = crate::codex_home::codex_home_dir_for_settings(settings);
+        let profile = settings.active_relay_profile();
+        crate::relay_config::ensure_applied_local_proxy_stream_idle_timeout_to_home(
+            &home, &profile,
+        )?;
+        Ok(())
     }
 
     async fn ensure_plugin_marketplace_config(
@@ -1230,9 +1256,6 @@ impl EitherResponsesStreamConverter<'_> {
     }
 }
 
-const DEFERRED_STREAM_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
-const DEFERRED_STREAM_KEEPALIVE_BYTES: &[u8] = b": codex-elves waiting for upstream\n\n";
-
 fn should_defer_protocol_stream(request_json: Option<&serde_json::Value>) -> anyhow::Result<bool> {
     let Some(request) = request_json else {
         return Ok(false);
@@ -1446,87 +1469,109 @@ async fn handle_protocol_proxy_connection(
         )
         .await;
     }
-    let upstream =
-        match crate::protocol_proxy::open_responses_proxy_request(request_body, request_user_agent)
-            .await
-        {
-            Ok(upstream) => upstream,
-            Err(error) => {
-                let failure_context =
-                    crate::protocol_proxy::upstream_failure_context(&error).cloned();
-                let error_message = error.to_string();
-                let bridge_remote_compaction_v2 = request_json.as_ref().is_some_and(|request| {
-                    crate::protocol_proxy::should_bridge_remote_compaction_v2_after_failure(
-                        request,
-                        failure_context
-                            .as_ref()
-                            .and_then(|context| context.response_protocol),
-                    )
-                });
-                let (status, status_code, body) = if bridge_remote_compaction_v2 {
-                    let failure = crate::layered_compaction::remote_compaction_v2_failure_response(
-                        request_json.as_ref().expect("V2 bridge request must exist"),
-                        None,
-                        "remote_compaction_upstream_request_failed",
-                        "Remote Compaction V2 upstream request failed.",
-                    );
-                    ("200 OK", 200, serde_json::to_vec(&failure)?)
+    let upstream_request = if request_json
+        .as_ref()
+        .and_then(|request| request.get("stream"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        let stream_header_timeout =
+            crate::protocol_proxy::stream_idle_timeout_for_request(request_json.as_ref());
+        crate::protocol_proxy::open_responses_proxy_request_with_stream_header_timeout(
+            request_body,
+            request_user_agent,
+            stream_header_timeout,
+        )
+        .await
+    } else {
+        crate::protocol_proxy::open_responses_proxy_request(request_body, request_user_agent).await
+    };
+    let upstream = match upstream_request {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            let failure_context = crate::protocol_proxy::upstream_failure_context(&error).cloned();
+            let error_message = error.to_string();
+            let upstream_timed_out = crate::protocol_proxy::upstream_error_is_timeout(&error);
+            let bridge_remote_compaction_v2 = request_json.as_ref().is_some_and(|request| {
+                crate::protocol_proxy::should_bridge_remote_compaction_v2_after_failure(
+                    request,
+                    failure_context
+                        .as_ref()
+                        .and_then(|context| context.response_protocol),
+                )
+            });
+            let (status, status_code, body) = if bridge_remote_compaction_v2 {
+                let failure = crate::layered_compaction::remote_compaction_v2_failure_response(
+                    request_json.as_ref().expect("V2 bridge request must exist"),
+                    None,
+                    "remote_compaction_upstream_request_failed",
+                    "Remote Compaction V2 upstream request failed.",
+                );
+                ("200 OK", 200, serde_json::to_vec(&failure)?)
+            } else if upstream_timed_out {
+                (
+                    "504 Gateway Timeout",
+                    504,
+                    serde_json::to_vec(&serde_json::json!({
+                        "status": "failed",
+                        "message": error_message.clone()
+                    }))?,
+                )
+            } else {
+                (
+                    "502 Bad Gateway",
+                    502,
+                    serde_json::to_vec(&serde_json::json!({
+                        "status": "failed",
+                        "message": error_message.clone()
+                    }))?,
+                )
+            };
+            write_http_response(stream, status, "application/json; charset=utf-8", &body).await?;
+            log_helper_response(
+                if bridge_remote_compaction_v2 {
+                    "helper.protocol_proxy_remote_compaction_failed"
                 } else {
-                    (
-                        "502 Bad Gateway",
-                        502,
-                        serde_json::to_vec(&serde_json::json!({
-                            "status": "failed",
-                            "message": error_message.clone()
-                        }))?,
-                    )
-                };
-                write_http_response(stream, status, "application/json; charset=utf-8", &body)
-                    .await?;
-                log_helper_response(
-                    if bridge_remote_compaction_v2 {
-                        "helper.protocol_proxy_remote_compaction_failed"
-                    } else {
-                        "helper.protocol_proxy_failed"
-                    },
-                    method,
-                    path,
-                    status,
-                    remote_addr_text.clone(),
-                );
-                let response_protocol = failure_context
+                    "helper.protocol_proxy_failed"
+                },
+                method,
+                path,
+                status,
+                remote_addr_text.clone(),
+            );
+            let response_protocol = failure_context
+                .as_ref()
+                .and_then(|context| context.response_protocol.map(response_protocol_label));
+            append_local_proxy_record(
+                log_id.clone(),
+                timestamp_ms,
+                started_at,
+                method,
+                path,
+                remote_addr_text,
+                &request_metadata,
+                failure_context
                     .as_ref()
-                    .and_then(|context| context.response_protocol.map(response_protocol_label));
-                append_local_proxy_record(
-                    log_id.clone(),
-                    timestamp_ms,
-                    started_at,
-                    method,
-                    path,
-                    remote_addr_text,
-                    &request_metadata,
-                    failure_context
-                        .as_ref()
-                        .and_then(|context| context.relay_id.clone()),
-                    failure_context
-                        .as_ref()
-                        .and_then(|context| context.relay_name.clone()),
-                    failure_context
-                        .as_ref()
-                        .and_then(|context| context.endpoint.clone()),
-                    response_protocol,
-                    status_code,
-                    false,
-                    request_body,
-                    &body,
-                    body.len(),
-                    false,
-                    Some(error_message),
-                );
-                stream.shutdown().await?;
-                return Ok(());
-            }
-        };
+                    .and_then(|context| context.relay_id.clone()),
+                failure_context
+                    .as_ref()
+                    .and_then(|context| context.relay_name.clone()),
+                failure_context
+                    .as_ref()
+                    .and_then(|context| context.endpoint.clone()),
+                response_protocol,
+                status_code,
+                false,
+                request_body,
+                &body,
+                body.len(),
+                false,
+                Some(error_message),
+            );
+            stream.shutdown().await?;
+            return Ok(());
+        }
+    };
 
     let logged_request_body = if upstream.request_body.trim().is_empty() {
         request_body.to_string()
@@ -1752,15 +1797,31 @@ async fn handle_protocol_proxy_connection(
             } else {
                 let mut bytes_stream = upstream.into_response()?.bytes_stream();
                 let mut first_round_bytes = Vec::new();
-                while let Some(chunk) = bytes_stream.next().await {
-                    let bytes = match chunk {
-                        Ok(bytes) => bytes,
+                let upstream_idle_timeout = crate::protocol_proxy::stream_idle_timeout_for_request(
+                    logged_request_json.as_ref().or(request_json.as_ref()),
+                );
+                loop {
+                    let chunk = match next_stream_chunk_with_idle_timeout(
+                        &mut bytes_stream,
+                        upstream_idle_timeout,
+                    )
+                    .await
+                    {
+                        Ok(Some(chunk)) => chunk,
+                        Ok(None) => break,
                         Err(error) => {
-                            response_bytes += first_round_bytes.len();
-                            response_truncated |= crate::proxy_log::append_capture(
-                                &mut response_capture,
-                                &first_round_bytes,
+                            let error_message = format!("Stream error: {error}");
+                            let failed = responses_stream_failure_bytes(
+                                logged_request_json.as_ref().or(request_json.as_ref()),
+                                Some(&diagnostic_id),
+                                Some(crate::protocol_proxy::UpstreamResponseProtocol::Responses),
+                                error_message.clone(),
+                                Some("stream_timeout".to_string()),
                             );
+                            response_bytes += failed.len();
+                            response_truncated |=
+                                crate::proxy_log::append_capture(&mut response_capture, &failed);
+                            stream.write_all(&failed).await?;
                             append_local_proxy_record(
                                 log_id.clone(),
                                 timestamp_ms,
@@ -1779,9 +1840,49 @@ async fn handle_protocol_proxy_connection(
                                 &response_capture,
                                 response_bytes,
                                 response_truncated,
-                                Some(format!("Stream error: {error}")),
+                                Some(error_message),
                             );
-                            return Err(error.into());
+                            stream.shutdown().await?;
+                            return Ok(());
+                        }
+                    };
+                    let bytes = match chunk {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            let error_message = format!("Stream error: {error}");
+                            let failed = responses_stream_failure_bytes(
+                                logged_request_json.as_ref().or(request_json.as_ref()),
+                                Some(&diagnostic_id),
+                                Some(crate::protocol_proxy::UpstreamResponseProtocol::Responses),
+                                error_message.clone(),
+                                Some("stream_error".to_string()),
+                            );
+                            response_bytes += failed.len();
+                            response_truncated |=
+                                crate::proxy_log::append_capture(&mut response_capture, &failed);
+                            stream.write_all(&failed).await?;
+                            append_local_proxy_record(
+                                log_id.clone(),
+                                timestamp_ms,
+                                started_at,
+                                method,
+                                path,
+                                remote_addr_text,
+                                &request_metadata,
+                                relay_id,
+                                relay_name,
+                                endpoint,
+                                Some(response_protocol_label),
+                                status_code,
+                                true,
+                                request_body,
+                                &response_capture,
+                                response_bytes,
+                                response_truncated,
+                                Some(error_message),
+                            );
+                            stream.shutdown().await?;
+                            return Ok(());
                         }
                     };
                     first_round_bytes.extend_from_slice(&bytes);
@@ -2230,44 +2331,21 @@ async fn handle_protocol_proxy_connection(
     Ok(())
 }
 
-async fn write_deferred_stream_keepalive(
-    stream: &mut tokio::net::TcpStream,
-    response_capture: &mut Vec<u8>,
-    response_bytes: &mut usize,
-    response_truncated: &mut bool,
-) -> anyhow::Result<()> {
-    *response_bytes += DEFERRED_STREAM_KEEPALIVE_BYTES.len();
-    *response_truncated |=
-        crate::proxy_log::append_capture(response_capture, DEFERRED_STREAM_KEEPALIVE_BYTES);
-    stream.write_all(DEFERRED_STREAM_KEEPALIVE_BYTES).await?;
-    stream.flush().await?;
-    Ok(())
-}
-
-async fn next_deferred_stream_chunk_with_keepalive<S, T, E>(
+async fn next_stream_chunk_with_idle_timeout<S, T, E>(
     bytes_stream: &mut S,
-    stream: &mut tokio::net::TcpStream,
-    response_capture: &mut Vec<u8>,
-    response_bytes: &mut usize,
-    response_truncated: &mut bool,
-    keepalive_interval: Duration,
+    upstream_idle_timeout: Duration,
 ) -> anyhow::Result<Option<Result<T, E>>>
 where
     S: Stream<Item = Result<T, E>> + Unpin,
 {
-    loop {
-        tokio::select! {
-            chunk = bytes_stream.next() => return Ok(chunk),
-            _ = tokio::time::sleep(keepalive_interval) => {
-                write_deferred_stream_keepalive(
-                    stream,
-                    response_capture,
-                    response_bytes,
-                    response_truncated,
-                ).await?;
-            }
-        }
-    }
+    tokio::time::timeout(upstream_idle_timeout, bytes_stream.next())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "上游流超过 {} 毫秒没有返回数据",
+                upstream_idle_timeout.as_millis()
+            )
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2313,33 +2391,13 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     }
 
     let stream_header_timeout =
-        crate::protocol_proxy::upstream_deferred_stream_header_timeout_for_request(
-            request_json.as_ref(),
-        );
-    let upstream_request =
-        crate::protocol_proxy::open_responses_proxy_request_with_stream_header_timeout(
-            request_body,
-            request_user_agent,
-            stream_header_timeout,
-        );
-    tokio::pin!(upstream_request);
-    let upstream = if downstream_stream_headers_sent {
-        loop {
-            tokio::select! {
-                result = &mut upstream_request => break result,
-                _ = tokio::time::sleep(DEFERRED_STREAM_KEEPALIVE_INTERVAL) => {
-                    write_deferred_stream_keepalive(
-                        stream,
-                        &mut response_capture,
-                        &mut response_bytes,
-                        &mut response_truncated,
-                    ).await?;
-                }
-            }
-        }
-    } else {
-        upstream_request.await
-    };
+        crate::protocol_proxy::stream_idle_timeout_for_request(request_json.as_ref());
+    let upstream = crate::protocol_proxy::open_responses_proxy_request_with_stream_header_timeout(
+        request_body,
+        request_user_agent,
+        stream_header_timeout,
+    )
+    .await;
 
     let upstream = match upstream {
         Ok(upstream) => upstream,
@@ -2628,16 +2686,40 @@ async fn handle_deferred_protocol_proxy_stream_connection(
             } else {
                 let mut bytes_stream = upstream.into_response()?.bytes_stream();
                 let mut buffered = Vec::new();
-                while let Some(chunk) = next_deferred_stream_chunk_with_keepalive(
-                    &mut bytes_stream,
-                    stream,
-                    &mut response_capture,
-                    &mut response_bytes,
-                    &mut response_truncated,
-                    DEFERRED_STREAM_KEEPALIVE_INTERVAL,
-                )
-                .await?
-                {
+                loop {
+                    let chunk = match next_stream_chunk_with_idle_timeout(
+                        &mut bytes_stream,
+                        stream_header_timeout,
+                    )
+                    .await
+                    {
+                        Ok(Some(chunk)) => chunk,
+                        Ok(None) => break,
+                        Err(error) => {
+                            let message = format!(
+                                "Remote Compaction V2 upstream stream failed before completion: {error}"
+                            );
+                            remote_compaction_stream_error = Some(message.clone());
+                            buffered.clear();
+                            buffered.extend_from_slice(
+                                crate::layered_compaction::remote_compaction_v2_failure_sse(
+                                    request_json.as_ref().expect("bridge request must exist"),
+                                    "remote_compaction_stream_error",
+                                    &message,
+                                )
+                                .as_bytes(),
+                            );
+                            let _ = crate::diagnostic_log::append_diagnostic_log(
+                                "remote_compaction_v2.stream_failed",
+                                serde_json::json!({
+                                    "transport": "http_sse",
+                                    "protocol": "responses",
+                                    "error": error.to_string()
+                                }),
+                            );
+                            break;
+                        }
+                    };
                     let bytes = match chunk {
                         Ok(bytes) => bytes,
                         Err(error) => {
@@ -2746,40 +2828,49 @@ async fn handle_deferred_protocol_proxy_stream_connection(
             stream.write_all(&body).await?;
         } else {
             let mut bytes_stream = upstream.into_response()?.bytes_stream();
-            while let Some(chunk) = next_deferred_stream_chunk_with_keepalive(
-                &mut bytes_stream,
-                stream,
-                &mut response_capture,
-                &mut response_bytes,
-                &mut response_truncated,
-                DEFERRED_STREAM_KEEPALIVE_INTERVAL,
-            )
-            .await?
-            {
+            loop {
+                let chunk = match next_stream_chunk_with_idle_timeout(
+                    &mut bytes_stream,
+                    stream_header_timeout,
+                )
+                .await
+                {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break,
+                    Err(error) => {
+                        let error_message = format!("Stream error: {error}");
+                        let failed = responses_stream_failure_bytes(
+                            request_json.as_ref(),
+                            Some(&diagnostic_id),
+                            Some(response_protocol),
+                            error_message.clone(),
+                            Some("stream_timeout".to_string()),
+                        );
+                        response_bytes += failed.len();
+                        response_truncated |=
+                            crate::proxy_log::append_capture(&mut response_capture, &failed);
+                        stream.write_all(&failed).await?;
+                        remote_compaction_stream_error = Some(error_message);
+                        break;
+                    }
+                };
                 let bytes = match chunk {
                     Ok(bytes) => bytes,
                     Err(error) => {
-                        append_local_proxy_record(
-                            log_id.clone(),
-                            timestamp_ms,
-                            started_at,
-                            method,
-                            path,
-                            remote_addr_text,
-                            &request_metadata,
-                            relay_id,
-                            relay_name,
-                            endpoint,
-                            Some(response_protocol_label),
-                            status_code,
-                            true,
-                            request_body,
-                            &response_capture,
-                            response_bytes,
-                            response_truncated,
-                            Some(format!("Stream error: {error}")),
+                        let error_message = format!("Stream error: {error}");
+                        let failed = responses_stream_failure_bytes(
+                            request_json.as_ref(),
+                            Some(&diagnostic_id),
+                            Some(response_protocol),
+                            error_message.clone(),
+                            Some("stream_error".to_string()),
                         );
-                        return Err(error.into());
+                        response_bytes += failed.len();
+                        response_truncated |=
+                            crate::proxy_log::append_capture(&mut response_capture, &failed);
+                        stream.write_all(&failed).await?;
+                        remote_compaction_stream_error = Some(error_message);
+                        break;
                     }
                 };
                 if first_token_ms.is_none() {
@@ -2882,7 +2973,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     // 压缩请求必须缓冲完整的转换后 SSE，最后统一改写再一次性写出：
     // - legacy 分层压缩需要把摘要和原始 tail 合并；
     // - Remote Compaction V2 需要把普通 message/tool 输出封装成唯一 compaction item。
-    // keepalive 仍在缓冲期间发出（SSE 注释），保持连接活性。
+    // 缓冲期间不伪造 Responses 事件；Codex 的等待上限由 Provider 配置单独控制。
     let is_legacy_compaction =
         crate::layered_compaction::is_compaction_request(request_json.as_ref());
     let is_remote_compaction_v2 =
@@ -2925,16 +3016,44 @@ async fn handle_deferred_protocol_proxy_stream_connection(
         }
     } else {
         let mut bytes_stream = upstream.into_response()?.bytes_stream();
-        while let Some(chunk) = next_deferred_stream_chunk_with_keepalive(
-            &mut bytes_stream,
-            stream,
-            &mut response_capture,
-            &mut response_bytes,
-            &mut response_truncated,
-            DEFERRED_STREAM_KEEPALIVE_INTERVAL,
-        )
-        .await?
-        {
+        loop {
+            let chunk =
+                match next_stream_chunk_with_idle_timeout(&mut bytes_stream, stream_header_timeout)
+                    .await
+                {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break,
+                    Err(error) => {
+                        let error_message = format!("Stream error: {error}");
+                        let failed = if is_remote_compaction_v2 {
+                            crate::layered_compaction::remote_compaction_v2_failure_sse(
+                                request_json
+                                    .as_ref()
+                                    .expect("Remote Compaction V2 request must exist"),
+                                "remote_compaction_stream_error",
+                                &error_message,
+                            )
+                            .into_bytes()
+                        } else {
+                            converter.fail(error_message.clone(), Some("stream_error".to_string()))
+                        };
+                        if !failed.is_empty() {
+                            let failed = if is_compaction && !is_remote_compaction_v2 {
+                                compaction_buffer.push_str(&String::from_utf8_lossy(&failed));
+                                compaction_buffer.as_bytes()
+                            } else {
+                                failed.as_slice()
+                            };
+                            response_bytes += failed.len();
+                            response_truncated |=
+                                crate::proxy_log::append_capture(&mut response_capture, failed);
+                            stream.write_all(failed).await?;
+                        }
+                        stream_error = Some(error_message);
+                        stream_failed = true;
+                        break;
+                    }
+                };
             match chunk {
                 Ok(bytes) => {
                     let converted = converter.push_bytes(&bytes);
@@ -4545,19 +4664,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deferred_stream_wait_writes_keepalive_before_late_body_chunk() {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .unwrap();
-        let address = listener.local_addr().unwrap();
-        let client_task = tokio::spawn(async move {
-            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-            let mut buffer = vec![0_u8; DEFERRED_STREAM_KEEPALIVE_BYTES.len()];
-            stream.read_exact(&mut buffer).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(120)).await;
-            buffer
-        });
-        let (mut server_stream, _) = listener.accept().await.unwrap();
+    async fn stream_wait_returns_late_body_chunk_without_synthetic_events() {
         let mut chunks = Box::pin(futures_util::stream::unfold(false, |sent| async move {
             if sent {
                 None
@@ -4566,35 +4673,44 @@ mod tests {
                 Some((Ok::<&'static [u8], ()>(&b"upstream"[..]), true))
             }
         }));
-        let mut response_capture = Vec::new();
-        let mut response_bytes = 0_usize;
-        let mut response_truncated = false;
 
-        let chunk = next_deferred_stream_chunk_with_keepalive(
-            &mut chunks,
-            &mut server_stream,
-            &mut response_capture,
-            &mut response_bytes,
-            &mut response_truncated,
-            Duration::from_millis(20),
-        )
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-        let keepalive = tokio::time::timeout(Duration::from_secs(1), client_task)
+        let chunk = next_stream_chunk_with_idle_timeout(&mut chunks, Duration::from_secs(1))
             .await
             .unwrap()
+            .unwrap()
             .unwrap();
-
         assert_eq!(chunk, &b"upstream"[..]);
-        assert_eq!(keepalive, DEFERRED_STREAM_KEEPALIVE_BYTES);
-        assert!(response_bytes >= DEFERRED_STREAM_KEEPALIVE_BYTES.len());
-        assert!(
-            response_capture
-                .windows(DEFERRED_STREAM_KEEPALIVE_BYTES.len())
-                .any(|window| window == DEFERRED_STREAM_KEEPALIVE_BYTES)
+    }
+
+    #[tokio::test]
+    async fn stream_wait_enforces_upstream_idle_timeout_without_synthetic_events() {
+        let mut chunks = Box::pin(futures_util::stream::pending::<Result<&'static [u8], ()>>());
+
+        let error = next_stream_chunk_with_idle_timeout(&mut chunks, Duration::from_millis(80))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("没有返回数据"));
+    }
+
+    #[test]
+    fn stream_timeout_failure_is_a_terminal_responses_event() {
+        let request = serde_json::json!({
+            "model": "gpt-5.6",
+            "stream": true
+        });
+        let failed = responses_stream_failure_bytes(
+            Some(&request),
+            Some("diag-timeout"),
+            Some(crate::protocol_proxy::UpstreamResponseProtocol::Responses),
+            "上游长时间没有返回数据".to_string(),
+            Some("stream_timeout".to_string()),
         );
-        assert!(!response_truncated);
+        let failed = String::from_utf8(failed).unwrap();
+
+        assert!(failed.contains("event: response.failed"));
+        assert!(failed.contains(r#""type":"response.failed""#));
+        assert!(failed.contains(r#""type":"stream_timeout""#));
+        assert!(failed.contains("上游长时间没有返回数据"));
     }
 }

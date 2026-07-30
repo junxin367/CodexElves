@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use futures_util::{Sink, SinkExt, StreamExt};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -22,6 +23,9 @@ use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 use crate::settings::{RelayProtocol, SettingsStore};
 
 const FRAME_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+const UPSTREAM_LIVENESS_PING_INTERVAL: Duration = Duration::from_secs(30);
+const UPSTREAM_APPLICATION_IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+const UPSTREAM_TRANSPORT_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub fn is_responses_websocket_upgrade(request_bytes: &[u8]) -> bool {
     let Ok((request, _)) = parse_websocket_upgrade_request(request_bytes) else {
@@ -73,6 +77,7 @@ pub async fn handle_responses_websocket_connection(
         .await?;
         return Ok(());
     }
+    let connection_context = WebSocketConnectionContext::from_request(&request);
 
     let settings = SettingsStore::default().load().unwrap_or_default();
     let relay = settings.active_relay_profile();
@@ -92,9 +97,12 @@ pub async fn handle_responses_websocket_connection(
             "helper.responses_websocket_rejected",
             &relay,
             remote_addr.as_deref(),
+            &connection_context,
             Some(message),
         );
-        reject_upgrade(&mut stream, StatusCode::CONFLICT, message).await?;
+        // Codex 仅把 426 识别为“该端点不具备 Responses WebSocket 能力”并立即回退 HTTP。
+        // 临时连接故障仍使用 502，避免把偶发故障误判为永久不支持。
+        reject_upgrade(&mut stream, StatusCode::UPGRADE_REQUIRED, message).await?;
         return Ok(());
     }
 
@@ -114,12 +122,13 @@ pub async fn handle_responses_websocket_connection(
                 "helper.responses_websocket_upstream_failed",
                 &relay,
                 remote_addr.as_deref(),
+                &connection_context,
                 Some(&error.to_string()),
             );
             reject_upgrade(
                 &mut stream,
                 StatusCode::BAD_GATEWAY,
-                "Responses WebSocket 上游连接失败，已回退 HTTP",
+                "Responses WebSocket 上游连接失败，Codex 将按客户端重试策略处理",
             )
             .await?;
             return Ok(());
@@ -148,9 +157,15 @@ pub async fn handle_responses_websocket_connection(
         "helper.responses_websocket_connected",
         &relay,
         remote_addr.as_deref(),
+        &connection_context,
         None,
     );
-    let request_logger = WebSocketRequestLogger::new(&relay, remote_addr.clone(), request_path);
+    let request_logger = WebSocketRequestLogger::new(
+        &relay,
+        remote_addr.clone(),
+        request_path,
+        connection_context.clone(),
+    );
     let result = bridge_responses_websockets(downstream, upstream, &relay, request_logger).await;
     log_websocket_event(
         if result.is_ok() {
@@ -160,6 +175,7 @@ pub async fn handle_responses_websocket_connection(
         },
         &relay,
         remote_addr.as_deref(),
+        &connection_context,
         result
             .as_ref()
             .err()
@@ -315,7 +331,66 @@ async fn bridge_responses_websockets(
     let upstream_continuation = continuation.clone();
     let upstream_reader = async move {
         let mut received_close = false;
-        while let Some(message) = upstream_stream.next().await {
+        let mut liveness_ping = tokio::time::interval_at(
+            tokio::time::Instant::now() + UPSTREAM_LIVENESS_PING_INTERVAL,
+            UPSTREAM_LIVENESS_PING_INTERVAL,
+        );
+        liveness_ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut application_idle_check = tokio::time::interval_at(
+            tokio::time::Instant::now() + UPSTREAM_APPLICATION_IDLE_CHECK_INTERVAL,
+            UPSTREAM_APPLICATION_IDLE_CHECK_INTERVAL,
+        );
+        application_idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_upstream_transport_activity = Instant::now();
+        loop {
+            let message = tokio::select! {
+                message = upstream_stream.next() => message,
+                _ = liveness_ping.tick() => {
+                    if !upstream_request_logger.has_pending_requests() {
+                        continue;
+                    }
+                    if continuation_upstream_tx
+                        .send(Message::Ping(b"codex-elves".to_vec().into()))
+                        .await
+                        .is_err()
+                    {
+                        anyhow::bail!("Responses WebSocket 上游发送队列已关闭");
+                    }
+                    continue;
+                }
+                _ = application_idle_check.tick() => {
+                    let now = Instant::now();
+                    if !upstream_request_logger.has_pending_requests() {
+                        last_upstream_transport_activity = now;
+                        continue;
+                    }
+                    if let Some(idle_for) = websocket_idle_timeout_elapsed(
+                        last_upstream_transport_activity,
+                        UPSTREAM_TRANSPORT_IDLE_TIMEOUT,
+                        now,
+                    ) {
+                        upstream_request_logger.log_transport_timeout(idle_for);
+                        anyhow::bail!(
+                            "Responses WebSocket 上游连接超过 {} 毫秒没有返回任何帧",
+                            UPSTREAM_TRANSPORT_IDLE_TIMEOUT.as_millis()
+                        );
+                    }
+                    if let Some(expired) =
+                        upstream_request_logger.expired_pending_request(now)
+                    {
+                        upstream_request_logger.log_idle_timeout(&expired);
+                        anyhow::bail!(
+                            "Responses WebSocket 上游请求 {} 超过 {} 毫秒没有返回应用事件",
+                            expired.log_id,
+                            expired.idle_timeout.as_millis()
+                        );
+                    }
+                    continue;
+                }
+            };
+            let Some(message) = message else {
+                break;
+            };
             let message = match message {
                 Ok(message) => message,
                 Err(error) => {
@@ -348,6 +423,8 @@ async fn bridge_responses_websockets(
                     return Err(error).context("读取上游 Responses WebSocket 消息失败");
                 }
             };
+            last_upstream_transport_activity = Instant::now();
+            upstream_request_logger.record_upstream_application_activity(&message);
             let is_close = matches!(message, Message::Close(_));
             upstream_request_logger.record_first_response_event(&message);
             match upstream_continuation.handle_upstream_message(message)? {
@@ -1256,6 +1333,7 @@ struct WebSocketRequestLogState {
     relay_id: String,
     relay_name: String,
     endpoint: Option<String>,
+    connection_context: WebSocketConnectionContext,
     requests: HashMap<String, TrackedWebSocketRequest>,
     active_order: VecDeque<String>,
     unassigned_order: VecDeque<String>,
@@ -1265,9 +1343,20 @@ struct WebSocketRequestLogState {
 struct TrackedWebSocketRequest {
     record: crate::proxy_log::ProxyRequestRecord,
     started_at: Instant,
+    last_upstream_event_at: Option<Instant>,
+    idle_timeout: Duration,
     response_capture: Vec<u8>,
     response_bytes: usize,
     response_truncated: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ExpiredWebSocketRequest {
+    log_id: String,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    idle_timeout: Duration,
+    idle_for: Duration,
 }
 
 impl WebSocketRequestLogger {
@@ -1275,6 +1364,7 @@ impl WebSocketRequestLogger {
         relay: &crate::settings::RelayProfile,
         remote_addr: Option<String>,
         path: String,
+        connection_context: WebSocketConnectionContext,
     ) -> Self {
         Self {
             state: Arc::new(Mutex::new(WebSocketRequestLogState {
@@ -1285,6 +1375,7 @@ impl WebSocketRequestLogger {
                 endpoint: crate::responses_websocket::responses_websocket_url(
                     crate::responses_websocket::relay_responses_base_url(relay),
                 ),
+                connection_context,
                 requests: HashMap::new(),
                 active_order: VecDeque::new(),
                 unassigned_order: VecDeque::new(),
@@ -1295,8 +1386,10 @@ impl WebSocketRequestLogger {
 
     fn record_request(&self, payload: &Value, request_body: &str) -> Option<String> {
         let metadata = crate::proxy_log::extract_request_metadata(Some(payload));
+        let idle_timeout = crate::protocol_proxy::stream_idle_timeout_for_request(Some(payload));
         let id = format!("local-{}", uuid::Uuid::new_v4());
         let timestamp_ms = crate::proxy_log::current_timestamp_ms();
+        let started_at = Instant::now();
         let Ok(mut state) = self.state.lock() else {
             return None;
         };
@@ -1342,11 +1435,14 @@ impl WebSocketRequestLogger {
             response_body: String::new(),
             error: None,
         };
+        let application_started_at = state.active_order.is_empty().then_some(started_at);
         state.requests.insert(
             id.clone(),
             TrackedWebSocketRequest {
                 record: record.clone(),
-                started_at: Instant::now(),
+                started_at,
+                last_upstream_event_at: application_started_at,
+                idle_timeout,
                 response_capture: Vec::new(),
                 response_bytes: 0,
                 response_truncated: false,
@@ -1356,7 +1452,119 @@ impl WebSocketRequestLogger {
         state.unassigned_order.push_back(id.clone());
         drop(state);
         append_websocket_proxy_log_record(&record);
+        if let Ok(state) = self.state.lock() {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "protocol_proxy.responses_websocket_request",
+                serde_json::json!({
+                    "logId": id,
+                    "relayId": state.relay_id,
+                    "relayName": state.relay_name,
+                    "endpoint": state.endpoint,
+                    "model": record.model,
+                    "sessionId": state.connection_context.session_id,
+                    "threadId": state.connection_context.thread_id,
+                    "turnId": state.connection_context.turn_id,
+                    "requestKind": state.connection_context.request_kind,
+                    "windowId": state.connection_context.window_id,
+                    "streamIdleTimeoutMs": idle_timeout.as_millis(),
+                }),
+            );
+        }
         Some(id)
+    }
+
+    fn has_pending_requests(&self) -> bool {
+        self.state
+            .lock()
+            .is_ok_and(|state| !state.requests.is_empty())
+    }
+
+    fn record_upstream_application_activity(&self, message: &Message) {
+        let Some(payload) = websocket_application_event_payload(message) else {
+            return;
+        };
+        let response_id = websocket_response_id(&payload);
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        // Responses WebSocket 在同一连接内顺序处理 response.create；后续请求由上游排队，
+        // 因此所有尚未终止的上游事件都属于当前队首请求。
+        let Some(log_id) = state
+            .active_order
+            .front()
+            .filter(|log_id| state.requests.contains_key(*log_id))
+            .cloned()
+        else {
+            return;
+        };
+        if let Some(response_id) = response_id {
+            state.response_ids.insert(response_id, log_id.clone());
+        }
+        state.unassigned_order.retain(|id| id != &log_id);
+        if let Some(tracked) = state.requests.get_mut(&log_id) {
+            tracked.last_upstream_event_at = Some(Instant::now());
+        }
+    }
+
+    fn expired_pending_request(&self, now: Instant) -> Option<ExpiredWebSocketRequest> {
+        let state = self.state.lock().ok()?;
+        let log_id = state.active_order.front()?;
+        let tracked = state.requests.get(log_id)?;
+        let last_upstream_event_at = tracked.last_upstream_event_at?;
+        websocket_idle_timeout_elapsed(last_upstream_event_at, tracked.idle_timeout, now).map(
+            |idle_for| ExpiredWebSocketRequest {
+                log_id: log_id.clone(),
+                model: tracked.record.model.clone(),
+                reasoning_effort: tracked.record.reasoning_effort.clone(),
+                idle_timeout: tracked.idle_timeout,
+                idle_for,
+            },
+        )
+    }
+
+    fn log_idle_timeout(&self, expired: &ExpiredWebSocketRequest) {
+        let Ok(state) = self.state.lock() else {
+            return;
+        };
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "protocol_proxy.responses_websocket_idle_timeout",
+            serde_json::json!({
+                "logId": expired.log_id,
+                "relayId": state.relay_id,
+                "relayName": state.relay_name,
+                "endpoint": state.endpoint,
+                "model": expired.model,
+                "reasoningEffort": expired.reasoning_effort,
+                "sessionId": state.connection_context.session_id,
+                "threadId": state.connection_context.thread_id,
+                "turnId": state.connection_context.turn_id,
+                "requestKind": state.connection_context.request_kind,
+                "windowId": state.connection_context.window_id,
+                "streamIdleTimeoutMs": expired.idle_timeout.as_millis(),
+                "idleForMs": expired.idle_for.as_millis(),
+            }),
+        );
+    }
+
+    fn log_transport_timeout(&self, idle_for: Duration) {
+        let Ok(state) = self.state.lock() else {
+            return;
+        };
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "protocol_proxy.responses_websocket_transport_timeout",
+            serde_json::json!({
+                "relayId": state.relay_id,
+                "relayName": state.relay_name,
+                "endpoint": state.endpoint,
+                "sessionId": state.connection_context.session_id,
+                "threadId": state.connection_context.thread_id,
+                "turnId": state.connection_context.turn_id,
+                "requestKind": state.connection_context.request_kind,
+                "windowId": state.connection_context.window_id,
+                "transportIdleTimeoutMs": UPSTREAM_TRANSPORT_IDLE_TIMEOUT.as_millis(),
+                "idleForMs": idle_for.as_millis(),
+            }),
+        );
     }
 
     fn record_response(&self, message: &Message) {
@@ -1479,6 +1687,7 @@ impl WebSocketRequestLogger {
             state.active_order.retain(|id| id != &log_id);
             state.unassigned_order.retain(|id| id != &log_id);
             state.response_ids.retain(|_, id| id != &log_id);
+            activate_next_queued_websocket_request(&mut state, Instant::now());
         }
         drop(state);
         if let Some(record) = update {
@@ -1521,6 +1730,11 @@ impl WebSocketRequestLogger {
             return;
         };
         let mut records = Vec::with_capacity(state.requests.len());
+        let interrupted_request_count = state.requests.len();
+        let connection_context = state.connection_context.clone();
+        let relay_id = state.relay_id.clone();
+        let relay_name = state.relay_name.clone();
+        let endpoint = state.endpoint.clone();
         for (_, mut tracked) in state.requests.drain() {
             tracked.record.state = crate::proxy_log::ProxyRequestState::Completed;
             tracked.record.status_code = Some(status_code);
@@ -1547,6 +1761,24 @@ impl WebSocketRequestLogger {
         for record in records {
             append_websocket_proxy_log_record(&record);
         }
+        if interrupted_request_count > 0 {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "protocol_proxy.responses_websocket_interrupted",
+                serde_json::json!({
+                    "relayId": relay_id,
+                    "relayName": relay_name,
+                    "endpoint": endpoint,
+                    "sessionId": connection_context.session_id,
+                    "threadId": connection_context.thread_id,
+                    "turnId": connection_context.turn_id,
+                    "requestKind": connection_context.request_kind,
+                    "windowId": connection_context.window_id,
+                    "requestCount": interrupted_request_count,
+                    "statusCode": status_code,
+                    "error": error,
+                }),
+            );
+        }
     }
 }
 
@@ -1558,13 +1790,19 @@ fn resolve_websocket_log_id(
         if let Some(log_id) = state.response_ids.get(response_id) {
             return Some(log_id.clone());
         }
-        while let Some(log_id) = state.unassigned_order.pop_front() {
-            if state.requests.contains_key(&log_id) {
-                state
-                    .response_ids
-                    .insert(response_id.to_string(), log_id.clone());
-                return Some(log_id);
-            }
+        // 上游一次只处理一个 response。续接轮次可能产生新的 response_id，
+        // 但仍必须绑定当前队首，不能误分配给后续排队请求。
+        if let Some(log_id) = state
+            .active_order
+            .front()
+            .filter(|log_id| state.requests.contains_key(*log_id))
+            .cloned()
+        {
+            state
+                .response_ids
+                .insert(response_id.to_string(), log_id.clone());
+            state.unassigned_order.retain(|id| id != &log_id);
+            return Some(log_id);
         }
     }
 
@@ -1580,6 +1818,18 @@ fn resolve_websocket_log_id(
     }
 }
 
+fn activate_next_queued_websocket_request(
+    state: &mut WebSocketRequestLogState,
+    activated_at: Instant,
+) {
+    let Some(log_id) = state.active_order.front().cloned() else {
+        return;
+    };
+    if let Some(tracked) = state.requests.get_mut(&log_id) {
+        tracked.last_upstream_event_at.get_or_insert(activated_at);
+    }
+}
+
 fn websocket_response_id(payload: &Value) -> Option<String> {
     payload
         .get("response_id")
@@ -1591,6 +1841,27 @@ fn websocket_response_id(payload: &Value) -> Option<String> {
                 .and_then(Value::as_str)
         })
         .map(ToString::to_string)
+}
+
+fn websocket_application_event_payload(message: &Message) -> Option<Value> {
+    let Message::Text(text) = message else {
+        return None;
+    };
+    let payload = serde_json::from_str::<Value>(text.as_str()).ok()?;
+    payload
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|event_type| !event_type.is_empty())
+        .then_some(payload)
+}
+
+fn websocket_idle_timeout_elapsed(
+    last_upstream_event_at: Instant,
+    idle_timeout: Duration,
+    now: Instant,
+) -> Option<Duration> {
+    let idle_for = now.saturating_duration_since(last_upstream_event_at);
+    (idle_for >= idle_timeout).then_some(idle_for)
 }
 
 fn is_terminal_websocket_response_event(event_type: &str) -> bool {
@@ -1915,6 +2186,7 @@ fn log_websocket_event(
     event: &str,
     relay: &crate::settings::RelayProfile,
     remote_addr: Option<&str>,
+    connection_context: &WebSocketConnectionContext,
     error: Option<&str>,
 ) {
     let _ = crate::diagnostic_log::append_diagnostic_log(
@@ -1926,23 +2198,111 @@ fn log_websocket_event(
                 crate::responses_websocket::relay_responses_base_url(relay)
             ),
             "remoteAddr": remote_addr,
+            "sessionId": connection_context.session_id,
+            "threadId": connection_context.thread_id,
+            "turnId": connection_context.turn_id,
+            "requestKind": connection_context.request_kind,
+            "windowId": connection_context.window_id,
             "error": error,
         }),
     );
 }
 
+#[derive(Clone, Debug, Default)]
+struct WebSocketConnectionContext {
+    session_id: Option<String>,
+    thread_id: Option<String>,
+    turn_id: Option<String>,
+    request_kind: Option<String>,
+    window_id: Option<String>,
+}
+
+impl WebSocketConnectionContext {
+    fn from_request(request: &Request) -> Self {
+        let turn_metadata = request
+            .headers()
+            .get("x-codex-turn-metadata")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| serde_json::from_str::<Value>(value).ok());
+        Self {
+            session_id: redact_websocket_identifier(websocket_header(request, "session-id")),
+            thread_id: redact_websocket_identifier(
+                websocket_header(request, "thread-id")
+                    .or_else(|| websocket_header(request, "x-client-request-id")),
+            ),
+            turn_id: redact_websocket_identifier(
+                turn_metadata
+                    .as_ref()
+                    .and_then(|value| value.get("turn_id"))
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+            ),
+            request_kind: bounded_websocket_context_label(
+                turn_metadata
+                    .as_ref()
+                    .and_then(|value| value.get("request_kind"))
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+            ),
+            window_id: redact_websocket_identifier(
+                websocket_header(request, "x-codex-window-id").or_else(|| {
+                    turn_metadata
+                        .as_ref()
+                        .and_then(|value| value.get("window_id"))
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string)
+                }),
+            ),
+        }
+    }
+}
+
+fn redact_websocket_identifier(value: Option<String>) -> Option<String> {
+    let value = value?.trim().to_string();
+    if value.is_empty() {
+        return None;
+    }
+    let digest = Sha256::digest(value.as_bytes());
+    let short_hash = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Some(format!("sha256:{short_hash}"))
+}
+
+fn bounded_websocket_context_label(value: Option<String>) -> Option<String> {
+    let value = value?;
+    let bounded = value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(64)
+        .collect::<String>();
+    (!bounded.trim().is_empty()).then_some(bounded)
+}
+
+fn websocket_header(request: &Request, name: &str) -> Option<String> {
+    request
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(ToString::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveWebSocketContinuation, ActiveWebSocketMode, WebSocketContinuationAction,
-        WebSocketContinuationCoordinator, WebSocketContinuationState,
+        ActiveWebSocketContinuation, ActiveWebSocketMode, WebSocketConnectionContext,
+        WebSocketContinuationAction, WebSocketContinuationCoordinator, WebSocketContinuationState,
+        WebSocketRequestLogger, activate_next_queued_websocket_request,
         is_responses_websocket_proxy_path, is_responses_websocket_upgrade,
         prepare_downstream_response_create_payload,
-        prepare_downstream_response_create_payload_with_settings,
+        prepare_downstream_response_create_payload_with_settings, resolve_websocket_log_id,
+        websocket_application_event_payload, websocket_idle_timeout_elapsed,
     };
-    use crate::settings::BackendSettings;
+    use crate::settings::{BackendSettings, RelayProfile};
     use serde_json::json;
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
     use tokio_tungstenite::tungstenite::Message;
 
     #[test]
@@ -1958,6 +2318,182 @@ mod tests {
         request.extend_from_slice(&[0x81, 0x00]);
 
         assert!(is_responses_websocket_upgrade(&request));
+    }
+
+    #[test]
+    fn websocket_connection_context_extracts_session_thread_and_turn_headers() {
+        let request = tokio_tungstenite::tungstenite::http::Request::builder()
+            .uri("ws://127.0.0.1/v1/responses")
+            .header("session-id", "session-a")
+            .header("thread-id", "thread-a")
+            .header("x-codex-window-id", "thread-a:3")
+            .header(
+                "x-codex-turn-metadata",
+                r#"{"turn_id":"turn-a","request_kind":"sampling","window_id":"fallback-window"}"#,
+            )
+            .body(())
+            .unwrap();
+
+        let context = WebSocketConnectionContext::from_request(&request);
+
+        assert!(
+            context
+                .session_id
+                .as_deref()
+                .is_some_and(|value| value.starts_with("sha256:"))
+        );
+        assert!(
+            context
+                .thread_id
+                .as_deref()
+                .is_some_and(|value| value.starts_with("sha256:"))
+        );
+        assert!(
+            context
+                .turn_id
+                .as_deref()
+                .is_some_and(|value| value.starts_with("sha256:"))
+        );
+        assert_eq!(context.request_kind.as_deref(), Some("sampling"));
+        assert!(
+            context
+                .window_id
+                .as_deref()
+                .is_some_and(|value| value.starts_with("sha256:"))
+        );
+        assert_ne!(context.session_id.as_deref(), Some("session-a"));
+        assert_ne!(context.thread_id.as_deref(), Some("thread-a"));
+    }
+
+    #[test]
+    fn websocket_transport_heartbeat_does_not_reset_application_idle_budget() {
+        assert!(websocket_application_event_payload(&Message::Ping(vec![].into())).is_none());
+        assert!(websocket_application_event_payload(&Message::Pong(vec![].into())).is_none());
+        assert!(
+            websocket_application_event_payload(&Message::Text(
+                r#"{"type":"response.output_text.delta","delta":"ok"}"#
+                    .to_string()
+                    .into()
+            ))
+            .is_some()
+        );
+
+        let started_at = Instant::now();
+        let idle_timeout = Duration::from_secs(900);
+        assert!(
+            websocket_idle_timeout_elapsed(
+                started_at,
+                idle_timeout,
+                started_at + Duration::from_secs(899)
+            )
+            .is_none()
+        );
+        assert_eq!(
+            websocket_idle_timeout_elapsed(started_at, idle_timeout, started_at + idle_timeout),
+            Some(idle_timeout)
+        );
+    }
+
+    #[test]
+    fn websocket_queued_request_starts_idle_timer_only_after_activation() {
+        let relay = RelayProfile {
+            id: "relay-test".to_string(),
+            name: "Relay Test".to_string(),
+            ..RelayProfile::default()
+        };
+        let logger = WebSocketRequestLogger::new(
+            &relay,
+            None,
+            "/v1/responses".to_string(),
+            WebSocketConnectionContext::default(),
+        );
+        let first = logger
+            .record_request(
+                &json!({"type":"response.create","model":"gpt-5.6","stream":true}),
+                r#"{"type":"response.create","model":"gpt-5.6","stream":true}"#,
+            )
+            .unwrap();
+        let second = logger
+            .record_request(
+                &json!({"type":"response.create","model":"gpt-5.6","stream":true}),
+                r#"{"type":"response.create","model":"gpt-5.6","stream":true}"#,
+            )
+            .unwrap();
+        let now = Instant::now();
+        {
+            let mut state = logger.state.lock().unwrap();
+            let first_request = state.requests.get_mut(&first).unwrap();
+            first_request.last_upstream_event_at = Some(now);
+            first_request.idle_timeout = Duration::from_secs(10);
+            let second_request = state.requests.get_mut(&second).unwrap();
+            second_request.idle_timeout = Duration::from_millis(1);
+            assert!(second_request.last_upstream_event_at.is_none());
+        }
+
+        assert!(
+            logger
+                .expired_pending_request(now + Duration::from_millis(5))
+                .is_none()
+        );
+
+        let activated_at = now + Duration::from_millis(5);
+        {
+            let mut state = logger.state.lock().unwrap();
+            state.requests.remove(&first);
+            state.active_order.retain(|id| id != &first);
+            state.unassigned_order.retain(|id| id != &first);
+            activate_next_queued_websocket_request(&mut state, activated_at);
+            assert_eq!(
+                state
+                    .requests
+                    .get(&second)
+                    .and_then(|tracked| tracked.last_upstream_event_at),
+                Some(activated_at)
+            );
+        }
+    }
+
+    #[test]
+    fn websocket_continuation_response_ids_stay_bound_to_current_request() {
+        let relay = RelayProfile {
+            id: "relay-test".to_string(),
+            name: "Relay Test".to_string(),
+            ..RelayProfile::default()
+        };
+        let logger = WebSocketRequestLogger::new(
+            &relay,
+            None,
+            "/v1/responses".to_string(),
+            WebSocketConnectionContext::default(),
+        );
+        let first = logger
+            .record_request(
+                &json!({"type":"response.create","model":"gpt-5.6","stream":true}),
+                "{}",
+            )
+            .unwrap();
+        let second = logger
+            .record_request(
+                &json!({"type":"response.create","model":"gpt-5.6","stream":true}),
+                "{}",
+            )
+            .unwrap();
+        let mut state = logger.state.lock().unwrap();
+
+        assert_eq!(
+            resolve_websocket_log_id(&mut state, Some("resp-first")).as_deref(),
+            Some(first.as_str())
+        );
+        assert_eq!(
+            resolve_websocket_log_id(&mut state, Some("resp-continuation")).as_deref(),
+            Some(first.as_str())
+        );
+        assert!(
+            state
+                .unassigned_order
+                .iter()
+                .any(|log_id| log_id == &second)
+        );
     }
 
     #[test]

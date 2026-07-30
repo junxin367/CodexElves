@@ -1319,6 +1319,13 @@ async fn launch_lifecycle_does_not_apply_relay_profile_while_launching_codex() {
     let events = Arc::new(Mutex::new(Vec::<String>::new()));
     let hooks = FakeHooks::new(events.clone()).with_settings(BackendSettings {
         relay_profiles_enabled: true,
+        relay_profiles: vec![RelayProfile {
+            id: "relay-a".to_string(),
+            base_url: "https://relay.example/v1".to_string(),
+            local_proxy_enabled: Some(true),
+            ..RelayProfile::default()
+        }],
+        active_relay_id: "relay-a".to_string(),
         ..BackendSettings::default()
     });
 
@@ -1337,6 +1344,7 @@ async fn launch_lifecycle_does_not_apply_relay_profile_while_launching_codex() {
 
     let events = events.lock().unwrap().clone();
     assert!(!events.contains(&"apply-relay".to_string()));
+    assert!(events.contains(&"ensure-stream-timeout".to_string()));
     assert!(events.contains(&"launch:9229".to_string()));
 }
 
@@ -1368,6 +1376,7 @@ async fn launch_lifecycle_skips_active_relay_profile_when_supplier_config_disabl
 
     let events = events.lock().unwrap().clone();
     assert!(!events.contains(&"apply-relay".to_string()));
+    assert!(!events.contains(&"ensure-stream-timeout".to_string()));
     assert!(!events.contains(&"computer-use-guard".to_string()));
     assert!(events.contains(&"launch:9229".to_string()));
 }
@@ -1857,6 +1866,14 @@ impl LaunchHooks for FakeHooks {
         if self.provider_sync_unsupported {
             anyhow::bail!("provider sync requires launcher hooks");
         }
+        Ok(())
+    }
+
+    async fn ensure_active_relay_stream_idle_timeout(
+        &self,
+        _settings: &BackendSettings,
+    ) -> anyhow::Result<()> {
+        self.event("ensure-stream-timeout");
         Ok(())
     }
 

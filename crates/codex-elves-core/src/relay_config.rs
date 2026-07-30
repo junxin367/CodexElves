@@ -15,6 +15,8 @@ use crate::settings::{RelayContextSelection, RelayProfile, RelayProtocol};
 const RELAY_PROVIDER: &str = "custom";
 const LEGACY_RELAY_PROVIDERS: &[&str] = &["CodexElves", "CodexPP"];
 const CHAT_UPSTREAM_BASE_URL_KEY: &str = "codex_elves_chat_base_url";
+const STREAM_IDLE_TIMEOUT_MS_KEY: &str = "stream_idle_timeout_ms";
+pub const LOCAL_PROXY_CODEX_STREAM_IDLE_TIMEOUT_MS: u64 = 3_600_000;
 const GENERATED_MODEL_CATALOG_FILENAME: &str = "codex-elves-model-catalog.json";
 const RESERVED_MODEL_PROVIDER_IDS: &[&str] = &[
     "amazon-bedrock",
@@ -262,7 +264,10 @@ pub fn apply_relay_config_to_home_with_protocol(
     }
     let codex_base_url = codex_base_url_for_protocol(base_url, protocol, proxy_port);
     let existing = read_optional_text(&home.join("config.toml"))?;
-    let updated = upsert_model_provider_config(&existing, &codex_base_url, bearer_token)?;
+    let uses_local_proxy = codex_base_url.trim_end_matches('/')
+        == crate::protocol_proxy::local_responses_proxy_base_url(proxy_port).trim_end_matches('/');
+    let updated =
+        upsert_model_provider_config(&existing, &codex_base_url, bearer_token, uses_local_proxy)?;
     let auth_contents = serde_json::to_string_pretty(&json!({
         "OPENAI_API_KEY": bearer_token
     }))?;
@@ -474,6 +479,14 @@ fn apply_relay_profile_owned_fields_to_config(
         },
     );
     updated = set_table_toml_string_line(&updated, &provider_table, "base_url", &codex_base_url);
+    if relay_profile_uses_protocol_proxy(profile) {
+        updated = set_table_toml_raw_line(
+            &updated,
+            &provider_table,
+            STREAM_IDLE_TIMEOUT_MS_KEY,
+            &LOCAL_PROXY_CODEX_STREAM_IDLE_TIMEOUT_MS.to_string(),
+        );
+    }
     if profile.relay_mode == crate::settings::RelayMode::PureApi {
         updated = remove_table_key(&updated, &provider_table, "experimental_bearer_token");
     } else {
@@ -737,6 +750,64 @@ pub fn sync_applied_relay_profile_base_url_to_home(
     Ok(true)
 }
 
+/// 启动供应商功能时，只为当前已应用的本地代理 Provider 补齐 Codex SSE 空闲上限。
+///
+/// 不重写整份供应商配置，不覆盖已有值，也不会修改直连 Provider。
+pub fn ensure_applied_local_proxy_stream_idle_timeout_to_home(
+    home: &Path,
+    profile: &RelayProfile,
+) -> anyhow::Result<bool> {
+    if !relay_profile_uses_protocol_proxy(profile) {
+        return Ok(false);
+    }
+
+    let live_config = read_optional_text(&home.join("config.toml"))?;
+    if live_config.trim().is_empty() {
+        return Ok(false);
+    }
+    let mut doc = parse_toml_document(&live_config)?;
+    let Some(live_provider) = active_provider_id(&doc) else {
+        return Ok(false);
+    };
+    if profile.relay_mode != crate::settings::RelayMode::Aggregate {
+        let profile_provider = relay_profile_provider_id(profile)?;
+        if live_provider.trim() != profile_provider.trim() {
+            return Ok(false);
+        }
+    }
+
+    let Some(provider) = doc
+        .get_mut("model_providers")
+        .and_then(Item::as_table_mut)
+        .and_then(|providers| providers.get_mut(&live_provider))
+        .and_then(Item::as_table_mut)
+    else {
+        return Ok(false);
+    };
+    // 启动器在启用协议代理时会强制使用项目固定端口，因此这里只匹配由
+    // CodexElves 管理的精确本地端点，避免误改用户自己的 localhost Provider。
+    let local_proxy_base_url = crate::protocol_proxy::local_responses_proxy_base_url(
+        crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+    );
+    let provider_base_url = provider
+        .get("base_url")
+        .and_then(Item::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if provider_base_url.trim_end_matches('/') != local_proxy_base_url.trim_end_matches('/') {
+        return Ok(false);
+    }
+    if provider.contains_key(STREAM_IDLE_TIMEOUT_MS_KEY) {
+        return Ok(false);
+    }
+
+    provider[STREAM_IDLE_TIMEOUT_MS_KEY] =
+        toml_edit::value(LOCAL_PROXY_CODEX_STREAM_IDLE_TIMEOUT_MS as i64);
+    let updated = ensure_trailing_newline(doc.to_string());
+    write_codex_live_atomic(home, Some(&updated), None, false)?;
+    Ok(true)
+}
+
 pub fn sync_applied_relay_profile_websocket_to_home_with_enabled(
     home: &Path,
     profile: &RelayProfile,
@@ -822,7 +893,10 @@ pub fn apply_pure_api_config_to_home_with_protocol(
     }
     let codex_base_url = codex_base_url_for_protocol(base_url, protocol, proxy_port);
     let existing = read_optional_text(&home.join("config.toml"))?;
-    let updated = upsert_model_provider_config(&existing, &codex_base_url, bearer_token)?;
+    let uses_local_proxy = codex_base_url.trim_end_matches('/')
+        == crate::protocol_proxy::local_responses_proxy_base_url(proxy_port).trim_end_matches('/');
+    let updated =
+        upsert_model_provider_config(&existing, &codex_base_url, bearer_token, uses_local_proxy)?;
     let auth_contents = serde_json::to_string_pretty(&json!({
         "OPENAI_API_KEY": bearer_token
     }))?;
@@ -3404,6 +3478,10 @@ fn complete_relay_profile_config(profile: &RelayProfile) -> anyhow::Result<Strin
     if !provider_base_url.trim().is_empty() {
         provider["base_url"] = toml_edit::value(provider_base_url.trim());
     }
+    if relay_profile_uses_protocol_proxy(profile) {
+        provider[STREAM_IDLE_TIMEOUT_MS_KEY] =
+            toml_edit::value(LOCAL_PROXY_CODEX_STREAM_IDLE_TIMEOUT_MS as i64);
+    }
     if profile.relay_mode == crate::settings::RelayMode::PureApi {
         provider.remove("experimental_bearer_token");
     } else if !api_key.trim().is_empty() {
@@ -4165,10 +4243,19 @@ mod tests {
                 .contains("Anthropic HTTP 400；已回退到 Chat Completions")
         );
         assert!(requests[0].starts_with("POST /v1/messages HTTP/1.1"));
-        assert!(requests[0].contains("\r\nx-api-key: sk-test\r\n"));
-        assert!(requests[0].contains("\r\nanthropic-version: 2023-06-01\r\n"));
+        let anthropic_request = requests[0].to_ascii_lowercase();
+        assert!(
+            anthropic_request.contains("\r\nx-api-key: sk-test\r\n"),
+            "Anthropic 请求头不符合预期：{}",
+            requests[0]
+        );
+        assert!(anthropic_request.contains("\r\nanthropic-version: 2023-06-01\r\n"));
         assert!(requests[1].starts_with("POST /v1/chat/completions HTTP/1.1"));
-        assert!(requests[1].contains("\r\nauthorization: Bearer sk-test\r\n"));
+        assert!(
+            requests[1]
+                .to_ascii_lowercase()
+                .contains("\r\nauthorization: bearer sk-test\r\n")
+        );
     }
 
     #[test]
@@ -5036,6 +5123,7 @@ fn upsert_model_provider_config(
     contents: &str,
     base_url: &str,
     bearer_token: &str,
+    uses_local_proxy: bool,
 ) -> anyhow::Result<String> {
     let doc = parse_toml_document(contents)?;
     let provider_id = active_or_default_provider_id(&doc);
@@ -5056,6 +5144,14 @@ fn upsert_model_provider_config(
     updated = set_table_toml_raw_line(&updated, &provider_table, "requires_openai_auth", "true");
     updated = set_table_toml_raw_line(&updated, &provider_table, "supports_websockets", "false");
     updated = set_table_toml_string_line(&updated, &provider_table, "base_url", base_url);
+    if uses_local_proxy {
+        updated = set_table_toml_raw_line(
+            &updated,
+            &provider_table,
+            STREAM_IDLE_TIMEOUT_MS_KEY,
+            &LOCAL_PROXY_CODEX_STREAM_IDLE_TIMEOUT_MS.to_string(),
+        );
+    }
     updated = set_table_toml_string_line(
         &updated,
         &provider_table,
@@ -5069,6 +5165,10 @@ fn upsert_model_provider_config(
 fn relay_profile_provider_id(profile: &RelayProfile) -> anyhow::Result<String> {
     let doc = parse_toml_document(&profile.config_contents)?;
     Ok(active_or_default_provider_id(&doc))
+}
+
+fn relay_profile_uses_protocol_proxy(profile: &RelayProfile) -> bool {
+    profile.local_proxy_enabled() || profile.relay_mode == crate::settings::RelayMode::Aggregate
 }
 
 fn reasoning_effort_rank(effort: &str) -> Option<usize> {

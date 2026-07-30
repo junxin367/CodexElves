@@ -483,6 +483,95 @@ async fn local_proxy_bridges_responses_websocket_messages_and_authentication() {
 }
 
 #[tokio::test]
+async fn local_proxy_does_not_turn_upstream_pong_into_application_event() {
+    let _settings_lock = websocket_settings_test_lock().lock().await;
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        let (stream, _) = upstream_listener.accept().await.unwrap();
+        let mut socket = accept_hdr_async(stream, |_request: &Request, response: Response| {
+            Ok(response)
+        })
+        .await
+        .unwrap();
+        let request = socket.next().await.unwrap().unwrap();
+        assert!(matches!(request, Message::Text(_)));
+        socket
+            .send(Message::Pong(b"alive".to_vec().into()))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "response.completed",
+                    "response": {"id": "resp_keepalive"}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let _ = socket.close(None).await;
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
+    save_supported_websocket_settings(upstream_address, false, "gpt-keepalive");
+
+    let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_address = local_listener.local_addr().unwrap();
+    let local_server = tokio::spawn(async move {
+        let (mut stream, remote_addr) = local_listener.accept().await.unwrap();
+        let request_bytes = read_upgrade_request(&mut stream).await;
+        handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr))
+            .await
+            .unwrap();
+    });
+
+    let (mut client, _) = connect_async(format!("ws://{local_address}/v1/responses"))
+        .await
+        .unwrap();
+    client
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-keepalive",
+                "input": [{"role": "user", "content": "hi"}],
+                "stream": true
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut saw_synthetic_event = false;
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(1), client.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+        match payload["type"].as_str() {
+            Some("codex_elves.keepalive") => saw_synthetic_event = true,
+            Some("response.completed") => break,
+            _ => {}
+        }
+    }
+    assert!(!saw_synthetic_event);
+
+    let _ = client.close(None).await;
+    local_server.await.unwrap();
+    upstream.await.unwrap();
+}
+
+#[tokio::test]
 async fn local_proxy_preserves_a_websocket_frame_read_with_the_upgrade_request() {
     let _settings_lock = websocket_settings_test_lock().lock().await;
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -668,7 +757,7 @@ async fn explicitly_disabled_websocket_rejects_upgrade_before_connecting_upstrea
     let WebSocketError::Http(response) = error else {
         panic!("expected HTTP rejection before websocket upgrade");
     };
-    assert_eq!(response.status().as_u16(), 409);
+    assert_eq!(response.status().as_u16(), 426);
     local_server.await.unwrap().unwrap();
 }
 
@@ -829,11 +918,13 @@ async fn reasoning_continuation_reuses_the_same_websocket_and_only_returns_the_f
         .await
         .unwrap();
 
-    let response = client.next().await.unwrap().unwrap();
-    let Message::Text(response) = response else {
-        panic!("expected final websocket response");
+    let response = loop {
+        let message = client.next().await.unwrap().unwrap();
+        let Message::Text(response) = message else {
+            continue;
+        };
+        break serde_json::from_str::<serde_json::Value>(response.as_str()).unwrap();
     };
-    let response: serde_json::Value = serde_json::from_str(response.as_str()).unwrap();
     assert_eq!(response["type"], "response.completed");
     assert_eq!(response["response"]["id"], "resp_final");
     assert!(!response.to_string().contains("resp_short"));
