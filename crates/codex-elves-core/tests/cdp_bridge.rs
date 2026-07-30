@@ -595,8 +595,6 @@ fn injection_script_exposes_compact_per_thread_token_usage_summary() {
     assert!(script.contains("card.dataset.status = \"placeholder\""));
     assert!(script.contains("panel.insertAdjacentElement(\"afterend\", card)"));
     assert!(script.contains("codexTokenUsageRefreshIntervalMs = 2500"));
-    assert!(script.contains("codexTokenUsageSettleDelayMs = 500"));
-    assert!(script.contains("codexTokenUsageCompletionSettleDelayMs = 2500"));
     assert!(script.contains("codexTokenUsageRetryDelaysMs = [1000, 2500, 5000]"));
     assert!(!script.contains("codexTokenUsageHiddenRefreshIntervalMs"));
     assert!(script.contains("function scheduleCodexTokenUsageRefresh(delayMs = 0)"));
@@ -618,6 +616,53 @@ fn injection_script_exposes_compact_per_thread_token_usage_summary() {
     assert!(script.contains("pauseCodexTokenUsageForHiddenPinnedSummary();"));
     assert!(!script.contains("syncCodexTokenUsageWithPinnedSummaryToggle"));
     assert!(!script.contains("scheduleCodexTokenUsageRefresh(120)"));
+}
+
+#[test]
+fn injection_script_resolves_temporary_thread_id_and_marks_stale_token_usage() {
+    let script = assets::injection_script(45221);
+
+    // 新建会话侧边栏 id 会长期停在临时形态，必须用 composer 上的真实 conversation id 校正。
+    assert!(script.contains("function isTemporaryThreadId(sessionId)"));
+    assert!(script.contains("(client-)?new-thread:"));
+    assert!(script.contains("function activeConversationIdFromDom()"));
+    assert!(script.contains("[data-above-composer-conversation-id]"));
+    assert!(script.contains("function resolveTemporarySessionRef(ref)"));
+    assert!(script.contains("return resolveTemporarySessionRef(ref);"));
+    assert!(script.contains(
+        "return resolveTemporarySessionRef({ session_id: locationThreadId(), title: \"\" });"
+    ));
+
+    // 读取失败时卡片必须标记过期，不能静默保留旧数值。
+    assert!(script.contains("function markCodexTokenUsageCardStale(card, sessionSignature)"));
+    assert!(script.contains("markCodexTokenUsageCardStale(activeCard, sessionSignature);"));
+    assert!(script.contains("function renderCodexTokenUsageSummary(card, summary, stale = false)"));
+    assert!(script.contains("card.dataset.stale = String(stale === true)"));
+    assert!(script.contains("codex-token-usage-stale"));
+    assert!(script.contains("可能已过期"));
+}
+
+#[test]
+fn injection_script_keeps_session_ref_stable_and_refreshes_after_turn_completion() {
+    let script = assets::injection_script(45221);
+
+    // 侧边栏瞬时拿不到会话时，composer id 作为独立主来源兼宽容期内沍用上一次结果。
+    assert!(script.contains("function currentSessionRefFromDom()"));
+    assert!(
+        script.contains("if (conversationId) return { session_id: conversationId, title: \"\" };")
+    );
+    assert!(script.contains("codexSessionRefGraceMs = 15000"));
+    assert!(script.contains("window.__codexElvesLastSessionRef"));
+
+    // 运行结束那一刻的最后一笔用量靠收尾刷新补齐，不能随轮询停止而丢失。
+    assert!(script.contains("codexTokenUsageCompletionRefreshDelayMs = 3000"));
+    assert!(script.contains("window.__codexTokenUsageWasRunning"));
+    assert!(
+        script.contains("const needsCompletionRefresh = wasRunning && summary.isRunning !== true;")
+    );
+    assert!(
+        script.contains("scheduleCodexTokenUsageRefresh(codexTokenUsageCompletionRefreshDelayMs);")
+    );
 }
 
 #[test]

@@ -2312,11 +2312,15 @@ async fn handle_deferred_protocol_proxy_stream_connection(
         .await?;
     }
 
+    let stream_header_timeout =
+        crate::protocol_proxy::upstream_deferred_stream_header_timeout_for_request(
+            request_json.as_ref(),
+        );
     let upstream_request =
         crate::protocol_proxy::open_responses_proxy_request_with_stream_header_timeout(
             request_body,
             request_user_agent,
-            crate::protocol_proxy::upstream_deferred_stream_header_timeout(),
+            stream_header_timeout,
         );
     tokio::pin!(upstream_request);
     let upstream = if downstream_stream_headers_sent {

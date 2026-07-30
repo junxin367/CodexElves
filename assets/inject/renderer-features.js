@@ -67,8 +67,8 @@
   const codexTokenUsageHostClass = "codex-token-usage-host";
   const codexTokenUsageRefreshIntervalMs = 2500;
   const codexTokenUsageDurationTickIntervalMs = 1000;
-  const codexTokenUsageSettleDelayMs = 500;
-  const codexTokenUsageCompletionSettleDelayMs = 2500;
+  const codexTokenUsageCompletionRefreshDelayMs = 3000;
+  const codexSessionRefGraceMs = 15000;
   const codexTokenUsageRetryDelaysMs = [1000, 2500, 5000];
   const codexTokenUsageRequestTimeoutMs = 5000;
   const codexTokenUsageLifecycleTimeoutMs = 30000;
@@ -108,10 +108,6 @@
   window.__codexTokenUsageRefreshTimer = null;
   clearInterval(window.__codexTokenUsageDurationTimer);
   window.__codexTokenUsageDurationTimer = null;
-  clearTimeout(window.__codexTokenUsageSettleTimer);
-  window.__codexTokenUsageSettleTimer = null;
-  clearTimeout(window.__codexTokenUsageCompletionSettleTimer);
-  window.__codexTokenUsageCompletionSettleTimer = null;
   clearTimeout(window.__codexTokenUsageRetryTimer);
   window.__codexTokenUsageRetryTimer = null;
   if (typeof cancelAnimationFrame === "function") {
@@ -134,16 +130,11 @@
   window.__codexTokenUsageVisibilityHandler = null;
   window.__codexTokenUsageRetryCount = 0;
   window.__codexTokenUsageRefreshPending = false;
+  window.__codexTokenUsageWasRunning = false;
   if (!(window.__codexTokenUsageSummaryCache instanceof Map)) {
     window.__codexTokenUsageSummaryCache = new Map();
   }
   window.__codexTokenUsageRequestSeq = (window.__codexTokenUsageRequestSeq || 0) + 1;
-  try {
-    window.__codexTokenUsageNotificationUnsubscribe?.();
-  } catch {
-  }
-  window.__codexTokenUsageNotificationUnsubscribe = null;
-  window.__codexTokenUsageNotificationManager = null;
   window.__codexPluginAutoExpandContainer = null;
   window.__codexPluginAutoExpandCandidates = [];
   window.__codexPluginAutoExpandIdleUntil = 0;
@@ -1228,6 +1219,18 @@
         font-weight: 445;
         line-height: 16px;
         opacity: .62;
+      }
+      .codex-token-usage-stale {
+        flex: 0 0 auto;
+        margin-left: auto;
+        padding: 1px 6px;
+        border-radius: 999px;
+        background: color-mix(in srgb, currentColor 8%, transparent);
+        color: currentColor;
+        font-size: 10px;
+        font-weight: 445;
+        line-height: 16px;
+        opacity: .5;
       }
       .codex-token-usage-section {
         display: grid;
@@ -4379,13 +4382,57 @@
     return /^[A-Za-z0-9_.-]{8,128}$/.test(key) ? key : "";
   }
 
-  function currentSessionRef() {
+  // 侧边栏 thread id 对新建会话会长期停留在临时形态（`local:client-new-thread:<uuid>`），
+  // 这种 id 在本地存储里没有对应 thread 记录。
+  function isTemporaryThreadId(sessionId) {
+    return /(^|:)(client-)?new-thread:/.test(String(sessionId || ""));
+  }
+
+  // composer 上方节点携带 Codex 分配的真实 conversation id，
+  // 用它校正临时 id，避免后端按临时 id 查不到会话。
+  function activeConversationIdFromDom() {
+    const raw = document
+      .querySelector("[data-above-composer-conversation-id]")
+      ?.getAttribute("data-above-composer-conversation-id");
+    const id = String(raw || "").trim();
+    if (!id || isTemporaryThreadId(id)) return "";
+    return validThreadSessionKey(id) ? id : "";
+  }
+
+  function resolveTemporarySessionRef(ref) {
+    if (!isTemporaryThreadId(ref?.session_id)) return ref;
+    const conversationId = activeConversationIdFromDom();
+    if (!conversationId) return ref;
+    return { ...ref, session_id: conversationId };
+  }
+
+  // 侧边栏折叠、虚拟滚动移除当前行、路由切换瞬间 aria-current 缺失时，
+  // 侧边栏都拿不到会话 id；app:// 下 URL 也不携带 id。
+  // 这种情况下 composer 上方节点通常仍在，因此作为独立主来源使用。
+  function currentSessionRefFromDom() {
     const rows = sessionRows();
     for (const row of rows) {
       const ref = sessionRefFromRow(row);
-      if (ref.session_id && isCurrentSessionRow(row, ref)) return ref;
+      if (ref.session_id && isCurrentSessionRow(row, ref)) return resolveTemporarySessionRef(ref);
     }
-    return { session_id: locationThreadId(), title: "" };
+    const conversationId = activeConversationIdFromDom();
+    if (conversationId) return { session_id: conversationId, title: "" };
+    return resolveTemporarySessionRef({ session_id: locationThreadId(), title: "" });
+  }
+
+  function currentSessionRef() {
+    const ref = currentSessionRefFromDom();
+    if (ref.session_id) {
+      window.__codexElvesLastSessionRef = { ...ref, at: Date.now() };
+      return ref;
+    }
+    // 解析失败往往是 DOM 重建造成的瞬时空窗口，宽容期内沍用上一次成功结果，
+    // 避免已正常展示的会话被误判为“未识别到会话”。
+    const last = window.__codexElvesLastSessionRef;
+    if (last?.session_id && Date.now() - finiteNonNegativeNumber(last.at) <= codexSessionRefGraceMs) {
+      return { session_id: last.session_id, title: last.title || "" };
+    }
+    return ref;
   }
 
   // 启动早期 bridge binding 可能尚未就绪。在启动窗口（首次注入后 8s）内，
@@ -4730,10 +4777,6 @@
     clearTimeout(window.__codexTokenUsageRefreshTimer);
     window.__codexTokenUsageRefreshTimer = null;
     stopCodexTokenUsageDurationTicker();
-    clearTimeout(window.__codexTokenUsageSettleTimer);
-    window.__codexTokenUsageSettleTimer = null;
-    clearTimeout(window.__codexTokenUsageCompletionSettleTimer);
-    window.__codexTokenUsageCompletionSettleTimer = null;
     clearTimeout(window.__codexTokenUsageRetryTimer);
     window.__codexTokenUsageRetryTimer = null;
     window.__codexTokenUsageRetryCount = 0;
@@ -4767,16 +4810,13 @@
     clearTimeout(window.__codexTokenUsageRefreshTimer);
     window.__codexTokenUsageRefreshTimer = null;
     stopCodexTokenUsageDurationTicker();
-    clearTimeout(window.__codexTokenUsageSettleTimer);
-    window.__codexTokenUsageSettleTimer = null;
-    clearTimeout(window.__codexTokenUsageCompletionSettleTimer);
-    window.__codexTokenUsageCompletionSettleTimer = null;
     clearTimeout(window.__codexTokenUsageRetryTimer);
     window.__codexTokenUsageRetryTimer = null;
     window.__codexTokenUsageRetryCount = 0;
     window.__codexTokenUsageRefreshPending = false;
     window.__codexTokenUsageRequestSeq = (window.__codexTokenUsageRequestSeq || 0) + 1;
     window.__codexTokenUsageRequestSession = "";
+    window.__codexTokenUsageWasRunning = false;
     removeCodexTokenUsageCards();
   }
 
@@ -4791,16 +4831,6 @@
       cancelAnimationFrame(window.__codexTokenUsagePinnedSummarySyncRafId);
     }
     window.__codexTokenUsagePinnedSummarySyncRafId = 0;
-  }
-
-  function scheduleCodexTokenUsageCalibration(delayMs, timerKey) {
-    clearTimeout(window[timerKey]);
-    window[timerKey] = null;
-    if (!codexElvesSettings().tokenUsage) return;
-    window[timerKey] = setTimeout(() => {
-      window[timerKey] = null;
-      scheduleCodexTokenUsageRefresh(0);
-    }, Math.max(0, delayMs));
   }
 
   function resetCodexTokenUsageRetry() {
@@ -4853,18 +4883,8 @@
     );
   }
 
-  function removeCodexTokenUsageNotificationListener() {
-    try {
-      window.__codexTokenUsageNotificationUnsubscribe?.();
-    } catch {
-    }
-    window.__codexTokenUsageNotificationUnsubscribe = null;
-    window.__codexTokenUsageNotificationManager = null;
-  }
-
   function refreshCodexTokenUsageFeatureState() {
     if (!codexElvesSettings().tokenUsage) {
-      removeCodexTokenUsageNotificationListener();
       removeCodexTokenUsagePinnedSummaryObservers();
       installCodexTokenUsageVisibilityListener();
       stopCodexTokenUsageRuntime();
@@ -4927,7 +4947,7 @@
     `;
   }
 
-  function renderCodexTokenUsageSummary(card, summary) {
+  function renderCodexTokenUsageSummary(card, summary, stale = false) {
     const totalUsage = normalizeCodexTokenUsage(summary.totalUsage);
     const lastTurnUsage = normalizeCodexTokenUsage(summary.lastTurnUsage);
     const lastTurnDuration = formatCodexTurnDuration(summary);
@@ -4938,14 +4958,18 @@
     const descendantLabel = descendantCount > 0
       ? `<span class="codex-token-usage-agent-count">子智能体 ${descendantCount}</span>`
       : "";
+    const staleLabel = stale
+      ? `<span class="codex-token-usage-stale" title="读取会话 Token 记录失败，当前数值可能已过期">可能已过期</span>`
+      : "";
     card.dataset.status = "ready";
+    card.dataset.stale = String(stale === true);
     card.dataset.running = String(summary.isRunning === true);
     card.removeAttribute("title");
     card.hidden = false;
     card.innerHTML = `
       <div class="codex-token-usage-header">
         <span class="codex-token-usage-title">Token 用量</span>
-        ${descendantLabel}
+        ${staleLabel}${descendantLabel}
       </div>
       <div class="codex-token-usage-section">
         <div class="codex-token-usage-section-head">
@@ -4996,6 +5020,15 @@
       card.dataset.codexTokenUsageResolvedSession = cacheEntry.resolvedSessionId;
     }
     renderCodexTokenUsageSummary(card, summary);
+    return true;
+  }
+
+  // 读取失败时不能静默保留旧数值，否则用户无法区分“未变化”和“无法更新”。
+  function markCodexTokenUsageCardStale(card, sessionSignature) {
+    if (!card || card.dataset.status !== "ready") return false;
+    const summary = cachedCodexTokenUsageSummary(sessionSignature)?.summary;
+    if (!summary) return false;
+    renderCodexTokenUsageSummary(card, summary, true);
     return true;
   }
 
@@ -5142,7 +5175,10 @@
       card = ensureCodexTokenUsageCard(mount);
       sessionChanged = card.dataset.codexTokenUsageSession !== sessionSignature;
       card.dataset.codexTokenUsageSession = sessionSignature;
-      if (sessionChanged) resetCodexTokenUsageRetry();
+      if (sessionChanged) {
+        resetCodexTokenUsageRetry();
+        window.__codexTokenUsageWasRunning = false;
+      }
       const cacheEntry = cachedCodexTokenUsageSummary(sessionSignature);
       if (cacheEntry) {
         renderCachedCodexTokenUsage(card, cacheEntry);
@@ -5192,6 +5228,7 @@
       if (activeCard) activeCard.dataset.codexTokenUsageSession = sessionSignature;
       if (result?.status !== "ok") {
         scheduleCodexTokenUsageRetry();
+        markCodexTokenUsageCardStale(activeCard, sessionSignature);
         if (
           activeCard
           && activeCard.dataset.status !== "ready"
@@ -5208,10 +5245,17 @@
         summary,
         String(result.session_id || sessionId)
       );
+      // 最后一笔 token_count 与 task_complete 几乎同时落盘，若本次已读到
+      // isRunning=false，轮询会停止并漏掉那一笔，因此补一次收尾刷新。
+      const wasRunning = window.__codexTokenUsageWasRunning === true;
+      window.__codexTokenUsageWasRunning = summary.isRunning === true;
+      const needsCompletionRefresh = wasRunning && summary.isRunning !== true;
       if (!codexTokenUsageHasData(summary.totalUsage)) {
         if (activeCard) renderCodexTokenUsageSummary(activeCard, summary);
         if (activeCard && summary.isRunning && document.visibilityState !== "hidden") {
           scheduleCodexTokenUsageRefresh(codexTokenUsageRefreshIntervalMs);
+        } else if (activeCard && needsCompletionRefresh && document.visibilityState !== "hidden") {
+          scheduleCodexTokenUsageRefresh(codexTokenUsageCompletionRefreshDelayMs);
         }
         return;
       }
@@ -5221,11 +5265,14 @@
       }
       if (activeCard && summary.isRunning && document.visibilityState !== "hidden") {
         scheduleCodexTokenUsageRefresh(codexTokenUsageRefreshIntervalMs);
+      } else if (activeCard && needsCompletionRefresh && document.visibilityState !== "hidden") {
+        scheduleCodexTokenUsageRefresh(codexTokenUsageCompletionRefreshDelayMs);
       }
     }).catch(() => {
       if (requestSeq !== window.__codexTokenUsageRequestSeq) return;
       scheduleCodexTokenUsageRetry();
       const activeCard = document.querySelector(`.${codexTokenUsageCardClass}`);
+      markCodexTokenUsageCardStale(activeCard, sessionSignature);
       if (activeCard && activeCard.dataset.status !== "ready") {
         renderCodexTokenUsageStatus(activeCard, "failed", "Token 统计暂不可用。");
       }

@@ -17,7 +17,9 @@ use crate::settings::SettingsStore;
 pub const DEFAULT_PROTOCOL_PROXY_PORT: u16 = 45221;
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const UPSTREAM_MODELS_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
-const UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(900);
+const UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT_HIGH_OR_LOWER: Duration = Duration::from_secs(900);
+const UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT_XHIGH: Duration = Duration::from_secs(1500);
+const UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT_MAX: Duration = Duration::from_secs(1800);
 const REMOTE_COMPACTION_CANDIDATE_BODY_TIMEOUT: Duration = Duration::from_secs(900);
 const MODEL_CAPACITY_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(2)];
 const THINK_OPEN_TAG: &str = "<think>";
@@ -40,6 +42,14 @@ const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
 const ERROR_BODY_PREVIEW_LIMIT: usize = 1024;
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_DEFAULT_REASONING_EFFORT: &str = "high";
+const ANTHROPIC_BELOW_HIGH_MAX_OUTPUT_TOKENS: u64 = 32_000;
+const ANTHROPIC_HIGH_MAX_OUTPUT_TOKENS: u64 = 64_000;
+const ANTHROPIC_XHIGH_MAX_OUTPUT_TOKENS: u64 = 128_000;
+const ANTHROPIC_FALLBACK_MAX_OUTPUT_TOKENS: u64 = 128_000;
+const ANTHROPIC_DEEPSEEK_V4_MAX_OUTPUT_TOKENS: u64 = 384_000;
+const ANTHROPIC_CLAUDE_LEGACY_MAX_OUTPUT_TOKENS: u64 = 8_192;
+const ANTHROPIC_CLAUDE_OPUS_4_MAX_OUTPUT_TOKENS: u64 = 32_000;
+const ANTHROPIC_CLAUDE_4_5_MAX_OUTPUT_TOKENS: u64 = 64_000;
 const REASONING_EFFORT_ORDER: &[&str] =
     &["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 static PROTOCOL_PROXY_DIAGNOSTIC_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -751,12 +761,8 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
         result["model"] = model.clone();
     }
 
-    result["max_tokens"] = body
-        .get("max_output_tokens")
-        .or_else(|| body.get("max_tokens"))
-        .or_else(|| body.get("max_completion_tokens"))
-        .cloned()
-        .unwrap_or_else(|| json!(32000));
+    let model = body.get("model").and_then(Value::as_str).unwrap_or("");
+    result["max_tokens"] = json!(resolve_anthropic_max_tokens(&body, model));
 
     let mut system_chunks = Vec::new();
     if let Some(instructions) = body.get("instructions") {
@@ -833,7 +839,6 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
         }
     }
 
-    let model = body.get("model").and_then(Value::as_str).unwrap_or("");
     apply_anthropic_reasoning_options(&mut result, &body, model);
     log_anthropic_request_shape(&result, &body, diagnostic_id);
 
@@ -1130,7 +1135,19 @@ pub fn upstream_models_header_timeout() -> Duration {
 }
 
 pub fn upstream_deferred_stream_header_timeout() -> Duration {
-    UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT
+    UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT_HIGH_OR_LOWER
+}
+
+pub fn upstream_deferred_stream_header_timeout_for_request(request: Option<&Value>) -> Duration {
+    match request
+        .and_then(extract_requested_reasoning_effort)
+        .as_deref()
+        .and_then(normalize_reasoning_effort)
+    {
+        Some("xhigh") => UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT_XHIGH,
+        Some("max" | "ultra") => UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT_MAX,
+        _ => UPSTREAM_DEFERRED_STREAM_HEADER_TIMEOUT_HIGH_OR_LOWER,
+    }
 }
 
 pub fn upstream_http_client() -> anyhow::Result<reqwest::Client> {
@@ -7762,6 +7779,7 @@ fn log_anthropic_request_shape(
             "systemLength": system.len(),
             "thinkingType": request.pointer("/thinking/type").and_then(Value::as_str).unwrap_or(""),
             "outputConfigEffort": request.pointer("/output_config/effort").and_then(Value::as_str).unwrap_or(""),
+            "maxTokens": request.get("max_tokens").and_then(Value::as_u64),
             "reasoningSource": reasoning_source_label(original_body)
         }),
     );
@@ -9179,6 +9197,84 @@ fn apply_anthropic_reasoning_options(result: &mut Value, body: &Value, model: &s
     result["output_config"] = json!({ "effort": effort });
 }
 
+fn resolve_anthropic_max_tokens(body: &Value, model: &str) -> u64 {
+    let model_max = anthropic_model_max_output_tokens(model);
+    let effort = requested_anthropic_output_token_effort(body, model);
+    if matches!(effort, "max" | "ultra") {
+        return model_max;
+    }
+
+    let tier_limit = match effort {
+        "xhigh" => ANTHROPIC_XHIGH_MAX_OUTPUT_TOKENS,
+        "high" => ANTHROPIC_HIGH_MAX_OUTPUT_TOKENS,
+        _ => ANTHROPIC_BELOW_HIGH_MAX_OUTPUT_TOKENS,
+    };
+    if let Some(requested) = requested_anthropic_max_tokens(body)
+        && requested < ANTHROPIC_BELOW_HIGH_MAX_OUTPUT_TOKENS
+    {
+        return requested.min(model_max);
+    }
+    tier_limit.min(model_max)
+}
+
+fn requested_anthropic_max_tokens(body: &Value) -> Option<u64> {
+    ["max_output_tokens", "max_tokens", "max_completion_tokens"]
+        .into_iter()
+        .find_map(|key| {
+            body.get(key)
+                .and_then(Value::as_u64)
+                .filter(|value| *value > 0)
+        })
+}
+
+fn requested_anthropic_output_token_effort(body: &Value, model: &str) -> &'static str {
+    if !reasoning_requested(body).unwrap_or(true) {
+        return "high";
+    }
+    extract_requested_reasoning_effort(body)
+        .and_then(|effort| normalize_reasoning_effort(&effort))
+        .unwrap_or_else(|| default_anthropic_reasoning_effort(model))
+}
+
+/// 按模型家族和版本推导 Anthropic 协议的最大输出能力。
+///
+/// 已知新版本按家族继承，避免只维护完整模型名；无法识别的新模型使用 128K
+/// 兜底。旧 Claude 仍按现有套餐模型能力封顶，避免统一放大后被上游拒绝。
+fn anthropic_model_max_output_tokens(model: &str) -> u64 {
+    let normalized = model.trim().to_ascii_lowercase();
+
+    if let Some((family, version)) = claude_family_version(&normalized) {
+        if version >= (5, 0) {
+            return ANTHROPIC_FALLBACK_MAX_OUTPUT_TOKENS;
+        }
+        if family == "opus" {
+            if version >= (4, 6) {
+                return ANTHROPIC_FALLBACK_MAX_OUTPUT_TOKENS;
+            }
+            if version >= (4, 5) {
+                return ANTHROPIC_CLAUDE_4_5_MAX_OUTPUT_TOKENS;
+            }
+            if version >= (4, 0) {
+                return ANTHROPIC_CLAUDE_OPUS_4_MAX_OUTPUT_TOKENS;
+            }
+        }
+        if matches!(family, "sonnet" | "haiku") && version >= (4, 0) {
+            return ANTHROPIC_CLAUDE_4_5_MAX_OUTPUT_TOKENS;
+        }
+        if version >= (3, 0) {
+            return ANTHROPIC_CLAUDE_LEGACY_MAX_OUTPUT_TOKENS;
+        }
+    }
+
+    if normalized.contains("deepseek")
+        && model_family_version(&normalized, "deepseek-v").is_some_and(|version| version >= (4, 0))
+    {
+        return ANTHROPIC_DEEPSEEK_V4_MAX_OUTPUT_TOKENS;
+    }
+
+    ANTHROPIC_FALLBACK_MAX_OUTPUT_TOKENS
+}
+
 fn default_anthropic_reasoning_effort(model: &str) -> &'static str {
     let lower = model.to_ascii_lowercase();
     if lower.contains("deepseek") || is_glm_reasoning_model(&lower) {
@@ -9398,14 +9494,40 @@ fn gpt_reasoning_efforts(model: &str) -> Vec<&'static str> {
 }
 
 /// 从 claude 模型名中解析家族和 (major, minor) 版本，
-/// 兼容 `claude-opus-4-8`、`claude-opus-4.8`、`claude-opus-5-20260301` 等写法。
+/// 兼容 `claude-opus-4-8`、`claude-opus-4.8`、`claude-opus-5-20260301`
+/// 以及旧式 `claude-3-7-sonnet` 等写法。
 fn claude_family_version(model: &str) -> Option<(&'static str, (u32, u32))> {
     for family in ["opus", "sonnet", "haiku", "fable"] {
         if let Some(version) = model_family_version(model, family) {
             return Some((family, version));
         }
     }
-    None
+
+    let normalized = model.trim().to_ascii_lowercase();
+    let slug = normalized
+        .rsplit('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(normalized.as_str());
+    let parts = slug
+        .split(['-', '.', '_'])
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let claude_index = parts.iter().position(|part| *part == "claude")?;
+    let major = parts.get(claude_index + 1)?.parse::<u32>().ok()?;
+    let mut cursor = claude_index + 2;
+    let minor = parts
+        .get(cursor)
+        .filter(|part| part.len() <= 2)
+        .and_then(|part| part.parse::<u32>().ok())
+        .inspect(|_| cursor += 1)
+        .unwrap_or(0);
+    let family = parts.get(cursor).and_then(|candidate| {
+        ["opus", "sonnet", "haiku", "fable"]
+            .into_iter()
+            .find(|family| candidate == family)
+    })?;
+    Some((family, (major, minor)))
 }
 
 /// 解析 `<family><sep><major>[<sep><minor>]` 形式的模型版本号。

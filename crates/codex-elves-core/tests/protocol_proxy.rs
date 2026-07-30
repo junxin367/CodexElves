@@ -10,7 +10,8 @@ use codex_elves_core::protocol_proxy::{
     open_responses_proxy_request_with_settings, responses_error_from_upstream,
     responses_to_anthropic_messages, responses_to_chat_completions,
     send_upstream_request_with_header_timeout, supported_reasoning_efforts_for_model,
-    upstream_deferred_stream_header_timeout, upstream_http_client, upstream_models_header_timeout,
+    upstream_deferred_stream_header_timeout, upstream_deferred_stream_header_timeout_for_request,
+    upstream_http_client, upstream_models_header_timeout,
 };
 use codex_elves_core::settings::{
     AggregateRelayMember, AggregateRelayProfile, AggregateRelayStrategy, BackendSettings,
@@ -885,6 +886,103 @@ fn anthropic_reasoning_effort_is_clamped_by_model_capability() {
     .unwrap();
     assert_eq!(sonnet5["thinking"], json!({ "type": "adaptive" }));
     assert_eq!(sonnet5["output_config"], json!({ "effort": "max" }));
+}
+
+#[test]
+fn anthropic_max_tokens_follow_model_capability_and_reasoning_effort() {
+    for (model, effort, expected) in [
+        ("claude-opus-5", "medium", 32_000_u64),
+        ("claude-opus-5", "high", 64_000),
+        ("claude-opus-5", "xhigh", 128_000),
+        ("claude-opus-5", "max", 128_000),
+        ("anthropic/claude-sonnet-6", "max", 128_000),
+        ("deepseek-v4-pro", "high", 64_000),
+        // 推理参数仍会把 DeepSeek xhigh 映射为 max，但输出预算保留 128K 档位。
+        ("deepseek-v4-pro", "xhigh", 128_000),
+        ("deepseek-v4-pro", "max", 384_000),
+        // 后续 DeepSeek 大版本按家族继承，不需要逐个添加完整模型名。
+        ("deepseek-v5-agent", "max", 384_000),
+        ("glm-5.2", "max", 128_000),
+        ("future-anthropic-model", "medium", 32_000),
+        ("future-anthropic-model", "high", 64_000),
+        ("future-anthropic-model", "xhigh", 128_000),
+        // 未识别新模型的最大能力兜底为 128K。
+        ("future-anthropic-model", "max", 128_000),
+    ] {
+        let converted = responses_to_anthropic_messages(json!({
+            "model": model,
+            "reasoning": { "effort": effort },
+            "input": "hi"
+        }))
+        .unwrap();
+        assert_eq!(
+            converted["max_tokens"],
+            json!(expected),
+            "{model} / {effort} 输出上限错误"
+        );
+    }
+}
+
+#[test]
+fn anthropic_reasoning_tier_overrides_legacy_client_max_token_hints() {
+    let high_with_lower_hint = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-5",
+        "reasoning": { "effort": "high" },
+        "max_output_tokens": 16_000,
+        "input": "hi"
+    }))
+    .unwrap();
+    assert_eq!(high_with_lower_hint["max_tokens"], 16_000);
+
+    let high_with_higher_hint = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-5",
+        "reasoning": { "effort": "high" },
+        "max_output_tokens": 256_000,
+        "input": "hi"
+    }))
+    .unwrap();
+    assert_eq!(high_with_higher_hint["max_tokens"], 64_000);
+
+    let xhigh_with_legacy_hint = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-5",
+        "reasoning": { "effort": "xhigh" },
+        "max_tokens": 32_000,
+        "input": "hi"
+    }))
+    .unwrap();
+    assert_eq!(xhigh_with_legacy_hint["max_tokens"], 128_000);
+
+    let max_effort = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-5",
+        "reasoning": { "effort": "max" },
+        "max_output_tokens": 16_000,
+        "input": "hi"
+    }))
+    .unwrap();
+    assert_eq!(max_effort["max_tokens"], 128_000);
+}
+
+#[test]
+fn anthropic_max_tokens_keep_legacy_claude_models_within_known_limits() {
+    for (model, expected) in [
+        ("claude-3-7-sonnet", 8_192_u64),
+        ("claude-opus-4-1", 32_000),
+        ("claude-opus-4-5", 64_000),
+        ("claude-opus-4-8", 64_000),
+        ("claude-sonnet-4-6", 64_000),
+    ] {
+        let converted = responses_to_anthropic_messages(json!({
+            "model": model,
+            "reasoning": { "effort": "high" },
+            "input": "hi"
+        }))
+        .unwrap();
+        assert_eq!(
+            converted["max_tokens"],
+            json!(expected),
+            "{model} 旧模型输出能力应保持兼容"
+        );
+    }
 }
 
 #[test]
@@ -5451,6 +5549,31 @@ fn retained_upstream_header_timeouts_match_proxy_policy() {
         upstream_deferred_stream_header_timeout(),
         Duration::from_secs(900)
     );
+    for (request, expected) in [
+        (json!({}), Duration::from_secs(900)),
+        (
+            json!({ "reasoning": { "effort": "high" } }),
+            Duration::from_secs(900),
+        ),
+        (
+            json!({ "reasoning": { "effort": "xhigh" } }),
+            Duration::from_secs(1500),
+        ),
+        (
+            json!({ "model_reasoning_effort": "max" }),
+            Duration::from_secs(1800),
+        ),
+        (
+            json!({ "reasoning_effort": "ultra" }),
+            Duration::from_secs(1800),
+        ),
+    ] {
+        assert_eq!(
+            upstream_deferred_stream_header_timeout_for_request(Some(&request)),
+            expected,
+            "推理级别对应的流式响应头超时错误: {request}"
+        );
+    }
 }
 
 #[tokio::test]
