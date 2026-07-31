@@ -66,6 +66,118 @@ fn responses_sse_with_reasoning(response_id: &str, reasoning_tokens: u64) -> Str
     responses_sse_with_reasoning_and_output(response_id, reasoning_tokens, json!([]))
 }
 
+/// 把一组文本分片包成一个完整的 Anthropic 流式响应（单个 text 块）。
+fn anthropic_sse_from_text_deltas(deltas: &[String]) -> String {
+    let mut sse = String::new();
+    sse.push_str("event: message_start\ndata: ");
+    sse.push_str(
+        &json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_split",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-opus-4-8",
+                "content": [],
+                "usage": { "input_tokens": 7 }
+            }
+        })
+        .to_string(),
+    );
+    sse.push_str("\n\nevent: content_block_start\ndata: ");
+    sse.push_str(
+        &json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": { "type": "text", "text": "" }
+        })
+        .to_string(),
+    );
+    sse.push_str("\n\n");
+    for delta in deltas {
+        sse.push_str("event: content_block_delta\ndata: ");
+        sse.push_str(
+            &json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": { "type": "text_delta", "text": delta }
+            })
+            .to_string(),
+        );
+        sse.push_str("\n\n");
+    }
+    sse.push_str("event: content_block_stop\ndata: ");
+    sse.push_str(&json!({ "type": "content_block_stop", "index": 0 }).to_string());
+    sse.push_str("\n\nevent: message_delta\ndata: ");
+    sse.push_str(
+        &json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": "end_turn", "stop_sequence": null },
+            "usage": { "output_tokens": 9 }
+        })
+        .to_string(),
+    );
+    sse.push_str("\n\nevent: message_stop\ndata: ");
+    sse.push_str(&json!({ "type": "message_stop" }).to_string());
+    sse.push_str("\n\n");
+    sse
+}
+
+fn collect_stream_output_text(converted: &str) -> String {
+    parse_response_sse_events(converted)
+        .into_iter()
+        .filter(|event| event.event == "response.output_text.delta")
+        .filter_map(|event| event.data["delta"].as_str().map(ToString::to_string))
+        .collect()
+}
+
+/// 按给定切点把文本拆成多个 delta，跑完整流式转换，返回拼接后的正文。
+fn stream_text_with_cuts(text: &str, cuts: &[usize]) -> String {
+    let mut deltas = Vec::new();
+    let mut prev = 0;
+    for &cut in cuts {
+        deltas.push(text[prev..cut].to_string());
+        prev = cut;
+    }
+    deltas.push(text[prev..].to_string());
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        &anthropic_sse_from_text_deltas(&deltas),
+        &json!({ "model": "claude-opus-4-8" }),
+    );
+    collect_stream_output_text(&converted)
+}
+
+fn char_boundaries(text: &str) -> Vec<usize> {
+    (1..text.len())
+        .filter(|index| text.is_char_boundary(*index))
+        .collect()
+}
+
+/// 验证所有「单切点」分片（覆盖标签在任意位置被一分为二）与逐字符分片（最恶劣形态）。
+///
+/// 不做更高阶的组合穷举：多切点场景已被「逐字符」这个最强约束覆盖，
+/// 而穷举组合会把单个用例拖到十秒级，反过来干扰同进程里对时序敏感的网络用例。
+fn assert_all_fragmentations_yield(text: &str, expected: &str) {
+    let boundaries = char_boundaries(text);
+    assert_eq!(
+        stream_text_with_cuts(text, &[]),
+        expected,
+        "不分片时输出不符：text={text:?}"
+    );
+    for &boundary in &boundaries {
+        assert_eq!(
+            stream_text_with_cuts(text, &[boundary]),
+            expected,
+            "在字节 {boundary} 处分片时输出不符：text={text:?}"
+        );
+    }
+    assert_eq!(
+        stream_text_with_cuts(text, &boundaries),
+        expected,
+        "逐字符分片时输出不符：text={text:?}"
+    );
+}
+
 fn responses_sse_with_reasoning_and_output(
     response_id: &str,
     reasoning_tokens: u64,
@@ -1102,6 +1214,65 @@ fn anthropic_message_response_strips_inline_cite_wrappers() {
     assert_eq!(
         converted["output"][0]["content"][0]["text"],
         "规则：将回答作为新输入回到 EXPAND。"
+    );
+}
+
+#[test]
+fn anthropic_message_response_strips_inline_cite_wrappers_with_attributes() {
+    // 带属性的开标签（`<cite index="4-1">`）必须和无属性写法一样被完整剥离，
+    // 否则会出现「闭标签被删、开标签残留在正文」的不对称结果。
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_cite_attr",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [{
+                "type": "text",
+                "text": "文档写得很直白：<cite index=\"4-1\">没有别的选项</cite>。另见 <cite index=\"6-21,6-22\">缓存前缀共享</cite>。"
+            }],
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-4-8",
+            "input": "确认结论"
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(
+        converted["output"][0]["content"][0]["text"],
+        "文档写得很直白：没有别的选项。另见 缓存前缀共享。"
+    );
+}
+
+#[test]
+fn anthropic_message_response_keeps_non_cite_angle_brackets() {
+    // 引用标记剥离必须按标签名精确匹配，不能误吞正文里的小于号或同前缀标签。
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_cite_guard",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [{
+                "type": "text",
+                "text": "当 a < b 且 c<d 时成立；<citation>保留</citation>。"
+            }],
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-4-8",
+            "input": "确认结论"
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(
+        converted["output"][0]["content"][0]["text"],
+        "当 a < b 且 c<d 时成立；<citation>保留</citation>。"
     );
 }
 
@@ -4519,6 +4690,317 @@ data: {"type":"message_stop"}
     assert_eq!(text, "规则：将回答作为新输入回到 EXPAND。");
     assert!(!converted.contains("<cite>"));
     assert!(!converted.contains("</cite>"));
+}
+
+#[test]
+fn anthropic_sse_strips_fragmented_inline_cite_wrappers_with_attributes() {
+    // 带属性的开标签长度不固定，且会被上游切分到多个 delta；
+    // 缓冲必须等到 `>` 才判定，否则开标签会原样泄露到正文。
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_cite_attr_stream","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"文档写得很直白：<cite ind"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ex=\"4-1\">没有别的选项</ci"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"te>。"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-opus-4-8"
+        }),
+    );
+
+    let text = parse_response_sse_events(&converted)
+        .into_iter()
+        .filter(|event| event.event == "response.output_text.delta")
+        .filter_map(|event| event.data["delta"].as_str().map(ToString::to_string))
+        .collect::<String>();
+
+    assert_eq!(text, "文档写得很直白：没有别的选项。");
+    assert!(!converted.contains("<cite"));
+    assert!(!converted.contains("</cite"));
+}
+
+#[test]
+fn anthropic_sse_strips_inline_cite_under_every_fragmentation() {
+    // 历次复发都是因为手写样例没撞上真实分片点。这里穷举所有切分方式（含逐字符），
+    // 从构造上消除「某个特定分片位置没覆盖到」这类 bug。
+    for (text, expected) in [
+        ("a<cite index=\"4-1\">b</cite>c", "abc"),
+        ("x<cite>y</cite>z", "xyz"),
+        (
+            "p<cite index=\"1\">q</cite>r<cite index=\"2\">s</cite>t",
+            "pqrst",
+        ),
+    ] {
+        assert_all_fragmentations_yield(text, expected);
+    }
+}
+
+#[test]
+fn anthropic_sse_keeps_non_cite_markup_under_every_fragmentation() {
+    // 剥离逻辑不能在任何分片方式下吞掉正常正文（小于号、同前缀标签）。
+    for text in [
+        "if a < b then",
+        "<citation>x</citation>",
+        "Vec<City> 列表",
+        "a <cite中文> b",
+    ] {
+        assert_all_fragmentations_yield(text, text);
+    }
+}
+
+#[test]
+fn anthropic_sse_keeps_unclosed_cite_tag_text() {
+    // 上游截断导致开标签永远等不到 `>` 时，块结束必须兵底吐出残留文本，不能静默丢失。
+    for text in ["尾巴 <cite ind", "尾巴 <ci", "尾巴 <", "尾巴 </cit"] {
+        assert_all_fragmentations_yield(text, text);
+    }
+}
+
+#[test]
+fn anthropic_sse_strips_inline_cite_without_breaking_textual_invoke() {
+    // 引用剥离和文本式工具调用解析共用同一个文本缓冲，必须确认两者不互相破坏。
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        &anthropic_sse_from_text_deltas(&[
+            "结论：<cite ind".to_string(),
+            "ex=\"4-1\">看这里</ci".to_string(),
+            "te>\n\n<invoke name=\"shell\">".to_string(),
+            "<parameter name=\"cmd\">ls</parameter></invoke>".to_string(),
+        ]),
+        &json!({ "model": "claude-opus-4-8" }),
+    );
+
+    assert_eq!(collect_stream_output_text(&converted), "结论：看这里");
+    assert!(!converted.contains("<cite"));
+
+    let call = parse_response_sse_events(&converted)
+        .into_iter()
+        .find(|event| {
+            event.event == "response.output_item.done"
+                && event.data["item"]["type"] == "function_call"
+        })
+        .expect("文本式工具调用应该被识别为 function_call");
+    assert_eq!(call.data["item"]["name"], "shell");
+}
+
+#[test]
+fn anthropic_sse_strips_inline_cite_across_multiple_text_blocks() {
+    // 引用残留按 block index 分开缓存；多个 text 块各自截断时不能串位。
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_multi","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"一<cite ind"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ex=\"1\">二</cite>"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"三<cite ind"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ex=\"2\">四</cite>"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({ "model": "claude-opus-4-8" }),
+    );
+
+    assert_eq!(collect_stream_output_text(&converted), "一二三四");
+    assert!(!converted.contains("<cite"));
+}
+
+#[test]
+fn anthropic_stream_and_non_stream_agree_on_inline_cite_stripping() {}
+
+/// 引用标记剥离已收敛到共享文本出口，Chat Completions 协议必须同样生效。
+#[test]
+fn chat_completion_response_strips_inline_cite_wrappers() {
+    let converted = chat_completion_to_response_with_request(
+        json!({
+            "id": "chatcmpl_cite",
+            "object": "chat.completion",
+            "model": "claude-opus-4-8",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "文档：<cite index=\"4-1\">结论</cite>。a < b 保留",
+                    "reasoning_content": "推理：<cite index=\"9-9\">依据</cite>。"
+                },
+                "finish_reason": "stop"
+            }]
+        }),
+        &json!({ "model": "claude-opus-4-8" }),
+    )
+    .unwrap();
+
+    let output = converted["output"].as_array().unwrap();
+    let reasoning = output
+        .iter()
+        .find(|item| item["type"] == "reasoning")
+        .expect("应该有 reasoning item");
+    assert_eq!(reasoning["reasoning_content"], "推理：依据。");
+    assert_eq!(reasoning["summary"][0]["text"], "推理：依据。");
+
+    let message = output
+        .iter()
+        .find(|item| item["type"] == "message")
+        .expect("应该有 message item");
+    assert_eq!(message["content"][0]["text"], "文档：结论。a < b 保留");
+}
+
+#[test]
+fn chat_sse_strips_fragmented_inline_cite_wrappers() {
+    // Chat 流式与 Anthropic 流式现在共用同一个过滤器，分片行为必须一致。
+    let converted = chat_sse_to_responses_sse_with_request(
+        concat!(
+            "data: {\"id\":\"c\",\"model\":\"claude-opus-4-8\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"文档：<cite ind\"}}]}\n\n",
+            "data: {\"id\":\"c\",\"model\":\"claude-opus-4-8\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ex=\\\"4-1\\\">结论</ci\"}}]}\n\n",
+            "data: {\"id\":\"c\",\"model\":\"claude-opus-4-8\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"te>。\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        ),
+        &json!({ "model": "claude-opus-4-8" }),
+    );
+
+    assert_eq!(collect_stream_output_text(&converted), "文档：结论。");
+    assert!(!converted.contains("<cite"));
+    assert!(!converted.contains("</cite"));
+}
+
+#[test]
+fn anthropic_response_strips_inline_cite_wrappers_in_thinking() {
+    // 推理内容也会带引用标记；展开推理详情时不能看到裸露的 `<cite ...>`。
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_think_cite",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [
+                { "type": "thinking", "thinking": "我查到<cite index=\"4-1\">证据</cite>。" },
+                { "type": "text", "text": "结论" }
+            ],
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({ "model": "claude-opus-4-8" }),
+    )
+    .unwrap();
+
+    assert_eq!(converted["output"][0]["type"], "reasoning");
+    assert_eq!(converted["output"][0]["reasoning_content"], "我查到证据。");
+    assert_eq!(converted["output"][0]["summary"][0]["text"], "我查到证据。");
+}
+
+#[test]
+fn anthropic_sse_strips_inline_cite_wrappers_in_thinking_stream() {
+    // 流式推理同样会被分片，引用过滤器必须在推理通道上独立生效。
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_think_stream","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"我查到<cite ind"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ex=\"4-1\">证据</ci"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"te>。"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({ "model": "claude-opus-4-8" }),
+    );
+
+    let reasoning = parse_response_sse_events(&converted)
+        .into_iter()
+        .filter(|event| event.event == "response.reasoning_summary_text.delta")
+        .filter_map(|event| event.data["delta"].as_str().map(ToString::to_string))
+        .collect::<String>();
+
+    assert_eq!(reasoning, "我查到证据。");
+    assert!(!converted.contains("<cite"));
+    // 非流式和流式是两条独立代码路径，历史上就是它们不一致才出的问题。
+    for text in [
+        "文档：<cite index=\"4-1\">结论</cite>。",
+        "无属性 <cite>x</cite> 尾巴",
+        "if a < b && c<d then",
+        "<citation>保留</citation>",
+        "未闭合 <cite ind",
+    ] {
+        let non_stream = anthropic_message_to_response_with_request(
+            json!({
+                "id": "msg_agree",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-opus-4-8",
+                "content": [{ "type": "text", "text": text }],
+                "stop_reason": "end_turn",
+                "usage": { "input_tokens": 10, "output_tokens": 5 }
+            }),
+            &json!({ "model": "claude-opus-4-8" }),
+        )
+        .unwrap();
+        let non_stream_text = non_stream["output"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+
+        assert_eq!(
+            stream_text_with_cuts(text, &char_boundaries(text)),
+            non_stream_text,
+            "流式与非流式结果不一致：text={text:?}"
+        );
+    }
 }
 
 #[test]

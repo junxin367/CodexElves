@@ -3482,6 +3482,9 @@ struct ChatSseState {
     text: TextItemState,
     reasoning: ReasoningItemState,
     inline_think: InlineThinkState,
+    /// 正文与推理各自维护引用过滤状态，两路流不能串位。
+    content_cite_filter: InlineCiteFilter,
+    reasoning_cite_filter: InlineCiteFilter,
     tools: BTreeMap<usize, ToolCallState>,
     output_items: Vec<(u32, Value)>,
     latest_usage: Option<Value>,
@@ -3503,6 +3506,8 @@ impl Default for ChatSseState {
             text: TextItemState::default(),
             reasoning: ReasoningItemState::default(),
             inline_think: InlineThinkState::default(),
+            content_cite_filter: InlineCiteFilter::default(),
+            reasoning_cite_filter: InlineCiteFilter::default(),
             tools: BTreeMap::new(),
             output_items: Vec::new(),
             latest_usage: None,
@@ -3579,7 +3584,16 @@ impl ChatSseState {
         }
     }
 
+    /// 正文入口：先统一剥离行内引用标记，再交给 think / 工具解析等后续环节。
     fn push_content_delta_into(&mut self, delta: &str, output: &mut String) {
+        let delta = self.content_cite_filter.push(delta);
+        if delta.is_empty() {
+            return;
+        }
+        self.push_filtered_content_delta_into(&delta, output);
+    }
+
+    fn push_filtered_content_delta_into(&mut self, delta: &str, output: &mut String) {
         match self.inline_think.mode {
             InlineThinkMode::Text => {
                 self.finalize_reasoning_into(output);
@@ -3624,6 +3638,11 @@ impl ChatSseState {
     }
 
     fn flush_inline_think_at_boundary_into(&mut self, output: &mut String) {
+        // 边界处先吐出引用过滤器残留，避免未闭合标签把正文吞掉。
+        let pending = self.content_cite_filter.flush();
+        if !pending.is_empty() {
+            self.push_filtered_content_delta_into(&pending, output);
+        }
         match self.inline_think.mode {
             InlineThinkMode::Text => {}
             InlineThinkMode::Detecting => {
@@ -3691,7 +3710,16 @@ impl ChatSseState {
         );
     }
 
+    /// 推理内容入口：与正文同样需要剥离引用标记，否则会泄露到推理详情里。
     fn push_reasoning_delta_into(&mut self, delta: &str, output: &mut String) {
+        let delta = self.reasoning_cite_filter.push(delta);
+        if delta.is_empty() {
+            return;
+        }
+        self.push_filtered_reasoning_delta_into(&delta, output);
+    }
+
+    fn push_filtered_reasoning_delta_into(&mut self, delta: &str, output: &mut String) {
         if !self.reasoning.added {
             let output_index = self.next_output_index();
             let item_id = format!("rs_{}", self.response_id);
@@ -3963,6 +3991,11 @@ impl ChatSseState {
     }
 
     fn finalize_reasoning_into(&mut self, output: &mut String) {
+        // 同理：推理流结束前必须先吐出引用过滤器残留。
+        let pending = self.reasoning_cite_filter.flush();
+        if !pending.is_empty() {
+            self.push_filtered_reasoning_delta_into(&pending, output);
+        }
         if !self.reasoning.added || self.reasoning.done {
             return;
         }
@@ -4194,7 +4227,6 @@ struct AnthropicSseState {
     diagnostic_id: Option<String>,
     blocks: BTreeMap<usize, AnthropicBlockKind>,
     text_buffers: BTreeMap<usize, String>,
-    inline_cite_remainders: BTreeMap<usize, String>,
     usage: Value,
     text_block_count: usize,
     thinking_block_count: usize,
@@ -4217,7 +4249,6 @@ impl AnthropicSseState {
             diagnostic_id: diagnostic_id.map(ToString::to_string),
             blocks: BTreeMap::new(),
             text_buffers: BTreeMap::new(),
-            inline_cite_remainders: BTreeMap::new(),
             usage: json!({}),
             text_block_count: 0,
             thinking_block_count: 0,
@@ -4419,9 +4450,6 @@ impl AnthropicSseState {
         let index = chunk.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
         let kind = self.blocks.remove(&index);
         if matches!(kind, Some(AnthropicBlockKind::Text)) {
-            if let Some(remainder) = self.inline_cite_remainders.remove(&index) {
-                self.handle_normalized_text_delta_into(index, &remainder, output);
-            }
             if let Some(text) = self.text_buffers.remove(&index) {
                 self.flush_buffered_text_block_into(index, &text, output);
             }
@@ -4429,34 +4457,7 @@ impl AnthropicSseState {
     }
 
     fn handle_text_delta_into(&mut self, index: usize, text: &str, output: &mut String) {
-        let text = self.normalize_inline_cite_delta(index, text);
-        if text.is_empty() {
-            return;
-        }
-        self.handle_normalized_text_delta_into(index, &text, output);
-    }
-
-    fn normalize_inline_cite_delta(&mut self, index: usize, text: &str) -> String {
-        let mut combined = self
-            .inline_cite_remainders
-            .remove(&index)
-            .unwrap_or_default();
-        combined.push_str(text);
-
-        let remainder_len = anthropic_inline_cite_tag_prefix_suffix_len(&combined);
-        let remainder = if remainder_len == 0 {
-            String::new()
-        } else {
-            combined.split_off(combined.len() - remainder_len)
-        };
-        if !remainder.is_empty() {
-            self.inline_cite_remainders.insert(index, remainder);
-        }
-
-        strip_anthropic_inline_cite_tags(&combined)
-    }
-
-    fn handle_normalized_text_delta_into(&mut self, index: usize, text: &str, output: &mut String) {
+        // 引用标记剥离统一在 `ChatSseState` 的文本出口完成，这里只管工具调用切分。
         let buffer = self.text_buffers.entry(index).or_default();
         buffer.push_str(text);
         // 缓冲区已出现 `<invoke`：进入工具调用区，不再透传，等 block 结束后统一切分。
@@ -7244,7 +7245,7 @@ fn responses_tool_choice_to_anthropic(
 }
 
 fn chat_reasoning_to_response_output_item(message: &Value, response_id: &str) -> Option<Value> {
-    let reasoning = chat_reasoning_text(message)?;
+    let reasoning = strip_inline_cite_tags(&chat_reasoning_text(message)?);
     if reasoning.is_empty() {
         return None;
     }
@@ -7278,6 +7279,7 @@ fn chat_message_to_response_output_item(message: &Value, response_id: &str) -> O
         let text = split_leading_think_block(text)
             .map(|(_reasoning, answer)| answer)
             .unwrap_or_else(|| text.to_string());
+        let text = strip_inline_cite_tags(&text);
         if !text.is_empty() {
             content.push(json!({ "type": "output_text", "text": text, "annotations": [] }));
         }
@@ -7286,6 +7288,7 @@ fn chat_message_to_response_output_item(message: &Value, response_id: &str) -> O
             match part.get("type").and_then(Value::as_str).unwrap_or("") {
                 "text" | "output_text" => {
                     if let Some(text) = part.get("text").and_then(Value::as_str) {
+                        let text = strip_inline_cite_tags(text);
                         if !text.is_empty() {
                             content.push(
                                 json!({ "type": "output_text", "text": text, "annotations": [] }),
@@ -7722,14 +7725,16 @@ fn anthropic_content_to_response_output_items(
         match block.get("type").and_then(Value::as_str).unwrap_or("") {
             "thinking" => {
                 if let Some(text) = block.get("thinking").and_then(Value::as_str) {
+                    // 推理内容也会带引用标记，不剥离会泄露到推理详情里。
+                    let text = strip_inline_cite_tags(text);
                     if !text.is_empty() {
-                        reasoning_chunks.push(text.to_string());
+                        reasoning_chunks.push(text);
                     }
                 }
             }
             "text" => {
                 if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    let text = strip_anthropic_inline_cite_tags(text);
+                    let text = strip_inline_cite_tags(text);
                     if let Some((leading, calls)) = split_text_into_message_and_tool_calls(&text) {
                         if !leading.is_empty() {
                             message_content.push(json!({
@@ -8255,24 +8260,111 @@ fn textual_invoke_safe_passthrough_len(buffer: &str) -> usize {
     buffer.len()
 }
 
-const ANTHROPIC_INLINE_CITE_TAGS: [&str; 2] = ["<cite>", "</cite>"];
+const INLINE_CITE_TAG_NAME: &str = "cite";
+/// 单个引用标记允许的最大字节数；超出则不当作标记，避免把正文里的 `<` 误吞。
+const INLINE_CITE_TAG_MAX_LEN: usize = 256;
 
-fn strip_anthropic_inline_cite_tags(text: &str) -> String {
-    ANTHROPIC_INLINE_CITE_TAGS
-        .iter()
-        .fold(text.to_string(), |normalized, tag| {
-            normalized.replace(tag, "")
-        })
+/// 剥离 Claude 正文里的行内引用包装标记。
+///
+/// 开标签可以带任意属性（如 `<cite index="4-1">`），因此必须按标签名解析，
+/// 不能用固定字面量匹配，否则会出现「开标签残留、闭标签被删」的不对称结果。
+fn strip_inline_cite_tags(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(relative) = rest.find('<') {
+        let (before, tail) = rest.split_at(relative);
+        normalized.push_str(before);
+        match inline_cite_tag_len(tail) {
+            Some(tag_len) => rest = &tail[tag_len..],
+            None => {
+                normalized.push('<');
+                rest = &tail[1..];
+            }
+        }
+    }
+    normalized.push_str(rest);
+    normalized
 }
 
-fn anthropic_inline_cite_tag_prefix_suffix_len(text: &str) -> usize {
-    ANTHROPIC_INLINE_CITE_TAGS
-        .iter()
-        .flat_map(|tag| (1..tag.len()).map(move |length| &tag[..length]))
-        .filter(|prefix| text.ends_with(prefix))
-        .map(|prefix| prefix.len())
-        .max()
-        .unwrap_or(0)
+/// `text` 以 `<` 开头时，返回开头处完整 `<cite ...>` / `</cite ...>` 标签的字节长度。
+fn inline_cite_tag_len(text: &str) -> Option<usize> {
+    let body = inline_cite_tag_body(text)?;
+    let end = body.find('>')?;
+    let inside = &body[..end];
+    // 标记内部不会出现 `<` 或换行；出现即说明这不是一个引用标记。
+    if inside.contains('<') || inside.contains('\n') {
+        return None;
+    }
+    let tag_len = text.len() - body.len() + end + 1;
+    (tag_len <= INLINE_CITE_TAG_MAX_LEN).then_some(tag_len)
+}
+
+/// 去掉 `<cite` / `</cite` 前缀后的剩余部分；不是引用标记时返回 `None`。
+fn inline_cite_tag_body(text: &str) -> Option<&str> {
+    let after_bracket = text.strip_prefix('<')?;
+    let after_slash = after_bracket.strip_prefix('/').unwrap_or(after_bracket);
+    let body = after_slash.strip_prefix(INLINE_CITE_TAG_NAME)?;
+    // 标签名后必须紧跟 `>` 或空白，避免误伤 `<citation>` 这类同前缀标签。
+    match body.chars().next() {
+        Some('>') => Some(body),
+        Some(ch) if ch.is_whitespace() => Some(body),
+        _ => None,
+    }
+}
+
+/// 流式场景：尾部若是尚未闭合的引用标记片段，返回需要继续缓冲的字节数。
+///
+/// 带属性的开标签长度不固定，必须缓冲到 `>` 才能判定，不能按固定字面量前缀长度截断。
+fn inline_cite_tag_pending_suffix_len(text: &str) -> usize {
+    let Some(start) = text.rfind('<') else {
+        return 0;
+    };
+    let tail = &text[start..];
+    // 已经闭合、跨行或过长，都不可能是「等待补全」的引用标记。
+    if tail.contains('>') || tail.contains('\n') || tail.len() > INLINE_CITE_TAG_MAX_LEN {
+        return 0;
+    }
+    if inline_cite_tag_body(tail).is_some() {
+        return tail.len();
+    }
+    // 标签名本身可能被切断：`<`、`<ci`、`</cit` 等都要继续等待。
+    let open = format!("<{INLINE_CITE_TAG_NAME}");
+    let close = format!("</{INLINE_CITE_TAG_NAME}");
+    if open.starts_with(tail) || close.starts_with(tail) {
+        tail.len()
+    } else {
+        0
+    }
+}
+
+/// 行内引用标记的流式过滤器。
+///
+/// 所有协议、所有文本出口共用这一份实现，避免「这条路径修了那条没修」导致的反复复发。
+#[derive(Debug, Default)]
+struct InlineCiteFilter {
+    pending: String,
+}
+
+impl InlineCiteFilter {
+    /// 写入一段上游文本，返回可以安全透传的已去标文本。
+    fn push(&mut self, text: &str) -> String {
+        if text.is_empty() {
+            return String::new();
+        }
+        let mut combined = std::mem::take(&mut self.pending);
+        combined.push_str(text);
+        let pending_len = inline_cite_tag_pending_suffix_len(&combined);
+        if pending_len > 0 {
+            self.pending = combined.split_off(combined.len() - pending_len);
+        }
+        strip_inline_cite_tags(&combined)
+    }
+
+    /// 边界处兵底吐出残留（上游截断导致标签永远等不到 `>`），避免静默丢文本。
+    fn flush(&mut self) -> String {
+        let pending = std::mem::take(&mut self.pending);
+        strip_inline_cite_tags(&pending)
+    }
 }
 
 /// 尾部子串是否可能是一个尚未输完的工具调用起点（`<invoke` 或 marker 前缀）。
