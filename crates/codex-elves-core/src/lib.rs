@@ -16,6 +16,7 @@ pub mod install;
 pub mod launcher;
 pub mod layered_compaction;
 mod log_limits;
+pub mod model_capabilities;
 pub mod model_catalog;
 pub mod models;
 pub mod paths;

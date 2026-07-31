@@ -1,3 +1,6 @@
+use codex_elves_core::layered_compaction::{
+    apply_compaction_model_override, is_any_compaction_request, restore_response_model_in_sse,
+};
 use codex_elves_core::protocol_proxy::{
     AnthropicSseToResponsesConverter, ChatSseToResponsesConverter, UpstreamResponseProtocol,
     anthropic_message_to_response_with_request, anthropic_messages_url,
@@ -16,7 +19,7 @@ use codex_elves_core::protocol_proxy::{
 };
 use codex_elves_core::settings::{
     AggregateRelayMember, AggregateRelayProfile, AggregateRelayStrategy, BackendSettings,
-    RelayMode, RelayModelMapping, RelayProfile, RelayProtocol,
+    LayeredCompactionModels, RelayMode, RelayModelMapping, RelayProfile, RelayProtocol,
 };
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -8307,6 +8310,10 @@ impl ChatServer {
     fn finish(self) -> ChatRequest {
         self.handle.join().unwrap().into_iter().next().unwrap()
     }
+
+    fn finish_all(self) -> Vec<ChatRequest> {
+        self.handle.join().unwrap()
+    }
 }
 
 struct ChatRequest {
@@ -8328,13 +8335,22 @@ fn spawn_chat_server_with_response(response_body: impl Into<String>) -> ChatServ
 }
 
 fn spawn_chat_server_with_responses(response_bodies: Vec<String>) -> ChatServer {
+    spawn_chat_server_with_status_responses(
+        response_bodies
+            .into_iter()
+            .map(|body| ("200 OK".to_string(), body))
+            .collect(),
+    )
+}
+
+fn spawn_chat_server_with_status_responses(responses: Vec<(String, String)>) -> ChatServer {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let address = listener.local_addr().unwrap();
     let base_url = format!("http://{address}/v1");
     listener.set_nonblocking(true).unwrap();
     let handle = thread::spawn(move || {
         let mut requests = Vec::new();
-        for response_body in response_bodies {
+        for (status, response_body) in responses {
             let started = std::time::Instant::now();
             let mut stream = loop {
                 match listener.accept() {
@@ -8402,7 +8418,7 @@ fn spawn_chat_server_with_responses(response_bodies: Vec<String>) -> ChatServer 
                 .map(|(_, body)| body.to_string())
                 .unwrap_or_default();
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 response_body.len(),
                 response_body
             );
@@ -8514,4 +8530,146 @@ fn spawn_raw_response_server(
         }
     });
     TruncatedResponseServer { base_url, handle }
+}
+
+fn legacy_compaction_request() -> serde_json::Value {
+    json!({
+        "model": "claude-opus-4-5",
+        "reasoning": { "effort": "max" },
+        "input": [
+            { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "hi" }] },
+            { "type": "reasoning", "encrypted_content": "opaque-original-model-blob" },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "You are performing a CONTEXT CHECKPOINT COMPACTION. Summarize."
+                }]
+            }
+        ]
+    })
+}
+
+#[test]
+fn compaction_model_override_replaces_model_and_strips_reasoning() {
+    let overridden = apply_compaction_model_override(&legacy_compaction_request(), "glm-4.6");
+    assert_eq!(overridden["model"], "glm-4.6");
+    assert!(overridden.get("reasoning").is_none());
+    let input = overridden["input"].as_array().unwrap();
+    assert!(
+        input
+            .iter()
+            .all(|item| item.get("type").and_then(|v| v.as_str()) != Some("reasoning"))
+    );
+    assert_eq!(input.len(), 2);
+}
+
+#[test]
+fn compaction_model_override_skips_non_compaction_requests() {
+    let plain = json!({
+        "model": "claude-opus-4-5",
+        "input": [{ "type": "message", "role": "user", "content": "hello" }]
+    });
+    assert!(!is_any_compaction_request(&plain));
+    assert_eq!(apply_compaction_model_override(&plain, "glm-4.6"), plain);
+}
+
+#[test]
+fn compaction_model_override_is_noop_for_empty_or_same_model() {
+    let request = legacy_compaction_request();
+    assert_eq!(apply_compaction_model_override(&request, "   "), request);
+    assert_eq!(
+        apply_compaction_model_override(&request, "claude-opus-4-5"),
+        request
+    );
+}
+
+#[test]
+fn compaction_response_model_is_restored_to_session_model() {
+    let sse = concat!(
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"glm-4.6\",\"status\":\"completed\"}}\n\n"
+    );
+    let restored = restore_response_model_in_sse(sse, "claude-opus-4-5", "glm-4.6");
+    assert!(restored.contains("\"model\":\"claude-opus-4-5\""));
+    assert!(!restored.contains("glm-4.6"));
+}
+
+#[tokio::test]
+async fn failed_compaction_model_retries_once_with_session_model() {
+    let server = spawn_chat_server_with_status_responses(vec![
+        (
+            "404 Not Found".to_string(),
+            r#"{"error":{"code":"model_not_found","message":"model unavailable"}}"#.to_string(),
+        ),
+        (
+            "200 OK".to_string(),
+            r#"{"id":"resp-original","status":"completed","model":"gpt-5.4","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"summary"}]}]}"#
+                .to_string(),
+        ),
+    ]);
+    let settings = BackendSettings {
+        layered_compaction_enabled: true,
+        layered_compaction_model_override_enabled: true,
+        layered_compaction_models: LayeredCompactionModels {
+            claude: "deepseek-chat".to_string(),
+            ..Default::default()
+        },
+        relay_profiles: vec![RelayProfile {
+            id: "compaction-retry".to_string(),
+            name: "Compaction Retry".to_string(),
+            base_url: server.base_url.clone(),
+            upstream_base_url: server.base_url.clone(),
+            api_key: "sk-test".to_string(),
+            model_mappings: vec![
+                RelayModelMapping {
+                    request_model: "claude-opus-4-8".to_string(),
+                    protocol: RelayProtocol::Anthropic,
+                    context_window: "1000000".to_string(),
+                },
+                RelayModelMapping {
+                    request_model: "deepseek-chat".to_string(),
+                    protocol: RelayProtocol::ChatCompletions,
+                    context_window: "128000".to_string(),
+                },
+            ],
+            ..RelayProfile::default()
+        }],
+        active_relay_id: "compaction-retry".to_string(),
+        ..BackendSettings::default()
+    };
+    let request = json!({
+        "model": "claude-opus-4-8",
+        "stream": false,
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "small context" }]
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "You are performing a CONTEXT CHECKPOINT COMPACTION. Summarize."
+                }]
+            }
+        ]
+    });
+
+    let response = open_responses_proxy_request_with_settings(&request.to_string(), settings)
+        .await
+        .unwrap();
+    assert_eq!(response.status_code, 200);
+
+    let requests = server.finish_all();
+    assert_eq!(requests.len(), 2);
+    let first: Value = serde_json::from_str(&requests[0].body).unwrap();
+    let second: Value = serde_json::from_str(&requests[1].body).unwrap();
+    assert!(requests[0].path.ends_with("/chat/completions"));
+    assert!(requests[1].path.ends_with("/messages"));
+    assert_eq!(first["model"], "deepseek-chat");
+    assert_eq!(second["model"], "claude-opus-4-8");
 }

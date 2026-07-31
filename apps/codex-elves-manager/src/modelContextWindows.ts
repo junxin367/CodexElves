@@ -54,25 +54,36 @@ const COMMON_MODEL_CONTEXT_WINDOWS: Record<string, string> = {
 };
 
 const COMMON_MODEL_CONTEXT_PATTERNS: Array<{ pattern: RegExp; contextWindow: string }> = [
-  // gpt-5.6 起上下文提升到 372k，后续版本默认继承
-  { pattern: /^gpt-5\.(?:[6-9]|\d{2,})(?:[.-]|$)/, contextWindow: "372000" },
-  { pattern: /^gpt-(?:[6-9]|\d{2,})(?:[.-]|$)/, contextWindow: "372000" },
-  { pattern: /^gpt-5(?:[.-]|$)/, contextWindow: "272000" },
+  // Plan 套餐窗口只匹配已确认版本；未知后续版本保持为空，交由供应商配置。
+  { pattern: /^gpt-5\.6(?:[.-]|$)/, contextWindow: "372000" },
+  { pattern: /^gpt-5\.5(?:[.-]|$)/, contextWindow: "272000" },
+  { pattern: /^gpt-5\.4-mini(?:[.-]|$)/, contextWindow: "272000" },
+  { pattern: /^gpt-5\.4(?:[.-]|$)/, contextWindow: "1000000" },
+  { pattern: /^gpt-5\.3-codex(?:[.-]|$)/, contextWindow: "272000" },
+  { pattern: /^gpt-5\.2(?:[.-]|$)/, contextWindow: "272000" },
+  { pattern: /^gpt-5-(?:mini|nano)(?:[.-]|$)/, contextWindow: "272000" },
+  { pattern: /^gpt-5$/, contextWindow: "272000" },
   { pattern: /^gpt-4\.1(?:[.-]|$)/, contextWindow: "1047576" },
   { pattern: /^gpt-4o(?:[.-]|$)/, contextWindow: "128000" },
   { pattern: /^o[34](?:[.-]|$)/, contextWindow: "200000" },
-  // Claude 5 代起默认继承百万上下文，避免新模型落回 200k 兵底
-  { pattern: /^claude-(?:opus|sonnet|haiku)-(?:[5-9]|\d{2,})(?:[.-]|$)/, contextWindow: "1000000" },
   { pattern: /^claude-(?:opus-4-[678]|sonnet-4-6)(?:[.-]|$)/, contextWindow: "1000000" },
-  { pattern: /^claude-/, contextWindow: "200000" },
-  // deepseek v4 起为百万上下文，后续大版本默认继承
-  { pattern: /^deepseek-v(?:[4-9]|\d{2,})(?:[.-]|$)/, contextWindow: "1000000" },
-  { pattern: /^deepseek-/, contextWindow: "128000" },
+  { pattern: /^claude-(?:opus-4-5|opus-4-1|opus-4|sonnet-4-5|sonnet-4|3-7-sonnet|3-5-sonnet|3-opus|3-haiku)(?:[.-]|$)/, contextWindow: "200000" },
+  { pattern: /^deepseek-v4-(?:flash|pro)(?:[.-]|$)/, contextWindow: "1000000" },
+  { pattern: /^deepseek-(?:chat|reasoner|coder|r1|v3)(?:[.-]|$)/, contextWindow: "128000" },
   { pattern: /^qwen3-coder-(?:plus|flash)(?:[.-]|$)/, contextWindow: "1000000" },
   { pattern: /^qwen3\.7-max(?:[.-]|$)/, contextWindow: "1000000" },
   { pattern: /^qwen(?:3\.[56]-)?(?:plus|flash)(?:[.-]|$)/, contextWindow: "1000000" },
   { pattern: /^qwen3(?:\.6)?-?max(?:[.-]|$)/, contextWindow: "262144" },
 ];
+
+export type ModelFamily = "gpt" | "claude" | "other";
+
+export function modelFamilyForModel(model: string): ModelFamily {
+  const slug = model.trim().toLowerCase().split("/").filter(Boolean).pop() || "";
+  if (slug === "gpt" || slug.startsWith("gpt-") || /^o\d/.test(slug)) return "gpt";
+  if (slug.startsWith("claude-")) return "claude";
+  return "other";
+}
 
 export function knownModelContextWindow(model: string): string {
   const normalized = model.trim().toLowerCase();

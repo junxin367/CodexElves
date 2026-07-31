@@ -2881,26 +2881,9 @@ fn catalog_context_window_for_model(model: &str, configured: &str) -> String {
     if !configured.is_empty() {
         return configured.to_string();
     }
-    default_catalog_context_window(model)
-        .unwrap_or("")
-        .to_string()
-}
-
-fn default_catalog_context_window(model: &str) -> Option<&'static str> {
-    let normalized = model.trim().to_ascii_lowercase();
-    let model = normalized
-        .rsplit('/')
-        .next()
-        .filter(|value| !value.is_empty())
-        .unwrap_or(normalized.as_str());
-    if model == "gpt-5.4" {
-        return Some("1000000");
-    }
-    // gpt-5.6 起上下文提升到 372k，后续版本默认继承，不写死在 5.6。
-    if crate::protocol_proxy::gpt_version_at_least(model, (5, 6)) {
-        return Some("372000");
-    }
-    None
+    crate::model_capabilities::known_model_context_window(model)
+        .map(|value| value.to_string())
+        .unwrap_or_default()
 }
 
 fn model_prefers_max_reasoning_default(model: &str) -> bool {

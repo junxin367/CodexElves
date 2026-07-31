@@ -62,7 +62,7 @@ import {
 } from "lucide-react";
 import { ProviderPresetSelector } from "@/components/ProviderPresetSelector";
 import type { PresetPatch } from "@/components/ProviderPresetSelector";
-import { knownModelContextWindow } from "@/modelContextWindows";
+import { knownModelContextWindow, modelFamilyForModel, type ModelFamily } from "@/modelContextWindows";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 
@@ -204,6 +204,10 @@ type BackendSettings = {
   layeredCompactionEnabled: boolean;
   layeredCompactionRetainTokens: number;
   layeredCompactionPromptOverride: string;
+  layeredCompactionModelOverrideEnabled: boolean;
+  layeredCompactionModels: Record<ModelFamily, string>;
+  /** 旧版单模型字段，仅用于读取迁移。 */
+  layeredCompactionModel: string;
   launchMode: LaunchMode;
   relayBaseUrl: string;
   relayApiKey: string;
@@ -319,6 +323,11 @@ const PROTOCOL_PROXY_BASE_URL = "http://127.0.0.1:45221/v1";
 const CHAT_UPSTREAM_BASE_URL_KEY = "codex_elves_chat_base_url";
 const SCRIPT_MARKET_REPOSITORY_URL = "https://github.com/BigPizzaV3/CodexElvesScriptMarket";
 const REMOTE_COMPACTION_V2_PROVIDER_NAME = "OpenAI";
+const COMPACTION_MODEL_FAMILIES: Array<{ value: ModelFamily; label: string }> = [
+  { value: "gpt", label: "GPT 会话" },
+  { value: "claude", label: "Claude 会话" },
+  { value: "other", label: "其他会话" },
+];
 
 // 会话管理中使用的默认上下文压缩提示词。
 const LAYERED_COMPACTION_DEFAULT_PROMPT = `You are creating a structured context checkpoint for another LLM that will continue the current task.
@@ -908,6 +917,13 @@ const defaultSettings: BackendSettings = {
   layeredCompactionEnabled: false,
   layeredCompactionRetainTokens: 20000,
   layeredCompactionPromptOverride: "",
+  layeredCompactionModelOverrideEnabled: false,
+  layeredCompactionModels: {
+    gpt: "",
+    claude: "",
+    other: "",
+  },
+  layeredCompactionModel: "",
   launchMode: "patch",
   relayBaseUrl: "",
   relayApiKey: "",
@@ -1001,12 +1017,36 @@ function createBrowserPreviewSettings(): BackendSettings {
         contextWindow: "",
         autoCompactLimit: "900000",
         modelMappings: [
-          { requestModel: "gpt-5.5", protocol: "responses", contextWindow: "1047576" },
-          { requestModel: "gpt-5.4", protocol: "responses", contextWindow: "1000000" },
-          { requestModel: "gpt-5.4-mini", protocol: "responses", contextWindow: "1047576" },
-          { requestModel: "deepseek-chat", protocol: "chatCompletions", contextWindow: "65536" },
-          { requestModel: "deepseek-reasoner", protocol: "chatCompletions", contextWindow: "65536" },
-          { requestModel: "claude-opus-4-8", protocol: "anthropic", contextWindow: "200000" },
+          {
+            requestModel: "gpt-5.5",
+            protocol: "responses",
+            contextWindow: knownModelContextWindow("gpt-5.5"),
+          },
+          {
+            requestModel: "gpt-5.4",
+            protocol: "responses",
+            contextWindow: knownModelContextWindow("gpt-5.4"),
+          },
+          {
+            requestModel: "gpt-5.4-mini",
+            protocol: "responses",
+            contextWindow: knownModelContextWindow("gpt-5.4-mini"),
+          },
+          {
+            requestModel: "deepseek-chat",
+            protocol: "chatCompletions",
+            contextWindow: knownModelContextWindow("deepseek-chat"),
+          },
+          {
+            requestModel: "deepseek-reasoner",
+            protocol: "chatCompletions",
+            contextWindow: knownModelContextWindow("deepseek-reasoner"),
+          },
+          {
+            requestModel: "claude-opus-4-8",
+            protocol: "anthropic",
+            contextWindow: knownModelContextWindow("claude-opus-4-8"),
+          },
         ],
         responsesModelList: "gpt-5.5\ngpt-5.4\ngpt-5.4-mini",
         chatCompletionsModelList: "deepseek-chat\ndeepseek-reasoner",
@@ -5591,6 +5631,44 @@ function SessionsScreen({
     setLayeredCompactionRetainTokensInput(String(form.layeredCompactionRetainTokens));
   }, [form.layeredCompactionRetainTokens]);
 
+  // 三个配置槽按源会话家族区分，但目标模型可以是当前供应商的任意模型。
+  const compactionModelOptions = useMemo<Record<ModelFamily, SelectMenuOption<string>[]>>(() => {
+    const profile = activeRelayProfile(form);
+    const options: SelectMenuOption<string>[] = [
+      { value: "", label: "跟随会话模型" },
+      ...relayProfileKnownModels(profile).map((model) => {
+        const contextWindow = relayProfileContextWindowForModel(profile, model);
+        return {
+          value: model,
+          label: contextWindow
+            ? `${model} · ${formatContextWindowCompact(contextWindow)}`
+            : `${model} · 容量未知`,
+        };
+      }),
+    ];
+    return {
+      gpt: [...options],
+      claude: [...options],
+      other: [...options],
+    };
+  }, [form]);
+  const compactionModelWarnings = useMemo(() => {
+    if (!form.layeredCompactionModelOverrideEnabled) return [];
+    const profile = activeRelayProfile(form);
+    const knownModels = new Set(relayProfileKnownModels(profile));
+    return COMPACTION_MODEL_FAMILIES.flatMap(({ value: family, label }) => {
+      const model = form.layeredCompactionModels[family].trim();
+      if (!model) return [];
+      if (!knownModels.has(model)) {
+        return [`${label}：当前供应商未配置「${model}」`];
+      }
+      if (!relayProfileContextWindowForModel(profile, model)) {
+        return [`${label}：「${model}」未配置上下文容量`];
+      }
+      return [];
+    });
+  }, [form]);
+
   // 项目（cwd）筛选选项：去重后的项目路径列表，附带会话数量
   const projectOptions = useMemo(() => {
     const counts = new Map<string, number>();
@@ -5760,40 +5838,116 @@ function SessionsScreen({
                 Codex 原生压缩只保留你的历史消息 + 一段摘要，会丢弃最近的助手回复和工具调用，导致“忘记上一秒在做什么”。开启后本地代理会在摘要后补回“最近一轮”的原始记录（user 请求 + 助手回复 + 工具调用/输出），并可替换压缩提示词。
               </small>
             </label>
-            <div className="session-context-compaction-limit-row">
-              <label htmlFor="context-compaction-retain-tokens">补回上限 token</label>
-              <Input
-                aria-label="上下文压缩补回上限 token"
-                className="session-context-compaction-limit"
-                disabled={!form.layeredCompactionEnabled}
-                id="context-compaction-retain-tokens"
-                inputMode="numeric"
-                maxLength={5}
-                onBlur={saveLayeredCompactionRetainTokens}
-                onChange={(event) =>
-                  setLayeredCompactionRetainTokensInput(event.currentTarget.value.replace(/[^0-9]/g, "").slice(0, 5))
-                }
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") event.currentTarget.blur();
-                }}
-                pattern="[0-9]*"
-                value={layeredCompactionRetainTokensInput}
-              />
-              <small>安全上限，防止异常巨大的一轮占满上下文；正常只保留最近一轮，不会刻意填满。范围 20,000–64,000。</small>
-            </div>
-            <div className="session-context-compaction-limit-row">
-              <Button
-                disabled={!form.layeredCompactionEnabled}
-                onClick={() => setCompactionPromptOpen(true)}
-                size="sm"
-                title="自定义上下文压缩的 LLM 摘要提示词"
-                type="button"
-                variant="secondary"
-              >
-                <MessageCircle className="h-4 w-4" />
-                替换压缩提示词
-              </Button>
-              {form.layeredCompactionPromptOverride.trim() ? <small>已使用自定义提示词</small> : null}
+            <div className="session-context-compaction-options">
+              <div className="session-context-compaction-option">
+                <div className="session-context-compaction-option-copy">
+                  <strong>补回上限</strong>
+                  <small>限制补回最近一轮原始记录的最大 token 数，范围 20,000–64,000。</small>
+                </div>
+                <div className="session-context-compaction-option-control session-context-compaction-limit-control">
+                  <Input
+                    aria-label="上下文压缩补回上限 token"
+                    className="session-context-compaction-limit"
+                    disabled={!form.layeredCompactionEnabled}
+                    id="context-compaction-retain-tokens"
+                    inputMode="numeric"
+                    maxLength={5}
+                    onBlur={saveLayeredCompactionRetainTokens}
+                    onChange={(event) =>
+                      setLayeredCompactionRetainTokensInput(event.currentTarget.value.replace(/[^0-9]/g, "").slice(0, 5))
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") event.currentTarget.blur();
+                    }}
+                    pattern="[0-9]*"
+                    value={layeredCompactionRetainTokensInput}
+                  />
+                  <span className="session-context-compaction-unit">token</span>
+                </div>
+              </div>
+              <div className="session-context-compaction-option">
+                <div className="session-context-compaction-option-copy">
+                  <strong>压缩提示词</strong>
+                  <small>
+                    {form.layeredCompactionPromptOverride.trim()
+                      ? "当前使用自定义摘要提示词。"
+                      : "当前使用 Codex 默认摘要提示词。"}
+                  </small>
+                </div>
+                <div className="session-context-compaction-option-control">
+                  <Button
+                    disabled={!form.layeredCompactionEnabled}
+                    onClick={() => setCompactionPromptOpen(true)}
+                    size="sm"
+                    title="自定义上下文压缩的 LLM 摘要提示词"
+                    type="button"
+                    variant="secondary"
+                  >
+                    <MessageCircle className="h-4 w-4" />
+                    设置
+                  </Button>
+                </div>
+              </div>
+              <div className="session-context-compaction-option">
+                <div className="session-context-compaction-option-copy">
+                  <strong>独立压缩模型</strong>
+                  <small data-warning={compactionModelWarnings.length > 0 || undefined}>
+                    {compactionModelWarnings.length
+                      ? `${compactionModelWarnings.join("；")}。触发压缩时会回落使用会话原模型。`
+                      : "按原会话类型分别指定压缩模型，可跨模型家族选择；容量不足或模型不可用时自动回落原模型。"}
+                  </small>
+                </div>
+                <div className="session-context-compaction-option-control">
+                  <button
+                    aria-checked={form.layeredCompactionModelOverrideEnabled}
+                    aria-label="启用独立压缩模型"
+                    className={`context-enabled-switch ${form.layeredCompactionModelOverrideEnabled ? "active" : ""}`}
+                    disabled={!form.layeredCompactionEnabled}
+                    onClick={() => {
+                      const next = {
+                        ...form,
+                        layeredCompactionModelOverrideEnabled: !form.layeredCompactionModelOverrideEnabled,
+                      };
+                      onFormChange(next);
+                      void actions.saveSettingsValue(next, false);
+                    }}
+                    role="switch"
+                    type="button"
+                  >
+                    <span className="context-switch-track" aria-hidden="true">
+                      <span className="context-switch-thumb" />
+                    </span>
+                  </button>
+                </div>
+                {form.layeredCompactionEnabled && form.layeredCompactionModelOverrideEnabled ? (
+                  <div className="session-context-compaction-family-grid">
+                    {COMPACTION_MODEL_FAMILIES.map(({ value: family, label }) => (
+                      <label className="session-context-compaction-family-field" key={family}>
+                        <span>{label}</span>
+                        <SelectMenu
+                          ariaLabel={`${label}使用的上下文压缩模型`}
+                          className="session-context-compaction-model-select"
+                          onChange={(next) => {
+                            const value = {
+                              ...form,
+                              layeredCompactionModels: {
+                                ...form.layeredCompactionModels,
+                                [family]: next,
+                              },
+                              layeredCompactionModel: "",
+                            };
+                            onFormChange(value);
+                            void actions.saveSettingsValue(value, false);
+                          }}
+                          options={compactionModelOptions[family]}
+                          placeholder="跟随会话模型"
+                          value={form.layeredCompactionModels[family]}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             </div>
           </div>
         </div>
@@ -10350,6 +10504,7 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
   const activeRelayId = profiles.some((profile) => profile.id === settings.activeRelayId)
     ? settings.activeRelayId
     : profiles[0]?.id || "default";
+  const layeredCompactionModels = normalizeLayeredCompactionModels(settings);
   return syncLegacyRelayFields({
     ...defaultSettings,
     ...settings,
@@ -10363,11 +10518,29 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
       20000,
       64000,
     ),
+    layeredCompactionModels,
+    layeredCompactionModel: "",
     relayCommonConfigContents,
     relayContextConfigContents,
     relayProfiles: profiles,
     activeRelayId,
   });
+}
+
+function normalizeLayeredCompactionModels(settings: BackendSettings): Record<ModelFamily, string> {
+  const normalized: Record<ModelFamily, string> = {
+    gpt: settings.layeredCompactionModels?.gpt?.trim() || "",
+    claude: settings.layeredCompactionModels?.claude?.trim() || "",
+    other: settings.layeredCompactionModels?.other?.trim() || "",
+  };
+  if (normalized.gpt || normalized.claude || normalized.other) return normalized;
+  const legacy = settings.layeredCompactionModel?.trim() || "";
+  if (legacy) {
+    normalized.gpt = legacy;
+    normalized.claude = legacy;
+    normalized.other = legacy;
+  }
+  return normalized;
 }
 
 function clampNumber(value: number, min: number, max: number): number {
@@ -10535,6 +10708,29 @@ function relayProfileContextWindowForActiveModel(profile: RelayProfile): string 
     return match?.contextWindow.trim() || "";
   }
   return profile.contextWindow.trim();
+}
+
+function relayProfileContextWindowForModel(profile: RelayProfile, model: string): string {
+  const normalizedModel = model.trim();
+  if (!normalizedModel) return "";
+  const mapping = normalizeRelayModelMappings(profile.modelMappings)
+    .find((item) => item.requestModel.trim() === normalizedModel);
+  return mapping?.contextWindow.trim()
+    || (profile.model.trim() === normalizedModel ? profile.contextWindow.trim() : "");
+}
+
+function formatContextWindowCompact(value: string): string {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return "容量未知";
+  if (parsed >= 1_000_000) {
+    const millions = parsed / 1_000_000;
+    return `${Number.isInteger(millions) ? millions.toFixed(0) : millions.toFixed(2)}M`;
+  }
+  if (parsed >= 1_000) {
+    const thousands = parsed / 1_000;
+    return `${Number.isInteger(thousands) ? thousands.toFixed(0) : thousands.toFixed(1)}k`;
+  }
+  return parsed.toLocaleString();
 }
 
 function ccsProviderSummary(result: CcsProvidersResult | null): string {

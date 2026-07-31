@@ -47,6 +47,27 @@ pub struct RelayModelMapping {
     pub context_window: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LayeredCompactionModels {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub gpt: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub claude: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub other: String,
+}
+
+impl LayeredCompactionModels {
+    pub fn model_for_family(&self, family: crate::model_capabilities::ModelFamily) -> &str {
+        match family {
+            crate::model_capabilities::ModelFamily::Gpt => &self.gpt,
+            crate::model_capabilities::ModelFamily::Claude => &self.claude,
+            crate::model_capabilities::ModelFamily::Other => &self.other,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ResponsesWebsocketCapabilityState {
@@ -229,6 +250,25 @@ impl RelayProfile {
                 .unwrap_or_default();
         }
         self.context_window.trim().to_string()
+    }
+
+    pub fn context_window_for_model(&self, model: &str) -> Option<u64> {
+        let model = model.trim();
+        if model.is_empty() {
+            return None;
+        }
+        self.model_mappings
+            .iter()
+            .find(|mapping| mapping.request_model.trim() == model)
+            .map(|mapping| mapping.context_window.trim())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                (self.model_mappings.is_empty() && self.model.trim() == model)
+                    .then_some(self.context_window.trim())
+                    .filter(|value| !value.is_empty())
+            })
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
     }
 
     pub fn resolve_protocol_for_model(&self, model: &str) -> anyhow::Result<RelayProtocol> {
@@ -441,6 +481,17 @@ pub struct BackendSettings {
         skip_serializing_if = "String::is_empty"
     )]
     pub layered_compaction_prompt_override: String,
+    #[serde(rename = "layeredCompactionModelOverrideEnabled", default)]
+    pub layered_compaction_model_override_enabled: bool,
+    #[serde(rename = "layeredCompactionModels", default)]
+    pub layered_compaction_models: LayeredCompactionModels,
+    /// 旧版单一压缩模型配置，仅用于读取迁移。
+    #[serde(
+        rename = "layeredCompactionModel",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub layered_compaction_model: String,
     #[serde(rename = "launchMode", default)]
     pub launch_mode: LaunchMode,
     #[serde(rename = "relayBaseUrl", default = "default_relay_base_url")]
@@ -509,6 +560,9 @@ impl Default for BackendSettings {
             layered_compaction_enabled: false,
             layered_compaction_retain_tokens: default_layered_compaction_retain_tokens(),
             layered_compaction_prompt_override: String::new(),
+            layered_compaction_model_override_enabled: false,
+            layered_compaction_models: LayeredCompactionModels::default(),
+            layered_compaction_model: String::new(),
             launch_mode: LaunchMode::Patch,
             relay_base_url: default_relay_base_url(),
             relay_api_key: String::new(),
@@ -524,6 +578,26 @@ impl Default for BackendSettings {
             cli_wrapper_api_key: String::new(),
             cli_wrapper_api_key_env: default_api_key_env(),
         }
+    }
+}
+
+impl BackendSettings {
+    pub fn compaction_model_for_family(
+        &self,
+        family: crate::model_capabilities::ModelFamily,
+    ) -> &str {
+        let configured = self
+            .layered_compaction_models
+            .model_for_family(family)
+            .trim();
+        if !configured.is_empty() {
+            return configured;
+        }
+        let legacy = self.layered_compaction_model.trim();
+        if !legacy.is_empty() {
+            return legacy;
+        }
+        ""
     }
 }
 
@@ -1360,6 +1434,27 @@ mod tests {
     }
 
     #[test]
+    fn legacy_single_compaction_model_applies_to_all_source_families() {
+        let settings = BackendSettings {
+            layered_compaction_model: "deepseek-chat".to_string(),
+            ..BackendSettings::default()
+        };
+
+        assert_eq!(
+            settings.compaction_model_for_family(crate::model_capabilities::ModelFamily::Gpt),
+            "deepseek-chat"
+        );
+        assert_eq!(
+            settings.compaction_model_for_family(crate::model_capabilities::ModelFamily::Claude),
+            "deepseek-chat"
+        );
+        assert_eq!(
+            settings.compaction_model_for_family(crate::model_capabilities::ModelFamily::Other),
+            "deepseek-chat"
+        );
+    }
+
+    #[test]
     fn settings_deserialize_keeps_plugin_unlock_switches_independent() {
         let settings: BackendSettings = serde_json::from_str(
             r#"{
@@ -1935,6 +2030,13 @@ experimental_bearer_token = "sk-existing""#
             cli_wrapper_api_key: "sk-test".to_string(),
             cli_wrapper_api_key_env: "CUSTOM_ENV".to_string(),
             codex_extra_args: vec!["--force_high_performance_gpu".to_string()],
+            layered_compaction_enabled: true,
+            layered_compaction_model_override_enabled: true,
+            layered_compaction_models: LayeredCompactionModels {
+                gpt: "deepseek-chat".to_string(),
+                claude: "gpt-5.6".to_string(),
+                other: "claude-sonnet-4-6".to_string(),
+            },
             ..BackendSettings::default()
         };
 

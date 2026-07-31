@@ -3160,28 +3160,136 @@ body {
   cursor: pointer;
 }
 
-.session-context-compaction-limit-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
+.session-context-compaction-limit {
+  width: 78px;
+  height: 32px;
+  padding: 0 8px;
+  text-align: center;
 }
 
-.session-context-compaction-limit-row > label {
+.session-context-compaction-options {
+  display: grid;
+  border-top: 1px solid hsl(var(--border));
+}
+
+.session-context-compaction-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px 20px;
+  min-width: 0;
+  min-height: 56px;
+  padding: 10px 0;
+}
+
+.session-context-compaction-option + .session-context-compaction-option {
+  border-top: 1px solid hsl(var(--border));
+}
+
+.session-context-compaction-option-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.session-context-compaction-option-copy strong {
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.session-context-compaction-option-copy small {
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.session-context-compaction-option-copy small[data-warning] {
+  color: hsl(var(--destructive));
+}
+
+.session-context-compaction-option-control {
+  display: flex;
+  min-width: 92px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.session-context-compaction-limit-control {
+  gap: 7px;
+}
+
+.session-context-compaction-unit {
   color: hsl(var(--muted-foreground));
   font-size: 12px;
   white-space: nowrap;
 }
 
-.session-context-compaction-limit {
-  width: 104px;
-  height: 28px;
-  padding: 0 8px;
-  text-align: center;
+.session-context-compaction-option-control .context-enabled-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
-.session-context-compaction-limit-row small {
+.session-context-compaction-model-select {
+  width: 210px;
+  min-width: 0;
+}
+
+.session-context-compaction-model-select .app-select-trigger {
+  min-height: 32px;
+  gap: 8px;
+}
+
+.session-context-compaction-family-grid {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px 16px;
+  width: 100%;
+  padding: 2px 0 4px;
+}
+
+.session-context-compaction-family-field {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.session-context-compaction-family-field > span {
+  color: hsl(var(--muted-foreground));
   font-size: 12px;
+  white-space: nowrap;
+}
+
+.session-context-compaction-family-field .session-context-compaction-model-select {
+  width: 100%;
+}
+
+@media (min-width: 761px) and (max-width: 1100px) {
+  .session-context-compaction-family-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .session-context-compaction-family-field:last-child {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 760px) {
+  .session-context-compaction-option {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .session-context-compaction-option-control {
+    min-width: 0;
+    justify-content: flex-start;
+  }
+
+  .session-context-compaction-family-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .field .field-help {

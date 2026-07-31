@@ -727,6 +727,164 @@ pub fn prepare_legacy_layered_compaction_request(
     request
 }
 
+/// 判断请求是否属于任一种上下文压缩（传统压缩或 Remote Compaction V2）。
+pub fn is_any_compaction_request(request_json: &Value) -> bool {
+    is_compaction_request(Some(request_json)) || is_remote_compaction_v2_request(Some(request_json))
+}
+
+/// 把压缩请求改写为使用独立的压缩模型。
+///
+/// 压缩轮只需要一段纯文本摘要，因此除了替换 `model` 还要做两件事：
+///
+/// - 剔除历史里的 `reasoning` item。它们携带原模型的 `encrypted_content`，跨模型
+///   （尤其跨供应商）传回上游必被拒；摘要也用不到这些推理痕迹。
+/// - 清理推理档位字段，避免把主模型的高档位（如 `xhigh`/`max`）带到压缩模型上。
+///   去掉后由上游按目标模型的默认档位处理，不需要本模块猜能力表。
+///
+/// 非压缩请求、模型名为空、或目标模型与当前模型相同时原样返回。
+pub fn apply_compaction_model_override(request_json: &Value, model: &str) -> Value {
+    let model = model.trim();
+    if model.is_empty() || !is_any_compaction_request(request_json) {
+        return request_json.clone();
+    }
+    apply_confirmed_compaction_model_override(request_json, model)
+}
+
+/// 为已经在改写前确认身份的压缩请求替换模型。
+///
+/// 自定义压缩提示词会移除 Codex 固定前缀，因此代理必须先冻结请求身份，再调用此入口。
+pub(crate) fn apply_confirmed_compaction_model_override(
+    request_json: &Value,
+    model: &str,
+) -> Value {
+    let model = model.trim();
+    if model.is_empty() {
+        return request_json.clone();
+    }
+    if request_json.get("model").and_then(Value::as_str) == Some(model) {
+        return request_json.clone();
+    }
+    let mut request = request_json.clone();
+    let Some(object) = request.as_object_mut() else {
+        return request_json.clone();
+    };
+    object.insert("model".to_string(), json!(model));
+    for key in ["reasoning", "model_reasoning_effort", "reasoning_effort"] {
+        object.remove(key);
+    }
+    if let Some(Value::Array(items)) = object.get_mut("input") {
+        items.retain(|item| item.get("type").and_then(Value::as_str) != Some("reasoning"));
+    }
+    request
+}
+
+pub const DEFAULT_COMPACTION_OUTPUT_RESERVE_TOKENS: u64 = 8_192;
+
+/// 估算独立压缩模型实际收到的请求 token 数。
+///
+/// 上游 tokenizer 不可用时采用偏保守估算，并取以下两种结果中的较大值：
+///
+/// - 字符加权：ASCII 连续词每 4 字符约 1 token，其他非空白字符按 1 token；
+/// - 序列化 JSON UTF-8 字节数除以 3，覆盖结构字段与中英文混合内容。
+pub fn estimate_compaction_request_tokens(request_json: &Value) -> u64 {
+    let weighted = estimate_json_value_tokens(request_json);
+    let serialized = serde_json::to_vec(request_json)
+        .map(|bytes| (bytes.len() as u64).div_ceil(3))
+        .unwrap_or(0);
+    weighted.max(serialized)
+}
+
+/// 为压缩摘要输出预留上下文空间。
+pub fn compaction_output_reserve_tokens(request_json: &Value) -> u64 {
+    ["max_output_tokens", "max_tokens", "max_completion_tokens"]
+        .into_iter()
+        .filter_map(|key| request_json.get(key).and_then(Value::as_u64))
+        .max()
+        .unwrap_or(0)
+        .max(DEFAULT_COMPACTION_OUTPUT_RESERVE_TOKENS)
+}
+
+pub fn compaction_request_fits_context(request_json: &Value, context_window: u64) -> bool {
+    let estimated_input = estimate_compaction_request_tokens(request_json);
+    let output_reserve = compaction_output_reserve_tokens(request_json);
+    estimated_input.saturating_add(output_reserve) <= context_window
+}
+
+fn estimate_json_value_tokens(value: &Value) -> u64 {
+    match value {
+        Value::Null => 1,
+        Value::Bool(_) | Value::Number(_) => 1,
+        Value::String(text) => estimate_text_tokens(text),
+        Value::Array(items) => items.iter().fold(2_u64, |total, item| {
+            total
+                .saturating_add(estimate_json_value_tokens(item))
+                .saturating_add(1)
+        }),
+        Value::Object(object) => object.iter().fold(2_u64, |total, (key, value)| {
+            total
+                .saturating_add(estimate_text_tokens(key))
+                .saturating_add(estimate_json_value_tokens(value))
+                .saturating_add(2)
+        }),
+    }
+}
+
+fn estimate_text_tokens(text: &str) -> u64 {
+    let mut tokens = 0_u64;
+    let mut ascii_word_len = 0_u64;
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            ascii_word_len += 1;
+            continue;
+        }
+        if ascii_word_len > 0 {
+            tokens = tokens.saturating_add(ascii_word_len.div_ceil(4));
+            ascii_word_len = 0;
+        }
+        if !ch.is_whitespace() {
+            tokens = tokens.saturating_add(1);
+        }
+    }
+    if ascii_word_len > 0 {
+        tokens = tokens.saturating_add(ascii_word_len.div_ceil(4));
+    }
+    tokens
+}
+
+/// 把压缩响应 SSE 里的 `model` 回填为会话原本的模型。
+///
+/// 上游返回的是压缩模型名，直接透传会让 Codex 侧的记账和展示错乱。
+pub fn restore_response_model_in_sse(
+    sse_text: &str,
+    original_model: &str,
+    compaction_model: &str,
+) -> String {
+    let original_model = original_model.trim();
+    let compaction_model = compaction_model.trim();
+    if original_model.is_empty()
+        || compaction_model.is_empty()
+        || original_model == compaction_model
+    {
+        return sse_text.to_string();
+    }
+    let from = format!("\"model\":{}", json!(compaction_model));
+    let to = format!("\"model\":{}", json!(original_model));
+    sse_text.replace(&from, &to)
+}
+
+/// 响应对象版本的压缩模型回填。
+pub fn restore_response_model(response: &mut Value, original_model: &str) {
+    let original_model = original_model.trim();
+    if original_model.is_empty() {
+        return;
+    }
+    if let Some(object) = response.as_object_mut()
+        && object.contains_key("model")
+    {
+        object.insert("model".to_string(), json!(original_model));
+    }
+}
+
 /// 判断 completed Responses 对象是否包含传统压缩可用的 assistant 摘要文本。
 pub fn has_completed_compaction_summary(response_object: &Value) -> bool {
     response_object.get("status").and_then(Value::as_str) == Some("completed")
