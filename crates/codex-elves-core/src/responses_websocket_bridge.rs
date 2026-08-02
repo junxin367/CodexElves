@@ -710,7 +710,7 @@ impl WebSocketContinuationCoordinator {
             return Ok(());
         }
         if original_compaction_model.is_some()
-            && crate::layered_compaction::is_any_compaction_request(payload)
+            && crate::layered_compaction::is_compaction_request(Some(payload))
         {
             state.active = Some(ActiveWebSocketContinuation {
                 mode: ActiveWebSocketMode::CompactionModelOverride,
@@ -2335,12 +2335,12 @@ fn prepare_downstream_response_create_payload_with_settings(
     Option<WebSocketCompactionFallback>,
 ) {
     let original_normalized = normalized.clone();
-    // 压缩模型覆写：WebSocket 通道只承载原生 Responses 协议，所以只有当目标模型
-    // 也归属 Responses 时才能覆写；否则保持原模型，让本次压缩正常走下去。
+    // 独立模型只用于传统本地压缩。WebSocket 通道只承载原生 Responses 协议，
+    // 所以目标模型还必须归属 Responses；Remote Compaction V2 始终保留会话原模型。
     let relay = settings.active_relay_profile();
     let compaction_model_override = match crate::protocol_proxy::resolve_compaction_model_override(
         &normalized,
-        crate::layered_compaction::is_any_compaction_request(&normalized),
+        &normalized,
         settings,
         &relay,
     ) {
@@ -2993,7 +2993,65 @@ mod tests {
     }
 
     #[test]
-    fn websocket_cross_family_compaction_override_keeps_original_model_fallback() {
+    fn websocket_cross_family_local_compaction_override_keeps_original_model_fallback() {
+        let relay = RelayProfile {
+            id: "relay-test".to_string(),
+            name: "Relay Test".to_string(),
+            model_mappings: vec![
+                RelayModelMapping {
+                    request_model: "claude-opus-4-8".to_string(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "1000000".to_string(),
+                },
+                RelayModelMapping {
+                    request_model: "gpt-5.6".to_string(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "372000".to_string(),
+                },
+            ],
+            ..RelayProfile::default()
+        };
+        let settings = BackendSettings {
+            layered_compaction_enabled: true,
+            layered_compaction_model_override_enabled: true,
+            layered_compaction_models: LayeredCompactionModels {
+                claude: "gpt-5.6".to_string(),
+                ..Default::default()
+            },
+            relay_profiles: vec![relay],
+            active_relay_id: "relay-test".to_string(),
+            ..BackendSettings::default()
+        };
+        let payload = json!({
+            "type": "response.create",
+            "model": "claude-opus-4-8",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "small context" }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a summary."
+                }
+            ]
+        });
+        let (request_payload, forwarded_payload, options, original_model, fallback) =
+            prepare_downstream_response_create_payload_with_settings(payload, &settings);
+
+        assert_eq!(request_payload["model"], "gpt-5.6");
+        assert_eq!(forwarded_payload["model"], "gpt-5.6");
+        assert!(options.is_some());
+        assert_eq!(original_model.as_deref(), Some("claude-opus-4-8"));
+        let fallback = fallback.expect("override should preserve an original-model fallback");
+        assert_eq!(fallback.request_payload["model"], "claude-opus-4-8");
+        assert_eq!(fallback.forwarded_payload["model"], "claude-opus-4-8");
+    }
+
+    #[test]
+    fn websocket_remote_compaction_keeps_session_model_when_override_is_enabled() {
         let relay = RelayProfile {
             id: "relay-test".to_string(),
             name: "Relay Test".to_string(),
@@ -3037,13 +3095,11 @@ mod tests {
         let (request_payload, forwarded_payload, options, original_model, fallback) =
             prepare_downstream_response_create_payload_with_settings(payload, &settings);
 
-        assert_eq!(request_payload["model"], "gpt-5.6");
-        assert_eq!(forwarded_payload["model"], "gpt-5.6");
-        assert!(options.is_none());
-        assert_eq!(original_model.as_deref(), Some("claude-opus-4-8"));
-        let fallback = fallback.expect("override should preserve an original-model fallback");
-        assert_eq!(fallback.request_payload["model"], "claude-opus-4-8");
-        assert_eq!(fallback.forwarded_payload["model"], "claude-opus-4-8");
+        assert_eq!(request_payload["model"], "claude-opus-4-8");
+        assert_eq!(forwarded_payload["model"], "claude-opus-4-8");
+        assert!(options.is_some());
+        assert!(original_model.is_none());
+        assert!(fallback.is_none());
     }
 
     #[test]
@@ -3052,13 +3108,20 @@ mod tests {
         let request_payload = json!({
             "type": "response.create",
             "model": "gpt-5.6",
-            "input": [{ "type": "compaction_trigger" }]
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a summary."
+            }]
         });
         coordinator
             .register_request_with_settings_and_original_model(
                 &request_payload,
                 Some("log-restore".to_string()),
-                None,
+                Some(crate::protocol_proxy::LayeredCompactionOptions {
+                    enabled: true,
+                    retain_tokens: crate::layered_compaction::DEFAULT_RETAIN_TOKENS,
+                }),
                 &BackendSettings::default(),
                 Some("claude-opus-4-8".to_string()),
                 None,
@@ -3103,25 +3166,40 @@ mod tests {
         let request_payload = json!({
             "type": "response.create",
             "model": "gpt-5.6",
-            "input": [{ "type": "compaction_trigger" }]
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a summary."
+            }]
         });
         coordinator
             .register_request_with_settings_and_original_model(
                 &request_payload,
                 Some("log-retry".to_string()),
-                None,
+                Some(crate::protocol_proxy::LayeredCompactionOptions {
+                    enabled: true,
+                    retain_tokens: crate::layered_compaction::DEFAULT_RETAIN_TOKENS,
+                }),
                 &settings,
                 Some("gpt-5.4".to_string()),
                 Some(super::WebSocketCompactionFallback {
                     request_payload: json!({
                         "type": "response.create",
                         "model": "gpt-5.4",
-                        "input": [{ "type": "compaction_trigger" }]
+                        "input": [{
+                            "type": "message",
+                            "role": "user",
+                            "content": "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a summary."
+                        }]
                     }),
                     forwarded_payload: json!({
                         "type": "response.create",
                         "model": "gpt-5.4",
-                        "input": [{ "type": "compaction_trigger" }]
+                        "input": [{
+                            "type": "message",
+                            "role": "user",
+                            "content": "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a summary."
+                        }]
                     }),
                 }),
             )
@@ -3159,7 +3237,7 @@ mod tests {
     }
 
     #[test]
-    fn websocket_rejects_non_responses_compaction_target() {
+    fn websocket_rejects_non_responses_local_compaction_target() {
         let relay = RelayProfile {
             id: "relay-test".to_string(),
             name: "Relay Test".to_string(),
@@ -3191,13 +3269,18 @@ mod tests {
         let payload = json!({
             "type": "response.create",
             "model": "claude-opus-4-8",
-            "input": [{ "type": "compaction_trigger" }]
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a summary."
+            }]
         });
-        let (request_payload, forwarded_payload, _, original_model, fallback) =
+        let (request_payload, forwarded_payload, options, original_model, fallback) =
             prepare_downstream_response_create_payload_with_settings(payload, &settings);
 
         assert_eq!(request_payload["model"], "claude-opus-4-8");
         assert_eq!(forwarded_payload["model"], "claude-opus-4-8");
+        assert!(options.is_some());
         assert!(original_model.is_none());
         assert!(fallback.is_none());
     }

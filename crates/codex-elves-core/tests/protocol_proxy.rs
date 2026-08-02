@@ -8576,6 +8576,19 @@ fn compaction_model_override_skips_non_compaction_requests() {
 }
 
 #[test]
+fn compaction_model_override_skips_remote_compaction_requests() {
+    let remote = json!({
+        "model": "claude-opus-4-5",
+        "input": [
+            { "type": "message", "role": "user", "content": "keep this context" },
+            { "type": "compaction_trigger" }
+        ]
+    });
+    assert!(is_any_compaction_request(&remote));
+    assert_eq!(apply_compaction_model_override(&remote, "glm-4.6"), remote);
+}
+
+#[test]
 fn compaction_model_override_is_noop_for_empty_or_same_model() {
     let request = legacy_compaction_request();
     assert_eq!(apply_compaction_model_override(&request, "   "), request);
@@ -8594,6 +8607,69 @@ fn compaction_response_model_is_restored_to_session_model() {
     let restored = restore_response_model_in_sse(sse, "claude-opus-4-5", "glm-4.6");
     assert!(restored.contains("\"model\":\"claude-opus-4-5\""));
     assert!(!restored.contains("glm-4.6"));
+}
+
+#[tokio::test]
+async fn remote_compaction_keeps_session_model_when_override_is_enabled() {
+    let server = spawn_chat_server_with_status_responses(vec![(
+        "200 OK".to_string(),
+        r#"{"id":"resp-remote","status":"completed","model":"gpt-5.4","output":[]}"#.to_string(),
+    )]);
+    let settings = BackendSettings {
+        layered_compaction_enabled: true,
+        layered_compaction_model_override_enabled: true,
+        layered_compaction_models: LayeredCompactionModels {
+            gpt: "gpt-5.6".to_string(),
+            ..Default::default()
+        },
+        relay_profiles: vec![RelayProfile {
+            id: "remote-compaction-original-model".to_string(),
+            name: "Remote Compaction Original Model".to_string(),
+            base_url: server.base_url.clone(),
+            upstream_base_url: server.base_url.clone(),
+            api_key: "sk-test".to_string(),
+            model_mappings: vec![
+                RelayModelMapping {
+                    request_model: "gpt-5.4".to_string(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "1000000".to_string(),
+                },
+                RelayModelMapping {
+                    request_model: "gpt-5.6".to_string(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "372000".to_string(),
+                },
+            ],
+            ..RelayProfile::default()
+        }],
+        active_relay_id: "remote-compaction-original-model".to_string(),
+        ..BackendSettings::default()
+    };
+    let request = json!({
+        "model": "gpt-5.4",
+        "stream": false,
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "small context" }]
+            },
+            { "type": "compaction_trigger" }
+        ]
+    });
+
+    let response = open_responses_proxy_request_with_settings(&request.to_string(), settings)
+        .await
+        .unwrap();
+    assert_eq!(response.status_code, 200);
+    drop(response);
+
+    let requests = server.finish_all();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].path.ends_with("/responses"));
+    let upstream: Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(upstream["model"], "gpt-5.4");
+    assert_eq!(upstream["input"][1]["type"], "compaction_trigger");
 }
 
 #[tokio::test]

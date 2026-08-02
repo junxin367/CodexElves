@@ -3239,6 +3239,12 @@ body {
   gap: 8px;
 }
 
+.session-context-compaction-model-menu .app-select-option {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .session-context-compaction-family-grid {
   display: grid;
   grid-column: 1 / -1;

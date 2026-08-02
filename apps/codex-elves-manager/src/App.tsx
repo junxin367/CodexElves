@@ -5894,7 +5894,7 @@ function SessionsScreen({
                   <small data-warning={compactionModelWarnings.length > 0 || undefined}>
                     {compactionModelWarnings.length
                       ? `${compactionModelWarnings.join("；")}。触发压缩时会回落使用会话原模型。`
-                      : "按原会话类型分别指定压缩模型，可跨模型家族选择；容量不足或模型不可用时自动回落原模型。"}
+                      : "仅本地压缩生效，可按原会话类型跨模型家族选择；远程压缩始终使用会话原模型。"}
                   </small>
                 </div>
                 <div className="session-context-compaction-option-control">
@@ -5927,6 +5927,7 @@ function SessionsScreen({
                         <SelectMenu
                           ariaLabel={`${label}使用的上下文压缩模型`}
                           className="session-context-compaction-model-select"
+                          menuClassName="session-context-compaction-model-menu"
                           onChange={(next) => {
                             const value = {
                               ...form,
@@ -7518,6 +7519,7 @@ function SelectMenu<T extends string>({
   onChange,
   disabled = false,
   className,
+  menuClassName,
   ariaLabel,
   placeholder,
 }: {
@@ -7526,6 +7528,7 @@ function SelectMenu<T extends string>({
   onChange: (value: T) => void;
   disabled?: boolean;
   className?: string;
+  menuClassName?: string;
   ariaLabel?: string;
   placeholder?: string;
 }) {
@@ -7591,7 +7594,7 @@ function SelectMenu<T extends string>({
 
   const menu = open ? (
     <div
-      className="app-select-menu"
+      className={`app-select-menu${menuClassName ? ` ${menuClassName}` : ""}`}
       onBlur={(event) => {
         if (containsSelectTarget(event.relatedTarget)) return;
         setOpen(false);

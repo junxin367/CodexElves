@@ -732,7 +732,7 @@ pub fn is_any_compaction_request(request_json: &Value) -> bool {
     is_compaction_request(Some(request_json)) || is_remote_compaction_v2_request(Some(request_json))
 }
 
-/// 把压缩请求改写为使用独立的压缩模型。
+/// 把传统本地压缩请求改写为使用独立的压缩模型。
 ///
 /// 压缩轮只需要一段纯文本摘要，因此除了替换 `model` 还要做两件事：
 ///
@@ -741,10 +741,10 @@ pub fn is_any_compaction_request(request_json: &Value) -> bool {
 /// - 清理推理档位字段，避免把主模型的高档位（如 `xhigh`/`max`）带到压缩模型上。
 ///   去掉后由上游按目标模型的默认档位处理，不需要本模块猜能力表。
 ///
-/// 非压缩请求、模型名为空、或目标模型与当前模型相同时原样返回。
+/// Remote Compaction V2、非压缩请求、模型名为空、或目标模型与当前模型相同时原样返回。
 pub fn apply_compaction_model_override(request_json: &Value, model: &str) -> Value {
     let model = model.trim();
-    if model.is_empty() || !is_any_compaction_request(request_json) {
+    if model.is_empty() || !is_compaction_request(Some(request_json)) {
         return request_json.clone();
     }
     apply_confirmed_compaction_model_override(request_json, model)
@@ -1689,6 +1689,15 @@ mod tests {
         assert!(!is_remote_compaction_v2_request(Some(&json!({
             "input": [user_message("normal")]
         }))));
+    }
+
+    #[test]
+    fn remote_compaction_v2_keeps_original_model() {
+        let request = remote_compaction_v2_request();
+        assert_eq!(
+            apply_compaction_model_override(&request, "gpt-5.6"),
+            request
+        );
     }
 
     #[test]

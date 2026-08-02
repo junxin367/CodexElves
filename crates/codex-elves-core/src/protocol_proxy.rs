@@ -964,18 +964,21 @@ pub(crate) struct ResolvedCompactionModelOverride {
 
 /// 解析本次压缩请求实际应该使用的家族压缩模型。
 ///
+/// `original_request_json` 用于在自定义提示词改写前确认请求确实属于传统本地压缩；
+/// Remote Compaction V2 不进入独立模型选择。
+///
 /// 返回 `None` 表示继续用会话原模型压缩。配置槽按原会话家族选择，但目标模型
 /// 可以跨家族；只有同时通过供应商、协议归属和本次实际请求容量校验后才会被采用。
 pub(crate) fn resolve_compaction_model_override(
     request_json: &Value,
-    request_is_compaction: bool,
+    original_request_json: &Value,
     settings: &crate::settings::BackendSettings,
     relay: &crate::settings::RelayProfile,
 ) -> Option<ResolvedCompactionModelOverride> {
     if !settings.layered_compaction_enabled || !settings.layered_compaction_model_override_enabled {
         return None;
     }
-    if !request_is_compaction {
+    if !crate::layered_compaction::is_compaction_request(Some(original_request_json)) {
         return None;
     }
     let original_model = request_json
@@ -1872,17 +1875,16 @@ async fn open_responses_proxy_request_once(
     override_attempted: &mut bool,
 ) -> anyhow::Result<UpstreamProxyResponse> {
     let diagnostic_id = next_protocol_proxy_diagnostic_id();
-    let request_json: Value = serde_json::from_str(body)?;
-    let request_is_compaction = crate::layered_compaction::is_any_compaction_request(&request_json);
+    let original_request_json: Value = serde_json::from_str(body)?;
     let request_json = if settings.layered_compaction_enabled {
         crate::layered_compaction::apply_custom_compaction_prompt(
-            &request_json,
+            &original_request_json,
             crate::layered_compaction::effective_compaction_prompt(
                 &settings.layered_compaction_prompt_override,
             ),
         )
     } else {
-        request_json
+        original_request_json.clone()
     };
     let is_stream = request_json
         .get("stream")
@@ -1905,7 +1907,7 @@ async fn open_responses_proxy_request_once(
         // 覆写取决于当前 relay 的模型协议归属，所以放在 relay 循环内逐个判定。
         let compaction_model_override = resolve_compaction_model_override(
             &request_json,
-            request_is_compaction,
+            &original_request_json,
             &settings,
             &relay,
         );
@@ -10402,6 +10404,20 @@ mod compaction_model_override_tests {
         })
     }
 
+    fn remote_compaction_request(model: &str) -> Value {
+        json!({
+            "model": model,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "small context"
+                },
+                { "type": "compaction_trigger" }
+            ]
+        })
+    }
+
     fn relay_with_models(models: &[(&str, RelayProtocol, &str)]) -> RelayProfile {
         RelayProfile {
             id: "relay-test".to_string(),
@@ -10439,7 +10455,7 @@ mod compaction_model_override_tests {
         ]);
         let resolved = resolve_compaction_model_override(
             &compaction_request("gpt-5.4", "small"),
-            true,
+            &compaction_request("gpt-5.4", "small"),
             &settings,
             &relay,
         )
@@ -10463,7 +10479,22 @@ mod compaction_model_override_tests {
         ]);
         let request = compaction_request("gpt-5.4", &"x".repeat(6_000));
 
-        assert!(resolve_compaction_model_override(&request, true, &settings, &relay).is_none());
+        assert!(resolve_compaction_model_override(&request, &request, &settings, &relay).is_none());
+    }
+
+    #[test]
+    fn remote_compaction_does_not_resolve_model_override() {
+        let settings = settings_with_models(LayeredCompactionModels {
+            gpt: "gpt-5.6".to_string(),
+            ..Default::default()
+        });
+        let relay = relay_with_models(&[
+            ("gpt-5.4", RelayProtocol::Responses, "1000000"),
+            ("gpt-5.6", RelayProtocol::Responses, "372000"),
+        ]);
+        let request = remote_compaction_request("gpt-5.4");
+
+        assert!(resolve_compaction_model_override(&request, &request, &settings, &relay).is_none());
     }
 
     #[test]
@@ -10482,7 +10513,7 @@ mod compaction_model_override_tests {
         ]);
         let claude_resolved = resolve_compaction_model_override(
             &compaction_request("claude-opus-4-8", "small"),
-            true,
+            &compaction_request("claude-opus-4-8", "small"),
             &settings,
             &relay,
         )
@@ -10492,7 +10523,7 @@ mod compaction_model_override_tests {
 
         let gpt_resolved = resolve_compaction_model_override(
             &compaction_request("gpt-5.4", "small"),
-            true,
+            &compaction_request("gpt-5.4", "small"),
             &settings,
             &relay,
         )
@@ -10515,7 +10546,7 @@ mod compaction_model_override_tests {
         assert!(
             resolve_compaction_model_override(
                 &compaction_request("gpt-5.4", "small"),
-                true,
+                &compaction_request("gpt-5.4", "small"),
                 &settings,
                 &relay,
             )
@@ -10540,7 +10571,7 @@ mod compaction_model_override_tests {
         assert!(
             resolve_compaction_model_override(
                 &compaction_request("gpt-5.4", "small"),
-                true,
+                &compaction_request("gpt-5.4", "small"),
                 &settings,
                 &relay,
             )
@@ -10549,7 +10580,7 @@ mod compaction_model_override_tests {
         assert!(
             resolve_compaction_model_override(
                 &compaction_request("claude-opus-4-8", "small"),
-                true,
+                &compaction_request("claude-opus-4-8", "small"),
                 &settings,
                 &relay,
             )
