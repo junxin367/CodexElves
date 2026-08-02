@@ -45,9 +45,8 @@ pub fn known_model_context_window(model: &str) -> Option<u64> {
         "gpt-5.4" => 1_000_000,
         "gpt-5.6" => 372_000,
         "o3" | "o3-mini" | "o4" | "o4-mini" => 200_000,
-        "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" | "claude-sonnet-4-6" => {
-            1_000_000
-        }
+        "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" | "claude-sonnet-4-6"
+        | "claude-fable-5" => 1_000_000,
         "claude-opus-4-5" | "claude-opus-4-1" | "claude-opus-4" | "claude-sonnet-4-5"
         | "claude-sonnet-4" | "claude-3-7-sonnet" | "claude-3-5-sonnet" | "claude-3-opus"
         | "claude-3-haiku" => 200_000,
@@ -100,7 +99,8 @@ pub fn known_model_context_window(model: &str) -> Option<u64> {
     {
         return Some(200_000);
     }
-    if slug.starts_with("claude-opus-4-6")
+    if slug.starts_with("claude-fable-5")
+        || slug.starts_with("claude-opus-4-6")
         || slug.starts_with("claude-opus-4-7")
         || slug.starts_with("claude-opus-4-8")
         || slug.starts_with("claude-sonnet-4-6")
@@ -179,6 +179,14 @@ mod tests {
         );
         assert_eq!(
             known_model_context_window("claude-opus-4-8"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            known_model_context_window("anthropic/claude-fable-5"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            known_model_context_window("claude-fable-5-2026-06-09"),
             Some(1_000_000)
         );
         assert_eq!(
