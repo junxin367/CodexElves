@@ -8474,6 +8474,36 @@ async fn responses_proxy_rewrites_default_system_prompt_model_before_chat_conver
 }
 
 #[tokio::test]
+async fn responses_proxy_rewrites_inherited_claude_identity_before_anthropic_conversion() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let server = spawn_chat_server();
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+
+    let upstream = open_responses_proxy_request(
+        r#"{"model":"glm-5.2","instructions":"You are Codex, a coding agent based on the claude-sonnet-5 model. Keep claude-sonnet-5 compatibility notes.","input":"hello","stream":false}"#,
+        Some("Original-Codex-UA/1.0"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(upstream.status_code, 200);
+    assert_eq!(
+        upstream.response_protocol,
+        UpstreamResponseProtocol::Anthropic
+    );
+
+    let request = server.finish();
+    let logged_body: Value = serde_json::from_str(&upstream.request_body).unwrap();
+    assert_eq!(
+        logged_body["system"],
+        "You are Codex, a coding agent based on the glm-5.2 model. Keep claude-sonnet-5 compatibility notes."
+    );
+    let body: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["system"], logged_body["system"]);
+}
+
+#[tokio::test]
 async fn responses_proxy_e2e_chat_upstream_regular_text_with_tools_still_returns_message() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -9324,6 +9354,11 @@ fn write_mixed_relay_settings_with_system_prompt(
                     "requestModel": "claude-sonnet-4",
                     "protocol": "anthropic",
                     "contextWindow": "200000"
+                },
+                {
+                    "requestModel": "glm-5.2",
+                    "protocol": "anthropic",
+                    "contextWindow": "1000000"
                 }
             ],
             "systemPromptOverride": system_prompt

@@ -2463,117 +2463,7 @@ fn packaged_model_catalog_entry(slug: &str) -> Option<Value> {
 }
 
 fn rewrite_generated_catalog_prompt_text_for_model(text: &str, model: &str) -> String {
-    let text = replace_gpt_identity_phrases_with_model(text, model);
-    replace_gpt_identity_tokens_with_model(&text, model)
-}
-
-fn replace_gpt_identity_phrases_with_model(text: &str, model: &str) -> String {
-    let lower = text.to_ascii_lowercase();
-    let mut result = String::with_capacity(text.len());
-    let mut index = 0;
-    let model = prompt_model_name(model);
-    let replacement = format!(" based on the {model} model");
-
-    while let Some((start, pattern_len)) = find_next_gpt_identity_phrase(&lower, index) {
-        result.push_str(&text[index..start]);
-        let end = consume_optional_model_word(
-            text,
-            consume_gpt_identity_suffix(text, start + pattern_len),
-        );
-        result.push_str(&replacement);
-        index = end;
-    }
-
-    result.push_str(&text[index..]);
-    result
-}
-
-fn find_next_gpt_identity_phrase(lower: &str, from: usize) -> Option<(usize, usize)> {
-    [" based on gpt", " based on the gpt"]
-        .into_iter()
-        .filter_map(|pattern| {
-            lower[from..]
-                .find(pattern)
-                .map(|offset| (from + offset, pattern.len()))
-        })
-        .min_by_key(|(start, _)| *start)
-}
-
-fn consume_gpt_identity_suffix(text: &str, from: usize) -> usize {
-    let bytes = text.as_bytes();
-    let mut cursor = from;
-
-    while cursor < bytes.len() {
-        let byte = bytes[cursor];
-        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
-            cursor += 1;
-        } else if byte == b'.'
-            && cursor + 1 < bytes.len()
-            && bytes[cursor + 1].is_ascii_alphanumeric()
-        {
-            cursor += 1;
-        } else {
-            break;
-        }
-    }
-
-    cursor
-}
-
-fn consume_optional_model_word(text: &str, from: usize) -> usize {
-    let candidate = text.get(from..from + 6).unwrap_or_default();
-    if candidate.eq_ignore_ascii_case(" model") {
-        from + 6
-    } else {
-        from
-    }
-}
-
-fn replace_gpt_identity_tokens_with_model(text: &str, model: &str) -> String {
-    let lower = text.to_ascii_lowercase();
-    let mut result = String::with_capacity(text.len());
-    let mut index = 0;
-    let model = prompt_model_name(model);
-
-    while let Some(offset) = lower[index..].find("gpt") {
-        let start = index + offset;
-        result.push_str(&text[index..start]);
-        if is_gpt_identity_token_start(text, start) {
-            let end = consume_gpt_identity_suffix(text, start + 3);
-            result.push_str(&model);
-            index = end;
-        } else {
-            result.push_str(&text[start..start + 3]);
-            index = start + 3;
-        }
-    }
-
-    result.push_str(&text[index..]);
-    result
-}
-
-fn prompt_model_name(model: &str) -> String {
-    let trimmed = model.trim();
-    if trimmed.is_empty() {
-        "Codex".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn is_gpt_identity_token_start(text: &str, start: usize) -> bool {
-    let bytes = text.as_bytes();
-    if start > 0 {
-        let previous = bytes[start - 1];
-        if previous.is_ascii_alphanumeric() || previous == b'_' || previous == b'-' {
-            return false;
-        }
-    }
-
-    let Some(next) = bytes.get(start + 3).copied() else {
-        return false;
-    };
-    next.is_ascii_digit() || next == b'-' || next == b'_'
+    crate::protocol_proxy::rewrite_prompt_text_model_identity(text, model)
 }
 
 fn rewrite_generated_catalog_prompt_value_for_model(value: Value, model: &str) -> Value {
@@ -4029,6 +3919,32 @@ mod tests {
         assert!(!rewritten.contains("GPT-5"));
         assert!(!rewritten.contains("GPT5"));
         assert!(!rewritten.contains(".5"));
+    }
+
+    #[test]
+    fn generated_catalog_prompt_replaces_known_model_identity_phrases_only() {
+        for (source, target) in [
+            ("claude-sonnet-5", "glm-5.2"),
+            ("deepseek-v4-flash", "kimi-k2.5"),
+            ("glm-5.2", "claude-sonnet-5"),
+            ("kimi-k2.5", "deepseek-v4-flash"),
+        ] {
+            let prompt = format!(
+                "You are Codex, a coding agent based on the {source} model. Keep {source} compatibility notes."
+            );
+            let rewritten = rewrite_generated_catalog_prompt_text_for_model(&prompt, target);
+
+            assert!(
+                rewritten.starts_with(&format!(
+                    "You are Codex, a coding agent based on the {target} model."
+                )),
+                "应将 {source} 身份替换为 {target}: {rewritten}"
+            );
+            assert!(
+                rewritten.ends_with(&format!("Keep {source} compatibility notes.")),
+                "不应替换身份句之外的普通模型说明: {rewritten}"
+            );
+        }
     }
 
     #[test]

@@ -353,23 +353,23 @@ fn rewrite_prompt_value_model_identity(value: &mut Value, model: &str) {
     }
 }
 
-fn rewrite_prompt_text_model_identity(text: &str, model: &str) -> String {
-    let text = replace_gpt_identity_phrases_with_model(text, model);
+pub(crate) fn rewrite_prompt_text_model_identity(text: &str, model: &str) -> String {
+    let text = replace_model_identity_phrases_with_model(text, model);
     replace_gpt_identity_tokens_with_model(&text, model)
 }
 
-fn replace_gpt_identity_phrases_with_model(text: &str, model: &str) -> String {
+fn replace_model_identity_phrases_with_model(text: &str, model: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let mut result = String::with_capacity(text.len());
     let mut index = 0;
     let model = prompt_model_name(model);
     let replacement = format!(" based on the {model} model");
 
-    while let Some((start, pattern_len)) = find_next_gpt_identity_phrase(&lower, index) {
+    while let Some((start, pattern_len)) = find_next_model_identity_phrase(&lower, index) {
         result.push_str(&text[index..start]);
         let end = consume_optional_model_word(
             text,
-            consume_gpt_identity_suffix(text, start + pattern_len),
+            consume_model_identity_suffix(text, start + pattern_len),
         );
         result.push_str(&replacement);
         index = end;
@@ -379,15 +379,26 @@ fn replace_gpt_identity_phrases_with_model(text: &str, model: &str) -> String {
     result
 }
 
-fn find_next_gpt_identity_phrase(lower: &str, from: usize) -> Option<(usize, usize)> {
-    [" based on gpt", " based on the gpt"]
-        .into_iter()
-        .filter_map(|pattern| {
-            lower[from..]
-                .find(pattern)
-                .map(|offset| (from + offset, pattern.len()))
-        })
-        .min_by_key(|(start, _)| *start)
+fn find_next_model_identity_phrase(lower: &str, from: usize) -> Option<(usize, usize)> {
+    [
+        " based on gpt",
+        " based on the gpt",
+        " based on claude",
+        " based on the claude",
+        " based on deepseek",
+        " based on the deepseek",
+        " based on glm",
+        " based on the glm",
+        " based on kimi",
+        " based on the kimi",
+    ]
+    .into_iter()
+    .filter_map(|pattern| {
+        lower[from..]
+            .find(pattern)
+            .map(|offset| (from + offset, pattern.len()))
+    })
+    .min_by_key(|(start, _)| *start)
 }
 
 fn replace_gpt_identity_tokens_with_model(text: &str, model: &str) -> String {
@@ -400,7 +411,7 @@ fn replace_gpt_identity_tokens_with_model(text: &str, model: &str) -> String {
         let start = index + offset;
         result.push_str(&text[index..start]);
         if is_gpt_identity_token_start(text, start) {
-            let end = consume_gpt_identity_suffix(text, start + 3);
+            let end = consume_model_identity_suffix(text, start + 3);
             result.push_str(&model);
             index = end;
         } else {
@@ -413,7 +424,7 @@ fn replace_gpt_identity_tokens_with_model(text: &str, model: &str) -> String {
     result
 }
 
-fn consume_gpt_identity_suffix(text: &str, from: usize) -> usize {
+fn consume_model_identity_suffix(text: &str, from: usize) -> usize {
     let bytes = text.as_bytes();
     let mut cursor = from;
 
@@ -480,21 +491,29 @@ fn is_likely_model_suffix_word(word: &str) -> bool {
     matches!(
         lower.as_str(),
         "sol"
+            | "terra"
+            | "luna"
             | "codex"
             | "code"
             | "chat"
+            | "coder"
+            | "reasoner"
             | "mini"
             | "nano"
             | "turbo"
+            | "sonnet"
+            | "opus"
+            | "haiku"
+            | "flash"
+            | "pro"
+            | "air"
+            | "k2"
             | "preview"
             | "latest"
             | "instruct"
             | "reasoning"
             | "thinking"
-    ) || word
-        .as_bytes()
-        .first()
-        .is_some_and(|byte| byte.is_ascii_uppercase())
+    )
 }
 
 fn consume_optional_model_word(text: &str, from: usize) -> usize {
