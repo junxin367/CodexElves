@@ -3739,10 +3739,9 @@
   function pluginAutoExpandButtonLooksLikeMore(button) {
     const text = pluginAutoExpandButtonText(button);
     if (!text || text.length > 120) return false;
+    // Current Codex builds use compound "View ... and N more" labels for
+    // category navigation, so only generic labels are safe to auto-click.
     if (/^(更多|显示更多|查看更多|加载更多|Show more|Load more|More)$/i.test(text)) return true;
-    if (/^查看\s+.+以及另外\s*\d+\s*个$/i.test(text)) return true;
-    if (/^View\s+.+\s+and\s+\d+\s+more$/i.test(text)) return true;
-    if (/^Show\s+.+\s+and\s+\d+\s+more$/i.test(text)) return true;
     return false;
   }
 

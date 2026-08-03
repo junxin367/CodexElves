@@ -1065,6 +1065,12 @@ fn injection_script_applies_fast_service_tier_contract() {
         cases["pluginAutoExpandLabels"]["latestChineseCompact"],
         false
     );
+    assert_eq!(cases["pluginAutoExpandLabels"]["categoryChinese"], false);
+    assert_eq!(cases["pluginAutoExpandLabels"]["categoryEnglish"], false);
+    assert_eq!(
+        cases["pluginAutoExpandLabels"]["categoryShowEnglish"],
+        false
+    );
     assert_eq!(cases["pluginAutoExpandLabels"]["legacyChinese"], true);
     assert_eq!(cases["pluginAutoExpandLabels"]["unrelatedCount"], false);
     assert_eq!(
@@ -1226,6 +1232,9 @@ const pluginAutoExpandApi = window.__codexElvesPluginAutoExpandTest;
 const pluginAutoExpandLabels = {{
   latestChinese: pluginAutoExpandApi.matchesText("另有 4 个"),
   latestChineseCompact: pluginAutoExpandApi.matchesText("另有4个插件"),
+  categoryChinese: pluginAutoExpandApi.matchesText("查看 Computer Use, Visualize，以及另外 2 个"),
+  categoryEnglish: pluginAutoExpandApi.matchesText("View Computer Use and 2 more"),
+  categoryShowEnglish: pluginAutoExpandApi.matchesText("Show Computer Use and 2 more"),
   legacyChinese: pluginAutoExpandApi.matchesText("显示更多"),
   unrelatedCount: pluginAutoExpandApi.matchesText("已安装 4 个"),
 }};
