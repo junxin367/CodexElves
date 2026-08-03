@@ -781,6 +781,7 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
     }
     dedupe_anthropic_codex_context_text(&mut messages);
     dedupe_anthropic_system_chunks(&mut system_chunks);
+    normalize_anthropic_tool_boundary_markers(&mut messages);
     if !system_chunks.is_empty() {
         result["system"] = json!(system_chunks.join("\n\n"));
     }
@@ -1606,6 +1607,7 @@ pub struct AnthropicSseToResponsesConverter {
     state: AnthropicSseState,
     failed: bool,
     saw_message_stop: bool,
+    saw_done: bool,
     failure_source: Option<&'static str>,
     failure_message: Option<String>,
     failure_type: Option<String>,
@@ -1619,6 +1621,7 @@ impl Default for AnthropicSseToResponsesConverter {
             state: AnthropicSseState::default(),
             failed: false,
             saw_message_stop: false,
+            saw_done: false,
             failure_source: None,
             failure_message: None,
             failure_type: None,
@@ -1699,6 +1702,13 @@ impl AnthropicSseToResponsesConverter {
             "model": self.state.inner.model.as_str(),
             "terminalStatus": stream_terminal_status(self.failed, self.state.inner.completed),
             "sawMessageStop": self.saw_message_stop,
+            "sawDone": self.saw_done,
+            "openBlockCount": self.state.blocks.len(),
+            "pendingTextBufferCount": self.state.text_buffers.len(),
+            "hasPendingTextMarker": self.state.pending_text_marker.is_some(),
+            "serverToolResultBlockCount": self.state.server_tool_result_block_count,
+            "unknownBlockCount": self.state.unknown_block_count,
+            "unknownBlockTypes": self.state.unknown_block_types.iter().cloned().collect::<Vec<_>>(),
             "finishReason": self.state.inner.finish_reason.as_deref(),
             "failureSource": self.failure_source,
             "failureType": self.failure_type.as_deref(),
@@ -1723,7 +1733,20 @@ impl AnthropicSseToResponsesConverter {
         }
         let data = data_parts.join("\n");
         if data.trim() == "[DONE]" {
-            self.saw_message_stop = true;
+            self.saw_done = true;
+            if self.state.inner.completed {
+                return;
+            }
+            if self.state.has_open_content_blocks() {
+                self.record_failure_into(
+                    output,
+                    "incomplete_done_marker",
+                    "upstream sent [DONE] before closing Anthropic content blocks".to_string(),
+                    Some("stream_error".to_string()),
+                );
+                return;
+            }
+            self.state.flush_pending_text_marker_into(output);
             self.state.inner.finalize_into(output);
             return;
         }
@@ -4543,6 +4566,7 @@ enum AnthropicBlockKind {
     Text,
     Thinking,
     Tool,
+    Other,
 }
 
 #[derive(Debug, Default)]
@@ -4551,11 +4575,16 @@ struct AnthropicSseState {
     diagnostic_id: Option<String>,
     blocks: BTreeMap<usize, AnthropicBlockKind>,
     text_buffers: BTreeMap<usize, String>,
+    native_tool_state_indices: BTreeMap<usize, usize>,
+    next_tool_state_index: usize,
     usage: Value,
     text_block_count: usize,
     thinking_block_count: usize,
     native_tool_use_block_count: usize,
     other_block_count: usize,
+    server_tool_result_block_count: usize,
+    unknown_block_count: usize,
+    unknown_block_types: BTreeSet<String>,
     textual_invoke_block_count: usize,
     textual_invoke_call_count: usize,
     native_tool_names: BTreeSet<String>,
@@ -4573,11 +4602,16 @@ impl AnthropicSseState {
             diagnostic_id: diagnostic_id.map(ToString::to_string),
             blocks: BTreeMap::new(),
             text_buffers: BTreeMap::new(),
+            native_tool_state_indices: BTreeMap::new(),
+            next_tool_state_index: 0,
             usage: json!({}),
             text_block_count: 0,
             thinking_block_count: 0,
             native_tool_use_block_count: 0,
             other_block_count: 0,
+            server_tool_result_block_count: 0,
+            unknown_block_count: 0,
+            unknown_block_types: BTreeSet::new(),
             textual_invoke_block_count: 0,
             textual_invoke_call_count: 0,
             native_tool_names: BTreeSet::new(),
@@ -4644,6 +4678,7 @@ impl AnthropicSseState {
             "tool_use" => {
                 self.native_tool_use_block_count += 1;
                 self.blocks.insert(index, AnthropicBlockKind::Tool);
+                let tool_state_index = self.native_tool_state_index(index);
                 self.inner.flush_inline_think_at_boundary_into(output);
                 self.inner.finalize_reasoning_into(output);
                 if let Some(name) = block
@@ -4654,7 +4689,7 @@ impl AnthropicSseState {
                     self.native_tool_names.insert(name.to_string());
                 }
                 let fake = json!({
-                    "index": index,
+                    "index": tool_state_index,
                     "id": block.get("id").and_then(Value::as_str).unwrap_or(""),
                     "function": {
                         "name": block.get("name").and_then(Value::as_str).unwrap_or(""),
@@ -4669,7 +4704,7 @@ impl AnthropicSseState {
                         .unwrap_or(false)
                 }) {
                     let fake = json!({
-                        "index": index,
+                        "index": tool_state_index,
                         "function": {
                             "arguments": canonical_json_string(input)
                         }
@@ -4683,6 +4718,7 @@ impl AnthropicSseState {
                 // 不会触发客户端工具循环。
                 self.native_tool_use_block_count += 1;
                 self.blocks.insert(index, AnthropicBlockKind::Tool);
+                let tool_state_index = self.native_tool_state_index(index);
                 self.inner.flush_inline_think_at_boundary_into(output);
                 self.inner.finalize_reasoning_into(output);
                 if let Some(name) = block
@@ -4693,7 +4729,7 @@ impl AnthropicSseState {
                     self.native_tool_names.insert(name.to_string());
                 }
                 let fake = json!({
-                    "index": index,
+                    "index": tool_state_index,
                     "id": block.get("id").and_then(Value::as_str).unwrap_or(""),
                     "function": {
                         "name": block.get("name").and_then(Value::as_str).unwrap_or(""),
@@ -4708,7 +4744,7 @@ impl AnthropicSseState {
                         .unwrap_or(false)
                 }) {
                     let fake = json!({
-                        "index": index,
+                        "index": tool_state_index,
                         "function": {
                             "arguments": canonical_json_string(input)
                         }
@@ -4718,10 +4754,22 @@ impl AnthropicSseState {
             }
             "web_search_tool_result" => {
                 // 服务端搜索结果由 Claude 自己消化并写进最终 text，不透传给客户端。
+                self.blocks.insert(index, AnthropicBlockKind::Other);
                 self.other_block_count += 1;
+                self.server_tool_result_block_count += 1;
             }
             _ => {
+                self.blocks.insert(index, AnthropicBlockKind::Other);
                 self.other_block_count += 1;
+                self.unknown_block_count += 1;
+                self.unknown_block_types.insert(
+                    if block_type.is_empty() {
+                        "unknown"
+                    } else {
+                        block_type
+                    }
+                    .to_string(),
+                );
             }
         }
     }
@@ -4752,13 +4800,14 @@ impl AnthropicSseState {
             "input_json_delta" => {
                 self.inner.flush_inline_think_at_boundary_into(output);
                 self.inner.finalize_reasoning_into(output);
+                let tool_state_index = self.native_tool_state_index(index);
                 let partial = delta
                     .get("partial_json")
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 if !partial.is_empty() {
                     let fake = json!({
-                        "index": index,
+                        "index": tool_state_index,
                         "function": {
                             "arguments": partial
                         }
@@ -4777,7 +4826,30 @@ impl AnthropicSseState {
             if let Some(text) = self.text_buffers.remove(&index) {
                 self.flush_buffered_text_block_into(index, &text, output);
             }
+        } else if matches!(kind, Some(AnthropicBlockKind::Tool)) {
+            self.native_tool_state_indices.remove(&index);
         }
+    }
+
+    fn allocate_tool_state_index(&mut self) -> usize {
+        let index = self.next_tool_state_index;
+        self.next_tool_state_index = self.next_tool_state_index.saturating_add(1);
+        index
+    }
+
+    fn has_open_content_blocks(&self) -> bool {
+        !self.blocks.is_empty()
+            || !self.text_buffers.is_empty()
+            || !self.native_tool_state_indices.is_empty()
+    }
+
+    fn native_tool_state_index(&mut self, block_index: usize) -> usize {
+        if let Some(index) = self.native_tool_state_indices.get(&block_index) {
+            return *index;
+        }
+        let index = self.allocate_tool_state_index();
+        self.native_tool_state_indices.insert(block_index, index);
+        index
     }
 
     fn handle_text_delta_into(&mut self, index: usize, text: &str, output: &mut String) {
@@ -4835,7 +4907,8 @@ impl AnthropicSseState {
         }
 
         self.textual_invoke_block_count += 1;
-        self.textual_invoke_call_count += calls.len();
+        let first_call_index = self.textual_invoke_call_count;
+        self.textual_invoke_call_count = self.textual_invoke_call_count.saturating_add(calls.len());
         for call in &calls {
             self.textual_invoke_tool_names.insert(call.name.clone());
         }
@@ -4852,10 +4925,11 @@ impl AnthropicSseState {
         self.inner.flush_inline_think_at_boundary_into(output);
         self.inner.finalize_reasoning_into(output);
         for (offset, call) in calls.into_iter().enumerate() {
-            let stream_index = index.saturating_mul(1000).saturating_add(offset);
+            let call_index = first_call_index.saturating_add(offset);
+            let tool_state_index = self.allocate_tool_state_index();
             let fake = json!({
-                "index": stream_index,
-                "id": format!("call_textual_invoke_{stream_index}"),
+                "index": tool_state_index,
+                "id": format!("call_textual_invoke_{call_index}"),
                 "function": {
                     "name": call.name,
                     "arguments": canonical_json_string(&Value::Object(call.arguments))
@@ -5362,7 +5436,7 @@ fn append_responses_item_to_anthropic(
                     vec![json!({
                         "type": "tool_result",
                         "tool_use_id": call_id,
-                        "content": response_output_text(output)
+                        "content": anthropic_tool_result_content(output)
                     })],
                 );
             }
@@ -5517,6 +5591,46 @@ fn dedupe_anthropic_codex_context_text(messages: &mut Vec<Value>) {
     });
     if messages.is_empty() {
         messages.push(json!({ "role": "user", "content": [{ "type": "text", "text": "" }] }));
+    }
+}
+
+/// 删除历史 assistant 消息里紧邻原生工具调用的内部边界标记。
+///
+/// 只处理已知标记作为整块文本或独立尾行的情况；没有工具调用跟随时保留原文，
+/// 避免把正常回答、代码变量或用户真正要求返回的 `count` 误删。
+fn normalize_anthropic_tool_boundary_markers(messages: &mut [Value]) {
+    for message in messages {
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+
+        let mut index = 0;
+        while index + 1 < content.len() {
+            if !is_anthropic_native_tool_block(&content[index + 1]) {
+                index += 1;
+                continue;
+            }
+            let replacement = content[index]
+                .get("type")
+                .and_then(Value::as_str)
+                .filter(|block_type| *block_type == "text")
+                .and_then(|_| content[index].get("text"))
+                .and_then(Value::as_str)
+                .and_then(strip_trailing_anthropic_tool_boundary_marker);
+            let Some(leading) = replacement else {
+                index += 1;
+                continue;
+            };
+            if leading.is_empty() {
+                content.remove(index);
+                continue;
+            }
+            content[index]["text"] = json!(leading);
+            index += 1;
+        }
     }
 }
 
@@ -6884,6 +6998,9 @@ fn chat_tool_to_anthropic_tool(tool: &Value) -> Option<Value> {
     {
         anthropic_tool["description"] = json!(description);
     }
+    if let Some(strict) = function.get("strict").and_then(Value::as_bool) {
+        anthropic_tool["strict"] = json!(strict);
+    }
     Some(anthropic_tool)
 }
 
@@ -7064,47 +7181,13 @@ fn normalize_chat_tool_parameters(parameters: &Value) -> Value {
 
 fn normalize_anthropic_tool_input_schema(parameters: &Value) -> Value {
     let mut normalized = normalize_chat_tool_parameters(parameters);
-    if !has_top_level_schema_union(&normalized) {
+    // `allOf` 是合取约束，无法用当前的宽松属性合并算法无损表达。
+    // 遇到任意层级的 `allOf` 时保留原 Schema，避免把交集错误放宽成 `anyOf`。
+    if schema_contains_keyword(&normalized, "allOf") || !has_top_level_schema_union(&normalized) {
         return normalized;
     }
 
-    let (merged_properties, merged_required) = {
-        let parent = normalized.as_object().expect("normalized schema is object");
-        let mut merged_properties = parent
-            .get("properties")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        let parent_required = schema_required_fields(parent);
-        let mut union_leaves = Vec::new();
-        collect_schema_union_leaves(&normalized, &mut union_leaves);
-
-        let mut common_required: Option<BTreeSet<String>> = None;
-        for leaf in union_leaves {
-            if let Some(properties) = leaf.get("properties").and_then(Value::as_object) {
-                for (name, schema) in properties {
-                    match merged_properties.get_mut(name) {
-                        Some(existing) => merge_schema_property(existing, schema),
-                        None => {
-                            merged_properties.insert(name.clone(), schema.clone());
-                        }
-                    }
-                }
-            }
-
-            let required = schema_required_fields(leaf);
-            common_required = Some(match common_required {
-                Some(current) => current.intersection(&required).cloned().collect(),
-                None => required,
-            });
-        }
-
-        let mut merged_required = parent_required;
-        if let Some(common_required) = common_required {
-            merged_required.extend(common_required);
-        }
-        (merged_properties, merged_required)
-    };
+    let (merged_properties, merged_required) = summarize_anthropic_schema_composition(&normalized);
 
     if let Some(object) = normalized.as_object_mut() {
         object.remove("oneOf");
@@ -7121,28 +7204,75 @@ fn normalize_anthropic_tool_input_schema(parameters: &Value) -> Value {
 }
 
 fn has_top_level_schema_union(schema: &Value) -> bool {
-    schema.as_object().is_some_and(|object| {
-        object.contains_key("oneOf") || object.contains_key("anyOf") || object.contains_key("allOf")
-    })
+    schema
+        .as_object()
+        .is_some_and(|object| object.contains_key("oneOf") || object.contains_key("anyOf"))
 }
 
-fn collect_schema_union_leaves<'a>(schema: &'a Value, leaves: &mut Vec<&'a Map<String, Value>>) {
+fn schema_contains_keyword(schema: &Value, keyword: &str) -> bool {
+    match schema {
+        Value::Object(object) => {
+            object.contains_key(keyword)
+                || object
+                    .values()
+                    .any(|value| schema_contains_keyword(value, keyword))
+        }
+        Value::Array(items) => items
+            .iter()
+            .any(|value| schema_contains_keyword(value, keyword)),
+        _ => false,
+    }
+}
+
+/// 把顶层 JSON Schema 联合类型近似为 Anthropic 更稳定接受的单一对象 Schema。
+///
+/// `oneOf` / `anyOf` 是备选分支，只有所有分支都要求的字段才能继续标记为必填；
+/// 含 `allOf` 的 Schema 会在入口处原样保留，不进入该近似转换。
+fn summarize_anthropic_schema_composition(
+    schema: &Value,
+) -> (Map<String, Value>, BTreeSet<String>) {
     let Some(object) = schema.as_object() else {
-        return;
+        return (Map::new(), BTreeSet::new());
     };
 
-    let mut expanded = false;
-    for key in ["oneOf", "anyOf", "allOf"] {
+    let mut merged_properties = object
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut merged_required = schema_required_fields(object);
+
+    for key in ["oneOf", "anyOf"] {
         if let Some(items) = object.get(key).and_then(Value::as_array) {
-            expanded = true;
+            let mut common_required: Option<BTreeSet<String>> = None;
             for item in items {
-                collect_schema_union_leaves(item, leaves);
+                let (properties, required) = summarize_anthropic_schema_composition(item);
+                merge_schema_properties(&mut merged_properties, properties);
+                common_required = Some(match common_required {
+                    Some(current) => current.intersection(&required).cloned().collect(),
+                    None => required,
+                });
+            }
+            if let Some(common_required) = common_required {
+                merged_required.extend(common_required);
             }
         }
     }
 
-    if !expanded {
-        leaves.push(object);
+    (merged_properties, merged_required)
+}
+
+fn merge_schema_properties(
+    merged_properties: &mut Map<String, Value>,
+    incoming_properties: Map<String, Value>,
+) {
+    for (name, schema) in incoming_properties {
+        match merged_properties.get_mut(&name) {
+            Some(existing) => merge_schema_property(existing, &schema),
+            None => {
+                merged_properties.insert(name, schema);
+            }
+        }
     }
 }
 
@@ -8044,6 +8174,7 @@ fn anthropic_content_to_response_output_items(
     let mut reasoning_chunks = Vec::new();
     let mut message_content = Vec::new();
     let mut tool_items = Vec::new();
+    let mut textual_invoke_call_index = 0;
 
     for (index, block) in blocks.iter().enumerate() {
         match block.get("type").and_then(Value::as_str).unwrap_or("") {
@@ -8059,6 +8190,14 @@ fn anthropic_content_to_response_output_items(
             "text" => {
                 if let Some(text) = block.get("text").and_then(Value::as_str) {
                     let text = strip_inline_cite_tags(text);
+                    let text = if blocks
+                        .get(index + 1)
+                        .is_some_and(is_anthropic_native_tool_block)
+                    {
+                        strip_trailing_anthropic_tool_boundary_marker(&text).unwrap_or(text)
+                    } else {
+                        text
+                    };
                     if let Some((leading, calls)) = split_text_into_message_and_tool_calls(&text) {
                         if !leading.is_empty() {
                             message_content.push(json!({
@@ -8067,8 +8206,11 @@ fn anthropic_content_to_response_output_items(
                                 "annotations": []
                             }));
                         }
-                        tool_items
-                            .extend(textual_invoke_calls_to_response_items(calls, tool_context));
+                        tool_items.extend(textual_invoke_calls_to_response_items(
+                            calls,
+                            tool_context,
+                            &mut textual_invoke_call_index,
+                        ));
                     } else if !text.is_empty() {
                         message_content.push(
                             json!({ "type": "output_text", "text": text, "annotations": [] }),
@@ -8279,6 +8421,9 @@ fn log_anthropic_stream_response_shape(state: &AnthropicSseState) {
             "nativeToolUseBlockCount": state.native_tool_use_block_count,
             "nativeToolUseNames": state.native_tool_names.iter().cloned().collect::<Vec<_>>(),
             "otherBlockCount": state.other_block_count,
+            "serverToolResultBlockCount": state.server_tool_result_block_count,
+            "unknownBlockCount": state.unknown_block_count,
+            "unknownBlockTypes": state.unknown_block_types.iter().cloned().collect::<Vec<_>>(),
             "textualInvokeBlockCount": state.textual_invoke_block_count,
             "textualInvokeCallCount": state.textual_invoke_call_count,
             "textualInvokeToolNames": state.textual_invoke_tool_names.iter().cloned().collect::<Vec<_>>()
@@ -8453,13 +8598,15 @@ fn log_responses_request_metadata(
 fn textual_invoke_calls_to_response_items(
     calls: Vec<TextualInvokeToolCall>,
     tool_context: &CodexToolContext,
+    next_call_index: &mut usize,
 ) -> Vec<Value> {
     calls
         .into_iter()
-        .enumerate()
-        .map(|(index, call)| {
+        .map(|call| {
+            let call_id = format!("call_textual_invoke_{}", *next_call_index);
+            *next_call_index = next_call_index.saturating_add(1);
             response_tool_call_item(
-                &format!("call_textual_invoke_{index}"),
+                &call_id,
                 &call.name,
                 &canonical_json_string(&Value::Object(call.arguments)),
                 tool_context,
@@ -8474,10 +8621,43 @@ struct TextualInvokeToolCall {
     arguments: serde_json::Map<String, Value>,
 }
 
+const ANTHROPIC_TOOL_BOUNDARY_MARKERS: &[&str] = &["course", "codex", "call", "count"];
+
+fn is_anthropic_tool_boundary_marker(text: &str) -> bool {
+    ANTHROPIC_TOOL_BOUNDARY_MARKERS.contains(&text.trim())
+}
+
+fn is_anthropic_native_tool_block(block: &Value) -> bool {
+    matches!(
+        block.get("type").and_then(Value::as_str),
+        Some("tool_use" | "server_tool_use")
+    )
+}
+
+/// 若文本以已知工具边界标记结束，返回标记前的正文。
+///
+/// 标记必须是整块文本或独立尾行；返回空串表示整块都是标记。
+fn strip_trailing_anthropic_tool_boundary_marker(text: &str) -> Option<String> {
+    let trimmed = text.trim_end();
+    for &marker in ANTHROPIC_TOOL_BOUNDARY_MARKERS {
+        if let Some(prefix) = trimmed.strip_suffix(marker) {
+            if is_anthropic_tool_marker_line_boundary(prefix) {
+                return Some(prefix.trim_end().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn is_anthropic_tool_marker_line_boundary(prefix: &str) -> bool {
+    let prefix = prefix.trim_end_matches([' ', '\t']);
+    prefix.is_empty() || prefix.ends_with('\n') || prefix.ends_with('\r')
+}
+
 /// 把一段文本切成「前导正文」和「文本化工具调用」两部分。
 ///
 /// 模型有时会先输出正常正文，再在结尾追加 `<invoke>` 形式的工具调用。
-/// 该函数定位第一个工具调用起点（含可选的 course/codex/call 前缀标记），
+/// 该函数定位第一个工具调用起点（含可选的已知 Anthropic 边界标记），
 /// 起点之前作为正文返回，起点之后交给 `parse_textual_invoke_tool_calls` 解析。
 /// 若起点之后无法解析为完整工具调用，则视为普通文本，返回 `None`。
 fn split_text_into_message_and_tool_calls(
@@ -8498,10 +8678,10 @@ fn split_text_into_message_and_tool_calls(
 
 fn textual_invoke_region_start_before(text: &str, invoke_pos: usize) -> usize {
     let trimmed_before = text[..invoke_pos].trim_end();
-    for marker in ["course", "codex", "call"] {
+    for &marker in ANTHROPIC_TOOL_BOUNDARY_MARKERS {
         if let Some(prefix) = trimmed_before.strip_suffix(marker) {
-            // 前缀标记必须是独立词：其前面要么是文本开头，要么是空白/换行。
-            if prefix.is_empty() || prefix.ends_with(char::is_whitespace) {
+            // 前缀标记必须独占一行，避免把正常句尾的 call/count 当内部标记删除。
+            if is_anthropic_tool_marker_line_boundary(prefix) {
                 return prefix.len();
             }
         }
@@ -8549,7 +8729,7 @@ fn parse_textual_invoke_tool_calls(text: &str) -> Option<Vec<TextualInvokeToolCa
 }
 
 fn strip_textual_invoke_prefix(text: &str) -> &str {
-    for marker in ["course", "codex", "call"] {
+    for &marker in ANTHROPIC_TOOL_BOUNDARY_MARKERS {
         if let Some(rest) = text.strip_prefix(marker) {
             if rest.trim_start().starts_with("<invoke") {
                 return rest.trim_start();
@@ -8561,24 +8741,37 @@ fn strip_textual_invoke_prefix(text: &str) -> &str {
 
 /// 流式场景：当文本块尚未出现 `<invoke` 时，计算「可安全透传」的前缀字节长度。
 ///
-/// 尾部可能是下一个工具调用起点的开头（`<invoke` 的不完整前缀，或 course/codex/call
-/// 标记的前缀），这部分必须保留继续缓冲；其余前缀可以作为正文先输出。
+/// 尾部可能是下一个工具调用起点的开头（`<invoke` 或已知边界标记的不完整前缀），
+/// 这部分必须保留继续缓冲；其余前缀可以作为正文先输出。
 fn textual_invoke_safe_passthrough_len(buffer: &str) -> usize {
-    // 尾部最多保留这么多字节用于拼接检测（足以容纳 "course" + 空白 + "<invoke"）。
-    const MAX_PENDING_TAIL: usize = 16;
-    let start = buffer.len().saturating_sub(MAX_PENDING_TAIL);
+    let max_marker_len = ANTHROPIC_TOOL_BOUNDARY_MARKERS
+        .iter()
+        .map(|marker| marker.len())
+        .max()
+        .unwrap_or(0);
+    // 额外保留空白和 `<invoke` 前缀，后续新增更长 marker 时无需同步魔法数字。
+    let max_pending_tail = max_marker_len + "<invoke".len() + 4;
+    let start = buffer.len().saturating_sub(max_pending_tail);
     // 从距尾部 MAX_PENDING_TAIL 处向后逐个字节边界尝试，找到最早的「可能是起点」位置。
     for candidate in start..=buffer.len() {
         if !buffer.is_char_boundary(candidate) {
             continue;
         }
-        let at_text_boundary = candidate == 0
-            || buffer[..candidate]
-                .chars()
-                .next_back()
-                .is_none_or(char::is_whitespace);
-        if textual_invoke_tail_may_start_call(&buffer[candidate..], at_text_boundary) {
-            return candidate;
+        let at_marker_line_boundary = is_anthropic_tool_marker_line_boundary(&buffer[..candidate]);
+        if textual_invoke_tail_may_start_call(&buffer[candidate..], at_marker_line_boundary) {
+            // 连同 marker 前的空白一起暂存。否则 marker 跨 chunk 时，正文后的换行会先
+            // 透传，最终即使工具调用被正确识别，流式结果仍比非流式多出空行。
+            let mut boundary = candidate;
+            while boundary > 0 {
+                let Some(previous) = buffer[..boundary].chars().next_back() else {
+                    break;
+                };
+                if !previous.is_whitespace() {
+                    break;
+                }
+                boundary -= previous.len_utf8();
+            }
+            return boundary;
         }
     }
     buffer.len()
@@ -8692,7 +8885,7 @@ impl InlineCiteFilter {
 }
 
 /// 尾部子串是否可能是一个尚未输完的工具调用起点（`<invoke` 或 marker 前缀）。
-fn textual_invoke_tail_may_start_call(tail: &str, at_text_boundary: bool) -> bool {
+fn textual_invoke_tail_may_start_call(tail: &str, at_marker_line_boundary: bool) -> bool {
     if tail.is_empty() {
         return false;
     }
@@ -8701,10 +8894,10 @@ fn textual_invoke_tail_may_start_call(tail: &str, at_text_boundary: bool) -> boo
         return true;
     }
     // 尾部是 course/codex/call 标记的前缀，或标记后跟着空白/`<invoke` 前缀。
-    if !at_text_boundary {
+    if !at_marker_line_boundary {
         return false;
     }
-    for marker in ["course", "codex", "call"] {
+    for &marker in ANTHROPIC_TOOL_BOUNDARY_MARKERS {
         if marker.starts_with(tail) {
             return true;
         }
@@ -8731,7 +8924,10 @@ fn text_tool_marker_kinds(text: &str) -> Vec<String> {
     if trimmed.contains("<invoke") {
         kinds.insert("xmlInvoke".to_string());
     }
-    for marker in ["course", "codex", "call"] {
+    for &marker in ANTHROPIC_TOOL_BOUNDARY_MARKERS {
+        if trimmed == marker {
+            kinds.insert(format!("{marker}Standalone"));
+        }
         if let Some(rest) = trimmed.strip_prefix(marker) {
             if rest.trim_start().starts_with("<invoke") {
                 kinds.insert(format!("{marker}Prefix"));
@@ -8745,7 +8941,7 @@ fn text_tool_marker_kinds(text: &str) -> Vec<String> {
 }
 
 fn is_standalone_textual_tool_marker(text: &str) -> bool {
-    matches!(text.trim(), "course" | "codex" | "call")
+    is_anthropic_tool_boundary_marker(text)
 }
 
 fn diagnostic_text_preview(text: &str) -> String {
@@ -8948,7 +9144,18 @@ fn extract_reasoning_summary_text(value: &Value) -> Option<String> {
 }
 
 fn default_responses_usage() -> Value {
-    json!({ "input_tokens": 0, "output_tokens": 0, "total_tokens": 0 })
+    json!({
+        "input_tokens": 0,
+        "input_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 0
+        },
+        "output_tokens": 0,
+        "output_tokens_details": {
+            "reasoning_tokens": 0
+        },
+        "total_tokens": 0
+    })
 }
 
 fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
@@ -8979,11 +9186,13 @@ fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let cache_creation_5m = usage
-        .get("cache_creation_5m_input_tokens")
+        .pointer("/cache_creation/ephemeral_5m_input_tokens")
+        .or_else(|| usage.get("cache_creation_5m_input_tokens"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let cache_creation_1h = usage
-        .get("cache_creation_1h_input_tokens")
+        .pointer("/cache_creation/ephemeral_1h_input_tokens")
+        .or_else(|| usage.get("cache_creation_1h_input_tokens"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let has_claude_cache_fields = usage.get("cache_read_input_tokens").is_some()
@@ -9016,12 +9225,11 @@ fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
 
     let usage_input_tokens = if input_tokens_include_cache {
         input_tokens.saturating_sub(
-            cached_tokens
-                + effective_cache_creation_tokens(
-                    cache_creation,
-                    cache_creation_5m,
-                    cache_creation_1h,
-                ),
+            cached_tokens.saturating_add(effective_cache_creation_tokens(
+                cache_creation,
+                cache_creation_5m,
+                cache_creation_1h,
+            )),
         )
     } else {
         input_tokens
@@ -9033,14 +9241,18 @@ fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
         || usage.get("promptTokenCount").is_some();
     let total_tokens = if should_recalculate_total {
         usage_input_tokens
-            + output_tokens
-            + cached_tokens
-            + effective_cache_creation_tokens(cache_creation, cache_creation_5m, cache_creation_1h)
+            .saturating_add(output_tokens)
+            .saturating_add(cached_tokens)
+            .saturating_add(effective_cache_creation_tokens(
+                cache_creation,
+                cache_creation_5m,
+                cache_creation_1h,
+            ))
     } else {
         usage
             .get("total_tokens")
             .and_then(Value::as_u64)
-            .unwrap_or(usage_input_tokens + output_tokens)
+            .unwrap_or_else(|| usage_input_tokens.saturating_add(output_tokens))
     };
     let mut result = json!({
         "input_tokens": usage_input_tokens,
@@ -9079,7 +9291,78 @@ fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
 }
 
 fn anthropic_usage_to_responses_usage(usage: Option<&Value>) -> Value {
-    chat_usage_to_responses_usage(usage)
+    let Some(usage) = usage.filter(|value| value.is_object() && !value.is_null()) else {
+        return default_responses_usage();
+    };
+
+    let uncached_input_tokens = usage
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cache_read_tokens = usage
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cache_creation = usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cache_creation_5m = usage
+        .pointer("/cache_creation/ephemeral_5m_input_tokens")
+        .or_else(|| usage.get("cache_creation_5m_input_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cache_creation_1h = usage
+        .pointer("/cache_creation/ephemeral_1h_input_tokens")
+        .or_else(|| usage.get("cache_creation_1h_input_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cache_write_tokens =
+        effective_cache_creation_tokens(cache_creation, cache_creation_5m, cache_creation_1h);
+    let input_tokens = uncached_input_tokens
+        .saturating_add(cache_read_tokens)
+        .saturating_add(cache_write_tokens);
+    let output_tokens = usage
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
+    let mut result = json!({
+        "input_tokens": input_tokens,
+        "input_tokens_details": {
+            "cached_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens
+        },
+        "output_tokens": output_tokens,
+        "output_tokens_details": responses_output_tokens_details_from_usage(usage)
+            .unwrap_or_else(|| json!({ "reasoning_tokens": 0 })),
+        "total_tokens": input_tokens.saturating_add(output_tokens)
+    });
+
+    for field in [
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "cache_creation_5m_input_tokens",
+        "cache_creation_1h_input_tokens",
+        "server_tool_use",
+    ] {
+        if let Some(value) = usage.get(field) {
+            result[field] = value.clone();
+        }
+    }
+    if let Some(cache_creation) = usage.get("cache_creation") {
+        result["cache_creation"] = cache_creation.clone();
+    }
+    let cache_ttl = match (cache_creation_5m > 0, cache_creation_1h > 0) {
+        (true, true) => Some("mixed"),
+        (true, false) => Some("5m"),
+        (false, true) => Some("1h"),
+        (false, false) => None,
+    };
+    if let Some(cache_ttl) = cache_ttl {
+        result["cache_ttl"] = json!(cache_ttl);
+    }
+    result
 }
 
 fn responses_output_tokens_details_from_usage(usage: &Value) -> Option<Value> {
@@ -9116,7 +9399,7 @@ fn effective_cache_creation_tokens(
     if cache_creation > 0 {
         cache_creation
     } else {
-        cache_creation_5m + cache_creation_1h
+        cache_creation_5m.saturating_add(cache_creation_1h)
     }
 }
 

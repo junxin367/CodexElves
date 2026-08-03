@@ -566,6 +566,130 @@ fn responses_request_converts_to_anthropic_messages() {
 }
 
 #[test]
+fn anthropic_request_preserves_strict_tool_definition() {
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-5",
+        "input": "look up the record",
+        "tools": [{
+            "type": "function",
+            "name": "lookup",
+            "description": "Look up one record.",
+            "strict": true,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" }
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }
+        }]
+    }))
+    .unwrap();
+
+    assert_eq!(converted["tools"][0]["name"], "lookup");
+    assert_eq!(converted["tools"][0]["strict"], true);
+}
+
+#[test]
+fn anthropic_request_removes_count_marker_before_tool_use_history() {
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-5",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "继续" }]
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": "先检查训练器。\n\ncount"
+                }]
+            },
+            {
+                "type": "function_call",
+                "name": "shell_command",
+                "call_id": "toolu_count_history",
+                "arguments": "{\"command\":\"git status --short\"}"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let assistant = &converted["messages"][1];
+    assert_eq!(assistant["role"], "assistant");
+    assert_eq!(assistant["content"][0]["type"], "text");
+    assert_eq!(assistant["content"][0]["text"], "先检查训练器。");
+    assert_eq!(assistant["content"][1]["type"], "tool_use");
+    assert_eq!(assistant["content"][1]["id"], "toolu_count_history");
+    assert_eq!(assistant["content"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn anthropic_request_keeps_count_history_without_following_tool() {
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-5",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "返回这个单词" }]
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "count" }]
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "继续" }]
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert_eq!(converted["messages"][1]["role"], "assistant");
+    assert_eq!(converted["messages"][1]["content"][0]["text"], "count");
+}
+
+#[test]
+fn anthropic_request_keeps_normal_sentence_ending_in_count_before_tool_use() {
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-5",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "检查数量" }]
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": "Please verify the count"
+                }]
+            },
+            {
+                "type": "function_call",
+                "name": "shell_command",
+                "call_id": "toolu_normal_count_history",
+                "arguments": "{\"command\":\"git status --short\"}"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let assistant = &converted["messages"][1];
+    assert_eq!(assistant["content"][0]["text"], "Please verify the count");
+    assert_eq!(assistant["content"][1]["type"], "tool_use");
+}
+
+#[test]
 fn anthropic_tool_result_keeps_images_as_image_blocks() {
     let converted = responses_to_anthropic_messages(json!({
         "model": "claude-opus-5",
@@ -600,6 +724,60 @@ fn anthropic_tool_result_keeps_images_as_image_blocks() {
     let tool_result = &converted["messages"][2]["content"][0];
     assert_eq!(tool_result["type"], "tool_result");
     assert_eq!(tool_result["tool_use_id"], "call-1");
+    assert_eq!(
+        tool_result["content"],
+        json!([
+            { "type": "text", "text": "screenshot" },
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": "aGVsbG8="
+                }
+            }
+        ])
+    );
+}
+
+#[test]
+fn anthropic_legacy_tool_result_keeps_images_as_image_blocks() {
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-5",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "look" }]
+            },
+            {
+                "type": "tool_call",
+                "tool_use": {
+                    "id": "call-legacy-image",
+                    "name": "view_image",
+                    "input": { "path": "screenshot.png" }
+                }
+            },
+            {
+                "type": "tool_result",
+                "content": {
+                    "tool_use_id": "call-legacy-image",
+                    "content": [
+                        { "type": "input_text", "text": "screenshot" },
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,aGVsbG8="
+                        }
+                    ]
+                }
+            }
+        ]
+    }))
+    .unwrap();
+
+    let tool_result = &converted["messages"][2]["content"][0];
+    assert_eq!(tool_result["type"], "tool_result");
+    assert_eq!(tool_result["tool_use_id"], "call-legacy-image");
     assert_eq!(
         tool_result["content"],
         json!([
@@ -875,6 +1053,59 @@ fn anthropic_tool_schema_flattens_top_level_union() {
     assert!(mode_enum.contains(&json!("create")));
     assert!(mode_enum.contains(&json!("delete")));
     assert!(schema.get("$defs").is_some());
+}
+
+#[test]
+fn anthropic_tool_schema_preserves_all_of_instead_of_weakening_constraints() {
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-opus-5",
+        "input": "update the record",
+        "tools": [{
+            "type": "function",
+            "name": "update_record",
+            "parameters": {
+                "allOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "score": {
+                                "type": "number",
+                                "minimum": 0
+                            }
+                        },
+                        "required": ["score"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "score": {
+                                "type": "number",
+                                "maximum": 10
+                            }
+                        },
+                        "required": ["score"],
+                        "additionalProperties": false
+                    }
+                ]
+            }
+        }]
+    }))
+    .unwrap();
+
+    let schema = &converted["tools"][0]["input_schema"];
+    assert_eq!(schema["allOf"][0]["properties"]["score"]["minimum"], 0);
+    assert_eq!(schema["allOf"][1]["properties"]["score"]["maximum"], 10);
+    assert!(
+        schema["allOf"][0]["properties"]["score"]
+            .get("anyOf")
+            .is_none()
+    );
+    assert!(
+        schema["allOf"][1]["properties"]["score"]
+            .get("anyOf")
+            .is_none()
+    );
 }
 
 #[test]
@@ -1179,8 +1410,17 @@ fn anthropic_message_response_converts_to_responses() {
     assert_eq!(converted["output"][2]["type"], "function_call");
     assert_eq!(converted["output"][2]["name"], "lookup");
     assert_eq!(converted["output"][2]["arguments"], r#"{"query":"codex"}"#);
-    assert_eq!(converted["usage"]["input_tokens"], 10);
+    assert_eq!(converted["usage"]["input_tokens"], 12);
     assert_eq!(converted["usage"]["output_tokens"], 5);
+    assert_eq!(converted["usage"]["total_tokens"], 17);
+    assert_eq!(
+        converted["usage"]["input_tokens_details"]["cached_tokens"],
+        2
+    );
+    assert_eq!(
+        converted["usage"]["input_tokens_details"]["cache_write_tokens"],
+        0
+    );
     assert_eq!(converted["usage"]["cache_read_input_tokens"], 2);
     assert_eq!(
         converted["usage"]["output_tokens_details"]["thinking_tokens"],
@@ -1190,6 +1430,257 @@ fn anthropic_message_response_converts_to_responses() {
         converted["usage"]["output_tokens_details"]["reasoning_tokens"],
         3
     );
+}
+
+#[test]
+fn anthropic_usage_maps_cache_reads_and_writes_into_responses_input_details() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_anthropic_cache_usage",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-5",
+            "content": [{ "type": "text", "text": "ok" }],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 3,
+                "cache_read_input_tokens": 2,
+                "cache_creation_input_tokens": 10,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 4,
+                    "ephemeral_1h_input_tokens": 6
+                }
+            }
+        }),
+        &json!({ "model": "claude-opus-5", "input": "hello" }),
+    )
+    .unwrap();
+
+    assert_eq!(converted["usage"]["input_tokens"], 22);
+    assert_eq!(converted["usage"]["output_tokens"], 3);
+    assert_eq!(converted["usage"]["total_tokens"], 25);
+    assert_eq!(
+        converted["usage"]["input_tokens_details"],
+        json!({ "cached_tokens": 2, "cache_write_tokens": 10 })
+    );
+    assert_eq!(converted["usage"]["cache_read_input_tokens"], 2);
+    assert_eq!(converted["usage"]["cache_creation_input_tokens"], 10);
+    assert_eq!(
+        converted["usage"]["cache_creation"],
+        json!({
+            "ephemeral_5m_input_tokens": 4,
+            "ephemeral_1h_input_tokens": 6
+        })
+    );
+    assert_eq!(
+        converted["usage"]["output_tokens_details"],
+        json!({ "reasoning_tokens": 0 })
+    );
+    assert_eq!(converted["usage"]["cache_ttl"], "mixed");
+}
+
+#[test]
+fn anthropic_usage_saturates_malformed_cache_counts() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_anthropic_cache_overflow",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-5",
+            "content": [{ "type": "text", "text": "ok" }],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 18446744073709551615u64,
+                    "ephemeral_1h_input_tokens": 18446744073709551615u64
+                }
+            }
+        }),
+        &json!({ "model": "claude-opus-5", "input": "hello" }),
+    )
+    .unwrap();
+
+    assert_eq!(converted["usage"]["input_tokens"], u64::MAX);
+    assert_eq!(converted["usage"]["total_tokens"], u64::MAX);
+    assert_eq!(
+        converted["usage"]["input_tokens_details"]["cache_write_tokens"],
+        u64::MAX
+    );
+}
+
+#[test]
+fn anthropic_missing_usage_includes_required_responses_details() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_anthropic_missing_usage",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-5",
+            "content": [{ "type": "text", "text": "ok" }],
+            "stop_reason": "end_turn"
+        }),
+        &json!({ "model": "claude-opus-5", "input": "hello" }),
+    )
+    .unwrap();
+
+    assert_eq!(
+        converted["usage"],
+        json!({
+            "input_tokens": 0,
+            "input_tokens_details": {
+                "cached_tokens": 0,
+                "cache_write_tokens": 0
+            },
+            "output_tokens": 0,
+            "output_tokens_details": {
+                "reasoning_tokens": 0
+            },
+            "total_tokens": 0
+        })
+    );
+}
+
+#[test]
+fn anthropic_message_response_drops_count_before_native_tool_use() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_count_native",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-5",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "现在检查 `_sample_cdf`。\n\ncount"
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_count_native",
+                    "name": "shell_command",
+                    "input": { "command": "git status --short" }
+                }
+            ],
+            "stop_reason": "tool_use",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-5",
+            "input": "继续",
+            "tools": [{
+                "type": "function",
+                "name": "shell_command",
+                "parameters": { "type": "object" }
+            }]
+        }),
+    )
+    .unwrap();
+
+    let output = converted["output"].as_array().unwrap();
+    assert_eq!(output[0]["type"], "message");
+    assert_eq!(output[0]["content"][0]["text"], "现在检查 `_sample_cdf`。");
+    assert_eq!(output[1]["type"], "function_call");
+    assert_eq!(output[1]["name"], "shell_command");
+    assert!(!converted["output"].to_string().contains("\n\ncount"));
+}
+
+#[test]
+fn anthropic_message_response_drops_standalone_count_before_native_tool_use() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_count_only_native",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-5",
+            "content": [
+                { "type": "text", "text": "count" },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_count_only",
+                    "name": "shell_command",
+                    "input": { "command": "git status --short" }
+                }
+            ],
+            "stop_reason": "tool_use",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-5",
+            "input": "继续",
+            "tools": [{
+                "type": "function",
+                "name": "shell_command",
+                "parameters": { "type": "object" }
+            }]
+        }),
+    )
+    .unwrap();
+
+    let output = converted["output"].as_array().unwrap();
+    assert_eq!(output.len(), 1);
+    assert_eq!(output[0]["type"], "function_call");
+}
+
+#[test]
+fn anthropic_message_response_keeps_count_without_tool_and_in_normal_code() {
+    for text in ["count", "counter discount\nlet count = 1;"] {
+        let converted = anthropic_message_to_response_with_request(
+            json!({
+                "id": "msg_count_plain",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-opus-5",
+                "content": [{ "type": "text", "text": text }],
+                "stop_reason": "end_turn",
+                "usage": { "input_tokens": 10, "output_tokens": 5 }
+            }),
+            &json!({ "model": "claude-opus-5", "input": "返回正文" }),
+        )
+        .unwrap();
+
+        assert_eq!(converted["output"][0]["content"][0]["text"], text);
+    }
+}
+
+#[test]
+fn anthropic_message_response_keeps_normal_sentence_ending_in_count_before_tool_use() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_normal_count_native",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-5",
+            "content": [
+                { "type": "text", "text": "Please verify the count" },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_normal_count",
+                    "name": "shell_command",
+                    "input": { "command": "git status --short" }
+                }
+            ],
+            "stop_reason": "tool_use",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-5",
+            "input": "检查数量",
+            "tools": [{
+                "type": "function",
+                "name": "shell_command",
+                "parameters": { "type": "object" }
+            }]
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(
+        converted["output"][0]["content"][0]["text"],
+        "Please verify the count"
+    );
+    assert_eq!(converted["output"][1]["call_id"], "toolu_normal_count");
 }
 
 #[test]
@@ -1552,6 +2043,53 @@ fn anthropic_call_prefixed_textual_invoke_response_converts_to_tool_call() {
 }
 
 #[test]
+fn anthropic_count_prefixed_textual_invoke_response_converts_to_tool_call() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_textual_count_tool",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-5",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "正文保留。\n\ncount\n<invoke name=\"exec_command\">\n<parameter name=\"command\">git status --short</parameter>\n</invoke>"
+                }
+            ],
+            "stop_reason": "stop",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-5",
+            "input": "检查状态",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": { "type": "string" }
+                        }
+                    }
+                }
+            ]
+        }),
+    )
+    .unwrap();
+
+    let output = converted["output"].as_array().unwrap();
+    assert_eq!(output[0]["type"], "message");
+    assert_eq!(output[0]["content"][0]["text"], "正文保留。");
+    assert_eq!(output[1]["type"], "function_call");
+    assert_eq!(output[1]["name"], "exec_command");
+    assert_eq!(
+        output[1]["arguments"],
+        r#"{"command":"git status --short"}"#
+    );
+}
+
+#[test]
 fn anthropic_textual_invoke_exec_command_allows_invoke_text_inside_parameter() {
     let command = r#"cd E:\code\junes\github\CodexElves; rg -n "invoke|textual_invoke|call_prefixed|<invoke|antml_tool_call|parse_textual|extract_tool" crates/codex-elves-core/src/protocol_proxy.rs | Select-Object -First 40"#;
     let converted = anthropic_message_to_response_with_request(
@@ -1822,6 +2360,54 @@ fn anthropic_textual_invoke_converts_multiple_real_calls_in_order() {
         output[1]["input"],
         "*** Begin Patch\n*** Delete File: temp/old.txt\n*** End Patch"
     );
+}
+
+#[test]
+fn anthropic_textual_invoke_uses_unique_ids_across_text_blocks() {
+    let converted = anthropic_message_to_response_with_request(
+        json!({
+            "id": "msg_textual_calls_across_blocks",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-5",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "call\n<invoke name=\"exec_command\">\n<parameter name=\"cmd\">git status --short</parameter>\n</invoke>"
+                },
+                {
+                    "type": "text",
+                    "text": "call\n<invoke name=\"exec_command\">\n<parameter name=\"cmd\">git diff --check</parameter>\n</invoke>"
+                }
+            ],
+            "stop_reason": "tool_use",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        }),
+        &json!({
+            "model": "claude-opus-5",
+            "input": "检查状态",
+            "tools": [{
+                "type": "function",
+                "name": "exec_command",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "cmd": { "type": "string" } }
+                }
+            }]
+        }),
+    )
+    .unwrap();
+
+    let calls = converted["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0]["call_id"], "call_textual_invoke_0");
+    assert_eq!(calls[1]["call_id"], "call_textual_invoke_1");
+    assert_ne!(calls[0]["id"], calls[1]["id"]);
 }
 
 #[test]
@@ -4240,6 +4826,31 @@ fn chat_completion_response_maps_gemini_and_claude_cache_usage_like_ccx() {
 }
 
 #[test]
+fn chat_usage_saturates_malformed_cache_counts() {
+    let converted = chat_completion_to_response(json!({
+        "id": "chatcmpl_usage_overflow",
+        "created": 123,
+        "model": "claude-proxy",
+        "choices": [{
+            "finish_reason": "stop",
+            "message": { "role": "assistant", "content": "ok" }
+        }],
+        "usage": {
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "cache_read_input_tokens": 18446744073709551615u64,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 18446744073709551615u64,
+                "ephemeral_1h_input_tokens": 18446744073709551615u64
+            }
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(converted["usage"]["total_tokens"], u64::MAX);
+}
+
+#[test]
 fn chat_completion_response_splits_inline_think_block() {
     let converted = chat_completion_to_response(json!({
         "id": "chatcmpl_think",
@@ -5235,6 +5846,134 @@ data: {"type":"message_stop"}
 }
 
 #[test]
+fn anthropic_sse_count_prefixed_textual_invoke_converts_to_tool_call_events() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_textual_stream_count","type":"message","role":"assistant","model":"claude-opus-5","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"正文保留。\n\nco"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"unt\n<in"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"voke name=\"exec_command\">\n<parameter name=\"command\">git status --short</parameter>\n</invoke>"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-opus-5",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "command": { "type": "string" } }
+                    }
+                }
+            ]
+        }),
+    );
+
+    let events = parse_response_sse_events(&converted);
+    let text_delta = events
+        .iter()
+        .filter(|event| event.event == "response.output_text.delta")
+        .filter_map(|event| event.data["delta"].as_str())
+        .collect::<String>();
+    assert_eq!(text_delta, "正文保留。");
+    let arguments_done = events
+        .iter()
+        .find(|event| event.event == "response.function_call_arguments.done")
+        .expect("应该还原出 exec_command 调用");
+    assert_eq!(arguments_done.data["name"], "exec_command");
+    assert_eq!(
+        arguments_done.data["arguments"],
+        r#"{"command":"git status --short"}"#
+    );
+}
+
+#[test]
+fn anthropic_sse_keeps_textual_and_native_tool_state_indices_distinct() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_mixed_tool_indices","type":"message","role":"assistant","model":"claude-opus-5","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"call\n<invoke name=\"exec_command\">\n<parameter name=\"command\">git status --short</parameter>\n</invoke>\n<invoke name=\"exec_command\">\n<parameter name=\"command\">git diff --check</parameter>\n</invoke>"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_native_after_textual","name":"shell_command","input":{"command":"pwd"}}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-opus-5",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": { "type": "object" }
+                },
+                {
+                    "type": "function",
+                    "name": "shell_command",
+                    "parameters": { "type": "object" }
+                }
+            ]
+        }),
+    );
+
+    let events = parse_response_sse_events(&converted);
+    let completed = events
+        .iter()
+        .find(|event| event.event == "response.completed")
+        .unwrap();
+    let calls = completed.data["response"]["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[0]["call_id"], "call_textual_invoke_0");
+    assert_eq!(calls[1]["call_id"], "call_textual_invoke_1");
+    assert_eq!(calls[2]["call_id"], "toolu_native_after_textual");
+    assert_eq!(calls[0]["name"], "exec_command");
+    assert_eq!(calls[1]["name"], "exec_command");
+    assert_eq!(calls[2]["name"], "shell_command");
+    assert_ne!(calls[0]["id"], calls[1]["id"]);
+    assert_ne!(calls[1]["id"], calls[2]["id"]);
+}
+
+#[test]
 fn anthropic_sse_ignores_descriptive_invoke_text_before_real_exec_call() {
     let converted = anthropic_sse_to_responses_sse_with_request(
         r#"event: message_start
@@ -5480,6 +6219,145 @@ data: {"type":"message_stop"}
     let output = completed.data["response"]["output"].as_array().unwrap();
     assert!(!output.iter().any(|item| item["type"] == "message"));
     assert!(output.iter().any(|item| item["type"] == "function_call"));
+}
+
+#[test]
+fn anthropic_sse_drops_fragmented_count_marker_before_native_tool_use() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_native_tool_with_count_marker","type":"message","role":"assistant","model":"claude-opus-5","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"现在检查 `_sample_cdf`。\n\nco"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"unt"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_count_stream","name":"shell_command","input":{"command":"git status --short"}}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-opus-5",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "shell_command",
+                    "parameters": { "type": "object" }
+                }
+            ]
+        }),
+    );
+
+    let events = parse_response_sse_events(&converted);
+    let text_delta = events
+        .iter()
+        .filter(|event| event.event == "response.output_text.delta")
+        .filter_map(|event| event.data["delta"].as_str())
+        .collect::<String>();
+    assert_eq!(text_delta, "现在检查 `_sample_cdf`。");
+    assert!(!text_delta.contains("count"));
+    let arguments_done = events
+        .iter()
+        .find(|event| event.event == "response.function_call_arguments.done")
+        .expect("应该保留原生工具调用");
+    assert_eq!(arguments_done.data["name"], "shell_command");
+}
+
+#[test]
+fn anthropic_sse_keeps_normal_sentence_ending_in_count_before_native_tool_use() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_normal_count_stream","type":"message","role":"assistant","model":"claude-opus-5","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Please verify the co"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"unt"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_normal_count_stream","name":"shell_command","input":{"command":"git status --short"}}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({
+            "model": "claude-opus-5",
+            "tools": [{
+                "type": "function",
+                "name": "shell_command",
+                "parameters": { "type": "object" }
+            }]
+        }),
+    );
+
+    assert_eq!(
+        collect_stream_output_text(&converted),
+        "Please verify the count"
+    );
+    let events = parse_response_sse_events(&converted);
+    let arguments_done = events
+        .iter()
+        .find(|event| event.event == "response.function_call_arguments.done")
+        .expect("应该保留原生工具调用");
+    assert_eq!(arguments_done.data["name"], "shell_command");
+}
+
+#[test]
+fn anthropic_sse_keeps_count_marker_when_no_tool_follows() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_count_without_tool","type":"message","role":"assistant","model":"claude-opus-5","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"count"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &json!({ "model": "claude-opus-5" }),
+    );
+
+    assert_eq!(collect_stream_output_text(&converted), "count");
 }
 
 #[test]
@@ -5875,6 +6753,110 @@ data: {"type":"message_stop"}
 
     assert!(output.contains("\"delta\":\"你好\""));
     assert!(output.contains("event: response.completed"));
+}
+
+#[test]
+fn anthropic_sse_diagnostics_distinguish_done_from_message_stop_and_pending_blocks() {
+    let mut converter = AnthropicSseToResponsesConverter::default();
+    let output = converter.push_bytes(
+        br#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_done_only","type":"message","role":"assistant","model":"claude-opus-5","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"call"}}
+
+data: [DONE]
+
+"#,
+    );
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("response.failed")
+    );
+
+    let summary = converter.diagnostic_summary();
+    assert_eq!(summary["sawDone"], true);
+    assert_eq!(summary["sawMessageStop"], false);
+    assert_eq!(summary["terminalStatus"], "response_failed");
+    assert_eq!(summary["failureSource"], "incomplete_done_marker");
+    assert_eq!(summary["openBlockCount"], 1);
+    assert_eq!(summary["pendingTextBufferCount"], 1);
+}
+
+#[test]
+fn anthropic_sse_done_after_closed_text_block_flushes_pending_marker() {
+    let converted = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_done_after_closed_text","type":"message","role":"assistant","model":"claude-opus-5","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"count"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+data: [DONE]
+
+"#,
+        &json!({ "model": "claude-opus-5" }),
+    );
+
+    assert_eq!(collect_stream_output_text(&converted), "count");
+    assert!(converted.contains("event: response.completed"));
+    assert!(!converted.contains("event: response.failed"));
+}
+
+#[test]
+fn anthropic_sse_ignores_done_after_message_stop_terminal_event() {
+    let mut converter = AnthropicSseToResponsesConverter::default();
+    let mut output = converter.push_bytes(
+        br#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"mystery_block","value":"x"}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+    );
+    output.extend(converter.push_bytes(b"data: [DONE]\n\n"));
+    let output = String::from_utf8(output).unwrap();
+
+    assert_eq!(output.matches("event: response.completed").count(), 1);
+    assert!(!output.contains("event: response.failed"));
+    let summary = converter.diagnostic_summary();
+    assert_eq!(summary["sawMessageStop"], true);
+    assert_eq!(summary["sawDone"], true);
+    assert_eq!(summary["terminalStatus"], "response_completed");
+}
+
+#[test]
+fn anthropic_sse_diagnostics_separate_server_results_from_unknown_blocks() {
+    let mut converter = AnthropicSseToResponsesConverter::default();
+    converter.push_bytes(
+        br#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[]}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"mystery_block","value":"x"}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+    );
+
+    let summary = converter.diagnostic_summary();
+    assert_eq!(summary["serverToolResultBlockCount"], 1);
+    assert_eq!(summary["unknownBlockCount"], 1);
+    assert_eq!(summary["unknownBlockTypes"], json!(["mystery_block"]));
+    assert_eq!(summary["openBlockCount"], 2);
 }
 
 #[test]
