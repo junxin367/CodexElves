@@ -62,7 +62,12 @@ import {
 } from "lucide-react";
 import { ProviderPresetSelector } from "@/components/ProviderPresetSelector";
 import type { PresetPatch } from "@/components/ProviderPresetSelector";
-import { knownModelContextWindow, modelFamilyForModel, type ModelFamily } from "@/modelContextWindows";
+import {
+  knownModelContextWindow,
+  modelFamilyForModel,
+  requiredModelContextWindow,
+  type ModelFamily,
+} from "@/modelContextWindows";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 
@@ -2312,7 +2317,11 @@ export function App() {
 
   const deleteLocalSession = async (session: LocalSession) => {
     const title = session.title || session.id;
-    if (!window.confirm(`删除会话“${title}”？此操作会删除本地数据库记录和 rollout 文件，并创建备份。`)) return;
+    if (
+      !window.confirm(
+        `删除会话“${title}”？\n\n将删除本地数据库记录和 rollout 文件，并创建可恢复备份。请先关闭正在使用该会话的窗口。`,
+      )
+    ) return;
     const result = await run(() =>
       call<DeleteLocalSessionResult>("delete_local_session", {
         request: { sessionId: session.id, title: session.title, dbPath: session.dbPath },
@@ -2338,7 +2347,11 @@ export function App() {
 
   const deleteLocalSessionsBatch = async (sessionsToDelete: LocalSession[]) => {
     if (!sessionsToDelete.length) return;
-    if (!window.confirm(`确认批量删除这 ${sessionsToDelete.length} 个会话？此操作会删除本地数据库记录和 rollout 文件，并为每个会话创建备份。`)) return;
+    if (
+      !window.confirm(
+        `确认批量删除这 ${sessionsToDelete.length} 个会话？\n\n将删除本地数据库记录和 rollout 文件，并为每个会话创建可恢复备份。请先关闭正在使用这些会话的窗口。`,
+      )
+    ) return;
     let deleted = 0;
     let failed = 0;
     for (const session of sessionsToDelete) {
@@ -5751,22 +5764,43 @@ function SessionsScreen({
                 <strong>历史会话修复</strong>
                 <small>刷新本地会话，或将旧会话归属同步到指定 provider。</small>
               </div>
-              <Field className="provider-sync-target-field" label="同步目标">
-                <SelectMenu
-                  disabled={providerSyncProgress.active || !(providerSyncTargets?.targets ?? []).length}
-                  value={selectedProviderSyncTarget}
-                  placeholder="当前配置 provider"
-                  options={
-                    (providerSyncTargets?.targets ?? []).length
-                      ? (providerSyncTargets?.targets ?? []).map((target) => ({
-                          value: target.id,
-                          label: `${target.id}（${providerSyncTargetLabel(target)}）`,
-                        }))
-                      : [{ value: "", label: "当前配置 provider" }]
-                  }
-                  onChange={(next) => actions.setProviderSyncTarget(next)}
-                />
-              </Field>
+              <div className="session-sync-options">
+                <Field className="provider-sync-target-field" label="同步目标">
+                  <SelectMenu
+                    disabled={providerSyncProgress.active || !(providerSyncTargets?.targets ?? []).length}
+                    value={selectedProviderSyncTarget}
+                    placeholder="当前配置 provider"
+                    options={
+                      (providerSyncTargets?.targets ?? []).length
+                        ? (providerSyncTargets?.targets ?? []).map((target) => ({
+                            value: target.id,
+                            label: `${target.id}（${providerSyncTargetLabel(target)}）`,
+                          }))
+                        : [{ value: "", label: "当前配置 provider" }]
+                    }
+                    onChange={(next) => actions.setProviderSyncTarget(next)}
+                  />
+                </Field>
+                <Field
+                  as="div"
+                  className="provider-sync-enabled-field"
+                  label="启动前自动修复历史会话"
+                >
+                  <button
+                    aria-checked={form.providerSyncEnabled}
+                    aria-label="启动前自动修复历史会话"
+                    className={`session-sync-toggle-control ${form.providerSyncEnabled ? "active" : ""}`}
+                    onClick={() => onFormChange({ ...form, providerSyncEnabled: !form.providerSyncEnabled })}
+                    role="switch"
+                    type="button"
+                  >
+                    <span>启动前自动整理一次旧对话归属。</span>
+                    <span className="context-switch-track" aria-hidden="true">
+                      <span className="context-switch-thumb" />
+                    </span>
+                  </button>
+                </Field>
+              </div>
               <div className="session-sync-actions">
                 <Button onClick={() => void actions.refreshLocalSessions()}>
                   <RefreshCw className="h-4 w-4" />
@@ -5776,6 +5810,7 @@ function SessionsScreen({
                   <RefreshCw className="h-4 w-4" />
                   {providerSyncProgress.active ? "正在修复…" : "立刻修复历史会话"}
                 </Button>
+                <Button onClick={() => void actions.saveSettings()}>保存会话设置</Button>
               </div>
               {providerSyncProgressVisible ? (
                 <div className="provider-sync-progress" data-active={providerSyncProgress.active}>
@@ -5794,24 +5829,6 @@ function SessionsScreen({
                   </div>
                 </div>
               ) : null}
-              <label className="switch-row compact">
-                <input
-                  checked={form.providerSyncEnabled}
-                  onChange={(event) => onFormChange({ ...form, providerSyncEnabled: event.currentTarget.checked })}
-                  type="checkbox"
-                />
-                <span>
-                  <strong>启动前自动修复历史会话</strong>
-                  <small>启动 ChatGPT/Codex 前自动整理一次旧对话归属。</small>
-                </span>
-              </label>
-              <div className="hint-line session-delete-hint">
-                <Info className="h-4 w-4" />
-                <span>删除会创建本地备份；正在使用的会话建议先关闭对应窗口。</span>
-              </div>
-              <div className="session-save-row">
-                <Button onClick={() => void actions.saveSettings()}>保存会话设置</Button>
-              </div>
             </section>
           </div>
         </CardContent>
@@ -5928,6 +5945,8 @@ function SessionsScreen({
                           ariaLabel={`${label}使用的上下文压缩模型`}
                           className="session-context-compaction-model-select"
                           menuClassName="session-context-compaction-model-menu"
+                          menuMaxWidth={320}
+                          menuMinWidth={320}
                           onChange={(next) => {
                             const value = {
                               ...form,
@@ -7520,6 +7539,9 @@ function SelectMenu<T extends string>({
   disabled = false,
   className,
   menuClassName,
+  menuFitContent = false,
+  menuMaxWidth,
+  menuMinWidth,
   ariaLabel,
   placeholder,
 }: {
@@ -7529,6 +7551,9 @@ function SelectMenu<T extends string>({
   disabled?: boolean;
   className?: string;
   menuClassName?: string;
+  menuFitContent?: boolean;
+  menuMaxWidth?: number;
+  menuMinWidth?: number;
   ariaLabel?: string;
   placeholder?: string;
 }) {
@@ -7545,16 +7570,41 @@ function SelectMenu<T extends string>({
     const rect = button.getBoundingClientRect();
     const gap = 4;
     const viewportPadding = 8;
+    const availableWidth = Math.max(0, window.innerWidth - viewportPadding * 2);
+    const contentWidth = menuFitContent
+      ? Math.max(
+          0,
+          ...Array.from(menuRef.current?.querySelectorAll<HTMLElement>(".app-select-option") ?? [])
+            .map((option) => {
+              const range = document.createRange();
+              range.selectNodeContents(option);
+              const contentRect = range.getBoundingClientRect();
+              const styles = getComputedStyle(option);
+              return contentRect.width
+                + Number.parseFloat(styles.paddingLeft || "0")
+                + Number.parseFloat(styles.paddingRight || "0");
+            }),
+        ) + 22
+      : 0;
+    const widthLimit = Math.min(menuMaxWidth ?? availableWidth, availableWidth);
+    const menuWidth = Math.min(
+      Math.max(rect.width, menuMinWidth ?? rect.width, contentWidth),
+      widthLimit,
+    );
+    const menuLeft = Math.min(
+      Math.max(rect.left, viewportPadding),
+      window.innerWidth - viewportPadding - menuWidth,
+    );
     const desiredHeight = Math.min(options.length * 36 + 8, 280);
     const spaceBelow = window.innerHeight - rect.bottom - viewportPadding;
     const spaceAbove = rect.top - viewportPadding;
     const openAbove = spaceBelow < desiredHeight && spaceAbove > spaceBelow;
     const maxHeight = Math.max(96, Math.min(desiredHeight, openAbove ? spaceAbove - gap : spaceBelow - gap));
     setMenuStyle({
-      left: rect.left,
+      left: menuLeft,
       maxHeight,
       top: openAbove ? rect.top - gap - maxHeight : rect.bottom + gap,
-      width: rect.width,
+      width: menuWidth,
     });
   };
 
@@ -10660,11 +10710,16 @@ function activeRelayProfile(settings: BackendSettings): RelayProfile {
 
 function normalizeRelayModelMappings(mappings: RelayModelMapping[] | undefined): RelayModelMapping[] {
   if (!Array.isArray(mappings)) return [];
-  return mappings.map((item) => ({
-    requestModel: item.requestModel || "",
-    protocol: normalizeRelayProtocol(item.protocol),
-    contextWindow: (item.contextWindow || "").replace(/[^\d]/g, ""),
-  }));
+  return mappings.map((item) => {
+    const requestModel = item.requestModel || "";
+    const contextWindow = (item.contextWindow || "").replace(/[^\d]/g, "")
+      || requiredModelContextWindow(requestModel);
+    return {
+      requestModel,
+      protocol: normalizeRelayProtocol(item.protocol),
+      contextWindow,
+    };
+  });
 }
 
 function normalizeRelayProtocol(protocol: RelayProtocol | undefined): RelayProtocol {
@@ -10719,7 +10774,8 @@ function relayProfileContextWindowForModel(profile: RelayProfile, model: string)
   const mapping = normalizeRelayModelMappings(profile.modelMappings)
     .find((item) => item.requestModel.trim() === normalizedModel);
   return mapping?.contextWindow.trim()
-    || (profile.model.trim() === normalizedModel ? profile.contextWindow.trim() : "");
+    || (profile.model.trim() === normalizedModel ? profile.contextWindow.trim() : "")
+    || requiredModelContextWindow(normalizedModel);
 }
 
 function formatContextWindowCompact(value: string): string {

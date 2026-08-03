@@ -298,6 +298,39 @@ async fn bridge_responses_websockets(
             } else {
                 (message, None, None, None, None, None)
             };
+            if let Some(request_payload) = request_payload.as_ref() {
+                if let Some(response_messages) =
+                    local_compaction_wait_websocket_messages(request_payload)
+                {
+                    if let Message::Text(text) = &message {
+                        let _ = downstream_request_logger
+                            .record_request(request_payload, text.as_str());
+                    }
+                    let model = request_payload
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                        "protocol_proxy.local_compaction_wait_for_user",
+                        serde_json::json!({
+                            "transport": "ws",
+                            "model": model,
+                            "reason": "restored local compaction history ends on the assistant side"
+                        }),
+                    );
+                    for response_message in response_messages {
+                        downstream_close_tx
+                            .send(response_message)
+                            .await
+                            .map_err(|_| {
+                                anyhow::anyhow!(
+                                    "Responses WebSocket 本地压缩等待用户响应队列已关闭"
+                                )
+                            })?;
+                    }
+                    continue;
+                }
+            }
             if let (Some(request_payload), Message::Text(text)) =
                 (request_payload.as_ref(), &message)
             {
@@ -2307,6 +2340,18 @@ fn prepare_downstream_response_create_payload(
     Ok((request_payload, forwarded_payload, options))
 }
 
+fn local_compaction_wait_websocket_messages(payload: &Value) -> Option<Vec<Message>> {
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    crate::layered_compaction::local_compaction_requires_real_user(payload, model).then(|| {
+        responses_sse_to_websocket_messages(
+            &crate::layered_compaction::local_compaction_wait_for_user_sse(payload),
+        )
+    })
+}
+
 fn prepare_downstream_response_create_payload_with_snapshot(
     payload: &Value,
     settings: &crate::settings::BackendSettings,
@@ -2654,7 +2699,7 @@ mod tests {
         WebSocketContinuationAction, WebSocketContinuationCoordinator, WebSocketContinuationState,
         WebSocketRequestLogger, activate_next_queued_websocket_request,
         is_responses_websocket_proxy_path, is_responses_websocket_upgrade,
-        prepare_downstream_response_create_payload,
+        local_compaction_wait_websocket_messages, prepare_downstream_response_create_payload,
         prepare_downstream_response_create_payload_with_settings, resolve_websocket_log_id,
         websocket_application_event_payload, websocket_idle_timeout_elapsed,
     };
@@ -2906,6 +2951,61 @@ mod tests {
     }
 
     #[test]
+    fn websocket_claude_assistant_tail_completes_locally_without_output_items() {
+        let compaction_request = json!({
+            "model": "claude-sonnet-5",
+            "input": [{ "type": "compaction_trigger" }]
+        });
+        let source_response = json!({
+            "id": "resp_bridge",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "SUMMARY" }]
+            }]
+        });
+        let compacted = crate::layered_compaction::rewrite_remote_compaction_v2_response(
+            &compaction_request,
+            &source_response,
+        )
+        .expect("synthetic compaction");
+        let payload = json!({
+            "type": "response.create",
+            "model": "claude-sonnet-5",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "earlier user" }]
+                },
+                compacted["output"][0].clone()
+            ]
+        });
+        let messages =
+            local_compaction_wait_websocket_messages(&payload).expect("must pause locally");
+        let payloads = messages
+            .iter()
+            .filter_map(|message| {
+                let Message::Text(text) = message else {
+                    return None;
+                };
+                serde_json::from_str::<Value>(text.as_str()).ok()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(payloads.iter().any(|payload| {
+            payload.get("type").and_then(Value::as_str) == Some("response.completed")
+        }));
+        assert!(!payloads.iter().any(|payload| {
+            matches!(
+                payload.get("type").and_then(Value::as_str),
+                Some("response.output_item.added" | "response.output_item.done")
+            )
+        }));
+    }
+
+    #[test]
     fn websocket_non_gpt_remote_compaction_uses_summary_bridge() {
         let payload = json!({
             "type": "response.create",
@@ -2923,7 +3023,7 @@ mod tests {
         let (request_payload, forwarded_payload, options) =
             prepare_downstream_response_create_payload(&payload).unwrap();
         assert_eq!(request_payload["input"][1]["type"], "compaction_trigger");
-        assert_eq!(forwarded_payload["input"][1]["type"], "message");
+        assert_eq!(forwarded_payload["input"][0]["type"], "message");
         assert!(forwarded_payload.get("tools").is_none());
         assert!(options.is_some());
     }
@@ -2969,7 +3069,7 @@ mod tests {
                 )
         );
         assert_eq!(
-            forwarded_payload["input"][1]["content"][0]["text"],
+            forwarded_payload["input"][0]["content"][0]["text"],
             crate::layered_compaction::DEFAULT_COMPACTION_PROMPT
         );
         assert!(forwarded_payload.get("tools").is_none());
@@ -3120,7 +3220,7 @@ mod tests {
         assert_eq!(request_payload["model"], "gpt-5.6");
         assert_eq!(request_payload["input"][1]["type"], "compaction_trigger");
         assert_eq!(forwarded_payload["model"], "gpt-5.6");
-        assert_eq!(forwarded_payload["input"][1]["type"], "message");
+        assert_eq!(forwarded_payload["input"][0]["type"], "message");
         assert!(options.is_some());
         assert_eq!(original_model.as_deref(), Some("claude-opus-4-8"));
         let fallback = fallback.expect("V2 本地桥接覆写应保留会话原模型重试请求");
@@ -3130,7 +3230,7 @@ mod tests {
             "compaction_trigger"
         );
         assert_eq!(fallback.forwarded_payload["model"], "claude-opus-4-8");
-        assert_eq!(fallback.forwarded_payload["input"][1]["type"], "message");
+        assert_eq!(fallback.forwarded_payload["input"][0]["type"], "message");
     }
 
     #[test]
@@ -3229,7 +3329,7 @@ mod tests {
         let request: Value = serde_json::from_str(request.as_str()).unwrap();
 
         assert_eq!(request["model"], "claude-opus-4-8");
-        assert_eq!(request["input"][1]["type"], "message");
+        assert_eq!(request["input"][0]["type"], "message");
         assert!(!crate::layered_compaction::is_remote_compaction_v2_request(
             Some(&request)
         ));
@@ -3537,13 +3637,26 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(done.len(), 1);
         assert_eq!(done[0]["item"]["type"], "compaction");
-        let restored =
-            crate::layered_compaction::synthetic_remote_compaction_history_text(&done[0]["item"])
-                .expect("websocket compaction should be decodable");
+        let expanded =
+            crate::layered_compaction::expand_synthetic_local_compaction_request(&json!({
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{ "type": "input_text", "text": "older user" }]
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{ "type": "input_text", "text": "keep this context" }]
+                    },
+                    done[0]["item"].clone()
+                ]
+            }));
+        let restored = expanded.to_string();
         assert!(restored.contains("WEBSOCKET COMPACTED SUMMARY"));
-        // 最近一轮完整保留：user 消息 + 其后的 assistant 回复。
         assert!(restored.contains("assistant reply to keep"));
-        assert!(restored.contains("keep this context"));
+        assert_eq!(restored.matches("keep this context").count(), 1);
         assert!(
             !payloads
                 .iter()
@@ -3642,7 +3755,7 @@ mod tests {
     }
 
     #[test]
-    fn websocket_legacy_compaction_completed_response_appends_recent_context() {
+    fn websocket_legacy_compaction_completed_response_stores_structured_tail() {
         let coordinator = websocket_legacy_compaction_coordinator();
         let action = coordinator
             .handle_upstream_message(Message::Text(
@@ -3690,12 +3803,32 @@ mod tests {
         let text = done["item"]["content"][0]["text"]
             .as_str()
             .expect("rewritten message should contain text");
+        let restored =
+            crate::layered_compaction::expand_synthetic_local_compaction_request(&json!({
+                "input": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": text }]
+                }]
+            }));
+        let restored_input = restored["input"]
+            .as_array()
+            .expect("v3 payload should restore Responses items");
 
         assert_eq!(done["item"]["type"], "message");
         assert!(text.contains("LEGACY LLM SUMMARY"));
-        // 最近一轮完整保留：user 消息 + 其后的 assistant 回复。
-        assert!(text.contains("KEEP THIS LEGACY ASSISTANT REPLY"));
-        assert!(text.contains("KEEP THIS LEGACY CONTEXT"));
+        assert_eq!(restored_input.len(), 3);
+        assert_eq!(restored_input[0]["role"], "assistant");
+        assert_eq!(restored_input[1]["role"], "user");
+        assert_eq!(
+            restored_input[1]["content"][0]["text"],
+            "KEEP THIS LEGACY CONTEXT"
+        );
+        assert_eq!(restored_input[2]["role"], "assistant");
+        assert_eq!(
+            restored_input[2]["content"][0]["text"],
+            "KEEP THIS LEGACY ASSISTANT REPLY"
+        );
         assert!(metadata.layered_compaction_triggered);
         assert_eq!(
             metadata.layered_compaction_retain_tokens,

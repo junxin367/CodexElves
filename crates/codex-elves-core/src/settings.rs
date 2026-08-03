@@ -269,6 +269,7 @@ impl RelayProfile {
             })
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| *value > 0)
+            .or_else(|| crate::model_capabilities::required_model_context_window(model))
     }
 
     pub fn resolve_protocol_for_model(&self, model: &str) -> anyhow::Result<RelayProtocol> {
@@ -1570,6 +1571,31 @@ mod tests {
         assert_eq!(profile.model_mappings[2].protocol, RelayProtocol::Anthropic);
         assert_eq!(profile.model_list, "qwen3-coder\ndeepseek-coder");
         assert_eq!(profile.anthropic_model_list, "claude-sonnet-4");
+    }
+
+    #[test]
+    fn relay_profile_context_window_backfills_required_fable_only() {
+        let profile = RelayProfile {
+            model_mappings: vec![
+                RelayModelMapping {
+                    request_model: "claude-fable-5".to_string(),
+                    protocol: RelayProtocol::Anthropic,
+                    context_window: String::new(),
+                },
+                RelayModelMapping {
+                    request_model: "gpt-5.6".to_string(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: String::new(),
+                },
+            ],
+            ..RelayProfile::default()
+        };
+
+        assert_eq!(
+            profile.context_window_for_model("claude-fable-5"),
+            Some(1_000_000)
+        );
+        assert_eq!(profile.context_window_for_model("gpt-5.6"), None);
     }
 
     #[test]

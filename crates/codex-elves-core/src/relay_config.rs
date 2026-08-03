@@ -3477,6 +3477,14 @@ fn complete_relay_profile_config(profile: &RelayProfile) -> anyhow::Result<Strin
 }
 
 pub fn normalize_relay_profile_for_storage(profile: &mut RelayProfile) -> anyhow::Result<()> {
+    for mapping in &mut profile.model_mappings {
+        if mapping.context_window.trim().is_empty()
+            && let Some(context_window) =
+                crate::model_capabilities::required_model_context_window(&mapping.request_model)
+        {
+            mapping.context_window = context_window.to_string();
+        }
+    }
     if profile.relay_mode == crate::settings::RelayMode::Official && !profile.official_mix_api_key {
         let has_api_config = !profile.base_url.trim().is_empty()
             || !profile.api_key.trim().is_empty()
@@ -3938,6 +3946,30 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn normalize_profile_backfills_required_fable_context_only() {
+        let mut profile = RelayProfile {
+            model_mappings: vec![
+                crate::settings::RelayModelMapping {
+                    request_model: "claude-fable-5".to_string(),
+                    protocol: RelayProtocol::Anthropic,
+                    context_window: String::new(),
+                },
+                crate::settings::RelayModelMapping {
+                    request_model: "gpt-5.6".to_string(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: String::new(),
+                },
+            ],
+            ..RelayProfile::default()
+        };
+
+        normalize_relay_profile_for_storage(&mut profile).unwrap();
+
+        assert_eq!(profile.model_mappings[0].context_window, "1000000");
+        assert!(profile.model_mappings[1].context_window.is_empty());
+    }
 
     fn read_test_http_request(stream: &mut TcpStream) -> String {
         stream

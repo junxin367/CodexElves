@@ -103,6 +103,13 @@ export function knownModelContextWindow(model: string): string {
   return "";
 }
 
+// 仅用于修复已经保存但缺少容量的明确模型元数据，不对所有 Plan 模型做通用兜底。
+export function requiredModelContextWindow(model: string): string {
+  const slug = model.trim().toLowerCase().split("/").filter(Boolean).pop() || "";
+  if (!/^claude-fable-5(?:[.-]|$)/.test(slug)) return "";
+  return knownModelContextWindow(model);
+}
+
 function uniqueStrings(values: string[]): string[] {
   return Array.from(new Set(values));
 }

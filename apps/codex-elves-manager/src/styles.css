@@ -2995,12 +2995,15 @@ body {
   transition: width 220ms var(--motion-ease);
 }
 
-.provider-sync-target-field {
+.provider-sync-target-field,
+.provider-sync-enabled-field {
+  min-width: 0;
   margin: 0;
 }
 
-.session-delete-hint {
-  margin-bottom: 0;
+.provider-sync-enabled-field > span {
+  font-size: 0.875rem;
+  line-height: 1;
 }
 
 .session-summary-grid {
@@ -3070,6 +3073,62 @@ body {
   line-height: 1.4;
 }
 
+.session-sync-options {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 1fr);
+  align-items: stretch;
+  gap: 10px;
+}
+
+.session-sync-toggle-control {
+  box-sizing: border-box;
+  display: inline-flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--surface-raised));
+  color: hsl(var(--foreground));
+  cursor: pointer;
+  font: inherit;
+  padding: 0 12px 0 14px;
+  text-align: left;
+  transition:
+    border-color var(--motion-fast) var(--motion-ease),
+    background-color var(--motion-fast) var(--motion-ease);
+}
+
+.session-sync-toggle-control:hover,
+.session-sync-toggle-control.active {
+  border-color: hsl(var(--primary) / 0.5);
+}
+
+.session-sync-toggle-control.active {
+  background: hsl(var(--accent) / 0.35);
+}
+
+.provider-sync-enabled-field .session-sync-toggle-control > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-sync-toggle-control.active .context-switch-track {
+  background: hsl(var(--primary));
+}
+
+.session-sync-toggle-control.active .context-switch-thumb {
+  transform: translateX(12px);
+}
+
 .session-sync-actions {
   display: flex;
   flex-wrap: wrap;
@@ -3088,11 +3147,6 @@ body {
 .session-management-grid .switch-row {
   margin-bottom: 0;
   padding: 10px;
-}
-
-.session-save-row {
-  display: flex;
-  justify-content: flex-end;
 }
 
 .session-runtime-settings {
@@ -3283,6 +3337,10 @@ body {
 }
 
 @media (max-width: 760px) {
+  .session-sync-options {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .session-context-compaction-option {
     grid-template-columns: minmax(0, 1fr);
     gap: 8px;

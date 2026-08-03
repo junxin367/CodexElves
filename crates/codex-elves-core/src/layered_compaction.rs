@@ -1,24 +1,23 @@
 //! 上下文压缩：处理传统 CONTEXT CHECKPOINT COMPACTION，以及不支持原生 Remote
-//! Compaction V2 的模型/协议降级摘要；在 LLM 摘要之上补回「被 Codex 丢弃的
-//! 最近助手回复 / 工具调用记录」，避免纯摘要压缩导致的“断片”。
+//! Compaction V2 的模型/协议降级摘要；把较早历史摘要与最近原始 Responses items
+//! 分开保存，避免纯摘要压缩导致角色、工具配对和短回复指代信息丢失。
 //!
 //! 机制（基于 Codex `core/src/compact.rs` 与 `compact_remote_v2.rs` 源码验证）：
 //! - Codex 压缩走普通 `/responses` 请求，`input` 最后一项是固定的压缩指令 user 消息。
 //! - 上游返回一条 assistant message 作为摘要。
-//! - 压缩后的历史由 Codex 自己重建：**逐字保留最近的 user（本地）或
-//!   user/developer/system（远程 V2）消息**（≤ 20k token），再追加摘要；
-//!   assistant 回复与工具调用/输出 **全部被丢弃**。
-//! - 因此本模块只需把「Codex 会丢弃的 assistant + 工具记录」经摘要通道补回，
-//!   user 消息交给 Codex 以协议原始结构保留，不重复拼接。最终效果等同
-//!   “摘要后又继续处理了最近 N 条对话”。
+//! - 本地压缩在请求前摘除“上一条可见 assistant 指代锚点 → 最后一条真实 user →
+//!   当前尾部”，只把更早历史发给摘要模型。
+//! - v3 载荷保存摘要和原始尾部；下一轮恢复时删除 Codex 自己保留的重复 user /
+//!   developer / system，再按原顺序插回完整尾部。
+//! - 尾部仍是 assistant 且目标 Claude 不支持 prefill 时，代理返回空 output 的 completed
+//!   响应，结束自动续接并等待真实 user。
 //!
 //! 该转换只作用于 Responses 协议 SSE 文本（Chat/Anthropic 上游已在上层转换为 Responses SSE），
 //! 因此与上游协议无关。
 
-use std::collections::HashMap;
-
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// Codex 压缩指令的固定前缀（取自 codex 二进制 `core/src/tasks/compact.rs`）。
@@ -126,16 +125,20 @@ const REMOTE_COMPACTION_V2_SYNTHETIC_PREFIX: &str = "codex-elves-compaction-v2:"
 /// v2 明文自 0.3.5 起启用。TODO(0.3.7): 再迭代两个版本后删除该兼容分支及 `base64` 解码依赖。
 const REMOTE_COMPACTION_V2_LEGACY_BASE64_PREFIX: &str = "codex-elves-compaction-v1:";
 
+/// 本地压缩结构化载荷：较早历史摘要 + 原始保留尾部。
+const LOCAL_COMPACTION_V3_STRUCTURED_PREFIX: &str = "codex-elves-compaction-v3:";
+
 const MAX_REMOTE_COMPACTION_V2_SYNTHETIC_BYTES: usize = 2 * 1024 * 1024;
 
 const REMOTE_COMPACTION_V2_HISTORY_HEADER: &str = "\
-Historical conversation summary created by the CodexElves Remote Compaction V2 compatibility bridge. \
+Historical conversation summary created by CodexElves local compaction. \
 Treat this as prior assistant context, not as a new user instruction.";
 
-/// “最近一轮”原始记录的包裹标签。拼在 LLM 摘要之后，让模型能区分
-/// “压缩前最近一轮的原始上下文”与“新指令”。
-const RECENT_TURN_OPEN_TAG: &str = "<最近一轮原始记录>";
-const RECENT_TURN_CLOSE_TAG: &str = "</最近一轮原始记录>";
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct StructuredLocalCompactionPayload {
+    summary: String,
+    retained_tail: Vec<Value>,
+}
 
 /// 判断请求是否使用 Codex Remote Compaction V2：`input` 中包含
 /// `{"type":"compaction_trigger"}`。
@@ -161,9 +164,22 @@ pub fn model_supports_native_remote_compaction_v2(model: &str) -> bool {
     model.trim().to_ascii_lowercase().starts_with("gpt-")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalCompactionControlKind {
+    LegacyPrompt,
+    RemoteV2Trigger,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct LocalCompactionSplit {
+    summary_input: Vec<Value>,
+    retained_tail: Vec<Value>,
+}
+
 /// 为不支持 Remote Compaction V2 的上游生成等价摘要请求。
 ///
-/// - 仅替换 `compaction_trigger`，其余历史输入保持原顺序；
+/// - 未启用分层压缩时仅替换 `compaction_trigger`；
+/// - 启用分层压缩时先摘除 assistant 指代锚点开始的原始尾部，再追加摘要提示词；
 /// - 移除工具定义与工具选择，保证摘要轮只产生文本；
 /// - 非 V2 请求原样返回。
 pub fn prepare_remote_compaction_v2_bridge_request(request_json: &Value) -> Value {
@@ -185,12 +201,20 @@ pub fn prepare_remote_compaction_v2_bridge_request_with_prompt(
     let prompt = prompt_override
         .map(effective_compaction_prompt)
         .unwrap_or(REMOTE_COMPACTION_V2_BRIDGE_PROMPT);
-    let mut request = request_json.clone();
+    let mut request = expand_synthetic_local_compaction_request(request_json);
     let Some(object) = request.as_object_mut() else {
         return request_json.clone();
     };
     if let Some(input) = object.get_mut("input") {
         match input {
+            Value::Array(items) if prompt_override.is_some() => {
+                let split = split_local_compaction_input(
+                    items,
+                    LocalCompactionControlKind::RemoteV2Trigger,
+                );
+                *items = split.summary_input;
+                items.push(remote_compaction_v2_bridge_prompt_item(prompt));
+            }
             Value::Array(items) => {
                 for item in items {
                     if is_remote_compaction_v2_trigger(item) {
@@ -221,16 +245,170 @@ fn remote_compaction_v2_bridge_prompt_item(prompt: &str) -> Value {
     })
 }
 
-/// 将本项目生成的合成 compaction item 恢复为可发送给普通模型的 assistant 历史。
+fn split_local_compaction_input(
+    input: &[Value],
+    control_kind: LocalCompactionControlKind,
+) -> LocalCompactionSplit {
+    let conversation = input
+        .iter()
+        .enumerate()
+        .filter(|(index, item)| {
+            !is_local_compaction_control_item(input, *index, item, control_kind)
+                && item.get("type").and_then(Value::as_str) != Some("reasoning")
+        })
+        .map(|(_, item)| item.clone())
+        .collect::<Vec<_>>();
+    let Some(last_user) = conversation.iter().rposition(is_real_user_message) else {
+        return LocalCompactionSplit {
+            summary_input: conversation,
+            retained_tail: Vec::new(),
+        };
+    };
+    let retained_start = conversation[..last_user]
+        .iter()
+        .rposition(is_visible_assistant_message)
+        .unwrap_or(last_user);
+    LocalCompactionSplit {
+        summary_input: conversation[..retained_start].to_vec(),
+        retained_tail: conversation[retained_start..].to_vec(),
+    }
+}
+
+fn is_local_compaction_control_item(
+    input: &[Value],
+    index: usize,
+    item: &Value,
+    control_kind: LocalCompactionControlKind,
+) -> bool {
+    match control_kind {
+        LocalCompactionControlKind::LegacyPrompt => {
+            index + 1 == input.len()
+                && item.get("role").and_then(Value::as_str) == Some("user")
+                && item_text(item)
+                    .trim_start()
+                    .starts_with(COMPACTION_PROMPT_PREFIX)
+        }
+        LocalCompactionControlKind::RemoteV2Trigger => is_remote_compaction_v2_trigger(item),
+    }
+}
+
+fn is_visible_assistant_message(item: &Value) -> bool {
+    item.get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("message")
+        == "message"
+        && item.get("role").and_then(Value::as_str) == Some("assistant")
+        && !item_text(item).trim().is_empty()
+}
+
+/// 将本项目生成的合成 compaction item 恢复为可发送给普通模型的 assistant 摘要文本。
+///
+/// v3 的原始尾部由 [`expand_synthetic_local_compaction_request`] 单独恢复；本入口只返回摘要，
+/// 同时继续兼容 v2 明文与 v1 Base64 历史载荷。
+pub fn synthetic_remote_compaction_history_text(item: &Value) -> Option<String> {
+    let payload = synthetic_local_compaction_payload(item)?;
+    historical_compaction_summary_text(&payload.summary)
+}
+
+/// 展开本地合成压缩历史：
+///
+/// - v1/v2：恢复为一条 assistant 摘要；
+/// - v3：恢复为 assistant 摘要 + 原始 retained_tail；
+/// - Codex 已原样保留的 user/developer/system 会先去重，再由 retained_tail 放回正确位置。
 ///
 /// 真实 OpenAI `encrypted_content` 没有本项目前缀，不会被误解码。
-/// 同时兼容 v2 明文与 v1 Base64 载荷，避免压缩过的历史会话在升级后失效。
-pub fn synthetic_remote_compaction_history_text(item: &Value) -> Option<String> {
-    if item.get("type").and_then(Value::as_str) != Some("compaction") {
+pub fn expand_synthetic_local_compaction_request(request_json: &Value) -> Value {
+    let mut request = request_json.clone();
+    let Some(input) = request
+        .as_object_mut()
+        .and_then(|object| object.get_mut("input"))
+        .and_then(Value::as_array_mut)
+    else {
+        return request;
+    };
+    *input = expand_synthetic_local_compaction_items(input);
+    request
+}
+
+/// 判断请求历史是否含 CodexElves 生成的本地合成压缩载荷。
+pub fn contains_synthetic_local_compaction(request_json: &Value) -> bool {
+    request_json
+        .get("input")
+        .and_then(Value::as_array)
+        .is_some_and(|input| {
+            input
+                .iter()
+                .any(|item| synthetic_local_compaction_payload(item).is_some())
+        })
+}
+
+/// Claude 家族禁止 assistant prefill。若本地合成压缩恢复后的最后一个有效协议项仍属于
+/// assistant 侧，则本次自动续接必须结束并等待真实 user/tool result。
+pub fn local_compaction_requires_real_user(request_json: &Value, model: &str) -> bool {
+    if !model.trim().to_ascii_lowercase().contains("claude")
+        || !contains_synthetic_local_compaction(request_json)
+    {
+        return false;
+    }
+    let expanded = expand_synthetic_local_compaction_request(request_json);
+    expanded
+        .get("input")
+        .and_then(Value::as_array)
+        .and_then(|input| input.iter().rev().find_map(effective_history_side))
+        == Some(EffectiveHistorySide::Assistant)
+}
+
+fn expand_synthetic_local_compaction_items(input: &[Value]) -> Vec<Value> {
+    let mut expanded = Vec::with_capacity(input.len());
+    for item in input {
+        let Some(payload) = synthetic_local_compaction_payload(item) else {
+            expanded.push(item.clone());
+            continue;
+        };
+        remove_codex_retained_duplicates(&mut expanded, &payload.retained_tail);
+        if let Some(summary) = historical_compaction_summary_item(&payload.summary) {
+            expanded.push(summary);
+        }
+        expanded.extend(payload.retained_tail);
+    }
+    expanded
+}
+
+fn synthetic_local_compaction_payload(item: &Value) -> Option<StructuredLocalCompactionPayload> {
+    match item
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("message")
+    {
+        "compaction" => {
+            let encrypted_content = item.get("encrypted_content")?.as_str()?;
+            if let Some(payload) = structured_local_compaction_payload(encrypted_content) {
+                return Some(payload);
+            }
+            synthetic_remote_compaction_summary(encrypted_content).map(|summary| {
+                StructuredLocalCompactionPayload {
+                    summary,
+                    retained_tail: Vec::new(),
+                }
+            })
+        }
+        "message" if item.get("role").and_then(Value::as_str) == Some("user") => {
+            structured_local_compaction_payload(&item_text(item))
+        }
+        _ => None,
+    }
+}
+
+fn structured_local_compaction_payload(text: &str) -> Option<StructuredLocalCompactionPayload> {
+    let marker = text.find(LOCAL_COMPACTION_V3_STRUCTURED_PREFIX)?;
+    let payload = text.get(marker + LOCAL_COMPACTION_V3_STRUCTURED_PREFIX.len()..)?;
+    if payload.len() > MAX_REMOTE_COMPACTION_V2_SYNTHETIC_BYTES {
         return None;
     }
-    let encrypted_content = item.get("encrypted_content")?.as_str()?;
-    let summary = synthetic_remote_compaction_summary(encrypted_content)?;
+    serde_json::from_str(payload.trim()).ok()
+}
+
+fn historical_compaction_summary_text(summary: &str) -> Option<String> {
     let summary = summary.trim();
     if summary.is_empty() {
         return None;
@@ -238,6 +416,139 @@ pub fn synthetic_remote_compaction_history_text(item: &Value) -> Option<String> 
     Some(format!(
         "{REMOTE_COMPACTION_V2_HISTORY_HEADER}\n\n{summary}"
     ))
+}
+
+fn historical_compaction_summary_item(summary: &str) -> Option<Value> {
+    historical_compaction_summary_text(summary).map(|text| {
+        json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": text
+            }]
+        })
+    })
+}
+
+fn remove_codex_retained_duplicates(output: &mut Vec<Value>, retained_tail: &[Value]) {
+    for retained in retained_tail
+        .iter()
+        .filter(|item| is_codex_retained_message(item))
+    {
+        let Some(index) = output
+            .iter()
+            .rposition(|candidate| retained_message_matches(candidate, retained))
+        else {
+            continue;
+        };
+        // Anthropic 需要首条有效消息为 user。若这是压缩前唯一可用的 user，则保留这一份
+        // 原生副本；v3 尾部仍会追加原始 user，避免伪造传输消息。
+        if is_real_user_message(retained)
+            && !output
+                .iter()
+                .enumerate()
+                .any(|(candidate_index, candidate)| {
+                    candidate_index != index && is_real_user_message(candidate)
+                })
+        {
+            continue;
+        }
+        output.remove(index);
+    }
+}
+
+fn is_codex_retained_message(item: &Value) -> bool {
+    if item
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("message")
+        != "message"
+    {
+        return false;
+    }
+    matches!(
+        item.get("role").and_then(Value::as_str),
+        Some("user" | "developer" | "system" | "latest_reminder")
+    )
+}
+
+fn is_real_user_message(item: &Value) -> bool {
+    item.get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("message")
+        == "message"
+        && item.get("role").and_then(Value::as_str) == Some("user")
+        && !item_text(item)
+            .trim_start()
+            .starts_with(COMPACTION_PROMPT_PREFIX)
+}
+
+fn retained_message_matches(candidate: &Value, retained: &Value) -> bool {
+    if candidate
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("message")
+        != "message"
+        || candidate.get("role").and_then(Value::as_str)
+            != retained.get("role").and_then(Value::as_str)
+    {
+        return false;
+    }
+    let candidate_id = candidate
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty());
+    let retained_id = retained
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty());
+    if candidate_id.is_some() && candidate_id == retained_id {
+        return true;
+    }
+    let candidate_turn = candidate
+        .pointer("/internal_chat_message_metadata_passthrough/turn_id")
+        .and_then(Value::as_str)
+        .filter(|turn_id| !turn_id.is_empty());
+    let retained_turn = retained
+        .pointer("/internal_chat_message_metadata_passthrough/turn_id")
+        .and_then(Value::as_str)
+        .filter(|turn_id| !turn_id.is_empty());
+    if candidate_turn.is_some() && candidate_turn == retained_turn {
+        return true;
+    }
+    let candidate_text = item_text(candidate);
+    !candidate_text.is_empty() && candidate_text == item_text(retained)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectiveHistorySide {
+    User,
+    Assistant,
+}
+
+fn effective_history_side(item: &Value) -> Option<EffectiveHistorySide> {
+    match item
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("message")
+    {
+        "message" => match item.get("role").and_then(Value::as_str) {
+            Some("assistant") => Some(EffectiveHistorySide::Assistant),
+            Some("user" | "latest_reminder") => Some(EffectiveHistorySide::User),
+            _ => None,
+        },
+        "function_call" | "custom_tool_call" | "local_shell_call" | "tool_call" | "reasoning" => {
+            Some(EffectiveHistorySide::Assistant)
+        }
+        "function_call_output"
+        | "custom_tool_call_output"
+        | "local_shell_call_output"
+        | "tool_call_output"
+        | "tool_result"
+        | "tool_search_output" => Some(EffectiveHistorySide::User),
+        _ => None,
+    }
 }
 
 /// 解出合成 compaction 的摘要正文：优先 v2 明文，其次回退 v1 Base64。
@@ -289,7 +600,106 @@ pub struct RemoteCompactionV2ResponseResult {
     pub layered: LayeredCompactionStats,
 }
 
-/// 将普通摘要响应封装为 synthetic V2 compaction，并可复用分层压缩的 tail 保留逻辑。
+struct StructuredCompactionBuild {
+    encoded: String,
+    stats: LayeredCompactionStats,
+}
+
+enum StructuredCompactionError {
+    RetainedTailTooLarge {
+        estimated_tokens: u64,
+        retain_tokens: u32,
+    },
+    PayloadTooLarge {
+        bytes: usize,
+    },
+    Serialize(String),
+}
+
+impl StructuredCompactionError {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::RetainedTailTooLarge { .. } => "local_compaction_retained_tail_too_large",
+            Self::PayloadTooLarge { .. } => "local_compaction_payload_too_large",
+            Self::Serialize(_) => "local_compaction_payload_serialize_failed",
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            Self::RetainedTailTooLarge {
+                estimated_tokens,
+                retain_tokens,
+            } => format!(
+                "Local compaction retained tail requires approximately {estimated_tokens} tokens, \
+                 exceeding the configured {retain_tokens}-token limit."
+            ),
+            Self::PayloadTooLarge { bytes } => format!(
+                "Local compaction structured payload is {bytes} bytes, exceeding the \
+                 {MAX_REMOTE_COMPACTION_V2_SYNTHETIC_BYTES}-byte limit."
+            ),
+            Self::Serialize(error) => {
+                format!("Local compaction could not serialize the structured payload: {error}")
+            }
+        }
+    }
+}
+
+fn build_structured_local_compaction(
+    request_json: &Value,
+    summary: &str,
+    retain_tokens: u32,
+) -> Result<Option<StructuredCompactionBuild>, StructuredCompactionError> {
+    let expanded = expand_synthetic_local_compaction_request(request_json);
+    let input = expanded
+        .get("input")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let control_kind = if is_remote_compaction_v2_request(Some(request_json)) {
+        LocalCompactionControlKind::RemoteV2Trigger
+    } else {
+        LocalCompactionControlKind::LegacyPrompt
+    };
+    let split = split_local_compaction_input(&input, control_kind);
+    if split.retained_tail.is_empty() {
+        return Ok(None);
+    }
+    let retain_tokens = retain_tokens.clamp(MIN_RETAIN_TOKENS, MAX_RETAIN_TOKENS);
+    let estimated_tokens = estimate_json_value_tokens(&Value::Array(split.retained_tail.clone()));
+    if estimated_tokens > u64::from(retain_tokens) {
+        return Err(StructuredCompactionError::RetainedTailTooLarge {
+            estimated_tokens,
+            retain_tokens,
+        });
+    }
+    let retained_json = serde_json::to_string(&split.retained_tail)
+        .map_err(|error| StructuredCompactionError::Serialize(error.to_string()))?;
+    let retained_chars = u32::try_from(retained_json.chars().count()).unwrap_or(u32::MAX);
+    let payload = StructuredLocalCompactionPayload {
+        summary: summary.trim().to_string(),
+        retained_tail: split.retained_tail,
+    };
+    let payload_json = serde_json::to_string(&payload)
+        .map_err(|error| StructuredCompactionError::Serialize(error.to_string()))?;
+    let encoded = format!("{LOCAL_COMPACTION_V3_STRUCTURED_PREFIX}{payload_json}");
+    if encoded.len() > MAX_REMOTE_COMPACTION_V2_SYNTHETIC_BYTES {
+        return Err(StructuredCompactionError::PayloadTooLarge {
+            bytes: encoded.len(),
+        });
+    }
+    Ok(Some(StructuredCompactionBuild {
+        encoded,
+        stats: LayeredCompactionStats {
+            triggered: true,
+            retained_items: u32::try_from(payload.retained_tail.len()).unwrap_or(u32::MAX),
+            retained_chars,
+        },
+    }))
+}
+
+/// 将普通摘要响应封装为 synthetic compaction。启用分层压缩时写入 v3 结构化尾部，
+/// 未启用时继续写入 v2 纯文本摘要。
 pub fn rewrite_remote_compaction_v2_response_with_layered_compaction(
     request_json: &Value,
     response_object: &Value,
@@ -339,9 +749,34 @@ pub fn rewrite_remote_compaction_v2_response_with_layered_compaction(
             layered: LayeredCompactionStats::default(),
         });
     };
-    let (summary, layered) =
-        apply_layered_tail_to_summary(request_json, &summary, layered_enabled, retain_tokens);
-    let compaction_item = synthetic_remote_compaction_item(&summary);
+    let (compaction_item, layered) = if layered_enabled {
+        match build_structured_local_compaction(request_json, &summary, retain_tokens) {
+            Ok(Some(build)) => (
+                synthetic_structured_compaction_item(&build.encoded),
+                build.stats,
+            ),
+            Ok(None) => (
+                synthetic_remote_compaction_item(&summary),
+                LayeredCompactionStats::default(),
+            ),
+            Err(error) => {
+                return Some(RemoteCompactionV2ResponseResult {
+                    response: remote_compaction_v2_failure_response(
+                        request_json,
+                        Some(response_object),
+                        error.code(),
+                        &error.message(),
+                    ),
+                    layered: LayeredCompactionStats::default(),
+                });
+            }
+        }
+    } else {
+        (
+            synthetic_remote_compaction_item(&summary),
+            LayeredCompactionStats::default(),
+        )
+    };
     let mut response = response_object.clone();
     let object = response.as_object_mut()?;
     object.insert("status".to_string(), json!("completed"));
@@ -498,45 +933,19 @@ fn extract_single_remote_compaction_v2_terminal_response(
     terminal_response.ok_or(RemoteCompactionV2SseTerminalError::MissingTerminal)
 }
 
-fn apply_layered_tail_to_summary(
-    request_json: &Value,
-    summary: &str,
-    enabled: bool,
-    retain_tokens: u32,
-) -> (String, LayeredCompactionStats) {
-    if !enabled {
-        return (summary.to_string(), LayeredCompactionStats::default());
-    }
-    let input = request_json
-        .get("input")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let skip_last_item = !is_remote_compaction_v2_request(Some(request_json));
-    let TailSection {
-        text: tail,
-        items,
-        chars,
-    } = build_tail_section(&input, retain_budget_chars(retain_tokens), skip_last_item);
-    if tail.is_empty() {
-        return (summary.to_string(), LayeredCompactionStats::default());
-    }
-    (
-        combine_summary_with_tail(summary, &tail),
-        LayeredCompactionStats {
-            triggered: true,
-            retained_items: items,
-            retained_chars: chars,
-        },
-    )
-}
-
 fn synthetic_remote_compaction_item(summary: &str) -> Value {
     let summary =
         truncate_utf8_to_byte_limit(summary.trim(), MAX_REMOTE_COMPACTION_V2_SYNTHETIC_BYTES);
     json!({
         "type": "compaction",
         "encrypted_content": format!("{REMOTE_COMPACTION_V2_SYNTHETIC_PREFIX}{summary}")
+    })
+}
+
+fn synthetic_structured_compaction_item(encoded: &str) -> Value {
+    json!({
+        "type": "compaction",
+        "encrypted_content": encoded
     })
 }
 
@@ -609,6 +1018,34 @@ pub fn compaction_failure_sse(
     let response =
         remote_compaction_v2_failure_response(request_json, response_object, code, message);
     build_responses_sse_for_remote_compaction_failure(&response)
+}
+
+/// assistant 尾部无法安全续接时返回一个不产生任何新会话内容的 completed 响应。
+pub fn local_compaction_wait_for_user_response(request_json: &Value) -> Value {
+    json!({
+        "id": "resp_codex_elves_wait_user",
+        "object": "response",
+        "created_at": 0,
+        "status": "completed",
+        "model": request_json
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        "output": [],
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "output_tokens_details": {
+                "reasoning_tokens": 0
+            }
+        }
+    })
+}
+
+/// 流式 / WebSocket 版本的“等待真实 user”响应。
+pub fn local_compaction_wait_for_user_sse(request_json: &Value) -> String {
+    build_responses_sse_for_empty_completed(&local_compaction_wait_for_user_response(request_json))
 }
 
 fn extract_compaction_summary_text(response_object: &Value) -> Option<String> {
@@ -708,8 +1145,8 @@ pub fn apply_custom_compaction_prompt(request_json: &Value, custom_prompt: &str)
 
 /// 为传统上下文压缩准备只生成摘要文本的上游请求。
 ///
-/// 请求身份仍由调用方保存的原始请求判断；转发副本会使用有效项目提示词，并移除工具字段，
-/// 避免摘要阶段产生工具调用。
+/// 请求身份仍由调用方保存的原始请求判断；转发副本会先摘除 assistant 指代锚点开始的
+/// 原始尾部，再使用有效项目提示词，并移除工具字段，避免摘要阶段产生工具调用。
 pub fn prepare_legacy_layered_compaction_request(
     request_json: &Value,
     prompt_override: &str,
@@ -717,9 +1154,20 @@ pub fn prepare_legacy_layered_compaction_request(
     if !is_compaction_request(Some(request_json)) {
         return request_json.clone();
     }
-    let mut request =
-        apply_custom_compaction_prompt(request_json, effective_compaction_prompt(prompt_override));
+    let prompt = effective_compaction_prompt(prompt_override);
+    let mut request = expand_synthetic_local_compaction_request(request_json);
     if let Some(object) = request.as_object_mut() {
+        if let Some(input) = object.get_mut("input").and_then(Value::as_array_mut) {
+            let mut prompt_item = input
+                .last()
+                .cloned()
+                .unwrap_or_else(|| remote_compaction_v2_bridge_prompt_item(prompt));
+            replace_message_text(&mut prompt_item, prompt);
+            let split =
+                split_local_compaction_input(input, LocalCompactionControlKind::LegacyPrompt);
+            *input = split.summary_input;
+            input.push(prompt_item);
+        }
         for key in ["tools", "tool_choice", "parallel_tool_calls"] {
             object.remove(key);
         }
@@ -916,10 +1364,10 @@ fn replace_message_text(item: &mut Value, text: &str) {
     }
 }
 
-/// 在压缩响应 SSE 上应用分层压缩：把上游摘要与请求中最近的原始记录合并回注。
+/// 在传统压缩响应 SSE 上应用结构化本地压缩：把上游摘要与原始保留尾部编码为 v3 载荷。
 ///
 /// - `enabled` 为 false、非压缩请求、或无法解析终止响应/摘要时，原样返回。
-/// - `retain_tokens` 是希望保留的最近原始记录预算（按 token 估算，约 4 字符/token）。
+/// - 原始尾部超预算时返回明确的 failed 响应，不截断或文本化。
 pub fn apply_layered_compaction_to_responses_sse(
     request_json: &Value,
     enabled: bool,
@@ -945,237 +1393,32 @@ pub fn apply_layered_compaction_to_responses_sse(
         return LayeredCompactionResult::unchanged(sse_text);
     }
 
-    let (combined, stats) =
-        apply_layered_tail_to_summary(request_json, &summary, true, retain_tokens);
-    if !stats.triggered {
-        return LayeredCompactionResult::unchanged(sse_text);
+    match build_structured_local_compaction(request_json, &summary, retain_tokens) {
+        Ok(Some(build)) => LayeredCompactionResult {
+            sse_text: build_responses_sse_for_message(&response_object, &build.encoded),
+            triggered: true,
+            retained_items: build.stats.retained_items,
+            retained_chars: build.stats.retained_chars,
+        },
+        Ok(None) => LayeredCompactionResult::unchanged(sse_text),
+        Err(error) => LayeredCompactionResult {
+            sse_text: compaction_failure_sse(
+                request_json,
+                Some(&response_object),
+                error.code(),
+                &error.message(),
+            ),
+            triggered: false,
+            retained_items: 0,
+            retained_chars: 0,
+        },
     }
-
-    let rebuilt = build_responses_sse_for_message(&response_object, &combined);
-
-    LayeredCompactionResult {
-        sse_text: rebuilt,
-        triggered: true,
-        retained_items: stats.retained_items,
-        retained_chars: stats.retained_chars,
-    }
-}
-
-/// token 预算换算为字符预算（粗略 4 字符 ≈ 1 token），并做上下限约束。
-fn retain_budget_chars(retain_tokens: u32) -> usize {
-    let tokens = retain_tokens.clamp(MIN_RETAIN_TOKENS, MAX_RETAIN_TOKENS);
-    tokens as usize * 4
 }
 
 /// 保留 token 预算的下限 / 上限 / 默认值。
 pub const MIN_RETAIN_TOKENS: u32 = 20_000;
 pub const MAX_RETAIN_TOKENS: u32 = 64_000;
 pub const DEFAULT_RETAIN_TOKENS: u32 = 20_000;
-
-/// 单条工具调用 / 工具输出的独立截断上限（与总预算解耦），
-/// 防止一条巨大的命令输出（如 `cat`/`ls -R`）占满整个 tail 预算，
-/// 挤掉更有价值的助手消息。参考 pi agent 对 tool result 的独立
-/// 截断策略（pi 固定 2000 字符）。
-const MAX_TOOL_ITEM_CHARS: usize = 4_000;
-
-struct TailSection {
-    text: String,
-    items: u32,
-    chars: u32,
-}
-
-/// item 在 tail 中的语义分类，用于两阶段预算分配。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ItemCategory {
-    /// 助手文字回复（用户/developer/system 由 Codex 原生保留，此处不重复），
-    /// 携带对话意图，优先保留。
-    Message,
-    /// 工具调用 / 工具输出，需要原子配对且优先级低于 message。
-    Tool,
-}
-
-/// 从 `input` 末尾向前选取“最近一轮”对话（最后一条 user 消息 → 结尾），跳过
-/// 最后一项（压缩指令本身）。保留 user 消息与其后的 assistant 回复、工具调用/输出，
-/// 按协议原始顺序拼接。
-///
-/// 与旧版“按预算填满”不同：目标是完整保留最近一轮，让压缩后的模型看到
-/// “上一轮在做什么”的原始上下文。`budget_chars` 仅作为安全上限，
-/// 防止异常巨大的一轮占满上下文；正常情况下不会触及。
-///
-/// 算法：
-/// 1. 从末尾向前找到最后一条 user 消息作为“最近一轮”的起点；若历史中没有
-///    user 消息，则保留全部（去掉压缩指令）。
-/// 2. 逐条文本化选中区间的 user/assistant 消息与工具调用/输出；单条工具记录独立
-///    截断到 `MAX_TOOL_ITEM_CHARS`，避免一条巨大输出占满上下文。
-/// 3. 孤儿 `function_call_output`（配对的 `function_call` 不在区间内）直接丢弃。
-/// 4. 若全部拼接后仍超过 `budget_chars` 安全上限，从最早的条目开始丢弃直到卡回预算内。
-fn build_tail_section(input: &[Value], budget_chars: usize, skip_last_item: bool) -> TailSection {
-    let end = if skip_last_item {
-        input.len().saturating_sub(1)
-    } else {
-        input.len()
-    };
-    let items = &input[..end];
-
-    // 最近一轮起点：最后一条 user 消息的下标；找不到则从头保留。
-    let turn_start = items
-        .iter()
-        .rposition(|item| {
-            item.get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("message")
-                == "message"
-                && item.get("role").and_then(Value::as_str) == Some("user")
-        })
-        .unwrap_or(0);
-    let turn = &items[turn_start..];
-
-    let call_index = index_function_calls_by_call_id(turn);
-
-    // 按原始顺序文本化最近一轮的每一条，工具记录单条截断；孤儿工具输出丢弃。
-    let mut pieces: Vec<String> = Vec::new();
-    for item in turn {
-        if let Some(call_id) = function_call_output_call_id(item) {
-            if !call_index.contains_key(call_id) {
-                continue;
-            }
-        }
-        let Some((category, text)) = textualize_item(item) else {
-            continue;
-        };
-        let text = match category {
-            ItemCategory::Message => text,
-            ItemCategory::Tool => truncate_chars(&text, MAX_TOOL_ITEM_CHARS),
-        };
-        pieces.push(text);
-    }
-
-    // 安全上限：若一轮异常巨大超过 budget_chars，从最早的条目开始丢弃。
-    let mut total = tail_pieces_chars(&pieces);
-    while total > budget_chars && pieces.len() > 1 {
-        let removed = pieces.remove(0);
-        total = total.saturating_sub(removed.chars().count() + 2);
-    }
-    // 仍只剩一条且超预算时，单条硬截断。
-    if total > budget_chars {
-        if let Some(only) = pieces.first_mut() {
-            *only = truncate_chars(only, budget_chars);
-        }
-    }
-
-    let text = pieces.join("\n\n");
-    let used = text.chars().count();
-
-    TailSection {
-        text,
-        items: pieces.len() as u32,
-        chars: used as u32,
-    }
-}
-
-/// 估算拼接后总字符数（含每段之间的 `\n\n` 分隔）。
-fn tail_pieces_chars(pieces: &[String]) -> usize {
-    let body: usize = pieces.iter().map(|piece| piece.chars().count()).sum();
-    let separators = pieces.len().saturating_sub(1) * 2;
-    body + separators
-}
-
-/// 预先扫描工具调用项，建立 `call_id -> input 下标` 索引，用于原子配对。
-fn index_function_calls_by_call_id(items: &[Value]) -> HashMap<&str, usize> {
-    let mut map = HashMap::new();
-    for (index, item) in items.iter().enumerate() {
-        if !matches!(
-            item.get("type").and_then(Value::as_str),
-            Some("function_call" | "custom_tool_call" | "local_shell_call" | "tool_call")
-        ) {
-            continue;
-        }
-        if let Some(call_id) = function_call_id(item) {
-            map.insert(call_id, index);
-        }
-    }
-    map
-}
-
-/// `function_call` 的配对键：优先 `call_id`，否则回退到 `id`
-/// （与代码库其他处理 `function_call` 的规则保持一致，见 protocol_proxy.rs）。
-fn function_call_id(item: &Value) -> Option<&str> {
-    item.get("call_id")
-        .or_else(|| item.get("id"))
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-}
-
-/// 若 item 是工具输出，返回其配对 ID。
-fn function_call_output_call_id(item: &Value) -> Option<&str> {
-    if !matches!(
-        item.get("type").and_then(Value::as_str),
-        Some(
-            "function_call_output"
-                | "custom_tool_call_output"
-                | "local_shell_call_output"
-                | "tool_call_output"
-        )
-    ) {
-        return None;
-    }
-    item.get("call_id")
-        .or_else(|| item.get("id"))
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-}
-
-/// 把单个 `input` item 转成可读文本并标注分类；无有效内容返回 None。
-fn textualize_item(item: &Value) -> Option<(ItemCategory, String)> {
-    let kind = item
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("message");
-    match kind {
-        "message" => {
-            let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
-            // 最近一轮只包含 user / assistant 对话；developer/system 是会话开头的
-            // 系统脚手架，不属于最近一轮，也由 Codex 自己管理，因此跳过。
-            if role != "user" && role != "assistant" {
-                return None;
-            }
-            let text = item_text(item);
-            let text = text.trim();
-            if text.is_empty() {
-                return None;
-            }
-            Some((ItemCategory::Message, format!("[{role}]\n{text}")))
-        }
-        "function_call" | "custom_tool_call" | "local_shell_call" | "tool_call" => {
-            let name = item.get("name").and_then(Value::as_str).unwrap_or("tool");
-            let args = item
-                .get("arguments")
-                .map(stringify_arguments)
-                .unwrap_or_default();
-            let args = args.trim();
-            let text = if args.is_empty() {
-                format!("[tool_call: {name}]")
-            } else {
-                format!("[tool_call: {name}]\n{args}")
-            };
-            Some((ItemCategory::Tool, text))
-        }
-        "function_call_output"
-        | "custom_tool_call_output"
-        | "local_shell_call_output"
-        | "tool_call_output" => {
-            let output = item.get("output").map(stringify_output).unwrap_or_default();
-            let output = output.trim();
-            if output.is_empty() {
-                None
-            } else {
-                Some((ItemCategory::Tool, format!("[tool_output]\n{output}")))
-            }
-        }
-        // reasoning 等内部项对续接价值低，跳过以节省预算。
-        _ => None,
-    }
-}
 
 /// 提取 message item 的文本（支持字符串 content 与 content 数组）。
 fn item_text(item: &Value) -> String {
@@ -1194,58 +1437,6 @@ fn item_text(item: &Value) -> String {
         }
         _ => String::new(),
     }
-}
-
-fn stringify_arguments(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        other => serde_json::to_string(other).unwrap_or_default(),
-    }
-}
-
-fn stringify_output(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Array(parts) => {
-            let mut text = String::new();
-            for part in parts {
-                if let Some(part_text) = part.get("text").and_then(Value::as_str) {
-                    text.push_str(part_text);
-                } else if let Some(part_text) = part.as_str() {
-                    text.push_str(part_text);
-                }
-            }
-            if text.is_empty() {
-                serde_json::to_string(value).unwrap_or_default()
-            } else {
-                text
-            }
-        }
-        other => serde_json::to_string(other).unwrap_or_default(),
-    }
-}
-
-/// 按字符数截断（保留 UTF-8 边界），超长时追加省略标记。
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    let mut truncated: String = text.chars().take(max_chars.saturating_sub(1)).collect();
-    truncated.push('…');
-    truncated
-}
-
-/// 合成回注文本：LLM 摘要 + 标签包住的“最近一轮”原始记录。
-///
-/// tail 用标签包住，让模型明确知道这是压缩前最近一轮的原始上下文，而非新指令。
-fn combine_summary_with_tail(summary: &str, tail: &str) -> String {
-    format!(
-        "{summary}\n\n{open}\n{tail}\n{close}",
-        summary = summary.trim_end(),
-        tail = tail.trim(),
-        open = RECENT_TURN_OPEN_TAG,
-        close = RECENT_TURN_CLOSE_TAG,
-    )
 }
 
 /// 以终止响应对象为骨架，重建一条只含单个 assistant message 的完整 Responses SSE。
@@ -1467,6 +1658,36 @@ fn build_responses_sse_for_compaction(response_object: &Value) -> String {
             "output_index": 0,
             "item": compaction_item
         }),
+        &mut sequence,
+    );
+    push_event(
+        &mut output,
+        "response.completed",
+        json!({ "type": "response.completed", "response": response_object }),
+        &mut sequence,
+    );
+    output.push_str("data: [DONE]\n\n");
+    output
+}
+
+fn build_responses_sse_for_empty_completed(response_object: &Value) -> String {
+    let mut sequence = 0u64;
+    let mut output = String::new();
+    let mut created = response_object.clone();
+    if let Some(object) = created.as_object_mut() {
+        object.insert("status".to_string(), json!("in_progress"));
+        object.insert("output".to_string(), json!([]));
+    }
+    push_event(
+        &mut output,
+        "response.created",
+        json!({ "type": "response.created", "response": created.clone() }),
+        &mut sequence,
+    );
+    push_event(
+        &mut output,
+        "response.in_progress",
+        json!({ "type": "response.in_progress", "response": created }),
         &mut sequence,
     );
     push_event(
@@ -1734,7 +1955,10 @@ mod tests {
             Some("CUSTOM LAYERED COMPACTION PROMPT"),
         );
         let input = rewritten.get("input").and_then(Value::as_array).unwrap();
-        assert_eq!(item_text(&input[1]), "CUSTOM LAYERED COMPACTION PROMPT");
+        assert_eq!(
+            item_text(input.last().unwrap()),
+            "CUSTOM LAYERED COMPACTION PROMPT"
+        );
     }
 
     #[test]
@@ -1744,7 +1968,7 @@ mod tests {
             Some(""),
         );
         let input = rewritten.get("input").and_then(Value::as_array).unwrap();
-        assert_eq!(item_text(&input[1]), DEFAULT_COMPACTION_PROMPT);
+        assert_eq!(item_text(input.last().unwrap()), DEFAULT_COMPACTION_PROMPT);
     }
 
     #[test]
@@ -1851,12 +2075,15 @@ mod tests {
         assert!(rewritten.layered.triggered);
         // 最近一轮 = 最后一条 user → 结尾：此例为 [user, assistant]。
         assert_eq!(rewritten.layered.retained_items, 2);
-        let restored =
-            synthetic_remote_compaction_history_text(&rewritten.response["output"][0]).unwrap();
-        assert!(restored.contains("SUMMARY"));
-        // 最近一轮完整保留，含该 user 消息与其后的 assistant 回复。
-        assert!(restored.contains("USER CONTEXT KEPT NATIVELY"));
-        assert!(restored.contains("KEEP THIS ASSISTANT CONTEXT"));
+        let payload = synthetic_local_compaction_payload(&rewritten.response["output"][0]).unwrap();
+        assert_eq!(payload.summary, "SUMMARY");
+        assert_eq!(
+            payload.retained_tail,
+            vec![
+                user_message("USER CONTEXT KEPT NATIVELY"),
+                assistant_message("KEEP THIS ASSISTANT CONTEXT")
+            ]
+        );
 
         let plain = rewrite_remote_compaction_v2_response_with_layered_compaction(
             &request,
@@ -2118,9 +2345,14 @@ mod tests {
             DEFAULT_RETAIN_TOKENS,
         )
         .expect("V2 request should be rewritten");
-        let restored =
-            synthetic_remote_compaction_history_text(&rewritten.response["output"][0]).unwrap();
-        assert!(restored.contains("latest context after trigger"));
+        let payload = synthetic_local_compaction_payload(&rewritten.response["output"][0]).unwrap();
+        assert_eq!(
+            payload.retained_tail,
+            vec![
+                user_message("earlier context"),
+                assistant_message("latest context after trigger")
+            ]
+        );
     }
 
     #[test]
@@ -2148,7 +2380,7 @@ mod tests {
         let rewritten = prepare_legacy_layered_compaction_request(&request, "");
         let input = rewritten.get("input").and_then(Value::as_array).unwrap();
 
-        assert_eq!(item_text(&input[1]), DEFAULT_COMPACTION_PROMPT);
+        assert_eq!(item_text(input.last().unwrap()), DEFAULT_COMPACTION_PROMPT);
         assert!(rewritten.get("tools").is_none());
         assert!(rewritten.get("tool_choice").is_none());
         assert!(rewritten.get("parallel_tool_calls").is_none());
@@ -2193,86 +2425,6 @@ mod tests {
         assert_eq!(result.sse_text, sse);
     }
 
-    #[test]
-    fn injects_summary_and_recent_tail() {
-        let request = json!({
-            "input": [
-                // 更早一轮（不属于最近一轮，不应出现在 tail）。
-                user_message("old question that should be dropped"),
-                assistant_message("old answer that should be dropped"),
-                // 最近一轮：从这条 user 消息开始直到结尾。
-                user_message("the most recent user request"),
-                function_call_item("call_1", "exec_command"),
-                function_call_output_item("call_1", "file_a\nfile_b"),
-                assistant_message("most recent assistant note"),
-                compaction_prompt_item()
-            ]
-        });
-        let result = apply_layered_compaction_to_responses_sse(
-            &request,
-            true,
-            DEFAULT_RETAIN_TOKENS,
-            summary_sse("SUMMARY-BODY"),
-        );
-        assert!(result.triggered);
-        assert!(result.retained_items >= 1);
-
-        let response = crate::continue_thinking::extract_terminal_response_object(&result.sse_text)
-            .expect("rebuilt sse has terminal response");
-        let text = extract_message_text(&response).expect("rebuilt message text");
-        assert!(text.contains("SUMMARY-BODY"), "keeps summary");
-        // 最近一轮完整保留：user 请求 + 工具调用/输出 + 助手回复。
-        assert!(
-            text.contains("the most recent user request"),
-            "keeps recent user turn"
-        );
-        assert!(
-            text.contains("most recent assistant note"),
-            "keeps recent tail"
-        );
-        assert!(text.contains("exec_command"), "keeps recent tool call");
-        assert!(text.contains("file_b"), "keeps recent tool output");
-        // 更早一轮（上一个 user 之前）不属于最近一轮，不应出现。
-        assert!(
-            !text.contains("old question that should be dropped"),
-            "earlier turn must not appear in the recent-turn tail"
-        );
-        assert!(!text.contains("old answer that should be dropped"));
-        let output = response.get("output").and_then(Value::as_array).unwrap();
-        assert_eq!(output.len(), 1);
-        assert_eq!(output[0]["role"], "assistant");
-        assert_eq!(output[0]["id"], "msg_test");
-    }
-
-    #[test]
-    fn tail_respects_char_budget() {
-        let big = "x".repeat(10_000);
-        let request = json!({
-            "input": [user_message(&big), assistant_message(&big), compaction_prompt_item()]
-        });
-        let result = apply_layered_compaction_to_responses_sse(
-            &request,
-            true,
-            MIN_RETAIN_TOKENS,
-            summary_sse("S"),
-        );
-        assert!(result.triggered);
-        assert!(result.retained_chars <= MIN_RETAIN_TOKENS * 4);
-    }
-
-    #[test]
-    fn single_oversized_message_is_truncated_to_hard_budget() {
-        let budget_chars = retain_budget_chars(MIN_RETAIN_TOKENS);
-        let huge_message = "x".repeat(budget_chars * 2);
-        // 用 assistant 消息：user 消息由 Codex 原生保留，不入 tail。
-        let input = vec![assistant_message(&huge_message), compaction_prompt_item()];
-        let tail = build_tail_section(&input, budget_chars, true);
-
-        assert!(tail.text.chars().count() <= budget_chars);
-        assert_eq!(tail.chars as usize, tail.text.chars().count());
-        assert_eq!(tail.items, 1);
-    }
-
     fn function_call_item(call_id: &str, name: &str) -> Value {
         json!({
             "type": "function_call",
@@ -2290,14 +2442,49 @@ mod tests {
         })
     }
 
-    /// 问题1：会话总量远低于保留预算时，应将全部原始记录保留，不报错也不硬填充。
     #[test]
-    fn session_smaller_than_budget_keeps_everything() {
+    fn legacy_summary_request_excludes_anchor_and_raw_tail() {
         let request = json!({
             "input": [
-                user_message("hi"),
-                assistant_message("hello"),
-                user_message("how are you"),
+                user_message("更早历史"),
+                assistant_message("推荐方案：执行方案 1"),
+                user_message("按推荐处理"),
+                function_call_item("call_1", "shell_command"),
+                function_call_output_item("call_1", "ok"),
+                compaction_prompt_item()
+            ],
+            "tools": [{ "type": "function", "name": "shell_command" }]
+        });
+        let prepared = prepare_legacy_layered_compaction_request(&request, "");
+        let input = prepared["input"].as_array().unwrap();
+
+        assert_eq!(input.len(), 2);
+        assert_eq!(item_text(&input[0]), "更早历史");
+        assert_eq!(item_text(&input[1]), DEFAULT_COMPACTION_PROMPT);
+        assert!(!prepared.to_string().contains("推荐方案：执行方案 1"));
+        assert!(!prepared.to_string().contains("按推荐处理"));
+        assert!(!prepared.to_string().contains("call_1"));
+        assert!(prepared.get("tools").is_none());
+    }
+
+    #[test]
+    fn structured_payload_preserves_anchor_user_and_tool_items_exactly() {
+        let anchor = assistant_message("推荐方案：执行方案 1");
+        let mut user = user_message("按推荐处理");
+        user["id"] = json!("msg-user");
+        user["content"] = json!([
+            { "type": "input_text", "text": "按推荐处理" },
+            { "type": "input_image", "image_url": "data:image/png;base64,AAAA" }
+        ]);
+        let call = function_call_item("call_1", "shell_command");
+        let output = function_call_output_item("call_1", "probe ready");
+        let request = json!({
+            "input": [
+                user_message("更早历史"),
+                anchor.clone(),
+                user.clone(),
+                call.clone(),
+                output.clone(),
                 compaction_prompt_item()
             ]
         });
@@ -2305,180 +2492,197 @@ mod tests {
             &request,
             true,
             DEFAULT_RETAIN_TOKENS,
-            summary_sse("S"),
+            summary_sse("较早历史摘要"),
         );
         assert!(result.triggered);
-        // 用户消息由 Codex 原生保留，tail 只补回被丢弃的 assistant 回复。
-        // 此例中仅 1 条 assistant（“hello”）应被补回；两条 user 不入 tail。
-        assert_eq!(result.retained_items, 1);
-        assert!(result.retained_chars < DEFAULT_RETAIN_TOKENS * 4 / 10);
+        assert_eq!(result.retained_items, 4);
+        let response = crate::continue_thinking::extract_terminal_response_object(&result.sse_text)
+            .expect("structured legacy response");
+        let encoded = extract_message_text(&response).expect("structured payload text");
+        let payload =
+            structured_local_compaction_payload(&encoded).expect("v3 payload should decode");
+
+        assert_eq!(payload.summary, "较早历史摘要");
+        assert_eq!(
+            payload.retained_tail,
+            vec![anchor, user, call, output],
+            "roles, content blocks and call ids must remain byte-for-byte JSON equivalent"
+        );
     }
 
-    /// 问题2：单条超大工具输出不得挤掉其他记录（与总预算解耦）。
     #[test]
-    fn oversized_tool_output_does_not_starve_other_items() {
-        let huge_output = "y".repeat(50_000);
+    fn expansion_removes_codex_user_duplicate_and_restores_original_order() {
+        let anchor = assistant_message("推荐方案：执行方案 1");
+        let user = json!({
+            "type": "message",
+            "id": "msg-user",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "按推荐处理" }],
+            "internal_chat_message_metadata_passthrough": { "turn_id": "turn-1" }
+        });
+        let call = function_call_item("call_1", "shell_command");
+        let output = function_call_output_item("call_1", "probe ready");
+        let payload = StructuredLocalCompactionPayload {
+            summary: "较早历史摘要".to_string(),
+            retained_tail: vec![anchor.clone(), user.clone(), call.clone(), output.clone()],
+        };
+        let item = synthetic_structured_compaction_item(&format!(
+            "{LOCAL_COMPACTION_V3_STRUCTURED_PREFIX}{}",
+            serde_json::to_string(&payload).unwrap()
+        ));
         let request = json!({
             "input": [
-                assistant_message("earlier assistant note that must survive"),
-                assistant_message("another earlier assistant note that must survive"),
-                function_call_item("call_1", "exec_command"),
+                user_message("更早保留的 user"),
+                user.clone(),
+                item
+            ]
+        });
+        let expanded = expand_synthetic_local_compaction_request(&request);
+        let input = expanded["input"].as_array().unwrap();
+
+        assert_eq!(input.len(), 6);
+        assert_eq!(item_text(&input[0]), "更早保留的 user");
+        assert_eq!(input[1]["role"], "assistant");
+        assert!(item_text(&input[1]).contains("较早历史摘要"));
+        assert_eq!(&input[2..], &[anchor, user, call, output]);
+        assert_eq!(
+            input
+                .iter()
+                .filter(|item| item.get("id").and_then(Value::as_str) == Some("msg-user"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn oversized_raw_tail_fails_without_partial_payload() {
+        let huge_output = "界".repeat(30_000);
+        let request = json!({
+            "input": [
+                assistant_message("推荐方案"),
+                user_message("按推荐处理"),
+                function_call_item("call_1", "shell_command"),
                 function_call_output_item("call_1", &huge_output),
-                assistant_message("most recent assistant note"),
                 compaction_prompt_item()
             ]
         });
         let result = apply_layered_compaction_to_responses_sse(
             &request,
             true,
-            DEFAULT_RETAIN_TOKENS,
-            summary_sse("S"),
+            MIN_RETAIN_TOKENS,
+            summary_sse("SUMMARY MUST NOT LEAK"),
         );
-        assert!(result.triggered);
-        let response =
-            crate::continue_thinking::extract_terminal_response_object(&result.sse_text).unwrap();
-        let text = extract_message_text(&response).unwrap();
-        // 巨大工具输出必须被单条截断，不能占满预算挤掉更早的消息。
+        assert!(!result.triggered);
+        assert!(result.sse_text.contains("response.failed"));
         assert!(
-            text.contains("earlier assistant note that must survive"),
-            "oversized tool output must not evict earlier assistant message"
+            result
+                .sse_text
+                .contains("local_compaction_retained_tail_too_large")
         );
-        assert!(text.contains("most recent assistant note"));
-        // 巨大输出本身仍在（被截断），但不应包含完整 50000 字符。
-        assert!(text.contains("tool_output"));
-        assert!(text.len() < huge_output.len());
+        assert!(
+            !result
+                .sse_text
+                .contains(LOCAL_COMPACTION_V3_STRUCTURED_PREFIX)
+        );
+        assert!(!result.sse_text.contains("SUMMARY MUST NOT LEAK"));
     }
 
-    /// 问题2：选中 function_call_output 时必须原子保留对应 function_call，不产生孤儿项。
     #[test]
-    fn tool_call_and_output_are_kept_atomically() {
-        let request = json!({
+    fn claude_prefill_pause_depends_on_restored_tail_side() {
+        let assistant_payload = StructuredLocalCompactionPayload {
+            summary: "summary".to_string(),
+            retained_tail: vec![
+                user_message("按推荐处理"),
+                assistant_message("已经开始执行"),
+            ],
+        };
+        let assistant_item = synthetic_structured_compaction_item(&format!(
+            "{LOCAL_COMPACTION_V3_STRUCTURED_PREFIX}{}",
+            serde_json::to_string(&assistant_payload).unwrap()
+        ));
+        let assistant_request = json!({
+            "model": "claude-sonnet-5",
+            "input": [user_message("older"), assistant_item]
+        });
+        assert!(local_compaction_requires_real_user(
+            &assistant_request,
+            "claude-sonnet-5"
+        ));
+        assert!(!local_compaction_requires_real_user(
+            &assistant_request,
+            "gpt-5.6"
+        ));
+        let legacy_v1_request = json!({
+            "model": "claude-sonnet-5",
             "input": [
-                user_message("start"),
-                function_call_item("call_1", "exec_command"),
-                function_call_output_item("call_1", "output one"),
-                function_call_item("call_2", "exec_command"),
-                function_call_output_item("call_2", "output two"),
-                compaction_prompt_item()
+                user_message("older"),
+                {
+                    "type": "compaction",
+                    "encrypted_content": format!(
+                        "{REMOTE_COMPACTION_V2_LEGACY_BASE64_PREFIX}c3VtbWFyeQ"
+                    )
+                }
             ]
         });
-        // 极小预算，只够选中最后一条 output，验证它不会单独出现。
-        let result = apply_layered_compaction_to_responses_sse(
-            &request,
-            true,
-            MIN_RETAIN_TOKENS,
-            summary_sse("S"),
-        );
-        assert!(result.triggered);
-        let response =
-            crate::continue_thinking::extract_terminal_response_object(&result.sse_text).unwrap();
-        let text = extract_message_text(&response).unwrap();
-        if text.contains("output two") {
-            assert!(
-                text.contains("exec_command"),
-                "tool_call_output must never appear without its tool_call"
-            );
-        }
+        assert!(local_compaction_requires_real_user(
+            &legacy_v1_request,
+            "claude-sonnet-5"
+        ));
+
+        let user_payload = StructuredLocalCompactionPayload {
+            summary: "summary".to_string(),
+            retained_tail: vec![assistant_message("推荐方案"), user_message("按推荐处理")],
+        };
+        let user_request = json!({
+            "model": "claude-sonnet-5",
+            "input": [
+                user_message("older"),
+                synthetic_structured_compaction_item(&format!(
+                    "{LOCAL_COMPACTION_V3_STRUCTURED_PREFIX}{}",
+                    serde_json::to_string(&user_payload).unwrap()
+                ))
+            ]
+        });
+        assert!(!local_compaction_requires_real_user(
+            &user_request,
+            "claude-sonnet-5"
+        ));
+
+        let tool_payload = StructuredLocalCompactionPayload {
+            summary: "summary".to_string(),
+            retained_tail: vec![
+                user_message("按推荐处理"),
+                function_call_item("call_1", "shell_command"),
+                function_call_output_item("call_1", "ok"),
+            ],
+        };
+        let tool_request = json!({
+            "model": "claude-sonnet-5",
+            "input": [
+                user_message("older"),
+                synthetic_structured_compaction_item(&format!(
+                    "{LOCAL_COMPACTION_V3_STRUCTURED_PREFIX}{}",
+                    serde_json::to_string(&tool_payload).unwrap()
+                ))
+            ]
+        });
+        assert!(!local_compaction_requires_real_user(
+            &tool_request,
+            "claude-sonnet-5"
+        ));
     }
 
     #[test]
-    fn custom_tool_call_and_output_are_kept_atomically() {
-        let input = vec![
-            json!({
-                "type": "custom_tool_call",
-                "name": "apply_patch",
-                "call_id": "call_custom",
-                "arguments": "{\"patch\":\"x\"}"
-            }),
-            json!({
-                "type": "custom_tool_call_output",
-                "call_id": "call_custom",
-                "output": "custom tool result"
-            }),
-            compaction_prompt_item(),
-        ];
-        let tail = build_tail_section(&input, 10_000, true);
-        assert!(tail.text.contains("apply_patch"));
-        assert!(tail.text.contains("custom tool result"));
+    fn wait_for_user_response_has_no_output_items() {
+        let request = json!({ "model": "claude-sonnet-5" });
+        let response = local_compaction_wait_for_user_response(&request);
+        assert_eq!(response["status"], "completed");
+        assert_eq!(response["output"], json!([]));
 
-        let orphan = vec![
-            json!({
-                "type": "custom_tool_call_output",
-                "call_id": "missing_call",
-                "output": "orphan must be dropped"
-            }),
-            compaction_prompt_item(),
-        ];
-        let orphan_tail = build_tail_section(&orphan, 10_000, true);
-        assert!(!orphan_tail.text.contains("orphan must be dropped"));
-    }
-
-    #[test]
-    fn tool_call_pairs_never_exceed_hard_budget() {
-        let budget_chars = retain_budget_chars(MIN_RETAIN_TOKENS);
-        let mut input = Vec::new();
-        for index in 0..20 {
-            let call_id = format!("call_{index}");
-            input.push(json!({
-                "type": "function_call",
-                "call_id": call_id,
-                "name": "exec_command",
-                "arguments": "a".repeat(MAX_TOOL_ITEM_CHARS * 2)
-            }));
-            input.push(function_call_output_item(
-                &format!("call_{index}"),
-                &"b".repeat(MAX_TOOL_ITEM_CHARS * 2),
-            ));
-        }
-        input.push(compaction_prompt_item());
-
-        let tail = build_tail_section(&input, budget_chars, true);
-        assert!(tail.text.chars().count() <= budget_chars);
-        assert_eq!(tail.chars as usize, tail.text.chars().count());
-        for index in 0..20 {
-            let call_id = format!("call_{index}");
-            let occurrences = tail.text.matches(&call_id).count();
-            assert!(
-                occurrences == 0 || occurrences >= 2,
-                "tool output must not be retained without its paired call"
-            );
-        }
-    }
-
-    /// 问题2（核心场景）：最近大量连续工具调用比 message 预算大得多时，
-    /// 仍应能穿透这些工具调用回溯到更早的真实用户/助手消息，而不是被工具
-    /// 调用完全挤满。
-    #[test]
-    fn message_survives_when_recent_history_is_all_tool_calls() {
-        let mut input = vec![
-            assistant_message("the actual assistant plan we care about"),
-            assistant_message("acknowledged, starting work"),
-        ];
-        // 模拟最近 20 轮工具调用，每条输出都接近单条截断上限，总量远超过
-        // 整个预算，模拟你提出的“最近 10000 token 都是工具调用”场景。
-        for i in 0..20 {
-            let call_id = format!("call_{i}");
-            input.push(function_call_item(&call_id, "exec_command"));
-            input.push(function_call_output_item(&call_id, &"z".repeat(3_000)));
-        }
-        input.push(compaction_prompt_item());
-        let request = json!({ "input": input });
-
-        let result = apply_layered_compaction_to_responses_sse(
-            &request,
-            true,
-            MIN_RETAIN_TOKENS,
-            summary_sse("S"),
-        );
-        assert!(result.triggered);
-        let response =
-            crate::continue_thinking::extract_terminal_response_object(&result.sse_text).unwrap();
-        let text = extract_message_text(&response).unwrap();
-        assert!(
-            text.contains("the actual assistant plan we care about"),
-            "message budget must reserve room for the earlier assistant message even when \
-recent history is dominated by tool calls"
-        );
+        let sse = local_compaction_wait_for_user_sse(&request);
+        assert!(sse.contains("event: response.completed"));
+        assert!(!sse.contains("response.output_item.added"));
+        assert!(!sse.contains("response.output_item.done"));
     }
 
     #[test]

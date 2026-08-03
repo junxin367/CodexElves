@@ -146,6 +146,21 @@ pub fn known_model_context_window(model: &str) -> Option<u64> {
     None
 }
 
+/// 为已保存但缺少容量的模型映射提供定向数据回填。
+///
+/// 这里只包含已经明确确认的 Plan 模型事实，不能扩展成所有已知模型的通用兜底。
+pub fn required_model_context_window(model: &str) -> Option<u64> {
+    let normalized = normalized_model_slug(model);
+    let slug = normalized.as_str();
+    if slug == "claude-fable-5"
+        || slug.starts_with("claude-fable-5-")
+        || slug.starts_with("claude-fable-5.")
+    {
+        return known_model_context_window(model);
+    }
+    None
+}
+
 fn normalized_model_slug(model: &str) -> String {
     let normalized = model.trim().to_ascii_lowercase();
     normalized
@@ -197,5 +212,10 @@ mod tests {
         assert_eq!(known_model_context_window("gpt-5.7"), None);
         assert_eq!(known_model_context_window("claude-opus-5"), None);
         assert_eq!(known_model_context_window("deepseek-v5"), None);
+        assert_eq!(
+            required_model_context_window("anthropic/claude-fable-5"),
+            Some(1_000_000)
+        );
+        assert_eq!(required_model_context_window("gpt-5.6"), None);
     }
 }

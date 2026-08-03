@@ -26,9 +26,11 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "27";
+  const codexDeleteStyleVersion = "29";
   const codexElvesMenuId = "codex-elves-menu";
+  const codexElvesMenuVersion = "7";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
+  const codexElvesMenuTitlebarClass = "codex-elves-menu-titlebar";
   const codexDeleteVersion = "7";
   const codexActionGroupVersion = "6";
   const codexArchiveRowActionsVersion = "1";
@@ -436,7 +438,9 @@
   const selectors = {
     sidebarThread: "[data-app-action-sidebar-thread-id]",
     threadTitle: "[data-thread-title]",
-    appHeader: ".app-header-tint",
+    applicationMenuTopBar: '[class*="_ApplicationMenuTopBar_"]',
+    applicationMenu: '[aria-label="应用程序菜单"], [aria-label="Application menu"]',
+    appHeader: "[data-app-shell-application-menu-bar], .app-header-tint",
     nativeMenuBar: "[class*=\"ms-auto\"][class*=\"flex\"][class*=\"items-center\"]",
     headerContextMenuSurface: '[data-testid="app-shell-header-context-menu-surface"]',
     pinnedSummaryPanel: '[data-pip-obstacle="thread-summary-panel"]',
@@ -870,6 +874,10 @@
         pointer-events: auto;
         -webkit-app-region: no-drag;
       }
+      #${codexElvesMenuId}.${codexElvesMenuTitlebarClass} {
+        margin-inline-start: auto;
+        margin-inline-end: 4px;
+      }
       .codex-elves-trigger {
         display: inline-flex;
         align-items: center;
@@ -923,6 +931,7 @@
       }
       .codex-elves-modal-title { display: flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 650; }
       .codex-elves-backend-indicator { width: 9px; height: 9px; border-radius: 999px; background: #a1a1aa; display: inline-block; }
+      #${codexElvesMenuId} .codex-elves-backend-indicator + [data-codex-elves-trigger-label] { margin-inline-start: 4px; }
       .codex-elves-backend-indicator[data-status="ok"] { background: #34d399; box-shadow: 0 0 8px rgba(52,211,153,.75); }
       .codex-elves-backend-indicator[data-status="failed"] { background: #ef4444; box-shadow: 0 0 8px rgba(239,68,68,.75); }
       .codex-elves-backend-indicator[data-status="checking"] { background: #fbbf24; }
@@ -3280,12 +3289,45 @@
     loadUserScripts();
   }
 
+  function findApplicationMenuTopBar() {
+    const applicationMenu = document.querySelector(selectors.applicationMenu);
+    const candidates = [
+      document.querySelector(selectors.applicationMenuTopBar),
+      applicationMenu?.parentElement,
+    ];
+    return candidates.find((node) => {
+      if (!node) return false;
+      const rect = node.getBoundingClientRect();
+      const styles = getComputedStyle(node);
+      return rect.width > 0 &&
+        rect.height > 0 &&
+        rect.height <= 48 &&
+        rect.top <= 2 &&
+        styles.display === "flex";
+    }) || null;
+  }
+
   function findNativeMenuInsertionPoint() {
     if (!codexElvesSettings().nativeMenuPlacement) return null;
+    const applicationMenuTopBar = findApplicationMenuTopBar();
+    if (applicationMenuTopBar) {
+      const applicationMenu = applicationMenuTopBar.querySelector(selectors.applicationMenu);
+      const nativeButtonClass = applicationMenu?.querySelector("button")?.className || headerIconTextButtonClass;
+      return {
+        parent: applicationMenuTopBar,
+        before: null,
+        nativeButtonClass,
+        menuClassName: codexElvesMenuTitlebarClass,
+      };
+    }
     const header = document.querySelector(selectors.appHeader);
     const isIconOnlyButton = (button) => String(button.className || "").includes("aspect-square");
-    const menuBar = Array.from(header?.querySelectorAll?.(selectors.nativeMenuBar) || [])
+    const contextSurface = header?.querySelector(selectors.headerContextMenuSurface);
+    const directMenuBar = Array.from(contextSurface?.children || [])
+      .find((node) => node.matches?.(selectors.nativeMenuBar));
+    const menuBar = [directMenuBar, ...Array.from(header?.querySelectorAll?.(selectors.nativeMenuBar) || [])]
       .find((node) => {
+        if (!node) return false;
         const rect = node.getBoundingClientRect();
         return !node.closest(".invisible") && rect.width > 0 && rect.height > 0;
       });
@@ -3302,7 +3344,6 @@
       if (openLocationGroup?.parentElement?.parentElement === menuBar) return { parent: menuBar, before: openLocationGroup.parentElement, nativeButtonClass };
       return { parent: menuBar, before: buttons[buttons.length - 1]?.nextSibling || null, nativeButtonClass: buttons[buttons.length - 1]?.className || "" };
     }
-    const contextSurface = header?.querySelector(selectors.headerContextMenuSurface);
     const buttons = Array.from(contextSurface?.querySelectorAll?.("button") || [])
       .filter((button) => !button.closest(`#${codexElvesMenuId}`) && button.getBoundingClientRect().width > 0 && button.getBoundingClientRect().height > 0);
     if (buttons.length && buttons.every(isIconOnlyButton)) return null;
@@ -3319,6 +3360,10 @@
     return { parent, before: nativeButton, nativeButtonClass: nativeButton.className || "" };
   }
 
+  function applyCodexElvesMenuPlacement(menu, insertionPoint) {
+    menu.className = insertionPoint?.menuClassName || "";
+  }
+
   function removeDuplicateCodexElvesMenus(keep) {
     document.querySelectorAll(`#${codexElvesMenuId}, [data-codex-elves-menu="true"]`).forEach((node) => {
       if (node !== keep) node.remove();
@@ -3332,7 +3377,25 @@
 
   function normalizeCodexElvesTriggerClassName(className) {
     const classes = String(className || "").split(/\s+/).filter(Boolean);
-    const incompatibleNativeGroupClasses = new Set(["gap-0", "rounded-l-none", "border-l-0", "pl-0.5", "pr-1.5"]);
+    const incompatibleNativeGroupClasses = new Set([
+      "gap-0",
+      "rounded-l-none",
+      "rounded-r-none",
+      "rounded-s-none",
+      "rounded-e-none",
+      "border-l-0",
+      "border-r-0",
+      "border-s-0",
+      "border-e-0",
+      "pl-0.5",
+      "pr-0.5",
+      "ps-0.5",
+      "pe-0.5",
+      "pl-1.5",
+      "pr-1.5",
+      "ps-1.5",
+      "pe-1.5",
+    ]);
     const hasIncompatibleNativeGroupClass = classes.some((name) => incompatibleNativeGroupClasses.has(name));
     const normalized = classes.filter((name) => !incompatibleNativeGroupClasses.has(name));
     if (hasIncompatibleNativeGroupClass) {
@@ -3423,18 +3486,19 @@
     const existing = document.getElementById(codexElvesMenuId);
     removeDuplicateCodexElvesMenus(existing);
     let insertionPoint = findNativeMenuInsertionPoint();
-    if (existing && existing.dataset.codexElvesMenuVersion !== "6") {
+    if (existing && existing.dataset.codexElvesMenuVersion !== codexElvesMenuVersion) {
       existing.remove();
       insertionPoint = findNativeMenuInsertionPoint();
     } else if (existing && insertionPoint && existing.parentElement === insertionPoint.parent) {
       configureCodexElvesTrigger(existing, existing.querySelector("button"), insertionPoint.nativeButtonClass);
+      applyCodexElvesMenuPlacement(existing, insertionPoint);
       const safeBefore = insertionPoint.before?.parentElement === insertionPoint.parent ? insertionPoint.before : null;
       if (existing.nextSibling !== safeBefore) insertionPoint.parent.insertBefore(existing, safeBefore);
       removeDuplicateCodexElvesMenus(existing);
       return;
     } else if (existing && insertionPoint) {
       configureCodexElvesTrigger(existing, existing.querySelector("button"), insertionPoint.nativeButtonClass);
-      existing.className = "";
+      applyCodexElvesMenuPlacement(existing, insertionPoint);
       const safeBefore = insertionPoint.before?.parentElement === insertionPoint.parent ? insertionPoint.before : null;
       insertionPoint.parent.insertBefore(existing, safeBefore);
       removeDuplicateCodexElvesMenus(existing);
@@ -3450,7 +3514,7 @@
     const menu = document.createElement("div");
     menu.id = codexElvesMenuId;
     menu.dataset.codexElvesMenu = "true";
-    menu.dataset.codexElvesMenuVersion = "6";
+    menu.dataset.codexElvesMenuVersion = codexElvesMenuVersion;
     const trigger = document.createElement("button");
     trigger.type = "button";
     const indicator = ensureCodexElvesTriggerIndicator(trigger);
@@ -3460,7 +3524,7 @@
     configureCodexElvesTrigger(menu, trigger, nativeButtonClass);
     menu.appendChild(trigger);
     if (insertionPoint) {
-      menu.className = "";
+      applyCodexElvesMenuPlacement(menu, insertionPoint);
       const safeBefore = insertionPoint.before?.parentElement === insertionPoint.parent ? insertionPoint.before : null;
       insertionPoint.parent.insertBefore(menu, safeBefore);
     } else {
@@ -9531,6 +9595,7 @@
     }
     if (domain === "header") {
       return [
+        selectors.applicationMenuTopBar,
         selectors.appHeader,
         selectors.pinnedSummaryPanel,
         selectors.pinnedSummaryToggle,
@@ -9658,7 +9723,10 @@
       document.querySelector("nav, aside, [role='navigation']");
     const conversationRoot = conversationViewFindContentEl()?.closest?.("main, [role='main']") ||
       document.querySelector("main, [role='main']");
-    const headerRoot = document.querySelector(selectors.appHeader)?.closest?.("header, [role='banner']") ||
+    const applicationMenuTopBar = findApplicationMenuTopBar();
+    const headerRoot = applicationMenuTopBar?.closest?.("header, [role='banner']") ||
+      applicationMenuTopBar?.parentElement ||
+      document.querySelector(selectors.appHeader)?.closest?.("header, [role='banner']") ||
       document.querySelector("header, [role='banner']");
     const scopedRootsReady = !!sidebarRoot && !!conversationRoot && !!headerRoot;
     push("shell", document.body || document.documentElement, {

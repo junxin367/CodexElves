@@ -1,5 +1,6 @@
 use codex_elves_core::layered_compaction::{
-    apply_compaction_model_override, is_any_compaction_request, restore_response_model_in_sse,
+    DEFAULT_RETAIN_TOKENS, apply_compaction_model_override, is_any_compaction_request,
+    restore_response_model_in_sse, rewrite_remote_compaction_v2_response_with_layered_compaction,
 };
 use codex_elves_core::protocol_proxy::{
     AnthropicSseToResponsesConverter, ChatSseToResponsesConverter, UpstreamResponseProtocol,
@@ -299,6 +300,11 @@ fn remote_compaction_v2_response_is_single_compaction_and_restores_history() {
     let history_request = json!({
         "model": "claude-sonnet-5",
         "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "historical user context" }]
+            },
             output[0].clone(),
             {
                 "type": "message",
@@ -332,6 +338,159 @@ fn remote_compaction_v2_response_is_single_compaction_and_restores_history() {
                     })
             })
     );
+}
+
+#[test]
+fn structured_compaction_restores_real_roles_and_tool_pairing_across_protocols() {
+    let current_user = json!({
+        "type": "message",
+        "id": "msg-current-user",
+        "role": "user",
+        "content": [{ "type": "input_text", "text": "按推荐处理" }]
+    });
+    let source_request = json!({
+        "model": "claude-sonnet-5",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "接下来做什么" }]
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "推荐方案：执行方案 1" }]
+            },
+            current_user.clone(),
+            {
+                "type": "function_call",
+                "call_id": "call-probe",
+                "name": "shell_command",
+                "arguments": "{\"command\":\"run probe\"}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call-probe",
+                "output": "probe ready"
+            },
+            { "type": "compaction_trigger" }
+        ]
+    });
+    let source_response = json!({
+        "id": "resp-structured",
+        "status": "completed",
+        "model": "claude-sonnet-5",
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": "较早历史摘要" }]
+        }]
+    });
+    let compacted = rewrite_remote_compaction_v2_response_with_layered_compaction(
+        &source_request,
+        &source_response,
+        true,
+        DEFAULT_RETAIN_TOKENS,
+    )
+    .expect("structured compaction response");
+    let history_request = json!({
+        "model": "claude-sonnet-5",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "更早保留的 user" }]
+            },
+            current_user,
+            compacted.response["output"][0].clone()
+        ]
+    });
+
+    let chat = responses_to_chat_completions(history_request.clone()).unwrap();
+    let chat_messages = chat["messages"].as_array().unwrap();
+    let chat_text = serde_json::to_string(chat_messages).unwrap();
+    assert_eq!(chat_text.matches("按推荐处理").count(), 1);
+    assert!(chat_text.contains("推荐方案：执行方案 1"));
+    assert!(chat_text.contains("较早历史摘要"));
+    assert!(chat_text.contains("\"id\":\"call-probe\""));
+    assert!(chat_messages.iter().any(|message| {
+        message["role"] == "tool"
+            && message["tool_call_id"] == "call-probe"
+            && message["content"] == "probe ready"
+    }));
+
+    let anthropic = responses_to_anthropic_messages(history_request).unwrap();
+    let anthropic_messages = anthropic["messages"].as_array().unwrap();
+    let anthropic_text = serde_json::to_string(anthropic_messages).unwrap();
+    assert_eq!(anthropic_text.matches("按推荐处理").count(), 1);
+    assert!(anthropic_text.contains("推荐方案：执行方案 1"));
+    assert!(anthropic_text.contains("较早历史摘要"));
+    assert!(anthropic_text.contains("\"id\":\"call-probe\""));
+    let last = anthropic_messages.last().unwrap();
+    assert_eq!(last["role"], "user");
+    assert!(
+        last["content"]
+            .as_array()
+            .is_some_and(|content| content.iter().any(|block| {
+                block["type"] == "tool_result"
+                    && block["tool_use_id"] == "call-probe"
+                    && block["content"] == "probe ready"
+            }))
+    );
+}
+
+#[tokio::test]
+async fn claude_synthetic_assistant_tail_completes_locally_without_upstream_prefill() {
+    let compaction_request = json!({
+        "model": "claude-sonnet-5",
+        "input": [{ "type": "compaction_trigger" }]
+    });
+    let source_response = json!({
+        "id": "resp-summary",
+        "status": "completed",
+        "model": "claude-sonnet-5",
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": "SUMMARY" }]
+        }]
+    });
+    let compacted = rewrite_remote_compaction_v2_response_with_layered_compaction(
+        &compaction_request,
+        &source_response,
+        false,
+        DEFAULT_RETAIN_TOKENS,
+    )
+    .expect("legacy synthetic compaction");
+    let request = json!({
+        "model": "claude-sonnet-5",
+        "stream": false,
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "earlier user" }]
+            },
+            compacted.response["output"][0].clone()
+        ]
+    });
+
+    let response = handle_responses_proxy_request(&request.to_string())
+        .await
+        .expect("assistant-tail pause should not need an upstream");
+    assert_eq!(response.status, "200 OK");
+    let body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(body["status"], "completed");
+    assert_eq!(body["output"], json!([]));
+
+    let mut stream_request = request;
+    stream_request["stream"] = json!(true);
+    let response = handle_responses_proxy_request(&stream_request.to_string())
+        .await
+        .expect("streaming assistant-tail pause should not need an upstream");
+    let body = String::from_utf8(response.body).unwrap();
+    assert!(body.contains("event: response.completed"));
+    assert!(!body.contains("response.output_item.done"));
 }
 
 #[test]
@@ -7248,7 +7407,7 @@ async fn responses_proxy_legacy_compaction_blank_override_uses_project_default_p
     let forwarded: Value = serde_json::from_str(&captured.body).unwrap();
 
     assert_eq!(
-        forwarded["input"][1]["content"][0]["text"],
+        forwarded["input"][0]["content"][0]["text"],
         codex_elves_core::layered_compaction::DEFAULT_COMPACTION_PROMPT
     );
 }
@@ -9716,7 +9875,7 @@ async fn bridged_claude_remote_compaction_uses_override_without_becoming_native_
     assert!(requests[0].path.ends_with("/responses"));
     let upstream: Value = serde_json::from_str(&requests[0].body).unwrap();
     assert_eq!(upstream["model"], "gpt-5.6");
-    assert_eq!(upstream["input"][1]["type"], "message");
+    assert_eq!(upstream["input"][0]["type"], "message");
     assert!(upstream.get("tools").is_none());
     assert!(upstream.get("tool_choice").is_none());
 }

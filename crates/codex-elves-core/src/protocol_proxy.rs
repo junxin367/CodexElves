@@ -531,6 +531,7 @@ fn prompt_model_name(model: &str) -> String {
 }
 
 pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
+    let body = crate::layered_compaction::expand_synthetic_local_compaction_request(&body);
     let body = crate::layered_compaction::prepare_remote_compaction_v2_bridge_request(&body);
     let mut result = json!({});
 
@@ -754,6 +755,7 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
     body: Value,
     diagnostic_id: Option<&str>,
 ) -> anyhow::Result<Value> {
+    let body = crate::layered_compaction::expand_synthetic_local_compaction_request(&body);
     let body = crate::layered_compaction::prepare_remote_compaction_v2_bridge_request(&body);
     let mut result = json!({});
 
@@ -3209,6 +3211,36 @@ async fn handle_responses_proxy_request_inner(
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let request_model = request_json
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if crate::layered_compaction::local_compaction_requires_real_user(&request_json, request_model)
+    {
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "protocol_proxy.local_compaction_wait_for_user",
+            json!({
+                "model": request_model,
+                "stream": request_is_stream,
+                "reason": "restored local compaction history ends on the assistant side"
+            }),
+        );
+        if request_is_stream {
+            return Ok(ProxyHttpResponse {
+                status: "200 OK".to_string(),
+                content_type: "text/event-stream; charset=utf-8".to_string(),
+                body: crate::layered_compaction::local_compaction_wait_for_user_sse(&request_json)
+                    .into_bytes(),
+            });
+        }
+        return Ok(ProxyHttpResponse {
+            status: "200 OK".to_string(),
+            content_type: "application/json; charset=utf-8".to_string(),
+            body: serde_json::to_vec(
+                &crate::layered_compaction::local_compaction_wait_for_user_response(&request_json),
+            )?,
+        });
+    }
     let upstream = match open_responses_proxy_request(body, None).await {
         Ok(upstream) => upstream,
         Err(error) => {
@@ -3627,7 +3659,8 @@ pub(crate) fn normalize_responses_message_item_id(id: &str) -> Option<String> {
 }
 
 pub(crate) fn normalize_native_responses_request(request_json: &Value) -> Value {
-    let mut request = request_json.clone();
+    let mut request =
+        crate::layered_compaction::expand_synthetic_local_compaction_request(request_json);
     clamp_native_gpt_reasoning_effort(&mut request);
     let Some(input) = request.get_mut("input").and_then(Value::as_array_mut) else {
         return request;
@@ -10582,6 +10615,99 @@ mod remote_compaction_v2_tests {
     }
 
     #[test]
+    fn native_responses_expands_structured_compaction_and_removes_duplicate_user() {
+        let source_request = json!({
+            "model": "claude-sonnet-5",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "更早历史" }]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "推荐方案：执行方案 1" }]
+                },
+                {
+                    "type": "message",
+                    "id": "msg-current-user",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "按推荐处理" }]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "shell_command",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": "ok"
+                },
+                { "type": "compaction_trigger" }
+            ]
+        });
+        let source_response = json!({
+            "id": "resp_bridge",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "较早历史摘要" }]
+            }]
+        });
+        let compacted =
+            crate::layered_compaction::rewrite_remote_compaction_v2_response_with_layered_compaction(
+                &source_request,
+                &source_response,
+                true,
+                crate::layered_compaction::DEFAULT_RETAIN_TOKENS,
+            )
+            .expect("structured bridge response");
+        let compaction_item = compacted.response["output"][0].clone();
+        let normalized = normalize_native_responses_request(&json!({
+            "model": "gpt-5.6",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "更早历史" }]
+                },
+                {
+                    "type": "message",
+                    "id": "msg-current-user",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "按推荐处理" }]
+                },
+                compaction_item
+            ]
+        }));
+        let input = normalized["input"].as_array().unwrap();
+
+        assert_eq!(input.len(), 6);
+        assert_eq!(input[1]["role"], "assistant");
+        assert!(
+            input[1]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("较早历史摘要"))
+        );
+        assert_eq!(input[2]["role"], "assistant");
+        assert_eq!(input[2]["content"][0]["text"], "推荐方案：执行方案 1");
+        assert_eq!(input[3]["id"], "msg-current-user");
+        assert_eq!(input[4]["call_id"], "call-1");
+        assert_eq!(input[5]["call_id"], "call-1");
+        assert_eq!(
+            input
+                .iter()
+                .filter(|item| item.get("id").and_then(Value::as_str) == Some("msg-current-user"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn native_responses_preserves_real_remote_compaction_trigger() {
         let request = json!({
             "type": "response.create",
@@ -10964,6 +11090,31 @@ mod compaction_model_override_tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn required_fable_context_backfill_allows_stale_plan_mapping() {
+        let settings = settings_with_models(LayeredCompactionModels {
+            claude: "claude-fable-5".to_string(),
+            ..Default::default()
+        });
+        let relay = relay_with_models(&[
+            ("claude-opus-4-8", RelayProtocol::Anthropic, "1000000"),
+            ("claude-fable-5", RelayProtocol::Anthropic, ""),
+        ]);
+        let request = compaction_request("claude-opus-4-8", "small");
+
+        let resolved = resolve_compaction_model_override(
+            &request,
+            &request,
+            CompactionExecutionMode::LegacyLocal,
+            &settings,
+            &relay,
+        )
+        .expect("confirmed Fable context should repair a stale empty Plan mapping");
+
+        assert_eq!(resolved.compaction_model, "claude-fable-5");
+        assert_eq!(resolved.context_window, 1_000_000);
     }
 
     #[test]

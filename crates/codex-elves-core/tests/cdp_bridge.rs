@@ -94,6 +94,33 @@ fn renderer_features_diagnostics_prefer_bridge_before_http_fallback() {
 }
 
 #[test]
+fn renderer_features_supports_current_app_shell_header_layout() {
+    let script = assets::renderer_features_script();
+
+    assert!(script.contains("applicationMenuTopBar: '[class*=\"_ApplicationMenuTopBar_\"]'"));
+    assert!(script.contains("function findApplicationMenuTopBar()"));
+    assert!(script.contains("menuClassName: codexElvesMenuTitlebarClass"));
+    assert!(script.contains("margin-inline-start: auto"));
+    assert!(script.contains(
+        "#${codexElvesMenuId} .codex-elves-backend-indicator + [data-codex-elves-trigger-label] { margin-inline-start: 4px; }"
+    ));
+    assert!(script.contains(
+        "const applicationMenuTopBar = findApplicationMenuTopBar();\n    const headerRoot"
+    ));
+    assert!(
+        script.contains("appHeader: \"[data-app-shell-application-menu-bar], .app-header-tint\"")
+    );
+    assert!(script.contains(
+        "const contextSurface = header?.querySelector(selectors.headerContextMenuSurface)"
+    ));
+    assert!(script.contains("Array.from(contextSurface?.children || [])"));
+    assert!(script.contains("node.matches?.(selectors.nativeMenuBar)"));
+    assert!(script.contains("\"rounded-s-none\""));
+    assert!(script.contains("\"border-s-0\""));
+    assert!(script.contains("\"ps-0.5\""));
+}
+
+#[test]
 fn renderer_features_reuses_scan_observers_when_roots_are_unchanged() {
     let script = assets::renderer_features_script();
 
