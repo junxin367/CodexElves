@@ -8,10 +8,19 @@ use codex_elves_core::models::{DeleteResult, ExportResult, SessionRef};
 use codex_elves_core::routes::{BridgeContext, BridgeDataService, BridgeRuntimeService};
 use codex_elves_core::user_scripts::UserScriptManager;
 use serde_json::{Value, json};
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+const LAUNCHER_REPAIR_COMMAND: &[u8] = b"codex-elves:repair-bridge\n";
+const LAUNCHER_REPAIR_ACK: &[u8] = b"ok\n";
+const LAUNCHER_CONTROL_TIMEOUT: Duration = Duration::from_millis(750);
+const LAUNCHER_CONTROL_MAX_CONNECTIONS: usize = 8;
 
 #[derive(Clone)]
 struct LauncherHooks {
@@ -21,6 +30,7 @@ struct LauncherHooks {
     app_dir: Arc<Mutex<Option<PathBuf>>>,
     bridge_runtime: Arc<tokio::sync::Mutex<Option<codex_elves_core::bridge::BridgeRuntime>>>,
     bridge_watchdog: Arc<tokio::sync::Mutex<Option<LauncherBridgeWatchdogRuntime>>>,
+    bridge_repair_notify: Arc<tokio::sync::Notify>,
 }
 
 impl Default for LauncherHooks {
@@ -35,6 +45,7 @@ impl Default for LauncherHooks {
             app_dir: Arc::new(Mutex::new(None)),
             bridge_runtime: Arc::new(tokio::sync::Mutex::new(None)),
             bridge_watchdog: Arc::new(tokio::sync::Mutex::new(None)),
+            bridge_repair_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 }
@@ -47,7 +58,8 @@ struct LauncherBridgeWatchdogRuntime {
 #[tokio::main]
 async fn main() -> Result<()> {
     let options = parse_launch_options(std::env::args().skip(1));
-    let Some(_guard) = acquire_single_instance_guard(options.debug_port)? else {
+    let Some(guard) = acquire_single_instance_guard(options.debug_port)? else {
+        request_existing_launcher_bridge_repair();
         activate_existing_codex_app(&options).await?;
         return Ok(());
     };
@@ -55,9 +67,149 @@ async fn main() -> Result<()> {
         let _ = notify_manager_when_update_available().await;
     });
     let hooks = LauncherHooks::default();
+    if let Err(error) = start_launcher_control_listener(&guard, hooks.bridge_repair_notify.clone())
+    {
+        let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+            "launcher.control_start_failed_nonfatal",
+            json!({
+                "message": error.to_string()
+            }),
+        );
+    }
     let handle = launch_and_inject_with_hooks(options, &hooks).await?;
     handle.wait_for_codex_exit().await?;
     Ok(())
+}
+
+fn start_launcher_control_listener(
+    guard: &codex_elves_core::ports::LoopbackPortGuard,
+    bridge_repair_notify: Arc<tokio::sync::Notify>,
+) -> anyhow::Result<bool> {
+    let Some(listener) = guard.try_clone_listener()? else {
+        let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+            "launcher.control_unavailable",
+            json!({
+                "guard_port": codex_elves_core::ports::launcher_guard_port(),
+                "reason": "fallback_lock"
+            }),
+        );
+        return Ok(false);
+    };
+    listener.set_nonblocking(true)?;
+    let weak_notify = Arc::downgrade(&bridge_repair_notify);
+    let active_connections = Arc::new(AtomicUsize::new(0));
+    std::thread::Builder::new()
+        .name("codex-elves-launcher-control".to_string())
+        .spawn(move || {
+            loop {
+                let Some(bridge_repair_notify) = weak_notify.upgrade() else {
+                    break;
+                };
+                match listener.accept() {
+                    Ok((stream, peer)) => {
+                        if active_connections
+                            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                                (count < LAUNCHER_CONTROL_MAX_CONNECTIONS).then_some(count + 1)
+                            })
+                            .is_err()
+                        {
+                            let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+                                "launcher.control_request_dropped",
+                                json!({
+                                    "peer": peer.to_string(),
+                                    "reason": "connection_limit",
+                                    "limit": LAUNCHER_CONTROL_MAX_CONNECTIONS
+                                }),
+                            );
+                            continue;
+                        }
+                        let request_notify = bridge_repair_notify.clone();
+                        let request_connections = active_connections.clone();
+                        let peer_text = peer.to_string();
+                        let request_peer = peer_text.clone();
+                        if let Err(error) = std::thread::Builder::new()
+                            .name("codex-elves-launcher-control-request".to_string())
+                            .spawn(move || {
+                                let handled =
+                                    handle_launcher_control_connection(stream, &request_notify);
+                                request_connections.fetch_sub(1, Ordering::AcqRel);
+                                let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+                                    "launcher.control_request",
+                                    json!({
+                                        "peer": request_peer,
+                                        "handled": handled
+                                    }),
+                                );
+                            })
+                        {
+                            active_connections.fetch_sub(1, Ordering::AcqRel);
+                            let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+                                "launcher.control_request_thread_failed",
+                                json!({
+                                    "peer": peer_text,
+                                    "message": error.to_string()
+                                }),
+                            );
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        drop(bridge_repair_notify);
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(error) => {
+                        let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+                            "launcher.control_accept_failed",
+                            json!({
+                                "message": error.to_string()
+                            }),
+                        );
+                        break;
+                    }
+                }
+            }
+        })?;
+    Ok(true)
+}
+
+fn handle_launcher_control_connection(
+    mut stream: TcpStream,
+    bridge_repair_notify: &tokio::sync::Notify,
+) -> bool {
+    let _ = stream.set_read_timeout(Some(LAUNCHER_CONTROL_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(LAUNCHER_CONTROL_TIMEOUT));
+    let mut command = vec![0u8; LAUNCHER_REPAIR_COMMAND.len()];
+    if stream.read_exact(&mut command).is_err() || command != LAUNCHER_REPAIR_COMMAND {
+        return false;
+    }
+    bridge_repair_notify.notify_one();
+    stream.write_all(LAUNCHER_REPAIR_ACK).is_ok()
+}
+
+fn request_existing_launcher_bridge_repair() -> bool {
+    let guard_port = codex_elves_core::ports::launcher_guard_port();
+    let repaired = send_launcher_bridge_repair(guard_port);
+    let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+        "launcher.bridge_repair_requested",
+        json!({
+            "guard_port": guard_port,
+            "delivered": repaired
+        }),
+    );
+    repaired
+}
+
+fn send_launcher_bridge_repair(guard_port: u16) -> bool {
+    let address = SocketAddr::from(([127, 0, 0, 1], guard_port));
+    TcpStream::connect_timeout(&address, LAUNCHER_CONTROL_TIMEOUT)
+        .and_then(|mut stream| {
+            stream.set_read_timeout(Some(LAUNCHER_CONTROL_TIMEOUT))?;
+            stream.set_write_timeout(Some(LAUNCHER_CONTROL_TIMEOUT))?;
+            stream.write_all(LAUNCHER_REPAIR_COMMAND)?;
+            let mut ack = vec![0u8; LAUNCHER_REPAIR_ACK.len()];
+            stream.read_exact(&mut ack)?;
+            Ok(ack == LAUNCHER_REPAIR_ACK)
+        })
+        .unwrap_or(false)
 }
 
 fn acquire_single_instance_guard(
@@ -367,53 +519,61 @@ impl LaunchHooks for LauncherHooks {
         let data = self.data.clone();
         let app_dir = self.app_dir.clone();
         let bridge_runtime = self.bridge_runtime.clone();
+        let bridge_repair_notify = self.bridge_repair_notify.clone();
         let task = tokio::spawn(async move {
             let mut delay = codex_elves_core::launcher::bridge_watchdog_delay(
                 codex_elves_core::launcher::BridgeWatchdogStatus::Healthy,
             );
             loop {
-                tokio::select! {
+                let trigger = tokio::select! {
                     _ = &mut shutdown_rx => break,
-                    _ = tokio::time::sleep(delay) => {
+                    _ = tokio::time::sleep(delay) => "interval",
+                    _ = bridge_repair_notify.notified() => "requested",
+                };
+                let runtime = runtime.clone();
+                let data = data.clone();
+                let app_dir = app_dir.clone();
+                let bridge_runtime = bridge_runtime.clone();
+                let outcome = codex_elves_core::launcher::check_and_reinject_bridge_status_with(
+                    debug_port,
+                    helper_port,
+                    move || {
                         let runtime = runtime.clone();
                         let data = data.clone();
                         let app_dir = app_dir.clone();
                         let bridge_runtime = bridge_runtime.clone();
-                        let outcome = codex_elves_core::launcher::check_and_reinject_bridge_status_with(
-                            debug_port,
-                            helper_port,
-                            move || {
-                                let runtime = runtime.clone();
-                                let data = data.clone();
-                                let app_dir = app_dir.clone();
-                                let bridge_runtime = bridge_runtime.clone();
-                                async move {
-                                    let app_dir = app_dir
-                                        .lock()
-                                        .unwrap()
-                                        .clone()
-                                        .ok_or_else(|| anyhow::anyhow!("launcher app dir is not configured"))?;
-                                    runtime.set_debug_port(debug_port);
-                                    let ctx = BridgeContext::core_with_data_and_app_dir(
-                                        runtime.clone(),
-                                        data.clone(),
-                                        app_dir,
-                                    );
-                                    inject_with_context(
-                                        debug_port,
-                                        helper_port,
-                                        ctx,
-                                        runtime,
-                                        bridge_runtime,
-                                    )
-                                    .await
-                                }
-                            },
-                        )
-                        .await;
-                        delay = codex_elves_core::launcher::bridge_watchdog_delay(outcome);
-                    }
-                }
+                        async move {
+                            let app_dir = app_dir.lock().unwrap().clone().ok_or_else(|| {
+                                anyhow::anyhow!("launcher app dir is not configured")
+                            })?;
+                            runtime.set_debug_port(debug_port);
+                            let ctx = BridgeContext::core_with_data_and_app_dir(
+                                runtime.clone(),
+                                data.clone(),
+                                app_dir,
+                            );
+                            inject_with_context(
+                                debug_port,
+                                helper_port,
+                                ctx,
+                                runtime,
+                                bridge_runtime,
+                            )
+                            .await
+                        }
+                    },
+                )
+                .await;
+                let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+                    "bridge.watchdog_check",
+                    json!({
+                        "debug_port": debug_port,
+                        "helper_port": helper_port,
+                        "trigger": trigger,
+                        "outcome": format!("{outcome:?}")
+                    }),
+                );
+                delay = codex_elves_core::launcher::bridge_watchdog_delay(outcome);
             }
         });
         if let Some(runtime) = self
@@ -909,6 +1069,22 @@ mod tests {
         assert!(source.contains("acquire_single_instance_guard(options.debug_port)?"));
         assert!(source.contains("launcher_guard_port"));
         assert!(source.contains("launcher.already_running"));
+        assert!(source.contains("request_existing_launcher_bridge_repair()"));
+    }
+
+    #[tokio::test]
+    async fn launcher_control_request_wakes_existing_bridge_watchdog() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let guard = codex_elves_core::ports::LoopbackPortGuard::listener(listener);
+        let notify = Arc::new(tokio::sync::Notify::new());
+
+        assert!(start_launcher_control_listener(&guard, notify.clone()).unwrap());
+
+        assert!(send_launcher_bridge_repair(port));
+        tokio::time::timeout(Duration::from_secs(1), notify.notified())
+            .await
+            .expect("repair notification should reach watchdog");
     }
 
     #[test]
@@ -942,6 +1118,7 @@ mod tests {
         assert!(watchdog.contains(&watchdog_status_call));
         assert!(watchdog.contains(&bridge_context));
         assert!(watchdog.contains(&contextual_injection));
+        assert!(watchdog.contains("bridge_repair_notify.notified()"));
     }
 
     #[test]

@@ -64,6 +64,9 @@
   const codexPluginAutoExpandMaxClicks = 24;
   const codexPluginAutoExpandClickDelayMs = 180;
   const codexBackendHeartbeatIntervalMs = 30000;
+  const codexBackendBridgeReadyTimeoutMs = 2000;
+  const codexBackendBridgeTimeoutMs = 2000;
+  const codexBackendStatusTimeoutMs = 5000;
   const codexElvesImageOverlayId = "codex-elves-image-overlay";
   const codexTokenUsageCardClass = "codex-token-usage-card";
   const codexTokenUsageHostClass = "codex-token-usage-host";
@@ -2916,7 +2919,7 @@
   function withBackendTimeout(request) {
     return Promise.race([
       request,
-      new Promise((resolve) => setTimeout(() => resolve({ status: "failed", message: "后端检查超时", timeout: true }), 2000)),
+      new Promise((resolve) => setTimeout(() => resolve({ status: "failed", message: "后端检查超时", timeout: true }), codexBackendStatusTimeoutMs)),
     ]);
   }
 
@@ -4505,7 +4508,7 @@
     const startupWindowMs = 8000;
     const loadedAt = window.__codexElvesScriptLoadedAt || Date.now();
     if (Date.now() - loadedAt > startupWindowMs) return false;
-    const deadline = Date.now() + 2000;
+    const deadline = Date.now() + codexBackendBridgeReadyTimeoutMs;
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 100));
       if (typeof window.__codexSessionDeleteBridge === "function") return true;
@@ -4542,7 +4545,7 @@
     function bridgeWithBackendTimeout(path, payload) {
       return Promise.race([
         window.__codexSessionDeleteBridge(path, payload),
-        new Promise((resolve) => setTimeout(() => resolve({ status: "failed", message: "后端检查超时", timeout: true }), 2000)),
+        new Promise((resolve) => setTimeout(() => resolve({ status: "failed", message: "后端检查超时", timeout: true }), codexBackendBridgeTimeoutMs)),
       ]);
     }
     async function fetchBackendStatusFromHelper(path, payload) {

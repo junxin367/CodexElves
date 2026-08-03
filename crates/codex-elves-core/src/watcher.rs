@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::process::Command;
 #[cfg(windows)]
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -176,6 +178,17 @@ pub fn find_codex_processes() -> Vec<u32> {
     find_codex_processes_from_snapshot(&processes)
 }
 
+#[cfg(target_os = "macos")]
+pub fn find_codex_processes() -> Vec<u32> {
+    let Ok(output) = Command::new("ps").args(["-axo", "pid=,command="]).output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    find_macos_codex_processes_from_ps(&String::from_utf8_lossy(&output.stdout))
+}
+
 #[cfg(windows)]
 pub fn find_codex_processes_from_snapshot(
     processes: &[crate::windows_integration::WindowsProcessInfo],
@@ -220,9 +233,45 @@ pub fn find_codex_processes_from_snapshot(
     ids
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn find_codex_processes() -> Vec<u32> {
     Vec::new()
+}
+
+pub fn find_macos_codex_processes_from_ps(output: &str) -> Vec<u32> {
+    let mut process_ids = output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let split_at = line.find(char::is_whitespace)?;
+            let process_id = line[..split_at].parse::<u32>().ok()?;
+            let command = line[split_at..].trim();
+            is_macos_codex_main_process(command).then_some(process_id)
+        })
+        .collect::<Vec<_>>();
+    process_ids.sort_unstable();
+    process_ids.dedup();
+    process_ids
+}
+
+fn is_macos_codex_main_process(command: &str) -> bool {
+    let command = command.trim().to_ascii_lowercase();
+    let executable = command
+        .split_once(" --")
+        .map(|(executable, _)| executable)
+        .unwrap_or(command.as_str())
+        .trim_matches('"');
+    if executable.contains(" -") {
+        return false;
+    }
+    [
+        "/codex.app/contents/macos/codex",
+        "/openai codex.app/contents/macos/codex",
+        "/chatgpt.app/contents/macos/chatgpt",
+        "/openai chatgpt.app/contents/macos/chatgpt",
+    ]
+    .into_iter()
+    .any(|suffix| executable.ends_with(suffix))
 }
 
 #[cfg(windows)]

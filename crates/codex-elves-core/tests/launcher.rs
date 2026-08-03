@@ -345,6 +345,9 @@ fn launcher_windows_process_wait_uses_platform_cfg_guards() {
     assert!(source.contains(
         "#[cfg(windows)]\nfn wait_for_windows_process_id_blocking(process_id: u32) -> anyhow::Result<()>"
     ));
+    assert!(
+        source.contains("#[cfg(windows)]\n        {\n            let mut empty_streak = 0u32;")
+    );
 }
 
 #[test]
@@ -1108,6 +1111,7 @@ async fn launch_lifecycle_runs_sync_before_launch_writes_success_and_shutdowns_o
             "start-helper:45221",
             "launch:9229",
             "inject:9229:45221",
+            "bridge-watchdog:9229:45221",
             "status:running",
             "wait-codex",
             "shutdown-helper:45221",
@@ -1193,6 +1197,7 @@ async fn launch_lifecycle_keeps_js_injection_in_relay_mode() {
             "start-helper:45221",
             "launch:9229",
             "inject:9229:45221",
+            "bridge-watchdog:9229:45221",
             "status:running",
             "wait-codex",
             "shutdown-helper:45221",
@@ -1275,6 +1280,7 @@ async fn launch_lifecycle_runs_computer_use_guard_when_enabled() {
             "launch:9229",
             "computer-use-guard-watchdog",
             "inject:9229:45221",
+            "bridge-watchdog:9229:45221",
             "status:running",
             "wait-codex",
             "shutdown-helper:45221",
@@ -1464,6 +1470,7 @@ async fn launch_lifecycle_enters_degraded_mode_and_retries_when_injection_fails(
             "start-helper:45221",
             "launch:9229",
             "inject:9229:45221",
+            "bridge-watchdog:9229:45221",
             "status:running_degraded",
         ]
     );
@@ -1635,6 +1642,7 @@ async fn launch_lifecycle_cleans_helper_and_codex_when_status_save_fails() {
             "start-helper:45221",
             "launch:9229",
             "inject:9229:45221",
+            "bridge-watchdog:9229:45221",
             "shutdown-helper:45221",
             "terminate-packaged:4242",
             "status:failed",
@@ -1726,6 +1734,7 @@ async fn launch_continues_when_plugin_marketplace_config_fails() {
             "start-helper:45221",
             "launch:9229",
             "inject:9229:45221",
+            "bridge-watchdog:9229:45221",
             "status:running"
         ]
     );
@@ -1929,16 +1938,8 @@ impl LaunchHooks for FakeHooks {
         Ok(())
     }
 
-    async fn ensure_injection(&self, debug_port: u16, helper_port: u16, _app_dir: &Path) -> bool {
-        self.event(format!("inject:{debug_port}:{helper_port}"));
-        self.inject_error.is_none()
-    }
-
-    async fn start_bridge_watchdog(
-        &self,
-        _debug_port: u16,
-        _helper_port: u16,
-    ) -> anyhow::Result<()> {
+    async fn start_bridge_watchdog(&self, debug_port: u16, helper_port: u16) -> anyhow::Result<()> {
+        self.event(format!("bridge-watchdog:{debug_port}:{helper_port}"));
         Ok(())
     }
 

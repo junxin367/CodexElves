@@ -1,7 +1,8 @@
 use codex_elves_core::watcher::{
     build_spawn_launcher_command, build_watcher_install_plan, cdp_listening, codex_process_ids,
     disable_watcher_at, enable_watcher_at, filter_killable_launcher_processes,
-    process_ids_still_running, should_recover_stale_launcher, watcher_disabled_flag,
+    find_macos_codex_processes_from_ps, process_ids_still_running, should_recover_stale_launcher,
+    watcher_disabled_flag,
 };
 
 #[cfg(windows)]
@@ -125,6 +126,22 @@ fn stop_wait_tracks_only_expected_process_ids() {
         process_ids_still_running(&[10, 20, 30], [5, 20, 40, 30]),
         vec![20, 30]
     );
+}
+
+#[test]
+fn macos_process_parser_finds_codex_and_chatgpt_main_processes_only() {
+    let output = r#"
+  501 /Applications/OpenAI Codex.app/Contents/MacOS/Codex --remote-debugging-port=9229
+  502 /Applications/OpenAI Codex.app/Contents/Frameworks/Codex Helper.app/Contents/MacOS/Codex Helper
+  503 /Users/me/Applications/ChatGPT.app/Contents/MacOS/ChatGPT
+  504 /usr/local/bin/codex
+  501 /Applications/OpenAI Codex.app/Contents/MacOS/Codex --duplicate
+  505 /bin/sh -c /Applications/OpenAI Codex.app/Contents/MacOS/Codex
+  506 /Applications/MyCodex.app/Contents/MacOS/Codex
+  507 /Applications/Not Codex.app/Contents/MacOS/Codex
+"#;
+
+    assert_eq!(find_macos_codex_processes_from_ps(output), vec![501, 503]);
 }
 
 #[cfg(windows)]

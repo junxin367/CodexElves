@@ -228,6 +228,21 @@ fn injection_script_marks_diagnostic_build_and_reports_script_loaded() {
 #[test]
 fn injection_script_times_out_backend_bridge_calls_and_falls_back_to_helper() {
     let script = assets::injection_script(45221);
+    let timeout_value = |name: &str| -> u64 {
+        let marker = format!("const {name} = ");
+        let start = script
+            .find(&marker)
+            .map(|offset| offset + marker.len())
+            .unwrap_or_else(|| panic!("missing timeout constant {name}"));
+        let end = script[start..]
+            .find(';')
+            .map(|offset| start + offset)
+            .unwrap_or_else(|| panic!("unterminated timeout constant {name}"));
+        script[start..end]
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("invalid timeout constant {name}"))
+    };
 
     assert!(script.contains("bridgeWithBackendTimeout"));
     assert!(script.contains("backend_bridge_timeout"));
@@ -237,6 +252,11 @@ fn injection_script_times_out_backend_bridge_calls_and_falls_back_to_helper() {
     assert!(script.contains("bridgeMissing: true"));
     assert!(script.contains("backend_status_bridge_failed_http_fallback_ok"));
     assert!(script.contains("backend_status_bridge_and_http_failed"));
+    assert!(
+        timeout_value("codexBackendStatusTimeoutMs")
+            > timeout_value("codexBackendBridgeReadyTimeoutMs")
+                + timeout_value("codexBackendBridgeTimeoutMs")
+    );
 }
 
 #[test]

@@ -4208,11 +4208,11 @@ function LocalProxyScreen({
       }),
     [entries, modelFilter],
   );
-  const gptRequestRatio = useMemo(() => calculateGptRequestRatio(modelFilteredEntries), [modelFilteredEntries]);
+  const requestRatio = useMemo(() => calculateRequestRatio(modelFilteredEntries), [modelFilteredEntries]);
   const filteredEntries = useMemo(
     () =>
       modelFilteredEntries.filter((entry) => {
-        if (logFilter === "high" && classifyGptIqRequest(entry) !== "high") return false;
+        if (logFilter === "high" && classifyHighReasoningRequest(entry) !== "high") return false;
         if (logFilter === "continuation" && !isContinueThinkingEntry(entry)) return false;
         return true;
       }),
@@ -4330,7 +4330,7 @@ function LocalProxyScreen({
                 onChange={(next) => setModelFilter(next)}
               />
               <div
-                aria-label="GPT 请求高智商和续接比例"
+                aria-label="请求高推理和 GPT 续接比例"
                 className="proxy-iq-ratio"
               >
                 <button
@@ -4339,7 +4339,7 @@ function LocalProxyScreen({
                   onClick={() => setLogFilter((current) => (current === "high" ? "" : "high"))}
                   type="button"
                 >
-                  高 <strong>{gptRequestRatio.highPercent}%</strong>
+                  高 <strong>{requestRatio.highPercent}%</strong>
                 </button>
                 <button
                   aria-pressed={logFilter === "continuation"}
@@ -4347,7 +4347,7 @@ function LocalProxyScreen({
                   onClick={() => setLogFilter((current) => (current === "continuation" ? "" : "continuation"))}
                   type="button"
                 >
-                  续接 <strong>{gptRequestRatio.continuationPercent}%</strong>
+                  续接 <strong>{requestRatio.continuationPercent}%</strong>
                 </button>
               </div>
             </div>
@@ -10538,33 +10538,38 @@ function serializeProxyEventBody(events: unknown[]) {
   return body === null ? null : JSON.stringify(body, null, 2);
 }
 
-function calculateGptRequestRatio(entries: LocalProxyLogEntry[]) {
+function calculateRequestRatio(entries: LocalProxyLogEntry[]) {
   let high = 0;
+  let highTotal = 0;
   let continuation = 0;
-  let total = 0;
+  let continuationTotal = 0;
 
   entries.forEach((entry) => {
-    if (!isGptModel(entry.model)) return;
-    total += 1;
-    if (classifyGptIqRequest(entry) === "high") {
+    highTotal += 1;
+    if (classifyHighReasoningRequest(entry) === "high") {
       high += 1;
     }
-    if (isContinueThinkingEntry(entry)) {
-      continuation += 1;
+    if (isGptModel(entry.model)) {
+      continuationTotal += 1;
+      if (isContinueThinkingEntry(entry)) {
+        continuation += 1;
+      }
     }
   });
 
   return {
     high,
     continuation,
-    total,
-    highPercent: total ? Math.round((high / total) * 100) : 0,
-    continuationPercent: total ? Math.round((continuation / total) * 100) : 0,
+    highTotal,
+    continuationTotal,
+    highPercent: highTotal ? Math.round((high / highTotal) * 100) : 0,
+    continuationPercent: continuationTotal
+      ? Math.round((continuation / continuationTotal) * 100)
+      : 0,
   };
 }
 
-function classifyGptIqRequest(entry: Pick<LocalProxyLogEntry, "model" | "reasoningTokens">) {
-  if (!isGptModel(entry.model)) return null;
+function classifyHighReasoningRequest(entry: Pick<LocalProxyLogEntry, "reasoningTokens">) {
   if (entry.reasoningTokens === 516) return "low";
   if (typeof entry.reasoningTokens === "number" && entry.reasoningTokens > 516) return "high";
   return null;

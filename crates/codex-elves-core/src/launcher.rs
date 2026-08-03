@@ -182,29 +182,25 @@ pub trait LaunchHooks: Send + Sync {
         self.inject(debug_port, helper_port).await
     }
     async fn ensure_injection(&self, debug_port: u16, helper_port: u16, app_dir: &Path) -> bool {
-        for attempt in 1..=120 {
-            let result = match self.bridge_context(debug_port, app_dir).await {
-                Ok(Some(ctx)) => self.inject_bridge(debug_port, helper_port, ctx).await,
-                Ok(None) => self.inject(debug_port, helper_port).await,
-                Err(error) => Err(error),
-            };
-            match result {
-                Ok(()) => return true,
-                Err(error) => {
-                    let _ = crate::diagnostic_log::append_diagnostic_log(
-                        "launcher.ensure_injection_retry_failed",
-                        serde_json::json!({
-                            "debug_port": debug_port,
-                            "helper_port": helper_port,
-                            "attempt": attempt,
-                            "message": error.to_string()
-                        }),
-                    );
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                }
+        let result = match self.bridge_context(debug_port, app_dir).await {
+            Ok(Some(ctx)) => self.inject_bridge(debug_port, helper_port, ctx).await,
+            Ok(None) => self.inject(debug_port, helper_port).await,
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "launcher.initial_injection_failed",
+                    serde_json::json!({
+                        "debug_port": debug_port,
+                        "helper_port": helper_port,
+                        "message": error.to_string()
+                    }),
+                );
+                false
             }
         }
-        false
     }
     async fn start_bridge_watchdog(
         &self,
@@ -331,9 +327,9 @@ where
             let injection_ready = hooks
                 .ensure_injection(debug_port, helper_port, &app_dir)
                 .await;
+            hooks.start_bridge_watchdog(debug_port, helper_port).await?;
             if injection_ready {
                 keep_launched_on_error = false;
-                hooks.start_bridge_watchdog(debug_port, helper_port).await?;
             } else {
                 let degraded = launch_status(
                     "running_degraded",
@@ -803,17 +799,20 @@ impl LaunchHooks for DefaultLaunchHooks {
                 }
             }
         }
-        let mut empty_streak = 0u32;
-        loop {
-            if crate::watcher::find_codex_processes().is_empty() {
-                empty_streak = empty_streak.saturating_add(1);
-                if empty_streak >= 3 {
-                    break;
+        #[cfg(windows)]
+        {
+            let mut empty_streak = 0u32;
+            loop {
+                if crate::watcher::find_codex_processes().is_empty() {
+                    empty_streak = empty_streak.saturating_add(1);
+                    if empty_streak >= 3 {
+                        break;
+                    }
+                } else {
+                    empty_streak = 0;
                 }
-            } else {
-                empty_streak = 0;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
         Ok(())
     }
