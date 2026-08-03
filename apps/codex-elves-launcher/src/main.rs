@@ -181,6 +181,12 @@ fn log_launcher_already_running(debug_port: u16) {
 }
 
 async fn notify_manager_when_update_available() -> anyhow::Result<bool> {
+    let settings = codex_elves_core::settings::SettingsStore::default()
+        .load()
+        .unwrap_or_default();
+    if !update_prompt_enabled(&settings) {
+        return Ok(false);
+    }
     let update =
         codex_elves_core::update::check_for_update(codex_elves_core::version::VERSION).await?;
     if !update.update_available {
@@ -188,6 +194,10 @@ async fn notify_manager_when_update_available() -> anyhow::Result<bool> {
     }
     open_manager_with_update_prompt()?;
     Ok(true)
+}
+
+fn update_prompt_enabled(settings: &codex_elves_core::settings::BackendSettings) -> bool {
+    settings.github_release_update_prompt_enabled
 }
 
 fn open_manager_with_update_prompt() -> anyhow::Result<()> {
@@ -963,5 +973,14 @@ mod tests {
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.contains(codex_elves_core::install::MANAGER_BINARY))
         );
+    }
+
+    #[test]
+    fn update_prompt_setting_defaults_on_and_can_be_disabled() {
+        let mut settings = codex_elves_core::settings::BackendSettings::default();
+        assert!(update_prompt_enabled(&settings));
+
+        settings.github_release_update_prompt_enabled = false;
+        assert!(!update_prompt_enabled(&settings));
     }
 }

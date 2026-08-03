@@ -10,13 +10,15 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, PhysicalPosition, PhysicalSize, Position, Size, WindowEvent};
+use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, WindowEvent};
 
 static APP_EXITING: AtomicBool = AtomicBool::new(false);
 const TRAY_MENU_SHOW: &str = "tray_show_main";
 const TRAY_MENU_QUIT: &str = "tray_quit_app";
-const MANAGER_WAKE_MESSAGE: &[u8] = b"codex-elves-manager:show-main-window\n";
+const MANAGER_WAKE_SHOW: u8 = 1;
+const MANAGER_WAKE_SHOW_UPDATE: u8 = 2;
 const MANAGER_WAKE_ACK: &[u8] = b"codex-elves-manager:shown\n";
+const SHOW_UPDATE_EVENT: &str = "codex-elves://show-update";
 const MANAGER_WINDOW_STATE_FILE: &str = "manager-window-state.json";
 const DEV_MANAGER_WINDOW_STATE_FILE: &str = "manager-window-state-dev.json";
 const DEFAULT_WINDOW_WIDTH: f64 = 1180.0;
@@ -41,7 +43,8 @@ pub fn run() {
             "version": env!("CARGO_PKG_VERSION")
         }),
     );
-    let Some(guard) = acquire_single_instance_guard() else {
+    let show_update = commands::startup_should_show_update();
+    let Some(guard) = acquire_single_instance_guard(show_update) else {
         return;
     };
     let wake_listener = match guard.try_clone_listener() {
@@ -56,7 +59,6 @@ pub fn run() {
             None
         }
     };
-    let show_update = commands::startup_should_show_update();
     let run_result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
@@ -384,24 +386,33 @@ fn spawn_manager_wake_listener<R: tauri::Runtime>(
                 continue;
             };
             let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-            let mut buffer = [0_u8; MANAGER_WAKE_MESSAGE.len()];
+            let mut buffer = [0_u8; 1];
             if stream.read_exact(&mut buffer).is_err() {
                 continue;
             }
-            if buffer.as_slice() == MANAGER_WAKE_MESSAGE {
-                show_main_window(&app_handle);
-                let _ = stream.write_all(MANAGER_WAKE_ACK);
-                let _ = stream.flush();
+            match buffer[0] {
+                MANAGER_WAKE_SHOW => show_main_window(&app_handle),
+                MANAGER_WAKE_SHOW_UPDATE => {
+                    show_main_window(&app_handle);
+                    let _ = app_handle.emit(SHOW_UPDATE_EVENT, ());
+                }
+                _ => continue,
             }
+            let _ = stream.write_all(MANAGER_WAKE_ACK);
+            let _ = stream.flush();
         }
     });
 }
 
-fn request_existing_manager_to_show(manager_guard_port: u16) -> std::io::Result<()> {
+fn request_existing_manager_to_show(
+    manager_guard_port: u16,
+    show_update: bool,
+) -> std::io::Result<()> {
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], manager_guard_port));
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500))?;
     stream.set_write_timeout(Some(Duration::from_millis(500)))?;
-    stream.write_all(MANAGER_WAKE_MESSAGE)?;
+    let command = manager_wake_command(show_update);
+    stream.write_all(&[command])?;
     stream.flush()?;
     stream.set_read_timeout(Some(Duration::from_millis(500)))?;
     let mut ack = [0_u8; MANAGER_WAKE_ACK.len()];
@@ -413,6 +424,14 @@ fn request_existing_manager_to_show(manager_guard_port: u16) -> std::io::Result<
             std::io::ErrorKind::InvalidData,
             "manager wake acknowledgement mismatch",
         ))
+    }
+}
+
+fn manager_wake_command(show_update: bool) -> u8 {
+    if show_update {
+        MANAGER_WAKE_SHOW_UPDATE
+    } else {
+        MANAGER_WAKE_SHOW
     }
 }
 
@@ -441,7 +460,9 @@ fn install_panic_logger() {
     }));
 }
 
-fn acquire_single_instance_guard() -> Option<codex_elves_core::ports::LoopbackPortGuard> {
+fn acquire_single_instance_guard(
+    show_update: bool,
+) -> Option<codex_elves_core::ports::LoopbackPortGuard> {
     let manager_guard_port = codex_elves_core::ports::manager_guard_port();
     match codex_elves_core::ports::acquire_resilient_loopback_port_guard(manager_guard_port) {
         Ok(guard) => {
@@ -457,7 +478,7 @@ fn acquire_single_instance_guard() -> Option<codex_elves_core::ports::LoopbackPo
             Some(guard)
         }
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
-            let wake_result = request_existing_manager_to_show(manager_guard_port);
+            let wake_result = request_existing_manager_to_show(manager_guard_port, show_update);
             let should_start_fallback = wake_result.is_err();
             let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
                 "manager.already_running",
@@ -474,7 +495,7 @@ fn acquire_single_instance_guard() -> Option<codex_elves_core::ports::LoopbackPo
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-            let wake_result = request_existing_manager_to_show(manager_guard_port);
+            let wake_result = request_existing_manager_to_show(manager_guard_port, show_update);
             let should_start_fallback = wake_result.is_err();
             let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
                 "manager.already_running",
@@ -517,5 +538,16 @@ fn fallback_single_instance_guard() -> Option<codex_elves_core::ports::LoopbackP
             );
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manager_wake_command_distinguishes_update_prompt() {
+        assert_eq!(manager_wake_command(false), MANAGER_WAKE_SHOW);
+        assert_eq!(manager_wake_command(true), MANAGER_WAKE_SHOW_UPDATE);
     }
 }

@@ -15,6 +15,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
@@ -181,6 +182,7 @@ type BackendSettings = {
   codexAppPath: string;
   codexHomePath: string;
   codexExtraArgs: string[];
+  githubReleaseUpdatePromptEnabled: boolean;
   providerSyncEnabled: boolean;
   providerSyncSavedProviders: string[];
   providerSyncManualProviders: string[];
@@ -714,7 +716,6 @@ type UpdateResult = CommandResult<{
   assetUrl?: string | null;
   updateAvailable?: boolean;
   installedPath?: string;
-  progress?: number;
 }>;
 
 type CodexRadarIqRun = {
@@ -894,6 +895,7 @@ const defaultSettings: BackendSettings = {
   codexAppPath: "",
   codexHomePath: "",
   codexExtraArgs: [],
+  githubReleaseUpdatePromptEnabled: true,
   providerSyncEnabled: false,
   providerSyncSavedProviders: [],
   providerSyncManualProviders: [],
@@ -1749,7 +1751,39 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
     case "startup_options":
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
-      return Promise.resolve(browserPreviewResult({ currentVersion: "0.3.6", updateAvailable: false }) as T);
+      return Promise.resolve(browserPreviewResult({
+        currentVersion: "0.3.8",
+        latestVersion: "0.4.0",
+        releaseSummary: [
+          "CodexElves 0.4.0",
+          "",
+          "- 优化启动与托盘唤醒稳定性",
+          "- 改进 GitHub Release 更新体验",
+          "- 修复若干协议代理兼容性问题",
+        ].join("\n"),
+        assetName: "CodexElves-0.4.0-windows-x64-setup.exe",
+        assetUrl: "https://example.test/CodexElves-0.4.0-windows-x64-setup.exe",
+        updateAvailable: true,
+      }, "发现可用更新。") as T);
+    case "perform_update":
+      return Promise.resolve(browserPreviewResult({
+        currentVersion: "0.3.8",
+        latestVersion: "0.4.0",
+        releaseSummary: "浏览器预览不会下载真实安装包。",
+        installedPath: "C:\\Temp\\CodexElves-0.4.0-windows-x64-setup.exe",
+        launched: true,
+      }, "浏览器预览已模拟启动安装包。") as T);
+    case "copy_diagnostics":
+      return Promise.resolve(browserPreviewResult({
+        report: [
+          "CodexElves 诊断报告",
+          "版本: 0.3.8",
+          "平台: windows-x64",
+          "Codex 应用: C:\\Users\\junes\\AppData\\Local\\Programs\\CodexElves\\CodexElves.exe",
+          "配置目录: C:\\Users\\junes\\.codex",
+          "本地代理: running",
+        ].join("\n"),
+      }, "浏览器预览已生成诊断报告。") as T);
     case "load_overview":
       return Promise.resolve(browserPreviewResult({
         codex_app: { status: "found", path: settings.codexAppPath },
@@ -1764,7 +1798,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.3.6",
+        current_version: "0.3.8",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -2100,6 +2134,8 @@ export function App() {
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
   const [watcher, setWatcher] = useState<WatcherResult | null>(null);
   const [update, setUpdate] = useState<UpdateResult | null>(null);
+  const [updatePrompt, setUpdatePrompt] = useState<UpdateResult | null>(null);
+  const [updateInstallActive, setUpdateInstallActive] = useState(false);
   const [scriptMarket, setScriptMarket] = useState<ScriptMarketResult | null>(null);
   const [skins, setSkins] = useState<SkinsResult | null>(null);
   const [codexRadar, setCodexRadar] = useState<CodexRadarResult | null>(null);
@@ -2786,27 +2822,47 @@ export function App() {
     const result = await run(() => call<UpdateResult>("check_update"));
     if (result) {
       setUpdate(result);
-      if (!silent || result.updateAvailable) {
+      if (result.updateAvailable) {
+        setUpdatePrompt(result);
+      } else if (!silent) {
         showNotice("GitHub Release 检查", result.message, result.status);
       }
     }
   };
 
-  const performUpdate = async () => {
+  const performUpdateFrom = async (source: UpdateResult | null) => {
     const release =
-      update?.latestVersion && update.assetName && update.assetUrl
+      source?.latestVersion && source.assetName && source.assetUrl
         ? {
-            version: update.latestVersion,
+            version: source.latestVersion,
             url: "",
-            body: update.releaseSummary ?? "",
-            asset_name: update.assetName,
-            asset_url: update.assetUrl,
+            body: source.releaseSummary ?? "",
+            asset_name: source.assetName,
+            asset_url: source.assetUrl,
           }
         : null;
     const result = await run(() => call<UpdateResult>("perform_update", { release }));
     if (result) {
       setUpdate(result);
       showNotice("更新安装", result.message, result.status);
+    }
+    return result;
+  };
+
+  const performUpdate = async () => {
+    await performUpdateFrom(update);
+  };
+
+  const performPromptUpdate = async () => {
+    if (updateInstallActive) return;
+    setUpdateInstallActive(true);
+    try {
+      const result = await performUpdateFrom(updatePrompt);
+      if (result && isSuccessStatus(result.status)) {
+        setUpdatePrompt(null);
+      }
+    } finally {
+      setUpdateInstallActive(false);
     }
   };
 
@@ -3331,15 +3387,11 @@ export function App() {
 
   useEffect(() => {
     void (async () => {
-      const startup = await run(() => call<StartupResult>("startup_options"));
-      if (startup?.showUpdate) {
-        setRoute("about");
-        void checkUpdate(false);
-      } else {
+      const loadedSettings = await refreshSettings(true);
+      if (loadedSettings?.githubReleaseUpdatePromptEnabled !== false) {
         void checkUpdate(true);
       }
       await refreshOverview(true);
-      await refreshSettings(true);
       await refreshRelay(true);
       await refreshEnvConflicts(true);
       await refreshProviderSyncTargets(true);
@@ -3353,6 +3405,25 @@ export function App() {
       await checkPluginMarketplacePrompt();
       await checkRemotePluginMarketplacePrompt();
     })();
+  }, []);
+
+  useEffect(() => {
+    if (isBrowserPreview()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen("codex-elves://show-update", () => {
+      void checkUpdate(true);
+    }).then((dispose) => {
+      if (disposed) {
+        dispose();
+      } else {
+        unlisten = dispose;
+      }
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -3843,6 +3914,16 @@ export function App() {
           key={`${notice.title}-${notice.message}-${notice.status ?? ""}`}
           notice={notice}
           onClose={() => setNotice(null)}
+        />
+      ) : null}
+      {updatePrompt ? (
+        <UpdatePromptDialog
+          active={updateInstallActive}
+          update={updatePrompt}
+          onLater={() => {
+            if (!updateInstallActive) setUpdatePrompt(null);
+          }}
+          onUpdate={() => void performPromptUpdate()}
         />
       ) : null}
       {pluginMarketplacePrompt ? (
@@ -5945,8 +6026,8 @@ function SessionsScreen({
                           ariaLabel={`${label}使用的上下文压缩模型`}
                           className="session-context-compaction-model-select"
                           menuClassName="session-context-compaction-model-menu"
-                          menuMaxWidth={320}
-                          menuMinWidth={320}
+                          menuMaxWidth={260}
+                          menuMinWidth={260}
                           onChange={(next) => {
                             const value = {
                               ...form,
@@ -6124,7 +6205,7 @@ function MaintenanceScreen({
       <Panel>
         <CardHead title="检查与修复" detail="检查入口、ChatGPT/Codex 应用和 Watcher 状态" />
         <CardContent>
-          <div className="status-table">
+          <div className="status-table maintenance-health-status">
             <StatusRow title="ChatGPT/Codex 应用" status={overview?.codex_app.status} path={overview?.codex_app.path} />
             <StatusRow title="静默启动入口" status={overview?.silent_shortcut.status} path={overview?.silent_shortcut.path} />
             <StatusRow title="管理控制台入口" status={overview?.management_shortcut.status} path={overview?.management_shortcut.path} />
@@ -6138,9 +6219,39 @@ function MaintenanceScreen({
         </CardContent>
       </Panel>
       <Panel>
+        <CardHead title="GitHub Release 更新" detail="控制启动软件时是否自动检查并提醒新版本" />
+        <CardContent>
+          <div className="maintenance-update-preference">
+            <div>
+              <strong>启动时提醒新版本</strong>
+              <p>关闭后不再自动请求 GitHub Release，仍可在“关于”页手动检查和下载安装包。</p>
+            </div>
+            <button
+              aria-checked={form.githubReleaseUpdatePromptEnabled}
+              aria-label="启动时提醒 GitHub Release 新版本"
+              className={`context-enabled-switch ${form.githubReleaseUpdatePromptEnabled ? "active" : ""}`}
+              onClick={() => {
+                const next = {
+                  ...form,
+                  githubReleaseUpdatePromptEnabled: !form.githubReleaseUpdatePromptEnabled,
+                };
+                onFormChange(next);
+                void actions.saveSettingsValue(next, false);
+              }}
+              role="switch"
+              type="button"
+            >
+              <span className="context-switch-track" aria-hidden="true">
+                <span className="context-switch-thumb" />
+              </span>
+            </button>
+          </div>
+        </CardContent>
+      </Panel>
+      <Panel>
         <CardHead title="入口管理" detail="快捷方式写入系统实际桌面位置，不使用写死桌面路径" />
         <CardContent>
-          <label className="check-row">
+          <label className="check-row maintenance-remove-data">
             <input checked={removeOwnedData} onChange={(event) => onRemoveOwnedDataChange(event.currentTarget.checked)} type="checkbox" />
             <span>卸载时移除 CodexElves 托管数据</span>
           </label>
@@ -6162,7 +6273,7 @@ function MaintenanceScreen({
           </Toolbar>
         </CardContent>
       </Panel>
-      <Panel>
+      <Panel className="maintenance-codex-app">
         <CardHead title="ChatGPT/Codex 应用路径" detail="免安装版或解包版只需要选择一次，之后静默启动会自动复用" />
         <CardContent>
           <div className="status-table">
@@ -6183,7 +6294,7 @@ function MaintenanceScreen({
           </Toolbar>
         </CardContent>
       </Panel>
-      <Panel>
+      <Panel className="maintenance-codex-home">
         <CardHead title="Codex 配置目录" detail="为空时使用 CODEX_HOME 或系统默认 ~/.codex；设置后 CodexElves 写入的 config.toml、auth.json、codex-elves-model-catalog.json、会话索引和插件市场都会指向此目录" />
         <CardContent>
           <div className="status-table">
@@ -6261,10 +6372,16 @@ function AboutScreen({
       <Panel>
         <CardHead title="关于 CodexElves" detail="本地 ChatGPT/Codex 增强、管理工具和安装包维护" />
         <CardContent>
-          <div className="metric-list">
-            <Metric label="CodexElves 版本" value={overview?.current_version ?? update?.currentVersion ?? "-"} />
-            <Metric label="ChatGPT/Codex 版本" value={overview?.codex_version ?? "未检测到"} />
-            <Metric label="项目地址" value="github.com/junxin367/CodexElves" />
+          <div className="about-summary-layout">
+            <div className="metric-list about-version-list">
+              <Metric label="CodexElves 版本" value={overview?.current_version ?? update?.currentVersion ?? "-"} />
+              <Metric label="ChatGPT/Codex 版本" value={overview?.codex_version ?? "未检测到"} />
+            </div>
+            <div className="about-project-block">
+              <div className="metric-list about-project-metric">
+                <Metric label="项目地址" value="github.com/junxin367/CodexElves" />
+              </div>
+            </div>
           </div>
           <Toolbar>
             <Button onClick={() => void actions.openExternalUrl("https://github.com/junxin367/CodexElves")} variant="secondary">
@@ -6281,13 +6398,14 @@ function AboutScreen({
       <Panel>
         <CardHead title="GitHub Release 更新" detail={`当前版本 ${overview?.current_version ?? update?.currentVersion ?? "-"}`} />
         <CardContent>
-          <div className="metric-list">
+          <div className="metric-list update-metric-grid">
             <Metric label="状态" value={update?.status ?? "not_checked"} />
             <Metric label="最新版本" value={update?.latestVersion ?? "未检查"} />
             <Metric label="资源" value={update?.assetName ?? "-"} />
-            <Metric label="进度" value={`${update?.progress ?? 0}%`} />
           </div>
-          <Textarea className="log-view" readOnly value={update?.releaseSummary || update?.message || "尚未检查 GitHub Release；更新会下载并启动安装包。"} />
+          <div className="update-release-summary">
+            {update?.releaseSummary || update?.message || "尚未检查 GitHub Release；更新会下载并启动安装包。"}
+          </div>
           <Toolbar>
             <Button onClick={() => void actions.checkUpdate()}>检查更新</Button>
             <Button variant="secondary" onClick={() => void actions.performUpdate()}>下载并运行安装包</Button>
@@ -6418,11 +6536,29 @@ function LogsPanel({ logs, actions }: { logs: LogsResult | null; actions: Action
 }
 
 function DiagnosticsPanel({ diagnostics, actions }: { diagnostics: DiagnosticsResult | null; actions: Actions }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasReport = Boolean(diagnostics?.report);
   return (
     <Panel>
       <CardHead title="诊断报告" detail="包含版本、路径、设置和平台信息" />
       <CardContent>
-        <Textarea className="log-view tall" readOnly value={diagnostics?.report ?? "尚未生成诊断报告。"} />
+        <div className="diagnostics-summary">
+          <div>
+            <strong>{hasReport ? "诊断报告已生成" : "尚未生成诊断报告"}</strong>
+          </div>
+          <Button
+            aria-expanded={expanded}
+            disabled={!hasReport}
+            onClick={() => setExpanded((current) => !current)}
+            size="sm"
+            variant="ghost"
+          >
+            {expanded ? "收起内容" : "展开内容"}
+          </Button>
+        </div>
+        {expanded && hasReport ? (
+          <Textarea className="log-view diagnostics-report" readOnly value={diagnostics?.report ?? ""} />
+        ) : null}
         <Toolbar>
           <Button onClick={() => void actions.refreshDiagnostics()}>重新生成</Button>
           <Button variant="secondary" onClick={() => void actions.copyDiagnostics()}>
@@ -9355,6 +9491,55 @@ function GuideList({ items }: { items: string[] }) {
           <p>{item}</p>
         </div>
       ))}
+    </div>
+  );
+}
+
+function UpdatePromptDialog({
+  update,
+  active,
+  onLater,
+  onUpdate,
+}: {
+  update: UpdateResult;
+  active: boolean;
+  onLater: () => void;
+  onUpdate: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="update-prompt-title">
+      <div className="modal-card update-prompt-modal">
+        <div className="modal-head">
+          <div>
+            <h2 id="update-prompt-title">发现 CodexElves 新版本</h2>
+            <p>建议更新到最新版本，以获得最新修复和兼容性改进。</p>
+          </div>
+          <CircleArrowUp className="update-prompt-icon h-6 w-6" aria-hidden="true" />
+        </div>
+        <div className="update-prompt-versions">
+          <div>
+            <span>当前版本</span>
+            <strong>{update.currentVersion}</strong>
+          </div>
+          <div>
+            <span>最新版本</span>
+            <strong>{update.latestVersion ?? "-"}</strong>
+          </div>
+        </div>
+        <div className="update-prompt-notes">
+          <strong>更新说明</strong>
+          <pre>{update.releaseSummary || "该版本暂未提供更新说明。"}</pre>
+        </div>
+        {update.assetName ? <p className="update-prompt-asset">安装包：{update.assetName}</p> : null}
+        <Toolbar>
+          <Button disabled={active} onClick={onLater} variant="secondary">
+            稍后提醒
+          </Button>
+          <Button disabled={active || !update.assetUrl} onClick={onUpdate}>
+            {active ? "正在下载并启动…" : "立即更新"}
+          </Button>
+        </Toolbar>
+      </div>
     </div>
   );
 }

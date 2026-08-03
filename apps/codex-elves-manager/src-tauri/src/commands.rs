@@ -1812,8 +1812,7 @@ pub async fn check_update() -> CommandResult<Value> {
                     "releaseSummary": update.release_summary,
                     "assetName": update.asset_name,
                     "assetUrl": update.asset_url,
-                    "updateAvailable": update.update_available,
-                    "progress": 0
+                    "updateAvailable": update.update_available
                 }),
             }
         }
@@ -1825,8 +1824,7 @@ pub async fn check_update() -> CommandResult<Value> {
                 "releaseSummary": "",
                 "assetName": Value::Null,
                 "assetUrl": Value::Null,
-                "updateAvailable": false,
-                "progress": 0
+                "updateAvailable": false
             }),
         ),
     }
@@ -1840,8 +1838,7 @@ pub async fn perform_update(
         return failed(
             "请先检查更新并选择可下载的 Release asset。",
             json!({
-                "currentVersion": codex_elves_core::version::VERSION,
-                "progress": 0
+                "currentVersion": codex_elves_core::version::VERSION
             }),
         );
     };
@@ -1854,8 +1851,7 @@ pub async fn perform_update(
                 "latestVersion": result.release.version,
                 "releaseSummary": result.release.body,
                 "installedPath": result.installer_path.to_string_lossy(),
-                "launched": result.launched,
-                "progress": 100
+                "launched": result.launched
             }),
         ),
         Err(error) => failed(
@@ -1863,8 +1859,7 @@ pub async fn perform_update(
             json!({
                 "currentVersion": codex_elves_core::version::VERSION,
                 "latestVersion": release.version,
-                "releaseSummary": release.body,
-                "progress": 0
+                "releaseSummary": release.body
             }),
         ),
     }

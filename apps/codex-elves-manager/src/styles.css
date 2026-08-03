@@ -674,6 +674,120 @@ body {
   gap: 8px;
 }
 
+.maintenance-update-preference {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+}
+
+.maintenance-update-preference p {
+  margin: 4px 0 0;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.about-summary-layout {
+  display: grid;
+  gap: 16px;
+  align-items: start;
+}
+
+.about-summary-layout {
+  grid-template-columns: minmax(0, 0.9fr) minmax(280px, 1.1fr);
+}
+
+.about-project-block {
+  min-width: 0;
+}
+
+.about-summary-layout .metric-list span,
+.about-summary-layout .metric-list strong {
+  font-size: 12px;
+}
+
+.maintenance-health-status .status-row > span,
+.maintenance-health-status .status-row .inline-flex,
+.maintenance-remove-data span {
+  font-size: 12px;
+}
+
+.maintenance-codex-home .status-row > span,
+.maintenance-codex-home .status-row .inline-flex,
+.maintenance-codex-home .field span,
+.maintenance-codex-home .field input,
+.maintenance-codex-home .field-hint,
+.maintenance-codex-home .toolbar button {
+  font-size: 12px;
+}
+
+.maintenance-codex-home .panel-head p {
+  font-size: 12px;
+}
+
+.maintenance-codex-app .status-row > span,
+.maintenance-codex-app .status-row .inline-flex,
+.maintenance-codex-app .field span,
+.maintenance-codex-app .field input,
+.maintenance-codex-app .toolbar button {
+  font-size: 12px;
+}
+
+.update-metric-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 18px;
+}
+
+.update-metric-grid > div {
+  grid-template-columns: 90px minmax(0, 1fr);
+}
+
+.update-metric-grid > div:last-child {
+  grid-column: 1 / -1;
+}
+
+.update-metric-grid span,
+.update-metric-grid strong {
+  font-size: 12px;
+}
+
+.update-release-summary {
+  min-height: 116px;
+  max-height: 180px;
+  overflow: auto;
+  margin-top: 12px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+}
+
+.diagnostics-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  border-bottom: 1px solid hsl(var(--border));
+  padding: 0 0 10px;
+}
+
+.diagnostics-summary strong,
+.diagnostics-summary button {
+  font-size: 12px;
+}
+
+.diagnostics-report {
+  min-height: 280px;
+  max-height: min(440px, calc(100vh - 300px));
+}
+
 .relay-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3031,7 +3145,7 @@ body {
 .session-summary-grid > div strong {
   min-width: 0;
   overflow-wrap: anywhere;
-  font-size: 16px;
+  font-size: 12px;
   line-height: 1.25;
 }
 
@@ -3422,6 +3536,73 @@ body {
   font-size: 12px;
   font-weight: 600;
   line-height: 1.55;
+}
+
+.update-prompt-modal {
+  width: min(620px, calc(100vw - 32px));
+}
+
+.update-prompt-icon {
+  flex: 0 0 auto;
+  color: hsl(var(--brand-accent));
+}
+
+.update-prompt-versions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.update-prompt-versions > div {
+  display: grid;
+  gap: 2px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--background));
+  padding: 6px 10px;
+}
+
+.update-prompt-versions span,
+.update-prompt-asset {
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+}
+
+.update-prompt-notes {
+  display: grid;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.update-prompt-notes pre {
+  min-height: 136px;
+  max-height: min(260px, calc(100vh - 390px));
+  overflow: auto;
+  margin: 0;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: Consolas, "SFMono-Regular", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  padding: 12px;
+  white-space: pre-wrap;
+}
+
+.update-prompt-asset {
+  margin: 10px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.update-prompt-modal .toolbar {
+  justify-content: flex-end;
+}
+
+.update-prompt-modal .toolbar button {
+  font-size: 12px;
 }
 
 .system-prompt-modal {
@@ -5391,6 +5572,24 @@ body {
   .health-item .inline-flex {
     grid-column: 2;
     width: fit-content;
+  }
+}
+
+@media (max-width: 720px) {
+  .about-summary-layout,
+  .update-metric-grid,
+  .diagnostics-summary,
+  .maintenance-update-preference,
+  .update-prompt-versions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .maintenance-update-preference .context-enabled-switch {
+    justify-self: start;
+  }
+
+  .diagnostics-summary button {
+    justify-self: start;
   }
 }
 

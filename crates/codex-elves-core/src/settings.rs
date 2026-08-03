@@ -410,6 +410,8 @@ pub struct BackendSettings {
     pub codex_home_path: String,
     #[serde(rename = "codexExtraArgs", default)]
     pub codex_extra_args: Vec<String>,
+    #[serde(rename = "githubReleaseUpdatePromptEnabled", default = "default_true")]
+    pub github_release_update_prompt_enabled: bool,
     #[serde(rename = "providerSyncEnabled", default)]
     pub provider_sync_enabled: bool,
     #[serde(rename = "providerSyncSavedProviders", default)]
@@ -533,6 +535,7 @@ impl Default for BackendSettings {
             codex_app_path: String::new(),
             codex_home_path: String::new(),
             codex_extra_args: Vec::new(),
+            github_release_update_prompt_enabled: true,
             provider_sync_enabled: false,
             provider_sync_saved_providers: Vec::new(),
             provider_sync_manual_providers: Vec::new(),
@@ -976,6 +979,7 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
             ),
         );
     }
+    merge_bool_setting(target, source, "githubReleaseUpdatePromptEnabled");
     if let Some(value) = source.get("providerSyncEnabled").and_then(Value::as_bool) {
         target.insert("providerSyncEnabled".to_string(), Value::Bool(value));
     }
@@ -1363,6 +1367,7 @@ mod tests {
     #[test]
     fn settings_default_matches_expected_behavior() {
         let settings = BackendSettings::default();
+        assert!(settings.github_release_update_prompt_enabled);
         assert!(!settings.provider_sync_enabled);
         assert!(settings.relay_profiles_enabled);
         assert!(settings.enhancements_enabled);
@@ -2191,6 +2196,7 @@ experimental_bearer_token = "sk-existing""#
         let updated = store
             .update(json!({
             "providerSyncEnabled": true,
+            "githubReleaseUpdatePromptEnabled": false,
             "codexAppPath": "C:\\Portable\\Codex\\Codex.exe",
             "codexHomePath": " C:\\Portable\\CodexHome ",
             "enhancementsEnabled": false,
@@ -2209,6 +2215,7 @@ experimental_bearer_token = "sk-existing""#
             .unwrap();
 
         assert!(updated.provider_sync_enabled);
+        assert!(!updated.github_release_update_prompt_enabled);
         assert_eq!(updated.codex_app_path, r"C:\Portable\Codex\Codex.exe");
         assert_eq!(updated.codex_home_path, r"C:\Portable\CodexHome");
         assert!(!updated.enhancements_enabled);
