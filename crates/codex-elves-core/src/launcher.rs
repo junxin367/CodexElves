@@ -1281,14 +1281,12 @@ fn should_defer_protocol_stream(request_json: Option<&serde_json::Value>) -> any
 fn is_native_remote_compaction_v2_response(
     request_json: Option<&serde_json::Value>,
     response_protocol: crate::protocol_proxy::UpstreamResponseProtocol,
+    bridge_remote_compaction_v2: bool,
 ) -> bool {
     request_json.is_some_and(|request| {
         crate::layered_compaction::is_remote_compaction_v2_request(Some(request))
             && response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses
-            && !crate::protocol_proxy::should_bridge_remote_compaction_v2(
-                request,
-                response_protocol,
-            )
+            && !bridge_remote_compaction_v2
     })
 }
 
@@ -1373,6 +1371,27 @@ fn apply_remote_compaction_v2_bridge(
         LocalLayeredCompactionLog::default()
     };
     (result.sse_text, log)
+}
+
+fn restore_compaction_model_in_text(text: String, restore: Option<&(String, String)>) -> String {
+    let Some((original_model, compaction_model)) = restore else {
+        return text;
+    };
+    crate::layered_compaction::restore_response_model_in_sse(
+        &text,
+        original_model,
+        compaction_model,
+    )
+}
+
+fn restore_compaction_model_in_bytes(body: Vec<u8>, restore: Option<&(String, String)>) -> Vec<u8> {
+    let Some(_) = restore else {
+        return body;
+    };
+    match String::from_utf8(body) {
+        Ok(text) => restore_compaction_model_in_text(text, restore).into_bytes(),
+        Err(error) => error.into_bytes(),
+    }
 }
 
 fn deferred_stream_target_protocol(
@@ -1492,14 +1511,16 @@ async fn handle_protocol_proxy_connection(
             let failure_context = crate::protocol_proxy::upstream_failure_context(&error).cloned();
             let error_message = error.to_string();
             let upstream_timed_out = crate::protocol_proxy::upstream_error_is_timeout(&error);
-            let bridge_remote_compaction_v2 = request_json.as_ref().is_some_and(|request| {
-                crate::protocol_proxy::should_bridge_remote_compaction_v2_after_failure(
-                    request,
-                    failure_context
-                        .as_ref()
-                        .and_then(|context| context.response_protocol),
-                )
-            });
+            let bridge_remote_compaction_v2 = failure_context.as_ref().map_or_else(
+                || {
+                    request_json.as_ref().is_some_and(|request| {
+                        crate::protocol_proxy::should_bridge_remote_compaction_v2_after_failure(
+                            request, None,
+                        )
+                    })
+                },
+                |context| context.bridge_remote_compaction_v2,
+            );
             let (status, status_code, body) = if bridge_remote_compaction_v2 {
                 let failure = crate::layered_compaction::remote_compaction_v2_failure_response(
                     request_json.as_ref().expect("V2 bridge request must exist"),
@@ -1593,9 +1614,7 @@ async fn handle_protocol_proxy_connection(
         let response_protocol = upstream.response_protocol;
         let response_protocol_label = response_protocol_label(response_protocol);
         let status_code = upstream.status_code;
-        let bridge_remote_compaction_v2 = request_json.as_ref().is_some_and(|request| {
-            crate::protocol_proxy::should_bridge_remote_compaction_v2(request, response_protocol)
-        });
+        let bridge_remote_compaction_v2 = upstream.bridge_remote_compaction_v2;
         let upstream_body = match upstream.into_body_bytes().await {
             Ok(body) => body,
             Err(error) if bridge_remote_compaction_v2 => {
@@ -1770,6 +1789,10 @@ async fn handle_protocol_proxy_connection(
     let relay_id = upstream.relay_id.clone();
     let relay_name = upstream.relay_name.clone();
     let endpoint = upstream.endpoint.clone();
+    let compaction_model_restore = upstream
+        .original_compaction_model
+        .clone()
+        .zip(upstream.compaction_model.clone());
 
     if upstream.is_stream {
         if upstream.response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses
@@ -1789,7 +1812,10 @@ async fn handle_protocol_proxy_connection(
             let mut continue_thinking_log = LocalContinueThinkingLog::default();
             let mut layered_compaction_log = LocalLayeredCompactionLog::default();
             if upstream.body_override.is_some() {
-                let body = upstream.into_body_bytes().await?;
+                let body = restore_compaction_model_in_bytes(
+                    upstream.into_body_bytes().await?,
+                    compaction_model_restore.as_ref(),
+                );
                 response_bytes += body.len();
                 response_truncated |=
                     crate::proxy_log::append_capture(&mut response_capture, &body);
@@ -1938,7 +1964,11 @@ async fn handle_protocol_proxy_connection(
                     final_sse_text,
                 );
                 layered_compaction_log = compaction_log;
-                let final_bytes = final_sse_text.into_bytes();
+                let final_bytes = restore_compaction_model_in_text(
+                    final_sse_text,
+                    compaction_model_restore.as_ref(),
+                )
+                .into_bytes();
                 response_bytes += final_bytes.len();
                 response_truncated |=
                     crate::proxy_log::append_capture(&mut response_capture, &final_bytes);
@@ -2018,7 +2048,10 @@ async fn handle_protocol_proxy_connection(
         while let Some(chunk) = bytes_stream.next().await {
             match chunk {
                 Ok(bytes) => {
-                    let converted = converter.push_bytes(&bytes);
+                    let converted = restore_compaction_model_in_bytes(
+                        converter.push_bytes(&bytes),
+                        compaction_model_restore.as_ref(),
+                    );
                     if !converted.is_empty() {
                         if first_token_ms.is_none() {
                             let elapsed_ms = started_at.elapsed().as_millis() as u64;
@@ -2048,8 +2081,10 @@ async fn handle_protocol_proxy_connection(
                 }
                 Err(error) => {
                     let error_message = format!("Stream error: {error}");
-                    let failed =
-                        converter.fail(error_message.clone(), Some("stream_error".to_string()));
+                    let failed = restore_compaction_model_in_bytes(
+                        converter.fail(error_message.clone(), Some("stream_error".to_string())),
+                        compaction_model_restore.as_ref(),
+                    );
                     if !failed.is_empty() {
                         response_bytes += failed.len();
                         response_truncated |=
@@ -2064,7 +2099,10 @@ async fn handle_protocol_proxy_connection(
         }
 
         if !stream_failed {
-            let tail = converter.finish();
+            let tail = restore_compaction_model_in_bytes(
+                converter.finish(),
+                compaction_model_restore.as_ref(),
+            );
             if !tail.is_empty() {
                 response_bytes += tail.len();
                 response_truncated |=
@@ -2117,9 +2155,7 @@ async fn handle_protocol_proxy_connection(
     let status_code = upstream.status_code;
     let upstream_status = upstream.status();
     let upstream_content_type = upstream.content_type.clone();
-    let bridge_remote_compaction_v2 = request_json.as_ref().is_some_and(|request| {
-        crate::protocol_proxy::should_bridge_remote_compaction_v2(request, response_protocol)
-    });
+    let bridge_remote_compaction_v2 = upstream.bridge_remote_compaction_v2;
     let upstream_body = match upstream.into_body_bytes().await {
         Ok(body) => body,
         Err(error) if bridge_remote_compaction_v2 => {
@@ -2189,6 +2225,7 @@ async fn handle_protocol_proxy_connection(
         } else {
             upstream_body
         };
+        let body = restore_compaction_model_in_bytes(body, compaction_model_restore.as_ref());
         let content_type = if bridge_remote_compaction_v2 || upstream_content_type.is_empty() {
             "application/json; charset=utf-8".to_string()
         } else {
@@ -2298,7 +2335,10 @@ async fn handle_protocol_proxy_connection(
         }
         Err(error) => return Err(error),
     };
-    let body = serde_json::to_vec(&response_json)?;
+    let body = restore_compaction_model_in_bytes(
+        serde_json::to_vec(&response_json)?,
+        compaction_model_restore.as_ref(),
+    );
     write_http_response(stream, "200 OK", "application/json; charset=utf-8", &body).await?;
     log_helper_response(
         "helper.protocol_proxy_ok",
@@ -2491,17 +2531,23 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     let relay_id = upstream.relay_id.clone();
     let relay_name = upstream.relay_name.clone();
     let endpoint = upstream.endpoint.clone();
+    let compaction_model_restore = upstream
+        .original_compaction_model
+        .clone()
+        .zip(upstream.compaction_model.clone());
     let response_protocol = upstream.response_protocol;
     let layered_compaction_options = upstream.layered_compaction_options;
     let response_protocol_label = response_protocol_label(response_protocol);
     let status_code = upstream.status_code;
     let upstream_status = upstream.status();
     let upstream_content_type = upstream.content_type.clone();
-    let bridge_remote_compaction_v2 = request_json.as_ref().is_some_and(|request| {
-        crate::protocol_proxy::should_bridge_remote_compaction_v2(request, response_protocol)
-    });
+    let bridge_remote_compaction_v2 = upstream.bridge_remote_compaction_v2;
     let native_remote_compaction_v2 = preserve_native_remote_compaction_response
-        && is_native_remote_compaction_v2_response(request_json.as_ref(), response_protocol);
+        && is_native_remote_compaction_v2_response(
+            request_json.as_ref(),
+            response_protocol,
+            bridge_remote_compaction_v2,
+        );
 
     if !upstream.is_success() {
         let upstream_body = match upstream.into_body_bytes().await {
@@ -2798,13 +2844,18 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                 layered_compaction_options,
             );
             layered_compaction_log = log;
-            let rewritten = rewritten.into_bytes();
+            let rewritten =
+                restore_compaction_model_in_text(rewritten, compaction_model_restore.as_ref())
+                    .into_bytes();
             response_bytes += rewritten.len();
             response_truncated |=
                 crate::proxy_log::append_capture(&mut response_capture, &rewritten);
             stream.write_all(&rewritten).await?;
         } else if upstream.body_override.is_some() {
-            let body = upstream.into_body_bytes().await?;
+            let body = restore_compaction_model_in_bytes(
+                upstream.into_body_bytes().await?,
+                compaction_model_restore.as_ref(),
+            );
             let elapsed_ms = started_at.elapsed().as_millis() as u64;
             first_token_ms = Some(elapsed_ms);
             append_local_proxy_first_token_record(
@@ -3140,12 +3191,15 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                 layered_compaction_log = log;
                 rewritten
             };
-            let rewritten = rewritten.into_bytes();
+            let rewritten =
+                restore_compaction_model_in_text(rewritten, compaction_model_restore.as_ref())
+                    .into_bytes();
             response_bytes += rewritten.len();
             response_truncated |=
                 crate::proxy_log::append_capture(&mut response_capture, &rewritten);
             stream.write_all(&rewritten).await?;
         } else if !tail.is_empty() {
+            let tail = restore_compaction_model_in_bytes(tail, compaction_model_restore.as_ref());
             response_bytes += tail.len();
             response_truncated |= crate::proxy_log::append_capture(&mut response_capture, &tail);
             stream.write_all(&tail).await?;
@@ -4651,15 +4705,18 @@ mod tests {
         });
         assert!(is_native_remote_compaction_v2_response(
             Some(&gpt),
-            crate::protocol_proxy::UpstreamResponseProtocol::Responses
+            crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+            false,
         ));
         assert!(!is_native_remote_compaction_v2_response(
             Some(&gpt),
-            crate::protocol_proxy::UpstreamResponseProtocol::ChatCompletions
+            crate::protocol_proxy::UpstreamResponseProtocol::ChatCompletions,
+            true,
         ));
         assert!(!is_native_remote_compaction_v2_response(
             Some(&non_gpt),
-            crate::protocol_proxy::UpstreamResponseProtocol::Responses
+            crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+            true,
         ));
     }
 

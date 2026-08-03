@@ -8610,7 +8610,7 @@ fn compaction_response_model_is_restored_to_session_model() {
 }
 
 #[tokio::test]
-async fn remote_compaction_keeps_session_model_when_override_is_enabled() {
+async fn native_remote_compaction_keeps_session_model_when_override_is_enabled() {
     let server = spawn_chat_server_with_status_responses(vec![(
         "200 OK".to_string(),
         r#"{"id":"resp-remote","status":"completed","model":"gpt-5.4","output":[]}"#.to_string(),
@@ -8670,6 +8670,141 @@ async fn remote_compaction_keeps_session_model_when_override_is_enabled() {
     let upstream: Value = serde_json::from_str(&requests[0].body).unwrap();
     assert_eq!(upstream["model"], "gpt-5.4");
     assert_eq!(upstream["input"][1]["type"], "compaction_trigger");
+}
+
+#[tokio::test]
+async fn bridged_claude_remote_compaction_uses_override_without_becoming_native_v2() {
+    let server = spawn_chat_server_with_status_responses(vec![(
+        "200 OK".to_string(),
+        r#"{"id":"resp-bridge","status":"completed","model":"gpt-5.6","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"BRIDGED SUMMARY"}]}]}"#.to_string(),
+    )]);
+    let settings = BackendSettings {
+        layered_compaction_enabled: true,
+        layered_compaction_model_override_enabled: true,
+        layered_compaction_models: LayeredCompactionModels {
+            claude: "gpt-5.6".to_string(),
+            ..Default::default()
+        },
+        relay_profiles: vec![RelayProfile {
+            id: "bridged-compaction-override".to_string(),
+            name: "Bridged Compaction Override".to_string(),
+            base_url: server.base_url.clone(),
+            upstream_base_url: server.base_url.clone(),
+            api_key: "sk-test".to_string(),
+            model_mappings: vec![
+                RelayModelMapping {
+                    request_model: "claude-opus-4-8".to_string(),
+                    protocol: RelayProtocol::Anthropic,
+                    context_window: "1000000".to_string(),
+                },
+                RelayModelMapping {
+                    request_model: "gpt-5.6".to_string(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "372000".to_string(),
+                },
+            ],
+            ..RelayProfile::default()
+        }],
+        active_relay_id: "bridged-compaction-override".to_string(),
+        ..BackendSettings::default()
+    };
+    let request = json!({
+        "model": "claude-opus-4-8",
+        "stream": false,
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "small context" }]
+            },
+            { "type": "compaction_trigger" }
+        ],
+        "tools": [{ "type": "function", "name": "exec_command" }],
+        "tool_choice": "auto"
+    });
+
+    let response = open_responses_proxy_request_with_settings(&request.to_string(), settings)
+        .await
+        .unwrap();
+    assert_eq!(response.status_code, 200);
+    drop(response);
+
+    let requests = server.finish_all();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].path.ends_with("/responses"));
+    let upstream: Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(upstream["model"], "gpt-5.6");
+    assert_eq!(upstream["input"][1]["type"], "message");
+    assert!(upstream.get("tools").is_none());
+    assert!(upstream.get("tool_choice").is_none());
+}
+
+#[tokio::test]
+async fn bridged_claude_remote_compaction_uses_configured_claude_model() {
+    let server = spawn_chat_server_with_status_responses(vec![(
+        "200 OK".to_string(),
+        r#"{"id":"msg-bridge","type":"message","role":"assistant","model":"claude-sonnet-4-6","stop_reason":"end_turn","content":[{"type":"text","text":"BRIDGED CLAUDE SUMMARY"}],"usage":{"input_tokens":10,"output_tokens":5}}"#.to_string(),
+    )]);
+    let settings = BackendSettings {
+        layered_compaction_enabled: true,
+        layered_compaction_model_override_enabled: true,
+        layered_compaction_models: LayeredCompactionModels {
+            claude: "claude-sonnet-4-6".to_string(),
+            ..Default::default()
+        },
+        relay_profiles: vec![RelayProfile {
+            id: "bridged-claude-compaction-override".to_string(),
+            name: "Bridged Claude Compaction Override".to_string(),
+            base_url: server.base_url.clone(),
+            upstream_base_url: server.base_url.clone(),
+            api_key: "sk-test".to_string(),
+            model_mappings: vec![
+                RelayModelMapping {
+                    request_model: "claude-opus-4-8".to_string(),
+                    protocol: RelayProtocol::Anthropic,
+                    context_window: "1000000".to_string(),
+                },
+                RelayModelMapping {
+                    request_model: "claude-sonnet-4-6".to_string(),
+                    protocol: RelayProtocol::Anthropic,
+                    context_window: "1000000".to_string(),
+                },
+            ],
+            ..RelayProfile::default()
+        }],
+        active_relay_id: "bridged-claude-compaction-override".to_string(),
+        ..BackendSettings::default()
+    };
+    let request = json!({
+        "model": "claude-opus-4-8",
+        "stream": false,
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "small context" }]
+            },
+            { "type": "compaction_trigger" }
+        ]
+    });
+
+    let response = open_responses_proxy_request_with_settings(&request.to_string(), settings)
+        .await
+        .unwrap();
+    assert_eq!(response.status_code, 200);
+    drop(response);
+
+    let requests = server.finish_all();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].path.ends_with("/messages"));
+    let upstream: Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(upstream["model"], "claude-sonnet-4-6");
+    assert!(!requests[0].body.contains("compaction_trigger"));
+    assert!(
+        upstream["messages"]
+            .as_array()
+            .is_some_and(|messages| !messages.is_empty())
+    );
 }
 
 #[tokio::test]

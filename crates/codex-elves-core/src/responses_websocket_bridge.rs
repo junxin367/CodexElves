@@ -657,31 +657,30 @@ impl WebSocketContinuationCoordinator {
         if state.active.is_some() {
             anyhow::bail!("自动推理续接期间不支持并发 response.create");
         }
-        if crate::layered_compaction::is_remote_compaction_v2_request(Some(payload))
-            && !crate::layered_compaction::model_supports_native_remote_compaction_v2(model)
-        {
-            let options = layered_compaction_options
-                .context("Responses WebSocket V2 降级请求缺少上下文压缩配置快照")?;
-            state.active = Some(ActiveWebSocketContinuation {
-                mode: ActiveWebSocketMode::RemoteCompactionV2 {
-                    layered_enabled: options.enabled,
-                    retain_tokens: options.retain_tokens,
-                },
-                original_request: payload.clone(),
-                log_id,
-                max_rounds: 0,
-                round: 0,
-                completed_rounds: 0,
-                accumulated_reasoning_tokens: None,
-                buffered_messages: Vec::new(),
-                fallback_messages: Vec::new(),
-                fallback_response_body: None,
-                continue_requests: Vec::new(),
-                before_response_body: None,
-                original_compaction_model,
-                compaction_fallback,
-                compaction_fallback_attempted: false,
-            });
+        if crate::layered_compaction::is_remote_compaction_v2_request(Some(payload)) {
+            if let Some(options) = layered_compaction_options {
+                state.active = Some(ActiveWebSocketContinuation {
+                    mode: ActiveWebSocketMode::RemoteCompactionV2 {
+                        layered_enabled: options.enabled,
+                        retain_tokens: options.retain_tokens,
+                    },
+                    original_request: payload.clone(),
+                    log_id,
+                    max_rounds: 0,
+                    round: 0,
+                    completed_rounds: 0,
+                    accumulated_reasoning_tokens: None,
+                    buffered_messages: Vec::new(),
+                    fallback_messages: Vec::new(),
+                    fallback_response_body: None,
+                    continue_requests: Vec::new(),
+                    before_response_body: None,
+                    original_compaction_model,
+                    compaction_fallback,
+                    compaction_fallback_attempted: false,
+                });
+            }
+            // 原生 Remote Compaction V2 不需要本地续接状态，也不能误进自动推理续接。
             return Ok(());
         }
         if crate::layered_compaction::is_compaction_request(Some(payload)) {
@@ -2335,12 +2334,20 @@ fn prepare_downstream_response_create_payload_with_settings(
     Option<WebSocketCompactionFallback>,
 ) {
     let original_normalized = normalized.clone();
-    // 独立模型只用于传统本地压缩。WebSocket 通道只承载原生 Responses 协议，
-    // 所以目标模型还必须归属 Responses；Remote Compaction V2 始终保留会话原模型。
+    // WebSocket 通道固定使用 Responses 协议，因此可以直接基于会话原模型冻结执行方式。
+    // V2 本地兼容桥必须先替换 trigger、移除工具，再做容量校验和独立模型选择；
+    // 原生 GPT Remote Compaction V2 不进入独立模型覆写。
+    let compaction_execution_mode = crate::protocol_proxy::compaction_execution_mode(
+        &original_normalized,
+        crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+    );
+    let (prepared_forwarded_payload, layered_compaction_options) =
+        prepare_websocket_compaction_forwarded_payload(&original_normalized, settings);
     let relay = settings.active_relay_profile();
     let compaction_model_override = match crate::protocol_proxy::resolve_compaction_model_override(
-        &normalized,
-        &normalized,
+        &prepared_forwarded_payload,
+        &original_normalized,
+        compaction_execution_mode,
         settings,
         &relay,
     ) {
@@ -2364,22 +2371,29 @@ fn prepare_downstream_response_create_payload_with_settings(
     let original_compaction_model = compaction_model_override
         .as_ref()
         .map(|resolved| resolved.original_model.clone());
-    let normalized = match compaction_model_override.as_ref() {
+    // 状态机和响应改写仍需保留原始压缩语义；只同步目标 model，实际转发载荷
+    // 使用已经完成本地压缩转换和容量校验的副本。
+    let request_payload = match compaction_model_override.as_ref() {
+        Some(resolved) => crate::layered_compaction::apply_confirmed_compaction_model_override(
+            &original_normalized,
+            &resolved.compaction_model,
+        ),
+        None => original_normalized.clone(),
+    };
+    let forwarded_payload = match compaction_model_override.as_ref() {
         Some(resolved) => resolved.request_json.clone(),
-        None => normalized,
+        None => prepared_forwarded_payload,
     };
     let compaction_fallback = compaction_model_override.as_ref().map(|_| {
         let (forwarded_payload, _) =
             prepare_websocket_compaction_forwarded_payload(&original_normalized, settings);
         WebSocketCompactionFallback {
-            request_payload: original_normalized,
+            request_payload: original_normalized.clone(),
             forwarded_payload,
         }
     });
-    let (forwarded_payload, layered_compaction_options) =
-        prepare_websocket_compaction_forwarded_payload(&normalized, settings);
     (
-        normalized,
+        request_payload,
         forwarded_payload,
         layered_compaction_options,
         original_compaction_model,
@@ -2647,7 +2661,7 @@ mod tests {
     use crate::settings::{
         BackendSettings, LayeredCompactionModels, RelayModelMapping, RelayProfile, RelayProtocol,
     };
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use tokio_tungstenite::tungstenite::Message;
@@ -3050,8 +3064,7 @@ mod tests {
         assert_eq!(fallback.forwarded_payload["model"], "claude-opus-4-8");
     }
 
-    #[test]
-    fn websocket_remote_compaction_keeps_session_model_when_override_is_enabled() {
+    fn websocket_bridged_remote_override_settings() -> BackendSettings {
         let relay = RelayProfile {
             id: "relay-test".to_string(),
             name: "Relay Test".to_string(),
@@ -3069,7 +3082,7 @@ mod tests {
             ],
             ..RelayProfile::default()
         };
-        let settings = BackendSettings {
+        BackendSettings {
             layered_compaction_enabled: true,
             layered_compaction_model_override_enabled: true,
             layered_compaction_models: LayeredCompactionModels {
@@ -3079,8 +3092,11 @@ mod tests {
             relay_profiles: vec![relay],
             active_relay_id: "relay-test".to_string(),
             ..BackendSettings::default()
-        };
-        let payload = json!({
+        }
+    }
+
+    fn websocket_bridged_remote_request() -> Value {
+        json!({
             "type": "response.create",
             "model": "claude-opus-4-8",
             "input": [
@@ -3091,15 +3107,132 @@ mod tests {
                 },
                 { "type": "compaction_trigger" }
             ]
-        });
+        })
+    }
+
+    #[test]
+    fn websocket_bridged_remote_compaction_uses_override_and_keeps_original_fallback() {
+        let settings = websocket_bridged_remote_override_settings();
+        let payload = websocket_bridged_remote_request();
         let (request_payload, forwarded_payload, options, original_model, fallback) =
             prepare_downstream_response_create_payload_with_settings(payload, &settings);
 
-        assert_eq!(request_payload["model"], "claude-opus-4-8");
-        assert_eq!(forwarded_payload["model"], "claude-opus-4-8");
+        assert_eq!(request_payload["model"], "gpt-5.6");
+        assert_eq!(request_payload["input"][1]["type"], "compaction_trigger");
+        assert_eq!(forwarded_payload["model"], "gpt-5.6");
+        assert_eq!(forwarded_payload["input"][1]["type"], "message");
         assert!(options.is_some());
-        assert!(original_model.is_none());
-        assert!(fallback.is_none());
+        assert_eq!(original_model.as_deref(), Some("claude-opus-4-8"));
+        let fallback = fallback.expect("V2 本地桥接覆写应保留会话原模型重试请求");
+        assert_eq!(fallback.request_payload["model"], "claude-opus-4-8");
+        assert_eq!(
+            fallback.request_payload["input"][1]["type"],
+            "compaction_trigger"
+        );
+        assert_eq!(fallback.forwarded_payload["model"], "claude-opus-4-8");
+        assert_eq!(fallback.forwarded_payload["input"][1]["type"], "message");
+    }
+
+    #[test]
+    fn websocket_bridged_remote_compaction_restores_session_model_in_response() {
+        let settings = websocket_bridged_remote_override_settings();
+        let (request_payload, _, options, original_model, fallback) =
+            prepare_downstream_response_create_payload_with_settings(
+                websocket_bridged_remote_request(),
+                &settings,
+            );
+        let coordinator = WebSocketContinuationCoordinator::default();
+        coordinator
+            .register_request_with_settings_and_original_model(
+                &request_payload,
+                Some("log-remote-restore".to_string()),
+                options,
+                &settings,
+                original_model,
+                fallback,
+            )
+            .unwrap();
+
+        let action = coordinator
+            .handle_upstream_message(Message::Text(
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp-remote-target",
+                        "object": "response",
+                        "status": "completed",
+                        "model": "gpt-5.6",
+                        "output": [{
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{
+                                "type": "output_text",
+                                "text": "REMOTE OVERRIDE SUMMARY"
+                            }]
+                        }]
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        let WebSocketContinuationAction::Flush { messages, .. } = action else {
+            panic!("本地桥接 V2 完成后应输出改写后的 compaction 事件");
+        };
+        let output = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(output.contains("claude-opus-4-8"));
+        assert!(!output.contains(r#""model":"gpt-5.6""#));
+        assert!(output.contains(r#""type":"compaction""#));
+        assert!(output.contains("REMOTE OVERRIDE SUMMARY"));
+    }
+
+    #[test]
+    fn websocket_failed_bridged_remote_override_retries_original_local_bridge() {
+        let settings = websocket_bridged_remote_override_settings();
+        let (request_payload, _, options, original_model, fallback) =
+            prepare_downstream_response_create_payload_with_settings(
+                websocket_bridged_remote_request(),
+                &settings,
+            );
+        let coordinator = WebSocketContinuationCoordinator::default();
+        coordinator
+            .register_request_with_settings_and_original_model(
+                &request_payload,
+                Some("log-remote-retry".to_string()),
+                options,
+                &settings,
+                original_model,
+                fallback,
+            )
+            .unwrap();
+
+        let action = coordinator
+            .handle_upstream_message(Message::Text(
+                r#"{"type":"response.failed","response":{"id":"resp-remote-target","model":"gpt-5.6","status":"failed","error":{"code":"model_not_found"}}}"#
+                    .into(),
+            ))
+            .unwrap();
+        let WebSocketContinuationAction::Continue { request, .. } = action else {
+            panic!("独立模型失败后应使用会话原模型重试本地桥接请求");
+        };
+        let Message::Text(request) = request else {
+            panic!("原模型重试请求应为文本帧");
+        };
+        let request: Value = serde_json::from_str(request.as_str()).unwrap();
+
+        assert_eq!(request["model"], "claude-opus-4-8");
+        assert_eq!(request["input"][1]["type"], "message");
+        assert!(!crate::layered_compaction::is_remote_compaction_v2_request(
+            Some(&request)
+        ));
     }
 
     #[test]
