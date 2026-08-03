@@ -9144,6 +9144,60 @@ async fn responses_proxy_directs_anthropic_models_to_anthropic_upstream() {
 }
 
 #[tokio::test]
+async fn responses_proxy_keeps_deepseek_enabled_for_anthropic_upstream() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    clear_anthropic_reasoning_compatibility_cache_for_tests();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let server = spawn_chat_server();
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+
+    let upstream = open_responses_proxy_request(
+        r#"{"model":"deepseek-v4-flash","input":"hello","stream":false,"reasoning":{"effort":"max"}}"#,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        upstream.response_protocol,
+        UpstreamResponseProtocol::Anthropic
+    );
+
+    let request = server.finish();
+    let body: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["model"], "deepseek-v4-flash");
+    assert_eq!(body["thinking"], json!({ "type": "enabled" }));
+    assert_eq!(body["output_config"], json!({ "effort": "max" }));
+}
+
+#[tokio::test]
+async fn responses_proxy_preserves_deepseek_max_for_cli_proxy_api_gateway() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    clear_anthropic_reasoning_compatibility_cache_for_tests();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let server = spawn_chat_server();
+    write_cli_proxy_api_relay_settings(temp.path(), &server.base_url);
+
+    let upstream = open_responses_proxy_request(
+        r#"{"model":"deepseek-v4-flash","input":"hello","stream":false,"reasoning":{"effort":"max"}}"#,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        upstream.response_protocol,
+        UpstreamResponseProtocol::Anthropic
+    );
+
+    let request = server.finish();
+    let body: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["model"], "deepseek-v4-flash(max)");
+    assert!(body.get("thinking").is_none());
+    assert_eq!(body["output_config"], json!({ "effort": "max" }));
+}
+
+#[tokio::test]
 async fn responses_proxy_rejects_models_missing_from_protocol_mappings() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -9321,7 +9375,11 @@ fn pal_namespace_tool() -> Value {
 }
 
 fn write_mixed_relay_settings(settings_dir: &Path, base_url: &str) {
-    write_mixed_relay_settings_with_system_prompt(settings_dir, base_url, "");
+    write_named_mixed_relay_settings_with_system_prompt(settings_dir, base_url, "Mixed", "");
+}
+
+fn write_cli_proxy_api_relay_settings(settings_dir: &Path, base_url: &str) {
+    write_named_mixed_relay_settings_with_system_prompt(settings_dir, base_url, "CPA", "");
 }
 
 fn write_mixed_relay_settings_with_system_prompt(
@@ -9329,10 +9387,24 @@ fn write_mixed_relay_settings_with_system_prompt(
     base_url: &str,
     system_prompt: &str,
 ) {
+    write_named_mixed_relay_settings_with_system_prompt(
+        settings_dir,
+        base_url,
+        "Mixed",
+        system_prompt,
+    );
+}
+
+fn write_named_mixed_relay_settings_with_system_prompt(
+    settings_dir: &Path,
+    base_url: &str,
+    relay_name: &str,
+    system_prompt: &str,
+) {
     let settings = json!({
         "relayProfiles": [{
             "id": "mixed",
-            "name": "Mixed",
+            "name": relay_name,
             "baseUrl": base_url,
             "upstreamBaseUrl": base_url,
             "apiKey": "sk-test",
@@ -9357,6 +9429,11 @@ fn write_mixed_relay_settings_with_system_prompt(
                 },
                 {
                     "requestModel": "glm-5.2",
+                    "protocol": "anthropic",
+                    "contextWindow": "1000000"
+                },
+                {
+                    "requestModel": "deepseek-v4-flash",
                     "protocol": "anthropic",
                     "contextWindow": "1000000"
                 }

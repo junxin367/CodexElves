@@ -2416,12 +2416,15 @@ async fn send_responses_upstream_request(
     diagnostic_id: &str,
     header_timeout: Option<Duration>,
 ) -> anyhow::Result<(reqwest::Response, Value)> {
-    let upstream_request = responses_upstream_request_for_protocol(
+    let mut upstream_request = responses_upstream_request_for_protocol(
         request_json,
         response_protocol,
         is_stream,
         diagnostic_id,
     )?;
+    if response_protocol == UpstreamResponseProtocol::Anthropic {
+        apply_cli_proxy_api_deepseek_reasoning_compatibility(relay, &mut upstream_request);
+    }
     let response = match response_protocol {
         UpstreamResponseProtocol::Responses => {
             send_upstream_request_with_optional_header_timeout(
@@ -2458,6 +2461,76 @@ async fn send_responses_upstream_request(
         }
     }?;
     Ok((response, upstream_request))
+}
+
+fn apply_cli_proxy_api_deepseek_reasoning_compatibility(
+    relay: &crate::settings::RelayProfile,
+    request: &mut Value,
+) {
+    if !is_cli_proxy_api_relay(relay) {
+        return;
+    }
+    let Some(model) = request
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| model.to_ascii_lowercase().contains("deepseek"))
+        .map(str::to_string)
+    else {
+        return;
+    };
+    if !request
+        .pointer("/thinking/type")
+        .and_then(Value::as_str)
+        .is_some_and(|thinking_type| thinking_type.eq_ignore_ascii_case("enabled"))
+    {
+        return;
+    }
+    let Some(effort) = request
+        .pointer("/output_config/effort")
+        .and_then(Value::as_str)
+        .and_then(normalize_reasoning_effort)
+    else {
+        return;
+    };
+
+    // CLIProxyAPI 会把 Claude 入参中的 `thinking.type=enabled`（未带 budget_tokens）
+    // 解释成 auto，并在后续能力处理时丢掉 `output_config.effort`。这里只在 CPA
+    // 中转这一跳用其模型后缀携带等级，同时移除会触发 auto 分支的 thinking；
+    // DeepSeek 默认开启思考，保留的 output_config.effort 仍会传给最终上游。
+    let Some(object) = request.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "model".to_string(),
+        json!(model_with_cli_proxy_api_reasoning_suffix(&model, effort)),
+    );
+    object.remove("thinking");
+}
+
+fn is_cli_proxy_api_relay(relay: &crate::settings::RelayProfile) -> bool {
+    let normalized_name = relay
+        .name
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .map(|character| character.to_ascii_lowercase())
+        .collect::<String>();
+    normalized_name == "cpa" || normalized_name.contains("cliproxyapi")
+}
+
+fn model_with_cli_proxy_api_reasoning_suffix(model: &str, effort: &str) -> String {
+    let model = model.trim();
+    if let Some(without_closing) = model.strip_suffix(')')
+        && let Some((base, suffix)) = without_closing.rsplit_once('(')
+    {
+        let normalized_suffix = suffix.trim().to_ascii_lowercase();
+        if normalize_reasoning_effort(&normalized_suffix).is_some()
+            || matches!(normalized_suffix.as_str(), "none" | "auto" | "-1")
+        {
+            return format!("{}({effort})", base.trim_end());
+        }
+    }
+    format!("{model}({effort})")
 }
 
 fn responses_upstream_request_for_protocol(
@@ -10100,7 +10173,8 @@ fn default_anthropic_reasoning_effort(model: &str) -> &'static str {
 
 fn anthropic_thinking_type(model: &str) -> &'static str {
     if model.to_ascii_lowercase().contains("deepseek") {
-        // DeepSeek Anthropic 兼容接口文档使用 enabled/disabled，不使用 Claude 的 adaptive。
+        // DeepSeek Anthropic 兼容接口只使用 enabled/disabled，禁止改成 adaptive。
+        // CPA 的特殊解析问题由发送前的中转兼容层处理，不能污染 DeepSeek 直连请求。
         return "enabled";
     }
     "adaptive"
