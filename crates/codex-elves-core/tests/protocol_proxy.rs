@@ -2917,7 +2917,7 @@ fn non_claude_anthropic_compatible_reasoning_keeps_effort_by_model_capability() 
         "input": "hi"
     }))
     .unwrap();
-    assert_eq!(deepseek["thinking"], json!({ "type": "enabled" }));
+    assert_eq!(deepseek["thinking"], json!({ "type": "adaptive" }));
     assert_eq!(deepseek["output_config"], json!({ "effort": "max" }));
 
     let deepseek_xhigh = responses_to_anthropic_messages(json!({
@@ -2926,7 +2926,7 @@ fn non_claude_anthropic_compatible_reasoning_keeps_effort_by_model_capability() 
         "input": "hi"
     }))
     .unwrap();
-    assert_eq!(deepseek_xhigh["thinking"], json!({ "type": "enabled" }));
+    assert_eq!(deepseek_xhigh["thinking"], json!({ "type": "adaptive" }));
     assert_eq!(deepseek_xhigh["output_config"], json!({ "effort": "max" }));
 
     let deepseek_default = responses_to_anthropic_messages(json!({
@@ -2934,7 +2934,7 @@ fn non_claude_anthropic_compatible_reasoning_keeps_effort_by_model_capability() 
         "input": "hi"
     }))
     .unwrap();
-    assert_eq!(deepseek_default["thinking"], json!({ "type": "enabled" }));
+    assert_eq!(deepseek_default["thinking"], json!({ "type": "adaptive" }));
     assert_eq!(
         deepseek_default["output_config"],
         json!({ "effort": "max" })
@@ -9144,7 +9144,7 @@ async fn responses_proxy_directs_anthropic_models_to_anthropic_upstream() {
 }
 
 #[tokio::test]
-async fn responses_proxy_keeps_deepseek_enabled_for_anthropic_upstream() {
+async fn responses_proxy_keeps_deepseek_adaptive_for_anthropic_upstream() {
     let _lock = settings_path_test_lock().lock().unwrap();
     clear_anthropic_reasoning_compatibility_cache_for_tests();
     let temp = tempfile::tempdir().unwrap();
@@ -9166,12 +9166,12 @@ async fn responses_proxy_keeps_deepseek_enabled_for_anthropic_upstream() {
     let request = server.finish();
     let body: Value = serde_json::from_str(&request.body).unwrap();
     assert_eq!(body["model"], "deepseek-v4-flash");
-    assert_eq!(body["thinking"], json!({ "type": "enabled" }));
+    assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
     assert_eq!(body["output_config"], json!({ "effort": "max" }));
 }
 
 #[tokio::test]
-async fn responses_proxy_preserves_deepseek_max_for_cli_proxy_api_gateway() {
+async fn responses_proxy_preserves_deepseek_high_for_cli_proxy_api_gateway() {
     let _lock = settings_path_test_lock().lock().unwrap();
     clear_anthropic_reasoning_compatibility_cache_for_tests();
     let temp = tempfile::tempdir().unwrap();
@@ -9180,7 +9180,7 @@ async fn responses_proxy_preserves_deepseek_max_for_cli_proxy_api_gateway() {
     write_cli_proxy_api_relay_settings(temp.path(), &server.base_url);
 
     let upstream = open_responses_proxy_request(
-        r#"{"model":"deepseek-v4-flash","input":"hello","stream":false,"reasoning":{"effort":"max"}}"#,
+        r#"{"model":"deepseek-v4-flash","input":"hello","stream":false,"reasoning":{"effort":"high"}}"#,
         None,
     )
     .await
@@ -9192,9 +9192,9 @@ async fn responses_proxy_preserves_deepseek_max_for_cli_proxy_api_gateway() {
 
     let request = server.finish();
     let body: Value = serde_json::from_str(&request.body).unwrap();
-    assert_eq!(body["model"], "deepseek-v4-flash(max)");
-    assert!(body.get("thinking").is_none());
-    assert_eq!(body["output_config"], json!({ "effort": "max" }));
+    assert_eq!(body["model"], "deepseek-v4-flash");
+    assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
+    assert_eq!(body["output_config"], json!({ "effort": "high" }));
 }
 
 #[tokio::test]
@@ -9846,6 +9846,17 @@ fn independent_compaction_models_receive_family_default_reasoning_effort() {
             "{model} 应默认使用 xhigh"
         );
     }
+}
+
+#[test]
+fn deepseek_anthropic_compaction_override_uses_adaptive_without_model_suffix() {
+    let overridden =
+        apply_compaction_model_override(&legacy_compaction_request(), "deepseek-v4-flash");
+    let converted = responses_to_anthropic_messages(overridden).unwrap();
+
+    assert_eq!(converted["model"], "deepseek-v4-flash");
+    assert_eq!(converted["thinking"], json!({ "type": "adaptive" }));
+    assert_eq!(converted["output_config"], json!({ "effort": "max" }));
 }
 
 #[test]
