@@ -1172,10 +1172,61 @@ fn injection_script_applies_fast_service_tier_contract() {
 #[test]
 fn injection_script_does_not_patch_app_server_model_requests() {
     let script = assets::injection_script(45221);
-    assert!(script.contains("const codexAppServerManagerDiscoveryVersion = \"1\";"));
+    assert!(script.contains("const codexAppServerManagerDiscoveryVersion = \"2\";"));
     assert!(!script.contains("__codexElvesModelOriginalSendRequest"));
     assert!(!script.contains("__codexElvesModelRequestPatch"));
     assert!(!script.contains("codexElvesModelPatchedSendRequest"));
+}
+
+#[test]
+fn injection_script_adds_safe_app_server_restart_recovery() {
+    let script = assets::renderer_features_script();
+    let cases = run_service_tier_contract_harness();
+
+    assert!(script.contains("failed to start turn: internal error; agent loop died unexpectedly"));
+    assert!(script.contains("button.dataset.codexAppServerRestart = \"true\""));
+    assert!(script.contains("function installCodexAppServerRestartButtons()"));
+    assert!(script.contains("function codexAppServerRunningConversations("));
+    assert!(script.contains("threadRuntimeStatus?.type === \"active\""));
+    assert!(script.contains("runtimeThreadStatusEvidenceByThreadId"));
+    assert!(script.contains("status === \"inProgress\""));
+    assert!(script.contains("当前有 ${count} 个会话正在执行"));
+    assert!(script.contains("dispatcher.dispatchMessage(\"codex-app-server-restart\""));
+    assert!(script.contains("killCodexProcess: false"));
+    assert!(!script.contains("data-codex-app-server-restart-force"));
+
+    assert_eq!(cases["appServerRestart"]["transientMatched"], true);
+    assert_eq!(cases["appServerRestart"]["persistedMatched"], false);
+    assert_eq!(
+        cases["appServerRestart"]["runningIds"],
+        json!(["running-main", "running-turn", "running-subagent"])
+    );
+    assert_eq!(
+        cases["appServerRestart"]["failedConversationBlocked"],
+        false
+    );
+    assert_eq!(cases["appServerRestart"]["removedTurnCount"], 1);
+    assert_eq!(
+        cases["appServerRestart"]["remainingEntityKeys"],
+        json!(["persisted"])
+    );
+    assert_eq!(
+        cases["appServerRestart"]["remainingIslandKeys"],
+        json!(["persisted"])
+    );
+    assert_eq!(
+        cases["appServerRestartDispatch"]["dispatched"][0]["type"],
+        "codex-app-server-restart"
+    );
+    assert_eq!(
+        cases["appServerRestartDispatch"]["dispatched"][0]["payload"]["killCodexProcess"],
+        false
+    );
+    assert_eq!(cases["appServerRestartDispatch"]["remainingFailure"], false);
+    assert_eq!(
+        cases["appServerRestartDispatch"]["toasts"],
+        json!(["app-server 已重启，失败状态已清理"])
+    );
 }
 
 #[test]
@@ -1240,6 +1291,7 @@ globalThis.getComputedStyle = () => ({{
 globalThis.window = globalThis;
 window.__CODEX_ELVES_TEST_SERVICE_TIER__ = true;
 window.__CODEX_ELVES_TEST_PLUGIN_AUTO_EXPAND__ = true;
+window.__CODEX_ELVES_TEST_APP_SERVER_RESTART__ = true;
 window.dispatchEvent = () => true;
 globalThis.CustomEvent = class CustomEvent {{
   constructor(type, options = {{}}) {{
@@ -1276,6 +1328,97 @@ globalThis.performance = {{ getEntriesByType: () => [] }};
 require(scriptPath);
 const api = window.__codexElvesServiceTierTest;
 const pluginAutoExpandApi = window.__codexElvesPluginAutoExpandTest;
+const appServerRestartApi = window.__codexElvesAppServerRestartTest;
+const appServerRestartError = "failed to start turn: internal error; agent loop died unexpectedly";
+const transientFailedTurn = {{
+  turnId: null,
+  status: "failed",
+  error: {{ message: appServerRestartError }},
+  items: [{{ type: "error", message: appServerRestartError }}],
+}};
+const persistedFailedTurn = {{
+  ...transientFailedTurn,
+  turnId: "turn-persisted",
+}};
+function restartConversation(id, turns, runtimeType = "idle") {{
+  const entitiesByKey = Object.fromEntries(turns.map((turn, index) => [
+    index === 0 ? "failed" : `entity-${{index}}`,
+    turn,
+  ]));
+  return {{
+    id,
+    title: id,
+    turns: [],
+    threadRuntimeStatus: {{ type: runtimeType }},
+    turnHistory: {{
+      kind: "canonical",
+      history: {{
+        entitiesByKey,
+        islands: [{{
+          id: "tail",
+          entries: Object.keys(entitiesByKey).map((key) => ({{ key, value: key }})),
+        }}],
+      }},
+    }},
+  }};
+}}
+function restartManager(conversations, runtimeEvidence = new Map()) {{
+  return {{
+    hostId: "local",
+    threadStore: {{ runtimeThreadStatusEvidenceByThreadId: runtimeEvidence }},
+    getCachedConversations: () => conversations,
+    getConversation: (id) => conversations.find((conversation) => conversation.id === id) || null,
+    updateConversationState(id, updater) {{
+      const conversation = this.getConversation(id);
+      if (conversation) updater(conversation);
+    }},
+  }};
+}}
+const failedConversation = restartConversation("failed-current", [transientFailedTurn], "active");
+const runningMain = restartConversation("running-main", [{{ turnId: "done", status: "completed", items: [] }}], "active");
+const runningTurn = restartConversation("running-turn", [{{ turnId: "turn-running", status: "inProgress", items: [] }}], "idle");
+const restartRunningManager = restartManager(
+  [failedConversation, runningMain, runningTurn],
+  new Map([["running-subagent", {{ type: "active", activeFlags: [] }}]])
+);
+const runningState = appServerRestartApi.runningConversations(
+  restartRunningManager,
+  failedConversation.id
+);
+const cleanupConversation = restartConversation(
+  "cleanup-current",
+  [transientFailedTurn, persistedFailedTurn],
+  "idle"
+);
+cleanupConversation.turnHistory.history.entitiesByKey = {{
+  failed: transientFailedTurn,
+  persisted: persistedFailedTurn,
+}};
+cleanupConversation.turnHistory.history.islands = [{{
+  id: "tail",
+  entries: [
+    {{ key: "failed", value: "failed" }},
+    {{ key: "persisted", value: "persisted" }},
+  ],
+}}];
+const cleanupManager = restartManager([cleanupConversation]);
+const removedTurnCount = appServerRestartApi.cleanupTransientFailedTurns(
+  cleanupManager,
+  cleanupConversation.id
+);
+const appServerRestart = {{
+  transientMatched: appServerRestartApi.isTransientFailedTurn(transientFailedTurn),
+  persistedMatched: appServerRestartApi.isTransientFailedTurn(persistedFailedTurn),
+  runningIds: runningState.conversations.map((conversation) => conversation.id),
+  failedConversationBlocked: runningState.conversations.some(
+    (conversation) => conversation.id === failedConversation.id
+  ),
+  removedTurnCount,
+  remainingEntityKeys: Object.keys(cleanupConversation.turnHistory.history.entitiesByKey),
+  remainingIslandKeys: cleanupConversation.turnHistory.history.islands[0].entries.map(
+    (entry) => entry.value
+  ),
+}};
 const pluginAutoExpandLabels = {{
   latestChinese: pluginAutoExpandApi.matchesText("另有 4 个"),
   latestChineseCompact: pluginAutoExpandApi.matchesText("另有4个插件"),
@@ -1649,9 +1792,37 @@ async function runModernServiceTierModuleCase() {{
   }};
 }}
 
+async function runAppServerRestartDispatchCase() {{
+  const conversation = restartConversation(
+    "restart-safe",
+    [transientFailedTurn],
+    "active",
+  );
+  const manager = restartManager([conversation]);
+  const dispatched = [];
+  const dispatcher = {{
+    dispatchMessage(type, payload) {{
+      dispatched.push({{ type, payload }});
+    }},
+  }};
+  const button = node();
+  button.isConnected = true;
+  appServerRestartApi.setConversationManager(manager);
+  appServerRestartApi.setDispatcher(dispatcher);
+  await appServerRestartApi.restartFromFailure(button, conversation.id);
+  return {{
+    dispatched,
+    remainingFailure: appServerRestartApi.conversationHasTransientFailure(conversation),
+    buttonText: button.textContent,
+    buttonDisabled: button.disabled === true,
+    toasts: window.__codexElvesAppServerRestartTestToasts || [],
+  }};
+}}
+
 (async () => {{
   const serviceTierRetry = await runServiceTierRetryCase();
   const modernServiceTierModule = await runModernServiceTierModuleCase();
+  const appServerRestartDispatch = await runAppServerRestartDispatchCase();
   const pluginMarketplaceRequestClientCase = await runPluginMarketplaceRequestClientCase();
   process.stdout.write(JSON.stringify({{
     supportedFast,
@@ -1673,6 +1844,8 @@ async function runModernServiceTierModuleCase() {{
     pluginScopedFilters,
     pluginAutoExpandLabels,
     badgeTooltip,
+    appServerRestart,
+    appServerRestartDispatch,
     serviceTierRetry,
     modernServiceTierModule,
   }}));
