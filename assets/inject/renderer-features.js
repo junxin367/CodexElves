@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "30";
+  const codexDeleteStyleVersion = "32";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "7";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -55,7 +55,7 @@
   const codexServiceTierRequestOverrideVersion = "4";
   const codexServiceTierRequestClientPatchRetryBaseMs = 1000;
   const codexServiceTierRequestClientPatchRetryMaxMs = 30000;
-  const codexAppServerManagerDiscoveryVersion = "2";
+  const codexAppServerManagerDiscoveryVersion = "8";
   const codexAppServerRestartErrorText = "failed to start turn: internal error; agent loop died unexpectedly";
   const codexAppServerRestartRecoveryDelaysMs = [120, 280, 520, 900, 1500, 2400];
   const codexStatsigModelVisibilityConfigId = "107580212";
@@ -681,16 +681,14 @@
         cursor: pointer;
       }
       [data-codex-app-server-restart-banner="true"] {
-        position: relative !important;
-        padding-right: 88px !important;
+        padding-right: 0 !important;
       }
       .${codexAppServerRestartButtonClass} {
-        position: absolute;
-        right: 12px;
-        top: 50%;
-        transform: translateY(-50%);
+        position: static;
+        transform: none;
         z-index: 2;
         min-width: 58px;
+        margin-left: 10px;
         border: 1px solid rgba(148,163,184,.55);
         border-radius: 7px;
         background: rgba(255,255,255,.1);
@@ -699,6 +697,10 @@
         padding: 3px 9px;
         cursor: pointer;
         white-space: nowrap;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        vertical-align: middle;
         -webkit-app-region: no-drag;
       }
       .${codexAppServerRestartButtonClass}:hover,
@@ -5976,18 +5978,7 @@
   }
 
   function codexAppServerRestartBannerFromTextElement(element) {
-    const main = element.closest("main, [role='main']");
-    if (!main) return null;
-    let banner = element;
-    for (let parent = element.parentElement; parent && main.contains(parent); parent = parent.parentElement) {
-      if (codexAppServerNormalizedText(parent.innerText || parent.textContent) !== codexAppServerRestartErrorText) {
-        break;
-      }
-      if (parent.closest('[data-message-author-role="user"], [data-user-message-bubble]')) break;
-      banner = parent;
-      if (parent.hasAttribute("data-content-search-unit-key")) break;
-    }
-    return banner;
+    return element;
   }
 
   function codexAppServerRestartErrorBanners() {
@@ -6199,7 +6190,15 @@
     const existing = document.querySelector(
       `.${codexAppServerRestartButtonClass}[data-codex-app-server-restart-conversation-id="${CSS.escape(conversationId)}"]`
     );
-    if (existing?.isConnected) return;
+    if (existing?.isConnected) {
+      if (
+        existing.dataset.codexAppServerRestartVersion
+        === codexAppServerManagerDiscoveryVersion
+      ) {
+        return;
+      }
+      removeCodexAppServerRestartButton(existing);
+    }
 
     const banners = codexAppServerRestartErrorBanners();
     for (const banner of banners) {
@@ -6211,9 +6210,18 @@
       button.className = codexAppServerRestartButtonClass;
       button.dataset.codexAppServerRestart = "true";
       button.dataset.codexAppServerRestartConversationId = conversationId;
+      button.dataset.codexAppServerRestartVersion = codexAppServerManagerDiscoveryVersion;
+      button.dataset.codexActionLabel = "CodexElves 提供热重启修复问题";
+      button.dataset.codexTooltipPlacement = "top";
+      button.dataset.codexTooltipGap = "10";
       button.textContent = "重启";
-      button.setAttribute("aria-label", "重启 app-server");
+      button.setAttribute("aria-label", "CodexElves 提供热重启修复问题");
+      button.addEventListener("pointerenter", () => showActionButtonTooltip(button));
+      button.addEventListener("pointerleave", hideActionButtonTooltip);
+      button.addEventListener("focus", () => showActionButtonTooltip(button));
+      button.addEventListener("blur", hideActionButtonTooltip);
       button.addEventListener("click", (event) => {
+        hideActionButtonTooltip();
         event.preventDefault();
         event.stopPropagation();
         void restartCodexAppServerFromFailure(button, conversationId);
@@ -8924,16 +8932,30 @@
     document.body.appendChild(tooltip);
     const buttonRect = button.getBoundingClientRect();
     const tooltipRect = tooltip.getBoundingClientRect();
-    const gap = 3;
-    const left = Math.min(
-      window.innerWidth - tooltipRect.width - 8,
-      Math.max(8, buttonRect.left + buttonRect.width / 2 - tooltipRect.width / 2),
-    );
+    const requestedGap = Number(button.dataset.codexTooltipGap);
+    const gap = Number.isFinite(requestedGap) && requestedGap >= 0
+      ? requestedGap
+      : 3;
+    const placement = button.dataset.codexTooltipPlacement || "";
+    let left = 0;
+    if (placement === "top-right") {
+      const preferredLeft = buttonRect.right + gap;
+      left = preferredLeft + tooltipRect.width <= window.innerWidth - 8
+        ? preferredLeft
+        : Math.max(8, buttonRect.left - tooltipRect.width - gap);
+    } else {
+      left = Math.min(
+        window.innerWidth - tooltipRect.width - 8,
+        Math.max(8, buttonRect.left + buttonRect.width / 2 - tooltipRect.width / 2),
+      );
+    }
     const aboveTop = buttonRect.top - tooltipRect.height - gap;
     const top = aboveTop >= 8
       ? aboveTop
       : Math.min(window.innerHeight - tooltipRect.height - 8, buttonRect.bottom + gap);
-    tooltip.dataset.side = aboveTop >= 8 ? "top" : "bottom";
+    tooltip.dataset.side = aboveTop >= 8
+      ? placement === "top-right" ? "top-right" : "top"
+      : placement === "top-right" ? "bottom-right" : "bottom";
     tooltip.style.left = `${left}px`;
     tooltip.style.top = `${Math.max(8, top)}px`;
   }

@@ -746,9 +746,10 @@ fn injection_script_reuses_native_session_action_button_style_with_fallback() {
     assert!(script.contains("tooltip.setAttribute(\"role\", \"tooltip\")"));
     assert!(script.contains("content.className = \"flex items-center gap-2\""));
     assert!(script.contains("text.className = \"min-w-0\""));
-    assert!(script.contains("const gap = 3;"));
+    assert!(script.contains("const requestedGap = Number(button.dataset.codexTooltipGap);"));
+    assert!(script.contains(": 3;"));
     assert!(script.contains("const aboveTop = buttonRect.top - tooltipRect.height - gap;"));
-    assert!(script.contains("tooltip.dataset.side = aboveTop >= 8 ? \"top\" : \"bottom\""));
+    assert!(script.contains("tooltip.dataset.side = aboveTop >= 8"));
 }
 
 #[test]
@@ -1172,7 +1173,7 @@ fn injection_script_applies_fast_service_tier_contract() {
 #[test]
 fn injection_script_does_not_patch_app_server_model_requests() {
     let script = assets::injection_script(45221);
-    assert!(script.contains("const codexAppServerManagerDiscoveryVersion = \"2\";"));
+    assert!(script.contains("const codexAppServerManagerDiscoveryVersion = \"8\";"));
     assert!(!script.contains("__codexElvesModelOriginalSendRequest"));
     assert!(!script.contains("__codexElvesModelRequestPatch"));
     assert!(!script.contains("codexElvesModelPatchedSendRequest"));
@@ -1185,12 +1186,21 @@ fn injection_script_adds_safe_app_server_restart_recovery() {
 
     assert!(script.contains("failed to start turn: internal error; agent loop died unexpectedly"));
     assert!(script.contains("button.dataset.codexAppServerRestart = \"true\""));
+    assert!(script.contains("button.dataset.codexAppServerRestartVersion"));
     assert!(script.contains("function installCodexAppServerRestartButtons()"));
+    assert!(script.contains("CodexElves 提供热重启修复问题"));
     assert!(script.contains("function codexAppServerRunningConversations("));
     assert!(script.contains("threadRuntimeStatus?.type === \"active\""));
     assert!(script.contains("runtimeThreadStatusEvidenceByThreadId"));
     assert!(script.contains("status === \"inProgress\""));
     assert!(script.contains("当前有 ${count} 个会话正在执行"));
+    assert!(script.contains(
+        "button.addEventListener(\"pointerenter\", () => showActionButtonTooltip(button));"
+    ));
+    assert!(script.contains("button.addEventListener(\"pointerleave\", hideActionButtonTooltip);"));
+    assert!(script.contains("button.dataset.codexTooltipPlacement = \"top\""));
+    assert!(script.contains("button.dataset.codexTooltipGap = \"10\""));
+    assert!(!script.contains("button.dataset.codexTooltip = \"CodexElves 提供热重启修复问题\""));
     assert!(script.contains("dispatcher.dispatchMessage(\"codex-app-server-restart\""));
     assert!(script.contains("killCodexProcess: false"));
     assert!(!script.contains("data-codex-app-server-restart-force"));
