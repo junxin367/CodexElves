@@ -27,68 +27,7 @@ pub const COMPACTION_PROMPT_PREFIX: &str = "You are performing a CONTEXT CHECKPO
 ///
 /// 管理器以空字符串表示“使用项目默认提示词”，HTTP 与 WebSocket 两条路径都必须通过
 /// [`effective_compaction_prompt`] 解析该语义。
-pub const DEFAULT_COMPACTION_PROMPT: &str = r#"You are creating a structured context checkpoint for another LLM that will continue the current task.
-
-Do not continue the conversation or solve the task. Summarize only the information required to resume the work accurately.
-
-Use exactly this structure:
-
-## Goal
-
-* Describe what the user is trying to accomplish.
-* Preserve multiple goals separately when the session contains more than one task.
-
-## Constraints & Preferences
-
-* List all user requirements, technical constraints, workflow rules, and preferences.
-* Preserve the user's latest corrections and overrides.
-* Write “(none)” when no constraints were established.
-
-## Progress
-
-### Done
-
-* [x] List only work that was actually completed.
-* Include relevant verification evidence when available.
-
-### In Progress
-
-* [ ] Identify the exact task currently being performed.
-* State the current file, symbol, command, investigation point, or operation when known.
-* Do not describe planned work as completed.
-
-### Blocked
-
-* List unresolved errors, failed commands, missing information, dependencies, or decisions.
-* Remove blockers that were subsequently resolved.
-
-## Key Decisions
-
-* **Decision**: Give the reason and relevant consequences.
-* Preserve rejected approaches when retrying them would waste work.
-
-## Next Steps
-
-1. Give the immediate concrete action that should be performed after restoration.
-2. List subsequent actions in execution order.
-3. Distinguish required work from optional follow-up work.
-
-## Critical Context
-
-* Preserve facts, examples, identifiers, references, and technical discoveries needed to continue.
-* Preserve exact file paths, function names, commands, error messages, configuration keys, URLs, and IDs.
-* Write “(none)” when no additional context is needed.
-
-When updating an existing checkpoint:
-
-* Preserve all still-valid information.
-* Add newly discovered information.
-* Move completed items from “In Progress” to “Done”.
-* Update blockers and next steps from the latest evidence.
-* Remove only information that is demonstrably stale or superseded.
-* Never allow an older summary to override newer user instructions or tool results.
-
-Be concise, factual, and operationally precise."#;
+pub const DEFAULT_COMPACTION_PROMPT: &str = include_str!("../assets/default-compaction-prompt.md");
 
 /// 解析实际使用的摘要压缩提示词。
 ///
@@ -1186,8 +1125,8 @@ pub fn is_any_compaction_request(request_json: &Value) -> bool {
 ///
 /// - 剔除历史里的 `reasoning` item。它们携带原模型的 `encrypted_content`，跨模型
 ///   （尤其跨供应商）传回上游必被拒；摘要也用不到这些推理痕迹。
-/// - 清理推理档位字段，避免把主模型的高档位（如 `xhigh`/`max`）带到压缩模型上。
-///   去掉后由上游按目标模型的默认档位处理，不需要本模块猜能力表。
+/// - 清理主模型的推理档位，再按独立压缩模型设置摘要专用默认值：
+///   DeepSeek/GLM 使用 `max`，其他模型使用 `xhigh`。
 ///
 /// Remote Compaction V2、非压缩请求、模型名为空、或目标模型与当前模型相同时原样返回。
 pub fn apply_compaction_model_override(request_json: &Value, model: &str) -> Value {
@@ -1220,10 +1159,23 @@ pub(crate) fn apply_confirmed_compaction_model_override(
     for key in ["reasoning", "model_reasoning_effort", "reasoning_effort"] {
         object.remove(key);
     }
+    object.insert(
+        "reasoning".to_string(),
+        json!({ "effort": default_compaction_reasoning_effort(model) }),
+    );
     if let Some(Value::Array(items)) = object.get_mut("input") {
         items.retain(|item| item.get("type").and_then(Value::as_str) != Some("reasoning"));
     }
     request
+}
+
+fn default_compaction_reasoning_effort(model: &str) -> &'static str {
+    let model = model.trim().to_ascii_lowercase();
+    if model.contains("deepseek") || model.contains("glm") {
+        "max"
+    } else {
+        "xhigh"
+    }
 }
 
 pub const DEFAULT_COMPACTION_OUTPUT_RESERVE_TOKENS: u64 = 8_192;
@@ -1932,6 +1884,16 @@ mod tests {
             effective_compaction_prompt("  CUSTOM SUMMARY PROMPT  "),
             "CUSTOM SUMMARY PROMPT"
         );
+    }
+
+    #[test]
+    fn project_default_prompt_is_scope_aware_evidence_handoff() {
+        assert!(DEFAULT_COMPACTION_PROMPT.starts_with("You are a conversation compaction writer."));
+        assert!(!DEFAULT_COMPACTION_PROMPT.starts_with('#'));
+        assert!(DEFAULT_COMPACTION_PROMPT.contains("## Evidence Scope and Supersession"));
+        assert!(DEFAULT_COMPACTION_PROMPT.contains("## Mandatory Internal Evidence Ledger"));
+        assert!(DEFAULT_COMPACTION_PROMPT.contains("Example: `git log -3`"));
+        assert!(DEFAULT_COMPACTION_PROMPT.contains("## Mandatory Internal Verification"));
     }
 
     #[test]

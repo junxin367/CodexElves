@@ -3157,6 +3157,8 @@ mod tests {
 
         assert_eq!(request_payload["model"], "gpt-5.6");
         assert_eq!(forwarded_payload["model"], "gpt-5.6");
+        assert_eq!(request_payload["reasoning"], json!({ "effort": "xhigh" }));
+        assert_eq!(forwarded_payload["reasoning"], json!({ "effort": "xhigh" }));
         assert!(options.is_some());
         assert_eq!(original_model.as_deref(), Some("claude-opus-4-8"));
         let fallback = fallback.expect("override should preserve an original-model fallback");
@@ -3220,6 +3222,8 @@ mod tests {
         assert_eq!(request_payload["model"], "gpt-5.6");
         assert_eq!(request_payload["input"][1]["type"], "compaction_trigger");
         assert_eq!(forwarded_payload["model"], "gpt-5.6");
+        assert_eq!(request_payload["reasoning"], json!({ "effort": "xhigh" }));
+        assert_eq!(forwarded_payload["reasoning"], json!({ "effort": "xhigh" }));
         assert_eq!(forwarded_payload["input"][0]["type"], "message");
         assert!(options.is_some());
         assert_eq!(original_model.as_deref(), Some("claude-opus-4-8"));

@@ -9789,6 +9789,8 @@ fn legacy_compaction_request() -> serde_json::Value {
     json!({
         "model": "claude-opus-4-5",
         "reasoning": { "effort": "max" },
+        "model_reasoning_effort": "high",
+        "reasoning_effort": "low",
         "input": [
             { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "hi" }] },
             { "type": "reasoning", "encrypted_content": "opaque-original-model-blob" },
@@ -9805,10 +9807,12 @@ fn legacy_compaction_request() -> serde_json::Value {
 }
 
 #[test]
-fn compaction_model_override_replaces_model_and_strips_reasoning() {
+fn compaction_model_override_replaces_model_resets_effort_and_strips_reasoning_history() {
     let overridden = apply_compaction_model_override(&legacy_compaction_request(), "glm-4.6");
     assert_eq!(overridden["model"], "glm-4.6");
-    assert!(overridden.get("reasoning").is_none());
+    assert_eq!(overridden["reasoning"], json!({ "effort": "max" }));
+    assert!(overridden.get("model_reasoning_effort").is_none());
+    assert!(overridden.get("reasoning_effort").is_none());
     let input = overridden["input"].as_array().unwrap();
     assert!(
         input
@@ -9816,6 +9820,32 @@ fn compaction_model_override_replaces_model_and_strips_reasoning() {
             .all(|item| item.get("type").and_then(|v| v.as_str()) != Some("reasoning"))
     );
     assert_eq!(input.len(), 2);
+}
+
+#[test]
+fn independent_compaction_models_receive_family_default_reasoning_effort() {
+    for model in [
+        "deepseek-v4-flash",
+        "DeepSeek-V4-Pro",
+        "glm-5.2",
+        "z-ai/GLM-4.6",
+    ] {
+        let overridden = apply_compaction_model_override(&legacy_compaction_request(), model);
+        assert_eq!(
+            overridden["reasoning"],
+            json!({ "effort": "max" }),
+            "{model} 应默认使用 max"
+        );
+    }
+
+    for model in ["gpt-5.6", "claude-sonnet-5", "gemini-3-pro"] {
+        let overridden = apply_compaction_model_override(&legacy_compaction_request(), model);
+        assert_eq!(
+            overridden["reasoning"],
+            json!({ "effort": "xhigh" }),
+            "{model} 应默认使用 xhigh"
+        );
+    }
 }
 
 #[test]
@@ -9987,6 +10017,7 @@ async fn bridged_claude_remote_compaction_uses_override_without_becoming_native_
     assert!(requests[0].path.ends_with("/responses"));
     let upstream: Value = serde_json::from_str(&requests[0].body).unwrap();
     assert_eq!(upstream["model"], "gpt-5.6");
+    assert_eq!(upstream["reasoning"], json!({ "effort": "xhigh" }));
     assert_eq!(upstream["input"][0]["type"], "message");
     assert!(upstream.get("tools").is_none());
     assert!(upstream.get("tool_choice").is_none());
@@ -9996,13 +10027,13 @@ async fn bridged_claude_remote_compaction_uses_override_without_becoming_native_
 async fn bridged_claude_remote_compaction_uses_configured_claude_model() {
     let server = spawn_chat_server_with_status_responses(vec![(
         "200 OK".to_string(),
-        r#"{"id":"msg-bridge","type":"message","role":"assistant","model":"claude-sonnet-4-6","stop_reason":"end_turn","content":[{"type":"text","text":"BRIDGED CLAUDE SUMMARY"}],"usage":{"input_tokens":10,"output_tokens":5}}"#.to_string(),
+        r#"{"id":"msg-bridge","type":"message","role":"assistant","model":"claude-sonnet-5","stop_reason":"end_turn","content":[{"type":"text","text":"BRIDGED CLAUDE SUMMARY"}],"usage":{"input_tokens":10,"output_tokens":5}}"#.to_string(),
     )]);
     let settings = BackendSettings {
         layered_compaction_enabled: true,
         layered_compaction_model_override_enabled: true,
         layered_compaction_models: LayeredCompactionModels {
-            claude: "claude-sonnet-4-6".to_string(),
+            claude: "claude-sonnet-5".to_string(),
             ..Default::default()
         },
         relay_profiles: vec![RelayProfile {
@@ -10018,7 +10049,7 @@ async fn bridged_claude_remote_compaction_uses_configured_claude_model() {
                     context_window: "1000000".to_string(),
                 },
                 RelayModelMapping {
-                    request_model: "claude-sonnet-4-6".to_string(),
+                    request_model: "claude-sonnet-5".to_string(),
                     protocol: RelayProtocol::Anthropic,
                     context_window: "1000000".to_string(),
                 },
@@ -10051,7 +10082,8 @@ async fn bridged_claude_remote_compaction_uses_configured_claude_model() {
     assert_eq!(requests.len(), 1);
     assert!(requests[0].path.ends_with("/messages"));
     let upstream: Value = serde_json::from_str(&requests[0].body).unwrap();
-    assert_eq!(upstream["model"], "claude-sonnet-4-6");
+    assert_eq!(upstream["model"], "claude-sonnet-5");
+    assert_eq!(upstream["output_config"], json!({ "effort": "xhigh" }));
     assert!(!requests[0].body.contains("compaction_trigger"));
     assert!(
         upstream["messages"]
@@ -10135,5 +10167,6 @@ async fn failed_compaction_model_retries_once_with_session_model() {
     assert!(requests[0].path.ends_with("/chat/completions"));
     assert!(requests[1].path.ends_with("/messages"));
     assert_eq!(first["model"], "deepseek-chat");
+    assert_eq!(first["reasoning_effort"], "max");
     assert_eq!(second["model"], "claude-opus-4-8");
 }

@@ -11006,6 +11006,10 @@ mod compaction_model_override_tests {
         assert_eq!(resolved.original_model, "gpt-5.4");
         assert_eq!(resolved.compaction_model, "gpt-5.6");
         assert_eq!(resolved.request_json["model"], "gpt-5.6");
+        assert_eq!(
+            resolved.request_json["reasoning"],
+            json!({ "effort": "xhigh" })
+        );
         assert!(resolved.estimated_input_tokens + resolved.output_reserve_tokens <= 9_000);
     }
 
@@ -11083,6 +11087,10 @@ mod compaction_model_override_tests {
         assert_eq!(resolved.original_model, "claude-opus-4-8");
         assert_eq!(resolved.compaction_model, "gpt-5.6");
         assert_eq!(resolved.request_json["model"], "gpt-5.6");
+        assert_eq!(
+            resolved.request_json["reasoning"],
+            json!({ "effort": "xhigh" })
+        );
         assert!(!crate::layered_compaction::is_remote_compaction_v2_request(
             Some(&resolved.request_json)
         ));
@@ -11160,6 +11168,10 @@ mod compaction_model_override_tests {
         .expect("GPT session should be allowed to use the configured DeepSeek target");
         assert_eq!(gpt_resolved.compaction_model, "deepseek-chat");
         assert_eq!(gpt_resolved.protocol, RelayProtocol::ChatCompletions);
+        assert_eq!(
+            gpt_resolved.request_json["reasoning"],
+            json!({ "effort": "max" })
+        );
     }
 
     #[test]
