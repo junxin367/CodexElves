@@ -58,6 +58,7 @@ pub struct SettingsPayload {
     pub settings_path: String,
     pub codex_home: String,
     pub user_scripts: Value,
+    pub layered_compaction_default_prompt: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -578,6 +579,8 @@ pub async fn save_settings(settings: BackendSettings) -> CommandResult<SettingsP
                     .to_string_lossy()
                     .to_string(),
                 user_scripts: user_script_inventory(),
+                layered_compaction_default_prompt:
+                    codex_elves_core::layered_compaction::DEFAULT_COMPACTION_PROMPT,
             },
         );
     }
@@ -616,6 +619,8 @@ pub async fn save_settings(settings: BackendSettings) -> CommandResult<SettingsP
                     .to_string_lossy()
                     .to_string(),
                 user_scripts: user_script_inventory(),
+                layered_compaction_default_prompt:
+                    codex_elves_core::layered_compaction::DEFAULT_COMPACTION_PROMPT,
             },
         ),
     }
@@ -2126,6 +2131,8 @@ pub fn reset_settings() -> CommandResult<SettingsPayload> {
                     .to_string_lossy()
                     .to_string(),
                 user_scripts: user_script_inventory(),
+                layered_compaction_default_prompt:
+                    codex_elves_core::layered_compaction::DEFAULT_COMPACTION_PROMPT,
             },
         ),
     }
@@ -2159,6 +2166,8 @@ pub async fn reset_image_overlay_settings() -> CommandResult<SettingsPayload> {
                     .to_string_lossy()
                     .to_string(),
                 user_scripts: user_script_inventory(),
+                layered_compaction_default_prompt:
+                    codex_elves_core::layered_compaction::DEFAULT_COMPACTION_PROMPT,
             },
         ),
     }
@@ -2260,6 +2269,8 @@ pub async fn activate_skin(id: String) -> CommandResult<SettingsPayload> {
                     .to_string_lossy()
                     .to_string(),
                 user_scripts: user_script_inventory(),
+                layered_compaction_default_prompt:
+                    codex_elves_core::layered_compaction::DEFAULT_COMPACTION_PROMPT,
             },
         ),
     }
@@ -3618,6 +3629,8 @@ fn settings_payload_value() -> Result<SettingsPayload, (anyhow::Error, SettingsP
             settings,
             settings_path,
             user_scripts: user_script_inventory(),
+            layered_compaction_default_prompt:
+                codex_elves_core::layered_compaction::DEFAULT_COMPACTION_PROMPT,
         }),
         Err(error) => Err((
             error,
@@ -3628,6 +3641,8 @@ fn settings_payload_value() -> Result<SettingsPayload, (anyhow::Error, SettingsP
                     .to_string(),
                 settings_path,
                 user_scripts: user_script_inventory(),
+                layered_compaction_default_prompt:
+                    codex_elves_core::layered_compaction::DEFAULT_COMPACTION_PROMPT,
             },
         )),
     }
@@ -3644,6 +3659,8 @@ fn fallback_settings_payload() -> SettingsPayload {
             .to_string_lossy()
             .to_string(),
         user_scripts: user_script_inventory(),
+        layered_compaction_default_prompt:
+            codex_elves_core::layered_compaction::DEFAULT_COMPACTION_PROMPT,
     }
 }
 
@@ -4057,6 +4074,17 @@ mod tests {
             previous_app_state_dir,
             previous_settings_path,
         }
+    }
+
+    #[test]
+    fn settings_payload_exposes_core_default_compaction_prompt() {
+        let _guard = process_state_test_guard();
+        let payload = settings_payload_value().expect("settings payload should load");
+
+        assert_eq!(
+            payload.layered_compaction_default_prompt,
+            codex_elves_core::layered_compaction::DEFAULT_COMPACTION_PROMPT
+        );
     }
 
     fn websocket_cache_profile(

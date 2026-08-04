@@ -83,6 +83,7 @@ import appIconUrl from "../src-tauri/icons/icon.png";
 import arinaHashimotoSkinUrl from "../../../assets/skins/builtin/arina-hashimoto.png";
 import dilrabaSkinUrl from "../../../assets/skins/builtin/dilraba.png";
 import jacksonYeeSkinUrl from "../../../assets/skins/builtin/jackson-yee.png";
+import browserPreviewCompactionDefaultPrompt from "../../../crates/codex-elves-core/assets/default-compaction-prompt.md?raw";
 
 type Status = "ok" | "failed" | "not_implemented" | "not_checked" | string;
 
@@ -336,70 +337,6 @@ const COMPACTION_MODEL_FAMILIES: Array<{ value: ModelFamily; label: string }> = 
   { value: "other", label: "其他会话" },
 ];
 
-// 会话管理中使用的默认上下文压缩提示词。
-const LAYERED_COMPACTION_DEFAULT_PROMPT = `You are creating a structured context checkpoint for another LLM that will continue the current task.
-
-Do not continue the conversation or solve the task. Summarize only the information required to resume the work accurately.
-
-Use exactly this structure:
-
-## Goal
-
-* Describe what the user is trying to accomplish.
-* Preserve multiple goals separately when the session contains more than one task.
-
-## Constraints & Preferences
-
-* List all user requirements, technical constraints, workflow rules, and preferences.
-* Preserve the user's latest corrections and overrides.
-* Write “(none)” when no constraints were established.
-
-## Progress
-
-### Done
-
-* [x] List only work that was actually completed.
-* Include relevant verification evidence when available.
-
-### In Progress
-
-* [ ] Identify the exact task currently being performed.
-* State the current file, symbol, command, investigation point, or operation when known.
-* Do not describe planned work as completed.
-
-### Blocked
-
-* List unresolved errors, failed commands, missing information, dependencies, or decisions.
-* Remove blockers that were subsequently resolved.
-
-## Key Decisions
-
-* **Decision**: Give the reason and relevant consequences.
-* Preserve rejected approaches when retrying them would waste work.
-
-## Next Steps
-
-1. Give the immediate concrete action that should be performed after restoration.
-2. List subsequent actions in execution order.
-3. Distinguish required work from optional follow-up work.
-
-## Critical Context
-
-* Preserve facts, examples, identifiers, references, and technical discoveries needed to continue.
-* Preserve exact file paths, function names, commands, error messages, configuration keys, URLs, and IDs.
-* Write “(none)” when no additional context is needed.
-
-When updating an existing checkpoint:
-
-* Preserve all still-valid information.
-* Add newly discovered information.
-* Move completed items from “In Progress” to “Done”.
-* Update blockers and next steps from the latest evidence.
-* Remove only information that is demonstrably stale or superseded.
-* Never allow an older summary to override newer user instructions or tool results.
-
-Be concise, factual, and operationally precise.`;
-
 const emptyContextSelection = (): RelayContextSelection => ({
   mcpServers: [],
   skills: [],
@@ -428,6 +365,7 @@ type SettingsResult = CommandResult<{
   settings_path: string;
   codex_home: string;
   user_scripts: UserScriptInventory;
+  layered_compaction_default_prompt: string;
 }>;
 
 type Skin = {
@@ -1809,6 +1747,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         settings_path: "浏览器预览 mock",
         codex_home: browserPreviewCodexHome(settings),
         user_scripts: { enabled: true, scripts: [] },
+        layered_compaction_default_prompt: browserPreviewCompactionDefaultPrompt,
       }) as T);
     case "set_user_scripts_enabled":
     case "set_user_script_enabled":
@@ -1818,6 +1757,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         settings_path: "浏览器预览 mock",
         codex_home: browserPreviewCodexHome(settings),
         user_scripts: { enabled: true, scripts: [] },
+        layered_compaction_default_prompt: browserPreviewCompactionDefaultPrompt,
       }, "浏览器预览已保存脚本设置。") as T);
     case "reload_user_scripts":
       return Promise.resolve(browserPreviewResult({
@@ -1825,6 +1765,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         settings_path: "浏览器预览 mock",
         codex_home: browserPreviewCodexHome(settings),
         user_scripts: { enabled: true, scripts: [] },
+        layered_compaction_default_prompt: browserPreviewCompactionDefaultPrompt,
       }, "浏览器预览已重新加载启用脚本。") as T);
     case "save_settings": {
       const next = (args?.settings as BackendSettings | undefined) || settings;
@@ -1834,6 +1775,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         settings_path: "浏览器预览 mock",
         codex_home: browserPreviewCodexHome(normalized),
         user_scripts: { enabled: true, scripts: [] },
+        layered_compaction_default_prompt: browserPreviewCompactionDefaultPrompt,
       }, "浏览器预览已保存到内存。") as T);
     }
     case "list_skins":
@@ -1868,6 +1810,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         settings_path: "浏览器预览 mock",
         codex_home: browserPreviewCodexHome(normalized),
         user_scripts: { enabled: true, scripts: [] },
+        layered_compaction_default_prompt: browserPreviewCompactionDefaultPrompt,
       }, id ? "皮肤已切换。" : "已关闭皮肤。") as T);
     }
     case "clone_skin": {
@@ -3305,6 +3248,7 @@ export function App() {
         settings_path: result.settingsPath,
         codex_home: result.codexHome,
         user_scripts: result.user_scripts as UserScriptInventory,
+        layered_compaction_default_prompt: settings?.layered_compaction_default_prompt ?? "",
       });
       setSettingsForm(selectedSettings);
       setRelay({
@@ -5708,6 +5652,7 @@ function SessionsScreen({
   actions: Actions;
 }) {
   const items = sessions?.sessions ?? [];
+  const defaultCompactionPrompt = settings?.layered_compaction_default_prompt ?? "";
   const activeCount = items.filter((item) => !item.archived).length;
   const archivedCount = items.length - activeCount;
   const [projectFilter, setProjectFilter] = useState<string>("");
@@ -5969,7 +5914,7 @@ function SessionsScreen({
                   <small>
                     {form.layeredCompactionPromptOverride.trim()
                       ? "当前使用自定义摘要提示词。"
-                      : "当前使用 Codex 默认摘要提示词。"}
+                      : "当前使用 CodexElves 默认摘要提示词。"}
                   </small>
                 </div>
                 <div className="session-context-compaction-option-control">
@@ -6160,6 +6105,7 @@ function SessionsScreen({
       </Panel>
       {compactionPromptOpen ? (
         <LayeredCompactionPromptModal
+          defaultPrompt={defaultCompactionPrompt}
           onClose={() => setCompactionPromptOpen(false)}
           onSave={(value) => {
             const next = { ...form, layeredCompactionPromptOverride: value };
@@ -7407,15 +7353,17 @@ function SystemPromptOverrideModal({
 
 function LayeredCompactionPromptModal({
   value,
+  defaultPrompt,
   onClose,
   onSave,
 }: {
   value: string;
+  defaultPrompt: string;
   onClose: () => void;
   onSave: (value: string) => void;
 }) {
   // 未自定义时展示默认提示词，便于用户在其基础上修改。
-  const [draft, setDraft] = useState(value.trim() ? value : LAYERED_COMPACTION_DEFAULT_PROMPT);
+  const [draft, setDraft] = useState(value.trim() ? value : defaultPrompt);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -7438,7 +7386,7 @@ function LayeredCompactionPromptModal({
           <div>
             <h2 id="layered-compaction-prompt-title">替换压缩提示词</h2>
             <p>
-              Codex 触发上下文压缩时用于生成 LLM 摘要的指令。默认显示 Codex
+              Codex 触发上下文压缩时用于生成 LLM 摘要的指令。默认显示 CodexElves
               内置提示词，可直接修改后保存；保存内容与默认提示词完全一致时等同于不替换。
             </p>
           </div>
@@ -7455,15 +7403,14 @@ function LayeredCompactionPromptModal({
         />
         <Toolbar>
           <Button
-            onClick={() =>
-              onSave(draft.trim() === LAYERED_COMPACTION_DEFAULT_PROMPT.trim() ? "" : draft)
-            }
+            onClick={() => onSave(draft.trim() === defaultPrompt.trim() ? "" : draft)}
           >
             <Save className="h-4 w-4" />
             保存
           </Button>
           <Button
-            onClick={() => setDraft(LAYERED_COMPACTION_DEFAULT_PROMPT)}
+            disabled={!defaultPrompt.trim()}
+            onClick={() => setDraft(defaultPrompt)}
             title="回退到默认压缩提示词"
             variant="secondary"
           >
