@@ -25,7 +25,7 @@ use crate::settings::{RelayProtocol, SettingsStore};
 const FRAME_SEND_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_LIVENESS_PING_INTERVAL: Duration = Duration::from_secs(30);
 const UPSTREAM_APPLICATION_IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
-const UPSTREAM_TRANSPORT_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+const UPSTREAM_TRANSPORT_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
 
 pub fn is_responses_websocket_upgrade(request_bytes: &[u8]) -> bool {
     let Ok((request, _)) = parse_websocket_upgrade_request(request_bytes) else {
@@ -419,8 +419,8 @@ async fn bridge_responses_websockets(
                     ) {
                         upstream_request_logger.log_transport_timeout(idle_for);
                         anyhow::bail!(
-                            "Responses WebSocket 上游连接超过 {} 毫秒没有返回任何帧",
-                            UPSTREAM_TRANSPORT_IDLE_TIMEOUT.as_millis()
+                            "Responses WebSocket 上游连接超过 {} 秒没有返回任何帧",
+                            UPSTREAM_TRANSPORT_IDLE_TIMEOUT.as_secs()
                         );
                     }
                     if let Some(expired) =
