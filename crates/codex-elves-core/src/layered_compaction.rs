@@ -68,6 +68,7 @@ const REMOTE_COMPACTION_V2_LEGACY_BASE64_PREFIX: &str = "codex-elves-compaction-
 const LOCAL_COMPACTION_V3_STRUCTURED_PREFIX: &str = "codex-elves-compaction-v3:";
 
 const MAX_REMOTE_COMPACTION_V2_SYNTHETIC_BYTES: usize = 2 * 1024 * 1024;
+const RETAINED_TOOL_DETAIL_PREVIEW_CHARS: usize = 4_000;
 
 const REMOTE_COMPACTION_V2_HISTORY_HEADER: &str = "\
 Historical conversation summary created by CodexElves local compaction. \
@@ -545,20 +546,13 @@ struct StructuredCompactionBuild {
 }
 
 enum StructuredCompactionError {
-    RetainedTailTooLarge {
-        estimated_tokens: u64,
-        retain_tokens: u32,
-    },
-    PayloadTooLarge {
-        bytes: usize,
-    },
+    PayloadTooLarge { bytes: usize },
     Serialize(String),
 }
 
 impl StructuredCompactionError {
     fn code(&self) -> &'static str {
         match self {
-            Self::RetainedTailTooLarge { .. } => "local_compaction_retained_tail_too_large",
             Self::PayloadTooLarge { .. } => "local_compaction_payload_too_large",
             Self::Serialize(_) => "local_compaction_payload_serialize_failed",
         }
@@ -566,13 +560,6 @@ impl StructuredCompactionError {
 
     fn message(&self) -> String {
         match self {
-            Self::RetainedTailTooLarge {
-                estimated_tokens,
-                retain_tokens,
-            } => format!(
-                "Local compaction retained tail requires approximately {estimated_tokens} tokens, \
-                 exceeding the configured {retain_tokens}-token limit."
-            ),
             Self::PayloadTooLarge { bytes } => format!(
                 "Local compaction structured payload is {bytes} bytes, exceeding the \
                  {MAX_REMOTE_COMPACTION_V2_SYNTHETIC_BYTES}-byte limit."
@@ -582,6 +569,447 @@ impl StructuredCompactionError {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RetainedDetailEncoding {
+    ToolOutput,
+    ToolSearchTools,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetainedDetailReplacementMode {
+    Preview,
+    MarkerOnly,
+    MediaOnly,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RetainedDetailPath {
+    TopLevel(&'static str),
+    Nested {
+        parent: &'static str,
+        child: &'static str,
+    },
+}
+
+impl RetainedDetailPath {
+    fn get<'a>(&self, item: &'a Value) -> Option<&'a Value> {
+        match self {
+            Self::TopLevel(field) => item.get(field),
+            Self::Nested { parent, child } => item.get(parent)?.get(child),
+        }
+    }
+
+    fn set(&self, item: &mut Value, replacement: Value) -> bool {
+        match self {
+            Self::TopLevel(field) => item
+                .as_object_mut()
+                .map(|object| object.insert((*field).to_string(), replacement))
+                .is_some(),
+            Self::Nested { parent, child } => item
+                .as_object_mut()
+                .and_then(|object| object.get_mut(*parent))
+                .and_then(Value::as_object_mut)
+                .map(|object| object.insert((*child).to_string(), replacement))
+                .is_some(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RetainedDetailCandidate {
+    item_index: usize,
+    path: RetainedDetailPath,
+    encoding: RetainedDetailEncoding,
+    original: Value,
+    estimated_tokens: u64,
+}
+
+/// 将保留尾部中的大块工具细节裁剪到目标预算附近。
+///
+/// 工具 item 本身、顺序、`id` / `call_id` / `name` 和调用结果配对全部保留：
+/// - 文本结果保留头尾，裁掉中间并插入明确标记；
+/// - 图片等结构化媒体结果替换为合法文本结果，避免留下损坏的 data URL；
+/// - 所有调用参数原样保留；
+/// - 用户 / assistant 原文不裁剪，因此 `retain_tokens` 是裁剪目标而不是失败阈值。
+fn trim_retained_tail_details_to_target(retained_tail: &mut [Value], retain_tokens: u64) -> u64 {
+    let mut estimated_tokens = estimate_json_array_tokens(retained_tail);
+    if estimated_tokens <= retain_tokens {
+        return estimated_tokens;
+    }
+
+    // 一旦尾部超过目标，先无条件清掉所有可裁剪工具细节中的媒体载荷。
+    // 该阶段不能在达到 token 目标后提前结束，否则较小或靠后的 data URL 会原样残留。
+    estimated_tokens = redact_retained_tail_media(retained_tail, estimated_tokens);
+    if estimated_tokens <= retain_tokens {
+        return estimated_tokens;
+    }
+
+    trim_retained_detail_phase(retained_tail, retain_tokens, estimated_tokens)
+}
+
+fn redact_retained_tail_media(retained_tail: &mut [Value], mut estimated_tokens: u64) -> u64 {
+    for candidate in retained_detail_candidates(retained_tail) {
+        if !retained_detail_contains_media(&candidate.original) {
+            continue;
+        }
+        estimated_tokens = apply_retained_detail_candidate(
+            retained_tail,
+            &candidate,
+            RetainedDetailReplacementMode::MediaOnly,
+            estimated_tokens,
+            true,
+        );
+    }
+    estimated_tokens
+}
+
+fn trim_retained_detail_phase(
+    retained_tail: &mut [Value],
+    retain_tokens: u64,
+    mut estimated_tokens: u64,
+) -> u64 {
+    let candidates = retained_detail_candidates(retained_tail);
+
+    // 第一轮保留每个大字段的头尾预览；媒体字段直接降为文字标记。
+    for candidate in &candidates {
+        if estimated_tokens <= retain_tokens {
+            return estimated_tokens;
+        }
+        estimated_tokens = apply_retained_detail_candidate(
+            retained_tail,
+            candidate,
+            RetainedDetailReplacementMode::Preview,
+            estimated_tokens,
+            false,
+        );
+    }
+
+    // 若多个工具字段的预览相加仍超预算，再从最大的字段开始缩成仅保留标记。
+    for candidate in &candidates {
+        if estimated_tokens <= retain_tokens {
+            return estimated_tokens;
+        }
+        estimated_tokens = apply_retained_detail_candidate(
+            retained_tail,
+            candidate,
+            RetainedDetailReplacementMode::MarkerOnly,
+            estimated_tokens,
+            false,
+        );
+    }
+
+    estimated_tokens
+}
+
+fn retained_detail_candidates(retained_tail: &[Value]) -> Vec<RetainedDetailCandidate> {
+    let mut candidates = Vec::new();
+    for (item_index, item) in retained_tail.iter().enumerate() {
+        let Some(kind) = item.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        let mut details = Vec::new();
+        match kind {
+            "function_call_output"
+            | "custom_tool_call_output"
+            | "local_shell_call_output"
+            | "tool_call_output" => details.push((
+                RetainedDetailPath::TopLevel("output"),
+                RetainedDetailEncoding::ToolOutput,
+            )),
+            "tool_result"
+                if item.get("content").and_then(Value::as_object).is_some()
+                    && item
+                        .get("content")
+                        .and_then(|content| content.get("content"))
+                        .is_some() =>
+            {
+                details.push((
+                    RetainedDetailPath::Nested {
+                        parent: "content",
+                        child: "content",
+                    },
+                    RetainedDetailEncoding::ToolOutput,
+                ));
+            }
+            "tool_result" => details.push((
+                RetainedDetailPath::TopLevel("content"),
+                RetainedDetailEncoding::ToolOutput,
+            )),
+            "tool_search_output" => {
+                if item.get("output").is_some() {
+                    details.push((
+                        RetainedDetailPath::TopLevel("output"),
+                        RetainedDetailEncoding::ToolOutput,
+                    ));
+                }
+                if item.get("tools").is_some() {
+                    details.push((
+                        RetainedDetailPath::TopLevel("tools"),
+                        RetainedDetailEncoding::ToolSearchTools,
+                    ));
+                }
+            }
+            _ => {}
+        }
+        for (path, encoding) in details {
+            let Some(original) = path.get(item).cloned() else {
+                continue;
+            };
+            if retained_detail_is_empty(&original) {
+                continue;
+            }
+            candidates.push(RetainedDetailCandidate {
+                item_index,
+                path,
+                encoding,
+                estimated_tokens: estimate_json_value_tokens(&original),
+                original,
+            });
+        }
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .estimated_tokens
+            .cmp(&left.estimated_tokens)
+            .then_with(|| left.item_index.cmp(&right.item_index))
+    });
+    candidates
+}
+
+fn retained_detail_is_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(text) => text.is_empty(),
+        Value::Array(items) => items.is_empty(),
+        Value::Object(object) => object.is_empty(),
+        Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn apply_retained_detail_candidate(
+    retained_tail: &mut [Value],
+    candidate: &RetainedDetailCandidate,
+    mode: RetainedDetailReplacementMode,
+    estimated_tokens: u64,
+    allow_growth: bool,
+) -> u64 {
+    let Some(item) = retained_tail.get_mut(candidate.item_index) else {
+        return estimated_tokens;
+    };
+    let Some(current) = candidate.path.get(item) else {
+        return estimated_tokens;
+    };
+    let replacement = retained_detail_replacement(candidate, mode);
+    let current_tokens = estimate_json_value_tokens(current);
+    let replacement_tokens = estimate_json_value_tokens(&replacement);
+    if replacement == *current || (!allow_growth && replacement_tokens >= current_tokens) {
+        return estimated_tokens;
+    }
+    if !candidate.path.set(item, replacement) {
+        return estimated_tokens;
+    }
+    estimated_tokens
+        .saturating_sub(current_tokens)
+        .saturating_add(replacement_tokens)
+}
+
+fn retained_detail_replacement(
+    candidate: &RetainedDetailCandidate,
+    mode: RetainedDetailReplacementMode,
+) -> Value {
+    let original_text = retained_detail_text(&candidate.original);
+    let original_chars = original_text.chars().count();
+    let original_tokens = candidate.estimated_tokens;
+    let contains_media = retained_detail_contains_media(&candidate.original);
+    let marker_only = mode == RetainedDetailReplacementMode::MarkerOnly;
+
+    match candidate.encoding {
+        RetainedDetailEncoding::ToolOutput => {
+            let structured = !candidate.original.is_string();
+            let label = if structured {
+                "structured tool output"
+            } else {
+                "tool output"
+            };
+            if mode == RetainedDetailReplacementMode::MediaOnly && !contains_media {
+                return candidate.original.clone();
+            }
+            if marker_only || contains_media || mode == RetainedDetailReplacementMode::MediaOnly {
+                return Value::String(retained_detail_marker(
+                    label,
+                    original_tokens,
+                    contains_media,
+                ));
+            }
+            if original_chars <= RETAINED_TOOL_DETAIL_PREVIEW_CHARS {
+                return candidate.original.clone();
+            }
+            Value::String(retained_detail_with_middle_removed(
+                &original_text,
+                RETAINED_TOOL_DETAIL_PREVIEW_CHARS,
+                label,
+                original_tokens,
+                contains_media,
+            ))
+        }
+        RetainedDetailEncoding::ToolSearchTools => {
+            let mut replacement = candidate.original.clone();
+            if contains_media {
+                redact_tool_search_media_descriptions(&mut replacement);
+            }
+            if mode != RetainedDetailReplacementMode::MediaOnly {
+                trim_tool_search_descriptions(&mut replacement, marker_only);
+            }
+            replacement
+        }
+    }
+}
+
+fn trim_tool_search_descriptions(value: &mut Value, marker_only: bool) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                trim_tool_search_descriptions(item, marker_only);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(Value::String(description)) = object.get_mut("description") {
+                let original_tokens = estimate_text_tokens(description);
+                let retained_chars = if marker_only {
+                    0
+                } else {
+                    RETAINED_TOOL_DETAIL_PREVIEW_CHARS
+                };
+                *description = retained_detail_with_middle_removed(
+                    description,
+                    retained_chars,
+                    "tool search description",
+                    original_tokens,
+                    false,
+                );
+            }
+            // `parameters` / `input_schema` 是动态工具注册协议的一部分，必须原样保留。
+            // 只沿嵌套工具列表继续寻找 namespace / function 自身的描述。
+            if let Some(tools) = object.get_mut("tools") {
+                trim_tool_search_descriptions(tools, marker_only);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+fn redact_tool_search_media_descriptions(value: &mut Value) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                redact_tool_search_media_descriptions(item);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(Value::String(description)) = object.get_mut("description")
+                && contains_media_data_url(description)
+            {
+                let original_tokens = estimate_text_tokens(description);
+                *description =
+                    retained_detail_marker("tool search description", original_tokens, true);
+            }
+            // 与普通描述裁剪一致，只遍历动态工具列表；schema 必须保持原样。
+            if let Some(tools) = object.get_mut("tools") {
+                redact_tool_search_media_descriptions(tools);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+fn retained_detail_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+fn retained_detail_contains_media(value: &Value) -> bool {
+    match value {
+        Value::String(text) => contains_media_data_url(text),
+        Value::Array(items) => items.iter().any(retained_detail_contains_media),
+        Value::Object(object) => {
+            object
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| {
+                    matches!(
+                        kind,
+                        "input_image"
+                            | "output_image"
+                            | "input_audio"
+                            | "output_audio"
+                            | "input_video"
+                            | "output_video"
+                    )
+                })
+                || object.values().any(retained_detail_contains_media)
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn contains_media_data_url(text: &str) -> bool {
+    ["data:image/", "data:audio/", "data:video/"]
+        .into_iter()
+        .any(|needle| {
+            text.as_bytes()
+                .windows(needle.len())
+                .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+        })
+}
+
+fn retained_detail_with_middle_removed(
+    text: &str,
+    retained_chars: usize,
+    label: &str,
+    original_tokens: u64,
+    contains_media: bool,
+) -> String {
+    let original_chars = text.chars().count();
+    let retained_chars = retained_chars.min(original_chars);
+    if retained_chars == original_chars {
+        return text.to_string();
+    }
+    let head_chars = retained_chars.div_ceil(2);
+    let tail_chars = retained_chars / 2;
+    let head = text.chars().take(head_chars).collect::<String>();
+    let tail = text
+        .chars()
+        .rev()
+        .take(tail_chars)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    let marker = retained_detail_marker(label, original_tokens, contains_media);
+    if retained_chars == 0 {
+        marker
+    } else {
+        format!("{head}\n\n{marker}\n\n{tail}")
+    }
+}
+
+fn retained_detail_marker(label: &str, original_tokens: u64, contains_media: bool) -> String {
+    let kind = if contains_media {
+        "media"
+    } else {
+        match label {
+            "tool output" => "tool",
+            "structured tool output" => "structured",
+            "custom tool input" => "input",
+            "tool search description" => "tool-desc",
+            _ => "content",
+        }
+    };
+    format!("<truncated:{kind};~{original_tokens}t>")
 }
 
 fn build_structured_local_compaction(
@@ -605,19 +1033,14 @@ fn build_structured_local_compaction(
         return Ok(None);
     }
     let retain_tokens = retain_tokens.clamp(MIN_RETAIN_TOKENS, MAX_RETAIN_TOKENS);
-    let estimated_tokens = estimate_json_value_tokens(&Value::Array(split.retained_tail.clone()));
-    if estimated_tokens > u64::from(retain_tokens) {
-        return Err(StructuredCompactionError::RetainedTailTooLarge {
-            estimated_tokens,
-            retain_tokens,
-        });
-    }
-    let retained_json = serde_json::to_string(&split.retained_tail)
+    let mut retained_tail = split.retained_tail;
+    trim_retained_tail_details_to_target(&mut retained_tail, u64::from(retain_tokens));
+    let retained_json = serde_json::to_string(&retained_tail)
         .map_err(|error| StructuredCompactionError::Serialize(error.to_string()))?;
     let retained_chars = u32::try_from(retained_json.chars().count()).unwrap_or(u32::MAX);
     let payload = StructuredLocalCompactionPayload {
         summary: summary.trim().to_string(),
-        retained_tail: split.retained_tail,
+        retained_tail,
     };
     let payload_json = serde_json::to_string(&payload)
         .map_err(|error| StructuredCompactionError::Serialize(error.to_string()))?;
@@ -1215,11 +1638,7 @@ fn estimate_json_value_tokens(value: &Value) -> u64 {
         Value::Null => 1,
         Value::Bool(_) | Value::Number(_) => 1,
         Value::String(text) => estimate_text_tokens(text),
-        Value::Array(items) => items.iter().fold(2_u64, |total, item| {
-            total
-                .saturating_add(estimate_json_value_tokens(item))
-                .saturating_add(1)
-        }),
+        Value::Array(items) => estimate_json_array_tokens(items),
         Value::Object(object) => object.iter().fold(2_u64, |total, (key, value)| {
             total
                 .saturating_add(estimate_text_tokens(key))
@@ -1227,6 +1646,14 @@ fn estimate_json_value_tokens(value: &Value) -> u64 {
                 .saturating_add(2)
         }),
     }
+}
+
+fn estimate_json_array_tokens(items: &[Value]) -> u64 {
+    items.iter().fold(2_u64, |total, item| {
+        total
+            .saturating_add(estimate_json_value_tokens(item))
+            .saturating_add(1)
+    })
 }
 
 fn estimate_text_tokens(text: &str) -> u64 {
@@ -1319,7 +1746,8 @@ fn replace_message_text(item: &mut Value, text: &str) {
 /// 在传统压缩响应 SSE 上应用结构化本地压缩：把上游摘要与原始保留尾部编码为 v3 载荷。
 ///
 /// - `enabled` 为 false、非压缩请求、或无法解析终止响应/摘要时，原样返回。
-/// - 原始尾部超预算时返回明确的 failed 响应，不截断或文本化。
+/// - 原始尾部超出配置目标时裁剪工具输出 / 动态工具描述，保留消息、item、调用参数和调用配对结构。
+/// - 不可裁剪的用户 / assistant 原文和调用参数仍可软超目标；只有结构化载荷超过物理上限才失败。
 pub fn apply_layered_compaction_to_responses_sse(
     request_json: &Value,
     enabled: bool,
@@ -1791,6 +2219,27 @@ mod tests {
             "role": "assistant",
             "content": [{ "type": "output_text", "text": text }]
         })
+    }
+
+    fn assert_short_marker(marker: &str, kind: &str) {
+        assert!(
+            marker.starts_with(&format!("<truncated:{kind};~")),
+            "marker must use the short English angle-bracket format: {marker}"
+        );
+        assert!(
+            marker.ends_with("t>"),
+            "marker must end with a token estimate: {marker}"
+        );
+        assert!(
+            !marker.contains("characters") && !marker.contains("CodexElves"),
+            "marker must not carry the old verbose character-count explanation: {marker}"
+        );
+    }
+
+    fn short_marker_in(text: &str) -> &str {
+        text.lines()
+            .find(|line| line.starts_with("<truncated:"))
+            .expect("trimmed text must contain a short marker")
     }
 
     fn remote_compaction_v2_request() -> Value {
@@ -2404,6 +2853,27 @@ mod tests {
         })
     }
 
+    fn legacy_tool_call_item(call_id: &str, name: &str, input: Value) -> Value {
+        json!({
+            "type": "tool_call",
+            "tool_use": {
+                "id": call_id,
+                "name": name,
+                "input": input
+            }
+        })
+    }
+
+    fn legacy_tool_result_item(call_id: &str, content: Value) -> Value {
+        json!({
+            "type": "tool_result",
+            "content": {
+                "tool_use_id": call_id,
+                "content": content
+            }
+        })
+    }
+
     #[test]
     fn legacy_summary_request_excludes_anchor_and_raw_tail() {
         let request = json!({
@@ -2517,13 +2987,14 @@ mod tests {
     }
 
     #[test]
-    fn oversized_raw_tail_fails_without_partial_payload() {
-        let huge_output = "界".repeat(30_000);
+    fn oversized_text_tool_output_is_trimmed_without_breaking_pair() {
+        let huge_output = format!("BEGIN\n{}\nEND", "界".repeat(30_000));
+        let call = function_call_item("call_1", "shell_command");
         let request = json!({
             "input": [
                 assistant_message("推荐方案"),
                 user_message("按推荐处理"),
-                function_call_item("call_1", "shell_command"),
+                call.clone(),
                 function_call_output_item("call_1", &huge_output),
                 compaction_prompt_item()
             ]
@@ -2532,21 +3003,776 @@ mod tests {
             &request,
             true,
             MIN_RETAIN_TOKENS,
-            summary_sse("SUMMARY MUST NOT LEAK"),
+            summary_sse("SUMMARY"),
         );
-        assert!(!result.triggered);
-        assert!(result.sse_text.contains("response.failed"));
-        assert!(
-            result
-                .sse_text
-                .contains("local_compaction_retained_tail_too_large")
-        );
+        assert!(result.triggered);
+        assert!(!result.sse_text.contains("response.failed"));
         assert!(
             !result
                 .sse_text
-                .contains(LOCAL_COMPACTION_V3_STRUCTURED_PREFIX)
+                .contains("local_compaction_retained_tail_too_large")
         );
-        assert!(!result.sse_text.contains("SUMMARY MUST NOT LEAK"));
+        let response = crate::continue_thinking::extract_terminal_response_object(&result.sse_text)
+            .expect("trimmed compaction response");
+        let encoded = extract_message_text(&response).expect("structured payload text");
+        let payload =
+            structured_local_compaction_payload(&encoded).expect("v3 payload should decode");
+
+        assert_eq!(payload.summary, "SUMMARY");
+        assert_eq!(payload.retained_tail.len(), 4);
+        assert_eq!(payload.retained_tail[2], call);
+        assert_eq!(payload.retained_tail[3]["type"], "function_call_output");
+        assert_eq!(payload.retained_tail[3]["call_id"], "call_1");
+        let trimmed = payload.retained_tail[3]["output"]
+            .as_str()
+            .expect("text output remains text");
+        assert!(trimmed.starts_with("BEGIN"));
+        assert!(trimmed.ends_with("END"));
+        let marker = trimmed
+            .lines()
+            .find(|line| line.starts_with("<truncated:"))
+            .expect("trimmed tool output must carry a short marker");
+        assert_short_marker(marker, "tool");
+        assert!(
+            trimmed.chars().count() < huge_output.chars().count(),
+            "tool output details must actually be reduced"
+        );
+        assert!(
+            estimate_json_value_tokens(&Value::Array(payload.retained_tail))
+                <= u64::from(MIN_RETAIN_TOKENS)
+        );
+    }
+
+    #[test]
+    fn image_tool_output_from_failed_session_is_replaced_with_text_marker() {
+        let image_url = format!("data:image/png;base64,{}", "A".repeat(136_760));
+        let call = json!({
+            "type": "function_call",
+            "id": "fc_view_image",
+            "call_id": "call_view_image",
+            "name": "view_image",
+            "arguments": "{\"path\":\"temp/picker-dark.png\"}",
+            "internal_chat_message_metadata_passthrough": { "turn_id": "turn-session" }
+        });
+        let output = json!({
+            "type": "function_call_output",
+            "id": "fco_view_image",
+            "call_id": "call_view_image",
+            "output": [{
+                "type": "input_image",
+                "image_url": image_url,
+                "detail": "high"
+            }],
+            "internal_chat_message_metadata_passthrough": { "turn_id": "turn-session" }
+        });
+        let request = json!({
+            "input": [
+                assistant_message("亲自验收视觉效果"),
+                user_message("继续"),
+                call.clone(),
+                output,
+                assistant_message("视觉验收通过"),
+                compaction_prompt_item()
+            ]
+        });
+
+        assert!(
+            estimate_json_value_tokens(&Value::Array(
+                request["input"].as_array().unwrap()[..5].to_vec()
+            )) > u64::from(MIN_RETAIN_TOKENS),
+            "fixture must reproduce an oversized retained tail"
+        );
+
+        let result = apply_layered_compaction_to_responses_sse(
+            &request,
+            true,
+            MIN_RETAIN_TOKENS,
+            summary_sse("SUMMARY"),
+        );
+        assert!(result.triggered);
+        assert!(!result.sse_text.contains("response.failed"));
+        let response = crate::continue_thinking::extract_terminal_response_object(&result.sse_text)
+            .expect("trimmed compaction response");
+        let encoded = extract_message_text(&response).expect("structured payload text");
+        let payload =
+            structured_local_compaction_payload(&encoded).expect("v3 payload should decode");
+
+        assert_eq!(payload.retained_tail.len(), 5);
+        assert_eq!(payload.retained_tail[2], call);
+        let trimmed_output = &payload.retained_tail[3];
+        assert_eq!(trimmed_output["type"], "function_call_output");
+        assert_eq!(trimmed_output["id"], "fco_view_image");
+        assert_eq!(trimmed_output["call_id"], "call_view_image");
+        assert_eq!(
+            trimmed_output["internal_chat_message_metadata_passthrough"]["turn_id"],
+            "turn-session"
+        );
+        let marker = trimmed_output["output"]
+            .as_str()
+            .expect("structured image output becomes a valid text result");
+        assert_short_marker(marker, "media");
+        assert!(
+            !serde_json::to_string(&payload)
+                .unwrap()
+                .contains("data:image/png;base64")
+        );
+        assert!(
+            estimate_json_value_tokens(&Value::Array(payload.retained_tail))
+                <= u64::from(MIN_RETAIN_TOKENS)
+        );
+    }
+
+    #[test]
+    fn oversized_tool_arguments_are_preserved_even_when_tail_exceeds_target() {
+        let arguments = serde_json::to_string(&json!({
+            "patch": format!("BEGIN_PATCH{}END_PATCH", "x".repeat(100_000))
+        }))
+        .unwrap();
+        let call = json!({
+            "type": "function_call",
+            "id": "fc_patch",
+            "call_id": "call_patch",
+            "name": "apply_patch",
+            "arguments": arguments
+        });
+        let output = function_call_output_item("call_patch", "Done!");
+        let request = json!({
+            "input": [
+                assistant_message("开始修改"),
+                user_message("继续"),
+                call.clone(),
+                output.clone(),
+                compaction_prompt_item()
+            ]
+        });
+
+        let result = apply_layered_compaction_to_responses_sse(
+            &request,
+            true,
+            MIN_RETAIN_TOKENS,
+            summary_sse("SUMMARY"),
+        );
+        assert!(result.triggered);
+        assert!(!result.sse_text.contains("response.failed"));
+        let response = crate::continue_thinking::extract_terminal_response_object(&result.sse_text)
+            .expect("trimmed compaction response");
+        let encoded = extract_message_text(&response).expect("structured payload text");
+        let payload =
+            structured_local_compaction_payload(&encoded).expect("v3 payload should decode");
+
+        assert_eq!(
+            payload.retained_tail[2], call,
+            "function call arguments must remain exactly as supplied"
+        );
+        assert_eq!(payload.retained_tail[3], output);
+        assert!(
+            estimate_json_value_tokens(&Value::Array(payload.retained_tail))
+                > u64::from(MIN_RETAIN_TOKENS),
+            "an oversized immutable argument may leave the soft target exceeded"
+        );
+    }
+
+    #[test]
+    fn oversized_legacy_tool_result_preserves_nested_tool_use_id() {
+        let call = legacy_tool_call_item("call_legacy", "lookup", json!({ "query": "weather" }));
+        let output = legacy_tool_result_item(
+            "call_legacy",
+            json!(format!("BEGIN\n{}\nEND", "界".repeat(30_000))),
+        );
+        let request = json!({
+            "input": [
+                assistant_message("开始查询"),
+                user_message("继续"),
+                call.clone(),
+                output,
+                compaction_prompt_item()
+            ]
+        });
+
+        let result = apply_layered_compaction_to_responses_sse(
+            &request,
+            true,
+            MIN_RETAIN_TOKENS,
+            summary_sse("SUMMARY"),
+        );
+        assert!(result.triggered);
+        let response = crate::continue_thinking::extract_terminal_response_object(&result.sse_text)
+            .expect("trimmed compaction response");
+        let encoded = extract_message_text(&response).expect("structured payload text");
+        let payload =
+            structured_local_compaction_payload(&encoded).expect("v3 payload should decode");
+
+        assert_eq!(payload.retained_tail[2], call);
+        let trimmed_result = &payload.retained_tail[3];
+        assert_eq!(trimmed_result["type"], "tool_result");
+        assert_eq!(
+            trimmed_result["content"]["tool_use_id"],
+            json!("call_legacy")
+        );
+        let trimmed = trimmed_result["content"]["content"]
+            .as_str()
+            .expect("legacy result content remains nested text");
+        assert!(trimmed.starts_with("BEGIN"));
+        assert!(trimmed.ends_with("END"));
+        let marker = trimmed
+            .lines()
+            .find(|line| line.starts_with("<truncated:"))
+            .expect("legacy result must carry a short marker");
+        assert_short_marker(marker, "tool");
+        assert!(
+            estimate_json_value_tokens(&Value::Array(payload.retained_tail))
+                <= u64::from(MIN_RETAIN_TOKENS)
+        );
+    }
+
+    #[test]
+    fn oversized_legacy_tool_call_input_is_preserved_even_when_tail_exceeds_target() {
+        let call = legacy_tool_call_item(
+            "call_legacy",
+            "lookup",
+            json!({ "query": format!("BEGIN{}END", "x".repeat(100_000)) }),
+        );
+        let output = legacy_tool_result_item("call_legacy", json!("found"));
+        let request = json!({
+            "input": [
+                assistant_message("开始查询"),
+                user_message("继续"),
+                call.clone(),
+                output.clone(),
+                compaction_prompt_item()
+            ]
+        });
+
+        let result = apply_layered_compaction_to_responses_sse(
+            &request,
+            true,
+            MIN_RETAIN_TOKENS,
+            summary_sse("SUMMARY"),
+        );
+        assert!(result.triggered);
+        let response = crate::continue_thinking::extract_terminal_response_object(&result.sse_text)
+            .expect("trimmed compaction response");
+        let encoded = extract_message_text(&response).expect("structured payload text");
+        let payload =
+            structured_local_compaction_payload(&encoded).expect("v3 payload should decode");
+
+        assert_eq!(
+            payload.retained_tail[2], call,
+            "legacy tool input must remain exactly as supplied"
+        );
+        assert_eq!(payload.retained_tail[3], output);
+        assert!(
+            estimate_json_value_tokens(&Value::Array(payload.retained_tail))
+                > u64::from(MIN_RETAIN_TOKENS),
+            "an oversized immutable legacy input may leave the soft target exceeded"
+        );
+    }
+
+    #[test]
+    fn oversized_tool_search_descriptions_are_trimmed_without_losing_tool_schema() {
+        let parameters = json!({
+            "type": "object",
+            "properties": {
+                "step": {
+                    "type": "string",
+                    "description": format!(
+                        "PARAMETER_SCHEMA_MUST_REMAIN_UNCHANGED data:image/png;base64,{} END_SCHEMA",
+                        "S".repeat(12_000)
+                    )
+                }
+            },
+            "required": ["step"],
+            "additionalProperties": false
+        });
+        let call = json!({
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "status": "completed",
+            "execution": "client",
+            "arguments": { "query": "consensus" }
+        });
+        let output = json!({
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "status": "completed",
+            "execution": "client",
+            "tools": [{
+                "type": "namespace",
+                "name": "mcp__pal",
+                "description": format!("BEGIN_NAMESPACE{}END_NAMESPACE", "界".repeat(12_000)),
+                "tools": [{
+                    "type": "function",
+                    "name": "consensus",
+                    "description": format!("BEGIN_TOOL{}END_TOOL", "界".repeat(12_000)),
+                    "parameters": parameters.clone()
+                }]
+            }]
+        });
+        let request = json!({
+            "input": [
+                assistant_message("查找工具"),
+                user_message("继续"),
+                call.clone(),
+                output,
+                compaction_prompt_item()
+            ]
+        });
+
+        let result = apply_layered_compaction_to_responses_sse(
+            &request,
+            true,
+            MIN_RETAIN_TOKENS,
+            summary_sse("SUMMARY"),
+        );
+        assert!(result.triggered);
+        let response = crate::continue_thinking::extract_terminal_response_object(&result.sse_text)
+            .expect("trimmed compaction response");
+        let encoded = extract_message_text(&response).expect("structured payload text");
+        let payload =
+            structured_local_compaction_payload(&encoded).expect("v3 payload should decode");
+
+        assert_eq!(payload.retained_tail[2], call);
+        let trimmed_output = &payload.retained_tail[3];
+        assert_eq!(trimmed_output["call_id"], "call_search");
+        assert_eq!(trimmed_output["tools"][0]["name"], "mcp__pal");
+        assert_eq!(trimmed_output["tools"][0]["tools"][0]["name"], "consensus");
+        assert_eq!(
+            trimmed_output["tools"][0]["tools"][0]["parameters"], parameters,
+            "tool parameter schema must remain byte-for-byte equivalent as JSON"
+        );
+        assert_short_marker(
+            short_marker_in(trimmed_output["tools"][0]["description"].as_str().unwrap()),
+            "tool-desc",
+        );
+        assert_short_marker(
+            short_marker_in(
+                trimmed_output["tools"][0]["tools"][0]["description"]
+                    .as_str()
+                    .unwrap(),
+            ),
+            "tool-desc",
+        );
+        assert!(
+            estimate_json_value_tokens(&Value::Array(payload.retained_tail))
+                <= u64::from(MIN_RETAIN_TOKENS)
+        );
+    }
+
+    #[test]
+    fn tool_search_output_with_output_and_tools_redacts_media_description() {
+        let call = json!({
+            "type": "tool_search_call",
+            "call_id": "call_search_media",
+            "status": "completed",
+            "execution": "client",
+            "arguments": { "query": "vision" }
+        });
+        let request = json!({
+            "input": [
+                assistant_message("查找视觉工具"),
+                user_message("继续"),
+                call.clone(),
+                {
+                    "type": "tool_search_output",
+                    "call_id": "call_search_media",
+                    "status": "completed",
+                    "execution": "client",
+                    "output": "ok",
+                    "tools": [{
+                        "type": "namespace",
+                        "name": "mcp__vision",
+                        "description": "vision namespace",
+                        "tools": [{
+                            "type": "function",
+                            "name": "inspect",
+                            "description": format!(
+                                "preview data:image/png;base64,{} done",
+                                "I".repeat(100_000)
+                            ),
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": false
+                            }
+                        }]
+                    }]
+                },
+                compaction_prompt_item()
+            ]
+        });
+
+        let result = apply_layered_compaction_to_responses_sse(
+            &request,
+            true,
+            MIN_RETAIN_TOKENS,
+            summary_sse("SUMMARY"),
+        );
+        assert!(result.triggered);
+        let response = crate::continue_thinking::extract_terminal_response_object(&result.sse_text)
+            .expect("trimmed compaction response");
+        let encoded = extract_message_text(&response).expect("structured payload text");
+        let payload =
+            structured_local_compaction_payload(&encoded).expect("v3 payload should decode");
+        let retained_json = serde_json::to_string(&payload.retained_tail).unwrap();
+        let output = payload
+            .retained_tail
+            .iter()
+            .find(|item| item.get("type").and_then(Value::as_str) == Some("tool_search_output"))
+            .expect("tool search output remains");
+
+        assert_eq!(payload.retained_tail[2], call);
+        assert_eq!(output["call_id"], "call_search_media");
+        assert_eq!(output["output"], "ok");
+        assert_eq!(output["tools"][0]["name"], "mcp__vision");
+        assert_eq!(output["tools"][0]["tools"][0]["name"], "inspect");
+        assert_short_marker(
+            output["tools"][0]["tools"][0]["description"]
+                .as_str()
+                .unwrap(),
+            "media",
+        );
+        assert!(!contains_media_data_url(&retained_json));
+        assert!(
+            estimate_json_value_tokens(&Value::Array(payload.retained_tail))
+                <= u64::from(MIN_RETAIN_TOKENS)
+        );
+    }
+
+    #[test]
+    fn embedded_data_url_tool_output_is_replaced_instead_of_partially_truncated() {
+        let output = format!(
+            "screenshot: data:image/png;base64,{} :done",
+            "A".repeat(100_000)
+        );
+        let request = json!({
+            "input": [
+                assistant_message("检查截图"),
+                user_message("继续"),
+                function_call_item("call_image", "view_image"),
+                function_call_output_item("call_image", &output),
+                compaction_prompt_item()
+            ]
+        });
+
+        let result = apply_layered_compaction_to_responses_sse(
+            &request,
+            true,
+            MIN_RETAIN_TOKENS,
+            summary_sse("SUMMARY"),
+        );
+        assert!(result.triggered);
+        let response = crate::continue_thinking::extract_terminal_response_object(&result.sse_text)
+            .expect("trimmed compaction response");
+        let encoded = extract_message_text(&response).expect("structured payload text");
+        let payload =
+            structured_local_compaction_payload(&encoded).expect("v3 payload should decode");
+        let trimmed = payload.retained_tail[3]["output"]
+            .as_str()
+            .expect("media output becomes text marker");
+
+        assert_short_marker(trimmed, "media");
+        assert!(!trimmed.contains("data:image/"));
+        assert!(!trimmed.contains(&"A".repeat(1_000)));
+    }
+
+    #[test]
+    fn media_output_is_redacted_but_call_arguments_stay_original() {
+        let video_arguments = serde_json::to_string(&json!({
+            "source": format!("prefix DATA:VIDEO/mp4;base64,{} suffix", "V".repeat(128))
+        }))
+        .unwrap();
+        let request = json!({
+            "input": [
+                assistant_message("处理多个工具结果"),
+                user_message("继续"),
+                function_call_item("call_large", "shell_command"),
+                function_call_output_item("call_large", &"L".repeat(100_000)),
+                function_call_item("call_audio", "inspect_audio"),
+                function_call_output_item(
+                    "call_audio",
+                    &format!("prefix data:audio/wav;base64,{} suffix", "A".repeat(128))
+                ),
+                {
+                    "type": "function_call",
+                    "call_id": "call_video",
+                    "name": "inspect_video",
+                    "arguments": video_arguments.clone()
+                },
+                function_call_output_item("call_video", "ok"),
+                compaction_prompt_item()
+            ]
+        });
+
+        let result = apply_layered_compaction_to_responses_sse(
+            &request,
+            true,
+            MIN_RETAIN_TOKENS,
+            summary_sse("SUMMARY"),
+        );
+        assert!(result.triggered);
+        let response = crate::continue_thinking::extract_terminal_response_object(&result.sse_text)
+            .expect("trimmed compaction response");
+        let encoded = extract_message_text(&response).expect("structured payload text");
+        let payload =
+            structured_local_compaction_payload(&encoded).expect("v3 payload should decode");
+        let retained_json = serde_json::to_string(&payload.retained_tail).unwrap();
+
+        let audio_output = payload
+            .retained_tail
+            .iter()
+            .find(|item| {
+                item.get("call_id").and_then(Value::as_str) == Some("call_audio")
+                    && item.get("type").and_then(Value::as_str) == Some("function_call_output")
+            })
+            .expect("audio output remains paired");
+        assert_short_marker(audio_output["output"].as_str().unwrap(), "media");
+        let video_call = payload
+            .retained_tail
+            .iter()
+            .find(|item| {
+                item.get("call_id").and_then(Value::as_str) == Some("call_video")
+                    && item.get("type").and_then(Value::as_str) == Some("function_call")
+            })
+            .expect("video call remains paired");
+        assert_eq!(
+            video_call["arguments"], video_arguments,
+            "function call arguments must not be redacted even when they contain media"
+        );
+        assert!(
+            contains_media_data_url(&retained_json),
+            "the original media data URL remains only inside the untouched call arguments"
+        );
+    }
+
+    #[test]
+    fn sanitized_failed_session_shape_keeps_all_25_items_and_reaches_token_target() {
+        let image_url = format!(
+            "data:image/png;base64,{}{}",
+            "A".repeat(136_760),
+            "/".repeat(10_809)
+        );
+        let original_tail = vec![
+            assistant_message("anchor"),
+            function_call_item("call_wait", "wait_agent"),
+            function_call_output_item("call_wait", "done"),
+            user_message("notification"),
+            assistant_message("inspect"),
+            function_call_item("call_shell_1", "shell_command"),
+            function_call_output_item("call_shell_1", "ok"),
+            function_call_item("call_image", "view_image"),
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_image",
+                "output": [{
+                    "type": "input_image",
+                    "image_url": image_url,
+                    "detail": "high"
+                }]
+            }),
+            assistant_message("visual result"),
+            function_call_item("call_shell_2", "shell_command"),
+            function_call_item("call_shell_3", "shell_command"),
+            function_call_output_item("call_shell_2", "ok"),
+            function_call_output_item("call_shell_3", "ok"),
+            assistant_message("verify"),
+            function_call_item("call_shell_4", "shell_command"),
+            function_call_item("call_shell_5", "shell_command"),
+            function_call_output_item("call_shell_4", "ok"),
+            function_call_output_item("call_shell_5", "ok"),
+            assistant_message("cleanup"),
+            function_call_item("call_shell_6", "shell_command"),
+            function_call_item("call_shell_7", "shell_command"),
+            function_call_output_item("call_shell_6", "ok"),
+            function_call_output_item("call_shell_7", "ok"),
+            assistant_message("final"),
+        ];
+        assert_eq!(original_tail.len(), 25);
+        assert_eq!(
+            estimate_json_value_tokens(&Value::Array(original_tail.clone())),
+            45_754
+        );
+        let mut input = original_tail.clone();
+        input.push(json!({ "type": "compaction_trigger" }));
+        let request = json!({
+            "model": "claude-sonnet-5",
+            "input": input
+        });
+        let source = json!({
+            "id": "resp_sanitized_session",
+            "status": "completed",
+            "model": "claude-sonnet-5",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "SUMMARY" }]
+            }]
+        });
+
+        let result = rewrite_remote_compaction_v2_response_with_layered_compaction(
+            &request,
+            &source,
+            true,
+            MIN_RETAIN_TOKENS,
+        )
+        .expect("trimmed remote compaction response");
+        assert!(result.layered.triggered);
+        assert_eq!(result.layered.retained_items, 25);
+        let payload = synthetic_local_compaction_payload(&result.response["output"][0])
+            .expect("v3 payload should decode");
+
+        for (original, retained) in original_tail.iter().zip(&payload.retained_tail) {
+            for field in ["type", "id", "call_id", "name", "role"] {
+                assert_eq!(
+                    retained.get(field),
+                    original.get(field),
+                    "identity field {field} must remain unchanged"
+                );
+            }
+        }
+        assert_short_marker(
+            payload.retained_tail[8]["output"].as_str().unwrap(),
+            "media",
+        );
+        assert!(
+            estimate_json_value_tokens(&Value::Array(payload.retained_tail))
+                <= u64::from(MIN_RETAIN_TOKENS)
+        );
+    }
+
+    #[test]
+    fn multiple_large_tool_outputs_fall_back_to_marker_only_until_under_target() {
+        let mut input = vec![assistant_message("执行批量检查"), user_message("继续")];
+        for index in 0..8 {
+            let call_id = format!("call_{index}");
+            input.push(function_call_item(&call_id, "shell_command"));
+            input.push(function_call_output_item(
+                &call_id,
+                &format!("BEGIN_{index}{}END_{index}", "界".repeat(4_000)),
+            ));
+        }
+        input.push(compaction_prompt_item());
+        let request = json!({ "input": input });
+
+        let result = apply_layered_compaction_to_responses_sse(
+            &request,
+            true,
+            MIN_RETAIN_TOKENS,
+            summary_sse("SUMMARY"),
+        );
+        assert!(result.triggered);
+        let response = crate::continue_thinking::extract_terminal_response_object(&result.sse_text)
+            .expect("trimmed compaction response");
+        let encoded = extract_message_text(&response).expect("structured payload text");
+        let payload =
+            structured_local_compaction_payload(&encoded).expect("v3 payload should decode");
+
+        let marker_only_outputs = payload
+            .retained_tail
+            .iter()
+            .filter(|item| {
+                item.get("type").and_then(Value::as_str) == Some("function_call_output")
+                    && item
+                        .get("output")
+                        .and_then(Value::as_str)
+                        .is_some_and(|output| output.starts_with("<truncated:tool;~"))
+            })
+            .count();
+        assert!(
+            marker_only_outputs > 0,
+            "the second pass must collapse at least one preview to marker-only"
+        );
+        for index in 0..8 {
+            let call_id = format!("call_{index}");
+            assert_eq!(
+                payload
+                    .retained_tail
+                    .iter()
+                    .filter(|item| {
+                        item.get("call_id").and_then(Value::as_str) == Some(call_id.as_str())
+                    })
+                    .count(),
+                2,
+                "each tool call/output pair must remain present"
+            );
+        }
+        assert!(
+            estimate_json_value_tokens(&Value::Array(payload.retained_tail))
+                <= u64::from(MIN_RETAIN_TOKENS)
+        );
+    }
+
+    #[test]
+    fn physical_payload_limit_remains_a_hard_failure() {
+        let request = json!({
+            "model": "claude-sonnet-5",
+            "input": [
+                assistant_message("不可裁剪的助手原文"),
+                user_message(&"界".repeat(700_000)),
+                { "type": "compaction_trigger" }
+            ]
+        });
+        let source = json!({
+            "id": "resp_payload_too_large",
+            "status": "completed",
+            "model": "claude-sonnet-5",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "SUMMARY" }]
+            }]
+        });
+
+        let rewritten = rewrite_remote_compaction_v2_response_with_layered_compaction(
+            &request,
+            &source,
+            true,
+            MIN_RETAIN_TOKENS,
+        )
+        .expect("remote compaction response");
+        assert_eq!(rewritten.response["status"], "failed");
+        assert_eq!(
+            rewritten.response["error"]["code"],
+            "local_compaction_payload_too_large"
+        );
+        assert_eq!(rewritten.response["output"], json!([]));
+    }
+
+    #[test]
+    fn oversized_non_tool_tail_uses_configured_limit_as_soft_target() {
+        let anchor = assistant_message("不可裁剪的助手原文");
+        let user = user_message(&"界".repeat(30_000));
+        let request = json!({
+            "input": [
+                anchor.clone(),
+                user.clone(),
+                compaction_prompt_item()
+            ]
+        });
+        let result = apply_layered_compaction_to_responses_sse(
+            &request,
+            true,
+            MIN_RETAIN_TOKENS,
+            summary_sse("SUMMARY"),
+        );
+
+        assert!(result.triggered);
+        assert!(!result.sse_text.contains("response.failed"));
+        assert!(
+            !result
+                .sse_text
+                .contains("local_compaction_retained_tail_too_large")
+        );
+        let response = crate::continue_thinking::extract_terminal_response_object(&result.sse_text)
+            .expect("soft-limit compaction response");
+        let encoded = extract_message_text(&response).expect("structured payload text");
+        let payload =
+            structured_local_compaction_payload(&encoded).expect("v3 payload should decode");
+        assert_eq!(payload.retained_tail, vec![anchor, user]);
+        assert!(
+            estimate_json_value_tokens(&Value::Array(payload.retained_tail))
+                > u64::from(MIN_RETAIN_TOKENS),
+            "non-tool dialogue remains intact even when the configured target cannot be met"
+        );
     }
 
     #[test]

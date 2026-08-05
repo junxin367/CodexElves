@@ -159,7 +159,8 @@ V2 本地兼容桥把该载荷写入单个 `compaction.encrypted_content`。传�
 
 1. 把 `summary` 恢复为历史 assistant context。
 2. 按原始顺序追加 `retained_tail` 中的消息和工具记录。
-3. 不改变原始 role、call ID、内容块和工具调用配对关系。
+3. 不改变原始 role、item ID、call ID、工具名称、顺序和工具调用配对关系。尾部未超预算时
+   内容块保持原样；触发容量裁剪时只替换过大的工具结果或动态工具描述。
 4. 删除 Codex 压缩器已经原样保留、同时又出现在 `retained_tail` 中的 user/developer/system
    重复项；优先按 item ID 匹配，其次按 turn metadata，最后按 role 与文本匹配。若待删除项是
    摘要前唯一一条真实 user，删除后会导致 Anthropic 请求以 assistant 开头，则保留这条原始
@@ -168,14 +169,31 @@ V2 本地兼容桥把该载荷写入单个 `compaction.encrypted_content`。传�
 
 ### 5. 容量处理
 
-原始最近回合必须作为完整原子区间处理：
+原始最近回合必须在 item 和调用配对层面保持原子性：
 
-- 不截断单条消息。
-- 不删除工具调用或工具输出的一半。
-- 不把结构化记录降级为纯文本。
+- user / assistant 消息原文不裁剪。
+- 函数调用参数不裁剪。
+- 不删除工具调用或工具输出的一半，不改变 `id`、`call_id`、工具名称和顺序。
+- 尾部不超过 `retain_tokens` 时，所有 Responses items 原样保留。
 
-如果最近回合本身已经超过配置预算或目标模型可用上下文，则本次本地压缩明确失败并保留原
-会话，不生成部分保留或结构损坏的压缩结果。
+尾部超过 `retain_tokens` 时，将该配置视为裁剪目标：
+
+1. 一旦确认超目标，先扫描全部可裁剪工具结果和动态工具描述，无条件移除其中的图片、音频和视频
+   Data URL；该扫描不因中途达到目标而提前结束，避免较小或靠后的媒体载荷原样残留。同一个
+   `tool_search_output` 的 `output` 与 `tools` 独立处理。
+2. 再优先处理占用最大的工具结果。文本结果保留头尾各一部分并裁掉中间，插入仅含类型和
+   估算 Token 数的短标记；短标记格式为 `<truncated:<kind>;~<tokens>t>`。结构化媒体载荷替换
+   为 `<truncated:media;~<tokens>t>`。
+3. 多个工具结果保留预览后仍超目标时，将最大的结果继续缩成仅保留标记。
+4. legacy `tool_result` 只裁剪 `content.content`，保留 `content.tool_use_id`；legacy
+   `tool_call` 的 `tool_use.input` 原样保留。
+5. `tool_search_output` 只沿嵌套 `tools` 列表裁剪 namespace / function 自身的描述，不进入
+   `parameters` 或 `input_schema`；媒体清理同样不进入 schema。工具名称和参数 schema 保持
+   不变，保证恢复后仍能注册动态工具。
+6. 如果剩余超量来自不可裁剪的 user / assistant 原文或调用参数，则允许软超配置目标，不返回
+   `local_compaction_retained_tail_too_large`。
+
+2 MiB 合成载荷上限仍是物理硬限制；超过该上限时明确失败，避免生成无法解码的压缩记录。
 
 ## 自动续接规则
 
@@ -311,6 +329,16 @@ user/tool_result：Gamma 和价格历史探针结果
 该结果确认：摘要不能承担短回复指代解析的可靠性责任；必须原样保留 assistant 指代锚点和
 后续原始尾部。
 
+2026 年 8 月 5 日使用会话 `019fc6cf-cc9b-7472-8b6a-ae57e9e268d3` 的失败请求回放容量
+裁剪：
+
+- 从会话 JSONL 精确恢复 25 个保留尾部 item，旧逻辑估算为 45,754 Token，与原错误一致。
+- 其中一条 `view_image` 的 `function_call_output` 含 136,782 字符的 PNG data URL，单项
+  约占 39,835 Token，是直接超限来源。
+- 新逻辑保留全部 25 个 item 及调用配对，把媒体结果替换为裁剪标记。
+- 回放后保留尾部为 14,699 字符，保守复算约 6,040 Token；Remote Compaction V2 返回
+  completed，不再产生超限失败。
+
 ## 测试设计
 
 需要长期保留以下回归测试：
@@ -325,8 +353,17 @@ user/tool_result：Gamma 和价格历史探针结果
   的真实 user，则保留原始副本以满足 Anthropic 首条消息约束。
 - user、assistant、工具调用和工具输出顺序保持不变。
 - 工具调用与输出 ID 配对保持不变。
-- 图片和结构化内容块不被文本化。
-- 超预算最近回合明确失败，不产生部分压缩结果。
+- 预算内图片和结构化内容块保持原样。
+- 超预算文本工具结果保留头尾和裁剪标记，调用配对不变。
+- 超预算图片工具结果移除 data URL，保留原工具结果 item 和明确文本标记。
+- 超预算函数调用参数仍原样保留，且 `id`、`call_id` 和工具名称不变。
+- legacy `tool_call/tool_result` 的嵌套 ID 外壳在裁剪后仍能通过 Chat 与 Anthropic 配对。
+- `tool_search_output` 裁剪描述后仍保留工具名称和参数 schema，并能在 Chat 与 Anthropic
+  注册动态工具。
+- 多个大工具结果会进入第二轮 marker-only 裁剪，直到达到目标。
+- 脱敏 25-item 夹具稳定复现裁剪前 45,754 Token，并在裁剪后保留全部 item。
+- 不可裁剪的 user / assistant 原文把配置值视为软目标，不因配置值失败。
+- 仅超过 2 MiB 物理载荷上限时明确失败。
 - 旧版文本压缩载荷仍可恢复。
 - 禁止 assistant prefill 的上游不会收到 assistant 结尾的自动续接请求。
 - 为避免虚拟用户内容，无法安全续接时停止并等待真实用户消息。

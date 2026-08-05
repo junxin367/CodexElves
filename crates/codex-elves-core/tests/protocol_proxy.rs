@@ -1,6 +1,7 @@
 use codex_elves_core::layered_compaction::{
-    DEFAULT_RETAIN_TOKENS, apply_compaction_model_override, is_any_compaction_request,
-    restore_response_model_in_sse, rewrite_remote_compaction_v2_response_with_layered_compaction,
+    DEFAULT_RETAIN_TOKENS, MIN_RETAIN_TOKENS, apply_compaction_model_override,
+    is_any_compaction_request, restore_response_model_in_sse,
+    rewrite_remote_compaction_v2_response_with_layered_compaction,
 };
 use codex_elves_core::protocol_proxy::{
     AnthropicSseToResponsesConverter, ChatSseToResponsesConverter, UpstreamResponseProtocol,
@@ -436,6 +437,236 @@ fn structured_compaction_restores_real_roles_and_tool_pairing_across_protocols()
                     && block["tool_use_id"] == "call-probe"
                     && block["content"] == "probe ready"
             }))
+    );
+}
+
+#[test]
+fn structured_compaction_trims_legacy_tool_result_without_breaking_protocol_pairing() {
+    let current_user = json!({
+        "type": "message",
+        "id": "msg-current-user-legacy",
+        "role": "user",
+        "content": [{ "type": "input_text", "text": "继续查询" }]
+    });
+    let source_request = json!({
+        "model": "claude-sonnet-5",
+        "input": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "查询推荐方案" }]
+            },
+            current_user.clone(),
+            {
+                "type": "tool_call",
+                "tool_use": {
+                    "id": "call-legacy",
+                    "name": "lookup",
+                    "input": { "query": "weather" }
+                }
+            },
+            {
+                "type": "tool_result",
+                "content": {
+                    "tool_use_id": "call-legacy",
+                    "content": format!("BEGIN\n{}\nEND", "界".repeat(30_000))
+                }
+            },
+            { "type": "compaction_trigger" }
+        ]
+    });
+    let source_response = json!({
+        "id": "resp-legacy-trimmed",
+        "status": "completed",
+        "model": "claude-sonnet-5",
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": "较早历史摘要" }]
+        }]
+    });
+    let compacted = rewrite_remote_compaction_v2_response_with_layered_compaction(
+        &source_request,
+        &source_response,
+        true,
+        MIN_RETAIN_TOKENS,
+    )
+    .expect("structured compaction response");
+    assert!(compacted.layered.triggered);
+    let history_request = json!({
+        "model": "claude-sonnet-5",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "更早保留的 user" }]
+            },
+            current_user,
+            compacted.response["output"][0].clone()
+        ]
+    });
+
+    let chat = responses_to_chat_completions(history_request.clone()).unwrap();
+    let chat_messages = chat["messages"].as_array().unwrap();
+    assert!(chat_messages.iter().any(|message| {
+        message["role"] == "assistant"
+            && message["tool_calls"].as_array().is_some_and(|calls| {
+                calls
+                    .iter()
+                    .any(|call| call["id"] == "call-legacy" && call["function"]["name"] == "lookup")
+            })
+    }));
+    let chat_result = chat_messages
+        .iter()
+        .find(|message| message["role"] == "tool" && message["tool_call_id"] == "call-legacy")
+        .expect("chat tool result remains paired");
+    let chat_content = chat_result["content"].as_str().unwrap();
+    assert!(chat_content.starts_with("BEGIN"));
+    assert!(chat_content.ends_with("END"));
+    assert!(chat_content.contains("<truncated:tool;~"));
+
+    let anthropic = responses_to_anthropic_messages(history_request).unwrap();
+    let anthropic_messages = anthropic["messages"].as_array().unwrap();
+    assert!(anthropic_messages.iter().any(|message| {
+        message["role"] == "assistant"
+            && message["content"].as_array().is_some_and(|content| {
+                content.iter().any(|block| {
+                    block["type"] == "tool_use"
+                        && block["id"] == "call-legacy"
+                        && block["name"] == "lookup"
+                })
+            })
+    }));
+    let anthropic_result = anthropic_messages
+        .iter()
+        .flat_map(|message| message["content"].as_array().into_iter().flatten())
+        .find(|block| block["type"] == "tool_result" && block["tool_use_id"] == "call-legacy")
+        .expect("anthropic tool result remains paired");
+    let anthropic_content = anthropic_result["content"].as_str().unwrap();
+    assert!(anthropic_content.starts_with("BEGIN"));
+    assert!(anthropic_content.ends_with("END"));
+    assert!(anthropic_content.contains("<truncated:tool;~"));
+}
+
+#[test]
+fn structured_compaction_trims_tool_search_descriptions_without_losing_dynamic_tools() {
+    let parameters = json!({
+        "type": "object",
+        "properties": {
+            "step": {
+                "type": "string",
+                "description": format!(
+                    "PARAMETER_SCHEMA_MUST_REMAIN_UNCHANGED data:image/png;base64,{} END_SCHEMA",
+                    "S".repeat(12_000)
+                )
+            }
+        },
+        "required": ["step"],
+        "additionalProperties": false
+    });
+    let current_user = json!({
+        "type": "message",
+        "id": "msg-current-user-tool-search",
+        "role": "user",
+        "content": [{ "type": "input_text", "text": "继续使用工具" }]
+    });
+    let source_request = json!({
+        "model": "claude-sonnet-5",
+        "input": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "查找 consensus 工具" }]
+            },
+            current_user.clone(),
+            {
+                "type": "tool_search_call",
+                "call_id": "call-tool-search",
+                "status": "completed",
+                "execution": "client",
+                "arguments": { "query": "consensus" }
+            },
+            {
+                "type": "tool_search_output",
+                "call_id": "call-tool-search",
+                "status": "completed",
+                "execution": "client",
+                "tools": [{
+                    "type": "namespace",
+                    "name": "mcp__pal",
+                    "description": format!("BEGIN_NAMESPACE{}END_NAMESPACE", "界".repeat(12_000)),
+                    "tools": [{
+                        "type": "function",
+                        "name": "consensus",
+                        "description": format!("BEGIN_TOOL{}END_TOOL", "界".repeat(12_000)),
+                        "parameters": parameters.clone()
+                    }]
+                }]
+            },
+            { "type": "compaction_trigger" }
+        ],
+        "tools": [{ "type": "tool_search" }]
+    });
+    let source_response = json!({
+        "id": "resp-tool-search-trimmed",
+        "status": "completed",
+        "model": "claude-sonnet-5",
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": "较早历史摘要" }]
+        }]
+    });
+    let compacted = rewrite_remote_compaction_v2_response_with_layered_compaction(
+        &source_request,
+        &source_response,
+        true,
+        MIN_RETAIN_TOKENS,
+    )
+    .expect("structured compaction response");
+    assert!(compacted.layered.triggered);
+    let history_request = json!({
+        "model": "claude-sonnet-5",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "更早保留的 user" }]
+            },
+            current_user,
+            compacted.response["output"][0].clone()
+        ],
+        "tools": [{ "type": "tool_search" }]
+    });
+
+    let chat = responses_to_chat_completions(history_request.clone()).unwrap();
+    let chat_tool = chat["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["function"]["name"] == "mcp__pal__consensus")
+        .expect("trimmed tool search output still registers chat tool");
+    assert_eq!(chat_tool["function"]["parameters"], parameters);
+    assert!(
+        chat_tool["function"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("<truncated:tool-desc;~")
+    );
+
+    let anthropic = responses_to_anthropic_messages(history_request).unwrap();
+    let anthropic_tool = anthropic["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "mcp__pal__consensus")
+        .expect("trimmed tool search output still registers anthropic tool");
+    assert_eq!(anthropic_tool["input_schema"], parameters);
+    assert!(
+        anthropic_tool["description"]
+            .as_str()
+            .unwrap()
+            .contains("<truncated:tool-desc;~")
     );
 }
 

@@ -10803,11 +10803,12 @@ mod remote_compaction_v2_tests {
             "test",
         )
         .unwrap();
-        assert_eq!(bridged["input"][1]["type"], "message");
-        assert_eq!(
-            bridged["input"][1]["content"][0]["text"],
-            "CUSTOM V2 PROMPT"
-        );
+        let bridged_prompt = bridged["input"]
+            .as_array()
+            .and_then(|input| input.last())
+            .expect("layered bridge keeps the compaction prompt");
+        assert_eq!(bridged_prompt["type"], "message");
+        assert_eq!(bridged_prompt["content"][0]["text"], "CUSTOM V2 PROMPT");
         assert!(bridged.get("tools").is_none());
 
         let prepared =
@@ -10821,12 +10822,14 @@ mod remote_compaction_v2_tests {
             "test",
         )
         .unwrap();
+        let plain_prompt = plain["input"]
+            .as_array()
+            .and_then(|input| input.last())
+            .expect("plain bridge keeps the compaction prompt");
         assert!(
-            plain["input"][1]["content"][0]["text"]
-                .as_str()
-                .is_some_and(
-                    |text| text.starts_with(crate::layered_compaction::COMPACTION_PROMPT_PREFIX)
-                )
+            plain_prompt["content"][0]["text"].as_str().is_some_and(
+                |text| text.starts_with(crate::layered_compaction::COMPACTION_PROMPT_PREFIX)
+            )
         );
     }
 }

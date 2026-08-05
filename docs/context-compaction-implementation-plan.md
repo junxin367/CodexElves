@@ -19,7 +19,8 @@ Claude 等禁止 assistant prefill 的模型上安全停止自动续接。
 - 原生 Remote Compaction V2 保持不变。
 - v1/v2 合成压缩载荷继续可读。
 - 不创建虚拟 user、零宽字符或伪造工具结果。
-- 不截断或文本化 v3 原始尾部；超预算时明确失败。
+- v3 尾部预算内保持原样；超预算时只裁剪工具结果和动态工具描述，保留 item、ID、顺序、调用参数与
+  调用配对。user / assistant 原文不裁剪，配置值作为软目标。
 - 保留当前未提交改动，不修改无关 UI、模型能力和中继配置逻辑。
 
 ---
@@ -77,8 +78,16 @@ assert_eq!(
       原始尾部；如果待删除项是摘要前唯一真实 user，则保留原始副本作为 Anthropic 协议锚点，
       不生成虚拟 user。
 - [x] 重复项匹配顺序固定为 item ID、turn metadata、role + 文本。
-- [x] v3 尾部超过 `retain_tokens` 或 2 MiB 载荷上限时构造 `response.failed`，不截断。
-- [x] 在现有单元测试中验证图片内容块、call ID、tool call/output 顺序逐项相等。
+- [x] v3 尾部超过 `retain_tokens` 时，先完整移除全部工具结果和动态工具描述中的媒体 Data URL，
+      再按“工具结果预览 → 仅保留结果标记”的顺序自适应裁剪；调用参数保持原样，配置值不再触发
+      `response.failed`。
+- [x] legacy `tool_result` / `tool_call` 使用嵌套详情路径裁剪，保留 `tool_use_id`、调用 ID
+      和工具名称；其中 `tool_call.tool_use.input` 保持原样；`tool_search_output` 只裁剪工具对象自身描述，不进入 `parameters` /
+      `input_schema`，且分别处理同时存在的 `output` 与 `tools`，保留动态工具 schema。
+- [x] user / assistant 原文不可裁剪且仍超目标时允许软超；2 MiB 载荷上限仍明确失败。
+- [x] 在现有单元测试中验证预算内图片内容块逐项相等，以及超预算图片、文本结果裁剪后仍保留
+      call ID、tool call/output 顺序与合法结构；函数参数即使超过目标也原样保留；补充 25-item/45,754 Token
+      脱敏回放、第二轮 marker-only、legacy 配对、动态工具注册和 2 MiB 边界测试。
 
 ### Task 3：接入三种协议转换
 

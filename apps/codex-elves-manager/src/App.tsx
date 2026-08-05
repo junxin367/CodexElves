@@ -4544,7 +4544,7 @@ function LocalProxyLogDetailDialog({
                 <span>约 {Math.round(entry.layeredCompactionRetainedChars / 4).toLocaleString()} token</span>
               ) : null}
               {entry.layeredCompactionTriggered && typeof entry.layeredCompactionRetainTokens === "number" ? (
-                <span>预算上限 {entry.layeredCompactionRetainTokens.toLocaleString()} token</span>
+                <span>裁剪目标 {entry.layeredCompactionRetainTokens.toLocaleString()} token</span>
               ) : null}
             </div>
           ) : entry.layeredCompactionTriggered ? (
@@ -4560,7 +4560,7 @@ function LocalProxyLogDetailDialog({
                 <span>约 {Math.round(entry.layeredCompactionRetainedChars / 4).toLocaleString()} token</span>
               ) : null}
               {typeof entry.layeredCompactionRetainTokens === "number" ? (
-                <span>预算上限 {entry.layeredCompactionRetainTokens.toLocaleString()} token</span>
+                <span>裁剪目标 {entry.layeredCompactionRetainTokens.toLocaleString()} token</span>
               ) : null}
             </div>
           ) : null}
@@ -5884,12 +5884,14 @@ function SessionsScreen({
             <div className="session-context-compaction-options">
               <div className="session-context-compaction-option">
                 <div className="session-context-compaction-option-copy">
-                  <strong>补回上限</strong>
-                  <small>限制补回最近一轮原始记录的最大 token 数，范围 20,000–64,000。</small>
+                  <strong>补回裁剪目标</strong>
+                  <small>
+                    超过目标时优先裁剪工具结果和动态工具描述；调用参数、用户与助手原文不会仅因该值超限而失败。范围 20,000–64,000。
+                  </small>
                 </div>
                 <div className="session-context-compaction-option-control session-context-compaction-limit-control">
                   <Input
-                    aria-label="上下文压缩补回上限 token"
+                    aria-label="上下文压缩补回裁剪目标 token"
                     className="session-context-compaction-limit"
                     disabled={!form.layeredCompactionEnabled}
                     id="context-compaction-retain-tokens"
@@ -10554,7 +10556,7 @@ function formatLayeredCompactionTitle(
     parts.push(`约 ${Math.round(entry.layeredCompactionRetainedChars / 4).toLocaleString()} token`);
   }
   if (typeof entry.layeredCompactionRetainTokens === "number") {
-    parts.push(`预算 ${entry.layeredCompactionRetainTokens.toLocaleString()} token`);
+    parts.push(`裁剪目标 ${entry.layeredCompactionRetainTokens.toLocaleString()} token`);
   }
   return parts.join(" · ");
 }
