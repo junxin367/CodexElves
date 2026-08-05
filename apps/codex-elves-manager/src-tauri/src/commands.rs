@@ -15,6 +15,7 @@ use codex_elves_core::status::{LaunchStatus, StatusStore};
 use codex_elves_core::user_scripts::UserScriptManager;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tauri::Emitter;
 
 use crate::install::{self, InstallActionResult, InstallOptions};
 
@@ -1179,50 +1180,219 @@ fn merge_manual_provider_sync_targets(
     });
 }
 
+const PROVIDER_SYNC_PROGRESS_EVENT: &str = "codex-elves://provider-sync-progress";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderSyncProgressEventPayload {
+    operation_id: String,
+    stage: &'static str,
+    phase: codex_elves_data::ProviderSyncProgressPhase,
+    completed: usize,
+    total: usize,
+    percent: u8,
+    message: String,
+}
+
+fn emit_provider_sync_progress(
+    app: &tauri::AppHandle,
+    operation_id: &str,
+    stage: &'static str,
+    start_percent: u8,
+    end_percent: u8,
+    progress: codex_elves_data::ProviderSyncProgress,
+) {
+    let range = u16::from(end_percent.saturating_sub(start_percent));
+    let mapped =
+        u16::from(start_percent) + (u16::from(progress.percent).saturating_mul(range) / 100);
+    let _ = app.emit(
+        PROVIDER_SYNC_PROGRESS_EVENT,
+        ProviderSyncProgressEventPayload {
+            operation_id: operation_id.to_string(),
+            stage,
+            phase: progress.phase,
+            completed: progress.completed,
+            total: progress.total,
+            percent: mapped.min(100) as u8,
+            message: progress.message,
+        },
+    );
+}
+
+fn provider_sync_operation_id(value: String) -> anyhow::Result<String> {
+    let operation_id = value.trim();
+    if operation_id.is_empty() {
+        anyhow::bail!("历史会话修复操作标识为空，请重新点击修复");
+    }
+    Ok(operation_id.to_string())
+}
+
 #[tauri::command]
-pub async fn sync_providers_now(target_provider: Option<String>) -> CommandResult<Value> {
+pub async fn preview_provider_sync(
+    app: tauri::AppHandle,
+    operation_id: String,
+    target_provider: Option<String>,
+) -> CommandResult<Value> {
+    let operation_id = match provider_sync_operation_id(operation_id) {
+        Ok(value) => value,
+        Err(error) => return failed(&error.to_string(), json!({})),
+    };
+    let settings = SettingsStore::default().load().unwrap_or_default();
+    let target_provider = target_provider
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let home = codex_elves_core::codex_home::codex_home_dir_for_settings(&settings);
+    let progress_app = app.clone();
+    let progress_operation_id = operation_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<_> {
+        let stale_lock_removed = codex_elves_data::cleanup_stale_provider_sync_lock(Some(&home))?;
+        if stale_lock_removed {
+            emit_provider_sync_progress(
+                &progress_app,
+                &progress_operation_id,
+                "preview",
+                2,
+                55,
+                codex_elves_data::ProviderSyncProgress {
+                    phase: codex_elves_data::ProviderSyncProgressPhase::Preparing,
+                    completed: 1,
+                    total: 1,
+                    percent: 1,
+                    message: "已清理上次中断留下的历史会话修复锁。".to_string(),
+                },
+            );
+        }
+        let preview = codex_elves_data::preview_provider_sync_with_target_and_progress(
+            Some(&home),
+            target_provider.as_deref(),
+            |progress| {
+                emit_provider_sync_progress(
+                    &progress_app,
+                    &progress_operation_id,
+                    "preview",
+                    2,
+                    55,
+                    progress,
+                );
+            },
+        )?;
+        Ok((preview, stale_lock_removed))
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("provider sync preview task failed: {error}"))
+    .and_then(|result| result);
+    match result {
+        Ok((preview, stale_lock_removed)) => ok(
+            "历史会话修复预检完成。",
+            json!({
+                "targetProvider": preview.target_provider,
+                "activeDbPath": preview.active_db_path,
+                "scannedSessionFiles": preview.scanned_session_files,
+                "changedSessionFiles": preview.changed_session_files,
+                "skippedLockedRolloutFiles": preview.skipped_locked_rollout_files,
+                "sqliteRowsToUpdate": preview.sqlite_rows_to_update,
+                "sqliteRowsToInsert": preview.sqlite_rows_to_insert,
+                "updatedWorkspaceRoots": preview.updated_workspace_roots,
+                "encryptedContentWarning": preview.encrypted_content_warning,
+                "syncMessage": preview.message,
+                "staleLockRemoved": stale_lock_removed,
+            }),
+        ),
+        Err(error) => failed(&format!("历史会话修复预检失败：{error}"), json!({})),
+    }
+}
+
+#[tauri::command]
+pub async fn sync_providers_now(
+    app: tauri::AppHandle,
+    operation_id: String,
+    target_provider: Option<String>,
+) -> CommandResult<Value> {
+    let operation_id = match provider_sync_operation_id(operation_id) {
+        Ok(value) => value,
+        Err(error) => return failed(&error.to_string(), json!({})),
+    };
+    let running_processes = codex_elves_core::watcher::find_codex_processes();
+    if !running_processes.is_empty() {
+        return failed(
+            &format!(
+                "检测到 Codex/ChatGPT 正在运行（PID：{}）。请先完全关闭 Codex/ChatGPT，再执行历史会话修复。",
+                running_processes
+                    .iter()
+                    .map(|process_id| process_id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            json!({
+                "errorCode": "codex_running",
+                "runningProcessIds": running_processes,
+            }),
+        );
+    }
     let settings = SettingsStore::default().load().unwrap_or_default();
     let target_provider = target_provider
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let target_for_settings = target_provider.clone();
     let home = codex_elves_core::codex_home::codex_home_dir_for_settings(&settings);
+    let progress_app = app.clone();
+    let progress_operation_id = operation_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        codex_elves_data::run_provider_sync_with_target(Some(&home), target_provider.as_deref())
+        codex_elves_data::run_provider_sync_with_target_guarded_and_progress(
+            Some(&home),
+            target_provider.as_deref(),
+            |progress| {
+                emit_provider_sync_progress(
+                    &progress_app,
+                    &progress_operation_id,
+                    "apply",
+                    60,
+                    100,
+                    progress,
+                );
+            },
+        )
     })
     .await
     .map_err(|error| anyhow::anyhow!("provider sync task failed: {error}"));
     match result {
         Ok(sync) => {
+            let payload = json!({
+                "syncStatus": sync.status,
+                "errorCode": sync.error_code,
+                "targetProvider": sync.target_provider,
+                "activeDbPath": sync.active_db_path,
+                "changedSessionFiles": sync.changed_session_files,
+                "skippedLockedRolloutFiles": sync.skipped_locked_rollout_files,
+                "sqliteRowsUpdated": sync.sqlite_rows_updated,
+                "sqliteRowsInserted": sync.sqlite_rows_inserted,
+                "sqliteProviderRowsUpdated": sync.sqlite_provider_rows_updated,
+                "sqliteUserEventRowsUpdated": sync.sqlite_user_event_rows_updated,
+                "sqliteCwdRowsUpdated": sync.sqlite_cwd_rows_updated,
+                "updatedWorkspaceRoots": sync.updated_workspace_roots,
+                "encryptedContentWarning": sync.encrypted_content_warning,
+                "backupDir": sync.backup_dir,
+                "syncMessage": sync.message,
+            });
             if is_success_sync_status(&sync.status) {
                 persist_provider_sync_selection(
                     target_for_settings
                         .as_deref()
                         .unwrap_or(&sync.target_provider),
                 );
+                ok(
+                    &format!(
+                        "供应商已同步一次：{} 个会话文件，{} 行索引更新，{} 条索引重建，跳过 {} 个占用文件。",
+                        sync.changed_session_files,
+                        sync.sqlite_rows_updated,
+                        sync.sqlite_rows_inserted,
+                        sync.skipped_locked_rollout_files.len()
+                    ),
+                    payload,
+                )
+            } else {
+                failed(&format!("历史会话修复未执行：{}", sync.message), payload)
             }
-            ok(
-                &format!(
-                    "供应商已同步一次：{} 个会话文件，{} 行索引，跳过 {} 个占用文件。",
-                    sync.changed_session_files,
-                    sync.sqlite_rows_updated,
-                    sync.skipped_locked_rollout_files.len()
-                ),
-                json!({
-                    "syncStatus": sync.status,
-                    "targetProvider": sync.target_provider,
-                    "changedSessionFiles": sync.changed_session_files,
-                    "skippedLockedRolloutFiles": sync.skipped_locked_rollout_files,
-                    "sqliteRowsUpdated": sync.sqlite_rows_updated,
-                    "sqliteProviderRowsUpdated": sync.sqlite_provider_rows_updated,
-                    "sqliteUserEventRowsUpdated": sync.sqlite_user_event_rows_updated,
-                    "sqliteCwdRowsUpdated": sync.sqlite_cwd_rows_updated,
-                    "updatedWorkspaceRoots": sync.updated_workspace_roots,
-                    "encryptedContentWarning": sync.encrypted_content_warning,
-                    "backupDir": sync.backup_dir,
-                    "syncMessage": sync.message,
-                }),
-            )
         }
         Err(error) => failed(&format!("供应商同步失败：{error}"), json!({})),
     }

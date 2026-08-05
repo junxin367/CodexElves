@@ -515,16 +515,37 @@ type RemoveEnvConflictsResult = CommandResult<{
 
 type ProviderSyncPayload = {
   syncStatus?: string;
+  syncMessage?: string;
+  errorCode?: string | null;
   targetProvider?: string;
+  activeDbPath?: string | null;
+  backupDir?: string | null;
   changedSessionFiles?: number;
   skippedLockedRolloutFiles?: string[];
   sqliteRowsUpdated?: number;
+  sqliteRowsInserted?: number;
   sqliteProviderRowsUpdated?: number;
   sqliteUserEventRowsUpdated?: number;
   sqliteCwdRowsUpdated?: number;
   updatedWorkspaceRoots?: number;
   encryptedContentWarning?: string | null;
 };
+
+type ProviderSyncPreviewPayload = {
+  targetProvider?: string;
+  activeDbPath?: string | null;
+  scannedSessionFiles?: number;
+  changedSessionFiles?: number;
+  skippedLockedRolloutFiles?: string[];
+  sqliteRowsToUpdate?: number;
+  sqliteRowsToInsert?: number;
+  updatedWorkspaceRoots?: number;
+  encryptedContentWarning?: string | null;
+  syncMessage?: string;
+  staleLockRemoved?: boolean;
+};
+
+type ProviderSyncPreviewResult = CommandResult<ProviderSyncPreviewPayload>;
 
 type ProviderSyncTargetSource = "config" | "rollout" | "sqlite" | "manual";
 
@@ -548,6 +569,16 @@ type ProviderSyncProgress = {
   percent: number;
   message: string;
   result: CommandResult<ProviderSyncPayload> | null;
+};
+
+type ProviderSyncProgressEvent = {
+  operationId: string;
+  stage: "preview" | "apply" | string;
+  phase: string;
+  completed: number;
+  total: number;
+  percent: number;
+  message: string;
 };
 
 type TaskProgress = {
@@ -727,12 +758,28 @@ type ScriptMarketResult = CommandResult<{
 }>;
 
 function providerSyncProgressMessage(result: CommandResult<ProviderSyncPayload>): string {
+  if (!isSuccessStatus(result.status)) {
+    return result.syncMessage || result.message || "历史会话修复失败。";
+  }
   const changed = result.changedSessionFiles ?? 0;
   const rows = result.sqliteRowsUpdated ?? 0;
+  const inserted = result.sqliteRowsInserted ?? 0;
   const target = result.targetProvider || "当前 provider";
   const skipped = result.skippedLockedRolloutFiles?.length ?? 0;
   const skippedText = skipped ? `，跳过 ${skipped} 个占用文件` : "";
-  return `已同步到 ${target}：修复 ${changed} 个会话文件，更新 ${rows} 行索引${skippedText}。`;
+  const insertedText = inserted ? `，重建 ${inserted} 条缺失索引` : "";
+  return `已同步到 ${target}：修复 ${changed} 个会话文件，更新 ${rows} 行索引${insertedText}${skippedText}。`;
+}
+
+function createProviderSyncOperationId(): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return `provider-sync-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function waitForNextPaint(): Promise<void> {
+  return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
 }
 
 const providerSyncSourceLabels: Record<ProviderSyncTargetSource, string> = {
@@ -1925,6 +1972,34 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({ conflicts: [] }) as T);
     case "load_provider_sync_targets":
       return Promise.resolve(browserPreviewResult({ currentProvider: "custom", targets: [] }) as T);
+    case "preview_provider_sync":
+      return Promise.resolve(browserPreviewResult({
+        targetProvider: String(args?.targetProvider || "custom"),
+        activeDbPath: "C:\\Users\\junes\\.codex\\state_5.sqlite",
+        scannedSessionFiles: 1100,
+        changedSessionFiles: 1066,
+        skippedLockedRolloutFiles: [],
+        sqliteRowsToUpdate: 1068,
+        sqliteRowsToInsert: 1,
+        updatedWorkspaceRoots: 0,
+        encryptedContentWarning: null,
+        syncMessage: "Provider sync preview complete",
+        staleLockRemoved: false,
+      }, "历史会话修复预检完成。") as T);
+    case "sync_providers_now":
+      return Promise.resolve(browserPreviewResult({
+        syncStatus: "synced",
+        targetProvider: String(args?.targetProvider || "custom"),
+        activeDbPath: "C:\\Users\\junes\\.codex\\state_5.sqlite",
+        changedSessionFiles: 1066,
+        skippedLockedRolloutFiles: [],
+        sqliteRowsUpdated: 1068,
+        sqliteRowsInserted: 1,
+        updatedWorkspaceRoots: 0,
+        encryptedContentWarning: null,
+        backupDir: "C:\\Users\\junes\\.codex\\backups_state\\provider-sync\\preview",
+        syncMessage: "Provider sync complete",
+      }, "历史会话修复已完成。") as T);
     case "plugin_marketplace_status":
       return Promise.resolve(browserPreviewResult({
         codexHome: browserPreviewCodexHome(settings),
@@ -2097,6 +2172,8 @@ export function App() {
   });
   const [providerSyncProgressVisible, setProviderSyncProgressVisible] = useState(false);
   const providerSyncProgressHideTimerRef = useRef<number | null>(null);
+  const providerSyncProgressActiveRef = useRef(false);
+  const providerSyncOperationIdRef = useRef<string | null>(null);
   const [pluginMarketplaceProgress, setPluginMarketplaceProgress] = useState<TaskProgress>({
     active: false,
     percent: 0,
@@ -2979,8 +3056,22 @@ export function App() {
     return result;
   };
 
+  const hideProviderSyncProgressLater = () => {
+    if (providerSyncProgressHideTimerRef.current !== null) {
+      window.clearTimeout(providerSyncProgressHideTimerRef.current);
+    }
+    providerSyncProgressHideTimerRef.current = window.setTimeout(() => {
+      setProviderSyncProgressVisible(false);
+      providerSyncProgressHideTimerRef.current = null;
+    }, 6000);
+  };
+
   const syncProvidersNow = async () => {
-    if (providerSyncProgress.active) return;
+    if (providerSyncProgressActiveRef.current) return;
+    providerSyncProgressActiveRef.current = true;
+    const operationId = createProviderSyncOperationId();
+    providerSyncOperationIdRef.current = operationId;
+    const targetProvider = selectedProviderSyncTarget || undefined;
     if (providerSyncProgressHideTimerRef.current !== null) {
       window.clearTimeout(providerSyncProgressHideTimerRef.current);
       providerSyncProgressHideTimerRef.current = null;
@@ -2988,24 +3079,97 @@ export function App() {
     setProviderSyncProgressVisible(true);
     setProviderSyncProgress({
       active: true,
-      percent: 12,
-      message: selectedProviderSyncTarget ? `正在同步到 ${selectedProviderSyncTarget}…` : "正在扫描历史会话与索引…",
+      percent: 1,
+      message: targetProvider
+        ? `正在启动历史会话预检，目标 Provider：${targetProvider}…`
+        : "正在启动历史会话预检…",
       result: null,
     });
-    const progressTimer = window.setInterval(() => {
-      setProviderSyncProgress((current) => {
-        if (!current.active) return current;
-        return {
-          ...current,
-          percent: Math.min(88, current.percent + 8),
-          message: current.percent < 40 ? "正在检查会话 provider 标记…" : "正在写入修复与备份…",
-        };
-      });
-    }, 350);
+    await waitForNextPaint();
     try {
-      const targetProvider = selectedProviderSyncTarget || undefined;
+      const preview = await run(() =>
+        call<ProviderSyncPreviewResult>("preview_provider_sync", {
+          operationId,
+          targetProvider,
+        }),
+      );
+      if (!preview) {
+        setProviderSyncProgress({
+          active: false,
+          percent: 100,
+          message: "历史会话预检调用失败，请查看错误提示后重试。",
+          result: null,
+        });
+        return;
+      }
+      if (!isSuccessStatus(preview.status)) {
+        setProviderSyncProgress({
+          active: false,
+          percent: 100,
+          message: preview.syncMessage || preview.message || "历史会话修复预检失败。",
+          result: null,
+        });
+        showNotice("历史会话修复预检", preview.message, preview.status);
+        return;
+      }
+      const previewChanged = preview.changedSessionFiles ?? 0;
+      const previewUpdated = preview.sqliteRowsToUpdate ?? 0;
+      const previewInserted = preview.sqliteRowsToInsert ?? 0;
+      const previewWorkspace = preview.updatedWorkspaceRoots ?? 0;
+      if (previewChanged + previewUpdated + previewInserted + previewWorkspace === 0) {
+        const cleanedText = preview.staleLockRemoved
+          ? "已清理上次中断留下的残留锁；"
+          : "";
+        const message = `${cleanedText}预检未发现需要修复的内容。活动索引库：${preview.activeDbPath || "未发现"}。`;
+        setProviderSyncProgress({
+          active: false,
+          percent: 100,
+          message,
+          result: null,
+        });
+        showNotice("历史会话修复", message, "ok");
+        return;
+      }
+      setProviderSyncProgress((current) => ({
+        ...current,
+        active: true,
+        percent: Math.max(current.percent, 58),
+        message: "预检完成，等待确认是否写入修复。",
+      }));
+      await waitForNextPaint();
+      const warningText = preview.encryptedContentWarning
+        ? `\n\n注意：${preview.encryptedContentWarning}`
+        : "";
+      const confirmationLines = [
+        `目标 Provider：${preview.targetProvider || targetProvider || "当前 Provider"}`,
+        `活动索引库：${preview.activeDbPath || "未发现"}`,
+        `已扫描 ${preview.scannedSessionFiles ?? 0} 个会话文件。`,
+        `将修复 ${previewChanged} 个会话文件、更新 ${previewUpdated} 行索引、重建 ${previewInserted} 条缺失索引。`,
+        ...(preview.staleLockRemoved ? ["已清理上次中断留下的历史会话修复锁。"] : []),
+        "",
+        "执行前必须完全关闭 Codex/ChatGPT。系统不会自动结束进程；若仍在运行，将直接报错且不会写入。",
+      ];
+      const confirmed = window.confirm(confirmationLines.join("\n") + warningText);
+      if (!confirmed) {
+        setProviderSyncProgress((current) => ({
+          ...current,
+          active: false,
+          message: "已取消历史会话修复，未修改任何会话。",
+        }));
+        return;
+      }
+      setProviderSyncProgress((current) => ({
+        ...current,
+        active: true,
+        percent: Math.max(current.percent, 60),
+        message: "正在重新校验会话状态并准备写入…",
+      }));
+      await waitForNextPaint();
       const result = await run(() =>
-        call<CommandResult<ProviderSyncPayload>>("sync_providers_now", { targetProvider }),
+        call<CommandResult<ProviderSyncPayload>>("sync_providers_now", {
+          operationId,
+          targetProvider,
+        }),
       );
       if (result) {
         setProviderSyncProgress({
@@ -3014,7 +3178,7 @@ export function App() {
           message: providerSyncProgressMessage(result),
           result,
         });
-        if (targetProvider) {
+        if (targetProvider && isSuccessStatus(result.status)) {
           const next = {
             ...settingsForm,
             providerSyncLastSelectedProvider: targetProvider,
@@ -3024,8 +3188,13 @@ export function App() {
           };
           setSettingsForm(next);
         }
-        await refreshProviderSyncTargets(true);
-        showNotice("历史会话修复", result.message, result.status);
+        if (isSuccessStatus(result.status)) {
+          await refreshProviderSyncTargets(true);
+        }
+        const noticeMessage = result.encryptedContentWarning
+          ? `${result.message}\n\n${result.encryptedContentWarning}`
+          : result.message;
+        showNotice("历史会话修复", noticeMessage, result.status);
       } else {
         setProviderSyncProgress({
           active: false,
@@ -3035,11 +3204,11 @@ export function App() {
         });
       }
     } finally {
-      window.clearInterval(progressTimer);
-      providerSyncProgressHideTimerRef.current = window.setTimeout(() => {
-        setProviderSyncProgressVisible(false);
-        providerSyncProgressHideTimerRef.current = null;
-      }, 5000);
+      providerSyncProgressActiveRef.current = false;
+      if (providerSyncOperationIdRef.current === operationId) {
+        providerSyncOperationIdRef.current = null;
+      }
+      hideProviderSyncProgressLater();
     }
   };
 
@@ -3371,6 +3540,38 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (isBrowserPreview()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen<ProviderSyncProgressEvent>(
+      "codex-elves://provider-sync-progress",
+      ({ payload }) => {
+        if (!payload || payload.operationId !== providerSyncOperationIdRef.current) return;
+        const percent = Number.isFinite(payload.percent)
+          ? Math.max(0, Math.min(100, Math.round(payload.percent)))
+          : 0;
+        setProviderSyncProgressVisible(true);
+        setProviderSyncProgress((current) => ({
+          ...current,
+          active: true,
+          percent: Math.max(current.percent, percent),
+          message: payload.message || current.message,
+        }));
+      },
+    ).then((dispose) => {
+      if (disposed) {
+        dispose();
+      } else {
+        unlisten = dispose;
+      }
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
     if (route === "localProxy") return;
     const timer = window.setInterval(() => {
       if (localProxyPollInFlightRef.current) return;
@@ -3396,6 +3597,8 @@ export function App() {
 
   useEffect(() => {
     return () => {
+      providerSyncProgressActiveRef.current = false;
+      providerSyncOperationIdRef.current = null;
       if (providerSyncProgressHideTimerRef.current !== null) {
         window.clearTimeout(providerSyncProgressHideTimerRef.current);
       }
@@ -5853,6 +6056,7 @@ function SessionsScreen({
                   >
                     <div className="provider-sync-progress-fill" style={{ width: `${providerSyncProgress.percent}%` }} />
                   </div>
+                  <small>{providerSyncProgress.message}</small>
                 </div>
               ) : null}
             </section>
