@@ -1,11 +1,14 @@
 use codex_elves_data::{
-    ProviderSyncStatus, ProviderSyncTargetSource, load_provider_sync_targets, run_provider_sync,
-    run_provider_sync_with_target,
+    ProviderSyncProgressPhase, ProviderSyncStatus, ProviderSyncTargetSource,
+    cleanup_stale_provider_sync_lock, load_provider_sync_targets,
+    preview_provider_sync_with_target, preview_provider_sync_with_target_and_progress,
+    run_provider_sync, run_provider_sync_with_target,
 };
 use rusqlite::Connection;
 use serde_json::json;
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 use tempfile::tempdir;
 
@@ -44,6 +47,52 @@ fn write_rollout_with_providers(path: &Path, providers: &[&str], thread_id: &str
     fs::write(path, format!("{}\n", lines.join("\n"))).unwrap();
 }
 
+fn write_indexable_rollout(path: &Path, provider: &str, thread_id: &str, thread_source: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let lines = [
+        json!({
+            "timestamp": "2026-08-05T01:02:03Z",
+            "type": "session_meta",
+            "payload": {
+                "id": thread_id,
+                "model_provider": provider,
+                "cwd": "C:/workspace",
+                "source": "vscode",
+                "thread_source": thread_source,
+                "cli_version": "0.99.0"
+            }
+        }),
+        json!({
+            "timestamp": "2026-08-05T01:02:04Z",
+            "type": "turn_context",
+            "payload": {
+                "approval_policy": "never",
+                "sandbox_policy": {"type": "danger-full-access"}
+            }
+        }),
+        json!({
+            "timestamp": "2026-08-05T01:02:05Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": "请修复历史会话"
+            }
+        }),
+    ];
+    fs::write(
+        path,
+        format!(
+            "{}\n",
+            lines
+                .into_iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    )
+    .unwrap();
+}
+
 fn create_state_db(path: &Path) {
     let db = Connection::open(path).unwrap();
     db.execute(
@@ -54,6 +103,36 @@ fn create_state_db(path: &Path) {
     db.execute(
         "INSERT INTO threads VALUES ('thread-1', 'old-provider', 0, 0, 'C:/old')",
         [],
+    )
+    .unwrap();
+}
+
+fn create_full_state_db(path: &Path) {
+    let db = Connection::open(path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            rollout_path TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            model_provider TEXT NOT NULL,
+            cwd TEXT NOT NULL,
+            title TEXT NOT NULL,
+            sandbox_policy TEXT NOT NULL,
+            approval_mode TEXT NOT NULL,
+            tokens_used INTEGER NOT NULL DEFAULT 0,
+            has_user_event INTEGER NOT NULL DEFAULT 0,
+            archived INTEGER NOT NULL DEFAULT 0,
+            cli_version TEXT NOT NULL DEFAULT '',
+            first_user_message TEXT NOT NULL DEFAULT '',
+            memory_mode TEXT NOT NULL DEFAULT 'enabled',
+            preview TEXT NOT NULL DEFAULT '',
+            recency_at INTEGER NOT NULL DEFAULT 0,
+            recency_at_ms INTEGER NOT NULL DEFAULT 0,
+            history_mode TEXT NOT NULL DEFAULT 'legacy',
+            is_pinned INTEGER NOT NULL DEFAULT 0
+        );",
     )
     .unwrap();
 }
@@ -775,4 +854,296 @@ fn provider_sync_preserves_rollout_mtime() {
         drift < Duration::from_secs(2),
         "mtime drifted by {drift:?}, expected < 2s"
     );
+}
+
+#[test]
+fn provider_sync_preview_is_read_only_and_rebuilds_missing_user_index_on_apply() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join(".codex");
+    fs::create_dir(&home).unwrap();
+    fs::write(home.join("config.toml"), "model_provider = \"custom\"\n").unwrap();
+    let rollout = home.join("sessions/2026/rollout-missing-index.jsonl");
+    write_indexable_rollout(&rollout, "team", "thread-missing", "user");
+    create_full_state_db(&home.join("state_5.sqlite"));
+    let original = fs::read_to_string(&rollout).unwrap();
+
+    let preview = preview_provider_sync_with_target(Some(&home), Some("custom")).unwrap();
+
+    assert_eq!(preview.active_db_path, Some(home.join("state_5.sqlite")));
+    assert_eq!(preview.changed_session_files, 1);
+    assert_eq!(preview.sqlite_rows_to_insert, 1);
+    assert_eq!(fs::read_to_string(&rollout).unwrap(), original);
+    let db = Connection::open(home.join("state_5.sqlite")).unwrap();
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM threads", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    drop(db);
+
+    let result = run_provider_sync_with_target(Some(&home), Some("custom"));
+
+    assert_eq!(result.status, ProviderSyncStatus::Synced);
+    assert_eq!(result.sqlite_rows_inserted, 1);
+    assert_eq!(result.active_db_path, Some(home.join("state_5.sqlite")));
+    let db = Connection::open(home.join("state_5.sqlite")).unwrap();
+    let row = db
+        .query_row(
+            "SELECT model_provider, source, cwd, title, sandbox_policy, approval_mode, has_user_event, history_mode
+             FROM threads WHERE id = 'thread-missing'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(row.0, "custom");
+    assert_eq!(row.1, "vscode");
+    assert_eq!(row.2, "C:/workspace");
+    assert_eq!(row.3, "请修复历史会话");
+    assert_eq!(row.4, r#"{"type":"danger-full-access"}"#);
+    assert_eq!(row.5, "never");
+    assert_eq!(row.6, 1);
+    assert_eq!(row.7, "legacy");
+}
+
+#[test]
+fn provider_sync_preview_reports_real_scan_progress() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join(".codex");
+    fs::create_dir(&home).unwrap();
+    fs::write(home.join("config.toml"), "model_provider = \"custom\"\n").unwrap();
+    for index in 0..30 {
+        write_rollout(
+            &home.join(format!("sessions/2026/rollout-{index:02}.jsonl")),
+            "team",
+            &format!("thread-{index:02}"),
+            "C:/workspace",
+        );
+    }
+    let events = Mutex::new(Vec::new());
+
+    let preview =
+        preview_provider_sync_with_target_and_progress(Some(&home), Some("custom"), |event| {
+            events.lock().unwrap().push(event);
+        })
+        .unwrap();
+
+    assert_eq!(preview.scanned_session_files, 30);
+    let events = events.into_inner().unwrap();
+    assert_eq!(
+        events.first().map(|event| event.phase),
+        Some(ProviderSyncProgressPhase::Preparing)
+    );
+    assert_eq!(
+        events.last().map(|event| event.phase),
+        Some(ProviderSyncProgressPhase::Complete)
+    );
+    assert_eq!(events.last().map(|event| event.percent), Some(100));
+    assert!(
+        events
+            .windows(2)
+            .all(|pair| pair[0].percent <= pair[1].percent)
+    );
+    let last_scan = events
+        .iter()
+        .rev()
+        .find(|event| event.phase == ProviderSyncProgressPhase::ScanningSessions)
+        .unwrap();
+    assert_eq!(last_scan.completed, 30);
+    assert_eq!(last_scan.total, 30);
+}
+
+#[test]
+fn manual_provider_sync_cleanup_removes_only_dead_owner_lock() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join(".codex");
+    let lock_dir = home.join("tmp/provider-sync.lock");
+    fs::create_dir_all(&lock_dir).unwrap();
+    fs::write(
+        lock_dir.join("owner.json"),
+        json!({
+            "pid": u32::MAX,
+            "startedAt": 1
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let removed = cleanup_stale_provider_sync_lock(Some(&home)).unwrap();
+
+    assert!(removed);
+    assert!(!lock_dir.exists());
+    assert!(home.join("tmp/provider-sync.lock.lease").exists());
+
+    fs::create_dir_all(&lock_dir).unwrap();
+    fs::write(
+        lock_dir.join("owner.json"),
+        json!({
+            "pid": std::process::id(),
+            "startedAt": 1
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let error = cleanup_stale_provider_sync_lock(Some(&home)).unwrap_err();
+
+    assert!(error.to_string().contains("正在运行"));
+    assert!(lock_dir.exists());
+}
+
+#[test]
+fn provider_sync_does_not_index_subagent_rollout() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join(".codex");
+    fs::create_dir(&home).unwrap();
+    fs::write(home.join("config.toml"), "model_provider = \"custom\"\n").unwrap();
+    write_indexable_rollout(
+        &home.join("sessions/2026/rollout-subagent.jsonl"),
+        "team",
+        "thread-subagent",
+        "subagent",
+    );
+    create_full_state_db(&home.join("state_5.sqlite"));
+
+    let result = run_provider_sync(Some(&home));
+
+    assert_eq!(result.status, ProviderSyncStatus::Synced);
+    assert_eq!(result.sqlite_rows_inserted, 0);
+    let db = Connection::open(home.join("state_5.sqlite")).unwrap();
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM threads", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn provider_sync_updates_only_the_most_active_session_database() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join(".codex");
+    let sqlite_dir = home.join("sqlite");
+    fs::create_dir_all(&sqlite_dir).unwrap();
+    fs::write(home.join("config.toml"), "model_provider = \"custom\"\n").unwrap();
+    let stale_db = sqlite_dir.join("state_5.sqlite");
+    create_state_db(&stale_db);
+    let stale_file = fs::File::options().write(true).open(&stale_db).unwrap();
+    stale_file
+        .set_times(
+            fs::FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(86_400)),
+        )
+        .unwrap();
+    drop(stale_file);
+    let active_db = home.join("state_5.sqlite");
+    create_state_db(&active_db);
+    write_rollout(
+        &home.join("sessions/2026/rollout-active-db.jsonl"),
+        "team",
+        "thread-1",
+        "C:/workspace",
+    );
+
+    let result = run_provider_sync(Some(&home));
+
+    assert_eq!(result.status, ProviderSyncStatus::Synced);
+    assert_eq!(result.active_db_path, Some(active_db.clone()));
+    let active_provider: String = Connection::open(active_db)
+        .unwrap()
+        .query_row(
+            "SELECT model_provider FROM threads WHERE id = 'thread-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stale_provider: String = Connection::open(stale_db)
+        .unwrap()
+        .query_row(
+            "SELECT model_provider FROM threads WHERE id = 'thread-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(active_provider, "custom");
+    assert_eq!(stale_provider, "old-provider");
+}
+
+#[test]
+fn provider_sync_recovers_dead_owner_lock_but_blocks_live_owner() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join(".codex");
+    let lock_dir = home.join("tmp/provider-sync.lock");
+    fs::create_dir_all(&lock_dir).unwrap();
+    fs::write(home.join("config.toml"), "model_provider = \"custom\"\n").unwrap();
+    write_rollout(
+        &home.join("sessions/rollout-lock.jsonl"),
+        "team",
+        "thread-1",
+        "C:/workspace",
+    );
+    fs::write(
+        lock_dir.join("owner.json"),
+        json!({
+            "pid": u32::MAX,
+            "startedAt": 1
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let recovered = run_provider_sync(Some(&home));
+
+    assert_eq!(recovered.status, ProviderSyncStatus::Synced);
+    assert!(!lock_dir.exists());
+
+    fs::create_dir_all(&lock_dir).unwrap();
+    fs::write(
+        lock_dir.join("owner.json"),
+        json!({
+            "pid": std::process::id(),
+            "startedAt": 1
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let blocked = run_provider_sync(Some(&home));
+
+    assert_eq!(blocked.status, ProviderSyncStatus::Skipped);
+    assert_eq!(blocked.error_code.as_deref(), Some("provider_sync_locked"));
+    assert!(blocked.message.contains("正在运行"));
+    assert!(lock_dir.exists());
+}
+
+#[test]
+fn provider_sync_rejects_unsupported_threads_schema_before_writes() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join(".codex");
+    fs::create_dir(&home).unwrap();
+    fs::write(home.join("config.toml"), "model_provider = \"custom\"\n").unwrap();
+    let rollout = home.join("sessions/rollout-unsupported-schema.jsonl");
+    write_rollout(&rollout, "team", "thread-unsupported", "C:/workspace");
+    let original = fs::read_to_string(&rollout).unwrap();
+    let db = Connection::open(home.join("state_5.sqlite")).unwrap();
+    db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY)", [])
+        .unwrap();
+    drop(db);
+
+    let result = run_provider_sync(Some(&home));
+
+    assert_eq!(result.status, ProviderSyncStatus::Skipped);
+    assert!(result.message.contains("缺少 id 或 model_provider"));
+    assert_eq!(fs::read_to_string(&rollout).unwrap(), original);
+    assert!(result.backup_dir.is_none());
 }

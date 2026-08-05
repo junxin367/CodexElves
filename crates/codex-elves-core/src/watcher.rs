@@ -139,6 +139,36 @@ pub fn process_ids_still_running(
 }
 
 #[cfg(windows)]
+pub fn process_id_is_running(process_id: u32) -> bool {
+    let processes = crate::windows_integration::enumerate_processes();
+    processes.is_empty()
+        || processes
+            .iter()
+            .any(|process| process.process_id == process_id)
+}
+
+#[cfg(target_os = "macos")]
+pub fn process_id_is_running(process_id: u32) -> bool {
+    let Ok(output) = Command::new("ps")
+        .args(["-p", &process_id.to_string(), "-o", "pid="])
+        .output()
+    else {
+        return true;
+    };
+    output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+}
+
+#[cfg(target_os = "linux")]
+pub fn process_id_is_running(process_id: u32) -> bool {
+    Path::new("/proc").join(process_id.to_string()).exists()
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+pub fn process_id_is_running(process_id: u32) -> bool {
+    process_id != 0
+}
+
+#[cfg(windows)]
 pub fn install_watcher(launcher_path: &Path, debug_port: u16) -> anyhow::Result<()> {
     let plan = build_watcher_install_plan(launcher_path.to_path_buf(), debug_port);
     crate::windows_integration::set_current_user_string_value(
