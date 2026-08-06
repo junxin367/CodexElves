@@ -238,6 +238,26 @@ pub fn find_codex_processes() -> Vec<u32> {
     Vec::new()
 }
 
+#[cfg(windows)]
+pub fn process_id_is_running(process_id: u32) -> bool {
+    crate::windows_integration::enumerate_processes()
+        .iter()
+        .any(|process| process.process_id == process_id)
+}
+
+#[cfg(target_os = "macos")]
+pub fn process_id_is_running(process_id: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &process_id.to_string()])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn process_id_is_running(process_id: u32) -> bool {
+    Path::new("/proc").join(process_id.to_string()).exists()
+}
+
 pub fn find_macos_codex_processes_from_ps(output: &str) -> Vec<u32> {
     let mut process_ids = output
         .lines()

@@ -427,11 +427,22 @@ impl LaunchHooks for LauncherHooks {
 
     async fn run_provider_sync(&self) -> anyhow::Result<()> {
         let home = codex_elves_core::codex_home::default_codex_home_dir();
-        let _ =
-            tokio::task::spawn_blocking(move || codex_elves_data::run_provider_sync(Some(&home)))
-                .await
-                .map_err(|error| anyhow::anyhow!("provider sync task failed: {error}"))?;
-        Ok(())
+        let sync = tokio::task::spawn_blocking(move || {
+            codex_elves_data::run_provider_sync_with_target_guarded(Some(&home), None)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("provider sync task failed: {error}"))?;
+        match sync.status {
+            codex_elves_data::ProviderSyncStatus::Disabled
+            | codex_elves_data::ProviderSyncStatus::Synced
+            | codex_elves_data::ProviderSyncStatus::Partial => Ok(()),
+            codex_elves_data::ProviderSyncStatus::Skipped
+            | codex_elves_data::ProviderSyncStatus::Blocked
+            | codex_elves_data::ProviderSyncStatus::RecoveryRequired
+            | codex_elves_data::ProviderSyncStatus::Failed => {
+                anyhow::bail!("{}", sync.message)
+            }
+        }
     }
 
     async fn ensure_active_relay_stream_idle_timeout(

@@ -1188,12 +1188,21 @@ pub async fn sync_providers_now(target_provider: Option<String>) -> CommandResul
     let target_for_settings = target_provider.clone();
     let home = codex_elves_core::codex_home::codex_home_dir_for_settings(&settings);
     let result = tauri::async_runtime::spawn_blocking(move || {
-        codex_elves_data::run_provider_sync_with_target(Some(&home), target_provider.as_deref())
+        codex_elves_data::run_provider_sync_with_target_guarded(
+            Some(&home),
+            target_provider.as_deref(),
+        )
     })
     .await
     .map_err(|error| anyhow::anyhow!("provider sync task failed: {error}"));
     match result {
         Ok(sync) => {
+            if is_failed_sync_status(&sync.status) {
+                return failed(
+                    &format!("供应商同步失败：{}", sync.message),
+                    serde_json::to_value(&sync).unwrap_or_else(|_| json!({})),
+                );
+            }
             if is_success_sync_status(&sync.status) {
                 persist_provider_sync_selection(
                     target_for_settings
@@ -1202,18 +1211,18 @@ pub async fn sync_providers_now(target_provider: Option<String>) -> CommandResul
                 );
             }
             ok(
-                &format!(
-                    "供应商已同步一次：{} 个会话文件，{} 行索引，跳过 {} 个占用文件。",
-                    sync.changed_session_files,
-                    sync.sqlite_rows_updated,
-                    sync.skipped_locked_rollout_files.len()
-                ),
+                &provider_sync_result_message(&sync),
                 json!({
                     "syncStatus": sync.status,
+                    "errorCode": sync.error_code,
                     "targetProvider": sync.target_provider,
+                    "activeDbPath": sync.active_db_path,
+                    "operationId": sync.operation_id,
+                    "scannedSessionFiles": sync.scanned_session_files,
                     "changedSessionFiles": sync.changed_session_files,
                     "skippedLockedRolloutFiles": sync.skipped_locked_rollout_files,
                     "sqliteRowsUpdated": sync.sqlite_rows_updated,
+                    "sqliteRowsInserted": sync.sqlite_rows_inserted,
                     "sqliteProviderRowsUpdated": sync.sqlite_provider_rows_updated,
                     "sqliteUserEventRowsUpdated": sync.sqlite_user_event_rows_updated,
                     "sqliteCwdRowsUpdated": sync.sqlite_cwd_rows_updated,
@@ -1221,6 +1230,7 @@ pub async fn sync_providers_now(target_provider: Option<String>) -> CommandResul
                     "encryptedContentWarning": sync.encrypted_content_warning,
                     "backupDir": sync.backup_dir,
                     "syncMessage": sync.message,
+                    "issues": sync.issues,
                 }),
             )
         }
@@ -1229,7 +1239,37 @@ pub async fn sync_providers_now(target_provider: Option<String>) -> CommandResul
 }
 
 fn is_success_sync_status(status: &codex_elves_data::ProviderSyncStatus) -> bool {
-    matches!(status, codex_elves_data::ProviderSyncStatus::Synced)
+    matches!(
+        status,
+        codex_elves_data::ProviderSyncStatus::Synced
+            | codex_elves_data::ProviderSyncStatus::Partial
+    )
+}
+
+fn is_failed_sync_status(status: &codex_elves_data::ProviderSyncStatus) -> bool {
+    matches!(
+        status,
+        codex_elves_data::ProviderSyncStatus::Blocked
+            | codex_elves_data::ProviderSyncStatus::RecoveryRequired
+            | codex_elves_data::ProviderSyncStatus::Failed
+    )
+}
+
+fn provider_sync_result_message(sync: &codex_elves_data::ProviderSyncResult) -> String {
+    if matches!(sync.status, codex_elves_data::ProviderSyncStatus::Partial) {
+        format!(
+            "供应商部分同步完成：扫描 {} 个会话，修复 {} 个文件，更新/重建 {} 行索引，发现 {} 个异常。",
+            sync.scanned_session_files,
+            sync.changed_session_files,
+            sync.sqlite_rows_updated,
+            sync.issues.len()
+        )
+    } else {
+        format!(
+            "供应商同步完成：扫描 {} 个会话，修复 {} 个文件，更新/重建 {} 行索引。",
+            sync.scanned_session_files, sync.changed_session_files, sync.sqlite_rows_updated
+        )
+    }
 }
 
 fn persist_provider_sync_selection(provider: &str) {

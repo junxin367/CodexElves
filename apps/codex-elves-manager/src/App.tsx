@@ -515,15 +515,26 @@ type RemoveEnvConflictsResult = CommandResult<{
 
 type ProviderSyncPayload = {
   syncStatus?: string;
+  errorCode?: string | null;
   targetProvider?: string;
+  activeDbPath?: string | null;
+  operationId?: string | null;
+  scannedSessionFiles?: number;
   changedSessionFiles?: number;
   skippedLockedRolloutFiles?: string[];
   sqliteRowsUpdated?: number;
+  sqliteRowsInserted?: number;
   sqliteProviderRowsUpdated?: number;
   sqliteUserEventRowsUpdated?: number;
   sqliteCwdRowsUpdated?: number;
   updatedWorkspaceRoots?: number;
   encryptedContentWarning?: string | null;
+  issues?: Array<{
+    path: string;
+    threadId?: string | null;
+    kind: string;
+    message: string;
+  }>;
 };
 
 type ProviderSyncTargetSource = "config" | "rollout" | "sqlite" | "manual";
@@ -731,7 +742,14 @@ function providerSyncProgressMessage(result: CommandResult<ProviderSyncPayload>)
   const rows = result.sqliteRowsUpdated ?? 0;
   const target = result.targetProvider || "当前 provider";
   const skipped = result.skippedLockedRolloutFiles?.length ?? 0;
+  const issues = result.issues?.length ?? 0;
   const skippedText = skipped ? `，跳过 ${skipped} 个占用文件` : "";
+  if (result.syncStatus === "partial") {
+    return `已部分同步到 ${target}：修复 ${changed} 个会话文件，更新/重建 ${rows} 行索引，发现 ${issues} 个异常${skippedText}。`;
+  }
+  if (["blocked", "failed", "recovery_required"].includes(result.syncStatus ?? "")) {
+    return result.message || "历史会话修复失败，请查看错误详情。";
+  }
   return `已同步到 ${target}：修复 ${changed} 个会话文件，更新 ${rows} 行索引${skippedText}。`;
 }
 
@@ -1690,7 +1708,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.3.8",
+        currentVersion: "0.3.9",
         latestVersion: "0.4.0",
         releaseSummary: [
           "CodexElves 0.4.0",
@@ -1705,7 +1723,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       }, "发现可用更新。") as T);
     case "perform_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.3.8",
+        currentVersion: "0.3.9",
         latestVersion: "0.4.0",
         releaseSummary: "浏览器预览不会下载真实安装包。",
         installedPath: "C:\\Temp\\CodexElves-0.4.0-windows-x64-setup.exe",
@@ -1715,7 +1733,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({
         report: [
           "CodexElves 诊断报告",
-          "版本: 0.3.8",
+          "版本: 0.3.9",
           "平台: windows-x64",
           "Codex 应用: C:\\Users\\junes\\AppData\\Local\\Programs\\CodexElves\\CodexElves.exe",
           "配置目录: C:\\Users\\junes\\.codex",
@@ -1736,7 +1754,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.3.8",
+        current_version: "0.3.9",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
