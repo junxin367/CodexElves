@@ -4866,11 +4866,16 @@
   function codexPinnedSummaryMount() {
     const toggle = document.querySelector(selectors.pinnedSummaryToggle);
     if (toggle && toggle.getAttribute("aria-pressed") !== "true") return null;
-    const panel = document.querySelector(selectors.pinnedSummaryPanel);
-    if (!panel?.parentElement) return null;
+    const obstacle = document.querySelector(selectors.pinnedSummaryPanel);
+    if (!obstacle?.parentElement) return null;
+    const host = obstacle.parentElement;
+    const panel = Array.from(host.children).find((node) =>
+      node !== obstacle && !node.classList?.contains(codexTokenUsageCardClass)
+    );
+    if (!panel) return null;
     const rect = panel.getBoundingClientRect();
     if (rect.width < 240 || rect.width > 420 || rect.height <= 0) return null;
-    return { panel, host: panel.parentElement };
+    return { panel, host };
   }
 
   function removeCodexTokenUsageCards() {
