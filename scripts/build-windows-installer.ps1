@@ -74,6 +74,31 @@ function Invoke-Checked {
     }
 }
 
+function Start-CargoCacheCleanup {
+    param(
+        [string]$RepoRoot,
+        [double]$MaxSizeGiB
+    )
+
+    if ($env:CODEX_ELVES_SKIP_CARGO_CACHE_CLEANUP -eq "1") {
+        Write-Output "[INFO] Cargo cache cleanup skipped by environment"
+        return
+    }
+
+    $cleanupScript = Join-Path $RepoRoot "scripts\cleanup-cargo-cache.ps1"
+    if (!(Test-Path -LiteralPath $cleanupScript)) {
+        Write-Warning "Cargo cache cleanup script not found: $cleanupScript"
+        return
+    }
+
+    try {
+        & $cleanupScript -RepoRoot $RepoRoot -MaxSizeGiB $MaxSizeGiB -Background
+    }
+    catch {
+        Write-Warning "Unable to schedule Cargo cache cleanup: $($_.Exception.Message)"
+    }
+}
+
 $RepoRoot = Resolve-RepoRoot
 $ResolvedVersion = Resolve-WorkspaceVersion -RepoRoot $RepoRoot
 $ManagerDir = Join-Path $RepoRoot "apps\codex-elves-manager"
@@ -126,3 +151,5 @@ $LastWriteTime = $InstallerItem.LastWriteTime
 Write-Output "[OK] Installer: $InstallerPath"
 Write-Output "[OK] Size: $Length bytes"
 Write-Output "[OK] Updated: $LastWriteTime"
+
+Start-CargoCacheCleanup -RepoRoot $RepoRoot -MaxSizeGiB 20

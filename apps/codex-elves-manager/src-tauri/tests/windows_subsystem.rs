@@ -86,6 +86,265 @@ fn dev_manager_script_sets_isolated_dev_environment() {
     assert!(script.contains("npm run dev"));
 }
 
+#[cfg(windows)]
+#[test]
+fn cargo_cache_cleanup_skips_when_debug_target_is_below_limit() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cleanup_script = manifest_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .and_then(std::path::Path::parent)
+        .unwrap()
+        .join("scripts/cleanup-cargo-cache.ps1");
+    let temp_dir = tempfile::tempdir().expect("create cleanup test directory");
+    let debug_dir = temp_dir.path().join("target/debug");
+    std::fs::create_dir_all(&debug_dir).expect("create debug target directory");
+    std::fs::write(debug_dir.join("small.bin"), [0_u8; 16]).expect("write small debug artifact");
+    let cargo_marker = temp_dir.path().join("cargo-args.txt");
+    let fake_cargo = temp_dir.path().join("fake-cargo.cmd");
+    std::fs::write(
+        &fake_cargo,
+        format!(
+            "@echo off\r\necho %*>>\"{}\"\r\nexit /b 0\r\n",
+            cargo_marker.display()
+        ),
+    )
+    .expect("write fake cargo command");
+
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            cleanup_script.to_str().expect("cleanup script path"),
+            "-RepoRoot",
+            temp_dir.path().to_str().expect("temporary repo path"),
+            "-MaxSizeGiB",
+            "1",
+            "-CargoPath",
+            fake_cargo.to_str().expect("fake cargo path"),
+        ])
+        .output()
+        .expect("run cleanup script");
+
+    assert!(
+        output.status.success(),
+        "cleanup script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("[SKIP]"),
+        "cleanup script should report that cleanup was skipped"
+    );
+    assert!(
+        !cargo_marker.exists(),
+        "cargo clean must not run below the configured limit"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn cargo_cache_cleanup_serializes_overlapping_foreground_requests() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cleanup_script = manifest_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .and_then(std::path::Path::parent)
+        .unwrap()
+        .join("scripts/cleanup-cargo-cache.ps1");
+    let temp_dir = tempfile::tempdir().expect("create cleanup test directory");
+    let repo_root = temp_dir.path().join("repo with spaces");
+    let debug_dir = repo_root.join("target/debug");
+    std::fs::create_dir_all(&debug_dir).expect("create debug target directory");
+    std::fs::write(debug_dir.join("large.bin"), [0_u8; 2048]).expect("write large debug artifact");
+    let cargo_started = repo_root.join("cargo-started.txt");
+    let cargo_marker = repo_root.join("cargo-args.txt");
+    let fake_cargo = repo_root.join("fake-cargo.cmd");
+    std::fs::write(
+        &fake_cargo,
+        format!(
+            "@echo off\r\necho started>\"{}\"\r\npowershell.exe -NoProfile -Command \"Start-Sleep -Milliseconds 2000\"\r\n(\r\n  echo %~1\r\n  echo %~2\r\n  echo %~3\r\n  echo %~4\r\n  echo %~5\r\n)>>\"{}\"\r\nexit /b 0\r\n",
+            cargo_started.display(),
+            cargo_marker.display()
+        ),
+    )
+    .expect("write fake cargo command");
+
+    let cleanup_command = || {
+        let mut command = std::process::Command::new("powershell.exe");
+        command
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                cleanup_script.to_str().expect("cleanup script path"),
+                "-RepoRoot",
+                repo_root.to_str().expect("temporary repo path"),
+                "-MaxSizeGiB",
+                "0.000001",
+                "-CargoPath",
+                fake_cargo.to_str().expect("fake cargo path"),
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        command
+    };
+
+    let first = cleanup_command()
+        .spawn()
+        .expect("start first foreground cleanup");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !cargo_started.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        cargo_started.exists(),
+        "first cleanup did not acquire the lock"
+    );
+
+    let second = cleanup_command()
+        .spawn()
+        .expect("start overlapping foreground cleanup");
+    let first_output = first.wait_with_output().expect("wait for first cleanup");
+    let second_output = second.wait_with_output().expect("wait for second cleanup");
+    assert!(
+        first_output.status.success(),
+        "first cleanup failed: {}",
+        String::from_utf8_lossy(&first_output.stderr)
+    );
+    assert!(
+        second_output.status.success(),
+        "second cleanup failed: {}",
+        String::from_utf8_lossy(&second_output.stderr)
+    );
+    let combined_stdout = format!(
+        "{}{}",
+        String::from_utf8_lossy(&first_output.stdout),
+        String::from_utf8_lossy(&second_output.stdout)
+    );
+    assert_eq!(combined_stdout.matches("[OK]").count(), 1);
+    assert_eq!(
+        combined_stdout
+            .matches("[SKIP] Cargo cache cleanup is already running")
+            .count(),
+        1
+    );
+
+    let cargo_calls = std::fs::read_to_string(&cargo_marker).expect("read cargo invocations");
+    let calls = cargo_calls.lines().collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        [
+            "clean",
+            "--profile",
+            "dev",
+            "--target-dir",
+            repo_root.join("target").to_str().expect("target path")
+        ],
+        "concurrent cleanup requests should invoke cargo clean exactly once"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn cargo_cache_cleanup_background_mode_is_non_blocking_and_overwrites_status_log() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cleanup_script = manifest_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .and_then(std::path::Path::parent)
+        .unwrap()
+        .join("scripts/cleanup-cargo-cache.ps1");
+    let temp_dir = tempfile::tempdir().expect("create cleanup test directory");
+    let repo_root = temp_dir.path().join("background repo with spaces");
+    let debug_dir = repo_root.join("target/debug");
+    std::fs::create_dir_all(&debug_dir).expect("create debug target directory");
+    std::fs::write(debug_dir.join("large.bin"), [0_u8; 2048]).expect("write large debug artifact");
+    let cargo_finished = repo_root.join("cargo-finished.txt");
+    let fake_cargo = repo_root.join("fake cargo.cmd");
+    std::fs::write(
+        &fake_cargo,
+        format!(
+            "@echo off\r\npowershell.exe -NoProfile -Command \"Start-Sleep -Milliseconds 3000\"\r\necho finished>\"{}\"\r\nexit /b 0\r\n",
+            cargo_finished.display()
+        ),
+    )
+    .expect("write fake cargo command");
+
+    let started = std::time::Instant::now();
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            cleanup_script.to_str().expect("cleanup script path"),
+            "-RepoRoot",
+            repo_root.to_str().expect("temporary repo path"),
+            "-MaxSizeGiB",
+            "0.000001",
+            "-CargoPath",
+            fake_cargo.to_str().expect("fake cargo path"),
+            "-Background",
+        ])
+        .output()
+        .expect("schedule background cleanup");
+    let elapsed = started.elapsed();
+
+    assert!(
+        output.status.success(),
+        "background cleanup launcher failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "background launcher blocked for {elapsed:?}"
+    );
+
+    let status_log = repo_root.join("target/cargo-cache-cleanup.log");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while (!cargo_finished.exists() || !status_log.exists()) && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        cargo_finished.exists(),
+        "background cargo command did not finish"
+    );
+    assert!(
+        status_log.exists(),
+        "background cleanup did not write status"
+    );
+
+    let skip_output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            cleanup_script.to_str().expect("cleanup script path"),
+            "-RepoRoot",
+            repo_root.to_str().expect("temporary repo path"),
+            "-MaxSizeGiB",
+            "1",
+            "-CargoPath",
+            fake_cargo.to_str().expect("fake cargo path"),
+        ])
+        .output()
+        .expect("run below-limit cleanup");
+    assert!(skip_output.status.success());
+
+    let status = std::fs::read_to_string(&status_log).expect("read cleanup status");
+    assert_eq!(
+        status.lines().count(),
+        1,
+        "cleanup status log should overwrite its previous result"
+    );
+    assert!(status.contains("skipped:"));
+}
+
 #[test]
 fn manager_second_launch_requests_existing_window_to_show() {
     let lib_rs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
