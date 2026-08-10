@@ -150,6 +150,23 @@ pub fn codex_thread_usage_history_from_paths(
     backup_store: BackupStore,
     session: &SessionRef,
 ) -> Value {
+    codex_thread_usage_from_paths(db_paths, backup_store, session, true)
+}
+
+pub fn codex_thread_usage_summary_from_paths(
+    db_paths: impl IntoIterator<Item = PathBuf>,
+    backup_store: BackupStore,
+    session: &SessionRef,
+) -> Value {
+    codex_thread_usage_from_paths(db_paths, backup_store, session, false)
+}
+
+fn codex_thread_usage_from_paths(
+    db_paths: impl IntoIterator<Item = PathBuf>,
+    backup_store: BackupStore,
+    session: &SessionRef,
+    include_history: bool,
+) -> Value {
     let mut result = json!({
         "status": "failed",
         "session_id": session.session_id,
@@ -159,7 +176,7 @@ pub fn codex_thread_usage_history_from_paths(
     let mut best: Option<(bool, i64, Value)> = None;
     for db_path in db_paths {
         let adapter = SQLiteStorageAdapter::new(db_path, backup_store.clone());
-        let candidate = adapter.codex_thread_usage_history(session);
+        let candidate = adapter.codex_thread_usage(session, include_history);
         if candidate.get("status").and_then(Value::as_str) != Some("ok") {
             result = candidate;
             continue;
@@ -572,6 +589,14 @@ impl SQLiteStorageAdapter {
     }
 
     pub fn codex_thread_usage_history(&self, session: &SessionRef) -> serde_json::Value {
+        self.codex_thread_usage(session, true)
+    }
+
+    pub fn codex_thread_usage_summary(&self, session: &SessionRef) -> serde_json::Value {
+        self.codex_thread_usage(session, false)
+    }
+
+    fn codex_thread_usage(&self, session: &SessionRef, include_history: bool) -> serde_json::Value {
         let result = (|| -> anyhow::Result<Value> {
             if !self.db_path.exists() {
                 return Ok(json!({
@@ -626,7 +651,7 @@ impl SQLiteStorageAdapter {
             let mut reports = HashMap::new();
             reports.insert(
                 thread.id.clone(),
-                read_rollout_usage_history(&rollout, &thread.id)?,
+                read_rollout_usage_history(&rollout, &thread.id, include_history)?,
             );
             let mut partial_errors = Vec::new();
             for node in graph.iter().skip(1) {
@@ -652,7 +677,7 @@ impl SQLiteStorageAdapter {
                     }));
                     continue;
                 }
-                match read_rollout_usage_history(&path, &record.id) {
+                match read_rollout_usage_history(&path, &record.id, include_history) {
                     Ok(report) => {
                         reports.insert(record.id.clone(), report);
                     }
@@ -790,7 +815,7 @@ impl SQLiteStorageAdapter {
             if !partial_errors.is_empty() {
                 summary.insert("partialErrors".to_string(), json!(partial_errors));
             }
-            Ok(json!({
+            let mut response = json!({
                 "status": "ok",
                 "session_id": thread.id,
                 "requested_session_id": requested_thread_id,
@@ -799,9 +824,15 @@ impl SQLiteStorageAdapter {
                 "thread_updated_at_ms": thread.updated_at_ms,
                 "db_path": self.db_path.to_string_lossy().to_string(),
                 "rollout_path": rollout_path,
-                "history": root_usage.history,
                 "summary": Value::Object(summary),
-            }))
+            });
+            if include_history {
+                response
+                    .as_object_mut()
+                    .expect("thread usage response should be an object")
+                    .insert("history".to_string(), json!(root_usage.history));
+            }
+            Ok(response)
         })();
         let db_value = result.unwrap_or_else(|err| {
             json!({
@@ -820,7 +851,7 @@ impl SQLiteStorageAdapter {
             if let Some(rollout) =
                 find_rollout_path_by_session_id(&sessions_dir, &session.session_id)
             {
-                match rollout_only_usage_history_value(&session.session_id, &rollout) {
+                match rollout_only_usage_value(&session.session_id, &rollout, include_history) {
                     Ok(value) => return value,
                     Err(_) => return db_value,
                 }
@@ -1402,7 +1433,7 @@ impl RolloutUsageParser {
         }
     }
 
-    fn consume_line(&mut self, line: &str, thread_id: &str) {
+    fn consume_line(&mut self, line: &str, thread_id: &str, include_history: bool) {
         if line.trim().is_empty() {
             return;
         }
@@ -1533,26 +1564,28 @@ impl RolloutUsageParser {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                self.history.push(json!({
-                    "source": "rollout-history",
-                    "conversation_id": format!("local:{thread_id}"),
-                    "turn_id": usage_turn_id,
-                    "observed_at": self.latest_observed_at,
-                    "usage": {
-                        "inputTokens": last_usage.input_tokens,
-                        "outputTokens": last_usage.output_tokens,
-                        "totalTokens": last_usage.total_tokens,
-                        "cachedTokens": last_usage.cached_tokens,
-                        "cacheReadTokens": last_usage.cached_tokens,
-                        "cacheCreationTokens": last_usage.cache_creation_tokens,
-                        "contextUsed": context_used,
-                        "contextLimit": model_context_window,
-                        "hasBreakdown": last_usage.input_tokens > 0
-                            || last_usage.output_tokens > 0
-                            || last_usage.cached_tokens > 0
-                            || last_usage.cache_creation_tokens > 0,
-                    }
-                }));
+                if include_history {
+                    self.history.push(json!({
+                        "source": "rollout-history",
+                        "conversation_id": format!("local:{thread_id}"),
+                        "turn_id": usage_turn_id,
+                        "observed_at": self.latest_observed_at,
+                        "usage": {
+                            "inputTokens": last_usage.input_tokens,
+                            "outputTokens": last_usage.output_tokens,
+                            "totalTokens": last_usage.total_tokens,
+                            "cachedTokens": last_usage.cached_tokens,
+                            "cacheReadTokens": last_usage.cached_tokens,
+                            "cacheCreationTokens": last_usage.cache_creation_tokens,
+                            "contextUsed": context_used,
+                            "contextLimit": model_context_window,
+                            "hasBreakdown": last_usage.input_tokens > 0
+                                || last_usage.output_tokens > 0
+                                || last_usage.cached_tokens > 0
+                                || last_usage.cache_creation_tokens > 0,
+                        }
+                    }));
+                }
             }
             "response_item" => {
                 let Some(payload) = value.get("payload") else {
@@ -1607,7 +1640,7 @@ struct CachedRolloutUsage {
     last_access: u64,
 }
 
-type RolloutUsageCacheKey = (PathBuf, String);
+type RolloutUsageCacheKey = (PathBuf, String, bool);
 
 #[derive(Default)]
 struct RolloutUsageCache {
@@ -1615,7 +1648,9 @@ struct RolloutUsageCache {
     access_tick: u64,
 }
 
-const ROLLOUT_USAGE_CACHE_CAPACITY: usize = 128;
+// 父会话可能包含数百个 subagent。容量小于单个会话图时，顺序遍历会让 LRU
+// 每轮都淘汰下一轮即将读取的条目，退化成反复全量解析。
+const ROLLOUT_USAGE_CACHE_CAPACITY: usize = 512;
 const ROLLOUT_USAGE_CACHE_TAIL_BYTES: u64 = 4096;
 
 fn rollout_usage_cache() -> &'static Mutex<RolloutUsageCache> {
@@ -1782,12 +1817,13 @@ fn find_rollout_path_by_session_id(sessions_dir: &Path, session_id: &str) -> Opt
 /// 基于单个 rollout 文件组装 token 统计（不含子会话图，用于 db schema 不兼容时的兵底）。
 ///
 /// 输出 shape 与成功路径一致（只少 descendant 相关字段），前端无需区分。
-fn rollout_only_usage_history_value(
+fn rollout_only_usage_value(
     session_id: &str,
     rollout_path: &Path,
+    include_history: bool,
 ) -> anyhow::Result<Value> {
     let thread_id = normalize_codex_thread_id(session_id);
-    let report = read_rollout_usage_history(rollout_path, &thread_id)?;
+    let report = read_rollout_usage_history(rollout_path, &thread_id, include_history)?;
     let mut summary = serde_json::Map::new();
     summary.insert(
         "totalUsage".to_string(),
@@ -1811,15 +1847,21 @@ fn rollout_only_usage_history_value(
         summary.insert("activeThreadCount".to_string(), json!(1));
         summary.insert("lastTurnRunning".to_string(), json!(true));
     }
-    Ok(json!({
+    let mut response = json!({
         "status": "ok",
         "session_id": thread_id,
         "requested_session_id": thread_id,
         "matched_by": "rollout_file",
         "rollout_path": rollout_path.to_string_lossy().to_string(),
-        "history": report.history,
         "summary": Value::Object(summary),
-    }))
+    });
+    if include_history {
+        response
+            .as_object_mut()
+            .expect("rollout usage response should be an object")
+            .insert("history".to_string(), json!(report.history));
+    }
+    Ok(response)
 }
 
 fn spawned_child_thread_id(payload: &Value) -> Option<String> {
@@ -1855,9 +1897,14 @@ fn spawned_child_thread_id(payload: &Value) -> Option<String> {
 fn read_rollout_usage_history(
     rollout_path: &Path,
     thread_id: &str,
+    include_history: bool,
 ) -> anyhow::Result<RolloutUsageReport> {
     let stamp = rollout_file_stamp(rollout_path)?;
-    let cache_key = (rollout_path.to_path_buf(), thread_id.to_string());
+    let cache_key = (
+        rollout_path.to_path_buf(),
+        thread_id.to_string(),
+        include_history,
+    );
     let cached_entry = {
         let mut cache = rollout_usage_cache()
             .lock()
@@ -1903,7 +1950,11 @@ fn read_rollout_usage_history(
             break;
         }
         let line = std::str::from_utf8(&line)?;
-        parser.consume_line(line.trim_end_matches(['\r', '\n']), thread_id);
+        parser.consume_line(
+            line.trim_end_matches(['\r', '\n']),
+            thread_id,
+            include_history,
+        );
         parsed_offset = parsed_offset.saturating_add(bytes_read as u64);
     }
 
@@ -2389,5 +2440,61 @@ fn json_to_sql_value(value: &Value) -> SqlValue {
         }
         Value::String(value) => SqlValue::Text(value.clone()),
         other => SqlValue::Text(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rollout_usage_cache_retains_large_parent_thread_graph() {
+        const GRAPH_SIZE: usize = 194;
+        let prefix = format!("rollout-usage-cache-large-graph-{}", std::process::id());
+        let keys = (0..GRAPH_SIZE)
+            .map(|index| {
+                (
+                    PathBuf::from(format!("{prefix}-{index}.jsonl")),
+                    format!("thread-{index}"),
+                    false,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for key in &keys {
+            insert_rollout_usage_cache(
+                key.clone(),
+                CachedRolloutUsage {
+                    observed_len: 0,
+                    parsed_offset: 0,
+                    stamp: RolloutFileStamp {
+                        len: 0,
+                        modified: None,
+                        created: None,
+                    },
+                    tail: Vec::new(),
+                    parser: RolloutUsageParser::default(),
+                    last_access: 0,
+                },
+            );
+        }
+
+        let retained = {
+            let cache = rollout_usage_cache()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            keys.iter()
+                .filter(|key| cache.entries.contains_key(*key))
+                .count()
+        };
+
+        let mut cache = rollout_usage_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for key in &keys {
+            cache.entries.remove(key);
+        }
+
+        assert_eq!(retained, GRAPH_SIZE);
     }
 }

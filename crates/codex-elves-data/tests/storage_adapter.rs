@@ -1,7 +1,8 @@
 use codex_elves_core::models::{DeleteStatus, SessionRef};
 use codex_elves_data::{
     BackupStore, SQLiteStorageAdapter, codex_thread_usage_history_from_paths,
-    delete_local_from_paths, move_codex_thread_workspace_from_paths, undo_local_from_backup,
+    codex_thread_usage_summary_from_paths, delete_local_from_paths,
+    move_codex_thread_workspace_from_paths, undo_local_from_backup,
 };
 use rusqlite::Connection;
 use serde_json::json;
@@ -1223,6 +1224,30 @@ fn thread_usage_history_reads_rollout_token_count_events() {
     );
 }
 
+#[test]
+fn thread_usage_summary_omits_history_and_preserves_totals() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let rollout_path = tmp.path().join("rollout.jsonl");
+    fs::write(
+        &rollout_path,
+        concat!(
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"turn-1\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":5000,\"cached_input_tokens\":1500,\"output_tokens\":500,\"total_tokens\":5500},\"last_token_usage\":{\"input_tokens\":1200,\"cached_input_tokens\":900,\"output_tokens\":120,\"total_tokens\":1320},\"model_context_window\":258400}}}\n"
+        ),
+    )
+    .unwrap();
+    create_codex_thread_db(&db_path, &rollout_path);
+    let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")));
+
+    let value = adapter.codex_thread_usage_summary(&session("local:t1", "Codex Thread"));
+
+    assert_eq!(value["status"], "ok");
+    assert!(value.get("history").is_none());
+    assert_eq!(value["summary"]["totalUsage"]["totalTokens"], 5500);
+    assert_eq!(value["summary"]["lastTurnUsage"]["totalTokens"], 1320);
+}
+
 // Codex 升级后换了 SQLite schema（threads 表不存在）时，token 统计应回退到
 // 按 session_id 直接扫 sessions 目录定位 rollout 文件，不依赖 db schema。
 #[test]
@@ -1286,6 +1311,15 @@ fn thread_usage_history_falls_back_to_rollout_file_when_db_schema_unsupported() 
             .and_then(|v| v.as_u64()),
         Some(1320)
     );
+
+    let summary_only = codex_thread_usage_summary_from_paths(
+        vec![db_path],
+        BackupStore::new(tmp.path().join("summary-backups")),
+        &session(uuid, ""),
+    );
+    assert_eq!(summary_only["status"], "ok");
+    assert!(summary_only.get("history").is_none());
+    assert_eq!(summary_only["summary"]["totalUsage"]["totalTokens"], 5500);
 }
 
 #[test]
@@ -1576,4 +1610,8 @@ fn thread_usage_history_includes_recursive_subagents_in_parent_totals_and_latest
             .get("unassociatedDescendantCount")
             .is_none()
     );
+
+    let summary_only = adapter.codex_thread_usage_summary(&session("local:t1", "Codex Thread"));
+    assert!(summary_only.get("history").is_none());
+    assert_eq!(summary_only["summary"], result["summary"]);
 }

@@ -611,7 +611,8 @@ fn injection_script_exposes_compact_per_thread_token_usage_summary() {
     assert!(script.contains("会话 Token 统计"));
     assert!(script.contains("[data-pip-obstacle=\"thread-summary-panel\"]"));
     assert!(script.contains("aria-pressed"));
-    assert!(script.contains("/thread-usage-history"));
+    assert!(script.contains("/thread-usage-summary"));
+    assert!(!script.contains("postJson(\"/thread-usage-history\""));
     assert!(script.contains("turnId === latestTurnId"));
     assert!(script.contains("最近一轮"));
     assert!(script.contains("formatCodexTokenCount"));
@@ -651,6 +652,9 @@ fn injection_script_exposes_compact_per_thread_token_usage_summary() {
     assert!(!script.contains("执行中 · 已结算至最近模型响应"));
     assert!(script.contains("descendantCount"));
     assert!(script.contains("window.__codexTokenUsageRequestSeq"));
+    assert!(script.contains("backendTimedOut"));
+    assert!(script.contains("processCodexTokenUsageResult"));
+    assert!(script.contains("if (!backendTimedOut || result?.status !== \"ok\") return"));
     assert!(script.contains("refreshCodexTokenUsageCard"));
     assert!(script.contains("function syncCodexTokenUsageWithPinnedSummaryState()"));
     assert!(script.contains("function installCodexTokenUsagePinnedSummaryObserver()"));
@@ -918,11 +922,16 @@ fn injection_script_exposes_fast_service_tier_control() {
     assert!(script.contains("applyCodexServiceTierRequestOverride(\"thread/start\", message)"));
     assert!(script.contains("codex-service-tier-badge"));
     assert!(script.contains("installCodexServiceTierBadge"));
+    assert!(script.contains(
+        "syncCodexServiceTierBadgeLayoutListener();\n      installCodexServiceTierBadge();"
+    ));
     assert!(script.contains("toggleCodexServiceTierFromBadge"));
     assert!(script.contains("wireCodexServiceTierBadge"));
     assert!(script.contains("codexServiceTierBadgePlacement"));
     assert!(script.contains("codexServiceTierNativeServiceTierSlot"));
     assert!(script.contains("[class*=\"_footer_\"]"));
+    assert!(script.contains("codexServiceTierComposerFooterSelector"));
+    assert!(script.contains("ComposerLayoutFooter"));
     assert!(script.contains("codexServiceTierBadgeFooterGroup"));
     assert!(script.contains("codexServiceTierFindComposerEl"));
     assert!(script.contains("codexServiceTierVisibleComposerFooters"));

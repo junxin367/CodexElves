@@ -694,6 +694,20 @@ impl BridgeDataService for LauncherDataService {
         .map_err(|error| anyhow::anyhow!("thread usage history task failed: {error}"))
     }
 
+    async fn thread_usage_summary(&self, session: SessionRef) -> anyhow::Result<Value> {
+        let db_paths = self.candidate_db_paths();
+        let backup_store = codex_elves_data::BackupStore::new(self.backup_dir.clone());
+        tokio::task::spawn_blocking(move || {
+            codex_elves_data::codex_thread_usage_summary_from_paths(
+                db_paths,
+                backup_store,
+                &session,
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("thread usage summary task failed: {error}"))
+    }
+
     async fn find_archived_thread_by_title(
         &self,
         title: String,

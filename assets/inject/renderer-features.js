@@ -2895,6 +2895,7 @@
   function refreshCodexServiceTierFeatureState() {
     if (codexElvesSettings().serviceTierControls) {
       syncCodexServiceTierBadgeLayoutListener();
+      installCodexServiceTierBadge();
       void installCodexServiceTierDispatcherPatch();
       void installCodexServiceTierRequestClientPatch();
       void loadCodexServiceTierState();
@@ -5327,19 +5328,12 @@
     window.__codexTokenUsageRequestSeq = requestSeq;
     window.__codexTokenUsageRequestSession = sessionSignature;
     let timeoutId = null;
-    const backendRequest = postJson("/thread-usage-history", {
+    let backendTimedOut = false;
+    const backendRequest = postJson("/thread-usage-summary", {
       session_id: sessionId,
       title: sessionTitle,
     });
-    const requestPromise = Promise.race([
-      backendRequest,
-      new Promise((resolve) => {
-        timeoutId = setTimeout(
-          () => resolve({ status: "failed", message: "读取超时", timeout: true }),
-          codexTokenUsageRequestTimeoutMs
-        );
-      }),
-    ]).then((result) => {
+    const processCodexTokenUsageResult = (result) => {
       if (requestSeq !== window.__codexTokenUsageRequestSeq) return;
       const activeRef = currentSessionRef();
       if (`${activeRef?.session_id || ""}\n${activeRef?.title || ""}` !== sessionSignature) return;
@@ -5388,6 +5382,18 @@
       } else if (activeCard && needsCompletionRefresh && document.visibilityState !== "hidden") {
         scheduleCodexTokenUsageRefresh(codexTokenUsageCompletionRefreshDelayMs);
       }
+    };
+    const requestPromise = Promise.race([
+      backendRequest,
+      new Promise((resolve) => {
+        timeoutId = setTimeout(
+          () => resolve({ status: "failed", message: "读取超时", timeout: true }),
+          codexTokenUsageRequestTimeoutMs
+        );
+      }),
+    ]).then((result) => {
+      backendTimedOut = result?.timeout === true;
+      return processCodexTokenUsageResult(result);
     }).catch(() => {
       if (requestSeq !== window.__codexTokenUsageRequestSeq) return;
       scheduleCodexTokenUsageRetry();
@@ -5399,6 +5405,12 @@
     }).finally(() => {
       if (timeoutId) clearTimeout(timeoutId);
     });
+    // 冷缓存或超大父会话可能超过前端等待预算。后端成功返回时仍应用结果，
+    // 避免 5 秒超时把随后到达的有效摘要永久丢弃。
+    void backendRequest.then((result) => {
+      if (!backendTimedOut || result?.status !== "ok") return;
+      processCodexTokenUsageResult(result);
+    }).catch(() => {});
     const backendLifecycle = Promise.race([
       backendRequest.catch(() => null),
       new Promise((resolve) => setTimeout(resolve, codexTokenUsageLifecycleTimeoutMs)),
@@ -9341,11 +9353,16 @@
       });
   }
 
+  const codexServiceTierComposerFooterSelector = '.composer-footer, [class*="_footer_"], [class*="ComposerLayoutFooter"]';
+
+  function codexServiceTierIsComposerFooter(element) {
+    return element instanceof HTMLElement && element.matches?.(codexServiceTierComposerFooterSelector);
+  }
+
   function codexServiceTierVisibleComposerFooters(root = document) {
     const footers = [
-      ...(root?.matches?.(".composer-footer") ? [root] : []),
-      ...(root?.matches?.('[class*="_footer_"]') ? [root] : []),
-      ...Array.from(root?.querySelectorAll?.('.composer-footer, [class*="_footer_"]') || []),
+      ...(codexServiceTierIsComposerFooter(root) ? [root] : []),
+      ...Array.from(root?.querySelectorAll?.(codexServiceTierComposerFooterSelector) || []),
     ];
     return footers
       .filter(codexServiceTierLooksLikeComposerFooter)
@@ -9361,8 +9378,10 @@
     if (!(footer instanceof HTMLElement)) return false;
     if (footer.matches?.(".composer-footer")) return codexServiceTierFooterHasNearbyComposerInput(footer);
     const className = String(footer.className || "");
-    if (!className.includes("_footer_")) return false;
-    if (!className.includes("items-center")) return false;
+    const legacyModuleFooter = className.includes("_footer_");
+    const composerLayoutFooter = className.includes("ComposerLayoutFooter");
+    if (!legacyModuleFooter && !composerLayoutFooter) return false;
+    if (legacyModuleFooter && !className.includes("items-center")) return false;
     const rect = footer.getBoundingClientRect();
     if (rect.width < 220 || rect.height > 90) return false;
     if (!codexServiceTierFooterHasNearbyComposerInput(footer)) return false;
@@ -9380,8 +9399,8 @@
     if (providerNames.some((name) => name && text.includes(name))) score += 40;
     if (/完全访问权限|full access|model|超高|high|sub2api|provider/i.test(text)) score += 20;
     if (/本地模式|local mode|worktree|branch|codex\//i.test(text)) score -= 30;
-    if (composer.matches?.(".composer-footer")) score += 4;
-    if (composer.querySelector?.(".composer-footer")) score += 8;
+    if (codexServiceTierIsComposerFooter(composer)) score += 4;
+    if (composer.querySelector?.(codexServiceTierComposerFooterSelector)) score += 8;
     const buttons = Array.from(composer.querySelectorAll?.("button, [role='button']") || []).filter(codexServiceTierBadgeVisibleElement);
     if (buttons.some((button) => codexServiceTierLooksLikeProviderButton(button, providerNames))) score += 30;
     score += Math.min(10, buttons.length);
@@ -9427,7 +9446,7 @@
   }
 
   function codexServiceTierComposerFooter(composer) {
-    if (composer?.matches?.(".composer-footer")) return composer;
+    if (codexServiceTierIsComposerFooter(composer)) return composer;
     return codexServiceTierBestComposerFooter(composer) || codexServiceTierBestComposerFooter() || null;
   }
 
@@ -9474,7 +9493,7 @@
 
   function codexServiceTierPlacementFooter(placement) {
     const parent = placement?.parent;
-    const footer = parent?.closest?.('.composer-footer, [class*="_footer_"]');
+    const footer = parent?.closest?.(codexServiceTierComposerFooterSelector);
     return codexServiceTierLooksLikeComposerFooter(footer) ? footer : null;
   }
 

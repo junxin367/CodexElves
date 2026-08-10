@@ -58,6 +58,10 @@ async fn bridge_routes_cover_all_current_paths() {
             "/thread-usage-history",
             json!({"session_id": "s1", "title": "First"}),
         ),
+        (
+            "/thread-usage-summary",
+            json!({"session_id": "s1", "title": "First"}),
+        ),
         ("/archived-thread", json!({"title": "Archived"})),
         (
             "/move-thread-workspace",
@@ -347,6 +351,25 @@ async fn data_routes_forward_payloads_to_data_service() {
                     }
                 }
             ]
+        })
+    );
+    assert_eq!(
+        handle_bridge_request(
+            ctx.clone(),
+            "/thread-usage-summary",
+            json!({"session_id": "s1", "title": "First"}),
+        )
+        .await,
+        json!({
+            "status": "ok",
+            "session_id": "s1",
+            "summary": {
+                "totalUsage": {
+                    "inputTokens": 1200,
+                    "outputTokens": 120,
+                    "totalTokens": 1320
+                }
+            }
         })
     );
     assert_eq!(
@@ -1095,6 +1118,20 @@ impl BridgeDataService for FakeData {
                     }
                 }
             ]
+        }))
+    }
+
+    async fn thread_usage_summary(&self, session: SessionRef) -> anyhow::Result<Value> {
+        Ok(json!({
+            "status": "ok",
+            "session_id": session.session_id,
+            "summary": {
+                "totalUsage": {
+                    "inputTokens": 1200,
+                    "outputTokens": 120,
+                    "totalTokens": 1320
+                }
+            }
         }))
     }
 
