@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "32";
+  const codexDeleteStyleVersion = "35";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "7";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -55,7 +55,7 @@
   const codexServiceTierRequestOverrideVersion = "4";
   const codexServiceTierRequestClientPatchRetryBaseMs = 1000;
   const codexServiceTierRequestClientPatchRetryMaxMs = 30000;
-  const codexAppServerManagerDiscoveryVersion = "8";
+  const codexAppServerManagerDiscoveryVersion = "11";
   const codexAppServerRestartErrorText = "failed to start turn: internal error; agent loop died unexpectedly";
   const codexAppServerRestartRecoveryDelaysMs = [120, 280, 520, 900, 1500, 2400];
   const codexStatsigModelVisibilityConfigId = "107580212";
@@ -680,19 +680,18 @@
         padding: 3px 8px;
         cursor: pointer;
       }
-      [data-codex-app-server-restart-banner="true"] {
-        padding-right: 0 !important;
-      }
       .${codexAppServerRestartButtonClass} {
-        position: static;
+        position: fixed;
+        right: 24px;
+        bottom: 96px;
         transform: none;
-        z-index: 2;
+        z-index: 2147482900;
         min-width: 58px;
-        margin-left: 10px;
+        margin: 0;
         border: 1px solid rgba(148,163,184,.55);
         border-radius: 7px;
-        background: rgba(255,255,255,.1);
-        color: inherit;
+        background: rgba(255,255,255,.96);
+        color: #111827;
         font: 12px/18px system-ui, sans-serif;
         padding: 3px 9px;
         cursor: pointer;
@@ -706,12 +705,27 @@
       .${codexAppServerRestartButtonClass}:hover,
       .${codexAppServerRestartButtonClass}:focus-visible {
         border-color: rgba(148,163,184,.85);
-        background: rgba(255,255,255,.18);
+        background: #ffffff;
         outline: none;
       }
       .${codexAppServerRestartButtonClass}:disabled {
         cursor: wait;
         opacity: .65;
+      }
+      .${codexAppServerRestartButtonClass}[data-codex-app-server-restart-placement="notice"] {
+        min-width: 0;
+        border-color: transparent !important;
+        border-radius: 8px;
+        background: #111827 !important;
+        color: #ffffff !important;
+        font: 13px/18px system-ui, sans-serif;
+        padding: 10px 12px;
+        box-shadow: 0 8px 30px rgba(0,0,0,.25);
+      }
+      .${codexAppServerRestartButtonClass}[data-codex-app-server-restart-placement="notice"]:hover,
+      .${codexAppServerRestartButtonClass}[data-codex-app-server-restart-placement="notice"]:focus-visible {
+        border-color: transparent !important;
+        background: #1f2937 !important;
       }
       .codex-delete-toast {
         position: fixed;
@@ -5824,11 +5838,9 @@
 
   function isCodexAppServerTransientFailedTurn(turn) {
     if (!turn || turn.turnId != null || turn.status !== "failed") return false;
-    const normalized = codexAppServerTurnErrorMessages(turn)
-      .join("\n")
-      .toLowerCase();
-    return normalized.includes("failed to start turn")
-      && normalized.includes("agent loop died unexpectedly");
+    return codexAppServerRestartTextMatches(
+      codexAppServerTurnErrorMessages(turn).join("\n")
+    );
   }
 
   function codexAppServerConversationEntityEntries(conversation) {
@@ -5983,25 +5995,44 @@
     return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
   }
 
+  function codexAppServerRestartTextMatches(value) {
+    const normalized = codexAppServerNormalizedText(value);
+    return normalized.includes("failed to start turn")
+      && normalized.includes("agent loop died unexpectedly");
+  }
+
   function codexAppServerRestartTextElementEligible(element) {
     if (!(element instanceof Element)) return false;
     if (codexAppServerNormalizedText(element.innerText || element.textContent) !== codexAppServerRestartErrorText) {
       return false;
     }
-    if (!element.closest("main, [role='main']")) return false;
     if (element.closest('[data-message-author-role="user"], [data-user-message-bubble]')) return false;
     if (element.closest(`.${codexAppServerRestartButtonClass}, .${codexAppServerRestartDialogClass}`)) return false;
     return true;
   }
 
-  function codexAppServerRestartBannerFromTextElement(element) {
-    return element;
+  function codexAppServerRestartMutationRelevant(mutation) {
+    if (mutation?.type !== "childList") return false;
+    const changedNodes = [
+      ...Array.from(mutation.addedNodes || []),
+      ...Array.from(mutation.removedNodes || []),
+    ];
+    return changedNodes.some((node) => {
+      const element = node?.nodeType === 1 ? node : node?.parentElement;
+      if (element?.closest?.('[data-message-author-role="user"], [data-user-message-bubble]')) {
+        return false;
+      }
+      const text = node?.nodeType === 3
+        ? node.nodeValue
+        : node?.innerText || node?.textContent;
+      return codexAppServerRestartTextMatches(text);
+    });
   }
 
-  function codexAppServerRestartErrorBanners() {
-    const root = document.querySelector("main, [role='main']");
+  function codexAppServerRestartErrorElements() {
+    const root = document.body || document.documentElement;
     if (!root) return [];
-    const banners = new Set();
+    const elements = new Set();
     if (typeof document.createTreeWalker === "function") {
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
       let textNode = null;
@@ -6009,32 +6040,171 @@
         if (codexAppServerNormalizedText(textNode.nodeValue) !== codexAppServerRestartErrorText) continue;
         const element = textNode.parentElement;
         if (!codexAppServerRestartTextElementEligible(element)) continue;
-        const banner = codexAppServerRestartBannerFromTextElement(element);
-        if (banner) banners.add(banner);
+        elements.add(element);
       }
     }
-    if (banners.size === 0) {
-      for (const element of root.querySelectorAll("div, p, span")) {
+    if (elements.size === 0) {
+      for (const element of root.querySelectorAll("div, p, span, [role='alert']")) {
         if (!codexAppServerRestartTextElementEligible(element)) continue;
         const childContainsWholeError = Array.from(element.children).some((child) =>
           codexAppServerNormalizedText(child.innerText || child.textContent)
             === codexAppServerRestartErrorText
         );
         if (childContainsWholeError) continue;
-        const banner = codexAppServerRestartBannerFromTextElement(element);
-        if (banner) banners.add(banner);
+        elements.add(element);
       }
     }
-    return Array.from(banners);
+    return Array.from(elements);
+  }
+
+  function codexAppServerRestartElementRect(element) {
+    if (!(element instanceof Element) || !element.isConnected) return null;
+    if (typeof document.createRange === "function") {
+      try {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        const rect = range.getBoundingClientRect();
+        if (rect && rect.width > 0 && rect.height > 0) return rect;
+      } catch {
+      }
+    }
+    try {
+      const rect = element.getBoundingClientRect();
+      return rect && rect.width > 0 && rect.height > 0 ? rect : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function codexAppServerRestartViewportSize() {
+    return {
+      width: Math.max(
+        0,
+        finiteNonNegativeNumber(window.innerWidth)
+          || finiteNonNegativeNumber(document.documentElement?.clientWidth)
+      ),
+      height: Math.max(
+        0,
+        finiteNonNegativeNumber(window.innerHeight)
+          || finiteNonNegativeNumber(document.documentElement?.clientHeight)
+      ),
+    };
+  }
+
+  function codexAppServerRestartRectVisible(rect, viewport) {
+    return !!rect
+      && rect.bottom > 0
+      && rect.right > 0
+      && (!viewport.width || rect.left < viewport.width)
+      && (!viewport.height || rect.top < viewport.height);
+  }
+
+  function codexAppServerRestartVisibleErrorElement() {
+    const viewport = codexAppServerRestartViewportSize();
+    return codexAppServerRestartErrorElements().find((element) =>
+      codexAppServerRestartRectVisible(
+        codexAppServerRestartElementRect(element),
+        viewport
+      )
+    ) || null;
+  }
+
+  function resolveCodexAppServerRestartPlacement(
+    anchorRect,
+    buttonRect,
+    viewportWidth,
+    viewportHeight
+  ) {
+    const margin = 8;
+    const gap = 10;
+    const buttonWidth = Math.max(58, finiteNonNegativeNumber(buttonRect?.width));
+    const buttonHeight = Math.max(24, finiteNonNegativeNumber(buttonRect?.height));
+    if (anchorRect && viewportWidth > 0 && viewportHeight > 0) {
+      const maxTop = Math.max(margin, viewportHeight - buttonHeight - margin);
+      const top = Math.min(
+        maxTop,
+        Math.max(margin, anchorRect.top + (anchorRect.height - buttonHeight) / 2)
+      );
+      const afterLeft = anchorRect.right + gap;
+      if (afterLeft + buttonWidth <= viewportWidth - margin) {
+        return { placement: "after", left: afterLeft, top };
+      }
+      const beforeLeft = anchorRect.left - gap - buttonWidth;
+      if (beforeLeft >= margin) {
+        return { placement: "before", left: beforeLeft, top };
+      }
+    }
+    return { placement: "notice", right: 18, bottom: 18 };
+  }
+
+  function syncCodexAppServerRestartButtonLabel(button) {
+    if (!button) return;
+    const notice = button.dataset.codexAppServerRestartPlacement === "notice";
+    if (button.disabled) {
+      button.textContent = notice ? "app-server 重启中…" : "重启中…";
+      return;
+    }
+    button.textContent = notice ? "检测到 app-server 异常，点击重启" : "重启";
+  }
+
+  function positionCodexAppServerRestartButton(button) {
+    if (!button?.isConnected) return;
+    const viewport = codexAppServerRestartViewportSize();
+    let anchor = button.__codexAppServerRestartAnchor;
+    let anchorRect = codexAppServerRestartElementRect(anchor);
+    if (!codexAppServerRestartRectVisible(anchorRect, viewport)) {
+      anchor = codexAppServerRestartVisibleErrorElement();
+      anchorRect = codexAppServerRestartElementRect(anchor);
+      button.__codexAppServerRestartAnchor = anchor;
+    }
+
+    const buttonRect = button.getBoundingClientRect();
+    const placement = resolveCodexAppServerRestartPlacement(
+      codexAppServerRestartRectVisible(anchorRect, viewport) ? anchorRect : null,
+      buttonRect,
+      viewport.width,
+      viewport.height
+    );
+    button.dataset.codexAppServerRestartPlacement = placement.placement;
+    if (placement.placement === "notice") {
+      button.style.left = "auto";
+      button.style.top = "auto";
+      button.style.right = `${placement.right}px`;
+      button.style.bottom = `${placement.bottom}px`;
+      syncCodexAppServerRestartButtonLabel(button);
+      return;
+    }
+    button.style.right = "auto";
+    button.style.bottom = "auto";
+    button.style.left = `${Math.round(placement.left)}px`;
+    button.style.top = `${Math.round(placement.top)}px`;
+    syncCodexAppServerRestartButtonLabel(button);
+  }
+
+  function scheduleCodexAppServerRestartButtonPosition() {
+    if (window.__codexAppServerRestartPositionRaf) return;
+    window.__codexAppServerRestartPositionRaf = requestAnimationFrame(() => {
+      window.__codexAppServerRestartPositionRaf = 0;
+      document.querySelectorAll(`.${codexAppServerRestartButtonClass}`)
+        .forEach(positionCodexAppServerRestartButton);
+    });
+  }
+
+  function installCodexAppServerRestartPositionTracking() {
+    const previous = window.__codexAppServerRestartPositionHandler;
+    if (previous) {
+      window.removeEventListener("resize", previous, true);
+      document.removeEventListener("scroll", previous, true);
+    }
+    const handler = () => scheduleCodexAppServerRestartButtonPosition();
+    window.__codexAppServerRestartPositionHandler = handler;
+    window.addEventListener("resize", handler, true);
+    document.addEventListener("scroll", handler, true);
   }
 
   function removeCodexAppServerRestartButton(button) {
-    const banner = button?.closest?.('[data-codex-app-server-restart-banner="true"]');
+    if (button) button.__codexAppServerRestartAnchor = null;
     button?.remove?.();
-    if (banner && !banner.querySelector(`.${codexAppServerRestartButtonClass}`)) {
-      delete banner.dataset.codexAppServerRestartBanner;
-      banner.removeAttribute("data-codex-app-server-restart-banner");
-    }
   }
 
   function removeCodexAppServerRestartButtonsExcept(conversationId = "") {
@@ -6087,8 +6257,8 @@
   function setCodexAppServerRestartButtonBusy(button, busy) {
     if (!button) return;
     button.disabled = !!busy;
-    button.textContent = busy ? "重启中…" : "重启";
     button.setAttribute("aria-busy", busy ? "true" : "false");
+    syncCodexAppServerRestartButtonLabel(button);
   }
 
   function waitForCodexAppServerRestartDelay(delayMs) {
@@ -6189,18 +6359,21 @@
   }
 
   function installCodexAppServerRestartButtons() {
-    const conversationId = activeConversationIdFromDom();
+    const activeRef = currentSessionRefFromDom();
+    const conversationId = activeConversationIdFromDom()
+      || validThreadSessionKey(activeRef?.session_id);
     removeCodexAppServerRestartButtonsExcept(conversationId);
     if (!conversationId) return;
+    const anchor = codexAppServerRestartVisibleErrorElement();
     const discovery = findCodexConversationManagerInReactTree();
     const manager = discovery.manager;
-    if (!manager) return;
     let conversation = null;
     try {
-      conversation = manager.getConversation(conversationId);
+      conversation = manager?.getConversation?.(conversationId);
     } catch {
     }
-    if (!conversation || !codexAppServerConversationHasTransientFailure(conversation)) {
+    const stateHasFailure = codexAppServerConversationHasTransientFailure(conversation);
+    if (!stateHasFailure && !anchor) {
       removeCodexAppServerRestartButtonsExcept();
       return;
     }
@@ -6212,47 +6385,51 @@
         existing.dataset.codexAppServerRestartVersion
         === codexAppServerManagerDiscoveryVersion
       ) {
+        existing.__codexAppServerRestartAnchor = anchor;
+        positionCodexAppServerRestartButton(existing);
         return;
       }
       removeCodexAppServerRestartButton(existing);
     }
 
-    const banners = codexAppServerRestartErrorBanners();
-    for (const banner of banners) {
-      if (banner.querySelector(`.${codexAppServerRestartButtonClass}`)) continue;
-      banner.dataset.codexAppServerRestartBanner = "true";
-      banner.setAttribute("data-codex-app-server-restart-banner", "true");
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = codexAppServerRestartButtonClass;
-      button.dataset.codexAppServerRestart = "true";
-      button.dataset.codexAppServerRestartConversationId = conversationId;
-      button.dataset.codexAppServerRestartVersion = codexAppServerManagerDiscoveryVersion;
-      button.dataset.codexActionLabel = "CodexElves 提供热重启修复问题";
-      button.dataset.codexTooltipPlacement = "top";
-      button.dataset.codexTooltipGap = "10";
-      button.textContent = "重启";
-      button.setAttribute("aria-label", "CodexElves 提供热重启修复问题");
-      button.addEventListener("pointerenter", () => showActionButtonTooltip(button));
-      button.addEventListener("pointerleave", hideActionButtonTooltip);
-      button.addEventListener("focus", () => showActionButtonTooltip(button));
-      button.addEventListener("blur", hideActionButtonTooltip);
-      button.addEventListener("click", (event) => {
-        hideActionButtonTooltip();
-        event.preventDefault();
-        event.stopPropagation();
-        void restartCodexAppServerFromFailure(button, conversationId);
-      }, true);
-      banner.appendChild(button);
-      sendCodexElvesDiagnostic("app_server_restart_button_installed", {
-        conversationId,
-      });
-    }
+    if (!document.body) return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = codexAppServerRestartButtonClass;
+    button.dataset.codexAppServerRestart = "true";
+    button.dataset.codexAppServerRestartConversationId = conversationId;
+    button.dataset.codexAppServerRestartVersion = codexAppServerManagerDiscoveryVersion;
+    button.dataset.codexActionLabel = "CodexElves 提供热重启修复问题";
+    button.dataset.codexTooltipPlacement = "top";
+    button.dataset.codexTooltipGap = "10";
+    button.__codexAppServerRestartAnchor = anchor;
+    button.textContent = "重启";
+    button.setAttribute("aria-label", "CodexElves 提供热重启修复问题");
+    button.addEventListener("pointerenter", () => showActionButtonTooltip(button));
+    button.addEventListener("pointerleave", hideActionButtonTooltip);
+    button.addEventListener("focus", () => showActionButtonTooltip(button));
+    button.addEventListener("blur", hideActionButtonTooltip);
+    button.addEventListener("click", (event) => {
+      hideActionButtonTooltip();
+      event.preventDefault();
+      event.stopPropagation();
+      void restartCodexAppServerFromFailure(button, conversationId);
+    }, true);
+    document.body.appendChild(button);
+    positionCodexAppServerRestartButton(button);
+    sendCodexElvesDiagnostic("app_server_restart_button_installed", {
+      conversationId,
+      source: stateHasFailure ? "state" : "dom",
+      placement: button.dataset.codexAppServerRestartPlacement || "",
+    });
   }
 
   if (window.__CODEX_ELVES_TEST_APP_SERVER_RESTART__) {
     window.__codexElvesAppServerRestartTest = {
       isTransientFailedTurn: isCodexAppServerTransientFailedTurn,
+      matchesErrorText: codexAppServerRestartTextMatches,
+      mutationRelevant: codexAppServerRestartMutationRelevant,
+      resolvePlacement: resolveCodexAppServerRestartPlacement,
       runningConversations: codexAppServerRunningConversations,
       cleanupTransientFailedTurns: cleanupCodexAppServerTransientFailedTurns,
       conversationHasTransientFailure: codexAppServerConversationHasTransientFailure,
@@ -10083,6 +10260,7 @@
     installDeleteButtonEventDelegation();
     installConversationViewRouteHooks();
     installCodexRouteFeatureRefreshEvents();
+    installCodexAppServerRestartPositionTracking();
     installCodexTokenUsagePinnedSummaryObserver();
     refreshCodexServiceTierControls();
     window.__codexElvesRuntimeOnceInstalled = codexElvesBuild;
@@ -10338,6 +10516,9 @@
 
   function shouldScheduleScan(mutations, domain) {
     if (!mutations) return true;
+    const appServerRestartDirty = (
+      domain === "conversation" || domain === "shell"
+    ) && mutations.some(codexAppServerRestartMutationRelevant);
     const pluginMutationRelevant = (
       (domain === "conversation" || domain === "shell")
       && codexElvesSettings().pluginAutoExpand
@@ -10347,7 +10528,7 @@
         && (mutation.type === "childList" || mutation.type === "attributes")
         && pluginAutoExpandMutationRelevant(mutation)
       );
-    return pluginMutationRelevant || mutations.some((mutation) => {
+    return appServerRestartDirty || pluginMutationRelevant || mutations.some((mutation) => {
       if (domain === "conversation" && isChatContentMutation(mutation)) return false;
       const target = mutation.target;
       if (isExtensionUiNode(target)) return false;
@@ -10519,6 +10700,7 @@
     syncChatsSortVisibilityListener();
     installScanObservers();
     installSuppressedThreadObserver();
+    installCodexAppServerRestartPositionTracking();
   };
   window.__codexElvesRuntimeBuild = codexElvesBuild;
   window.__codexElvesRuntimeHelperBase = helperBase;

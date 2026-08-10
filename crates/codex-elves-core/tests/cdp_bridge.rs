@@ -1182,7 +1182,7 @@ fn injection_script_applies_fast_service_tier_contract() {
 #[test]
 fn injection_script_does_not_patch_app_server_model_requests() {
     let script = assets::injection_script(45221);
-    assert!(script.contains("const codexAppServerManagerDiscoveryVersion = \"8\";"));
+    assert!(script.contains("const codexAppServerManagerDiscoveryVersion = \"11\";"));
     assert!(!script.contains("__codexElvesModelOriginalSendRequest"));
     assert!(!script.contains("__codexElvesModelRequestPatch"));
     assert!(!script.contains("codexElvesModelPatchedSendRequest"));
@@ -1197,6 +1197,19 @@ fn injection_script_adds_safe_app_server_restart_recovery() {
     assert!(script.contains("button.dataset.codexAppServerRestart = \"true\""));
     assert!(script.contains("button.dataset.codexAppServerRestartVersion"));
     assert!(script.contains("function installCodexAppServerRestartButtons()"));
+    assert!(script.contains("function codexAppServerRestartErrorElements()"));
+    assert!(script.contains("function codexAppServerRestartMutationRelevant(mutation)"));
+    assert!(script.contains("mutations.some(codexAppServerRestartMutationRelevant)"));
+    assert!(script.contains("const root = document.body || document.documentElement;"));
+    assert!(script.contains("document.body.appendChild(button);"));
+    assert!(script.contains("positionCodexAppServerRestartButton(button);"));
+    assert!(script.contains("function codexAppServerRestartVisibleErrorElement()"));
+    assert!(script.contains("function resolveCodexAppServerRestartPlacement("));
+    assert!(script.contains("placement: \"after\""));
+    assert!(script.contains("placement: \"before\""));
+    assert!(script.contains("placement: \"notice\""));
+    assert!(script.contains("检测到 app-server 异常，点击重启"));
+    assert!(!script.contains("banner.appendChild(button);"));
     assert!(script.contains("CodexElves 提供热重启修复问题"));
     assert!(script.contains("function codexAppServerRunningConversations("));
     assert!(script.contains("threadRuntimeStatus?.type === \"active\""));
@@ -1216,6 +1229,19 @@ fn injection_script_adds_safe_app_server_restart_recovery() {
 
     assert_eq!(cases["appServerRestart"]["transientMatched"], true);
     assert_eq!(cases["appServerRestart"]["persistedMatched"], false);
+    assert_eq!(cases["appServerRestart"]["exactErrorTextMatched"], true);
+    assert_eq!(cases["appServerRestart"]["decoratedErrorTextMatched"], true);
+    assert_eq!(
+        cases["appServerRestart"]["unrelatedErrorTextMatched"],
+        false
+    );
+    assert_eq!(cases["appServerRestart"]["errorMutationMatched"], true);
+    assert_eq!(cases["appServerRestart"]["unrelatedMutationMatched"], false);
+    assert_eq!(cases["appServerRestart"]["afterPlacement"], "after");
+    assert_eq!(cases["appServerRestart"]["beforePlacement"], "before");
+    assert_eq!(cases["appServerRestart"]["noticePlacement"], "notice");
+    assert_eq!(cases["appServerRestart"]["noticeRight"], 18);
+    assert_eq!(cases["appServerRestart"]["noticeBottom"], 18);
     assert_eq!(
         cases["appServerRestart"]["runningIds"],
         json!(["running-main", "running-turn", "running-subagent"])
@@ -1428,6 +1454,63 @@ const removedTurnCount = appServerRestartApi.cleanupTransientFailedTurns(
 const appServerRestart = {{
   transientMatched: appServerRestartApi.isTransientFailedTurn(transientFailedTurn),
   persistedMatched: appServerRestartApi.isTransientFailedTurn(persistedFailedTurn),
+  exactErrorTextMatched: appServerRestartApi.matchesErrorText(appServerRestartError),
+  decoratedErrorTextMatched: appServerRestartApi.matchesErrorText(
+    `prefix ${{appServerRestartError}} suffix`
+  ),
+  unrelatedErrorTextMatched: appServerRestartApi.matchesErrorText(
+    "failed to start turn: request cancelled"
+  ),
+  errorMutationMatched: appServerRestartApi.mutationRelevant({{
+    type: "childList",
+    addedNodes: [{{
+      nodeType: 1,
+      innerText: appServerRestartError,
+      textContent: appServerRestartError,
+      closest() {{ return null; }},
+    }}],
+    removedNodes: [],
+  }}),
+  unrelatedMutationMatched: appServerRestartApi.mutationRelevant({{
+    type: "childList",
+    addedNodes: [{{
+      nodeType: 1,
+      innerText: "completed",
+      textContent: "completed",
+      closest() {{ return null; }},
+    }}],
+    removedNodes: [],
+  }}),
+  afterPlacement: appServerRestartApi.resolvePlacement(
+    {{ left: 100, right: 300, top: 100, height: 20 }},
+    {{ width: 58, height: 26 }},
+    1000,
+    800
+  ).placement,
+  beforePlacement: appServerRestartApi.resolvePlacement(
+    {{ left: 930, right: 990, top: 100, height: 20 }},
+    {{ width: 58, height: 26 }},
+    1000,
+    800
+  ).placement,
+  noticePlacement: appServerRestartApi.resolvePlacement(
+    {{ left: 20, right: 990, top: 100, height: 20 }},
+    {{ width: 58, height: 26 }},
+    1000,
+    800
+  ).placement,
+  noticeRight: appServerRestartApi.resolvePlacement(
+    {{ left: 20, right: 990, top: 100, height: 20 }},
+    {{ width: 58, height: 26 }},
+    1000,
+    800
+  ).right,
+  noticeBottom: appServerRestartApi.resolvePlacement(
+    {{ left: 20, right: 990, top: 100, height: 20 }},
+    {{ width: 58, height: 26 }},
+    1000,
+    800
+  ).bottom,
   runningIds: runningState.conversations.map((conversation) => conversation.id),
   failedConversationBlocked: runningState.conversations.some(
     (conversation) => conversation.id === failedConversation.id
