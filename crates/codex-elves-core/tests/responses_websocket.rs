@@ -19,7 +19,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::accept_hdr_async;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 
@@ -762,6 +764,242 @@ async fn explicitly_disabled_websocket_rejects_upgrade_before_connecting_upstrea
 }
 
 #[tokio::test]
+async fn local_proxy_downgrades_same_turn_after_disconnect_before_first_request() {
+    let _settings_lock = websocket_settings_test_lock().lock().await;
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    let upstream_connection_count = Arc::new(AtomicUsize::new(0));
+    let upstream_count = upstream_connection_count.clone();
+    let upstream = tokio::spawn(async move {
+        loop {
+            let accepted =
+                tokio::time::timeout(Duration::from_secs(1), upstream_listener.accept()).await;
+            let Ok(Ok((stream, _))) = accepted else {
+                break;
+            };
+            upstream_count.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let Ok(mut socket) =
+                    accept_hdr_async(stream, |_request: &Request, response: Response| {
+                        Ok(response)
+                    })
+                    .await
+                else {
+                    return;
+                };
+                while let Some(message) = socket.next().await {
+                    if matches!(message, Ok(Message::Close(_)) | Err(_)) {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    save_supported_websocket_settings(upstream_address, false, "gpt-side-turn");
+
+    let local_listener = Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
+    let local_address = local_listener.local_addr().unwrap();
+    let first_listener = local_listener.clone();
+    let first_local_server = tokio::spawn(async move {
+        let (mut stream, remote_addr) = first_listener.accept().await.unwrap();
+        let request_bytes = read_upgrade_request(&mut stream).await;
+        handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr)).await
+    });
+
+    let mut first_client = tokio::net::TcpStream::connect(local_address).await.unwrap();
+    let upgrade_request = format!(
+        "GET /v1/responses HTTP/1.1\r\n\
+         Host: {local_address}\r\n\
+         Connection: Upgrade\r\n\
+         Upgrade: websocket\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         session-id: side-session\r\n\
+         thread-id: side-thread\r\n\
+         x-codex-window-id: side-window\r\n\
+         x-codex-turn-metadata: {{\"turn_id\":\"side-turn\",\"request_kind\":\"turn\",\"window_id\":\"side-window\"}}\r\n\
+         \r\n"
+    );
+    first_client
+        .write_all(upgrade_request.as_bytes())
+        .await
+        .unwrap();
+    let first_response = read_upgrade_request(&mut first_client).await;
+    assert!(
+        first_response.starts_with(b"HTTP/1.1 101"),
+        "{}",
+        String::from_utf8_lossy(&first_response)
+    );
+    first_client.shutdown().await.unwrap();
+    drop(first_client);
+    let first_result = tokio::time::timeout(Duration::from_secs(2), first_local_server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        first_result
+            .unwrap_err()
+            .to_string()
+            .contains("读取本地 Responses WebSocket 消息失败")
+    );
+
+    let second_listener = local_listener.clone();
+    let second_local_server = tokio::spawn(async move {
+        let (mut stream, remote_addr) = second_listener.accept().await.unwrap();
+        let request_bytes = read_upgrade_request(&mut stream).await;
+        handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr)).await
+    });
+    let mut second_client = tokio::net::TcpStream::connect(local_address).await.unwrap();
+    second_client
+        .write_all(upgrade_request.as_bytes())
+        .await
+        .unwrap();
+    let second_response = read_upgrade_request(&mut second_client).await;
+    assert!(
+        second_response.starts_with(b"HTTP/1.1 426"),
+        "{}",
+        String::from_utf8_lossy(&second_response)
+    );
+    drop(second_client);
+    second_local_server.await.unwrap().unwrap();
+
+    let third_listener = local_listener.clone();
+    let third_local_server = tokio::spawn(async move {
+        let (mut stream, remote_addr) = third_listener.accept().await.unwrap();
+        let request_bytes = read_upgrade_request(&mut stream).await;
+        handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr)).await
+    });
+    let mut third_client = tokio::net::TcpStream::connect(local_address).await.unwrap();
+    let different_turn_request =
+        upgrade_request.replace("\"side-turn\"", "\"different-side-turn\"");
+    third_client
+        .write_all(different_turn_request.as_bytes())
+        .await
+        .unwrap();
+    let third_response = read_upgrade_request(&mut third_client).await;
+    assert!(
+        third_response.starts_with(b"HTTP/1.1 101"),
+        "{}",
+        String::from_utf8_lossy(&third_response)
+    );
+    third_client.shutdown().await.unwrap();
+    drop(third_client);
+    let third_result = tokio::time::timeout(Duration::from_secs(2), third_local_server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        third_result
+            .unwrap_err()
+            .to_string()
+            .contains("读取本地 Responses WebSocket 消息失败")
+    );
+
+    upstream.await.unwrap();
+    assert_eq!(upstream_connection_count.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn local_proxy_keeps_websocket_for_same_turn_after_application_request() {
+    let _settings_lock = websocket_settings_test_lock().lock().await;
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        for connection_index in 0..2 {
+            let (stream, _) = upstream_listener.accept().await.unwrap();
+            let mut socket = accept_hdr_async(stream, |_request: &Request, response: Response| {
+                Ok(response)
+            })
+            .await
+            .unwrap();
+            if connection_index == 0 {
+                let request = socket.next().await.unwrap().unwrap();
+                let Message::Text(request) = request else {
+                    panic!("expected response.create");
+                };
+                let request: serde_json::Value = serde_json::from_str(request.as_str()).unwrap();
+                assert_eq!(request["type"], "response.create");
+                socket
+                    .send(Message::Text(
+                        serde_json::json!({
+                            "type": "response.completed",
+                            "response": {"id": "resp_side_turn"}
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            while let Some(message) = socket.next().await {
+                if matches!(message, Ok(Message::Close(_)) | Err(_)) {
+                    break;
+                }
+            }
+        }
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    save_supported_websocket_settings(upstream_address, false, "gpt-side-turn-requested");
+
+    let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_address = local_listener.local_addr().unwrap();
+    let local_server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut stream, remote_addr) = local_listener.accept().await.unwrap();
+            let request_bytes = read_upgrade_request(&mut stream).await;
+            let _ = handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr))
+                .await;
+        }
+    });
+
+    let request = websocket_turn_request(
+        local_address,
+        "requested-side-thread",
+        "requested-side-turn",
+    );
+    let (mut first_client, _) = connect_async(request).await.unwrap();
+    first_client
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-side-turn-requested",
+                "input": [{"role": "user", "content": "hi"}],
+                "stream": true
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let response = first_client.next().await.unwrap().unwrap();
+    let Message::Text(response) = response else {
+        panic!("expected response.completed");
+    };
+    let response: serde_json::Value = serde_json::from_str(response.as_str()).unwrap();
+    assert_eq!(response["type"], "response.completed");
+    first_client.close(None).await.unwrap();
+    drop(first_client);
+
+    let request = websocket_turn_request(
+        local_address,
+        "requested-side-thread",
+        "requested-side-turn",
+    );
+    let (mut second_client, response) = connect_async(request).await.unwrap();
+    assert_eq!(response.status().as_u16(), 101);
+    second_client.close(None).await.unwrap();
+    drop(second_client);
+
+    local_server.await.unwrap();
+    upstream.await.unwrap();
+}
+
+#[tokio::test]
 async fn reasoning_continuation_reuses_the_same_websocket_and_only_returns_the_final_round() {
     let _settings_lock = websocket_settings_test_lock().lock().await;
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1012,6 +1250,36 @@ async fn read_upgrade_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
             return request;
         }
     }
+}
+
+fn websocket_turn_request(
+    local_address: std::net::SocketAddr,
+    thread_id: &str,
+    turn_id: &str,
+) -> tokio_tungstenite::tungstenite::http::Request<()> {
+    let mut request = format!("ws://{local_address}/v1/responses")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("session-id", HeaderValue::from_static("side-session"));
+    request
+        .headers_mut()
+        .insert("thread-id", HeaderValue::from_str(thread_id).unwrap());
+    request
+        .headers_mut()
+        .insert("x-codex-window-id", HeaderValue::from_static("side-window"));
+    let turn_metadata = serde_json::json!({
+        "turn_id": turn_id,
+        "request_kind": "turn",
+        "window_id": "side-window"
+    })
+    .to_string();
+    request.headers_mut().insert(
+        "x-codex-turn-metadata",
+        HeaderValue::from_str(&turn_metadata).unwrap(),
+    );
+    request
 }
 
 fn websocket_settings_test_lock() -> &'static tokio::sync::Mutex<()> {

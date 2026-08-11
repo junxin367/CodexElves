@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -26,6 +26,7 @@ const FRAME_SEND_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_LIVENESS_PING_INTERVAL: Duration = Duration::from_secs(30);
 const UPSTREAM_APPLICATION_IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const UPSTREAM_TRANSPORT_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+const EARLY_DISCONNECT_HTTP_FALLBACK_TTL: Duration = Duration::from_secs(30);
 
 pub fn is_responses_websocket_upgrade(request_bytes: &[u8]) -> bool {
     let Ok((request, _)) = parse_websocket_upgrade_request(request_bytes) else {
@@ -105,6 +106,18 @@ pub async fn handle_responses_websocket_connection(
         reject_upgrade(&mut stream, StatusCode::UPGRADE_REQUIRED, message).await?;
         return Ok(());
     }
+    if should_temporarily_fallback_responses_websocket_to_http(&relay.id, &connection_context) {
+        let message = "当前会话轮次的 Responses WebSocket 在首个请求前异常断开，临时回退 HTTP";
+        log_websocket_event(
+            "helper.responses_websocket_http_fallback",
+            &relay,
+            remote_addr.as_deref(),
+            &connection_context,
+            Some(message),
+        );
+        reject_upgrade(&mut stream, StatusCode::UPGRADE_REQUIRED, message).await?;
+        return Ok(());
+    }
 
     let original_user_agent = request
         .headers()
@@ -166,7 +179,20 @@ pub async fn handle_responses_websocket_connection(
         request_path,
         connection_context.clone(),
     );
-    let result = bridge_responses_websockets(downstream, upstream, &relay, request_logger).await;
+    let result =
+        bridge_responses_websockets(downstream, upstream, &relay, request_logger.clone()).await;
+    if !request_logger.has_recorded_application_requests()
+        && arm_temporary_responses_websocket_http_fallback(&relay.id, &connection_context)
+    {
+        log_websocket_event(
+            "helper.responses_websocket_http_fallback_armed",
+            &relay,
+            remote_addr.as_deref(),
+            &connection_context,
+            Some("本地连接在首个 response.create 前结束"),
+        );
+    }
+    let error_detail = result.as_ref().err().map(|error| format!("{error:#}"));
     log_websocket_event(
         if result.is_ok() {
             "helper.responses_websocket_closed"
@@ -176,11 +202,7 @@ pub async fn handle_responses_websocket_connection(
         &relay,
         remote_addr.as_deref(),
         &connection_context,
-        result
-            .as_ref()
-            .err()
-            .map(|error| error.to_string())
-            .as_deref(),
+        error_detail.as_deref(),
     );
     result
 }
@@ -553,7 +575,7 @@ async fn bridge_responses_websockets(
     );
     match &result {
         Ok(_) => request_logger.finish_pending("Responses WebSocket 连接在响应完成前关闭", 499),
-        Err(error) => request_logger.finish_pending(&error.to_string(), 502),
+        Err(error) => request_logger.finish_pending(&format!("{error:#}"), 502),
     }
     result?;
     Ok(())
@@ -1653,6 +1675,7 @@ struct WebSocketRequestLogState {
     active_order: VecDeque<String>,
     unassigned_order: VecDeque<String>,
     response_ids: HashMap<String, String>,
+    application_request_count: usize,
 }
 
 struct TrackedWebSocketRequest {
@@ -1695,6 +1718,7 @@ impl WebSocketRequestLogger {
                 active_order: VecDeque::new(),
                 unassigned_order: VecDeque::new(),
                 response_ids: HashMap::new(),
+                application_request_count: 0,
             })),
         }
     }
@@ -1708,6 +1732,7 @@ impl WebSocketRequestLogger {
         let Ok(mut state) = self.state.lock() else {
             return None;
         };
+        state.application_request_count += 1;
         let record = crate::proxy_log::ProxyRequestRecord {
             id: id.clone(),
             state: crate::proxy_log::ProxyRequestState::Pending,
@@ -1792,6 +1817,12 @@ impl WebSocketRequestLogger {
         self.state
             .lock()
             .is_ok_and(|state| !state.requests.is_empty())
+    }
+
+    fn has_recorded_application_requests(&self) -> bool {
+        self.state
+            .lock()
+            .is_ok_and(|state| state.application_request_count > 0)
     }
 
     fn record_upstream_application_activity(&self, message: &Message) {
@@ -2610,6 +2641,65 @@ fn log_websocket_event(
             "error": error,
         }),
     );
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ResponsesWebSocketHttpFallbackKey {
+    relay_id: String,
+    thread_id: String,
+    turn_id: String,
+}
+
+fn responses_websocket_http_fallback_key(
+    relay_id: &str,
+    connection_context: &WebSocketConnectionContext,
+) -> Option<ResponsesWebSocketHttpFallbackKey> {
+    if connection_context.request_kind.as_deref() != Some("turn") {
+        return None;
+    }
+    Some(ResponsesWebSocketHttpFallbackKey {
+        relay_id: relay_id.to_string(),
+        thread_id: connection_context.thread_id.clone()?,
+        turn_id: connection_context.turn_id.clone()?,
+    })
+}
+
+fn responses_websocket_http_fallbacks()
+-> &'static Mutex<HashMap<ResponsesWebSocketHttpFallbackKey, Instant>> {
+    static FALLBACKS: OnceLock<Mutex<HashMap<ResponsesWebSocketHttpFallbackKey, Instant>>> =
+        OnceLock::new();
+    FALLBACKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn should_temporarily_fallback_responses_websocket_to_http(
+    relay_id: &str,
+    connection_context: &WebSocketConnectionContext,
+) -> bool {
+    let Some(key) = responses_websocket_http_fallback_key(relay_id, connection_context) else {
+        return false;
+    };
+    let now = Instant::now();
+    let Ok(mut fallbacks) = responses_websocket_http_fallbacks().lock() else {
+        return false;
+    };
+    fallbacks.retain(|_, expires_at| *expires_at > now);
+    fallbacks.contains_key(&key)
+}
+
+fn arm_temporary_responses_websocket_http_fallback(
+    relay_id: &str,
+    connection_context: &WebSocketConnectionContext,
+) -> bool {
+    let Some(key) = responses_websocket_http_fallback_key(relay_id, connection_context) else {
+        return false;
+    };
+    let Ok(mut fallbacks) = responses_websocket_http_fallbacks().lock() else {
+        return false;
+    };
+    let now = Instant::now();
+    fallbacks.retain(|_, expires_at| *expires_at > now);
+    fallbacks.insert(key, now + EARLY_DISCONNECT_HTTP_FALLBACK_TTL);
+    true
 }
 
 #[derive(Clone, Debug, Default)]
