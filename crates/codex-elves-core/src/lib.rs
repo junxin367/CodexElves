@@ -31,6 +31,7 @@ pub mod relay_switch;
 pub mod remote_ssh;
 pub mod responses_websocket;
 pub mod responses_websocket_bridge;
+mod responses_websocket_checkpoint;
 pub mod routes;
 pub mod script_market;
 pub mod settings;

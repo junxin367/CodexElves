@@ -638,6 +638,273 @@ async fn local_proxy_preserves_a_websocket_frame_read_with_the_upgrade_request()
 }
 
 #[tokio::test]
+async fn local_proxy_prunes_compacted_image_history_before_websocket_size_check() {
+    let _settings_lock = websocket_settings_test_lock().lock().await;
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        let (stream, _) = upstream_listener.accept().await.unwrap();
+        let mut socket = accept_hdr_async(stream, |_request: &Request, response: Response| {
+            Ok(response)
+        })
+        .await
+        .unwrap();
+        let message = socket.next().await.unwrap().unwrap();
+        let Message::Text(text) = message else {
+            panic!("expected response.create text message");
+        };
+        assert!(text.len() < 16 * 1024 * 1024);
+        let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+        let input = payload["input"].as_array().unwrap();
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["type"], "compaction");
+        assert_eq!(input[1]["content"][0]["text"], "继续");
+        assert!(!text.contains("data:image/png;base64"));
+
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "response.completed",
+                    "response": {"id": "resp_compacted_image_history"}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let _ = socket.close(None).await;
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
+    save_supported_websocket_settings(upstream_address, false, "gpt-compacted-images");
+
+    let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_address = local_listener.local_addr().unwrap();
+    let local_server = tokio::spawn(async move {
+        let (mut stream, remote_addr) = local_listener.accept().await.unwrap();
+        let request_bytes = read_upgrade_request(&mut stream).await;
+        handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr))
+            .await
+            .unwrap();
+    });
+
+    let (mut client, _) = connect_async(format!("ws://{local_address}/v1/responses"))
+        .await
+        .unwrap();
+    client
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-compacted-images",
+                "store": false,
+                "stream": true,
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{
+                            "type": "input_image",
+                            "image_url": format!(
+                                "data:image/png;base64,{}",
+                                "A".repeat(17 * 1024 * 1024)
+                            )
+                        }]
+                    },
+                    {
+                        "type": "compaction",
+                        "id": "cmp_latest",
+                        "encrypted_content": "opaque"
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{
+                            "type": "input_text",
+                            "text": "继续"
+                        }]
+                    }
+                ]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let response = client.next().await.unwrap().unwrap();
+    let Message::Text(text) = response else {
+        panic!("expected response.completed text message");
+    };
+    let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+    assert_eq!(payload["type"], "response.completed");
+
+    let _ = client.close(None).await;
+    local_server.await.unwrap();
+    upstream.await.unwrap();
+}
+
+#[tokio::test]
+async fn local_proxy_restores_resumed_compaction_checkpoint_before_websocket_size_check() {
+    let _settings_lock = websocket_settings_test_lock().lock().await;
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        let (stream, _) = upstream_listener.accept().await.unwrap();
+        let mut socket = accept_hdr_async(stream, |_request: &Request, response: Response| {
+            Ok(response)
+        })
+        .await
+        .unwrap();
+        let message = socket.next().await.unwrap().unwrap();
+        let Message::Text(text) = message else {
+            panic!("expected response.create text message");
+        };
+        assert!(text.len() < 16 * 1024 * 1024);
+        let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+        let input = payload["input"].as_array().unwrap();
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["type"], "compaction");
+        assert_eq!(input[0]["id"], "cmp_window_75");
+        assert_eq!(input[1]["content"][0]["text"], "继续");
+        assert!(!text.contains("data:image/png;base64"));
+
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "response.completed",
+                    "response": {"id": "resp_resumed_compaction_checkpoint"}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let _ = socket.close(None).await;
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let codex_home = temp.path().join("codex-home");
+    let thread_id = uuid::Uuid::new_v4().to_string();
+    let rollout_path = codex_home
+        .join("sessions")
+        .join("2026")
+        .join("08")
+        .join("12")
+        .join(format!("rollout-2026-08-12T00-00-00-{thread_id}.jsonl"));
+    std::fs::create_dir_all(rollout_path.parent().unwrap()).unwrap();
+    let historical_message = serde_json::json!({
+        "type": "message",
+        "id": "msg_historical_image",
+        "role": "user",
+        "content": [{
+            "type": "input_image",
+            "image_url": format!(
+                "data:image/png;base64,{}",
+                "A".repeat(17 * 1024 * 1024)
+            )
+        }]
+    });
+    let checkpoint = serde_json::json!({
+        "timestamp": "2026-08-12T00:00:00Z",
+        "type": "compacted",
+        "payload": {
+            "message": "",
+            "replacement_history": [
+                historical_message.clone(),
+                {
+                    "type": "compaction",
+                    "id": "cmp_window_75",
+                    "encrypted_content": "opaque"
+                }
+            ],
+            "window_number": 75,
+            "window_id": "window-75"
+        }
+    });
+    std::fs::write(&rollout_path, format!("{checkpoint}\n")).unwrap();
+    let state_db = rusqlite::Connection::open(codex_home.join("state_5.sqlite")).unwrap();
+    state_db
+        .execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                rollout_path TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+    state_db
+        .execute(
+            "INSERT INTO threads (id, rollout_path) VALUES (?1, ?2)",
+            (&thread_id, rollout_path.to_string_lossy().as_ref()),
+        )
+        .unwrap();
+    drop(state_db);
+
+    let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
+    save_supported_websocket_settings(upstream_address, false, "gpt-resumed-compacted-images");
+    let mut settings = SettingsStore::default().load().unwrap();
+    settings.codex_home_path = codex_home.to_string_lossy().to_string();
+    SettingsStore::default().save(&settings).unwrap();
+
+    let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_address = local_listener.local_addr().unwrap();
+    let local_server = tokio::spawn(async move {
+        let (mut stream, remote_addr) = local_listener.accept().await.unwrap();
+        let request_bytes = read_upgrade_request(&mut stream).await;
+        handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr))
+            .await
+            .unwrap();
+    });
+
+    let (mut client, _) = connect_async(format!("ws://{local_address}/v1/responses"))
+        .await
+        .unwrap();
+    client
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-resumed-compacted-images",
+                "store": false,
+                "stream": true,
+                "input": [
+                    historical_message,
+                    {
+                        "type": "message",
+                        "id": "msg_current",
+                        "role": "user",
+                        "content": [{
+                            "type": "input_text",
+                            "text": "继续"
+                        }]
+                    }
+                ],
+                "client_metadata": {
+                    "thread_id": thread_id,
+                    "session_id": thread_id,
+                    "x-codex-window-id": format!("{thread_id}:75")
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let response = client.next().await.unwrap().unwrap();
+    let Message::Text(text) = response else {
+        panic!("expected response.completed text message");
+    };
+    let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+    assert_eq!(payload["type"], "response.completed");
+
+    let _ = client.close(None).await;
+    local_server.await.unwrap();
+    upstream.await.unwrap();
+}
+
+#[tokio::test]
 async fn local_proxy_falls_back_same_turn_when_websocket_request_exceeds_16_mib() {
     let _settings_lock = websocket_settings_test_lock().lock().await;
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

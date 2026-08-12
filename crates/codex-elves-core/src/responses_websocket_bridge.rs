@@ -304,7 +304,8 @@ async fn bridge_responses_websockets(
                     layered_compaction_options,
                     original_compaction_model,
                     compaction_fallback,
-                ) = prepare_downstream_response_create_payload_with_snapshot(&payload, &settings);
+                ) = prepare_downstream_response_create_payload_with_snapshot(&payload, &settings)
+                    .await;
                 let message = if forwarded_payload == payload {
                     message
                 } else {
@@ -2442,7 +2443,7 @@ fn prepare_downstream_response_create_payload(
     Value,
     Option<crate::protocol_proxy::LayeredCompactionOptions>,
 )> {
-    let normalized = crate::protocol_proxy::normalize_native_responses_request(payload);
+    let normalized = normalize_downstream_response_create_payload(payload);
     let model = normalized
         .get("model")
         .and_then(Value::as_str)
@@ -2474,7 +2475,7 @@ fn local_compaction_wait_websocket_messages(payload: &Value) -> Option<Vec<Messa
     })
 }
 
-fn prepare_downstream_response_create_payload_with_snapshot(
+async fn prepare_downstream_response_create_payload_with_snapshot(
     payload: &Value,
     settings: &crate::settings::BackendSettings,
 ) -> (
@@ -2484,10 +2485,143 @@ fn prepare_downstream_response_create_payload_with_snapshot(
     Option<String>,
     Option<WebSocketCompactionFallback>,
 ) {
-    prepare_downstream_response_create_payload_with_settings(
-        crate::protocol_proxy::normalize_native_responses_request(payload),
-        settings,
-    )
+    let normalized = normalize_downstream_response_create_payload(payload);
+    let normalized = restore_oversized_resumed_compaction_checkpoint(normalized, settings).await;
+    prepare_downstream_response_create_payload_with_settings(normalized, settings)
+}
+
+fn normalize_downstream_response_create_payload(payload: &Value) -> Value {
+    let mut normalized = crate::protocol_proxy::normalize_native_responses_request(payload);
+    if normalized
+        .get("previous_response_id")
+        .is_some_and(|value| !value.is_null())
+    {
+        return normalized;
+    }
+    let model = normalized
+        .get("model")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let original_bytes = serde_json::to_vec(&normalized)
+        .ok()
+        .map(|value| value.len());
+    let (original_input_items, retained_input_items) = {
+        let Some(input) = normalized.get_mut("input").and_then(Value::as_array_mut) else {
+            return normalized;
+        };
+        let Some(latest_compaction_index) = input
+            .iter()
+            .rposition(|item| item.get("type").and_then(Value::as_str) == Some("compaction"))
+        else {
+            return normalized;
+        };
+        if latest_compaction_index == 0 {
+            return normalized;
+        }
+
+        let original_input_items = input.len();
+        input.drain(..latest_compaction_index);
+        (original_input_items, input.len())
+    };
+    let retained_bytes = serde_json::to_vec(&normalized)
+        .ok()
+        .map(|value| value.len());
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "protocol_proxy.responses_websocket_compacted_history_pruned",
+        serde_json::json!({
+            "source": "wire",
+            "model": model,
+            "droppedInputItems": original_input_items.saturating_sub(retained_input_items),
+            "retainedInputItems": retained_input_items,
+            "originalBytes": original_bytes,
+            "retainedBytes": retained_bytes,
+        }),
+    );
+    normalized
+}
+
+async fn restore_oversized_resumed_compaction_checkpoint(
+    normalized: Value,
+    settings: &crate::settings::BackendSettings,
+) -> Value {
+    if normalized
+        .get("previous_response_id")
+        .is_some_and(|value| !value.is_null())
+        || normalized
+            .get("input")
+            .and_then(Value::as_array)
+            .is_some_and(|input| {
+                input
+                    .iter()
+                    .any(|item| item.get("type").and_then(Value::as_str) == Some("compaction"))
+            })
+    {
+        return normalized;
+    }
+    let original_bytes = serde_json::to_vec(&normalized)
+        .ok()
+        .map(|value| value.len());
+    if original_bytes.is_some_and(|bytes| {
+        bytes <= crate::responses_websocket::RESPONSES_UPSTREAM_WEBSOCKET_SAFE_MAX_BYTES
+    }) {
+        return normalized;
+    }
+
+    let model = normalized
+        .get("model")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let codex_home = crate::codex_home::codex_home_dir_for_settings(settings);
+    let fallback = normalized.clone();
+    let restore = tokio::task::spawn_blocking(move || {
+        crate::responses_websocket_checkpoint::restore_missing_compaction_checkpoint(
+            normalized,
+            &codex_home,
+        )
+    })
+    .await;
+    let Ok(restore) = restore else {
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "protocol_proxy.responses_websocket_checkpoint_restore_skipped",
+            serde_json::json!({
+                "model": model,
+                "reason": "checkpoint_restore_task_failed",
+                "originalBytes": original_bytes,
+            }),
+        );
+        return fallback;
+    };
+    let Some(restored) = restore.restored else {
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "protocol_proxy.responses_websocket_checkpoint_restore_skipped",
+            serde_json::json!({
+                "model": model,
+                "reason": restore.skip_reason.unwrap_or("checkpoint_restore_failed"),
+                "originalBytes": original_bytes,
+            }),
+        );
+        return restore.payload;
+    };
+
+    let retained_bytes = serde_json::to_vec(&restore.payload)
+        .ok()
+        .map(|value| value.len());
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "protocol_proxy.responses_websocket_compacted_history_pruned",
+        serde_json::json!({
+            "source": "rollout_checkpoint",
+            "model": model,
+            "windowNumber": restored.window_number,
+            "checkpointPrefixItems": restored.checkpoint_prefix_items,
+            "droppedInputItems": restored
+                .original_input_items
+                .saturating_sub(restored.retained_input_items),
+            "retainedInputItems": restored.retained_input_items,
+            "originalBytes": original_bytes,
+            "retainedBytes": retained_bytes,
+        }),
+    );
+    restore.payload
 }
 
 fn prepare_downstream_response_create_payload_with_settings(
@@ -2950,6 +3084,71 @@ mod tests {
         );
         assert_ne!(context.session_id.as_deref(), Some("session-a"));
         assert_ne!(context.thread_id.as_deref(), Some("thread-a"));
+    }
+
+    #[test]
+    fn websocket_prunes_stateless_history_before_latest_compaction() {
+        let historical_image = format!("data:image/png;base64,{}", "A".repeat(17 * 1024 * 1024));
+        let payload = json!({
+            "type": "response.create",
+            "model": "gpt-5.6",
+            "store": false,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_image",
+                        "image_url": historical_image
+                    }]
+                },
+                {
+                    "type": "compaction",
+                    "id": "cmp_latest",
+                    "encrypted_content": "opaque"
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "继续"
+                    }]
+                }
+            ]
+        });
+
+        let (request_payload, forwarded_payload, _) =
+            prepare_downstream_response_create_payload(&payload).unwrap();
+
+        assert_eq!(request_payload["input"].as_array().unwrap().len(), 2);
+        assert_eq!(forwarded_payload["input"][0]["type"], "compaction");
+        assert_eq!(forwarded_payload["input"][1]["content"][0]["text"], "继续");
+        assert!(
+            serde_json::to_string(&forwarded_payload).unwrap().len()
+                <= crate::responses_websocket::RESPONSES_UPSTREAM_WEBSOCKET_SAFE_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn websocket_does_not_prune_previous_response_id_chaining() {
+        let payload = json!({
+            "type": "response.create",
+            "model": "gpt-5.6",
+            "previous_response_id": "resp_previous",
+            "input": [
+                {"type": "message", "role": "user", "content": "历史"},
+                {"type": "compaction", "id": "cmp_latest", "encrypted_content": "opaque"},
+                {"type": "message", "role": "user", "content": "继续"}
+            ]
+        });
+
+        let (request_payload, forwarded_payload, _) =
+            prepare_downstream_response_create_payload(&payload).unwrap();
+
+        assert_eq!(request_payload["input"].as_array().unwrap().len(), 3);
+        assert_eq!(forwarded_payload["input"].as_array().unwrap().len(), 3);
+        assert_eq!(forwarded_payload["previous_response_id"], "resp_previous");
     }
 
     #[test]
