@@ -13,6 +13,8 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const RESPONSES_TRANSPORT_MAX_BYTES: usize = 64 * 1024 * 1024;
+// OpenAI Responses WebSocket 按完整逻辑消息限制约 16 MiB；预留 1 KiB 给中转规范化增量。
+pub(crate) const RESPONSES_UPSTREAM_WEBSOCKET_SAFE_MAX_BYTES: usize = 16 * 1024 * 1024 - 1024;
 pub type UpstreamResponsesWebsocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 

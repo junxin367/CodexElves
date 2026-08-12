@@ -363,6 +363,26 @@ async fn bridge_responses_websockets(
             {
                 let log_id =
                     downstream_request_logger.record_request(request_payload, text.as_str());
+                if text.len()
+                    > crate::responses_websocket::RESPONSES_UPSTREAM_WEBSOCKET_SAFE_MAX_BYTES
+                {
+                    downstream_request_logger.finish_oversized_request(
+                        log_id.as_deref(),
+                        text.len(),
+                        crate::responses_websocket::RESPONSES_UPSTREAM_WEBSOCKET_SAFE_MAX_BYTES,
+                    );
+                    let downstream_close = Message::Close(Some(CloseFrame {
+                        code: CloseCode::Size,
+                        reason: "request exceeds upstream websocket limit; retry over HTTP".into(),
+                    }));
+                    let upstream_close = Message::Close(Some(CloseFrame {
+                        code: CloseCode::Normal,
+                        reason: "oversized request routed to HTTP".into(),
+                    }));
+                    let _ = downstream_close_tx.send(downstream_close).await;
+                    let _ = upstream_close_tx.send(upstream_close).await;
+                    return Ok::<(), anyhow::Error>(());
+                }
                 if let Err(error) = downstream_continuation
                     .register_request_with_settings_and_original_model(
                         request_payload,
@@ -2130,6 +2150,72 @@ impl WebSocketRequestLogger {
                 }),
             );
         }
+    }
+
+    fn finish_oversized_request(
+        &self,
+        log_id: Option<&str>,
+        request_bytes: usize,
+        safe_max_bytes: usize,
+    ) {
+        let Some(log_id) = log_id else {
+            return;
+        };
+        let (mut record, relay_id, relay_name, endpoint, connection_context, fallback_armed) = {
+            let Ok(mut state) = self.state.lock() else {
+                return;
+            };
+            let Some(mut tracked) = state.requests.remove(log_id) else {
+                return;
+            };
+            tracked.record.state = crate::proxy_log::ProxyRequestState::Completed;
+            tracked.record.status_code = Some(413);
+            tracked.record.duration_ms = Some(tracked.started_at.elapsed().as_millis() as u64);
+            tracked.record.response_bytes = Some(0);
+            tracked.record.response_captured_bytes = Some(0);
+            tracked.record.error = Some(format!(
+                "Responses WebSocket 请求大小 {request_bytes} 字节超过上游安全上限 {safe_max_bytes} 字节，当前轮次改走 HTTP"
+            ));
+            state.active_order.retain(|id| id != log_id);
+            state.unassigned_order.retain(|id| id != log_id);
+            state.response_ids.retain(|_, id| id != log_id);
+            activate_next_queued_websocket_request(&mut state, Instant::now());
+            let relay_id = state.relay_id.clone();
+            let relay_name = state.relay_name.clone();
+            let endpoint = state.endpoint.clone();
+            let connection_context = state.connection_context.clone();
+            let record = tracked.record;
+            drop(state);
+            let fallback_armed =
+                arm_temporary_responses_websocket_http_fallback(&relay_id, &connection_context);
+            (
+                record,
+                relay_id,
+                relay_name,
+                endpoint,
+                connection_context,
+                fallback_armed,
+            )
+        };
+        record.response_body.clear();
+        append_websocket_proxy_log_record(&record);
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "protocol_proxy.responses_websocket_request_too_large",
+            serde_json::json!({
+                "logId": log_id,
+                "relayId": relay_id,
+                "relayName": relay_name,
+                "endpoint": endpoint,
+                "sessionId": connection_context.session_id,
+                "threadId": connection_context.thread_id,
+                "turnId": connection_context.turn_id,
+                "requestKind": connection_context.request_kind,
+                "windowId": connection_context.window_id,
+                "requestBytes": request_bytes,
+                "safeMaxBytes": safe_max_bytes,
+                "httpFallbackArmed": fallback_armed,
+            }),
+        );
     }
 }
 

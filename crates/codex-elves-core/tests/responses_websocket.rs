@@ -638,7 +638,7 @@ async fn local_proxy_preserves_a_websocket_frame_read_with_the_upgrade_request()
 }
 
 #[tokio::test]
-async fn local_proxy_forwards_responses_websocket_frames_larger_than_16_mib() {
+async fn local_proxy_falls_back_same_turn_when_websocket_request_exceeds_16_mib() {
     let _settings_lock = websocket_settings_test_lock().lock().await;
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_address = upstream_listener.local_addr().unwrap();
@@ -655,13 +655,10 @@ async fn local_proxy_forwards_responses_websocket_frames_larger_than_16_mib() {
         .await
         .unwrap();
         let message = socket.next().await.unwrap().unwrap();
-        let Message::Text(text) = message else {
-            panic!("expected response.create text message");
-        };
-        let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
-        let content_length = payload["input"][0]["content"].as_str().unwrap().len();
-        let _ = socket.close(None).await;
-        content_length
+        assert!(
+            matches!(message, Message::Close(_)),
+            "oversized response.create must not reach the upstream websocket"
+        );
     });
 
     let temp = tempfile::tempdir().unwrap();
@@ -672,14 +669,33 @@ async fn local_proxy_forwards_responses_websocket_frames_larger_than_16_mib() {
     let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_address = local_listener.local_addr().unwrap();
     let local_server = tokio::spawn(async move {
-        let (mut stream, remote_addr) = local_listener.accept().await.unwrap();
-        let request_bytes = read_upgrade_request(&mut stream).await;
-        handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr)).await
+        for _ in 0..2 {
+            let (mut stream, remote_addr) = local_listener.accept().await.unwrap();
+            let request_bytes = read_upgrade_request(&mut stream).await;
+            let _ = handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr))
+                .await;
+        }
     });
 
-    let (mut client, _) = connect_async(format!("ws://{local_address}/v1/responses"))
-        .await
-        .unwrap();
+    let websocket_request = || {
+        let mut request = format!("ws://{local_address}/v1/responses")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("session-id", HeaderValue::from_static("large-session"));
+        request
+            .headers_mut()
+            .insert("thread-id", HeaderValue::from_static("large-thread"));
+        request.headers_mut().insert(
+            "x-codex-turn-metadata",
+            HeaderValue::from_static(
+                r#"{"turn_id":"large-turn","request_kind":"turn","window_id":"large-window"}"#,
+            ),
+        );
+        request
+    };
+    let (mut client, _) = connect_async(websocket_request()).await.unwrap();
     let content = "x".repeat(17 * 1024 * 1024);
     client
         .send(Message::Text(
@@ -694,13 +710,23 @@ async fn local_proxy_forwards_responses_websocket_frames_larger_than_16_mib() {
         .await
         .unwrap();
 
-    let forwarded_length = tokio::time::timeout(Duration::from_secs(10), upstream)
+    let message = tokio::time::timeout(Duration::from_secs(10), client.next())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(forwarded_length, 17 * 1024 * 1024);
-    let _ = client.close(None).await;
-    local_server.await.unwrap().unwrap();
+    let Message::Close(Some(close)) = message.unwrap() else {
+        panic!("oversized response.create should receive a websocket close");
+    };
+    assert_eq!(close.code, CloseCode::Size);
+
+    let error = connect_async(websocket_request()).await.unwrap_err();
+    let WebSocketError::Http(response) = error else {
+        panic!("same turn should be rejected before websocket upgrade");
+    };
+    assert_eq!(response.status().as_u16(), 426);
+
+    upstream.await.unwrap();
+    local_server.await.unwrap();
 }
 
 #[tokio::test]
