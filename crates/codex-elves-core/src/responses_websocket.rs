@@ -9,10 +9,18 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::error::Error as WebsocketError;
 use tokio_tungstenite::tungstenite::http::header::{AUTHORIZATION, USER_AGENT};
 use tokio_tungstenite::tungstenite::http::{HeaderValue, Request, StatusCode};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const RESPONSES_TRANSPORT_MAX_BYTES: usize = 64 * 1024 * 1024;
 pub type UpstreamResponsesWebsocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+pub(crate) fn responses_websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_frame_size(Some(RESPONSES_TRANSPORT_MAX_BYTES))
+        .max_message_size(Some(RESPONSES_TRANSPORT_MAX_BYTES))
+}
 
 /// 返回供应商原生 Responses WebSocket 的规范化端点。
 pub fn responses_websocket_url(base_url: &str) -> Option<String> {
@@ -92,7 +100,16 @@ pub async fn probe_responses_websocket(profile: &RelayProfile) -> ResponsesWebso
         }
     };
 
-    match tokio::time::timeout(PROBE_TIMEOUT, tokio_tungstenite::connect_async(request)).await {
+    match tokio::time::timeout(
+        PROBE_TIMEOUT,
+        tokio_tungstenite::connect_async_with_config(
+            request,
+            Some(responses_websocket_config()),
+            false,
+        ),
+    )
+    .await
+    {
         Err(_) => unknown_probe_result(endpoint, "Responses WebSocket 探测超时。"),
         Ok(Ok((socket, response))) => {
             drop(socket);
@@ -110,9 +127,16 @@ pub async fn open_responses_websocket_upstream(
     original_user_agent: Option<&str>,
 ) -> anyhow::Result<UpstreamResponsesWebsocket> {
     let request = responses_websocket_request(profile, original_user_agent)?;
-    let result = tokio::time::timeout(PROBE_TIMEOUT, tokio_tungstenite::connect_async(request))
-        .await
-        .context("Responses WebSocket 上游连接超时")?;
+    let result = tokio::time::timeout(
+        PROBE_TIMEOUT,
+        tokio_tungstenite::connect_async_with_config(
+            request,
+            Some(responses_websocket_config()),
+            false,
+        ),
+    )
+    .await
+    .context("Responses WebSocket 上游连接超时")?;
     let (socket, response) = result.map_err(|error| {
         anyhow::anyhow!(
             "{}",

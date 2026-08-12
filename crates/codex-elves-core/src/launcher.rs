@@ -22,7 +22,7 @@ const BRIDGE_WATCHDOG_HEALTHY_INTERVAL: Duration = Duration::from_secs(5);
 const BRIDGE_WATCHDOG_RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_HELPER_CONNECTIONS: usize = 64;
 const HELPER_REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(15);
-const MAX_HELPER_REQUEST_BYTES: usize = 32 * 1024 * 1024;
+const MAX_HELPER_REQUEST_BYTES: usize = crate::responses_websocket::RESPONSES_TRANSPORT_MAX_BYTES;
 const MAX_HELPER_HEADER_BYTES: usize = 64 * 1024;
 type BridgeRuntimeSlot = Arc<Mutex<Option<crate::bridge::BridgeRuntime>>>;
 

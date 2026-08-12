@@ -163,8 +163,13 @@ pub async fn handle_responses_websocket_connection(
     let mut response_bytes = Vec::new();
     write_response(&mut response_bytes, &response)?;
     stream.write_all(&response_bytes).await?;
-    let downstream =
-        WebSocketStream::from_partially_read(stream, trailing_bytes, Role::Server, None).await;
+    let downstream = WebSocketStream::from_partially_read(
+        stream,
+        trailing_bytes,
+        Role::Server,
+        Some(crate::responses_websocket::responses_websocket_config()),
+    )
+    .await;
 
     log_websocket_event(
         "helper.responses_websocket_connected",

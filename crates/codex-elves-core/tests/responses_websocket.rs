@@ -17,13 +17,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio_tungstenite::accept_hdr_async;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
+use tokio_tungstenite::{accept_hdr_async, accept_hdr_async_with_config};
 
 fn native_responses_profile() -> RelayProfile {
     RelayProfile {
@@ -634,6 +635,72 @@ async fn local_proxy_preserves_a_websocket_frame_read_with_the_upgrade_request()
     assert_eq!(upstream_payload["model"], "gpt-trailing-frame");
     local_server.await.unwrap().unwrap();
     drop(client);
+}
+
+#[tokio::test]
+async fn local_proxy_forwards_responses_websocket_frames_larger_than_16_mib() {
+    let _settings_lock = websocket_settings_test_lock().lock().await;
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        let (stream, _) = upstream_listener.accept().await.unwrap();
+        let config = WebSocketConfig::default()
+            .max_frame_size(Some(64 * 1024 * 1024))
+            .max_message_size(Some(64 * 1024 * 1024));
+        let mut socket = accept_hdr_async_with_config(
+            stream,
+            |_request: &Request, response: Response| Ok(response),
+            Some(config),
+        )
+        .await
+        .unwrap();
+        let message = socket.next().await.unwrap().unwrap();
+        let Message::Text(text) = message else {
+            panic!("expected response.create text message");
+        };
+        let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+        let content_length = payload["input"][0]["content"].as_str().unwrap().len();
+        let _ = socket.close(None).await;
+        content_length
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
+    save_supported_websocket_settings(upstream_address, false, "gpt-large-frame");
+
+    let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_address = local_listener.local_addr().unwrap();
+    let local_server = tokio::spawn(async move {
+        let (mut stream, remote_addr) = local_listener.accept().await.unwrap();
+        let request_bytes = read_upgrade_request(&mut stream).await;
+        handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr)).await
+    });
+
+    let (mut client, _) = connect_async(format!("ws://{local_address}/v1/responses"))
+        .await
+        .unwrap();
+    let content = "x".repeat(17 * 1024 * 1024);
+    client
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-large-frame",
+                "input": [{"role": "user", "content": content}]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let forwarded_length = tokio::time::timeout(Duration::from_secs(10), upstream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(forwarded_length, 17 * 1024 * 1024);
+    let _ = client.close(None).await;
+    local_server.await.unwrap().unwrap();
 }
 
 #[tokio::test]
