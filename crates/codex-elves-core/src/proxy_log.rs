@@ -16,7 +16,6 @@ pub const MAX_CAPTURED_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_CAPTURED_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const CAPTURE_HEAD_BYTES: usize = 64 * 1024;
 const FULL_CAPTURE_ENV: &str = "CODEX_ELVES_FULL_PROXY_CAPTURE";
-pub const STARTUP_RETAINED_RECORDS: usize = 10;
 pub const RUNTIME_RETAINED_RECORDS: usize = 500;
 const PROXY_INDEX_HEADER: &str = r#"{"format":"codex-elves-proxy-index","version":1}"#;
 const MAX_PROXY_INDEX_BYTES: u64 = 8 * 1024 * 1024;
@@ -663,21 +662,6 @@ fn clear_records_at_path(path: &Path) -> std::io::Result<()> {
     unlock_result
 }
 
-pub fn retain_recent_records(limit: usize) -> std::io::Result<()> {
-    if let Some(path) = crate::paths::proxy_log_path_for_tests() {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        return retain_recent_records_at_path(&path, limit);
-    }
-    flush_pending_records()?;
-    let path = default_log_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    retain_recent_records_at_path(&path, limit)
-}
-
 fn proxy_log_sender() -> &'static SyncSender<ProxyLogCommand> {
     PROXY_LOG_SENDER.get_or_init(|| {
         let (sender, receiver) = sync_channel(PROXY_LOG_QUEUE_CAPACITY);
@@ -797,27 +781,6 @@ fn find_record_at_path(path: &Path, id: &str) -> std::io::Result<Option<ProxyReq
     serde_json::from_str::<ProxyRequestRecord>(&text)
         .map(Some)
         .map_err(std::io::Error::other)
-}
-
-fn retain_recent_records_at_path(path: &Path, limit: usize) -> std::io::Result<()> {
-    let mut index_file = open_index_file(path)?;
-    index_file.lock_exclusive()?;
-    let result = (|| {
-        ensure_index_format_locked(path, &mut index_file)?;
-        let updates = read_summaries_from_locked_index(&mut index_file)?;
-        let mut summaries = dedupe_summaries(updates);
-        sort_summaries(&mut summaries);
-        let removed = if summaries.len() > limit {
-            summaries.split_off(limit)
-        } else {
-            Vec::new()
-        };
-        write_summaries_to_locked_index(&mut index_file, &summaries)?;
-        remove_detail_records(path, &removed)
-    })();
-    let unlock_result = index_file.unlock();
-    result?;
-    unlock_result
 }
 
 fn open_index_file(path: &Path) -> std::io::Result<fs::File> {
@@ -1446,7 +1409,7 @@ mod tests {
         ProxyRequestRecord, ProxyRequestState, append_record, append_record_at_path,
         clear_records_at_path, current_timestamp_ms, extract_reasoning_tokens_from_response_body,
         extract_request_metadata, find_record, find_record_at_path, read_summaries,
-        read_summaries_at_path, retain_recent_records, serialize_record_for_log,
+        read_summaries_at_path, serialize_record_for_log,
     };
 
     fn temp_proxy_log_path(name: &str) -> std::path::PathBuf {
@@ -1758,23 +1721,6 @@ data: [DONE]
         assert_eq!(
             summaries.last().map(|entry| entry.id.as_str()),
             Some("test-record")
-        );
-
-        retain_recent_records(super::STARTUP_RETAINED_RECORDS).expect("retain recent proxy logs");
-        let summaries = read_summaries(20).expect("read retained proxy log summaries");
-        assert_eq!(summaries.len(), super::STARTUP_RETAINED_RECORDS);
-        assert_eq!(
-            summaries.first().map(|entry| entry.id.as_str()),
-            Some("test-record-11")
-        );
-        assert_eq!(
-            summaries.last().map(|entry| entry.id.as_str()),
-            Some("test-record-2")
-        );
-        assert!(
-            find_record("test-record")
-                .expect("read removed detail")
-                .is_none()
         );
 
         remove_proxy_log_artifacts(&path);

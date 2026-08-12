@@ -19,6 +19,7 @@ use codex_elves_core::launcher::{WindowsProcessControlStrategy, windows_process_
 use codex_elves_core::ports::{
     select_packaged_codex_debug_port_with, select_platform_loopback_port_with,
 };
+use codex_elves_core::proxy_log::{ProxyRequestRecord, ProxyRequestState, ProxyRequestTransport};
 use codex_elves_core::settings::{BackendSettings, RelayProfile, RelayProtocol};
 use codex_elves_core::status::StatusStore;
 
@@ -1527,11 +1528,20 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
     let app_dir = temp.path().join("Codex.app");
     std::fs::create_dir_all(&app_dir).unwrap();
     let proxy_log_path = temp.path().join("proxy-requests.jsonl");
-    let old_proxy_log = (0..codex_elves_core::proxy_log::STARTUP_RETAINED_RECORDS + 2)
-        .map(|index| format!("stale-request-{index}"))
-        .collect::<Vec<_>>();
-    std::fs::write(&proxy_log_path, format!("{}\n", old_proxy_log.join("\n"))).unwrap();
     let _proxy_log_guard = LauncherProxyLogPathGuard::set(proxy_log_path.clone());
+    for index in 0..12 {
+        codex_elves_core::proxy_log::append_record(&launcher_proxy_request_record(
+            &format!("stale-request-{index}"),
+            index,
+        ))
+        .unwrap();
+    }
+    assert_eq!(
+        codex_elves_core::proxy_log::read_summaries(20)
+            .unwrap()
+            .len(),
+        12
+    );
     let status_store = StatusStore::new(temp.path().join("latest-status.json"));
     let events = Arc::new(Mutex::new(Vec::<String>::new()));
     let settings = BackendSettings {
@@ -1592,7 +1602,16 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
         proxy_log.lines().next(),
         Some(r#"{"format":"codex-elves-proxy-index","version":1}"#)
     );
-    assert!(!proxy_log.contains("stale-request-"));
+    assert!(
+        codex_elves_core::proxy_log::read_summaries(20)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        codex_elves_core::proxy_log::find_record("stale-request-11")
+            .unwrap()
+            .is_none()
+    );
 
     handle.wait_for_codex_exit().await.unwrap();
 
@@ -2004,6 +2023,49 @@ impl LauncherProxyLogPathGuard {
 impl Drop for LauncherProxyLogPathGuard {
     fn drop(&mut self) {
         codex_elves_core::paths::set_proxy_log_path_for_tests(self.previous.take());
+    }
+}
+
+fn launcher_proxy_request_record(id: &str, timestamp_ms: u64) -> ProxyRequestRecord {
+    ProxyRequestRecord {
+        id: id.to_string(),
+        state: ProxyRequestState::Completed,
+        transport: ProxyRequestTransport::Http,
+        timestamp_ms,
+        method: "POST".to_string(),
+        path: "/v1/responses".to_string(),
+        remote_addr: Some("127.0.0.1:1".to_string()),
+        model: Some("gpt-5.4".to_string()),
+        reasoning_tokens: None,
+        reasoning_effort: None,
+        reasoning_source: None,
+        continue_thinking_triggered: false,
+        continue_thinking_rounds: 0,
+        continue_thinking_request_body: None,
+        continue_thinking_before_response_body: None,
+        continue_thinking_after_response_body: None,
+        remote_compaction_triggered: false,
+        layered_compaction_triggered: false,
+        layered_compaction_retain_tokens: None,
+        layered_compaction_retained_items: None,
+        layered_compaction_retained_chars: None,
+        layered_compaction_before_response_body: None,
+        service_tier: None,
+        relay_id: Some("relay-chat".to_string()),
+        relay_name: Some("Chat".to_string()),
+        endpoint: Some("https://chat-only.example.test/v1/responses".to_string()),
+        response_protocol: Some("responses".to_string()),
+        status_code: Some(200),
+        first_token_ms: Some(1),
+        duration_ms: Some(2),
+        stream: false,
+        request_bytes: 2,
+        response_bytes: Some(2),
+        response_captured_bytes: Some(2),
+        response_truncated: false,
+        request_body: "{}".to_string(),
+        response_body: "{}".to_string(),
+        error: None,
     }
 }
 
