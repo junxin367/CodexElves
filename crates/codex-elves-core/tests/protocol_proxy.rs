@@ -7,18 +7,21 @@ use codex_elves_core::protocol_proxy::{
     AnthropicSseToResponsesConverter, ChatSseToResponsesConverter, UpstreamResponseProtocol,
     anthropic_message_to_response_with_request, anthropic_messages_url,
     anthropic_sse_to_responses_sse_with_request, apply_continue_thinking_to_responses_stream,
-    chat_completion_to_response, chat_completion_to_response_with_request, chat_completions_url,
-    chat_sse_to_responses_sse, chat_sse_to_responses_sse_with_request,
+    apply_continue_thinking_to_responses_stream_with_request_context, chat_completion_to_response,
+    chat_completion_to_response_with_request, chat_completions_url, chat_sse_to_responses_sse,
+    chat_sse_to_responses_sse_with_request,
     clear_anthropic_reasoning_compatibility_cache_for_tests, handle_responses_proxy_request,
     is_chat_completions_proxy_path, is_models_proxy_path, is_responses_proxy_path, models_url,
     open_chat_completions_proxy_request, open_models_proxy_request, open_responses_proxy_request,
-    open_responses_proxy_request_with_settings, responses_error_from_upstream,
+    open_responses_proxy_request_with_settings,
+    open_responses_proxy_request_with_settings_and_request_context, responses_error_from_upstream,
     responses_to_anthropic_messages, responses_to_chat_completions,
     send_upstream_request_with_header_timeout, stream_idle_timeout_for_reasoning_effort,
     stream_idle_timeout_for_request, stream_idle_timeout_ms_for_reasoning_effort,
     supported_reasoning_efforts_for_model, upstream_error_is_timeout, upstream_http_client,
     upstream_models_header_timeout,
 };
+use codex_elves_core::request_headers::RequestContext;
 use codex_elves_core::settings::{
     AggregateRelayMember, AggregateRelayProfile, AggregateRelayStrategy, BackendSettings,
     LayeredCompactionModels, RelayMode, RelayModelMapping, RelayProfile, RelayProtocol,
@@ -7528,6 +7531,56 @@ async fn aggregate_proxy_fails_over_to_next_member_in_same_request() {
 }
 
 #[tokio::test]
+async fn aggregate_failover_reapplies_header_policy_after_switching_to_chat_completions() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let first_server = spawn_chat_server_with_status_responses(vec![(
+        "500 Internal Server Error".to_string(),
+        r#"{"error":{"message":"retry another member"}}"#.to_string(),
+    )]);
+    let second_server = spawn_chat_server_with_response(
+        r#"{"id":"chatcmpl_failover","object":"chat.completion","choices":[]}"#,
+    );
+    let mut settings = aggregate_proxy_settings(
+        "header-policy-failover",
+        first_server.base_url.clone(),
+        second_server.base_url.clone(),
+    );
+    settings.relay_profiles[1].protocol = RelayProtocol::ChatCompletions;
+    settings.relay_profiles[1].model_mappings[0].protocol = RelayProtocol::ChatCompletions;
+
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "x-codex-beta-features",
+        reqwest::header::HeaderValue::from_static("remote_compaction_v2"),
+    );
+    let request_context = RequestContext::from_headers(headers);
+    let upstream = open_responses_proxy_request_with_settings_and_request_context(
+        r#"{"model":"gpt-5-mini","input":"hi","stream":false}"#,
+        settings,
+        &request_context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(upstream.status_code, 200);
+    assert_eq!(
+        upstream.response_protocol,
+        UpstreamResponseProtocol::ChatCompletions
+    );
+    drop(upstream);
+
+    let first = first_server.finish();
+    let second = second_server.finish();
+    assert_eq!(first.path, "/v1/responses");
+    assert_eq!(first.x_codex_beta_features, "remote_compaction_v2");
+    assert_eq!(second.path, "/v1/chat/completions");
+    assert!(
+        second.x_codex_beta_features.is_empty(),
+        "Codex Responses semantics must not leak after failover changes the target protocol"
+    );
+}
+
+#[tokio::test]
 async fn aggregate_remote_compaction_uses_successful_candidates_actual_protocol() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let first = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -7913,7 +7966,13 @@ async fn continue_thinking_reports_accumulated_reasoning_tokens() {
         ..BackendSettings::default()
     };
 
-    let result = apply_continue_thinking_to_responses_stream(
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "x-codex-beta-features",
+        reqwest::header::HeaderValue::from_static("remote_compaction_v2"),
+    );
+    let request_context = RequestContext::from_headers(headers);
+    let result = apply_continue_thinking_to_responses_stream_with_request_context(
         &json!({
             "model": "gpt-responses",
             "input": "hi",
@@ -7921,7 +7980,7 @@ async fn continue_thinking_reports_accumulated_reasoning_tokens() {
             "reasoning": { "effort": "high" }
         }),
         settings,
-        None,
+        &request_context,
         responses_sse_with_reasoning("resp_first", 516),
     )
     .await;
@@ -7933,6 +7992,7 @@ async fn continue_thinking_reports_accumulated_reasoning_tokens() {
     let request = server.finish();
     assert_eq!(request.path, "/v1/responses");
     assert!(request.body.contains("continue_thinking"));
+    assert_eq!(request.x_codex_beta_features, "remote_compaction_v2");
 }
 
 #[tokio::test]
@@ -9805,6 +9865,7 @@ struct ChatRequest {
     user_agent: String,
     x_api_key: String,
     anthropic_version: String,
+    x_codex_beta_features: String,
     body: String,
 }
 
@@ -9897,6 +9958,7 @@ fn spawn_chat_server_with_status_responses(responses: Vec<(String, String)>) -> 
             let user_agent = header_value("user-agent").unwrap_or_default();
             let x_api_key = header_value("x-api-key").unwrap_or_default();
             let anthropic_version = header_value("anthropic-version").unwrap_or_default();
+            let x_codex_beta_features = header_value("x-codex-beta-features").unwrap_or_default();
             let request_body = request
                 .split_once("\r\n\r\n")
                 .map(|(_, body)| body.to_string())
@@ -9912,6 +9974,7 @@ fn spawn_chat_server_with_status_responses(responses: Vec<(String, String)>) -> 
                 user_agent,
                 x_api_key,
                 anthropic_version,
+                x_codex_beta_features,
                 body: request_body,
             });
         }
@@ -10010,6 +10073,7 @@ fn spawn_raw_response_server(
             user_agent: header_value("user-agent").unwrap_or_default(),
             x_api_key: header_value("x-api-key").unwrap_or_default(),
             anthropic_version: header_value("anthropic-version").unwrap_or_default(),
+            x_codex_beta_features: header_value("x-codex-beta-features").unwrap_or_default(),
             body: request_body,
         }
     });

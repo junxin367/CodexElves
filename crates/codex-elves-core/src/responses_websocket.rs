@@ -1,5 +1,6 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::request_headers::{RequestContext, UpstreamHeaderRoute};
 use crate::settings::{
     BackendSettings, RelayMode, RelayProfile, RelayProtocol, ResponsesWebsocketCapability,
     ResponsesWebsocketCapabilityState,
@@ -128,7 +129,15 @@ pub async fn open_responses_websocket_upstream(
     profile: &RelayProfile,
     original_user_agent: Option<&str>,
 ) -> anyhow::Result<UpstreamResponsesWebsocket> {
-    let request = responses_websocket_request(profile, original_user_agent)?;
+    let request_context = RequestContext::from_user_agent(original_user_agent);
+    open_responses_websocket_upstream_with_request_context(profile, &request_context).await
+}
+
+pub async fn open_responses_websocket_upstream_with_request_context(
+    profile: &RelayProfile,
+    request_context: &RequestContext,
+) -> anyhow::Result<UpstreamResponsesWebsocket> {
+    let request = responses_websocket_request(profile, Some(request_context))?;
     let result = tokio::time::timeout(
         PROBE_TIMEOUT,
         tokio_tungstenite::connect_async_with_config(
@@ -245,7 +254,7 @@ pub fn relay_responses_base_url(profile: &RelayProfile) -> &str {
 
 fn responses_websocket_request(
     profile: &RelayProfile,
-    original_user_agent: Option<&str>,
+    request_context: Option<&RequestContext>,
 ) -> anyhow::Result<Request<()>> {
     let endpoint = responses_websocket_url(relay_responses_base_url(profile))
         .ok_or_else(|| anyhow::anyhow!("Responses WebSocket 端点无效"))?;
@@ -256,11 +265,21 @@ fn responses_websocket_request(
         .as_str()
         .into_client_request()
         .context("Responses WebSocket 请求无效")?;
+    if let Some(request_context) = request_context {
+        let headers = request_context.headers_for(UpstreamHeaderRoute::NativeResponsesWebSocket);
+        let mut header_names = std::collections::HashSet::new();
+        header_names.extend(headers.keys().cloned());
+        for name in header_names {
+            for value in headers.get_all(&name) {
+                request.headers_mut().append(name.clone(), value.clone());
+            }
+        }
+    }
     let authorization = HeaderValue::from_str(&format!("Bearer {}", profile.api_key.trim()))
         .context("Responses WebSocket 鉴权配置无效")?;
     let user_agent = HeaderValue::from_str(&effective_user_agent(
         &profile.user_agent,
-        original_user_agent,
+        request_context.and_then(RequestContext::user_agent),
     ))
     .context("Responses WebSocket User-Agent 无效")?;
     request.headers_mut().insert(AUTHORIZATION, authorization);

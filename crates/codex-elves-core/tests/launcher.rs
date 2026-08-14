@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -20,8 +21,72 @@ use codex_elves_core::ports::{
     select_packaged_codex_debug_port_with, select_platform_loopback_port_with,
 };
 use codex_elves_core::proxy_log::{ProxyRequestRecord, ProxyRequestState, ProxyRequestTransport};
+use codex_elves_core::request_headers::{RequestContext, UpstreamHeaderRoute};
 use codex_elves_core::settings::{BackendSettings, RelayProfile, RelayProtocol};
 use codex_elves_core::status::StatusStore;
+
+#[test]
+fn request_context_rebuilds_only_native_responses_semantic_headers() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.append(
+        "x-codex-beta-features",
+        reqwest::header::HeaderValue::from_static("remote_compaction_v2"),
+    );
+    headers.append(
+        "x-codex-beta-features",
+        reqwest::header::HeaderValue::from_static("future_native_feature"),
+    );
+    headers.insert(
+        "x-codex-turn-state",
+        reqwest::header::HeaderValue::from_static("turn-state"),
+    );
+    headers.insert(
+        "openai-beta",
+        reqwest::header::HeaderValue::from_static("responses_websockets=2026-02-06"),
+    );
+    headers.insert(
+        "connection",
+        reqwest::header::HeaderValue::from_static("x-codex-turn-state, x-unrelated"),
+    );
+    headers.insert(
+        "authorization",
+        reqwest::header::HeaderValue::from_static("Bearer local-client-token"),
+    );
+    headers.insert(
+        "x-forwarded-for",
+        reqwest::header::HeaderValue::from_static("203.0.113.42"),
+    );
+
+    let context = RequestContext::from_headers(headers);
+    let native = context.headers_for(UpstreamHeaderRoute::NativeResponsesHttp);
+    let beta_features = native
+        .get_all("x-codex-beta-features")
+        .iter()
+        .map(|value| value.to_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        beta_features,
+        ["remote_compaction_v2", "future_native_feature"]
+    );
+    assert_eq!(
+        native
+            .get("openai-beta")
+            .and_then(|value| value.to_str().ok()),
+        Some("responses_websockets=2026-02-06")
+    );
+    assert!(
+        native.get("x-codex-turn-state").is_none(),
+        "Connection-declared headers are hop-by-hop and must not be forwarded"
+    );
+    assert!(native.get("authorization").is_none());
+    assert!(native.get("x-forwarded-for").is_none());
+    assert!(
+        context
+            .headers_for(UpstreamHeaderRoute::ConvertedProtocol)
+            .is_empty()
+    );
+}
 
 #[test]
 fn app_paths_find_latest_windows_package_prefers_highest_version_app_dir() {
@@ -739,6 +804,95 @@ data: [DONE]
 }
 
 #[tokio::test]
+async fn helper_preserves_codex_semantic_headers_for_native_responses_upstream() {
+    let _lock = launcher_settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
+    let upstream = spawn_launcher_upstream_with_response(
+        "application/json",
+        r#"{"id":"resp_headers","object":"response","status":"completed","model":"gpt-responses","output":[]}"#
+            .to_string(),
+    );
+    write_launcher_mixed_relay_settings(temp.path(), &upstream.base_url);
+
+    let hooks = DefaultLaunchHooks::default();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    hooks.start_helper(port).await.unwrap();
+
+    let mut semantic_headers = reqwest::header::HeaderMap::new();
+    semantic_headers.append(
+        "x-codex-beta-features",
+        reqwest::header::HeaderValue::from_static("remote_compaction_v2"),
+    );
+    semantic_headers.append(
+        "x-codex-beta-features",
+        reqwest::header::HeaderValue::from_static("future_native_feature"),
+    );
+    semantic_headers.insert(
+        "x-codex-turn-state",
+        reqwest::header::HeaderValue::from_static("turn-state-from-client"),
+    );
+    semantic_headers.insert(
+        "openai-beta",
+        reqwest::header::HeaderValue::from_static("responses_websockets=2026-02-06"),
+    );
+    semantic_headers.insert(
+        "authorization",
+        reqwest::header::HeaderValue::from_static("Bearer local-client-token"),
+    );
+    semantic_headers.insert(
+        "x-forwarded-for",
+        reqwest::header::HeaderValue::from_static("203.0.113.42"),
+    );
+
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .headers(semantic_headers)
+        .json(&serde_json::json!({
+            "model": "gpt-responses",
+            "input": "preserve the native responses context"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    hooks.shutdown_helper(port).await;
+    let requests = upstream.finish_all();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+
+    assert_eq!(
+        request.header_values("x-codex-beta-features"),
+        Some(
+            &[
+                "remote_compaction_v2".to_string(),
+                "future_native_feature".to_string()
+            ][..]
+        )
+    );
+    assert_eq!(
+        request.header_values("x-codex-turn-state"),
+        Some(&["turn-state-from-client".to_string()][..])
+    );
+    assert_eq!(
+        request.header_values("openai-beta"),
+        Some(&["responses_websockets=2026-02-06".to_string()][..])
+    );
+    assert_eq!(
+        request.header_value("authorization"),
+        Some("Bearer sk-test"),
+        "the relay credential must replace the local client credential"
+    );
+    assert_eq!(request.header_value("x-forwarded-for"), None);
+}
+
+#[tokio::test]
 async fn native_remote_compaction_preserves_upstream_non_sse_status_and_content_type() {
     let _lock = launcher_settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -840,6 +994,7 @@ data: [DONE]
         .build()
         .unwrap()
         .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .header("x-codex-beta-features", "remote_compaction_v2")
         .json(&serde_json::json!({
             "model": "gpt-responses",
             "input": "retry the same model",
@@ -858,6 +1013,14 @@ data: [DONE]
     assert_eq!(requests[0].path, "/v1/responses");
     assert_eq!(requests[1].path, "/v1/responses");
     assert_eq!(requests[0].body, requests[1].body);
+    assert_eq!(
+        requests[0].header_values("x-codex-beta-features"),
+        Some(&["remote_compaction_v2".to_string()][..])
+    );
+    assert_eq!(
+        requests[1].header_values("x-codex-beta-features"),
+        Some(&["remote_compaction_v2".to_string()][..])
+    );
     assert!(body.contains("resp_recovered"));
     assert!(!body.contains("server_is_overloaded"));
 }
@@ -893,6 +1056,7 @@ data: [DONE]
         .build()
         .unwrap()
         .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .header("x-codex-beta-features", "remote_compaction_v2")
         .json(&serde_json::json!({
             "model": "gpt-chat",
             "input": "think deeply",
@@ -921,6 +1085,7 @@ data: [DONE]
 
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path, "/v1/chat/completions");
+    assert_eq!(requests[0].header_value("x-codex-beta-features"), None);
     let first_upstream_body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
     assert_eq!(first_upstream_body["stream"], true);
     assert!(content_type.contains("text/event-stream"));
@@ -1035,6 +1200,7 @@ data: {"type":"message_stop"}
         .build()
         .unwrap()
         .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .header("x-codex-beta-features", "remote_compaction_v2")
         .json(&serde_json::json!({
             "model": "claude-sonnet-4",
             "input": "think deeply",
@@ -1062,6 +1228,7 @@ data: {"type":"message_stop"}
 
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path, "/v1/messages");
+    assert_eq!(requests[0].header_value("x-codex-beta-features"), None);
     let first_upstream_body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
     assert_eq!(first_upstream_body["stream"], true);
     assert!(content_type.contains("text/event-stream"));
@@ -2087,7 +2254,22 @@ impl LauncherUpstream {
 
 struct LauncherUpstreamRequest {
     path: String,
+    headers: BTreeMap<String, Vec<String>>,
     body: String,
+}
+
+impl LauncherUpstreamRequest {
+    fn header_values(&self, name: &str) -> Option<&[String]> {
+        self.headers
+            .get(&name.to_ascii_lowercase())
+            .map(Vec::as_slice)
+    }
+
+    fn header_value(&self, name: &str) -> Option<&str> {
+        self.header_values(name)
+            .and_then(|values| values.first())
+            .map(String::as_str)
+    }
 }
 
 fn spawn_launcher_upstream_with_response(
@@ -2142,16 +2324,7 @@ fn spawn_launcher_upstream_with_status_response(
             }
         };
         let request = read_launcher_upstream_request(&mut stream);
-        let path = request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .unwrap_or_default()
-            .to_string();
-        let body = request
-            .split_once("\r\n\r\n")
-            .map(|(_, body)| body.to_string())
-            .unwrap_or_default();
+        let request = launcher_upstream_request_from_raw(&request);
         if !response_delay.is_zero() {
             std::thread::sleep(response_delay);
         }
@@ -2161,7 +2334,7 @@ fn spawn_launcher_upstream_with_status_response(
             response_body
         );
         stream.write_all(response.as_bytes()).unwrap();
-        vec![LauncherUpstreamRequest { path, body }]
+        vec![request]
     });
 
     LauncherUpstream { base_url, handle }
@@ -2194,16 +2367,7 @@ fn spawn_launcher_upstream_with_response_specs(
             };
 
             let request = read_launcher_upstream_request(&mut stream);
-            let path = request
-                .lines()
-                .next()
-                .and_then(|line| line.split_whitespace().nth(1))
-                .unwrap_or_default()
-                .to_string();
-            let body = request
-                .split_once("\r\n\r\n")
-                .map(|(_, body)| body.to_string())
-                .unwrap_or_default();
+            let request = launcher_upstream_request_from_raw(&request);
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 content_type,
@@ -2214,12 +2378,46 @@ fn spawn_launcher_upstream_with_response_specs(
                 std::thread::sleep(response_delay);
             }
             stream.write_all(response.as_bytes()).unwrap();
-            requests.push(LauncherUpstreamRequest { path, body });
+            requests.push(request);
         }
         requests
     });
 
     LauncherUpstream { base_url, handle }
+}
+
+fn launcher_upstream_request_from_raw(request: &str) -> LauncherUpstreamRequest {
+    let path = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or_default()
+        .to_string();
+    let mut headers = BTreeMap::<String, Vec<String>>::new();
+    for line in request
+        .split_once("\r\n\r\n")
+        .map(|(headers, _)| headers)
+        .unwrap_or(request)
+        .lines()
+        .skip(1)
+    {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        headers
+            .entry(name.trim().to_ascii_lowercase())
+            .or_default()
+            .push(value.trim().to_string());
+    }
+    let body = request
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_default();
+    LauncherUpstreamRequest {
+        path,
+        headers,
+        body,
+    }
 }
 
 fn read_launcher_upstream_request(stream: &mut std::net::TcpStream) -> String {

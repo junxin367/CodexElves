@@ -119,34 +119,33 @@ pub async fn handle_responses_websocket_connection(
         return Ok(());
     }
 
-    let original_user_agent = request
-        .headers()
-        .get("user-agent")
-        .and_then(|value| value.to_str().ok());
-    let upstream = match crate::responses_websocket::open_responses_websocket_upstream(
-        &relay,
-        original_user_agent,
-    )
-    .await
-    {
-        Ok(upstream) => upstream,
-        Err(error) => {
-            log_websocket_event(
-                "helper.responses_websocket_upstream_failed",
-                &relay,
-                remote_addr.as_deref(),
-                &connection_context,
-                Some(&error.to_string()),
-            );
-            reject_upgrade(
-                &mut stream,
-                StatusCode::BAD_GATEWAY,
-                "Responses WebSocket 上游连接失败，Codex 将按客户端重试策略处理",
-            )
-            .await?;
-            return Ok(());
-        }
-    };
+    let request_context =
+        crate::request_headers::RequestContext::from_headers(request.headers().clone());
+    let upstream =
+        match crate::responses_websocket::open_responses_websocket_upstream_with_request_context(
+            &relay,
+            &request_context,
+        )
+        .await
+        {
+            Ok(upstream) => upstream,
+            Err(error) => {
+                log_websocket_event(
+                    "helper.responses_websocket_upstream_failed",
+                    &relay,
+                    remote_addr.as_deref(),
+                    &connection_context,
+                    Some(&error.to_string()),
+                );
+                reject_upgrade(
+                    &mut stream,
+                    StatusCode::BAD_GATEWAY,
+                    "Responses WebSocket 上游连接失败，Codex 将按客户端重试策略处理",
+                )
+                .await?;
+                return Ok(());
+            }
+        };
     if let Err(error) = ensure_websocket_relay_still_current(&relay) {
         reject_upgrade(&mut stream, StatusCode::CONFLICT, &error.to_string()).await?;
         return Ok(());

@@ -12,6 +12,7 @@ use anyhow::Context;
 use serde_json::{Map, Value, json};
 
 use crate::relay_rotation::{RotationContext, RotationEvent};
+use crate::request_headers::{RequestContext, UpstreamHeaderRoute};
 use crate::settings::SettingsStore;
 
 pub const DEFAULT_PROTOCOL_PROXY_PORT: u16 = 45221;
@@ -1867,11 +1868,19 @@ pub async fn open_responses_proxy_request(
     body: &str,
     original_user_agent: Option<&str>,
 ) -> anyhow::Result<UpstreamProxyResponse> {
+    let request_context = RequestContext::from_user_agent(original_user_agent);
+    open_responses_proxy_request_with_request_context(body, &request_context).await
+}
+
+pub async fn open_responses_proxy_request_with_request_context(
+    body: &str,
+    request_context: &RequestContext,
+) -> anyhow::Result<UpstreamProxyResponse> {
     let settings = SettingsStore::default().load().unwrap_or_default();
-    open_responses_proxy_request_with_settings_user_agent_and_timeout(
+    open_responses_proxy_request_with_settings_request_context_and_timeout(
         body,
         settings,
-        original_user_agent,
+        request_context,
         None,
     )
     .await
@@ -1881,8 +1890,23 @@ pub async fn open_responses_proxy_request_with_settings(
     body: &str,
     settings: crate::settings::BackendSettings,
 ) -> anyhow::Result<UpstreamProxyResponse> {
-    open_responses_proxy_request_with_settings_user_agent_and_timeout(body, settings, None, None)
+    let request_context = RequestContext::default();
+    open_responses_proxy_request_with_settings_and_request_context(body, settings, &request_context)
         .await
+}
+
+pub async fn open_responses_proxy_request_with_settings_and_request_context(
+    body: &str,
+    settings: crate::settings::BackendSettings,
+    request_context: &RequestContext,
+) -> anyhow::Result<UpstreamProxyResponse> {
+    open_responses_proxy_request_with_settings_request_context_and_timeout(
+        body,
+        settings,
+        request_context,
+        None,
+    )
+    .await
 }
 
 pub async fn open_responses_proxy_request_with_stream_header_timeout(
@@ -1890,27 +1914,41 @@ pub async fn open_responses_proxy_request_with_stream_header_timeout(
     original_user_agent: Option<&str>,
     stream_header_timeout: Duration,
 ) -> anyhow::Result<UpstreamProxyResponse> {
+    let request_context = RequestContext::from_user_agent(original_user_agent);
+    open_responses_proxy_request_with_request_context_and_stream_header_timeout(
+        body,
+        &request_context,
+        stream_header_timeout,
+    )
+    .await
+}
+
+pub async fn open_responses_proxy_request_with_request_context_and_stream_header_timeout(
+    body: &str,
+    request_context: &RequestContext,
+    stream_header_timeout: Duration,
+) -> anyhow::Result<UpstreamProxyResponse> {
     let settings = SettingsStore::default().load().unwrap_or_default();
-    open_responses_proxy_request_with_settings_user_agent_and_timeout(
+    open_responses_proxy_request_with_settings_request_context_and_timeout(
         body,
         settings,
-        original_user_agent,
+        request_context,
         Some(stream_header_timeout),
     )
     .await
 }
 
-async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
+async fn open_responses_proxy_request_with_settings_request_context_and_timeout(
     body: &str,
     settings: crate::settings::BackendSettings,
-    original_user_agent: Option<&str>,
+    request_context: &RequestContext,
     stream_header_timeout_override: Option<Duration>,
 ) -> anyhow::Result<UpstreamProxyResponse> {
     let mut override_attempted = false;
     let first = open_responses_proxy_request_once(
         body,
         settings.clone(),
-        original_user_agent,
+        request_context,
         stream_header_timeout_override,
         &mut override_attempted,
     )
@@ -1942,7 +1980,7 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
     open_responses_proxy_request_once(
         body,
         fallback_settings,
-        original_user_agent,
+        request_context,
         stream_header_timeout_override,
         &mut fallback_override_attempted,
     )
@@ -1953,7 +1991,7 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
 async fn open_responses_proxy_request_once(
     body: &str,
     settings: crate::settings::BackendSettings,
-    original_user_agent: Option<&str>,
+    request_context: &RequestContext,
     stream_header_timeout_override: Option<Duration>,
     override_attempted: &mut bool,
 ) -> anyhow::Result<UpstreamProxyResponse> {
@@ -2088,7 +2126,7 @@ async fn open_responses_proxy_request_once(
         );
         let client = crate::http_client::proxied_client(&effective_user_agent(
             &relay.user_agent,
-            original_user_agent,
+            request_context.user_agent(),
         ))?;
         let (upstream, upstream_request_json) = match send_responses_upstream_request(
             &client,
@@ -2098,6 +2136,7 @@ async fn open_responses_proxy_request_once(
             upstream_is_stream,
             &diagnostic_id,
             header_timeout,
+            request_context,
         )
         .await
         {
@@ -2415,6 +2454,7 @@ async fn send_responses_upstream_request(
     is_stream: bool,
     diagnostic_id: &str,
     header_timeout: Option<Duration>,
+    request_context: &RequestContext,
 ) -> anyhow::Result<(reqwest::Response, Value)> {
     let upstream_request = responses_upstream_request_for_protocol(
         request_json,
@@ -2431,6 +2471,7 @@ async fn send_responses_upstream_request(
                     relay.api_key.trim(),
                     is_stream,
                     &upstream_request,
+                    request_context.headers_for(UpstreamHeaderRoute::NativeResponsesHttp),
                 ),
                 header_timeout,
             )
@@ -2511,6 +2552,7 @@ async fn send_chat_completions_request(
             relay.api_key.trim(),
             is_stream,
             chat_request,
+            reqwest::header::HeaderMap::new(),
         ),
         header_timeout,
     )
@@ -2711,9 +2753,11 @@ fn upstream_request_builder(
     api_key: &str,
     is_stream: bool,
     upstream_body: &Value,
+    request_headers: reqwest::header::HeaderMap,
 ) -> reqwest::RequestBuilder {
     let mut builder = client
         .post(endpoint)
+        .headers(request_headers)
         .bearer_auth(api_key)
         .header(reqwest::header::CONTENT_TYPE, "application/json");
     if is_stream {
@@ -2862,7 +2906,7 @@ fn responses_stream_has_retryable_model_capacity_error(sse_text: &str) -> bool {
 async fn retry_model_capacity_responses_stream(
     original_request: &Value,
     settings: &crate::settings::BackendSettings,
-    original_user_agent: Option<&str>,
+    request_context: &RequestContext,
     first_round_sse_text: String,
 ) -> String {
     let model = original_request
@@ -2895,10 +2939,10 @@ async fn retry_model_capacity_responses_stream(
 
         // 部分 GPT 上游会在模型完成推理后才返回 HTTP 响应头；这里有意让
         // 响应头等待与当前请求的业务空闲预算一致，避免短头超时提前关闭请求。
-        let upstream = match open_responses_proxy_request_with_settings_user_agent_and_timeout(
+        let upstream = match open_responses_proxy_request_with_settings_request_context_and_timeout(
             &request_body,
             settings.clone(),
-            original_user_agent,
+            request_context,
             Some(stream_idle_timeout),
         )
         .await
@@ -2957,10 +3001,26 @@ pub async fn apply_continue_thinking_to_responses_stream(
     original_user_agent: Option<&str>,
     first_round_sse_text: String,
 ) -> ContinueThinkingResult {
+    let request_context = RequestContext::from_user_agent(original_user_agent);
+    apply_continue_thinking_to_responses_stream_with_request_context(
+        original_request,
+        settings,
+        &request_context,
+        first_round_sse_text,
+    )
+    .await
+}
+
+pub async fn apply_continue_thinking_to_responses_stream_with_request_context(
+    original_request: &Value,
+    settings: crate::settings::BackendSettings,
+    request_context: &RequestContext,
+    first_round_sse_text: String,
+) -> ContinueThinkingResult {
     let first_round_sse_text = retry_model_capacity_responses_stream(
         original_request,
         &settings,
-        original_user_agent,
+        request_context,
         first_round_sse_text,
     )
     .await;
@@ -3077,10 +3137,10 @@ pub async fn apply_continue_thinking_to_responses_stream(
 
         // 续接轮次与首轮遵循同一规则：响应头可能就是首个业务进展，
         // 因此继续按请求推理等级使用业务空闲预算。
-        let upstream = match open_responses_proxy_request_with_settings_user_agent_and_timeout(
+        let upstream = match open_responses_proxy_request_with_settings_request_context_and_timeout(
             &continue_body,
             settings.clone(),
-            original_user_agent,
+            request_context,
             Some(stream_idle_timeout),
         )
         .await

@@ -367,6 +367,28 @@ async fn local_proxy_bridges_responses_websocket_messages_and_authentication() {
                     .and_then(|value| value.to_str().ok()),
                 Some("Bearer sk-bridge-secret")
             );
+            assert_eq!(
+                request
+                    .headers()
+                    .get("x-codex-beta-features")
+                    .and_then(|value| value.to_str().ok()),
+                Some("remote_compaction_v2")
+            );
+            assert_eq!(
+                request
+                    .headers()
+                    .get("x-codex-turn-state")
+                    .and_then(|value| value.to_str().ok()),
+                Some("turn-state-from-client")
+            );
+            assert_eq!(
+                request
+                    .headers()
+                    .get("openai-beta")
+                    .and_then(|value| value.to_str().ok()),
+                Some("responses_websockets=2026-02-06")
+            );
+            assert!(request.headers().get("x-forwarded-for").is_none());
             Ok(response)
         })
         .await
@@ -435,9 +457,29 @@ async fn local_proxy_bridges_responses_websocket_messages_and_authentication() {
             .unwrap();
     });
 
-    let (mut client, _) = connect_async(format!("ws://{local_address}/v1/responses"))
-        .await
+    let mut client_request = format!("ws://{local_address}/v1/responses")
+        .into_client_request()
         .unwrap();
+    client_request.headers_mut().insert(
+        "x-codex-beta-features",
+        HeaderValue::from_static("remote_compaction_v2"),
+    );
+    client_request.headers_mut().insert(
+        "x-codex-turn-state",
+        HeaderValue::from_static("turn-state-from-client"),
+    );
+    client_request.headers_mut().insert(
+        "openai-beta",
+        HeaderValue::from_static("responses_websockets=2026-02-06"),
+    );
+    client_request.headers_mut().insert(
+        "authorization",
+        HeaderValue::from_static("Bearer local-client-token"),
+    );
+    client_request
+        .headers_mut()
+        .insert("x-forwarded-for", HeaderValue::from_static("203.0.113.42"));
+    let (mut client, _) = connect_async(client_request).await.unwrap();
     client
         .send(Message::Text(
             serde_json::json!({

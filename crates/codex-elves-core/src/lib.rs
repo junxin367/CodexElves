@@ -29,6 +29,7 @@ pub mod relay_config;
 pub mod relay_rotation;
 pub mod relay_switch;
 pub mod remote_ssh;
+pub mod request_headers;
 pub mod responses_websocket;
 pub mod responses_websocket_bridge;
 mod responses_websocket_checkpoint;
