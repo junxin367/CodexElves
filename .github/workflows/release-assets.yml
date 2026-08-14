@@ -7,10 +7,11 @@ on:
     tags:
       - "v*"
       - "V*"
+      - "[0-9]*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build, for example v0.1.0"
+        description: "Release tag to build, for example 0.1.0-alpha.1 or v0.1.0"
         required: true
 
 permissions:
@@ -52,11 +53,16 @@ jobs:
           set -euo pipefail
           node scripts/generate-release-notes.mjs "$TAG" "$REPO" > release-notes.md
 
+          release_state_args=()
+          if [[ "$TAG" =~ ^[vV]?[0-9]+\.[0-9]+\.[0-9]+- ]]; then
+            release_state_args+=(--prerelease)
+          fi
+
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             echo "Release already exists: $TAG"
-            gh release edit "$TAG" --repo "$REPO" --notes-file release-notes.md
+            gh release edit "$TAG" --repo "$REPO" --title "$TAG" --notes-file release-notes.md "${release_state_args[@]}"
           else
-            gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes-file release-notes.md --target "$GITHUB_SHA"
+            gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes-file release-notes.md --target "$GITHUB_SHA" "${release_state_args[@]}"
           fi
 
   windows-installer:

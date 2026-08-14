@@ -94,7 +94,7 @@ function findPreviousTag(currentTag) {
 }
 
 function parseVersionTag(value) {
-  const match = value.match(/^[vV](\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
+  const match = value.match(/^[vV]?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
   if (!match) return null;
   return {
     major: Number(match[1]),
