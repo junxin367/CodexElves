@@ -890,6 +890,8 @@ async fn handle_helper_connection(
     let path = raw_path.split('?').next().unwrap_or(raw_path);
     let request_body = http_request_body(&request);
     let request_user_agent = header_value_from_request(&request, "user-agent");
+    let request_codex_beta_features =
+        header_value_from_request(&request, crate::protocol_proxy::CODEX_BETA_FEATURES_HEADER);
     let remote_addr_text = remote_addr.map(|addr| addr.to_string());
 
     let _ = crate::diagnostic_log::append_diagnostic_log(
@@ -908,6 +910,7 @@ async fn handle_helper_connection(
             &mut stream,
             request_body,
             request_user_agent.as_deref(),
+            request_codex_beta_features.as_deref(),
             method,
             path,
             remote_addr_text,
@@ -1450,6 +1453,7 @@ async fn handle_protocol_proxy_connection(
     stream: &mut tokio::net::TcpStream,
     request_body: &str,
     request_user_agent: Option<&str>,
+    request_codex_beta_features: Option<&str>,
     method: &str,
     path: &str,
     remote_addr_text: Option<String>,
@@ -1474,6 +1478,7 @@ async fn handle_protocol_proxy_connection(
             stream,
             request_body,
             request_user_agent,
+            request_codex_beta_features,
             method,
             path,
             remote_addr_text,
@@ -1485,23 +1490,25 @@ async fn handle_protocol_proxy_connection(
         )
         .await;
     }
-    let upstream_request = if request_json
+    let stream_header_timeout = if request_json
         .as_ref()
         .and_then(|request| request.get("stream"))
         .and_then(serde_json::Value::as_bool)
         == Some(true)
     {
-        let stream_header_timeout =
-            crate::protocol_proxy::stream_idle_timeout_for_request(request_json.as_ref());
-        crate::protocol_proxy::open_responses_proxy_request_with_stream_header_timeout(
-            request_body,
-            request_user_agent,
-            stream_header_timeout,
-        )
-        .await
+        Some(crate::protocol_proxy::stream_idle_timeout_for_request(
+            request_json.as_ref(),
+        ))
     } else {
-        crate::protocol_proxy::open_responses_proxy_request(request_body, request_user_agent).await
+        None
     };
+    let upstream_request = crate::protocol_proxy::open_responses_proxy_request_with_client_headers(
+        request_body,
+        request_user_agent,
+        request_codex_beta_features,
+        stream_header_timeout,
+    )
+    .await;
     let upstream = match upstream_request {
         Ok(upstream) => upstream,
         Err(error) => {
@@ -2390,6 +2397,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     stream: &mut tokio::net::TcpStream,
     request_body: &str,
     request_user_agent: Option<&str>,
+    request_codex_beta_features: Option<&str>,
     method: &str,
     path: &str,
     remote_addr_text: Option<String>,
@@ -2429,10 +2437,11 @@ async fn handle_deferred_protocol_proxy_stream_connection(
 
     let stream_header_timeout =
         crate::protocol_proxy::stream_idle_timeout_for_request(request_json.as_ref());
-    let upstream = crate::protocol_proxy::open_responses_proxy_request_with_stream_header_timeout(
+    let upstream = crate::protocol_proxy::open_responses_proxy_request_with_client_headers(
         request_body,
         request_user_agent,
-        stream_header_timeout,
+        request_codex_beta_features,
+        Some(stream_header_timeout),
     )
     .await;
 

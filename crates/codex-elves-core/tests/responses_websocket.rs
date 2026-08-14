@@ -1,9 +1,10 @@
 use codex_elves_core::proxy_log::{ProxyRequestState, ProxyRequestTransport};
 use codex_elves_core::responses_websocket::{
-    normalize_responses_websocket_capability, probe_active_relay_responses_websocket_if_needed,
-    probe_responses_websocket, relay_prefers_native_responses_websocket,
-    relay_supports_native_responses_websocket, relay_websocket_enabled_for_settings,
-    responses_websocket_url,
+    normalize_responses_websocket_capability,
+    open_responses_websocket_upstream_with_client_features,
+    probe_active_relay_responses_websocket_if_needed, probe_responses_websocket,
+    relay_prefers_native_responses_websocket, relay_supports_native_responses_websocket,
+    relay_websocket_enabled_for_settings, responses_websocket_url,
 };
 use codex_elves_core::responses_websocket_bridge::handle_responses_websocket_connection;
 use codex_elves_core::settings::{
@@ -251,6 +252,48 @@ async fn probe_uses_real_websocket_handshake_with_bearer_and_configured_user_age
             "Bearer sk-probe-secret".to_string(),
             "Codex-Probe-Test/1.0".to_string()
         ))
+    );
+}
+
+#[tokio::test]
+async fn upstream_websocket_forwards_remote_compaction_v2_beta_feature() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let captured_beta_feature = Arc::new(Mutex::new(None));
+    let server_beta_feature = Arc::clone(&captured_beta_feature);
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let socket = accept_hdr_async(stream, move |request: &Request, response: Response| {
+            let beta_feature = request
+                .headers()
+                .get("x-codex-beta-features")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            *server_beta_feature.lock().unwrap() = Some(beta_feature);
+            Ok(response)
+        })
+        .await
+        .unwrap();
+        drop(socket);
+    });
+
+    let profile = RelayProfile {
+        relay_mode: RelayMode::PureApi,
+        protocol: RelayProtocol::Responses,
+        base_url: format!("http://{address}"),
+        api_key: "test-websocket-api-key".to_string(),
+        ..RelayProfile::default()
+    };
+    let upstream = open_responses_websocket_upstream_with_client_features(&profile, None, true)
+        .await
+        .unwrap();
+    drop(upstream);
+    server.await.unwrap();
+
+    assert_eq!(
+        captured_beta_feature.lock().unwrap().as_deref(),
+        Some("remote_compaction_v2")
     );
 }
 

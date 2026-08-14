@@ -15,6 +15,10 @@ use crate::relay_rotation::{RotationContext, RotationEvent};
 use crate::settings::SettingsStore;
 
 pub const DEFAULT_PROTOCOL_PROXY_PORT: u16 = 45221;
+/// Codex 用于声明 Responses 私有能力的请求头。
+pub(crate) const CODEX_BETA_FEATURES_HEADER: &str = "x-codex-beta-features";
+/// 原生 Remote Compaction V2 对应的 Codex feature token。
+pub(crate) const REMOTE_COMPACTION_V2_BETA_FEATURE: &str = "remote_compaction_v2";
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const UPSTREAM_MODELS_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 const STREAM_IDLE_TIMEOUT_HIGH_OR_LOWER: Duration = Duration::from_secs(900);
@@ -985,6 +989,15 @@ pub(crate) enum CompactionExecutionMode {
     NativeRemoteV2,
 }
 
+pub(crate) fn codex_beta_features_include_remote_compaction_v2(header_value: Option<&str>) -> bool {
+    header_value.is_some_and(|value| {
+        value
+            .split(',')
+            .map(str::trim)
+            .any(|feature| feature == REMOTE_COMPACTION_V2_BETA_FEATURE)
+    })
+}
+
 impl CompactionExecutionMode {
     fn allows_model_override(self) -> bool {
         matches!(self, Self::LegacyLocal | Self::BridgedRemoteV2)
@@ -1868,10 +1881,12 @@ pub async fn open_responses_proxy_request(
     original_user_agent: Option<&str>,
 ) -> anyhow::Result<UpstreamProxyResponse> {
     let settings = SettingsStore::default().load().unwrap_or_default();
+    // 该 body-only API 早于下游 Header 转发接口，保留其原有的可信内部调用语义。
     open_responses_proxy_request_with_settings_user_agent_and_timeout(
         body,
         settings,
         original_user_agent,
+        Some(REMOTE_COMPACTION_V2_BETA_FEATURE),
         None,
     )
     .await
@@ -1881,8 +1896,15 @@ pub async fn open_responses_proxy_request_with_settings(
     body: &str,
     settings: crate::settings::BackendSettings,
 ) -> anyhow::Result<UpstreamProxyResponse> {
-    open_responses_proxy_request_with_settings_user_agent_and_timeout(body, settings, None, None)
-        .await
+    // 测试和内部转换调用没有原始 HTTP Header，继续按已启用的 Codex V2 语义处理。
+    open_responses_proxy_request_with_settings_user_agent_and_timeout(
+        body,
+        settings,
+        None,
+        Some(REMOTE_COMPACTION_V2_BETA_FEATURE),
+        None,
+    )
+    .await
 }
 
 pub async fn open_responses_proxy_request_with_stream_header_timeout(
@@ -1895,7 +1917,25 @@ pub async fn open_responses_proxy_request_with_stream_header_timeout(
         body,
         settings,
         original_user_agent,
+        Some(REMOTE_COMPACTION_V2_BETA_FEATURE),
         Some(stream_header_timeout),
+    )
+    .await
+}
+
+pub(crate) async fn open_responses_proxy_request_with_client_headers(
+    body: &str,
+    original_user_agent: Option<&str>,
+    original_codex_beta_features: Option<&str>,
+    stream_header_timeout_override: Option<Duration>,
+) -> anyhow::Result<UpstreamProxyResponse> {
+    let settings = SettingsStore::default().load().unwrap_or_default();
+    open_responses_proxy_request_with_settings_user_agent_and_timeout(
+        body,
+        settings,
+        original_user_agent,
+        original_codex_beta_features,
+        stream_header_timeout_override,
     )
     .await
 }
@@ -1904,6 +1944,7 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
     body: &str,
     settings: crate::settings::BackendSettings,
     original_user_agent: Option<&str>,
+    original_codex_beta_features: Option<&str>,
     stream_header_timeout_override: Option<Duration>,
 ) -> anyhow::Result<UpstreamProxyResponse> {
     let mut override_attempted = false;
@@ -1911,6 +1952,7 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
         body,
         settings.clone(),
         original_user_agent,
+        original_codex_beta_features,
         stream_header_timeout_override,
         &mut override_attempted,
     )
@@ -1943,6 +1985,7 @@ async fn open_responses_proxy_request_with_settings_user_agent_and_timeout(
         body,
         fallback_settings,
         original_user_agent,
+        original_codex_beta_features,
         stream_header_timeout_override,
         &mut fallback_override_attempted,
     )
@@ -1954,6 +1997,7 @@ async fn open_responses_proxy_request_once(
     body: &str,
     settings: crate::settings::BackendSettings,
     original_user_agent: Option<&str>,
+    original_codex_beta_features: Option<&str>,
     stream_header_timeout_override: Option<Duration>,
     override_attempted: &mut bool,
 ) -> anyhow::Result<UpstreamProxyResponse> {
@@ -1986,8 +2030,23 @@ async fn open_responses_proxy_request_once(
         // 实际目标，不能把 V2 本地兼容桥重新解释成原生远程压缩。
         let source_response_protocol =
             responses_proxy_target_protocol(&relay, &source_request_json)?;
-        let compaction_execution_mode =
+        let mut compaction_execution_mode =
             compaction_execution_mode(&source_request_json, source_response_protocol);
+        if compaction_execution_mode == CompactionExecutionMode::NativeRemoteV2
+            && !codex_beta_features_include_remote_compaction_v2(original_codex_beta_features)
+        {
+            compaction_execution_mode = CompactionExecutionMode::BridgedRemoteV2;
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "protocol_proxy.remote_compaction_v2_missing_beta_feature",
+                json!({
+                    "transport": "http",
+                    "diagnosticId": diagnostic_id.as_str(),
+                    "relayId": relay.id,
+                    "relayName": relay.name,
+                    "action": "bridge_locally"
+                }),
+            );
+        }
         // 容量校验必须基于实际发送给压缩模型的本地载荷：V2 先替换 trigger，
         // legacy 先应用有效提示词并移除工具，再选择独立压缩模型。
         let local_request_json = match compaction_execution_mode {
@@ -2096,6 +2155,7 @@ async fn open_responses_proxy_request_once(
             &request_json,
             response_protocol,
             upstream_is_stream,
+            compaction_execution_mode == CompactionExecutionMode::NativeRemoteV2,
             &diagnostic_id,
             header_timeout,
         )
@@ -2413,6 +2473,7 @@ async fn send_responses_upstream_request(
     request_json: &Value,
     response_protocol: UpstreamResponseProtocol,
     is_stream: bool,
+    advertise_remote_compaction_v2: bool,
     diagnostic_id: &str,
     header_timeout: Option<Duration>,
 ) -> anyhow::Result<(reqwest::Response, Value)> {
@@ -2431,6 +2492,7 @@ async fn send_responses_upstream_request(
                     relay.api_key.trim(),
                     is_stream,
                     &upstream_request,
+                    advertise_remote_compaction_v2,
                 ),
                 header_timeout,
             )
@@ -2511,6 +2573,7 @@ async fn send_chat_completions_request(
             relay.api_key.trim(),
             is_stream,
             chat_request,
+            false,
         ),
         header_timeout,
     )
@@ -2711,6 +2774,7 @@ fn upstream_request_builder(
     api_key: &str,
     is_stream: bool,
     upstream_body: &Value,
+    advertise_remote_compaction_v2: bool,
 ) -> reqwest::RequestBuilder {
     let mut builder = client
         .post(endpoint)
@@ -2720,6 +2784,12 @@ fn upstream_request_builder(
         builder = builder
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .header(reqwest::header::CACHE_CONTROL, "no-cache");
+    }
+    if advertise_remote_compaction_v2 {
+        builder = builder.header(
+            CODEX_BETA_FEATURES_HEADER,
+            REMOTE_COMPACTION_V2_BETA_FEATURE,
+        );
     }
     builder.json(upstream_body)
 }
@@ -2899,6 +2969,7 @@ async fn retry_model_capacity_responses_stream(
             &request_body,
             settings.clone(),
             original_user_agent,
+            Some(REMOTE_COMPACTION_V2_BETA_FEATURE),
             Some(stream_idle_timeout),
         )
         .await
@@ -3081,6 +3152,7 @@ pub async fn apply_continue_thinking_to_responses_stream(
             &continue_body,
             settings.clone(),
             original_user_agent,
+            Some(REMOTE_COMPACTION_V2_BETA_FEATURE),
             Some(stream_idle_timeout),
         )
         .await
@@ -10573,11 +10645,25 @@ fn is_stepfun_model(model: &str) -> bool {
 #[cfg(test)]
 mod remote_compaction_v2_tests {
     use super::{
-        UpstreamResponseProtocol, normalize_native_responses_request,
-        responses_upstream_request_for_protocol, should_bridge_remote_compaction_v2,
-        should_bridge_remote_compaction_v2_after_failure,
+        UpstreamResponseProtocol, codex_beta_features_include_remote_compaction_v2,
+        normalize_native_responses_request, responses_upstream_request_for_protocol,
+        should_bridge_remote_compaction_v2, should_bridge_remote_compaction_v2_after_failure,
     };
     use serde_json::{Value, json};
+
+    #[test]
+    fn remote_compaction_v2_beta_feature_requires_an_exact_comma_separated_token() {
+        assert!(codex_beta_features_include_remote_compaction_v2(Some(
+            "another_feature, remote_compaction_v2"
+        )));
+        assert!(!codex_beta_features_include_remote_compaction_v2(None));
+        assert!(!codex_beta_features_include_remote_compaction_v2(Some(
+            "remote_compaction_v20"
+        )));
+        assert!(!codex_beta_features_include_remote_compaction_v2(Some(
+            "REMOTE_COMPACTION_V2"
+        )));
+    }
 
     #[test]
     fn native_responses_replays_synthetic_compaction_as_assistant_history() {

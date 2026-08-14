@@ -7,7 +7,7 @@ use crate::settings::{
 use anyhow::Context;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::error::Error as WebsocketError;
-use tokio_tungstenite::tungstenite::http::header::{AUTHORIZATION, USER_AGENT};
+use tokio_tungstenite::tungstenite::http::header::{AUTHORIZATION, HeaderName, USER_AGENT};
 use tokio_tungstenite::tungstenite::http::{HeaderValue, Request, StatusCode};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
@@ -95,7 +95,7 @@ pub async fn probe_responses_websocket(profile: &RelayProfile) -> ResponsesWebso
         return unknown_probe_result(endpoint, "Responses WebSocket 端点无效。");
     }
 
-    let request = match responses_websocket_request(&profile, None) {
+    let request = match responses_websocket_request(&profile, None, false) {
         Ok(request) => request,
         Err(_) => {
             return unknown_probe_result(endpoint, "Responses WebSocket 请求或鉴权配置无效。");
@@ -128,7 +128,16 @@ pub async fn open_responses_websocket_upstream(
     profile: &RelayProfile,
     original_user_agent: Option<&str>,
 ) -> anyhow::Result<UpstreamResponsesWebsocket> {
-    let request = responses_websocket_request(profile, original_user_agent)?;
+    open_responses_websocket_upstream_with_client_features(profile, original_user_agent, true).await
+}
+
+pub async fn open_responses_websocket_upstream_with_client_features(
+    profile: &RelayProfile,
+    original_user_agent: Option<&str>,
+    advertise_remote_compaction_v2: bool,
+) -> anyhow::Result<UpstreamResponsesWebsocket> {
+    let request =
+        responses_websocket_request(profile, original_user_agent, advertise_remote_compaction_v2)?;
     let result = tokio::time::timeout(
         PROBE_TIMEOUT,
         tokio_tungstenite::connect_async_with_config(
@@ -246,6 +255,7 @@ pub fn relay_responses_base_url(profile: &RelayProfile) -> &str {
 fn responses_websocket_request(
     profile: &RelayProfile,
     original_user_agent: Option<&str>,
+    advertise_remote_compaction_v2: bool,
 ) -> anyhow::Result<Request<()>> {
     let endpoint = responses_websocket_url(relay_responses_base_url(profile))
         .ok_or_else(|| anyhow::anyhow!("Responses WebSocket 端点无效"))?;
@@ -265,6 +275,12 @@ fn responses_websocket_request(
     .context("Responses WebSocket User-Agent 无效")?;
     request.headers_mut().insert(AUTHORIZATION, authorization);
     request.headers_mut().insert(USER_AGENT, user_agent);
+    if advertise_remote_compaction_v2 {
+        request.headers_mut().insert(
+            HeaderName::from_static(crate::protocol_proxy::CODEX_BETA_FEATURES_HEADER),
+            HeaderValue::from_static(crate::protocol_proxy::REMOTE_COMPACTION_V2_BETA_FEATURE),
+        );
+    }
     Ok(request)
 }
 

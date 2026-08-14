@@ -123,30 +123,39 @@ pub async fn handle_responses_websocket_connection(
         .headers()
         .get("user-agent")
         .and_then(|value| value.to_str().ok());
-    let upstream = match crate::responses_websocket::open_responses_websocket_upstream(
-        &relay,
-        original_user_agent,
-    )
-    .await
-    {
-        Ok(upstream) => upstream,
-        Err(error) => {
-            log_websocket_event(
-                "helper.responses_websocket_upstream_failed",
-                &relay,
-                remote_addr.as_deref(),
-                &connection_context,
-                Some(&error.to_string()),
-            );
-            reject_upgrade(
-                &mut stream,
-                StatusCode::BAD_GATEWAY,
-                "Responses WebSocket 上游连接失败，Codex 将按客户端重试策略处理",
-            )
-            .await?;
-            return Ok(());
-        }
-    };
+    let remote_compaction_v2_enabled =
+        crate::protocol_proxy::codex_beta_features_include_remote_compaction_v2(
+            request
+                .headers()
+                .get(crate::protocol_proxy::CODEX_BETA_FEATURES_HEADER)
+                .and_then(|value| value.to_str().ok()),
+        );
+    let upstream =
+        match crate::responses_websocket::open_responses_websocket_upstream_with_client_features(
+            &relay,
+            original_user_agent,
+            remote_compaction_v2_enabled,
+        )
+        .await
+        {
+            Ok(upstream) => upstream,
+            Err(error) => {
+                log_websocket_event(
+                    "helper.responses_websocket_upstream_failed",
+                    &relay,
+                    remote_addr.as_deref(),
+                    &connection_context,
+                    Some(&error.to_string()),
+                );
+                reject_upgrade(
+                    &mut stream,
+                    StatusCode::BAD_GATEWAY,
+                    "Responses WebSocket 上游连接失败，Codex 将按客户端重试策略处理",
+                )
+                .await?;
+                return Ok(());
+            }
+        };
     if let Err(error) = ensure_websocket_relay_still_current(&relay) {
         reject_upgrade(&mut stream, StatusCode::CONFLICT, &error.to_string()).await?;
         return Ok(());
@@ -184,8 +193,14 @@ pub async fn handle_responses_websocket_connection(
         request_path,
         connection_context.clone(),
     );
-    let result =
-        bridge_responses_websockets(downstream, upstream, &relay, request_logger.clone()).await;
+    let result = bridge_responses_websockets(
+        downstream,
+        upstream,
+        &relay,
+        request_logger.clone(),
+        remote_compaction_v2_enabled,
+    )
+    .await;
     if !request_logger.has_recorded_application_requests()
         && arm_temporary_responses_websocket_http_fallback(&relay.id, &connection_context)
     {
@@ -217,6 +232,7 @@ async fn bridge_responses_websockets(
     upstream: crate::responses_websocket::UpstreamResponsesWebsocket,
     relay: &crate::settings::RelayProfile,
     request_logger: WebSocketRequestLogger,
+    remote_compaction_v2_enabled: bool,
 ) -> anyhow::Result<()> {
     let (mut downstream_sink, mut downstream_stream) = downstream.split();
     let (mut upstream_sink, mut upstream_stream) = upstream.split();
@@ -304,8 +320,12 @@ async fn bridge_responses_websockets(
                     layered_compaction_options,
                     original_compaction_model,
                     compaction_fallback,
-                ) = prepare_downstream_response_create_payload_with_snapshot(&payload, &settings)
-                    .await;
+                ) = prepare_downstream_response_create_payload_with_snapshot(
+                    &payload,
+                    &settings,
+                    remote_compaction_v2_enabled,
+                )
+                .await;
                 let message = if forwarded_payload == payload {
                     message
                 } else {
@@ -2478,6 +2498,7 @@ fn local_compaction_wait_websocket_messages(payload: &Value) -> Option<Vec<Messa
 async fn prepare_downstream_response_create_payload_with_snapshot(
     payload: &Value,
     settings: &crate::settings::BackendSettings,
+    remote_compaction_v2_enabled: bool,
 ) -> (
     Value,
     Value,
@@ -2487,7 +2508,11 @@ async fn prepare_downstream_response_create_payload_with_snapshot(
 ) {
     let normalized = normalize_downstream_response_create_payload(payload);
     let normalized = restore_oversized_resumed_compaction_checkpoint(normalized, settings).await;
-    prepare_downstream_response_create_payload_with_settings(normalized, settings)
+    prepare_downstream_response_create_payload_with_settings_and_features(
+        normalized,
+        settings,
+        remote_compaction_v2_enabled,
+    )
 }
 
 fn normalize_downstream_response_create_payload(payload: &Value) -> Value {
@@ -2624,9 +2649,26 @@ async fn restore_oversized_resumed_compaction_checkpoint(
     restore.payload
 }
 
+#[cfg(test)]
 fn prepare_downstream_response_create_payload_with_settings(
     normalized: Value,
     settings: &crate::settings::BackendSettings,
+) -> (
+    Value,
+    Value,
+    Option<crate::protocol_proxy::LayeredCompactionOptions>,
+    Option<String>,
+    Option<WebSocketCompactionFallback>,
+) {
+    prepare_downstream_response_create_payload_with_settings_and_features(
+        normalized, settings, true,
+    )
+}
+
+fn prepare_downstream_response_create_payload_with_settings_and_features(
+    normalized: Value,
+    settings: &crate::settings::BackendSettings,
+    remote_compaction_v2_enabled: bool,
 ) -> (
     Value,
     Value,
@@ -2638,12 +2680,29 @@ fn prepare_downstream_response_create_payload_with_settings(
     // WebSocket 通道固定使用 Responses 协议，因此可以直接基于会话原模型冻结执行方式。
     // V2 本地兼容桥必须先替换 trigger、移除工具，再做容量校验和独立模型选择；
     // 原生 GPT Remote Compaction V2 不进入独立模型覆写。
-    let compaction_execution_mode = crate::protocol_proxy::compaction_execution_mode(
+    let mut compaction_execution_mode = crate::protocol_proxy::compaction_execution_mode(
         &original_normalized,
         crate::protocol_proxy::UpstreamResponseProtocol::Responses,
     );
+    if compaction_execution_mode == crate::protocol_proxy::CompactionExecutionMode::NativeRemoteV2
+        && !remote_compaction_v2_enabled
+    {
+        compaction_execution_mode = crate::protocol_proxy::CompactionExecutionMode::BridgedRemoteV2;
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "protocol_proxy.remote_compaction_v2_missing_beta_feature",
+            serde_json::json!({
+                "transport": "ws",
+                "model": original_normalized.get("model").and_then(Value::as_str),
+                "action": "bridge_locally"
+            }),
+        );
+    }
     let (prepared_forwarded_payload, layered_compaction_options) =
-        prepare_websocket_compaction_forwarded_payload(&original_normalized, settings);
+        prepare_websocket_compaction_forwarded_payload(
+            &original_normalized,
+            settings,
+            compaction_execution_mode,
+        );
     let relay = settings.active_relay_profile();
     let compaction_model_override = match crate::protocol_proxy::resolve_compaction_model_override(
         &prepared_forwarded_payload,
@@ -2686,8 +2745,11 @@ fn prepare_downstream_response_create_payload_with_settings(
         None => prepared_forwarded_payload,
     };
     let compaction_fallback = compaction_model_override.as_ref().map(|_| {
-        let (forwarded_payload, _) =
-            prepare_websocket_compaction_forwarded_payload(&original_normalized, settings);
+        let (forwarded_payload, _) = prepare_websocket_compaction_forwarded_payload(
+            &original_normalized,
+            settings,
+            compaction_execution_mode,
+        );
         WebSocketCompactionFallback {
             request_payload: original_normalized.clone(),
             forwarded_payload,
@@ -2705,16 +2767,12 @@ fn prepare_downstream_response_create_payload_with_settings(
 fn prepare_websocket_compaction_forwarded_payload(
     normalized: &Value,
     settings: &crate::settings::BackendSettings,
+    compaction_execution_mode: crate::protocol_proxy::CompactionExecutionMode,
 ) -> (
     Value,
     Option<crate::protocol_proxy::LayeredCompactionOptions>,
 ) {
-    let model = normalized
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if crate::layered_compaction::is_remote_compaction_v2_request(Some(&normalized))
-        && !crate::layered_compaction::model_supports_native_remote_compaction_v2(model)
+    if compaction_execution_mode == crate::protocol_proxy::CompactionExecutionMode::BridgedRemoteV2
     {
         let forwarded =
             crate::layered_compaction::prepare_remote_compaction_v2_bridge_request_with_prompt(
@@ -3015,8 +3073,10 @@ mod tests {
         WebSocketRequestLogger, activate_next_queued_websocket_request,
         is_responses_websocket_proxy_path, is_responses_websocket_upgrade,
         local_compaction_wait_websocket_messages, prepare_downstream_response_create_payload,
-        prepare_downstream_response_create_payload_with_settings, resolve_websocket_log_id,
-        websocket_application_event_payload, websocket_idle_timeout_elapsed,
+        prepare_downstream_response_create_payload_with_settings,
+        prepare_downstream_response_create_payload_with_settings_and_features,
+        resolve_websocket_log_id, websocket_application_event_payload,
+        websocket_idle_timeout_elapsed,
     };
     use crate::settings::{
         BackendSettings, LayeredCompactionModels, RelayModelMapping, RelayProfile, RelayProtocol,
@@ -3328,6 +3388,33 @@ mod tests {
                 .to_string()
                 .contains("codex-elves-compaction-v2:")
         );
+    }
+
+    #[test]
+    fn websocket_native_remote_compaction_without_beta_feature_uses_local_bridge() {
+        let payload = json!({
+            "type": "response.create",
+            "model": "gpt-5.6",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "compact this context" }]
+                },
+                { "type": "compaction_trigger" }
+            ],
+            "tools": [{ "type": "function", "name": "exec_command" }]
+        });
+        let (_, forwarded_payload, options, _, _) =
+            prepare_downstream_response_create_payload_with_settings_and_features(
+                payload,
+                &BackendSettings::default(),
+                false,
+            );
+
+        assert!(!forwarded_payload.to_string().contains("compaction_trigger"));
+        assert!(forwarded_payload.get("tools").is_none());
+        assert!(options.is_some());
     }
 
     #[test]

@@ -699,6 +699,7 @@ data: [DONE]
         .build()
         .unwrap()
         .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .header("x-codex-beta-features", "remote_compaction_v2")
         .json(&serde_json::json!({
             "model": "gpt-responses",
             "input": "think deeply",
@@ -727,6 +728,7 @@ data: [DONE]
 
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path, "/v1/responses");
+    assert!(requests[0].codex_beta_features.is_empty());
     let first_upstream_body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
     assert_eq!(first_upstream_body["stream"], true);
     assert_eq!(
@@ -763,6 +765,10 @@ async fn native_remote_compaction_preserves_upstream_non_sse_status_and_content_
         .build()
         .unwrap()
         .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .header(
+            "x-codex-beta-features",
+            "another_feature, remote_compaction_v2",
+        )
         .json(&serde_json::json!({
             "model": "gpt-responses",
             "input": [
@@ -795,6 +801,57 @@ async fn native_remote_compaction_preserves_upstream_non_sse_status_and_content_
     assert!(body.contains("upstream is busy"));
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path, "/v1/responses");
+    assert_eq!(requests[0].codex_beta_features, "remote_compaction_v2");
+    let upstream_body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(upstream_body["stream"], true);
+    assert_eq!(upstream_body["input"][1]["type"], "compaction_trigger");
+}
+
+#[tokio::test]
+async fn native_remote_compaction_without_beta_feature_bridges_locally() {
+    let _lock = launcher_settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
+    let upstream = spawn_launcher_upstream_with_response(
+        "application/json; charset=utf-8",
+        r#"{"id":"resp_summary","object":"response","status":"completed","model":"gpt-responses","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"LOCAL BRIDGE SUMMARY"}]}]}"#
+            .to_string(),
+    );
+    write_launcher_mixed_relay_settings(temp.path(), &upstream.base_url);
+
+    let hooks = DefaultLaunchHooks::default();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    hooks.start_helper(port).await.unwrap();
+
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .json(&serde_json::json!({
+            "model": "gpt-responses",
+            "input": [
+                { "role": "user", "content": "compact this context" },
+                { "type": "compaction_trigger" }
+            ],
+            "stream": false
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body: serde_json::Value = response.json().await.unwrap();
+    hooks.shutdown_helper(port).await;
+    let requests = upstream.finish_all();
+
+    assert_eq!(body["output"][0]["type"], "compaction");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/v1/responses");
+    assert!(requests[0].codex_beta_features.is_empty());
+    assert!(!requests[0].body.contains("compaction_trigger"));
 }
 
 #[tokio::test]
@@ -960,6 +1017,7 @@ data: [DONE]
         .build()
         .unwrap()
         .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .header("x-codex-beta-features", "remote_compaction_v2")
         .json(&serde_json::json!({
             "model": "gpt-chat",
             "input": [
@@ -990,6 +1048,7 @@ data: [DONE]
     assert!(body.contains("event: response.completed"));
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path, "/v1/chat/completions");
+    assert!(requests[0].codex_beta_features.is_empty());
 }
 
 #[tokio::test]
@@ -1524,6 +1583,7 @@ async fn launch_lifecycle_cleans_helper_when_launch_fails_after_helper_started()
 
 #[tokio::test]
 async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
+    let _lock = launcher_settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let app_dir = temp.path().join("Codex.app");
     std::fs::create_dir_all(&app_dir).unwrap();
@@ -2087,6 +2147,7 @@ impl LauncherUpstream {
 
 struct LauncherUpstreamRequest {
     path: String,
+    codex_beta_features: String,
     body: String,
 }
 
@@ -2148,6 +2209,7 @@ fn spawn_launcher_upstream_with_status_response(
             .and_then(|line| line.split_whitespace().nth(1))
             .unwrap_or_default()
             .to_string();
+        let codex_beta_features = launcher_upstream_header_value(&request, "x-codex-beta-features");
         let body = request
             .split_once("\r\n\r\n")
             .map(|(_, body)| body.to_string())
@@ -2161,7 +2223,11 @@ fn spawn_launcher_upstream_with_status_response(
             response_body
         );
         stream.write_all(response.as_bytes()).unwrap();
-        vec![LauncherUpstreamRequest { path, body }]
+        vec![LauncherUpstreamRequest {
+            path,
+            codex_beta_features,
+            body,
+        }]
     });
 
     LauncherUpstream { base_url, handle }
@@ -2200,6 +2266,8 @@ fn spawn_launcher_upstream_with_response_specs(
                 .and_then(|line| line.split_whitespace().nth(1))
                 .unwrap_or_default()
                 .to_string();
+            let codex_beta_features =
+                launcher_upstream_header_value(&request, "x-codex-beta-features");
             let body = request
                 .split_once("\r\n\r\n")
                 .map(|(_, body)| body.to_string())
@@ -2214,12 +2282,28 @@ fn spawn_launcher_upstream_with_response_specs(
                 std::thread::sleep(response_delay);
             }
             stream.write_all(response.as_bytes()).unwrap();
-            requests.push(LauncherUpstreamRequest { path, body });
+            requests.push(LauncherUpstreamRequest {
+                path,
+                codex_beta_features,
+                body,
+            });
         }
         requests
     });
 
     LauncherUpstream { base_url, handle }
+}
+
+fn launcher_upstream_header_value(request: &str, header_name: &str) -> String {
+    request
+        .lines()
+        .find_map(|line| {
+            line.split_once(':').and_then(|(name, value)| {
+                name.eq_ignore_ascii_case(header_name)
+                    .then(|| value.trim().to_string())
+            })
+        })
+        .unwrap_or_default()
 }
 
 fn read_launcher_upstream_request(stream: &mut std::net::TcpStream) -> String {
