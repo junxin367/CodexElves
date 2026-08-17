@@ -2549,6 +2549,8 @@ fn generated_catalog_prompt_fields(
 #[derive(Debug, Clone)]
 pub(crate) struct CatalogModelRow {
     model: String,
+    catalog_slug: String,
+    alias: String,
     context_window: String,
     protocol: RelayProtocol,
 }
@@ -2566,6 +2568,12 @@ pub(crate) fn generated_model_catalog_json(
 
     for (index, row) in rows.into_iter().enumerate() {
         let model = row.model;
+        let catalog_slug = row.catalog_slug;
+        let display_name = if row.alias.trim().is_empty() {
+            model.clone()
+        } else {
+            row.alias.trim().to_string()
+        };
         let packaged_model = packaged_model_catalog_entry(&model);
         let (model_base_instructions, model_messages) =
             generated_catalog_prompt_fields(profile, &model, packaged_model.as_ref());
@@ -2582,8 +2590,8 @@ pub(crate) fn generated_model_catalog_json(
         );
         let context_window = catalog_context_window_for_model(&model, &row.context_window);
         let mut entry = Map::new();
-        entry.insert("slug".to_string(), json!(model.clone()));
-        entry.insert("display_name".to_string(), json!(model.clone()));
+        entry.insert("slug".to_string(), json!(catalog_slug));
+        entry.insert("display_name".to_string(), json!(display_name));
         entry.insert("description".to_string(), json!(model));
         entry.insert("priority".to_string(), json!(1000 + index as u64));
         entry.insert("visibility".to_string(), json!("list"));
@@ -2665,16 +2673,19 @@ pub(crate) fn relay_profile_catalog_rows(
     profile: &RelayProfile,
 ) -> anyhow::Result<Vec<CatalogModelRow>> {
     profile.validate_model_protocol_assignments()?;
-    let mut seen = HashSet::new();
     let mut rows = Vec::new();
     if !profile.model_mappings.is_empty() {
-        for mapping in &profile.model_mappings {
+        let catalog_slugs =
+            crate::settings::relay_model_mapping_catalog_slugs(&profile.model_mappings);
+        for (mapping, catalog_slug) in profile.model_mappings.iter().zip(catalog_slugs) {
             let model = mapping.request_model.trim();
-            if model.is_empty() || !seen.insert(model.to_string()) {
+            if model.is_empty() || catalog_slug.is_empty() {
                 continue;
             }
             rows.push(CatalogModelRow {
                 model: model.to_string(),
+                catalog_slug,
+                alias: mapping.alias.trim().to_string(),
                 context_window: mapping.context_window.trim().to_string(),
                 protocol: mapping.protocol,
             });
@@ -2686,12 +2697,17 @@ pub(crate) fn relay_profile_catalog_rows(
     if !profile.system_prompt_override.trim().is_empty() && !active_model.trim().is_empty() {
         rows.push(CatalogModelRow {
             model: active_model.trim().to_string(),
+            catalog_slug: active_model.trim().to_string(),
+            alias: String::new(),
             context_window: profile.context_window_for_active_model(),
             protocol: profile.protocol,
         });
-        seen.insert(active_model.trim().to_string());
     }
 
+    let mut seen = HashSet::new();
+    if !active_model.trim().is_empty() {
+        seen.insert(active_model.trim().to_string());
+    }
     for (protocol, models) in [
         (
             RelayProtocol::Responses,
@@ -2712,7 +2728,9 @@ pub(crate) fn relay_profile_catalog_rows(
                 continue;
             }
             rows.push(CatalogModelRow {
+                catalog_slug: model.clone(),
                 model,
+                alias: String::new(),
                 context_window: String::new(),
                 protocol,
             });
@@ -3367,6 +3385,16 @@ fn complete_relay_profile_config(profile: &RelayProfile) -> anyhow::Result<Strin
 }
 
 pub fn normalize_relay_profile_for_storage(profile: &mut RelayProfile) -> anyhow::Result<()> {
+    let needs_local_proxy_for_catalog_virtual_slugs =
+        crate::settings::relay_model_mapping_catalog_slugs(&profile.model_mappings)
+            .iter()
+            .zip(&profile.model_mappings)
+            .any(|(catalog_slug, mapping)| {
+                !catalog_slug.is_empty() && catalog_slug != mapping.request_model.trim()
+            });
+    if needs_local_proxy_for_catalog_virtual_slugs {
+        profile.local_proxy_enabled = Some(true);
+    }
     for mapping in &mut profile.model_mappings {
         if mapping.context_window.trim().is_empty()
             && let Some(context_window) =
@@ -3843,11 +3871,13 @@ mod tests {
             model_mappings: vec![
                 crate::settings::RelayModelMapping {
                     request_model: "claude-fable-5".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Anthropic,
                     context_window: String::new(),
                 },
                 crate::settings::RelayModelMapping {
                     request_model: "gpt-5.6".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: String::new(),
                 },
@@ -3859,6 +3889,58 @@ mod tests {
 
         assert_eq!(profile.model_mappings[0].context_window, "1000000");
         assert!(profile.model_mappings[1].context_window.is_empty());
+    }
+
+    #[test]
+    fn normalize_profile_enables_local_proxy_for_duplicate_request_model_aliases() {
+        let mut profile = RelayProfile {
+            local_proxy_enabled: Some(false),
+            model_mappings: vec![
+                crate::settings::RelayModelMapping {
+                    request_model: "gpt-5.6-sol".to_string(),
+                    alias: String::new(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "372000".to_string(),
+                },
+                crate::settings::RelayModelMapping {
+                    request_model: "gpt-5.6-sol".to_string(),
+                    alias: "gpt-5.6-sol[1M]".to_string(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "1000000".to_string(),
+                },
+            ],
+            ..RelayProfile::default()
+        };
+
+        normalize_relay_profile_for_storage(&mut profile).unwrap();
+
+        assert_eq!(profile.local_proxy_enabled, Some(true));
+    }
+
+    #[test]
+    fn normalize_profile_enables_local_proxy_for_duplicate_request_models_without_aliases() {
+        let mut profile = RelayProfile {
+            local_proxy_enabled: Some(false),
+            model_mappings: vec![
+                crate::settings::RelayModelMapping {
+                    request_model: "gpt-5.6-sol".to_string(),
+                    alias: String::new(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "372000".to_string(),
+                },
+                crate::settings::RelayModelMapping {
+                    request_model: "gpt-5.6-sol".to_string(),
+                    alias: String::new(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "1000000".to_string(),
+                },
+            ],
+            ..RelayProfile::default()
+        };
+
+        normalize_relay_profile_for_storage(&mut profile).unwrap();
+
+        assert_eq!(profile.local_proxy_enabled, Some(true));
     }
 
     fn read_test_http_request(stream: &mut TcpStream) -> String {
@@ -4060,6 +4142,7 @@ mod tests {
         let explicit = RelayProfile {
             model_mappings: vec![crate::settings::RelayModelMapping {
                 request_model: "gpt-5.4".to_string(),
+                alias: String::new(),
                 protocol: RelayProtocol::Anthropic,
                 context_window: String::new(),
             }],
@@ -4272,16 +4355,19 @@ mod tests {
             model_mappings: vec![
                 crate::settings::RelayModelMapping {
                     request_model: "gpt-5.5".to_string(),
+                    alias: String::new(),
                     context_window: "400000".to_string(),
                     protocol: RelayProtocol::Responses,
                 },
                 crate::settings::RelayModelMapping {
                     request_model: "gpt-5.2".to_string(),
+                    alias: String::new(),
                     context_window: "400000".to_string(),
                     protocol: RelayProtocol::Responses,
                 },
                 crate::settings::RelayModelMapping {
                     request_model: "openai/gpt-5.6-terra".to_string(),
+                    alias: String::new(),
                     context_window: "1000000".to_string(),
                     protocol: RelayProtocol::Responses,
                 },
@@ -4345,6 +4431,65 @@ mod tests {
     }
 
     #[test]
+    fn generated_model_catalog_uses_mapping_alias_for_display_name_only() {
+        let profile: RelayProfile = serde_json::from_value(json!({
+            "id": "relay-a",
+            "name": "供应商 A",
+            "modelMappings": [
+                {
+                    "requestModel": "gpt-5.6-sol",
+                    "alias": "主力编程模型",
+                    "protocol": "responses",
+                    "contextWindow": "372000"
+                }
+            ]
+        }))
+        .unwrap();
+
+        let rows = relay_profile_catalog_rows(&profile).unwrap();
+        let catalog = generated_model_catalog_json(&profile, "", rows).unwrap();
+        let model = &catalog["models"][0];
+
+        assert_eq!(model["slug"], "gpt-5.6-sol");
+        assert_eq!(model["display_name"], "主力编程模型");
+        assert_eq!(model["description"], "gpt-5.6-sol");
+    }
+
+    #[test]
+    fn generated_model_catalog_keeps_duplicate_request_models_as_distinct_alias_entries() {
+        let profile: RelayProfile = serde_json::from_value(json!({
+            "id": "relay-a",
+            "name": "供应商 A",
+            "modelMappings": [
+                {
+                    "requestModel": "gpt-5.6-sol",
+                    "protocol": "responses",
+                    "contextWindow": "372000"
+                },
+                {
+                    "requestModel": "gpt-5.6-sol",
+                    "alias": "gpt-5.6-sol[1M]",
+                    "protocol": "responses",
+                    "contextWindow": "1000000"
+                }
+            ]
+        }))
+        .unwrap();
+
+        let rows = relay_profile_catalog_rows(&profile).unwrap();
+        let catalog = generated_model_catalog_json(&profile, "", rows).unwrap();
+        let models = catalog["models"].as_array().unwrap();
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["display_name"], "gpt-5.6-sol");
+        assert_eq!(models[1]["display_name"], "gpt-5.6-sol[1M]");
+        assert_eq!(models[0]["description"], "gpt-5.6-sol");
+        assert_eq!(models[1]["description"], "gpt-5.6-sol");
+        assert_eq!(models[0]["slug"], "gpt-5.6-sol");
+        assert_eq!(models[1]["slug"], "gpt-5.6-sol--codex-elves-alias-2");
+    }
+
+    #[test]
     fn generated_model_catalog_prefers_websockets_only_for_responses_models() {
         let profile = RelayProfile {
             relay_mode: crate::settings::RelayMode::PureApi,
@@ -4353,11 +4498,13 @@ mod tests {
             model_mappings: vec![
                 crate::settings::RelayModelMapping {
                     request_model: "gpt-5.6-sol".to_string(),
+                    alias: String::new(),
                     context_window: "372000".to_string(),
                     protocol: RelayProtocol::Responses,
                 },
                 crate::settings::RelayModelMapping {
                     request_model: "claude-sonnet-5".to_string(),
+                    alias: String::new(),
                     context_window: "1000000".to_string(),
                     protocol: RelayProtocol::Anthropic,
                 },
@@ -4395,21 +4542,25 @@ mod tests {
             model_mappings: vec![
                 crate::settings::RelayModelMapping {
                     request_model: "gpt-5.4".to_string(),
+                    alias: String::new(),
                     context_window: String::new(),
                     protocol: RelayProtocol::Responses,
                 },
                 crate::settings::RelayModelMapping {
                     request_model: "openai/gpt-5.6-custom".to_string(),
+                    alias: String::new(),
                     context_window: String::new(),
                     protocol: RelayProtocol::Responses,
                 },
                 crate::settings::RelayModelMapping {
                     request_model: "openai/gpt-5.6-sol-2026-07-09".to_string(),
+                    alias: String::new(),
                     context_window: String::new(),
                     protocol: RelayProtocol::Responses,
                 },
                 crate::settings::RelayModelMapping {
                     request_model: "gpt-5.6-luna".to_string(),
+                    alias: String::new(),
                     context_window: String::new(),
                     protocol: RelayProtocol::Responses,
                 },
@@ -4497,11 +4648,13 @@ mod tests {
             model_mappings: vec![
                 crate::settings::RelayModelMapping {
                     request_model: "shared-model".to_string(),
+                    alias: String::new(),
                     context_window: "200000".to_string(),
                     protocol: RelayProtocol::Responses,
                 },
                 crate::settings::RelayModelMapping {
                     request_model: "shared-model".to_string(),
+                    alias: String::new(),
                     context_window: "200000".to_string(),
                     protocol: RelayProtocol::Anthropic,
                 },
@@ -4549,6 +4702,7 @@ mod tests {
                 .iter()
                 .map(|model| crate::settings::RelayModelMapping {
                     request_model: (*model).to_string(),
+                    alias: String::new(),
                     context_window: String::new(),
                     protocol: RelayProtocol::Responses,
                 })
@@ -4586,6 +4740,7 @@ mod tests {
             protocol: RelayProtocol::Responses,
             model_mappings: vec![crate::settings::RelayModelMapping {
                 request_model: "qwen3-coder".to_string(),
+                alias: String::new(),
                 context_window: String::new(),
                 protocol: RelayProtocol::Responses,
             }],
@@ -4661,11 +4816,13 @@ base_url = "http://127.0.0.1:45221/v1"
             model_mappings: vec![
                 crate::settings::RelayModelMapping {
                     request_model: "deepseek-coder".to_string(),
+                    alias: String::new(),
                     context_window: "128000".to_string(),
                     protocol: RelayProtocol::Responses,
                 },
                 crate::settings::RelayModelMapping {
                     request_model: "qwen3-coder".to_string(),
+                    alias: String::new(),
                     context_window: "200000".to_string(),
                     protocol: RelayProtocol::ChatCompletions,
                 },
@@ -4694,16 +4851,19 @@ base_url = "http://127.0.0.1:45221/v1"
         profile.model_mappings = vec![
             crate::settings::RelayModelMapping {
                 request_model: "claude-opus-4.6".to_string(),
+                alias: String::new(),
                 context_window: "1000000".to_string(),
                 protocol: RelayProtocol::Anthropic,
             },
             crate::settings::RelayModelMapping {
                 request_model: "qwen3-coder".to_string(),
+                alias: String::new(),
                 context_window: "200000".to_string(),
                 protocol: RelayProtocol::ChatCompletions,
             },
             crate::settings::RelayModelMapping {
                 request_model: "deepseek-coder".to_string(),
+                alias: String::new(),
                 context_window: "128000".to_string(),
                 protocol: RelayProtocol::Responses,
             },

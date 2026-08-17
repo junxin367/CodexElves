@@ -1479,7 +1479,7 @@ body {
   color: hsl(var(--muted-foreground));
   font-size: 12px;
   font-weight: 600;
-  grid-template-columns: 18px minmax(180px, 1fr) minmax(150px, 180px) minmax(112px, 150px) 36px;
+  grid-template-columns: 18px minmax(160px, 1fr) minmax(150px, 1fr) minmax(150px, 180px) minmax(112px, 150px) 36px;
   border: 1px solid hsl(var(--border) / 0.48);
   border-radius: 8px;
   background: hsl(var(--surface-sunken));
@@ -1492,7 +1492,7 @@ body {
   border: 1px solid hsl(var(--border) / 0.72);
   border-radius: 8px;
   background: hsl(var(--surface-sunken));
-  grid-template-columns: 18px minmax(180px, 1fr) minmax(150px, 180px) minmax(112px, 150px) 36px;
+  grid-template-columns: 18px minmax(160px, 1fr) minmax(150px, 1fr) minmax(150px, 180px) minmax(112px, 150px) 36px;
   padding: 4px 8px;
 }
 
@@ -1558,6 +1558,10 @@ body {
 }
 
 .relay-model-request-cell {
+  min-width: 0;
+}
+
+.relay-model-alias-cell {
   min-width: 0;
 }
 

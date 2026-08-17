@@ -119,11 +119,13 @@ fn native_responses_websocket_supports_mixed_profiles_with_responses_models() {
     profile.model_mappings = vec![
         RelayModelMapping {
             request_model: "gpt-responses".to_string(),
+            alias: String::new(),
             protocol: RelayProtocol::Responses,
             context_window: String::new(),
         },
         RelayModelMapping {
             request_model: "claude-sonnet".to_string(),
+            alias: String::new(),
             protocol: RelayProtocol::Anthropic,
             context_window: String::new(),
         },
@@ -132,6 +134,7 @@ fn native_responses_websocket_supports_mixed_profiles_with_responses_models() {
 
     profile.model_mappings = vec![RelayModelMapping {
         request_model: "chat-model".to_string(),
+        alias: String::new(),
         protocol: RelayProtocol::ChatCompletions,
         context_window: String::new(),
     }];
@@ -143,11 +146,13 @@ fn native_responses_websocket_supports_mixed_profiles_with_responses_models() {
     profile.model_mappings = vec![
         RelayModelMapping {
             request_model: "gpt-responses".to_string(),
+            alias: String::new(),
             protocol: RelayProtocol::Responses,
             context_window: String::new(),
         },
         RelayModelMapping {
             request_model: "claude-sonnet".to_string(),
+            alias: String::new(),
             protocol: RelayProtocol::Anthropic,
             context_window: String::new(),
         },
@@ -429,6 +434,7 @@ async fn local_proxy_bridges_responses_websocket_messages_and_authentication() {
         auth_contents: r#"{"OPENAI_API_KEY":"sk-bridge-secret"}"#.to_string(),
         model_mappings: vec![RelayModelMapping {
             request_model: "gpt-bridge".to_string(),
+            alias: String::new(),
             protocol: RelayProtocol::Responses,
             context_window: String::new(),
         }],
@@ -1742,6 +1748,7 @@ fn save_supported_websocket_settings(
         auth_contents: r#"{"OPENAI_API_KEY":"sk-websocket-test"}"#.to_string(),
         model_mappings: vec![RelayModelMapping {
             request_model: request_model.to_string(),
+            alias: String::new(),
             protocol: RelayProtocol::Responses,
             context_window: String::new(),
         }],

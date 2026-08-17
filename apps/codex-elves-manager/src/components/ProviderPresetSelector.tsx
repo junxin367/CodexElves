@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
-import type { ProviderPreset, RelayProtocol } from "../presets";
+import type { ProviderPreset } from "../presets";
 import { PRESETS } from "../presets";
+import type { RelayMode, RelayModelMapping, RelayProtocol } from "../relay-types";
 
 export type RelayProfile = {
   id: string;
@@ -11,7 +12,7 @@ export type RelayProfile = {
   apiKey: string;
   protocol: RelayProtocol;
   localProxyEnabled: boolean;
-  relayMode: string;
+  relayMode: RelayMode;
   officialMixApiKey: boolean;
   testModel: string;
   configContents: string;
@@ -26,12 +27,6 @@ export type RelayProfile = {
   chatCompletionsModelList: string;
   anthropicModelList: string;
   userAgent: string;
-};
-
-export type RelayModelMapping = {
-  requestModel: string;
-  protocol: RelayProtocol;
-  contextWindow: string;
 };
 
 export type PresetPatch = Partial<RelayProfile>;
@@ -51,6 +46,7 @@ export function createPresetPatch(preset: ProviderPreset): PresetPatch {
   const modelList = preset.modelList?.join("\n") ?? "";
   const modelMappings = (preset.modelList ?? []).map((model) => ({
     requestModel: model,
+    alias: "",
     protocol: preset.protocol,
     contextWindow: "",
   }));

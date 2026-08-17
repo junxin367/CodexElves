@@ -2400,7 +2400,7 @@ fn validate_downstream_message(
         return Ok(None);
     };
     let settings = current_websocket_settings(relay)?;
-    let payload: Value =
+    let mut payload: Value =
         serde_json::from_str(text.as_str()).context("Responses WebSocket 请求不是有效 JSON")?;
     if payload.get("type").and_then(Value::as_str) != Some("response.create") {
         anyhow::bail!("Responses WebSocket 仅支持 response.create 请求");
@@ -2409,16 +2409,21 @@ fn validate_downstream_message(
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or_default()
-        .trim();
+        .trim()
+        .to_string();
     if model.is_empty() {
         anyhow::bail!("Responses WebSocket 请求缺少 model");
     }
     if settings
         .active_relay_profile()
-        .resolve_protocol_for_model(model)?
+        .resolve_protocol_for_model(&model)?
         != RelayProtocol::Responses
     {
         anyhow::bail!("当前模型不是原生 Responses 协议");
+    }
+    let request_model = relay.request_model_for_catalog_model(&model);
+    if request_model != model {
+        payload["model"] = serde_json::json!(request_model);
     }
     let _ = crate::diagnostic_log::append_diagnostic_log(
         "protocol_proxy.responses_websocket_request",
@@ -2428,7 +2433,7 @@ fn validate_downstream_message(
             "endpoint": crate::responses_websocket::responses_websocket_url(
                 crate::responses_websocket::relay_responses_base_url(relay)
             ),
-            "model": model,
+            "model": payload.get("model").and_then(Value::as_str).unwrap_or_default(),
         }),
     );
     Ok(Some((payload, settings)))
@@ -3493,11 +3498,13 @@ mod tests {
             model_mappings: vec![
                 RelayModelMapping {
                     request_model: "claude-opus-4-8".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "1000000".to_string(),
                 },
                 RelayModelMapping {
                     request_model: "gpt-5.6".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "372000".to_string(),
                 },
@@ -3552,11 +3559,13 @@ mod tests {
             model_mappings: vec![
                 RelayModelMapping {
                     request_model: "claude-opus-4-8".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "1000000".to_string(),
                 },
                 RelayModelMapping {
                     request_model: "gpt-5.6".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "372000".to_string(),
                 },
@@ -3860,11 +3869,13 @@ mod tests {
             model_mappings: vec![
                 RelayModelMapping {
                     request_model: "claude-opus-4-8".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "1000000".to_string(),
                 },
                 RelayModelMapping {
                     request_model: "claude-sonnet-4-6".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Anthropic,
                     context_window: "1000000".to_string(),
                 },

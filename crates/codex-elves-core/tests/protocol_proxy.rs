@@ -7653,6 +7653,7 @@ async fn responses_proxy_legacy_compaction_blank_override_uses_project_default_p
             protocol: RelayProtocol::Responses,
             model_mappings: vec![RelayModelMapping {
                 request_model: "gpt-5-mini".to_string(),
+                alias: String::new(),
                 protocol: RelayProtocol::Responses,
                 context_window: "200000".to_string(),
             }],
@@ -7957,6 +7958,7 @@ async fn continue_thinking_reports_accumulated_reasoning_tokens() {
             relay_mode: RelayMode::MixedApi,
             model_mappings: vec![RelayModelMapping {
                 request_model: "gpt-responses".to_string(),
+                alias: String::new(),
                 protocol: RelayProtocol::Responses,
                 context_window: "200000".to_string(),
             }],
@@ -8009,6 +8011,7 @@ async fn continue_thinking_skips_response_with_tool_call_output() {
             relay_mode: RelayMode::MixedApi,
             model_mappings: vec![RelayModelMapping {
                 request_model: "gpt-responses".to_string(),
+                alias: String::new(),
                 protocol: RelayProtocol::Responses,
                 context_window: "200000".to_string(),
             }],
@@ -8075,6 +8078,7 @@ async fn continue_thinking_respects_configured_max_rounds() {
             relay_mode: RelayMode::MixedApi,
             model_mappings: vec![RelayModelMapping {
                 request_model: "gpt-responses".to_string(),
+                alias: String::new(),
                 protocol: RelayProtocol::Responses,
                 context_window: "200000".to_string(),
             }],
@@ -8129,6 +8133,7 @@ fn aggregate_proxy_settings(
                 api_key: "sk-first".to_string(),
                 model_mappings: vec![RelayModelMapping {
                     request_model: "gpt-5-mini".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "200000".to_string(),
                 }],
@@ -8141,6 +8146,7 @@ fn aggregate_proxy_settings(
                 api_key: "sk-second".to_string(),
                 model_mappings: vec![RelayModelMapping {
                     request_model: "gpt-5-mini".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "200000".to_string(),
                 }],
@@ -8258,6 +8264,54 @@ async fn responses_proxy_directs_responses_models_to_responses_upstream() {
 }
 
 #[tokio::test]
+async fn responses_proxy_rewrites_duplicate_alias_catalog_slug_to_request_model() {
+    let server = spawn_chat_server();
+    let settings = BackendSettings {
+        relay_profiles: vec![RelayProfile {
+            id: "duplicate-alias".to_string(),
+            name: "Duplicate alias".to_string(),
+            base_url: server.base_url.clone(),
+            upstream_base_url: server.base_url.clone(),
+            api_key: "sk-test".to_string(),
+            relay_mode: RelayMode::PureApi,
+            model_mappings: vec![
+                RelayModelMapping {
+                    request_model: "gpt-5.6-sol".to_string(),
+                    alias: String::new(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "372000".to_string(),
+                },
+                RelayModelMapping {
+                    request_model: "gpt-5.6-sol".to_string(),
+                    alias: "gpt-5.6-sol[1M]".to_string(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "1000000".to_string(),
+                },
+            ],
+            ..RelayProfile::default()
+        }],
+        active_relay_id: "duplicate-alias".to_string(),
+        ..BackendSettings::default()
+    };
+
+    let upstream = open_responses_proxy_request_with_settings(
+        r#"{"model":"gpt-5.6-sol--codex-elves-alias-2","input":"hello","stream":false}"#,
+        settings,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        upstream.response_protocol,
+        UpstreamResponseProtocol::Responses
+    );
+    let request = server.finish();
+    assert_eq!(request.path, "/v1/responses");
+    let body: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["model"], "gpt-5.6-sol");
+}
+
+#[tokio::test]
 async fn responses_proxy_clamps_unsupported_gpt_reasoning_to_model_max() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -8295,11 +8349,13 @@ async fn responses_proxy_rejects_conflicting_duplicate_model_mappings() {
             model_mappings: vec![
                 RelayModelMapping {
                     request_model: "shared-model".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "200000".to_string(),
                 },
                 RelayModelMapping {
                     request_model: "shared-model".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::ChatCompletions,
                     context_window: "200000".to_string(),
                 },
@@ -8646,6 +8702,7 @@ async fn responses_proxy_accepts_anthropic_history_after_switching_to_responses_
             relay_mode: RelayMode::MixedApi,
             model_mappings: vec![RelayModelMapping {
                 request_model: "gpt-responses".to_string(),
+                alias: String::new(),
                 protocol: RelayProtocol::Responses,
                 context_window: "200000".to_string(),
             }],
@@ -10220,11 +10277,13 @@ async fn native_remote_compaction_keeps_session_model_when_override_is_enabled()
             model_mappings: vec![
                 RelayModelMapping {
                     request_model: "gpt-5.4".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "1000000".to_string(),
                 },
                 RelayModelMapping {
                     request_model: "gpt-5.6".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "372000".to_string(),
                 },
@@ -10283,11 +10342,13 @@ async fn bridged_claude_remote_compaction_uses_override_without_becoming_native_
             model_mappings: vec![
                 RelayModelMapping {
                     request_model: "claude-opus-4-8".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Anthropic,
                     context_window: "1000000".to_string(),
                 },
                 RelayModelMapping {
                     request_model: "gpt-5.6".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "372000".to_string(),
                 },
@@ -10351,11 +10412,13 @@ async fn bridged_claude_remote_compaction_uses_configured_claude_model() {
             model_mappings: vec![
                 RelayModelMapping {
                     request_model: "claude-opus-4-8".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Anthropic,
                     context_window: "1000000".to_string(),
                 },
                 RelayModelMapping {
                     request_model: "claude-sonnet-5".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Anthropic,
                     context_window: "1000000".to_string(),
                 },
@@ -10427,11 +10490,13 @@ async fn failed_compaction_model_retries_once_with_session_model() {
             model_mappings: vec![
                 RelayModelMapping {
                     request_model: "claude-opus-4-8".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Anthropic,
                     context_window: "1000000".to_string(),
                 },
                 RelayModelMapping {
                     request_model: "deepseek-chat".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::ChatCompletions,
                     context_window: "128000".to_string(),
                 },

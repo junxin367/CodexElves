@@ -1945,9 +1945,12 @@
     return "";
   }
 
-  // 规范化模型名/文本用于匹配：小写、去除所有非字母数字字符
+  // 规范化模型名/文本用于匹配：保留 Unicode 字母和数字，支持中文等展示别名。
   function codexServiceTierModelMatchKey(value) {
-    return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+    return String(value || "")
+      .normalize("NFKC")
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, "");
   }
 
   // slug 去掉常见厂商前缀后的“核心版本片段”（如 gpt-5.5 -> 5.5），用于与 UI 简写文本匹配
@@ -1978,16 +1981,8 @@
   // 解决：fast 能力判断不应使用后端配置的默认模型，而应使用会话里实际选中的模型。
   function codexServiceTierComposerSelectedModel() {
     try {
-      const slugs = [];
-      const entries = Array.isArray(codexModelCatalog.model_entries) ? codexModelCatalog.model_entries : [];
-      for (const entry of entries) {
-        if (entry && entry.slug) slugs.push(String(entry.slug));
-        if (entry && entry.display_name) slugs.push(String(entry.display_name));
-      }
-      if (Array.isArray(codexModelCatalog.models)) {
-        for (const m of codexModelCatalog.models) if (m) slugs.push(String(m));
-      }
-      if (!slugs.length) return "";
+      const entries = codexServiceTierCatalogEntries();
+      if (!entries.length) return "";
       if (typeof codexServiceTierBestComposerFooter !== "function") return "";
       const footer = codexServiceTierBestComposerFooter();
       if (!footer) return "";
@@ -1998,26 +1993,71 @@
       const texts = (modelButtons.length ? modelButtons : buttons)
         .flatMap(codexServiceTierSelectedModelTexts)
         .filter(Boolean);
-      // 优先精确匹配，再包含，再片段；同时优先更长的 slug，避免短片段误命中
-      const sortedSlugs = slugs.slice().sort((a, b) => b.length - a.length);
       for (const text of texts) {
-        for (const slug of sortedSlugs) {
-          if (codexServiceTierModelMatchKey(text) === codexServiceTierModelMatchKey(slug)) {
-            return findCatalogSlug(slug) || slug;
-          }
-        }
+        const match = codexServiceTierCatalogModelMatch(text, false, entries);
+        if (match.slug) return match.slug;
+        if (match.ambiguous) return null;
       }
       for (const text of texts) {
-        for (const slug of sortedSlugs) {
-          if (codexServiceTierModelMatchesText(slug, text)) {
-            return findCatalogSlug(slug) || slug;
-          }
-        }
+        const match = codexServiceTierCatalogModelMatch(text, true, entries);
+        if (match.slug) return match.slug;
+        if (match.ambiguous) return null;
       }
     } catch (error) {
       void error;
     }
     return "";
+  }
+
+  function codexServiceTierCatalogEntries() {
+    const entries = [];
+    const seen = new Set();
+    const modelEntries = Array.isArray(codexModelCatalog.model_entries) ? codexModelCatalog.model_entries : [];
+    for (const entry of modelEntries) {
+      const slug = String(entry?.slug || "").trim();
+      if (!slug || seen.has(slug)) continue;
+      seen.add(slug);
+      entries.push({ slug, displayName: String(entry?.display_name || "").trim() });
+    }
+    if (Array.isArray(codexModelCatalog.models)) {
+      for (const model of codexModelCatalog.models) {
+        const slug = String(model || "").trim();
+        if (!slug || seen.has(slug)) continue;
+        seen.add(slug);
+        entries.push({ slug, displayName: "" });
+      }
+    }
+    return entries;
+  }
+
+  function codexServiceTierUniqueCatalogMatch(entries, predicate) {
+    const slugs = new Set(
+      entries
+        .filter(predicate)
+        .map((entry) => entry.slug)
+        .filter(Boolean)
+    );
+    if (slugs.size === 1) return { slug: Array.from(slugs)[0], ambiguous: false };
+    return { slug: "", ambiguous: slugs.size > 1 };
+  }
+
+  // slug 和 display_name 的任一交叉冲突都拒绝猜测，避免可见别名解析到另一模型。
+  function codexServiceTierCatalogModelMatch(value, allowPartial = false, entries = codexServiceTierCatalogEntries()) {
+    const key = codexServiceTierModelMatchKey(value);
+    if (!key || !entries.length) return { slug: "", ambiguous: false };
+
+    let match = codexServiceTierUniqueCatalogMatch(
+      entries,
+      (entry) => codexServiceTierModelMatchKey(entry.slug) === key
+        || (entry.displayName && codexServiceTierModelMatchKey(entry.displayName) === key)
+    );
+    if (match.slug || match.ambiguous || !allowPartial) return match;
+
+    return codexServiceTierUniqueCatalogMatch(
+      entries,
+      (entry) => codexServiceTierModelMatchesText(entry.slug, value)
+        || (entry.displayName && codexServiceTierModelMatchesText(entry.displayName, value))
+    );
   }
 
   function codexServiceTierSelectedModelTexts(button) {
@@ -2042,21 +2082,14 @@
 
   // 将匹配到的 slug/display_name 归一回 catalog 真实 slug
   function findCatalogSlug(value) {
-    const key = codexServiceTierModelMatchKey(value);
-    const entries = Array.isArray(codexModelCatalog.model_entries) ? codexModelCatalog.model_entries : [];
-    for (const entry of entries) {
-      if (entry && entry.slug && codexServiceTierModelMatchKey(entry.slug) === key) return String(entry.slug);
-      if (entry && entry.display_name && codexServiceTierModelMatchKey(entry.display_name) === key && entry.slug) return String(entry.slug);
-    }
-    if (Array.isArray(codexModelCatalog.models)) {
-      for (const m of codexModelCatalog.models) if (m && codexServiceTierModelMatchKey(m) === key) return String(m);
-    }
-    return "";
+    return codexServiceTierCatalogModelMatch(value).slug;
   }
 
   function codexServiceTierCurrentModelName() {
     // 优先使用会话 composer 中实际选中的模型；回退到后端配置的激活/默认模型
-    return codexServiceTierComposerSelectedModel()
+    const selectedModel = codexServiceTierComposerSelectedModel();
+    if (selectedModel === null) return "";
+    return selectedModel
       || codexServiceTierModelFromValue(codexModelCatalog.model)
       || codexServiceTierModelFromValue(codexModelCatalog.default_model);
   }
@@ -6506,6 +6539,7 @@
       },
       modelNames: () => codexElvesModelNames(),
       modelMatchesText: (slug, text) => codexServiceTierModelMatchesText(slug, text),
+      catalogSlugForText: (text) => codexServiceTierCatalogModelMatch(text, true).slug || null,
       patchStatsigModelVisibilityConfig: (config) => patchStatsigModelVisibilityConfig(config),
       patchPluginMarketplaceRequestParams: (method, params) => patchPluginMarketplaceRequestParams(method, params),
       patchPluginMarketplaceRequestClient: (client) => patchPluginMarketplaceRequestClient(client),

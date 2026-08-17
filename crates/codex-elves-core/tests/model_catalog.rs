@@ -117,26 +117,31 @@ fn relay_profile_model_ids_preserve_mapping_order_for_catalog_generation() {
         model_mappings: vec![
             RelayModelMapping {
                 request_model: "gpt-responses".to_string(),
+                alias: String::new(),
                 protocol: RelayProtocol::Responses,
                 context_window: String::new(),
             },
             RelayModelMapping {
                 request_model: "gpt-chat".to_string(),
+                alias: String::new(),
                 protocol: RelayProtocol::ChatCompletions,
                 context_window: String::new(),
             },
             RelayModelMapping {
                 request_model: "gpt-shared".to_string(),
+                alias: String::new(),
                 protocol: RelayProtocol::Responses,
                 context_window: String::new(),
             },
             RelayModelMapping {
                 request_model: "gpt-chat".to_string(),
+                alias: String::new(),
                 protocol: RelayProtocol::Anthropic,
                 context_window: String::new(),
             },
             RelayModelMapping {
                 request_model: "claude-sonnet-4".to_string(),
+                alias: String::new(),
                 protocol: RelayProtocol::Anthropic,
                 context_window: String::new(),
             },

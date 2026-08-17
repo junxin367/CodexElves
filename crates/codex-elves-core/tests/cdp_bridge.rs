@@ -1087,6 +1087,18 @@ fn injection_script_applies_fast_service_tier_contract() {
     assert_eq!(cases["displayNameMatches"]["gpt56Sol"], true);
     assert_eq!(cases["displayNameMatches"]["gpt56Terra"], true);
     assert_eq!(cases["displayNameMatches"]["gpt55"], true);
+    assert_eq!(cases["unicodeAliasMatches"]["primary"], true);
+    assert_eq!(cases["unicodeAliasMatches"]["backup"], true);
+    assert_eq!(cases["unicodeAliasMatches"]["asciiLocaleIndependent"], true);
+    assert_eq!(cases["aliasCatalogResolution"]["primary"], "gpt-5.6-sol");
+    assert_eq!(
+        cases["aliasCatalogResolution"]["ambiguous"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        cases["aliasCatalogResolution"]["aliasSlugConflict"],
+        serde_json::Value::Null
+    );
 
     // catalog 驱动：白名单之外但 catalog 标记 supports_fast 的模型也能注入 priority
     assert_eq!(cases["catalogDrivenFast"]["service_tier"], "priority");
@@ -1537,6 +1549,29 @@ const displayNameMatches = {{
   gpt56Terra: api.modelMatchesText("gpt-5.6-terra", "5.6 Terra"),
   gpt55: api.modelMatchesText("gpt-5.5", "5.5 超高"),
 }};
+const unicodeAliasMatches = {{
+  primary: api.modelMatchesText("主力编程模型", "主力编程模型"),
+  backup: api.modelMatchesText("备用编程模型", "备用编程模型"),
+  asciiLocaleIndependent: api.modelMatchesText("KIMI", "kimi"),
+}};
+api.setModelCatalog({{
+  status: "ok",
+  model: "gpt-5.6-sol",
+  default_model: "gpt-5.6-sol",
+  model_entries: [
+    {{ slug: "gpt-5.6-sol", display_name: "主力编程模型" }},
+    {{ slug: "gpt-fast", display_name: "主力" }},
+    {{ slug: "claude-slow", display_name: "主力" }},
+    {{ slug: "model-a", display_name: "model-b" }},
+    {{ slug: "model-b", display_name: "备用模型 B" }},
+  ],
+}});
+const aliasCatalogResolution = {{
+  primary: api.catalogSlugForText("主力编程模型"),
+  ambiguous: api.catalogSlugForText("主力"),
+  aliasSlugConflict: api.catalogSlugForText("model-b"),
+}};
+api.setModelCatalog({{ status: "ok", model: "gpt-5.4", default_model: "gpt-5.4", models: ["gpt-5.4", "gpt-5.5"] }});
 
 api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
 const supportedFast = api.applyServiceTierOverride("turn/start", {{
@@ -1936,6 +1971,8 @@ async function runAppServerRestartDispatchCase() {{
     gpt56Fast,
     gpt56EmptyCatalogFast,
     displayNameMatches,
+    unicodeAliasMatches,
+    aliasCatalogResolution,
     catalogDrivenFast,
     catalogDrivenBlocked,
     patchedCreateRequest,

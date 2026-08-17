@@ -63,6 +63,7 @@ import {
 } from "lucide-react";
 import { ProviderPresetSelector } from "@/components/ProviderPresetSelector";
 import type { PresetPatch } from "@/components/ProviderPresetSelector";
+import type { RelayMode, RelayModelMapping, RelayProtocol } from "@/relay-types";
 import {
   knownModelContextWindow,
   modelFamilyForModel,
@@ -294,12 +295,6 @@ type AggregateRelayProfile = {
   members: AggregateRelayMember[];
 };
 
-type RelayModelMapping = {
-  requestModel: string;
-  protocol: RelayProtocol;
-  contextWindow: string;
-};
-
 type ModelChoiceChangeSource = "input" | "select";
 
 type RelayContextSelection = {
@@ -325,8 +320,6 @@ type CodexContextEntries = {
   plugins: CodexContextEntry[];
 };
 
-type RelayProtocol = "responses" | "chatCompletions" | "anthropic";
-type RelayMode = "official" | "mixedApi" | "pureApi" | "aggregate";
 const PROTOCOL_PROXY_BASE_URL = "http://127.0.0.1:45221/v1";
 const CHAT_UPSTREAM_BASE_URL_KEY = "codex_elves_chat_base_url";
 const SCRIPT_MARKET_REPOSITORY_URL = "https://github.com/BigPizzaV3/CodexElvesScriptMarket";
@@ -982,31 +975,37 @@ function createBrowserPreviewSettings(): BackendSettings {
         modelMappings: [
           {
             requestModel: "gpt-5.5",
+            alias: "",
             protocol: "responses",
             contextWindow: knownModelContextWindow("gpt-5.5"),
           },
           {
             requestModel: "gpt-5.4",
+            alias: "",
             protocol: "responses",
             contextWindow: knownModelContextWindow("gpt-5.4"),
           },
           {
             requestModel: "gpt-5.4-mini",
+            alias: "",
             protocol: "responses",
             contextWindow: knownModelContextWindow("gpt-5.4-mini"),
           },
           {
             requestModel: "deepseek-chat",
+            alias: "",
             protocol: "chatCompletions",
             contextWindow: knownModelContextWindow("deepseek-chat"),
           },
           {
             requestModel: "deepseek-reasoner",
+            alias: "",
             protocol: "chatCompletions",
             contextWindow: knownModelContextWindow("deepseek-reasoner"),
           },
           {
             requestModel: "claude-opus-4-8",
+            alias: "",
             protocol: "anthropic",
             contextWindow: knownModelContextWindow("claude-opus-4-8"),
           },
@@ -1708,7 +1707,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.3.11",
+        currentVersion: "0.3.12",
         latestVersion: "0.4.0",
         releaseSummary: [
           "CodexElves 0.4.0",
@@ -1723,7 +1722,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       }, "发现可用更新。") as T);
     case "perform_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.3.11",
+        currentVersion: "0.3.12",
         latestVersion: "0.4.0",
         releaseSummary: "浏览器预览不会下载真实安装包。",
         installedPath: "C:\\Temp\\CodexElves-0.4.0-windows-x64-setup.exe",
@@ -1733,7 +1732,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({
         report: [
           "CodexElves 诊断报告",
-          "版本: 0.3.11",
+          "版本: 0.3.12",
           "平台: windows-x64",
           "Codex 应用: C:\\Users\\junes\\AppData\\Local\\Programs\\CodexElves\\CodexElves.exe",
           "配置目录: C:\\Users\\junes\\.codex",
@@ -1754,7 +1753,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.3.11",
+        current_version: "0.3.12",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -7004,6 +7003,7 @@ function RelayProfileEditor({
         .filter((model) => !existingModels.has(model))
         .map((requestModel) => ({
           requestModel,
+          alias: "",
           protocol: defaultProtocolForModel(requestModel),
           contextWindow: knownModelContextWindow(requestModel),
         }));
@@ -7072,7 +7072,7 @@ function RelayProfileEditor({
       {isNew ? (
         <ProviderPresetSelector
           onSelect={(patch: PresetPatch) => {
-            updateDraft(patch as unknown as Partial<RelayProfile>);
+            updateDraft(patch);
           }}
         />
       ) : null}
@@ -7197,7 +7197,7 @@ function RelayProfileEditor({
                   onClick={() =>
                     updateModelMappings([
                       ...profile.modelMappings,
-                      { requestModel: "", protocol: defaultProtocolForModel(""), contextWindow: "" },
+                      { requestModel: "", alias: "", protocol: defaultProtocolForModel(""), contextWindow: "" },
                     ])
                   }
                   size="sm"
@@ -7455,7 +7455,7 @@ function RelayModelMappingTable({
 }) {
   const displayRows = mappings.length
     ? mappings
-    : [{ requestModel: "", protocol: defaultProtocolForModel("") as RelayProtocol, contextWindow: "" }];
+    : [{ requestModel: "", alias: "", protocol: defaultProtocolForModel("") as RelayProtocol, contextWindow: "" }];
   const canSort = mappings.length > 1;
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -7468,7 +7468,7 @@ function RelayModelMappingTable({
   const updateRow = (index: number, patch: Partial<RelayModelMapping>) => {
     const next = mappings.length
       ? [...mappings]
-      : [{ requestModel: "", protocol: defaultProtocolForModel("") as RelayProtocol, contextWindow: "" }];
+      : [{ requestModel: "", alias: "", protocol: defaultProtocolForModel("") as RelayProtocol, contextWindow: "" }];
     next[index] = {
       ...next[index],
       ...patch,
@@ -7507,6 +7507,7 @@ function RelayModelMappingTable({
         <div className="relay-model-table-head" role="row">
           <span aria-hidden="true" />
           <span role="columnheader">请求模型</span>
+          <span role="columnheader">别名</span>
           <span role="columnheader">协议</span>
           <span role="columnheader">上下文大小</span>
           <span role="columnheader" aria-label="删除" />
@@ -7591,6 +7592,14 @@ function SortableRelayModelMappingRow({
             onUpdate(index, { requestModel: value });
           }}
           placeholder="点击选择或输入模型"
+        />
+      </div>
+      <div className="relay-model-alias-cell" role="cell">
+        <Input
+          aria-label="模型别名"
+          value={row.alias}
+          onChange={(event) => onUpdate(index, { alias: event.currentTarget.value })}
+          placeholder="留空显示请求模型"
         />
       </div>
       <div role="cell">
@@ -10869,10 +10878,12 @@ function normalizeRelayModelMappings(mappings: RelayModelMapping[] | undefined):
   if (!Array.isArray(mappings)) return [];
   return mappings.map((item) => {
     const requestModel = item.requestModel || "";
+    const alias = item.alias || "";
     const contextWindow = (item.contextWindow || "").replace(/[^\d]/g, "")
       || requiredModelContextWindow(requestModel);
     return {
       requestModel,
+      alias,
       protocol: normalizeRelayProtocol(item.protocol),
       contextWindow,
     };

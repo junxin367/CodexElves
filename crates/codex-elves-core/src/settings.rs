@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -41,6 +41,8 @@ impl Default for RelayContextSelection {
 pub struct RelayModelMapping {
     #[serde(default)]
     pub request_model: String,
+    #[serde(default)]
+    pub alias: String,
     #[serde(default)]
     pub protocol: RelayProtocol,
     #[serde(default)]
@@ -239,6 +241,24 @@ impl RelayProfile {
         self.local_proxy_enabled.unwrap_or(false)
     }
 
+    fn model_mapping_for_catalog_model(&self, model: &str) -> Option<&RelayModelMapping> {
+        let model = model.trim();
+        if model.is_empty() {
+            return None;
+        }
+        relay_model_mapping_catalog_slugs(&self.model_mappings)
+            .iter()
+            .position(|catalog_slug| catalog_slug == model)
+            .and_then(|index| self.model_mappings.get(index))
+    }
+
+    pub(crate) fn request_model_for_catalog_model(&self, model: &str) -> String {
+        self.model_mapping_for_catalog_model(model)
+            .map(|mapping| mapping.request_model.trim().to_string())
+            .filter(|request_model| !request_model.is_empty())
+            .unwrap_or_else(|| model.trim().to_string())
+    }
+
     pub fn context_window_for_active_model(&self) -> String {
         let model = self.model.trim();
         if !model.is_empty() && !self.model_mappings.is_empty() {
@@ -257,9 +277,7 @@ impl RelayProfile {
         if model.is_empty() {
             return None;
         }
-        self.model_mappings
-            .iter()
-            .find(|mapping| mapping.request_model.trim() == model)
+        self.model_mapping_for_catalog_model(model)
             .map(|mapping| mapping.context_window.trim())
             .filter(|value| !value.is_empty())
             .or_else(|| {
@@ -281,9 +299,7 @@ impl RelayProfile {
 
         if !self.model_mappings.is_empty() {
             return self
-                .model_mappings
-                .iter()
-                .find(|mapping| mapping.request_model.trim() == model)
+                .model_mapping_for_catalog_model(model)
                 .map(|mapping| mapping.protocol)
                 .with_context(|| format!("模型「{model}」没有明确协议归属"));
         }
@@ -332,6 +348,44 @@ impl RelayProfile {
         }
         Ok(())
     }
+}
+
+pub(crate) fn relay_model_mapping_catalog_slugs(mappings: &[RelayModelMapping]) -> Vec<String> {
+    let reserved_request_models = mappings
+        .iter()
+        .map(|mapping| mapping.request_model.trim())
+        .filter(|model| !model.is_empty())
+        .map(ToString::to_string)
+        .collect::<HashSet<_>>();
+    let mut used_catalog_slugs = HashSet::new();
+    let mut occurrences = HashMap::<String, usize>::new();
+
+    mappings
+        .iter()
+        .map(|mapping| {
+            let request_model = mapping.request_model.trim();
+            if request_model.is_empty() {
+                return String::new();
+            }
+            let occurrence = occurrences.entry(request_model.to_string()).or_default();
+            *occurrence += 1;
+            if *occurrence == 1 {
+                used_catalog_slugs.insert(request_model.to_string());
+                return request_model.to_string();
+            }
+
+            let base = format!("{request_model}--codex-elves-alias-{occurrence}");
+            let mut catalog_slug = base.clone();
+            let mut collision_index = 2;
+            while reserved_request_models.contains(&catalog_slug)
+                || !used_catalog_slugs.insert(catalog_slug.clone())
+            {
+                catalog_slug = format!("{base}-{collision_index}");
+                collision_index += 1;
+            }
+            catalog_slug
+        })
+        .collect()
 }
 
 fn split_relay_model_ids(value: &str) -> impl Iterator<Item = &str> {
@@ -1579,16 +1633,42 @@ mod tests {
     }
 
     #[test]
+    fn relay_profile_round_trips_model_mapping_alias() {
+        let profile: RelayProfile = serde_json::from_str(
+            r#"{
+                "id":"relay-a",
+                "name":"供应商 A",
+                "modelMappings":[
+                    {
+                        "requestModel":"gpt-5.6-sol",
+                        "alias":"主力编程模型",
+                        "protocol":"responses",
+                        "contextWindow":"372000"
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let saved = serde_json::to_value(&profile).unwrap();
+
+        assert_eq!(saved["modelMappings"][0]["requestModel"], "gpt-5.6-sol");
+        assert_eq!(saved["modelMappings"][0]["alias"], "主力编程模型");
+    }
+
+    #[test]
     fn relay_profile_context_window_backfills_required_fable_only() {
         let profile = RelayProfile {
             model_mappings: vec![
                 RelayModelMapping {
                     request_model: "claude-fable-5".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Anthropic,
                     context_window: String::new(),
                 },
                 RelayModelMapping {
                     request_model: "gpt-5.6".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: String::new(),
                 },
@@ -1610,11 +1690,13 @@ mod tests {
             model_mappings: vec![
                 RelayModelMapping {
                     request_model: "gpt-chat".to_string(),
+                    alias: "对话模型".to_string(),
                     protocol: RelayProtocol::ChatCompletions,
                     context_window: "200000".to_string(),
                 },
                 RelayModelMapping {
                     request_model: "claude-sonnet-4".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Anthropic,
                     context_window: "200000".to_string(),
                 },
@@ -1626,6 +1708,7 @@ mod tests {
             profile.resolve_protocol_for_model("gpt-chat").unwrap(),
             RelayProtocol::ChatCompletions
         );
+        assert!(profile.resolve_protocol_for_model("对话模型").is_err());
         assert_eq!(
             profile
                 .resolve_protocol_for_model("claude-sonnet-4")
@@ -1637,16 +1720,50 @@ mod tests {
     }
 
     #[test]
+    fn relay_profile_resolves_duplicate_mapping_catalog_slug_to_its_protocol_and_context() {
+        let profile = RelayProfile {
+            model_mappings: vec![
+                RelayModelMapping {
+                    request_model: "gpt-5.6-sol".to_string(),
+                    alias: String::new(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "372000".to_string(),
+                },
+                RelayModelMapping {
+                    request_model: "gpt-5.6-sol".to_string(),
+                    alias: "gpt-5.6-sol[1M]".to_string(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "1000000".to_string(),
+                },
+            ],
+            ..RelayProfile::default()
+        };
+
+        let catalog_slug = "gpt-5.6-sol--codex-elves-alias-2";
+
+        assert_eq!(
+            profile.resolve_protocol_for_model(catalog_slug).unwrap(),
+            RelayProtocol::Responses
+        );
+        assert_eq!(
+            profile.context_window_for_model(catalog_slug),
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
     fn relay_profile_rejects_conflicting_duplicate_model_mappings() {
         let profile = RelayProfile {
             model_mappings: vec![
                 RelayModelMapping {
                     request_model: "gpt-conflict".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "200000".to_string(),
                 },
                 RelayModelMapping {
                     request_model: "gpt-conflict".to_string(),
+                    alias: String::new(),
                     protocol: RelayProtocol::ChatCompletions,
                     context_window: "200000".to_string(),
                 },
@@ -2088,11 +2205,13 @@ experimental_bearer_token = "sk-existing""#
                 model_mappings: vec![
                     RelayModelMapping {
                         request_model: "shared-model".to_string(),
+                        alias: String::new(),
                         protocol: RelayProtocol::Responses,
                         context_window: String::new(),
                     },
                     RelayModelMapping {
                         request_model: "shared-model".to_string(),
+                        alias: String::new(),
                         protocol: RelayProtocol::Anthropic,
                         context_window: String::new(),
                     },

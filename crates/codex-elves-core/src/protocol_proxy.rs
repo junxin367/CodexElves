@@ -222,6 +222,24 @@ fn apply_system_prompt_override_to_responses_request(
     updated
 }
 
+fn rewrite_catalog_model_to_request_model(
+    request: &Value,
+    relay: &crate::settings::RelayProfile,
+) -> Value {
+    let Some(catalog_model) = request.get("model").and_then(Value::as_str) else {
+        return request.clone();
+    };
+    let request_model = relay.request_model_for_catalog_model(catalog_model);
+    if request_model == catalog_model.trim() {
+        return request.clone();
+    }
+    let mut updated = request.clone();
+    if let Some(object) = updated.as_object_mut() {
+        object.insert("model".to_string(), json!(request_model));
+    }
+    updated
+}
+
 fn remove_responses_system_messages(value: &mut Value) {
     match value {
         Value::Array(items) => {
@@ -2020,6 +2038,8 @@ async fn open_responses_proxy_request_once(
         validate_upstream(&relay)?;
         let source_request_json =
             apply_system_prompt_override_to_responses_request(&original_request_json, &relay);
+        let source_request_json =
+            rewrite_catalog_model_to_request_model(&source_request_json, &relay);
         // 先按会话原模型解析协议并冻结压缩执行方式。独立模型只能改变本地压缩的
         // 实际目标，不能把 V2 本地兼容桥重新解释成原生远程压缩。
         let source_response_protocol =
@@ -2704,6 +2724,7 @@ pub async fn open_chat_completions_proxy_request(
     }
 
     let request_json: Value = serde_json::from_str(body)?;
+    let request_json = rewrite_catalog_model_to_request_model(&request_json, &relay);
     let request_json = apply_system_prompt_override_to_chat_request(&request_json, &relay);
     let request_body = serialized_proxy_request_body(&request_json);
     let is_stream = request_json
@@ -10948,6 +10969,7 @@ mod compaction_model_override_tests {
                 .iter()
                 .map(|(model, protocol, context_window)| RelayModelMapping {
                     request_model: (*model).to_string(),
+                    alias: String::new(),
                     protocol: *protocol,
                     context_window: (*context_window).to_string(),
                 })
