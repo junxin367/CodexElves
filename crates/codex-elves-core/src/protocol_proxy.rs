@@ -10365,6 +10365,9 @@ fn claude_reasoning_efforts(model: &str) -> Vec<&'static str> {
             return levels(&["low", "medium", "high", "max"]);
         }
     }
+    if family == "sonnet" && version >= (4, 6) {
+        return levels(&["low", "medium", "high", "max"]);
+    }
     levels(&["low", "medium", "high"])
 }
 

@@ -1607,7 +1607,7 @@ fn anthropic_reasoning_effort_is_clamped_by_model_capability() {
     }))
     .unwrap();
     assert_eq!(sonnet["thinking"], json!({ "type": "adaptive" }));
-    assert_eq!(sonnet["output_config"], json!({ "effort": "high" }));
+    assert_eq!(sonnet["output_config"], json!({ "effort": "max" }));
 
     let opus = responses_to_anthropic_messages(json!({
         "model": "claude-opus-4-6",
@@ -3343,7 +3343,7 @@ fn future_claude_models_inherit_top_reasoning_efforts() {
             "claude-sonnet-4-6",
             UpstreamResponseProtocol::Anthropic
         ),
-        vec!["low", "medium", "high"]
+        vec!["low", "medium", "high", "max"]
     );
 }
 
