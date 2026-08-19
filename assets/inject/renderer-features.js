@@ -2324,7 +2324,7 @@
 
   function setCodexServiceTierControlMode(mode) {
     if (codexElvesBackendStatus.status !== "ok") {
-      showToast("后端未连接，无法切换服务模式", null);
+      showToast("后端未连接，无法切换服务模式");
       refreshCodexServiceTierControls();
       return;
     }
@@ -2333,7 +2333,7 @@
       const fastAvailability = codexServiceTierFastAvailability();
       if (!fastAvailability.supported) {
         codexServiceTierMaybeLoadModelCatalog(true);
-        showToast(codexServiceTierFastUnsupportedMessage(fastAvailability.modelName), null);
+        showToast(codexServiceTierFastUnsupportedMessage(fastAvailability.modelName));
         refreshCodexServiceTierControls();
         return;
       }
@@ -2355,7 +2355,7 @@
       "global-fast": "全局 Fast",
       custom: "自定义",
     };
-    showToast(`服务模式：${labels[normalizedMode] || normalizedMode}`, null);
+    showToast(`服务模式：${labels[normalizedMode] || normalizedMode}`);
   }
 
   function syncCodexServiceTierEffectiveState() {
@@ -2526,7 +2526,7 @@
 
   function setCodexThreadServiceTierMode(mode) {
     if (codexElvesBackendStatus.status !== "ok") {
-      showToast("后端未连接，无法切换服务模式", null);
+      showToast("后端未连接，无法切换服务模式");
       refreshCodexServiceTierControls();
       return;
     }
@@ -2535,7 +2535,7 @@
       const fastAvailability = codexServiceTierFastAvailability();
       if (!fastAvailability.supported) {
         codexServiceTierMaybeLoadModelCatalog(true);
-        showToast(codexServiceTierFastUnsupportedMessage(fastAvailability.modelName), null);
+        showToast(codexServiceTierFastUnsupportedMessage(fastAvailability.modelName));
         refreshCodexServiceTierControls();
         return;
       }
@@ -2544,12 +2544,12 @@
     setCodexThreadServiceTierOverride(threadId, normalizedMode);
     refreshCodexServiceTierControls();
     const target = threadId ? "当前 thread" : "新 thread 草稿";
-    showToast(`${target}服务模式：${normalizedMode === "inherit" ? "继承" : normalizedMode}`, null);
+    showToast(`${target}服务模式：${normalizedMode === "inherit" ? "继承" : normalizedMode}`);
   }
 
   function toggleCodexServiceTierFromBadge() {
     if (codexElvesBackendStatus.status !== "ok") {
-      showToast("后端未连接，无法切换服务模式", null);
+      showToast("后端未连接，无法切换服务模式");
       refreshCodexServiceTierControls();
       return;
     }
@@ -2559,7 +2559,7 @@
       const fastAvailability = codexServiceTierFastAvailability();
       if (!fastAvailability.supported) {
         codexServiceTierMaybeLoadModelCatalog(true);
-        showToast(codexServiceTierFastUnsupportedMessage(fastAvailability.modelName), null);
+        showToast(codexServiceTierFastUnsupportedMessage(fastAvailability.modelName));
         refreshCodexServiceTierControls();
         return;
       }
@@ -3070,9 +3070,9 @@
   async function openManagerFromCodex() {
     const result = await postJson("/manager/open", {});
     if (result.status === "ok") {
-      showToast("管理工具已打开", null);
+      showToast("管理工具已打开");
     } else {
-      showToast(result.message || "打开管理工具失败", null);
+      showToast(result.message || "打开管理工具失败");
     }
   }
 
@@ -3196,7 +3196,7 @@
               </div>
             </div>
             <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">会话删除</div><div class="codex-elves-row-description">在会话列表悬停显示删除按钮，并支持撤销。</div></div>
+              <div><div class="codex-elves-row-title">会话删除</div><div class="codex-elves-row-description">在会话列表悬停显示删除按钮；删除后不可恢复。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="sessionDelete"><span></span></button>
             </div>
             <div class="codex-elves-row">
@@ -3360,7 +3360,7 @@
       }
       if (target?.closest("[data-codex-upstream-worktree-open]")) {
         if (!codexElvesSettings().upstreamWorktreeCreate) {
-          showToast("Upstream worktree enhancement is disabled", null);
+          showToast("Upstream worktree enhancement is disabled");
           return;
         }
         openUpstreamWorktreeDialog();
@@ -6305,7 +6305,7 @@
       window.__codexElvesAppServerRestartTestToasts.push(String(message || ""));
       return;
     }
-    showToast(message, null);
+    showToast(message);
   }
 
   async function restartCodexAppServerFromFailure(button, conversationId) {
@@ -6851,15 +6851,6 @@
     removeSuppressedThreadRows();
     installSuppressedThreadObserver();
     void postJson("/session/suppress", { thread_id: rawId }).catch(() => {});
-  }
-
-  // 撤销删除时从抑制集移除（内存 + 后端），使会话可重新显示。
-  function unsuppressThreadEverywhere(rawId) {
-    threadIdVariants(rawId).forEach((variant) => {
-      const id = normalizeSuppressedThreadId(variant);
-      if (id) suppressedThreadIds().delete(id);
-    });
-    void postJson("/session/unsuppress", { thread_id: rawId }).catch(() => {});
   }
 
   function uuidV7TimestampMs(sessionId) {
@@ -7725,22 +7716,11 @@
     return result;
   }
 
-  function showToast(message, undoToken, undoRef) {
+  function showToast(message) {
     document.querySelectorAll(".codex-delete-toast").forEach((node) => node.remove());
     const toast = document.createElement("div");
     toast.className = "codex-delete-toast";
     toast.textContent = message;
-    if (undoToken) {
-      const undo = document.createElement("button");
-      undo.textContent = "撤销";
-      undo.addEventListener("click", async () => {
-        const result = await postJson("/undo", { undo_token: undoToken });
-        if (result.status === "undone" && undoRef) restoreSessionToCodexAppStore(undoRef);
-        toast.textContent = result.message || "撤销完成";
-        setTimeout(() => toast.remove(), 5000);
-      });
-      toast.appendChild(undo);
-    }
     document.body.appendChild(toast);
     setTimeout(() => toast.remove(), 10000);
   }
@@ -8230,7 +8210,7 @@
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation?.();
-      showToast(`该分支已在另一个 worktree 使用：${usedWorktreePath}`, null);
+      showToast(`该分支已在另一个 worktree 使用：${usedWorktreePath}`);
     }
   }
 
@@ -8323,7 +8303,7 @@
       prepareUpstreamBranchSelection(selection);
       syncUpstreamBranchTriggerLabel();
       syncUpstreamBranchMenuSelection(option.closest?.('[role="menu"], [data-radix-menu-content], [cmdk-list]'));
-      showToast(`将从 ${upstreamBranchOptionLabel(option) || "upstream/main"} 创建新 worktree`, null);
+      showToast(`将从 ${upstreamBranchOptionLabel(option) || "upstream/main"} 创建新 worktree`);
     };
     document.addEventListener("click", window.__codexUpstreamBranchDropdownClickHandler, true);
     const schedule = () => {
@@ -8497,7 +8477,7 @@
     if (!trigger) return false;
     const payload = upstreamWorktreePayloadFromSelection(trigger) || upstreamWorktreeNativePayloadFromElement(trigger);
     if (!payload) {
-      showToast("无法安全识别 Codex 原生 worktree 表单，请使用 CodexElves 菜单创建。", null);
+      showToast("无法安全识别 Codex 原生 worktree 表单，请使用 CodexElves 菜单创建。");
       return false;
     }
     event.preventDefault();
@@ -8507,12 +8487,12 @@
       if (result?.status === "ok") {
         writeUpstreamBranchSelection(null);
         syncUpstreamBranchTriggerLabel();
-        showToast(`已从 ${result.sourceRef} 创建 worktree`, null);
+        showToast(`已从 ${result.sourceRef} 创建 worktree`);
       } else {
-        showToast(result?.message || "创建 upstream worktree 失败", null);
+        showToast(result?.message || "创建 upstream worktree 失败");
       }
     } catch (error) {
-      showToast(error?.message || "创建 upstream worktree 失败", null);
+      showToast(error?.message || "创建 upstream worktree 失败");
     }
     return true;
   }
@@ -8568,7 +8548,7 @@
       const result = await postJson("/upstream-worktree/create", payload);
       if (result?.status === "ok") {
         setUpstreamWorktreeMessage(dialog, `已从 ${result.sourceRef} 创建：${result.worktreePath}`, "ok");
-        showToast(`已创建 upstream worktree：${result.branchName}`, null);
+        showToast(`已创建 upstream worktree：${result.branchName}`);
       } else {
         setUpstreamWorktreeMessage(dialog, result?.message || "创建 upstream worktree 失败", "failed");
       }
@@ -8690,15 +8670,6 @@
     }
   }
 
-  // 撤销删除：从持久抑制集移除（不依赖 Codex 内部 manager），
-  // 否则撤销后会话仍被 DOM 抑制层拦截、不显示。
-  function restoreSessionToCodexAppStore(ref) {
-    const threadId = validThreadSessionKey(ref?.session_id);
-    if (!threadId) return false;
-    unsuppressThreadEverywhere(ref.session_id);
-    return true;
-  }
-
   function removeDeletedRow(row, button, ref, archived = false) {
     releaseDeleteFocus(row, button);
     const shouldReload = isCurrentSessionRow(row, ref);
@@ -8738,16 +8709,16 @@
       releaseDeleteFocus(row, button);
       // 先删数据，再由 removeDeletedRow 加入持久抑制集（不依赖 Codex 内部 manager）。
       const result = await postJson("/delete", ref);
-      if (result.status === "server_deleted" || result.status === "local_deleted") {
+      if (result.status === "server_deleted" || result.status === "local_deleted" || result.status === "partial") {
         removeDeletedRow(row, button, ref);
-        // 持久抑制集已保证不复现，提示删除成功。
-        showToast(result.message || "删除成功", result.undo_token, ref);
+        // partial 表示数据库记录已经删除，仅有 rollout 文件清理失败；仍需抑制残留列表行。
+        showToast(result.message || (result.status === "partial" ? "数据库已删除，但部分文件清理失败" : "删除成功"));
       } else if (result.status === "not_found") {
         // 会话在本地存储中已不存在，目标（会话不存在）已达成，直接移除残留的列表行
         removeDeletedRow(row, button, ref);
-        showToast(result.message || "会话已不存在，已从列表移除", null);
+        showToast(result.message || "会话已不存在，已从列表移除");
       } else {
-        showToast(result.message || "删除失败", null);
+        showToast(result.message || "删除失败");
       }
     });
   }
@@ -8757,13 +8728,13 @@
     if (result.status === "exported" && result.filename && typeof result.markdown === "string") {
       const saveResult = await saveMarkdown(result.filename, result.markdown);
       if (saveResult?.status === "cancelled") {
-        showToast(saveResult.message || "导出已取消", null);
+        showToast(saveResult.message || "导出已取消");
       } else {
-        showToast(result.message || "导出成功", null);
+        showToast(result.message || "导出成功");
       }
       return;
     }
-    showToast(result.message || "导出失败", null);
+    showToast(result.message || "导出失败");
   }
 
   function sortStateFromMoveResult(result, ref, row) {
@@ -8778,7 +8749,7 @@
     saveProjectMoveProjection(ref, target, target.sortMs || rowSortMs(row, ref, target));
     if (target.kind === "projectless") moveRowToChats(row, target);
     refreshAfterProjectMove();
-    showToast(message, null);
+    showToast(message);
   }
 
   async function applyProjectMove(row, button, ref, target) {
@@ -8795,7 +8766,7 @@
     } catch (error) {
       button.disabled = false;
       button.textContent = "移动";
-      showToast(`移动失败：${error?.message || error}`, null);
+      showToast(`移动失败：${error?.message || error}`);
     }
   }
 
@@ -8859,7 +8830,7 @@
       list.querySelector("button")?.focus();
     } catch (error) {
       close();
-      showToast(`加载项目失败：${error?.message || error}`, null);
+      showToast(`加载项目失败：${error?.message || error}`);
     }
   }
 
@@ -9406,7 +9377,7 @@
         stopArchivedButtonEvent(event);
         const ref = await resolveArchivedThread(row);
         if (!ref.session_id) {
-          showToast("导出失败：未找到归档会话 ID", null);
+          showToast("导出失败：未找到归档会话 ID");
           return;
         }
         await exportMarkdown(ref);

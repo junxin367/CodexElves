@@ -1,7 +1,5 @@
-use crate::BackupStore;
-use anyhow::Context;
 use codex_elves_core::models::{DeleteResult, DeleteStatus, SessionRef};
-use rusqlite::types::{ToSqlOutput, Value as SqlValue, ValueRef};
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, ToSql, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -15,117 +13,71 @@ use std::time::SystemTime;
 
 pub fn delete_local_from_paths(
     db_paths: impl IntoIterator<Item = PathBuf>,
-    backup_store: BackupStore,
     session: &SessionRef,
 ) -> DeleteResult {
-    let mut result = not_found(&session.session_id, "会话在本地存储中已不存在".to_string());
     let mut deleted_count = 0usize;
-    let mut undo_tokens = Vec::new();
+    let mut deleted_session_id = session.session_id.clone();
+    let mut partial_count = 0usize;
+    let mut failed_count = 0usize;
+    let mut issues = Vec::new();
+    let mut first_failure = None;
     for db_path in db_paths {
-        let adapter = SQLiteStorageAdapter::new(db_path, backup_store.clone());
+        if !db_path.is_file() {
+            continue;
+        }
+        let adapter = SQLiteStorageAdapter::new(db_path);
         let candidate_result = adapter.delete_local(session);
-        if matches!(candidate_result.status, DeleteStatus::LocalDeleted) {
-            deleted_count += 1;
-            if let Some(token) = candidate_result.undo_token.clone() {
-                undo_tokens.push(token);
+        match candidate_result.status {
+            DeleteStatus::LocalDeleted | DeleteStatus::ServerDeleted => {
+                deleted_count += 1;
+                deleted_session_id = candidate_result.session_id;
             }
-            result = candidate_result;
-        } else if deleted_count == 0 {
-            result = candidate_result;
+            DeleteStatus::Partial => {
+                deleted_count += 1;
+                partial_count += 1;
+                deleted_session_id = candidate_result.session_id;
+                issues.push(candidate_result.message);
+            }
+            DeleteStatus::Failed => {
+                failed_count += 1;
+                issues.push(candidate_result.message.clone());
+                first_failure.get_or_insert(candidate_result);
+            }
+            DeleteStatus::NotFound => {}
         }
     }
-    if deleted_count > 1 {
-        match backup_store.write_multi_database_undo(&session.session_id, &undo_tokens) {
-            Ok(token) => {
-                result.message = format!("已从 {deleted_count} 个本地存储删除");
-                result.undo_token = Some(token.clone());
-                result.backup_path =
-                    Some(backup_store.path_for(&token).to_string_lossy().to_string());
-            }
-            Err(error) => {
-                result.status = DeleteStatus::Failed;
-                result.message =
-                    format!("已从 {deleted_count} 个本地存储删除，但无法创建完整撤销清单：{error}");
-            }
-        }
+    if deleted_count == 0 {
+        return first_failure.unwrap_or_else(|| {
+            not_found(&session.session_id, "会话在本地存储中已不存在".to_string())
+        });
     }
-    result
-}
-
-pub fn undo_local_from_backup(
-    allowed_db_paths: impl IntoIterator<Item = PathBuf>,
-    backup_store: BackupStore,
-    token: &str,
-) -> DeleteResult {
-    let result = (|| -> anyhow::Result<DeleteResult> {
-        let allowed_db_paths = allowed_db_paths
-            .into_iter()
-            .filter(|path| path.is_file())
-            .map(|path| {
-                fs::canonicalize(&path).with_context(|| {
-                    format!(
-                        "failed to normalize allowed source database: {}",
-                        path.to_string_lossy()
-                    )
-                })
-            })
-            .collect::<anyhow::Result<HashSet<_>>>()?;
-        let plan = backup_store.undo_plan(token)?;
-        let adapters = plan
-            .targets
-            .iter()
-            .map(|target| {
-                let source_db = fs::canonicalize(&target.source_db).with_context(|| {
-                    format!(
-                        "backup source database not found: {}",
-                        target.source_db.to_string_lossy()
-                    )
-                })?;
-                if !allowed_db_paths.contains(&source_db) {
-                    anyhow::bail!(
-                        "backup source database is outside the allowed database paths: {}",
-                        source_db.to_string_lossy()
-                    );
-                }
-                Ok((
-                    SQLiteStorageAdapter::new(source_db, backup_store.clone()),
-                    target,
-                ))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-
-        for (adapter, target) in &adapters {
-            adapter.validate_undo(target.token.as_str())?;
-        }
-
-        let multiple = adapters.len() > 1;
-        let mut restored = None;
-        for (adapter, target) in adapters {
-            let result = adapter.undo(target.token.as_str());
-            if result.status != DeleteStatus::Undone {
-                return Ok(failed_with_undo(
-                    &plan.session_id,
-                    format!("本地会话恢复不完整：{}", result.message),
-                    token,
-                    None,
-                ));
-            }
-            restored = Some(result);
-        }
-        let mut restored = restored.context("backup has no restore targets")?;
-        if multiple {
-            restored.session_id = plan.session_id;
-            restored.message = format!("已从 {} 个本地存储恢复", plan.targets.len());
-            restored.undo_token = Some(token.to_string());
-        }
-        Ok(restored)
-    })();
-    result.unwrap_or_else(|error| failed_with_undo("", error.to_string(), token, None))
+    if issues.is_empty() {
+        return DeleteResult {
+            status: DeleteStatus::LocalDeleted,
+            session_id: deleted_session_id,
+            message: if deleted_count > 1 {
+                format!("已从 {deleted_count} 个本地存储删除")
+            } else {
+                "已从本地存储删除".to_string()
+            },
+        };
+    }
+    DeleteResult {
+        status: DeleteStatus::Partial,
+        session_id: deleted_session_id,
+        message: if deleted_count == 1 && partial_count == 1 && failed_count == 0 {
+            issues.remove(0)
+        } else {
+            format!(
+                "已从 {deleted_count} 个本地存储删除，但部分清理失败：{}",
+                issues.join("; ")
+            )
+        },
+    }
 }
 
 pub fn move_codex_thread_workspace_from_paths(
     db_paths: impl IntoIterator<Item = PathBuf>,
-    backup_store: BackupStore,
     session: &SessionRef,
     target_cwd: &str,
 ) -> Value {
@@ -135,7 +87,7 @@ pub fn move_codex_thread_workspace_from_paths(
         "message": "会话在本地存储中已不存在"
     });
     for db_path in db_paths {
-        let adapter = SQLiteStorageAdapter::new(db_path, backup_store.clone());
+        let adapter = SQLiteStorageAdapter::new(db_path);
         let candidate_result = adapter.move_codex_thread_workspace(session, target_cwd);
         if candidate_result.get("status").and_then(Value::as_str) == Some("moved") {
             return candidate_result;
@@ -147,23 +99,20 @@ pub fn move_codex_thread_workspace_from_paths(
 
 pub fn codex_thread_usage_history_from_paths(
     db_paths: impl IntoIterator<Item = PathBuf>,
-    backup_store: BackupStore,
     session: &SessionRef,
 ) -> Value {
-    codex_thread_usage_from_paths(db_paths, backup_store, session, true)
+    codex_thread_usage_from_paths(db_paths, session, true)
 }
 
 pub fn codex_thread_usage_summary_from_paths(
     db_paths: impl IntoIterator<Item = PathBuf>,
-    backup_store: BackupStore,
     session: &SessionRef,
 ) -> Value {
-    codex_thread_usage_from_paths(db_paths, backup_store, session, false)
+    codex_thread_usage_from_paths(db_paths, session, false)
 }
 
 fn codex_thread_usage_from_paths(
     db_paths: impl IntoIterator<Item = PathBuf>,
-    backup_store: BackupStore,
     session: &SessionRef,
     include_history: bool,
 ) -> Value {
@@ -175,7 +124,7 @@ fn codex_thread_usage_from_paths(
     });
     let mut best: Option<(bool, i64, Value)> = None;
     for db_path in db_paths {
-        let adapter = SQLiteStorageAdapter::new(db_path, backup_store.clone());
+        let adapter = SQLiteStorageAdapter::new(db_path);
         let candidate = adapter.codex_thread_usage(session, include_history);
         if candidate.get("status").and_then(Value::as_str) != Some("ok") {
             result = candidate;
@@ -203,7 +152,6 @@ fn codex_thread_usage_from_paths(
 #[derive(Debug, Clone)]
 pub struct SQLiteStorageAdapter {
     db_path: PathBuf,
-    backup_store: BackupStore,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,20 +174,10 @@ pub struct LocalSession {
     pub db_path: String,
 }
 
-#[derive(Debug, Clone)]
-struct OwnedSqlValue(SqlValue);
-
-impl ToSql for OwnedSqlValue {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        Ok(ToSqlOutput::Owned(self.0.clone()))
-    }
-}
-
 impl SQLiteStorageAdapter {
-    pub fn new(db_path: impl Into<PathBuf>, backup_store: BackupStore) -> Self {
+    pub fn new(db_path: impl Into<PathBuf>) -> Self {
         Self {
             db_path: db_path.into(),
-            backup_store,
         }
     }
 
@@ -353,69 +291,6 @@ impl SQLiteStorageAdapter {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-
-    pub fn undo(&self, token: &str) -> DeleteResult {
-        let result = (|| -> anyhow::Result<DeleteResult> {
-            let backup = self.backup_store.read_backup(token)?;
-            let session_id = backup["session_id"].as_str().unwrap_or("").to_string();
-            let mut db = Connection::open(&self.db_path)?;
-            validate_restore_backup(&db, &backup)?;
-            if let Some(tables) = backup["tables"].as_object() {
-                let tx = db.transaction()?;
-                for (table, rows) in tables {
-                    if table.starts_with("__") {
-                        continue;
-                    }
-                    let Some(rows) = rows.as_array() else {
-                        continue;
-                    };
-                    for row in rows {
-                        if let Some(row) = row.as_object() {
-                            if table == "agent_job_items"
-                                && update_existing_agent_job_item(&tx, row)?
-                            {
-                                continue;
-                            }
-                            insert_row(&tx, table, row)?;
-                        }
-                    }
-                }
-                tx.commit()?;
-                if let Some(files) = tables.get("__files").and_then(Value::as_array) {
-                    for file in files {
-                        let Some(path) = file.get("path").and_then(Value::as_str) else {
-                            continue;
-                        };
-                        let Some(content) = file.get("content_b64").and_then(Value::as_str) else {
-                            continue;
-                        };
-                        let bytes = base64::Engine::decode(
-                            &base64::engine::general_purpose::STANDARD,
-                            content,
-                        )?;
-                        if let Some(parent) = Path::new(path).parent() {
-                            fs::create_dir_all(parent)?;
-                        }
-                        fs::write(path, bytes)?;
-                    }
-                }
-            }
-            Ok(DeleteResult {
-                status: DeleteStatus::Undone,
-                session_id,
-                message: "Local session restored from backup".to_string(),
-                undo_token: Some(token.to_string()),
-                backup_path: None,
-            })
-        })();
-        result.unwrap_or_else(|err| failed_with_undo("", err.to_string(), token, None))
-    }
-
-    fn validate_undo(&self, token: &str) -> anyhow::Result<()> {
-        let backup = self.backup_store.read_backup(token)?;
-        let db = Connection::open(&self.db_path)?;
-        validate_restore_backup(&db, &backup)
     }
 
     pub fn find_archived_thread_by_title(&self, title: &str) -> Option<SessionRef> {
@@ -865,32 +740,20 @@ impl SQLiteStorageAdapter {
         db: &mut Connection,
         session: &SessionRef,
     ) -> anyhow::Result<DeleteResult> {
-        let sessions = select_dicts(
-            db,
-            "SELECT * FROM sessions WHERE id = ?1",
-            &[&session.session_id],
-        )?;
-        if sessions.is_empty() {
+        let exists = db
+            .query_row(
+                "SELECT 1 FROM sessions WHERE id = ?1 LIMIT 1",
+                [&session.session_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
             return Ok(not_found(
                 &session.session_id,
                 "会话在本地存储中已不存在".to_string(),
             ));
         }
-        let messages = if has_table(db, "messages")? {
-            select_dicts(
-                db,
-                "SELECT * FROM messages WHERE session_id = ?1",
-                &[&session.session_id],
-            )?
-        } else {
-            Vec::new()
-        };
-        let token = self.backup_store.write_backup(
-            &session.session_id,
-            &self.db_path,
-            json!({"sessions": sessions, "messages": messages}),
-        )?;
-        let backup_path = self.backup_store.path_for(&token);
         let delete_result = (|| -> anyhow::Result<()> {
             let tx = db.transaction()?;
             if has_table(&tx, "messages")? {
@@ -904,14 +767,9 @@ impl SQLiteStorageAdapter {
             Ok(())
         })();
         if let Err(err) = delete_result {
-            return Ok(failed_with_undo(
-                &session.session_id,
-                err.to_string(),
-                &token,
-                Some(&backup_path),
-            ));
+            return Ok(failed(&session.session_id, err.to_string()));
         }
-        Ok(local_deleted(&session.session_id, &token, &backup_path))
+        Ok(local_deleted(&session.session_id))
     }
 
     fn delete_codex_thread(
@@ -920,58 +778,19 @@ impl SQLiteStorageAdapter {
         session: &SessionRef,
     ) -> anyhow::Result<DeleteResult> {
         let thread_id = normalize_codex_thread_id(&session.session_id);
-        let thread_rows = select_dicts(db, "SELECT * FROM threads WHERE id = ?1", &[&thread_id])?;
-        if thread_rows.is_empty() {
+        let rollout_path = db
+            .query_row(
+                "SELECT rollout_path FROM threads WHERE id = ?1 LIMIT 1",
+                [&thread_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        let Some(rollout_path) = rollout_path else {
             return Ok(not_found(
                 &session.session_id,
                 "会话在本地存储中已不存在".to_string(),
             ));
-        }
-        let mut tables = Map::new();
-        tables.insert("threads".to_string(), Value::Array(thread_rows));
-        backup_related_rows(
-            db,
-            &mut tables,
-            "thread_dynamic_tools",
-            "thread_id = ?1",
-            &[&thread_id],
-        )?;
-        backup_related_rows(
-            db,
-            &mut tables,
-            "thread_goals",
-            "thread_id = ?1",
-            &[&thread_id],
-        )?;
-        backup_related_rows(
-            db,
-            &mut tables,
-            "thread_spawn_edges",
-            "parent_thread_id = ?1 OR child_thread_id = ?1",
-            &[&thread_id],
-        )?;
-        backup_related_rows(
-            db,
-            &mut tables,
-            "stage1_outputs",
-            "thread_id = ?1",
-            &[&thread_id],
-        )?;
-        backup_related_rows(
-            db,
-            &mut tables,
-            "agent_job_items",
-            "assigned_thread_id = ?1",
-            &[&thread_id],
-        )?;
-        let file_backups = rollout_file_backups(tables.get("threads").and_then(Value::as_array));
-        if !file_backups.is_empty() {
-            tables.insert("__files".to_string(), Value::Array(file_backups.clone()));
-        }
-        let token =
-            self.backup_store
-                .write_backup(&thread_id, &self.db_path, Value::Object(tables))?;
-        let backup_path = self.backup_store.path_for(&token);
+        };
         let delete_result = (|| -> anyhow::Result<()> {
             let tx = db.transaction()?;
             delete_related_rows(&tx, "thread_dynamic_tools", "thread_id = ?1", &[&thread_id])?;
@@ -996,36 +815,27 @@ impl SQLiteStorageAdapter {
             Ok(())
         })();
         if let Err(err) = delete_result {
-            return Ok(failed_with_undo(
-                &thread_id,
-                err.to_string(),
-                &token,
-                Some(&backup_path),
-            ));
+            return Ok(failed(&thread_id, err.to_string()));
         }
         let mut file_errors = Vec::new();
-        for file in file_backups {
-            if let Some(path) = file.get("path").and_then(Value::as_str) {
-                if let Err(err) = fs::remove_file(path) {
-                    if err.kind() != std::io::ErrorKind::NotFound {
-                        file_errors.push(format!("{path}: {err}"));
-                    }
+        if let Some(path) = rollout_path.filter(|path| !path.trim().is_empty()) {
+            if let Err(err) = fs::remove_file(&path) {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    file_errors.push(format!("{path}: {err}"));
                 }
             }
         }
         if !file_errors.is_empty() {
             return Ok(DeleteResult {
-                status: DeleteStatus::Failed,
+                status: DeleteStatus::Partial,
                 session_id: thread_id,
                 message: format!(
                     "本地数据库已删除，但文件删除失败：{}",
                     file_errors.join("; ")
                 ),
-                undo_token: Some(token.clone()),
-                backup_path: Some(backup_path.to_string_lossy().to_string()),
             });
         }
-        Ok(local_deleted(&thread_id, &token, &backup_path))
+        Ok(local_deleted(&thread_id))
     }
 
     fn delete_codex_automation_run(
@@ -1034,35 +844,24 @@ impl SQLiteStorageAdapter {
         session: &SessionRef,
     ) -> anyhow::Result<DeleteResult> {
         let thread_id = normalize_codex_thread_id(&session.session_id);
-        let mut tables = Map::new();
-        backup_related_rows(
-            db,
-            &mut tables,
-            "automation_runs",
-            "thread_id = ?1",
-            &[&thread_id],
-        )?;
-        backup_related_rows(
-            db,
-            &mut tables,
-            "inbox_items",
-            "thread_id = ?1",
-            &[&thread_id],
-        )?;
-        if tables.values().all(|rows| {
-            rows.as_array()
-                .map(|items| items.is_empty())
-                .unwrap_or(true)
-        }) {
+        let automation_exists = has_table(db, "automation_runs")?
+            && db.query_row(
+                "SELECT COUNT(*) FROM automation_runs WHERE thread_id = ?1",
+                [&thread_id],
+                |row| row.get::<_, i64>(0),
+            )? > 0;
+        let inbox_exists = has_table(db, "inbox_items")?
+            && db.query_row(
+                "SELECT COUNT(*) FROM inbox_items WHERE thread_id = ?1",
+                [&thread_id],
+                |row| row.get::<_, i64>(0),
+            )? > 0;
+        if !automation_exists && !inbox_exists {
             return Ok(not_found(
                 &session.session_id,
                 "会话在本地存储中已不存在".to_string(),
             ));
         }
-        let token =
-            self.backup_store
-                .write_backup(&thread_id, &self.db_path, Value::Object(tables))?;
-        let backup_path = self.backup_store.path_for(&token);
         let delete_result = (|| -> anyhow::Result<()> {
             let tx = db.transaction()?;
             delete_related_rows(&tx, "automation_runs", "thread_id = ?1", &[&thread_id])?;
@@ -1071,14 +870,9 @@ impl SQLiteStorageAdapter {
             Ok(())
         })();
         if let Err(err) = delete_result {
-            return Ok(failed_with_undo(
-                &thread_id,
-                err.to_string(),
-                &token,
-                Some(&backup_path),
-            ));
+            return Ok(failed(&thread_id, err.to_string()));
         }
-        Ok(local_deleted(&thread_id, &token, &backup_path))
+        Ok(local_deleted(&thread_id))
     }
 }
 
@@ -1267,8 +1061,6 @@ fn failed(session_id: &str, message: String) -> DeleteResult {
         status: DeleteStatus::Failed,
         session_id: session_id.to_string(),
         message,
-        undo_token: None,
-        backup_path: None,
     }
 }
 
@@ -1280,18 +1072,14 @@ fn not_found(session_id: &str, message: String) -> DeleteResult {
         status: DeleteStatus::NotFound,
         session_id: session_id.to_string(),
         message,
-        undo_token: None,
-        backup_path: None,
     }
 }
 
-fn local_deleted(session_id: &str, token: &str, backup_path: &Path) -> DeleteResult {
+fn local_deleted(session_id: &str) -> DeleteResult {
     DeleteResult {
         status: DeleteStatus::LocalDeleted,
         session_id: session_id.to_string(),
         message: "已从本地存储删除".to_string(),
-        undo_token: Some(token.to_string()),
-        backup_path: Some(backup_path.to_string_lossy().to_string()),
     }
 }
 
@@ -1973,21 +1761,6 @@ fn read_rollout_usage_history(
     Ok(report)
 }
 
-fn failed_with_undo(
-    session_id: &str,
-    message: String,
-    token: &str,
-    backup_path: Option<&Path>,
-) -> DeleteResult {
-    DeleteResult {
-        status: DeleteStatus::Failed,
-        session_id: session_id.to_string(),
-        message,
-        undo_token: Some(token.to_string()),
-        backup_path: backup_path.map(|path| path.to_string_lossy().to_string()),
-    }
-}
-
 fn normalize_codex_thread_id(session_id: &str) -> String {
     session_id
         .strip_prefix("local:")
@@ -2035,239 +1808,6 @@ fn table_columns(db: &Connection, table: &str) -> anyhow::Result<Vec<String>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-fn select_dicts(db: &Connection, sql: &str, params: &[&dyn ToSql]) -> anyhow::Result<Vec<Value>> {
-    let mut stmt = db.prepare(sql)?;
-    let columns: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(|name| name.to_string())
-        .collect();
-    let rows = stmt.query_map(params, |row| {
-        let mut data = Map::new();
-        for (index, column) in columns.iter().enumerate() {
-            data.insert(column.clone(), sql_value_to_json(row.get_ref(index)?));
-        }
-        Ok(Value::Object(data))
-    })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
-
-fn validate_restore_tables(tables: &Map<String, Value>) -> anyhow::Result<()> {
-    let allowed = [
-        "sessions",
-        "messages",
-        "threads",
-        "thread_dynamic_tools",
-        "thread_goals",
-        "thread_spawn_edges",
-        "stage1_outputs",
-        "agent_job_items",
-        "automation_runs",
-        "inbox_items",
-        "__files",
-    ];
-    for table in tables.keys() {
-        if !allowed.contains(&table.as_str()) {
-            anyhow::bail!("unknown restore table: {table}");
-        }
-    }
-    Ok(())
-}
-
-fn validate_restore_backup(db: &Connection, backup: &Value) -> anyhow::Result<()> {
-    if let Some(tables) = backup["tables"].as_object() {
-        validate_restore_tables(tables)?;
-        detect_restore_conflicts(db, tables)?;
-        detect_file_restore_conflicts(tables)?;
-    }
-    Ok(())
-}
-
-fn detect_restore_conflicts(db: &Connection, tables: &Map<String, Value>) -> anyhow::Result<()> {
-    for (table, rows) in tables {
-        if table.starts_with("__") {
-            continue;
-        }
-        let Some(rows) = rows.as_array() else {
-            continue;
-        };
-        for row in rows {
-            let Some(row) = row.as_object() else {
-                continue;
-            };
-            if restore_row_conflicts(db, table, row)? {
-                anyhow::bail!("restore conflict: {table} row already exists");
-            }
-        }
-    }
-    Ok(())
-}
-
-fn restore_row_conflicts(
-    db: &Connection,
-    table: &str,
-    row: &Map<String, Value>,
-) -> anyhow::Result<bool> {
-    let key_columns = restore_conflict_key_columns(table, row);
-    if key_columns.is_empty() || !has_table(db, table)? {
-        return Ok(false);
-    }
-    let where_clause = key_columns
-        .iter()
-        .enumerate()
-        .map(|(index, column)| format!("\"{}\" = ?{}", column.replace('"', "\"\""), index + 1))
-        .collect::<Vec<_>>()
-        .join(" AND ");
-    let values = key_columns
-        .iter()
-        .map(|column| OwnedSqlValue(json_to_sql_value(&row[*column])))
-        .collect::<Vec<_>>();
-    let refs = values
-        .iter()
-        .map(|value| value as &dyn ToSql)
-        .collect::<Vec<_>>();
-    Ok(db
-        .query_row(
-            &format!("SELECT 1 FROM \"{table}\" WHERE {where_clause} LIMIT 1"),
-            refs.as_slice(),
-            |_| Ok(()),
-        )
-        .is_ok())
-}
-
-fn restore_conflict_key_columns<'a>(table: &str, row: &'a Map<String, Value>) -> Vec<&'a String> {
-    let wanted: &[&str] = match table {
-        "sessions" | "threads" => &["id"],
-        "messages" => &["id"],
-        "automation_runs" | "inbox_items" => &["thread_id"],
-        "thread_dynamic_tools" => &["thread_id", "tool_name"],
-        "thread_goals" => &["thread_id", "goal"],
-        "thread_spawn_edges" => &["parent_thread_id", "child_thread_id"],
-        "stage1_outputs" => &["thread_id"],
-        _ => &[],
-    };
-    let keys = wanted
-        .iter()
-        .filter_map(|column| row.get_key_value(*column).map(|(key, _)| key))
-        .collect::<Vec<_>>();
-    if table == "messages" && keys.is_empty() {
-        row.get_key_value("session_id")
-            .map(|(key, _)| vec![key])
-            .unwrap_or_default()
-    } else {
-        keys
-    }
-}
-
-fn detect_file_restore_conflicts(tables: &Map<String, Value>) -> anyhow::Result<()> {
-    let Some(files) = tables.get("__files").and_then(Value::as_array) else {
-        return Ok(());
-    };
-    let allowed_paths = allowed_backup_file_paths(tables);
-    for file in files {
-        if let Some(path) = file.get("path").and_then(Value::as_str) {
-            if !allowed_paths.contains(path) {
-                anyhow::bail!("unexpected backup file path: {path}");
-            }
-            if Path::new(path).exists() {
-                anyhow::bail!("restore conflict: file already exists: {path}");
-            }
-        }
-    }
-    Ok(())
-}
-
-fn allowed_backup_file_paths(tables: &Map<String, Value>) -> HashSet<String> {
-    tables
-        .get("threads")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|row| row.get("rollout_path").and_then(Value::as_str))
-        .filter(|path| !path.trim().is_empty())
-        .map(ToString::to_string)
-        .collect()
-}
-
-fn insert_row(db: &Connection, table: &str, row: &Map<String, Value>) -> anyhow::Result<()> {
-    let columns: Vec<&String> = row.keys().collect();
-    if columns.is_empty() {
-        return Ok(());
-    }
-    let quoted = columns
-        .iter()
-        .map(|column| format!("\"{}\"", column.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let marks = (0..columns.len())
-        .map(|index| format!("?{}", index + 1))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let values = columns
-        .iter()
-        .map(|column| OwnedSqlValue(json_to_sql_value(&row[*column])))
-        .collect::<Vec<_>>();
-    let refs = values
-        .iter()
-        .map(|value| value as &dyn ToSql)
-        .collect::<Vec<_>>();
-    db.execute(
-        &format!("INSERT INTO \"{table}\" ({quoted}) VALUES ({marks})"),
-        refs.as_slice(),
-    )?;
-    Ok(())
-}
-
-fn update_existing_agent_job_item(
-    db: &Connection,
-    row: &Map<String, Value>,
-) -> anyhow::Result<bool> {
-    let Some(id) = row.get("id") else {
-        return Ok(false);
-    };
-    if !row.contains_key("assigned_thread_id") || !has_table(db, "agent_job_items")? {
-        return Ok(false);
-    }
-    let id_value = OwnedSqlValue(json_to_sql_value(id));
-    let current_assignment = db.query_row(
-        "SELECT assigned_thread_id FROM agent_job_items WHERE id = ?1 LIMIT 1",
-        [&id_value as &dyn ToSql],
-        |row| row.get::<_, Option<String>>(0),
-    );
-    let current_assignment = match current_assignment {
-        Ok(value) => value,
-        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(false),
-        Err(err) => return Err(err.into()),
-    };
-    if current_assignment.is_some() {
-        anyhow::bail!("restore conflict: agent_job_items row already assigned");
-    }
-    let assigned = OwnedSqlValue(json_to_sql_value(&row["assigned_thread_id"]));
-    db.execute(
-        "UPDATE agent_job_items SET assigned_thread_id = ?1 WHERE id = ?2 AND assigned_thread_id IS NULL",
-        [&assigned as &dyn ToSql, &id_value as &dyn ToSql],
-    )?;
-    Ok(true)
-}
-
-fn backup_related_rows(
-    db: &Connection,
-    tables: &mut Map<String, Value>,
-    table: &str,
-    where_clause: &str,
-    params: &[&dyn ToSql],
-) -> anyhow::Result<()> {
-    if has_table(db, table)? {
-        let rows = select_dicts(
-            db,
-            &format!("SELECT * FROM \"{table}\" WHERE {where_clause}"),
-            params,
-        )?;
-        tables.insert(table.to_string(), Value::Array(rows));
-    }
-    Ok(())
-}
-
 fn delete_related_rows(
     db: &Connection,
     table: &str,
@@ -2281,21 +1821,6 @@ fn delete_related_rows(
         )?;
     }
     Ok(())
-}
-
-fn rollout_file_backups(thread_rows: Option<&Vec<Value>>) -> Vec<Value> {
-    thread_rows
-        .into_iter()
-        .flatten()
-        .filter_map(|row| row.get("rollout_path").and_then(Value::as_str))
-        .filter_map(|path| {
-            let bytes = fs::read(path).ok()?;
-            Some(json!({
-                "path": path,
-                "content_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
-            }))
-        })
-        .collect()
 }
 
 fn update_rollout_session_meta_cwd(
@@ -2422,24 +1947,6 @@ fn sql_value_to_json(value: ValueRef<'_>) -> Value {
             &base64::engine::general_purpose::STANDARD,
             value
         )),
-    }
-}
-
-fn json_to_sql_value(value: &Value) -> SqlValue {
-    match value {
-        Value::Null => SqlValue::Null,
-        Value::Bool(value) => SqlValue::Integer(i64::from(*value)),
-        Value::Number(number) => {
-            if let Some(value) = number.as_i64() {
-                SqlValue::Integer(value)
-            } else if let Some(value) = number.as_f64() {
-                SqlValue::Real(value)
-            } else {
-                SqlValue::Text(number.to_string())
-            }
-        }
-        Value::String(value) => SqlValue::Text(value.clone()),
-        other => SqlValue::Text(other.to_string()),
     }
 }
 

@@ -94,6 +94,40 @@ fn renderer_features_diagnostics_prefer_bridge_before_http_fallback() {
 }
 
 #[test]
+fn renderer_features_delete_is_permanent_without_undo_ui() {
+    let script = assets::renderer_features_script();
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("core crate should live under crates/codex-elves-core");
+    let manager_source =
+        std::fs::read_to_string(repo.join("apps/codex-elves-manager/src/App.tsx")).unwrap();
+
+    assert!(!script.contains("postJson(\"/undo\""));
+    assert!(!script.contains("result.undo_token"));
+    assert!(!script.contains("undo.textContent = \"撤销\""));
+    assert!(script.contains("result.status === \"partial\""));
+    assert!(manager_source.contains("deleteStatus === \"partial\""));
+}
+
+#[test]
+fn obsolete_session_backup_cleanup_only_spawns_before_migration_completes() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("core crate should live under crates/codex-elves-core");
+    let launcher =
+        std::fs::read_to_string(repo.join("apps/codex-elves-launcher/src/main.rs")).unwrap();
+    let manager =
+        std::fs::read_to_string(repo.join("apps/codex-elves-manager/src-tauri/src/lib.rs"))
+            .unwrap();
+    let guard = "if codex_elves_core::paths::obsolete_session_backup_cleanup_needed()";
+
+    assert!(launcher.contains(guard));
+    assert!(manager.contains(guard));
+}
+
+#[test]
 fn renderer_features_supports_current_app_shell_header_layout() {
     let script = assets::renderer_features_script();
 

@@ -762,8 +762,6 @@ pub fn delete_local_session(request: DeleteLocalSessionRequest) -> CommandResult
                 status: codex_elves_core::models::DeleteStatus::Failed,
                 session_id: String::new(),
                 message: "会话 ID 不能为空。".to_string(),
-                undo_token: None,
-                backup_path: None,
             },
         );
     }
@@ -797,13 +795,7 @@ pub fn delete_local_session(request: DeleteLocalSessionRequest) -> CommandResult
                 .collect::<Vec<_>>(),
         }),
     );
-    let result = codex_elves_data::delete_local_from_paths(
-        candidate_paths.clone(),
-        codex_elves_data::BackupStore::new(
-            codex_elves_core::paths::default_app_state_dir().join("backups"),
-        ),
-        &session,
-    );
+    let result = codex_elves_data::delete_local_from_paths(candidate_paths.clone(), &session);
     log_manager_event(
         "manager.delete_local_session.finish",
         json!({
@@ -832,12 +824,7 @@ pub fn delete_local_session(request: DeleteLocalSessionRequest) -> CommandResult
 }
 
 fn local_session_adapter(db_path: &Path) -> codex_elves_data::SQLiteStorageAdapter {
-    codex_elves_data::SQLiteStorageAdapter::new(
-        db_path,
-        codex_elves_data::BackupStore::new(
-            codex_elves_core::paths::default_app_state_dir().join("backups"),
-        ),
-    )
+    codex_elves_data::SQLiteStorageAdapter::new(db_path)
 }
 
 fn normalize_settings_before_save(mut settings: BackendSettings) -> BackendSettings {

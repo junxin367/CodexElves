@@ -425,8 +425,6 @@ type DeleteLocalSessionResult = CommandResult<{
   status: string;
   session_id: string;
   message: string;
-  undo_token: string | null;
-  backup_path: string | null;
 }>;
 
 type ContextEntriesResult = CommandResult<{
@@ -1707,7 +1705,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.3.12",
+        currentVersion: "0.3.13",
         latestVersion: "0.4.0",
         releaseSummary: [
           "CodexElves 0.4.0",
@@ -1722,7 +1720,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       }, "发现可用更新。") as T);
     case "perform_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.3.12",
+        currentVersion: "0.3.13",
         latestVersion: "0.4.0",
         releaseSummary: "浏览器预览不会下载真实安装包。",
         installedPath: "C:\\Temp\\CodexElves-0.4.0-windows-x64-setup.exe",
@@ -1732,7 +1730,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({
         report: [
           "CodexElves 诊断报告",
-          "版本: 0.3.12",
+          "版本: 0.3.13",
           "平台: windows-x64",
           "Codex 应用: C:\\Users\\junes\\AppData\\Local\\Programs\\CodexElves\\CodexElves.exe",
           "配置目录: C:\\Users\\junes\\.codex",
@@ -1753,7 +1751,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.3.12",
+        current_version: "0.3.13",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -2315,7 +2313,7 @@ export function App() {
     const title = session.title || session.id;
     if (
       !window.confirm(
-        `删除会话“${title}”？\n\n将删除本地数据库记录和 rollout 文件，并创建可恢复备份。请先关闭正在使用该会话的窗口。`,
+        `永久删除会话“${title}”？\n\n将删除本地数据库记录和 rollout 文件，此操作不可恢复。请先关闭正在使用该会话的窗口。`,
       )
     ) return;
     const result = await run(() =>
@@ -2345,10 +2343,11 @@ export function App() {
     if (!sessionsToDelete.length) return;
     if (
       !window.confirm(
-        `确认批量删除这 ${sessionsToDelete.length} 个会话？\n\n将删除本地数据库记录和 rollout 文件，并为每个会话创建可恢复备份。请先关闭正在使用这些会话的窗口。`,
+        `确认永久删除这 ${sessionsToDelete.length} 个会话？\n\n将删除本地数据库记录和 rollout 文件，此操作不可恢复。请先关闭正在使用这些会话的窗口。`,
       )
     ) return;
     let deleted = 0;
+    let partial = 0;
     let failed = 0;
     for (const session of sessionsToDelete) {
       const result = await run(() =>
@@ -2358,20 +2357,26 @@ export function App() {
       );
       // not_found 也视为已达成目标（会话本来就不存在）
       // 注：CommandResult 与 DeleteResult 的 status 字段经 serde flatten 后重名，
-      // 前端拿到的 result.status 实际是删除业务状态（local_deleted/server_deleted/not_found/failed），
-      // 因此这里按业务状态判断，not_found 视为已达成目标（会话本来就不存在）。
+      // 前端拿到的 result.status 实际是删除业务状态。partial 表示数据库已删除、
+      // rollout 文件清理不完整；not_found 表示会话本来就不存在。
       const deleteStatus = result?.status as string | undefined;
       if (deleteStatus === "local_deleted" || deleteStatus === "server_deleted" || deleteStatus === "not_found") {
         deleted += 1;
+      } else if (deleteStatus === "partial") {
+        deleted += 1;
+        partial += 1;
       } else {
         failed += 1;
       }
     }
     await refreshLocalSessions(true);
+    const summary = [`已删除 ${deleted} 个`];
+    if (partial) summary.push(`其中 ${partial} 个文件清理不完整`);
+    if (failed) summary.push(`失败 ${failed} 个`);
     showNotice(
       "批量删除会话",
-      failed ? `已删除 ${deleted} 个，失败 ${failed} 个。` : `已成功删除 ${deleted} 个会话。`,
-      failed ? "failed" : "ok",
+      `${summary.join("，")}。`,
+      failed ? "failed" : partial ? "partial" : "ok",
     );
   };
 
@@ -5146,7 +5151,7 @@ function EnhanceScreen({
             <FeatureToggle title="强制解锁入口" detail="恢复 1.1.9 的入口解锁方式，强制显示并启用插件入口。" checked={form.codexAppPluginEntryUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginEntryUnlock", value)} />
             <FeatureToggle title="插件列表全量展示" detail="进入插件页后自动连续展开“更多”，尽量一次显示完整插件列表。" checked={form.codexAppPluginAutoExpand} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginAutoExpand", value)} />
             <FeatureToggle title="Fast 按钮" detail="显示服务模式切换按钮。Fast 仅支持 gpt-5.4+。" checked={form.codexAppServiceTierControls} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppServiceTierControls", value)} />
-            <FeatureToggle title="会话删除" detail="在会话列表悬停显示删除按钮，并支持撤销。" checked={form.codexAppSessionDelete} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppSessionDelete", value)} />
+            <FeatureToggle title="会话删除" detail="在会话列表悬停显示删除按钮；删除后不可恢复。" checked={form.codexAppSessionDelete} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppSessionDelete", value)} />
             <FeatureToggle title="Markdown 导出" detail="在会话列表显示导出按钮，导出带时间戳的 Markdown。" checked={form.codexAppMarkdownExport} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppMarkdownExport", value)} />
             <FeatureToggle title="会话项目移动" detail="把会话移动到普通对话或其他本地项目。" checked={form.codexAppProjectMove} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppProjectMove", value)} />
             <FeatureToggle title="对话居中宽度" detail="把主对话和输入框限制到固定最大宽度，适合大屏阅读。" checked={form.codexAppConversationView} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppConversationView", value)} />

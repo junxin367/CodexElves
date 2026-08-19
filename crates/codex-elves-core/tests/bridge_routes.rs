@@ -49,7 +49,6 @@ async fn bridge_routes_cover_all_current_paths() {
             json!({"repoPath": "/repo", "branchName": "feature/demo"}),
         ),
         ("/delete", json!({"session_id": "s1", "title": "First"})),
-        ("/undo", json!({"undo_token": "undo-1"})),
         (
             "/export-markdown",
             json!({"session_id": "s1", "title": "First"}),
@@ -300,17 +299,11 @@ async fn data_routes_forward_payloads_to_data_service() {
             "/delete",
             json!({"session_id": "s1", "title": "First"}),
         )
-        .await["undo_token"],
-        "undo-s1"
-    );
-    assert_eq!(
-        handle_bridge_request(ctx.clone(), "/undo", json!({"undo_token": "undo-s1"})).await,
+        .await,
         json!({
-            "status": "undone",
+            "status": "local_deleted",
             "session_id": "s1",
-            "message": "undone",
-            "undo_token": "undo-s1",
-            "backup_path": null
+            "message": "deleted First"
         })
     );
     assert_eq!(
@@ -425,7 +418,8 @@ async fn bridge_context_core_with_data_uses_injected_data_service() {
     .await;
 
     assert_eq!(result["status"], "local_deleted");
-    assert_eq!(result["undo_token"], "undo-s1");
+    assert!(result.get("undo_token").is_none());
+    assert!(result.get("backup_path").is_none());
     assert_ne!(
         result["message"],
         "Delete service is not wired in core launcher hooks"
@@ -1070,18 +1064,6 @@ impl BridgeDataService for FakeData {
             status: DeleteStatus::LocalDeleted,
             session_id: session.session_id.clone(),
             message: format!("deleted {}", session.title),
-            undo_token: Some(format!("undo-{}", session.session_id)),
-            backup_path: None,
-        })
-    }
-
-    async fn undo(&self, undo_token: String) -> anyhow::Result<DeleteResult> {
-        Ok(DeleteResult {
-            status: DeleteStatus::Undone,
-            session_id: "s1".to_string(),
-            message: "undone".to_string(),
-            undo_token: Some(undo_token),
-            backup_path: None,
         })
     }
 

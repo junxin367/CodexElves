@@ -66,19 +66,6 @@ pub fn suppress_thread(raw_id: &str) -> Vec<String> {
     list
 }
 
-/// 把一个 thread ID 从抑制集合移除（撤销删除时使用），返回更新后的完整列表。
-pub fn unsuppress_thread(raw_id: &str) -> Vec<String> {
-    let id = normalize_thread_id(raw_id);
-    let path = store_path();
-    let mut list = read_list(&path);
-    let before = list.len();
-    list.retain(|existing| existing != &id);
-    if list.len() != before {
-        let _ = write_list(&path, &list);
-    }
-    list
-}
-
 /// 用于去重/集合运算的辅助：把列表转为 `BTreeSet`。
 pub fn suppressed_set() -> BTreeSet<String> {
     load_suppressed_ids().into_iter().collect()

@@ -47,6 +47,9 @@ pub fn run() {
     let Some(guard) = acquire_single_instance_guard(show_update) else {
         return;
     };
+    if codex_elves_core::paths::obsolete_session_backup_cleanup_needed() {
+        spawn_obsolete_session_backup_cleanup();
+    }
     let wake_listener = match guard.try_clone_listener() {
         Ok(listener) => listener,
         Err(error) => {
@@ -433,6 +436,21 @@ fn manager_wake_command(show_update: bool) -> u8 {
     } else {
         MANAGER_WAKE_SHOW
     }
+}
+
+fn spawn_obsolete_session_backup_cleanup() {
+    let _ = std::thread::Builder::new()
+        .name("codex-elves-obsolete-backup-cleanup".to_string())
+        .spawn(|| {
+            if let Err(error) = codex_elves_core::paths::cleanup_obsolete_session_backups() {
+                let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+                    "manager.obsolete_session_backups_cleanup_failed",
+                    serde_json::json!({
+                        "error": error.to_string()
+                    }),
+                );
+            }
+        });
 }
 
 fn install_panic_logger() {

@@ -63,6 +63,9 @@ async fn main() -> Result<()> {
         activate_existing_codex_app(&options).await?;
         return Ok(());
     };
+    if codex_elves_core::paths::obsolete_session_backup_cleanup_needed() {
+        spawn_obsolete_session_backup_cleanup();
+    }
     tokio::spawn(async {
         let _ = notify_manager_when_update_available().await;
     });
@@ -79,6 +82,19 @@ async fn main() -> Result<()> {
     let handle = launch_and_inject_with_hooks(options, &hooks).await?;
     handle.wait_for_codex_exit().await?;
     Ok(())
+}
+
+fn spawn_obsolete_session_backup_cleanup() {
+    drop(tokio::task::spawn_blocking(|| {
+        if let Err(error) = codex_elves_core::paths::cleanup_obsolete_session_backups() {
+            let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+                "launcher.obsolete_session_backups_cleanup_failed",
+                json!({
+                    "message": error.to_string()
+                }),
+            );
+        }
+    }));
 }
 
 fn start_launcher_control_listener(
@@ -637,14 +653,12 @@ impl LaunchHooks for LauncherHooks {
 #[derive(Debug, Clone)]
 struct LauncherDataService {
     db_path: PathBuf,
-    backup_dir: PathBuf,
 }
 
 impl Default for LauncherDataService {
     fn default() -> Self {
         Self {
             db_path: default_codex_db_path(),
-            backup_dir: codex_elves_core::paths::default_app_state_dir().join("backups"),
         }
     }
 }
@@ -653,22 +667,11 @@ impl Default for LauncherDataService {
 impl BridgeDataService for LauncherDataService {
     async fn delete(&self, session: SessionRef) -> anyhow::Result<DeleteResult> {
         let db_paths = self.candidate_db_paths();
-        let backup_store = codex_elves_data::BackupStore::new(self.backup_dir.clone());
         tokio::task::spawn_blocking(move || {
-            codex_elves_data::delete_local_from_paths(db_paths, backup_store, &session)
+            codex_elves_data::delete_local_from_paths(db_paths, &session)
         })
         .await
         .map_err(|error| anyhow::anyhow!("delete task failed: {error}"))
-    }
-
-    async fn undo(&self, undo_token: String) -> anyhow::Result<DeleteResult> {
-        let db_paths = self.candidate_db_paths();
-        let backup_store = codex_elves_data::BackupStore::new(self.backup_dir.clone());
-        tokio::task::spawn_blocking(move || {
-            codex_elves_data::undo_local_from_backup(db_paths, backup_store, &undo_token)
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("undo task failed: {error}"))
     }
 
     async fn export_markdown(&self, session: SessionRef) -> anyhow::Result<ExportResult> {
@@ -682,13 +685,8 @@ impl BridgeDataService for LauncherDataService {
 
     async fn thread_usage_history(&self, session: SessionRef) -> anyhow::Result<Value> {
         let db_paths = self.candidate_db_paths();
-        let backup_store = codex_elves_data::BackupStore::new(self.backup_dir.clone());
         tokio::task::spawn_blocking(move || {
-            codex_elves_data::codex_thread_usage_history_from_paths(
-                db_paths,
-                backup_store,
-                &session,
-            )
+            codex_elves_data::codex_thread_usage_history_from_paths(db_paths, &session)
         })
         .await
         .map_err(|error| anyhow::anyhow!("thread usage history task failed: {error}"))
@@ -696,13 +694,8 @@ impl BridgeDataService for LauncherDataService {
 
     async fn thread_usage_summary(&self, session: SessionRef) -> anyhow::Result<Value> {
         let db_paths = self.candidate_db_paths();
-        let backup_store = codex_elves_data::BackupStore::new(self.backup_dir.clone());
         tokio::task::spawn_blocking(move || {
-            codex_elves_data::codex_thread_usage_summary_from_paths(
-                db_paths,
-                backup_store,
-                &session,
-            )
+            codex_elves_data::codex_thread_usage_summary_from_paths(db_paths, &session)
         })
         .await
         .map_err(|error| anyhow::anyhow!("thread usage summary task failed: {error}"))
@@ -724,11 +717,9 @@ impl BridgeDataService for LauncherDataService {
         target_cwd: String,
     ) -> anyhow::Result<Value> {
         let db_paths = self.candidate_db_paths();
-        let backup_store = codex_elves_data::BackupStore::new(self.backup_dir.clone());
         tokio::task::spawn_blocking(move || {
             codex_elves_data::move_codex_thread_workspace_from_paths(
                 db_paths,
-                backup_store,
                 &session,
                 &target_cwd,
             )
@@ -776,10 +767,7 @@ impl LauncherDataService {
     }
 
     fn storage_adapter(&self) -> codex_elves_data::SQLiteStorageAdapter {
-        codex_elves_data::SQLiteStorageAdapter::new(
-            self.current_db_path(),
-            codex_elves_data::BackupStore::new(self.backup_dir.clone()),
-        )
+        codex_elves_data::SQLiteStorageAdapter::new(self.current_db_path())
     }
 }
 

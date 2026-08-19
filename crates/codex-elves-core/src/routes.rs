@@ -89,7 +89,6 @@ pub trait BridgeRuntimeService: Send + Sync {
 #[async_trait]
 pub trait BridgeDataService: Send + Sync {
     async fn delete(&self, session: SessionRef) -> anyhow::Result<DeleteResult>;
-    async fn undo(&self, undo_token: String) -> anyhow::Result<DeleteResult>;
     async fn export_markdown(&self, session: SessionRef) -> anyhow::Result<ExportResult>;
     async fn thread_usage_history(&self, session: SessionRef) -> anyhow::Result<Value>;
     async fn thread_usage_summary(&self, session: SessionRef) -> anyhow::Result<Value>;
@@ -174,20 +173,11 @@ pub async fn handle_bridge_request(
         }
         "/upstream-worktree/create" => ctx.runtime.upstream_worktree_create(payload.clone()).await,
         "/delete" => result_value(ctx.data.delete(session_from_payload(&payload)).await),
-        "/session/suppress" => suppress_thread_value(&payload, true),
-        "/session/unsuppress" => suppress_thread_value(&payload, false),
+        "/session/suppress" => suppress_thread_value(&payload),
         "/session/suppressed" => Ok(json!({
             "status": "ok",
             "ids": crate::suppressed_threads::load_suppressed_ids(),
         })),
-        "/undo" => {
-            let undo_token = payload
-                .get("undo_token")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            result_value(ctx.data.undo(undo_token).await)
-        }
         "/export-markdown" => result_value(
             ctx.data
                 .export_markdown(session_from_payload(&payload))
@@ -515,18 +505,6 @@ impl BridgeDataService for UnavailableDataService {
             status: DeleteStatus::Failed,
             session_id: session.session_id,
             message: "Delete service is not wired in core launcher hooks".to_string(),
-            undo_token: None,
-            backup_path: None,
-        })
-    }
-
-    async fn undo(&self, undo_token: String) -> anyhow::Result<DeleteResult> {
-        Ok(DeleteResult {
-            status: DeleteStatus::Failed,
-            session_id: String::new(),
-            message: "Undo service is not wired in core launcher hooks".to_string(),
-            undo_token: Some(undo_token),
-            backup_path: None,
         })
     }
 
@@ -640,17 +618,13 @@ where
     Ok(serde_json::to_value(result?)?)
 }
 
-fn suppress_thread_value(payload: &Value, suppress: bool) -> anyhow::Result<Value> {
+fn suppress_thread_value(payload: &Value) -> anyhow::Result<Value> {
     let raw_id = payload
         .get("thread_id")
         .or_else(|| payload.get("session_id"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let ids = if suppress {
-        crate::suppressed_threads::suppress_thread(raw_id)
-    } else {
-        crate::suppressed_threads::unsuppress_thread(raw_id)
-    };
+    let ids = crate::suppressed_threads::suppress_thread(raw_id);
     Ok(json!({
         "status": "ok",
         "ids": ids,

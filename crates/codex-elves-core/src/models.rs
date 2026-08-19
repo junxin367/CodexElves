@@ -29,7 +29,6 @@ pub enum DeleteStatus {
     Partial,
     NotFound,
     Failed,
-    Undone,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -37,8 +36,6 @@ pub struct DeleteResult {
     pub status: DeleteStatus,
     pub session_id: String,
     pub message: String,
-    pub undo_token: Option<String>,
-    pub backup_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -120,20 +117,24 @@ mod tests {
             status: DeleteStatus::Partial,
             session_id: "session-123".to_string(),
             message: "deleted locally only".to_string(),
-            undo_token: Some("undo-123".to_string()),
-            backup_path: None,
         };
 
         let value = serde_json::to_value(&result).unwrap();
 
+        assert!(
+            value.get("undo_token").is_none(),
+            "永久删除结果不应暴露撤销令牌"
+        );
+        assert!(
+            value.get("backup_path").is_none(),
+            "永久删除结果不应暴露备份路径"
+        );
         assert_eq!(
             value,
             json!({
                 "status": "partial",
                 "session_id": "session-123",
-                "message": "deleted locally only",
-                "undo_token": "undo-123",
-                "backup_path": null
+                "message": "deleted locally only"
             })
         );
         assert_eq!(
