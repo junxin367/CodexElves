@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 
 const tag = process.argv[2] || process.env.TAG || process.env.RELEASE_TAG || "";
 const repo = process.argv[3] || process.env.REPO || process.env.GITHUB_REPOSITORY || "";
@@ -9,6 +10,15 @@ if (!tag.trim()) {
 }
 
 const version = tag.replace(/^[vV]/, "");
+const curatedNotesPath = `.github/release-notes/${version}.md`;
+if (
+  /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)
+  && existsSync(curatedNotesPath)
+) {
+  process.stdout.write(`${readFileSync(curatedNotesPath, "utf8").trim()}\n`);
+  process.exit(0);
+}
+
 const previousTag = findPreviousTag(tag);
 const range = previousTag ? `${previousTag}..${tag}` : tag;
 const changesUrl = previousTag && repo
@@ -18,60 +28,34 @@ const changesUrl = previousTag && repo
     : "";
 
 const commits = readCommits(range).filter((commit) => !/^chore\(release\):/.test(commit.subject));
-const featureNotes = [];
-const maintenanceNotes = [];
-const testNotes = [];
+const releaseNotes = [];
 
 for (const commit of commits) {
   const parsed = parseSubject(commit.subject);
   const notes = extractBullets(commit.body);
-  const items = notes.length ? notes : [parsed.title || commit.subject];
-  const target = chooseSection(parsed.type, parsed.scope, commit.subject);
+  const fallbackTitle = sanitizeBullet(parsed.title || commit.subject);
+  const items = notes.length ? notes : fallbackTitle ? [fallbackTitle] : [];
+  const topic = releaseNoteTopic(parsed.type, parsed.scope, commit.subject);
   for (const item of items) {
-    target.push(item);
+    releaseNotes.push({ topic, text: item });
   }
 }
 
-const mainNotes = dedupe(featureNotes);
-const maintenance = dedupe(maintenanceNotes);
-const tests = dedupe(testNotes);
-const headline = mainNotes[0]
-  ? `CodexElves ${version} 重点更新：${trimSentence(mainNotes[0])}。`
-  : `CodexElves ${version} 发布版本。`;
+const notes = dedupeNotes(releaseNotes);
 
 const lines = [];
 lines.push(`## ${tag}`);
 lines.push("");
-lines.push(headline);
-lines.push("");
-lines.push("### 主要更新");
-pushBullets(lines, mainNotes, ["本版本包含应用能力和体验更新。"]);
-lines.push("");
-lines.push("### 修复与维护");
-pushBullets(lines, maintenance, ["无额外维护项。"]);
-if (tests.length) {
-  lines.push("");
-  lines.push("### 测试与发布保障");
-  pushBullets(lines, tests, []);
-}
-lines.push("");
-lines.push("### 安装包");
-lines.push(`- Windows: \`CodexElves-${version}-windows-x64-setup.exe\``);
-lines.push(`- macOS Intel: \`CodexElves-${version}-macos-x64.dmg\``);
-lines.push(`- macOS Apple Silicon: \`CodexElves-${version}-macos-arm64.dmg\``);
-lines.push("");
-lines.push("### 说明");
-lines.push("- 本 Release 由 GitHub Actions 自动编译并上传安装资产。");
-lines.push("- `latest.json` 会在所有平台资产上传后自动更新。");
-if (previousTag) {
-  lines.push(`- 自动更新说明基于 \`${previousTag}...${tag}\` 的提交正文生成。`);
+if (notes.length) {
+  for (const note of notes) {
+    lines.push(`- ${note.topic}: ${note.text}`);
+  }
 } else {
-  lines.push("- 自动更新说明基于当前 tag 的提交正文生成。");
+  lines.push("- 维护: 本版本包含常规维护与兼容性更新。");
 }
+lines.push("- 安装包: Windows x64、macOS Intel、macOS Apple Silicon。");
 if (changesUrl) {
-  lines.push("");
-  lines.push("### 完整变更");
-  lines.push(changesUrl);
+  lines.push(`- 完整变更: ${changesUrl}`);
 }
 
 process.stdout.write(`${lines.join("\n")}\n`);
@@ -134,44 +118,61 @@ function extractBullets(body) {
     .filter((line) => !/^版本升级到\s*\d+\.\d+\.\d+$/.test(line));
 }
 
-function chooseSection(type, scope, subject) {
-  if (type === "test" || type === "ci") return testNotes;
-  if (type === "docs") return testNotes;
-  if (type === "chore" && /node_modules|依赖/i.test(subject)) return maintenanceNotes;
-  if (type === "chore" && /发布|release|workflow/i.test(subject)) return testNotes;
-  if (type === "feat" || type === "perf") return featureNotes;
-  if (/proxy|本地代理/i.test(scope) || /本地代理|proxy/i.test(subject)) return featureNotes;
-  return maintenanceNotes;
+function releaseNoteTopic(type, scope, subject) {
+  const scopeTopics = {
+    session: "会话删除",
+    protocol: "协议兼容",
+    models: "模型支持",
+    model: "模型支持",
+    proxy: "本地代理",
+    manager: "管理器",
+    launcher: "启动器",
+    updater: "自动更新",
+    installer: "安装",
+    build: "构建",
+    release: "发布维护",
+    ci: "发布流程",
+    ui: "界面"
+  };
+  if (scopeTopics[scope]) return scopeTopics[scope];
+  if (/proxy|本地代理/i.test(scope) || /本地代理|proxy/i.test(subject)) return "本地代理";
+
+  const typeTopics = {
+    feat: "功能",
+    fix: "修复",
+    perf: "性能",
+    refactor: "维护",
+    docs: "文档",
+    test: "测试",
+    ci: "发布流程",
+    chore: "维护"
+  };
+  return typeTopics[type] || "维护";
 }
 
 function sanitizeBullet(text) {
   return text
+    .replace(
+      /(?:\s*并\s*|[，,]\s*)(?:发布版本升级到|版本升级到|发布(?:版本)?)\s*[vV]?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/g,
+      ""
+    )
     .replace(/[，,]\s*发布版本升级到\s*\d+\.\d+\.\d+$/g, "")
     .replace(/[，,]\s*版本升级到\s*\d+\.\d+\.\d+$/g, "")
     .trim();
 }
 
-function dedupe(items) {
+function dedupeNotes(items) {
   const seen = new Set();
   const result = [];
-  for (const item of items.map((value) => value.trim()).filter(Boolean)) {
-    const key = item.replace(/[。；;,.，\s]+$/g, "");
+  for (const item of items) {
+    const text = item.text.trim();
+    if (!text) continue;
+    const key = `${item.topic}\0${text.replace(/[。；;,.，\s]+$/g, "")}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    result.push(item);
+    result.push({ topic: item.topic, text });
   }
   return result;
-}
-
-function pushBullets(lines, items, fallback) {
-  const source = items.length ? items : fallback;
-  for (const item of source) {
-    lines.push(`- ${item}`);
-  }
-}
-
-function trimSentence(text) {
-  return text.replace(/[。；;,.，\s]+$/g, "");
 }
 
 function git(args) {

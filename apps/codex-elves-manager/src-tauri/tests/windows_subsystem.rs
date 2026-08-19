@@ -569,22 +569,38 @@ fn github_release_workflow_can_build_assets_from_tags_and_manual_dispatch() {
     assert!(workflow.contains("ensure-release:"));
     assert!(workflow.contains("gh release create \"$TAG\""));
     assert!(workflow.contains("release-notes.md"));
-    assert!(workflow.contains("gh release edit \"$TAG\""));
+    assert!(workflow.contains("Release already exists; preserving maintained notes"));
     assert!(
         workflow.contains(
             "node scripts/generate-release-notes.mjs \"$TAG\" \"$REPO\" > release-notes.md"
         )
     );
     assert!(!workflow.contains("CodexElves $VERSION 发布版本。"));
-    assert!(
-        workflow
-            .contains("gh release edit \"$TAG\" --repo \"$REPO\" --notes-file release-notes.md")
-    );
+    assert!(!workflow.contains("gh release edit \"$TAG\" --repo \"$REPO\" --notes-file"));
     assert!(workflow.contains("ref: ${{ needs.ensure-release.outputs.tag }}"));
     assert!(workflow.contains("TAG: ${{ needs.ensure-release.outputs.tag }}"));
     assert!(workflow.contains("gh release upload $env:TAG @($files.FullName) --clobber"));
     assert!(workflow.contains("gh release upload \"$TAG\" dist/macos/*.dmg --clobber"));
     assert!(!workflow.contains("softprops/action-gh-release"));
+}
+
+#[test]
+fn release_notes_generator_removes_release_metadata_from_feature_titles() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let generator = manifest_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .and_then(std::path::Path::parent)
+        .unwrap()
+        .join("scripts/generate-release-notes.mjs");
+    let generator = std::fs::read_to_string(&generator).expect("read release notes generator");
+
+    assert!(generator.contains("const fallbackTitle = sanitizeBullet"));
+    assert!(generator.contains(".github/release-notes/${version}.md"));
+    assert!(generator.contains("releaseNoteTopic(parsed.type, parsed.scope, commit.subject)"));
+    assert!(generator.contains("lines.push(`- ${note.topic}: ${note.text}`)"));
+    assert!(generator.contains("(?:\\s*并\\s*|[，,]\\s*)"));
+    assert!(!generator.contains("lines.push(\"### 主要更新\")"));
 }
 
 #[test]
