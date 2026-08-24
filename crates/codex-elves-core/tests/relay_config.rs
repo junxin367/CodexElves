@@ -1527,13 +1527,14 @@ experimental_bearer_token = "sk-new"
 
     let config = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
     assert!(config.contains(r#"model_catalog_json = "codex-elves-model-catalog.json""#));
+    assert!(config.contains(r#"model = "qwen3-coder 200000""#));
     assert!(!config.contains("model_context_window"));
     assert!(config.contains("model_auto_compact_token_limit = 160000"));
     let catalog: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(temp.path().join("codex-elves-model-catalog.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(catalog["models"][0]["slug"], "deepseek-coder");
+    assert_eq!(catalog["models"][0]["slug"], "deepseek-coder 128000");
     assert_eq!(catalog["models"][0]["shell_type"], "shell_command");
     assert_eq!(catalog["models"][0]["apply_patch_tool_type"], "freeform");
     assert_eq!(
@@ -1581,10 +1582,10 @@ experimental_bearer_token = "sk-new"
             { "effort": "max", "description": "Max reasoning" }
         ])
     );
-    assert_eq!(catalog["models"][1]["slug"], "qwen3-coder");
+    assert_eq!(catalog["models"][1]["slug"], "qwen3-coder 200000");
     assert_eq!(catalog["models"][1]["context_window"], 200000);
     assert_eq!(catalog["models"][1]["default_reasoning_level"], "xhigh");
-    assert_eq!(catalog["models"][2]["slug"], "glm-5.2");
+    assert_eq!(catalog["models"][2]["slug"], "glm-5.2 1000000");
     assert_eq!(catalog["models"][2]["default_reasoning_level"], "max");
     assert_eq!(
         catalog["models"][2]["supported_reasoning_levels"],
@@ -1593,6 +1594,111 @@ experimental_bearer_token = "sk-new"
             { "effort": "max", "description": "Max reasoning" }
         ])
     );
+}
+
+#[test]
+fn apply_relay_profile_collapses_legacy_exact_duplicate_mappings() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = RelayProfile {
+        id: "legacy-duplicates".to_string(),
+        name: "Legacy duplicates".to_string(),
+        model: "gpt-5.6-sol--codex-elves-alias-2".to_string(),
+        relay_mode: RelayMode::PureApi,
+        config_contents: r#"model = "gpt-5.6-sol--codex-elves-alias-2"
+model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://relay.example/v1"
+experimental_bearer_token = "sk-new"
+"#
+        .to_string(),
+        auth_contents: r#"{"OPENAI_API_KEY":"sk-new"}"#.to_string(),
+        model_mappings: vec![
+            RelayModelMapping {
+                request_model: "gpt-5.6-sol".to_string(),
+                alias: "gpt-primary".to_string(),
+                protocol: RelayProtocol::Responses,
+                context_window: "500000".to_string(),
+            },
+            RelayModelMapping {
+                request_model: "gpt-5.6-sol".to_string(),
+                alias: "gpt-secondary".to_string(),
+                protocol: RelayProtocol::Responses,
+                context_window: "500000".to_string(),
+            },
+        ],
+        ..RelayProfile::default()
+    };
+
+    apply_relay_profile_files_to_home_with_context(temp.path(), &profile, "").unwrap();
+
+    let catalog: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(temp.path().join("codex-elves-model-catalog.json")).unwrap(),
+    )
+    .unwrap();
+    let models = catalog["models"].as_array().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["slug"], "gpt-primary");
+    assert!(!catalog.to_string().contains("--codex-elves-alias-"));
+    let config = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(config.contains(r#"model = "gpt-primary""#));
+}
+
+#[test]
+fn apply_relay_profile_migrates_legacy_ambiguous_alias_to_model_context_ids() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = RelayProfile {
+        id: "legacy-ambiguous-alias".to_string(),
+        name: "Legacy ambiguous alias".to_string(),
+        model: "model-b".to_string(),
+        relay_mode: RelayMode::PureApi,
+        config_contents: r#"model = "model-b"
+model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = true
+base_url = "https://relay.example/v1"
+experimental_bearer_token = "sk-new"
+"#
+        .to_string(),
+        auth_contents: r#"{"OPENAI_API_KEY":"sk-new"}"#.to_string(),
+        model_mappings: vec![
+            RelayModelMapping {
+                request_model: "model-a".to_string(),
+                alias: "model-b".to_string(),
+                protocol: RelayProtocol::ChatCompletions,
+                context_window: "400000".to_string(),
+            },
+            RelayModelMapping {
+                request_model: "model-b".to_string(),
+                alias: String::new(),
+                protocol: RelayProtocol::Responses,
+                context_window: "500000".to_string(),
+            },
+        ],
+        ..RelayProfile::default()
+    };
+
+    apply_relay_profile_files_to_home_with_context(temp.path(), &profile, "").unwrap();
+
+    let catalog: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(temp.path().join("codex-elves-model-catalog.json")).unwrap(),
+    )
+    .unwrap();
+    let slugs = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|model| model["slug"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(slugs, vec!["model-a 400000", "model-b 500000"]);
+    let config = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(config.contains(r#"model = "model-b 500000""#));
 }
 
 #[test]

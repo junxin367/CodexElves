@@ -296,7 +296,7 @@ async fn bridge_responses_websockets(
                 request_settings,
                 original_compaction_model,
                 compaction_fallback,
-            ) = if let Some((payload, settings)) = payload {
+            ) = if let Some((payload, settings, payload_rewritten)) = payload {
                 let (
                     request_payload,
                     forwarded_payload,
@@ -305,7 +305,7 @@ async fn bridge_responses_websockets(
                     compaction_fallback,
                 ) = prepare_downstream_response_create_payload_with_snapshot(&payload, &settings)
                     .await;
-                let message = if forwarded_payload == payload {
+                let message = if !payload_rewritten && forwarded_payload == payload {
                     message
                 } else {
                     Message::Text(
@@ -2395,12 +2395,12 @@ fn is_expected_websocket_close_error(error: &WebSocketError) -> bool {
 fn validate_downstream_message(
     message: &Message,
     relay: &crate::settings::RelayProfile,
-) -> anyhow::Result<Option<(Value, crate::settings::BackendSettings)>> {
+) -> anyhow::Result<Option<(Value, crate::settings::BackendSettings, bool)>> {
     let Message::Text(text) = message else {
         return Ok(None);
     };
     let settings = current_websocket_settings(relay)?;
-    let mut payload: Value =
+    let payload: Value =
         serde_json::from_str(text.as_str()).context("Responses WebSocket 请求不是有效 JSON")?;
     if payload.get("type").and_then(Value::as_str) != Some("response.create") {
         anyhow::bail!("Responses WebSocket 仅支持 response.create 请求");
@@ -2421,10 +2421,9 @@ fn validate_downstream_message(
     {
         anyhow::bail!("当前模型不是原生 Responses 协议");
     }
-    let request_model = relay.request_model_for_catalog_model(&model);
-    if request_model != model {
-        payload["model"] = serde_json::json!(request_model);
-    }
+    let rewritten_payload =
+        crate::protocol_proxy::rewrite_catalog_model_to_request_model(&payload, relay);
+    let payload_rewritten = rewritten_payload != payload;
     let _ = crate::diagnostic_log::append_diagnostic_log(
         "protocol_proxy.responses_websocket_request",
         serde_json::json!({
@@ -2433,10 +2432,13 @@ fn validate_downstream_message(
             "endpoint": crate::responses_websocket::responses_websocket_url(
                 crate::responses_websocket::relay_responses_base_url(relay)
             ),
-            "model": payload.get("model").and_then(Value::as_str).unwrap_or_default(),
+            "model": rewritten_payload
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
         }),
     );
-    Ok(Some((payload, settings)))
+    Ok(Some((rewritten_payload, settings, payload_rewritten)))
 }
 
 #[cfg(test)]

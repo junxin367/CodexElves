@@ -212,17 +212,11 @@ fn apply_system_prompt_override_to_responses_request(
                 remove_responses_system_messages(input);
             }
         }
-        let model = object
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        rewrite_responses_system_prompt_model_identity(object, &model);
     }
     updated
 }
 
-fn rewrite_catalog_model_to_request_model(
+pub(crate) fn rewrite_catalog_model_to_request_model(
     request: &Value,
     relay: &crate::settings::RelayProfile,
 ) -> Value {
@@ -230,14 +224,74 @@ fn rewrite_catalog_model_to_request_model(
         return request.clone();
     };
     let request_model = relay.request_model_for_catalog_model(catalog_model);
-    if request_model == catalog_model.trim() {
-        return request.clone();
-    }
     let mut updated = request.clone();
     if let Some(object) = updated.as_object_mut() {
-        object.insert("model".to_string(), json!(request_model));
+        object.insert("model".to_string(), json!(request_model.clone()));
+        replace_responses_system_prompt_catalog_model(object, catalog_model, &request_model);
+        rewrite_responses_system_prompt_model_identity(object, &request_model);
+        if let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) {
+            for message in messages {
+                if matches!(
+                    message.get("role").and_then(Value::as_str),
+                    Some("system" | "developer")
+                ) {
+                    replace_message_content_catalog_model(message, catalog_model, &request_model);
+                    rewrite_message_content_model_identity(message, &request_model);
+                }
+            }
+        }
     }
     updated
+}
+
+fn replace_responses_system_prompt_catalog_model(
+    object: &mut Map<String, Value>,
+    catalog_model: &str,
+    request_model: &str,
+) {
+    if let Some(instructions) = object.get_mut("instructions") {
+        replace_prompt_value_catalog_model(instructions, catalog_model, request_model);
+    }
+    if let Some(input) = object.get_mut("input") {
+        replace_responses_input_system_prompt_catalog_model(input, catalog_model, request_model);
+    }
+}
+
+fn replace_responses_input_system_prompt_catalog_model(
+    value: &mut Value,
+    catalog_model: &str,
+    request_model: &str,
+) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                replace_responses_input_system_prompt_catalog_model(
+                    item,
+                    catalog_model,
+                    request_model,
+                );
+            }
+        }
+        Value::Object(object) => {
+            if matches!(
+                object.get("role").and_then(Value::as_str),
+                Some("system" | "developer")
+            ) {
+                if let Some(content) = object.get_mut("content") {
+                    replace_prompt_value_catalog_model(content, catalog_model, request_model);
+                }
+            } else {
+                for item in object.values_mut() {
+                    replace_responses_input_system_prompt_catalog_model(
+                        item,
+                        catalog_model,
+                        request_model,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn remove_responses_system_messages(value: &mut Value) {
@@ -350,6 +404,37 @@ fn rewrite_responses_input_system_prompt_model_identity(value: &mut Value, model
 fn rewrite_message_content_model_identity(message: &mut Value, model: &str) {
     if let Some(content) = message.get_mut("content") {
         rewrite_prompt_value_model_identity(content, model);
+    }
+}
+
+fn replace_message_content_catalog_model(
+    message: &mut Value,
+    catalog_model: &str,
+    request_model: &str,
+) {
+    if let Some(content) = message.get_mut("content") {
+        replace_prompt_value_catalog_model(content, catalog_model, request_model);
+    }
+}
+
+fn replace_prompt_value_catalog_model(value: &mut Value, catalog_model: &str, request_model: &str) {
+    match value {
+        Value::String(text) => {
+            if catalog_model != request_model && !catalog_model.is_empty() {
+                *text = text.replace(catalog_model, request_model);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                replace_prompt_value_catalog_model(item, catalog_model, request_model);
+            }
+        }
+        Value::Object(object) => {
+            for item in object.values_mut() {
+                replace_prompt_value_catalog_model(item, catalog_model, request_model);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1054,17 +1139,17 @@ pub(crate) fn resolve_compaction_model_override(
         return None;
     }
     let family = crate::model_capabilities::model_family(original_model);
-    let model = settings.compaction_model_for_family(family).trim();
-    if model.is_empty() || model == original_model {
+    let catalog_model = settings.compaction_model_for_family(family).trim();
+    if catalog_model.is_empty() || catalog_model == original_model {
         return None;
     }
-    let protocol = match relay.resolve_protocol_for_model(model) {
+    let protocol = match relay.resolve_protocol_for_model(catalog_model) {
         Ok(protocol) => protocol,
         Err(_) => {
             log_compaction_model_override_skipped(
                 relay,
                 original_model,
-                model,
+                catalog_model,
                 family.as_str(),
                 "当前供应商没有该模型的协议归属，回落原模型压缩",
                 None,
@@ -1072,19 +1157,22 @@ pub(crate) fn resolve_compaction_model_override(
             return None;
         }
     };
-    let Some(context_window) = relay.context_window_for_model(model) else {
+    let Some(context_window) = relay.context_window_for_model(catalog_model) else {
         log_compaction_model_override_skipped(
             relay,
             original_model,
-            model,
+            catalog_model,
             family.as_str(),
             "目标模型上下文容量未知，回落原模型压缩",
             None,
         );
         return None;
     };
-    let candidate =
-        crate::layered_compaction::apply_confirmed_compaction_model_override(request_json, model);
+    let request_model = relay.request_model_for_catalog_model(catalog_model);
+    let candidate = crate::layered_compaction::apply_confirmed_compaction_model_override(
+        request_json,
+        &request_model,
+    );
     let estimated_input_tokens =
         crate::layered_compaction::estimate_compaction_request_tokens(&candidate);
     let output_reserve_tokens =
@@ -1093,7 +1181,7 @@ pub(crate) fn resolve_compaction_model_override(
         log_compaction_model_override_skipped(
             relay,
             original_model,
-            model,
+            catalog_model,
             family.as_str(),
             "本次压缩载荷超过目标模型可用上下文，回落原模型压缩",
             Some(json!({
@@ -1107,7 +1195,7 @@ pub(crate) fn resolve_compaction_model_override(
     Some(ResolvedCompactionModelOverride {
         request_json: candidate,
         original_model: original_model.to_string(),
-        compaction_model: model.to_string(),
+        compaction_model: request_model,
         protocol,
         context_window,
         estimated_input_tokens,
@@ -11017,6 +11105,50 @@ mod compaction_model_override_tests {
             json!({ "effort": "xhigh" })
         );
         assert!(resolved.estimated_input_tokens + resolved.output_reserve_tokens <= 9_000);
+    }
+
+    #[test]
+    fn catalog_compaction_target_uses_selected_context_but_sends_request_model() {
+        let settings = settings_with_models(LayeredCompactionModels {
+            gpt: "gpt-5.6-sol [500K]".to_string(),
+            ..Default::default()
+        });
+        let relay = RelayProfile {
+            model_mappings: vec![
+                RelayModelMapping {
+                    request_model: "gpt-5.4".to_string(),
+                    alias: String::new(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "1000000".to_string(),
+                },
+                RelayModelMapping {
+                    request_model: "gpt-5.6-sol".to_string(),
+                    alias: String::new(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "9000".to_string(),
+                },
+                RelayModelMapping {
+                    request_model: "gpt-5.6-sol".to_string(),
+                    alias: "gpt-5.6-sol [500K]".to_string(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "500000".to_string(),
+                },
+            ],
+            ..RelayProfile::default()
+        };
+
+        let resolved = resolve_compaction_model_override(
+            &compaction_request("gpt-5.4", "small"),
+            &compaction_request("gpt-5.4", "small"),
+            CompactionExecutionMode::LegacyLocal,
+            &settings,
+            &relay,
+        )
+        .expect("应按别名选中 500K 上下文的压缩模型");
+
+        assert_eq!(resolved.context_window, 500_000);
+        assert_eq!(resolved.compaction_model, "gpt-5.6-sol");
+        assert_eq!(resolved.request_json["model"], "gpt-5.6-sol");
     }
 
     #[test]

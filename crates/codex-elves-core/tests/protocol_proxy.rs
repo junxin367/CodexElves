@@ -8264,7 +8264,7 @@ async fn responses_proxy_directs_responses_models_to_responses_upstream() {
 }
 
 #[tokio::test]
-async fn responses_proxy_rewrites_duplicate_alias_catalog_slug_to_request_model() {
+async fn responses_proxy_rewrites_alias_slug_and_prompt_identity_to_request_model() {
     let server = spawn_chat_server();
     let settings = BackendSettings {
         relay_profiles: vec![RelayProfile {
@@ -8283,9 +8283,9 @@ async fn responses_proxy_rewrites_duplicate_alias_catalog_slug_to_request_model(
                 },
                 RelayModelMapping {
                     request_model: "gpt-5.6-sol".to_string(),
-                    alias: "gpt-5.6-sol[1M]".to_string(),
+                    alias: "gpt-5.6-sol [500K]".to_string(),
                     protocol: RelayProtocol::Responses,
-                    context_window: "1000000".to_string(),
+                    context_window: "500000".to_string(),
                 },
             ],
             ..RelayProfile::default()
@@ -8295,7 +8295,7 @@ async fn responses_proxy_rewrites_duplicate_alias_catalog_slug_to_request_model(
     };
 
     let upstream = open_responses_proxy_request_with_settings(
-        r#"{"model":"gpt-5.6-sol--codex-elves-alias-2","input":"hello","stream":false}"#,
+        r#"{"model":"gpt-5.6-sol [500K]","instructions":"You are Codex, an agent based on the gpt-5.6-sol [500K] model.","input":"hello","stream":false}"#,
         settings,
     )
     .await
@@ -8309,6 +8309,105 @@ async fn responses_proxy_rewrites_duplicate_alias_catalog_slug_to_request_model(
     assert_eq!(request.path, "/v1/responses");
     let body: Value = serde_json::from_str(&request.body).unwrap();
     assert_eq!(body["model"], "gpt-5.6-sol");
+    assert_eq!(
+        body["instructions"],
+        "You are Codex, an agent based on the gpt-5.6-sol model."
+    );
+}
+
+#[tokio::test]
+async fn responses_proxy_accepts_legacy_alias_slug_without_forwarding_it() {
+    let server = spawn_chat_server();
+    let settings = BackendSettings {
+        relay_profiles: vec![RelayProfile {
+            id: "legacy-duplicate-alias".to_string(),
+            name: "Legacy duplicate alias".to_string(),
+            base_url: server.base_url.clone(),
+            upstream_base_url: server.base_url.clone(),
+            api_key: "sk-test".to_string(),
+            relay_mode: RelayMode::PureApi,
+            model_mappings: vec![
+                RelayModelMapping {
+                    request_model: "gpt-5.6-sol".to_string(),
+                    alias: String::new(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "372000".to_string(),
+                },
+                RelayModelMapping {
+                    request_model: "gpt-5.6-sol".to_string(),
+                    alias: "gpt-5.6-sol [500K]".to_string(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "500000".to_string(),
+                },
+            ],
+            ..RelayProfile::default()
+        }],
+        active_relay_id: "legacy-duplicate-alias".to_string(),
+        ..BackendSettings::default()
+    };
+
+    open_responses_proxy_request_with_settings(
+        r#"{"model":"gpt-5.6-sol--codex-elves-alias-2","instructions":"You are Codex, an agent based on the gpt-5.6-sol--codex-elves-alias-2 model.","input":"hello","stream":false}"#,
+        settings,
+    )
+    .await
+    .unwrap();
+
+    let request = server.finish();
+    let body: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["model"], "gpt-5.6-sol");
+    assert_eq!(
+        body["instructions"],
+        "You are Codex, an agent based on the gpt-5.6-sol model."
+    );
+}
+
+#[tokio::test]
+async fn responses_proxy_legacy_ambiguous_alias_prefers_legacy_request_model() {
+    let server = spawn_chat_server();
+    let settings = BackendSettings {
+        relay_profiles: vec![RelayProfile {
+            id: "legacy-ambiguous-alias".to_string(),
+            name: "Legacy ambiguous alias".to_string(),
+            base_url: server.base_url.clone(),
+            upstream_base_url: server.base_url.clone(),
+            api_key: "sk-test".to_string(),
+            relay_mode: RelayMode::PureApi,
+            model_mappings: vec![
+                RelayModelMapping {
+                    request_model: "model-a".to_string(),
+                    alias: "model-b".to_string(),
+                    protocol: RelayProtocol::ChatCompletions,
+                    context_window: "400000".to_string(),
+                },
+                RelayModelMapping {
+                    request_model: "model-b".to_string(),
+                    alias: String::new(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "500000".to_string(),
+                },
+            ],
+            ..RelayProfile::default()
+        }],
+        active_relay_id: "legacy-ambiguous-alias".to_string(),
+        ..BackendSettings::default()
+    };
+
+    let upstream = open_responses_proxy_request_with_settings(
+        r#"{"model":"model-b","input":"hello","stream":false}"#,
+        settings,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        upstream.response_protocol,
+        UpstreamResponseProtocol::Responses
+    );
+    let request = server.finish();
+    assert_eq!(request.path, "/v1/responses");
+    let body: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["model"], "model-b");
 }
 
 #[tokio::test]

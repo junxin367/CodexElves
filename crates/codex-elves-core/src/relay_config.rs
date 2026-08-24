@@ -452,7 +452,7 @@ fn apply_relay_profile_owned_fields_to_config(
     let mut updated = ensure_trailing_newline(live_config.trim_end().to_string());
     updated = set_root_toml_string_line(&updated, "model_provider", &provider_id);
 
-    let model = relay_profile_owned_model(profile);
+    let model = profile.catalog_model_for_configured_model(&relay_profile_owned_model(profile));
     if !model.trim().is_empty() {
         updated = set_root_toml_string_line(&updated, "model", model.trim());
     }
@@ -925,17 +925,18 @@ pub async fn test_relay_profile(
         anyhow::bail!("API Key 不能为空");
     }
 
-    let test_model = model.trim();
-    if test_model.is_empty() {
+    let catalog_model = model.trim();
+    if catalog_model.is_empty() {
         anyhow::bail!("测试模型不能为空");
     }
 
-    let protocols = relay_profile_test_protocols(profile, test_model)?;
+    let protocols = relay_profile_test_protocols(profile, catalog_model)?;
+    let test_model = profile.request_model_for_catalog_model(catalog_model);
     let client = crate::http_client::proxied_client("CodexElves/RelayTest")?;
     let mut failures = Vec::new();
 
     for (index, protocol) in protocols.iter().copied().enumerate() {
-        match send_relay_profile_test_attempt(&client, base_url, api_key, test_model, protocol)
+        match send_relay_profile_test_attempt(&client, base_url, api_key, &test_model, protocol)
             .await
         {
             Ok(mut result) if result.http_status < 400 => {
@@ -2550,7 +2551,6 @@ fn generated_catalog_prompt_fields(
 pub(crate) struct CatalogModelRow {
     model: String,
     catalog_slug: String,
-    alias: String,
     context_window: String,
     protocol: RelayProtocol,
 }
@@ -2560,7 +2560,7 @@ pub(crate) fn generated_model_catalog_json(
     config_text: &str,
     rows: Vec<CatalogModelRow>,
 ) -> anyhow::Result<Value> {
-    profile.validate_model_protocol_assignments()?;
+    profile.validate_model_catalog_identifiers()?;
     let reasoning_effort = catalog_reasoning_effort(config_text);
     let auto_compact_limit =
         parse_optional_positive_u64(&profile.auto_compact_limit, "压缩上下文大小")?;
@@ -2569,11 +2569,7 @@ pub(crate) fn generated_model_catalog_json(
     for (index, row) in rows.into_iter().enumerate() {
         let model = row.model;
         let catalog_slug = row.catalog_slug;
-        let display_name = if row.alias.trim().is_empty() {
-            model.clone()
-        } else {
-            row.alias.trim().to_string()
-        };
+        let display_name = catalog_slug.clone();
         let packaged_model = packaged_model_catalog_entry(&model);
         let (model_base_instructions, model_messages) =
             generated_catalog_prompt_fields(profile, &model, packaged_model.as_ref());
@@ -2672,12 +2668,12 @@ pub(crate) fn generated_model_catalog_json(
 pub(crate) fn relay_profile_catalog_rows(
     profile: &RelayProfile,
 ) -> anyhow::Result<Vec<CatalogModelRow>> {
-    profile.validate_model_protocol_assignments()?;
+    profile.validate_model_catalog_identifiers()?;
     let mut rows = Vec::new();
     if !profile.model_mappings.is_empty() {
-        let catalog_slugs =
-            crate::settings::relay_model_mapping_catalog_slugs(&profile.model_mappings);
-        for (mapping, catalog_slug) in profile.model_mappings.iter().zip(catalog_slugs) {
+        let mappings = crate::settings::relay_model_mappings_for_catalog(&profile.model_mappings);
+        let catalog_slugs = crate::settings::relay_model_mapping_catalog_slugs(&mappings);
+        for (mapping, catalog_slug) in mappings.iter().zip(catalog_slugs) {
             let model = mapping.request_model.trim();
             if model.is_empty() || catalog_slug.is_empty() {
                 continue;
@@ -2685,7 +2681,6 @@ pub(crate) fn relay_profile_catalog_rows(
             rows.push(CatalogModelRow {
                 model: model.to_string(),
                 catalog_slug,
-                alias: mapping.alias.trim().to_string(),
                 context_window: mapping.context_window.trim().to_string(),
                 protocol: mapping.protocol,
             });
@@ -2698,7 +2693,6 @@ pub(crate) fn relay_profile_catalog_rows(
         rows.push(CatalogModelRow {
             model: active_model.trim().to_string(),
             catalog_slug: active_model.trim().to_string(),
-            alias: String::new(),
             context_window: profile.context_window_for_active_model(),
             protocol: profile.protocol,
         });
@@ -2730,7 +2724,6 @@ pub(crate) fn relay_profile_catalog_rows(
             rows.push(CatalogModelRow {
                 catalog_slug: model.clone(),
                 model,
-                alias: String::new(),
                 context_window: String::new(),
                 protocol,
             });
@@ -3321,7 +3314,7 @@ fn complete_relay_profile_config(profile: &RelayProfile) -> anyhow::Result<Strin
     let provider_id = active_or_default_provider_id(&doc);
     set_provider_id(&mut doc, &provider_id);
 
-    let model = relay_profile_model(profile);
+    let model = profile.catalog_model_for_configured_model(&relay_profile_model(profile));
     if !model.trim().is_empty() {
         doc["model"] = toml_edit::value(model.trim());
     }
@@ -3385,6 +3378,14 @@ fn complete_relay_profile_config(profile: &RelayProfile) -> anyhow::Result<Strin
 }
 
 pub fn normalize_relay_profile_for_storage(profile: &mut RelayProfile) -> anyhow::Result<()> {
+    for mapping in &mut profile.model_mappings {
+        if mapping.context_window.trim().is_empty()
+            && let Some(context_window) =
+                crate::model_capabilities::required_model_context_window(&mapping.request_model)
+        {
+            mapping.context_window = context_window.to_string();
+        }
+    }
     let needs_local_proxy_for_catalog_virtual_slugs =
         crate::settings::relay_model_mapping_catalog_slugs(&profile.model_mappings)
             .iter()
@@ -3394,14 +3395,6 @@ pub fn normalize_relay_profile_for_storage(profile: &mut RelayProfile) -> anyhow
             });
     if needs_local_proxy_for_catalog_virtual_slugs {
         profile.local_proxy_enabled = Some(true);
-    }
-    for mapping in &mut profile.model_mappings {
-        if mapping.context_window.trim().is_empty()
-            && let Some(context_window) =
-                crate::model_capabilities::required_model_context_window(&mapping.request_model)
-        {
-            mapping.context_window = context_window.to_string();
-        }
     }
     if profile.relay_mode == crate::settings::RelayMode::Official && !profile.official_mix_api_key {
         let has_api_config = !profile.base_url.trim().is_empty()
@@ -3889,6 +3882,39 @@ mod tests {
 
         assert_eq!(profile.model_mappings[0].context_window, "1000000");
         assert!(profile.model_mappings[1].context_window.is_empty());
+        assert_eq!(profile.local_proxy_enabled, Some(true));
+    }
+
+    #[test]
+    fn complete_profile_config_writes_catalog_identifier_as_default_model() {
+        let alias_profile = RelayProfile {
+            model: "gpt-5.6-sol".to_string(),
+            config_contents: "model_provider = \"custom\"\n".to_string(),
+            model_mappings: vec![crate::settings::RelayModelMapping {
+                request_model: "gpt-5.6-sol".to_string(),
+                alias: "gpt-5.6-sol [500K]".to_string(),
+                protocol: RelayProtocol::Responses,
+                context_window: "500000".to_string(),
+            }],
+            ..RelayProfile::default()
+        };
+        let context_profile = RelayProfile {
+            model: "gpt-5.6-sol".to_string(),
+            config_contents: "model_provider = \"custom\"\n".to_string(),
+            model_mappings: vec![crate::settings::RelayModelMapping {
+                request_model: "gpt-5.6-sol".to_string(),
+                alias: String::new(),
+                protocol: RelayProtocol::Responses,
+                context_window: "372000".to_string(),
+            }],
+            ..RelayProfile::default()
+        };
+
+        let alias_config = complete_relay_profile_config(&alias_profile).unwrap();
+        let context_config = complete_relay_profile_config(&context_profile).unwrap();
+
+        assert!(alias_config.contains("model = \"gpt-5.6-sol [500K]\""));
+        assert!(context_config.contains("model = \"gpt-5.6-sol 372000\""));
     }
 
     #[test]
@@ -4179,6 +4205,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relay_profile_test_sends_request_model_for_catalog_alias() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_test_http_request(&mut stream);
+            write_test_http_response(&mut stream, "200 OK", r#"{"output_text":"hi"}"#);
+            request
+        });
+
+        let profile = RelayProfile {
+            base_url: format!("http://{address}/v1"),
+            api_key: "sk-test".to_string(),
+            model_mappings: vec![crate::settings::RelayModelMapping {
+                request_model: "gpt-5.6-sol".to_string(),
+                alias: "gpt-5.6-sol [500K]".to_string(),
+                protocol: RelayProtocol::Responses,
+                context_window: "500000".to_string(),
+            }],
+            ..RelayProfile::default()
+        };
+
+        let result = test_relay_profile(&profile, "gpt-5.6-sol [500K]")
+            .await
+            .unwrap();
+        let request = server.join().unwrap();
+        let body = request
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or_default();
+        let request_json: Value = serde_json::from_str(body).unwrap();
+
+        assert_eq!(result.http_status, 200);
+        assert_eq!(request_json["model"], "gpt-5.6-sol");
+    }
+
+    #[tokio::test]
     async fn relay_profile_test_falls_back_from_responses_to_chat_completions() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
@@ -4380,7 +4443,7 @@ mod tests {
 
         let fast_model = models
             .iter()
-            .find(|m| m.get("slug").and_then(Value::as_str) == Some("gpt-5.5"))
+            .find(|m| m.get("slug").and_then(Value::as_str) == Some("gpt-5.5 400000"))
             .expect("应存在 gpt-5.5");
         let tiers = fast_model
             .get("service_tiers")
@@ -4400,7 +4463,7 @@ mod tests {
 
         let standard_model = models
             .iter()
-            .find(|m| m.get("slug").and_then(Value::as_str) == Some("gpt-5.2"))
+            .find(|m| m.get("slug").and_then(Value::as_str) == Some("gpt-5.2 400000"))
             .expect("应存在 gpt-5.2");
         let standard_tiers = standard_model
             .get("service_tiers")
@@ -4410,7 +4473,7 @@ mod tests {
 
         let gpt56_model = models
             .iter()
-            .find(|m| m.get("slug").and_then(Value::as_str) == Some("openai/gpt-5.6-terra"))
+            .find(|m| m.get("slug").and_then(Value::as_str) == Some("openai/gpt-5.6-terra 1000000"))
             .expect("应存在 openai/gpt-5.6-terra");
         assert!(
             gpt56_model
@@ -4431,7 +4494,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_model_catalog_uses_mapping_alias_for_display_name_only() {
+    fn generated_model_catalog_uses_mapping_alias_as_slug_and_display_name() {
         let profile: RelayProfile = serde_json::from_value(json!({
             "id": "relay-a",
             "name": "供应商 A",
@@ -4450,13 +4513,13 @@ mod tests {
         let catalog = generated_model_catalog_json(&profile, "", rows).unwrap();
         let model = &catalog["models"][0];
 
-        assert_eq!(model["slug"], "gpt-5.6-sol");
+        assert_eq!(model["slug"], "主力编程模型");
         assert_eq!(model["display_name"], "主力编程模型");
         assert_eq!(model["description"], "gpt-5.6-sol");
     }
 
     #[test]
-    fn generated_model_catalog_keeps_duplicate_request_models_as_distinct_alias_entries() {
+    fn generated_model_catalog_uses_model_context_when_alias_is_blank() {
         let profile: RelayProfile = serde_json::from_value(json!({
             "id": "relay-a",
             "name": "供应商 A",
@@ -4468,9 +4531,9 @@ mod tests {
                 },
                 {
                     "requestModel": "gpt-5.6-sol",
-                    "alias": "gpt-5.6-sol[1M]",
+                    "alias": "gpt-5.6-sol [500K]",
                     "protocol": "responses",
-                    "contextWindow": "1000000"
+                    "contextWindow": "500000"
                 }
             ]
         }))
@@ -4481,12 +4544,42 @@ mod tests {
         let models = catalog["models"].as_array().unwrap();
 
         assert_eq!(models.len(), 2);
-        assert_eq!(models[0]["display_name"], "gpt-5.6-sol");
-        assert_eq!(models[1]["display_name"], "gpt-5.6-sol[1M]");
+        assert_eq!(models[0]["display_name"], "gpt-5.6-sol 372000");
+        assert_eq!(models[1]["display_name"], "gpt-5.6-sol [500K]");
         assert_eq!(models[0]["description"], "gpt-5.6-sol");
         assert_eq!(models[1]["description"], "gpt-5.6-sol");
-        assert_eq!(models[0]["slug"], "gpt-5.6-sol");
-        assert_eq!(models[1]["slug"], "gpt-5.6-sol--codex-elves-alias-2");
+        assert_eq!(models[0]["slug"], "gpt-5.6-sol 372000");
+        assert_eq!(models[1]["slug"], "gpt-5.6-sol [500K]");
+    }
+
+    #[test]
+    fn generated_model_catalog_collapses_legacy_exact_duplicate_parameters() {
+        let profile: RelayProfile = serde_json::from_value(json!({
+            "id": "relay-a",
+            "name": "供应商 A",
+            "modelMappings": [
+                {
+                    "requestModel": "gpt-5.6-sol",
+                    "alias": "",
+                    "protocol": "responses",
+                    "contextWindow": "500000"
+                },
+                {
+                    "requestModel": "gpt-5.6-sol",
+                    "alias": "",
+                    "protocol": "responses",
+                    "contextWindow": "500000"
+                }
+            ]
+        }))
+        .unwrap();
+
+        let rows = relay_profile_catalog_rows(&profile).unwrap();
+        let catalog = generated_model_catalog_json(&profile, "", rows).unwrap();
+        let models = catalog["models"].as_array().unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["slug"], "gpt-5.6-sol 500000");
     }
 
     #[test]
@@ -4523,11 +4616,11 @@ mod tests {
         let models = catalog["models"].as_array().unwrap();
         let responses = models
             .iter()
-            .find(|model| model["slug"] == "gpt-5.6-sol")
+            .find(|model| model["slug"] == "gpt-5.6-sol 372000")
             .unwrap();
         let anthropic = models
             .iter()
-            .find(|model| model["slug"] == "claude-sonnet-5")
+            .find(|model| model["slug"] == "claude-sonnet-5 1000000")
             .unwrap();
 
         assert_eq!(responses["prefer_websockets"], true);
@@ -4846,7 +4939,10 @@ base_url = "http://127.0.0.1:45221/v1"
             .iter()
             .filter_map(|model| model.get("slug").and_then(Value::as_str))
             .collect::<Vec<_>>();
-        assert_eq!(first_models, vec!["deepseek-coder", "qwen3-coder"]);
+        assert_eq!(
+            first_models,
+            vec!["deepseek-coder 128000", "qwen3-coder 200000"]
+        );
 
         profile.model_mappings = vec![
             crate::settings::RelayModelMapping {
@@ -4882,7 +4978,11 @@ base_url = "http://127.0.0.1:45221/v1"
             .collect::<Vec<_>>();
         assert_eq!(
             updated_models,
-            vec!["claude-opus-4.6", "qwen3-coder", "deepseek-coder"]
+            vec![
+                "claude-opus-4.6 1000000",
+                "qwen3-coder 200000",
+                "deepseek-coder 128000"
+            ]
         );
         assert_eq!(updated_catalog["models"][0]["context_window"], 1_000_000);
     }

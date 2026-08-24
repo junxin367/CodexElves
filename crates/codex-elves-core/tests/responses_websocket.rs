@@ -534,6 +534,250 @@ async fn local_proxy_bridges_responses_websocket_messages_and_authentication() {
 }
 
 #[tokio::test]
+async fn local_proxy_rewrites_websocket_alias_slug_and_prompt_identity_to_request_model() {
+    let _settings_lock = websocket_settings_test_lock().lock().await;
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        let (stream, _) = upstream_listener.accept().await.unwrap();
+        let mut socket = accept_hdr_async(stream, |_request: &Request, response: Response| {
+            Ok(response)
+        })
+        .await
+        .unwrap();
+        let message = socket.next().await.unwrap().unwrap();
+        let Message::Text(text) = message else {
+            panic!("expected response.create text message");
+        };
+        let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+        assert_eq!(payload["model"], "gpt-5.6-sol");
+        assert_eq!(
+            payload["instructions"],
+            "You are Codex, an agent based on the gpt-5.6-sol model."
+        );
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "response.completed",
+                    "response": {"id": "resp_alias"}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let _ = socket.close(None).await;
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
+    let mut profile = RelayProfile {
+        id: "relay-websocket-alias".to_string(),
+        name: "WebSocket Alias".to_string(),
+        relay_mode: RelayMode::PureApi,
+        protocol: RelayProtocol::Responses,
+        local_proxy_enabled: Some(true),
+        base_url: format!("http://{upstream_address}"),
+        upstream_base_url: format!("http://{upstream_address}"),
+        api_key: "sk-websocket-alias".to_string(),
+        auth_contents: r#"{"OPENAI_API_KEY":"sk-websocket-alias"}"#.to_string(),
+        model_mappings: vec![RelayModelMapping {
+            request_model: "gpt-5.6-sol".to_string(),
+            alias: "gpt-5.6-sol [500K]".to_string(),
+            protocol: RelayProtocol::Responses,
+            context_window: "500000".to_string(),
+        }],
+        config_contents: "model_provider = \"custom\"\n".to_string(),
+        ..RelayProfile::default()
+    };
+    normalize_responses_websocket_capability(&mut profile);
+    profile.responses_websocket.state = ResponsesWebsocketCapabilityState::Supported;
+    SettingsStore::default()
+        .save(&BackendSettings {
+            relay_profiles: vec![profile],
+            active_relay_id: "relay-websocket-alias".to_string(),
+            ..BackendSettings::default()
+        })
+        .unwrap();
+
+    let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_address = local_listener.local_addr().unwrap();
+    let local_server = tokio::spawn(async move {
+        let (mut stream, remote_addr) = local_listener.accept().await.unwrap();
+        let request_bytes = read_upgrade_request(&mut stream).await;
+        handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr))
+            .await
+            .unwrap();
+    });
+
+    let (mut client, _) = connect_async(format!("ws://{local_address}/v1/responses"))
+        .await
+        .unwrap();
+    client
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.6-sol [500K]",
+                "instructions": "You are Codex, an agent based on the gpt-5.6-sol [500K] model.",
+                "input": [{"role": "user", "content": "hi"}],
+                "stream": true
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let response = client.next().await.unwrap().unwrap();
+    let Message::Text(text) = response else {
+        panic!("expected response.completed text message");
+    };
+    let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+    assert_eq!(payload["type"], "response.completed");
+    let _ = client.close(None).await;
+
+    local_server.await.unwrap();
+    upstream.await.unwrap();
+}
+
+#[tokio::test]
+async fn local_proxy_accepts_legacy_hidden_alias_slug_without_forwarding_it() {
+    let _settings_lock = websocket_settings_test_lock().lock().await;
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        let (stream, _) = upstream_listener.accept().await.unwrap();
+        let mut socket = accept_hdr_async(stream, |_request: &Request, response: Response| {
+            Ok(response)
+        })
+        .await
+        .unwrap();
+        let message = socket.next().await.unwrap().unwrap();
+        let Message::Text(text) = message else {
+            panic!("expected response.create text message");
+        };
+        let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+        assert_eq!(payload["model"], "gpt-5.6-sol");
+        assert_eq!(
+            payload["instructions"],
+            "You are Codex, an agent based on the gpt-5.6-sol model."
+        );
+        assert_eq!(
+            payload["input"][0]["content"][0]["text"],
+            "Use the gpt-5.6-sol model."
+        );
+        assert!(!text.contains("--codex-elves-alias-2"));
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "response.completed",
+                    "response": {"id": "resp_legacy_hidden_alias"}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let _ = socket.close(None).await;
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
+    let mut profile = RelayProfile {
+        id: "relay-websocket-legacy-hidden-alias".to_string(),
+        name: "WebSocket Legacy Hidden Alias".to_string(),
+        relay_mode: RelayMode::PureApi,
+        protocol: RelayProtocol::Responses,
+        local_proxy_enabled: Some(true),
+        base_url: format!("http://{upstream_address}"),
+        upstream_base_url: format!("http://{upstream_address}"),
+        api_key: "sk-websocket-legacy-hidden-alias".to_string(),
+        auth_contents: r#"{"OPENAI_API_KEY":"sk-websocket-legacy-hidden-alias"}"#.to_string(),
+        model_mappings: vec![
+            RelayModelMapping {
+                request_model: "gpt-5.6-sol".to_string(),
+                alias: String::new(),
+                protocol: RelayProtocol::Responses,
+                context_window: "372000".to_string(),
+            },
+            RelayModelMapping {
+                request_model: "gpt-5.6-sol".to_string(),
+                alias: "gpt-5.6-sol [500K]".to_string(),
+                protocol: RelayProtocol::Responses,
+                context_window: "500000".to_string(),
+            },
+        ],
+        config_contents: "model_provider = \"custom\"\n".to_string(),
+        ..RelayProfile::default()
+    };
+    normalize_responses_websocket_capability(&mut profile);
+    profile.responses_websocket.state = ResponsesWebsocketCapabilityState::Supported;
+    SettingsStore::default()
+        .save(&BackendSettings {
+            relay_profiles: vec![profile],
+            active_relay_id: "relay-websocket-legacy-hidden-alias".to_string(),
+            ..BackendSettings::default()
+        })
+        .unwrap();
+
+    let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_address = local_listener.local_addr().unwrap();
+    let local_server = tokio::spawn(async move {
+        let (mut stream, remote_addr) = local_listener.accept().await.unwrap();
+        let request_bytes = read_upgrade_request(&mut stream).await;
+        handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr))
+            .await
+            .unwrap();
+    });
+
+    let (mut client, _) = connect_async(format!("ws://{local_address}/v1/responses"))
+        .await
+        .unwrap();
+    client
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.6-sol--codex-elves-alias-2",
+                "instructions": "You are Codex, an agent based on the gpt-5.6-sol--codex-elves-alias-2 model.",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{
+                            "type": "input_text",
+                            "text": "Use the gpt-5.6-sol--codex-elves-alias-2 model."
+                        }]
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{
+                            "type": "input_text",
+                            "text": "hi"
+                        }]
+                    }
+                ],
+                "stream": true
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let response = client.next().await.unwrap().unwrap();
+    let Message::Text(text) = response else {
+        panic!("expected response.completed text message");
+    };
+    let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+    assert_eq!(payload["type"], "response.completed");
+    let _ = client.close(None).await;
+
+    local_server.await.unwrap();
+    upstream.await.unwrap();
+}
+
+#[tokio::test]
 async fn local_proxy_does_not_turn_upstream_pong_into_application_event() {
     let _settings_lock = websocket_settings_test_lock().lock().await;
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

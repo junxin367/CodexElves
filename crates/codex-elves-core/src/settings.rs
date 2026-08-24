@@ -246,10 +246,34 @@ impl RelayProfile {
         if model.is_empty() {
             return None;
         }
-        relay_model_mapping_catalog_slugs(&self.model_mappings)
+        let catalog_mapping = relay_model_mapping_catalog_slugs(&self.model_mappings)
             .iter()
             .position(|catalog_slug| catalog_slug == model)
-            .and_then(|index| self.model_mappings.get(index))
+            .and_then(|index| self.model_mappings.get(index));
+        let legacy_mapping = legacy_relay_model_mapping_catalog_slugs(&self.model_mappings)
+            .iter()
+            .position(|catalog_slug| catalog_slug == model)
+            .and_then(|index| self.model_mappings.get(index));
+        let catalog_mappings = relay_model_mappings_for_catalog(&self.model_mappings);
+        let migrated_mapping = relay_model_mapping_catalog_slugs(&catalog_mappings)
+            .iter()
+            .position(|catalog_slug| catalog_slug == model)
+            .and_then(|index| catalog_mappings.get(index))
+            .and_then(|mapping| {
+                self.model_mappings
+                    .iter()
+                    .find(|candidate| relay_model_mapping_parameters_match(candidate, mapping))
+            });
+        let resolved = if validate_catalog_model_identifiers_only(&self.model_mappings).is_err() {
+            legacy_mapping.or(migrated_mapping).or(catalog_mapping)
+        } else {
+            catalog_mapping.or(migrated_mapping).or(legacy_mapping)
+        };
+        resolved.or_else(|| {
+            self.model_mappings
+                .iter()
+                .find(|mapping| mapping.request_model.trim() == model)
+        })
     }
 
     pub(crate) fn request_model_for_catalog_model(&self, model: &str) -> String {
@@ -259,13 +283,32 @@ impl RelayProfile {
             .unwrap_or_else(|| model.trim().to_string())
     }
 
+    pub(crate) fn catalog_model_for_configured_model(&self, model: &str) -> String {
+        let model = model.trim();
+        if model.is_empty() || self.model_mappings.is_empty() {
+            return model.to_string();
+        }
+        let Some(mapping) = self.model_mapping_for_catalog_model(model) else {
+            return model.to_string();
+        };
+        let catalog_mappings = relay_model_mappings_for_catalog(&self.model_mappings);
+        let canonical_mapping = catalog_mappings
+            .iter()
+            .find(|candidate| relay_model_mapping_parameters_match(candidate, mapping))
+            .unwrap_or(mapping);
+        let catalog_model = relay_model_mapping_catalog_slug(canonical_mapping);
+        if catalog_model.is_empty() {
+            model.to_string()
+        } else {
+            catalog_model
+        }
+    }
+
     pub fn context_window_for_active_model(&self) -> String {
         let model = self.model.trim();
         if !model.is_empty() && !self.model_mappings.is_empty() {
             return self
-                .model_mappings
-                .iter()
-                .find(|mapping| mapping.request_model.trim() == model)
+                .model_mapping_for_catalog_model(model)
                 .map(|mapping| mapping.context_window.trim().to_string())
                 .unwrap_or_default();
         }
@@ -325,9 +368,13 @@ impl RelayProfile {
         let mut assignments = HashMap::<String, RelayProtocol>::new();
         if !self.model_mappings.is_empty() {
             for mapping in &self.model_mappings {
+                let request_model = mapping.request_model.trim();
+                if request_model.is_empty() {
+                    continue;
+                }
                 insert_model_protocol_assignment(
                     &mut assignments,
-                    mapping.request_model.trim(),
+                    request_model,
                     mapping.protocol,
                 )?;
             }
@@ -348,9 +395,144 @@ impl RelayProfile {
         }
         Ok(())
     }
+
+    pub(crate) fn validate_model_catalog_identifiers(&self) -> anyhow::Result<()> {
+        self.validate_model_protocol_assignments()?;
+        validate_catalog_model_identifiers_only(&relay_model_mappings_for_catalog(
+            &self.model_mappings,
+        ))
+    }
+
+    fn validate_model_mapping_save_constraints(&self) -> anyhow::Result<()> {
+        let mut parameter_signatures = HashSet::new();
+        for mapping in &self.model_mappings {
+            let request_model = mapping.request_model.trim();
+            if request_model.is_empty() {
+                continue;
+            }
+            let context_window = normalized_model_context_window(&mapping.context_window);
+            if !parameter_signatures.insert((
+                request_model.to_string(),
+                mapping.protocol,
+                context_window,
+            )) {
+                anyhow::bail!(
+                    "模型「{request_model}」的模型配置重复：协议为 {}，上下文大小为「{}」；别名不能用于区分完全相同的参数",
+                    relay_protocol_label(mapping.protocol),
+                    mapping.context_window.trim()
+                );
+            }
+        }
+        validate_catalog_model_identifiers_only(&self.model_mappings)
+    }
+}
+
+fn normalized_model_context_window(value: &str) -> String {
+    let value = value.trim();
+    value
+        .parse::<u64>()
+        .map(|parsed| parsed.to_string())
+        .unwrap_or_else(|_| value.to_string())
+}
+
+fn relay_model_mapping_parameters_match(
+    left: &RelayModelMapping,
+    right: &RelayModelMapping,
+) -> bool {
+    left.request_model.trim() == right.request_model.trim()
+        && left.protocol == right.protocol
+        && normalized_model_context_window(&left.context_window)
+            == normalized_model_context_window(&right.context_window)
+}
+
+fn validate_catalog_model_identifiers_only(mappings: &[RelayModelMapping]) -> anyhow::Result<()> {
+    let catalog_slugs = relay_model_mapping_catalog_slugs(mappings);
+    let legacy_slugs = legacy_relay_model_mapping_catalog_slugs(mappings);
+    let mut catalog_identifiers = HashSet::new();
+
+    for (index, (mapping, catalog_slug)) in mappings.iter().zip(&catalog_slugs).enumerate() {
+        if mapping.request_model.trim().is_empty() || catalog_slug.is_empty() {
+            continue;
+        }
+        if !catalog_identifiers.insert(catalog_slug.clone()) {
+            anyhow::bail!(
+                "模型标识重复：「{catalog_slug}」；请使用唯一别名，或调整请求模型与上下文大小"
+            );
+        }
+        if mappings
+            .iter()
+            .enumerate()
+            .any(|(candidate_index, candidate)| {
+                candidate_index != index && candidate.request_model.trim() == catalog_slug
+            })
+        {
+            anyhow::bail!(
+                "模型标识「{catalog_slug}」与另一条请求模型冲突；请使用不会与真实请求模型重名的别名"
+            );
+        }
+        if legacy_slugs
+            .iter()
+            .enumerate()
+            .any(|(candidate_index, legacy_slug)| {
+                candidate_index != index && legacy_slug == catalog_slug
+            })
+        {
+            anyhow::bail!("模型标识「{catalog_slug}」与另一条旧版模型标识冲突；请更换别名");
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn relay_model_mapping_catalog_slugs(mappings: &[RelayModelMapping]) -> Vec<String> {
+    mappings
+        .iter()
+        .map(relay_model_mapping_catalog_slug)
+        .collect()
+}
+
+fn relay_model_mapping_catalog_slug(mapping: &RelayModelMapping) -> String {
+    let request_model = mapping.request_model.trim();
+    if request_model.is_empty() {
+        return String::new();
+    }
+    let alias = mapping.alias.trim();
+    if !alias.is_empty() {
+        return alias.to_string();
+    }
+    let context_window = mapping.context_window.trim();
+    if context_window.is_empty() {
+        request_model.to_string()
+    } else {
+        format!("{request_model} {context_window}")
+    }
+}
+
+pub(crate) fn relay_model_mappings_for_catalog(
+    mappings: &[RelayModelMapping],
+) -> Vec<RelayModelMapping> {
+    let mut parameter_signatures = HashSet::new();
+    let mut deduplicated = mappings
+        .iter()
+        .filter(|mapping| {
+            let request_model = mapping.request_model.trim();
+            !request_model.is_empty()
+                && parameter_signatures.insert((
+                    request_model.to_string(),
+                    mapping.protocol,
+                    normalized_model_context_window(&mapping.context_window),
+                ))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if validate_catalog_model_identifiers_only(&deduplicated).is_err() {
+        for mapping in &mut deduplicated {
+            mapping.alias.clear();
+        }
+    }
+    deduplicated
+}
+
+fn legacy_relay_model_mapping_catalog_slugs(mappings: &[RelayModelMapping]) -> Vec<String> {
     let reserved_request_models = mappings
         .iter()
         .map(|mapping| mapping.request_model.trim())
@@ -433,7 +615,9 @@ pub enum RelayModelInsertMode {
     Patch,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum RelayProtocol {
     #[default]
@@ -950,7 +1134,7 @@ impl SettingsStore {
         let mut settings = normalize_settings_config_sections(settings.clone());
         settings.codex_home_path = normalize_codex_home_path(&settings.codex_home_path);
         settings.codex_extra_args = normalize_codex_extra_args(&settings.codex_extra_args);
-        validate_relay_model_protocol_assignments(&settings)?;
+        validate_relay_model_mapping_save_constraints(&settings)?;
         let bytes = serde_json::to_vec_pretty(&settings)?;
         atomic_write(&self.path, &bytes)
     }
@@ -965,7 +1149,7 @@ impl SettingsStore {
         let settings = normalize_settings_config_sections(
             serde_json::from_value(Value::Object(raw.clone())).unwrap_or_default(),
         );
-        validate_relay_model_protocol_assignments(&settings)?;
+        validate_relay_model_mapping_save_constraints(&settings)?;
         raw.insert(
             "relayCommonConfigContents".to_string(),
             Value::String(settings.relay_common_config_contents.clone()),
@@ -1003,6 +1187,16 @@ fn validate_relay_model_protocol_assignments(settings: &BackendSettings) -> anyh
         profile
             .validate_model_protocol_assignments()
             .with_context(|| format!("供应商「{}」模型协议配置无效", profile.name))?;
+    }
+    Ok(())
+}
+
+fn validate_relay_model_mapping_save_constraints(settings: &BackendSettings) -> anyhow::Result<()> {
+    validate_relay_model_protocol_assignments(settings)?;
+    for profile in &settings.relay_profiles {
+        profile
+            .validate_model_mapping_save_constraints()
+            .with_context(|| format!("供应商「{}」模型配置无效", profile.name))?;
     }
     Ok(())
 }
@@ -1708,7 +1902,10 @@ mod tests {
             profile.resolve_protocol_for_model("gpt-chat").unwrap(),
             RelayProtocol::ChatCompletions
         );
-        assert!(profile.resolve_protocol_for_model("对话模型").is_err());
+        assert_eq!(
+            profile.resolve_protocol_for_model("对话模型").unwrap(),
+            RelayProtocol::ChatCompletions
+        );
         assert_eq!(
             profile
                 .resolve_protocol_for_model("claude-sonnet-4")
@@ -1720,7 +1917,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_profile_resolves_duplicate_mapping_catalog_slug_to_its_protocol_and_context() {
+    fn relay_profile_uses_alias_or_model_context_as_catalog_slug() {
         let profile = RelayProfile {
             model_mappings: vec![
                 RelayModelMapping {
@@ -1731,24 +1928,78 @@ mod tests {
                 },
                 RelayModelMapping {
                     request_model: "gpt-5.6-sol".to_string(),
-                    alias: "gpt-5.6-sol[1M]".to_string(),
+                    alias: "gpt-5.6-sol [500K]".to_string(),
                     protocol: RelayProtocol::Responses,
-                    context_window: "1000000".to_string(),
+                    context_window: "500000".to_string(),
                 },
             ],
             ..RelayProfile::default()
         };
 
-        let catalog_slug = "gpt-5.6-sol--codex-elves-alias-2";
+        assert_eq!(
+            relay_model_mapping_catalog_slugs(&profile.model_mappings),
+            vec!["gpt-5.6-sol 372000", "gpt-5.6-sol [500K]"]
+        );
 
         assert_eq!(
-            profile.resolve_protocol_for_model(catalog_slug).unwrap(),
+            profile
+                .resolve_protocol_for_model("gpt-5.6-sol 372000")
+                .unwrap(),
             RelayProtocol::Responses
         );
         assert_eq!(
-            profile.context_window_for_model(catalog_slug),
-            Some(1_000_000)
+            profile.context_window_for_model("gpt-5.6-sol 372000"),
+            Some(372_000)
         );
+        assert_eq!(
+            profile
+                .resolve_protocol_for_model("gpt-5.6-sol [500K]")
+                .unwrap(),
+            RelayProtocol::Responses
+        );
+        assert_eq!(
+            profile.context_window_for_model("gpt-5.6-sol [500K]"),
+            Some(500_000)
+        );
+    }
+
+    #[test]
+    fn legacy_ambiguous_alias_keeps_legacy_request_model_precedence() {
+        let profile = RelayProfile {
+            model_mappings: vec![
+                RelayModelMapping {
+                    request_model: "model-a".to_string(),
+                    alias: "model-b".to_string(),
+                    protocol: RelayProtocol::ChatCompletions,
+                    context_window: "400000".to_string(),
+                },
+                RelayModelMapping {
+                    request_model: "model-b".to_string(),
+                    alias: String::new(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "500000".to_string(),
+                },
+            ],
+            ..RelayProfile::default()
+        };
+
+        assert_eq!(
+            profile.request_model_for_catalog_model("model-b"),
+            "model-b"
+        );
+        assert_eq!(
+            profile.request_model_for_catalog_model("model-a 400000"),
+            "model-a"
+        );
+        assert_eq!(
+            profile.catalog_model_for_configured_model("model-b"),
+            "model-b 500000"
+        );
+        assert_eq!(
+            profile.resolve_protocol_for_model("model-b").unwrap(),
+            RelayProtocol::Responses
+        );
+        assert_eq!(profile.context_window_for_model("model-b"), Some(500_000));
     }
 
     #[test]
@@ -1774,6 +2025,148 @@ mod tests {
         let error = profile.validate_model_protocol_assignments().unwrap_err();
         assert!(error.to_string().contains("冲突协议归属"), "{error:#}");
         assert!(profile.resolve_protocol_for_model("gpt-conflict").is_err());
+    }
+
+    #[test]
+    fn settings_store_rejects_duplicate_model_mapping_parameters_ignoring_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let store = SettingsStore::new(path.clone());
+        let settings = BackendSettings {
+            relay_profiles: vec![RelayProfile {
+                id: "duplicate-model-parameters".to_string(),
+                name: "重复模型参数".to_string(),
+                model_mappings: vec![
+                    RelayModelMapping {
+                        request_model: "gpt-5.6-sol".to_string(),
+                        alias: "gpt-5.6-sol [500K]".to_string(),
+                        protocol: RelayProtocol::Responses,
+                        context_window: "500000".to_string(),
+                    },
+                    RelayModelMapping {
+                        request_model: "gpt-5.6-sol".to_string(),
+                        alias: "编程模型".to_string(),
+                        protocol: RelayProtocol::Responses,
+                        context_window: "500000".to_string(),
+                    },
+                ],
+                ..RelayProfile::default()
+            }],
+            ..BackendSettings::default()
+        };
+
+        let error = store.save(&settings).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("模型配置重复"), "{message}");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn settings_store_loads_legacy_duplicate_parameters_but_rejects_resave() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "relayProfiles": [{
+                    "id": "legacy-duplicates",
+                    "name": "历史重复参数",
+                    "modelMappings": [
+                        {
+                            "requestModel": "gpt-5.6-sol",
+                            "alias": "gpt-5.6-sol [500K]",
+                            "protocol": "responses",
+                            "contextWindow": "500000"
+                        },
+                        {
+                            "requestModel": "gpt-5.6-sol",
+                            "alias": "编程模型",
+                            "protocol": "responses",
+                            "contextWindow": "500000"
+                        }
+                    ]
+                }]
+            }"#,
+        )
+        .unwrap();
+        let store = SettingsStore::new(path);
+
+        let loaded = store.load().unwrap();
+
+        assert_eq!(loaded.relay_profiles[0].model_mappings.len(), 2);
+        let error = store.save(&loaded).unwrap_err();
+        assert!(format!("{error:#}").contains("模型配置重复"));
+    }
+
+    #[test]
+    fn settings_store_rejects_duplicate_catalog_model_identifiers() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let store = SettingsStore::new(path.clone());
+        let settings = BackendSettings {
+            relay_profiles: vec![RelayProfile {
+                id: "duplicate-catalog-model".to_string(),
+                name: "重复目录标识".to_string(),
+                model_mappings: vec![
+                    RelayModelMapping {
+                        request_model: "gpt-5.6-sol".to_string(),
+                        alias: "主力模型".to_string(),
+                        protocol: RelayProtocol::Responses,
+                        context_window: "500000".to_string(),
+                    },
+                    RelayModelMapping {
+                        request_model: "gpt-5.6-luna".to_string(),
+                        alias: "主力模型".to_string(),
+                        protocol: RelayProtocol::Responses,
+                        context_window: "600000".to_string(),
+                    },
+                ],
+                ..RelayProfile::default()
+            }],
+            ..BackendSettings::default()
+        };
+
+        let error = store.save(&settings).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("模型标识重复"), "{message}");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn settings_store_rejects_catalog_identifier_matching_other_request_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let store = SettingsStore::new(path.clone());
+        let settings = BackendSettings {
+            relay_profiles: vec![RelayProfile {
+                id: "ambiguous-catalog-model".to_string(),
+                name: "目录标识歧义".to_string(),
+                model_mappings: vec![
+                    RelayModelMapping {
+                        request_model: "model-a".to_string(),
+                        alias: "model-b".to_string(),
+                        protocol: RelayProtocol::Responses,
+                        context_window: "400000".to_string(),
+                    },
+                    RelayModelMapping {
+                        request_model: "model-b".to_string(),
+                        alias: String::new(),
+                        protocol: RelayProtocol::Responses,
+                        context_window: "500000".to_string(),
+                    },
+                ],
+                ..RelayProfile::default()
+            }],
+            ..BackendSettings::default()
+        };
+
+        let error = store.save(&settings).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("与另一条请求模型冲突"), "{message}");
+        assert!(!path.exists());
     }
 
     #[test]

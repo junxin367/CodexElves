@@ -5697,7 +5697,7 @@ function SessionsScreen({
     const profile = activeRelayProfile(form);
     const options: SelectMenuOption<string>[] = [
       { value: "", label: "跟随会话模型" },
-      ...relayProfileKnownModels(profile).map((model) => {
+      ...relayProfileCatalogModels(profile).map((model) => {
         const contextWindow = relayProfileContextWindowForModel(profile, model);
         return {
           value: model,
@@ -5716,7 +5716,7 @@ function SessionsScreen({
   const compactionModelWarnings = useMemo(() => {
     if (!form.layeredCompactionModelOverrideEnabled) return [];
     const profile = activeRelayProfile(form);
-    const knownModels = new Set(relayProfileKnownModels(profile));
+    const knownModels = new Set(relayProfileCatalogModels(profile));
     return COMPACTION_MODEL_FAMILIES.flatMap(({ value: family, label }) => {
       const model = form.layeredCompactionModels[family].trim();
       if (!model) return [];
@@ -10917,10 +10917,11 @@ function relayProfileDefaultTestModel(profile: RelayProfile, form: BackendSettin
 }
 
 function relayProfileKnownModels(profile: RelayProfile, fallbackModel = ""): string[] {
+  const requestModel = (model: string) => relayProfileRequestModelForCatalogModel(profile, model);
   const values = [
-    fallbackModel,
-    profile.testModel,
-    profile.model,
+    requestModel(fallbackModel),
+    requestModel(profile.testModel),
+    requestModel(profile.model),
     ...normalizeRelayModelMappings(profile.modelMappings).map((mapping) => mapping.requestModel),
     ...profile.responsesModelList.split(/\r?\n/),
     ...profile.chatCompletionsModelList.split(/\r?\n/),
@@ -10932,23 +10933,151 @@ function relayProfileKnownModels(profile: RelayProfile, fallbackModel = ""): str
   );
 }
 
-function relayProfileContextWindowForActiveModel(profile: RelayProfile): string {
-  const model = profile.model.trim();
-  if (model && profile.modelMappings.length > 0) {
-    const match = profile.modelMappings.find((item) => item.requestModel.trim() === model);
-    return match?.contextWindow.trim() || "";
+function relayModelMappingCatalogIdentifier(mapping: RelayModelMapping): string {
+  const requestModel = mapping.requestModel.trim();
+  if (!requestModel) return "";
+  const alias = mapping.alias.trim();
+  if (alias) return alias;
+  const contextWindow = mapping.contextWindow.trim();
+  return contextWindow ? `${requestModel} ${contextWindow}` : requestModel;
+}
+
+function normalizedRelayMappingContextWindow(value: string): string {
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) return normalized;
+  return normalized.replace(/^0+(?=\d)/, "");
+}
+
+function relayModelMappingParameterKey(mapping: RelayModelMapping): string {
+  return JSON.stringify([
+    mapping.requestModel.trim(),
+    normalizeRelayProtocol(mapping.protocol),
+    normalizedRelayMappingContextWindow(mapping.contextWindow),
+  ]);
+}
+
+function legacyRelayModelMappingCatalogIdentifiers(mappings: RelayModelMapping[]): string[] {
+  const reservedRequestModels = new Set(
+    mappings.map((mapping) => mapping.requestModel.trim()).filter(Boolean),
+  );
+  const usedCatalogIdentifiers = new Set<string>();
+  const occurrences = new Map<string, number>();
+  return mappings.map((mapping) => {
+    const requestModel = mapping.requestModel.trim();
+    if (!requestModel) return "";
+    const occurrence = (occurrences.get(requestModel) ?? 0) + 1;
+    occurrences.set(requestModel, occurrence);
+    if (occurrence === 1) {
+      usedCatalogIdentifiers.add(requestModel);
+      return requestModel;
+    }
+    const base = `${requestModel}--codex-elves-alias-${occurrence}`;
+    let catalogIdentifier = base;
+    let collisionIndex = 2;
+    while (
+      reservedRequestModels.has(catalogIdentifier)
+      || usedCatalogIdentifiers.has(catalogIdentifier)
+    ) {
+      catalogIdentifier = `${base}-${collisionIndex}`;
+      collisionIndex += 1;
+    }
+    usedCatalogIdentifiers.add(catalogIdentifier);
+    return catalogIdentifier;
+  });
+}
+
+function relayModelMappingsHaveValidCatalogIdentifiers(mappings: RelayModelMapping[]): boolean {
+  const catalogIdentifiers = mappings.map(relayModelMappingCatalogIdentifier);
+  const legacyIdentifiers = legacyRelayModelMappingCatalogIdentifiers(mappings);
+  const seen = new Set<string>();
+  for (let index = 0; index < mappings.length; index += 1) {
+    const catalogIdentifier = catalogIdentifiers[index];
+    if (!catalogIdentifier || seen.has(catalogIdentifier)) return false;
+    seen.add(catalogIdentifier);
+    if (mappings.some(
+      (candidate, candidateIndex) =>
+        candidateIndex !== index && candidate.requestModel.trim() === catalogIdentifier,
+    )) return false;
+    if (legacyIdentifiers.some(
+      (legacyIdentifier, candidateIndex) =>
+        candidateIndex !== index && legacyIdentifier === catalogIdentifier,
+    )) return false;
   }
-  return profile.contextWindow.trim();
+  return true;
+}
+
+function relayProfileCatalogMappings(profile: RelayProfile): RelayModelMapping[] {
+  const mappings = normalizeRelayModelMappings(profile.modelMappings);
+  const seenParameters = new Set<string>();
+  const deduplicated = mappings.filter((mapping) => {
+    const requestModel = mapping.requestModel.trim();
+    if (!requestModel) return false;
+    const key = relayModelMappingParameterKey(mapping);
+    if (seenParameters.has(key)) return false;
+    seenParameters.add(key);
+    return true;
+  });
+  if (relayModelMappingsHaveValidCatalogIdentifiers(deduplicated)) return deduplicated;
+  return deduplicated.map((mapping) => ({ ...mapping, alias: "" }));
+}
+
+function relayProfileCatalogModels(profile: RelayProfile): string[] {
+  const mappings = relayProfileCatalogMappings(profile);
+  if (!mappings.length) return relayProfileKnownModels(profile);
+  return uniqueStrings(
+    mappings.map(relayModelMappingCatalogIdentifier).filter(Boolean),
+  ).sort((left, right) => left.localeCompare(right));
+}
+
+function relayProfileMappingForCatalogModel(
+  profile: RelayProfile,
+  model: string,
+): RelayModelMapping | undefined {
+  const normalizedModel = model.trim();
+  if (!normalizedModel) return undefined;
+  const mappings = normalizeRelayModelMappings(profile.modelMappings);
+  const catalogMapping = mappings.find(
+    (item) => relayModelMappingCatalogIdentifier(item) === normalizedModel,
+  );
+  const legacyIdentifiers = legacyRelayModelMappingCatalogIdentifiers(mappings);
+  const legacyMapping = mappings.find(
+    (_, index) => legacyIdentifiers[index] === normalizedModel,
+  );
+  const catalogMappings = relayProfileCatalogMappings(profile);
+  const migratedMapping = catalogMappings.find(
+    (item) => relayModelMappingCatalogIdentifier(item) === normalizedModel,
+  );
+  const originalMigratedMapping = migratedMapping
+    ? mappings.find(
+      (item) => relayModelMappingParameterKey(item) === relayModelMappingParameterKey(migratedMapping),
+    )
+    : undefined;
+  const requestMapping = mappings.find((item) => item.requestModel.trim() === normalizedModel);
+  return relayModelMappingsHaveValidCatalogIdentifiers(mappings)
+    ? catalogMapping || originalMigratedMapping || legacyMapping || requestMapping
+    : legacyMapping || originalMigratedMapping || catalogMapping || requestMapping;
+}
+
+function relayProfileRequestModelForCatalogModel(profile: RelayProfile, model: string): string {
+  const normalizedModel = model.trim();
+  if (!normalizedModel) return "";
+  return relayProfileMappingForCatalogModel(profile, normalizedModel)?.requestModel.trim()
+    || normalizedModel;
+}
+
+function relayProfileContextWindowForActiveModel(profile: RelayProfile): string {
+  return relayProfileContextWindowForModel(profile, profile.model)
+    || profile.contextWindow.trim();
 }
 
 function relayProfileContextWindowForModel(profile: RelayProfile, model: string): string {
   const normalizedModel = model.trim();
   if (!normalizedModel) return "";
-  const mapping = normalizeRelayModelMappings(profile.modelMappings)
-    .find((item) => item.requestModel.trim() === normalizedModel);
+  const mapping = relayProfileMappingForCatalogModel(profile, normalizedModel);
+  const requestModel = mapping?.requestModel.trim() || normalizedModel;
   return mapping?.contextWindow.trim()
     || (profile.model.trim() === normalizedModel ? profile.contextWindow.trim() : "")
-    || requiredModelContextWindow(normalizedModel);
+    || requiredModelContextWindow(requestModel);
 }
 
 function formatContextWindowCompact(value: string): string {
