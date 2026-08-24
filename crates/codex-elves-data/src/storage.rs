@@ -174,6 +174,123 @@ pub struct LocalSession {
     pub db_path: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum LocalSessionCatalogWarning {
+    DatabaseReadFailed { count: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalSessionCatalogEntry {
+    pub id: String,
+    pub title: String,
+    pub cwd: String,
+    pub model_provider: String,
+    pub updated_at_ms: Option<i64>,
+}
+
+impl From<LocalSession> for LocalSessionCatalogEntry {
+    fn from(session: LocalSession) -> Self {
+        Self {
+            id: session.id,
+            title: session.title,
+            cwd: session.cwd,
+            model_provider: session.model_provider,
+            updated_at_ms: session.updated_at_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalSessionCatalog {
+    pub sessions: Vec<LocalSessionCatalogEntry>,
+    pub warnings: Vec<LocalSessionCatalogWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LocalSessionCatalogError {
+    #[error("all existing session databases failed to read ({count})")]
+    AllExistingDatabasesFailed { count: usize },
+}
+
+pub fn aggregate_local_session_catalog(
+    candidate_paths: &[PathBuf],
+) -> Result<LocalSessionCatalog, LocalSessionCatalogError> {
+    let mut seen_paths = HashSet::new();
+    let mut sessions = Vec::new();
+    let mut existing_database_count = 0usize;
+    let mut successful_database_count = 0usize;
+    let mut failed_database_count = 0usize;
+
+    for candidate_path in candidate_paths {
+        if !candidate_path.is_file() {
+            continue;
+        }
+
+        let path_key = canonical_database_path_key(candidate_path);
+        if !seen_paths.insert(path_key) {
+            continue;
+        }
+
+        existing_database_count += 1;
+        match SQLiteStorageAdapter::new(candidate_path).list_local_sessions() {
+            Ok(mut database_sessions) => {
+                successful_database_count += 1;
+                sessions.append(&mut database_sessions);
+            }
+            Err(_) => failed_database_count += 1,
+        }
+    }
+
+    if existing_database_count > 0 && successful_database_count == 0 {
+        return Err(LocalSessionCatalogError::AllExistingDatabasesFailed {
+            count: failed_database_count,
+        });
+    }
+
+    sessions.retain(|session| {
+        !session.archived && !session.id.trim().is_empty() && !session.cwd.trim().is_empty()
+    });
+    sessions.sort_by(|left, right| {
+        right
+            .updated_at_ms
+            .cmp(&left.updated_at_ms)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut seen_session_ids = HashSet::new();
+    sessions.retain(|session| seen_session_ids.insert(session.id.clone()));
+
+    let warnings = if failed_database_count == 0 {
+        Vec::new()
+    } else {
+        vec![LocalSessionCatalogWarning::DatabaseReadFailed {
+            count: failed_database_count,
+        }]
+    };
+
+    Ok(LocalSessionCatalog {
+        sessions: sessions
+            .into_iter()
+            .map(LocalSessionCatalogEntry::from)
+            .collect(),
+        warnings,
+    })
+}
+
+fn canonical_database_path_key(path: &Path) -> PathBuf {
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    #[cfg(windows)]
+    {
+        PathBuf::from(path.to_string_lossy().to_lowercase())
+    }
+    #[cfg(not(windows))]
+    {
+        path
+    }
+}
+
 impl SQLiteStorageAdapter {
     pub fn new(db_path: impl Into<PathBuf>) -> Self {
         Self {

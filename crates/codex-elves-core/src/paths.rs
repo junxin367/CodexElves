@@ -10,6 +10,8 @@ const DIAGNOSTIC_LOG_FILE: &str = "codex-elves.log";
 const PROXY_LOG_FILE: &str = "proxy-requests.jsonl";
 const SUPPRESSED_THREADS_FILE: &str = "suppressed-threads.json";
 const SKINS_FILE: &str = "skins.json";
+const TASK_BOARD_FILE: &str = "task-board.json";
+const TASK_BOARD_LOCK_FILE: &str = "task-board.lock";
 const OBSOLETE_SESSION_BACKUPS_DIR: &str = "backups";
 const MIGRATIONS_DIR: &str = "migrations";
 const SESSION_BACKUP_CLEANUP_MARKER: &str = "session-backups-v1.done";
@@ -50,6 +52,14 @@ pub fn default_skins_path() -> PathBuf {
         return path;
     }
     default_app_state_dir().join(SKINS_FILE)
+}
+
+pub fn default_task_board_path() -> PathBuf {
+    default_app_state_dir().join(TASK_BOARD_FILE)
+}
+
+pub fn default_task_board_lock_path() -> PathBuf {
+    default_app_state_dir().join(TASK_BOARD_LOCK_FILE)
 }
 
 pub fn default_proxy_log_path() -> PathBuf {

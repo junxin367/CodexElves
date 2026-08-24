@@ -6,8 +6,14 @@ use codex_elves_core::launcher::{
 };
 use codex_elves_core::models::{DeleteResult, ExportResult, SessionRef};
 use codex_elves_core::routes::{BridgeContext, BridgeDataService, BridgeRuntimeService};
+use codex_elves_core::task_board::{
+    TaskBoardCatalogProject, TaskBoardCatalogSession, TaskBoardCatalogWarning,
+    TaskBoardCatalogWarningCode, TaskBoardSessionCatalog, normalize_task_project_cwd,
+    task_board_timestamp_from_bridge_i64,
+};
 use codex_elves_core::user_scripts::UserScriptManager;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 #[cfg(windows)]
@@ -650,15 +656,38 @@ impl LaunchHooks for LauncherHooks {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+struct TaskBoardCatalogTestSeam {
+    candidate_db_paths: Vec<PathBuf>,
+    reader: Arc<
+        dyn Fn(Vec<PathBuf>) -> anyhow::Result<codex_elves_data::LocalSessionCatalog> + Send + Sync,
+    >,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for TaskBoardCatalogTestSeam {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TaskBoardCatalogTestSeam")
+            .field("candidate_db_paths", &self.candidate_db_paths)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct LauncherDataService {
     db_path: PathBuf,
+    #[cfg(test)]
+    task_board_catalog_test_seam: Option<TaskBoardCatalogTestSeam>,
 }
 
 impl Default for LauncherDataService {
     fn default() -> Self {
         Self {
             db_path: default_codex_db_path(),
+            #[cfg(test)]
+            task_board_catalog_test_seam: None,
         }
     }
 }
@@ -741,10 +770,39 @@ impl BridgeDataService for LauncherDataService {
             .await
             .map_err(|error| anyhow::anyhow!("thread sort keys task failed: {error}"))
     }
+
+    async fn task_board_session_catalog(&self) -> anyhow::Result<TaskBoardSessionCatalog> {
+        let db_paths = self.candidate_db_paths();
+        #[cfg(test)]
+        let test_reader = self
+            .task_board_catalog_test_seam
+            .as_ref()
+            .map(|seam| seam.reader.clone());
+
+        let local_catalog = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some(reader) = test_reader {
+                return reader(db_paths);
+            }
+
+            codex_elves_data::aggregate_local_session_catalog(&db_paths)
+                .map_err(anyhow::Error::from)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("Task board session catalog worker failed"))?
+        .map_err(|_| anyhow::anyhow!("Task board session catalog service is unavailable"))?;
+
+        task_board_catalog_from_local_catalog(local_catalog)
+    }
 }
 
 impl LauncherDataService {
     fn candidate_db_paths(&self) -> Vec<PathBuf> {
+        #[cfg(test)]
+        if let Some(seam) = &self.task_board_catalog_test_seam {
+            return seam.candidate_db_paths.clone();
+        }
+
         let mut paths = Vec::new();
         for path in codex_elves_core::codex_sqlite::codex_session_db_paths_from_home(
             &codex_elves_core::codex_sqlite::default_codex_home_dir(),
@@ -769,6 +827,76 @@ impl LauncherDataService {
     fn storage_adapter(&self) -> codex_elves_data::SQLiteStorageAdapter {
         codex_elves_data::SQLiteStorageAdapter::new(self.current_db_path())
     }
+}
+
+fn task_board_catalog_from_local_catalog(
+    local_catalog: codex_elves_data::LocalSessionCatalog,
+) -> anyhow::Result<TaskBoardSessionCatalog> {
+    let mut projects: Vec<TaskBoardCatalogProject> = Vec::new();
+    let mut project_indexes: HashMap<String, usize> = HashMap::new();
+    let mut sessions: Vec<TaskBoardCatalogSession> = Vec::new();
+
+    for session in local_catalog.sessions {
+        let Ok(cwd) = normalize_task_project_cwd(&session.cwd) else {
+            continue;
+        };
+        let updated_at_ms =
+            task_board_timestamp_from_bridge_i64(session.updated_at_ms).map_err(|_| {
+                anyhow::anyhow!("Task board session catalog contains an invalid timestamp")
+            })?;
+
+        if let Some(project_index) = project_indexes.get(&cwd).copied() {
+            let project = &mut projects[project_index];
+            project.session_count = project
+                .session_count
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("Task board project session count is too large"))?;
+        } else {
+            project_indexes.insert(cwd.clone(), projects.len());
+            projects.push(TaskBoardCatalogProject {
+                label: task_board_project_label(&cwd),
+                cwd: cwd.clone(),
+                session_count: 1,
+            });
+        }
+
+        sessions.push(TaskBoardCatalogSession {
+            session_id: session.id,
+            title: session.title,
+            cwd,
+            updated_at_ms,
+        });
+    }
+
+    let warnings = local_catalog
+        .warnings
+        .into_iter()
+        .map(|warning| match warning {
+            codex_elves_data::LocalSessionCatalogWarning::DatabaseReadFailed { count } => {
+                Ok(TaskBoardCatalogWarning {
+                    code: TaskBoardCatalogWarningCode::CodexDbReadFailed,
+                    count: u32::try_from(count).map_err(|_| {
+                        anyhow::anyhow!("Task board database failure count is too large")
+                    })?,
+                })
+            }
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    Ok(TaskBoardSessionCatalog {
+        projects,
+        sessions,
+        warnings,
+    })
+}
+
+fn task_board_project_label(cwd: &str) -> String {
+    let trimmed = cwd.trim_end_matches(|character| character == '\\' || character == '/');
+    trimmed
+        .rsplit(|character| character == '\\' || character == '/')
+        .find(|component| !component.is_empty())
+        .unwrap_or(cwd)
+        .to_string()
 }
 
 struct LauncherRuntimeService {
@@ -1050,6 +1178,282 @@ fn default_user_script_manager() -> UserScriptManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_elves_data::{
+        LocalSessionCatalog, LocalSessionCatalogEntry, LocalSessionCatalogWarning,
+    };
+    use std::sync::mpsc;
+
+    fn task_board_catalog_test_service(
+        candidate_db_paths: Vec<PathBuf>,
+        reader: impl Fn(Vec<PathBuf>) -> anyhow::Result<LocalSessionCatalog> + Send + Sync + 'static,
+    ) -> LauncherDataService {
+        LauncherDataService {
+            db_path: PathBuf::from("C:/unused/default-state.sqlite"),
+            task_board_catalog_test_seam: Some(TaskBoardCatalogTestSeam {
+                candidate_db_paths,
+                reader: Arc::new(reader),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn task_board_session_catalog_returns_empty_success_for_missing_candidates() {
+        let service = task_board_catalog_test_service(
+            vec![PathBuf::from("C:/test/missing-state.sqlite")],
+            |_| {
+                Ok(LocalSessionCatalog {
+                    sessions: Vec::new(),
+                    warnings: Vec::new(),
+                })
+            },
+        );
+
+        let catalog = service.task_board_session_catalog().await.unwrap();
+
+        assert!(catalog.projects.is_empty());
+        assert!(catalog.sessions.is_empty());
+        assert!(catalog.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn task_board_session_catalog_normalizes_projects_counts_sessions_and_labels() {
+        let service = task_board_catalog_test_service(Vec::new(), |_| {
+            Ok(LocalSessionCatalog {
+                sessions: vec![
+                    LocalSessionCatalogEntry {
+                        id: "session-one".to_string(),
+                        title: "First".to_string(),
+                        cwd: " C:/Workspace/Project/../Project ".to_string(),
+                        model_provider: "ignored".to_string(),
+                        updated_at_ms: Some(42),
+                    },
+                    LocalSessionCatalogEntry {
+                        id: "session-two".to_string(),
+                        title: "Second".to_string(),
+                        cwd: "c:\\WORKSPACE\\project".to_string(),
+                        model_provider: "ignored".to_string(),
+                        updated_at_ms: Some(11),
+                    },
+                    LocalSessionCatalogEntry {
+                        id: "session-three".to_string(),
+                        title: "Third".to_string(),
+                        cwd: "D:/Another".to_string(),
+                        model_provider: "ignored".to_string(),
+                        updated_at_ms: None,
+                    },
+                ],
+                warnings: Vec::new(),
+            })
+        });
+
+        let catalog = service.task_board_session_catalog().await.unwrap();
+
+        assert_eq!(
+            catalog
+                .sessions
+                .iter()
+                .map(|session| {
+                    (
+                        session.session_id.as_str(),
+                        session.title.as_str(),
+                        session.cwd.as_str(),
+                        session.updated_at_ms,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("session-one", "First", "C:\\workspace\\project", Some(42)),
+                ("session-two", "Second", "C:\\workspace\\project", Some(11)),
+                ("session-three", "Third", "D:\\another", None),
+            ]
+        );
+        assert_eq!(
+            catalog
+                .projects
+                .iter()
+                .map(|project| {
+                    (
+                        project.cwd.as_str(),
+                        project.label.as_str(),
+                        project.session_count,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("C:\\workspace\\project", "project", 2),
+                ("D:\\another", "another", 1),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn task_board_session_catalog_accepts_zero_and_js_safe_max_timestamps() {
+        let max_safe_timestamp =
+            i64::try_from(codex_elves_core::task_board::TASK_BOARD_MAX_SAFE_INTEGER).unwrap();
+        let service = task_board_catalog_test_service(Vec::new(), move |_| {
+            Ok(LocalSessionCatalog {
+                sessions: vec![
+                    LocalSessionCatalogEntry {
+                        id: "zero-timestamp".to_string(),
+                        title: "Zero".to_string(),
+                        cwd: "C:/workspace/zero".to_string(),
+                        model_provider: "ignored".to_string(),
+                        updated_at_ms: Some(0),
+                    },
+                    LocalSessionCatalogEntry {
+                        id: "max-timestamp".to_string(),
+                        title: "Max".to_string(),
+                        cwd: "C:/workspace/max".to_string(),
+                        model_provider: "ignored".to_string(),
+                        updated_at_ms: Some(max_safe_timestamp),
+                    },
+                ],
+                warnings: Vec::new(),
+            })
+        });
+
+        let catalog = service.task_board_session_catalog().await.unwrap();
+
+        assert_eq!(catalog.sessions[0].updated_at_ms, Some(0));
+        assert_eq!(
+            catalog.sessions[1].updated_at_ms,
+            Some(codex_elves_core::task_board::TASK_BOARD_MAX_SAFE_INTEGER)
+        );
+    }
+
+    #[tokio::test]
+    async fn task_board_session_catalog_rejects_negative_timestamp_without_sensitive_text() {
+        let sensitive_db_path = "C:/Users/tester/.codex/state.sqlite";
+        let sensitive_rollout_path = "C:/Users/tester/.codex/sessions/private.jsonl";
+        let invalid_timestamp = -1_i64;
+        let service =
+            task_board_catalog_test_service(vec![PathBuf::from(sensitive_db_path)], move |_| {
+                Ok(LocalSessionCatalog {
+                    sessions: vec![LocalSessionCatalogEntry {
+                        id: "negative-timestamp".to_string(),
+                        title: "Negative".to_string(),
+                        cwd: "C:/workspace/negative".to_string(),
+                        model_provider: "ignored".to_string(),
+                        updated_at_ms: Some(invalid_timestamp),
+                    }],
+                    warnings: Vec::new(),
+                })
+            });
+
+        let error = service.task_board_session_catalog().await.unwrap_err();
+        let message = error.to_string();
+
+        assert_eq!(
+            message,
+            "Task board session catalog contains an invalid timestamp"
+        );
+        assert!(!message.contains(sensitive_db_path));
+        assert!(!message.contains(sensitive_rollout_path));
+        assert!(!message.contains(&invalid_timestamp.to_string()));
+    }
+
+    #[tokio::test]
+    async fn task_board_session_catalog_rejects_timestamp_above_js_safe_max_without_sensitive_text()
+    {
+        let sensitive_db_path = "C:/Users/tester/.codex/state.sqlite";
+        let sensitive_rollout_path = "C:/Users/tester/.codex/sessions/private.jsonl";
+        let invalid_timestamp =
+            i64::try_from(codex_elves_core::task_board::TASK_BOARD_MAX_SAFE_INTEGER).unwrap() + 1;
+        let service =
+            task_board_catalog_test_service(vec![PathBuf::from(sensitive_db_path)], move |_| {
+                Ok(LocalSessionCatalog {
+                    sessions: vec![LocalSessionCatalogEntry {
+                        id: "unsafe-timestamp".to_string(),
+                        title: "Unsafe".to_string(),
+                        cwd: "C:/workspace/unsafe".to_string(),
+                        model_provider: "ignored".to_string(),
+                        updated_at_ms: Some(invalid_timestamp),
+                    }],
+                    warnings: Vec::new(),
+                })
+            });
+
+        let error = service.task_board_session_catalog().await.unwrap_err();
+        let message = error.to_string();
+
+        assert_eq!(
+            message,
+            "Task board session catalog contains an invalid timestamp"
+        );
+        assert!(!message.contains(sensitive_db_path));
+        assert!(!message.contains(sensitive_rollout_path));
+        assert!(!message.contains(&invalid_timestamp.to_string()));
+    }
+
+    #[tokio::test]
+    async fn task_board_session_catalog_preserves_only_aggregate_database_warning_counts() {
+        let sensitive_db_path = "C:/Users/tester/.codex/state.sqlite";
+        let sensitive_rollout_path = "C:/Users/tester/.codex/sessions/secret.jsonl";
+        let service =
+            task_board_catalog_test_service(vec![PathBuf::from(sensitive_db_path)], |_| {
+                Ok(LocalSessionCatalog {
+                    sessions: Vec::new(),
+                    warnings: vec![LocalSessionCatalogWarning::DatabaseReadFailed { count: 2 }],
+                })
+            });
+
+        let catalog = service.task_board_session_catalog().await.unwrap();
+        let serialized = serde_json::to_string(&catalog).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"projects":[],"sessions":[],"warnings":[{"code":"codex_db_read_failed","count":2}]}"#
+        );
+        assert!(!serialized.contains(sensitive_db_path));
+        assert!(!serialized.contains(sensitive_rollout_path));
+    }
+
+    #[tokio::test]
+    async fn task_board_session_catalog_returns_a_path_free_error_when_all_reads_fail() {
+        let sensitive_db_path = "C:/Users/tester/.codex/state.sqlite";
+        let sensitive_rollout_path = "C:/Users/tester/.codex/sessions/secret.jsonl";
+        let service = task_board_catalog_test_service(
+            vec![PathBuf::from(sensitive_db_path)],
+            move |_| {
+                anyhow::bail!(
+                    "failed to read database {sensitive_db_path} for rollout {sensitive_rollout_path}"
+                )
+            },
+        );
+
+        let error = service.task_board_session_catalog().await.unwrap_err();
+        let message = error.to_string();
+
+        assert_eq!(message, "Task board session catalog service is unavailable");
+        assert!(!message.contains(sensitive_db_path));
+        assert!(!message.contains(sensitive_rollout_path));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn task_board_session_catalog_uses_blocking_worker_and_passes_every_candidate_path() {
+        let caller_thread = std::thread::current().id();
+        let candidate_db_paths = vec![
+            PathBuf::from("C:/test/state.sqlite"),
+            PathBuf::from("C:/test/automation.sqlite"),
+        ];
+        let expected_paths = candidate_db_paths.clone();
+        let (sender, receiver) = mpsc::channel();
+        let service = task_board_catalog_test_service(candidate_db_paths, move |paths| {
+            sender
+                .send((std::thread::current().id(), paths))
+                .expect("test receiver should stay available");
+            Ok(LocalSessionCatalog {
+                sessions: Vec::new(),
+                warnings: Vec::new(),
+            })
+        });
+
+        service.task_board_session_catalog().await.unwrap();
+        let (reader_thread, observed_paths) = receiver.recv().unwrap();
+
+        assert_ne!(reader_thread, caller_thread);
+        assert_eq!(observed_paths, expected_paths);
+    }
 
     #[test]
     fn parse_launch_options_accepts_manager_forwarded_ports_and_app_path() {

@@ -10,7 +10,8 @@ pub use provider_sync::{
     run_provider_sync_with_target, run_provider_sync_with_target_guarded,
 };
 pub use storage::{
-    LocalSession, SQLiteStorageAdapter, codex_thread_usage_history_from_paths,
-    codex_thread_usage_summary_from_paths, delete_local_from_paths,
-    move_codex_thread_workspace_from_paths,
+    LocalSession, LocalSessionCatalog, LocalSessionCatalogEntry, LocalSessionCatalogError,
+    LocalSessionCatalogWarning, SQLiteStorageAdapter, aggregate_local_session_catalog,
+    codex_thread_usage_history_from_paths, codex_thread_usage_summary_from_paths,
+    delete_local_from_paths, move_codex_thread_workspace_from_paths,
 };

@@ -8,7 +8,10 @@ use serde_json::{Value, json};
 use crate::models::{DeleteResult, DeleteStatus, ExportResult, ExportStatus, SessionRef};
 use crate::settings::{BackendSettings, SettingsStore};
 use crate::status::StatusStore;
+use crate::task_board::{FileTaskBoardStore, TaskBoardSessionCatalog, TaskBoardStore};
 use crate::user_scripts::UserScriptManager;
+
+pub mod task_board;
 
 pub type UserScriptEvaluator = Arc<dyn Fn(&str, &str) -> anyhow::Result<Value> + Send + Sync>;
 pub type DevtoolsOpener = Arc<dyn Fn(&str) -> anyhow::Result<()> + Send + Sync>;
@@ -18,6 +21,7 @@ pub struct BridgeContext {
     settings: Arc<dyn BridgeSettingsService>,
     runtime: Arc<dyn BridgeRuntimeService>,
     data: Arc<dyn BridgeDataService>,
+    task_board_store: Arc<dyn TaskBoardStore>,
 }
 
 impl BridgeContext {
@@ -30,7 +34,13 @@ impl BridgeContext {
             settings,
             runtime,
             data,
+            task_board_store: Arc::new(FileTaskBoardStore::from_default_paths()),
         }
+    }
+
+    pub fn with_task_board_store(mut self, store: Arc<dyn TaskBoardStore>) -> Self {
+        self.task_board_store = store;
+        self
     }
 
     pub fn core(runtime: Arc<dyn BridgeRuntimeService>) -> Self {
@@ -103,6 +113,10 @@ pub trait BridgeDataService: Send + Sync {
     ) -> anyhow::Result<Value>;
     async fn thread_sort_key(&self, session: SessionRef) -> anyhow::Result<Value>;
     async fn thread_sort_keys(&self, sessions: Vec<SessionRef>) -> anyhow::Result<Value>;
+
+    async fn task_board_session_catalog(&self) -> anyhow::Result<TaskBoardSessionCatalog> {
+        anyhow::bail!("Task board session catalog service is unavailable")
+    }
 }
 
 pub async fn handle_bridge_request(
@@ -111,17 +125,36 @@ pub async fn handle_bridge_request(
     payload: Value,
 ) -> serde_json::Value {
     let started = Instant::now();
-    let _ = crate::diagnostic_log::append_diagnostic_log(
-        "bridge.request",
+    let request_detail = if path.starts_with("/task-board/") {
+        json!({
+            "path": path
+        })
+    } else {
         json!({
             "path": path,
             "payload_keys": payload
                 .as_object()
                 .map(|object| object.keys().cloned().collect::<Vec<_>>())
                 .unwrap_or_default()
-        }),
-    );
+        })
+    };
+    let _ = crate::diagnostic_log::append_diagnostic_log("bridge.request", request_detail);
     let result = match path {
+        task_board::TASK_BOARD_SNAPSHOT_PATH => {
+            Ok(task_board::handle_snapshot(ctx.task_board_store.clone(), payload.clone()).await)
+        }
+        task_board::TASK_BOARD_SESSION_CATALOG_PATH => {
+            Ok(task_board::handle_catalog(ctx.data.clone(), payload.clone()).await)
+        }
+        task_board::TASK_BOARD_CREATE_PATH => Ok(task_board::handle_create(
+            ctx.task_board_store.clone(),
+            ctx.data.clone(),
+            payload.clone(),
+        )
+        .await),
+        task_board::TASK_BOARD_MOVE_PATH => {
+            Ok(task_board::handle_move(ctx.task_board_store.clone(), payload.clone()).await)
+        }
         "/settings/get" => settings_value(&ctx, ctx.settings.get_settings().await).await,
         "/settings/set" => {
             settings_value(&ctx, ctx.settings.set_settings(payload.clone()).await).await
@@ -242,7 +275,8 @@ pub async fn handle_bridge_request(
         json!({
             "path": path,
             "elapsed_ms": started.elapsed().as_millis() as u64,
-            "status": response.get("status").and_then(Value::as_str).unwrap_or("")
+            "status": response.get("status").and_then(Value::as_str).unwrap_or(""),
+            "code": response.get("code").and_then(Value::as_str).unwrap_or("")
         }),
     );
     response
@@ -568,6 +602,10 @@ impl BridgeDataService for UnavailableDataService {
             "message": "Thread sort service is not wired in core launcher hooks",
             "sort_keys": []
         }))
+    }
+
+    async fn task_board_session_catalog(&self) -> anyhow::Result<TaskBoardSessionCatalog> {
+        anyhow::bail!("Task board session catalog service is unavailable in core launcher hooks")
     }
 }
 

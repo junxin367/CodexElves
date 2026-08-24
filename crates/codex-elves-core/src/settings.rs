@@ -670,6 +670,8 @@ pub struct BackendSettings {
     pub codex_app_plugin_marketplace_unlock: bool,
     #[serde(rename = "codexAppPluginAutoExpand", default = "default_true")]
     pub codex_app_plugin_auto_expand: bool,
+    #[serde(rename = "codexAppTaskBoard", default = "default_true")]
+    pub codex_app_task_board: bool,
     #[serde(rename = "codexAppSessionDelete", default = "default_true")]
     pub codex_app_session_delete: bool,
     #[serde(rename = "codexAppMarkdownExport", default)]
@@ -784,6 +786,7 @@ impl Default for BackendSettings {
             codex_app_plugin_entry_unlock: true,
             codex_app_plugin_marketplace_unlock: true,
             codex_app_plugin_auto_expand: true,
+            codex_app_task_board: true,
             codex_app_session_delete: true,
             codex_app_markdown_export: false,
             codex_app_project_move: false,
@@ -1246,6 +1249,7 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
     merge_bool_setting(target, source, "codexAppPluginEntryUnlock");
     merge_bool_setting(target, source, "codexAppPluginMarketplaceUnlock");
     merge_bool_setting(target, source, "codexAppPluginAutoExpand");
+    merge_bool_setting(target, source, "codexAppTaskBoard");
     merge_bool_setting(target, source, "codexAppSessionDelete");
     merge_bool_setting(target, source, "codexAppMarkdownExport");
     merge_bool_setting(target, source, "codexAppProjectMove");
@@ -1623,6 +1627,7 @@ mod tests {
         assert!(settings.codex_app_plugin_entry_unlock);
         assert!(settings.codex_app_plugin_marketplace_unlock);
         assert!(settings.codex_app_plugin_auto_expand);
+        assert!(settings.codex_app_task_board);
         assert!(settings.codex_app_session_delete);
         assert!(!settings.codex_app_markdown_export);
         assert!(!settings.codex_app_project_move);
@@ -1661,6 +1666,7 @@ mod tests {
         assert_eq!(settings.cli_wrapper_api_key_env, "CUSTOM_OPENAI_API_KEY");
         assert_eq!(settings.relay_base_url, default_relay_base_url());
         assert!(settings.codex_extra_args.is_empty());
+        assert!(settings.codex_app_task_board);
         assert_eq!(settings.gpt_reasoning_continuation_max_rounds, 3);
         assert_eq!(settings.layered_compaction_retain_tokens, 20_000);
     }
@@ -2713,6 +2719,7 @@ experimental_bearer_token = "sk-existing""#
             "codexHomePath": " C:\\Portable\\CodexHome ",
             "enhancementsEnabled": false,
             "codexAppPluginEntryUnlock": false,
+            "codexAppTaskBoard": false,
             "codexAppSessionDelete": false,
             "codexAppConversationView": true,
             "codexAppTokenUsage": true,
@@ -2732,6 +2739,7 @@ experimental_bearer_token = "sk-existing""#
         assert_eq!(updated.codex_home_path, r"C:\Portable\CodexHome");
         assert!(!updated.enhancements_enabled);
         assert!(!updated.codex_app_plugin_entry_unlock);
+        assert!(!updated.codex_app_task_board);
         assert!(!updated.codex_app_session_delete);
         assert!(updated.codex_app_conversation_view);
         assert!(updated.codex_app_token_usage);

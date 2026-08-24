@@ -185,6 +185,663 @@ fn renderer_features_reuses_scan_observers_when_roots_are_unchanged() {
 }
 
 #[test]
+fn renderer_task_board_lifecycle_keeps_the_native_main_surface_recoverable() {
+    let script = assets::renderer_features_script();
+
+    assert!(script.contains("data-codex-task-board-entry=\"true\""));
+    assert!(script.contains("function installTaskBoardEntry()"));
+    assert!(script.contains("function activateTaskBoard()"));
+    assert!(script.contains("const pluginNavigationControlSelector = ["));
+    assert!(script.contains("function pluginEntryControlMatches(control)"));
+    assert!(script.contains("globalSemanticMatches.length === 1"));
+    assert!(script.contains("main[data-app-shell-main-surface]"));
+    assert!(script.contains("data-codex-task-board-root=\"true\""));
+    assert!(script.contains("codex-task-board-main-host"));
+    assert!(script.contains("function destroyTaskBoardRuntime()"));
+    assert!(script.contains("taskBoard: true"));
+    assert!(script.contains("taskBoard: \"codexAppTaskBoard\""));
+    assert!(script.contains("data-codex-elves-setting=\"taskBoard\""));
+    assert!(script.contains("function taskBoardFeatureEnabled()"));
+    assert!(script.contains("function disableTaskBoardRuntime()"));
+    assert!(script.contains("if (!taskBoardFeatureEnabled())"));
+    assert!(script.contains("window.__codexElvesTaskBoardCleanup"));
+    assert!(script.contains("new ResizeObserver"));
+    assert!(script.contains("new MutationObserver"));
+}
+
+#[test]
+fn renderer_task_board_view_projects_read_only_bridge_snapshots_responsively() {
+    let script = assets::renderer_features_script();
+
+    assert!(script.contains("\"/task-board/snapshot\""));
+    assert!(script.contains("\"/task-board/session-catalog\""));
+    assert!(script.contains("window.__codexElvesTaskBoardMock"));
+    assert!(script.contains("新任务"));
+    assert!(script.contains("规划中"));
+    assert!(script.contains("执行中"));
+    assert!(script.contains("验收中"));
+    assert!(script.contains("已完成"));
+    assert!(script.contains("search.setAttribute(\"aria-label\", \"搜索任务、项目或关联会话\")"));
+    assert!(
+        script.contains("taskBoardConfigureDropdownTrigger(filter, \"全部项目\", \"筛选项目\")")
+    );
+    assert!(script.contains(
+        "const filter = taskBoardElement(\"button\", \"codex-task-board-project-filter\")"
+    ));
+    assert!(!script.contains("taskBoardElement(\"select\", \"codex-task-board-project-filter\")"));
+    assert!(script.contains("function openTaskBoardProjectMenu(trigger)"));
+    assert!(script.contains("function openTaskBoardDropdownMenu({"));
+    assert!(script.contains("function openTaskBoardCreateProjectMenu(trigger)"));
+    assert!(script.contains("function openTaskBoardCreateStatusMenu(trigger)"));
+    assert!(!script.contains("taskBoardElement(\"select\", \"codex-task-board-create-select\")"));
+    assert!(script.contains("codex-task-board-dropdown-trigger"));
+    assert!(script.contains("codex-task-board-dropdown-menu"));
+    assert!(script.contains("const gap = 6"));
+    assert!(script.contains("border-radius: 10px"));
+    assert!(script.contains("--task-board-action-background"));
+    assert!(script.contains("menu.setAttribute(\"role\", \"listbox\")"));
+    assert!(script.contains("grid-template-rows: auto minmax(180px, 1fr)"));
+    assert!(script.contains("min-height: 180px"));
+    assert!(script.contains("codex-task-board-empty-column"));
+    assert!(script.contains("overflow: auto"));
+    assert!(script.contains("@container"));
+    assert!(script.contains("taskBoardNativeAdapter.openSession"));
+}
+
+#[test]
+fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boundaries() {
+    let script = assets::renderer_features_script();
+
+    assert!(script.contains("const taskBoardRuntimeVersion ="));
+    assert!(script.contains("taskBoardRuntimeCanRefresh()"));
+    assert!(script.contains("window.__codexElvesTaskBoardRuntimeVersion"));
+    assert!(script.contains("window.__codexElvesTaskBoardRefreshRuntime"));
+    assert!(script.contains("function taskBoardEntryButtons()"));
+    assert!(script.contains("function reconcileTaskBoardEntry()"));
+    assert!(script.contains("entry.remove()"));
+    assert!(script.contains("pluginButton.cloneNode(true)"));
+    assert!(script.contains("pluginButton.insertAdjacentElement(\"afterend\", entry)"));
+    assert!(script.contains("function clearTaskBoardNativeSelection()"));
+    assert!(script.contains("function restoreTaskBoardNativeSelection("));
+    assert!(script.contains("[data-app-action-sidebar-thread-row]"));
+    assert!(script.contains("[data-app-action-sidebar-project-row]"));
+    assert!(script.contains("data-app-action-sidebar-thread-selected"));
+    assert!(script.contains("data-app-action-sidebar-thread-active"));
+    assert!(script.contains("queueMicrotask(() =>"));
+    assert!(script.contains("restoreNativeSelection: false"));
+    assert!(script.contains("function taskBoardCatalogSessionMap()"));
+    assert!(script.contains("function taskBoardConversationProjection("));
+    assert!(script.contains("目录部分不可用"));
+    assert!(script.contains("function taskBoardApplyReadOutcome("));
+    assert!(
+        !script.contains("const [snapshotOutcome, catalogOutcome] = await Promise.allSettled([")
+    );
+    assert!(script.contains("position: relative"));
+    assert!(script.contains("position: absolute"));
+    assert!(script.contains("inset: 0"));
+    assert!(script.contains("[data-low-height=\"true\"]"));
+    assert!(script.contains("::-webkit-scrollbar-thumb"));
+    assert!(script.contains("function taskBoardConversationSummary("));
+    assert!(script.contains("function openTaskBoardConversationPopover("));
+    assert!(script.contains("function closeTaskBoardConversationPopover()"));
+    assert!(!script.contains("Debug 原型"));
+    assert!(script.contains("拖动任务卡片可切换状态"));
+    assert!(script.contains("min-width: 1580px"));
+    assert!(script.contains("codex-task-board-card-footer"));
+
+    let sidebar_relevance = script
+        .split("if (domain === \"sidebar\")")
+        .nth(1)
+        .and_then(|section| section.split("if (domain === \"header\")").next())
+        .expect("sidebar relevance selector should be present");
+    assert!(sidebar_relevance.contains("pluginNavigationControlSelector"));
+    assert!(sidebar_relevance.contains("taskBoardEntrySelector"));
+
+    let runtime_refresh = script
+        .split("function refreshTaskBoardRuntime()")
+        .nth(1)
+        .and_then(|section| section.split("function destroyTaskBoardRuntime()").next())
+        .expect("task board runtime refresh should be present");
+    assert!(
+        runtime_refresh
+            .contains("closeTaskBoardCreateModal();\n    closeTaskBoardConversationPopover();\n    reconcileTaskBoardRuntime();")
+    );
+}
+
+#[test]
+fn renderer_task_board_dynamic_contracts_apply_latest_catalog_and_independent_reads() {
+    let cases = run_task_board_contract_harness();
+
+    assert!(
+        !cases["runtimeGate"]["oldRuntimeAccepted"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["runtimeGate"]["currentRuntimeAccepted"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(cases["featureSwitch"]["defaultEnabled"].as_bool().unwrap());
+    assert!(
+        cases["featureSwitch"]["disabledBySwitch"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["featureSwitch"]["disabledByMaster"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["featureSwitch"]["activeViewClosedWhenDisabled"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(cases["featureSwitch"]["restoredEnabled"].as_bool().unwrap());
+    assert!(
+        cases["entryDiscovery"]["currentSidebarClassIndependent"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["entryDiscovery"]["accessibleNameOnly"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["entryDiscovery"]["legacyIconFallback"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["entryDiscovery"]["uniqueGlobalFallback"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["entryDiscovery"]["ambiguousGlobalRejected"]
+            .as_bool()
+            .unwrap()
+    );
+    assert_eq!(cases["catalog"]["latestTitle"], "目录最新标题");
+    assert!(
+        cases["catalog"]["latestTitleMatchesSearch"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["catalog"]["partialMissingAvailable"]
+            .as_bool()
+            .unwrap()
+    );
+    assert_eq!(cases["catalog"]["partialMissingLabel"], "目录部分不可用");
+    assert!(
+        !cases["catalog"]["completeMissingAvailable"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(cases["popover"]["openBeforeRefresh"].as_bool().unwrap());
+    assert_eq!(cases["popover"]["bodyChildrenBeforeRefresh"], 1);
+    assert_eq!(cases["popover"]["dismissListenersBeforeRefresh"], 1);
+    assert!(cases["popover"]["removedAfterRefresh"].as_bool().unwrap());
+    assert_eq!(cases["popover"]["bodyChildrenAfterRefresh"], 0);
+    assert_eq!(cases["popover"]["dismissListenersAfterRefresh"], 0);
+    assert!(cases["popover"]["activeAfterRefresh"].as_bool().unwrap());
+    assert_eq!(cases["read"]["snapshotTitleBeforeCatalog"], "先到的快照");
+    assert_eq!(cases["read"]["catalogCountBeforeCatalog"], 0);
+    assert!(cases["read"]["loadingBeforeCatalog"].as_bool().unwrap());
+    assert_eq!(cases["read"]["catalogCountAfterCatalog"], 1);
+    assert!(!cases["read"]["loadingAfterCatalog"].as_bool().unwrap());
+}
+
+#[test]
+fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery_contracts() {
+    let script = assets::renderer_features_script();
+    let cases = run_task_board_create_contract_harness();
+
+    assert!(script.contains("\"/task-board/task-create\""));
+    assert!(script.contains("toolbar.append(searchControl, filter, create, hint)"));
+    assert!(script.contains("create.title = \"新建任务\""));
+    assert!(script.contains("role\", \"dialog\""));
+    assert!(script.contains("aria-modal\", \"true\""));
+    assert!(script.contains("width: 650px"));
+    assert!(script.contains("max-width: calc(100vw - 32px)"));
+    assert!(script.contains("将 Codex 会话组织到跨项目任务看板中"));
+    assert!(script.contains("codex-task-board-create-field-row"));
+    assert!(script.contains("codex-task-board-create-modal-footer"));
+    assert!(script.contains("创建新会话"));
+    assert!(script.contains("codex-task-board-empty-column"));
+    assert!(script.contains("function taskBoardCreateModalKeydown("));
+    assert!(script.contains("event.shiftKey"));
+    assert!(script.contains("probe(project)"));
+    assert!(script.contains("startConversation(project, firstInstruction)"));
+    assert!(script.contains("function taskBoardNativeProbe(project)"));
+    assert!(
+        script.contains("function taskBoardNativeStartConversation(project, firstInstruction)")
+    );
+    assert!(script.contains("\"native_create_unavailable\""));
+    assert!(script.contains("function taskBoardConflictSnapshotResult("));
+    assert!(script.contains("function reconcileTaskBoardRuntime()"));
+    assert!(script.contains("taskBoardReconcileCreateSelectedSessions"));
+    assert!(script.contains("function taskBoardToolbarLayout("));
+    let create_submit = script
+        .split("async function submitTaskBoardCreate()")
+        .nth(1)
+        .and_then(|section| {
+            section
+                .split("function taskBoardConversationButton(")
+                .next()
+        })
+        .expect("task board create submit should be present");
+    assert!(create_submit.contains("taskBoardNativeAdapter.probe(project)"));
+    assert!(!create_submit.contains("startConversation("));
+    assert!(script.contains("const initialStatus = taskBoardStatusId(modal.initialStatus);"));
+    assert!(script.contains("await taskBoardApplyInitialStatus(taskId, initialStatus);"));
+
+    assert_eq!(cases["modal"]["role"], "dialog");
+    assert!(cases["modal"]["ariaModal"].as_bool().unwrap());
+    assert!(cases["modal"]["initialFocus"].as_bool().unwrap());
+    assert!(cases["modal"]["bodyMounted"].as_bool().unwrap());
+    assert!(cases["modal"]["outsideMain"].as_bool().unwrap());
+    assert!(cases["modal"]["tabForwardWraps"].as_bool().unwrap());
+    assert!(
+        cases["modal"]["tabBackwardWraps"].as_bool().unwrap(),
+        "backward focus target: {}, order: {}",
+        cases["modal"]["tabBackwardActive"],
+        cases["modal"]["tabFocusableControls"]
+    );
+    assert!(cases["modal"]["busyControlsStayOpen"].as_bool().unwrap());
+    assert!(
+        cases["modal"]["routineReconcilePreservesDraft"]
+            .as_bool()
+            .unwrap()
+    );
+    assert_eq!(cases["modal"]["keydownListenersBeforeRefresh"], 1);
+    assert!(cases["modal"]["removedAfterRefresh"].as_bool().unwrap());
+    assert_eq!(cases["modal"]["keydownListenersAfterRefresh"], 0);
+    assert!(cases["modal"]["focusRestored"].as_bool().unwrap());
+    assert!(!cases["modal"]["busyAfterRefresh"].as_bool().unwrap());
+    assert!(
+        cases["dropdowns"]["sharedListbox"].as_bool().unwrap(),
+        "dropdown state: {}",
+        cases["dropdowns"]
+    );
+    assert!(
+        cases["dropdowns"]["keyboardAndFocus"].as_bool().unwrap(),
+        "dropdown state: {}",
+        cases["dropdowns"]
+    );
+
+    assert!(
+        cases["projectSelection"]["onlyMatchingSessions"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["projectSelection"]["clearedAfterProjectChange"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["projectSelection"]["catalogOutcomeReconcilesAndRenders"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["validation"]["trimmedTitleRejected"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["validation"]["catalogFailureBlockedExistingOnly"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["validation"]["tasksPreservedOnCatalogFailure"]
+            .as_bool()
+            .unwrap()
+    );
+
+    assert!(cases["success"]["exactPayload"].as_bool().unwrap());
+    assert!(cases["success"]["closed"].as_bool().unwrap());
+    assert!(!cases["success"]["busy"].as_bool().unwrap());
+    assert!(cases["initialStatus"]["createThenMove"].as_bool().unwrap());
+    assert!(
+        cases["initialStatus"]["moveUsesCreatedRevision"]
+            .as_bool()
+            .unwrap()
+    );
+    assert_eq!(cases["initialStatus"]["finalStatus"], "planning");
+
+    for code in [
+        "invalid_input",
+        "project_mismatch",
+        "task_id_conflict",
+        "bridge_unavailable",
+        "task_board_busy",
+        "task_file_invalid",
+        "task_board_unavailable",
+    ] {
+        assert!(
+            cases["stableErrors"][code]["feedback"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "{code} should provide explicit feedback"
+        );
+        assert!(cases["stableErrors"][code]["modalOpen"].as_bool().unwrap());
+        assert!(!cases["stableErrors"][code]["busy"].as_bool().unwrap());
+        assert!(
+            cases["stableErrors"][code]["inputsPreserved"]
+                .as_bool()
+                .unwrap()
+        );
+    }
+    assert!(
+        cases["stableErrors"]["task_id_conflict"]["nextManualRetryRotatesUuid"]
+            .as_bool()
+            .unwrap()
+    );
+
+    assert!(
+        cases["sessionNotFound"]["catalogRefreshed"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(cases["sessionNotFound"]["modalOpen"].as_bool().unwrap());
+    assert!(!cases["sessionNotFound"]["busy"].as_bool().unwrap());
+    assert!(
+        cases["sessionNotFound"]["staleSelectionCleared"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["sessionNotFound"]["nextSubmitRequiresSelection"]
+            .as_bool()
+            .unwrap()
+    );
+
+    assert!(cases["revisionConflict"]["retriedOnce"].as_bool().unwrap());
+    assert!(cases["revisionConflict"]["sameTaskId"].as_bool().unwrap());
+    assert_eq!(
+        cases["revisionConflict"]["expectedRevisions"],
+        serde_json::json!([3, 4])
+    );
+    assert!(
+        cases["revisionConflict"]["closedAfterRetry"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["revisionConflict"]["secondConflictStops"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        !cases["revisionConflict"]["secondConflictBusy"]
+            .as_bool()
+            .unwrap()
+    );
+
+    assert!(
+        cases["nativeMode"]["instructionRequiredStaysOpen"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["nativeMode"]["neverStartsConversation"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(cases["idempotency"]["uuidIsValid"].as_bool().unwrap());
+    assert!(
+        cases["idempotency"]["manualRetryReusesUuid"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["idempotency"]["semanticChangeRotatesUuid"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["idempotency"]["labelOnlyChangeReusesUuid"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(cases["toolbar"]["wideInlineAdjacent"].as_bool().unwrap());
+    assert!(
+        cases["toolbar"]["narrowWrapsWith36pxCreate"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["lifecycle"]["deferredClosePreventsLateWrite"]
+            .as_bool()
+            .unwrap()
+    );
+}
+
+#[test]
+fn renderer_task_board_open_session_uses_native_rows_and_bounded_project_expansion() {
+    let script = assets::renderer_features_script();
+    let cases = run_task_board_open_session_contract_harness();
+    let open_session = script
+        .split("async function taskBoardNativeOpenSession(")
+        .nth(1)
+        .and_then(|section| section.split("function taskBoardNativeProjectRow(").next())
+        .expect("native open session implementation should exist");
+
+    assert!(script.contains("[data-app-action-sidebar-thread-id]"));
+    assert!(open_session.contains("taskBoardNativeProjectTarget(location.cwd)"));
+    assert!(open_session.contains("taskBoardNativeOpenSessionTimeoutMs"));
+    assert!(!open_session.contains("dispatcher"));
+    assert!(!open_session.contains("window.location"));
+    assert!(!open_session.contains("sqlite"));
+
+    assert!(cases["mounted"]["rawIdClickedOnce"].as_bool().unwrap());
+    assert!(cases["mounted"]["localIdClickedOnce"].as_bool().unwrap());
+    assert!(
+        cases["expanded"]["projectThenThreadClickedOnce"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["deadline"]["fiveSecondsAndStableFailure"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(cases["errors"]["missingSessionStable"].as_bool().unwrap());
+    assert!(cases["errors"]["missingProjectStable"].as_bool().unwrap());
+    assert!(
+        cases["runtimeReplacement"]["stableFailure"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["repeat"]["safeAndDataPreserved"].as_bool().unwrap(),
+        "open session cases: {cases}"
+    );
+    assert!(cases["seam"]["injectedAdapterStillUsed"].as_bool().unwrap());
+}
+
+#[test]
+fn renderer_task_board_native_create_uses_host_adapter_and_recovers_without_instruction() {
+    let script = assets::renderer_features_script();
+    let cases = run_task_board_native_create_contract_harness();
+
+    assert!(script.contains("function taskBoardNativeProjectRow(project)"));
+    assert!(script.contains("[data-app-action-sidebar-project-row]"));
+    assert!(script.contains("memoizedProps?.composerController"));
+    assert!(script.contains("owner = owner.parentElement"));
+    assert!(script.contains("function taskBoardNativePermanentSessionId()"));
+    assert!(script.contains("taskBoardNativeCreatePermanentIdTimeoutMs = 15 * 1000"));
+    assert!(script.contains("taskBoardNativeCreateSessionRetryDelaysMs"));
+    assert!(script.contains("taskBoardNativeCreateRecoveryTtlMs = 24 * 60 * 60 * 1000"));
+
+    assert!(
+        cases["supported"]["structuralButtonOnly"]
+            .as_bool()
+            .unwrap(),
+        "native create cases: {cases}"
+    );
+    assert!(
+        cases["supported"]["controllerAndNativeSubmit"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(cases["supported"]["temporaryIdIgnored"].as_bool().unwrap());
+    assert!(
+        cases["supported"]["createAfterPermanentId"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["unsupported"]["newDisabledExistingWorks"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(cases["timeout"]["boundedAt15Seconds"].as_bool().unwrap());
+    assert!(
+        cases["retry"]["sessionNotFoundWithin10Seconds"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["retry"]["revisionRetriesOnceWithSameTaskId"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["recovery"]["bridgeFailurePersistsAllowedFields"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["recovery"]["nextActivationRetriesOnceAndClears"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["recovery"]["retryFailureKeepsRecordAndWarns"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["recovery"]["expiredRecordDiscarded"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["recovery"]["malformedRecordDiscarded"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["runtimeReplacement"]["boundedAndRecoverable"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["privacy"]["payloadStorageAndOutputExcludeInstruction"]
+            .as_bool()
+            .unwrap()
+    );
+}
+
+#[test]
+fn renderer_task_board_move_drag_menu_and_recovery_contracts() {
+    let script = assets::renderer_features_script();
+    let cases = run_task_board_move_contract_harness();
+
+    assert!(script.contains("\"/task-board/task-move\""));
+    assert!(script.contains("function taskBoardMoveTargetIndex("));
+    assert!(script.contains("function taskBoardMoveTask("));
+    assert!(script.contains("function openTaskBoardStatusMenu("));
+    assert!(script.contains("role\", \"listbox\""));
+    assert!(script.contains("taskBoardMoveTargetIndex(taskId, status.id)"));
+
+    assert!(cases["payloads"]["crossColumn"].as_bool().unwrap());
+    assert!(cases["payloads"]["sameColumn"].as_bool().unwrap());
+    assert!(cases["payloads"]["filteredIndex"].as_bool().unwrap());
+    assert!(cases["payloads"]["zeroAndEnd"].as_bool().unwrap());
+    assert!(cases["payloads"]["selfDropNoOp"].as_bool().unwrap());
+    assert!(cases["menu"]["fiveStatuses"].as_bool().unwrap());
+    assert!(cases["menu"]["keyboardAndFocus"].as_bool().unwrap());
+    assert!(
+        cases["success"]["serverSnapshotCorrectsOptimistic"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["failure"]["rollbackAndBusyRelease"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["conflict"]["adoptsLatestWithoutRetry"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(cases["conflict"]["malformedRollsBack"].as_bool().unwrap());
+    assert!(
+        cases["reads"]["beforeMoveCannotOverwrite"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["reads"]["refreshDuringMoveSkipped"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(cases["reads"]["moveFailureKeepsReadOut"].as_bool().unwrap());
+    assert!(
+        cases["lifecycle"]["staleDeferredAndCleanup"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["lifecycle"]["duplicateMoveBlocked"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["lifecycle"]["dragEndKeepsMoveAlive"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["dom"]["dragPathExactPayload"].as_bool().unwrap(),
+        "DOM move cases: {cases}"
+    );
+    assert!(cases["dom"]["dragEndKeepsMoveAlive"].as_bool().unwrap());
+    assert!(
+        cases["dom"]["optimisticOrdersContinuous"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(cases["dom"]["sameColumnDownward"].as_bool().unwrap());
+    assert!(cases["dom"]["selfDropNoRequest"].as_bool().unwrap());
+    assert!(cases["dom"]["menuOutsideMain"].as_bool().unwrap());
+    assert!(
+        cases["dom"]["enterMovesAndRestoresFocus"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["dom"]["escapeRestoresOriginalFocus"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["dom"]["mainReplacementRollsBackAndIgnoresLateResult"]
+            .as_bool()
+            .unwrap()
+    );
+}
+
+#[test]
 fn injection_script_batches_session_row_refresh_and_layout() {
     let script = assets::renderer_features_script();
 
@@ -2026,7 +2683,7 @@ async function runAppServerRestartDispatchCase() {{
   console.error(error);
   process.exitCode = 1;
 }});
-"#,
+    "#,
         script_path = serde_json::to_string(&script_path.to_string_lossy().to_string())
             .expect("script path should serialize")
     )
@@ -2044,6 +2701,2238 @@ async function runAppServerRestartDispatchCase() {{
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("harness stdout should be JSON")
+}
+
+fn run_task_board_contract_harness() -> serde_json::Value {
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+    let script_path = temp.path().join("renderer-inject.js");
+    let harness_path = temp.path().join("task-board-harness.cjs");
+    std::fs::write(&script_path, assets::injection_script(45221))
+        .expect("injection script should be written");
+    std::fs::write(
+        &harness_path,
+        r#"
+const scriptPath = process.argv[2];
+function node() {
+  return {
+    children: [],
+    dataset: {},
+    style: { setProperty() {}, removeProperty() {} },
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    appendChild(child) {
+      child.parentElement?.remove?.();
+      this.children.push(child);
+      child.parentElement = this;
+      child.isConnected = true;
+      return child;
+    },
+    append(...children) { children.forEach((child) => this.appendChild(child)); },
+    prepend(...children) {
+      children.slice().reverse().forEach((child) => {
+        child.parentElement?.remove?.();
+        this.children.unshift(child);
+        child.parentElement = this;
+        child.isConnected = true;
+      });
+    },
+    remove() {
+      this.removed = true;
+      if (this.parentElement) {
+        const index = this.parentElement.children.indexOf(this);
+        if (index >= 0) this.parentElement.children.splice(index, 1);
+      }
+      this.parentElement = null;
+      this.isConnected = false;
+    },
+    replaceChildren(...children) {
+      this.children.slice().forEach((child) => child.remove());
+      this.append(...children);
+    },
+    setAttribute() {},
+    getAttribute() { return null; },
+    removeAttribute() {},
+    toggleAttribute() {},
+    addEventListener() {},
+    removeEventListener() {},
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    closest() { return null; },
+    matches() { return false; },
+    contains() { return false; },
+    insertAdjacentElement() {},
+    parentElement: null,
+    isConnected: true,
+    removed: false,
+    textContent: "",
+    innerHTML: "",
+    clientWidth: 0,
+    clientHeight: 0,
+  };
+}
+globalThis.window = globalThis;
+globalThis.Element = class Element {};
+globalThis.HTMLElement = class HTMLElement extends Element {};
+globalThis.HTMLButtonElement = class HTMLButtonElement extends HTMLElement {};
+globalThis.MutationObserver = class MutationObserver {
+  observe() {}
+  disconnect() {}
+};
+globalThis.ResizeObserver = class ResizeObserver {
+  observe() {}
+  disconnect() {}
+};
+globalThis.requestAnimationFrame = (callback) => { callback(); return 1; };
+globalThis.cancelAnimationFrame = () => {};
+window.addEventListener = () => {};
+window.removeEventListener = () => {};
+window.dispatchEvent = () => true;
+const documentListeners = new Map();
+function documentListenerSet(type) {
+  let listeners = documentListeners.get(type);
+  if (!listeners) {
+    listeners = new Set();
+    documentListeners.set(type, listeners);
+  }
+  return listeners;
+}
+globalThis.document = {
+  readyState: "complete",
+  scripts: [],
+  visibilityState: "visible",
+  documentElement: node(),
+  body: node(),
+  createElement: () => node(),
+  getElementById: () => null,
+  querySelector: () => null,
+  querySelectorAll: () => [],
+  addEventListener(type, listener) { documentListenerSet(type).add(listener); },
+  removeEventListener(type, listener) { documentListenerSet(type).delete(listener); },
+  listenerCount(type) { return documentListeners.get(type)?.size || 0; },
+};
+globalThis.getComputedStyle = () => ({
+  display: "block",
+  visibility: "visible",
+  pointerEvents: "auto",
+});
+globalThis.localStorage = {
+  getItem: () => null,
+  setItem() {},
+  removeItem() {},
+};
+globalThis.location = {
+  href: "https://codex.test/local/thread-12345678",
+  pathname: "/local/thread-12345678",
+  search: "",
+  hash: "",
+  protocol: "https:",
+};
+globalThis.navigator = { userAgent: "node-test" };
+globalThis.performance = { getEntriesByType: () => [] };
+globalThis.CustomEvent = class CustomEvent {
+  constructor(type, options = {}) {
+    this.type = type;
+    this.detail = options.detail;
+  }
+};
+globalThis.Event = class Event {
+  constructor(type) {
+    this.type = type;
+  }
+};
+window.__CODEX_ELVES_TEST_TASK_BOARD__ = true;
+window.__codexSessionDeleteBridge = async (path) => {
+  if (path === "/settings/get") {
+    return { launchMode: "direct", enhancementsEnabled: true, providerSyncEnabled: true };
+  }
+  if (path === "/session/suppressed") return { ids: [] };
+  return { status: "ok" };
+};
+require(scriptPath);
+const api = window.__codexElvesTaskBoardTest;
+if (!api) throw new Error("task board test api unavailable");
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+async function tick() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+(async () => {
+  const runtimeGate = {
+    oldRuntimeAccepted: api.runtimeCanRefresh("old-runtime", () => {}),
+    currentRuntimeAccepted: api.runtimeCanRefresh(api.runtimeVersion(), () => {}),
+  };
+  function pluginControl({ text = "", ariaLabel = "", title = "", legacyIcon = false } = {}) {
+    return {
+      textContent: text,
+      getAttribute(name) {
+        if (name === "aria-label") return ariaLabel || null;
+        if (name === "title") return title || null;
+        return null;
+      },
+      querySelector() { return legacyIcon ? {} : null; },
+    };
+  }
+  const originalQuerySelectorAll = document.querySelectorAll;
+  function resolvePluginEntry(navigationControls, globalControls = navigationControls) {
+    document.querySelectorAll = (selector) => {
+      if (selector === 'button, [role="button"], a[href]') return globalControls;
+      if (selector.includes("navigation") || selector.includes("nav button")) {
+        return navigationControls;
+      }
+      return [];
+    };
+    return api.pluginEntryButtonForTest();
+  }
+  const unrelatedControl = pluginControl({ text: "拉取请求" });
+  const currentSidebarControl = pluginControl({ text: "插件" });
+  const accessibleOnlyControl = pluginControl({ ariaLabel: "Plugins" });
+  const legacyIconControl = pluginControl({ legacyIcon: true });
+  const globalFallbackControl = pluginControl({ title: "插件" });
+  const duplicateGlobalControl = pluginControl({ text: "Plugins" });
+  const entryDiscovery = {
+    currentSidebarClassIndependent:
+      resolvePluginEntry([unrelatedControl, currentSidebarControl]) === currentSidebarControl,
+    accessibleNameOnly:
+      resolvePluginEntry([unrelatedControl, accessibleOnlyControl]) === accessibleOnlyControl,
+    legacyIconFallback:
+      resolvePluginEntry([unrelatedControl, legacyIconControl]) === legacyIconControl,
+    uniqueGlobalFallback:
+      resolvePluginEntry([], [unrelatedControl, globalFallbackControl]) === globalFallbackControl,
+    ambiguousGlobalRejected:
+      resolvePluginEntry([], [globalFallbackControl, duplicateGlobalControl]) === null,
+  };
+  document.querySelectorAll = originalQuerySelectorAll;
+  const defaultTaskBoardEnabled = api.taskBoardFeatureEnabledForTest();
+  api.setBackendSettingsForTest({ enhancementsEnabled: true, codexAppTaskBoard: false });
+  const disabledBySwitch = !api.taskBoardFeatureEnabledForTest();
+  api.resetReadState();
+  api.reconcileRuntimeForTest();
+  const activeViewClosedWhenDisabled = !api.activeForTest();
+  api.setBackendSettingsForTest({ enhancementsEnabled: false, codexAppTaskBoard: true });
+  const disabledByMaster = !api.taskBoardFeatureEnabledForTest();
+  api.setBackendSettingsForTest({ enhancementsEnabled: true, codexAppTaskBoard: true });
+  const restoredEnabled = api.taskBoardFeatureEnabledForTest();
+  const latestCatalog = {
+    warnings: [],
+    projects: [],
+    sessions: [{ sessionId: "session-1", title: "目录最新标题", cwd: "/repo", updatedAtMs: 20 }],
+  };
+  const linkedConversation = { sessionId: "session-1", title: "快照旧标题", cwd: "/repo", updatedAtMs: 10 };
+  const latest = api.conversationProjection(linkedConversation, latestCatalog);
+  const latestTitleMatchesSearch = api.taskMatchesQuery({
+    title: "任务 A",
+    project: { cwd: "/repo", label: "repo" },
+    conversations: [linkedConversation],
+  }, latestCatalog, "目录最新标题");
+  const partial = api.conversationProjection(
+    { sessionId: "session-missing", title: "保留标题", cwd: "/repo", updatedAtMs: 1 },
+    { warnings: [{ code: "codex_db_read_failed", count: 1 }], projects: [], sessions: [] },
+  );
+  const complete = api.conversationProjection(
+    { sessionId: "session-missing", title: "保留标题", cwd: "/repo", updatedAtMs: 1 },
+    { warnings: [], projects: [], sessions: [] },
+  );
+  api.resetReadState();
+  api.openPopoverForTest();
+  const popoverNodeBeforeRefresh = api.popoverNodeForTest();
+  const popoverOpenBeforeRefresh = api.popoverOpen();
+  const bodyChildrenBeforeRefresh = document.body.children.length;
+  const dismissListenersBeforeRefresh = document.listenerCount("pointerdown");
+  api.refreshRuntimeForTest();
+  const removedAfterRefresh = popoverNodeBeforeRefresh?.removed === true;
+  const bodyChildrenAfterRefresh = document.body.children.length;
+  const dismissListenersAfterRefresh = document.listenerCount("pointerdown");
+  const activeAfterRefresh = api.activeForTest();
+  api.resetReadState();
+  const snapshot = deferred();
+  const catalog = deferred();
+  window.__codexElvesTaskBoardMock = {
+    snapshot: () => snapshot.promise,
+    catalog: () => catalog.promise,
+  };
+  const refresh = api.refresh();
+  snapshot.resolve({
+    status: "ok",
+    schemaVersion: 1,
+    revision: 3,
+    tasks: [{
+      id: "task-1",
+      title: "先到的快照",
+      project: { cwd: "/repo", label: "repo" },
+      status: "new",
+      order: 0,
+      conversations: [],
+    }],
+  });
+  await tick();
+  const beforeCatalog = api.readState();
+  catalog.resolve({
+    status: "ok",
+    projects: [],
+    sessions: [{ sessionId: "session-1", title: "目录最新标题", cwd: "/repo", updatedAtMs: 20 }],
+    warnings: [],
+  });
+  await refresh;
+  const afterCatalog = api.readState();
+  process.stdout.write(JSON.stringify({
+    runtimeGate,
+    entryDiscovery,
+    featureSwitch: {
+      defaultEnabled: defaultTaskBoardEnabled,
+      disabledBySwitch,
+      disabledByMaster,
+      activeViewClosedWhenDisabled,
+      restoredEnabled,
+    },
+    catalog: {
+      latestTitle: latest.title,
+      latestTitleMatchesSearch,
+      partialMissingAvailable: partial.available,
+      partialMissingLabel: partial.label,
+      completeMissingAvailable: complete.available,
+    },
+    popover: {
+      openBeforeRefresh: popoverOpenBeforeRefresh,
+      bodyChildrenBeforeRefresh,
+      dismissListenersBeforeRefresh,
+      removedAfterRefresh,
+      bodyChildrenAfterRefresh,
+      dismissListenersAfterRefresh,
+      activeAfterRefresh,
+    },
+    read: {
+      snapshotTitleBeforeCatalog: beforeCatalog.snapshot.tasks[0]?.title || "",
+      catalogCountBeforeCatalog: beforeCatalog.catalog.sessions.length,
+      loadingBeforeCatalog: beforeCatalog.loading,
+      catalogCountAfterCatalog: afterCatalog.catalog.sessions.length,
+      loadingAfterCatalog: afterCatalog.loading,
+    },
+  }));
+  process.exit(0);
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+"#,
+    )
+    .expect("task board harness should be written");
+
+    let output = Command::new("node")
+        .arg(&harness_path)
+        .arg(&script_path)
+        .output()
+        .expect("node should run task board harness");
+    assert!(
+        output.status.success(),
+        "node task board harness failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("task board harness stdout should be JSON")
+}
+
+fn run_task_board_move_contract_harness() -> serde_json::Value {
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+    let script_path = temp.path().join("renderer-inject.js");
+    let harness_path = temp.path().join("task-board-move-harness.cjs");
+    std::fs::write(&script_path, assets::injection_script(45221))
+        .expect("injection script should be written");
+    std::fs::write(
+        &harness_path,
+        r##"
+const scriptPath = process.argv[2];
+globalThis.window = globalThis;
+globalThis.Element = class Element {};
+globalThis.HTMLElement = class HTMLElement extends Element {};
+globalThis.HTMLButtonElement = class HTMLButtonElement extends HTMLElement {};
+function selectorMatches(element, selector) {
+  if (!element || element.nodeType !== 1) return false;
+  const attributeMatches = [...selector.matchAll(/\[([^=\]]+)(?:="([^"]*)")?\]/g)];
+  const classNames = [...selector.matchAll(/\.([a-zA-Z0-9_-]+)/g)].map((match) => match[1]);
+  const tagName = selector.replace(/\[[^\]]+\]/g, "").replace(/\.[a-zA-Z0-9_-]+/g, "").trim();
+  if (tagName && element.tagName !== tagName.toUpperCase()) return false;
+  if (classNames.some((className) => !element.classList.contains(className))) return false;
+  return attributeMatches.every((match) => {
+    const value = element.getAttribute(match[1]);
+    return match[2] === undefined ? value !== null : value === match[2];
+  });
+}
+function descendantsOf(element) {
+  const descendants = [];
+  for (const child of element.children || []) descendants.push(child, ...descendantsOf(child));
+  return descendants;
+}
+function node(tagName = "div") {
+  const attributes = new Map();
+  const listeners = new Map();
+  const prototype = tagName === "button" ? HTMLButtonElement.prototype : HTMLElement.prototype;
+  const value = Object.create(prototype);
+  let classes = new Set();
+  const get = (type) => listeners.get(type) || (listeners.set(type, new Set()), listeners.get(type));
+  Object.assign(value, {
+    nodeType: 1, tagName: String(tagName).toUpperCase(), children: [], dataset: {}, style: { setProperty() {}, removeProperty() {} },
+    disabled: false, draggable: false, parentElement: null, textContent: "", innerHTML: "", value: "", tabIndex: 0,
+    classList: {
+      add(...names) { names.forEach((name) => classes.add(name)); },
+      remove(...names) { names.forEach((name) => classes.delete(name)); },
+      contains(name) { return classes.has(name); },
+      toggle(name, force) { const next = force === undefined ? !classes.has(name) : Boolean(force); if (next) classes.add(name); else classes.delete(name); return next; }
+    },
+    appendChild(child) {
+      child.parentElement?.remove?.();
+      this.children.push(child);
+      child.parentElement = this;
+      return child;
+    },
+    append(...children) { children.forEach((child) => this.appendChild(child)); },
+    replaceChildren(...children) { this.children.slice().forEach((child) => child.remove?.()); this.append(...children); },
+    remove() { if (this.parentElement) this.parentElement.children = this.parentElement.children.filter((child) => child !== this); this.parentElement = null; this.removed = true; },
+    setAttribute(name, attributeValue) {
+      const stringValue = String(attributeValue);
+      attributes.set(String(name), stringValue);
+      if (String(name).startsWith("data-")) this.dataset[String(name).slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = stringValue;
+    },
+    getAttribute(name) { return attributes.get(String(name)) || null; },
+    removeAttribute(name) {
+      attributes.delete(String(name));
+      if (String(name).startsWith("data-")) delete this.dataset[String(name).slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())];
+    },
+    addEventListener(type, listener) { get(type).add(listener); },
+    removeEventListener(type, listener) { get(type).delete(listener); },
+    dispatchEvent(event) {
+      event.target ||= this;
+      event.currentTarget = this;
+      event.preventDefault ||= function() { this.defaultPrevented = true; };
+      event.stopPropagation ||= function() { this.cancelBubble = true; };
+      get(event.type).forEach((listener) => listener.call(this, event));
+      if (!event.cancelBubble && this.parentElement) this.parentElement.dispatchEvent(event);
+      return !event.defaultPrevented;
+    },
+    click() { this.dispatchEvent({ type: "click" }); },
+    focus() { document.activeElement = this; },
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
+    querySelectorAll(selector) { return descendantsOf(this).filter((child) => selectorMatches(child, selector)); },
+    closest(selector) { let current = this; while (current) { if (selectorMatches(current, selector)) return current; current = current.parentElement; } return null; },
+    matches(selector) { return selectorMatches(this, selector); },
+    contains(other) { return other === this || descendantsOf(this).includes(other); },
+  });
+  Object.defineProperty(value, "className", {
+    get() { return [...classes].join(" "); },
+    set(next) { classes = new Set(String(next || "").split(/\s+/).filter(Boolean)); }
+  });
+  Object.defineProperty(value, "isConnected", { get() { return document.documentElement.contains(this); } });
+  return value;
+}
+globalThis.MutationObserver = class MutationObserver { observe() {} disconnect() {} };
+globalThis.ResizeObserver = class ResizeObserver { observe() {} disconnect() {} };
+globalThis.requestAnimationFrame = (callback) => { callback(); return 1; };
+globalThis.cancelAnimationFrame = () => {};
+window.addEventListener = () => {};
+window.removeEventListener = () => {};
+window.dispatchEvent = () => true;
+const documentListeners = new Map();
+const documentSet = (type) => documentListeners.get(type) || (documentListeners.set(type, new Set()), documentListeners.get(type));
+globalThis.document = {
+  readyState: "complete", scripts: [], visibilityState: "visible", documentElement: node("html"), body: node("body"), activeElement: null,
+  createElement: (tag) => node(tag), createTextNode: (text) => { const value = node("#text"); value.nodeType = 3; value.textContent = String(text); return value; },
+  querySelector(selector) { return this.documentElement.querySelector(selector); },
+  querySelectorAll(selector) { return this.documentElement.querySelectorAll(selector); },
+  addEventListener(type, listener) { documentSet(type).add(listener); },
+  removeEventListener(type, listener) { documentSet(type).delete(listener); },
+  dispatchEvent(event) { event.target ||= this; documentSet(event.type).forEach((listener) => listener(event)); return true; },
+  listenerCount(type) { return documentListeners.get(type)?.size || 0; },
+};
+document.documentElement.appendChild(document.body);
+let mainSurface = node("main");
+mainSurface.setAttribute("data-app-shell-main-surface", "true");
+document.body.appendChild(mainSurface);
+globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible", pointerEvents: "auto" });
+globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+globalThis.location = { href: "https://codex.test/local/thread-12345678", pathname: "/local/thread-12345678", search: "", hash: "", protocol: "https:" };
+globalThis.navigator = { userAgent: "node-test" };
+globalThis.performance = { getEntriesByType: () => [] };
+globalThis.CustomEvent = class CustomEvent { constructor(type, options = {}) { this.type = type; this.detail = options.detail; } };
+globalThis.Event = class Event { constructor(type) { this.type = type; } };
+window.__CODEX_ELVES_TEST_TASK_BOARD__ = true;
+window.__codexSessionDeleteBridge = async (path) => path === "/settings/get"
+  ? { launchMode: "direct", enhancementsEnabled: true, providerSyncEnabled: true }
+  : { status: "ok", ids: [] };
+require(scriptPath);
+const api = window.__codexElvesTaskBoardTest;
+if (!api) throw new Error("task board test api unavailable");
+function task(id, status, order, title = id) {
+  return { id, title, project: { cwd: "/repo", label: "repo" }, status, order, conversations: [], createdAtMs: 1, updatedAtMs: 1 };
+}
+function snapshot(revision, tasks) { return { status: "ok", schemaVersion: 1, revision, tasks }; }
+function base() { return snapshot(7, [task("a", "new", 0, "alpha"), task("b", "new", 1, "beta"), task("c", "new", 2, "gamma"), task("d", "planning", 0)]); }
+function reset(mock = {}) { window.__codexElvesTaskBoardMock = mock; api.resetMoveStateForTest(base()); }
+function deferred() { let resolve; const promise = new Promise((next) => { resolve = next; }); return { promise, resolve }; }
+function settle() { return new Promise((resolve) => setTimeout(resolve, 0)); }
+(async () => {
+  reset();
+  const crossIndex = api.moveTargetIndexForTest("a", "planning", "d");
+  const sameBefore = api.moveTargetIndexForTest("c", "new", "a");
+  const sameEnd = api.moveTargetIndexForTest("a", "new");
+  const selfIndex = api.moveTargetIndexForTest("b", "new", "b");
+  api.setMoveFiltersForTest("alpha", "/repo");
+  const filteredIndex = api.moveTargetIndexForTest("c", "new", "a");
+  const payloadLog = [];
+  reset({ request(route, payload) {
+    if (route !== "/task-board/task-move") throw new Error(`unexpected ${route}`);
+    payloadLog.push(payload);
+    return snapshot(8, [task("b", "new", 0), task("c", "new", 1), task("a", "planning", 0), task("d", "planning", 1)]);
+  }});
+  await api.moveTaskForTest("a", "planning", crossIndex);
+  const payloads = {
+    crossColumn: JSON.stringify(payloadLog[0]) === JSON.stringify({ taskId: "a", toStatus: "planning", targetIndex: 0, expectedRevision: 7 }),
+    sameColumn: sameBefore === 0,
+    filteredIndex: filteredIndex === 0,
+    zeroAndEnd: crossIndex === 0 && sameEnd === 2,
+    selfDropNoOp: selfIndex === 1,
+  };
+  const success = {
+    serverSnapshotCorrectsOptimistic: api.moveStateForTest().revision === 8 &&
+      api.moveStateForTest().tasks.find((item) => item.id === "a")?.order === 0,
+  };
+  const menuPayloads = [];
+  reset({ request(route, payload) { menuPayloads.push(payload); return snapshot(8, base().tasks); } });
+  api.openStatusMenuForTest("a");
+  const menuInitial = api.statusMenuStateForTest();
+  api.dispatchStatusMenuKeyForTest("ArrowDown");
+  const menuDown = api.statusMenuStateForTest();
+  api.dispatchStatusMenuKeyForTest("ArrowUp");
+  const menuUp = api.statusMenuStateForTest();
+  api.dispatchStatusMenuKeyForTest("Home");
+  const menuHome = api.statusMenuStateForTest();
+  api.dispatchStatusMenuKeyForTest("End");
+  const menuEnd = api.statusMenuStateForTest();
+  api.dispatchStatusMenuKeyForTest("Enter");
+  await Promise.resolve();
+  api.openStatusMenuForTest("a");
+  api.dispatchStatusMenuKeyForTest("Escape");
+  const menu = {
+    fiveStatuses: menuInitial.itemCount === 5,
+    keyboardAndFocus: menuInitial.focusedIndex === 0 && menuDown.focusedIndex === 1 &&
+      menuUp.focusedIndex === 0 && menuHome.focusedIndex === 0 && menuEnd.focusedIndex === 4 &&
+      menuPayloads[0]?.toStatus === "done" && menuPayloads[0]?.targetIndex === 0 &&
+      !api.statusMenuStateForTest().open,
+  };
+  reset({ request() { return { status: "failed", code: "task_board_unavailable", message: "down" }; } });
+  await api.moveTaskForTest("a", "planning", 0);
+  const failure = {
+    rollbackAndBusyRelease: api.moveStateForTest().revision === 7 &&
+      api.moveStateForTest().tasks.find((item) => item.id === "a")?.status === "new" &&
+      !api.moveStateForTest().busy && api.moveStateForTest().feedback.includes("恢复"),
+  };
+  let conflictCalls = 0;
+  reset({ request() { conflictCalls += 1; return { status: "conflict", code: "revision_conflict", message: "changed", schemaVersion: 1, revision: 9, tasks: [task("a", "review", 0)] }; } });
+  await api.moveTaskForTest("a", "planning", 0);
+  const conflict = {
+    adoptsLatestWithoutRetry: conflictCalls === 1 && api.moveStateForTest().revision === 9 &&
+      api.moveStateForTest().tasks[0]?.status === "review" && api.moveStateForTest().feedback.includes("重试"),
+  };
+  reset({ request() { return { status: "conflict", code: "revision_conflict", message: "bad" }; } });
+  await api.moveTaskForTest("a", "planning", 0);
+  conflict.malformedRollsBack =
+    api.moveStateForTest().revision === 7 && api.moveStateForTest().tasks.find((item) => item.id === "a")?.status === "new";
+  const pending = deferred();
+  let deferredCalls = 0;
+  reset({ request() { deferredCalls += 1; return pending.promise; } });
+  const first = api.moveTaskForTest("a", "planning", 0);
+  const second = api.moveTaskForTest("b", "planning", 0);
+  const blocked = await second;
+  api.refreshRuntimeForTest();
+  pending.resolve(snapshot(10, [task("a", "planning", 0)]));
+  await first;
+  const lifecycle = {
+    staleDeferredAndCleanup: api.moveStateForTest().revision === 7 && !api.moveStateForTest().busy && !api.moveStateForTest().menuOpen,
+    duplicateMoveBlocked: deferredCalls === 1 && blocked.status === "blocked",
+  };
+  const dragPending = deferred();
+  reset({ request() { return dragPending.promise; } });
+  const dragMove = api.moveTaskForTest("a", "planning", 0);
+  api.dragEndForTest();
+  const dragStillBusy = api.moveStateForTest().busy;
+  dragPending.resolve(snapshot(8, [task("a", "planning", 0)]));
+  await dragMove;
+  lifecycle.dragEndKeepsMoveAlive = dragStillBusy && api.moveStateForTest().revision === 8;
+
+  const readSnapshot = deferred();
+  const moveSnapshot = deferred();
+  let readCalls = 0;
+  reset({ request(route) {
+    if (route === "/task-board/snapshot") { readCalls += 1; return readSnapshot.promise; }
+    if (route === "/task-board/session-catalog") return { status: "ok", projects: [], sessions: [], warnings: [] };
+    if (route === "/task-board/task-move") return moveSnapshot.promise;
+    throw new Error(`unexpected ${route}`);
+  }});
+  const readBeforeMove = api.refresh();
+  const pendingMove = api.moveTaskForTest("a", "planning", 0);
+  readSnapshot.resolve(snapshot(99, [task("a", "done", 0)]));
+  const skippedRefresh = await api.refresh();
+  moveSnapshot.resolve(snapshot(8, [task("a", "planning", 0)]));
+  await Promise.all([readBeforeMove, pendingMove]);
+  const reads = {
+    beforeMoveCannotOverwrite: api.moveStateForTest().revision === 8 && api.moveStateForTest().tasks[0]?.status === "planning",
+    refreshDuringMoveSkipped: readCalls === 1 && Array.isArray(skippedRefresh) && skippedRefresh.length === 0,
+  };
+  reset({ request(route) {
+    if (route === "/task-board/snapshot") return snapshot(99, [task("a", "done", 0)]);
+    if (route === "/task-board/session-catalog") return { status: "ok", projects: [], sessions: [], warnings: [] };
+    if (route === "/task-board/task-move") return { status: "failed", code: "task_board_unavailable", message: "down" };
+    throw new Error(`unexpected ${route}`);
+  }});
+  const ignoredRead = api.refresh();
+  await api.moveTaskForTest("a", "planning", 0);
+  await ignoredRead;
+  reads.moveFailureKeepsReadOut = api.moveStateForTest().revision === 7 && api.moveStateForTest().tasks[0]?.status === "new";
+
+  function mountDom(mock = {}) {
+    reset(mock);
+    api.setMoveFiltersForTest();
+    api.reconcileRuntimeForTest();
+    return mainSurface.querySelector('[data-codex-task-board-root="true"]');
+  }
+  function event(type, target) {
+    return {
+      type,
+      target,
+      dataTransfer: { setData() {} },
+      preventDefault() { this.defaultPrevented = true; },
+      stopPropagation() { this.cancelBubble = true; },
+    };
+  }
+  const domPayloads = [];
+  const domPending = deferred();
+  mountDom({ request(route, payload) {
+    domPayloads.push({ route, payload });
+    return domPending.promise;
+  }});
+  const dragCard = mainSurface.querySelector('.codex-task-board-card[data-task-board-id="a"]');
+  const planningList = mainSurface.querySelector('.codex-task-board-card-list[data-task-board-status="planning"]');
+  const planningCard = mainSurface.querySelector('.codex-task-board-card[data-task-board-id="d"]');
+  if (!dragCard || !planningList || !planningCard) {
+    throw new Error(`drag DOM unavailable: root=${!!mainSurface.querySelector('[data-codex-task-board-root="true"]')} cards=${mainSurface.querySelectorAll(".codex-task-board-card").length} lists=${mainSurface.querySelectorAll(".codex-task-board-card-list").length}`);
+  }
+  dragCard.dispatchEvent(event("dragstart", dragCard));
+  planningList.dispatchEvent(event("dragover", planningList));
+  const activeBeforeDrop = planningList.getAttribute("data-drop-active") === "true";
+  planningCard.dispatchEvent(event("drop", planningCard));
+  dragCard.dispatchEvent(event("dragend", dragCard));
+  const optimistic = api.moveStateForTest();
+  const optimisticOrdersContinuous =
+    optimistic.tasks.filter((item) => item.status === "new").sort((left, right) => left.order - right.order).map((item) => item.order).join(",") === "0,1" &&
+    optimistic.tasks.filter((item) => item.status === "planning").sort((left, right) => left.order - right.order).map((item) => item.order).join(",") === "0,1";
+  const dragEndKeepsDomMoveAlive = api.moveStateForTest().busy;
+  domPending.resolve(snapshot(8, [task("b", "new", 0), task("c", "new", 1), task("a", "planning", 0), task("d", "planning", 1)]));
+  await settle();
+
+  const sameColumnPayloads = [];
+  mountDom({ request(route, payload) { sameColumnPayloads.push(payload); return snapshot(8, base().tasks); }});
+  const sameDragCard = mainSurface.querySelector('.codex-task-board-card[data-task-board-id="a"]');
+  const newList = mainSurface.querySelector('.codex-task-board-card-list[data-task-board-status="new"]');
+  sameDragCard.dispatchEvent(event("dragstart", sameDragCard));
+  newList.dispatchEvent(event("drop", newList));
+  await settle();
+  const selfRoot = mountDom({ request(route, payload) { sameColumnPayloads.push(payload); return snapshot(8, base().tasks); }});
+  const selfCard = mainSurface.querySelector('.codex-task-board-card[data-task-board-id="b"]');
+  if (!selfCard) throw new Error(`self-drop card unavailable: ${mainSurface.querySelectorAll(".codex-task-board-card").map((card) => card.getAttribute("data-task-board-id")).join(",")}`);
+  selfCard.dispatchEvent(event("dragstart", selfCard));
+  selfCard.dispatchEvent(event("drop", selfCard));
+  await settle();
+
+  const menuPayloadsDom = [];
+  mountDom({ request(route, payload) { menuPayloadsDom.push(payload); return snapshot(8, [task("a", "done", 0)]); }});
+  const menuTrigger = mainSurface.querySelector('.codex-task-board-card[data-task-board-id="a"]').querySelector(".codex-task-board-card-move");
+  menuTrigger.click();
+  const menuNode = document.body.querySelector(".codex-task-board-status-menu");
+  const menuOutsideMain = !!menuNode && document.body.contains(menuNode) && !mainSurface.contains(menuNode);
+  document.dispatchEvent({ type: "keydown", key: "End", preventDefault() {}, stopPropagation() {} });
+  document.dispatchEvent({ type: "keydown", key: "Enter", preventDefault() {}, stopPropagation() {} });
+  await settle();
+  const focusReturned = document.activeElement === mainSurface.querySelector('.codex-task-board-card[data-task-board-id="a"]').querySelector(".codex-task-board-card-move");
+  const escapeTrigger = mainSurface.querySelector('.codex-task-board-card[data-task-board-id="a"]').querySelector(".codex-task-board-card-move");
+  escapeTrigger.click();
+  document.dispatchEvent({ type: "keydown", key: "Escape", preventDefault() {}, stopPropagation() {} });
+  const escapeReturnsOriginal = document.activeElement === escapeTrigger;
+
+  const replacementPending = deferred();
+  mountDom({ request() { return replacementPending.promise; }});
+  const replacementCard = mainSurface.querySelector('.codex-task-board-card[data-task-board-id="a"]');
+  const replacementList = mainSurface.querySelector('.codex-task-board-card-list[data-task-board-status="planning"]');
+  replacementCard.dispatchEvent(event("dragstart", replacementCard));
+  replacementList.dispatchEvent(event("drop", replacementList));
+  const replacementHost = node("main");
+  replacementHost.setAttribute("data-app-shell-main-surface", "true");
+  mainSurface.remove();
+  document.body.appendChild(replacementHost);
+  mainSurface = replacementHost;
+  api.reconcileRuntimeForTest();
+  replacementPending.resolve(snapshot(10, [task("a", "planning", 0)]));
+  await settle();
+  const replacementCleanup =
+    api.moveStateForTest().revision === 7 &&
+    api.moveStateForTest().tasks.find((item) => item.id === "a")?.status === "new" &&
+    !api.moveStateForTest().busy;
+
+  const dom = {
+    dragPathExactPayload: activeBeforeDrop &&
+      JSON.stringify(domPayloads[0]) === JSON.stringify({ route: "/task-board/task-move", payload: { taskId: "a", toStatus: "planning", targetIndex: 0, expectedRevision: 7 } }),
+    dragEndKeepsMoveAlive: dragEndKeepsDomMoveAlive,
+    optimisticOrdersContinuous,
+    sameColumnDownward: sameColumnPayloads[0]?.taskId === "a" && sameColumnPayloads[0]?.toStatus === "new" && sameColumnPayloads[0]?.targetIndex === 2,
+    selfDropNoRequest: sameColumnPayloads.length === 1,
+    menuOutsideMain,
+    enterMovesAndRestoresFocus: menuPayloadsDom[0]?.toStatus === "done" && focusReturned,
+    escapeRestoresOriginalFocus: escapeReturnsOriginal,
+    mainReplacementRollsBackAndIgnoresLateResult: replacementCleanup,
+  };
+  process.stdout.write(JSON.stringify({ payloads, menu, success, failure, conflict, lifecycle, reads, dom }));
+  process.exit(0);
+})().catch((error) => { console.error(error); process.exit(1); });
+"##,
+    )
+    .expect("task board move harness should be written");
+    let output = Command::new("node")
+        .arg(&harness_path)
+        .arg(&script_path)
+        .output()
+        .expect("node should run task board move harness");
+    assert!(
+        output.status.success(),
+        "node task board move harness failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("task board move harness stdout should be JSON")
+}
+
+fn run_task_board_open_session_contract_harness() -> serde_json::Value {
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+    let script_path = temp.path().join("renderer-inject.js");
+    let harness_path = temp.path().join("task-board-open-session-harness.cjs");
+    std::fs::write(&script_path, assets::injection_script(45221))
+        .expect("injection script should be written");
+    std::fs::write(
+        &harness_path,
+        r##"
+const scriptPath = process.argv[2];
+globalThis.window = globalThis;
+globalThis.Element = class Element {};
+globalThis.HTMLElement = class HTMLElement extends Element {};
+globalThis.HTMLButtonElement = class HTMLButtonElement extends HTMLElement {};
+function matches(element, selector) {
+  return selector.split(",").some((raw) => {
+    const value = raw.trim();
+    if (!value || !element || element.nodeType !== 1) return false;
+    const attributes = [...value.matchAll(/\[([^=\]]+)(?:=(?:"([^"]*)"|'([^']*)'))?\]/g)];
+    const classes = [...value.matchAll(/\.([a-zA-Z0-9_-]+)/g)].map((match) => match[1]);
+    const tag = value.replace(/\[[^\]]+\]/g, "").replace(/\.[a-zA-Z0-9_-]+/g, "").trim();
+    if (tag && element.tagName !== tag.toUpperCase()) return false;
+    if (classes.some((className) => !element.classList.contains(className))) return false;
+    return attributes.every((match) => {
+      const actual = element.getAttribute(match[1]);
+      const expected = match[2] ?? match[3];
+      return expected === undefined ? actual !== null : actual === expected;
+    });
+  });
+}
+function descendants(root) {
+  const result = [];
+  for (const child of root.children || []) result.push(child, ...descendants(child));
+  return result;
+}
+function node(tagName = "div") {
+  const attributes = new Map();
+  const listeners = new Map();
+  const prototype = tagName === "button" ? HTMLButtonElement.prototype : HTMLElement.prototype;
+  const element = Object.create(prototype);
+  let classes = new Set();
+  const listenerSet = (type) => listeners.get(type) || (listeners.set(type, new Set()), listeners.get(type));
+  Object.assign(element, {
+    nodeType: 1,
+    tagName: String(tagName).toUpperCase(),
+    children: [],
+    parentElement: null,
+    dataset: {},
+    style: { setProperty() {}, removeProperty() {} },
+    disabled: false,
+    textContent: "",
+    innerHTML: "",
+    classList: {
+      add(...names) { names.forEach((name) => classes.add(name)); },
+      remove(...names) { names.forEach((name) => classes.delete(name)); },
+      contains(name) { return classes.has(name); },
+      toggle(name, force) {
+        const next = force === undefined ? !classes.has(name) : Boolean(force);
+        if (next) classes.add(name); else classes.delete(name);
+        return next;
+      },
+    },
+    appendChild(child) {
+      child.parentElement?.remove?.();
+      this.children.push(child);
+      child.parentElement = this;
+      return child;
+    },
+    append(...children) { children.forEach((child) => this.appendChild(child)); },
+    replaceChildren(...children) { this.children.slice().forEach((child) => child.remove?.()); this.append(...children); },
+    remove() {
+      if (this.parentElement) this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
+      this.parentElement = null;
+      this.removed = true;
+    },
+    setAttribute(name, value) {
+      const stringValue = String(value);
+      attributes.set(String(name), stringValue);
+      if (String(name).startsWith("data-")) this.dataset[String(name).slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = stringValue;
+    },
+    getAttribute(name) { return attributes.has(String(name)) ? attributes.get(String(name)) : null; },
+    hasAttribute(name) { return attributes.has(String(name)); },
+    removeAttribute(name) { attributes.delete(String(name)); },
+    addEventListener(type, listener) { listenerSet(type).add(listener); },
+    removeEventListener(type, listener) { listenerSet(type).delete(listener); },
+    dispatchEvent(event) {
+      event.target ||= this;
+      event.currentTarget = this;
+      event.preventDefault ||= function() { this.defaultPrevented = true; };
+      for (const listener of [...listenerSet(event.type)]) listener.call(this, event);
+      if (!event.cancelBubble && this.parentElement) this.parentElement.dispatchEvent(event);
+      return !event.defaultPrevented;
+    },
+    click() { if (!this.disabled) this.dispatchEvent({ type: "click" }); },
+    focus() { document.activeElement = this; },
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
+    querySelectorAll(selector) { return descendants(this).filter((child) => matches(child, selector)); },
+    matches(selector) { return matches(this, selector); },
+    closest(selector) {
+      let current = this;
+      while (current) {
+        if (matches(current, selector)) return current;
+        current = current.parentElement;
+      }
+      return null;
+    },
+    contains(target) { return target === this || descendants(this).includes(target); },
+    getBoundingClientRect() { return { left: 0, top: 0, right: 100, bottom: 30, width: 100, height: 30 }; },
+  });
+  Object.defineProperty(element, "className", {
+    get() { return [...classes].join(" "); },
+    set(value) { classes = new Set(String(value || "").split(/\s+/).filter(Boolean)); },
+  });
+  Object.defineProperty(element, "isConnected", { get() { return document.documentElement.contains(this); } });
+  return element;
+}
+const documentListeners = new Map();
+const documentListenerSet = (type) => documentListeners.get(type) || (documentListeners.set(type, new Set()), documentListeners.get(type));
+globalThis.document = {
+  readyState: "complete",
+  scripts: [],
+  visibilityState: "visible",
+  documentElement: node("html"),
+  body: node("body"),
+  activeElement: null,
+  createElement(tagName) { return node(tagName); },
+  createTextNode(text) { const value = node("span"); value.nodeType = 3; value.textContent = String(text); return value; },
+  querySelector(selector) { return this.documentElement.querySelector(selector); },
+  querySelectorAll(selector) { return this.documentElement.querySelectorAll(selector); },
+  addEventListener(type, listener) { documentListenerSet(type).add(listener); },
+  removeEventListener(type, listener) { documentListenerSet(type).delete(listener); },
+  listenerCount(type) { return documentListeners.get(type)?.size || 0; },
+  dispatchEvent(event) {
+    event.target ||= this;
+    event.preventDefault ||= function() { this.defaultPrevented = true; };
+    for (const listener of [...documentListenerSet(event.type)]) listener.call(this, event);
+    return !event.defaultPrevented;
+  },
+};
+document.documentElement.appendChild(document.body);
+globalThis.MutationObserver = class MutationObserver { observe() {} disconnect() {} };
+globalThis.ResizeObserver = class ResizeObserver { observe() {} disconnect() {} };
+globalThis.requestAnimationFrame = (callback) => { callback(); return 1; };
+globalThis.cancelAnimationFrame = () => {};
+window.addEventListener = () => {};
+window.removeEventListener = () => {};
+window.dispatchEvent = () => true;
+globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible", pointerEvents: "auto" });
+globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+globalThis.sessionStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+globalThis.location = { href: "https://codex.test/local/thread", pathname: "/local/thread", search: "", hash: "", protocol: "https:" };
+globalThis.navigator = { userAgent: "node-test" };
+globalThis.performance = { getEntriesByType: () => [] };
+globalThis.CustomEvent = class CustomEvent { constructor(type, options = {}) { this.type = type; this.detail = options.detail; } };
+globalThis.Event = class Event { constructor(type, options = {}) { this.type = type; Object.assign(this, options); } };
+let now = 0;
+const waits = [];
+let mountThreadOnWait = false;
+let replaceRuntimeOnWait = false;
+window.__codexElvesTaskBoardNativeClock = {
+  now: () => now,
+  wait(delay) {
+    waits.push(delay);
+    now += delay;
+    if (replaceRuntimeOnWait) window.__codexElvesTaskBoardNativeRuntimeId += 1;
+    if (mountThreadOnWait) {
+      mountThreadOnWait = false;
+      addThread("session-expand");
+    }
+  },
+};
+window.__CODEX_ELVES_TEST_TASK_BOARD__ = true;
+window.__codexSessionDeleteBridge = async (path) => path === "/settings/get"
+  ? { launchMode: "direct", enhancementsEnabled: true, providerSyncEnabled: true }
+  : { status: "ok", ids: [] };
+
+let projectClicks = 0;
+const projectRow = node("button");
+projectRow.setAttribute("data-app-action-sidebar-project-row", "true");
+projectRow.setAttribute("data-app-action-sidebar-project-id", "c:/repo-a");
+projectRow.setAttribute("aria-expanded", "true");
+projectRow.addEventListener("click", () => {
+  projectClicks += 1;
+  projectRow.setAttribute("aria-expanded", "true");
+  projectRow.removeAttribute("data-app-action-sidebar-project-collapsed");
+});
+document.body.appendChild(projectRow);
+const threadClicks = new Map();
+function removeThreads() {
+  document.querySelectorAll("[data-app-action-sidebar-thread-id]").forEach((row) => row.remove());
+}
+function addThread(id) {
+  const row = node("button");
+  row.setAttribute("data-app-action-sidebar-thread-id", id);
+  row.addEventListener("click", () => threadClicks.set(id, (threadClicks.get(id) || 0) + 1));
+  document.body.appendChild(row);
+  return row;
+}
+function snapshot() {
+  return {
+    status: "ok",
+    schemaVersion: 1,
+    revision: 7,
+    tasks: [{
+      id: "task-open",
+      title: "打开关联会话",
+      project: { cwd: "c:/repo-a", label: "项目 A" },
+      status: "new",
+      order: 0,
+      conversations: [
+        { sessionId: "session-raw", title: "原始 ID" },
+        { sessionId: "session-local", title: "本地 ID" },
+        { sessionId: "session-expand", title: "折叠项目" },
+      ],
+    }],
+  };
+}
+function catalog() {
+  return {
+    status: "ok",
+    projects: [{ cwd: "c:/repo-a", label: "项目 A" }],
+    sessions: [
+      { sessionId: "session-raw", title: "原始 ID", cwd: "c:/repo-a", updatedAtMs: 3 },
+      { sessionId: "session-local", title: "本地 ID", cwd: "c:/repo-a", updatedAtMs: 2 },
+      { sessionId: "session-expand", title: "折叠项目", cwd: "c:/repo-a", updatedAtMs: 1 },
+    ],
+    warnings: [],
+  };
+}
+require(scriptPath);
+const api = window.__codexElvesTaskBoardTest;
+if (!api) throw new Error("task board test api unavailable");
+function reset(options = {}) {
+  now = 0;
+  waits.length = 0;
+  mountThreadOnWait = false;
+  replaceRuntimeOnWait = false;
+  projectClicks = 0;
+  threadClicks.clear();
+  projectRow.setAttribute("aria-expanded", "true");
+  projectRow.removeAttribute("data-app-action-sidebar-project-collapsed");
+  removeThreads();
+  window.__codexElvesTaskBoardNativeAdapter = options.adapter || null;
+  api.resetCreateStateForTest({
+    snapshot: options.snapshot || snapshot(),
+    catalog: options.catalog || catalog(),
+  });
+}
+(async () => {
+  reset();
+  addThread("session-raw");
+  const raw = await api.nativeOpenSessionForTest("session-raw");
+  const mounted = {
+    rawIdClickedOnce: raw.status === "ok" && threadClicks.get("session-raw") === 1 && projectClicks === 0,
+    localIdClickedOnce: false,
+  };
+  removeThreads();
+  addThread("local:session-local");
+  const local = await api.nativeOpenSessionForTest("session-local");
+  mounted.localIdClickedOnce = local.status === "ok" && threadClicks.get("local:session-local") === 1 && projectClicks === 0;
+
+  reset({ catalog: { status: "ok", projects: [{ cwd: "c:/repo-a", label: "项目 A" }], sessions: [], warnings: [] } });
+  projectRow.setAttribute("aria-expanded", "false");
+  projectRow.setAttribute("data-app-action-sidebar-project-collapsed", "true");
+  mountThreadOnWait = true;
+  const expandedResult = await api.nativeOpenSessionForTest("session-expand");
+  const expanded = {
+    projectThenThreadClickedOnce:
+      expandedResult.status === "ok" && projectClicks === 1 && threadClicks.get("session-expand") === 1 &&
+      waits.reduce((sum, delay) => sum + delay, 0) <= 5000,
+  };
+
+  reset();
+  const beforeFailure = JSON.stringify(api.createSnapshotForTest());
+  const deadlineResult = await api.nativeOpenSessionForTest("session-expand");
+  const deadline = {
+    fiveSecondsAndStableFailure:
+      deadlineResult.code === "session_unavailable" &&
+      waits.reduce((sum, delay) => sum + delay, 0) === 5000 &&
+      JSON.stringify(api.createSnapshotForTest()) === beforeFailure,
+  };
+
+  reset({ catalog: { status: "ok", projects: [], sessions: [], warnings: [] } });
+  const missingSession = await api.nativeOpenSessionForTest("does-not-exist");
+  const errors = {
+    missingSessionStable: missingSession.code === "session_unavailable",
+    missingProjectStable: false,
+  };
+  reset();
+  projectRow.remove();
+  const missingProject = await api.nativeOpenSessionForTest("session-expand");
+  errors.missingProjectStable = missingProject.code === "native_navigation_unavailable";
+  document.body.appendChild(projectRow);
+
+  reset();
+  projectRow.setAttribute("aria-expanded", "false");
+  projectRow.setAttribute("data-app-action-sidebar-project-collapsed", "true");
+  replaceRuntimeOnWait = true;
+  const runtimeResult = await api.nativeOpenSessionForTest("session-expand");
+  const runtimeReplacement = { stableFailure: runtimeResult.code === "runtime_replaced" };
+  window.__codexElvesTaskBoardNativeRuntimeId -= 1;
+
+  reset();
+  addThread("session-raw");
+  const beforeRepeat = JSON.stringify(api.createSnapshotForTest());
+  const first = await api.nativeOpenSessionForTest("session-raw");
+  const second = await api.nativeOpenSessionForTest("session-raw");
+  api.openPopoverForTest();
+  await api.openConversationForTest({ sessionId: "session-raw", title: "原始 ID" });
+  const repeat = {
+    safeAndDataPreserved:
+      first.status === "ok" && second.status === "ok" &&
+      threadClicks.get("session-raw") === 3 &&
+      JSON.stringify(api.createSnapshotForTest()) === beforeRepeat &&
+      !api.popoverOpen() && document.listenerCount("pointerdown") === 0,
+  };
+
+  let seamCalls = 0;
+  reset({ adapter: { openSession(sessionId) { seamCalls += 1; return { status: "ok", sessionId }; } } });
+  await api.openConversationForTest({ sessionId: "session-raw", title: "原始 ID" });
+  const seam = { injectedAdapterStillUsed: seamCalls === 1 };
+  process.stdout.write(JSON.stringify({ mounted, expanded, deadline, errors, runtimeReplacement, repeat, seam }));
+  process.exit(0);
+})().catch((error) => { process.stderr.write(String(error?.stack || error)); process.exit(1); });
+"##,
+    )
+    .expect("task board open session harness should be written");
+    let output = Command::new("node")
+        .arg(&harness_path)
+        .arg(&script_path)
+        .output()
+        .expect("node should run task board open session harness");
+    assert!(
+        output.status.success(),
+        "node task board open session harness failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("open session harness stdout should be JSON")
+}
+
+fn run_task_board_native_create_contract_harness() -> serde_json::Value {
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+    let script_path = temp.path().join("renderer-inject.js");
+    let harness_path = temp.path().join("task-board-native-create-harness.cjs");
+    std::fs::write(&script_path, assets::injection_script(45221))
+        .expect("injection script should be written");
+    std::fs::write(
+        &harness_path,
+        r##"
+const scriptPath = process.argv[2];
+globalThis.window = globalThis;
+globalThis.Element = class Element {};
+globalThis.HTMLElement = class HTMLElement extends Element {};
+globalThis.HTMLButtonElement = class HTMLButtonElement extends HTMLElement {};
+globalThis.Event = class Event {
+  constructor(type, options = {}) { this.type = type; Object.assign(this, options); }
+};
+globalThis.KeyboardEvent = class KeyboardEvent extends Event {};
+function matches(element, selector) {
+  return selector.split(",").some((part) => {
+    const value = part.trim();
+    if (!value || !element || element.nodeType !== 1) return false;
+    const attributes = [...value.matchAll(/\[([^=\]]+)(?:=(?:"([^"]*)"|'([^']*)'))?\]/g)];
+    const classes = [...value.matchAll(/\.([a-zA-Z0-9_-]+)/g)].map((match) => match[1]);
+    const tag = value.replace(/\[[^\]]+\]/g, "").replace(/\.[a-zA-Z0-9_-]+/g, "").trim();
+    if (tag && element.tagName !== tag.toUpperCase()) return false;
+    if (classes.some((className) => !element.classList.contains(className))) return false;
+    return attributes.every((match) => {
+      const actual = element.getAttribute(match[1]);
+      const expected = match[2] ?? match[3];
+      return expected === undefined ? actual !== null : actual === expected;
+    });
+  });
+}
+function descendants(root) {
+  const result = [];
+  for (const child of root.children || []) result.push(child, ...descendants(child));
+  return result;
+}
+function node(tagName = "div") {
+  const attributes = new Map();
+  const listeners = new Map();
+  const prototype = tagName === "button" ? HTMLButtonElement.prototype : HTMLElement.prototype;
+  const element = Object.create(prototype);
+  let classNames = new Set();
+  const listenerSet = (type) => listeners.get(type) || (listeners.set(type, new Set()), listeners.get(type));
+  Object.assign(element, {
+    nodeType: 1,
+    tagName: String(tagName).toUpperCase(),
+    children: [],
+    parentElement: null,
+    dataset: {},
+    style: { setProperty() {}, removeProperty() {} },
+    disabled: false,
+    hidden: false,
+    value: "",
+    checked: false,
+    textContent: "",
+    innerHTML: "",
+    tabIndex: 0,
+    classList: {
+      add(...names) { names.forEach((name) => classNames.add(name)); },
+      remove(...names) { names.forEach((name) => classNames.delete(name)); },
+      contains(name) { return classNames.has(name); },
+      toggle(name, force) {
+        const next = force === undefined ? !classNames.has(name) : Boolean(force);
+        if (next) classNames.add(name); else classNames.delete(name);
+        return next;
+      },
+    },
+    appendChild(child) {
+      child.parentElement?.remove?.();
+      this.children.push(child);
+      child.parentElement = this;
+      return child;
+    },
+    append(...children) { children.forEach((child) => this.appendChild(child)); },
+    replaceChildren(...children) { this.children.slice().forEach((child) => child.remove?.()); this.append(...children); },
+    remove() {
+      if (this.parentElement) this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
+      this.parentElement = null;
+      this.removed = true;
+    },
+    setAttribute(name, value) {
+      const stringValue = String(value);
+      attributes.set(String(name), stringValue);
+      if (String(name).startsWith("data-")) this.dataset[String(name).slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = stringValue;
+    },
+    getAttribute(name) { return attributes.has(String(name)) ? attributes.get(String(name)) : null; },
+    hasAttribute(name) { return attributes.has(String(name)); },
+    removeAttribute(name) { attributes.delete(String(name)); },
+    toggleAttribute(name, force) {
+      if (force === false) attributes.delete(String(name));
+      else attributes.set(String(name), "");
+    },
+    addEventListener(type, listener) { listenerSet(type).add(listener); },
+    removeEventListener(type, listener) { listenerSet(type).delete(listener); },
+    dispatchEvent(event) {
+      event.target ||= this;
+      event.currentTarget = this;
+      event.preventDefault ||= function() { this.defaultPrevented = true; };
+      event.stopPropagation ||= function() { this.cancelBubble = true; };
+      for (const listener of [...listenerSet(event.type)]) listener.call(this, event);
+      if (!event.cancelBubble && this.parentElement) this.parentElement.dispatchEvent(event);
+      return !event.defaultPrevented;
+    },
+    click() { if (!this.disabled) this.dispatchEvent({ type: "click" }); },
+    focus() { document.activeElement = this; },
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
+    querySelectorAll(selector) { return descendants(this).filter((child) => matches(child, selector)); },
+    matches(selector) { return matches(this, selector); },
+    closest(selector) {
+      let current = this;
+      while (current) {
+        if (matches(current, selector)) return current;
+        current = current.parentElement;
+      }
+      return null;
+    },
+    contains(target) { return target === this || descendants(this).includes(target); },
+    getBoundingClientRect() { return { left: 0, top: 0, right: 100, bottom: 32, width: 100, height: 32 }; },
+  });
+  Object.defineProperty(element, "className", {
+    get() { return [...classNames].join(" "); },
+    set(value) { classNames = new Set(String(value || "").split(/\s+/).filter(Boolean)); },
+  });
+  Object.defineProperty(element, "isConnected", { get() { return document.documentElement.contains(this); } });
+  return element;
+}
+const documentListeners = new Map();
+const documentListenerSet = (type) => documentListeners.get(type) || (documentListeners.set(type, new Set()), documentListeners.get(type));
+globalThis.document = {
+  readyState: "complete",
+  scripts: [],
+  visibilityState: "visible",
+  documentElement: node("html"),
+  body: node("body"),
+  activeElement: null,
+  createElement(tagName) { return node(tagName); },
+  createTextNode(text) { const textNode = node("span"); textNode.nodeType = 3; textNode.textContent = String(text); return textNode; },
+  querySelector(selector) { return this.documentElement.querySelector(selector); },
+  querySelectorAll(selector) { return this.documentElement.querySelectorAll(selector); },
+  addEventListener(type, listener) { documentListenerSet(type).add(listener); },
+  removeEventListener(type, listener) { documentListenerSet(type).delete(listener); },
+  dispatchEvent(event) {
+    event.target ||= this;
+    event.preventDefault ||= function() { this.defaultPrevented = true; };
+    for (const listener of [...documentListenerSet(event.type)]) listener.call(this, event);
+    return !event.defaultPrevented;
+  },
+};
+document.documentElement.appendChild(document.body);
+globalThis.MutationObserver = class MutationObserver { observe() {} disconnect() {} };
+globalThis.ResizeObserver = class ResizeObserver { observe() {} disconnect() {} };
+globalThis.requestAnimationFrame = (callback) => { callback(); return 1; };
+globalThis.cancelAnimationFrame = () => {};
+window.addEventListener = () => {};
+window.removeEventListener = () => {};
+window.dispatchEvent = () => true;
+globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible", pointerEvents: "auto" });
+const storage = new Map();
+const storageWrites = [];
+globalThis.sessionStorage = {
+  getItem(key) { return storage.has(key) ? storage.get(key) : null; },
+  setItem(key, value) { storage.set(key, String(value)); storageWrites.push(String(value)); },
+  removeItem(key) { storage.delete(key); },
+  clear() { storage.clear(); },
+};
+globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+globalThis.location = { href: "https://codex.test/local/thread", pathname: "/local/thread", search: "", hash: "", protocol: "https:" };
+globalThis.navigator = { userAgent: "node-test" };
+globalThis.performance = { getEntriesByType: () => [] };
+globalThis.CustomEvent = class CustomEvent extends Event { constructor(type, options = {}) { super(type, options); this.detail = options.detail; } };
+let now = 1000;
+const waits = [];
+window.__codexElvesTaskBoardNativeClock = {
+  now: () => now,
+  wait: (delay) => { waits.push(delay); now += delay; },
+};
+const capturedLogs = [];
+globalThis.console = {
+  log(...args) { capturedLogs.push(args.join(" ")); },
+  warn(...args) { capturedLogs.push(args.join(" ")); },
+  error(...args) { capturedLogs.push(args.join(" ")); },
+};
+window.__CODEX_ELVES_TEST_TASK_BOARD__ = true;
+window.__codexSessionDeleteBridge = async (path) => path === "/settings/get"
+  ? { launchMode: "direct", enhancementsEnabled: true, providerSyncEnabled: true }
+  : { status: "ok", ids: [] };
+
+let nativeStartClicks = 0;
+let menuClicks = 0;
+let selectClicks = 0;
+let submitEvents = 0;
+let setTextCalls = 0;
+let permanentOnSubmit = true;
+const projectRow = node("div");
+projectRow.setAttribute("data-app-action-sidebar-project-row", "true");
+projectRow.setAttribute("data-app-action-sidebar-project-id", "c:\\repo-a\\");
+const projectMenu = node("button");
+projectMenu.setAttribute("aria-haspopup", "menu");
+projectMenu.addEventListener("click", () => { menuClicks += 1; });
+const nativeStartButton = node("button");
+nativeStartButton.addEventListener("click", () => { nativeStartClicks += 1; });
+const projectSelectButton = node("button");
+projectSelectButton.setAttribute("data-app-action-sidebar-select-project", "true");
+projectSelectButton.addEventListener("click", () => { selectClicks += 1; });
+projectRow.append(projectMenu, nativeStartButton, projectSelectButton);
+const composer = node("div");
+composer.setAttribute("data-codex-composer", "true");
+composer.setAttribute("contenteditable", "true");
+composer.setAttribute("role", "textbox");
+const conversationSignal = node("div");
+conversationSignal.setAttribute("data-above-composer-conversation-id", "local:client-new-thread:temporary");
+const controller = {
+  text: "",
+  focus() {},
+  setText(value) { setTextCalls += 1; this.text = String(value); },
+  getText() { return this.text; },
+  getPersistedText() { return this.text; },
+  view: { dispatchEvent() { return true; } },
+};
+const composerOwner = node("div");
+composerOwner.__reactFiber$test = { memoizedProps: { composerController: controller }, return: null };
+composerOwner.appendChild(composer);
+composer.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  submitEvents += 1;
+  if (permanentOnSubmit) conversationSignal.setAttribute("data-above-composer-conversation-id", "session-permanent-1");
+});
+document.body.append(projectRow, composerOwner, conversationSignal);
+
+require(scriptPath);
+const api = window.__codexElvesTaskBoardTest;
+if (!api) throw new Error("task board test api unavailable");
+const instruction = "do not persist this native first instruction";
+function snapshot(revision, title = "任务") {
+  return {
+    status: "ok",
+    schemaVersion: 1,
+    revision,
+    tasks: [{ id: `task-${revision}`, title, project: { cwd: "c:/repo-a", label: "项目 A" }, status: "new", order: 0, conversations: [] }],
+  };
+}
+function catalog() {
+  return {
+    status: "ok",
+    projects: [{ cwd: "c:/repo-a", label: "项目 A" }],
+    sessions: [{ sessionId: "existing-1", title: "已有会话", cwd: "c:/repo-a", updatedAtMs: 1 }],
+    warnings: [],
+  };
+}
+function reset(options = {}) {
+  window.__codexElvesTaskBoardMock = options.mock || {};
+  window.__codexElvesTaskBoardNativeAdapter = options.nativeAdapter || null;
+  api.resetCreateStateForTest({ snapshot: options.snapshot || snapshot(3), catalog: catalog() });
+  api.openCreateModalForTest();
+}
+function setNew(title = "原生任务") {
+  api.setCreateDraftForTest({ mode: "new", title, projectCwd: "c:/repo-a", firstInstruction: instruction, sessionIds: [] });
+}
+function setExisting(title = "已有任务") {
+  api.setCreateDraftForTest({ mode: "existing", title, projectCwd: "c:/repo-a", sessionIds: ["existing-1"] });
+}
+function clearRecovery() {
+  storage.clear();
+  storageWrites.length = 0;
+}
+function recoveryKey() { return "codexElvesTaskBoardNativeCreateRecoveryV1"; }
+(async () => {
+  clearRecovery();
+  nativeStartButton.disabled = false;
+  permanentOnSubmit = true;
+  now = 1000;
+  waits.length = 0;
+  const supportedPayloads = [];
+  reset({ mock: { request(route, payload) {
+    if (route !== "/task-board/task-create") throw new Error("unexpected route");
+    supportedPayloads.push(payload);
+    return snapshot(4, "原生创建成功");
+  }}});
+  setNew();
+  await api.submitCreateForTest();
+  const supported = {
+    structuralButtonOnly: nativeStartClicks === 1 && menuClicks === 0 && selectClicks === 0,
+    controllerAndNativeSubmit: setTextCalls === 1 && submitEvents === 1,
+    temporaryIdIgnored: supportedPayloads[0]?.sessionIds?.[0] === "session-permanent-1",
+    createAfterPermanentId: supportedPayloads.length === 1 && supportedPayloads[0]?.taskId && supportedPayloads[0]?.expectedRevision === 3,
+  };
+
+  clearRecovery();
+  nativeStartButton.disabled = true;
+  let unsupportedCreateCalls = 0;
+  reset({ mock: { request(route) {
+    if (route === "/task-board/task-create") unsupportedCreateCalls += 1;
+    return snapshot(4);
+  }}});
+  api.setCreateProjectForTest("c:/repo-a");
+  await Promise.resolve();
+  const newDisabled = api.createModalContractForTest().newButton.disabled;
+  setNew("不支持的新会话");
+  await api.submitCreateForTest();
+  const unsupportedStaysOpen = api.createModalStateForTest().open && unsupportedCreateCalls === 0;
+  reset({ mock: { request(route) {
+    if (route === "/task-board/task-create") { unsupportedCreateCalls += 1; return snapshot(4); }
+    throw new Error("unexpected route");
+  }}});
+  setExisting();
+  await api.submitCreateForTest();
+  const unsupported = { newDisabledExistingWorks: newDisabled && unsupportedStaysOpen && unsupportedCreateCalls === 1 };
+
+  nativeStartButton.disabled = false;
+  permanentOnSubmit = false;
+  conversationSignal.setAttribute("data-above-composer-conversation-id", "local:client-new-thread:temporary");
+  now = 0;
+  waits.length = 0;
+  const timeoutResult = await api.nativeStartForTest({ cwd: "c:/repo-a", label: "项目 A" }, instruction);
+  const timeout = {
+    boundedAt15Seconds: timeoutResult.code === "native_create_timeout" && waits.reduce((sum, delay) => sum + delay, 0) === 15000,
+  };
+  permanentOnSubmit = true;
+
+  clearRecovery();
+  now = 0;
+  waits.length = 0;
+  let sessionNotFoundCalls = 0;
+  reset({
+    nativeAdapter: {
+      probe: () => ({ status: "ok", canStart: true, canOpen: false }),
+      startConversation: () => ({ status: "ok", sessionId: "session-retry-1" }),
+    },
+    mock: { request(route) {
+      if (route !== "/task-board/task-create") throw new Error("unexpected route");
+      sessionNotFoundCalls += 1;
+      if (sessionNotFoundCalls <= 5) return { status: "failed", code: "session_not_found", message: "missing" };
+      return snapshot(4);
+    }},
+  });
+  setNew("会话重试");
+  await api.submitCreateForTest();
+  const sessionNotFoundWithin10Seconds = sessionNotFoundCalls === 6 && waits.reduce((sum, delay) => sum + delay, 0) === 10000;
+
+  clearRecovery();
+  const revisionPayloads = [];
+  let revisionCalls = 0;
+  reset({
+    nativeAdapter: {
+      probe: () => ({ status: "ok", canStart: true, canOpen: false }),
+      startConversation: () => ({ status: "ok", sessionId: "session-revision-1" }),
+    },
+    mock: { request(route, payload) {
+      if (route !== "/task-board/task-create") throw new Error("unexpected route");
+      revisionPayloads.push(payload);
+      revisionCalls += 1;
+      if (revisionCalls === 1) return { status: "conflict", code: "revision_conflict", schemaVersion: 1, revision: 4, tasks: [] };
+      return snapshot(5);
+    }},
+  });
+  setNew("修订重试");
+  await api.submitCreateForTest();
+  const retry = {
+    sessionNotFoundWithin10Seconds,
+    revisionRetriesOnceWithSameTaskId:
+      revisionPayloads.length === 2 &&
+      revisionPayloads[0]?.taskId === revisionPayloads[1]?.taskId &&
+      JSON.stringify(revisionPayloads.map((payload) => payload.expectedRevision)) === JSON.stringify([3, 4]),
+  };
+
+  clearRecovery();
+  reset({
+    nativeAdapter: {
+      probe: () => ({ status: "ok", canStart: true, canOpen: false }),
+      startConversation: () => ({ status: "ok", sessionId: "session-recover-1" }),
+    },
+    mock: { request() { throw new Error("bridge lost"); } },
+  });
+  setNew("恢复任务");
+  await api.submitCreateForTest();
+  const persisted = api.nativeRecoveryForTest();
+  const persistedString = storage.get(recoveryKey()) || "";
+  const bridgeFailurePersistsAllowedFields =
+    persisted?.taskId && persisted?.title === "恢复任务" && persisted?.project?.cwd === "c:/repo-a" &&
+    persisted?.sessionId === "session-recover-1" && persisted?.createdAtMs > 0 &&
+    persisted?.initialStatus === "new" &&
+    JSON.stringify(Object.keys(persisted).sort()) === JSON.stringify(["createdAtMs", "initialStatus", "project", "sessionId", "taskId", "title"]);
+  let recoveryCalls = 0;
+  window.__codexElvesTaskBoardMock = { request(route, payload) {
+    if (route !== "/task-board/task-create") throw new Error("unexpected route");
+    recoveryCalls += 1;
+    return snapshot(5);
+  }};
+  await api.retryNativeCreateRecoveryForTest();
+  const nextActivationRetriesOnceAndClears = recoveryCalls === 1 && !storage.has(recoveryKey());
+
+  const retryFailureRecord = {
+    taskId: "11111111-1111-4111-8111-111111111112",
+    title: "恢复仍失败",
+    project: { cwd: "c:/repo-a", label: "项目 A" },
+    sessionId: "session-retry-failed",
+    createdAtMs: now,
+  };
+  storage.set(recoveryKey(), JSON.stringify(retryFailureRecord));
+  api.resetCreateStateForTest({ snapshot: snapshot(5), catalog: catalog() });
+  window.__codexElvesTaskBoardMock = {
+    request() { return { status: "failed", code: "task_board_unavailable", message: "down" }; },
+  };
+  await api.retryNativeCreateRecoveryForTest();
+  const retryFailureToast = document.body.querySelector(".codex-delete-toast")?.textContent || "";
+  const retryFailureKeepsRecordAndWarns =
+    storage.has(recoveryKey()) && retryFailureToast.includes("会话已创建，但任务尚未保存");
+
+  const expired = {
+    taskId: "11111111-1111-4111-8111-111111111111",
+    title: "过期恢复",
+    project: { cwd: "c:/repo-a", label: "项目 A" },
+    sessionId: "session-expired",
+    createdAtMs: now - 24 * 60 * 60 * 1000 - 1,
+  };
+  storage.set(recoveryKey(), JSON.stringify(expired));
+  const expiredRecordDiscarded = api.nativeRecoveryForTest() === null && !storage.has(recoveryKey());
+  storage.set(recoveryKey(), "{");
+  const malformedRecordDiscarded = api.nativeRecoveryForTest() === null && !storage.has(recoveryKey());
+
+  clearRecovery();
+  reset({
+    nativeAdapter: {
+      probe: () => ({ status: "ok", canStart: true, canOpen: false }),
+      startConversation: () => ({ status: "ok", sessionId: "session-runtime-1" }),
+    },
+    mock: { request(route) {
+      if (route !== "/task-board/task-create") throw new Error("unexpected route");
+      api.refreshRuntimeForTest();
+      return snapshot(9);
+    }},
+  });
+  setNew("替换恢复");
+  await api.submitCreateForTest();
+  const replacementRecord = api.nativeRecoveryForTest();
+  const runtimeReplacement = {
+    boundedAndRecoverable:
+      replacementRecord?.sessionId === "session-runtime-1" && api.createSnapshotForTest().revision === 3,
+  };
+
+  const privacy = {
+    payloadStorageAndOutputExcludeInstruction:
+      !JSON.stringify(supportedPayloads).includes(instruction) &&
+      !persistedString.includes(instruction) &&
+      !storageWrites.join("\n").includes(instruction) &&
+      !capturedLogs.join("\n").includes(instruction),
+  };
+  process.stdout.write(JSON.stringify({ supported, unsupported, timeout, retry, recovery: {
+    bridgeFailurePersistsAllowedFields,
+    nextActivationRetriesOnceAndClears,
+    retryFailureKeepsRecordAndWarns,
+    expiredRecordDiscarded,
+    malformedRecordDiscarded,
+  }, runtimeReplacement, privacy }));
+  process.exit(0);
+})().catch((error) => { process.stderr.write(String(error?.stack || error)); process.exit(1); });
+"##,
+    )
+    .expect("task board native create harness should be written");
+    let output = Command::new("node")
+        .arg(&harness_path)
+        .arg(&script_path)
+        .output()
+        .expect("node should run task board native create harness");
+    assert!(
+        output.status.success(),
+        "node task board native create harness failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("native create harness stdout should be JSON")
+}
+
+fn run_task_board_create_contract_harness() -> serde_json::Value {
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+    let script_path = temp.path().join("renderer-inject.js");
+    let harness_path = temp.path().join("task-board-create-harness.cjs");
+    std::fs::write(&script_path, assets::injection_script(45221))
+        .expect("injection script should be written");
+    std::fs::write(
+        &harness_path,
+        r#"
+const scriptPath = process.argv[2];
+function node(tagName = "div") {
+  const attributes = new Map();
+  const listeners = new Map();
+  const listenerSet = (type) => {
+    let entries = listeners.get(type);
+    if (!entries) {
+      entries = new Set();
+      listeners.set(type, entries);
+    }
+    return entries;
+  };
+  const descendants = (root) => root.children.flatMap((child) => [child, ...descendants(child)]);
+  const matches = (candidate, selector) => {
+    if (selector.includes("button") && candidate.tagName === "BUTTON") return !candidate.disabled;
+    if (selector.includes("input") && candidate.tagName === "INPUT") return !candidate.disabled;
+    if (selector.includes("select") && candidate.tagName === "SELECT") return !candidate.disabled;
+    const attribute = selector.match(/^\[([^=]+)="([^"]+)"\]$/);
+    return !!attribute && candidate.getAttribute(attribute[1]) === attribute[2];
+  };
+  return {
+    tagName: String(tagName).toUpperCase(),
+    children: [],
+    dataset: {},
+    style: { setProperty() {}, removeProperty() {} },
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    appendChild(child) {
+      child.parentElement?.remove?.();
+      this.children.push(child);
+      child.parentElement = this;
+      child.isConnected = true;
+      return child;
+    },
+    append(...children) { children.forEach((child) => this.appendChild(child)); },
+    prepend(...children) {
+      children.slice().reverse().forEach((child) => {
+        child.parentElement?.remove?.();
+        this.children.unshift(child);
+        child.parentElement = this;
+        child.isConnected = true;
+      });
+    },
+    remove() {
+      this.removed = true;
+      if (this.parentElement) {
+        const index = this.parentElement.children.indexOf(this);
+        if (index >= 0) this.parentElement.children.splice(index, 1);
+      }
+      this.parentElement = null;
+      this.isConnected = false;
+    },
+    replaceChildren(...children) {
+      this.children.slice().forEach((child) => child.remove());
+      this.append(...children);
+    },
+    setAttribute(name, value) { attributes.set(String(name), String(value)); },
+    getAttribute(name) { return attributes.get(String(name)) ?? null; },
+    removeAttribute(name) { attributes.delete(String(name)); },
+    toggleAttribute(name, force) {
+      if (force === false) attributes.delete(String(name));
+      else attributes.set(String(name), "");
+    },
+    addEventListener(type, listener) { listenerSet(type).add(listener); },
+    removeEventListener(type, listener) { listenerSet(type).delete(listener); },
+    dispatchEvent(event) {
+      event.target ||= this;
+      listenerSet(event.type).forEach((listener) => listener(event));
+      return !event.defaultPrevented;
+    },
+    click() {
+      return this.dispatchEvent({
+        type: "click",
+        target: this,
+        defaultPrevented: false,
+        preventDefault() { this.defaultPrevented = true; },
+      });
+    },
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
+    querySelectorAll(selector) {
+      return descendants(this).filter((candidate) => matches(candidate, selector));
+    },
+    closest() { return null; },
+    matches(selector) { return matches(this, selector); },
+    contains(target) {
+      return this === target || this.children.some((child) => child.contains?.(target));
+    },
+    insertAdjacentElement() {},
+    focus() { document.activeElement = this; },
+    parentElement: null,
+    isConnected: true,
+    removed: false,
+    disabled: false,
+    value: "",
+    checked: false,
+    textContent: "",
+    innerHTML: "",
+    clientWidth: 0,
+    clientHeight: 0,
+  };
+}
+globalThis.window = globalThis;
+globalThis.Element = class Element {};
+globalThis.HTMLElement = class HTMLElement extends Element {};
+globalThis.HTMLButtonElement = class HTMLButtonElement extends HTMLElement {};
+globalThis.MutationObserver = class MutationObserver {
+  observe() {}
+  disconnect() {}
+};
+globalThis.ResizeObserver = class ResizeObserver {
+  observe() {}
+  disconnect() {}
+};
+globalThis.requestAnimationFrame = (callback) => { callback(); return 1; };
+globalThis.cancelAnimationFrame = () => {};
+window.addEventListener = () => {};
+window.removeEventListener = () => {};
+window.dispatchEvent = () => true;
+const documentListeners = new Map();
+function documentListenerSet(type) {
+  let listeners = documentListeners.get(type);
+  if (!listeners) {
+    listeners = new Set();
+    documentListeners.set(type, listeners);
+  }
+  return listeners;
+}
+const mainSurface = node("main");
+mainSurface.setAttribute("data-app-shell-main-surface", "true");
+globalThis.document = {
+  readyState: "complete",
+  scripts: [],
+  visibilityState: "visible",
+  documentElement: node("html"),
+  body: node("body"),
+  activeElement: null,
+  createElement: (tagName) => node(tagName),
+  createTextNode: (text) => ({ textContent: String(text), remove() {} }),
+  getElementById: () => null,
+  querySelector(selector) {
+    if (selector === "main[data-app-shell-main-surface]" || selector === "main" || selector === "[role='main']") return mainSurface;
+    return null;
+  },
+  querySelectorAll: () => [],
+  addEventListener(type, listener) { documentListenerSet(type).add(listener); },
+  removeEventListener(type, listener) { documentListenerSet(type).delete(listener); },
+  listenerCount(type) { return documentListeners.get(type)?.size || 0; },
+  dispatchEvent(event) {
+    event.target ||= this;
+    event.preventDefault ||= () => { event.defaultPrevented = true; };
+    documentListenerSet(event.type).forEach((listener) => listener(event));
+    return !event.defaultPrevented;
+  },
+};
+document.body.appendChild(mainSurface);
+globalThis.getComputedStyle = () => ({
+  display: "block",
+  visibility: "visible",
+  pointerEvents: "auto",
+});
+globalThis.localStorage = {
+  getItem: () => null,
+  setItem() {},
+  removeItem() {},
+};
+globalThis.location = {
+  href: "https://codex.test/local/thread-12345678",
+  pathname: "/local/thread-12345678",
+  search: "",
+  hash: "",
+  protocol: "https:",
+};
+globalThis.navigator = { userAgent: "node-test" };
+globalThis.performance = { getEntriesByType: () => [] };
+globalThis.CustomEvent = class CustomEvent {
+  constructor(type, options = {}) {
+    this.type = type;
+    this.detail = options.detail;
+  }
+};
+globalThis.Event = class Event {
+  constructor(type) {
+    this.type = type;
+  }
+};
+window.__CODEX_ELVES_TEST_TASK_BOARD__ = true;
+window.__codexSessionDeleteBridge = async (path) => {
+  if (path === "/settings/get") {
+    return { launchMode: "direct", enhancementsEnabled: true, providerSyncEnabled: true };
+  }
+  if (path === "/session/suppressed") return { ids: [] };
+  return { status: "ok" };
+};
+require(scriptPath);
+const api = window.__codexElvesTaskBoardTest;
+if (!api) throw new Error("task board test api unavailable");
+function snapshot(revision, title = "已有任务") {
+  return {
+    status: "ok",
+    schemaVersion: 1,
+    revision,
+    tasks: [{
+      id: `task-${revision}`,
+      title,
+      project: { cwd: "/repo-a", label: "项目 A" },
+      status: "new",
+      order: 0,
+      conversations: [],
+    }],
+  };
+}
+function catalog() {
+  return {
+    status: "ok",
+    projects: [
+      { cwd: "/repo-a", label: "项目 A" },
+      { cwd: "/repo-b", label: "项目 B" },
+    ],
+    sessions: [
+      { sessionId: "session-a1", title: "A 一号", cwd: "/repo-a", updatedAtMs: 3 },
+      { sessionId: "session-a2", title: "A 二号", cwd: "/repo-a", updatedAtMs: 2 },
+      { sessionId: "session-b1", title: "B 一号", cwd: "/repo-b", updatedAtMs: 1 },
+    ],
+    warnings: [],
+  };
+}
+function reset(options = {}) {
+  window.__codexElvesTaskBoardMock = options.mock || {};
+  window.__codexElvesTaskBoardNativeAdapter = options.nativeAdapter || null;
+  api.resetCreateStateForTest({
+    snapshot: options.snapshot || snapshot(3),
+    catalog: options.catalog || catalog(),
+    catalogError: options.catalogError || "",
+  });
+  api.openCreateModalForTest();
+}
+function setExisting(title = "创建成功") {
+  api.setCreateDraftForTest({
+    mode: "existing",
+    title,
+    projectCwd: "/repo-a",
+    sessionIds: ["session-a1", "session-a2"],
+  });
+}
+function createState() {
+  return api.createModalStateForTest();
+}
+(async () => {
+  const priorFocus = document.createElement("button");
+  document.body.appendChild(priorFocus);
+  priorFocus.focus();
+  reset();
+  const modalBeforeRefresh = api.createModalContractForTest();
+  api.focusCreateModalControlForTest("submitButton");
+  api.dispatchCreateModalKeyForTest("Tab");
+  const tabForwardWraps = document.activeElement === modalBeforeRefresh.closeButton;
+  api.focusCreateModalControlForTest("closeButton");
+  const backwardPrevented = api.dispatchCreateModalKeyForTest("Tab", true);
+  const tabBackwardActive = api.activeCreateModalControlForTest();
+  const tabBackwardWraps = tabBackwardActive === "submitButton";
+  const tabFocusableControls = api.createModalFocusableControlsForTest();
+  setExisting("保留草稿");
+  api.reconcileRuntimeForTest();
+  const routineReconcilePreservesDraft = createState().open && createState().title === "保留草稿";
+  api.setCreateBusyForTest(true);
+  api.dispatchCreateModalKeyForTest("Escape");
+  api.clickCreateModalControlForTest("closeButton");
+  api.clickCreateModalControlForTest("cancelButton");
+  api.clickCreateModalControlForTest("backdrop");
+  const busyControlsStayOpen = createState().open;
+  api.refreshRuntimeForTest();
+  const modal = {
+    role: modalBeforeRefresh.role,
+    ariaModal: modalBeforeRefresh.ariaModal,
+    initialFocus: modalBeforeRefresh.initialFocus,
+    bodyMounted: modalBeforeRefresh.bodyMounted,
+    outsideMain: modalBeforeRefresh.outsideMain,
+    tabForwardWraps,
+    tabBackwardWraps,
+    tabBackwardActive,
+    tabFocusableControls,
+    busyControlsStayOpen,
+    routineReconcilePreservesDraft,
+    keydownListenersBeforeRefresh: modalBeforeRefresh.keydownListeners,
+    removedAfterRefresh: modalBeforeRefresh.node.removed === true,
+    keydownListenersAfterRefresh: document.listenerCount("keydown"),
+    focusRestored: document.activeElement === priorFocus,
+    busyAfterRefresh: createState().busy,
+  };
+
+  reset();
+  const dropdownContract = api.createModalContractForTest();
+  api.openCreateDropdownForTest("project");
+  const projectDropdownOpen = api.dropdownMenuStateForTest();
+  api.dispatchDropdownMenuKeyForTest("Escape");
+  const projectEscapeReturnsFocus = document.activeElement === dropdownContract.projectSelect;
+  const projectExpandedAfterEscape = dropdownContract.projectSelect.getAttribute("aria-expanded");
+  api.openCreateDropdownForTest("status");
+  const statusDropdownOpen = api.dropdownMenuStateForTest();
+  api.dispatchDropdownMenuKeyForTest("ArrowDown");
+  const statusDropdownDown = api.dropdownMenuStateForTest();
+  api.dispatchDropdownMenuKeyForTest("Enter");
+  const statusAfterEnter = createState().initialStatus;
+  const dropdownOpenAfterEnter = api.dropdownMenuStateForTest().open;
+  const dropdowns = {
+    projectEscapeReturnsFocus,
+    projectExpandedAfterEscape,
+    statusFocusedAfterDown: statusDropdownDown.focusedIndex,
+    statusAfterEnter,
+    dropdownOpenAfterEnter,
+    sharedListbox:
+      projectDropdownOpen.kind === "create-project" &&
+      projectDropdownOpen.role === "listbox" &&
+      projectDropdownOpen.itemCount === 2 &&
+      projectDropdownOpen.selectedIndex === 0 &&
+      projectDropdownOpen.triggerExpanded === "true" &&
+      statusDropdownOpen.kind === "create-status" &&
+      statusDropdownOpen.role === "listbox" &&
+      statusDropdownOpen.itemCount === 5 &&
+      statusDropdownOpen.selectedIndex === 0,
+    keyboardAndFocus:
+      projectEscapeReturnsFocus &&
+      projectExpandedAfterEscape === "false" &&
+      statusDropdownDown.focusedIndex === 1 &&
+      statusAfterEnter === "planning" &&
+      !dropdownOpenAfterEnter,
+  };
+
+  reset();
+  api.setCreateProjectForTest("/repo-a");
+  const matching = createState().availableSessionIds;
+  api.setCreateSessionsForTest(["session-a1", "session-a2"]);
+  api.setCreateProjectForTest("/repo-b");
+  const afterProjectChange = createState();
+  const projectSelection = {
+    onlyMatchingSessions: JSON.stringify(matching) === JSON.stringify(["session-a1", "session-a2"]),
+    clearedAfterProjectChange: afterProjectChange.selectedSessionIds.length === 0,
+  };
+  reset({
+    snapshot: { status: "ok", schemaVersion: 1, revision: 3, tasks: [] },
+  });
+  api.setCreateDraftForTest({ mode: "existing", title: "目录更新", projectCwd: "/repo-a", sessionIds: ["session-a1"] });
+  api.applyCatalogForTest({
+    status: "ok",
+    projects: [{ cwd: "/repo-b", label: "项目 B" }],
+    sessions: [{ sessionId: "session-b1", title: "B 一号", cwd: "/repo-b", updatedAtMs: 1 }],
+    warnings: [],
+  });
+  const catalogOutcomeState = createState();
+  projectSelection.catalogOutcomeReconcilesAndRenders =
+    catalogOutcomeState.selectedSessionIds.length === 0 &&
+    JSON.stringify(catalogOutcomeState.availableSessionIds) === JSON.stringify([]) &&
+    JSON.stringify(catalogOutcomeState.projectOptionCwds) === JSON.stringify(["/repo-b"]);
+
+  reset();
+  api.setCreateDraftForTest({ mode: "existing", title: "   ", projectCwd: "/repo-a", sessionIds: ["session-a1"] });
+  await api.submitCreateForTest();
+  const trimmedTitleRejected = createState().feedback.includes("标题");
+  let catalogCreateCalls = 0;
+  reset({
+    snapshot: snapshot(3, "保留任务"),
+    catalogError: "会话目录加载失败",
+    mock: {
+      request(route) {
+        if (route === "/task-board/task-create") catalogCreateCalls += 1;
+        return { status: "failed", code: "bridge_unavailable", message: "bridge unavailable" };
+      },
+    },
+  });
+  setExisting("目录失败");
+  await api.submitCreateForTest();
+  const catalogFailureState = createState();
+  const validation = {
+    trimmedTitleRejected,
+    catalogFailureBlockedExistingOnly: catalogCreateCalls === 0 && catalogFailureState.feedback.includes("目录"),
+    tasksPreservedOnCatalogFailure: api.createSnapshotForTest().tasks[0]?.title === "保留任务",
+  };
+
+  const successPayloads = [];
+  reset({
+    mock: {
+      request(route, payload) {
+        if (route !== "/task-board/task-create") throw new Error(`unexpected route ${route}`);
+        successPayloads.push(payload);
+        return snapshot(4, "创建成功");
+      },
+    },
+  });
+  setExisting("  创建成功  ");
+  await api.submitCreateForTest();
+  const successState = createState();
+  const successPayload = successPayloads[0] || {};
+  const success = {
+    exactPayload:
+      JSON.stringify(Object.keys(successPayload).sort()) === JSON.stringify(["expectedRevision", "project", "sessionIds", "taskId", "title"]) &&
+      typeof successPayload.taskId === "string" &&
+      successPayload.taskId.length > 0 &&
+      successPayload.expectedRevision === 3 &&
+      successPayload.title === "创建成功" &&
+      JSON.stringify(successPayload.project) === JSON.stringify({ cwd: "/repo-a", label: "项目 A" }) &&
+      JSON.stringify(successPayload.sessionIds) === JSON.stringify(["session-a1", "session-a2"]) &&
+      !("sessionTitle" in successPayload) &&
+      !("instruction" in successPayload),
+    closed: !successState.open,
+    busy: successState.busy,
+  };
+
+  const initialStatusRequests = [];
+  reset({
+    snapshot: { status: "ok", schemaVersion: 1, revision: 3, tasks: [] },
+    mock: {
+      request(route, payload) {
+        initialStatusRequests.push({ route, payload });
+        if (route === "/task-board/task-create") {
+          return {
+            status: "ok",
+            schemaVersion: 1,
+            revision: 4,
+            tasks: [{
+              id: payload.taskId,
+              title: payload.title,
+              project: payload.project,
+              status: "new",
+              order: 0,
+              conversations: [],
+            }],
+          };
+        }
+        if (route === "/task-board/task-move") {
+          return {
+            status: "ok",
+            schemaVersion: 1,
+            revision: 5,
+            tasks: [{
+              id: payload.taskId,
+              title: "带初始状态",
+              project: { cwd: "/repo-a", label: "项目 A" },
+              status: payload.toStatus,
+              order: 0,
+              conversations: [],
+            }],
+          };
+        }
+        throw new Error(`unexpected route ${route}`);
+      },
+    },
+  });
+  api.setCreateDraftForTest({
+    mode: "existing",
+    title: "带初始状态",
+    projectCwd: "/repo-a",
+    initialStatus: "planning",
+    sessionIds: ["session-a1"],
+  });
+  await api.submitCreateForTest();
+  const initialStatus = {
+    createThenMove:
+      initialStatusRequests.length === 2 &&
+      initialStatusRequests[0]?.route === "/task-board/task-create" &&
+      initialStatusRequests[1]?.route === "/task-board/task-move",
+    moveUsesCreatedRevision:
+      initialStatusRequests[1]?.payload?.expectedRevision === 4 &&
+      initialStatusRequests[1]?.payload?.toStatus === "planning",
+    finalStatus: api.createSnapshotForTest().tasks[0]?.status,
+  };
+
+  const stableErrors = {};
+  const conflictIds = [];
+  for (const code of [
+    "invalid_input",
+    "project_mismatch",
+    "task_id_conflict",
+    "bridge_unavailable",
+    "task_board_busy",
+    "task_file_invalid",
+    "task_board_unavailable",
+  ]) {
+    reset({
+      mock: {
+        request(route, payload) {
+          if (route !== "/task-board/task-create") throw new Error(`unexpected route ${route}`);
+          if (code === "task_id_conflict") conflictIds.push(payload.taskId);
+          return { status: "failed", code, message: `${code} message` };
+        },
+      },
+    });
+    setExisting(`错误 ${code}`);
+    await api.submitCreateForTest();
+    if (code === "task_id_conflict") await api.submitCreateForTest();
+    const state = createState();
+    stableErrors[code] = {
+      feedback: state.feedback,
+      modalOpen: state.open,
+      busy: state.busy,
+      inputsPreserved:
+        state.title === `错误 ${code}` &&
+        state.projectCwd === "/repo-a" &&
+        JSON.stringify(state.selectedSessionIds) === JSON.stringify(["session-a1", "session-a2"]),
+      nextManualRetryRotatesUuid:
+        code !== "task_id_conflict" || (conflictIds.length === 2 && conflictIds[0] !== conflictIds[1]),
+    };
+  }
+
+  let catalogRefreshes = 0;
+  const refreshedCatalog = catalog();
+  refreshedCatalog.sessions = refreshedCatalog.sessions.filter((session) => session.sessionId !== "session-a1");
+  reset({
+    mock: {
+      request(route) {
+        if (route === "/task-board/task-create") {
+          return { status: "failed", code: "session_not_found", message: "session missing" };
+        }
+        if (route === "/task-board/session-catalog") {
+          catalogRefreshes += 1;
+          return refreshedCatalog;
+        }
+        throw new Error(`unexpected route ${route}`);
+      },
+    },
+  });
+  api.setCreateDraftForTest({ mode: "existing", title: "会话丢失", projectCwd: "/repo-a", sessionIds: ["session-a1"] });
+  await api.submitCreateForTest();
+  const sessionNotFoundState = createState();
+  await api.submitCreateForTest();
+  const sessionNotFoundRetryState = createState();
+  const sessionNotFound = {
+    catalogRefreshed: catalogRefreshes === 1,
+    modalOpen: sessionNotFoundState.open,
+    busy: sessionNotFoundState.busy,
+    staleSelectionCleared: sessionNotFoundState.selectedSessionIds.length === 0,
+    nextSubmitRequiresSelection: sessionNotFoundRetryState.feedback.includes("至少选择"),
+  };
+
+  const retryPayloads = [];
+  let retryCalls = 0;
+  reset({
+    mock: {
+      request(route, payload) {
+        if (route !== "/task-board/task-create") throw new Error(`unexpected route ${route}`);
+        retryPayloads.push(payload);
+        retryCalls += 1;
+        if (retryCalls === 1) {
+          const latest = snapshot(4, "冲突后快照");
+          return { status: "conflict", schemaVersion: latest.schemaVersion, revision: latest.revision, tasks: latest.tasks };
+        }
+        return snapshot(5, "重试成功");
+      },
+    },
+  });
+  setExisting("重试任务");
+  await api.submitCreateForTest();
+  const revisionConflict = {
+    retriedOnce: retryPayloads.length === 2,
+    sameTaskId: retryPayloads[0]?.taskId === retryPayloads[1]?.taskId,
+    expectedRevisions: retryPayloads.map((payload) => payload.expectedRevision),
+    closedAfterRetry: !createState().open,
+  };
+
+  let secondConflictCalls = 0;
+  reset({
+    mock: {
+      request(route) {
+        if (route !== "/task-board/task-create") throw new Error(`unexpected route ${route}`);
+        secondConflictCalls += 1;
+        const latest = snapshot(3 + secondConflictCalls, "仍然冲突");
+        return { status: "conflict", schemaVersion: latest.schemaVersion, revision: latest.revision, tasks: latest.tasks };
+      },
+    },
+  });
+  setExisting("二次冲突");
+  await api.submitCreateForTest();
+  const secondConflictState = createState();
+  revisionConflict.secondConflictStops =
+    secondConflictCalls === 2 && secondConflictState.open && secondConflictState.feedback.includes("修订");
+  revisionConflict.secondConflictBusy = secondConflictState.busy;
+
+  let nativeStartCalls = 0;
+  reset({
+    nativeAdapter: {
+      probe: () => ({ status: "ok", canStart: true, canOpen: false }),
+      startConversation: () => { nativeStartCalls += 1; return { status: "ok", sessionId: "must-not-start" }; },
+    },
+    mock: {
+      request(route) {
+        if (route === "/task-board/task-create") throw new Error("T-010 must not create from native mode");
+        return catalog();
+      },
+    },
+  });
+  api.setCreateDraftForTest({ mode: "new", title: "原生流程未启用", projectCwd: "/repo-a", sessionIds: [] });
+  await api.submitCreateForTest();
+  const nativeState = createState();
+  const nativeMode = {
+    instructionRequiredStaysOpen:
+      nativeState.open && !nativeState.busy && nativeState.feedback.includes("首条指令"),
+    neverStartsConversation: nativeStartCalls === 0,
+  };
+
+  const retryIds = [];
+  let manualCalls = 0;
+  reset({
+    mock: {
+      request(route, payload) {
+        if (route !== "/task-board/task-create") throw new Error(`unexpected route ${route}`);
+        retryIds.push(payload.taskId);
+        manualCalls += 1;
+        if (manualCalls === 1) throw new Error("lost response");
+        return { status: "failed", code: "bridge_unavailable", message: "bridge unavailable" };
+      },
+    },
+  });
+  setExisting("幂等重试");
+  await api.submitCreateForTest();
+  await api.submitCreateForTest();
+  const renamedCatalog = catalog();
+  renamedCatalog.projects[0].label = "项目 A（改名）";
+  api.applyCatalogForTest(renamedCatalog);
+  await api.submitCreateForTest();
+  const taskIdBeforeSemanticChange = retryIds[retryIds.length - 1];
+  api.setCreateDraftForTest({ title: "幂等重试已修改" });
+  await api.submitCreateForTest();
+  const idempotency = {
+    uuidIsValid: /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(retryIds[0] || ""),
+    manualRetryReusesUuid: retryIds.length >= 2 && retryIds[0] === retryIds[1],
+    labelOnlyChangeReusesUuid: retryIds.length >= 3 && retryIds[1] === retryIds[2],
+    semanticChangeRotatesUuid: retryIds.length >= 4 && taskIdBeforeSemanticChange !== retryIds[3],
+  };
+
+  let resolveDeferredCreate;
+  const deferredCreate = new Promise((resolve) => { resolveDeferredCreate = resolve; });
+  reset({
+    mock: {
+      request(route) {
+        if (route !== "/task-board/task-create") throw new Error(`unexpected route ${route}`);
+        return deferredCreate;
+      },
+    },
+  });
+  setExisting("延迟关闭");
+  const pendingCreate = api.submitCreateForTest();
+  api.refreshRuntimeForTest();
+  resolveDeferredCreate(snapshot(4, "不应写入"));
+  await pendingCreate;
+  const lifecycle = {
+    deferredClosePreventsLateWrite: !createState().open && api.createSnapshotForTest().revision === 3,
+  };
+  const wideToolbar = api.toolbarLayoutForTest(996, 785);
+  const narrowToolbar = api.toolbarLayoutForTest(780, 400);
+  const toolbar = {
+    wideInlineAdjacent:
+      wideToolbar.mode === "inline" &&
+      JSON.stringify(wideToolbar.controls) === JSON.stringify(["search", "filter", "create"]),
+    narrowWrapsWith36pxCreate:
+      narrowToolbar.mode === "wrapped" &&
+      narrowToolbar.createMinHeight === 36 &&
+      JSON.stringify(narrowToolbar.controls) === JSON.stringify(["search", "filter", "create"]),
+  };
+
+  process.stdout.write(JSON.stringify({
+    modal,
+    dropdowns,
+    projectSelection,
+    validation,
+    success,
+    initialStatus,
+    stableErrors,
+    sessionNotFound,
+    revisionConflict,
+    nativeMode,
+    idempotency,
+    lifecycle,
+    toolbar,
+  }));
+  process.exit(0);
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+"#,
+    )
+    .expect("task board create harness should be written");
+
+    let output = Command::new("node")
+        .arg(&harness_path)
+        .arg(&script_path)
+        .output()
+        .expect("node should run task board create harness");
+    assert!(
+        output.status.success(),
+        "node task board create harness failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("task board create harness stdout should be JSON")
 }
 
 #[test]
@@ -2141,6 +5030,22 @@ fn manager_ui_exposes_pure_api_relay_mode_button() {
     assert!(source.contains("纯 API"));
     assert!(source.contains("apply_pure_api_injection"));
     assert!(commands.contains("commands::apply_pure_api_injection"));
+}
+
+#[test]
+fn manager_ui_exposes_default_enabled_task_board_page_enhancement() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("core crate should live under crates/codex-elves-core");
+    let source =
+        std::fs::read_to_string(repo.join("apps/codex-elves-manager/src/App.tsx")).unwrap();
+
+    assert!(source.contains("codexAppTaskBoard: boolean"));
+    assert!(source.contains("codexAppTaskBoard: true"));
+    assert!(source.contains("title=\"任务看板\""));
+    assert!(source.contains("checked={form.codexAppTaskBoard}"));
+    assert!(source.contains("setEnhanceFlag(\"codexAppTaskBoard\", value)"));
 }
 
 #[test]
