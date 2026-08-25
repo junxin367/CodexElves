@@ -1,12 +1,11 @@
 use std::collections::HashSet;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
 
 use super::{
     FileTaskBoardStore, TASK_BOARD_MAX_SAFE_INTEGER, TaskBoardAttachConversationsCommand,
-    TaskBoardMutationResult, TaskBoardStoreError, normalize_task_project_cwd,
-    validate_task_board_document,
+    TaskBoardMutationResult, TaskBoardStoreError, is_temporary_session_id,
+    normalize_task_project_cwd, unix_timestamp_ms,
 };
 
 pub(super) fn attach_conversations(
@@ -61,12 +60,6 @@ pub(super) fn attach_conversations(
                 .ok_or_else(|| TaskBoardStoreError::InvalidInput {
                     message: "task board revision cannot be incremented".to_string(),
                 })?;
-        validate_task_board_document(&mut current).map_err(|error| {
-            TaskBoardStoreError::InvalidInput {
-                message: error.to_string(),
-            }
-        })?;
-
         Ok(TaskBoardMutationResult {
             document: current,
             changed: true,
@@ -135,30 +128,4 @@ fn normalize_command(
         expected_revision: command.expected_revision,
         conversations,
     })
-}
-
-fn is_temporary_session_id(session_id: &str) -> bool {
-    session_id.starts_with("new-thread:")
-        || session_id.starts_with("client-new-thread:")
-        || session_id.contains(":new-thread:")
-        || session_id.contains(":client-new-thread:")
-}
-
-fn unix_timestamp_ms() -> Result<u64, TaskBoardStoreError> {
-    let timestamp_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| TaskBoardStoreError::InvalidInput {
-            message: format!("system clock is before Unix epoch: {error}"),
-        })?
-        .as_millis();
-    let timestamp_ms =
-        u64::try_from(timestamp_ms).map_err(|_| TaskBoardStoreError::InvalidInput {
-            message: "system timestamp exceeds the supported range".to_string(),
-        })?;
-    if timestamp_ms > TASK_BOARD_MAX_SAFE_INTEGER {
-        return Err(TaskBoardStoreError::InvalidInput {
-            message: "system timestamp exceeds the JavaScript safe integer range".to_string(),
-        });
-    }
-    Ok(timestamp_ms)
 }

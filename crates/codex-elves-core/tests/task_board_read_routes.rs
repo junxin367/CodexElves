@@ -6,8 +6,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use codex_elves_core::models::{DeleteResult, ExportResult, SessionRef};
 use codex_elves_core::routes::task_board::{
-    TASK_BOARD_ATTACH_CONVERSATIONS_PATH, TASK_BOARD_CREATE_PATH, TASK_BOARD_MOVE_PATH,
-    TASK_BOARD_SESSION_CATALOG_PATH, TASK_BOARD_SNAPSHOT_PATH,
+    TASK_BOARD_ATTACH_CONVERSATIONS_PATH, TASK_BOARD_CREATE_PATH,
+    TASK_BOARD_DETACH_CONVERSATIONS_PATH, TASK_BOARD_MOVE_PATH, TASK_BOARD_SESSION_CATALOG_PATH,
+    TASK_BOARD_SNAPSHOT_PATH,
 };
 use codex_elves_core::routes::{
     BridgeContext, BridgeDataService, CoreRuntimeService, CoreSettingsService,
@@ -78,7 +79,7 @@ fn context(store: Arc<dyn TaskBoardStore>, data: Arc<dyn BridgeDataService>) -> 
 }
 
 #[tokio::test]
-async fn five_task_board_route_constants_dispatch_through_the_existing_bridge_match() {
+async fn six_task_board_route_constants_dispatch_through_the_existing_bridge_match() {
     assert_eq!(TASK_BOARD_SNAPSHOT_PATH, "/task-board/snapshot");
     assert_eq!(
         TASK_BOARD_SESSION_CATALOG_PATH,
@@ -88,6 +89,10 @@ async fn five_task_board_route_constants_dispatch_through_the_existing_bridge_ma
     assert_eq!(
         TASK_BOARD_ATTACH_CONVERSATIONS_PATH,
         "/task-board/task-conversations-attach"
+    );
+    assert_eq!(
+        TASK_BOARD_DETACH_CONVERSATIONS_PATH,
+        "/task-board/task-conversations-detach"
     );
     assert_eq!(TASK_BOARD_MOVE_PATH, "/task-board/task-move");
 
@@ -107,6 +112,7 @@ async fn five_task_board_route_constants_dispatch_through_the_existing_bridge_ma
     for path in [
         TASK_BOARD_CREATE_PATH,
         TASK_BOARD_ATTACH_CONVERSATIONS_PATH,
+        TASK_BOARD_DETACH_CONVERSATIONS_PATH,
         TASK_BOARD_MOVE_PATH,
     ] {
         let response = handle_bridge_request(ctx.clone(), path, json!({})).await;

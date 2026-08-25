@@ -22,8 +22,6 @@ pub enum TaskBoardValidationError {
     DuplicateTaskId { task_id: String },
     #[error("task title must contain between 1 and 120 Unicode characters")]
     InvalidTitle,
-    #[error("task {task_id} must contain at least one conversation")]
-    MissingConversations { task_id: String },
     #[error("task {task_id} contains an empty session id")]
     EmptySessionId { task_id: String },
     #[error("task {task_id} contains a temporary session id")]
@@ -88,11 +86,6 @@ pub fn validate_task_board_document(
         let title_chars = task.title.chars().count();
         if title_chars == 0 || title_chars > MAX_TITLE_CHARS {
             return Err(TaskBoardValidationError::InvalidTitle);
-        }
-        if task.conversations.is_empty() {
-            return Err(TaskBoardValidationError::MissingConversations {
-                task_id: task.id.clone(),
-            });
         }
         if task.created_at_ms > TASK_BOARD_MAX_SAFE_INTEGER
             || task.updated_at_ms > TASK_BOARD_MAX_SAFE_INTEGER
@@ -178,7 +171,7 @@ pub fn task_board_timestamp_from_bridge_i64(
         .transpose()
 }
 
-fn is_temporary_session_id(session_id: &str) -> bool {
+pub(crate) fn is_temporary_session_id(session_id: &str) -> bool {
     session_id.starts_with(TEMPORARY_NEW_THREAD_SEGMENT)
         || session_id.starts_with(TEMPORARY_CLIENT_NEW_THREAD_SEGMENT)
         || session_id.contains(":new-thread:")

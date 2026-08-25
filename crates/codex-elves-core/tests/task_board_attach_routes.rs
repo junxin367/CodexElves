@@ -3,16 +3,18 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use codex_elves_core::models::{DeleteResult, ExportResult, SessionRef};
-use codex_elves_core::routes::task_board::TASK_BOARD_ATTACH_CONVERSATIONS_PATH;
+use codex_elves_core::routes::task_board::{
+    TASK_BOARD_ATTACH_CONVERSATIONS_PATH, TASK_BOARD_DETACH_CONVERSATIONS_PATH,
+};
 use codex_elves_core::routes::{
     BridgeContext, BridgeDataService, CoreRuntimeService, handle_bridge_request,
 };
 use codex_elves_core::status::StatusStore;
 use codex_elves_core::task_board::{
     TaskBoardAttachConversationsCommand, TaskBoardCatalogProject, TaskBoardCatalogSession,
-    TaskBoardConversation, TaskBoardCreateCommand, TaskBoardDocument, TaskBoardMoveCommand,
-    TaskBoardMutationResult, TaskBoardProject, TaskBoardSessionCatalog, TaskBoardStatus,
-    TaskBoardStore, TaskBoardStoreError, TaskBoardTask,
+    TaskBoardConversation, TaskBoardCreateCommand, TaskBoardDetachConversationsCommand,
+    TaskBoardDocument, TaskBoardMoveCommand, TaskBoardMutationResult, TaskBoardProject,
+    TaskBoardSessionCatalog, TaskBoardStatus, TaskBoardStore, TaskBoardStoreError, TaskBoardTask,
 };
 use serde_json::{Value, json};
 
@@ -187,6 +189,77 @@ async fn attach_route_exposes_stable_project_mismatch_and_revision_conflict_code
     assert_eq!(conflict["revision"], 9);
 }
 
+#[tokio::test]
+async fn detach_route_forwards_only_link_identity_without_reading_the_catalog() {
+    let store = Arc::new(FakeStore::success(response_document(8)));
+    let data = Arc::new(CatalogData::success(catalog()));
+
+    let response = handle_bridge_request(
+        context(store.clone(), data.clone()),
+        TASK_BOARD_DETACH_CONVERSATIONS_PATH,
+        json!({
+            "taskId": format!(" {TASK_ID} "),
+            "expectedRevision": 7,
+            "sessionIds": [format!(" {SESSION_A} ")]
+        }),
+    )
+    .await;
+
+    assert_eq!(response["status"], "ok");
+    assert_eq!(response["revision"], 8);
+    assert_eq!(data.calls.load(Ordering::SeqCst), 0);
+    let commands = store.detach_commands.lock().unwrap();
+    assert_eq!(
+        commands.as_slice(),
+        &[TaskBoardDetachConversationsCommand {
+            task_id: TASK_ID.to_string(),
+            expected_revision: 7,
+            session_ids: vec![SESSION_A.to_string()],
+        }]
+    );
+}
+
+#[tokio::test]
+async fn detach_route_rejects_invalid_sets_and_exposes_revision_conflicts() {
+    for session_ids in [
+        json!([]),
+        json!([SESSION_A, SESSION_A.to_ascii_uppercase()]),
+        json!(["local:client-new-thread:temporary"]),
+    ] {
+        let store = Arc::new(FakeStore::success(response_document(8)));
+        let response = handle_bridge_request(
+            context(store.clone(), Arc::new(CatalogData::success(catalog()))),
+            TASK_BOARD_DETACH_CONVERSATIONS_PATH,
+            json!({
+                "taskId": TASK_ID,
+                "expectedRevision": 7,
+                "sessionIds": session_ids
+            }),
+        )
+        .await;
+        assert_eq!(response["status"], "failed");
+        assert_eq!(response["code"], "invalid_input");
+        assert!(store.detach_commands.lock().unwrap().is_empty());
+    }
+
+    let store = Arc::new(FakeStore::error(TaskBoardStoreError::RevisionConflict {
+        current: response_document(9),
+    }));
+    let response = handle_bridge_request(
+        context(store, Arc::new(CatalogData::success(catalog()))),
+        TASK_BOARD_DETACH_CONVERSATIONS_PATH,
+        json!({
+            "taskId": TASK_ID,
+            "expectedRevision": 7,
+            "sessionIds": [SESSION_A]
+        }),
+    )
+    .await;
+    assert_eq!(response["status"], "conflict");
+    assert_eq!(response["code"], "revision_conflict");
+    assert_eq!(response["revision"], 9);
+}
+
 enum StoreOutcome {
     Success(TaskBoardDocument),
     Error(Mutex<Option<TaskBoardStoreError>>),
@@ -195,6 +268,7 @@ enum StoreOutcome {
 struct FakeStore {
     outcome: StoreOutcome,
     commands: Mutex<Vec<TaskBoardAttachConversationsCommand>>,
+    detach_commands: Mutex<Vec<TaskBoardDetachConversationsCommand>>,
 }
 
 impl FakeStore {
@@ -202,6 +276,7 @@ impl FakeStore {
         Self {
             outcome: StoreOutcome::Success(document),
             commands: Mutex::new(Vec::new()),
+            detach_commands: Mutex::new(Vec::new()),
         }
     }
 
@@ -209,6 +284,7 @@ impl FakeStore {
         Self {
             outcome: StoreOutcome::Error(Mutex::new(Some(error))),
             commands: Mutex::new(Vec::new()),
+            detach_commands: Mutex::new(Vec::new()),
         }
     }
 }
@@ -237,6 +313,21 @@ impl TaskBoardStore for FakeStore {
         command: TaskBoardAttachConversationsCommand,
     ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
         self.commands.lock().unwrap().push(command);
+        match &self.outcome {
+            StoreOutcome::Success(document) => Ok(TaskBoardMutationResult {
+                document: document.clone(),
+                changed: true,
+                idempotent: false,
+            }),
+            StoreOutcome::Error(error) => Err(error.lock().unwrap().take().unwrap()),
+        }
+    }
+
+    fn detach_conversations(
+        &self,
+        command: TaskBoardDetachConversationsCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        self.detach_commands.lock().unwrap().push(command);
         match &self.outcome {
             StoreOutcome::Success(document) => Ok(TaskBoardMutationResult {
                 document: document.clone(),

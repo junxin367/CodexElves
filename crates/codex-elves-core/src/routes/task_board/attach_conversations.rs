@@ -7,7 +7,8 @@ use uuid::Uuid;
 
 use crate::task_board::{
     TASK_BOARD_MAX_SAFE_INTEGER, TaskBoardAttachConversationsCommand, TaskBoardCatalogSession,
-    TaskBoardConversation, TaskBoardSessionCatalog, TaskBoardStore, normalize_task_project_cwd,
+    TaskBoardConversation, TaskBoardSessionCatalog, TaskBoardStore, is_temporary_session_id,
+    normalize_task_project_cwd,
 };
 
 use super::{BridgeDataService, failed, snapshot_success, store_error};
@@ -164,11 +165,4 @@ fn authoritative_conversation(
         cwd,
         updated_at_ms: session.updated_at_ms,
     })
-}
-
-fn is_temporary_session_id(session_id: &str) -> bool {
-    session_id.starts_with("new-thread:")
-        || session_id.starts_with("client-new-thread:")
-        || session_id.contains(":new-thread:")
-        || session_id.contains(":client-new-thread:")
 }

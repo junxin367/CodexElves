@@ -1,6 +1,7 @@
 use codex_elves_core::task_board::{
     FileTaskBoardStore, TaskBoardAttachConversationsCommand, TaskBoardConversation,
-    TaskBoardCreateCommand, TaskBoardProject, TaskBoardStore, TaskBoardStoreError,
+    TaskBoardCreateCommand, TaskBoardDetachConversationsCommand, TaskBoardProject, TaskBoardStore,
+    TaskBoardStoreError,
 };
 
 const TASK_ID: &str = "62a0a38e-65bd-4c49-b6ef-3d19d06f2d4e";
@@ -48,6 +49,18 @@ fn attach_command(
         task_id: task_id.to_string(),
         expected_revision,
         conversations,
+    }
+}
+
+fn detach_command(
+    task_id: &str,
+    expected_revision: u64,
+    session_ids: Vec<&str>,
+) -> TaskBoardDetachConversationsCommand {
+    TaskBoardDetachConversationsCommand {
+        task_id: task_id.to_string(),
+        expected_revision,
+        session_ids: session_ids.into_iter().map(str::to_string).collect(),
     }
 }
 
@@ -178,4 +191,98 @@ fn attach_rejects_missing_task_and_invalid_session_sets() {
         )),
         Err(TaskBoardStoreError::InvalidInput { .. })
     ));
+}
+
+#[test]
+fn detach_removes_only_requested_conversations_and_increments_revision_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store_in(&temp);
+    seed_task(&store);
+    store
+        .attach_conversations(attach_command(
+            TASK_ID,
+            1,
+            vec![conversation(SESSION_B, "E:\\code\\codexelves")],
+        ))
+        .unwrap();
+    let before = store.snapshot().unwrap();
+
+    let result = store
+        .detach_conversations(detach_command(TASK_ID, 2, vec![SESSION_A]))
+        .unwrap();
+
+    assert!(result.changed);
+    assert!(!result.idempotent);
+    assert_eq!(result.document.revision, 3);
+    assert_eq!(
+        result.document.tasks[0]
+            .conversations
+            .iter()
+            .map(|conversation| conversation.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![SESSION_B]
+    );
+    assert!(result.document.tasks[0].updated_at_ms >= before.tasks[0].updated_at_ms);
+    assert_eq!(store.snapshot().unwrap(), result.document);
+}
+
+#[test]
+fn detach_retry_is_idempotent_before_revision_check() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store_in(&temp);
+    seed_task(&store);
+    let command = detach_command(TASK_ID, 1, vec![SESSION_A]);
+    let first = store.detach_conversations(command.clone()).unwrap();
+    let original_bytes = std::fs::read(store.document_path()).unwrap();
+
+    let retry = store.detach_conversations(command).unwrap();
+
+    assert!(!retry.changed);
+    assert!(retry.idempotent);
+    assert_eq!(retry.document, first.document);
+    assert_eq!(
+        std::fs::read(store.document_path()).unwrap(),
+        original_bytes
+    );
+}
+
+#[test]
+fn detach_rejects_stale_revision_missing_task_and_invalid_session_sets() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store_in(&temp);
+    seed_task(&store);
+    let original_bytes = std::fs::read(store.document_path()).unwrap();
+
+    assert!(matches!(
+        store.detach_conversations(detach_command(TASK_ID, 0, vec![SESSION_A])),
+        Err(TaskBoardStoreError::RevisionConflict { .. })
+    ));
+    assert!(matches!(
+        store.detach_conversations(detach_command(MISSING_TASK_ID, 1, vec![SESSION_A])),
+        Err(TaskBoardStoreError::TaskNotFound)
+    ));
+    assert!(matches!(
+        store.detach_conversations(detach_command(TASK_ID, 1, Vec::new())),
+        Err(TaskBoardStoreError::InvalidInput { .. })
+    ));
+    assert!(matches!(
+        store.detach_conversations(detach_command(
+            TASK_ID,
+            1,
+            vec![SESSION_A, &SESSION_A.to_ascii_uppercase()],
+        )),
+        Err(TaskBoardStoreError::InvalidInput { .. })
+    ));
+    assert!(matches!(
+        store.detach_conversations(detach_command(
+            TASK_ID,
+            1,
+            vec!["local:client-new-thread:temporary"],
+        )),
+        Err(TaskBoardStoreError::InvalidInput { .. })
+    ));
+    assert_eq!(
+        std::fs::read(store.document_path()).unwrap(),
+        original_bytes
+    );
 }

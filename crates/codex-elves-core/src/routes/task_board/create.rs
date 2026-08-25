@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::task_board::{
     TASK_BOARD_MAX_SAFE_INTEGER, TaskBoardCatalogProject, TaskBoardCatalogSession,
     TaskBoardConversation, TaskBoardCreateCommand, TaskBoardProject, TaskBoardSessionCatalog,
-    TaskBoardStore, normalize_task_project_cwd,
+    TaskBoardStore, is_temporary_session_id, normalize_task_project_cwd,
 };
 
 use super::{BridgeDataService, failed, snapshot_success, store_error};
@@ -230,11 +230,4 @@ fn fallback_project_label(authoritative_cwd: &str) -> String {
         .filter(|component| !component.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| authoritative_cwd.trim().to_string())
-}
-
-fn is_temporary_session_id(session_id: &str) -> bool {
-    session_id.starts_with("new-thread:")
-        || session_id.starts_with("client-new-thread:")
-        || session_id.contains(":new-thread:")
-        || session_id.contains(":client-new-thread:")
 }

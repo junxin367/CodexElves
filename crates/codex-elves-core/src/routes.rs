@@ -160,6 +160,10 @@ pub async fn handle_bridge_request(
             )
             .await)
         }
+        task_board::TASK_BOARD_DETACH_CONVERSATIONS_PATH => Ok(
+            task_board::handle_detach_conversations(ctx.task_board_store.clone(), payload.clone())
+                .await,
+        ),
         task_board::TASK_BOARD_MOVE_PATH => {
             Ok(task_board::handle_move(ctx.task_board_store.clone(), payload.clone()).await)
         }

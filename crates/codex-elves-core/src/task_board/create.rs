@@ -1,10 +1,9 @@
 use super::{
-    FileTaskBoardStore, TASK_BOARD_MAX_SAFE_INTEGER, TASK_BOARD_SCHEMA_VERSION,
-    TaskBoardCreateCommand, TaskBoardDocument, TaskBoardMutationResult, TaskBoardStatus,
-    TaskBoardStoreError, TaskBoardTask, validate_task_board_document,
+    FileTaskBoardStore, TASK_BOARD_SCHEMA_VERSION, TaskBoardCreateCommand, TaskBoardDocument,
+    TaskBoardMutationResult, TaskBoardStatus, TaskBoardStoreError, TaskBoardTask,
+    unix_timestamp_ms, validate_task_board_document,
 };
 use std::collections::HashSet;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) fn create_task(
     store: &FileTaskBoardStore,
@@ -82,6 +81,11 @@ struct NormalizedCreateCommand {
 fn normalize_command(
     command: TaskBoardCreateCommand,
 ) -> Result<NormalizedCreateCommand, TaskBoardStoreError> {
+    if command.conversations.is_empty() {
+        return Err(TaskBoardStoreError::InvalidInput {
+            message: "at least one conversation is required".to_string(),
+        });
+    }
     let expected_revision = command.expected_revision;
     let mut document = TaskBoardDocument {
         schema_version: TASK_BOARD_SCHEMA_VERSION,
@@ -106,23 +110,4 @@ fn normalize_command(
         expected_revision,
         task: document.tasks.remove(0),
     })
-}
-
-fn unix_timestamp_ms() -> Result<u64, TaskBoardStoreError> {
-    let timestamp_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| TaskBoardStoreError::InvalidInput {
-            message: format!("system clock is before Unix epoch: {error}"),
-        })?
-        .as_millis();
-    let timestamp_ms =
-        u64::try_from(timestamp_ms).map_err(|_| TaskBoardStoreError::InvalidInput {
-            message: "system timestamp exceeds the supported range".to_string(),
-        })?;
-    if timestamp_ms > TASK_BOARD_MAX_SAFE_INTEGER {
-        return Err(TaskBoardStoreError::InvalidInput {
-            message: "system timestamp exceeds the JavaScript safe integer range".to_string(),
-        });
-    }
-    Ok(timestamp_ms)
 }

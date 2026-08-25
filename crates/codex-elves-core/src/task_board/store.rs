@@ -1,7 +1,7 @@
 use super::{
-    TaskBoardAttachConversationsCommand, TaskBoardCreateCommand, TaskBoardDocument,
-    TaskBoardMoveCommand, TaskBoardMutationResult, parse_task_board_document,
-    validate_task_board_document,
+    TaskBoardAttachConversationsCommand, TaskBoardCreateCommand,
+    TaskBoardDetachConversationsCommand, TaskBoardDocument, TaskBoardMoveCommand,
+    TaskBoardMutationResult, parse_task_board_document, validate_task_board_document,
 };
 use fs2::FileExt;
 use std::fs::{File, OpenOptions};
@@ -28,6 +28,15 @@ pub trait TaskBoardStore: Send + Sync {
         &self,
         command: TaskBoardAttachConversationsCommand,
     ) -> Result<TaskBoardMutationResult, TaskBoardStoreError>;
+    fn detach_conversations(
+        &self,
+        _command: TaskBoardDetachConversationsCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        Err(TaskBoardStoreError::InvalidInput {
+            message: "detaching conversations is not supported by this task board store"
+                .to_string(),
+        })
+    }
     fn move_task(
         &self,
         command: TaskBoardMoveCommand,
@@ -286,6 +295,13 @@ impl TaskBoardStore for FileTaskBoardStore {
         command: TaskBoardAttachConversationsCommand,
     ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
         super::attach_conversations::attach_conversations(self, command)
+    }
+
+    fn detach_conversations(
+        &self,
+        command: TaskBoardDetachConversationsCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        super::detach_conversations::detach_conversations(self, command)
     }
 
     fn move_task(

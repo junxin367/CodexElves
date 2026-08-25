@@ -197,7 +197,11 @@ fn renderer_task_board_lifecycle_keeps_the_native_main_surface_recoverable() {
     assert!(script.contains("main[data-app-shell-main-surface]"));
     assert!(script.contains("data-codex-task-board-root=\"true\""));
     assert!(script.contains("codex-task-board-main-host"));
-    assert!(script.contains("function destroyTaskBoardRuntime()"));
+    assert!(
+        script.contains("function destroyTaskBoardRuntime({ preserveNativeCreate = false } = {})")
+    );
+    assert!(script.contains("__codexElvesTaskBoardNativeOperationLease"));
+    assert!(script.contains("preserveNativeCreate: !!taskBoardNativeOperationLease()"));
     assert!(script.contains("taskBoard: true"));
     assert!(script.contains("taskBoard: \"codexAppTaskBoard\""));
     assert!(script.contains("data-codex-elves-setting=\"taskBoard\""));
@@ -233,6 +237,15 @@ fn renderer_task_board_view_projects_read_only_bridge_snapshots_responsively() {
     assert!(script.contains("function openTaskBoardDropdownMenu({"));
     assert!(script.contains("function openTaskBoardCreateProjectMenu(trigger)"));
     assert!(script.contains("function openTaskBoardCreateStatusMenu(trigger)"));
+    assert!(script.contains("const taskBoardProjectDropdownWidth = 320;"));
+    assert_eq!(
+        script
+            .matches("fixedWidth: taskBoardProjectDropdownWidth")
+            .count(),
+        2
+    );
+    assert_eq!(script.matches("align: \"start\"").count(), 2);
+    assert!(script.contains("const preferredLeft = align === \"start\""));
     assert!(!script.contains("taskBoardElement(\"select\", \"codex-task-board-create-select\")"));
     assert!(script.contains("codex-task-board-dropdown-trigger"));
     assert!(script.contains("codex-task-board-dropdown-menu"));
@@ -257,7 +270,8 @@ fn renderer_task_board_view_projects_read_only_bridge_snapshots_responsively() {
         2
     );
     assert!(!script.contains("background: #ececec;"));
-    assert!(script.contains("menu.setAttribute(\"role\", \"listbox\")"));
+    assert!(script.contains("menuRole = \"listbox\""));
+    assert!(script.contains("menu.setAttribute(\"role\", menuRole)"));
     assert!(script.contains("grid-template-rows: auto minmax(180px, 1fr)"));
     assert!(script.contains("min-height: 180px"));
     assert!(script.contains("codex-task-board-empty-column"));
@@ -271,10 +285,27 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
     let script = assets::renderer_features_script();
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
+    assert!(
+        script.contains(r#"const codexDeleteStyleVersion = "54";"#),
+        "task-board layout changes should invalidate the installed renderer stylesheet"
+    );
+    assert!(script.contains("--codex-confirm-surface: var("));
+    assert!(script.contains("--color-background-elevated-primary-opaque,"));
+    assert!(script.contains("--color-background-button-secondary-hover,"));
+    assert!(script.contains("--color-background-danger-soft,"));
+    assert!(script.contains("--color-text-danger-soft,"));
+    assert!(script.contains("background: var(--codex-confirm-surface);"));
+    assert!(script.contains("color: var(--codex-confirm-muted);"));
+    assert!(!script.contains("html.dark .codex-delete-confirm-content"));
+    assert!(
+        !script
+            .contains("html:not(.light):not([data-theme=\"light\"]) .codex-delete-confirm-content")
+    );
     assert!(script.contains("taskBoardRuntimeCanRefresh()"));
     assert!(script.contains("window.__codexElvesTaskBoardRuntimeVersion"));
     assert!(script.contains("window.__codexElvesTaskBoardRefreshRuntime"));
     assert!(script.contains("function taskBoardEntryButtons()"));
+    assert!(!script.contains("function taskBoardEntryButton()"));
     assert!(script.contains("function reconcileTaskBoardEntry()"));
     assert!(script.contains("entry.remove()"));
     assert!(script.contains("pluginButton.cloneNode(true)"));
@@ -287,8 +318,18 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
     assert!(script.contains("data-app-action-sidebar-thread-active"));
     assert!(script.contains("queueMicrotask(() =>"));
     assert!(script.contains("restoreNativeSelection: false"));
-    assert!(script.contains("function taskBoardCatalogSessionMap()"));
+    assert!(script.contains("const taskBoardCatalogSessionMapCache = new WeakMap();"));
+    assert!(script.contains("const taskBoardTaskSearchTextCache = new WeakMap();"));
+    assert!(script.contains("const taskBoardLinkedConversationsCache = new WeakMap();"));
+    assert!(!script.contains("function taskBoardCatalogSessionMap()"));
     assert!(script.contains("function taskBoardConversationProjection("));
+    assert!(script.contains("function scheduleTaskBoardCardsRender()"));
+    assert!(script.contains("const linkedEntries = Array.from(linked.entries());"));
+    assert!(script.contains("const taskBoardConversationStatusMaxConcurrency = 4;"));
+    assert!(script.contains("function taskBoardMapSettledWithConcurrency("));
+    assert!(!script.contains("Array.from(linked.keys())[index]"));
+    assert!(script.contains("if (resultsChanged) renderTaskBoardCards();"));
+    assert!(script.contains("const tasksByStatus = new Map("));
     assert!(script.contains("目录部分不可用"));
     assert!(script.contains("function taskBoardApplyReadOutcome("));
     assert!(
@@ -306,6 +347,11 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
     assert!(script.contains("拖动任务卡片可切换状态"));
     assert!(script.contains("min-width: 1580px"));
     assert!(script.contains("codex-task-board-card-footer"));
+    assert!(script.contains("function taskBoardStatusPresentation("));
+    assert!(script.contains(r#"const hint = root.querySelector(".codex-task-board-hint")"#));
+    assert!(script.contains(r#"hint.setAttribute("aria-live", "polite")"#));
+    assert!(!script.contains(r#"taskBoardElement("p", "codex-task-board-state")"#));
+    assert!(!script.contains(r#"root.querySelector(".codex-task-board-state")"#));
 
     let sidebar_relevance = script
         .split("if (domain === \"sidebar\")")
@@ -322,7 +368,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
         .expect("task board runtime refresh should be present");
     assert!(
         runtime_refresh
-            .contains("closeTaskBoardCreateModal();\n    closeTaskBoardConversationPopover();\n    reconcileTaskBoardRuntime();")
+            .contains("closeTaskBoardCreateModal();\n    closeTaskBoardDetachDialog({ restoreFocus: false });\n    closeTaskBoardConversationPopover();\n    reconcileTaskBoardRuntime();")
     );
 }
 
@@ -362,6 +408,7 @@ fn renderer_task_board_exposes_conversation_statuses_and_card_level_attach_flow(
     let script = assets::renderer_features_script();
 
     assert!(script.contains("\"/task-board/task-conversations-attach\""));
+    assert!(script.contains("\"/task-board/task-conversations-detach\""));
     assert!(script.contains("\"/thread-usage-summary\""));
     assert!(script.contains("function taskBoardConversationStatus("));
     assert!(script.contains("function refreshTaskBoardConversationStatuses("));
@@ -369,7 +416,10 @@ fn renderer_task_board_exposes_conversation_statuses_and_card_level_attach_flow(
     assert!(script.contains("data-conversation-status"));
     assert!(script.contains("codex-task-board-conversation-status-indicator"));
     assert!(script.contains("codex-task-board-card-add"));
+    assert!(script.contains("codex-task-board-conversation-remove"));
     assert!(script.contains("function openTaskBoardAttachModal("));
+    assert!(script.contains("function openTaskBoardDetachDialog("));
+    assert!(script.contains("不会删除 Codex 中的原始会话"));
     assert!(script.contains("创建并添加"));
 }
 
@@ -404,6 +454,20 @@ fn renderer_task_board_dynamic_contracts_apply_latest_catalog_and_independent_re
             .unwrap()
     );
     assert!(cases["featureSwitch"]["restoredEnabled"].as_bool().unwrap());
+    assert_eq!(cases["statusSlot"]["normal"]["status"], "ok");
+    assert_eq!(
+        cases["statusSlot"]["normal"]["text"],
+        "拖动任务卡片可切换状态"
+    );
+    assert_eq!(cases["statusSlot"]["loading"]["status"], "loading");
+    assert_eq!(
+        cases["statusSlot"]["loading"]["text"],
+        "正在加载任务与会话目录…"
+    );
+    assert_eq!(cases["statusSlot"]["failed"]["status"], "failed");
+    assert_eq!(cases["statusSlot"]["failed"]["text"], "任务快照加载失败");
+    assert_eq!(cases["statusSlot"]["warning"]["status"], "warning");
+    assert_eq!(cases["statusSlot"]["warning"]["text"], "目录部分不可用");
     assert!(
         cases["entryDiscovery"]["currentSidebarClassIndependent"]
             .as_bool()
@@ -426,6 +490,16 @@ fn renderer_task_board_dynamic_contracts_apply_latest_catalog_and_independent_re
     );
     assert!(
         cases["entryDiscovery"]["ambiguousGlobalRejected"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["entryDiscovery"]["settingsNavigationExcluded"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["entryDiscovery"]["settingsOnlyRejected"]
             .as_bool()
             .unwrap()
     );
@@ -459,6 +533,16 @@ fn renderer_task_board_dynamic_contracts_apply_latest_catalog_and_independent_re
             .as_bool()
             .unwrap()
     );
+    assert!(
+        cases["conversationStatuses"]["boundedConcurrency"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["conversationStatuses"]["idleRefreshSkipped"]
+            .as_bool()
+            .unwrap()
+    );
     assert!(cases["popover"]["openBeforeRefresh"].as_bool().unwrap());
     assert_eq!(cases["popover"]["bodyChildrenBeforeRefresh"], 1);
     assert_eq!(cases["popover"]["dismissListenersBeforeRefresh"], 1);
@@ -483,21 +567,62 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
     assert!(script.contains("create.title = \"新建任务\""));
     assert!(script.contains("role\", \"dialog\""));
     assert!(script.contains("aria-modal\", \"true\""));
+    assert!(script.contains("height: min(650px, calc(100vh - 32px))"));
     assert!(script.contains("width: 650px"));
     assert!(script.contains("max-width: calc(100vw - 32px)"));
+    assert!(script.contains("overflow: hidden;\n        padding: 17px 20px 14px;"));
+    assert!(script.contains("@media (max-height: 620px)"));
     assert!(script.contains("将 Codex 会话组织到跨项目任务看板中"));
     assert!(script.contains("codex-task-board-create-field-row"));
     assert!(script.contains("codex-task-board-create-modal-footer"));
+    assert!(script.contains("codex-task-board-create-mode-content"));
+    assert!(script.contains("codex-task-board-create-instruction-field"));
+    assert!(script.contains("codex-task-board-create-composer"));
+    assert!(script.contains("codex-task-board-create-model-trigger"));
+    assert!(script.contains("codex-task-board-create-settings-menu"));
+    assert!(script.contains("codex-task-board-create-model-menu"));
+    assert!(script.contains("codex-task-board-create-effort-menu"));
+    assert!(script.contains("function openTaskBoardCreateSettingsMenu("));
+    assert!(script.contains("function taskBoardOpenCreateSettingsSubmenu("));
+    assert!(script.contains("推理强度"));
+    assert!(script.contains(r#"{ id: "low", label: "轻度" }"#));
+    assert!(script.contains(
+        r#"const taskBoardDefaultReasoningEffortIds = ["low", "medium", "high", "xhigh", "max"];"#
+    ));
+    assert!(script.contains(r#"placement: "top""#));
+    assert!(script.contains("const opensAbove ="));
+    assert!(script.contains("menuitemradio"));
+    assert!(!script.contains("taskBoardConfigureDropdownTrigger(model"));
+    assert!(script.contains("新会话模型"));
     assert!(script.contains("创建新会话"));
+    assert!(!script.contains("将立即创建新会话、发送这条指令，并追加到当前任务"));
     assert!(script.contains("codex-task-board-empty-column"));
     assert!(script.contains("function taskBoardCreateModalKeydown("));
     assert!(script.contains("event.shiftKey"));
     assert!(script.contains("probe(project)"));
-    assert!(script.contains("startConversation(project, firstInstruction)"));
-    assert!(script.contains("function taskBoardNativeProbe(project)"));
     assert!(
-        script.contains("function taskBoardNativeStartConversation(project, firstInstruction)")
+        script.contains(
+            "startConversation(project, firstInstruction, modelId = \"\", effortId = \"\")"
+        )
     );
+    assert!(script.contains("function taskBoardNativeProbe(project)"));
+    assert!(script.contains("function taskBoardNativeStartConversation("));
+    assert!(script.contains("effortId = \"\","));
+    assert!(script.contains("function taskBoardNativeSelectModel("));
+    assert!(script.contains("function taskBoardNativeSelectReasoningEffort("));
+    assert!(script.contains("modal.effortId,"));
+    assert!(script.contains("actions.append(submitButton, cancelButton)"));
+    assert!(
+        script
+            .contains("backdropPressCompleted = backdropPressStarted && event.target === backdrop")
+    );
+    assert!(script.contains("description: project.cwd"));
+    assert!(script.contains("taskBoardSettingsNavigationLabelPattern"));
+    assert!(script.contains("installTaskBoardNavigationObserver"));
+    assert!(script.contains("classList?.toggle?.(\"bg-primary-ghost-hover\", !!active)"));
+    assert!(!script.contains("任务将保存到本地看板，关联会话限制在同一项目内。"));
+    assert!(!script.contains("仅展示当前目录中属于所选项目的会话；可同时选择多个。"));
+    assert!(!script.contains("创建任务后将立即创建新会话，并发送这条首条指令。"));
     assert!(script.contains("\"native_create_unavailable\""));
     assert!(script.contains("function taskBoardConflictSnapshotResult("));
     assert!(script.contains("function reconcileTaskBoardRuntime()"));
@@ -530,6 +655,8 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
         cases["modal"]["tabFocusableControls"]
     );
     assert!(cases["modal"]["busyControlsStayOpen"].as_bool().unwrap());
+    assert!(cases["modal"]["dragReleaseStaysOpen"].as_bool().unwrap());
+    assert!(cases["modal"]["backdropClickCloses"].as_bool().unwrap());
     assert!(
         cases["modal"]["routineReconcilePreservesDraft"]
             .as_bool()
@@ -543,6 +670,18 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
     assert!(
         cases["dropdowns"]["sharedListbox"].as_bool().unwrap(),
         "dropdown state: {}",
+        cases["dropdowns"]
+    );
+    assert!(
+        cases["dropdowns"]["projectMenusConsistent"]
+            .as_bool()
+            .unwrap(),
+        "project dropdown state: {}",
+        cases["dropdowns"]
+    );
+    assert!(
+        cases["dropdowns"]["nativeSettingsMenu"].as_bool().unwrap(),
+        "settings menu state: {}",
         cases["dropdowns"]
     );
     assert!(
@@ -599,9 +738,38 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
     assert!(
         cases["attach"]["native"]["createsThenAttaches"]
             .as_bool()
-            .unwrap()
+            .unwrap(),
+        "attach native cases: {cases}"
+    );
+    assert!(
+        cases["attach"]["native"]["modelForwarded"]
+            .as_bool()
+            .unwrap(),
+        "attach native model cases: {cases}"
+    );
+    assert!(
+        cases["attach"]["native"]["effortForwarded"]
+            .as_bool()
+            .unwrap(),
+        "attach native effort cases: {cases}"
     );
     assert!(cases["attach"]["native"]["closed"].as_bool().unwrap());
+    assert!(cases["detach"]["confirmation"].as_bool().unwrap());
+    assert!(
+        cases["detach"]["cancelledWithoutRequest"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["detach"]["exactPayloadAndSnapshot"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["detach"]["revisionConflictRetriesOnce"]
+            .as_bool()
+            .unwrap()
+    );
     assert!(cases["initialStatus"]["createThenMove"].as_bool().unwrap());
     assert!(
         cases["initialStatus"]["moveUsesCreatedRevision"]
@@ -772,6 +940,9 @@ fn renderer_task_board_native_create_uses_host_adapter_and_recovers_without_inst
     assert!(script.contains("owner = owner.parentElement"));
     assert!(script.contains("function taskBoardNativePermanentSessionId()"));
     assert!(script.contains("taskBoardNativeCreatePermanentIdTimeoutMs = 15 * 1000"));
+    assert!(script.contains("taskBoardNativeModelSelectionTimeoutMs = 5 * 1000"));
+    assert!(script.contains("function taskBoardNativeSelectModel("));
+    assert!(script.contains("function taskBoardNativeSelectReasoningEffort("));
     assert!(script.contains("taskBoardNativeCreateSessionRetryDelaysMs"));
     assert!(script.contains("taskBoardNativeCreateRecoveryTtlMs = 24 * 60 * 60 * 1000"));
 
@@ -783,6 +954,11 @@ fn renderer_task_board_native_create_uses_host_adapter_and_recovers_without_inst
     );
     assert!(
         cases["supported"]["controllerAndNativeSubmit"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["supported"]["selectedSettingsBeforeSubmit"]
             .as_bool()
             .unwrap()
     );
@@ -834,7 +1010,12 @@ fn renderer_task_board_native_create_uses_host_adapter_and_recovers_without_inst
             .unwrap()
     );
     assert!(
-        cases["runtimeReplacement"]["boundedAndRecoverable"]
+        cases["routineRefresh"]["keepsCreateAlive"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["runtimeReplacement"]["keepsRuntimeAndCreateAlive"]
             .as_bool()
             .unwrap()
     );
@@ -854,7 +1035,7 @@ fn renderer_task_board_move_drag_menu_and_recovery_contracts() {
     assert!(script.contains("function taskBoardMoveTargetIndex("));
     assert!(script.contains("function taskBoardMoveTask("));
     assert!(script.contains("function openTaskBoardStatusMenu("));
-    assert!(script.contains("role\", \"listbox\""));
+    assert!(script.contains("menuRole = \"listbox\""));
     assert!(script.contains("taskBoardMoveTargetIndex(taskId, status.id)"));
 
     assert!(cases["payloads"]["crossColumn"].as_bool().unwrap());
@@ -2928,7 +3109,22 @@ async function tick() {
     oldRuntimeAccepted: api.runtimeCanRefresh("old-runtime", () => {}),
     currentRuntimeAccepted: api.runtimeCanRefresh(api.runtimeVersion(), () => {}),
   };
-  function pluginControl({ text = "", ariaLabel = "", title = "", legacyIcon = false } = {}) {
+  function pluginControl({
+    text = "",
+    ariaLabel = "",
+    title = "",
+    legacyIcon = false,
+    navigationLabel = "",
+    sidebarContent = false,
+  } = {}) {
+    const navigation = {
+      getAttribute(name) {
+        return name === "aria-label" ? navigationLabel || null : null;
+      },
+      querySelector() {
+        return sidebarContent ? {} : null;
+      },
+    };
     return {
       textContent: text,
       getAttribute(name) {
@@ -2937,10 +3133,19 @@ async function tick() {
         return null;
       },
       querySelector() { return legacyIcon ? {} : null; },
+      closest(selector) {
+        return selector.includes("nav") || selector.includes("navigation")
+          ? navigation
+          : null;
+      },
     };
   }
   const originalQuerySelectorAll = document.querySelectorAll;
-  function resolvePluginEntry(navigationControls, globalControls = navigationControls) {
+  function resolvePluginEntry(
+    navigationControls,
+    globalControls = navigationControls,
+    resolve = api.pluginEntryButtonForTest,
+  ) {
     document.querySelectorAll = (selector) => {
       if (selector === 'button, [role="button"], a[href]') return globalControls;
       if (selector.includes("navigation") || selector.includes("nav button")) {
@@ -2948,7 +3153,7 @@ async function tick() {
       }
       return [];
     };
-    return api.pluginEntryButtonForTest();
+    return resolve();
   }
   const unrelatedControl = pluginControl({ text: "拉取请求" });
   const currentSidebarControl = pluginControl({ text: "插件" });
@@ -2956,6 +3161,14 @@ async function tick() {
   const legacyIconControl = pluginControl({ legacyIcon: true });
   const globalFallbackControl = pluginControl({ title: "插件" });
   const duplicateGlobalControl = pluginControl({ text: "Plugins" });
+  const settingsPluginControl = pluginControl({
+    text: "插件",
+    navigationLabel: "设置",
+  });
+  const mainPluginControl = pluginControl({
+    text: "插件",
+    sidebarContent: true,
+  });
   const entryDiscovery = {
     currentSidebarClassIndependent:
       resolvePluginEntry([unrelatedControl, currentSidebarControl]) === currentSidebarControl,
@@ -2967,6 +3180,18 @@ async function tick() {
       resolvePluginEntry([], [unrelatedControl, globalFallbackControl]) === globalFallbackControl,
     ambiguousGlobalRejected:
       resolvePluginEntry([], [globalFallbackControl, duplicateGlobalControl]) === null,
+    settingsNavigationExcluded:
+      resolvePluginEntry(
+        [settingsPluginControl, mainPluginControl],
+        [settingsPluginControl, mainPluginControl],
+        api.taskBoardPluginEntryButtonForTest,
+      ) === mainPluginControl,
+    settingsOnlyRejected:
+      resolvePluginEntry(
+        [settingsPluginControl],
+        [settingsPluginControl],
+        api.taskBoardPluginEntryButtonForTest,
+      ) === null,
   };
   document.querySelectorAll = originalQuerySelectorAll;
   const defaultTaskBoardEnabled = api.taskBoardFeatureEnabledForTest();
@@ -2979,6 +3204,34 @@ async function tick() {
   const disabledByMaster = !api.taskBoardFeatureEnabledForTest();
   api.setBackendSettingsForTest({ enhancementsEnabled: true, codexAppTaskBoard: true });
   const restoredEnabled = api.taskBoardFeatureEnabledForTest();
+  const statusSlot = {
+    normal: api.statusPresentationForTest({
+      loading: false,
+      snapshotError: "",
+      catalogError: "",
+      moveFeedback: "",
+      catalog: { warnings: [] },
+    }),
+    loading: api.statusPresentationForTest({
+      loading: true,
+      snapshotError: "任务快照加载失败",
+      catalog: { warnings: [] },
+    }),
+    failed: api.statusPresentationForTest({
+      loading: false,
+      snapshotError: "任务快照加载失败",
+      catalogError: "",
+      moveFeedback: "",
+      catalog: { warnings: [] },
+    }),
+    warning: api.statusPresentationForTest({
+      loading: false,
+      snapshotError: "",
+      catalogError: "",
+      moveFeedback: "",
+      catalog: { warnings: [{ code: "codex_db_read_failed", count: 1 }] },
+    }),
+  };
   const latestCatalog = {
     warnings: [],
     projects: [],
@@ -3052,6 +3305,72 @@ async function tick() {
     usageRequests[0]?.route === "/thread-usage-summary" &&
     usageRequests[0]?.payload?.session_id === "session-1" &&
     runningProjection.status?.id === "running";
+  const boundedConversations = Array.from({ length: 6 }, (_, index) => ({
+    sessionId: `bounded-${index}`,
+    title: `并发会话 ${index}`,
+    cwd: "/repo",
+    updatedAtMs: index,
+  }));
+  api.resetCreateStateForTest({
+    snapshot: {
+      status: "ok",
+      schemaVersion: 1,
+      revision: 2,
+      tasks: [{
+        id: "task-bounded-status",
+        title: "并发状态任务",
+        project: { cwd: "/repo", label: "repo" },
+        status: "executing",
+        order: 0,
+        conversations: boundedConversations,
+      }],
+    },
+    catalog: {
+      status: "ok",
+      warnings: [],
+      projects: [],
+      sessions: boundedConversations,
+    },
+  });
+  let boundedActive = 0;
+  let boundedMaxActive = 0;
+  let boundedRequestCount = 0;
+  const boundedPending = [];
+  window.__codexElvesTaskBoardMock = {
+    request(route) {
+      if (route !== "/thread-usage-summary") throw new Error(`unexpected route ${route}`);
+      boundedRequestCount += 1;
+      boundedActive += 1;
+      boundedMaxActive = Math.max(boundedMaxActive, boundedActive);
+      return new Promise((resolve) => {
+        boundedPending.push(() => {
+          boundedActive -= 1;
+          resolve({ status: "ok", summary: { isRunning: false } });
+        });
+      });
+    },
+  };
+  const boundedRefresh = api.refreshConversationStatusesForTest();
+  await Promise.resolve();
+  const boundedFirstWave = boundedPending.length;
+  while (boundedRequestCount < boundedConversations.length || boundedPending.length) {
+    const batch = boundedPending.splice(0);
+    if (!batch.length) {
+      await Promise.resolve();
+      continue;
+    }
+    batch.forEach((release) => release());
+    await Promise.resolve();
+  }
+  await boundedRefresh;
+  const boundedBeforeIdleRefresh = boundedRequestCount;
+  await api.refreshConversationStatusesForTest();
+  conversationStatuses.boundedConcurrency =
+    boundedFirstWave === 4 &&
+    boundedMaxActive === 4 &&
+    boundedRequestCount === boundedConversations.length;
+  conversationStatuses.idleRefreshSkipped =
+    boundedRequestCount === boundedBeforeIdleRefresh;
   api.resetReadState();
   api.openPopoverForTest();
   const popoverNodeBeforeRefresh = api.popoverNodeForTest();
@@ -3104,6 +3423,7 @@ async function tick() {
       activeViewClosedWhenDisabled,
       restoredEnabled,
     },
+    statusSlot,
     catalog: {
       latestTitle: latest.title,
       latestTitleMatchesSearch,
@@ -4074,6 +4394,12 @@ let menuClicks = 0;
 let selectClicks = 0;
 let submitEvents = 0;
 let setTextCalls = 0;
+let modelTriggerClicks = 0;
+let modelSubmenuClicks = 0;
+let modelOptionClicks = 0;
+let effortSubmenuClicks = 0;
+let effortOptionClicks = 0;
+const nativeSequence = [];
 let permanentOnSubmit = true;
 const projectRow = node("div");
 projectRow.setAttribute("data-app-action-sidebar-project-row", "true");
@@ -4096,7 +4422,11 @@ conversationSignal.setAttribute("data-above-composer-conversation-id", "local:cl
 const controller = {
   text: "",
   focus() {},
-  setText(value) { setTextCalls += 1; this.text = String(value); },
+  setText(value) {
+    setTextCalls += 1;
+    nativeSequence.push("instruction");
+    this.text = String(value);
+  },
   getText() { return this.text; },
   getPersistedText() { return this.text; },
   view: { dispatchEvent() { return true; } },
@@ -4107,13 +4437,101 @@ composerOwner.appendChild(composer);
 composer.addEventListener("keydown", (event) => {
   if (event.key !== "Enter") return;
   submitEvents += 1;
+  nativeSequence.push("submit");
   if (permanentOnSubmit) conversationSignal.setAttribute("data-above-composer-conversation-id", "session-permanent-1");
 });
-document.body.append(projectRow, composerOwner, conversationSignal);
+const modelTrigger = node("button");
+modelTrigger.setAttribute("data-codex-intelligence-trigger", "true");
+modelTrigger.setAttribute("data-composer-navigation-target", "reasoning");
+modelTrigger.setAttribute("aria-expanded", "false");
+modelTrigger.setAttribute("data-selected-reasoning-effort", "low");
+const modelTriggerLabel = node("span");
+modelTriggerLabel.setAttribute("data-tooltip-overflow-target", "true");
+modelTriggerLabel.textContent = "5.6 Sol";
+modelTrigger.appendChild(modelTriggerLabel);
+modelTrigger.addEventListener("click", () => {
+  modelTriggerClicks += 1;
+  modelTrigger.setAttribute(
+    "aria-expanded",
+    modelTrigger.getAttribute("aria-expanded") === "true" ? "false" : "true",
+  );
+});
+const modelSubmenu = node("div");
+modelSubmenu.setAttribute("role", "menuitem");
+modelSubmenu.setAttribute("aria-haspopup", "menu");
+modelSubmenu.setAttribute("aria-expanded", "false");
+modelSubmenu.setAttribute("aria-label", "模型 5.6 Sol");
+modelSubmenu.addEventListener("click", () => {
+  modelSubmenuClicks += 1;
+  modelSubmenu.setAttribute("aria-expanded", "true");
+});
+const modelOption = node("div");
+modelOption.setAttribute("role", "menuitem");
+modelOption.textContent = "Claude Sonnet 4.6";
+modelOption.addEventListener("click", () => {
+  modelOptionClicks += 1;
+  nativeSequence.push("model");
+  modelTriggerLabel.textContent = "Claude Sonnet 4.6";
+  modelTrigger.setAttribute("aria-expanded", "false");
+});
+const effortSubmenu = node("div");
+effortSubmenu.setAttribute("role", "menuitem");
+effortSubmenu.setAttribute("aria-haspopup", "menu");
+effortSubmenu.setAttribute("aria-expanded", "false");
+effortSubmenu.setAttribute("aria-label", "推理强度 低");
+effortSubmenu.addEventListener("click", () => {
+  effortSubmenuClicks += 1;
+  effortSubmenu.setAttribute("aria-expanded", "true");
+});
+const effortOption = node("div");
+effortOption.setAttribute("role", "menuitemradio");
+effortOption.setAttribute("data-value", "high");
+effortOption.textContent = "高";
+effortOption.addEventListener("click", () => {
+  effortOptionClicks += 1;
+  nativeSequence.push("effort");
+  modelTrigger.setAttribute("data-selected-reasoning-effort", "high");
+  modelTrigger.setAttribute("aria-expanded", "false");
+});
+document.body.append(
+  projectRow,
+  composerOwner,
+  conversationSignal,
+  modelTrigger,
+  modelSubmenu,
+  modelOption,
+  effortSubmenu,
+  effortOption,
+);
 
 require(scriptPath);
 const api = window.__codexElvesTaskBoardTest;
 if (!api) throw new Error("task board test api unavailable");
+api.setModelCatalogForTest({
+  status: "ok",
+  model: "gpt-5.6-sol",
+    default_model: "gpt-5.6-sol",
+    models: ["gpt-5.6-sol", "claude-sonnet-4-6"],
+    model_entries: [
+    {
+      slug: "gpt-5.6-sol",
+      display_name: "5.6 Sol",
+      default_reasoning_level: "medium",
+      supported_reasoning_levels: [
+        { effort: "low" },
+        { effort: "medium" },
+        { effort: "high" },
+        { effort: "xhigh" },
+      ],
+    },
+    {
+      slug: "claude-sonnet-4-6",
+      display_name: "Claude Sonnet 4.6",
+      default_reasoning_level: "high",
+      supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }],
+    },
+  ],
+});
 const instruction = "do not persist this native first instruction";
 function snapshot(revision, title = "任务") {
   return {
@@ -4137,8 +4555,16 @@ function reset(options = {}) {
   api.resetCreateStateForTest({ snapshot: options.snapshot || snapshot(3), catalog: catalog() });
   api.openCreateModalForTest();
 }
-function setNew(title = "原生任务") {
-  api.setCreateDraftForTest({ mode: "new", title, projectCwd: "c:/repo-a", firstInstruction: instruction, sessionIds: [] });
+function setNew(title = "原生任务", modelId = "claude-sonnet-4-6", effortId = "high") {
+  api.setCreateDraftForTest({
+    mode: "new",
+    title,
+    projectCwd: "c:/repo-a",
+    modelId,
+    effortId,
+    firstInstruction: instruction,
+    sessionIds: [],
+  });
 }
 function setExisting(title = "已有任务") {
   api.setCreateDraftForTest({ mode: "existing", title, projectCwd: "c:/repo-a", sessionIds: ["existing-1"] });
@@ -4165,6 +4591,14 @@ function recoveryKey() { return "codexElvesTaskBoardNativeCreateRecoveryV1"; }
   const supported = {
     structuralButtonOnly: nativeStartClicks === 1 && menuClicks === 0 && selectClicks === 0,
     controllerAndNativeSubmit: setTextCalls === 1 && submitEvents === 1,
+    selectedSettingsBeforeSubmit:
+      modelTriggerClicks === 2 &&
+      modelSubmenuClicks === 1 &&
+      modelOptionClicks === 1 &&
+      effortSubmenuClicks === 1 &&
+      effortOptionClicks === 1 &&
+      JSON.stringify(nativeSequence.slice(0, 4)) ===
+        JSON.stringify(["model", "effort", "instruction", "submit"]),
     temporaryIdIgnored: supportedPayloads[0]?.sessionIds?.[0] === "session-permanent-1",
     createAfterPermanentId: supportedPayloads.length === 1 && supportedPayloads[0]?.taskId && supportedPayloads[0]?.expectedRevision === 3,
   };
@@ -4304,6 +4738,7 @@ function recoveryKey() { return "codexElvesTaskBoardNativeCreateRecoveryV1"; }
   const malformedRecordDiscarded = api.nativeRecoveryForTest() === null && !storage.has(recoveryKey());
 
   clearRecovery();
+  let routineRefreshCalls = 0;
   reset({
     nativeAdapter: {
       probe: () => ({ status: "ok", canStart: true, canOpen: false }),
@@ -4311,16 +4746,50 @@ function recoveryKey() { return "codexElvesTaskBoardNativeCreateRecoveryV1"; }
     },
     mock: { request(route) {
       if (route !== "/task-board/task-create") throw new Error("unexpected route");
+      routineRefreshCalls += 1;
       api.refreshRuntimeForTest();
       return snapshot(9);
     }},
   });
-  setNew("替换恢复");
+  setNew("刷新期间继续创建");
   await api.submitCreateForTest();
-  const replacementRecord = api.nativeRecoveryForTest();
+  const routineRefreshRecord = api.nativeRecoveryForTest();
+  const routineRefresh = {
+    keepsCreateAlive:
+      routineRefreshCalls === 1 &&
+      routineRefreshRecord === null &&
+      api.createSnapshotForTest().revision === 9 &&
+      !window.__codexElvesTaskBoardNativeOperationLease,
+  };
+
+  clearRecovery();
+  const replacementRuntimeId = window.__codexElvesTaskBoardNativeRuntimeId;
+  let replacementCreateCalls = 0;
+  reset({
+    nativeAdapter: {
+      probe: () => ({ status: "ok", canStart: true, canOpen: false }),
+      startConversation: () => {
+        window.__codexElvesTaskBoardRuntimeVersion = "force-full-replacement";
+        delete require.cache[require.resolve(scriptPath)];
+        require(scriptPath);
+        return { status: "ok", sessionId: "session-replacement-1" };
+      },
+    },
+    mock: { request(route) {
+      if (route !== "/task-board/task-create") throw new Error("unexpected route");
+      replacementCreateCalls += 1;
+      return snapshot(10);
+    }},
+  });
+  setNew("完整替换期间继续创建");
+  await api.submitCreateForTest();
   const runtimeReplacement = {
-    boundedAndRecoverable:
-      replacementRecord?.sessionId === "session-runtime-1" && api.createSnapshotForTest().revision === 3,
+    keepsRuntimeAndCreateAlive:
+      replacementCreateCalls === 1 &&
+      window.__codexElvesTaskBoardNativeRuntimeId === replacementRuntimeId &&
+      api.nativeRecoveryForTest() === null &&
+      api.createSnapshotForTest().revision === 10 &&
+      !window.__codexElvesTaskBoardNativeOperationLease,
   };
 
   const privacy = {
@@ -4336,7 +4805,7 @@ function recoveryKey() { return "codexElvesTaskBoardNativeCreateRecoveryV1"; }
     retryFailureKeepsRecordAndWarns,
     expiredRecordDiscarded,
     malformedRecordDiscarded,
-  }, runtimeReplacement, privacy }));
+  }, routineRefresh, runtimeReplacement, privacy }));
   process.exit(0);
 })().catch((error) => { process.stderr.write(String(error?.stack || error)); process.exit(1); });
 "##,
@@ -4514,7 +4983,11 @@ globalThis.document = {
   dispatchEvent(event) {
     event.target ||= this;
     event.preventDefault ||= () => { event.defaultPrevented = true; };
-    documentListenerSet(event.type).forEach((listener) => listener(event));
+    event.stopImmediatePropagation ||= () => { event.immediatePropagationStopped = true; };
+    for (const listener of documentListenerSet(event.type)) {
+      listener(event);
+      if (event.immediatePropagationStopped) break;
+    }
     return !event.defaultPrevented;
   },
 };
@@ -4655,7 +5128,61 @@ function createState() {
   };
 
   reset();
+  api.releaseCreateModalOnBackdropForTest();
+  modal.dragReleaseStaysOpen = createState().open;
+  api.clickCreateModalControlForTest("backdrop");
+  modal.backdropClickCloses = !createState().open;
+
+  api.setModelCatalogForTest({
+    status: "ok",
+    model: "gpt-5.6-sol",
+    default_model: "gpt-5.6-sol",
+    models: ["gpt-5.6-sol", "claude-sonnet-4-6"],
+    model_entries: [
+      {
+        slug: "gpt-5.6-sol",
+        display_name: "5.6 Sol",
+        default_reasoning_level: "medium",
+        supported_reasoning_levels: [
+          { effort: "low" },
+          { effort: "medium" },
+          { effort: "high" },
+          { effort: "xhigh" },
+          { effort: "max" },
+        ],
+      },
+      {
+        slug: "claude-sonnet-4-6",
+        display_name: "Claude Sonnet 4.6",
+        default_reasoning_level: "high",
+        supported_reasoning_levels: [
+          { effort: "low" },
+          { effort: "high" },
+        ],
+      },
+    ],
+  });
+  reset();
   const dropdownContract = api.createModalContractForTest();
+  dropdownContract.projectSelect.getBoundingClientRect = () => ({
+    left: 260,
+    right: 560,
+    top: 100,
+    bottom: 136,
+    width: 300,
+    height: 36,
+  });
+  dropdownContract.modelTrigger.getBoundingClientRect = () => ({
+    left: 500,
+    right: 580,
+    top: 500,
+    bottom: 530,
+    width: 80,
+    height: 30,
+  });
+  api.openBoardProjectMenuForTest({ left: 40, top: 40, width: 132, height: 36 });
+  const boardProjectDropdownOpen = api.dropdownMenuStateForTest();
+  api.dispatchDropdownMenuKeyForTest("Enter");
   api.openCreateDropdownForTest("project");
   const projectDropdownOpen = api.dropdownMenuStateForTest();
   api.dispatchDropdownMenuKeyForTest("Escape");
@@ -4668,28 +5195,110 @@ function createState() {
   api.dispatchDropdownMenuKeyForTest("Enter");
   const statusAfterEnter = createState().initialStatus;
   const dropdownOpenAfterEnter = api.dropdownMenuStateForTest().open;
+  api.setCreateDraftForTest({ mode: "new", modelId: "gpt-5.6-sol", effortId: "xhigh" });
+  api.openCreateSettingsMenuForTest();
+  const settingsMenuOpen = api.dropdownMenuStateForTest();
+  api.dispatchDropdownMenuKeyForTest("Escape");
+  const settingsEscapeReturnsFocus = document.activeElement === dropdownContract.modelTrigger;
+  api.openCreateEffortMenuForTest();
+  const fullEffortMenuOpen = api.dropdownMenuStateForTest();
+  api.dispatchDropdownMenuKeyForTest("End");
+  api.dispatchDropdownMenuKeyForTest("Enter");
+  const afterMaxEnter = createState();
+  api.setCreateDraftForTest({ effortId: "xhigh" });
+  api.openCreateModelMenuForTest();
+  const modelMenuOpen = api.dropdownMenuStateForTest();
+  api.dispatchDropdownMenuKeyForTest("End");
+  api.dispatchDropdownMenuKeyForTest("Enter");
+  const afterModelEnter = createState();
+  api.openCreateEffortMenuForTest();
+  const effortMenuOpen = api.dropdownMenuStateForTest();
+  api.dispatchDropdownMenuKeyForTest("Home");
+  api.dispatchDropdownMenuKeyForTest("Enter");
+  const afterEffortEnter = createState();
+  api.openCreateEffortMenuForTest();
+  api.dispatchDropdownMenuKeyForTest("Escape");
+  const afterSubmenuEscape = api.dropdownMenuStateForTest();
+  api.dispatchDropdownMenuKeyForTest("Escape");
+  const afterSettingsEscape = api.dropdownMenuStateForTest();
+  const settingsLayeredEscape =
+    afterSubmenuEscape.open &&
+    !afterSubmenuEscape.submenuOpen &&
+    afterSubmenuEscape.focusedIndex === 1 &&
+    !afterSettingsEscape.open &&
+    document.activeElement === dropdownContract.modelTrigger;
   const dropdowns = {
     projectEscapeReturnsFocus,
     projectExpandedAfterEscape,
+    settingsEscapeReturnsFocus,
     statusFocusedAfterDown: statusDropdownDown.focusedIndex,
     statusAfterEnter,
     dropdownOpenAfterEnter,
+    settingsLayeredEscape,
+    projectMenusConsistent:
+      boardProjectDropdownOpen.kind === "project" &&
+      boardProjectDropdownOpen.role === "listbox" &&
+      boardProjectDropdownOpen.itemCount === 3 &&
+      boardProjectDropdownOpen.width === "320px" &&
+      boardProjectDropdownOpen.minWidth === "320px" &&
+      boardProjectDropdownOpen.left === "40px" &&
+      projectDropdownOpen.width === "320px" &&
+      projectDropdownOpen.minWidth === "320px" &&
+      projectDropdownOpen.left === "260px",
     sharedListbox:
       projectDropdownOpen.kind === "create-project" &&
       projectDropdownOpen.role === "listbox" &&
       projectDropdownOpen.itemCount === 2 &&
       projectDropdownOpen.selectedIndex === 0 &&
+      JSON.stringify(projectDropdownOpen.optionDescriptions) ===
+        JSON.stringify(["/repo-a", "/repo-b"]) &&
       projectDropdownOpen.triggerExpanded === "true" &&
       statusDropdownOpen.kind === "create-status" &&
       statusDropdownOpen.role === "listbox" &&
       statusDropdownOpen.itemCount === 5 &&
       statusDropdownOpen.selectedIndex === 0,
+    nativeSettingsMenu:
+      settingsMenuOpen.kind === "create-settings" &&
+      settingsMenuOpen.role === "menu" &&
+      settingsMenuOpen.itemCount === 2 &&
+      settingsMenuOpen.top === "494px" &&
+      JSON.stringify(settingsMenuOpen.buttonTexts) ===
+        JSON.stringify(["模型 5.6 Sol", "推理强度 极高"]) &&
+      settingsMenuOpen.triggerExpanded === "true" &&
+      fullEffortMenuOpen.submenuOpen &&
+      fullEffortMenuOpen.submenuKind === "effort" &&
+      fullEffortMenuOpen.submenuItemCount === 5 &&
+      fullEffortMenuOpen.submenuSelectedIndex === 3 &&
+      JSON.stringify(fullEffortMenuOpen.submenuTexts) ===
+        JSON.stringify(["轻度", "中", "高", "极高", "最高"]) &&
+      modelMenuOpen.submenuOpen &&
+      modelMenuOpen.submenuKind === "model" &&
+      modelMenuOpen.submenuRole === "menu" &&
+      modelMenuOpen.submenuItemCount === 2 &&
+      modelMenuOpen.submenuSelectedIndex === 0 &&
+      JSON.stringify(modelMenuOpen.submenuTexts) ===
+        JSON.stringify(["5.6 Sol", "Claude Sonnet 4.6"]) &&
+      effortMenuOpen.submenuOpen &&
+      effortMenuOpen.submenuKind === "effort" &&
+      effortMenuOpen.submenuRole === "menu" &&
+      effortMenuOpen.submenuItemCount === 2 &&
+      effortMenuOpen.submenuSelectedIndex === 1 &&
+      JSON.stringify(effortMenuOpen.submenuTexts) === JSON.stringify(["轻度", "高"]) &&
+      dropdownContract.modelTrigger.parentElement === dropdownContract.firstInstructionComposer &&
+      dropdownContract.modelTrigger.getAttribute("aria-haspopup") === "menu" &&
+      dropdownContract.modelTrigger.getAttribute("data-reasoning-effort") === "low",
     keyboardAndFocus:
       projectEscapeReturnsFocus &&
       projectExpandedAfterEscape === "false" &&
+      settingsEscapeReturnsFocus &&
+      settingsLayeredEscape &&
       statusDropdownDown.focusedIndex === 1 &&
       statusAfterEnter === "planning" &&
-      !dropdownOpenAfterEnter,
+      !dropdownOpenAfterEnter &&
+      afterMaxEnter.effortId === "max" &&
+      afterModelEnter.modelId === "claude-sonnet-4-6" &&
+      afterModelEnter.effortId === "high" &&
+      afterEffortEnter.effortId === "low",
   };
 
   reset();
@@ -4823,6 +5432,8 @@ function createState() {
   const attachExistingRevision = api.createSnapshotForTest().revision;
 
   let attachNativeStarts = 0;
+  let attachNativeModel = "";
+  let attachNativeEffort = "";
   const attachNativeRequests = [];
   window.__codexElvesTaskBoardMock = {
     request(route, payload) {
@@ -4838,11 +5449,33 @@ function createState() {
   };
   window.__codexElvesTaskBoardNativeAdapter = {
     probe: () => ({ status: "ok", canStart: true, canOpen: false }),
-    startConversation: () => {
+    startConversation: (_project, _instruction, modelId, effortId) => {
       attachNativeStarts += 1;
+      attachNativeModel = modelId;
+      attachNativeEffort = effortId;
       return { status: "ok", sessionId: "session-native" };
     },
   };
+  api.setModelCatalogForTest({
+    status: "ok",
+    model: "gpt-5.6-sol",
+    default_model: "gpt-5.6-sol",
+    models: ["gpt-5.6-sol", "claude-sonnet-4-6"],
+    model_entries: [
+      {
+        slug: "gpt-5.6-sol",
+        display_name: "5.6 Sol",
+        default_reasoning_level: "medium",
+        supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }],
+      },
+      {
+        slug: "claude-sonnet-4-6",
+        display_name: "Claude Sonnet 4.6",
+        default_reasoning_level: "high",
+        supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }],
+      },
+    ],
+  });
   api.resetCreateStateForTest({
     snapshot: attachSnapshot(4, ["session-a1"]),
     catalog: catalog(),
@@ -4850,6 +5483,8 @@ function createState() {
   api.openAttachModalForTest(attachTaskId);
   api.setCreateDraftForTest({
     mode: "new",
+    modelId: "claude-sonnet-4-6",
+    effortId: "high",
     firstInstruction: "为当前任务继续实现状态展示",
     sessionIds: [],
   });
@@ -4876,8 +5511,111 @@ function createState() {
         attachNativeRequests[0]?.taskId === attachTaskId &&
         attachNativeRequests[0]?.expectedRevision === 4 &&
         JSON.stringify(attachNativeRequests[0]?.sessionIds) === JSON.stringify(["session-native"]),
+      modelForwarded: attachNativeModel === "claude-sonnet-4-6",
+      effortForwarded: attachNativeEffort === "high",
       closed: !attachNativeAfter.open,
     },
+  };
+
+  const detachRequests = [];
+  const detachStart = attachSnapshot(4, ["session-a1", "session-a2"]);
+  window.__codexElvesTaskBoardMock = {
+    request(route, payload) {
+      if (route === "/thread-usage-summary") {
+        return { status: "ok", summary: { isRunning: false } };
+      }
+      if (route !== "/task-board/task-conversations-detach") {
+        throw new Error(`unexpected route ${route}`);
+      }
+      detachRequests.push(payload);
+      return attachSnapshot(5, ["session-a2"]);
+    },
+  };
+  api.resetCreateStateForTest({
+    snapshot: detachStart,
+    catalog: catalog(),
+  });
+  const detachTask = detachStart.tasks[0];
+  const detachConversation = detachTask.conversations[0];
+  const detachTrigger = document.createElement("button");
+  document.body.appendChild(detachTrigger);
+  detachTrigger.focus();
+  api.openDetachDialogForTest(detachTask, detachConversation, detachTrigger);
+  const detachContract = api.detachDialogContractForTest();
+  api.closeDetachForTest();
+  const cancelledWithoutRequest =
+    detachRequests.length === 0 &&
+    !api.detachDialogStateForTest().open &&
+    document.activeElement === detachTrigger;
+
+  api.openDetachDialogForTest(detachTask, detachConversation, detachTrigger);
+  await api.submitDetachForTest();
+  const detachPayload = detachRequests[0] || {};
+  const detachedSnapshot = api.createSnapshotForTest();
+
+  const detachConflictPayloads = [];
+  let detachConflictCalls = 0;
+  const detachConflictStart = attachSnapshot(5, ["session-a2"]);
+  window.__codexElvesTaskBoardMock = {
+    request(route, payload) {
+      if (route === "/thread-usage-summary") {
+        return { status: "ok", summary: { isRunning: false } };
+      }
+      if (route !== "/task-board/task-conversations-detach") {
+        throw new Error(`unexpected route ${route}`);
+      }
+      detachConflictPayloads.push(payload);
+      detachConflictCalls += 1;
+      if (detachConflictCalls === 1) {
+        const latest = attachSnapshot(6, ["session-a2"]);
+        return {
+          status: "conflict",
+          code: "revision_conflict",
+          schemaVersion: latest.schemaVersion,
+          revision: latest.revision,
+          tasks: latest.tasks,
+        };
+      }
+      return attachSnapshot(7, []);
+    },
+  };
+  api.resetCreateStateForTest({
+    snapshot: detachConflictStart,
+    catalog: catalog(),
+  });
+  api.openDetachDialogForTest(
+    detachConflictStart.tasks[0],
+    detachConflictStart.tasks[0].conversations[0],
+    detachTrigger,
+  );
+  await api.submitDetachForTest();
+  const detach = {
+    confirmation:
+      detachContract.role === "dialog" &&
+      detachContract.ariaModal &&
+      detachContract.initialFocus &&
+      detachContract.title === "移除关联会话？" &&
+      detachContract.message ===
+        "仅解除与任务“追加会话任务”的关联，不会删除 Codex 中的原始会话。",
+    cancelledWithoutRequest,
+    exactPayloadAndSnapshot:
+      JSON.stringify(Object.keys(detachPayload).sort()) ===
+        JSON.stringify(["expectedRevision", "sessionIds", "taskId"]) &&
+      detachPayload.taskId === attachTaskId &&
+      detachPayload.expectedRevision === 4 &&
+      JSON.stringify(detachPayload.sessionIds) === JSON.stringify(["session-a1"]) &&
+      detachedSnapshot.revision === 5 &&
+      JSON.stringify(
+        detachedSnapshot.tasks[0].conversations.map((conversation) => conversation.sessionId),
+      ) === JSON.stringify(["session-a2"]) &&
+      !api.detachDialogStateForTest().open,
+    revisionConflictRetriesOnce:
+      detachConflictPayloads.length === 2 &&
+      JSON.stringify(
+        detachConflictPayloads.map((payload) => payload.expectedRevision),
+      ) === JSON.stringify([5, 6]) &&
+      api.createSnapshotForTest().revision === 7 &&
+      !api.detachDialogStateForTest().open,
   };
 
   const initialStatusRequests = [];
@@ -5138,6 +5876,7 @@ function createState() {
     validation,
     success,
     attach,
+    detach,
     initialStatus,
     stableErrors,
     sessionNotFound,

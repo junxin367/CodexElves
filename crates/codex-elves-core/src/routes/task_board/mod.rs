@@ -11,6 +11,7 @@ use super::BridgeDataService;
 mod attach_conversations;
 mod catalog;
 mod create;
+mod detach_conversations;
 mod move_task;
 mod snapshot;
 
@@ -18,6 +19,7 @@ pub const TASK_BOARD_SNAPSHOT_PATH: &str = "/task-board/snapshot";
 pub const TASK_BOARD_SESSION_CATALOG_PATH: &str = "/task-board/session-catalog";
 pub const TASK_BOARD_CREATE_PATH: &str = "/task-board/task-create";
 pub const TASK_BOARD_ATTACH_CONVERSATIONS_PATH: &str = "/task-board/task-conversations-attach";
+pub const TASK_BOARD_DETACH_CONVERSATIONS_PATH: &str = "/task-board/task-conversations-detach";
 pub const TASK_BOARD_MOVE_PATH: &str = "/task-board/task-move";
 
 #[derive(Deserialize)]
@@ -46,6 +48,13 @@ pub(super) async fn handle_attach_conversations(
     payload: Value,
 ) -> Value {
     attach_conversations::handle(store, data, payload).await
+}
+
+pub(super) async fn handle_detach_conversations(
+    store: Arc<dyn TaskBoardStore>,
+    payload: Value,
+) -> Value {
+    detach_conversations::handle(store, payload).await
 }
 
 pub(super) async fn handle_move(store: Arc<dyn TaskBoardStore>, payload: Value) -> Value {

@@ -1,8 +1,8 @@
 use super::{
-    FileTaskBoardStore, TASK_BOARD_MAX_SAFE_INTEGER, TaskBoardDocument, TaskBoardMoveCommand,
-    TaskBoardMutationResult, TaskBoardStatus, TaskBoardStoreError,
+    FileTaskBoardStore, TaskBoardDocument, TaskBoardMoveCommand, TaskBoardMutationResult,
+    TaskBoardStatus, TaskBoardStoreError, unix_timestamp_ms,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 pub(super) fn move_task(
@@ -23,9 +23,10 @@ pub(super) fn move_task(
             .ok_or(TaskBoardStoreError::TaskNotFound)?;
         let source_status = current.tasks[source_index].status;
         let source_order = ordered_task_ids(&current, source_status);
-        let original = current.clone();
-        let mut moved = current.tasks.remove(source_index);
         let mut target_order = ordered_task_ids(&current, command.to_status);
+        if source_status == command.to_status {
+            target_order.retain(|candidate_id| candidate_id != &task_id);
+        }
         let target_len =
             u32::try_from(target_order.len()).map_err(|_| TaskBoardStoreError::InvalidInput {
                 message: "target column contains too many tasks".to_string(),
@@ -41,18 +42,18 @@ pub(super) fn move_task(
                 message: "target index exceeds the supported range".to_string(),
             }
         })?;
-        target_order.insert(target_index, moved.id.clone());
+        target_order.insert(target_index, task_id.clone());
 
         if source_status == command.to_status && target_order == source_order {
             return Ok(TaskBoardMutationResult {
-                document: original,
+                document: current,
                 changed: false,
                 idempotent: false,
             });
         }
 
-        moved.status = command.to_status;
-        moved.updated_at_ms = unix_timestamp_ms()?;
+        current.tasks[source_index].status = command.to_status;
+        current.tasks[source_index].updated_at_ms = unix_timestamp_ms()?;
         current.revision =
             current
                 .revision
@@ -60,8 +61,6 @@ pub(super) fn move_task(
                 .ok_or_else(|| TaskBoardStoreError::InvalidInput {
                     message: "task board revision cannot be incremented".to_string(),
                 })?;
-        current.tasks.insert(source_index, moved);
-
         if source_status != command.to_status {
             let source_order = ordered_task_ids(&current, source_status);
             assign_orders(&mut current, source_status, &source_order)?;
@@ -99,38 +98,30 @@ fn assign_orders(
     status: TaskBoardStatus,
     task_ids: &[String],
 ) -> Result<(), TaskBoardStoreError> {
+    let mut orders = HashMap::with_capacity(task_ids.len());
     for (order, task_id) in task_ids.iter().enumerate() {
         let order = u32::try_from(order).map_err(|_| TaskBoardStoreError::InvalidInput {
             message: "task order exceeds the supported range".to_string(),
         })?;
-        let task = document
-            .tasks
-            .iter_mut()
-            .find(|task| task.id == *task_id)
-            .ok_or_else(|| TaskBoardStoreError::InvalidInput {
-                message: "task disappeared during move".to_string(),
-            })?;
+        if orders.insert(task_id.as_str(), order).is_some() {
+            return Err(TaskBoardStoreError::InvalidInput {
+                message: "task order contains duplicate ids".to_string(),
+            });
+        }
+    }
+    let mut assigned = 0usize;
+    for task in &mut document.tasks {
+        let Some(order) = orders.get(task.id.as_str()).copied() else {
+            continue;
+        };
         task.order = order;
         task.status = status;
+        assigned += 1;
     }
-    Ok(())
-}
-
-fn unix_timestamp_ms() -> Result<u64, TaskBoardStoreError> {
-    let timestamp_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| TaskBoardStoreError::InvalidInput {
-            message: format!("system clock is before Unix epoch: {error}"),
-        })?
-        .as_millis();
-    let timestamp_ms =
-        u64::try_from(timestamp_ms).map_err(|_| TaskBoardStoreError::InvalidInput {
-            message: "system timestamp exceeds the supported range".to_string(),
-        })?;
-    if timestamp_ms > TASK_BOARD_MAX_SAFE_INTEGER {
+    if assigned != task_ids.len() {
         return Err(TaskBoardStoreError::InvalidInput {
-            message: "system timestamp exceeds the JavaScript safe integer range".to_string(),
+            message: "task disappeared during move".to_string(),
         });
     }
-    Ok(timestamp_ms)
+    Ok(())
 }

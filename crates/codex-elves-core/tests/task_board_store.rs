@@ -143,10 +143,6 @@ fn document_validation_rejects_invalid_task_and_conversation_fields() {
     long_title.tasks[0].title = "任".repeat(121);
     cases.push(long_title);
 
-    let mut no_conversations = valid_document();
-    no_conversations.tasks[0].conversations.clear();
-    cases.push(no_conversations);
-
     let mut temporary_session = valid_document();
     temporary_session.tasks[0].conversations[0].session_id =
         "local:client-new-thread:temporary".to_string();
@@ -170,6 +166,16 @@ fn document_validation_rejects_invalid_task_and_conversation_fields() {
     for mut document in cases {
         assert!(validate_task_board_document(&mut document).is_err());
     }
+}
+
+#[test]
+fn document_validation_allows_tasks_without_linked_conversations() {
+    let mut document = valid_document();
+    document.tasks[0].conversations.clear();
+
+    validate_task_board_document(&mut document).unwrap();
+
+    assert!(document.tasks[0].conversations.is_empty());
 }
 
 #[test]

@@ -86,6 +86,13 @@ pub struct TaskBoardAttachConversationsCommand {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskBoardDetachConversationsCommand {
+    pub task_id: String,
+    pub expected_revision: u64,
+    pub session_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskBoardMoveCommand {
     pub task_id: String,
     pub to_status: TaskBoardStatus,
