@@ -120,12 +120,15 @@ verify_app() {
 prepare_icon
 create_app "CodexElves" "CodexElves" "$BINARY_DIR/codex-elves" "com.bigpizzav3.codexelves" "true"
 create_app "CodexElves 管理工具" "CodexElvesManager" "$BINARY_DIR/codex-elves-manager" "com.bigpizzav3.codexelves.manager" "false"
+create_app "CodexElves 任务看板" "CodexElvesTaskBoard" "$BINARY_DIR/codex-elves-task-board" "com.bigpizzav3.codexelves.taskboard" "false"
 
 sign_app "$STAGE/CodexElves.app"
 sign_app "$STAGE/CodexElves 管理工具.app"
+sign_app "$STAGE/CodexElves 任务看板.app"
 
 verify_app "$STAGE/CodexElves.app"
 verify_app "$STAGE/CodexElves 管理工具.app"
+verify_app "$STAGE/CodexElves 任务看板.app"
 
 ln -s /Applications "$STAGE/Applications"
 

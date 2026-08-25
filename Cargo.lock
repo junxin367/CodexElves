@@ -479,6 +479,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

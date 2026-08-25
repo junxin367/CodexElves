@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod install;
+pub mod task_board;
 
 use std::io::{Read, Write};
 use std::net::TcpStream;

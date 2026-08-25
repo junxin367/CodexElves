@@ -987,6 +987,14 @@ impl BridgeRuntimeService for LauncherRuntimeService {
         }))
     }
 
+    async fn open_task_board(&self) -> anyhow::Result<Value> {
+        let path = codex_elves_core::routes::launch_task_board_app()?;
+        Ok(json!({
+            "status": "ok",
+            "path": path.to_string_lossy()
+        }))
+    }
+
     async fn backend_status(&self) -> anyhow::Result<Value> {
         Ok(
             json!({"status": "ok", "message": "后端已连接", "version": codex_elves_core::version::VERSION}),

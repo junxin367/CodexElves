@@ -26,7 +26,7 @@ fn manager_uses_single_instance_guard_before_starting_tauri() {
     let lib_rs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
         .expect("read manager lib.rs");
 
-    assert!(lib_rs.contains("acquire_single_instance_guard()"));
+    assert!(lib_rs.contains("acquire_single_instance_guard(show_update)"));
     assert!(lib_rs.contains("manager_guard_port()"));
     assert!(lib_rs.contains("manager.already_running"));
 }
@@ -352,7 +352,8 @@ fn manager_second_launch_requests_existing_window_to_show() {
 
     assert!(lib_rs.contains("spawn_manager_wake_listener"));
     assert!(lib_rs.contains("request_existing_manager_to_show"));
-    assert!(lib_rs.contains("MANAGER_WAKE_MESSAGE"));
+    assert!(lib_rs.contains("MANAGER_WAKE_SHOW"));
+    assert!(lib_rs.contains("MANAGER_WAKE_SHOW_UPDATE"));
     assert!(lib_rs.contains("MANAGER_WAKE_ACK"));
     assert!(lib_rs.contains("stream.write_all(MANAGER_WAKE_ACK)"));
     assert!(lib_rs.contains("fallback_single_instance_guard()"));
@@ -372,6 +373,59 @@ fn launcher_binary_embeds_codex_icon_resource() {
 
     assert!(build_rs.contains("WindowsResource"));
     assert!(build_rs.contains("icons/icon.ico"));
+}
+
+#[test]
+fn task_board_runs_as_a_separate_window_with_persistent_placement() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cargo_toml =
+        std::fs::read_to_string(manifest_dir.join("Cargo.toml")).expect("read Cargo.toml");
+    let main_rs = std::fs::read_to_string(manifest_dir.join("src/task_board_main.rs"))
+        .expect("read task board main.rs");
+    let task_board_rs = std::fs::read_to_string(manifest_dir.join("src/task_board.rs"))
+        .expect("read task board backend");
+    let permissions = std::fs::read_to_string(manifest_dir.join("permissions/default.toml"))
+        .expect("read manager permissions");
+
+    assert!(cargo_toml.contains("name = \"codex-elves-task-board\""));
+    assert!(main_rs.contains("#![cfg_attr(windows, windows_subsystem = \"windows\")]"));
+    assert!(task_board_rs.contains("task-board-webview2"));
+    assert!(task_board_rs.contains("task-board-window-state.json"));
+    assert!(task_board_rs.contains(".center()"));
+    assert!(task_board_rs.contains("window_state_is_visible"));
+    assert!(task_board_rs.contains("persist_window_state"));
+    assert!(task_board_rs.contains("task_board_guard_port()"));
+    assert!(task_board_rs.contains("JSON.stringify(result ?? null)"));
+    assert!(permissions.contains("\"task_board_load_create_options\""));
+}
+
+#[test]
+fn standalone_task_board_reuses_codex_board_visual_language() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let frontend_dir = manifest_dir.parent().expect("manager frontend directory");
+    let app = std::fs::read_to_string(frontend_dir.join("src/TaskBoardApp.tsx"))
+        .expect("read standalone task board");
+    let styles = std::fs::read_to_string(frontend_dir.join("src/task-board.css"))
+        .expect("read standalone task board styles");
+
+    assert!(app.contains("跨项目观察任务状态，并集中关联项目下的多个会话"));
+    assert!(app.contains("搜索任务、项目或关联会话"));
+    assert!(app.contains("拖动任务卡片可切换状态"));
+    assert!(!app.contains("独立 WebView2 进程"));
+    assert!(styles.contains("grid-template-columns: repeat(5, minmax(0, 1fr))"));
+    assert!(styles.contains("min-width: 1580px"));
+    assert!(styles.contains("background: #1f1f1f"));
+    assert!(styles.contains("font-size: 24px"));
+    assert!(!app.contains("<select"));
+    assert!(app.contains("function TaskBoardDropdown"));
+    assert!(app.contains("function TaskBoardCreateSettings"));
+    assert!(app.contains("function taskBoardModalFocusableElements"));
+    assert!(app.contains("为“${editor.targetTask?.title || \"未命名任务\"}”关联已有会话"));
+    assert!(app.contains("只可追加当前任务所属项目中的会话。"));
+    assert!(styles.contains("padding: 0 8px 0 9px"));
+    assert!(styles.contains(".task-board-dropdown-chevron"));
+    assert!(styles.contains("grid-template-columns: 18px 16px minmax(0, 1fr)"));
+    assert!(styles.contains("height: min(650px, calc(100vh - 32px))"));
 }
 
 #[test]
@@ -408,6 +462,12 @@ fn windows_binaries_request_administrator_privileges() {
     assert!(windows_dev_manifest.contains("asInvoker"));
     assert!(windows_dev_manifest.contains("Microsoft.Windows.Common-Controls"));
     assert!(windows_installer.contains("RequestExecutionLevel admin"));
+    assert!(
+        windows_installer
+            .contains("File \"${ROOT}\\dist\\windows\\app\\codex-elves-task-board.exe\"")
+    );
+    assert!(windows_installer.contains("taskkill /IM codex-elves-task-board.exe /F"));
+    assert!(windows_installer.contains("Delete \"$INSTDIR\\codex-elves-task-board.exe\""));
 }
 
 #[test]

@@ -32,9 +32,12 @@ Section "Install"
   Pop $0
   nsExec::ExecToLog 'taskkill /IM codex-elves-manager.exe /F'
   Pop $0
+  nsExec::ExecToLog 'taskkill /IM codex-elves-task-board.exe /F'
+  Pop $0
 
   File "${ROOT}\dist\windows\app\codex-elves.exe"
   File "${ROOT}\dist\windows\app\codex-elves-manager.exe"
+  File "${ROOT}\dist\windows\app\codex-elves-task-board.exe"
 
   Delete "$DESKTOP\CodexElves 绠＄悊宸ュ叿.lnk"
   Delete "$DESKTOP\CodexElves Manager.lnk"
@@ -67,6 +70,8 @@ Section "Uninstall"
   Pop $0
   nsExec::ExecToLog 'taskkill /IM codex-elves-manager.exe /F'
   Pop $0
+  nsExec::ExecToLog 'taskkill /IM codex-elves-task-board.exe /F'
+  Pop $0
 
   Delete "$DESKTOP\CodexElves.lnk"
   Delete "$DESKTOP\CodexElves 管理工具.lnk"
@@ -82,6 +87,7 @@ Section "Uninstall"
 
   Delete "$INSTDIR\codex-elves.exe"
   Delete "$INSTDIR\codex-elves-manager.exe"
+  Delete "$INSTDIR\codex-elves-task-board.exe"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 

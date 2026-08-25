@@ -7,8 +7,10 @@ pub mod windows;
 
 pub const SILENT_NAME: &str = "CodexElves";
 pub const MANAGER_NAME: &str = "CodexElves 管理工具";
+pub const TASK_BOARD_NAME: &str = "CodexElves 任务看板";
 pub const SILENT_BINARY: &str = "codex-elves";
 pub const MANAGER_BINARY: &str = "codex-elves-manager";
+pub const TASK_BOARD_BINARY: &str = "codex-elves-task-board";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -297,6 +299,26 @@ fn macos_companion_binary_from_exe(exe: &Path, binary: &str) -> Option<PathBuf> 
                 .exists()
                 .then(|| macos.join(MANAGER_BINARY))
                 .unwrap_or_else(|| macos.join("CodexElvesManager")),
+        );
+    }
+    if binary == TASK_BOARD_BINARY {
+        if app_name == format!("{TASK_BOARD_NAME}.app") {
+            return Some(macos_preferred_bundle_binary(
+                exe,
+                TASK_BOARD_BINARY,
+                "CodexElvesTaskBoard",
+            ));
+        }
+        let macos = applications_dir
+            .join(format!("{TASK_BOARD_NAME}.app"))
+            .join("Contents")
+            .join("MacOS");
+        return Some(
+            macos
+                .join(TASK_BOARD_BINARY)
+                .exists()
+                .then(|| macos.join(TASK_BOARD_BINARY))
+                .unwrap_or_else(|| macos.join("CodexElvesTaskBoard")),
         );
     }
     None

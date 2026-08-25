@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
+import { TaskBoardApp } from "./TaskBoardApp";
 import "./styles.css";
 
 /* ── Bundled fonts (offline, no Google Fonts request) ──
@@ -11,5 +12,6 @@ import "@fontsource/jetbrains-mono";
 const app = document.getElementById("app");
 
 if (app instanceof HTMLElement) {
-  createRoot(app).render(<App />);
+  const taskBoardMode = new URLSearchParams(window.location.search).get("taskBoard") === "1";
+  createRoot(app).render(taskBoardMode ? <TaskBoardApp /> : <App />);
 }

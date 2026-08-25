@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
-    "build": "cargo build -p codex-elves-launcher --release && tauri build",
+    "build": "npm run vite:build && cargo build -p codex-elves-launcher --release && cargo build -p codex-elves-manager --bin codex-elves-task-board --release && tauri build",
     "check": "tsc --noEmit -p tsconfig.json",
     "vite:dev": "vite --host 127.0.0.1 --port 1420",
     "vite:build": "vite build"

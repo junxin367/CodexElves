@@ -286,7 +286,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "55";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "57";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -371,6 +371,42 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
         runtime_refresh
             .contains("closeTaskBoardCreateModal();\n    closeTaskBoardDetachDialog({ restoreFocus: false });\n    reconcileTaskBoardRuntime();")
     );
+}
+
+#[test]
+fn renderer_task_board_navigation_opens_inline_and_offers_new_window_on_context_menu() {
+    let script = assets::renderer_features_script().replace("\r\n", "\n");
+    let entry_creation = script
+        .split("function taskBoardCreateEntry(pluginButton)")
+        .nth(1)
+        .and_then(|section| {
+            section
+                .split("async function openStandaloneTaskBoard()")
+                .next()
+        })
+        .expect("task board navigation entry implementation should be present");
+    let standalone_open = script
+        .split("async function openStandaloneTaskBoard()")
+        .nth(1)
+        .and_then(|section| section.split("function reconcileTaskBoardEntry()").next())
+        .expect("standalone task board opener should be present");
+
+    assert!(script.contains(r#"const taskBoardRuntimeVersion = "32";"#));
+    assert!(script.contains("codex-task-board-entry-context-menu"));
+    assert!(script.contains("function openTaskBoardEntryContextMenu(entry, event)"));
+    assert!(script.contains(r#"menu.setAttribute("role", "menu")"#));
+    assert!(script.contains(r#"openWindow.setAttribute("role", "menuitem")"#));
+    assert!(script.contains("在新窗口中打开"));
+    assert!(script.contains(r#"entry.addEventListener("contextmenu""#));
+    assert!(script.contains(r#"event.key === "ContextMenu""#));
+    assert!(script.contains(r#"event.shiftKey && event.key === "F10""#));
+    assert!(entry_creation.contains("activateTaskBoard();"));
+    assert!(!entry_creation.contains("void openStandaloneTaskBoard();"));
+    assert!(standalone_open.contains(r#"bridge("/task-board/open-window", {})"#));
+    assert!(!standalone_open.contains("activateTaskBoard();"));
+    assert!(!standalone_open.contains("deactivateTaskBoard"));
+    assert!(standalone_open.contains("独立任务看板暂不可用，请稍后重试"));
+    assert!(script.contains("closeTaskBoardEntryContextMenu({ restoreFocus: false });"));
 }
 
 #[test]
@@ -600,6 +636,8 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
     assert!(script.contains("function taskBoardCreateModalKeydown("));
     assert!(script.contains("event.shiftKey"));
     assert!(script.contains("probe(project)"));
+    assert!(script.contains("async createOptions()"));
+    assert!(script.contains("await loadCodexModelCatalog()"));
     assert!(
         script.contains(
             "startConversation(project, firstInstruction, modelId = \"\", effortId = \"\")"

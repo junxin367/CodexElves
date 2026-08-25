@@ -86,6 +86,9 @@ pub trait BridgeRuntimeService: Send + Sync {
     async fn reload_user_scripts(&self) -> anyhow::Result<Value>;
     async fn open_devtools(&self) -> anyhow::Result<Value>;
     async fn open_manager(&self) -> anyhow::Result<Value>;
+    async fn open_task_board(&self) -> anyhow::Result<Value> {
+        anyhow::bail!("Task board application is unavailable")
+    }
     async fn backend_status(&self) -> anyhow::Result<Value>;
     async fn repair_backend(&self) -> anyhow::Result<Value>;
     async fn install_renderer_features(&self) -> anyhow::Result<Value>;
@@ -140,6 +143,7 @@ pub async fn handle_bridge_request(
     };
     let _ = crate::diagnostic_log::append_diagnostic_log("bridge.request", request_detail);
     let result = match path {
+        task_board::TASK_BOARD_OPEN_WINDOW_PATH => ctx.runtime.open_task_board().await,
         task_board::TASK_BOARD_SNAPSHOT_PATH => {
             Ok(task_board::handle_snapshot(ctx.task_board_store.clone(), payload.clone()).await)
         }
@@ -470,6 +474,14 @@ impl BridgeRuntimeService for CoreRuntimeService {
         }))
     }
 
+    async fn open_task_board(&self) -> anyhow::Result<Value> {
+        let path = launch_task_board_app()?;
+        Ok(json!({
+            "status": "ok",
+            "path": path.to_string_lossy()
+        }))
+    }
+
     async fn backend_status(&self) -> anyhow::Result<Value> {
         let _ = self.status_store.load_latest();
         let _ = crate::diagnostic_log::append_diagnostic_log(
@@ -623,6 +635,24 @@ impl BridgeDataService for UnavailableDataService {
 
 fn manager_exe_path() -> PathBuf {
     crate::install::option_or_current_exe(&None, crate::install::MANAGER_BINARY)
+}
+
+pub fn launch_task_board_app() -> anyhow::Result<PathBuf> {
+    let task_board_path =
+        crate::install::option_or_current_exe(&None, crate::install::TASK_BOARD_BINARY);
+    if !task_board_path.exists() {
+        anyhow::bail!("未找到任务看板程序：{}", task_board_path.display());
+    }
+    let mut command = std::process::Command::new(&task_board_path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(crate::windows_create_no_window());
+    }
+    command
+        .spawn()
+        .map_err(|error| anyhow::anyhow!("启动任务看板失败：{error}"))?;
+    Ok(task_board_path)
 }
 
 fn spawn_manager(manager_path: &Path) -> anyhow::Result<()> {

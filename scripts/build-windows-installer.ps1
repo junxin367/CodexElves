@@ -106,6 +106,20 @@ $DistAppDir = Join-Path $RepoRoot "dist\windows\app"
 $InstallerScriptDir = Join-Path $RepoRoot "scripts\installer\windows"
 $InstallerScript = Join-Path $InstallerScriptDir "CodexElves.nsi"
 $InstallerPath = Join-Path $RepoRoot "dist\windows\CodexElves-$ResolvedVersion-windows-x64-setup.exe"
+if ($env:CARGO_TARGET_DIR) {
+    if ([System.IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+        $CargoTargetDir = [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+    }
+    else {
+        $CargoTargetDir = [System.IO.Path]::GetFullPath(
+            (Join-Path $ManagerDir $env:CARGO_TARGET_DIR)
+        )
+    }
+}
+else {
+    $CargoTargetDir = Join-Path $RepoRoot "target"
+}
+$ReleaseDir = Join-Path $CargoTargetDir "release"
 
 $NpmPath = Resolve-ToolPath -Name "npm.cmd" -ExplicitPath "" -FallbackPaths @()
 $NsisPath = Resolve-ToolPath `
@@ -122,14 +136,16 @@ Write-Output "[INFO] Repo: $RepoRoot"
 Write-Output "[INFO] Version: $ResolvedVersion"
 Write-Output "[INFO] npm: $NpmPath"
 Write-Output "[INFO] makensis: $NsisPath"
+Write-Output "[INFO] Cargo target: $CargoTargetDir"
 
 Invoke-Checked -FilePath $NpmPath -Arguments @("run", "build") -WorkingDirectory $ManagerDir
 
 New-Item -ItemType Directory -Path $DistAppDir -Force | Out-Null
-$LauncherExe = Join-Path $RepoRoot "target\release\codex-elves.exe"
-$ManagerExe = Join-Path $RepoRoot "target\release\codex-elves-manager.exe"
+$LauncherExe = Join-Path $ReleaseDir "codex-elves.exe"
+$ManagerExe = Join-Path $ReleaseDir "codex-elves-manager.exe"
+$TaskBoardExe = Join-Path $ReleaseDir "codex-elves-task-board.exe"
 
-foreach ($artifact in @($LauncherExe, $ManagerExe)) {
+foreach ($artifact in @($LauncherExe, $ManagerExe, $TaskBoardExe)) {
     if (!(Test-Path -LiteralPath $artifact)) {
         throw "Expected release artifact not found: $artifact"
     }

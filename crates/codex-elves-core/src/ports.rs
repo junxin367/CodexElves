@@ -7,8 +7,10 @@ use fs2::FileExt;
 pub const LAUNCHER_GUARD_PORT: u16 = 45220;
 pub const MANAGER_GUARD_PORT: u16 = 45219;
 pub const DEV_MANAGER_GUARD_PORT: u16 = 45229;
+pub const TASK_BOARD_GUARD_PORT: u16 = 45218;
 const LAUNCHER_GUARD_PORT_ENV: &str = "CODEX_ELVES_LAUNCHER_GUARD_PORT";
 const MANAGER_GUARD_PORT_ENV: &str = "CODEX_ELVES_MANAGER_GUARD_PORT";
+const TASK_BOARD_GUARD_PORT_ENV: &str = "CODEX_ELVES_TASK_BOARD_GUARD_PORT";
 const GUARD_PORT_OFFSET_ENV: &str = "CODEX_ELVES_GUARD_PORT_OFFSET";
 
 pub fn launcher_guard_port() -> u16 {
@@ -39,6 +41,16 @@ pub fn manager_guard_port() -> u16 {
     manager_guard_port_with(
         cfg!(debug_assertions),
         std::env::var(MANAGER_GUARD_PORT_ENV).ok().as_deref(),
+        std::env::var(GUARD_PORT_OFFSET_ENV).ok().as_deref(),
+        std::env::var("USERNAME").ok().as_deref(),
+        cfg!(windows),
+    )
+}
+
+pub fn task_board_guard_port() -> u16 {
+    guard_port_with(
+        TASK_BOARD_GUARD_PORT,
+        std::env::var(TASK_BOARD_GUARD_PORT_ENV).ok().as_deref(),
         std::env::var(GUARD_PORT_OFFSET_ENV).ok().as_deref(),
         std::env::var("USERNAME").ok().as_deref(),
         cfg!(windows),

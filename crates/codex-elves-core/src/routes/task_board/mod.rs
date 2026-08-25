@@ -16,6 +16,7 @@ mod move_task;
 mod snapshot;
 
 pub const TASK_BOARD_SNAPSHOT_PATH: &str = "/task-board/snapshot";
+pub const TASK_BOARD_OPEN_WINDOW_PATH: &str = "/task-board/open-window";
 pub const TASK_BOARD_SESSION_CATALOG_PATH: &str = "/task-board/session-catalog";
 pub const TASK_BOARD_CREATE_PATH: &str = "/task-board/task-create";
 pub const TASK_BOARD_ATTACH_CONVERSATIONS_PATH: &str = "/task-board/task-conversations-attach";

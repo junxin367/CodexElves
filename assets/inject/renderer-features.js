@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "55";
+  const codexDeleteStyleVersion = "57";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -82,9 +82,10 @@
   const codexPluginRequestIdMaxEntries = 256;
   const codexFailureHistoryMaxEntries = 64;
   const codexManagerReactDiscoveryCooldownMs = 15000;
-  const taskBoardRuntimeVersion = "29";
+  const taskBoardRuntimeVersion = "32";
   const taskBoardNativeOperationLeaseTtlMs = 2 * 60 * 1000;
   const taskBoardEntryAttribute = "data-codex-task-board-entry";
+  const taskBoardEntryContextMenuClass = "codex-task-board-entry-context-menu";
   const taskBoardRootAttribute = "data-codex-task-board-root";
   const taskBoardNativeSelectionAttribute = "data-codex-task-board-native-selection-suppressed";
   const taskBoardEntrySelector = '[data-codex-task-board-entry="true"]';
@@ -642,6 +643,69 @@
       .codex-session-more-menu-icon {
         width: 16px;
         text-align: center;
+      }
+      [${taskBoardEntryAttribute}="true"][data-codex-task-board-context-menu-open="true"] {
+        background: var(
+          --color-background-primary-soft-hover,
+          color-mix(in srgb, currentColor 8%, transparent)
+        ) !important;
+      }
+      .${taskBoardEntryContextMenuClass} {
+        position: fixed;
+        z-index: 2147483301;
+        min-width: 188px;
+        border: 1px solid var(
+          --color-border-primary-outline,
+          color-mix(in srgb, currentColor 16%, transparent)
+        );
+        border-radius: 10px;
+        background: var(--color-token-dropdown-background, #242628);
+        color: var(--color-token-text-primary, #f4f4f5);
+        box-shadow: 0 14px 40px rgba(0,0,0,.3);
+        padding: 5px;
+      }
+      .${taskBoardEntryContextMenuClass} button {
+        display: flex;
+        width: 100%;
+        min-height: 36px;
+        align-items: center;
+        gap: 9px;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        color: inherit;
+        cursor: default;
+        font: 13px/18px system-ui, sans-serif;
+        padding: 0 9px;
+        text-align: left;
+      }
+      .${taskBoardEntryContextMenuClass} button:hover,
+      .${taskBoardEntryContextMenuClass} button:focus-visible {
+        background: var(
+          --color-background-primary-soft-hover,
+          color-mix(in srgb, currentColor 9%, transparent)
+        );
+        outline: none;
+      }
+      .${taskBoardEntryContextMenuClass} button:active {
+        background: var(
+          --color-background-primary-soft-active,
+          color-mix(in srgb, currentColor 13%, transparent)
+        );
+      }
+      .codex-task-board-entry-context-menu-icon {
+        display: inline-flex;
+        width: 16px;
+        height: 16px;
+        flex: 0 0 auto;
+        align-items: center;
+        justify-content: center;
+        color: color-mix(in srgb, currentColor 72%, transparent);
+      }
+      .codex-task-board-entry-context-menu-icon svg {
+        display: block;
+        width: 16px;
+        height: 16px;
       }
       .codex-archive-row-button {
         border: 1px solid #ef4444;
@@ -8123,6 +8187,7 @@
     navigationVersion: 0,
     navigationReleaseId: 0,
     entryTemplateSignature: "",
+    entryContextMenu: null,
     requestRevision: 0,
     snapshot: { schemaVersion: 1, revision: 0, tasks: [] },
     catalog: { projects: [], sessions: [], warnings: [] },
@@ -8201,6 +8266,40 @@
         return adapter.startConversation(project, firstInstruction, modelId, effortId);
       }
       return taskBoardNativeStartConversation(project, firstInstruction, modelId, effortId);
+    },
+  };
+  window.__codexElvesTaskBoardHost = {
+    version: 1,
+    openSession(sessionId, conversation = null) {
+      return taskBoardNativeAdapter.openSession(sessionId, conversation);
+    },
+    probe(project) {
+      return taskBoardNativeAdapter.probe(project);
+    },
+    async createOptions() {
+      try {
+        await loadCodexModelCatalog();
+      } catch {
+        // The default-model option remains valid when the live catalog is unavailable.
+      }
+      const modelId = taskBoardCreateDefaultModelId();
+      return {
+        status: "ok",
+        modelId,
+        effortId: taskBoardCreateDefaultEffortId(modelId),
+        models: taskBoardCreateModelOptions().map((option) => ({
+          ...option,
+          efforts: taskBoardCreateEffortOptions(option.value),
+        })),
+      };
+    },
+    startConversation(project, firstInstruction, modelId = "", effortId = "") {
+      return taskBoardNativeAdapter.startConversation(
+        project,
+        firstInstruction,
+        modelId,
+        effortId,
+      );
     },
   };
 
@@ -9063,6 +9162,145 @@
     return icon;
   }
 
+  function closeTaskBoardEntryContextMenu({ restoreFocus = true } = {}) {
+    const state = taskBoardState.entryContextMenu;
+    if (!state) return;
+    document.removeEventListener("keydown", state.keydownHandler, true);
+    document.removeEventListener("pointerdown", state.dismissHandler, true);
+    window.removeEventListener("resize", state.viewportHandler);
+    window.removeEventListener("scroll", state.viewportHandler, true);
+    window.removeEventListener("blur", state.blurHandler);
+    state.entry?.removeAttribute?.("data-codex-task-board-context-menu-open");
+    state.element?.remove?.();
+    taskBoardState.entryContextMenu = null;
+    if (restoreFocus && state.entry?.isConnected !== false) state.entry?.focus?.();
+  }
+
+  function taskBoardEntryContextMenuAnchor(entry, event) {
+    const entryRect = entry?.getBoundingClientRect?.() || {
+      left: 8,
+      right: 220,
+      top: 8,
+      bottom: 44,
+    };
+    const clientX = Number(event?.clientX);
+    const clientY = Number(event?.clientY);
+    const pointerInvocation =
+      event?.type === "contextmenu" &&
+      Number.isFinite(clientX) &&
+      Number.isFinite(clientY) &&
+      (clientX !== 0 || clientY !== 0);
+    return pointerInvocation
+      ? { left: clientX, top: clientY }
+      : {
+          left: Number(entryRect.right || entryRect.left || 8) + 4,
+          top: Number(entryRect.top || 8),
+        };
+  }
+
+  function positionTaskBoardEntryContextMenu(menu, entry, event) {
+    const anchor = taskBoardEntryContextMenuAnchor(entry, event);
+    const viewportWidth = Number(window.innerWidth || 1024);
+    const viewportHeight = Number(window.innerHeight || 768);
+    const menuRect = menu.getBoundingClientRect?.() || { width: 188, height: 46 };
+    const menuWidth = Math.max(188, Number(menuRect.width || 188));
+    const menuHeight = Math.max(46, Number(menuRect.height || 46));
+    const left = Math.min(
+      viewportWidth - menuWidth - 8,
+      Math.max(8, Number(anchor.left || 8)),
+    );
+    const top = Number(anchor.top || 8) + menuHeight <= viewportHeight - 8
+      ? Number(anchor.top || 8)
+      : Math.max(8, Number(anchor.top || 8) - menuHeight);
+    menu.style.left = `${Math.max(8, left)}px`;
+    menu.style.top = `${Math.max(8, top)}px`;
+  }
+
+  function taskBoardEntryContextMenuIcon() {
+    const icon = taskBoardElement("span", "codex-task-board-entry-context-menu-icon");
+    icon.setAttribute("aria-hidden", "true");
+    icon.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"><rect x="2.25" y="3.75" width="8.5" height="9" rx="1.4"></rect><path d="M8.5 2.5h5v5M13.5 2.5 7.75 8.25"></path></svg>`;
+    return icon;
+  }
+
+  function openTaskBoardEntryContextMenu(entry, event) {
+    if (!entry) return null;
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    event?.stopImmediatePropagation?.();
+    closeTaskBoardEntryContextMenu({ restoreFocus: false });
+    closeTaskBoardDropdownMenu({ restoreFocus: false });
+    closeSessionMoreMenus();
+    const menu = taskBoardElement("div", taskBoardEntryContextMenuClass);
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", "任务看板操作");
+    const openWindow = taskBoardElement("button");
+    openWindow.type = "button";
+    openWindow.setAttribute("role", "menuitem");
+    openWindow.append(
+      taskBoardEntryContextMenuIcon(),
+      taskBoardElement("span", "", "在新窗口中打开"),
+    );
+    openWindow.addEventListener("click", (activateEvent) => {
+      activateEvent.preventDefault?.();
+      activateEvent.stopPropagation?.();
+      closeTaskBoardEntryContextMenu({ restoreFocus: false });
+      void openStandaloneTaskBoard();
+    }, true);
+    menu.appendChild(openWindow);
+    document.body.appendChild(menu);
+    entry.setAttribute("data-codex-task-board-context-menu-open", "true");
+    positionTaskBoardEntryContextMenu(menu, entry, event);
+    const state = {
+      element: menu,
+      entry,
+      openWindow,
+      keydownHandler: null,
+      dismissHandler: null,
+      viewportHandler: null,
+      blurHandler: null,
+    };
+    state.keydownHandler = (keyEvent) => {
+      if (keyEvent.key === "Escape") {
+        keyEvent.preventDefault?.();
+        closeTaskBoardEntryContextMenu();
+      } else if (keyEvent.key === "Tab") {
+        closeTaskBoardEntryContextMenu({ restoreFocus: false });
+      } else if (
+        keyEvent.key === "ArrowDown" ||
+        keyEvent.key === "ArrowUp" ||
+        keyEvent.key === "Home" ||
+        keyEvent.key === "End"
+      ) {
+        keyEvent.preventDefault?.();
+        openWindow.focus?.();
+      } else if (keyEvent.key === "Enter" || keyEvent.key === " ") {
+        if (document.activeElement !== openWindow) return;
+        keyEvent.preventDefault?.();
+        openWindow.click?.();
+      }
+    };
+    state.dismissHandler = (dismissEvent) => {
+      const target = dismissEvent.target;
+      if (menu.contains?.(target) || entry.contains?.(target)) return;
+      closeTaskBoardEntryContextMenu({ restoreFocus: false });
+    };
+    state.viewportHandler = () => {
+      closeTaskBoardEntryContextMenu({ restoreFocus: false });
+    };
+    state.blurHandler = () => {
+      closeTaskBoardEntryContextMenu({ restoreFocus: false });
+    };
+    taskBoardState.entryContextMenu = state;
+    document.addEventListener("keydown", state.keydownHandler, true);
+    document.addEventListener("pointerdown", state.dismissHandler, true);
+    window.addEventListener("resize", state.viewportHandler);
+    window.addEventListener("scroll", state.viewportHandler, true);
+    window.addEventListener("blur", state.blurHandler);
+    requestAnimationFrame(() => openWindow.focus?.());
+    return state;
+  }
+
   function taskBoardCreateEntry(pluginButton) {
     const entry = pluginButton.cloneNode(true);
     entry.type = "button";
@@ -9089,14 +9327,42 @@
     entry.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      closeTaskBoardEntryContextMenu({ restoreFocus: false });
       activateTaskBoard();
     });
+    entry.addEventListener("contextmenu", (event) => {
+      openTaskBoardEntryContextMenu(entry, event);
+    });
+    entry.addEventListener("keydown", (event) => {
+      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+        openTaskBoardEntryContextMenu(entry, event);
+      }
+    });
     return entry;
+  }
+
+  async function openStandaloneTaskBoard() {
+    let result;
+    try {
+      const bridge = window.__codexSessionDeleteBridge;
+      result = typeof bridge === "function"
+        ? await bridge("/task-board/open-window", {})
+        : taskBoardNativeFailure("bridge_unavailable", "任务看板启动接口不可用");
+    } catch (error) {
+      result = taskBoardNativeFailure(
+        "bridge_unavailable",
+        String(error?.message || error || "任务看板启动接口不可用"),
+      );
+    }
+    if (result?.status === "ok") return result;
+    showToast(result?.message || "独立任务看板暂不可用，请稍后重试");
+    return result;
   }
 
   function reconcileTaskBoardEntry() {
     const entries = taskBoardEntryButtons();
     if (!taskBoardFeatureEnabled()) {
+      closeTaskBoardEntryContextMenu({ restoreFocus: false });
       entries.forEach((entry) => entry.remove());
       taskBoardState.entry = null;
       return null;
@@ -9117,6 +9383,7 @@
     let entry = primaryEntries.shift() || null;
     primaryEntries.forEach((duplicate) => duplicate.remove());
     if (!entry || taskBoardState.entryTemplateSignature !== templateSignature) {
+      closeTaskBoardEntryContextMenu({ restoreFocus: false });
       entry?.remove?.();
       entry = taskBoardCreateEntry(pluginButton);
     }
@@ -12728,6 +12995,7 @@
 
   function disableTaskBoardRuntime() {
     taskBoardState.navigationReleaseId += 1;
+    closeTaskBoardEntryContextMenu({ restoreFocus: false });
     deactivateTaskBoard({ restoreNativeSelection: true });
     document.removeEventListener("click", taskBoardState.navigationHandler, true);
     taskBoardState.navigationHandler = null;
@@ -12757,6 +13025,7 @@
       (!!taskBoardState.nativeCreateOperation || !!taskBoardNativeOperationLease());
     if (!preserveNativeCreate) taskBoardCancelNativeCreateOperation();
     cancelTaskBoardMoveInteraction({ restoreFocus: false });
+    closeTaskBoardEntryContextMenu({ restoreFocus: false });
     closeTaskBoardCreateModal();
     closeTaskBoardDetachDialog({ restoreFocus: false });
     reconcileTaskBoardRuntime();
@@ -12836,6 +13105,18 @@
       },
       pluginEntryButtonForTest: pluginEntryButton,
       taskBoardPluginEntryButtonForTest: taskBoardPluginEntryButton,
+      createEntryForTest: taskBoardCreateEntry,
+      openEntryContextMenuForTest: openTaskBoardEntryContextMenu,
+      closeEntryContextMenuForTest: closeTaskBoardEntryContextMenu,
+      entryContextMenuStateForTest: () => ({
+        open: !!taskBoardState.entryContextMenu,
+        role: taskBoardState.entryContextMenu?.element?.getAttribute?.("role") || "",
+        label: taskBoardState.entryContextMenu?.openWindow?.textContent || "",
+        itemRole:
+          taskBoardState.entryContextMenu?.openWindow?.getAttribute?.("role") || "",
+        focused:
+          document.activeElement === taskBoardState.entryContextMenu?.openWindow,
+      }),
       conversationProjection: (conversation, catalog) =>
         taskBoardConversationProjectionForCatalog(conversation, catalog),
       conversationStatusForTest: taskBoardConversationStatus,
@@ -16660,7 +16941,7 @@
   }
 
   function isExtensionUiNode(node) {
-    return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-elves-modal-overlay, .${projectMoveOverlayClass}, .codex-conversation-timeline, .${codexServiceTierBadgeClass}, .${codexTokenUsageCardClass}, .${codexAppServerRestartButtonClass}, .${codexAppServerRestartDialogClass}, .${taskBoardMainHostClass}, [${taskBoardEntryAttribute}="true"], #codex-elves-menu`);
+    return !!node?.closest?.(`.codex-delete-toast, .codex-delete-confirm-overlay, .codex-elves-modal-overlay, .${projectMoveOverlayClass}, .codex-conversation-timeline, .${codexServiceTierBadgeClass}, .${codexTokenUsageCardClass}, .${codexAppServerRestartButtonClass}, .${codexAppServerRestartDialogClass}, .${taskBoardMainHostClass}, .${taskBoardEntryContextMenuClass}, [${taskBoardEntryAttribute}="true"], #codex-elves-menu`);
   }
 
   function scanRelevantSelectorForDomain(domain) {
