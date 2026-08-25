@@ -396,7 +396,11 @@ fn task_board_runs_as_a_separate_window_with_persistent_placement() {
     assert!(task_board_rs.contains("persist_window_state"));
     assert!(task_board_rs.contains("task_board_guard_port()"));
     assert!(task_board_rs.contains("JSON.stringify(result ?? null)"));
+    assert!(task_board_rs.contains("task_board_load_host_appearance"));
+    assert!(task_board_rs.contains("task_board_load_conversation_statuses"));
     assert!(permissions.contains("\"task_board_load_create_options\""));
+    assert!(permissions.contains("\"task_board_load_host_appearance\""));
+    assert!(permissions.contains("\"task_board_load_conversation_statuses\""));
 }
 
 #[test]
@@ -411,19 +415,57 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     assert!(app.contains("跨项目观察任务状态，并集中关联项目下的多个会话"));
     assert!(app.contains("搜索任务、项目或关联会话"));
     assert!(app.contains("拖动任务卡片可切换状态"));
+    assert!(app.contains("formatSessionUpdatedTime(session.updatedAtMs)"));
+    assert!(app.contains("task-board-session-time"));
+    assert!(app.contains("\"task_board_load_host_appearance\""));
+    assert!(app.contains("\"task_board_load_conversation_statuses\""));
+    assert!(app.contains("nativeCreateAvailable: null"));
+    assert!(app.contains("probe.canStart !== true"));
+    assert!(app.contains("disabled={editor.busy || !editor.projectCwd}"));
+    assert!(app.contains("function taskProjectRef(project: TaskProject)"));
+    assert!(app.contains("project: taskProjectRef(project)"));
+    assert!(app.contains("const hostProject = taskProjectRef(project)"));
+    assert!(app.contains("task-board-conversation-state"));
     assert!(!app.contains("独立 WebView2 进程"));
     assert!(styles.contains("grid-template-columns: repeat(5, minmax(0, 1fr))"));
     assert!(styles.contains("min-width: 1580px"));
+    assert!(styles.contains("align-content: start"));
+    assert!(styles.contains("grid-auto-rows: max-content"));
+    assert!(styles.contains(".task-board-session-copy"));
+    assert!(styles.contains(".task-board-session-time"));
+    assert!(styles.contains("--task-board-modal-background"));
+    assert!(styles.contains(".task-board-dropdown-status-dot"));
+    assert!(styles.contains(".task-board-conversation-state"));
     assert!(styles.contains("background: #1f1f1f"));
     assert!(styles.contains("font-size: 24px"));
     assert!(!app.contains("<select"));
     assert!(app.contains("function TaskBoardDropdown"));
     assert!(app.contains("function TaskBoardCreateSettings"));
+    assert!(app.contains("function taskBoardDropdownLeft("));
+    assert!(!app.contains("align?: \"start\" | \"end\""));
+    assert!(!app.contains("align=\"start\""));
+    assert!(!app.contains("const fitsRight = menuRect.right"));
     assert!(app.contains("function taskBoardModalFocusableElements"));
     assert!(app.contains("为“${editor.targetTask?.title || \"未命名任务\"}”关联已有会话"));
     assert!(app.contains("只可追加当前任务所属项目中的会话。"));
     assert!(styles.contains("padding: 0 8px 0 9px"));
     assert!(styles.contains(".task-board-dropdown-chevron"));
+    let dropdown_button_styles = styles
+        .split(".task-board-dropdown-menu button {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("standalone dropdown button styles should be present");
+    assert!(dropdown_button_styles.contains("align-items: center"));
+    assert!(!dropdown_button_styles.contains("align-items: flex-start"));
+    let dropdown_marker_styles = styles
+        .split(".task-board-dropdown-option-marker {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("standalone dropdown marker styles should be present");
+    assert!(dropdown_marker_styles.contains("margin-top: 0"));
+    assert!(styles.contains(
+        ".task-board-dropdown-option-marker svg,\n.task-board-create-settings-chevron svg"
+    ));
     assert!(styles.contains("grid-template-columns: 18px 16px minmax(0, 1fr)"));
     assert!(styles.contains("height: min(650px, calc(100vh - 32px))"));
 }

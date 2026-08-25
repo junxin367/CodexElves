@@ -244,8 +244,28 @@ fn renderer_task_board_view_projects_read_only_bridge_snapshots_responsively() {
             .count(),
         2
     );
-    assert_eq!(script.matches("align: \"start\"").count(), 2);
-    assert!(script.contains("const preferredLeft = align === \"start\""));
+    assert!(script.contains("function taskBoardDropdownLeft("));
+    assert!(script.contains("const viewportRight = Math.max(8, viewportWidth - menuWidth - 8);"));
+    assert!(script.contains("Number(parentRect.left || menuRect.left || 8)"));
+    assert!(!script.contains("align = \"end\""));
+    assert!(!script.contains("align: \"start\""));
+    assert!(!script.contains("const fitsRight = Number(menuRect.right"));
+    let dropdown_button_styles = script
+        .split(".codex-task-board-dropdown-menu button {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("task board dropdown button styles should be present");
+    assert!(dropdown_button_styles.contains("align-items: center"));
+    assert!(!dropdown_button_styles.contains("align-items: flex-start"));
+    let dropdown_marker_styles = script
+        .split(".codex-task-board-dropdown-option-marker {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("task board dropdown marker styles should be present");
+    assert!(dropdown_marker_styles.contains("margin-top: 0"));
+    assert!(script.contains(
+        ".codex-task-board-dropdown-option-marker svg,\n      .codex-task-board-create-settings-chevron svg"
+    ));
     assert!(!script.contains("taskBoardElement(\"select\", \"codex-task-board-create-select\")"));
     assert!(script.contains("codex-task-board-dropdown-trigger"));
     assert!(script.contains("codex-task-board-dropdown-menu"));
@@ -286,7 +306,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "57";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "60";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -327,6 +347,14 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
     assert!(script.contains("const linkedEntries = Array.from(linked.entries());"));
     assert!(script.contains("const taskBoardConversationStatusMaxConcurrency = 4;"));
     assert!(script.contains("function taskBoardMapSettledWithConcurrency("));
+    assert!(script.contains("function taskBoardHostAppearance()"));
+    assert!(script.contains("taskBoardHostAppearance() {\n    installStyle();"));
+    assert!(!script.contains("installStyles();"));
+    assert!(script.contains("function taskBoardHostConversationStatuses("));
+    assert!(script.contains("version: 2"));
+    assert!(script.contains("appearance()"));
+    assert!(script.contains("conversationStatuses(conversations = [])"));
+    assert!(script.contains("codex-task-board-dropdown-status-dot"));
     assert!(!script.contains("Array.from(linked.keys())[index]"));
     assert!(script.contains("if (resultsChanged) renderTaskBoardCards();"));
     assert!(script.contains("const tasksByStatus = new Map("));
@@ -391,7 +419,7 @@ fn renderer_task_board_navigation_opens_inline_and_offers_new_window_on_context_
         .and_then(|section| section.split("function reconcileTaskBoardEntry()").next())
         .expect("standalone task board opener should be present");
 
-    assert!(script.contains(r#"const taskBoardRuntimeVersion = "32";"#));
+    assert!(script.contains(r#"const taskBoardRuntimeVersion = "38";"#));
     assert!(script.contains("codex-task-board-entry-context-menu"));
     assert!(script.contains("function openTaskBoardEntryContextMenu(entry, event)"));
     assert!(script.contains(r#"menu.setAttribute("role", "menu")"#));
@@ -618,6 +646,17 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
     assert!(script.contains("codex-task-board-create-settings-menu"));
     assert!(script.contains("codex-task-board-create-model-menu"));
     assert!(script.contains("codex-task-board-create-effort-menu"));
+    assert!(script.contains("align-content: start;"));
+    assert!(script.contains("grid-auto-rows: max-content;"));
+    assert!(script.contains("function taskBoardSessionTimeLabel(value)"));
+    assert!(script.contains("codex-task-board-create-session-copy"));
+    assert!(script.contains("codex-task-board-create-session-time"));
+    assert!(script.contains("const taskBoardCatalogSessionsByProjectCache = new WeakMap();"));
+    assert!(script.contains("function taskBoardScheduleCreateSessionHydration("));
+    assert!(script.contains("function taskBoardHydrateCreateModalSessions("));
+    assert!(script.contains("正在准备会话列表…"));
+    assert!(script.contains("modal.sessionHydrationTimer = setTimeout(() =>"));
+    assert!(script.contains("taskBoardScheduleCreateSessionHydration(modal);"));
     assert!(script.contains("function openTaskBoardCreateSettingsMenu("));
     assert!(script.contains("function taskBoardOpenCreateSettingsSubmenu("));
     assert!(script.contains("推理强度"));
@@ -680,6 +719,20 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
     assert!(script.contains("const initialStatus = taskBoardStatusId(modal.initialStatus);"));
     assert!(script.contains("await taskBoardApplyInitialStatus(taskId, initialStatus);"));
 
+    assert!(
+        cases["deferredSessions"]["shellMountsBeforeRows"]
+            .as_bool()
+            .unwrap(),
+        "deferred session shell state: {}",
+        cases["deferredSessions"]
+    );
+    assert!(
+        cases["deferredSessions"]["rowsHydrateAfterShell"]
+            .as_bool()
+            .unwrap(),
+        "deferred session hydration state: {}",
+        cases["deferredSessions"]
+    );
     assert_eq!(cases["modal"]["role"], "dialog");
     assert!(cases["modal"]["ariaModal"].as_bool().unwrap());
     assert!(cases["modal"]["initialFocus"].as_bool().unwrap());
@@ -715,6 +768,18 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
             .as_bool()
             .unwrap(),
         "project dropdown state: {}",
+        cases["dropdowns"]
+    );
+    assert!(
+        cases["dropdowns"]["allRootMenusLeftAligned"]
+            .as_bool()
+            .unwrap(),
+        "root dropdown alignment state: {}",
+        cases["dropdowns"]
+    );
+    assert!(
+        cases["dropdowns"]["allMenusLeftAligned"].as_bool().unwrap(),
+        "all dropdown alignment state: {}",
         cases["dropdowns"]
     );
     assert!(
@@ -4668,6 +4733,7 @@ function reset(options = {}) {
   window.__codexElvesTaskBoardNativeAdapter = options.nativeAdapter || null;
   api.resetCreateStateForTest({ snapshot: options.snapshot || snapshot(3), catalog: catalog() });
   api.openCreateModalForTest();
+  api.hydrateCreateSessionsForTest();
 }
 function setNew(title = "原生任务", modelId = "claude-sonnet-4-6", effortId = "high") {
   api.setCreateDraftForTest({
@@ -5390,6 +5456,7 @@ function reset(options = {}) {
     catalogError: options.catalogError || "",
   });
   api.openCreateModalForTest();
+  api.hydrateCreateSessionsForTest();
 }
 function setExisting(title = "创建成功") {
   api.setCreateDraftForTest({
@@ -5403,6 +5470,28 @@ function createState() {
   return api.createModalStateForTest();
 }
 (async () => {
+  api.resetCreateStateForTest({
+    snapshot: snapshot(3),
+    catalog: catalog(),
+    catalogError: "",
+  });
+  api.openCreateModalForTest();
+  const immediateSessionState = api.createModalStateForTest();
+  api.hydrateCreateSessionsForTest();
+  const hydratedSessionState = api.createModalStateForTest();
+  const deferredSessions = {
+    shellMountsBeforeRows:
+      immediateSessionState.open &&
+      !immediateSessionState.sessionsHydrated &&
+      immediateSessionState.sessionRenderState === "pending" &&
+      immediateSessionState.sessionInputCount === 0,
+    rowsHydrateAfterShell:
+      hydratedSessionState.sessionsHydrated &&
+      hydratedSessionState.sessionRenderState === "ready" &&
+      hydratedSessionState.sessionInputCount === 2,
+  };
+  api.clickCreateModalControlForTest("closeButton");
+
   const priorFocus = document.createElement("button");
   document.body.appendChild(priorFocus);
   priorFocus.focus();
@@ -5481,6 +5570,8 @@ function createState() {
     ],
   });
   reset();
+  api.openStatusMenuForTest("task-3", { left: 700, top: 200, width: 92, height: 29 });
+  const cardStatusDropdownOpen = api.dropdownMenuStateForTest();
   const dropdownContract = api.createModalContractForTest();
   dropdownContract.projectSelect.getBoundingClientRect = () => ({
     left: 260,
@@ -5488,6 +5579,14 @@ function createState() {
     top: 100,
     bottom: 136,
     width: 300,
+    height: 36,
+  });
+  dropdownContract.statusSelect.getBoundingClientRect = () => ({
+    left: 420,
+    right: 580,
+    top: 100,
+    bottom: 136,
+    width: 160,
     height: 36,
   });
   dropdownContract.modelTrigger.getBoundingClientRect = () => ({
@@ -5553,6 +5652,29 @@ function createState() {
     statusAfterEnter,
     dropdownOpenAfterEnter,
     settingsLayeredEscape,
+    geometry: {
+      boardProject: boardProjectDropdownOpen.left,
+      cardStatus: cardStatusDropdownOpen.left,
+      createProject: projectDropdownOpen.left,
+      createStatus: statusDropdownOpen.left,
+      settings: settingsMenuOpen.left,
+    },
+    allRootMenusLeftAligned:
+      boardProjectDropdownOpen.left === "40px" &&
+      cardStatusDropdownOpen.kind === "status" &&
+      cardStatusDropdownOpen.left === "700px" &&
+      projectDropdownOpen.left === "260px" &&
+      statusDropdownOpen.left === "420px" &&
+      settingsMenuOpen.left === "500px",
+    allMenusLeftAligned:
+      boardProjectDropdownOpen.left === "40px" &&
+      cardStatusDropdownOpen.left === "700px" &&
+      projectDropdownOpen.left === "260px" &&
+      statusDropdownOpen.left === "420px" &&
+      settingsMenuOpen.left === "500px" &&
+      fullEffortMenuOpen.submenuLeft === "500px" &&
+      modelMenuOpen.submenuLeft === "500px" &&
+      effortMenuOpen.submenuLeft === "500px",
     projectMenusConsistent:
       boardProjectDropdownOpen.kind === "project" &&
       boardProjectDropdownOpen.role === "listbox" &&
@@ -5579,12 +5701,14 @@ function createState() {
       settingsMenuOpen.kind === "create-settings" &&
       settingsMenuOpen.role === "menu" &&
       settingsMenuOpen.itemCount === 2 &&
+      settingsMenuOpen.left === "500px" &&
       settingsMenuOpen.top === "494px" &&
       JSON.stringify(settingsMenuOpen.buttonTexts) ===
         JSON.stringify(["模型 5.6 Sol", "推理强度 极高"]) &&
       settingsMenuOpen.triggerExpanded === "true" &&
       fullEffortMenuOpen.submenuOpen &&
       fullEffortMenuOpen.submenuKind === "effort" &&
+      fullEffortMenuOpen.submenuLeft === "500px" &&
       fullEffortMenuOpen.submenuItemCount === 5 &&
       fullEffortMenuOpen.submenuSelectedIndex === 3 &&
       JSON.stringify(fullEffortMenuOpen.submenuTexts) ===
@@ -5592,6 +5716,7 @@ function createState() {
       modelMenuOpen.submenuOpen &&
       modelMenuOpen.submenuKind === "model" &&
       modelMenuOpen.submenuRole === "menu" &&
+      modelMenuOpen.submenuLeft === "500px" &&
       modelMenuOpen.submenuItemCount === 2 &&
       modelMenuOpen.submenuSelectedIndex === 0 &&
       JSON.stringify(modelMenuOpen.submenuTexts) ===
@@ -5599,6 +5724,7 @@ function createState() {
       effortMenuOpen.submenuOpen &&
       effortMenuOpen.submenuKind === "effort" &&
       effortMenuOpen.submenuRole === "menu" &&
+      effortMenuOpen.submenuLeft === "500px" &&
       effortMenuOpen.submenuItemCount === 2 &&
       effortMenuOpen.submenuSelectedIndex === 1 &&
       JSON.stringify(effortMenuOpen.submenuTexts) === JSON.stringify(["轻度", "高"]) &&
@@ -6188,6 +6314,7 @@ function createState() {
   };
 
   process.stdout.write(JSON.stringify({
+    deferredSessions,
     modal,
     dropdowns,
     projectSelection,

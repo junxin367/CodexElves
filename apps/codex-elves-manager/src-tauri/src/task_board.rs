@@ -92,6 +92,19 @@ pub struct StartConversationRequest {
     effort_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationStatusRef {
+    session_id: String,
+    title: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationStatusesRequest {
+    conversations: Vec<ConversationStatusRef>,
+}
+
 pub fn run() {
     install_panic_logger();
     let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
@@ -143,6 +156,8 @@ pub fn run() {
             task_board_open_session,
             task_board_probe_host,
             task_board_load_create_options,
+            task_board_load_host_appearance,
+            task_board_load_conversation_statuses,
             task_board_start_conversation,
         ])
         .run(tauri::generate_context!());
@@ -264,6 +279,33 @@ pub async fn task_board_probe_host(project: TaskBoardProject) -> Value {
 #[tauri::command]
 pub async fn task_board_load_create_options() -> Value {
     call_codex_host("createOptions", json!([])).await
+}
+
+#[tauri::command]
+pub async fn task_board_load_host_appearance() -> Value {
+    call_codex_host("appearance", json!([])).await
+}
+
+#[tauri::command]
+pub async fn task_board_load_conversation_statuses(request: ConversationStatusesRequest) -> Value {
+    let mut seen = HashSet::new();
+    let conversations = request
+        .conversations
+        .into_iter()
+        .filter_map(|conversation| {
+            let session_id = conversation.session_id.trim().to_string();
+            let key = session_id.trim_start_matches("local:").to_ascii_lowercase();
+            if session_id.is_empty() || !seen.insert(key) {
+                return None;
+            }
+            Some(ConversationStatusRef {
+                session_id,
+                title: conversation.title,
+            })
+        })
+        .take(256)
+        .collect::<Vec<_>>();
+    call_codex_host("conversationStatuses", json!([conversations])).await
 }
 
 #[tauri::command]

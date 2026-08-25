@@ -14,6 +14,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type DragEvent,
 } from "react";
 import "./task-board.css";
@@ -58,6 +59,7 @@ type DropdownOption = {
   value: string;
   label: string;
   description?: string;
+  color?: string;
   disabled?: boolean;
 };
 
@@ -80,6 +82,8 @@ type BoardResponse = {
   modelId?: string;
   effortId?: string;
   models?: CreateModelOption[];
+  appearance?: TaskBoardAppearance;
+  statuses?: ConversationRuntimeStatus[];
 };
 
 type BoardSnapshot = {
@@ -104,11 +108,50 @@ type EditorState = {
   instruction: string;
   busy: boolean;
   feedback: string;
-  nativeCreateAvailable: boolean;
+  nativeCreateAvailable: boolean | null;
+  nativeCreateMessage: string;
   modelId: string;
   effortId: string;
   modelOptions: CreateModelOption[];
   modelSelectionTouched: boolean;
+};
+
+type TaskBoardAppearance = {
+  background: string;
+  foreground: string;
+  panelBackground: string;
+  cardBackground: string;
+  cardBackgroundHover: string;
+  border: string;
+  borderSoft: string;
+  textSecondary: string;
+  textTertiary: string;
+  accent: string;
+  actionBackground: string;
+  actionBackgroundHover: string;
+  actionBackgroundActive: string;
+  actionForeground: string;
+  actionBorder: string;
+  modalBackground: string;
+  modalForeground: string;
+  modalBorder: string;
+  fieldBackground: string;
+  menuBackground: string;
+  rootFontFamily: string;
+  modalFontFamily: string;
+};
+
+type ConversationRuntimeStatus = {
+  sessionId: string;
+  known: boolean;
+  checking: boolean;
+  isRunning: boolean;
+  unread: boolean;
+};
+
+type ConversationStatusPresentation = {
+  id: "running" | "completed-unread" | "completed" | "checking" | "unknown" | "unavailable";
+  label: string;
 };
 
 const statuses: Array<{ id: TaskStatus; label: string; color: string }> = [
@@ -149,6 +192,80 @@ const fallbackModelOptions: CreateModelOption[] = [
     efforts: defaultEffortOptions,
   },
 ];
+
+function formatSessionUpdatedTime(value?: number | null) {
+  const timestamp = Number(value || 0);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "时间未知";
+  const date = new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) return "时间未知";
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return [
+    `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())}`,
+    `${pad(date.getHours())}:${pad(date.getMinutes())}`,
+  ].join(" ");
+}
+
+function taskBoardAppearanceStyle(
+  appearance: TaskBoardAppearance | null,
+): CSSProperties | undefined {
+  if (!appearance) return undefined;
+  return {
+    "--task-board-background": appearance.background,
+    "--task-board-foreground": appearance.foreground,
+    "--task-board-panel-background": appearance.panelBackground,
+    "--task-board-card-background": appearance.cardBackground,
+    "--task-board-card-background-hover": appearance.cardBackgroundHover,
+    "--task-board-border": appearance.border,
+    "--task-board-border-soft": appearance.borderSoft,
+    "--task-board-text-secondary": appearance.textSecondary,
+    "--task-board-text-tertiary": appearance.textTertiary,
+    "--task-board-accent": appearance.accent,
+    "--task-board-action-background": appearance.actionBackground,
+    "--task-board-action-background-hover": appearance.actionBackgroundHover,
+    "--task-board-action-background-active": appearance.actionBackgroundActive,
+    "--task-board-action-foreground": appearance.actionForeground,
+    "--task-board-action-border": appearance.actionBorder,
+    "--task-board-modal-background": appearance.modalBackground,
+    "--task-board-modal-foreground": appearance.modalForeground,
+    "--task-board-modal-border": appearance.modalBorder,
+    "--task-board-field-background": appearance.fieldBackground,
+    "--task-board-menu-background": appearance.menuBackground,
+    "--task-board-root-font-family": appearance.rootFontFamily,
+    "--task-board-modal-font-family": appearance.modalFontFamily,
+  } as CSSProperties;
+}
+
+function taskProjectRef(project: TaskProject): TaskProject {
+  return {
+    cwd: project.cwd,
+    label: project.label,
+  };
+}
+
+function taskBoardDropdownLeft(
+  triggerLeft: number,
+  menuWidth: number,
+  viewportWidth: number,
+) {
+  const viewportRight = Math.max(8, viewportWidth - menuWidth - 8);
+  return Math.max(8, Math.min(viewportRight, triggerLeft));
+}
+
+function conversationStatusPresentation(
+  runtimeStatus: ConversationRuntimeStatus | undefined,
+  available: boolean,
+): ConversationStatusPresentation {
+  if (!available) return { id: "unavailable", label: "不可用" };
+  if (runtimeStatus?.isRunning) return { id: "running", label: "运行中" };
+  if (!runtimeStatus || runtimeStatus.checking) {
+    return { id: "checking", label: "检查中" };
+  }
+  if (!runtimeStatus.known) return { id: "unknown", label: "状态未知" };
+  if (runtimeStatus.unread) {
+    return { id: "completed-unread", label: "已完成 · 未读" };
+  }
+  return { id: "completed", label: "已完成" };
+}
 
 function taskBoardModalFocusableElements(modal: HTMLElement) {
   return [
@@ -191,7 +308,6 @@ function TaskBoardDropdown({
   minWidth = 180,
   fixedWidth = 0,
   matchTriggerWidth = false,
-  align = "end",
   placement = "auto",
   disabled = false,
   modalFocusTrap = false,
@@ -206,7 +322,6 @@ function TaskBoardDropdown({
   minWidth?: number;
   fixedWidth?: number;
   matchTriggerWidth?: boolean;
-  align?: "start" | "end";
   placement?: "auto" | "top" | "bottom";
   disabled?: boolean;
   modalFocusTrap?: boolean;
@@ -251,11 +366,10 @@ function TaskBoardDropdown({
     const renderedWidth = menuRect.width || menuWidth;
     const renderedHeight = menuRect.height || 0;
     const gap = 6;
-    const preferredLeft =
-      align === "start" ? triggerRect.left : triggerRect.right - renderedWidth;
-    const left = Math.min(
-      viewportWidth - renderedWidth - 8,
-      Math.max(8, preferredLeft),
+    const left = taskBoardDropdownLeft(
+      triggerRect.left,
+      renderedWidth,
+      viewportWidth,
     );
     const fitsBelow = triggerRect.bottom + gap + renderedHeight <= viewportHeight - 8;
     const top =
@@ -264,11 +378,10 @@ function TaskBoardDropdown({
         : placement === "bottom" || fitsBelow
           ? triggerRect.bottom + gap
           : Math.max(8, triggerRect.top - gap - renderedHeight);
-    menu.style.left = `${Math.max(8, left)}px`;
+    menu.style.left = `${left}px`;
     menu.style.top = `${top}px`;
     menu.style.visibility = "visible";
   }, [
-    align,
     fixedWidth,
     matchTriggerWidth,
     minWidth,
@@ -399,8 +512,21 @@ function TaskBoardDropdown({
                   }}
                 >
                   <span className="task-board-dropdown-option-copy">
-                    <span className="task-board-dropdown-option-title">
-                      {option.label}
+                    <span className="task-board-dropdown-option-title-row">
+                      {option.color ? (
+                        <span
+                          className="task-board-dropdown-status-dot"
+                          style={
+                            {
+                              "--task-board-status-color": option.color,
+                            } as CSSProperties
+                          }
+                          aria-hidden="true"
+                        />
+                      ) : null}
+                      <span className="task-board-dropdown-option-title">
+                        {option.label}
+                      </span>
                     </span>
                     {option.description ? (
                       <span className="task-board-dropdown-option-description">
@@ -448,8 +574,19 @@ function TaskBoardDropdown({
         title={triggerLabel}
         onClick={() => setOpen((current) => !current)}
       >
-        <span className="task-board-dropdown-label">
-          {triggerLabel}
+        <span className="task-board-dropdown-trigger-copy">
+          {selectedOption?.color ? (
+            <span
+              className="task-board-dropdown-status-dot"
+              style={
+                {
+                  "--task-board-status-color": selectedOption.color,
+                } as CSSProperties
+              }
+              aria-hidden="true"
+            />
+          ) : null}
+          <span className="task-board-dropdown-label">{triggerLabel}</span>
         </span>
         <span className="task-board-dropdown-chevron">
           <svg
@@ -542,12 +679,13 @@ function TaskBoardCreateSettings({
     const viewportHeight = window.innerHeight || 768;
     const width = menuRect.width || 220;
     const height = menuRect.height || 0;
-    const left = Math.min(
-      viewportWidth - width - 8,
-      Math.max(8, triggerRect.right - width),
+    const left = taskBoardDropdownLeft(
+      triggerRect.left,
+      width,
+      viewportWidth,
     );
     const top = Math.max(8, triggerRect.top - 6 - height);
-    menu.style.left = `${Math.max(8, left)}px`;
+    menu.style.left = `${left}px`;
     menu.style.top = `${Math.min(viewportHeight - height - 8, top)}px`;
     menu.style.visibility = "visible";
   }, [open]);
@@ -571,19 +709,24 @@ function TaskBoardCreateSettings({
     const width = submenuRect.width || 220;
     const height = submenuRect.height || 0;
     const gap = 6;
-    const fitsRight = menuRect.right + gap + width <= viewportWidth - 8;
-    const left = fitsRight
-      ? menuRect.right + gap
-      : Math.max(8, menuRect.left - gap - width);
     const opensAbove = menuRect.bottom <= triggerRect.top;
-    const preferredTop = opensAbove
-      ? menuRect.bottom - height
-      : parentRect.top - 5;
+    const spaceAbove = Math.max(0, menuRect.top - gap - 8);
+    const spaceBelow = Math.max(0, viewportHeight - menuRect.bottom - gap - 8);
+    const placeAbove = opensAbove
+      ? spaceAbove >= height || spaceAbove >= spaceBelow
+      : spaceBelow < height && spaceAbove > spaceBelow;
+    const preferredTop = placeAbove
+      ? menuRect.top - gap - height
+      : menuRect.bottom + gap;
     const top = Math.min(
       viewportHeight - height - 8,
       Math.max(8, preferredTop),
     );
-    submenu.style.left = `${Math.max(8, left)}px`;
+    submenu.style.left = `${taskBoardDropdownLeft(
+      parentRect.left,
+      width,
+      viewportWidth,
+    )}px`;
     submenu.style.top = `${Math.max(8, top)}px`;
     submenu.style.visibility = "visible";
   }, [open, submenuKind, submenuOptions]);
@@ -941,6 +1084,10 @@ function TaskBoardCreateSettings({
 export function TaskBoardApp() {
   const [snapshot, setSnapshot] = useState<BoardSnapshot>(emptySnapshot);
   const [catalog, setCatalog] = useState<Catalog>(emptyCatalog);
+  const [appearance, setAppearance] = useState<TaskBoardAppearance | null>(null);
+  const [conversationStatuses, setConversationStatuses] = useState<
+    Map<string, ConversationRuntimeStatus>
+  >(new Map());
   const [query, setQuery] = useState("");
   const [projectFilter, setProjectFilter] = useState("");
   const [loading, setLoading] = useState(true);
@@ -1008,6 +1155,41 @@ export function TaskBoardApp() {
   }, [refresh]);
 
   useEffect(() => {
+    let cancelled = false;
+    void invoke<BoardResponse>("task_board_load_host_appearance")
+      .then((result) => {
+        if (!cancelled && result.status === "ok" && result.appearance) {
+          setAppearance(result.appearance);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const styles = taskBoardAppearanceStyle(appearance);
+    if (!styles) return undefined;
+    const root = document.documentElement;
+    const previous = new Map<string, string>();
+    Object.entries(styles).forEach(([name, value]) => {
+      if (!name.startsWith("--") || typeof value !== "string") return;
+      previous.set(name, root.style.getPropertyValue(name));
+      root.style.setProperty(name, value);
+    });
+    return () => {
+      previous.forEach((value, name) => {
+        if (value) {
+          root.style.setProperty(name, value);
+        } else {
+          root.style.removeProperty(name);
+        }
+      });
+    };
+  }, [appearance]);
+
+  useEffect(() => {
     const refreshWhenActive = () => {
       if (!document.hidden) void refresh();
     };
@@ -1024,7 +1206,17 @@ export function TaskBoardApp() {
     const project = catalog.projects.find((candidate) => candidate.cwd === projectCwd);
     if (!editor || !project) return;
     let cancelled = false;
-    void invoke<BoardResponse>("task_board_probe_host", { project })
+    setEditor((current) => {
+      if (!current || current.projectCwd !== projectCwd) return current;
+      return {
+        ...current,
+        nativeCreateAvailable: null,
+        nativeCreateMessage: "正在确认 Codex 新会话能力…",
+      };
+    });
+    void invoke<BoardResponse>("task_board_probe_host", {
+      project: taskProjectRef(project),
+    })
       .then((result) => {
         if (cancelled) return;
         setEditor((current) => {
@@ -1033,11 +1225,10 @@ export function TaskBoardApp() {
             result.status === "ok" && result.canStart === true;
           return {
             ...current,
-            mode:
-              !nativeCreateAvailable && current.mode === "new"
-                ? "existing"
-                : current.mode,
             nativeCreateAvailable,
+            nativeCreateMessage: nativeCreateAvailable
+              ? ""
+              : result.message || "当前项目暂不支持新建关联会话",
           };
         });
       })
@@ -1045,13 +1236,130 @@ export function TaskBoardApp() {
         if (cancelled) return;
         setEditor((current) => {
           if (!current || current.projectCwd !== projectCwd) return current;
-          return { ...current, nativeCreateAvailable: false };
+          return {
+            ...current,
+            nativeCreateAvailable: false,
+            nativeCreateMessage: "暂时无法连接 Codex，新建时将再次检查",
+          };
         });
       });
     return () => {
       cancelled = true;
     };
   }, [catalog.projects, editor?.projectCwd, editor?.targetTask?.id]);
+
+  const linkedConversations = useMemo(() => {
+    const conversations = new Map<string, TaskConversation>();
+    snapshot.tasks.forEach((task) => {
+      task.conversations.forEach((conversation) => {
+        const key = normalizeSessionId(conversation.sessionId);
+        if (key && !conversations.has(key)) conversations.set(key, conversation);
+      });
+    });
+    return Array.from(conversations.values());
+  }, [snapshot.tasks]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer = 0;
+    const refreshStatuses = async () => {
+      const activeKeys = new Set(
+        linkedConversations.map((conversation) =>
+          normalizeSessionId(conversation.sessionId),
+        ),
+      );
+      setConversationStatuses((current) => {
+        const next = new Map<string, ConversationRuntimeStatus>();
+        linkedConversations.forEach((conversation) => {
+          const key = normalizeSessionId(conversation.sessionId);
+          const existing = current.get(key);
+          next.set(
+            key,
+            existing ?? {
+              sessionId: conversation.sessionId,
+              known: false,
+              checking: true,
+              isRunning: false,
+              unread: false,
+            },
+          );
+        });
+        return next;
+      });
+      if (!linkedConversations.length) return;
+      let nextDelay = 10_000;
+      try {
+        const result = await invoke<BoardResponse>(
+          "task_board_load_conversation_statuses",
+          {
+            request: {
+              conversations: linkedConversations.map((conversation) => ({
+                sessionId: conversation.sessionId,
+                title: conversation.title,
+              })),
+            },
+          },
+        );
+        if (cancelled) return;
+        if (result.status === "ok" && Array.isArray(result.statuses)) {
+          const statuses = new Map<string, ConversationRuntimeStatus>();
+          result.statuses.forEach((status) => {
+            const key = normalizeSessionId(status.sessionId);
+            if (key && activeKeys.has(key)) statuses.set(key, status);
+          });
+          linkedConversations.forEach((conversation) => {
+            const key = normalizeSessionId(conversation.sessionId);
+            if (!statuses.has(key)) {
+              statuses.set(key, {
+                sessionId: conversation.sessionId,
+                known: false,
+                checking: false,
+                isRunning: false,
+                unread: false,
+              });
+            }
+          });
+          setConversationStatuses(statuses);
+          if (result.statuses.some((status) => status.isRunning)) {
+            nextDelay = 2_500;
+          }
+        } else {
+          setConversationStatuses((current) => {
+            const next = new Map(current);
+            next.forEach((status, key) => {
+              if (!activeKeys.has(key)) {
+                next.delete(key);
+                return;
+              }
+              next.set(key, { ...status, known: false, checking: false });
+            });
+            return next;
+          });
+        }
+      } catch {
+        if (cancelled) return;
+        setConversationStatuses((current) => {
+          const next = new Map(current);
+          next.forEach((status, key) => {
+            if (!activeKeys.has(key)) {
+              next.delete(key);
+              return;
+            }
+            next.set(key, { ...status, known: false, checking: false });
+          });
+          return next;
+        });
+      }
+      if (!cancelled) {
+        timer = window.setTimeout(refreshStatuses, nextDelay);
+      }
+    };
+    void refreshStatuses();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [linkedConversations]);
 
   useEffect(() => {
     if (!editor) return;
@@ -1246,7 +1554,8 @@ export function TaskBoardApp() {
         instruction: "",
         busy: false,
         feedback: "",
-        nativeCreateAvailable: false,
+        nativeCreateAvailable: null,
+        nativeCreateMessage: "正在确认 Codex 新会话能力…",
         modelId: "",
         effortId: "medium",
         modelOptions: fallbackModelOptions,
@@ -1283,20 +1592,24 @@ export function TaskBoardApp() {
     try {
       let sessionIds = editor.selectedSessionIds;
       if (editor.mode === "new") {
+        const hostProject = taskProjectRef(project);
         const probe = await invoke<BoardResponse>("task_board_probe_host", {
-          project,
+          project: hostProject,
         });
-        if (probe.status !== "ok") {
+        if (probe.status !== "ok" || probe.canStart !== true) {
           setEditor({
             ...busyEditor,
             busy: false,
+            nativeCreateAvailable: false,
+            nativeCreateMessage:
+              probe.message || "当前项目暂不支持新建关联会话",
             feedback: probe.message || "当前项目暂不支持新建会话",
           });
           return;
         }
         const started = await invoke<BoardResponse>("task_board_start_conversation", {
           request: {
-            project,
+            project: hostProject,
             firstInstruction: editor.instruction.trim(),
             modelId: editor.modelId,
             effortId: editor.effortId,
@@ -1412,8 +1725,20 @@ export function TaskBoardApp() {
       );
   }, [catalog.sessions, editor]);
 
+  const availableSessionIds = useMemo(() => {
+    const sessionIds = new Set<string>();
+    catalog.sessions.forEach((session) => {
+      const key = normalizeSessionId(session.sessionId);
+      if (key) sessionIds.add(key);
+    });
+    return sessionIds;
+  }, [catalog.sessions]);
+
   return (
-    <main className="task-board-app">
+    <main
+      className="task-board-app"
+      style={taskBoardAppearanceStyle(appearance)}
+    >
       <section className="task-board-page" aria-label="任务看板">
         <div className="task-board-heading">
           <h1>任务看板</h1>
@@ -1445,7 +1770,6 @@ export function TaskBoardApp() {
             ]}
             ariaLabel="筛选项目"
             fixedWidth={320}
-            align="start"
             onChange={setProjectFilter}
           />
           <button
@@ -1542,6 +1866,9 @@ export function TaskBoardApp() {
                         onDetachConversation={detachConversation}
                         onAttach={() => openEditor(task)}
                         onMoveStatus={(status) => void moveTask(task, status)}
+                        conversationStatuses={conversationStatuses}
+                        availableSessionIds={availableSessionIds}
+                        catalogPartiallyUnavailable={catalog.warnings.length > 0}
                       />
                     ))}
                     {tasks.length === 0 ? (
@@ -1587,6 +1914,9 @@ function TaskCard({
   onDetachConversation,
   onAttach,
   onMoveStatus,
+  conversationStatuses,
+  availableSessionIds,
+  catalogPartiallyUnavailable,
 }: {
   task: Task;
   dragging: boolean;
@@ -1596,6 +1926,9 @@ function TaskCard({
   onDetachConversation: (task: Task, conversation: TaskConversation) => void;
   onAttach: () => void;
   onMoveStatus: (status: TaskStatus) => void;
+  conversationStatuses: Map<string, ConversationRuntimeStatus>;
+  availableSessionIds: Set<string>;
+  catalogPartiallyUnavailable: boolean;
 }) {
   return (
     <article
@@ -1608,31 +1941,60 @@ function TaskCard({
       <h2 className="task-board-card-title">{task.title}</h2>
       <div className="task-board-conversations">
         {task.conversations.length ? (
-          task.conversations.map((conversation) => (
-            <div className="task-board-conversation-row" key={conversation.sessionId}>
-              <button
-                className="task-board-conversation"
-                type="button"
-                onClick={() => onOpenConversation(conversation)}
-                title={conversation.title || conversation.sessionId}
+          task.conversations.map((conversation) => {
+            const sessionKey = normalizeSessionId(conversation.sessionId);
+            const available =
+              availableSessionIds.has(sessionKey) ||
+              catalogPartiallyUnavailable;
+            const status = conversationStatusPresentation(
+              conversationStatuses.get(sessionKey),
+              available,
+            );
+            const title = conversation.title || "未命名会话";
+            return (
+              <div
+                className="task-board-conversation-row"
+                key={conversation.sessionId}
               >
-                <span className="task-board-conversation-icon" aria-hidden="true">
-                  <MessageSquare size={14} strokeWidth={1.2} />
-                </span>
-                <span className="task-board-conversation-title">
-                  {conversation.title || "未命名会话"}
-                </span>
-              </button>
-              <button
-                className="task-board-conversation-remove"
-                type="button"
-                aria-label={`移除会话 ${conversation.title || conversation.sessionId}`}
-                onClick={() => onDetachConversation(task, conversation)}
-              >
-                <X size={13} strokeWidth={1.35} aria-hidden="true" />
-              </button>
-            </div>
-          ))
+                <button
+                  className="task-board-conversation"
+                  type="button"
+                  onClick={() => onOpenConversation(conversation)}
+                  disabled={!available}
+                  title={`${title}\n${status.label}`}
+                  aria-label={`${title}，${status.label}，${
+                    available ? "打开会话" : "会话不可用"
+                  }`}
+                >
+                  <span
+                    className="task-board-conversation-icon"
+                    aria-hidden="true"
+                  >
+                    <MessageSquare size={14} strokeWidth={1.2} />
+                  </span>
+                  <span className="task-board-conversation-title">{title}</span>
+                  <span
+                    className="task-board-conversation-state"
+                    data-conversation-status={status.id}
+                  >
+                    <span
+                      className="task-board-conversation-status-indicator"
+                      aria-hidden="true"
+                    />
+                    {status.label}
+                  </span>
+                </button>
+                <button
+                  className="task-board-conversation-remove"
+                  type="button"
+                  aria-label={`移除会话 ${title}`}
+                  onClick={() => onDetachConversation(task, conversation)}
+                >
+                  <X size={13} strokeWidth={1.35} aria-hidden="true" />
+                </button>
+              </div>
+            );
+          })
         ) : (
           <div className="task-board-empty task-board-card-empty">未关联会话</div>
         )}
@@ -1654,6 +2016,7 @@ function TaskCard({
           options={statuses.map((status) => ({
             value: status.id,
             label: status.label,
+            color: status.color,
           }))}
           minWidth={150}
           onChange={(status) => onMoveStatus(status as TaskStatus)}
@@ -1830,7 +2193,6 @@ function TaskEditor({
                   ariaLabel="选择所属项目"
                   placeholder="请选择项目"
                   fixedWidth={320}
-                  align="start"
                   modalFocusTrap
                   onChange={(projectCwd) =>
                     onChange({
@@ -1838,7 +2200,8 @@ function TaskEditor({
                       projectCwd,
                       selectedSessionIds: [],
                       feedback: "",
-                      nativeCreateAvailable: false,
+                      nativeCreateAvailable: null,
+                      nativeCreateMessage: "正在确认 Codex 新会话能力…",
                     })
                   }
                   disabled={editor.busy}
@@ -1852,6 +2215,7 @@ function TaskEditor({
                   options={statuses.map((status) => ({
                     value: status.id,
                     label: status.label,
+                    color: status.color,
                   }))}
                   ariaLabel="选择初始状态"
                   minWidth={160}
@@ -1906,10 +2270,18 @@ function TaskEditor({
                 aria-pressed={editor.mode === "new"}
                 className="task-board-create-mode"
                 onClick={() => onChange({ ...editor, mode: "new", feedback: "" })}
-                disabled={
-                  editor.busy ||
-                  !editor.projectCwd ||
-                  !editor.nativeCreateAvailable
+                disabled={editor.busy || !editor.projectCwd}
+                data-availability={
+                  editor.nativeCreateAvailable === null
+                    ? "checking"
+                    : editor.nativeCreateAvailable
+                      ? "available"
+                      : "unavailable"
+                }
+                title={
+                  editor.nativeCreateAvailable === false
+                    ? `${editor.nativeCreateMessage}；提交时会重新检查`
+                    : undefined
                 }
               >
                 <svg
@@ -1988,11 +2360,21 @@ function TaskEditor({
                               />
                             </svg>
                           </span>
-                          <span
-                            className="task-board-session-title"
-                            title={session.title || "未命名会话"}
-                          >
-                            {session.title || "未命名会话"}
+                          <span className="task-board-session-copy">
+                            <span
+                              className="task-board-session-title"
+                              title={session.title || "未命名会话"}
+                            >
+                              {session.title || "未命名会话"}
+                            </span>
+                            <span
+                              className="task-board-session-time"
+                              title={`更新时间：${formatSessionUpdatedTime(
+                                session.updatedAtMs,
+                              )}`}
+                            >
+                              {formatSessionUpdatedTime(session.updatedAtMs)}
+                            </span>
                           </span>
                         </label>
                       );
@@ -2008,6 +2390,19 @@ function TaskEditor({
               </div>
             ) : (
               <div className="task-board-new-session">
+                {editor.nativeCreateAvailable !== true ? (
+                  <p
+                    className="task-board-create-availability"
+                    data-status={
+                      editor.nativeCreateAvailable === null
+                        ? "checking"
+                        : "unavailable"
+                    }
+                  >
+                    {editor.nativeCreateMessage ||
+                      "提交时会重新检查 Codex 新会话能力"}
+                  </p>
+                ) : null}
                 <label className="task-board-field task-board-instruction">
                   <span>新会话首条指令</span>
                   <div className="task-board-create-composer">
@@ -2024,13 +2419,13 @@ function TaskEditor({
                       }
                       placeholder="例如：梳理任务看板的数据模型，并输出可执行方案"
                       aria-label="新会话首条指令"
-                      disabled={editor.busy || !editor.nativeCreateAvailable}
+                      disabled={editor.busy}
                     />
                     <TaskBoardCreateSettings
                       modelId={editor.modelId}
                       effortId={editor.effortId}
                       modelOptions={editor.modelOptions}
-                      disabled={editor.busy || !editor.nativeCreateAvailable}
+                      disabled={editor.busy}
                       onModelChange={(modelId, effortId) =>
                         onChange({
                           ...editor,

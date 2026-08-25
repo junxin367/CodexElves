@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "57";
+  const codexDeleteStyleVersion = "60";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -82,7 +82,7 @@
   const codexPluginRequestIdMaxEntries = 256;
   const codexFailureHistoryMaxEntries = 64;
   const codexManagerReactDiscoveryCooldownMs = 15000;
-  const taskBoardRuntimeVersion = "32";
+  const taskBoardRuntimeVersion = "38";
   const taskBoardNativeOperationLeaseTtlMs = 2 * 60 * 1000;
   const taskBoardEntryAttribute = "data-codex-task-board-entry";
   const taskBoardEntryContextMenuClass = "codex-task-board-entry-context-menu";
@@ -2052,15 +2052,21 @@
         display: grid;
         flex: 1 1 auto;
         min-height: 0;
+        align-content: start;
+        grid-auto-rows: max-content;
         overflow-y: auto;
         border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
         border-radius: 9px;
         background: color-mix(in srgb, var(--color-token-main-surface-secondary, #2b2b2b) 82%, transparent);
         scrollbar-gutter: stable;
       }
+      .codex-task-board-create-session-list:has(.codex-task-board-create-session-hint) {
+        align-content: stretch;
+        grid-auto-rows: minmax(76px, 1fr);
+      }
       .codex-task-board-create-session-option {
         display: grid !important;
-        min-height: 39px;
+        min-height: 52px;
         grid-template-columns: 18px 16px minmax(0, 1fr);
         align-items: center;
         gap: 8px;
@@ -2087,12 +2093,28 @@
       .codex-task-board-create-session-icon {
         color: color-mix(in srgb, currentColor 48%, transparent);
       }
+      .codex-task-board-create-session-copy {
+        display: grid;
+        min-width: 0;
+        gap: 2px;
+      }
       .codex-task-board-create-session-title {
         min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
         font-size: 11px;
+        line-height: 1.35;
+      }
+      .codex-task-board-create-session-time {
+        min-width: 0;
+        overflow: hidden;
+        color: color-mix(in srgb, currentColor 44%, transparent);
+        font-size: 10px;
+        font-variant-numeric: tabular-nums;
+        line-height: 1.3;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       .codex-task-board-create-session-hint,
       .codex-task-board-create-feedback {
@@ -2332,7 +2354,7 @@
       .codex-task-board-dropdown-menu button {
         display: flex;
         min-height: 34px;
-        align-items: flex-start;
+        align-items: center;
         justify-content: space-between;
         gap: 14px;
         border: 0;
@@ -2348,7 +2370,33 @@
         display: grid;
         flex: 1 1 auto;
         min-width: 0;
+        align-content: center;
         gap: 2px;
+      }
+      .codex-task-board-dropdown-trigger-copy,
+      .codex-task-board-dropdown-option-title-row {
+        display: inline-flex;
+        min-width: 0;
+        align-items: center;
+        gap: 7px;
+      }
+      .codex-task-board-dropdown-trigger-copy {
+        flex: 1 1 auto;
+      }
+      .codex-task-board-dropdown-option-title-row {
+        max-width: 100%;
+      }
+      .codex-task-board-dropdown-status-dot {
+        width: 7px;
+        height: 7px;
+        flex: 0 0 auto;
+        border-radius: 999px;
+        background: var(--task-board-status-color);
+        box-shadow: 0 0 0 2px color-mix(
+          in srgb,
+          var(--task-board-status-color) 14%,
+          transparent
+        );
       }
       .codex-task-board-dropdown-option-title,
       .codex-task-board-dropdown-option-description {
@@ -2368,7 +2416,11 @@
         min-height: 14px;
         align-items: center;
         justify-content: center;
-        margin-top: 1px;
+        margin-top: 0;
+      }
+      .codex-task-board-dropdown-option-marker svg,
+      .codex-task-board-create-settings-chevron svg {
+        display: block;
       }
       .codex-task-board-dropdown-menu button:hover,
       .codex-task-board-dropdown-menu button:focus-visible {
@@ -8126,6 +8178,18 @@
     return `${Math.floor(elapsedDays / 365)} 年`;
   }
 
+  function taskBoardSessionTimeLabel(value) {
+    const timestamp = numericTimestamp(value);
+    if (!timestamp) return "时间未知";
+    const date = new Date(timestamp);
+    if (!Number.isFinite(date.getTime())) return "时间未知";
+    const pad = (part) => String(part).padStart(2, "0");
+    return [
+      `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())}`,
+      `${pad(date.getHours())}:${pad(date.getMinutes())}`,
+    ].join(" ");
+  }
+
   function normalizeWorkspacePath(path) {
     const normalized = String(path || "").trim().replace(/\\/g, "/").replace(/\/+$/, "");
     return normalized || String(path || "").trim();
@@ -8230,6 +8294,7 @@
     cardsRenderFrame: 0,
   };
   const taskBoardCatalogSessionMapCache = new WeakMap();
+  const taskBoardCatalogSessionsByProjectCache = new WeakMap();
   const taskBoardTaskSearchTextCache = new WeakMap();
   const taskBoardLinkedConversationsCache = new WeakMap();
 
@@ -8268,8 +8333,152 @@
       return taskBoardNativeStartConversation(project, firstInstruction, modelId, effortId);
     },
   };
+
+  function taskBoardHostAppearance() {
+    installStyle();
+    let root = document.querySelector(taskBoardRootSelector);
+    let removeRoot = false;
+    if (!root) {
+      root = document.createElement("div");
+      root.setAttribute(taskBoardRootAttribute, "true");
+      root.style.cssText = "position:fixed!important;left:-10000px!important;top:-10000px!important;width:1px!important;height:1px!important;visibility:hidden!important;pointer-events:none!important;";
+      document.documentElement.appendChild(root);
+      removeRoot = true;
+    }
+    let modal = document.querySelector(".codex-task-board-create-modal");
+    let removeModal = false;
+    if (!modal) {
+      modal = taskBoardElement("section", "codex-task-board-create-modal");
+      modal.style.cssText = "position:fixed!important;left:-10000px!important;top:-10000px!important;width:1px!important;height:1px!important;visibility:hidden!important;pointer-events:none!important;";
+      document.documentElement.appendChild(modal);
+      removeModal = true;
+    }
+    const field = taskBoardElement("input", "codex-task-board-create-input");
+    const menu = taskBoardElement("div", "codex-task-board-dropdown-menu");
+    menu.style.cssText = "position:fixed!important;left:-10000px!important;top:-10000px!important;width:1px!important;height:1px!important;visibility:hidden!important;pointer-events:none!important;";
+    modal.appendChild(field);
+    document.documentElement.appendChild(menu);
+    const rootStyle = getComputedStyle(root);
+    const modalStyle = getComputedStyle(modal);
+    const fieldStyle = getComputedStyle(field);
+    const menuStyle = getComputedStyle(menu);
+    const custom = (name, fallback) =>
+      String(rootStyle.getPropertyValue(name) || "").trim() || fallback;
+    const appearance = {
+      background: rootStyle.backgroundColor || "#1f1f1f",
+      foreground: rootStyle.color || "#d4d4d4",
+      panelBackground: custom("--task-board-panel-background", "#282828"),
+      cardBackground: custom("--task-board-card-background", "#303030"),
+      cardBackgroundHover: custom(
+        "--task-board-card-background-hover",
+        "color-mix(in srgb, #303030 88%, currentColor 8%)",
+      ),
+      border: custom(
+        "--task-board-border",
+        "color-mix(in srgb, currentColor 16%, transparent)",
+      ),
+      borderSoft: custom(
+        "--task-board-border-soft",
+        "color-mix(in srgb, currentColor 9%, transparent)",
+      ),
+      textSecondary: custom(
+        "--task-board-text-secondary",
+        "color-mix(in srgb, currentColor 72%, transparent)",
+      ),
+      textTertiary: custom(
+        "--task-board-text-tertiary",
+        "color-mix(in srgb, currentColor 54%, transparent)",
+      ),
+      accent: custom("--task-board-accent", "#63aee0"),
+      actionBackground: custom(
+        "--task-board-action-background",
+        "color-mix(in srgb, currentColor 5%, transparent)",
+      ),
+      actionBackgroundHover: custom(
+        "--task-board-action-background-hover",
+        "color-mix(in srgb, currentColor 8%, transparent)",
+      ),
+      actionBackgroundActive: custom(
+        "--task-board-action-background-active",
+        "color-mix(in srgb, currentColor 12%, transparent)",
+      ),
+      actionForeground: custom(
+        "--task-board-action-foreground",
+        rootStyle.color || "#d4d4d4",
+      ),
+      actionBorder: custom(
+        "--task-board-action-border",
+        "color-mix(in srgb, currentColor 16%, transparent)",
+      ),
+      modalBackground: modalStyle.backgroundColor || "#2f2f2f",
+      modalForeground: modalStyle.color || rootStyle.color || "#d4d4d4",
+      modalBorder: modalStyle.borderTopColor || "rgba(212, 212, 212, .18)",
+      fieldBackground: fieldStyle.backgroundColor || "#2b2b2b",
+      menuBackground: menuStyle.backgroundColor || "#363636",
+      rootFontFamily: rootStyle.fontFamily || "system-ui, sans-serif",
+      modalFontFamily:
+        modalStyle.fontFamily ||
+        '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    };
+    field.remove();
+    menu.remove();
+    if (removeModal) modal.remove();
+    if (removeRoot) root.remove();
+    return { status: "ok", appearance };
+  }
+
+  async function taskBoardHostConversationStatuses(conversations = []) {
+    const values = Array.isArray(conversations) ? conversations.slice(0, 256) : [];
+    const unreadBySession = taskBoardNativeThreadUnreadIndex();
+    const outcomes = await taskBoardMapSettledWithConcurrency(
+      values,
+      taskBoardConversationStatusMaxConcurrency,
+      async (conversation) => {
+        const sessionId = String(conversation?.sessionId || "").trim();
+        let result = null;
+        try {
+          result = await postJson(taskBoardBridgeRoutes.conversationStatus, {
+            session_id: sessionId,
+            title: String(conversation?.title || "").trim(),
+          });
+        } catch {
+          result = null;
+        }
+        const summary = result?.status === "ok" &&
+          result?.summary &&
+          typeof result.summary === "object"
+          ? result.summary
+          : null;
+        return {
+          sessionId,
+          known: !!summary,
+          checking: false,
+          isRunning:
+            summary?.isRunning === true ||
+            summary?.lastTurnRunning === true,
+          unread: taskBoardNativeThreadUnread(sessionId, unreadBySession),
+        };
+      },
+    );
+    return {
+      status: "ok",
+      statuses: outcomes.map((outcome, index) => {
+        if (outcome?.status === "fulfilled") return outcome.value;
+        const conversation = values[index];
+        const sessionId = String(conversation?.sessionId || "").trim();
+        return {
+          sessionId,
+          known: false,
+          checking: false,
+          isRunning: false,
+          unread: taskBoardNativeThreadUnread(sessionId, unreadBySession),
+        };
+      }),
+    };
+  }
+
   window.__codexElvesTaskBoardHost = {
-    version: 1,
+    version: 2,
     openSession(sessionId, conversation = null) {
       return taskBoardNativeAdapter.openSession(sessionId, conversation);
     },
@@ -8292,6 +8501,12 @@
           efforts: taskBoardCreateEffortOptions(option.value),
         })),
       };
+    },
+    appearance() {
+      return taskBoardHostAppearance();
+    },
+    conversationStatuses(conversations = []) {
+      return taskBoardHostConversationStatuses(conversations);
     },
     startConversation(project, firstInstruction, modelId = "", effortId = "") {
       return taskBoardNativeAdapter.startConversation(
@@ -8972,20 +9187,43 @@
     return marker;
   }
 
-  function taskBoardConfigureDropdownTrigger(trigger, label, ariaLabel) {
+  function taskBoardDropdownStatusDot(color = "") {
+    const normalized = String(color || "").trim();
+    if (!normalized) return null;
+    const dot = taskBoardElement("span", "codex-task-board-dropdown-status-dot");
+    dot.style.setProperty("--task-board-status-color", normalized);
+    dot.setAttribute("aria-hidden", "true");
+    return dot;
+  }
+
+  function taskBoardConfigureDropdownTrigger(trigger, label, ariaLabel, color = "") {
     if (!trigger) return trigger;
     trigger.classList.add("codex-task-board-dropdown-trigger");
     trigger.setAttribute("aria-label", ariaLabel);
     trigger.setAttribute("aria-haspopup", "listbox");
     trigger.setAttribute("aria-expanded", "false");
     const labelNode = taskBoardElement("span", "codex-task-board-dropdown-label", label);
-    trigger.replaceChildren(labelNode, taskBoardDropdownChevron());
+    const copy = taskBoardElement("span", "codex-task-board-dropdown-trigger-copy");
+    const dot = taskBoardDropdownStatusDot(color);
+    if (dot) copy.appendChild(dot);
+    copy.appendChild(labelNode);
+    trigger.replaceChildren(copy, taskBoardDropdownChevron());
     return trigger;
   }
 
-  function taskBoardSetDropdownTriggerLabel(trigger, label) {
+  function taskBoardSetDropdownTriggerLabel(trigger, label, color = "") {
     const labelNode = trigger?.querySelector?.(".codex-task-board-dropdown-label");
     if (labelNode) labelNode.textContent = String(label || "");
+    const copy = trigger?.querySelector?.(".codex-task-board-dropdown-trigger-copy");
+    const currentDot = copy?.querySelector?.(".codex-task-board-dropdown-status-dot");
+    const nextColor = String(color || "").trim();
+    if (nextColor) {
+      const dot = currentDot || taskBoardDropdownStatusDot(nextColor);
+      dot?.style?.setProperty?.("--task-board-status-color", nextColor);
+      if (!currentDot && dot) copy?.prepend?.(dot);
+    } else {
+      currentDot?.remove?.();
+    }
     if (trigger) trigger.title = String(label || "");
   }
 
@@ -10189,6 +10427,7 @@
     const modal = taskBoardState.createModal;
     taskBoardState.createModalRequestId += 1;
     if (!modal) return;
+    taskBoardCancelCreateSessionHydration(modal);
     if (taskBoardState.dropdownMenu?.kind?.startsWith?.("create-")) {
       closeTaskBoardDropdownMenu({ restoreFocus: false });
     }
@@ -10343,14 +10582,37 @@
     const excluded = excludedSessionIds instanceof Set
       ? new Set(Array.from(excludedSessionIds).map(taskBoardConversationStatusKey))
       : new Set();
-    return (taskBoardState.catalog.sessions || [])
-      .filter((session) => {
+    const catalog = taskBoardState.catalog;
+    const sessions = Array.isArray(catalog?.sessions) ? catalog.sessions : [];
+    let cached = catalog && typeof catalog === "object"
+      ? taskBoardCatalogSessionsByProjectCache.get(catalog)
+      : null;
+    if (!cached || cached.sessions !== sessions) {
+      const byProject = new Map();
+      sessions.forEach((session) => {
         const sessionId = String(session?.sessionId || "").trim();
-        return sessionId &&
-          !excluded.has(taskBoardConversationStatusKey(sessionId)) &&
-          taskBoardNormalizedCwd(session?.cwd) === normalizedCwd;
-      })
-      .sort((left, right) => Number(right?.updatedAtMs || 0) - Number(left?.updatedAtMs || 0));
+        const projectCwd = taskBoardNormalizedCwd(session?.cwd);
+        if (!sessionId || !projectCwd) return;
+        const projectSessions = byProject.get(projectCwd) || [];
+        projectSessions.push(session);
+        byProject.set(projectCwd, projectSessions);
+      });
+      byProject.forEach((projectSessions) => {
+        projectSessions.sort(
+          (left, right) =>
+            Number(right?.updatedAtMs || 0) - Number(left?.updatedAtMs || 0),
+        );
+      });
+      cached = { sessions, byProject };
+      if (catalog && typeof catalog === "object") {
+        taskBoardCatalogSessionsByProjectCache.set(catalog, cached);
+      }
+    }
+    const projectSessions = cached.byProject.get(normalizedCwd) || [];
+    if (!excluded.size) return projectSessions;
+    return projectSessions.filter((session) => {
+      return !excluded.has(taskBoardConversationStatusKey(session?.sessionId));
+    });
   }
 
   function taskBoardSetCreateModalFeedback(modal, message = "") {
@@ -10435,7 +10697,6 @@
       currentValue: modal.projectCwd,
       ariaLabel: "选择所属项目",
       fixedWidth: taskBoardProjectDropdownWidth,
-      align: "start",
       onSelect: (cwd) => taskBoardSetCreateProject(cwd),
     });
   }
@@ -10474,12 +10735,16 @@
     parentButton,
     trigger,
   ) {
+    const fallbackMenuLeft = Number.parseFloat(menu?.style?.left || "") || 8;
+    const fallbackMenuTop = Number.parseFloat(menu?.style?.top || "") || 8;
     const menuRect = menu?.getBoundingClientRect?.() || {
-      left: 8,
-      right: 228,
-      bottom: 85,
+      left: fallbackMenuLeft,
+      right: fallbackMenuLeft + 220,
+      top: fallbackMenuTop,
+      bottom: fallbackMenuTop + 77,
     };
     const parentRect = parentButton?.getBoundingClientRect?.() || {
+      left: Number(menuRect.left || 8),
       top: 8,
     };
     const submenuRect = submenu.getBoundingClientRect?.() || {
@@ -10491,22 +10756,30 @@
     const width = Number(submenuRect.width || 220);
     const height = Number(submenuRect.height || 0);
     const gap = 6;
-    const fitsRight = Number(menuRect.right || 228) + gap + width <= viewportWidth - 8;
-    const left = fitsRight
-      ? Number(menuRect.right || 228) + gap
-      : Math.max(8, Number(menuRect.left || 8) - gap - width);
     const triggerRect = trigger?.getBoundingClientRect?.() || {
       top: Number(menuRect.bottom || 85) + gap,
     };
     const opensAbove = Number(menuRect.bottom || 85) <= Number(triggerRect.top || 91);
-    const preferredTop = opensAbove
-      ? Number(menuRect.bottom || 85) - height
-      : Number(parentRect.top || 8) - 5;
+    const spaceAbove = Math.max(0, Number(menuRect.top || 8) - gap - 8);
+    const spaceBelow = Math.max(
+      0,
+      viewportHeight - Number(menuRect.bottom || 85) - gap - 8,
+    );
+    const placeAbove = opensAbove
+      ? spaceAbove >= height || spaceAbove >= spaceBelow
+      : spaceBelow < height && spaceAbove > spaceBelow;
+    const preferredTop = placeAbove
+      ? Number(menuRect.top || 8) - gap - height
+      : Number(menuRect.bottom || 85) + gap;
     const top = Math.min(
       viewportHeight - height - 8,
       Math.max(8, preferredTop),
     );
-    submenu.style.left = `${Math.max(8, left)}px`;
+    submenu.style.left = `${taskBoardDropdownLeft(
+      Number(parentRect.left || menuRect.left || 8),
+      width,
+      viewportWidth,
+    )}px`;
     submenu.style.top = `${Math.max(8, top)}px`;
   }
 
@@ -10783,7 +11056,11 @@
     return openTaskBoardDropdownMenu({
       kind: "create-status",
       trigger,
-      options: taskBoardStatusDefinitions.map((status) => ({ value: status.id, label: status.label })),
+      options: taskBoardStatusDefinitions.map((status) => ({
+        value: status.id,
+        label: status.label,
+        color: status.color,
+      })),
       currentValue: taskBoardStatusId(modal.initialStatus),
       ariaLabel: "选择初始状态",
       minWidth: 160,
@@ -10888,6 +11165,58 @@
     return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(taskId || ""));
   }
 
+  function taskBoardCancelCreateSessionHydration(modal) {
+    if (!modal) return;
+    if (modal.sessionHydrationFrame) {
+      cancelAnimationFrame(modal.sessionHydrationFrame);
+      modal.sessionHydrationFrame = 0;
+    }
+    if (modal.sessionHydrationTimer) {
+      clearTimeout(modal.sessionHydrationTimer);
+      modal.sessionHydrationTimer = 0;
+    }
+    modal.sessionHydrationScheduled = false;
+  }
+
+  function taskBoardHydrateCreateModalSessions(modal = taskBoardState.createModal) {
+    if (!modal || taskBoardState.createModal !== modal) return false;
+    taskBoardCancelCreateSessionHydration(modal);
+    if (modal.sessionsHydrated) return true;
+    modal.sessionsHydrated = true;
+    modal.sessionRenderKey = "";
+    modal.sessionRenderCatalog = null;
+    renderTaskBoardCreateModal();
+    return true;
+  }
+
+  function taskBoardScheduleCreateSessionHydration(modal) {
+    if (
+      !modal ||
+      taskBoardState.createModal !== modal ||
+      modal.sessionsHydrated ||
+      modal.sessionHydrationScheduled
+    ) {
+      return;
+    }
+    modal.sessionHydrationScheduled = true;
+    const hydrateAfterPaint = () => {
+      if (taskBoardState.createModal !== modal) return;
+      modal.sessionHydrationFrame = 0;
+      modal.sessionHydrationTimer = setTimeout(() => {
+        modal.sessionHydrationTimer = 0;
+        taskBoardHydrateCreateModalSessions(modal);
+      }, 0);
+    };
+    if (
+      document.visibilityState === "hidden" ||
+      typeof requestAnimationFrame !== "function"
+    ) {
+      hydrateAfterPaint();
+      return;
+    }
+    modal.sessionHydrationFrame = requestAnimationFrame(hydrateAfterPaint);
+  }
+
   function renderTaskBoardCreateModal() {
     const modal = taskBoardState.createModal;
     if (!modal) return;
@@ -10899,9 +11228,13 @@
       ? `${selectedProject.label}\n${selectedProject.cwd}`
       : "请选择项目";
     modal.statusSelect.value = taskBoardStatusId(modal.initialStatus);
+    const selectedStatus = taskBoardStatusDefinitions.find(
+      (status) => status.id === modal.statusSelect.value,
+    );
     taskBoardSetDropdownTriggerLabel(
       modal.statusSelect,
-      taskBoardStatusDefinitions.find((status) => status.id === modal.statusSelect.value)?.label || "新任务",
+      selectedStatus?.label || "新任务",
+      selectedStatus?.color || "",
     );
     const modelOptions = taskBoardCreateModelOptions();
     const selectedModel = modelOptions.find((option) => option.value === modal.modelId) ||
@@ -10930,59 +11263,96 @@
     modal.sessionSection.hidden = modal.mode !== "existing";
     modal.newSessionSection.hidden = modal.mode !== "new";
     modal.firstInstructionInput.value = modal.firstInstruction;
-    modal.sessionField.replaceChildren();
     modal.sessionCount.textContent = `已选 ${modal.selectedSessionIds.size} 个`;
-    if (taskBoardState.catalogError) {
-      modal.sessionField.appendChild(taskBoardElement(
-        "p",
-        "codex-task-board-create-session-hint",
-        "会话目录暂不可用，暂时无法绑定已有会话。",
-      ));
-    } else if (!modal.projectCwd) {
-      modal.sessionField.appendChild(taskBoardElement(
-        "p",
-        "codex-task-board-create-session-hint",
-        "请先选择项目。",
-      ));
-    } else {
-      const sessions = taskBoardCreateSessionsForProject(
-        modal.projectCwd,
-        modal.attachedSessionIds,
-      );
-      if (!sessions.length) {
+    const sessionRenderKey = [
+      modal.projectCwd,
+      Array.from(modal.attachedSessionIds || []).sort().join("\u0000"),
+      Array.from(modal.selectedSessionIds || []).sort().join("\u0000"),
+      String(!!modal.busy),
+      taskBoardState.catalogError,
+    ].join("\u0001");
+    if (!modal.sessionsHydrated) {
+      if (modal.sessionField.dataset.taskBoardRenderState !== "pending") {
+        modal.sessionField.replaceChildren();
         modal.sessionField.appendChild(taskBoardElement(
           "p",
           "codex-task-board-create-session-hint",
-          "该项目暂无可关联会话。",
+          "正在准备会话列表…",
         ));
+        modal.sessionField.dataset.taskBoardRenderState = "pending";
       }
-      sessions.forEach((session) => {
-        const option = taskBoardElement("label", "codex-task-board-create-session-option");
-        const checkbox = taskBoardElement("input");
-        checkbox.type = "checkbox";
-        checkbox.checked = modal.selectedSessionIds.has(session.sessionId);
-        checkbox.disabled = modal.busy;
-        checkbox.addEventListener("change", () => {
-          if (checkbox.checked) modal.selectedSessionIds.add(session.sessionId);
-          else modal.selectedSessionIds.delete(session.sessionId);
-          modal.feedback = "";
-          renderTaskBoardCreateModal();
+    } else if (
+      modal.sessionRenderCatalog !== taskBoardState.catalog ||
+      modal.sessionRenderKey !== sessionRenderKey
+    ) {
+      modal.sessionField.replaceChildren();
+      modal.sessionField.dataset.taskBoardRenderState = "ready";
+      if (taskBoardState.catalogError) {
+        modal.sessionField.appendChild(taskBoardElement(
+          "p",
+          "codex-task-board-create-session-hint",
+          "会话目录暂不可用，暂时无法绑定已有会话。",
+        ));
+      } else if (!modal.projectCwd) {
+        modal.sessionField.appendChild(taskBoardElement(
+          "p",
+          "codex-task-board-create-session-hint",
+          "请先选择项目。",
+        ));
+      } else {
+        const sessions = taskBoardCreateSessionsForProject(
+          modal.projectCwd,
+          modal.attachedSessionIds,
+        );
+        if (!sessions.length) {
+          modal.sessionField.appendChild(taskBoardElement(
+            "p",
+            "codex-task-board-create-session-hint",
+            "该项目暂无可关联会话。",
+          ));
+        }
+        sessions.forEach((session) => {
+          const option = taskBoardElement("label", "codex-task-board-create-session-option");
+          const checkbox = taskBoardElement("input");
+          checkbox.type = "checkbox";
+          checkbox.checked = modal.selectedSessionIds.has(session.sessionId);
+          checkbox.disabled = modal.busy;
+          checkbox.addEventListener("change", () => {
+            if (checkbox.checked) modal.selectedSessionIds.add(session.sessionId);
+            else modal.selectedSessionIds.delete(session.sessionId);
+            modal.feedback = "";
+            renderTaskBoardCreateModal();
+          });
+          const sessionIcon = taskBoardElement("span", "codex-task-board-create-session-icon");
+          sessionIcon.innerHTML = `<svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M3.25 3.25h9.5v7H7.4l-3.15 2.5v-2.5h-1z" stroke-linejoin="round"></path></svg>`;
+          const sessionTitle = taskBoardElement(
+            "span",
+            "codex-task-board-create-session-title",
+            String(session.title || "未命名会话"),
+          );
+          sessionTitle.title = String(session.title || "未命名会话");
+          const sessionTimeLabel = taskBoardSessionTimeLabel(session.updatedAtMs);
+          const sessionTime = taskBoardElement(
+            "span",
+            "codex-task-board-create-session-time",
+            sessionTimeLabel,
+          );
+          sessionTime.title = `更新时间：${sessionTimeLabel}`;
+          const sessionCopy = taskBoardElement(
+            "span",
+            "codex-task-board-create-session-copy",
+          );
+          sessionCopy.append(sessionTitle, sessionTime);
+          option.append(
+            checkbox,
+            sessionIcon,
+            sessionCopy,
+          );
+          modal.sessionField.appendChild(option);
         });
-        const sessionIcon = taskBoardElement("span", "codex-task-board-create-session-icon");
-        sessionIcon.innerHTML = `<svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M3.25 3.25h9.5v7H7.4l-3.15 2.5v-2.5h-1z" stroke-linejoin="round"></path></svg>`;
-        const sessionTitle = taskBoardElement(
-          "span",
-          "codex-task-board-create-session-title",
-          String(session.title || "未命名会话"),
-        );
-        sessionTitle.title = String(session.title || "未命名会话");
-        option.append(
-          checkbox,
-          sessionIcon,
-          sessionTitle,
-        );
-        modal.sessionField.appendChild(option);
-      });
+      }
+      modal.sessionRenderCatalog = taskBoardState.catalog;
+      modal.sessionRenderKey = sessionRenderKey;
     }
     modal.feedbackNode.textContent = modal.feedback;
     const submitLabel = modal.purpose === "attach"
@@ -11096,7 +11466,12 @@
     statusLabel.appendChild(taskBoardElement("span", "codex-task-board-create-field-label", "初始状态"));
     const statusSelect = taskBoardElement("button", "codex-task-board-create-select");
     statusSelect.type = "button";
-    taskBoardConfigureDropdownTrigger(statusSelect, "新任务", "选择初始状态");
+    taskBoardConfigureDropdownTrigger(
+      statusSelect,
+      taskBoardStatusDefinitions[0].label,
+      "选择初始状态",
+      taskBoardStatusDefinitions[0].color,
+    );
     statusSelect.addEventListener("click", () => openTaskBoardCreateStatusMenu(statusSelect));
     statusLabel.appendChild(statusSelect);
     fieldRow.append(projectLabel, statusLabel);
@@ -11272,6 +11647,12 @@
       modelSelectionTouched: false,
       modelsLoading: false,
       modelCatalogError: "",
+      sessionsHydrated: false,
+      sessionHydrationScheduled: false,
+      sessionHydrationFrame: 0,
+      sessionHydrationTimer: 0,
+      sessionRenderCatalog: null,
+      sessionRenderKey: "",
       selectedSessionIds: new Set(defaultSessions[0]?.sessionId ? [defaultSessions[0].sessionId] : []),
       firstInstruction: "",
       nativeCreateAvailable: false,
@@ -11291,6 +11672,7 @@
         (attaching ? modal.existingButton : modal.titleInput).focus?.();
       }
     });
+    taskBoardScheduleCreateSessionHydration(modal);
     void taskBoardRefreshNativeCreateAvailability(modal);
     void taskBoardRefreshCreateModels(modal);
     return modal;
@@ -12347,6 +12729,11 @@
     if (restoreFocus && previousFocus?.isConnected !== false) previousFocus?.focus?.();
   }
 
+  function taskBoardDropdownLeft(triggerLeft, menuWidth, viewportWidth) {
+    const viewportRight = Math.max(8, viewportWidth - menuWidth - 8);
+    return Math.max(8, Math.min(viewportRight, triggerLeft));
+  }
+
   function taskBoardPositionDropdownMenu(
     menu,
     trigger,
@@ -12354,7 +12741,6 @@
       minWidth = 180,
       matchTriggerWidth = false,
       fixedWidth = 0,
-      align = "end",
       placement = "auto",
     } = {},
   ) {
@@ -12383,12 +12769,10 @@
     const renderedWidth = Number(menuRect.width || menuWidth);
     const renderedHeight = Number(menuRect.height || 0);
     const gap = 6;
-    const preferredLeft = align === "start"
-      ? Number(triggerRect.left || 8)
-      : Number(triggerRect.right || 188) - renderedWidth;
-    const left = Math.min(
-      viewportWidth - renderedWidth - 8,
-      Math.max(8, preferredLeft),
+    const left = taskBoardDropdownLeft(
+      Number(triggerRect.left || 8),
+      renderedWidth,
+      viewportWidth,
     );
     const fitsBelow =
       Number(triggerRect.bottom || 44) + gap + renderedHeight <= viewportHeight - 8;
@@ -12397,7 +12781,7 @@
       : placement === "bottom" || fitsBelow
         ? Number(triggerRect.bottom || 44) + gap
         : Math.max(8, Number(triggerRect.top || 8) - gap - renderedHeight);
-    menu.style.left = `${Math.max(8, left)}px`;
+    menu.style.left = `${left}px`;
     menu.style.top = `${top}px`;
   }
 
@@ -12410,7 +12794,6 @@
     minWidth = 180,
     matchTriggerWidth = false,
     fixedWidth = 0,
-    align = "end",
     placement = "auto",
     surfaceClass = "",
     menuRole = "listbox",
@@ -12444,11 +12827,18 @@
       const label = String(option?.label || "");
       const description = String(option?.description || "").trim();
       const copy = taskBoardElement("span", "codex-task-board-dropdown-option-copy");
-      copy.appendChild(taskBoardElement(
+      const titleRow = taskBoardElement(
+        "span",
+        "codex-task-board-dropdown-option-title-row",
+      );
+      const dot = taskBoardDropdownStatusDot(option?.color);
+      if (dot) titleRow.appendChild(dot);
+      titleRow.appendChild(taskBoardElement(
         "span",
         "codex-task-board-dropdown-option-title",
         label,
       ));
+      copy.appendChild(titleRow);
       if (showDescriptions && description) {
         copy.appendChild(taskBoardElement(
           "span",
@@ -12477,7 +12867,6 @@
       minWidth,
       matchTriggerWidth,
       fixedWidth,
-      align,
       placement,
     });
     const state = {
@@ -12559,7 +12948,6 @@
       currentValue: taskBoardState.projectCwd,
       ariaLabel: "筛选项目",
       fixedWidth: taskBoardProjectDropdownWidth,
-      align: "start",
       onSelect: (cwd) => {
         taskBoardState.projectCwd = cwd;
         renderTaskBoardCards();
@@ -12688,7 +13076,11 @@
     const state = openTaskBoardDropdownMenu({
       kind: "status",
       trigger,
-      options: taskBoardStatusDefinitions.map((status) => ({ value: status.id, label: status.label })),
+      options: taskBoardStatusDefinitions.map((status) => ({
+        value: status.id,
+        label: status.label,
+        color: status.color,
+      })),
       currentValue: taskBoardStatusId(task?.status),
       ariaLabel: "移动任务状态",
       minWidth: 150,
@@ -12787,6 +13179,7 @@
           moveButton,
           status.label,
           `移动任务 ${String(task?.title || "未命名任务")} 的状态`,
+          status.color,
         );
         moveButton.disabled = taskBoardState.moveBusy;
         moveButton.addEventListener("click", () => openTaskBoardStatusMenu(moveButton, String(task?.id || "")));
@@ -13160,7 +13553,22 @@
       moveTargetIndexForTest: taskBoardMoveTargetIndex,
       moveTaskForTest: taskBoardMoveTask,
       dragEndForTest: clearTaskBoardDragVisuals,
-      openStatusMenuForTest: (taskId) => openTaskBoardStatusMenu(document.createElement("button"), taskId),
+      openStatusMenuForTest: (taskId, rect = {}) => {
+        const trigger = document.createElement("button");
+        const left = Number(rect.left ?? 40);
+        const top = Number(rect.top ?? 40);
+        const width = Number(rect.width ?? 92);
+        const height = Number(rect.height ?? 29);
+        trigger.getBoundingClientRect = () => ({
+          left,
+          right: left + width,
+          top,
+          bottom: top + height,
+          width,
+          height,
+        });
+        return openTaskBoardStatusMenu(trigger, taskId);
+      },
       openBoardProjectMenuForTest: (rect = {}) => {
         const trigger = document.createElement("button");
         const left = Number(rect.left ?? 40);
@@ -13245,6 +13653,8 @@
         submenuOpen: !!taskBoardState.dropdownMenu?.submenuElement,
         submenuKind: taskBoardState.dropdownMenu?.submenuKind || "",
         submenuRole: taskBoardState.dropdownMenu?.submenuElement?.getAttribute?.("role") || "",
+        submenuLeft: taskBoardState.dropdownMenu?.submenuElement?.style?.left || "",
+        submenuTop: taskBoardState.dropdownMenu?.submenuElement?.style?.top || "",
         submenuItemCount: taskBoardState.dropdownMenu?.submenuButtons?.length || 0,
         submenuFocusedIndex:
           taskBoardState.dropdownMenu?.submenuButtons?.indexOf(document.activeElement) ?? -1,
@@ -13344,6 +13754,8 @@
         const modal = taskBoardState.createModal;
         if (modal) taskBoardSetCreateModalBusy(modal, busy);
       },
+      hydrateCreateSessionsForTest: () =>
+        taskBoardHydrateCreateModalSessions(taskBoardState.createModal),
       submitCreateForTest: submitTaskBoardCreate,
       nativeStartForTest: taskBoardNativeStartConversation,
       nativeOpenSessionForTest: taskBoardNativeOpenSession,
@@ -13435,6 +13847,11 @@
           effortOptionIds: taskBoardCreateEffortOptions(modal?.modelId || "")
             .map((option) => option.value),
           selectedSessionIds: Array.from(modal?.selectedSessionIds || []),
+          sessionsHydrated: !!modal?.sessionsHydrated,
+          sessionRenderState:
+            modal?.sessionField?.dataset?.taskBoardRenderState || "",
+          sessionInputCount:
+            modal?.sessionField?.querySelectorAll?.("input")?.length || 0,
           availableSessionIds: modal
             ? taskBoardCreateSessionsForProject(
               modal.projectCwd,
