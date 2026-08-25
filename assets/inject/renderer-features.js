@@ -82,8 +82,9 @@
   const codexPluginRequestIdMaxEntries = 256;
   const codexFailureHistoryMaxEntries = 64;
   const codexManagerReactDiscoveryCooldownMs = 15000;
-  const taskBoardRuntimeVersion = "38";
+  const taskBoardRuntimeVersion = "39";
   const taskBoardNativeOperationLeaseTtlMs = 2 * 60 * 1000;
+  const taskBoardNativeCreateBusyMessage = "另一个窗口正在创建原生会话，请稍后重试";
   const taskBoardEntryAttribute = "data-codex-task-board-entry";
   const taskBoardEntryContextMenuClass = "codex-task-board-entry-context-menu";
   const taskBoardRootAttribute = "data-codex-task-board-root";
@@ -8301,6 +8302,8 @@
   const taskBoardNativeCreateRecoveryKey = "codexElvesTaskBoardNativeCreateRecoveryV1";
   const taskBoardNativeCreateRecoveryTtlMs = 24 * 60 * 60 * 1000;
   const taskBoardNativeCreatePermanentIdTimeoutMs = 15 * 1000;
+  const taskBoardNativeSubmitReadyTimeoutMs = 15 * 1000;
+  const taskBoardNativeSubmitTransitionGraceMs = 2 * 1000;
   const taskBoardNativeModelSelectionTimeoutMs = 5 * 1000;
   const taskBoardNativeCreateSessionRetryDelaysMs = [250, 750, 1500, 2500, 5000];
   const taskBoardNativeOpenSessionTimeoutMs = 5 * 1000;
@@ -8312,6 +8315,31 @@
     (Number(window.__codexElvesTaskBoardNativeRuntimeId || 0) + 1);
   window.__codexElvesTaskBoardNativeRuntimeId = taskBoardNativeRuntimeId;
 
+  function taskBoardForeignNativeCreateLease() {
+    const lease = taskBoardNativeOperationLease();
+    if (!lease) return null;
+    const localOperationId = String(
+      taskBoardState.nativeCreateOperation?.operationId || "",
+    ).trim();
+    return lease.operationId === localOperationId ? null : lease;
+  }
+
+  function taskBoardNativeCreateBusyProbe() {
+    return {
+      status: "ok",
+      canStart: false,
+      canOpen: false,
+      code: "native_create_busy",
+      message: taskBoardNativeCreateBusyMessage,
+    };
+  }
+
+  function taskBoardNativeCreateLeaseFailure() {
+    return taskBoardForeignNativeCreateLease()
+      ? taskBoardNativeFailure("native_create_busy", taskBoardNativeCreateBusyMessage)
+      : null;
+  }
+
   const taskBoardNativeAdapter = {
     openSession(sessionId, conversation) {
       const adapter = window.__codexElvesTaskBoardNativeAdapter;
@@ -8321,6 +8349,9 @@
       return taskBoardNativeOpenSession(sessionId, conversation);
     },
     probe(project) {
+      if (taskBoardForeignNativeCreateLease()) {
+        return Promise.resolve(taskBoardNativeCreateBusyProbe());
+      }
       const adapter = window.__codexElvesTaskBoardNativeAdapter;
       if (adapter && typeof adapter.probe === "function") return adapter.probe(project);
       return taskBoardNativeProbe(project);
@@ -8333,6 +8364,114 @@
       return taskBoardNativeStartConversation(project, firstInstruction, modelId, effortId);
     },
   };
+
+  function taskBoardHostAppearanceHash(value) {
+    const text = String(value || "");
+    let hash = 2166136261;
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  }
+
+  const taskBoardHostAppearanceSourceSignatureCache = new WeakMap();
+
+  function taskBoardHostAppearanceSourceSignature(config) {
+    const source = String(config?.dataUrl || "");
+    if (!config || typeof config !== "object") {
+      return taskBoardHostAppearanceHash(source);
+    }
+    const cached = taskBoardHostAppearanceSourceSignatureCache.get(config);
+    if (cached?.source === source) return cached.signature;
+    const signature = taskBoardHostAppearanceHash(source);
+    taskBoardHostAppearanceSourceSignatureCache.set(config, {
+      source,
+      signature,
+    });
+    return signature;
+  }
+
+  function taskBoardHostAppearanceOverlay() {
+    const config = window.__CODEX_ELVES_IMAGE_OVERLAY__ || {};
+    const kind = ["image", "color", "gradient"].includes(config.kind)
+      ? config.kind
+      : "image";
+    const rawImageUrl = typeof config.imageUrl === "string"
+      ? config.imageUrl.trim()
+      : "";
+    const imageUrl = /^data:/i.test(rawImageUrl) ? "" : rawImageUrl;
+    const enabled = config.enabled === true && (kind !== "image" || !!imageUrl);
+    const opacity = Math.min(1, Math.max(0.01, Number(config.opacity) || 0.35));
+    const fit = config.fit === "cover" ? "cover" : "contain";
+    const backgroundColor = typeof config.backgroundColor === "string" &&
+      config.backgroundColor.trim()
+      ? config.backgroundColor.trim()
+      : "#1e293b";
+    const gradientFrom = typeof config.gradientFrom === "string" &&
+      config.gradientFrom.trim()
+      ? config.gradientFrom.trim()
+      : "#4338ca";
+    const gradientTo = typeof config.gradientTo === "string" &&
+      config.gradientTo.trim()
+      ? config.gradientTo.trim()
+      : "#0ea5e9";
+    const gradientAngle = Number.isFinite(Number(config.gradientAngle))
+      ? Number(config.gradientAngle)
+      : 135;
+    return {
+      overlay: {
+        enabled,
+        kind,
+        imageUrl,
+        opacity,
+        fit,
+        backgroundColor,
+        gradientFrom,
+        gradientTo,
+        gradientAngle,
+      },
+      sourceSignature: taskBoardHostAppearanceSourceSignature(config),
+    };
+  }
+
+  function taskBoardHostAppearanceSignature(appearance, overlaySourceSignature = "") {
+    const overlay = appearance?.overlay || {};
+    return `task-board-appearance-v${appearance?.version || 1}-${taskBoardHostAppearanceHash([
+      appearance?.background,
+      appearance?.foreground,
+      appearance?.panelBackground,
+      appearance?.cardBackground,
+      appearance?.cardBackgroundHover,
+      appearance?.border,
+      appearance?.borderSoft,
+      appearance?.textSecondary,
+      appearance?.textTertiary,
+      appearance?.accent,
+      appearance?.actionBackground,
+      appearance?.actionBackgroundHover,
+      appearance?.actionBackgroundActive,
+      appearance?.actionForeground,
+      appearance?.actionBorder,
+      appearance?.modalBackground,
+      appearance?.modalForeground,
+      appearance?.modalBorder,
+      appearance?.fieldBackground,
+      appearance?.menuBackground,
+      appearance?.rootFontFamily,
+      appearance?.modalFontFamily,
+      overlay.enabled ? "1" : "0",
+      overlay.kind,
+      overlay.imageUrl,
+      overlay.opacity,
+      overlay.fit,
+      overlay.backgroundColor,
+      overlay.gradientFrom,
+      overlay.gradientTo,
+      overlay.gradientAngle,
+      overlaySourceSignature,
+    ].join("\u001f"))}`;
+  }
 
   function taskBoardHostAppearance() {
     installStyle();
@@ -8364,7 +8503,9 @@
     const menuStyle = getComputedStyle(menu);
     const custom = (name, fallback) =>
       String(rootStyle.getPropertyValue(name) || "").trim() || fallback;
+    const overlayContract = taskBoardHostAppearanceOverlay();
     const appearance = {
+      version: 2,
       background: rootStyle.backgroundColor || "#1f1f1f",
       foreground: rootStyle.color || "#d4d4d4",
       panelBackground: custom("--task-board-panel-background", "#282828"),
@@ -8419,7 +8560,12 @@
       modalFontFamily:
         modalStyle.fontFamily ||
         '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+      overlay: overlayContract.overlay,
     };
+    appearance.signature = taskBoardHostAppearanceSignature(
+      appearance,
+      overlayContract.sourceSignature,
+    );
     field.remove();
     menu.remove();
     if (removeModal) modal.remove();
@@ -8477,8 +8623,13 @@
     };
   }
 
+  const taskBoardHostCapabilities = Object.freeze({
+    nativeCreateLease: true,
+    nativeCreateRuntime: Number(taskBoardRuntimeVersion),
+  });
   window.__codexElvesTaskBoardHost = {
-    version: 2,
+    version: 3,
+    capabilities: taskBoardHostCapabilities,
     openSession(sessionId, conversation = null) {
       return taskBoardNativeAdapter.openSession(sessionId, conversation);
     },
@@ -8727,8 +8878,38 @@
     return null;
   }
 
+  function taskBoardNativeReusableComposerProject(composer) {
+    if (!(composer instanceof HTMLElement)) return "";
+    const root = composer.closest?.(
+      '[data-codex-composer-root][data-composer-placement="home"]',
+    );
+    if (!root) return "";
+    const trigger = root.querySelector?.(
+      '[data-composer-navigation-target="workspace-project"]',
+    );
+    const ariaLabel = String(trigger?.getAttribute?.("aria-label") || "")
+      .replace(/^(?:切换项目|Switch project)\s*[:：]\s*/i, "")
+      .trim();
+    return ariaLabel || String(trigger?.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  function taskBoardNativeComposerCanReuse(composer, project) {
+    const expected = String(project?.label || "").trim().toLocaleLowerCase("zh-Hans-CN");
+    const actual = taskBoardNativeReusableComposerProject(composer)
+      .toLocaleLowerCase("zh-Hans-CN");
+    return !!expected && actual === expected;
+  }
+
+  function taskBoardNativeSessionSignalId() {
+    return String(
+      document.querySelector("[data-above-composer-conversation-id]")
+        ?.getAttribute?.("data-above-composer-conversation-id") ||
+      "",
+    ).trim();
+  }
+
   function taskBoardNativePermanentSessionId() {
-    const value = String(document.querySelector("[data-above-composer-conversation-id]")?.getAttribute?.("data-above-composer-conversation-id") || "").trim();
+    const value = taskBoardNativeSessionSignalId();
     if (!value || isTemporaryThreadId(value)) return "";
     return validThreadSessionKey(value);
   }
@@ -8752,11 +8933,19 @@
     runtimeId,
     deadlineMs,
     previousComposer = null,
+    project = null,
   ) {
     while (taskBoardNativeRuntimeCurrent(runtimeId) && taskBoardNativeNow() <= deadlineMs) {
       const composer = taskBoardNativeComposer();
       const controller = taskBoardNativeComposerController(composer);
-      if (composer && composer !== previousComposer && controller) {
+      const ready =
+        composer &&
+        controller &&
+        (
+          composer !== previousComposer ||
+          taskBoardNativeComposerCanReuse(composer, project)
+        );
+      if (ready) {
         return { composer, controller };
       }
       const remainingMs = deadlineMs - taskBoardNativeNow();
@@ -8777,15 +8966,140 @@
     return null;
   }
 
+  const taskBoardNativeComposerControlSurfaceSelector = [
+    "[data-composer-footer-responsive]",
+    "[data-codex-composer-root]",
+    ".composer-footer",
+    '[class*="ComposerLayoutFooter"]',
+    '[class*="_footer_"]',
+  ].join(", ");
+
   function taskBoardNativeComposerControlSurface(composer) {
     if (!(composer instanceof HTMLElement)) return null;
-    return composer.closest?.([
-      "[data-composer-footer-responsive]",
-      "[data-codex-composer-root]",
-      ".composer-footer",
-      '[class*="ComposerLayoutFooter"]',
-      '[class*="_footer_"]',
-    ].join(", ")) || null;
+    return composer.closest?.(taskBoardNativeComposerControlSurfaceSelector) || null;
+  }
+
+  function taskBoardNativeSubmitButtonLabelMatches(button) {
+    const label = String(button?.getAttribute?.("aria-label") || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!label) return false;
+    return /^(?:发送|提交)(?:消息|指令|提示词)?(?:\s*(?:[（(][^）)]*[）)]|[：:].*))?\s*$/i.test(label) ||
+      /^(?:send|submit)(?:\s+(?:message|prompt|instruction))?(?:\s*(?:\([^)]*\)|[:.].*))?\s*$/i.test(label);
+  }
+
+  function taskBoardNativeSubmitButtonInteractive(button) {
+    if (!(button instanceof HTMLElement) || button.tagName !== "BUTTON") return false;
+    if (
+      button.isConnected === false ||
+      button.hidden ||
+      button.disabled ||
+      button.getAttribute?.("aria-disabled") === "true" ||
+      button.getAttribute?.("aria-hidden") === "true"
+    ) {
+      return false;
+    }
+    let style;
+    try {
+      style = getComputedStyle(button);
+    } catch {
+      return false;
+    }
+    if (
+      style?.display === "none" ||
+      style?.visibility === "hidden" ||
+      style?.visibility === "collapse" ||
+      style?.pointerEvents === "none" ||
+      style?.opacity === "0"
+    ) {
+      return false;
+    }
+    const rect = button.getBoundingClientRect?.();
+    const width = Number(rect?.width);
+    const height = Number(rect?.height);
+    return Number.isFinite(width) &&
+      Number.isFinite(height) &&
+      width >= 16 &&
+      height >= 16 &&
+      Number(rect?.right) > Number(rect?.left) &&
+      Number(rect?.bottom) > Number(rect?.top);
+  }
+
+  function taskBoardNativeSubmitButton(composer) {
+    const surface = taskBoardNativeComposerControlSurface(composer);
+    if (!surface) return null;
+    return Array.from(surface.querySelectorAll?.("button[aria-label]") || [])
+      .find((button) => {
+        return button.closest?.(taskBoardNativeComposerControlSurfaceSelector) === surface &&
+          taskBoardNativeSubmitButtonLabelMatches(button) &&
+          taskBoardNativeSubmitButtonInteractive(button);
+      }) || null;
+  }
+
+  function taskBoardNativeComposerTexts(composer, controller) {
+    const values = [];
+    try {
+      values.push(controller?.getText?.());
+    } catch {}
+    try {
+      values.push(controller?.getPersistedText?.());
+    } catch {}
+    values.push(composer?.textContent, composer?.innerText);
+    return uniqueValues(values)
+      .map((value) => String(value || "").replace(/\r\n/g, "\n").trim())
+      .filter(Boolean);
+  }
+
+  function taskBoardNativeComposerHasInstruction(
+    composer,
+    controller,
+    instruction,
+  ) {
+    const expected = String(instruction || "").replace(/\r\n/g, "\n").trim();
+    return !!expected && taskBoardNativeComposerTexts(composer, controller)
+      .some((value) => value === expected);
+  }
+
+  function taskBoardNativeComposerStateCurrent(runtimeId, composer, controller) {
+    return taskBoardNativeRuntimeCurrent(runtimeId) &&
+      composer?.isConnected !== false &&
+      taskBoardNativeComposer() === composer &&
+      taskBoardNativeComposerController(composer) === controller;
+  }
+
+  async function taskBoardNativeWaitForSubmitControl(
+    runtimeId,
+    composer,
+    controller,
+    instruction,
+  ) {
+    const deadlineMs = taskBoardNativeNow() + taskBoardNativeSubmitReadyTimeoutMs;
+    let instructionReady = false;
+    while (taskBoardNativeRuntimeCurrent(runtimeId) && taskBoardNativeNow() <= deadlineMs) {
+      if (!taskBoardNativeComposerStateCurrent(runtimeId, composer, controller)) {
+        return taskBoardNativeFailure("runtime_replaced", "Codex 页面已更新，请重试");
+      }
+      if (taskBoardNativeComposerHasInstruction(composer, controller, instruction)) {
+        instructionReady = true;
+        const submitButton = taskBoardNativeSubmitButton(composer);
+        if (submitButton) return { status: "ok", submitButton };
+      }
+      const remainingMs = deadlineMs - taskBoardNativeNow();
+      if (remainingMs <= 0) break;
+      await taskBoardNativeWait(Math.min(50, remainingMs));
+    }
+    if (!taskBoardNativeRuntimeCurrent(runtimeId)) {
+      return taskBoardNativeFailure("runtime_replaced", "Codex 页面已更新，请重试");
+    }
+    return instructionReady
+      ? taskBoardNativeFailure(
+        "composer_submit_unavailable",
+        "原生发送按钮尚未就绪，请稍后重试",
+      )
+      : taskBoardNativeFailure(
+        "composer_submit_failed",
+        "原生编辑器未保留首条指令",
+      );
   }
 
   function taskBoardNativeModelTrigger(composer = taskBoardNativeComposer()) {
@@ -8817,14 +9131,30 @@
     const desired = normalizeCodexServiceTierModelName(modelId);
     const text = String(value || "").replace(/\s+/g, " ").trim();
     if (!desired || !text) return false;
-    const exact = codexServiceTierCatalogModelMatch(text, false);
-    if (exact.slug || exact.ambiguous) {
-      return normalizeCodexServiceTierModelName(exact.slug) === desired;
-    }
-    const partial = codexServiceTierCatalogModelMatch(text, true);
-    return !!partial.slug &&
-      !partial.ambiguous &&
-      normalizeCodexServiceTierModelName(partial.slug) === desired;
+    const entry = taskBoardCreateSelectedModelCatalogEntry(desired);
+    const aliases = uniqueValues([
+      desired,
+      entry?.displayName,
+      taskBoardCreateModelDisplayLabel({
+        slug: entry?.slug || desired,
+        displayName: "",
+      }),
+    ])
+      .map(codexServiceTierModelMatchKey)
+      .filter(Boolean);
+    const textKey = codexServiceTierModelMatchKey(text);
+    if (!textKey || !aliases.length) return false;
+    const reasoningSuffixes = new Set(
+      taskBoardReasoningEffortDefinitions.flatMap((effort) => [
+        codexServiceTierModelMatchKey(effort.id),
+        codexServiceTierModelMatchKey(effort.label),
+      ]).filter(Boolean),
+    );
+    return aliases.some((alias) => {
+      if (textKey === alias) return true;
+      if (!textKey.startsWith(alias)) return false;
+      return reasoningSuffixes.has(textKey.slice(alias.length));
+    });
   }
 
   function taskBoardNativeCurrentModelMatches(modelId, knownTrigger = null) {
@@ -8919,6 +9249,25 @@
     if (!control || typeof control.click !== "function") return false;
     try {
       control.click();
+      if (
+        control.getAttribute?.("aria-haspopup") === "menu" &&
+        control.getAttribute?.("aria-expanded") !== "true" &&
+        typeof control.dispatchEvent === "function"
+      ) {
+        const options = {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          buttons: 1,
+          pointerId: 1,
+          pointerType: "mouse",
+          isPrimary: true,
+        };
+        const event = typeof PointerEvent === "function"
+          ? new PointerEvent("pointerdown", options)
+          : Object.assign(new Event("pointerdown", options), options);
+        control.dispatchEvent(event);
+      }
       return true;
     } catch {
       return false;
@@ -9058,19 +9407,40 @@
     return { status: "ok", effortId: desired };
   }
 
-  function taskBoardNativeSubmitComposer(composer, controller) {
-    if (!composer?.dispatchEvent || !controller) return false;
+  function taskBoardNativeSubmitComposer(
+    runtimeId,
+    composer,
+    controller,
+    submitButton,
+    instruction,
+  ) {
+    if (!taskBoardNativeComposerStateCurrent(runtimeId, composer, controller)) {
+      return taskBoardNativeFailure("runtime_replaced", "Codex 页面已更新，请重试");
+    }
+    if (!taskBoardNativeComposerHasInstruction(composer, controller, instruction)) {
+      return taskBoardNativeFailure("composer_submit_failed", "首条指令在提交前发生变化");
+    }
+    if (
+      taskBoardNativeSubmitButton(composer) !== submitButton ||
+      !taskBoardNativeSubmitButtonInteractive(submitButton)
+    ) {
+      return taskBoardNativeFailure(
+        "composer_submit_unavailable",
+        "原生发送按钮在提交前不可用",
+      );
+    }
     try {
-      const event = typeof KeyboardEvent === "function"
-        ? new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true })
-        : Object.assign(new Event("keydown", { bubbles: true, cancelable: true }), { key: "Enter", code: "Enter" });
-      return composer.dispatchEvent(event) !== false;
+      submitButton.click();
+      return { status: "ok" };
     } catch {
-      return false;
+      return taskBoardNativeFailure("composer_submit_failed", "无法点击原生发送按钮");
     }
   }
 
   function taskBoardNativeProbe(project) {
+    if (taskBoardForeignNativeCreateLease()) {
+      return Promise.resolve(taskBoardNativeCreateBusyProbe());
+    }
     const row = taskBoardNativeProjectRow(project);
     const button = taskBoardNativeStartButton(row);
     const composer = taskBoardNativeComposer();
@@ -9098,6 +9468,9 @@
     const button = taskBoardNativeStartButton(row);
     if (!row || !button) return taskBoardNativeFailure("native_create_unavailable", "当前项目暂不支持新建关联会话");
     const previousSessionId = taskBoardNativePermanentSessionId();
+    const previousSessionSignalId = taskBoardNativeSessionId(
+      taskBoardNativeSessionSignalId(),
+    );
     const previousComposer = taskBoardNativeComposer();
     try {
       button.click?.();
@@ -9109,6 +9482,7 @@
       runtimeId,
       composerDeadlineMs,
       previousComposer,
+      project,
     );
     if (!taskBoardNativeRuntimeCurrent(runtimeId)) return taskBoardNativeFailure("runtime_replaced", "Codex 页面已更新，请重试");
     if (!composerState) return taskBoardNativeFailure("composer_unavailable", "未找到原生会话编辑器");
@@ -9131,19 +9505,31 @@
     } catch {
       return taskBoardNativeFailure("composer_submit_failed", "无法写入首条指令");
     }
-    const text = String(controller.getText?.() || controller.getPersistedText?.() || "").trim();
-    if (text !== instruction) {
-      return taskBoardNativeFailure("composer_submit_failed", "无法写入首条指令");
-    }
-    if (!taskBoardNativeRuntimeCurrent(runtimeId) ||
-      taskBoardNativeComposer() !== composer || taskBoardNativeComposerController(composer) !== controller) {
-      return taskBoardNativeFailure("runtime_replaced", "Codex 页面已更新，请重试");
-    }
-    if (!taskBoardNativeSubmitComposer(composer, controller)) {
-      return taskBoardNativeFailure("composer_submit_failed", "无法提交首条指令");
-    }
+    const submitState = await taskBoardNativeWaitForSubmitControl(
+      runtimeId,
+      composer,
+      controller,
+      instruction,
+    );
+    if (submitState?.status !== "ok") return submitState;
+    const submitted = taskBoardNativeSubmitComposer(
+      runtimeId,
+      composer,
+      controller,
+      submitState.submitButton,
+      instruction,
+    );
+    if (submitted?.status !== "ok") return submitted;
+    const submittedAtMs = taskBoardNativeNow();
+    let submitTransitionObserved = false;
     const deadlineMs = taskBoardNativeNow() + taskBoardNativeCreatePermanentIdTimeoutMs;
-    while (taskBoardNativeRuntimeCurrent(runtimeId) && taskBoardNativeNow() <= deadlineMs) {
+    while (taskBoardNativeNow() <= deadlineMs) {
+      const sessionSignalId = taskBoardNativeSessionId(
+        taskBoardNativeSessionSignalId(),
+      );
+      if (sessionSignalId && sessionSignalId !== previousSessionSignalId) {
+        submitTransitionObserved = true;
+      }
       const sessionId = taskBoardNativePermanentSessionId();
       if (sessionId && sessionId !== previousSessionId) {
         const ref = currentSessionRef();
@@ -9153,6 +9539,16 @@
           title: ref?.session_id === sessionId ? String(ref?.title || "") : "",
           cwd: taskBoardNormalizedCwd(project?.cwd),
         };
+      }
+      if (!taskBoardNativeRuntimeCurrent(runtimeId)) {
+        return taskBoardNativeFailure("runtime_replaced", "Codex 页面已更新，请重试");
+      }
+      if (
+        !submitTransitionObserved &&
+        !taskBoardNativeComposerStateCurrent(runtimeId, composer, controller) &&
+        taskBoardNativeNow() - submittedAtMs >= taskBoardNativeSubmitTransitionGraceMs
+      ) {
+        return taskBoardNativeFailure("runtime_replaced", "Codex 页面已更新，请重试");
       }
       const remainingMs = deadlineMs - taskBoardNativeNow();
       if (remainingMs <= 0) break;
@@ -10631,7 +11027,13 @@
   function taskBoardSetCreateMode(mode) {
     const modal = taskBoardState.createModal;
     if (!modal || modal.busy || !["existing", "new"].includes(mode)) return;
-    if (mode === "new" && modal.nativeCreateAvailable === false) return;
+    if (mode === "new" && modal.nativeCreateAvailable === false) {
+      taskBoardSetCreateModalFeedback(
+        modal,
+        modal.nativeCreateMessage || "当前项目暂不支持新建关联会话",
+      );
+      return;
+    }
     if (mode !== "new" && taskBoardState.dropdownMenu?.kind === "create-settings") {
       closeTaskBoardDropdownMenu({ restoreFocus: false });
     }
@@ -11106,10 +11508,14 @@
     const probeId = ++modal.nativeProbeId;
     if (!project) {
       modal.nativeCreateAvailable = false;
+      modal.nativeCreateCode = "native_create_unavailable";
+      modal.nativeCreateMessage = "请选择项目";
       renderTaskBoardCreateModal();
       return;
     }
     modal.nativeCreateAvailable = null;
+    modal.nativeCreateCode = "";
+    modal.nativeCreateMessage = "";
     renderTaskBoardCreateModal();
     let probe;
     try {
@@ -11119,7 +11525,18 @@
     }
     if (taskBoardState.createModal !== modal || probeId !== modal.nativeProbeId || modal.busy) return;
     modal.nativeCreateAvailable = probe?.status === "ok" && probe?.canStart === true;
-    if (!modal.nativeCreateAvailable && modal.mode === "new") modal.mode = "existing";
+    modal.nativeCreateCode = modal.nativeCreateAvailable
+      ? ""
+      : String(probe?.code || "native_create_unavailable").trim();
+    modal.nativeCreateMessage = modal.nativeCreateAvailable
+      ? ""
+      : taskBoardMessageFromResult(probe, "当前项目暂不支持新建关联会话");
+    if (!modal.nativeCreateAvailable && modal.mode === "new") {
+      modal.mode = "existing";
+      if (modal.nativeCreateCode === "native_create_busy") {
+        modal.feedback = modal.nativeCreateMessage;
+      }
+    }
     renderTaskBoardCreateModal();
   }
 
@@ -11260,6 +11677,13 @@
     modal.modelTrigger.setAttribute("aria-busy", String(!!modal.modelsLoading));
     modal.existingButton.setAttribute("aria-pressed", String(modal.mode === "existing"));
     modal.newButton.setAttribute("aria-pressed", String(modal.mode === "new"));
+    modal.newButton.setAttribute(
+      "data-native-create-code",
+      modal.nativeCreateAvailable === false ? modal.nativeCreateCode : "",
+    );
+    modal.newButton.title = modal.nativeCreateAvailable === false
+      ? modal.nativeCreateMessage
+      : "";
     modal.sessionSection.hidden = modal.mode !== "existing";
     modal.newSessionSection.hidden = modal.mode !== "new";
     modal.firstInstructionInput.value = modal.firstInstruction;
@@ -11656,6 +12080,8 @@
       selectedSessionIds: new Set(defaultSessions[0]?.sessionId ? [defaultSessions[0].sessionId] : []),
       firstInstruction: "",
       nativeCreateAvailable: false,
+      nativeCreateCode: "",
+      nativeCreateMessage: "",
       nativeProbeId: 0,
       taskId: attaching ? String(targetTask?.id || "") : "",
       semanticKey: "",
@@ -11703,9 +12129,11 @@
 
   function taskBoardNativeCreateFailureMessage(result) {
     const code = String(result?.code || "").trim();
+    if (code === "native_create_busy") return taskBoardNativeCreateBusyMessage;
     if (code === "native_create_unavailable") return "当前项目暂不支持新建关联会话";
     if (code === "native_create_timeout") return "等待新会话就绪超时";
     if (code === "composer_unavailable") return "未找到原生会话编辑器";
+    if (code === "composer_submit_unavailable") return "原生发送按钮尚未就绪，请稍后重试";
     if (code === "composer_submit_failed") return "无法提交首条指令";
     if (code === "native_model_unavailable") return "原生模型列表暂不可用，请稍后重试";
     if (code === "native_model_not_found") return "所选模型在当前 Codex 会话中不可用";
@@ -11872,6 +12300,7 @@
     initialStatus = "new",
     kind = "create-task",
   ) {
+    if (taskBoardForeignNativeCreateLease()) return null;
     const operation = {
       kind: kind === "attach-conversation" ? "attach-conversation" : "create-task",
       taskId,
@@ -11968,6 +12397,18 @@
   }
 
   async function taskBoardStartNativeTaskCreate(modal, requestId, title, project) {
+    const leaseFailure = taskBoardNativeCreateLeaseFailure();
+    if (leaseFailure) {
+      if (taskBoardCreateRequestIsCurrent(modal, requestId)) {
+        taskBoardSetCreateModalFeedback(
+          modal,
+          taskBoardNativeCreateFailureMessage(leaseFailure),
+        );
+      } else {
+        showToast(taskBoardNativeCreateFailureMessage(leaseFailure));
+      }
+      return leaseFailure;
+    }
     const semanticKey = taskBoardCreateSemanticKey(title, project, []);
     if (modal.semanticKey !== semanticKey || !taskBoardCreateTaskIdIsValid(modal.taskId)) {
       modal.taskId = taskBoardCreateTaskId();
@@ -11982,6 +12423,19 @@
       modal.initialStatus,
       "create-task",
     );
+    if (!operation) {
+      const failure = taskBoardNativeCreateLeaseFailure() ||
+        taskBoardNativeFailure("native_create_busy", taskBoardNativeCreateBusyMessage);
+      if (taskBoardCreateRequestIsCurrent(modal, requestId)) {
+        taskBoardSetCreateModalFeedback(
+          modal,
+          taskBoardNativeCreateFailureMessage(failure),
+        );
+      } else {
+        showToast(taskBoardNativeCreateFailureMessage(failure));
+      }
+      return failure;
+    }
     let started;
     try {
       started = await Promise.resolve(
@@ -11997,7 +12451,7 @@
     }
     if (!taskBoardNativeCreateOperationCurrent(operation)) {
       taskBoardReleaseNativeCreateOperation(operation);
-      return;
+      return taskBoardNativeFailure("runtime_replaced", "Codex 页面已更新，请重试");
     }
     if (started?.status !== "ok" || !String(started?.sessionId || "").trim() ||
       isTemporaryThreadId(String(started?.sessionId || ""))) {
@@ -12007,7 +12461,7 @@
       } else {
         showToast(taskBoardNativeCreateFailureMessage(started));
       }
-      return;
+      return started;
     }
     operation.sessionId = String(started.sessionId).trim();
     operation.createdAtMs = taskBoardNativeNow();
@@ -12016,16 +12470,29 @@
     if (result?.status === "ok") {
       if (taskBoardCreateRequestIsCurrent(modal, requestId)) closeTaskBoardCreateModal();
       await taskBoardApplyInitialStatus(operation.taskId, operation.initialStatus);
-      return;
+      return result;
     }
     if (taskBoardCreateRequestIsCurrent(modal, requestId)) {
       taskBoardSetCreateModalFeedback(modal, taskBoardNativeCreateFailureMessage(result));
     } else {
       showToast("会话已创建，但任务尚未保存；下次打开任务看板时将自动重试");
     }
+    return result;
   }
 
   async function taskBoardStartNativeConversationAttach(modal, requestId, project) {
+    const leaseFailure = taskBoardNativeCreateLeaseFailure();
+    if (leaseFailure) {
+      if (taskBoardCreateRequestIsCurrent(modal, requestId)) {
+        taskBoardSetCreateModalFeedback(
+          modal,
+          taskBoardNativeCreateFailureMessage(leaseFailure),
+        );
+      } else {
+        showToast(taskBoardNativeCreateFailureMessage(leaseFailure));
+      }
+      return leaseFailure;
+    }
     const operation = taskBoardCreateNativeOperation(
       modal.taskId,
       modal.title,
@@ -12035,6 +12502,19 @@
       "new",
       "attach-conversation",
     );
+    if (!operation) {
+      const failure = taskBoardNativeCreateLeaseFailure() ||
+        taskBoardNativeFailure("native_create_busy", taskBoardNativeCreateBusyMessage);
+      if (taskBoardCreateRequestIsCurrent(modal, requestId)) {
+        taskBoardSetCreateModalFeedback(
+          modal,
+          taskBoardNativeCreateFailureMessage(failure),
+        );
+      } else {
+        showToast(taskBoardNativeCreateFailureMessage(failure));
+      }
+      return failure;
+    }
     let started;
     try {
       started = await Promise.resolve(
@@ -12054,7 +12534,7 @@
     }
     if (!taskBoardNativeCreateOperationCurrent(operation)) {
       taskBoardReleaseNativeCreateOperation(operation);
-      return;
+      return taskBoardNativeFailure("runtime_replaced", "Codex 页面已更新，请重试");
     }
     if (
       started?.status !== "ok" ||
@@ -12067,7 +12547,7 @@
       } else {
         showToast(taskBoardNativeCreateFailureMessage(started));
       }
-      return;
+      return started;
     }
     operation.sessionId = String(started.sessionId).trim();
     operation.createdAtMs = taskBoardNativeNow();
@@ -12075,20 +12555,29 @@
     const result = await taskBoardCreateNativeTask(operation);
     if (result?.status === "ok") {
       if (taskBoardCreateRequestIsCurrent(modal, requestId)) closeTaskBoardCreateModal();
-      return;
+      return result;
     }
     if (taskBoardCreateRequestIsCurrent(modal, requestId)) {
       taskBoardSetCreateModalFeedback(modal, taskBoardNativeCreateFailureMessage(result));
     } else {
       showToast("会话已创建，但尚未添加到任务；下次打开任务看板时将自动重试");
     }
+    return result;
   }
 
   async function taskBoardRetryNativeCreateRecovery() {
     if (taskBoardState.nativeCreateRecoveryAttempted || taskBoardState.nativeCreateOperation) return;
-    taskBoardState.nativeCreateRecoveryAttempted = true;
     const record = taskBoardReadNativeCreateRecovery();
-    if (!record) return;
+    if (!record) {
+      taskBoardState.nativeCreateRecoveryAttempted = true;
+      return;
+    }
+    const leaseFailure = taskBoardNativeCreateLeaseFailure();
+    if (leaseFailure) {
+      showToast(taskBoardNativeCreateFailureMessage(leaseFailure));
+      return leaseFailure;
+    }
+    taskBoardState.nativeCreateRecoveryAttempted = true;
     const operation = taskBoardCreateNativeOperation(
       record.taskId,
       record.title,
@@ -12098,6 +12587,13 @@
       record.initialStatus,
       record.kind,
     );
+    if (!operation) {
+      taskBoardState.nativeCreateRecoveryAttempted = false;
+      const failure = taskBoardNativeCreateLeaseFailure() ||
+        taskBoardNativeFailure("native_create_busy", taskBoardNativeCreateBusyMessage);
+      showToast(taskBoardNativeCreateFailureMessage(failure));
+      return failure;
+    }
     operation.createdAtMs = record.createdAtMs;
     const result = await taskBoardCreateNativeTask(operation);
     if (result?.status === "ok") {
@@ -12113,6 +12609,7 @@
           : "会话已创建，但任务尚未保存，请稍后重试",
       );
     }
+    return result;
   }
 
   async function taskBoardRefreshCatalogForCreate(modal, requestId) {
@@ -12443,7 +12940,8 @@
     if (!dialog) return;
     taskBoardState.detachRequestId += 1;
     taskBoardState.detachBusy = false;
-    document.removeEventListener("keydown", taskBoardState.detachDialogKeydownHandler, true);
+    window.removeEventListener("keydown", taskBoardState.detachDialogKeydownHandler, true);
+    window.removeEventListener("keyup", taskBoardState.detachDialogKeydownHandler, true);
     taskBoardState.detachDialogKeydownHandler = null;
     taskBoardState.detachDialog = null;
     dialog.overlay.remove?.();
@@ -12483,6 +12981,7 @@
       closeTaskBoardDetachDialog();
       return;
     }
+    if (event.type === "keyup") return;
     if (event.key !== "Tab") return;
     const focusable = taskBoardDetachDialogFocusable(dialog);
     if (!focusable.length) return;
@@ -12645,7 +13144,8 @@
         void taskBoardDetachConversation(dialog);
       }
     }, true);
-    document.addEventListener("keydown", taskBoardState.detachDialogKeydownHandler, true);
+    window.addEventListener("keydown", taskBoardState.detachDialogKeydownHandler, true);
+    window.addEventListener("keyup", taskBoardState.detachDialogKeydownHandler, true);
     document.body.appendChild(overlay);
     requestAnimationFrame(() => cancelButton.focus?.());
     return dialog;
@@ -13757,11 +14257,20 @@
       hydrateCreateSessionsForTest: () =>
         taskBoardHydrateCreateModalSessions(taskBoardState.createModal),
       submitCreateForTest: submitTaskBoardCreate,
+      nativeProbeForTest: taskBoardNativeProbe,
       nativeStartForTest: taskBoardNativeStartConversation,
       nativeOpenSessionForTest: taskBoardNativeOpenSession,
       openConversationForTest: openTaskBoardConversation,
       retryNativeCreateRecoveryForTest: taskBoardRetryNativeCreateRecovery,
       nativeRecoveryForTest: taskBoardReadNativeCreateRecovery,
+      nativeCreateLeaseStateForTest: () => ({
+        lease: taskBoardNativeOperationLease(),
+        foreignLease: taskBoardForeignNativeCreateLease(),
+        operationId: String(
+          taskBoardState.nativeCreateOperation?.operationId || "",
+        ),
+        recoveryAttempted: taskBoardState.nativeCreateRecoveryAttempted,
+      }),
       createModalContractForTest: () => {
         const modal = taskBoardState.createModal;
         return {
@@ -13846,6 +14355,9 @@
           effortId: modal?.effortId || "",
           effortOptionIds: taskBoardCreateEffortOptions(modal?.modelId || "")
             .map((option) => option.value),
+          nativeCreateAvailable: modal?.nativeCreateAvailable ?? null,
+          nativeCreateCode: modal?.nativeCreateCode || "",
+          nativeCreateMessage: modal?.nativeCreateMessage || "",
           selectedSessionIds: Array.from(modal?.selectedSessionIds || []),
           sessionsHydrated: !!modal?.sessionsHydrated,
           sessionRenderState:

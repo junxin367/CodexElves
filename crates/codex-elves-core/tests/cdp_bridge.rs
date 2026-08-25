@@ -402,6 +402,41 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 }
 
 #[test]
+fn renderer_task_board_host_appearance_contract_keeps_overlay_payload_lightweight() {
+    let script = assets::renderer_features_script();
+    let appearance_contract = script
+        .split("function taskBoardHostAppearanceHash(")
+        .nth(1)
+        .and_then(|section| {
+            section
+                .split("async function taskBoardHostConversationStatuses(")
+                .next()
+        })
+        .expect("task-board host appearance contract should be present");
+
+    assert!(appearance_contract.contains("function taskBoardHostAppearanceOverlay()"));
+    assert!(appearance_contract.contains("version: 2"));
+    assert!(appearance_contract.contains("imageUrl,"));
+    assert!(appearance_contract.contains("backgroundColor,"));
+    assert!(appearance_contract.contains("gradientFrom,"));
+    assert!(appearance_contract.contains("gradientTo,"));
+    assert!(appearance_contract.contains("gradientAngle,"));
+    assert!(
+        appearance_contract
+            .contains("const taskBoardHostAppearanceSourceSignatureCache = new WeakMap()")
+    );
+    assert!(
+        appearance_contract
+            .contains("sourceSignature: taskBoardHostAppearanceSourceSignature(config)")
+    );
+    assert!(appearance_contract.contains("cached?.source === source"));
+    assert!(
+        appearance_contract.contains("appearance.signature = taskBoardHostAppearanceSignature(")
+    );
+    assert!(!appearance_contract.contains("dataUrl:"));
+}
+
+#[test]
 fn renderer_task_board_navigation_opens_inline_and_offers_new_window_on_context_menu() {
     let script = assets::renderer_features_script().replace("\r\n", "\n");
     let entry_creation = script
@@ -419,7 +454,7 @@ fn renderer_task_board_navigation_opens_inline_and_offers_new_window_on_context_
         .and_then(|section| section.split("function reconcileTaskBoardEntry()").next())
         .expect("standalone task board opener should be present");
 
-    assert!(script.contains(r#"const taskBoardRuntimeVersion = "38";"#));
+    assert!(script.contains(r#"const taskBoardRuntimeVersion = "39";"#));
     assert!(script.contains("codex-task-board-entry-context-menu"));
     assert!(script.contains("function openTaskBoardEntryContextMenu(entry, event)"));
     assert!(script.contains(r#"menu.setAttribute("role", "menu")"#));
@@ -673,6 +708,18 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
     assert!(!script.contains("将立即创建新会话、发送这条指令，并追加到当前任务"));
     assert!(script.contains("codex-task-board-empty-column"));
     assert!(script.contains("function taskBoardCreateModalKeydown("));
+    assert!(script.contains(
+        "window.addEventListener(\"keydown\", taskBoardState.detachDialogKeydownHandler, true)"
+    ));
+    assert!(script.contains(
+        "window.addEventListener(\"keyup\", taskBoardState.detachDialogKeydownHandler, true)"
+    ));
+    assert!(script.contains(
+        "window.removeEventListener(\"keydown\", taskBoardState.detachDialogKeydownHandler, true)"
+    ));
+    assert!(script.contains(
+        "window.removeEventListener(\"keyup\", taskBoardState.detachDialogKeydownHandler, true)"
+    ));
     assert!(script.contains("event.shiftKey"));
     assert!(script.contains("probe(project)"));
     assert!(script.contains("async createOptions()"));
@@ -859,6 +906,12 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
     assert!(cases["attach"]["native"]["closed"].as_bool().unwrap());
     assert!(cases["detach"]["confirmation"].as_bool().unwrap());
     assert!(
+        cases["detach"]["escapeClosesWithoutRequest"]
+            .as_bool()
+            .unwrap(),
+        "detach escape cases: {cases}"
+    );
+    assert!(
         cases["detach"]["cancelledWithoutRequest"]
             .as_bool()
             .unwrap()
@@ -1036,18 +1089,38 @@ fn renderer_task_board_open_session_uses_native_rows_and_bounded_project_expansi
 fn renderer_task_board_native_create_uses_host_adapter_and_recovers_without_instruction() {
     let script = assets::renderer_features_script();
     let cases = run_task_board_native_create_contract_harness();
+    let native_submit_contract = script
+        .split("function taskBoardNativeSubmitComposer(")
+        .nth(1)
+        .and_then(|section| section.split("function taskBoardNativeProbe(").next())
+        .expect("native submit contract should be present");
 
     assert!(script.contains("function taskBoardNativeProjectRow(project)"));
     assert!(script.contains("[data-app-action-sidebar-project-row]"));
     assert!(script.contains("memoizedProps?.composerController"));
     assert!(script.contains("owner = owner.parentElement"));
     assert!(script.contains("function taskBoardNativePermanentSessionId()"));
+    assert!(script.contains("function taskBoardNativeComposerCanReuse("));
+    assert!(script.contains(r#"[data-composer-placement="home"]"#));
+    assert!(script.contains(r#"[data-composer-navigation-target="workspace-project"]"#));
     assert!(script.contains("taskBoardNativeCreatePermanentIdTimeoutMs = 15 * 1000"));
+    assert!(script.contains("taskBoardNativeSubmitReadyTimeoutMs = 15 * 1000"));
     assert!(script.contains("taskBoardNativeModelSelectionTimeoutMs = 5 * 1000"));
     assert!(script.contains("function taskBoardNativeSelectModel("));
     assert!(script.contains("function taskBoardNativeSelectReasoningEffort("));
+    assert!(script.contains("function taskBoardNativeSubmitButton(composer)"));
+    assert!(script.contains("function taskBoardNativeWaitForSubmitControl("));
+    assert!(native_submit_contract.contains("submitButton.click();"));
+    assert!(!native_submit_contract.contains("dispatchEvent"));
+    assert!(!native_submit_contract.contains("KeyboardEvent"));
+    assert!(script.contains("new PointerEvent(\"pointerdown\", options)"));
+    assert!(script.contains("reasoningSuffixes.has(textKey.slice(alias.length))"));
     assert!(script.contains("taskBoardNativeCreateSessionRetryDelaysMs"));
     assert!(script.contains("taskBoardNativeCreateRecoveryTtlMs = 24 * 60 * 60 * 1000"));
+    assert!(script.contains("function taskBoardForeignNativeCreateLease()"));
+    assert!(script.contains(r#"code: "native_create_busy""#));
+    assert!(script.contains("nativeCreateLease: true"));
+    assert!(script.contains("nativeCreateRuntime: Number(taskBoardRuntimeVersion)"));
 
     assert!(
         cases["supported"]["structuralButtonOnly"]
@@ -1062,6 +1135,81 @@ fn renderer_task_board_native_create_uses_host_adapter_and_recovers_without_inst
     );
     assert!(
         cases["supported"]["selectedSettingsBeforeSubmit"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["sharedPrefix"]["radixPointerFallbackOpensMenu"]
+            .as_bool()
+            .unwrap(),
+        "native create shared-prefix cases: {cases}"
+    );
+    assert!(
+        cases["sharedPrefix"]["exactExtendedModelSelected"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["reusedComposer"]["homeDraftForTargetProjectAccepted"]
+            .as_bool()
+            .unwrap(),
+        "native create reused-composer cases: {cases}"
+    );
+    assert!(
+        cases["submissionReliability"]["hiddenDelayedButtonCommitsOnce"]
+            .as_bool()
+            .unwrap(),
+        "native create submission reliability cases: {cases}"
+    );
+    assert!(
+        cases["submissionReliability"]["postClickComposerReplacementUsesSessionEvidence"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["submissionReliability"]["unavailableButtonFailsSpecifically"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["hostContract"]["v3LeaseCapability"]
+            .as_bool()
+            .unwrap(),
+        "native create host contract cases: {cases}"
+    );
+    assert!(
+        cases["hostContract"]["stableCapabilities"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["sharedLease"]["foreignActiveBlocksInlineAndPreservesLease"]
+            .as_bool()
+            .unwrap(),
+        "native create shared-lease cases: {cases}"
+    );
+    assert!(
+        cases["sharedLease"]["createAndAttachRaceRejected"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["sharedLease"]["releaseAndExpiryPermit"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["sharedLease"]["localOwnLeaseAccepted"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["sharedLease"]["recoveryWaitsForRelease"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["sharedLease"]["lowLevelPreheldLeaseAllowed"]
             .as_bool()
             .unwrap()
     );
@@ -4344,6 +4492,7 @@ globalThis.Event = class Event {
   constructor(type, options = {}) { this.type = type; Object.assign(this, options); }
 };
 globalThis.KeyboardEvent = class KeyboardEvent extends Event {};
+globalThis.PointerEvent = class PointerEvent extends Event {};
 function matches(element, selector) {
   return selector.split(",").some((part) => {
     const value = part.trim();
@@ -4525,15 +4674,59 @@ let nativeStartClicks = 0;
 let menuClicks = 0;
 let selectClicks = 0;
 let submitEvents = 0;
+let submitButtonClicks = 0;
+let wrongSubmitButtonClicks = 0;
 let setTextCalls = 0;
 let modelTriggerClicks = 0;
+let modelTriggerPointerDowns = 0;
 let modelSubmenuClicks = 0;
+let baseModelOptionClicks = 0;
+let extendedModelOptionClicks = 0;
 let modelOptionClicks = 0;
 let effortSubmenuClicks = 0;
 let effortOptionClicks = 0;
 const nativeSequence = [];
 let permanentOnSubmit = true;
 let nativeStartHook = null;
+let activeSubmitButton = null;
+let nativeSubmitStartsDisabled = false;
+let nativeSubmitSessionId = "session-permanent-1";
+let nativeSubmitReplacesComposer = false;
+function createNativeSubmitButton(label = "Send message") {
+  const button = node("button");
+  button.setAttribute("aria-label", label);
+  button.disabled = nativeSubmitStartsDisabled;
+  button.addEventListener("click", () => {
+    submitButtonClicks += 1;
+    nativeSequence.push("submit");
+    if (permanentOnSubmit) {
+      if (nativeSubmitReplacesComposer) {
+        conversationSignal.setAttribute(
+          "data-above-composer-conversation-id",
+          "local:client-new-thread:submitted-transition",
+        );
+        activeComposerOwner.remove();
+      } else {
+        conversationSignal.setAttribute(
+          "data-above-composer-conversation-id",
+          nativeSubmitSessionId,
+        );
+      }
+    }
+  });
+  return button;
+}
+function createNestedSubmitDecoy() {
+  const surface = node("div");
+  surface.setAttribute("data-composer-footer-responsive", "true");
+  const button = node("button");
+  button.setAttribute("aria-label", "Submit");
+  button.addEventListener("click", () => {
+    wrongSubmitButtonClicks += 1;
+  });
+  surface.appendChild(button);
+  return surface;
+}
 const projectRow = node("div");
 projectRow.setAttribute("data-app-action-sidebar-project-row", "true");
 projectRow.setAttribute("data-app-action-sidebar-project-id", "c:\\repo-a\\");
@@ -4573,10 +4766,12 @@ composerOwner.__reactFiber$test = { memoizedProps: { composerController: control
 composerOwner.appendChild(composer);
 composer.addEventListener("keydown", (event) => {
   if (event.key !== "Enter") return;
+  event.preventDefault?.();
   submitEvents += 1;
-  nativeSequence.push("submit");
-  if (permanentOnSubmit) conversationSignal.setAttribute("data-above-composer-conversation-id", "session-permanent-1");
 });
+const initialSubmitButton = createNativeSubmitButton("发送消息");
+composerOwner.append(createNestedSubmitDecoy(), initialSubmitButton);
+activeSubmitButton = initialSubmitButton;
 let activeComposerOwner = composerOwner;
 function mountFreshNativeComposer() {
   const nextComposer = node("div");
@@ -4601,20 +4796,21 @@ function mountFreshNativeComposer() {
     memoizedProps: { composerController: nextController },
     return: null,
   };
-  nextOwner.append(nextComposer, modelTrigger);
+  const nextSubmitButton = createNativeSubmitButton("Send message");
+  nextOwner.append(
+    nextComposer,
+    modelTrigger,
+    createNestedSubmitDecoy(),
+    nextSubmitButton,
+  );
   nextComposer.addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
+    event.preventDefault?.();
     submitEvents += 1;
-    nativeSequence.push("submit");
-    if (permanentOnSubmit) {
-      conversationSignal.setAttribute(
-        "data-above-composer-conversation-id",
-        "session-permanent-1",
-      );
-    }
   });
   activeComposerOwner.remove();
   activeComposerOwner = nextOwner;
+  activeSubmitButton = nextSubmitButton;
   document.body.appendChild(nextOwner);
 }
 const modelTrigger = node("button");
@@ -4629,6 +4825,9 @@ modelTriggerLabel.textContent = "5.6 Sol";
 modelTrigger.appendChild(modelTriggerLabel);
 modelTrigger.addEventListener("click", () => {
   modelTriggerClicks += 1;
+});
+modelTrigger.addEventListener("pointerdown", () => {
+  modelTriggerPointerDowns += 1;
   modelTrigger.setAttribute(
     "aria-expanded",
     modelTrigger.getAttribute("aria-expanded") === "true" ? "false" : "true",
@@ -4644,6 +4843,26 @@ modelSubmenu.addEventListener("click", () => {
   modelSubmenuClicks += 1;
   modelSubmenu.setAttribute("aria-expanded", "true");
 });
+const baseModelOption = node("div");
+baseModelOption.setAttribute("role", "menuitem");
+baseModelOption.textContent = "5.6 Sol";
+baseModelOption.addEventListener("click", () => {
+  baseModelOptionClicks += 1;
+  nativeSequence.push("base-model");
+  modelTriggerLabel.textContent = "5.6 Sol";
+  modelSubmenu.setAttribute("aria-expanded", "false");
+  modelTrigger.setAttribute("aria-expanded", "false");
+});
+const extendedModelOption = node("div");
+extendedModelOption.setAttribute("role", "menuitem");
+extendedModelOption.textContent = "5.6 Sol [500K]";
+extendedModelOption.addEventListener("click", () => {
+  extendedModelOptionClicks += 1;
+  nativeSequence.push("extended-model");
+  modelTriggerLabel.textContent = "5.6 Sol [500K]";
+  modelSubmenu.setAttribute("aria-expanded", "false");
+  modelTrigger.setAttribute("aria-expanded", "false");
+});
 const modelOption = node("div");
 modelOption.setAttribute("role", "menuitem");
 modelOption.textContent = "Claude Sonnet 4.6";
@@ -4651,6 +4870,7 @@ modelOption.addEventListener("click", () => {
   modelOptionClicks += 1;
   nativeSequence.push("model");
   modelTriggerLabel.textContent = "Claude Sonnet 4.6";
+  modelSubmenu.setAttribute("aria-expanded", "false");
   modelTrigger.setAttribute("aria-expanded", "false");
 });
 const effortSubmenu = node("div");
@@ -4670,16 +4890,59 @@ effortOption.addEventListener("click", () => {
   effortOptionClicks += 1;
   nativeSequence.push("effort");
   modelTrigger.setAttribute("data-selected-reasoning-effort", "high");
+  effortSubmenu.setAttribute("aria-expanded", "false");
   modelTrigger.setAttribute("aria-expanded", "false");
+});
+const visibleNativeRect = () => ({
+  left: 0,
+  top: 0,
+  right: 100,
+  bottom: 32,
+  width: 100,
+  height: 32,
+});
+const hiddenNativeRect = () => ({
+  left: 0,
+  top: 0,
+  right: 0,
+  bottom: 0,
+  width: 0,
+  height: 0,
+});
+modelSubmenu.getBoundingClientRect = () =>
+  modelTrigger.getAttribute("aria-expanded") === "true"
+    ? visibleNativeRect()
+    : hiddenNativeRect();
+for (const option of [baseModelOption, extendedModelOption, modelOption]) {
+  option.getBoundingClientRect = () =>
+    modelSubmenu.getAttribute("aria-expanded") === "true"
+      ? visibleNativeRect()
+      : hiddenNativeRect();
+}
+effortSubmenu.getBoundingClientRect = () =>
+  modelTrigger.getAttribute("aria-expanded") === "true"
+    ? visibleNativeRect()
+    : hiddenNativeRect();
+effortOption.getBoundingClientRect = () =>
+  effortSubmenu.getAttribute("aria-expanded") === "true"
+    ? visibleNativeRect()
+    : hiddenNativeRect();
+const globalSubmitDecoy = node("button");
+globalSubmitDecoy.setAttribute("aria-label", "Send");
+globalSubmitDecoy.addEventListener("click", () => {
+  wrongSubmitButtonClicks += 1;
 });
 document.body.append(
   projectRow,
   composerOwner,
   conversationSignal,
   modelSubmenu,
+  baseModelOption,
+  extendedModelOption,
   modelOption,
   effortSubmenu,
   effortOption,
+  globalSubmitDecoy,
 );
 nativeStartHook = mountFreshNativeComposer;
 
@@ -4690,7 +4953,7 @@ api.setModelCatalogForTest({
   status: "ok",
   model: "gpt-5.6-sol",
     default_model: "gpt-5.6-sol",
-    models: ["gpt-5.6-sol", "claude-sonnet-4-6"],
+    models: ["gpt-5.6-sol", "gpt-5.6-sol [500K]", "claude-sonnet-4-6"],
     model_entries: [
     {
       slug: "gpt-5.6-sol",
@@ -4702,6 +4965,12 @@ api.setModelCatalogForTest({
         { effort: "high" },
         { effort: "xhigh" },
       ],
+    },
+    {
+      slug: "gpt-5.6-sol [500K]",
+      display_name: "gpt-5.6-sol [500K]",
+      default_reasoning_level: "high",
+      supported_reasoning_levels: [{ effort: "high" }],
     },
     {
       slug: "claude-sonnet-4-6",
@@ -4770,9 +5039,14 @@ function recoveryKey() { return "codexElvesTaskBoardNativeCreateRecoveryV1"; }
   await api.submitCreateForTest();
   const supported = {
     structuralButtonOnly: nativeStartClicks === 1 && menuClicks === 0 && selectClicks === 0,
-    controllerAndNativeSubmit: setTextCalls === 1 && submitEvents === 1,
+    controllerAndNativeSubmit:
+      setTextCalls === 1 &&
+      submitButtonClicks === 1 &&
+      submitEvents === 0 &&
+      wrongSubmitButtonClicks === 0,
     selectedSettingsBeforeSubmit:
       modelTriggerClicks === 2 &&
+      modelTriggerPointerDowns === 2 &&
       modelSubmenuClicks === 1 &&
       modelOptionClicks === 1 &&
       effortSubmenuClicks === 1 &&
@@ -4781,6 +5055,417 @@ function recoveryKey() { return "codexElvesTaskBoardNativeCreateRecoveryV1"; }
         JSON.stringify(["model", "effort", "instruction", "submit"]),
     temporaryIdIgnored: supportedPayloads[0]?.sessionIds?.[0] === "session-permanent-1",
     createAfterPermanentId: supportedPayloads.length === 1 && supportedPayloads[0]?.taskId && supportedPayloads[0]?.expectedRevision === 3,
+  };
+
+  conversationSignal.setAttribute(
+    "data-above-composer-conversation-id",
+    "local:client-new-thread:shared-prefix",
+  );
+  modelTriggerLabel.textContent = "Claude Sonnet 4.6";
+  modelTrigger.setAttribute("aria-expanded", "false");
+  modelSubmenu.setAttribute("aria-expanded", "false");
+  modelTrigger.setAttribute("data-selected-reasoning-effort", "high");
+  const baseClicksBeforeSharedPrefix = baseModelOptionClicks;
+  const extendedClicksBeforeSharedPrefix = extendedModelOptionClicks;
+  const sharedPrefixResult = await api.nativeStartForTest(
+    { cwd: "c:/repo-a", label: "项目 A" },
+    instruction,
+    "gpt-5.6-sol [500K]",
+    "high",
+  );
+  const sharedPrefix = {
+    radixPointerFallbackOpensMenu:
+      modelTriggerPointerDowns === 3 &&
+      sharedPrefixResult.status === "ok",
+    exactExtendedModelSelected:
+      baseModelOptionClicks === baseClicksBeforeSharedPrefix &&
+      extendedModelOptionClicks === extendedClicksBeforeSharedPrefix + 1 &&
+      modelTriggerLabel.textContent === "5.6 Sol [500K]",
+  };
+
+  conversationSignal.setAttribute(
+    "data-above-composer-conversation-id",
+    "local:client-new-thread:reused-composer",
+  );
+  modelTriggerLabel.textContent = "5.6 Sol [500K]";
+  modelTrigger.setAttribute("aria-expanded", "false");
+  modelTrigger.setAttribute("data-selected-reasoning-effort", "high");
+  const reusedComposerBefore = activeComposerOwner.querySelector(
+    '[data-codex-composer][contenteditable="true"][role="textbox"]',
+  );
+  const reusedSetTextCallsBefore = setTextCalls;
+  const reusedSubmitButtonClicksBefore = submitButtonClicks;
+  const reusedSubmitEventsBefore = submitEvents;
+  nativeStartHook = () => {
+    activeComposerOwner.setAttribute("data-codex-composer-root", "");
+    activeComposerOwner.setAttribute("data-composer-placement", "home");
+    const projectTrigger = node("button");
+    projectTrigger.setAttribute(
+      "data-composer-navigation-target",
+      "workspace-project",
+    );
+    projectTrigger.setAttribute("aria-label", "切换项目：项目 A");
+    projectTrigger.textContent = "项目 A";
+    activeComposerOwner.appendChild(projectTrigger);
+  };
+  const reusedComposerResult = await api.nativeStartForTest(
+    { cwd: "c:/repo-a", label: "项目 A" },
+    instruction,
+    "gpt-5.6-sol [500K]",
+    "high",
+  );
+  const reusedComposerAfter = activeComposerOwner.querySelector(
+    '[data-codex-composer][contenteditable="true"][role="textbox"]',
+  );
+  const reusedComposer = {
+    homeDraftForTargetProjectAccepted:
+      reusedComposerResult.status === "ok" &&
+      reusedComposerBefore === reusedComposerAfter &&
+      setTextCalls === reusedSetTextCallsBefore + 1 &&
+      submitButtonClicks === reusedSubmitButtonClicksBefore + 1 &&
+      submitEvents === reusedSubmitEventsBefore,
+  };
+  nativeStartHook = mountFreshNativeComposer;
+
+  conversationSignal.setAttribute(
+    "data-above-composer-conversation-id",
+    "local:client-new-thread:delayed-submit",
+  );
+  document.visibilityState = "hidden";
+  nativeSubmitStartsDisabled = true;
+  nativeSubmitSessionId = "session-delayed-button";
+  const delayedSubmitReadyAt = now + 600;
+  const delayedWaitIndex = waits.length;
+  const delayedButtonClicksBefore = submitButtonClicks;
+  const delayedSubmitEventsBefore = submitEvents;
+  nativeClockWaitHook = () => {
+    if (activeSubmitButton && now >= delayedSubmitReadyAt) {
+      activeSubmitButton.disabled = false;
+    }
+  };
+  const delayedSubmitResult = await api.nativeStartForTest(
+    { cwd: "c:/repo-a", label: "项目 A" },
+    instruction,
+  );
+  nativeClockWaitHook = null;
+  document.visibilityState = "visible";
+  nativeSubmitStartsDisabled = false;
+  nativeSubmitSessionId = "session-permanent-1";
+  const delayedSubmitWaitMs = waits
+    .slice(delayedWaitIndex)
+    .reduce((sum, delay) => sum + delay, 0);
+  const delayedButtonClicksAfter = submitButtonClicks;
+  const delayedSubmitEventsAfter = submitEvents;
+  const delayedWrongSubmitButtonClicksAfter = wrongSubmitButtonClicks;
+
+  conversationSignal.setAttribute(
+    "data-above-composer-conversation-id",
+    "local:client-new-thread:post-click-replacement",
+  );
+  nativeSubmitReplacesComposer = true;
+  nativeSubmitSessionId = "session-post-click-replacement";
+  const replacementPermanentAt = now + 200;
+  const replacementButtonClicksBefore = submitButtonClicks;
+  nativeClockWaitHook = () => {
+    if (now >= replacementPermanentAt) {
+      conversationSignal.setAttribute(
+        "data-above-composer-conversation-id",
+        nativeSubmitSessionId,
+      );
+    }
+  };
+  const postClickReplacementResult = await api.nativeStartForTest(
+    { cwd: "c:/repo-a", label: "项目 A" },
+    instruction,
+  );
+  nativeClockWaitHook = null;
+  nativeSubmitReplacesComposer = false;
+  nativeSubmitSessionId = "session-permanent-1";
+
+  conversationSignal.setAttribute(
+    "data-above-composer-conversation-id",
+    "local:client-new-thread:submit-unavailable",
+  );
+  nativeSubmitStartsDisabled = true;
+  const unavailableWaitIndex = waits.length;
+  const unavailableButtonClicksBefore = submitButtonClicks;
+  const unavailableResult = await api.nativeStartForTest(
+    { cwd: "c:/repo-a", label: "项目 A" },
+    instruction,
+  );
+  nativeSubmitStartsDisabled = false;
+  const unavailableWaitMs = waits
+    .slice(unavailableWaitIndex)
+    .reduce((sum, delay) => sum + delay, 0);
+  const submissionReliability = {
+    hiddenDelayedButtonCommitsOnce:
+      delayedSubmitResult.status === "ok" &&
+      delayedSubmitResult.sessionId === "session-delayed-button" &&
+      delayedSubmitWaitMs === 600 &&
+      delayedButtonClicksAfter === delayedButtonClicksBefore + 1 &&
+      delayedSubmitEventsAfter === delayedSubmitEventsBefore &&
+      delayedWrongSubmitButtonClicksAfter === 0,
+    postClickComposerReplacementUsesSessionEvidence:
+      postClickReplacementResult.status === "ok" &&
+      postClickReplacementResult.sessionId === "session-post-click-replacement" &&
+      submitButtonClicks === replacementButtonClicksBefore + 1 &&
+      submitEvents === delayedSubmitEventsBefore &&
+      wrongSubmitButtonClicks === 0,
+    unavailableButtonFailsSpecifically:
+      unavailableResult.code === "composer_submit_unavailable" &&
+      unavailableWaitMs === 15000 &&
+      submitButtonClicks === unavailableButtonClicksBefore &&
+      wrongSubmitButtonClicks === 0,
+  };
+
+  const host = window.__codexElvesTaskBoardHost;
+  const capabilities = host?.capabilities;
+  const hostContract = {
+    v3LeaseCapability:
+      host?.version === 3 &&
+      capabilities?.nativeCreateLease === true &&
+      capabilities?.nativeCreateRuntime === 39,
+    stableCapabilities:
+      host?.capabilities === capabilities &&
+      Object.isFrozen(capabilities),
+  };
+  const leaseProject = { cwd: "c:/repo-a", label: "项目 A" };
+  const leaseMessage = "另一个窗口正在创建原生会话，请稍后重试";
+  const activeForeignLease = {
+    operationId: "standalone:active",
+    runtimeId: capabilities.nativeCreateRuntime,
+    createdAtMs: Date.now(),
+  };
+  let foreignBlockedStarts = 0;
+  let foreignBlockedCreates = 0;
+  window.__codexElvesTaskBoardNativeOperationLease = activeForeignLease;
+  reset({
+    nativeAdapter: {
+      probe: () => ({ status: "ok", canStart: true, canOpen: false }),
+      startConversation: () => {
+        foreignBlockedStarts += 1;
+        return { status: "ok", sessionId: "session-foreign-should-not-start" };
+      },
+    },
+    mock: { request(route) {
+      if (route === "/task-board/task-create") foreignBlockedCreates += 1;
+      return snapshot(4);
+    }},
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  const foreignProbe = await api.nativeProbeForTest(leaseProject);
+  const foreignModal = api.createModalStateForTest();
+  const foreignModalContract = api.createModalContractForTest();
+  setNew("共享租约阻止");
+  await api.submitCreateForTest();
+  const foreignSubmit = api.createModalStateForTest();
+  const foreignLeaseAfterSubmit = window.__codexElvesTaskBoardNativeOperationLease;
+  const foreignActiveBlocksInlineAndPreservesLease =
+    foreignProbe.status === "ok" &&
+    foreignProbe.canStart === false &&
+    foreignProbe.code === "native_create_busy" &&
+    foreignProbe.message === leaseMessage &&
+    foreignModal.nativeCreateAvailable === false &&
+    foreignModal.nativeCreateCode === "native_create_busy" &&
+    foreignModal.nativeCreateMessage === leaseMessage &&
+    foreignModalContract.newButton.disabled === true &&
+    foreignModalContract.newButton.title === leaseMessage &&
+    foreignModalContract.newButton.getAttribute("data-native-create-code") ===
+      "native_create_busy" &&
+    foreignSubmit.feedback === leaseMessage &&
+    foreignBlockedStarts === 0 &&
+    foreignBlockedCreates === 0 &&
+    foreignLeaseAfterSubmit?.operationId === activeForeignLease.operationId &&
+    foreignLeaseAfterSubmit?.createdAtMs === activeForeignLease.createdAtMs;
+
+  let raceLeaseToInstall = null;
+  let raceBlockedStarts = 0;
+  let raceBlockedWrites = 0;
+  const raceAdapter = {
+    probe: () => {
+      if (raceLeaseToInstall) {
+        window.__codexElvesTaskBoardNativeOperationLease = raceLeaseToInstall;
+      }
+      return { status: "ok", canStart: true, canOpen: false };
+    },
+    startConversation: () => {
+      raceBlockedStarts += 1;
+      return { status: "ok", sessionId: "session-race-should-not-start" };
+    },
+  };
+  delete window.__codexElvesTaskBoardNativeOperationLease;
+  reset({
+    nativeAdapter: raceAdapter,
+    mock: { request() {
+      raceBlockedWrites += 1;
+      return snapshot(4);
+    }},
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  setNew("创建入口竞态");
+  raceLeaseToInstall = {
+    operationId: "standalone:create-race",
+    runtimeId: capabilities.nativeCreateRuntime,
+    createdAtMs: Date.now(),
+  };
+  await api.submitCreateForTest();
+  const createRaceState = api.createModalStateForTest();
+  const createRaceLease = window.__codexElvesTaskBoardNativeOperationLease;
+
+  raceLeaseToInstall = null;
+  delete window.__codexElvesTaskBoardNativeOperationLease;
+  reset({
+    nativeAdapter: raceAdapter,
+    mock: { request() {
+      raceBlockedWrites += 1;
+      return snapshot(4);
+    }},
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  api.openAttachModalForTest(api.createSnapshotForTest().tasks[0]);
+  await Promise.resolve();
+  await Promise.resolve();
+  api.setCreateDraftForTest({
+    mode: "new",
+    modelId: "claude-sonnet-4-6",
+    effortId: "high",
+    firstInstruction: instruction,
+    sessionIds: [],
+  });
+  raceLeaseToInstall = {
+    operationId: "standalone:attach-race",
+    runtimeId: capabilities.nativeCreateRuntime,
+    createdAtMs: Date.now(),
+  };
+  await api.submitCreateForTest();
+  const attachRaceState = api.createModalStateForTest();
+  const attachRaceLease = window.__codexElvesTaskBoardNativeOperationLease;
+  raceLeaseToInstall = null;
+  const createAndAttachRaceRejected =
+    createRaceState.feedback === leaseMessage &&
+    createRaceLease?.operationId === "standalone:create-race" &&
+    attachRaceState.feedback === leaseMessage &&
+    attachRaceLease?.operationId === "standalone:attach-race" &&
+    raceBlockedStarts === 0 &&
+    raceBlockedWrites === 0;
+
+  delete window.__codexElvesTaskBoardNativeOperationLease;
+  nativeStartButton.disabled = false;
+  const releasedProbe = await api.nativeProbeForTest(leaseProject);
+  window.__codexElvesTaskBoardNativeOperationLease = {
+    operationId: "standalone:expired",
+    runtimeId: capabilities.nativeCreateRuntime,
+    createdAtMs: Date.now() - 2 * 60 * 1000 - 1,
+  };
+  const expiredProbe = await api.nativeProbeForTest(leaseProject);
+  const releaseAndExpiryPermit =
+    releasedProbe.canStart === true &&
+    expiredProbe.canStart === true &&
+    !window.__codexElvesTaskBoardNativeOperationLease;
+
+  let resolveOwnStart;
+  reset({
+    nativeAdapter: {
+      probe: () => ({ status: "ok", canStart: true, canOpen: false }),
+      startConversation: () => new Promise((resolve) => {
+        resolveOwnStart = resolve;
+      }),
+    },
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  setNew("本地租约");
+  const ownCreatePending = api.submitCreateForTest();
+  await Promise.resolve();
+  await Promise.resolve();
+  const ownLeaseState = api.nativeCreateLeaseStateForTest();
+  const ownProbe = await api.nativeProbeForTest(leaseProject);
+  resolveOwnStart({
+    status: "failed",
+    code: "native_create_unavailable",
+    message: "stop own operation",
+  });
+  await ownCreatePending;
+  const ownLeaseReleased = !window.__codexElvesTaskBoardNativeOperationLease;
+  const localOwnLeaseAccepted =
+    !!ownLeaseState.operationId &&
+    ownLeaseState.lease?.operationId === ownLeaseState.operationId &&
+    ownLeaseState.foreignLease === null &&
+    ownProbe.canStart === true &&
+    ownLeaseReleased;
+
+  clearRecovery();
+  now = 7000;
+  const sharedRecoveryRecord = {
+    kind: "create-task",
+    taskId: "11111111-1111-4111-8111-111111111113",
+    title: "共享租约恢复",
+    project: leaseProject,
+    sessionId: "session-shared-recovery",
+    initialStatus: "new",
+    createdAtMs: now,
+  };
+  storage.set(recoveryKey(), JSON.stringify(sharedRecoveryRecord));
+  api.resetCreateStateForTest({ snapshot: snapshot(3), catalog: catalog() });
+  let sharedRecoveryCalls = 0;
+  window.__codexElvesTaskBoardMock = { request(route) {
+    if (route !== "/task-board/task-create") throw new Error("unexpected route");
+    sharedRecoveryCalls += 1;
+    return snapshot(4);
+  }};
+  const recoveryForeignLease = {
+    operationId: "standalone:recovery",
+    runtimeId: capabilities.nativeCreateRuntime,
+    createdAtMs: Date.now(),
+  };
+  window.__codexElvesTaskBoardNativeOperationLease = recoveryForeignLease;
+  const recoveryBusyResult = await api.retryNativeCreateRecoveryForTest();
+  const recoveryBusyState = api.nativeCreateLeaseStateForTest();
+  const recoveryLeaseAfterBusy = window.__codexElvesTaskBoardNativeOperationLease;
+  delete window.__codexElvesTaskBoardNativeOperationLease;
+  const recoveryReleasedResult = await api.retryNativeCreateRecoveryForTest();
+  const recoveryWaitsForRelease =
+    recoveryBusyResult?.code === "native_create_busy" &&
+    recoveryBusyState.recoveryAttempted === false &&
+    recoveryLeaseAfterBusy?.operationId === recoveryForeignLease.operationId &&
+    sharedRecoveryCalls === 1 &&
+    recoveryReleasedResult?.status === "ok" &&
+    !storage.has(recoveryKey());
+
+  permanentOnSubmit = true;
+  nativeStartHook = mountFreshNativeComposer;
+  conversationSignal.setAttribute(
+    "data-above-composer-conversation-id",
+    "local:client-new-thread:standalone-preheld",
+  );
+  const lowLevelLease = {
+    operationId: "standalone:preheld",
+    runtimeId: capabilities.nativeCreateRuntime,
+    createdAtMs: Date.now(),
+  };
+  window.__codexElvesTaskBoardNativeOperationLease = lowLevelLease;
+  const lowLevelStartClicksBefore = nativeStartClicks;
+  const lowLevelResult = await api.nativeStartForTest(
+    leaseProject,
+    instruction,
+  );
+  const lowLevelLeaseAfter = window.__codexElvesTaskBoardNativeOperationLease;
+  const lowLevelPreheldLeaseAllowed =
+    lowLevelResult.status === "ok" &&
+    nativeStartClicks === lowLevelStartClicksBefore + 1 &&
+    lowLevelLeaseAfter?.operationId === lowLevelLease.operationId;
+  delete window.__codexElvesTaskBoardNativeOperationLease;
+
+  const sharedLease = {
+    foreignActiveBlocksInlineAndPreservesLease,
+    createAndAttachRaceRejected,
+    releaseAndExpiryPermit,
+    localOwnLeaseAccepted,
+    recoveryWaitsForRelease,
+    lowLevelPreheldLeaseAllowed,
   };
 
   clearRecovery();
@@ -5011,6 +5696,7 @@ function recoveryKey() { return "codexElvesTaskBoardNativeCreateRecoveryV1"; }
 
   let raceSetTextCalls = 0;
   let raceSubmitEvents = 0;
+  let raceSubmitButtonClicks = 0;
   let raceModelTriggerClicks = 0;
   let raceModelSubmenuClicks = 0;
   let raceModelOptionClicks = 0;
@@ -5042,12 +5728,8 @@ function recoveryKey() { return "codexElvesTaskBoardNativeCreateRecoveryV1"; }
   raceComposerOwner.appendChild(raceComposer);
   raceComposer.addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
+    event.preventDefault?.();
     raceSubmitEvents += 1;
-    raceSequence.push("submit");
-    conversationSignal.setAttribute(
-      "data-above-composer-conversation-id",
-      "session-navigation-race",
-    );
   });
 
   const raceModelTrigger = node("button");
@@ -5070,6 +5752,17 @@ function recoveryKey() { return "codexElvesTaskBoardNativeCreateRecoveryV1"; }
     );
   });
   raceComposerOwner.appendChild(raceModelTrigger);
+  const raceSubmitButton = node("button");
+  raceSubmitButton.setAttribute("aria-label", "提交");
+  raceSubmitButton.addEventListener("click", () => {
+    raceSubmitButtonClicks += 1;
+    raceSequence.push("submit");
+    conversationSignal.setAttribute(
+      "data-above-composer-conversation-id",
+      "session-navigation-race",
+    );
+  });
+  raceComposerOwner.append(createNestedSubmitDecoy(), raceSubmitButton);
 
   const raceModelSubmenu = node("div");
   raceModelSubmenu.setAttribute("role", "menuitem");
@@ -5171,7 +5864,9 @@ function recoveryKey() { return "codexElvesTaskBoardNativeCreateRecoveryV1"; }
       raceEffortSubmenuClicks === 1 &&
       raceEffortOptionClicks === 1 &&
       raceSetTextCalls === 1 &&
-      raceSubmitEvents === 1 &&
+      raceSubmitButtonClicks === 1 &&
+      raceSubmitEvents === 0 &&
+      wrongSubmitButtonClicks === 0 &&
       JSON.stringify(raceSequence) ===
         JSON.stringify(["model", "effort", "instruction", "submit"]),
   };
@@ -5183,7 +5878,7 @@ function recoveryKey() { return "codexElvesTaskBoardNativeCreateRecoveryV1"; }
       !storageWrites.join("\n").includes(instruction) &&
       !capturedLogs.join("\n").includes(instruction),
   };
-  process.stdout.write(JSON.stringify({ supported, navigationRace, unsupported, timeout, retry, recovery: {
+  process.stdout.write(JSON.stringify({ supported, sharedPrefix, reusedComposer, submissionReliability, hostContract, sharedLease, navigationRace, unsupported, timeout, retry, recovery: {
     bridgeFailurePersistsAllowedFields,
     nextActivationRetriesOnceAndClears,
     retryFailureKeepsRecordAndWarns,
@@ -5332,9 +6027,32 @@ globalThis.ResizeObserver = class ResizeObserver {
 };
 globalThis.requestAnimationFrame = (callback) => { callback(); return 1; };
 globalThis.cancelAnimationFrame = () => {};
-window.addEventListener = () => {};
-window.removeEventListener = () => {};
-window.dispatchEvent = () => true;
+const windowListeners = new Map();
+function windowListenerSet(type) {
+  let listeners = windowListeners.get(type);
+  if (!listeners) {
+    listeners = new Set();
+    windowListeners.set(type, listeners);
+  }
+  return listeners;
+}
+window.addEventListener = (type, listener) => windowListenerSet(type).add(listener);
+window.removeEventListener = (type, listener) => windowListenerSet(type).delete(listener);
+window.dispatchEvent = (event) => {
+  event.target ||= window;
+  event.preventDefault ||= () => { event.defaultPrevented = true; };
+  event.stopImmediatePropagation ||= () => { event.immediatePropagationStopped = true; };
+  for (const listener of windowListenerSet(event.type)) {
+    listener(event);
+    if (event.immediatePropagationStopped) break;
+  }
+  return !event.defaultPrevented;
+};
+window.addEventListener("keydown", (event) => {
+  if (window.__codexElvesBlockLateEscapeKeydown && event.key === "Escape") {
+    event.stopImmediatePropagation();
+  }
+}, true);
 const documentListeners = new Map();
 function documentListenerSet(type) {
   let listeners = documentListeners.get(type);
@@ -5986,6 +6704,28 @@ function createState() {
   detachTrigger.focus();
   api.openDetachDialogForTest(detachTask, detachConversation, detachTrigger);
   const detachContract = api.detachDialogContractForTest();
+  window.__codexElvesBlockLateEscapeKeydown = true;
+  window.dispatchEvent({
+    type: "keydown",
+    key: "Escape",
+    preventDefault() { this.defaultPrevented = true; },
+    stopImmediatePropagation() { this.immediatePropagationStopped = true; },
+  });
+  const blockedKeydownKeepsOpen = api.detachDialogStateForTest().open;
+  window.__codexElvesBlockLateEscapeKeydown = false;
+  window.dispatchEvent({
+    type: "keyup",
+    key: "Escape",
+    preventDefault() { this.defaultPrevented = true; },
+    stopImmediatePropagation() { this.immediatePropagationStopped = true; },
+  });
+  const escapeNoRequest = detachRequests.length === 0;
+  const escapeClosed = !api.detachDialogStateForTest().open;
+  const escapeFocusRestored = document.activeElement === detachTrigger;
+  const escapeClosesWithoutRequest =
+    blockedKeydownKeepsOpen && escapeNoRequest && escapeClosed && escapeFocusRestored;
+
+  api.openDetachDialogForTest(detachTask, detachConversation, detachTrigger);
   api.closeDetachForTest();
   const cancelledWithoutRequest =
     detachRequests.length === 0 &&
@@ -6041,6 +6781,11 @@ function createState() {
       detachContract.title === "移除关联会话？" &&
       detachContract.message ===
         "仅解除与任务“追加会话任务”的关联，不会删除 Codex 中的原始会话。",
+    escapeClosesWithoutRequest,
+    blockedKeydownKeepsOpen,
+    escapeNoRequest,
+    escapeClosed,
+    escapeFocusRestored,
     cancelledWithoutRequest,
     exactPayloadAndSnapshot:
       JSON.stringify(Object.keys(detachPayload).sort()) ===

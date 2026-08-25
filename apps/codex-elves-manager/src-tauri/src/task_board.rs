@@ -22,6 +22,13 @@ const DEV_TASK_BOARD_WINDOW_STATE_FILE: &str = "task-board-window-state-dev.json
 const TASK_BOARD_WAKE_SHOW: u8 = 1;
 const TASK_BOARD_WAKE_ACK: &[u8] = b"codex-elves-task-board:shown\n";
 const TASK_BOARD_CONTROL_TIMEOUT: Duration = Duration::from_millis(750);
+const TASK_BOARD_HOST_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
+const TASK_BOARD_HOST_OPERATION_POLL_DELAY: Duration = Duration::from_millis(350);
+const TASK_BOARD_HOST_OPERATION_MAX_CONSECUTIVE_POLL_FAILURES: u32 = 3;
+const TASK_BOARD_HOST_OPERATION_RETENTION_MS: u64 = 5 * 60 * 1_000;
+const TASK_BOARD_HOST_OPERATION_MAX_ENTRIES: usize = 32;
+const TASK_BOARD_MIN_HOST_VERSION: u64 = 3;
+const TASK_BOARD_MIN_RUNTIME_VERSION: u64 = 39;
 const DEFAULT_WINDOW_WIDTH: f64 = 1280.0;
 const DEFAULT_WINDOW_HEIGHT: f64 = 860.0;
 const MIN_WINDOW_WIDTH: u32 = 840;
@@ -313,7 +320,7 @@ pub async fn task_board_start_conversation(request: StartConversationRequest) ->
     if request.first_instruction.trim().is_empty() {
         return failed("invalid_input", "请输入首条指令");
     }
-    call_codex_host(
+    call_codex_host_operation(
         "startConversation",
         json!([
             request.project,
@@ -494,27 +501,167 @@ fn project_label(cwd: &str) -> String {
 }
 
 async fn call_codex_host(method: &str, arguments: Value) -> Value {
+    let websocket_url = match codex_host_websocket_url().await {
+        Ok(websocket_url) => websocket_url,
+        Err(failure) => return failure,
+    };
+    let script = task_board_host_call_script(method, &arguments);
+    match codex_elves_core::bridge::evaluate_script_with_await_promise(
+        &websocket_url,
+        &script,
+        true,
+    )
+    .await
+    {
+        Ok(response) => runtime_evaluate_value(&response)
+            .unwrap_or_else(|| failed("host_action_failed", "Codex 宿主动作没有返回有效结果")),
+        Err(_) => failed("host_action_failed", "Codex 宿主动作执行失败"),
+    }
+}
+
+async fn call_codex_host_operation(method: &str, arguments: Value) -> Value {
+    let websocket_url = match codex_host_websocket_url().await {
+        Ok(websocket_url) => websocket_url,
+        Err(failure) => return failure,
+    };
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let start_script = task_board_host_operation_start_script(&operation_id, method, &arguments);
+    let start_result =
+        match evaluate_codex_host_operation_script(&websocket_url, &start_script).await {
+            Ok(result) => result,
+            Err(error) => {
+                return abandon_codex_host_operation(
+                    &websocket_url,
+                    &operation_id,
+                    "start_failed",
+                    format!("启动 Codex 宿主动作时调试通道失败：{error}"),
+                )
+                .await;
+            }
+        };
+    match task_board_host_operation_poll_outcome(start_result, &operation_id) {
+        TaskBoardHostOperationPollOutcome::Pending => {}
+        TaskBoardHostOperationPollOutcome::Complete(result) => return result,
+    }
+
+    let deadline = tokio::time::Instant::now() + TASK_BOARD_HOST_OPERATION_TIMEOUT;
+    let mut consecutive_poll_failures = 0_u32;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return abandon_codex_host_operation(
+                &websocket_url,
+                &operation_id,
+                "timeout",
+                format!(
+                    "等待 Codex 宿主动作超过 {} 秒，最终结果未知",
+                    TASK_BOARD_HOST_OPERATION_TIMEOUT.as_secs()
+                ),
+            )
+            .await;
+        }
+
+        let poll_script = task_board_host_operation_poll_script(&operation_id);
+        match evaluate_codex_host_operation_script(&websocket_url, &poll_script).await {
+            Ok(result) => {
+                consecutive_poll_failures = 0;
+                match task_board_host_operation_poll_outcome(result, &operation_id) {
+                    TaskBoardHostOperationPollOutcome::Pending => {}
+                    TaskBoardHostOperationPollOutcome::Complete(result) => return result,
+                }
+            }
+            Err(error) => {
+                consecutive_poll_failures = consecutive_poll_failures.saturating_add(1);
+                if consecutive_poll_failures
+                    >= TASK_BOARD_HOST_OPERATION_MAX_CONSECUTIVE_POLL_FAILURES
+                {
+                    return abandon_codex_host_operation(
+                        &websocket_url,
+                        &operation_id,
+                        "poll_failed",
+                        format!(
+                            "连续 {consecutive_poll_failures} 次查询 Codex 宿主动作失败，最终结果未知：{error}"
+                        ),
+                    )
+                    .await;
+                }
+            }
+        }
+
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            continue;
+        }
+        tokio::time::sleep(std::cmp::min(
+            TASK_BOARD_HOST_OPERATION_POLL_DELAY,
+            remaining,
+        ))
+        .await;
+    }
+}
+
+async fn evaluate_codex_host_operation_script(
+    websocket_url: &str,
+    script: &str,
+) -> Result<Value, String> {
+    let response =
+        codex_elves_core::bridge::evaluate_script_with_await_promise(websocket_url, script, false)
+            .await
+            .map_err(|error| error.to_string())?;
+    runtime_evaluate_value(&response)
+        .ok_or_else(|| "Codex 调试通道没有返回可解析的宿主结果".to_string())
+}
+
+async fn abandon_codex_host_operation(
+    websocket_url: &str,
+    operation_id: &str,
+    reason: &str,
+    message: String,
+) -> Value {
+    let abandon_script = task_board_host_operation_abandon_script(operation_id);
+    match evaluate_codex_host_operation_script(websocket_url, &abandon_script).await {
+        Ok(result) => {
+            task_board_host_operation_abandon_resolution(result, operation_id, reason, message)
+        }
+        Err(cleanup_error) => task_board_host_outcome_unknown(
+            operation_id,
+            reason,
+            format!("{message}；清理页面 operation 时失败：{cleanup_error}"),
+        ),
+    }
+}
+
+async fn codex_host_websocket_url() -> Result<String, Value> {
     let latest = match StatusStore::default().load_latest() {
         Ok(Some(latest)) if latest.status == "running" => latest,
-        _ => return failed("codex_unavailable", "Codex 当前未通过 CodexElves 运行"),
+        _ => {
+            return Err(failed(
+                "codex_unavailable",
+                "Codex 当前未通过 CodexElves 运行",
+            ));
+        }
     };
     let Some(debug_port) = latest.debug_port else {
-        return failed("codex_unavailable", "Codex 调试端口不可用");
+        return Err(failed("codex_unavailable", "Codex 调试端口不可用"));
     };
     let targets = match codex_elves_core::cdp::list_targets(debug_port).await {
         Ok(targets) => targets,
-        Err(_) => return failed("codex_unavailable", "无法连接 Codex 页面"),
+        Err(_) => return Err(failed("codex_unavailable", "无法连接 Codex 页面")),
     };
     let target = match codex_elves_core::cdp::pick_injectable_codex_page_target(&targets) {
         Ok(target) => target,
-        Err(_) => return failed("codex_unavailable", "未找到可用的 Codex 主页面"),
+        Err(_) => return Err(failed("codex_unavailable", "未找到可用的 Codex 主页面")),
     };
     let Some(websocket_url) = target.web_socket_debugger_url.as_deref() else {
-        return failed("codex_unavailable", "Codex 页面调试通道不可用");
+        return Err(failed("codex_unavailable", "Codex 页面调试通道不可用"));
     };
+    Ok(websocket_url.to_string())
+}
+
+fn task_board_host_call_script(method: &str, arguments: &Value) -> String {
     let method_json = serde_json::to_string(method).unwrap_or_else(|_| "\"\"".to_string());
-    let arguments_json = serde_json::to_string(&arguments).unwrap_or_else(|_| "[]".to_string());
-    let script = format!(
+    let arguments_json = serde_json::to_string(arguments).unwrap_or_else(|_| "[]".to_string());
+    format!(
         r#"
 (() => {{
   const method = {method_json};
@@ -532,14 +679,386 @@ async fn call_codex_host(method: &str, arguments: Value) -> Value {
     }}));
 }})()
 "#
+    )
+}
+
+fn task_board_host_operation_start_script(
+    operation_id: &str,
+    method: &str,
+    arguments: &Value,
+) -> String {
+    let operation_id_json =
+        serde_json::to_string(operation_id).unwrap_or_else(|_| "\"\"".to_string());
+    let method_json = serde_json::to_string(method).unwrap_or_else(|_| "\"\"".to_string());
+    let arguments_json = serde_json::to_string(arguments).unwrap_or_else(|_| "[]".to_string());
+    format!(
+        r#"
+(() => {{
+  const operationId = {operation_id_json};
+  const method = {method_json};
+  const args = {arguments_json};
+  const retentionMs = {retention_ms};
+  const maxEntries = {max_entries};
+  const operations = window.__codexElvesTaskBoardStandaloneOperations ||
+    (window.__codexElvesTaskBoardStandaloneOperations = Object.create(null));
+  const releaseOperationLease = (candidateOperationId, runtimeId = 0) => {{
+    const lease = window.__codexElvesTaskBoardNativeOperationLease;
+    if (
+      String(lease?.operationId || "") === `standalone:${{candidateOperationId}}` &&
+      (!runtimeId || Number(lease?.runtimeId) === Number(runtimeId))
+    ) {{
+      delete window.__codexElvesTaskBoardNativeOperationLease;
+    }}
+  }};
+  const removeOperation = (candidateOperationId, operation, abandon = false) => {{
+    if (abandon && operation) {{
+      operation.abandoned = true;
+      operation.settledAtMs ||= Date.now();
+    }}
+    if (operation?.cleanupTimer) clearTimeout(operation.cleanupTimer);
+    releaseOperationLease(candidateOperationId, operation?.runtimeId);
+    delete operations[candidateOperationId];
+  }};
+  const cleanupStaleOperations = () => {{
+    const now = Date.now();
+    Object.entries(operations).forEach(([candidateOperationId, operation]) => {{
+      const createdAtMs = Number(operation?.createdAtMs);
+      const settledAtMs = Number(operation?.settledAtMs);
+      const terminalAtMs = operation?.settled || operation?.abandoned
+        ? settledAtMs || createdAtMs
+        : createdAtMs;
+      const invalid = !Number.isFinite(createdAtMs) || createdAtMs <= 0;
+      const stale = Number.isFinite(terminalAtMs) &&
+        terminalAtMs > 0 &&
+        now - terminalAtMs >= retentionMs;
+      if (invalid || stale) {{
+        removeOperation(candidateOperationId, operation, !operation?.settled);
+      }}
+    }});
+  }};
+  cleanupStaleOperations();
+  if (operations[operationId]) {{
+    return JSON.stringify({{ status: "pending", operationId }});
+  }}
+  if (Object.keys(operations).length >= maxEntries) {{
+    return JSON.stringify({{
+      status: "failed",
+      code: "host_operation_capacity",
+      message: "Codex 宿主操作队列已满，请稍后重试",
+    }});
+  }}
+  const host = window.__codexElvesTaskBoardHost;
+  if (!host || typeof host[method] !== "function") {{
+    return JSON.stringify({{
+      status: "failed",
+      code: "host_unavailable",
+      message: "Codex 任务看板宿主接口尚未就绪",
+    }});
+  }}
+  const hostVersion = Number(host.version);
+  const runtimeVersionText = String(
+    window.__codexElvesTaskBoardRuntimeVersion || "",
+  ).trim();
+  const runtimeVersion = Number.parseInt(runtimeVersionText, 10);
+  const capabilities = host.capabilities;
+  const supportsNativeCreateLease =
+    capabilities?.nativeCreateLease === true;
+  const nativeCreateRuntime = Number(capabilities?.nativeCreateRuntime);
+  const supportsNativeCreateRuntime =
+    Number.isSafeInteger(nativeCreateRuntime) &&
+    nativeCreateRuntime >= {min_runtime_version} &&
+    nativeCreateRuntime === runtimeVersion;
+  if (
+    !Number.isSafeInteger(hostVersion) ||
+    hostVersion < {min_host_version} ||
+    !Number.isSafeInteger(runtimeVersion) ||
+    runtimeVersion < {min_runtime_version} ||
+    !supportsNativeCreateLease ||
+    !supportsNativeCreateRuntime
+  ) {{
+    return JSON.stringify({{
+      status: "failed",
+      code: "host_version_unsupported",
+      message: "Codex 任务看板宿主版本过旧，请重启 CodexElves 完成升级",
+      hostVersion: Number.isFinite(hostVersion) ? hostVersion : null,
+      runtimeVersion: runtimeVersionText,
+    }});
+  }}
+  const nativeRuntimeId = Number(
+    window.__codexElvesTaskBoardNativeRuntimeId,
+  );
+  const nativeOperationLeaseId = `standalone:${{operationId}}`;
+  const existingNativeLease =
+    window.__codexElvesTaskBoardNativeOperationLease;
+  const existingNativeLeaseActive =
+    String(existingNativeLease?.operationId || "") &&
+    Number.isSafeInteger(Number(existingNativeLease?.runtimeId)) &&
+    Number(existingNativeLease?.runtimeId) > 0 &&
+    Number.isFinite(Number(existingNativeLease?.createdAtMs)) &&
+    Date.now() - Number(existingNativeLease?.createdAtMs) <= 120_000;
+  if (
+    existingNativeLeaseActive &&
+    existingNativeLease.operationId !== nativeOperationLeaseId
+  ) {{
+    return JSON.stringify({{
+      status: "failed",
+      code: "native_create_busy",
+      message: "Codex 正在创建另一个会话，请稍后重试",
+    }});
+  }}
+  if (!Number.isSafeInteger(nativeRuntimeId) || nativeRuntimeId <= 0) {{
+    return JSON.stringify({{
+      status: "failed",
+      code: "runtime_replaced",
+      message: "Codex 页面已更新，请重试",
+    }});
+  }}
+  const createdAtMs = Date.now();
+  window.__codexElvesTaskBoardNativeOperationLease = {{
+    operationId: nativeOperationLeaseId,
+    runtimeId: nativeRuntimeId,
+    createdAtMs,
+  }};
+
+  const operation = {{
+    method,
+    runtimeId: nativeRuntimeId,
+    createdAtMs,
+    settledAtMs: 0,
+    abandoned: false,
+    settled: false,
+    result: null,
+    promise: null,
+    cleanupTimer: null,
+  }};
+  operations[operationId] = operation;
+  operation.cleanupTimer = setTimeout(() => {{
+    if (operations[operationId] !== operation) return;
+    removeOperation(operationId, operation, !operation.settled);
+  }}, retentionMs);
+  try {{
+    operation.promise = Promise.resolve(host[method](...args)).then(
+      (result) => {{
+        if (operation.abandoned) {{
+          releaseOperationLease(operationId, operation.runtimeId);
+          return;
+        }}
+        operation.result = result ?? {{
+          status: "failed",
+          code: "host_action_failed",
+          message: "Codex 宿主动作没有返回有效结果",
+        }};
+        operation.settled = true;
+        operation.settledAtMs = Date.now();
+        releaseOperationLease(operationId, operation.runtimeId);
+      }},
+      (error) => {{
+        if (operation.abandoned) {{
+          releaseOperationLease(operationId, operation.runtimeId);
+          return;
+        }}
+        operation.result = {{
+          status: "failed",
+          code: "host_action_failed",
+          message: String(error?.message || error || "宿主动作失败"),
+        }};
+        operation.settled = true;
+        operation.settledAtMs = Date.now();
+        releaseOperationLease(operationId, operation.runtimeId);
+      }},
     );
-    match codex_elves_core::bridge::evaluate_script_with_await_promise(websocket_url, &script, true)
-        .await
-    {
-        Ok(response) => runtime_evaluate_value(&response)
-            .unwrap_or_else(|| failed("host_action_failed", "Codex 宿主动作没有返回有效结果")),
-        Err(_) => failed("host_action_failed", "Codex 宿主动作执行失败"),
+  }} catch (error) {{
+    removeOperation(operationId, operation, true);
+    return JSON.stringify({{
+      status: "failed",
+      code: "host_action_failed",
+      message: String(error?.message || error || "宿主动作失败"),
+    }});
+  }}
+  return JSON.stringify({{ status: "pending", operationId }});
+}})()
+"#,
+        retention_ms = TASK_BOARD_HOST_OPERATION_RETENTION_MS,
+        max_entries = TASK_BOARD_HOST_OPERATION_MAX_ENTRIES,
+        min_host_version = TASK_BOARD_MIN_HOST_VERSION,
+        min_runtime_version = TASK_BOARD_MIN_RUNTIME_VERSION,
+    )
+}
+
+fn task_board_host_operation_poll_script(operation_id: &str) -> String {
+    let operation_id_json =
+        serde_json::to_string(operation_id).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        r#"
+(() => {{
+  const operationId = {operation_id_json};
+  const operations = window.__codexElvesTaskBoardStandaloneOperations;
+  const operation = operations?.[operationId];
+  const releaseOperationLease = () => {{
+    const lease = window.__codexElvesTaskBoardNativeOperationLease;
+    if (
+      String(lease?.operationId || "") === `standalone:${{operationId}}` &&
+      (!operation?.runtimeId ||
+        Number(lease?.runtimeId) === Number(operation.runtimeId))
+    ) {{
+      delete window.__codexElvesTaskBoardNativeOperationLease;
+    }}
+  }};
+  if (!operation) {{
+    releaseOperationLease();
+    return JSON.stringify({{
+      status: "failed",
+      code: "runtime_replaced",
+      message: "Codex 页面 operation 已丢失，最终结果未知",
+      outcomeUnknown: true,
+      operationId,
+    }});
+  }}
+  if (operation.abandoned) {{
+    if (operation.cleanupTimer) clearTimeout(operation.cleanupTimer);
+    delete operations[operationId];
+    releaseOperationLease();
+    return JSON.stringify({{
+      status: "failed",
+      code: "host_outcome_unknown",
+      message: "Codex 宿主动作已放弃，最终结果未知",
+      outcomeUnknown: true,
+      operationId,
+    }});
+  }}
+  if (!operation.settled) {{
+    return JSON.stringify({{
+      status: "pending",
+      operationId,
+      createdAtMs: operation.createdAtMs,
+    }});
+  }}
+  const result = operation.result ?? {{
+    status: "failed",
+    code: "host_action_failed",
+    message: "Codex 宿主动作没有返回有效结果",
+  }};
+  if (operation.cleanupTimer) clearTimeout(operation.cleanupTimer);
+  delete operations[operationId];
+  releaseOperationLease();
+  return JSON.stringify(result);
+}})()
+"#
+    )
+}
+
+fn task_board_host_operation_abandon_script(operation_id: &str) -> String {
+    let operation_id_json =
+        serde_json::to_string(operation_id).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        r#"
+(() => {{
+  const operationId = {operation_id_json};
+  const operations = window.__codexElvesTaskBoardStandaloneOperations;
+  const operation = operations?.[operationId];
+  const releaseOperationLease = () => {{
+    const lease = window.__codexElvesTaskBoardNativeOperationLease;
+    if (
+      String(lease?.operationId || "") === `standalone:${{operationId}}` &&
+      (!operation?.runtimeId ||
+        Number(lease?.runtimeId) === Number(operation.runtimeId))
+    ) {{
+      delete window.__codexElvesTaskBoardNativeOperationLease;
+    }}
+  }};
+  if (!operation) {{
+    releaseOperationLease();
+    return JSON.stringify({{
+      status: "failed",
+      code: "runtime_replaced",
+      message: "Codex 页面 operation 已丢失，最终结果未知",
+      outcomeUnknown: true,
+      operationId,
+    }});
+  }}
+  if (operation.settled) {{
+    const result = operation.result ?? {{
+      status: "failed",
+      code: "host_action_failed",
+      message: "Codex 宿主动作没有返回有效结果",
+    }};
+    if (operation.cleanupTimer) clearTimeout(operation.cleanupTimer);
+    delete operations[operationId];
+    releaseOperationLease();
+    return JSON.stringify({{
+      status: "settled",
+      operationId,
+      result,
+    }});
+  }}
+  operation.abandoned = true;
+  operation.settledAtMs = Date.now();
+  if (operation.cleanupTimer) clearTimeout(operation.cleanupTimer);
+  delete operations[operationId];
+  releaseOperationLease();
+  return JSON.stringify({{
+    status: "abandoned",
+    operationId,
+    createdAtMs: operation.createdAtMs,
+    settledAtMs: operation.settledAtMs,
+    abandoned: true,
+  }});
+}})()
+"#
+    )
+}
+
+#[derive(Debug, PartialEq)]
+enum TaskBoardHostOperationPollOutcome {
+    Pending,
+    Complete(Value),
+}
+
+fn task_board_host_operation_poll_outcome(
+    value: Value,
+    operation_id: &str,
+) -> TaskBoardHostOperationPollOutcome {
+    if value.get("status").and_then(Value::as_str) != Some("pending") {
+        return TaskBoardHostOperationPollOutcome::Complete(value);
     }
+    if value.get("operationId").and_then(Value::as_str) == Some(operation_id) {
+        return TaskBoardHostOperationPollOutcome::Pending;
+    }
+    TaskBoardHostOperationPollOutcome::Complete(failed(
+        "host_operation_protocol_error",
+        "Codex 宿主 operation 标识不匹配",
+    ))
+}
+
+fn task_board_host_operation_abandon_resolution(
+    value: Value,
+    operation_id: &str,
+    reason: &str,
+    message: String,
+) -> Value {
+    if value.get("status").and_then(Value::as_str) == Some("settled") {
+        return value.get("result").cloned().unwrap_or_else(|| {
+            failed(
+                "host_operation_protocol_error",
+                "Codex 宿主 operation 已完成但缺少结果",
+            )
+        });
+    }
+    if value.get("status").and_then(Value::as_str) == Some("failed") {
+        return value;
+    }
+    task_board_host_outcome_unknown(operation_id, reason, message)
+}
+
+fn task_board_host_outcome_unknown(operation_id: &str, reason: &str, message: String) -> Value {
+    json!({
+        "status": "failed",
+        "code": "host_outcome_unknown",
+        "message": message,
+        "outcomeUnknown": true,
+        "reason": reason,
+        "operationId": operation_id,
+    })
 }
 
 fn runtime_evaluate_value(response: &Value) -> Option<Value> {
@@ -908,6 +1427,164 @@ mod tests {
             runtime_evaluate_value(&response),
             Some(json!({"status": "ok", "sessionId": "session-1"}))
         );
+    }
+
+    #[test]
+    fn standalone_start_operation_requires_v3_capabilities_without_dom_overrides() {
+        let script = task_board_host_operation_start_script(
+            "operation-1",
+            "startConversation",
+            &json!([
+                {"cwd": "E:\\code\\junes\\github\\CodexPlusPlus", "label": "CodexPlusPlus"},
+                "验证首条指令",
+                "gpt-5.6-sol",
+                "max"
+            ]),
+        );
+
+        assert!(script.contains("window.__codexElvesTaskBoardStandaloneOperations"));
+        assert!(script.contains("__codexElvesTaskBoardNativeOperationLease"));
+        assert!(script.contains("native_create_busy"));
+        assert!(script.contains(r#"code: "host_version_unsupported""#));
+        assert!(script.contains("hostVersion < 3"));
+        assert!(script.contains("runtimeVersion < 39"));
+        assert!(script.contains("supportsNativeCreateLease"));
+        assert!(script.contains("supportsNativeCreateRuntime"));
+        assert!(script.contains("capabilities?.nativeCreateLease === true"));
+        assert!(script.contains("Number(capabilities?.nativeCreateRuntime)"));
+        assert!(script.contains("nativeCreateRuntime === runtimeVersion"));
+        assert!(script.contains("createdAtMs"));
+        assert!(script.contains("settledAtMs: 0"));
+        assert!(script.contains("abandoned: false"));
+        assert!(script.contains("cleanupStaleOperations();"));
+        assert!(script.contains("operation.cleanupTimer = setTimeout"));
+        assert!(script.contains(r#"return JSON.stringify({ status: "pending", operationId });"#));
+        assert!(!script.contains("Document.prototype"));
+        assert!(!script.contains("querySelector"));
+        assert!(!script.contains("dispatchEvent"));
+        assert!(!script.contains("sendButton"));
+    }
+
+    #[test]
+    fn standalone_host_operation_poll_is_immediate_and_preserves_detailed_result() {
+        let script = task_board_host_operation_poll_script("operation-2");
+
+        assert!(script.contains("if (!operation.settled)"));
+        assert!(script.contains("operation.result ??"));
+        assert!(script.contains("delete operations[operationId]"));
+        assert!(script.contains(r#"code: "runtime_replaced""#));
+        assert!(!script.contains("Promise.race"));
+        assert!(!script.contains("operation.promise.then"));
+        assert_eq!(
+            task_board_host_operation_poll_outcome(
+                json!({"status": "pending", "operationId": "operation-2"}),
+                "operation-2"
+            ),
+            TaskBoardHostOperationPollOutcome::Pending
+        );
+        assert_eq!(
+            task_board_host_operation_poll_outcome(
+                json!({
+                    "status": "failed",
+                    "code": "native_model_not_found",
+                    "message": "模型不存在"
+                }),
+                "operation-2"
+            ),
+            TaskBoardHostOperationPollOutcome::Complete(json!({
+                "status": "failed",
+                "code": "native_model_not_found",
+                "message": "模型不存在"
+            }))
+        );
+        let mismatch = task_board_host_operation_poll_outcome(
+            json!({"status": "pending", "operationId": "another-operation"}),
+            "operation-2",
+        );
+        assert!(matches!(
+            mismatch,
+            TaskBoardHostOperationPollOutcome::Complete(value)
+                if value.get("code").and_then(Value::as_str)
+                    == Some("host_operation_protocol_error")
+        ));
+    }
+
+    #[test]
+    fn standalone_host_operation_abandon_cleans_state_and_preserves_settled_result() {
+        let script = task_board_host_operation_abandon_script("operation-3");
+
+        assert!(script.contains("operation.abandoned = true"));
+        assert!(script.contains("operation.settledAtMs = Date.now()"));
+        assert!(script.contains("clearTimeout(operation.cleanupTimer)"));
+        assert!(script.contains("delete operations[operationId]"));
+        assert!(script.contains("releaseOperationLease();"));
+        assert_eq!(
+            task_board_host_operation_abandon_resolution(
+                json!({
+                    "status": "settled",
+                    "operationId": "operation-3",
+                    "result": {
+                        "status": "failed",
+                        "code": "native_create_timeout",
+                        "message": "等待新会话就绪超时"
+                    }
+                }),
+                "operation-3",
+                "timeout",
+                "外层超时".to_string(),
+            ),
+            json!({
+                "status": "failed",
+                "code": "native_create_timeout",
+                "message": "等待新会话就绪超时"
+            })
+        );
+        assert_eq!(
+            task_board_host_operation_abandon_resolution(
+                json!({
+                    "status": "failed",
+                    "code": "runtime_replaced",
+                    "message": "operation 已丢失",
+                    "outcomeUnknown": true
+                }),
+                "operation-3",
+                "poll_failed",
+                "轮询失败".to_string(),
+            ),
+            json!({
+                "status": "failed",
+                "code": "runtime_replaced",
+                "message": "operation 已丢失",
+                "outcomeUnknown": true
+            })
+        );
+        let abandoned = task_board_host_operation_abandon_resolution(
+            json!({"status": "abandoned", "operationId": "operation-3"}),
+            "operation-3",
+            "timeout",
+            "结果未知".to_string(),
+        );
+        assert_eq!(
+            abandoned.get("code").and_then(Value::as_str),
+            Some("host_outcome_unknown")
+        );
+        assert_eq!(
+            abandoned.get("outcomeUnknown").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            abandoned.get("reason").and_then(Value::as_str),
+            Some("timeout")
+        );
+    }
+
+    #[test]
+    fn standalone_host_operation_timeout_covers_hidden_page_throttling() {
+        assert_eq!(TASK_BOARD_HOST_OPERATION_TIMEOUT, Duration::from_secs(120));
+        assert!(TASK_BOARD_HOST_OPERATION_TIMEOUT > Duration::from_millis(66_700));
+        assert!(TASK_BOARD_HOST_OPERATION_POLL_DELAY >= Duration::from_millis(250));
+        assert!(TASK_BOARD_HOST_OPERATION_POLL_DELAY <= Duration::from_millis(500));
+        assert_eq!(TASK_BOARD_HOST_OPERATION_MAX_CONSECUTIVE_POLL_FAILURES, 3);
     }
 
     #[test]

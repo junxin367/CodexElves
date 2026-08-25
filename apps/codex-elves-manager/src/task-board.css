@@ -46,15 +46,24 @@ body:has(.task-board-app) {
   font: 14px/1.45 var(--task-board-root-font-family);
 }
 
+.task-board-appearance-overlay {
+  position: fixed;
+  z-index: 2147483646;
+  inset: 0;
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  user-select: none;
+}
+
 .task-board-app *,
 .task-board-app *::before,
 .task-board-app *::after {
   box-sizing: border-box;
 }
 
-.task-board-app button,
-.task-board-app input,
-.task-board-app textarea {
+.task-board-app :where(button, input, textarea) {
   font: inherit;
 }
 
@@ -716,6 +725,120 @@ body:has(.task-board-app) {
   padding: 16px;
 }
 
+.task-board-confirm-backdrop {
+  --task-board-confirm-surface: var(--task-board-modal-background);
+  --task-board-confirm-foreground: var(--task-board-modal-foreground);
+  --task-board-confirm-muted: var(--task-board-text-secondary);
+  --task-board-confirm-border: var(--task-board-action-border);
+  --task-board-confirm-action-background: var(--task-board-action-background);
+  --task-board-confirm-action-background-hover:
+    var(--task-board-action-background-hover);
+  --task-board-confirm-action-background-active:
+    var(--task-board-action-background-active);
+  --task-board-confirm-danger-background:
+    color-mix(in srgb, #ef4444 14%, transparent);
+  --task-board-confirm-danger-background-hover:
+    color-mix(in srgb, #ef4444 19%, transparent);
+  --task-board-confirm-danger-background-active:
+    color-mix(in srgb, #ef4444 24%, transparent);
+  --task-board-confirm-danger-border:
+    color-mix(in srgb, #ef4444 22%, transparent);
+  --task-board-confirm-danger-foreground: #ef6b6b;
+  position: fixed;
+  z-index: 2147483200;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(0 0 0 / 58%);
+  backdrop-filter: blur(4px);
+}
+
+.task-board-confirm-dialog {
+  width: min(420px, calc(100vw - 48px));
+  border: 1px solid var(--task-board-confirm-border);
+  border-radius: 12px;
+  background: var(--task-board-confirm-surface);
+  color: var(--task-board-confirm-foreground);
+  box-shadow: 0 24px 80px rgb(0 0 0 / 42%);
+  font: 14px/1.45 system-ui, sans-serif;
+  padding: 18px;
+}
+
+.task-board-confirm-dialog h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.task-board-confirm-dialog > p {
+  margin: 8px 0 0;
+  color: var(--task-board-confirm-muted);
+}
+
+.task-board-confirm-feedback {
+  color: #ff8582 !important;
+  font-size: 12px;
+}
+
+.task-board-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.task-board-confirm-actions button {
+  min-height: 32px;
+  border: 1px solid var(--task-board-confirm-border);
+  border-radius: 7px;
+  background: var(--task-board-confirm-action-background);
+  color: var(--task-board-confirm-foreground);
+  cursor: pointer;
+  font: 13px/1 system-ui, sans-serif;
+  padding: 6px 12px;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease;
+}
+
+.task-board-confirm-actions button:hover {
+  background: var(--task-board-confirm-action-background-hover);
+}
+
+.task-board-confirm-actions button:active {
+  background: var(--task-board-confirm-action-background-active);
+}
+
+.task-board-confirm-actions button:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
+
+.task-board-confirm-actions button:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.task-board-confirm-actions button.danger {
+  border-color: var(--task-board-confirm-danger-border);
+  background: var(--task-board-confirm-danger-background);
+  color: var(--task-board-confirm-danger-foreground);
+}
+
+.task-board-confirm-actions button.danger:hover {
+  background: var(--task-board-confirm-danger-background-hover);
+}
+
+.task-board-confirm-actions button.danger:active {
+  background: var(--task-board-confirm-danger-background-active);
+}
+
+.task-board-confirm-actions button.danger:focus-visible {
+  outline-color: var(--task-board-confirm-danger-foreground);
+}
+
 .task-board-modal {
   display: flex;
   width: 650px;
@@ -810,8 +933,10 @@ body:has(.task-board-app) {
   outline: none;
   background: var(--task-board-field-background);
   color: inherit;
-  font: inherit;
   font-size: 12px;
+  font-family: var(--task-board-modal-font-family);
+  font-weight: 445;
+  line-height: 18px;
   padding: 0 10px;
 }
 
@@ -859,7 +984,7 @@ body:has(.task-board-app) {
   background: transparent;
   color: color-mix(in srgb, currentColor 58%, transparent);
   cursor: pointer;
-  font: 11px/1 system-ui, sans-serif;
+  font: 11px/11px system-ui, sans-serif;
   padding: 0 8px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -948,8 +1073,14 @@ body:has(.task-board-app) {
 .task-board-field input:focus,
 .task-board-create-select:focus,
 .task-board-field textarea:focus {
-  border-color: #63aee0;
-  box-shadow: 0 0 0 2px rgb(99 174 224 / 20%);
+  border-color: var(--task-board-accent);
+  box-shadow: 0 0 0 1px rgb(99 174 224 / 20%);
+}
+
+.task-board-app .task-board-field input:focus-visible,
+.task-board-app .task-board-create-select:focus-visible,
+.task-board-app .task-board-field textarea:focus-visible {
+  outline: none;
 }
 
 .task-board-mode-tabs {
@@ -1113,13 +1244,14 @@ body:has(.task-board-app) {
 }
 
 .task-board-new-session {
-  display: grid;
+  display: flex;
   min-height: 0;
-  grid-template-rows: auto minmax(0, 1fr);
+  flex-direction: column;
   gap: 7px;
 }
 
 .task-board-create-availability {
+  flex: 0 0 auto;
   margin: 0;
   color: color-mix(in srgb, currentColor 52%, transparent);
   font-size: 10px;
@@ -1131,6 +1263,7 @@ body:has(.task-board-app) {
 }
 
 .task-board-instruction {
+  flex: 1 1 auto;
   min-height: 0;
   grid-template-rows: auto minmax(0, 1fr);
 }
@@ -1266,12 +1399,11 @@ body:has(.task-board-app) {
   align-items: center;
   justify-content: center;
   gap: 7px;
-  border: 1px solid var(--task-board-modal-border);
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
   border-radius: 8px;
   background: transparent;
   color: var(--task-board-text-secondary);
-  font-size: 12px;
-  font-weight: 600;
+  font: 600 12px/12px system-ui, sans-serif;
   padding: 0 13px;
 }
 

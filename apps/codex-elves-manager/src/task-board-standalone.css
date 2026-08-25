@@ -1,0 +1,41 @@
+/*
+ * Dedicated entry for the standalone task-board window.
+ *
+ * The manager stylesheet intentionally is not loaded for `?taskBoard=1`.
+ * Its global Tailwind preflight and control transitions otherwise leak into
+ * the embedded-board mirror and alter its measured typography and motion.
+ */
+
+html,
+body,
+#app {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--task-board-background);
+}
+
+button,
+input,
+textarea {
+  margin: 0;
+}
+
+/*
+ * Codex does not apply the manager-wide transition preset to board controls.
+ * Keep the board's explicit card and toast transitions in task-board.css;
+ * only neutralize the inherited control transition surface.
+ */
+.task-board-app button,
+.task-board-app input,
+.task-board-app textarea,
+.task-board-dropdown-menu,
+.task-board-dropdown-menu button {
+  transition: none;
+}

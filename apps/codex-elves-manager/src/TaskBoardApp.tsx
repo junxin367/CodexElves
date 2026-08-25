@@ -100,6 +100,8 @@ type Catalog = {
 
 type EditorState = {
   targetTask: Task | null;
+  taskId: string;
+  semanticKey: string;
   mode: "existing" | "new";
   title: string;
   projectCwd: string;
@@ -116,7 +118,35 @@ type EditorState = {
   modelSelectionTouched: boolean;
 };
 
+type NativeCreateRecoveryKind = "create-task" | "attach-conversation";
+
+type NativeCreateRecoveryRecord = {
+  kind: NativeCreateRecoveryKind;
+  taskId: string;
+  title: string;
+  project: TaskProject;
+  sessionId: string;
+  initialStatus: TaskStatus;
+  targetTaskId?: string;
+  createdAtMs: number;
+  semanticKey: string;
+};
+
+type TaskBoardAppearanceOverlay = {
+  enabled: boolean;
+  kind: "image" | "color" | "gradient";
+  imageUrl: string;
+  opacity: number;
+  fit: "cover" | "contain";
+  backgroundColor: string;
+  gradientFrom: string;
+  gradientTo: string;
+  gradientAngle: number;
+};
+
 type TaskBoardAppearance = {
+  version?: number;
+  signature?: string;
   background: string;
   foreground: string;
   panelBackground: string;
@@ -139,6 +169,14 @@ type TaskBoardAppearance = {
   menuBackground: string;
   rootFontFamily: string;
   modalFontFamily: string;
+  overlay?: TaskBoardAppearanceOverlay;
+};
+
+type DetachConfirmationState = {
+  task: Task;
+  conversation: TaskConversation;
+  busy: boolean;
+  feedback: string;
 };
 
 type ConversationRuntimeStatus = {
@@ -175,6 +213,11 @@ const emptyCatalog: Catalog = {
 };
 
 const newSessionRetryDelaysMs = [250, 750, 1500, 2500, 5000];
+const appearanceRefreshIntervalMs = 20_000;
+const nativeCreateRecoveryKey =
+  "codexElvesTaskBoardStandaloneNativeCreateRecoveryV1";
+const nativeCreateRecoveryTtlMs = 24 * 60 * 60 * 1000;
+const nativeCreateRecoveryClockSkewMs = 5 * 60 * 1000;
 
 const defaultEffortOptions: DropdownOption[] = [
   { value: "low", label: "轻度" },
@@ -192,6 +235,253 @@ const fallbackModelOptions: CreateModelOption[] = [
     efforts: defaultEffortOptions,
   },
 ];
+
+function normalizeProjectCwd(value: string) {
+  return value
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/+$/, "")
+    .toLocaleLowerCase("en-US");
+}
+
+function taskBoardCreateTaskId() {
+  return crypto.randomUUID();
+}
+
+function taskBoardCreateTaskIdIsValid(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value.trim(),
+  );
+}
+
+function taskBoardRecoverySemanticKey(
+  kind: NativeCreateRecoveryKind,
+  title: string,
+  project: TaskProject,
+  initialStatus: TaskStatus,
+  targetTaskId = "",
+) {
+  return JSON.stringify([
+    kind,
+    targetTaskId.trim().toLocaleLowerCase("en-US"),
+    title.trim(),
+    normalizeProjectCwd(project.cwd),
+    initialStatus,
+  ]);
+}
+
+function taskBoardNativeCreateRecoveryRecord(
+  value: unknown,
+): NativeCreateRecoveryRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const allowedKeys = new Set([
+    "kind",
+    "taskId",
+    "title",
+    "project",
+    "sessionId",
+    "initialStatus",
+    "targetTaskId",
+    "createdAtMs",
+    "semanticKey",
+  ]);
+  if (Object.keys(candidate).some((key) => !allowedKeys.has(key))) return null;
+  if (
+    !candidate.project ||
+    typeof candidate.project !== "object" ||
+    Array.isArray(candidate.project)
+  ) {
+    return null;
+  }
+  const projectValue = candidate.project as Record<string, unknown>;
+  if (
+    Object.keys(projectValue).some(
+      (key) => key !== "cwd" && key !== "label",
+    )
+  ) {
+    return null;
+  }
+  const kind =
+    candidate.kind === "create-task" ||
+    candidate.kind === "attach-conversation"
+      ? candidate.kind
+      : null;
+  const taskId = String(candidate.taskId || "").trim();
+  const title = String(candidate.title || "").trim();
+  const project = {
+    cwd: String(projectValue.cwd || "").trim(),
+    label: String(projectValue.label || "").trim(),
+  };
+  const sessionId = String(candidate.sessionId || "").trim();
+  const initialStatus = String(candidate.initialStatus || "") as TaskStatus;
+  const targetTaskId = String(candidate.targetTaskId || "").trim();
+  const createdAtMs = Number(candidate.createdAtMs || 0);
+  const semanticKey = String(candidate.semanticKey || "");
+  const now = Date.now();
+  if (
+    !kind ||
+    !taskBoardCreateTaskIdIsValid(taskId) ||
+    !title ||
+    !project.cwd ||
+    !project.label ||
+    !sessionId ||
+    /(^|:)(client-)?new-thread:/i.test(sessionId) ||
+    !statuses.some((status) => status.id === initialStatus) ||
+    !Number.isFinite(createdAtMs) ||
+    createdAtMs <= 0 ||
+    now - createdAtMs > nativeCreateRecoveryTtlMs ||
+    createdAtMs - now > nativeCreateRecoveryClockSkewMs
+  ) {
+    return null;
+  }
+  if (
+    (kind === "attach-conversation" &&
+      (!taskBoardCreateTaskIdIsValid(targetTaskId) ||
+        targetTaskId !== taskId)) ||
+    (kind === "create-task" && targetTaskId)
+  ) {
+    return null;
+  }
+  const expectedSemanticKey = taskBoardRecoverySemanticKey(
+    kind,
+    title,
+    project,
+    initialStatus,
+    targetTaskId,
+  );
+  if (semanticKey !== expectedSemanticKey) return null;
+  return {
+    kind,
+    taskId,
+    title,
+    project,
+    sessionId,
+    initialStatus,
+    ...(targetTaskId ? { targetTaskId } : {}),
+    createdAtMs,
+    semanticKey,
+  };
+}
+
+function readNativeCreateRecovery() {
+  try {
+    const parsed = JSON.parse(
+      sessionStorage.getItem(nativeCreateRecoveryKey) || "null",
+    );
+    const record = taskBoardNativeCreateRecoveryRecord(parsed);
+    if (!record) sessionStorage.removeItem(nativeCreateRecoveryKey);
+    return record;
+  } catch {
+    try {
+      sessionStorage.removeItem(nativeCreateRecoveryKey);
+    } catch {
+      // Ignore unavailable session storage.
+    }
+    return null;
+  }
+}
+
+function saveNativeCreateRecovery(record: NativeCreateRecoveryRecord) {
+  const validated = taskBoardNativeCreateRecoveryRecord(record);
+  if (!validated) return false;
+  const payload =
+    validated.kind === "attach-conversation"
+      ? {
+          kind: validated.kind,
+          taskId: validated.taskId,
+          title: validated.title,
+          project: validated.project,
+          sessionId: validated.sessionId,
+          initialStatus: validated.initialStatus,
+          targetTaskId: validated.targetTaskId,
+          createdAtMs: validated.createdAtMs,
+          semanticKey: validated.semanticKey,
+        }
+      : {
+          kind: validated.kind,
+          taskId: validated.taskId,
+          title: validated.title,
+          project: validated.project,
+          sessionId: validated.sessionId,
+          initialStatus: validated.initialStatus,
+          createdAtMs: validated.createdAtMs,
+          semanticKey: validated.semanticKey,
+        };
+  try {
+    sessionStorage.setItem(nativeCreateRecoveryKey, JSON.stringify(payload));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function clearNativeCreateRecovery() {
+  try {
+    sessionStorage.removeItem(nativeCreateRecoveryKey);
+  } catch {
+    // Ignore unavailable session storage.
+  }
+}
+
+function taskBoardRecoveryAlreadyApplied(
+  record: NativeCreateRecoveryRecord,
+  snapshot: BoardSnapshot,
+) {
+  const taskId =
+    record.kind === "attach-conversation"
+      ? record.targetTaskId || record.taskId
+      : record.taskId;
+  const task = snapshot.tasks.find((candidate) => candidate.id === taskId);
+  if (!task) return false;
+  if (
+    normalizeProjectCwd(task.project.cwd) !==
+    normalizeProjectCwd(record.project.cwd)
+  ) {
+    return false;
+  }
+  if (record.kind === "create-task" && task.title.trim() !== record.title) {
+    return false;
+  }
+  const expectedSessionId = normalizeSessionId(record.sessionId);
+  return task.conversations.some(
+    (conversation) =>
+      normalizeSessionId(conversation.sessionId) === expectedSessionId,
+  );
+}
+
+function taskBoardSnapshotFromResponse(
+  response: BoardResponse,
+): BoardSnapshot | null {
+  if (!Array.isArray(response.tasks)) return null;
+  return {
+    schemaVersion: response.schemaVersion ?? 1,
+    revision: response.revision ?? 0,
+    tasks: response.tasks,
+  };
+}
+
+async function invokeSessionMutationWithRetry(
+  command: "task_board_create_task" | "task_board_attach_conversations",
+  request: Record<string, unknown>,
+  onCatalog: (catalog: Catalog) => void,
+) {
+  let result = await invoke<BoardResponse>(command, { request });
+  for (const delayMs of newSessionRetryDelaysMs) {
+    if (result.code !== "session_not_found") break;
+    await wait(delayMs);
+    const sessions = await invoke<BoardResponse>("task_board_load_catalog");
+    if (sessions.status === "ok") {
+      onCatalog({
+        projects: sessions.projects ?? [],
+        sessions: sessions.sessions ?? [],
+        warnings: sessions.warnings ?? [],
+      });
+    }
+    result = await invoke<BoardResponse>(command, { request });
+  }
+  return result;
+}
 
 function formatSessionUpdatedTime(value?: number | null) {
   const timestamp = Number(value || 0);
@@ -233,6 +523,42 @@ function taskBoardAppearanceStyle(
     "--task-board-root-font-family": appearance.rootFontFamily,
     "--task-board-modal-font-family": appearance.modalFontFamily,
   } as CSSProperties;
+}
+
+function taskBoardAppearanceOverlay(
+  appearance: TaskBoardAppearance | null,
+): TaskBoardAppearanceOverlay | null {
+  const overlay = appearance?.overlay;
+  if (!overlay?.enabled) return null;
+  const kind = ["image", "color", "gradient"].includes(overlay.kind)
+    ? overlay.kind
+    : "image";
+  const imageUrl = String(overlay.imageUrl || "").trim();
+  if (kind === "image" && (!imageUrl || /^data:/i.test(imageUrl))) return null;
+  return {
+    enabled: true,
+    kind,
+    imageUrl,
+    opacity: Math.min(1, Math.max(0.01, Number(overlay.opacity) || 0.35)),
+    fit: overlay.fit === "cover" ? "cover" : "contain",
+    backgroundColor: String(overlay.backgroundColor || "#1e293b"),
+    gradientFrom: String(overlay.gradientFrom || "#4338ca"),
+    gradientTo: String(overlay.gradientTo || "#0ea5e9"),
+    gradientAngle: Number.isFinite(Number(overlay.gradientAngle))
+      ? Number(overlay.gradientAngle)
+      : 135,
+  };
+}
+
+function taskBoardAppearanceImageUrl(
+  imageUrl: string,
+  appearanceSignature = "",
+) {
+  const rawImageUrl = imageUrl.trim();
+  const signature = appearanceSignature.trim();
+  if (!rawImageUrl || !signature) return rawImageUrl;
+  const separator = rawImageUrl.includes("?") ? "&" : "?";
+  return `${rawImageUrl}${separator}codexElvesAppearance=${encodeURIComponent(signature)}`;
 }
 
 function taskProjectRef(project: TaskProject): TaskProject {
@@ -1085,6 +1411,8 @@ export function TaskBoardApp() {
   const [snapshot, setSnapshot] = useState<BoardSnapshot>(emptySnapshot);
   const [catalog, setCatalog] = useState<Catalog>(emptyCatalog);
   const [appearance, setAppearance] = useState<TaskBoardAppearance | null>(null);
+  const [detachConfirmation, setDetachConfirmation] =
+    useState<DetachConfirmationState | null>(null);
   const [conversationStatuses, setConversationStatuses] = useState<
     Map<string, ConversationRuntimeStatus>
   >(new Map());
@@ -1095,6 +1423,10 @@ export function TaskBoardApp() {
   const [dragTaskId, setDragTaskId] = useState("");
   const [dropStatus, setDropStatus] = useState<TaskStatus | "">("");
   const [toast, setToast] = useState("");
+  const appearanceRequestRef = useRef<Promise<void> | null>(null);
+  const appearanceMountedRef = useRef(false);
+  const submitEditorBusyRef = useRef(false);
+  const nativeCreateRecoveryAttemptedRef = useRef(false);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -1124,6 +1456,122 @@ export function TaskBoardApp() {
     [showToast],
   );
 
+  const applyTaskInitialStatus = useCallback(
+    async (
+      taskId: string,
+      initialStatus: TaskStatus,
+      currentSnapshot: BoardSnapshot,
+    ) => {
+      const task = currentSnapshot.tasks.find(
+        (candidate) => candidate.id === taskId,
+      );
+      if (!task || initialStatus === "new" || task.status === initialStatus) {
+        return currentSnapshot;
+      }
+      const targetCount = currentSnapshot.tasks.filter(
+        (candidate) => candidate.status === initialStatus,
+      ).length;
+      const moved = await invoke<BoardResponse>("task_board_move_task", {
+        request: {
+          taskId,
+          toStatus: initialStatus,
+          targetIndex: targetCount,
+          expectedRevision: currentSnapshot.revision,
+        },
+      });
+      const movedSnapshot = taskBoardSnapshotFromResponse(moved);
+      if (movedSnapshot) setSnapshot(movedSnapshot);
+      if (moved.status !== "ok") {
+        showToast("任务已创建，但初始状态设置失败，可在看板中手动移动");
+        return movedSnapshot ?? currentSnapshot;
+      }
+      return movedSnapshot ?? currentSnapshot;
+    },
+    [showToast],
+  );
+
+  const attemptNativeCreateRecovery = useCallback(
+    async (loadedSnapshot: BoardSnapshot) => {
+      if (nativeCreateRecoveryAttemptedRef.current) return;
+      nativeCreateRecoveryAttemptedRef.current = true;
+      const record = readNativeCreateRecovery();
+      if (!record) return;
+
+      let effectiveSnapshot = loadedSnapshot;
+      if (!taskBoardRecoveryAlreadyApplied(record, effectiveSnapshot)) {
+        const command =
+          record.kind === "attach-conversation"
+            ? "task_board_attach_conversations"
+            : "task_board_create_task";
+        const request =
+          record.kind === "attach-conversation"
+            ? {
+                taskId: record.targetTaskId || record.taskId,
+                expectedRevision: effectiveSnapshot.revision,
+                sessionIds: [record.sessionId],
+              }
+            : {
+                taskId: record.taskId,
+                expectedRevision: effectiveSnapshot.revision,
+                title: record.title,
+                project: taskProjectRef(record.project),
+                sessionIds: [record.sessionId],
+              };
+        let result: BoardResponse;
+        try {
+          result = await invokeSessionMutationWithRetry(
+            command,
+            request,
+            setCatalog,
+          );
+        } catch (error) {
+          showToast(
+            messageFromError(
+              error,
+              record.kind === "attach-conversation"
+                ? "恢复关联会话失败，将在下次打开任务看板时重试"
+                : "恢复任务失败，将在下次打开任务看板时重试",
+            ),
+          );
+          return;
+        }
+        const responseSnapshot = taskBoardSnapshotFromResponse(result);
+        if (responseSnapshot) {
+          effectiveSnapshot = responseSnapshot;
+          setSnapshot(responseSnapshot);
+        }
+        if (
+          result.status !== "ok" &&
+          !taskBoardRecoveryAlreadyApplied(record, effectiveSnapshot)
+        ) {
+          showToast(
+            result.message ||
+              (record.kind === "attach-conversation"
+                ? "会话尚未恢复到任务，将在下次打开任务看板时重试"
+                : "会话对应任务尚未恢复，将在下次打开任务看板时重试"),
+          );
+          return;
+        }
+      }
+
+      clearNativeCreateRecovery();
+      if (record.kind === "create-task") {
+        effectiveSnapshot = await applyTaskInitialStatus(
+          record.taskId,
+          record.initialStatus,
+          effectiveSnapshot,
+        );
+        setSnapshot(effectiveSnapshot);
+      }
+      showToast(
+        record.kind === "attach-conversation"
+          ? "已恢复新会话与任务的关联"
+          : "已恢复新会话对应的任务",
+      );
+    },
+    [applyTaskInitialStatus, showToast],
+  );
+
   const refresh = useCallback(
     async () => {
       try {
@@ -1132,6 +1580,7 @@ export function TaskBoardApp() {
           invoke<BoardResponse>("task_board_load_catalog"),
         ]);
         applySnapshotResponse(board, "任务看板读取失败");
+        const loadedSnapshot = taskBoardSnapshotFromResponse(board);
         if (sessions.status === "ok") {
           setCatalog({
             projects: sessions.projects ?? [],
@@ -1141,32 +1590,66 @@ export function TaskBoardApp() {
         } else {
           showToast(sessions.message || "会话目录读取失败");
         }
+        if (board.status === "ok" && loadedSnapshot && sessions.status === "ok") {
+          await attemptNativeCreateRecovery(loadedSnapshot);
+        }
       } catch (error) {
         showToast(messageFromError(error, "任务看板读取失败"));
       } finally {
         setLoading(false);
       }
     },
-    [applySnapshotResponse, showToast],
+    [applySnapshotResponse, attemptNativeCreateRecovery, showToast],
   );
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
-  useEffect(() => {
-    let cancelled = false;
-    void invoke<BoardResponse>("task_board_load_host_appearance")
+  const refreshAppearance = useCallback(() => {
+    if (appearanceRequestRef.current) return appearanceRequestRef.current;
+    const request = invoke<BoardResponse>("task_board_load_host_appearance")
       .then((result) => {
-        if (!cancelled && result.status === "ok" && result.appearance) {
-          setAppearance(result.appearance);
+        if (
+          !appearanceMountedRef.current ||
+          result.status !== "ok" ||
+          !result.appearance
+        ) {
+          return;
         }
+        const signature = String(result.appearance.signature || "");
+        setAppearance((current) =>
+          signature && current?.signature === signature
+            ? current
+            : result.appearance ?? current,
+        );
       })
       .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
+    appearanceRequestRef.current = request;
+    void request.finally(() => {
+      if (appearanceRequestRef.current === request) {
+        appearanceRequestRef.current = null;
+      }
+    });
+    return request;
   }, []);
+
+  useEffect(() => {
+    appearanceMountedRef.current = true;
+    const refreshWhenVisible = () => {
+      if (!document.hidden) void refreshAppearance();
+    };
+    void refreshAppearance();
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    const timer = window.setInterval(refreshWhenVisible, appearanceRefreshIntervalMs);
+    return () => {
+      appearanceMountedRef.current = false;
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.clearInterval(timer);
+    };
+  }, [refreshAppearance]);
 
   useEffect(() => {
     const styles = taskBoardAppearanceStyle(appearance);
@@ -1502,11 +1985,24 @@ export function TaskBoardApp() {
     setEditor((current) => (current?.busy ? current : null));
   }, []);
 
+  const requestDetachConfirmation = useCallback(
+    (task: Task, conversation: TaskConversation) => {
+      setDetachConfirmation({
+        task,
+        conversation,
+        busy: false,
+        feedback: "",
+      });
+    },
+    [],
+  );
+
+  const closeDetachConfirmation = useCallback(() => {
+    setDetachConfirmation((current) => (current?.busy ? current : null));
+  }, []);
+
   const detachConversation = useCallback(
     async (task: Task, conversation: TaskConversation) => {
-      if (!window.confirm(`从任务“${task.title}”移除会话“${conversation.title}”？`)) {
-        return;
-      }
       try {
         const result = await invoke<BoardResponse>("task_board_detach_conversations", {
           request: {
@@ -1517,13 +2013,32 @@ export function TaskBoardApp() {
         });
         if (applySnapshotResponse(result, "移除会话失败")) {
           showToast("已从任务中移除会话");
+          return "";
         }
+        return result.message || "移除会话失败";
       } catch (error) {
-        showToast(messageFromError(error, "移除会话失败"));
+        return messageFromError(error, "移除会话失败");
       }
     },
     [applySnapshotResponse, showToast, snapshot.revision],
   );
+
+  const confirmDetachConversation = useCallback(async () => {
+    const pending = detachConfirmation;
+    if (!pending || pending.busy) return;
+    setDetachConfirmation({ ...pending, busy: true, feedback: "" });
+    const feedback = await detachConversation(pending.task, pending.conversation);
+    if (!feedback) {
+      setDetachConfirmation(null);
+      return;
+    }
+    setDetachConfirmation((current) =>
+      current?.task.id === pending.task.id &&
+      current.conversation.sessionId === pending.conversation.sessionId
+        ? { ...current, busy: false, feedback }
+        : current,
+    );
+  }, [detachConfirmation, detachConversation]);
 
   const openEditor = useCallback(
     (task: Task | null = null) => {
@@ -1544,12 +2059,32 @@ export function TaskBoardApp() {
           (left, right) =>
             Number(right.updatedAtMs || 0) - Number(left.updatedAtMs || 0),
         )[0];
+      const title = task?.title || "";
+      const project =
+        task?.project ||
+        catalog.projects.find((candidate) => candidate.cwd === defaultProject) || {
+          cwd: defaultProject,
+          label: defaultProject,
+        };
+      const initialStatus: TaskStatus = "new";
+      const kind: NativeCreateRecoveryKind = task
+        ? "attach-conversation"
+        : "create-task";
+      const taskId = task?.id || taskBoardCreateTaskId();
       setEditor({
         targetTask: task,
+        taskId,
+        semanticKey: taskBoardRecoverySemanticKey(
+          kind,
+          title,
+          project,
+          initialStatus,
+          task?.id || "",
+        ),
         mode: "existing",
-        title: task?.title || "",
+        title,
         projectCwd: defaultProject,
-        initialStatus: "new",
+        initialStatus,
         selectedSessionIds: defaultSession ? [defaultSession.sessionId] : [],
         instruction: "",
         busy: false,
@@ -1566,32 +2101,78 @@ export function TaskBoardApp() {
   );
 
   const submitEditor = useCallback(async () => {
-    if (!editor) return;
-    const project = catalog.projects.find(
-      (candidate) => candidate.cwd === editor.projectCwd,
-    );
-    if (!project) {
-      setEditor({ ...editor, feedback: "请选择项目" });
-      return;
-    }
-    if (!editor.targetTask && !editor.title.trim()) {
-      setEditor({ ...editor, feedback: "请输入任务名称" });
-      return;
-    }
-    if (editor.mode === "existing" && editor.selectedSessionIds.length === 0) {
-      setEditor({ ...editor, feedback: "至少选择一个会话" });
-      return;
-    }
-    if (editor.mode === "new" && !editor.instruction.trim()) {
-      setEditor({ ...editor, feedback: "请输入首条指令" });
-      return;
-    }
-
-    const busyEditor = { ...editor, busy: true, feedback: "" };
-    setEditor(busyEditor);
+    if (submitEditorBusyRef.current) return;
+    submitEditorBusyRef.current = true;
     try {
+      if (!editor || editor.busy) return;
+      const project = catalog.projects.find(
+        (candidate) => candidate.cwd === editor.projectCwd,
+      );
+      if (!project) {
+        setEditor({ ...editor, feedback: "请选择项目" });
+        return;
+      }
+      const title = editor.title.trim();
+      if (!editor.targetTask && !title) {
+        setEditor({ ...editor, feedback: "请输入任务名称" });
+        return;
+      }
+      if (
+        editor.mode === "existing" &&
+        editor.selectedSessionIds.length === 0
+      ) {
+        setEditor({ ...editor, feedback: "至少选择一个会话" });
+        return;
+      }
+      if (editor.mode === "new" && !editor.instruction.trim()) {
+        setEditor({ ...editor, feedback: "请输入首条指令" });
+        return;
+      }
+
+      const kind: NativeCreateRecoveryKind = editor.targetTask
+        ? "attach-conversation"
+        : "create-task";
+      const targetTaskId = editor.targetTask?.id || "";
+      const initialStatus = editor.targetTask ? "new" : editor.initialStatus;
+      const semanticKey = taskBoardRecoverySemanticKey(
+        kind,
+        title,
+        project,
+        initialStatus,
+        targetTaskId,
+      );
+      let taskId = editor.targetTask?.id || editor.taskId;
+      if (
+        !editor.targetTask &&
+        (editor.semanticKey !== semanticKey ||
+          !taskBoardCreateTaskIdIsValid(taskId))
+      ) {
+        taskId = taskBoardCreateTaskId();
+      }
+
+      let recovery =
+        editor.mode === "new" ? readNativeCreateRecovery() : null;
+      const matchingRecovery =
+        recovery?.kind === kind &&
+        recovery.semanticKey === semanticKey &&
+        (kind !== "attach-conversation" ||
+          recovery.targetTaskId === targetTaskId);
+      if (!matchingRecovery) recovery = null;
+      if (recovery) taskId = recovery.taskId;
+
+      let busyEditor: EditorState = {
+        ...editor,
+        taskId,
+        semanticKey,
+        busy: true,
+        feedback: "",
+      };
+      setEditor(busyEditor);
+
       let sessionIds = editor.selectedSessionIds;
-      if (editor.mode === "new") {
+      if (editor.mode === "new" && recovery) {
+        sessionIds = [recovery.sessionId];
+      } else if (editor.mode === "new") {
         const hostProject = taskProjectRef(project);
         const probe = await invoke<BoardResponse>("task_board_probe_host", {
           project: hostProject,
@@ -1607,15 +2188,23 @@ export function TaskBoardApp() {
           });
           return;
         }
-        const started = await invoke<BoardResponse>("task_board_start_conversation", {
-          request: {
-            project: hostProject,
-            firstInstruction: editor.instruction.trim(),
-            modelId: editor.modelId,
-            effortId: editor.effortId,
+        const started = await invoke<BoardResponse>(
+          "task_board_start_conversation",
+          {
+            request: {
+              project: hostProject,
+              firstInstruction: editor.instruction.trim(),
+              modelId: editor.modelId,
+              effortId: editor.effortId,
+            },
           },
-        });
-        if (started.status !== "ok" || !started.sessionId) {
+        );
+        const sessionId = String(started.sessionId || "").trim();
+        if (
+          started.status !== "ok" ||
+          !sessionId ||
+          /(^|:)(client-)?new-thread:/i.test(sessionId)
+        ) {
           setEditor({
             ...busyEditor,
             busy: false,
@@ -1623,7 +2212,42 @@ export function TaskBoardApp() {
           });
           return;
         }
-        sessionIds = [started.sessionId];
+        sessionIds = [sessionId];
+        recovery = {
+          kind,
+          taskId,
+          title,
+          project: taskProjectRef(project),
+          sessionId,
+          initialStatus,
+          ...(targetTaskId ? { targetTaskId } : {}),
+          createdAtMs: Date.now(),
+          semanticKey,
+        };
+        saveNativeCreateRecovery(recovery);
+      }
+
+      if (
+        recovery &&
+        taskBoardRecoveryAlreadyApplied(recovery, snapshot)
+      ) {
+        clearNativeCreateRecovery();
+        let recoveredSnapshot = snapshot;
+        if (recovery.kind === "create-task") {
+          recoveredSnapshot = await applyTaskInitialStatus(
+            recovery.taskId,
+            recovery.initialStatus,
+            recoveredSnapshot,
+          );
+          setSnapshot(recoveredSnapshot);
+        }
+        setEditor(null);
+        showToast(
+          recovery.kind === "attach-conversation"
+            ? "会话已关联到任务"
+            : "任务已创建",
+        );
+        return;
       }
 
       const command = editor.targetTask
@@ -1631,34 +2255,30 @@ export function TaskBoardApp() {
         : "task_board_create_task";
       const request = editor.targetTask
         ? {
-            taskId: editor.targetTask.id,
+            taskId,
             expectedRevision: snapshot.revision,
             sessionIds,
           }
         : {
-            taskId: crypto.randomUUID(),
+            taskId,
             expectedRevision: snapshot.revision,
-            title: editor.title.trim(),
-            project: { cwd: project.cwd, label: project.label },
+            title,
+            project: taskProjectRef(project),
             sessionIds,
           };
-      let result = await invoke<BoardResponse>(command, { request });
-      if (editor.mode === "new") {
-        for (const delayMs of newSessionRetryDelaysMs) {
-          if (result.code !== "session_not_found") break;
-          await wait(delayMs);
-          const sessions = await invoke<BoardResponse>("task_board_load_catalog");
-          if (sessions.status === "ok") {
-            setCatalog({
-              projects: sessions.projects ?? [],
-              sessions: sessions.sessions ?? [],
-              warnings: sessions.warnings ?? [],
-            });
-          }
-          result = await invoke<BoardResponse>(command, { request });
-        }
-      }
-      if (!applySnapshotResponse(result, editor.targetTask ? "关联会话失败" : "创建任务失败")) {
+      const result =
+        editor.mode === "new"
+          ? await invokeSessionMutationWithRetry(command, request, setCatalog)
+          : await invoke<BoardResponse>(command, { request });
+      const responseSnapshot = taskBoardSnapshotFromResponse(result);
+      if (responseSnapshot) setSnapshot(responseSnapshot);
+      const idempotentSuccess =
+        Boolean(recovery) &&
+        taskBoardRecoveryAlreadyApplied(
+          recovery as NativeCreateRecoveryRecord,
+          responseSnapshot ?? snapshot,
+        );
+      if (result.status !== "ok" && !idempotentSuccess) {
         setEditor({
           ...busyEditor,
           busy: false,
@@ -1667,44 +2287,41 @@ export function TaskBoardApp() {
         return;
       }
 
-      if (!editor.targetTask && editor.initialStatus !== "new" && Array.isArray(result.tasks)) {
-        const created = result.tasks.find(
-          (task) =>
-            task.title === editor.title.trim() &&
-            task.project.cwd === project.cwd &&
-            sessionIds.some((sessionId) =>
-              task.conversations.some(
-                (conversation) => conversation.sessionId === sessionId,
-              ),
-            ),
+      if (editor.mode === "new") clearNativeCreateRecovery();
+      if (!editor.targetTask) {
+        const currentSnapshot = responseSnapshot ?? snapshot;
+        const finalSnapshot = await applyTaskInitialStatus(
+          taskId,
+          editor.initialStatus,
+          currentSnapshot,
         );
-        if (created) {
-          const targetCount = result.tasks.filter(
-            (task) => task.status === editor.initialStatus,
-          ).length;
-          const moved = await invoke<BoardResponse>("task_board_move_task", {
-            request: {
-              taskId: created.id,
-              toStatus: editor.initialStatus,
-              targetIndex: targetCount,
-              expectedRevision: result.revision ?? snapshot.revision,
-            },
-          });
-          applySnapshotResponse(moved, "任务已创建，但初始状态设置失败");
-        }
+        setSnapshot(finalSnapshot);
       }
 
       setEditor(null);
       showToast(editor.targetTask ? "会话已关联到任务" : "任务已创建");
       void refresh();
     } catch (error) {
-      setEditor({
-        ...busyEditor,
-        busy: false,
-        feedback: messageFromError(error, "操作失败"),
-      });
+      setEditor((current) =>
+        current
+          ? {
+              ...current,
+              busy: false,
+              feedback: messageFromError(error, "操作失败"),
+            }
+          : current,
+      );
+    } finally {
+      submitEditorBusyRef.current = false;
     }
-  }, [applySnapshotResponse, catalog.projects, editor, refresh, showToast, snapshot.revision]);
+  }, [
+    applyTaskInitialStatus,
+    catalog.projects,
+    editor,
+    refresh,
+    showToast,
+    snapshot,
+  ]);
 
   const sessionsForEditor = useMemo(() => {
     if (!editor) return [];
@@ -1735,10 +2352,11 @@ export function TaskBoardApp() {
   }, [catalog.sessions]);
 
   return (
-    <main
-      className="task-board-app"
-      style={taskBoardAppearanceStyle(appearance)}
-    >
+    <>
+      <main
+        className="task-board-app"
+        style={taskBoardAppearanceStyle(appearance)}
+      >
       <section className="task-board-page" aria-label="任务看板">
         <div className="task-board-heading">
           <h1>任务看板</h1>
@@ -1863,7 +2481,7 @@ export function TaskBoardApp() {
                         }}
                         dragging={dragTaskId === task.id}
                         onOpenConversation={openConversation}
-                        onDetachConversation={detachConversation}
+                        onDetachConversation={requestDetachConfirmation}
                         onAttach={() => openEditor(task)}
                         onMoveStatus={(status) => void moveTask(task, status)}
                         conversationStatuses={conversationStatuses}
@@ -1894,14 +2512,23 @@ export function TaskBoardApp() {
         />
       ) : null}
 
-      <div
-        className={`task-board-toast ${toast ? "visible" : ""}`}
-        role="status"
-        aria-live="polite"
-      >
-        {toast}
-      </div>
-    </main>
+        <div
+          className={`task-board-toast ${toast ? "visible" : ""}`}
+          role="status"
+          aria-live="polite"
+        >
+          {toast}
+        </div>
+      </main>
+      <TaskBoardAppearanceOverlay appearance={appearance} />
+      {detachConfirmation ? (
+        <TaskBoardDetachConfirmation
+          confirmation={detachConfirmation}
+          onClose={closeDetachConfirmation}
+          onConfirm={() => void confirmDetachConversation()}
+        />
+      ) : null}
+    </>
   );
 }
 
@@ -2023,6 +2650,182 @@ function TaskCard({
         />
       </footer>
     </article>
+  );
+}
+
+function TaskBoardAppearanceOverlay({
+  appearance,
+}: {
+  appearance: TaskBoardAppearance | null;
+}) {
+  const overlay = taskBoardAppearanceOverlay(appearance);
+  if (!overlay || !document.body) return null;
+  const imageUrl = taskBoardAppearanceImageUrl(
+    overlay.imageUrl,
+    appearance?.signature,
+  );
+  const layer =
+    overlay.kind === "image" ? (
+      <img
+        key={appearance?.signature || imageUrl}
+        className="task-board-appearance-overlay"
+        src={imageUrl}
+        alt=""
+        aria-hidden="true"
+        draggable={false}
+        style={{
+          opacity: overlay.opacity,
+          objectFit: overlay.fit,
+          objectPosition: "50% 50%",
+        }}
+      />
+    ) : (
+      <div
+        className="task-board-appearance-overlay"
+        aria-hidden="true"
+        style={{
+          opacity: overlay.opacity,
+          background:
+            overlay.kind === "color"
+              ? overlay.backgroundColor
+              : `linear-gradient(${overlay.gradientAngle}deg, ${overlay.gradientFrom}, ${overlay.gradientTo})`,
+        }}
+      />
+    );
+  return createPortal(layer, document.body);
+}
+
+function TaskBoardDetachConfirmation({
+  confirmation,
+  onClose,
+  onConfirm,
+}: {
+  confirmation: DetachConfirmationState;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(
+    document.activeElement instanceof HTMLElement ? document.activeElement : null,
+  );
+  const busyRef = useRef(confirmation.busy);
+  const backdropPressStartedRef = useRef(false);
+  const backdropPressCompletedRef = useRef(false);
+  busyRef.current = confirmation.busy;
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const handleKeydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (!busyRef.current) onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(
+        dialog.querySelectorAll<HTMLElement>("button:not(:disabled)"),
+      );
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const currentIndex = focusable.indexOf(document.activeElement as HTMLElement);
+      const nextIndex = event.shiftKey
+        ? currentIndex <= 0
+          ? focusable.length - 1
+          : currentIndex - 1
+        : currentIndex === focusable.length - 1
+          ? 0
+          : currentIndex + 1;
+      event.preventDefault();
+      focusable[nextIndex]?.focus();
+    };
+    document.addEventListener("keydown", handleKeydown, true);
+    window.requestAnimationFrame(() => cancelButtonRef.current?.focus());
+    return () => {
+      document.removeEventListener("keydown", handleKeydown, true);
+    };
+  }, [onClose]);
+
+  useEffect(
+    () => () => {
+      window.requestAnimationFrame(() => {
+        if (previousFocusRef.current?.isConnected) {
+          previousFocusRef.current.focus();
+        }
+      });
+    },
+    [],
+  );
+
+  if (!document.body) return null;
+  return createPortal(
+    <div
+      className="task-board-confirm-backdrop"
+      role="presentation"
+      onPointerDown={(event) => {
+        backdropPressStartedRef.current = event.target === event.currentTarget;
+        backdropPressCompletedRef.current = false;
+      }}
+      onPointerUp={(event) => {
+        backdropPressCompletedRef.current =
+          backdropPressStartedRef.current && event.target === event.currentTarget;
+      }}
+      onPointerCancel={() => {
+        backdropPressStartedRef.current = false;
+        backdropPressCompletedRef.current = false;
+      }}
+      onClick={(event) => {
+        const shouldClose =
+          event.target === event.currentTarget && backdropPressCompletedRef.current;
+        backdropPressStartedRef.current = false;
+        backdropPressCompletedRef.current = false;
+        if (shouldClose && !confirmation.busy) onClose();
+      }}
+    >
+      <section
+        className="task-board-confirm-dialog"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="task-board-detach-title"
+        aria-describedby="task-board-detach-description"
+        tabIndex={-1}
+      >
+        <h2 id="task-board-detach-title">移除关联会话？</h2>
+        <p id="task-board-detach-description">
+          仅解除与任务“{confirmation.task.title || "未命名任务"}”的关联，不会删除
+          Codex 中的原始会话。
+        </p>
+        {confirmation.feedback ? (
+          <p className="task-board-confirm-feedback" role="alert">
+            {confirmation.feedback}
+          </p>
+        ) : null}
+        <div className="task-board-confirm-actions">
+          <button
+            ref={cancelButtonRef}
+            type="button"
+            onClick={onClose}
+            disabled={confirmation.busy}
+          >
+            取消
+          </button>
+          <button
+            className="danger"
+            type="button"
+            onClick={onConfirm}
+            disabled={confirmation.busy}
+          >
+            {confirmation.busy ? "正在移除…" : "移除"}
+          </button>
+        </div>
+      </section>
+    </div>,
+    document.body,
   );
 }
 

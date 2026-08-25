@@ -398,6 +398,19 @@ fn task_board_runs_as_a_separate_window_with_persistent_placement() {
     assert!(task_board_rs.contains("JSON.stringify(result ?? null)"));
     assert!(task_board_rs.contains("task_board_load_host_appearance"));
     assert!(task_board_rs.contains("task_board_load_conversation_statuses"));
+    assert!(task_board_rs.contains("call_codex_host_operation("));
+    assert!(task_board_rs.contains("__codexElvesTaskBoardStandaloneOperations"));
+    assert!(task_board_rs.contains("task_board_host_operation_abandon_script"));
+    assert!(task_board_rs.contains("host_version_unsupported"));
+    assert!(task_board_rs.contains("host_outcome_unknown"));
+    assert!(task_board_rs.contains("TASK_BOARD_HOST_OPERATION_TIMEOUT"));
+    assert!(task_board_rs.contains("Duration::from_secs(120)"));
+    assert!(task_board_rs.contains("nativeCreateLease"));
+    assert!(task_board_rs.contains("nativeCreateRuntime"));
+    assert!(!task_board_rs.contains("skip_initial_composer"));
+    assert!(!task_board_rs.contains("TASK_BOARD_HOST_OPERATION_POLL_SLICE_MS"));
+    assert!(!task_board_rs.contains("taskBoardStandaloneQuerySelector"));
+    assert!(!task_board_rs.contains("taskBoardStandaloneDispatchEvent"));
     assert!(permissions.contains("\"task_board_load_create_options\""));
     assert!(permissions.contains("\"task_board_load_host_appearance\""));
     assert!(permissions.contains("\"task_board_load_conversation_statuses\""));
@@ -411,6 +424,11 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
         .expect("read standalone task board");
     let styles = std::fs::read_to_string(frontend_dir.join("src/task-board.css"))
         .expect("read standalone task board styles");
+    let standalone_styles =
+        std::fs::read_to_string(frontend_dir.join("src/task-board-standalone.css"))
+            .expect("read standalone task board entry styles");
+    let main = std::fs::read_to_string(frontend_dir.join("src/main.tsx"))
+        .expect("read standalone task board entry");
 
     assert!(app.contains("跨项目观察任务状态，并集中关联项目下的多个会话"));
     assert!(app.contains("搜索任务、项目或关联会话"));
@@ -426,6 +444,13 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     assert!(app.contains("project: taskProjectRef(project)"));
     assert!(app.contains("const hostProject = taskProjectRef(project)"));
     assert!(app.contains("task-board-conversation-state"));
+    assert!(app.contains("TaskBoardAppearanceOverlay"));
+    assert!(app.contains("appearanceRefreshIntervalMs = 20_000"));
+    assert!(app.contains("codexElvesAppearance="));
+    assert!(app.contains("TaskBoardDetachConfirmation"));
+    assert!(app.contains("task-board-confirm-backdrop"));
+    assert!(app.contains("仅解除与任务“{confirmation.task.title || \"未命名任务\"}”的关联"));
+    assert!(!app.contains("window.confirm("));
     assert!(!app.contains("独立 WebView2 进程"));
     assert!(styles.contains("grid-template-columns: repeat(5, minmax(0, 1fr))"));
     assert!(styles.contains("min-width: 1580px"));
@@ -468,6 +493,102 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     ));
     assert!(styles.contains("grid-template-columns: 18px 16px minmax(0, 1fr)"));
     assert!(styles.contains("height: min(650px, calc(100vh - 32px))"));
+    assert!(styles.contains(".task-board-app :where(button, input, textarea)"));
+    assert!(styles.contains(
+        ".task-board-app .task-board-field input:focus-visible,\n.task-board-app .task-board-create-select:focus-visible,\n.task-board-app .task-board-field textarea:focus-visible"
+    ));
+    let field_focus_styles = styles
+        .split(".task-board-field input:focus,")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("standalone task-board field focus styles should be present");
+    assert!(field_focus_styles.contains("border-color: var(--task-board-accent)"));
+    assert!(field_focus_styles.contains("box-shadow: 0 0 0 1px"));
+    assert!(!field_focus_styles.contains("box-shadow: 0 0 0 2px"));
+    assert!(styles.contains(".task-board-appearance-overlay"));
+    assert!(styles.contains("z-index: 2147483646"));
+    assert!(styles.contains(".task-board-confirm-backdrop"));
+    assert!(styles.contains("z-index: 2147483200"));
+    assert!(standalone_styles.contains(".task-board-app button"));
+    assert!(standalone_styles.contains("transition: none"));
+    assert!(main.contains("if (taskBoardMode)"));
+    assert!(main.contains("void import(\"./task-board-standalone.css\")"));
+    assert!(main.contains("void import(\"./styles.css\")"));
+}
+
+#[test]
+fn standalone_native_create_recovery_is_private_and_idempotent() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let frontend_dir = manifest_dir.parent().expect("manager frontend directory");
+    let app = std::fs::read_to_string(frontend_dir.join("src/TaskBoardApp.tsx"))
+        .expect("read standalone task board");
+
+    let submit = app
+        .split("const submitEditor = useCallback(async () => {")
+        .nth(1)
+        .and_then(|value| value.split("const sessionsForEditor = useMemo").next())
+        .expect("standalone submitEditor body");
+    assert!(
+        submit
+            .trim_start()
+            .starts_with("if (submitEditorBusyRef.current) return;")
+    );
+    assert!(submit.contains("submitEditorBusyRef.current = true;"));
+    assert!(submit.contains("submitEditorBusyRef.current = false;"));
+    assert!(submit.contains("if (editor.mode === \"new\" && recovery)"));
+    assert!(submit.contains("} else if (editor.mode === \"new\") {"));
+    assert_eq!(
+        submit.matches("\"task_board_start_conversation\"").count(),
+        1
+    );
+    assert!(submit.contains("recovery.semanticKey === semanticKey"));
+    assert!(submit.contains("taskId = recovery.taskId"));
+    assert!(submit.contains("taskBoardRecoveryAlreadyApplied(recovery, snapshot)"));
+    assert!(
+        submit.find("let taskId =").expect("stable task id")
+            < submit
+                .find("\"task_board_start_conversation\"")
+                .expect("start conversation")
+    );
+    assert!(
+        submit
+            .find("saveNativeCreateRecovery(recovery)")
+            .expect("save recovery")
+            < submit.find("const command =").expect("task mutation")
+    );
+
+    let save_recovery = app
+        .split("function saveNativeCreateRecovery(")
+        .nth(1)
+        .and_then(|value| value.split("function clearNativeCreateRecovery()").next())
+        .expect("standalone recovery writer");
+    assert!(save_recovery.contains("sessionStorage.setItem"));
+    assert!(!save_recovery.contains("instruction"));
+    assert!(!save_recovery.contains("firstInstruction"));
+    assert!(!save_recovery.contains("modelId"));
+    assert!(!save_recovery.contains("effortId"));
+
+    let automatic_recovery = app
+        .split("const attemptNativeCreateRecovery = useCallback(")
+        .nth(1)
+        .and_then(|value| value.split("const refresh = useCallback").next())
+        .expect("standalone automatic recovery");
+    assert!(automatic_recovery.contains("nativeCreateRecoveryAttemptedRef.current = true"));
+    assert!(automatic_recovery.contains("\"task_board_create_task\""));
+    assert!(automatic_recovery.contains("\"task_board_attach_conversations\""));
+    assert!(automatic_recovery.contains("expectedRevision: effectiveSnapshot.revision"));
+    assert!(automatic_recovery.contains("invokeSessionMutationWithRetry"));
+    assert!(automatic_recovery.contains("clearNativeCreateRecovery()"));
+    assert!(automatic_recovery.contains("taskBoardRecoveryAlreadyApplied"));
+    assert!(!automatic_recovery.contains("task_board_start_conversation"));
+
+    assert!(app.contains("nativeCreateRecoveryTtlMs = 24 * 60 * 60 * 1000"));
+    assert!(app.contains("kind: NativeCreateRecoveryKind"));
+    assert!(app.contains("targetTaskId?: string"));
+    assert!(app.contains("semanticKey: string"));
+    assert!(app.contains("taskBoardCreateTaskIdIsValid"));
+    assert!(app.contains("now - createdAtMs > nativeCreateRecoveryTtlMs"));
+    assert!(app.contains("if (!record) sessionStorage.removeItem(nativeCreateRecoveryKey)"));
 }
 
 #[test]
