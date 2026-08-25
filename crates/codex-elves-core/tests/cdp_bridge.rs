@@ -286,7 +286,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "54";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "55";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -340,9 +340,10 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
     assert!(script.contains("inset: 0"));
     assert!(script.contains("[data-low-height=\"true\"]"));
     assert!(script.contains("::-webkit-scrollbar-thumb"));
-    assert!(script.contains("function taskBoardConversationSummary("));
-    assert!(script.contains("function openTaskBoardConversationPopover("));
-    assert!(script.contains("function closeTaskBoardConversationPopover()"));
+    assert!(script.contains("linked.forEach((conversation) =>"));
+    assert!(!script.contains("function taskBoardConversationSummary("));
+    assert!(!script.contains("function openTaskBoardConversationPopover("));
+    assert!(!script.contains("codex-task-board-conversation-popover"));
     assert!(!script.contains("Debug 原型"));
     assert!(script.contains("拖动任务卡片可切换状态"));
     assert!(script.contains("min-width: 1580px"));
@@ -368,7 +369,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
         .expect("task board runtime refresh should be present");
     assert!(
         runtime_refresh
-            .contains("closeTaskBoardCreateModal();\n    closeTaskBoardDetachDialog({ restoreFocus: false });\n    closeTaskBoardConversationPopover();\n    reconcileTaskBoardRuntime();")
+            .contains("closeTaskBoardCreateModal();\n    closeTaskBoardDetachDialog({ restoreFocus: false });\n    reconcileTaskBoardRuntime();")
     );
 }
 
@@ -399,8 +400,9 @@ fn renderer_task_board_preserves_debug_spike_column_and_card_surface_hierarchy()
     assert!(board_styles.contains("border-radius: 9px"));
     assert!(board_styles.contains("background: var(--task-board-card-background);"));
     assert!(board_styles.contains(".codex-task-board-card:hover {"));
-    assert!(conversation_styles.contains("min-height: 0;"));
-    assert!(conversation_styles.contains("padding: 0;"));
+    assert!(script.contains(".codex-task-board-conversations {\n        display: grid;"));
+    assert!(conversation_styles.contains("min-height: 24px;"));
+    assert!(conversation_styles.contains("padding: 0 4px 0 0;"));
 }
 
 #[test]
@@ -543,13 +545,11 @@ fn renderer_task_board_dynamic_contracts_apply_latest_catalog_and_independent_re
             .as_bool()
             .unwrap()
     );
-    assert!(cases["popover"]["openBeforeRefresh"].as_bool().unwrap());
-    assert_eq!(cases["popover"]["bodyChildrenBeforeRefresh"], 1);
-    assert_eq!(cases["popover"]["dismissListenersBeforeRefresh"], 1);
-    assert!(cases["popover"]["removedAfterRefresh"].as_bool().unwrap());
-    assert_eq!(cases["popover"]["bodyChildrenAfterRefresh"], 0);
-    assert_eq!(cases["popover"]["dismissListenersAfterRefresh"], 0);
-    assert!(cases["popover"]["activeAfterRefresh"].as_bool().unwrap());
+    assert!(
+        cases["runtimeRefresh"]["activeAfterRefresh"]
+            .as_bool()
+            .unwrap()
+    );
     assert_eq!(cases["read"]["snapshotTitleBeforeCatalog"], "先到的快照");
     assert_eq!(cases["read"]["catalogCountBeforeCatalog"], 0);
     assert!(cases["read"]["loadingBeforeCatalog"].as_bool().unwrap());
@@ -1099,6 +1099,12 @@ fn renderer_task_board_move_drag_menu_and_recovery_contracts() {
     );
     assert!(cases["dom"]["sameColumnDownward"].as_bool().unwrap());
     assert!(cases["dom"]["selfDropNoRequest"].as_bool().unwrap());
+    assert!(
+        cases["dom"]["allConversationsRenderedInline"]
+            .as_bool()
+            .unwrap(),
+        "DOM move cases: {cases}"
+    );
     assert!(cases["dom"]["cardStructureMatchesDebug"].as_bool().unwrap());
     assert!(cases["dom"]["menuOutsideMain"].as_bool().unwrap());
     assert!(
@@ -3372,15 +3378,7 @@ async function tick() {
   conversationStatuses.idleRefreshSkipped =
     boundedRequestCount === boundedBeforeIdleRefresh;
   api.resetReadState();
-  api.openPopoverForTest();
-  const popoverNodeBeforeRefresh = api.popoverNodeForTest();
-  const popoverOpenBeforeRefresh = api.popoverOpen();
-  const bodyChildrenBeforeRefresh = document.body.children.length;
-  const dismissListenersBeforeRefresh = document.listenerCount("pointerdown");
   api.refreshRuntimeForTest();
-  const removedAfterRefresh = popoverNodeBeforeRefresh?.removed === true;
-  const bodyChildrenAfterRefresh = document.body.children.length;
-  const dismissListenersAfterRefresh = document.listenerCount("pointerdown");
   const activeAfterRefresh = api.activeForTest();
   api.resetReadState();
   const snapshot = deferred();
@@ -3432,13 +3430,7 @@ async function tick() {
       completeMissingAvailable: complete.available,
     },
     conversationStatuses,
-    popover: {
-      openBeforeRefresh: popoverOpenBeforeRefresh,
-      bodyChildrenBeforeRefresh,
-      dismissListenersBeforeRefresh,
-      removedAfterRefresh,
-      bodyChildrenAfterRefresh,
-      dismissListenersAfterRefresh,
+    runtimeRefresh: {
       activeAfterRefresh,
     },
     read: {
@@ -3606,7 +3598,10 @@ function task(id, status, order, title = id) {
 }
 function snapshot(revision, tasks) { return { status: "ok", schemaVersion: 1, revision, tasks }; }
 function base() { return snapshot(7, [task("a", "new", 0, "alpha"), task("b", "new", 1, "beta"), task("c", "new", 2, "gamma"), task("d", "planning", 0)]); }
-function reset(mock = {}) { window.__codexElvesTaskBoardMock = mock; api.resetMoveStateForTest(base()); }
+function reset(mock = {}, nextSnapshot = base()) {
+  window.__codexElvesTaskBoardMock = mock;
+  api.resetMoveStateForTest(nextSnapshot);
+}
 function deferred() { let resolve; const promise = new Promise((next) => { resolve = next; }); return { promise, resolve }; }
 function settle() { return new Promise((resolve) => setTimeout(resolve, 0)); }
 (async () => {
@@ -3728,8 +3723,8 @@ function settle() { return new Promise((resolve) => setTimeout(resolve, 0)); }
   await ignoredRead;
   reads.moveFailureKeepsReadOut = api.moveStateForTest().revision === 7 && api.moveStateForTest().tasks[0]?.status === "new";
 
-  function mountDom(mock = {}) {
-    reset(mock);
+  function mountDom(mock = {}, nextSnapshot = base()) {
+    reset(mock, nextSnapshot);
     api.setMoveFiltersForTest();
     api.reconcileRuntimeForTest();
     return mainSurface.querySelector('[data-codex-task-board-root="true"]');
@@ -3743,6 +3738,30 @@ function settle() { return new Promise((resolve) => setTimeout(resolve, 0)); }
       stopPropagation() { this.cancelBubble = true; },
     };
   }
+  const multiConversationTask = task("multi", "new", 0, "多会话任务");
+  multiConversationTask.conversations = [
+    { sessionId: "session-inline-1", title: "第一条关联会话" },
+    { sessionId: "session-inline-2", title: "第二条关联会话" },
+  ];
+  mountDom({}, snapshot(7, [multiConversationTask]));
+  const multiConversationCard = mainSurface.querySelector(
+    '.codex-task-board-card[data-task-board-id="multi"]',
+  );
+  const multiConversationRows = Array.from(
+    multiConversationCard?.querySelectorAll?.(".codex-task-board-conversation-row") || [],
+  );
+  const inlineConversationTitles = multiConversationRows.map(
+    (row) => row.querySelector?.(".codex-task-board-conversation-title")?.textContent || "",
+  );
+  const allConversationsRenderedInline =
+    multiConversationRows.length === 2 &&
+    JSON.stringify(inlineConversationTitles) ===
+      JSON.stringify(["第一条关联会话", "第二条关联会话"]) &&
+    multiConversationCard?.querySelectorAll?.(".codex-task-board-conversation-state").length === 2 &&
+    multiConversationCard?.querySelectorAll?.(".codex-task-board-conversation-remove").length === 2 &&
+    !multiConversationCard?.querySelector?.(".codex-task-board-conversation-summary") &&
+    !document.body.querySelector?.(".codex-task-board-conversation-popover");
+
   const domPayloads = [];
   const domPending = deferred();
   mountDom({ request(route, payload) {
@@ -3832,6 +3851,7 @@ function settle() { return new Promise((resolve) => setTimeout(resolve, 0)); }
     optimisticOrdersContinuous,
     sameColumnDownward: sameColumnPayloads[0]?.taskId === "a" && sameColumnPayloads[0]?.toStatus === "new" && sameColumnPayloads[0]?.targetIndex === 2,
     selfDropNoRequest: sameColumnPayloads.length === 1,
+    allConversationsRenderedInline,
     cardStructureMatchesDebug,
     menuOutsideMain,
     enterMovesAndRestoresFocus: menuPayloadsDom[0]?.toStatus === "done" && focusReturned,
@@ -4165,14 +4185,12 @@ function reset(options = {}) {
   const beforeRepeat = JSON.stringify(api.createSnapshotForTest());
   const first = await api.nativeOpenSessionForTest("session-raw");
   const second = await api.nativeOpenSessionForTest("session-raw");
-  api.openPopoverForTest();
   await api.openConversationForTest({ sessionId: "session-raw", title: "原始 ID" });
   const repeat = {
     safeAndDataPreserved:
       first.status === "ok" && second.status === "ok" &&
       threadClicks.get("session-raw") === 3 &&
-      JSON.stringify(api.createSnapshotForTest()) === beforeRepeat &&
-      !api.popoverOpen() && document.listenerCount("pointerdown") === 0,
+      JSON.stringify(api.createSnapshotForTest()) === beforeRepeat,
   };
 
   let seamCalls = 0;

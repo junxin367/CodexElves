@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "54";
+  const codexDeleteStyleVersion = "55";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -82,7 +82,7 @@
   const codexPluginRequestIdMaxEntries = 256;
   const codexFailureHistoryMaxEntries = 64;
   const codexManagerReactDiscoveryCooldownMs = 15000;
-  const taskBoardRuntimeVersion = "28";
+  const taskBoardRuntimeVersion = "29";
   const taskBoardNativeOperationLeaseTtlMs = 2 * 60 * 1000;
   const taskBoardEntryAttribute = "data-codex-task-board-entry";
   const taskBoardRootAttribute = "data-codex-task-board-root";
@@ -2435,8 +2435,9 @@
         opacity: .52;
       }
       .codex-task-board-conversations {
-        display: flex;
-        align-items: center;
+        display: grid;
+        align-items: stretch;
+        gap: 3px;
         flex: 1 1 auto;
         min-width: 0;
       }
@@ -2447,6 +2448,12 @@
         flex: 1 1 auto;
         width: 100%;
         min-width: 0;
+        border-radius: 7px;
+        padding: 2px 0 2px 4px;
+        transition: background .15s ease;
+      }
+      .codex-task-board-conversation-row:hover {
+        background: color-mix(in srgb, currentColor 7%, transparent);
       }
       .codex-task-board-conversation {
         display: flex;
@@ -2455,14 +2462,14 @@
         flex: 1 1 auto;
         width: auto;
         min-width: 0;
-        min-height: 0;
+        min-height: 24px;
         border: 0;
         border-radius: 7px;
         background: transparent;
         color: var(--task-board-text-tertiary);
         cursor: pointer;
         font: 10px/1.3 system-ui, sans-serif;
-        padding: 0;
+        padding: 0 4px 0 0;
         text-align: left;
       }
       .codex-task-board-conversation:hover {
@@ -2506,6 +2513,8 @@
         color: color-mix(in srgb, currentColor 64%, transparent);
       }
       .codex-task-board-conversation-title {
+        flex: 1 1 auto;
+        min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -2568,51 +2577,9 @@
       .codex-task-board-conversation-state[data-conversation-status="unavailable"] {
         color: #d59a91;
       }
-      .codex-task-board-conversation-summary {
-        justify-content: flex-start;
-      }
-      .codex-task-board-conversation-extra {
-        flex: 0 0 auto;
-        margin-left: 2px;
-        border-radius: 999px;
-        background: color-mix(in srgb, currentColor 10%, transparent);
-        color: inherit;
-        font-size: 10px;
-        font-variant-numeric: tabular-nums;
-        line-height: 18px;
-        padding: 0 6px;
-      }
       .codex-task-board-conversations .codex-task-board-empty {
         padding: 0;
         text-align: left;
-      }
-      .codex-task-board-conversation-popover {
-        position: fixed;
-        z-index: 2147483200;
-        display: grid;
-        gap: 4px;
-        width: min(340px, calc(100vw - 24px));
-        max-height: min(360px, calc(100vh - 24px));
-        overflow: auto;
-        border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
-        border-radius: 10px;
-        background: var(--color-token-dropdown-background, #27272a);
-        color: var(--color-token-text-primary, #f4f4f5);
-        box-shadow: 0 16px 42px rgba(0,0,0,.34);
-        padding: 6px;
-      }
-      .codex-task-board-conversation-popover-title {
-        color: color-mix(in srgb, currentColor 62%, transparent);
-        font-size: 11px;
-        font-weight: 650;
-        padding: 5px 7px 3px;
-      }
-      .codex-task-board-conversation-popover .codex-task-board-conversation-row {
-        border-radius: 7px;
-        padding: 4px 3px 4px 7px;
-      }
-      .codex-task-board-conversation-popover .codex-task-board-conversation-row:hover {
-        background: color-mix(in srgb, currentColor 7%, transparent);
       }
       .codex-task-board-detach-feedback {
         min-height: 18px;
@@ -8170,8 +8137,6 @@
     query: "",
     projectCwd: "",
     nativeSelection: null,
-    popover: null,
-    popoverDismissHandler: null,
     detachDialog: null,
     detachDialogKeydownHandler: null,
     detachDialogPreviousFocus: null,
@@ -9575,14 +9540,6 @@
     );
   }
 
-  function taskBoardConversationSummary(conversations) {
-    const linked = Array.isArray(conversations) ? conversations : [];
-    return {
-      primary: linked[0] || null,
-      extraCount: Math.max(0, linked.length - 1),
-    };
-  }
-
   function taskBoardLinkedConversations() {
     const snapshot = taskBoardState.snapshot;
     if (snapshot && typeof snapshot === "object") {
@@ -9830,17 +9787,9 @@
   }
 
   async function openTaskBoardConversation(conversation) {
-    closeTaskBoardConversationPopover();
     const result = await taskBoardNativeAdapter.openSession(String(conversation?.sessionId || ""), conversation);
     if (result?.status === "ok") return;
     showToast(result?.message || "无法打开关联会话");
-  }
-
-  function closeTaskBoardConversationPopover() {
-    document.removeEventListener("pointerdown", taskBoardState.popoverDismissHandler, true);
-    taskBoardState.popoverDismissHandler = null;
-    taskBoardState.popover?.remove?.();
-    taskBoardState.popover = null;
   }
 
   function taskBoardCreateModalKeydown(event) {
@@ -11664,23 +11613,6 @@
     return node;
   }
 
-  function taskBoardConversationGroupStatus(projections) {
-    const counts = new Map();
-    (Array.isArray(projections) ? projections : []).forEach((projection) => {
-      const statusId = String(projection?.status?.id || "unknown");
-      counts.set(statusId, (counts.get(statusId) || 0) + 1);
-    });
-    const count = (id) => counts.get(id) || 0;
-    const running = count("running");
-    if (running) return { id: "running", label: `${running} 运行中` };
-    const unread = count("completed-unread");
-    if (unread) return { id: "completed-unread", label: `${unread} 未读` };
-    if (count("checking")) return { id: "checking", label: "检查中" };
-    if (count("unknown")) return { id: "unknown", label: "状态未知" };
-    if (count("unavailable")) return { id: "unavailable", label: "部分不可用" };
-    return { id: "completed", label: "已完成" };
-  }
-
   function taskBoardConversationButton(
     conversation,
     className = "codex-task-board-conversation",
@@ -11750,30 +11682,6 @@
     });
     row.append(conversationButton, removeButton);
     return row;
-  }
-
-  function openTaskBoardConversationPopover(trigger, task, conversations) {
-    closeTaskBoardConversationPopover();
-    const popover = taskBoardElement("div", "codex-task-board-conversation-popover");
-    popover.setAttribute("role", "dialog");
-    popover.setAttribute("aria-label", "关联会话列表");
-    popover.appendChild(taskBoardElement("div", "codex-task-board-conversation-popover-title", "关联会话"));
-    (Array.isArray(conversations) ? conversations : []).forEach((conversation) => {
-      popover.appendChild(taskBoardConversationRow(task, conversation));
-    });
-    document.body.appendChild(popover);
-    const rect = trigger?.getBoundingClientRect?.();
-    if (rect) {
-      popover.style.left = `${Math.max(12, Math.min(rect.left, window.innerWidth - 352))}px`;
-      popover.style.top = `${Math.max(12, Math.min(rect.bottom + 6, window.innerHeight - 372))}px`;
-    }
-    taskBoardState.popover = popover;
-    taskBoardState.popoverDismissHandler = (event) => {
-      const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-      if (target && (popover.contains(target) || trigger?.contains?.(target))) return;
-      closeTaskBoardConversationPopover();
-    };
-    document.addEventListener("pointerdown", taskBoardState.popoverDismissHandler, true);
   }
 
   function taskBoardDetachFailureMessage(result) {
@@ -11848,7 +11756,7 @@
         (
           matchingRemoveButton ||
           card?.querySelector?.(
-            ".codex-task-board-conversation-summary, .codex-task-board-card-add, .codex-task-board-card-move",
+            ".codex-task-board-conversation, .codex-task-board-card-add, .codex-task-board-card-move",
           )
         )?.focus?.();
       });
@@ -11918,7 +11826,6 @@
           taskBoardState.snapshotError = "";
           const taskId = dialog.taskId;
           closeTaskBoardDetachDialog({ restoreFocus: false });
-          closeTaskBoardConversationPopover();
           renderTaskBoard();
           void refreshTaskBoardConversationStatuses();
           showToast("已从任务中移除会话");
@@ -12574,28 +12481,10 @@
         const linked = Array.isArray(task?.conversations) ? task.conversations : [];
         if (!linked.length) {
           conversations.appendChild(taskBoardElement("div", "codex-task-board-empty", "未关联会话"));
-        }
-        const summary = taskBoardConversationSummary(linked);
-        if (summary.primary && summary.extraCount === 0) {
-          conversations.appendChild(taskBoardConversationRow(task, summary.primary));
-        } else if (summary.primary) {
-          const projections = linked.map(taskBoardConversationProjection);
-          const projection = projections[0];
-          const groupStatus = taskBoardConversationGroupStatus(projections);
-          const button = taskBoardElement("button", "codex-task-board-conversation codex-task-board-conversation-summary");
-          button.type = "button";
-          button.setAttribute("aria-label", `查看 ${linked.length} 个关联会话，${groupStatus.label}`);
-          button.append(
-            taskBoardConversationIcon(),
-            taskBoardElement("span", "codex-task-board-conversation-title", projection.title),
-            taskBoardElement("span", "codex-task-board-conversation-extra", `+${summary.extraCount}`),
-            taskBoardConversationStatusNode(groupStatus),
-          );
-          button.addEventListener(
-            "click",
-            () => openTaskBoardConversationPopover(button, task, linked),
-          );
-          conversations.appendChild(button);
+        } else {
+          linked.forEach((conversation) => {
+            conversations.appendChild(taskBoardConversationRow(task, conversation));
+          });
         }
         const footer = taskBoardElement("div", "codex-task-board-card-footer");
         footer.append(addConversationButton, moveButton);
@@ -12726,7 +12615,6 @@
     taskBoardState.requestRevision += 1;
     taskBoardState.pendingReadCount = 0;
     taskBoardState.loading = false;
-    closeTaskBoardConversationPopover();
     taskBoardUnmountHost();
     taskBoardSetEntryActive(false);
     if (restoreNativeSelection) restoreTaskBoardNativeSelection();
@@ -12810,7 +12698,6 @@
     cancelTaskBoardMoveInteraction({ restoreFocus: false });
     closeTaskBoardCreateModal();
     closeTaskBoardDetachDialog({ restoreFocus: false });
-    closeTaskBoardConversationPopover();
     reconcileTaskBoardRuntime();
   }
 
@@ -12901,9 +12788,6 @@
       }),
       resetReadState: resetTaskBoardReadStateForTests,
       refresh: refreshTaskBoardData,
-      openPopoverForTest: () => openTaskBoardConversationPopover(null, null, []),
-      popoverOpen: () => !!taskBoardState.popover,
-      popoverNodeForTest: () => taskBoardState.popover,
       openDetachDialogForTest: (task, conversation, trigger = null) =>
         openTaskBoardDetachDialog(task, conversation, trigger),
       detachDialogStateForTest: () => ({
