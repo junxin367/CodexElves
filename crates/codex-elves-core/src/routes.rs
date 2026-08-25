@@ -152,6 +152,14 @@ pub async fn handle_bridge_request(
             payload.clone(),
         )
         .await),
+        task_board::TASK_BOARD_ATTACH_CONVERSATIONS_PATH => {
+            Ok(task_board::handle_attach_conversations(
+                ctx.task_board_store.clone(),
+                ctx.data.clone(),
+                payload.clone(),
+            )
+            .await)
+        }
         task_board::TASK_BOARD_MOVE_PATH => {
             Ok(task_board::handle_move(ctx.task_board_store.clone(), payload.clone()).await)
         }

@@ -11,10 +11,10 @@ use codex_elves_core::routes::{
 };
 use codex_elves_core::status::StatusStore;
 use codex_elves_core::task_board::{
-    TASK_BOARD_MAX_SAFE_INTEGER, TaskBoardCatalogProject, TaskBoardCatalogSession,
-    TaskBoardConversation, TaskBoardCreateCommand, TaskBoardDocument, TaskBoardMoveCommand,
-    TaskBoardMutationResult, TaskBoardProject, TaskBoardSessionCatalog, TaskBoardStatus,
-    TaskBoardStore, TaskBoardStoreError, TaskBoardTask,
+    TASK_BOARD_MAX_SAFE_INTEGER, TaskBoardAttachConversationsCommand, TaskBoardCatalogProject,
+    TaskBoardCatalogSession, TaskBoardConversation, TaskBoardCreateCommand, TaskBoardDocument,
+    TaskBoardMoveCommand, TaskBoardMutationResult, TaskBoardProject, TaskBoardSessionCatalog,
+    TaskBoardStatus, TaskBoardStore, TaskBoardStoreError, TaskBoardTask,
 };
 use serde_json::{Value, json};
 
@@ -169,6 +169,35 @@ async fn single_session_create_returns_exact_snapshot_and_uses_authoritative_met
             updated_at_ms: Some(1_787_544_000_001),
         }]
     );
+}
+
+#[tokio::test]
+async fn extended_windows_catalog_cwd_matches_normal_requested_project() {
+    let store = Arc::new(FakeStore::new(StoreOutcome::Success {
+        document: response_document(8),
+        changed: true,
+        idempotent: false,
+    }));
+    let data = Arc::new(CatalogData::success(catalog_with_sessions(vec![session(
+        SESSION_A,
+        "服务端会话 A",
+        r"\\?\E:\CODE\CodexElves",
+        Some(1_787_544_000_001),
+    )])));
+    let ctx = context(store.clone(), data);
+
+    let response = handle_bridge_request(
+        ctx,
+        TASK_BOARD_CREATE_PATH,
+        valid_payload(json!([SESSION_A])),
+    )
+    .await;
+
+    assert_eq!(response["status"], "ok");
+    assert_eq!(store.calls(), 1);
+    let command = store.commands().remove(0);
+    assert_eq!(command.project.cwd, PROJECT_CWD);
+    assert_eq!(command.conversations[0].cwd, PROJECT_CWD);
 }
 
 #[tokio::test]
@@ -751,6 +780,13 @@ impl TaskBoardStore for FakeStore {
             }),
             StoreOutcome::Panic(message) => panic!("{message}"),
         }
+    }
+
+    fn attach_conversations(
+        &self,
+        _command: TaskBoardAttachConversationsCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        panic!("create route must not call attach_conversations")
     }
 
     fn move_task(

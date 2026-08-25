@@ -79,6 +79,13 @@ pub struct TaskBoardCreateCommand {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskBoardAttachConversationsCommand {
+    pub task_id: String,
+    pub expected_revision: u64,
+    pub conversations: Vec<TaskBoardConversation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskBoardMoveCommand {
     pub task_id: String,
     pub to_status: TaskBoardStatus,

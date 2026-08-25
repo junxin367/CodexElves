@@ -1,6 +1,7 @@
 use super::{
-    TaskBoardCreateCommand, TaskBoardDocument, TaskBoardMoveCommand, TaskBoardMutationResult,
-    parse_task_board_document, validate_task_board_document,
+    TaskBoardAttachConversationsCommand, TaskBoardCreateCommand, TaskBoardDocument,
+    TaskBoardMoveCommand, TaskBoardMutationResult, parse_task_board_document,
+    validate_task_board_document,
 };
 use fs2::FileExt;
 use std::fs::{File, OpenOptions};
@@ -22,6 +23,10 @@ pub trait TaskBoardStore: Send + Sync {
     fn create_task(
         &self,
         command: TaskBoardCreateCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError>;
+    fn attach_conversations(
+        &self,
+        command: TaskBoardAttachConversationsCommand,
     ) -> Result<TaskBoardMutationResult, TaskBoardStoreError>;
     fn move_task(
         &self,
@@ -276,6 +281,13 @@ impl TaskBoardStore for FileTaskBoardStore {
         super::create::create_task(self, command)
     }
 
+    fn attach_conversations(
+        &self,
+        command: TaskBoardAttachConversationsCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        super::attach_conversations::attach_conversations(self, command)
+    }
+
     fn move_task(
         &self,
         command: TaskBoardMoveCommand,
@@ -371,6 +383,8 @@ pub enum TaskBoardStoreError {
     RevisionConflict { current: TaskBoardDocument },
     #[error("task id conflicts with an existing task")]
     TaskIdConflict,
+    #[error("task board conversations must belong to the task project")]
+    ProjectMismatch,
     #[error("task was not found")]
     TaskNotFound,
     #[error("task board storage {path} is unavailable: {message}", path = path.display())]

@@ -207,7 +207,7 @@ fn looks_like_windows_path(path: &str) -> bool {
 }
 
 fn normalize_windows_path(path: &str) -> Result<String, TaskBoardValidationError> {
-    let path = path.replace('/', r"\");
+    let path = strip_supported_windows_extended_path_prefix(path.replace('/', r"\"));
     if path.starts_with(r"\\") {
         return normalize_unc_path(&path);
     }
@@ -249,6 +249,27 @@ fn normalize_windows_path(path: &str) -> Result<String, TaskBoardValidationError
     } else {
         Ok(components.join(r"\"))
     }
+}
+
+fn strip_supported_windows_extended_path_prefix(path: String) -> String {
+    if !path.starts_with(r"\\?\") {
+        return path;
+    }
+
+    let extended_path = &path[4..];
+    if extended_path
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("UNC\\"))
+    {
+        return format!(r"\\{}", &extended_path[4..]);
+    }
+
+    let bytes = extended_path.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return extended_path.to_string();
+    }
+
+    path
 }
 
 fn normalize_unc_path(path: &str) -> Result<String, TaskBoardValidationError> {

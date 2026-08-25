@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "41";
+  const codexDeleteStyleVersion = "46";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -85,7 +85,7 @@
   const codexPluginRequestIdMaxEntries = 256;
   const codexFailureHistoryMaxEntries = 64;
   const codexManagerReactDiscoveryCooldownMs = 15000;
-  const taskBoardRuntimeVersion = "10";
+  const taskBoardRuntimeVersion = "15";
   const taskBoardEntryAttribute = "data-codex-task-board-entry";
   const taskBoardRootAttribute = "data-codex-task-board-root";
   const taskBoardNativeSelectionAttribute = "data-codex-task-board-native-selection-suppressed";
@@ -122,7 +122,9 @@
     snapshot: "/task-board/snapshot",
     catalog: "/task-board/session-catalog",
     createTask: "/task-board/task-create",
+    attachConversations: "/task-board/task-conversations-attach",
     moveTask: "/task-board/task-move",
+    conversationStatus: "/thread-usage-summary",
   };
   window.__codexProjectMoveRuntimeId = (window.__codexProjectMoveRuntimeId || 0) + 1;
   const codexProjectMoveRuntimeId = window.__codexProjectMoveRuntimeId;
@@ -1469,14 +1471,46 @@
         background-color: transparent !important;
         box-shadow: none !important;
       }
+      [${taskBoardRootAttribute}="true"],
+      .codex-task-board-create-modal {
+        --task-board-action-background: var(--color-background-button-secondary, color-mix(in srgb, currentColor 5%, transparent));
+        --task-board-action-background-hover: var(--color-background-button-secondary-hover, color-mix(in srgb, currentColor 8%, transparent));
+        --task-board-action-background-active: var(--color-background-button-secondary-active, color-mix(in srgb, currentColor 12%, transparent));
+        --task-board-action-foreground: var(--color-token-text-primary, var(--color-text-primary, currentColor));
+        --task-board-action-border: var(--color-border-primary-outline, color-mix(in srgb, currentColor 16%, transparent));
+      }
       [${taskBoardRootAttribute}="true"] {
-        --task-board-action-background: var(
-          --color-background-inverse,
-          var(--color-text-primary, var(--color-token-text-primary, #f4f4f5))
+        --task-board-panel-background: var(
+          --color-background-secondary,
+          var(--color-token-main-surface-secondary, #282828)
         );
-        --task-board-action-foreground: var(
-          --color-text-inverse,
-          var(--color-background-primary, var(--color-token-main-surface-primary, #18181b))
+        --task-board-card-background: var(
+          --color-background-elevated-primary,
+          var(--color-background-secondary, var(--color-token-dropdown-background, #303030))
+        );
+        --task-board-card-background-hover: var(
+          --color-background-primary-soft-active,
+          color-mix(in srgb, var(--task-board-card-background) 88%, currentColor 8%)
+        );
+        --task-board-border: var(
+          --color-border-primary-outline,
+          color-mix(in srgb, currentColor 16%, transparent)
+        );
+        --task-board-border-soft: var(
+          --color-border-primary-soft,
+          color-mix(in srgb, currentColor 9%, transparent)
+        );
+        --task-board-text-secondary: var(
+          --color-text-secondary,
+          color-mix(in srgb, currentColor 72%, transparent)
+        );
+        --task-board-text-tertiary: var(
+          --color-text-tertiary,
+          color-mix(in srgb, currentColor 54%, transparent)
+        );
+        --task-board-accent: var(
+          --color-text-accent,
+          var(--color-token-text-accent, #63aee0)
         );
         position: absolute;
         inset: 0;
@@ -1608,7 +1642,7 @@
         gap: 6px;
         flex: 0 0 auto;
         min-width: 98px;
-        border-color: color-mix(in srgb, var(--task-board-action-foreground) 12%, transparent);
+        border-color: var(--task-board-action-border);
         background: var(--task-board-action-background);
         color: var(--task-board-action-foreground);
         padding: 0 12px;
@@ -1649,13 +1683,11 @@
         outline: 2px solid #38bdf8;
         outline-offset: 2px;
       }
-      .codex-task-board-create:hover,
+      .codex-task-board-create:hover {
+        background: var(--task-board-action-background-hover);
+      }
       .codex-task-board-create:active {
-        background: color-mix(
-          in srgb,
-          var(--task-board-action-background) 90%,
-          var(--task-board-action-foreground) 10%
-        );
+        background: var(--task-board-action-background-active);
       }
       .codex-task-board-create-modal-backdrop {
         position: fixed;
@@ -1926,12 +1958,15 @@
         padding: 0 13px;
       }
       .codex-task-board-create-submit {
-        border: 1px solid rgba(255, 255, 255, .72);
-        background: #ececec;
-        color: #181818;
+        border: 1px solid var(--task-board-action-border);
+        background: var(--task-board-action-background);
+        color: var(--task-board-action-foreground);
       }
       .codex-task-board-create-submit:hover {
-        background: #fff;
+        background: var(--task-board-action-background-hover);
+      }
+      .codex-task-board-create-submit:active {
+        background: var(--task-board-action-background-active);
       }
       .codex-task-board-create-cancel {
         border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
@@ -1991,9 +2026,9 @@
         min-width: 0;
         grid-template-rows: auto minmax(180px, 1fr);
         align-self: stretch;
-        border: 1px solid color-mix(in srgb, currentColor 13%, transparent);
-        border-radius: 12px;
-        background: color-mix(in srgb, currentColor 3%, transparent);
+        border: 1px solid var(--task-board-border-soft);
+        border-radius: 10px;
+        background: color-mix(in srgb, var(--task-board-panel-background) 78%, transparent);
         overflow: hidden;
       }
       .codex-task-board-column-head {
@@ -2003,28 +2038,38 @@
         justify-content: space-between;
         gap: 8px;
         padding: 0 12px;
-        border-bottom: 1px solid color-mix(in srgb, currentColor 11%, transparent);
+        border-bottom: 1px solid var(--task-board-border-soft);
       }
       .codex-task-board-column-title {
         display: inline-flex;
+        min-width: 0;
         align-items: center;
-        gap: 7px;
-        font-weight: 650;
+        gap: 8px;
+        color: var(--task-board-text-secondary);
+        font-size: 12px;
+        font-weight: 600;
       }
       .codex-task-board-status-dot {
-        width: 8px;
-        height: 8px;
+        width: 7px;
+        height: 7px;
+        flex: 0 0 auto;
         border-radius: 999px;
         background: var(--task-board-status-color);
-        box-shadow: 0 0 0 3px color-mix(in srgb, var(--task-board-status-color) 16%, transparent);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--task-board-status-color) 14%, transparent);
       }
       .codex-task-board-count {
-        min-width: 22px;
+        display: inline-flex;
+        min-width: 21px;
+        height: 21px;
+        align-items: center;
+        justify-content: center;
+        padding: 0 6px;
         border-radius: 999px;
-        background: color-mix(in srgb, currentColor 8%, transparent);
-        color: color-mix(in srgb, currentColor 72%, transparent);
-        font-size: 11px;
-        line-height: 22px;
+        background: color-mix(in srgb, currentColor 7%, transparent);
+        color: var(--task-board-text-tertiary);
+        font-size: 10px;
+        font-variant-numeric: tabular-nums;
+        line-height: 1;
         text-align: center;
       }
       .codex-task-board-card-list {
@@ -2033,23 +2078,30 @@
         flex-direction: column;
         gap: 9px;
         padding: 9px;
+        transition: background .15s ease, box-shadow .15s ease;
       }
       .codex-task-board-card {
-        display: flex;
-        flex-direction: column;
+        display: grid;
         box-sizing: border-box;
         min-width: 0;
-        min-height: 132px;
-        border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
-        border-radius: 10px;
-        background: color-mix(in srgb, currentColor 5%, transparent);
-        padding: 12px;
+        gap: 10px;
+        border: 1px solid var(--task-board-border-soft);
+        border-radius: 9px;
+        background: var(--task-board-card-background);
+        box-shadow: 0 1px 1px rgba(0,0,0,.12);
+        padding: 11px;
+        transition: border-color .15s ease, background .15s ease, transform .15s ease;
       }
       .codex-task-board-card[draggable="true"] { cursor: grab; }
       .codex-task-board-card[data-dragging="true"] { opacity: .48; }
+      .codex-task-board-card:hover {
+        border-color: var(--task-board-border);
+        background: var(--task-board-card-background-hover);
+        transform: translateY(-1px);
+      }
       .codex-task-board-card-list[data-drop-active="true"] {
-        outline: 2px dashed color-mix(in srgb, #38bdf8 68%, transparent);
-        outline-offset: -4px;
+        background: color-mix(in srgb, var(--task-board-accent) 8%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--task-board-accent) 50%, transparent);
       }
       .codex-task-board-dropdown-menu {
         position: fixed;
@@ -2108,40 +2160,64 @@
       .codex-task-board-card-move {
         flex: 0 0 auto;
         width: 92px;
-        min-height: 30px;
-        border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
-        border-radius: 8px;
-        background: color-mix(in srgb, currentColor 5%, transparent);
+        min-height: 29px;
+        border: 1px solid var(--task-board-border);
+        border-radius: 7px;
+        background: color-mix(in srgb, var(--task-board-card-background) 82%, currentColor 4%);
         color: inherit;
-        font: 12px/1.3 system-ui, sans-serif;
+        font: 11px/1.3 system-ui, sans-serif;
+        padding: 0 8px 0 9px;
       }
       .codex-task-board-card-move:hover {
-        background: color-mix(in srgb, currentColor 10%, transparent);
+        background: var(--task-board-card-background-hover);
       }
       .codex-task-board-project {
+        min-width: 0;
         overflow: hidden;
-        color: color-mix(in srgb, currentColor 60%, transparent);
-        font-size: 11px;
+        color: var(--task-board-text-tertiary);
+        font-size: 10px;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
       .codex-task-board-card-title {
         display: -webkit-box;
-        margin: 5px 0 14px;
+        margin: 0;
         overflow: hidden;
         color: inherit;
-        font-size: 14px;
-        font-weight: 650;
-        line-height: 1.4;
+        font-size: 13px;
+        font-weight: 600;
+        line-height: 1.45;
         -webkit-box-orient: vertical;
         -webkit-line-clamp: 2;
       }
       .codex-task-board-card-footer {
         display: flex;
         align-items: center;
+        justify-content: space-between;
         gap: 10px;
-        margin-top: auto;
         min-width: 0;
+      }
+      .codex-task-board-card-add {
+        display: inline-flex;
+        min-height: 29px;
+        align-items: center;
+        justify-content: center;
+        gap: 5px;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        color: var(--task-board-text-tertiary);
+        cursor: pointer;
+        font: 10px/1.3 system-ui, sans-serif;
+        padding: 0 7px;
+      }
+      .codex-task-board-card-add:hover {
+        background: color-mix(in srgb, currentColor 8%, transparent);
+        color: inherit;
+      }
+      .codex-task-board-card-add:disabled {
+        cursor: not-allowed;
+        opacity: .52;
       }
       .codex-task-board-conversations {
         display: flex;
@@ -2156,14 +2232,14 @@
         flex: 1 1 auto;
         width: auto;
         min-width: 0;
-        min-height: 28px;
+        min-height: 0;
         border: 0;
         border-radius: 7px;
         background: transparent;
-        color: color-mix(in srgb, currentColor 74%, transparent);
+        color: var(--task-board-text-tertiary);
         cursor: pointer;
-        font: 11px/1.3 system-ui, sans-serif;
-        padding: 4px 0;
+        font: 10px/1.3 system-ui, sans-serif;
+        padding: 0;
         text-align: left;
       }
       .codex-task-board-conversation:hover {
@@ -2188,10 +2264,62 @@
         white-space: nowrap;
       }
       .codex-task-board-conversation-state {
+        display: inline-flex;
+        min-height: 18px;
+        align-items: center;
+        gap: 4px;
         flex: 0 0 auto;
         margin-left: auto;
-        color: color-mix(in srgb, currentColor 55%, transparent);
-        font-size: 10px;
+        border-radius: 999px;
+        background: color-mix(in srgb, currentColor 7%, transparent);
+        color: color-mix(in srgb, currentColor 58%, transparent);
+        font-size: 9px;
+        line-height: 1;
+        padding: 0 6px;
+        white-space: nowrap;
+      }
+      .codex-task-board-conversation-status-indicator {
+        box-sizing: border-box;
+        width: 6px;
+        height: 6px;
+        flex: 0 0 auto;
+        border-radius: 999px;
+        background: currentColor;
+      }
+      .codex-task-board-conversation-state[data-conversation-status="running"] {
+        background: color-mix(in srgb, var(--task-board-accent) 12%, transparent);
+        color: var(--task-board-accent);
+      }
+      .codex-task-board-conversation-state[data-conversation-status="running"]
+      .codex-task-board-conversation-status-indicator {
+        width: 8px;
+        height: 8px;
+        border: 1.5px solid currentColor;
+        border-right-color: transparent;
+        background: transparent;
+        animation: codex-task-board-status-spin .8s linear infinite;
+      }
+      .codex-task-board-conversation-state[data-conversation-status="completed-unread"] {
+        background: color-mix(in srgb, var(--task-board-accent) 12%, transparent);
+        color: var(--task-board-accent);
+      }
+      .codex-task-board-conversation-state[data-conversation-status="completed-unread"]
+      .codex-task-board-conversation-status-indicator {
+        box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 18%, transparent);
+      }
+      .codex-task-board-conversation-state[data-conversation-status="completed"]
+      .codex-task-board-conversation-status-indicator {
+        background: #72a987;
+      }
+      .codex-task-board-conversation-state[data-conversation-status="checking"]
+      .codex-task-board-conversation-status-indicator,
+      .codex-task-board-conversation-state[data-conversation-status="unknown"]
+      .codex-task-board-conversation-status-indicator {
+        border: 1px solid currentColor;
+        background: transparent;
+      }
+      .codex-task-board-conversation-state[data-conversation-status="unavailable"] {
+        color: #d59a91;
       }
       .codex-task-board-conversation-summary {
         justify-content: flex-start;
@@ -2207,7 +2335,7 @@
         line-height: 18px;
         padding: 0 6px;
       }
-      .codex-task-board-card-footer .codex-task-board-empty {
+      .codex-task-board-conversations .codex-task-board-empty {
         padding: 0;
         text-align: left;
       }
@@ -2231,6 +2359,9 @@
         font-size: 11px;
         font-weight: 650;
         padding: 5px 7px 3px;
+      }
+      @keyframes codex-task-board-status-spin {
+        to { transform: rotate(360deg); }
       }
       .codex-task-board-empty-column {
         display: grid;
@@ -2293,7 +2424,12 @@
         padding: 9px;
       }
       @media (prefers-reduced-motion: reduce) {
+        .codex-task-board-card,
+        .codex-task-board-card-list,
         .codex-task-board-conversation { transition: none !important; }
+        .codex-task-board-card:hover { transform: none; }
+        .codex-task-board-conversation-state[data-conversation-status="running"]
+        .codex-task-board-conversation-status-indicator { animation: none !important; }
       }
     `;
     document.documentElement.appendChild(style);
@@ -7898,6 +8034,10 @@
     catalogError: "",
     loading: false,
     pendingReadCount: 0,
+    conversationStatuses: new Map(),
+    conversationStatusRequestId: 0,
+    conversationStatusTimer: null,
+    conversationStatusRefreshPromise: null,
     query: "",
     projectCwd: "",
     nativeSelection: null,
@@ -7929,6 +8069,8 @@
   const taskBoardNativeCreatePermanentIdTimeoutMs = 15 * 1000;
   const taskBoardNativeCreateSessionRetryDelaysMs = [250, 750, 1500, 2500, 5000];
   const taskBoardNativeOpenSessionTimeoutMs = 5 * 1000;
+  const taskBoardConversationStatusRefreshIntervalMs = 2500;
+  const taskBoardConversationStatusIdleRefreshIntervalMs = 10000;
   const taskBoardNativeRuntimeId = (window.__codexElvesTaskBoardNativeRuntimeId || 0) + 1;
   window.__codexElvesTaskBoardNativeRuntimeId = taskBoardNativeRuntimeId;
 
@@ -7982,6 +8124,19 @@
     return Array.from(document.querySelectorAll("[data-app-action-sidebar-thread-id]")).find((row) => {
       return variants.has(String(row.getAttribute?.("data-app-action-sidebar-thread-id") || "").trim());
     }) || null;
+  }
+
+  function taskBoardConversationStatusKey(sessionId) {
+    return taskBoardNativeSessionId(sessionId).toLocaleLowerCase();
+  }
+
+  function taskBoardNativeThreadUnread(sessionId) {
+    const row = taskBoardNativeThreadRow(sessionId);
+    if (!row) return false;
+    return Array.from(row.querySelectorAll?.(".sr-only") || []).some((node) => {
+      const text = String(node?.textContent || "").replace(/\s+/g, " ").trim();
+      return text === "未读" || /^unread$/i.test(text);
+    });
   }
 
   function taskBoardNativeConversationLocation(sessionId, fallbackConversation = null) {
@@ -8742,21 +8897,73 @@
 
   function taskBoardConversationProjectionForCatalog(conversation, catalog, catalogError = "") {
     const sessionId = String(conversation?.sessionId || "").trim();
-    if (!sessionId) return { available: false, label: "会话不可用" };
+    if (!sessionId) {
+      return {
+        available: false,
+        label: "会话不可用",
+        status: taskBoardConversationStatus({ available: false }),
+      };
+    }
     const catalogSession = taskBoardCatalogSessionMapFor(catalog).get(sessionId);
     const fallbackTitle = String(conversation?.title || "未命名会话");
+    const runtimeStatus = taskBoardState.conversationStatuses.get(
+      taskBoardConversationStatusKey(sessionId),
+    );
+    const status = taskBoardConversationStatus({
+      available: !!catalogSession || !!catalogError || taskBoardCatalogPartiallyUnavailable(catalog),
+      usageKnown: runtimeStatus?.known === true,
+      checking: runtimeStatus?.checking === true || !runtimeStatus,
+      isRunning: runtimeStatus?.isRunning === true,
+      unread: taskBoardNativeThreadUnread(sessionId),
+    });
     if (catalogSession) {
       return {
         available: true,
         label: "打开会话",
         title: String(catalogSession.title || fallbackTitle),
+        status,
       };
     }
-    if (catalogError) return { available: true, label: "目录暂不可用", title: fallbackTitle };
-    if (taskBoardCatalogPartiallyUnavailable(catalog)) {
-      return { available: true, label: "目录部分不可用", title: fallbackTitle };
+    if (catalogError) {
+      return {
+        available: true,
+        label: "目录暂不可用",
+        title: fallbackTitle,
+        status,
+      };
     }
-    return { available: false, label: "会话不可用", title: fallbackTitle };
+    if (taskBoardCatalogPartiallyUnavailable(catalog)) {
+      return {
+        available: true,
+        label: "目录部分不可用",
+        title: fallbackTitle,
+        status,
+      };
+    }
+    return {
+      available: false,
+      label: "会话不可用",
+      title: fallbackTitle,
+      status: taskBoardConversationStatus({ available: false }),
+    };
+  }
+
+  function taskBoardConversationStatus({
+    available = true,
+    usageKnown = false,
+    checking = false,
+    isRunning = false,
+    unread = false,
+  } = {}) {
+    if (!available) return { id: "unavailable", label: "不可用" };
+    if (isRunning) return { id: "running", label: "运行中" };
+    if (!usageKnown) {
+      return checking
+        ? { id: "checking", label: "检查中" }
+        : { id: "unknown", label: "状态未知" };
+    }
+    if (unread) return { id: "completed-unread", label: "已完成 · 未读" };
+    return { id: "completed", label: "已完成" };
   }
 
   function taskBoardConversationProjection(conversation) {
@@ -8773,6 +8980,127 @@
       primary: linked[0] || null,
       extraCount: Math.max(0, linked.length - 1),
     };
+  }
+
+  function taskBoardLinkedConversations() {
+    const conversations = new Map();
+    (taskBoardState.snapshot?.tasks || []).forEach((task) => {
+      (Array.isArray(task?.conversations) ? task.conversations : []).forEach((conversation) => {
+        const key = taskBoardConversationStatusKey(conversation?.sessionId);
+        if (key && !conversations.has(key)) conversations.set(key, conversation);
+      });
+    });
+    return conversations;
+  }
+
+  function stopTaskBoardConversationStatusRefresh() {
+    if (taskBoardState.conversationStatusTimer !== null) {
+      clearTimeout(taskBoardState.conversationStatusTimer);
+      taskBoardState.conversationStatusTimer = null;
+    }
+    taskBoardState.conversationStatusRequestId += 1;
+    taskBoardState.conversationStatusRefreshPromise = null;
+  }
+
+  function scheduleTaskBoardConversationStatusRefresh(delayMs) {
+    if (!taskBoardState.active) return;
+    if (taskBoardState.conversationStatusTimer !== null) {
+      clearTimeout(taskBoardState.conversationStatusTimer);
+    }
+    taskBoardState.conversationStatusTimer = setTimeout(() => {
+      taskBoardState.conversationStatusTimer = null;
+      void refreshTaskBoardConversationStatuses();
+    }, Math.max(0, Number(delayMs || 0)));
+  }
+
+  async function refreshTaskBoardConversationStatuses({ schedule = true } = {}) {
+    if (!taskBoardState.active) return [];
+    if (taskBoardState.conversationStatusRefreshPromise) {
+      return taskBoardState.conversationStatusRefreshPromise;
+    }
+    if (taskBoardState.conversationStatusTimer !== null) {
+      clearTimeout(taskBoardState.conversationStatusTimer);
+      taskBoardState.conversationStatusTimer = null;
+    }
+    const linked = taskBoardLinkedConversations();
+    const activeKeys = new Set(linked.keys());
+    taskBoardState.conversationStatuses = new Map(
+      Array.from(taskBoardState.conversationStatuses.entries())
+        .filter(([key]) => activeKeys.has(key)),
+    );
+    if (!linked.size) {
+      renderTaskBoardCards();
+      if (schedule) {
+        scheduleTaskBoardConversationStatusRefresh(
+          taskBoardConversationStatusIdleRefreshIntervalMs,
+        );
+      }
+      return [];
+    }
+
+    linked.forEach((_, key) => {
+      const current = taskBoardState.conversationStatuses.get(key);
+      if (!current) {
+        taskBoardState.conversationStatuses.set(key, {
+          known: false,
+          checking: true,
+          isRunning: false,
+        });
+      }
+    });
+    renderTaskBoardCards();
+    const requestId = ++taskBoardState.conversationStatusRequestId;
+    const refreshPromise = Promise.allSettled(
+      Array.from(linked.entries()).map(async ([key, conversation]) => {
+        const result = await taskBoardMockOrBridgeResult("conversationStatus", {
+          session_id: String(conversation?.sessionId || "").trim(),
+          title: String(conversation?.title || "").trim(),
+        });
+        const summary = result?.status === "ok" && result?.summary && typeof result.summary === "object"
+          ? result.summary
+          : null;
+        return {
+          key,
+          known: !!summary,
+          checking: false,
+          isRunning: summary?.isRunning === true || summary?.lastTurnRunning === true,
+        };
+      }),
+    ).then((outcomes) => {
+      if (!taskBoardState.active || requestId !== taskBoardState.conversationStatusRequestId) {
+        return outcomes;
+      }
+      outcomes.forEach((outcome, index) => {
+        const key = Array.from(linked.keys())[index];
+        if (!key) return;
+        if (outcome.status === "fulfilled") {
+          taskBoardState.conversationStatuses.set(key, outcome.value);
+        } else {
+          taskBoardState.conversationStatuses.set(key, {
+            known: false,
+            checking: false,
+            isRunning: false,
+          });
+        }
+      });
+      renderTaskBoardCards();
+      if (schedule) {
+        const anyRunning = Array.from(taskBoardState.conversationStatuses.values())
+          .some((status) => status?.isRunning === true);
+        scheduleTaskBoardConversationStatusRefresh(
+          anyRunning
+            ? taskBoardConversationStatusRefreshIntervalMs
+            : taskBoardConversationStatusIdleRefreshIntervalMs,
+        );
+      }
+      return outcomes;
+    }).finally(() => {
+      if (taskBoardState.conversationStatusRefreshPromise === refreshPromise) {
+        taskBoardState.conversationStatusRefreshPromise = null;
+      }
+    });
+    taskBoardState.conversationStatusRefreshPromise = refreshPromise;
+    return refreshPromise;
   }
 
   function taskBoardTaskSearchText(task, catalog = taskBoardState.catalog) {
@@ -8891,11 +9219,16 @@
     return taskBoardProjectOptions();
   }
 
-  function taskBoardCreateSessionsForProject(cwd) {
+  function taskBoardCreateSessionsForProject(cwd, excludedSessionIds = null) {
     const normalizedCwd = taskBoardNormalizedCwd(cwd);
+    const excluded = excludedSessionIds instanceof Set
+      ? new Set(Array.from(excludedSessionIds).map(taskBoardConversationStatusKey))
+      : new Set();
     return (taskBoardState.catalog.sessions || [])
       .filter((session) => {
-        return String(session?.sessionId || "").trim() &&
+        const sessionId = String(session?.sessionId || "").trim();
+        return sessionId &&
+          !excluded.has(taskBoardConversationStatusKey(sessionId)) &&
           taskBoardNormalizedCwd(session?.cwd) === normalizedCwd;
       })
       .sort((left, right) => Number(right?.updatedAtMs || 0) - Number(left?.updatedAtMs || 0));
@@ -8927,6 +9260,7 @@
   function taskBoardSetCreateProject(cwd) {
     const modal = taskBoardState.createModal;
     if (!modal || modal.busy) return;
+    if (modal.purpose === "attach") return;
     const normalizedCwd = taskBoardNormalizedCwd(cwd);
     if (modal.projectCwd !== normalizedCwd) {
       modal.selectedSessionIds.clear();
@@ -8940,7 +9274,7 @@
 
   function openTaskBoardCreateProjectMenu(trigger) {
     const modal = taskBoardState.createModal;
-    if (!modal || modal.busy) return null;
+    if (!modal || modal.busy || modal.purpose === "attach") return null;
     const projects = taskBoardCreateModalProjects();
     return openTaskBoardDropdownMenu({
       kind: "create-project",
@@ -8958,7 +9292,7 @@
 
   function openTaskBoardCreateStatusMenu(trigger) {
     const modal = taskBoardState.createModal;
-    if (!modal || modal.busy) return null;
+    if (!modal || modal.busy || modal.purpose === "attach") return null;
     return openTaskBoardDropdownMenu({
       kind: "create-status",
       trigger,
@@ -8990,6 +9324,15 @@
   }
 
   function taskBoardCreateModalSelectedProject(modal) {
+    if (modal?.purpose === "attach" && modal.targetProject?.cwd) {
+      return {
+        cwd: taskBoardNormalizedCwd(modal.targetProject.cwd),
+        label: String(
+          modal.targetProject.label ||
+          displayProjectName(modal.targetProject.cwd),
+        ),
+      };
+    }
     return taskBoardCreateModalProjects().find((project) => project.cwd === modal.projectCwd) || null;
   }
 
@@ -9018,7 +9361,10 @@
 
   function taskBoardReconcileCreateSelectedSessions(modal = taskBoardState.createModal) {
     if (!modal) return false;
-    const available = new Set(taskBoardCreateSessionsForProject(modal.projectCwd)
+    const available = new Set(taskBoardCreateSessionsForProject(
+      modal.projectCwd,
+      modal.attachedSessionIds,
+    )
       .map((session) => String(session?.sessionId || "").trim())
       .filter(Boolean));
     const next = new Set(Array.from(modal.selectedSessionIds).filter((sessionId) => available.has(sessionId)));
@@ -9043,6 +9389,10 @@
 
   function taskBoardClearCreateIdentity(modal) {
     if (!modal) return;
+    if (modal.purpose === "attach") {
+      modal.semanticKey = "";
+      return;
+    }
     modal.taskId = "";
     modal.semanticKey = "";
   }
@@ -9083,7 +9433,10 @@
         "请先选择项目。",
       ));
     } else {
-      const sessions = taskBoardCreateSessionsForProject(modal.projectCwd);
+      const sessions = taskBoardCreateSessionsForProject(
+        modal.projectCwd,
+        modal.attachedSessionIds,
+      );
       if (!sessions.length) {
         modal.sessionField.appendChild(taskBoardElement(
           "p",
@@ -9120,14 +9473,19 @@
       });
     }
     modal.feedbackNode.textContent = modal.feedback;
+    const submitLabel = modal.purpose === "attach"
+      ? (modal.mode === "new" ? "创建并添加" : "添加会话")
+      : "创建任务";
+    const submitLabelNode = modal.submitButton.querySelector?.("span");
+    if (submitLabelNode) submitLabelNode.textContent = submitLabel;
     modal.submitButton.disabled = modal.busy;
     modal.cancelButton.disabled = modal.busy;
     modal.closeButton.disabled = modal.busy;
     modal.existingButton.disabled = modal.busy;
     modal.newButton.disabled = modal.busy || !modal.projectCwd || modal.nativeCreateAvailable === false;
-    modal.titleInput.disabled = modal.busy;
-    modal.projectSelect.disabled = modal.busy;
-    modal.statusSelect.disabled = modal.busy;
+    modal.titleInput.disabled = modal.busy || modal.purpose === "attach";
+    modal.projectSelect.disabled = modal.busy || modal.purpose === "attach";
+    modal.statusSelect.disabled = modal.busy || modal.purpose === "attach";
     modal.firstInstructionInput.disabled = modal.busy || modal.nativeCreateAvailable === false;
   }
 
@@ -9146,9 +9504,28 @@
     ).trim();
   }
 
-  function openTaskBoardCreateModal() {
+  function openTaskBoardAttachModal(taskOrId) {
+    const task = typeof taskOrId === "object" && taskOrId
+      ? taskOrId
+      : (taskBoardState.snapshot?.tasks || []).find(
+        (candidate) => String(candidate?.id || "") === String(taskOrId || ""),
+      );
+    if (!task) {
+      showToast("未找到要添加会话的任务");
+      return null;
+    }
+    return openTaskBoardCreateModal(task);
+  }
+
+  function openTaskBoardCreateModal(targetTask = null) {
     closeTaskBoardDropdownMenu({ restoreFocus: false });
     closeTaskBoardCreateModal();
+    const attaching = !!targetTask;
+    const attachedSessionIds = new Set(
+      (Array.isArray(targetTask?.conversations) ? targetTask.conversations : [])
+        .map((conversation) => String(conversation?.sessionId || "").trim())
+        .filter(Boolean),
+    );
     const previousFocus = document.activeElement;
     const backdrop = taskBoardElement("div", "codex-task-board-create-modal-backdrop");
     const dialog = taskBoardElement("section", "codex-task-board-create-modal");
@@ -9158,13 +9535,19 @@
     dialog.tabIndex = -1;
     const heading = taskBoardElement("div", "codex-task-board-create-modal-head");
     const headingCopy = taskBoardElement("div");
-    const title = taskBoardElement("h2", "", "新建任务");
+    const title = taskBoardElement("h2", "", attaching ? "添加会话" : "新建任务");
     title.id = "codex-task-board-create-modal-title";
-    const subtitle = taskBoardElement("p", "", "将 Codex 会话组织到跨项目任务看板中");
+    const subtitle = taskBoardElement(
+      "p",
+      "",
+      attaching
+        ? `为“${String(targetTask?.title || "未命名任务")}”关联已有会话，或创建一个新会话`
+        : "将 Codex 会话组织到跨项目任务看板中",
+    );
     headingCopy.append(title, subtitle);
     const closeButton = taskBoardElement("button", "codex-task-board-create-close");
     closeButton.type = "button";
-    closeButton.setAttribute("aria-label", "关闭新建任务弹窗");
+    closeButton.setAttribute("aria-label", attaching ? "关闭添加会话弹窗" : "关闭新建任务弹窗");
     closeButton.innerHTML = `<svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="m4 4 8 8M12 4l-8 8" stroke-linecap="round"></path></svg>`;
     closeButton.addEventListener("click", () => {
       if (!taskBoardState.createModal?.busy) closeTaskBoardCreateModal();
@@ -9187,6 +9570,7 @@
       }
     });
     titleLabel.appendChild(titleInput);
+    titleLabel.hidden = attaching;
     const fieldRow = taskBoardElement("div", "codex-task-board-create-field-row");
     const projectLabel = taskBoardElement("label", "codex-task-board-create-field");
     projectLabel.appendChild(taskBoardElement("span", "codex-task-board-create-field-label", "所属项目"));
@@ -9203,6 +9587,7 @@
     statusSelect.addEventListener("click", () => openTaskBoardCreateStatusMenu(statusSelect));
     statusLabel.appendChild(statusSelect);
     fieldRow.append(projectLabel, statusLabel);
+    fieldRow.hidden = attaching;
     const modeField = taskBoardElement("div", "codex-task-board-create-field");
     modeField.appendChild(taskBoardElement("span", "codex-task-board-create-field-label", "会话关联方式"));
     const modeRow = taskBoardElement("div", "codex-task-board-create-mode-row");
@@ -9252,7 +9637,9 @@
       taskBoardElement(
         "span",
         "codex-task-board-create-session-help",
-        "创建任务后将立即创建新会话，并发送这条首条指令。",
+        attaching
+          ? "将立即创建新会话、发送这条指令，并追加到当前任务。"
+          : "创建任务后将立即创建新会话，并发送这条首条指令。",
       ),
     );
     const feedbackNode = taskBoardElement("p", "codex-task-board-create-feedback");
@@ -9260,7 +9647,7 @@
     fields.append(titleLabel, fieldRow, modeField, sessionSection, firstInstructionLabel, feedbackNode);
     const footer = taskBoardElement("footer", "codex-task-board-create-modal-footer");
     const note = taskBoardElement("span", "codex-task-board-create-note");
-    note.innerHTML = `<svg aria-hidden="true" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M8 2c.3 2.2 1.4 3.3 3.6 3.6C9.4 5.9 8.3 7 8 9.2 7.7 7 6.6 5.9 4.4 5.6 6.6 5.3 7.7 4.2 8 2Z" stroke-linejoin="round"></path></svg><span>任务将保存到本地看板，关联会话限制在同一项目内。</span>`;
+    note.innerHTML = `<svg aria-hidden="true" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M8 2c.3 2.2 1.4 3.3 3.6 3.6C9.4 5.9 8.3 7 8 9.2 7.7 7 6.6 5.9 4.4 5.6 6.6 5.3 7.7 4.2 8 2Z" stroke-linejoin="round"></path></svg><span>${attaching ? "只可追加当前任务所属项目中的会话。" : "任务将保存到本地看板，关联会话限制在同一项目内。"}</span>`;
     const actions = taskBoardElement("div", "codex-task-board-create-modal-actions");
     const cancelButton = taskBoardElement("button", "codex-task-board-create-cancel", "取消");
     cancelButton.type = "button";
@@ -9290,12 +9677,23 @@
         return project.label.trim().toLocaleLowerCase("zh-Hans-CN") === currentProjectLabel;
       })
       : null;
-    const defaultProject = currentProject || nativeProjects.find(
+    const targetProject = attaching
+      ? {
+        cwd: taskBoardNormalizedCwd(targetTask?.project?.cwd),
+        label: String(
+          targetTask?.project?.label ||
+          displayProjectName(targetTask?.project?.cwd || ""),
+        ),
+      }
+      : null;
+    const defaultProject = targetProject || currentProject || nativeProjects.find(
       (project) => taskBoardCreateSessionsForProject(project.cwd).length >= 2,
     ) || nativeProjects[0] || projects.find(
       (project) => taskBoardCreateSessionsForProject(project.cwd).length >= 2,
     ) || projects[0] || null;
-    const defaultSessions = defaultProject ? taskBoardCreateSessionsForProject(defaultProject.cwd) : [];
+    const defaultSessions = defaultProject
+      ? taskBoardCreateSessionsForProject(defaultProject.cwd, attachedSessionIds)
+      : [];
     const modal = {
       backdrop,
       dialog,
@@ -9313,15 +9711,18 @@
       feedbackNode,
       cancelButton,
       submitButton,
+      purpose: attaching ? "attach" : "create",
+      targetProject,
+      attachedSessionIds,
       mode: "existing",
-      title: "",
+      title: attaching ? String(targetTask?.title || "未命名任务") : "",
       projectCwd: defaultProject?.cwd || "",
       initialStatus: "new",
       selectedSessionIds: new Set(defaultSessions[0]?.sessionId ? [defaultSessions[0].sessionId] : []),
       firstInstruction: "",
       nativeCreateAvailable: false,
       nativeProbeId: 0,
-      taskId: "",
+      taskId: attaching ? String(targetTask?.id || "") : "",
       semanticKey: "",
       feedback: "",
       busy: false,
@@ -9332,7 +9733,9 @@
     document.addEventListener("keydown", taskBoardState.createModalKeydownHandler, true);
     renderTaskBoardCreateModal();
     requestAnimationFrame(() => {
-      if (taskBoardState.createModal === modal) modal.titleInput.focus?.();
+      if (taskBoardState.createModal === modal) {
+        (attaching ? modal.existingButton : modal.titleInput).focus?.();
+      }
     });
     void taskBoardRefreshNativeCreateAvailability(modal);
     return modal;
@@ -9351,6 +9754,7 @@
     if (code === "invalid_input") return "任务信息无效，请检查标题、项目和关联会话";
     if (code === "project_mismatch") return "所选会话不属于当前项目，请重新选择";
     if (code === "task_id_conflict") return "任务 ID 冲突，请重试";
+    if (code === "task_not_found") return "任务不存在或已被移除";
     if (code === "session_not_found") return "关联会话不存在，已刷新会话目录";
     if (code === "revision_conflict") return "任务修订已变化，请检查后重试";
     if (code === "bridge_unavailable") return "任务看板桥接暂不可用，请稍后重试";
@@ -9378,6 +9782,14 @@
       expectedRevision,
       title,
       project: { cwd: project.cwd, label: project.label },
+      sessionIds: Array.from(sessionIds),
+    };
+  }
+
+  function taskBoardAttachPayload(taskId, expectedRevision, sessionIds) {
+    return {
+      taskId,
+      expectedRevision,
       sessionIds: Array.from(sessionIds),
     };
   }
@@ -9410,6 +9822,9 @@
 
   function taskBoardNativeCreateRecoveryRecord(value) {
     if (!value || typeof value !== "object") return null;
+    const kind = value.kind === "attach-conversation"
+      ? "attach-conversation"
+      : "create-task";
     const taskId = String(value.taskId || "").trim();
     const title = String(value.title || "").trim();
     const projectCwd = taskBoardNormalizedCwd(value.project?.cwd);
@@ -9423,6 +9838,7 @@
       return null;
     }
     return {
+      kind,
       taskId,
       title,
       project: { cwd: projectCwd, label: projectLabel || displayProjectName(projectCwd) },
@@ -9448,6 +9864,7 @@
 
   function taskBoardSaveNativeCreateRecovery(operation) {
     const record = taskBoardNativeCreateRecoveryRecord({
+      kind: operation?.kind,
       taskId: operation?.taskId,
       title: operation?.title,
       project: operation?.project,
@@ -9480,8 +9897,10 @@
     expectedRevision,
     sessionId = "",
     initialStatus = "new",
+    kind = "create-task",
   ) {
     const operation = {
+      kind: kind === "attach-conversation" ? "attach-conversation" : "create-task",
       taskId,
       title,
       project: { cwd: taskBoardNormalizedCwd(project?.cwd), label: String(project?.label || "") },
@@ -9511,16 +9930,26 @@
     let revisionRetries = 0;
     let sessionRetryIndex = 0;
     while (taskBoardNativeCreateOperationCurrent(operation)) {
-      const payload = taskBoardCreatePayload(
-        operation.taskId,
-        expectedRevision,
-        operation.title,
-        operation.project,
-        [operation.sessionId],
-      );
+      const attaching = operation.kind === "attach-conversation";
+      const payload = attaching
+        ? taskBoardAttachPayload(
+          operation.taskId,
+          expectedRevision,
+          [operation.sessionId],
+        )
+        : taskBoardCreatePayload(
+          operation.taskId,
+          expectedRevision,
+          operation.title,
+          operation.project,
+          [operation.sessionId],
+        );
       let result;
       try {
-        result = await taskBoardMockOrBridgeResult("createTask", payload);
+        result = await taskBoardMockOrBridgeResult(
+          attaching ? "attachConversations" : "createTask",
+          payload,
+        );
       } catch (error) {
         result = { status: "failed", code: "bridge_unavailable", message: taskBoardMessageFromResult(error, "") };
       }
@@ -9535,6 +9964,7 @@
         taskBoardClearNativeCreateRecovery();
         taskBoardState.nativeCreateOperation = null;
         renderTaskBoard();
+        void refreshTaskBoardConversationStatuses();
         return { status: "ok", snapshot };
       }
       if ((result?.status === "conflict" || result?.code === "revision_conflict") && revisionRetries < 1) {
@@ -9573,6 +10003,7 @@
       taskBoardState.snapshot.revision,
       "",
       modal.initialStatus,
+      "create-task",
     );
     let started;
     try {
@@ -9607,6 +10038,57 @@
     }
   }
 
+  async function taskBoardStartNativeConversationAttach(modal, requestId, project) {
+    const operation = taskBoardCreateNativeOperation(
+      modal.taskId,
+      modal.title,
+      project,
+      taskBoardState.snapshot.revision,
+      "",
+      "new",
+      "attach-conversation",
+    );
+    let started;
+    try {
+      started = await Promise.resolve(
+        taskBoardNativeAdapter.startConversation(project, modal.firstInstruction),
+      );
+    } catch (error) {
+      started = {
+        status: "failed",
+        code: "bridge_unavailable",
+        message: taskBoardMessageFromResult(error, ""),
+      };
+    }
+    if (!taskBoardNativeCreateOperationCurrent(operation)) return;
+    if (
+      started?.status !== "ok" ||
+      !String(started?.sessionId || "").trim() ||
+      isTemporaryThreadId(String(started?.sessionId || ""))
+    ) {
+      taskBoardState.nativeCreateOperation = null;
+      if (taskBoardCreateRequestIsCurrent(modal, requestId)) {
+        taskBoardSetCreateModalFeedback(modal, taskBoardNativeCreateFailureMessage(started));
+      } else {
+        showToast(taskBoardNativeCreateFailureMessage(started));
+      }
+      return;
+    }
+    operation.sessionId = String(started.sessionId).trim();
+    operation.createdAtMs = taskBoardNativeNow();
+    taskBoardSaveNativeCreateRecovery(operation);
+    const result = await taskBoardCreateNativeTask(operation);
+    if (result?.status === "ok") {
+      if (taskBoardCreateRequestIsCurrent(modal, requestId)) closeTaskBoardCreateModal();
+      return;
+    }
+    if (taskBoardCreateRequestIsCurrent(modal, requestId)) {
+      taskBoardSetCreateModalFeedback(modal, taskBoardNativeCreateFailureMessage(result));
+    } else {
+      showToast("会话已创建，但尚未添加到任务；下次打开任务看板时将自动重试");
+    }
+  }
+
   async function taskBoardRetryNativeCreateRecovery() {
     if (taskBoardState.nativeCreateRecoveryAttempted || taskBoardState.nativeCreateOperation) return;
     taskBoardState.nativeCreateRecoveryAttempted = true;
@@ -9619,13 +10101,22 @@
       taskBoardState.snapshot.revision,
       record.sessionId,
       record.initialStatus,
+      record.kind,
     );
     operation.createdAtMs = record.createdAtMs;
     const result = await taskBoardCreateNativeTask(operation);
     if (result?.status === "ok") {
-      await taskBoardApplyInitialStatus(operation.taskId, operation.initialStatus);
+      if (operation.kind === "create-task") {
+        await taskBoardApplyInitialStatus(operation.taskId, operation.initialStatus);
+      }
+    } else if (result?.code === "task_not_found") {
+      taskBoardClearNativeCreateRecovery();
     } else {
-      showToast("会话已创建，但任务尚未保存，请稍后重试");
+      showToast(
+        operation.kind === "attach-conversation"
+          ? "会话已创建，但尚未添加到任务，请稍后重试"
+          : "会话已创建，但任务尚未保存，请稍后重试",
+      );
     }
   }
 
@@ -9650,13 +10141,64 @@
     return true;
   }
 
+  async function taskBoardAttachSelectedConversations(modal, requestId, sessionIds) {
+    let expectedRevision = taskBoardState.snapshot.revision;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const payload = taskBoardAttachPayload(modal.taskId, expectedRevision, sessionIds);
+      let result;
+      try {
+        result = await taskBoardMockOrBridgeResult("attachConversations", payload);
+      } catch (error) {
+        result = {
+          status: "failed",
+          code: "bridge_unavailable",
+          message: taskBoardMessageFromResult(error, ""),
+        };
+      }
+      if (!taskBoardCreateRequestIsCurrent(modal, requestId)) return;
+      result = taskBoardCreateNormalizedFailure(result);
+      const snapshot = taskBoardSnapshotResult(result);
+      if (result?.status === "ok" && snapshot) {
+        taskBoardState.snapshot = snapshot;
+        taskBoardState.snapshotError = "";
+        closeTaskBoardCreateModal();
+        renderTaskBoard();
+        void refreshTaskBoardConversationStatuses();
+        return;
+      }
+      if (result?.status === "conflict" || result?.code === "revision_conflict") {
+        const conflictSnapshot = taskBoardConflictSnapshotResult(result);
+        if (conflictSnapshot) {
+          taskBoardState.snapshot = conflictSnapshot;
+          taskBoardState.snapshotError = "";
+          renderTaskBoard();
+        }
+        if (attempt === 0 && conflictSnapshot) {
+          expectedRevision = conflictSnapshot.revision;
+          continue;
+        }
+        taskBoardSetCreateModalFeedback(modal, taskBoardCreateFailureMessage(result));
+        return;
+      }
+      if (result?.code === "session_not_found") {
+        if (!await taskBoardRefreshCatalogForCreate(modal, requestId)) return;
+        if (!taskBoardCreateRequestIsCurrent(modal, requestId)) return;
+      }
+      taskBoardSetCreateModalFeedback(modal, taskBoardCreateFailureMessage(
+        result,
+        "添加会话失败，请稍后重试",
+      ));
+      return;
+    }
+  }
+
   async function submitTaskBoardCreate() {
     const modal = taskBoardState.createModal;
     if (!modal || modal.busy) return;
     const title = String(modal.title || "").trim();
     const titleLength = Array.from(title).length;
     const project = taskBoardCreateModalSelectedProject(modal);
-    if (!title || titleLength > 120) {
+    if (modal.purpose !== "attach" && (!title || titleLength > 120)) {
       taskBoardSetCreateModalFeedback(modal, "任务标题必须为 1 到 120 个字符");
       return;
     }
@@ -9693,7 +10235,15 @@
           taskBoardSetCreateModalFeedback(modal, "请输入首条指令");
           return;
         }
-        await taskBoardStartNativeTaskCreate(modal, requestId, title, project);
+        if (modal.purpose === "attach") {
+          await taskBoardStartNativeConversationAttach(modal, requestId, project);
+        } else {
+          await taskBoardStartNativeTaskCreate(modal, requestId, title, project);
+        }
+        return;
+      }
+      if (modal.purpose === "attach") {
+        await taskBoardAttachSelectedConversations(modal, requestId, sessionIds);
         return;
       }
       const semanticKey = taskBoardCreateSemanticKey(title, project, sessionIds);
@@ -9760,21 +10310,56 @@
     return icon;
   }
 
+  function taskBoardConversationStatusNode(status) {
+    const normalized = status && typeof status === "object"
+      ? status
+      : { id: "unknown", label: "状态未知" };
+    const node = taskBoardElement(
+      "span",
+      "codex-task-board-conversation-state",
+    );
+    node.setAttribute("data-conversation-status", String(normalized.id || "unknown"));
+    const indicator = taskBoardElement(
+      "span",
+      "codex-task-board-conversation-status-indicator",
+    );
+    indicator.setAttribute("aria-hidden", "true");
+    node.append(indicator, document.createTextNode(String(normalized.label || "状态未知")));
+    return node;
+  }
+
+  function taskBoardConversationGroupStatus(conversations) {
+    const statuses = (Array.isArray(conversations) ? conversations : [])
+      .map((conversation) => taskBoardConversationProjection(conversation).status);
+    const count = (id) => statuses.filter((status) => status?.id === id).length;
+    const running = count("running");
+    if (running) return { id: "running", label: `${running} 运行中` };
+    const unread = count("completed-unread");
+    if (unread) return { id: "completed-unread", label: `${unread} 未读` };
+    if (count("checking")) return { id: "checking", label: "检查中" };
+    if (count("unknown")) return { id: "unknown", label: "状态未知" };
+    if (count("unavailable")) return { id: "unavailable", label: "部分不可用" };
+    return { id: "completed", label: "已完成" };
+  }
+
   function taskBoardConversationButton(
     conversation,
     className = "codex-task-board-conversation",
-    { showState = false } = {},
+    { showState = true } = {},
   ) {
     const projection = taskBoardConversationProjection(conversation);
     const button = taskBoardElement("button", className);
     button.type = "button";
     button.disabled = !projection.available;
-    button.setAttribute("aria-label", `${projection.title}，${projection.label}`);
+    button.setAttribute(
+      "aria-label",
+      `${projection.title}，${projection.status?.label || "状态未知"}，${projection.label}`,
+    );
     const title = taskBoardElement("span", "codex-task-board-conversation-title", projection.title);
     button.append(taskBoardConversationIcon(), title);
-    if (showState || !projection.available) {
-      button.appendChild(taskBoardElement("span", "codex-task-board-conversation-state", projection.label));
-    }
+    if (showState || !projection.available) button.appendChild(
+      taskBoardConversationStatusNode(projection.status),
+    );
     if (projection.available) {
       button.addEventListener("click", () => void openTaskBoardConversation(conversation));
     }
@@ -10236,6 +10821,21 @@
         );
         moveButton.disabled = taskBoardState.moveBusy;
         moveButton.addEventListener("click", () => openTaskBoardStatusMenu(moveButton, String(task?.id || "")));
+        const addConversationButton = taskBoardElement(
+          "button",
+          "codex-task-board-card-add",
+        );
+        addConversationButton.type = "button";
+        addConversationButton.disabled = taskBoardState.moveBusy;
+        addConversationButton.setAttribute(
+          "aria-label",
+          `为任务 ${String(task?.title || "未命名任务")} 添加会话`,
+        );
+        addConversationButton.innerHTML = `<svg aria-hidden="true" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.35"><path d="M8 3v10M3 8h10" stroke-linecap="round"></path></svg><span>添加会话</span>`;
+        addConversationButton.addEventListener(
+          "click",
+          () => openTaskBoardAttachModal(task),
+        );
         const conversations = taskBoardElement("div", "codex-task-board-conversations");
         const linked = Array.isArray(task?.conversations) ? task.conversations : [];
         if (!linked.length) {
@@ -10246,20 +10846,22 @@
           conversations.appendChild(taskBoardConversationButton(summary.primary));
         } else if (summary.primary) {
           const projection = taskBoardConversationProjection(summary.primary);
+          const groupStatus = taskBoardConversationGroupStatus(linked);
           const button = taskBoardElement("button", "codex-task-board-conversation codex-task-board-conversation-summary");
           button.type = "button";
-          button.setAttribute("aria-label", `查看 ${linked.length} 个关联会话`);
+          button.setAttribute("aria-label", `查看 ${linked.length} 个关联会话，${groupStatus.label}`);
           button.append(
             taskBoardConversationIcon(),
             taskBoardElement("span", "codex-task-board-conversation-title", projection.title),
             taskBoardElement("span", "codex-task-board-conversation-extra", `+${summary.extraCount}`),
+            taskBoardConversationStatusNode(groupStatus),
           );
           button.addEventListener("click", () => openTaskBoardConversationPopover(button, linked));
           conversations.appendChild(button);
         }
         const footer = taskBoardElement("div", "codex-task-board-card-footer");
-        footer.append(conversations, moveButton);
-        card.appendChild(footer);
+        footer.append(addConversationButton, moveButton);
+        card.append(conversations, footer);
         list.appendChild(card);
       });
       column.append(header, list);
@@ -10328,7 +10930,10 @@
       (value) => taskBoardApplyReadOutcome(requestRevision, kind, { status: "fulfilled", value }),
       (reason) => taskBoardApplyReadOutcome(requestRevision, kind, { status: "rejected", reason }),
     );
-    return Promise.all([read("snapshot"), read("catalog")]);
+    return Promise.all([read("snapshot"), read("catalog")]).then((outcomes) => {
+      void refreshTaskBoardConversationStatuses();
+      return outcomes;
+    });
   }
 
   function deactivateTaskBoard({
@@ -10337,6 +10942,7 @@
   } = {}) {
     cancelTaskBoardMoveInteraction({ restoreFocus: false });
     closeTaskBoardCreateModal();
+    stopTaskBoardConversationStatusRefresh();
     if (!taskBoardState.active && !taskBoardState.root) return;
     taskBoardState.active = false;
     taskBoardState.requestRevision += 1;
@@ -10433,6 +11039,7 @@
   function resetTaskBoardReadStateForTests() {
     cancelTaskBoardMoveInteraction({ restoreFocus: false });
     closeTaskBoardCreateModal({ restoreFocus: false });
+    stopTaskBoardConversationStatusRefresh();
     taskBoardState.active = true;
     taskBoardState.root = null;
     taskBoardState.host = null;
@@ -10443,12 +11050,14 @@
     taskBoardState.catalogError = "";
     taskBoardState.loading = false;
     taskBoardState.pendingReadCount = 0;
+    taskBoardState.conversationStatuses = new Map();
   }
 
   function resetTaskBoardCreateStateForTests(options = {}) {
     taskBoardCancelNativeCreateOperation();
     cancelTaskBoardMoveInteraction({ restoreFocus: false });
     closeTaskBoardCreateModal({ restoreFocus: false });
+    stopTaskBoardConversationStatusRefresh();
     taskBoardState.active = true;
     taskBoardState.root = null;
     taskBoardState.host = null;
@@ -10459,11 +11068,13 @@
     taskBoardState.catalogError = String(options.catalogError || "");
     taskBoardState.loading = false;
     taskBoardState.pendingReadCount = 0;
+    taskBoardState.conversationStatuses = new Map();
     taskBoardState.nativeCreateRecoveryAttempted = false;
   }
 
   function resetTaskBoardMoveStateForTests(snapshot) {
     cancelTaskBoardMoveInteraction({ restoreFocus: false });
+    stopTaskBoardConversationStatusRefresh();
     taskBoardState.active = true;
     taskBoardState.root = null;
     taskBoardState.host = null;
@@ -10472,6 +11083,7 @@
     taskBoardState.snapshotError = "";
     taskBoardState.catalogError = "";
     taskBoardState.moveFeedback = "";
+    taskBoardState.conversationStatuses = new Map();
   }
 
   if (window.__CODEX_ELVES_TEST_TASK_BOARD__ === true) {
@@ -10489,6 +11101,9 @@
       pluginEntryButtonForTest: pluginEntryButton,
       conversationProjection: (conversation, catalog) =>
         taskBoardConversationProjectionForCatalog(conversation, catalog),
+      conversationStatusForTest: taskBoardConversationStatus,
+      refreshConversationStatusesForTest: (options = {}) =>
+        refreshTaskBoardConversationStatuses({ schedule: false, ...options }),
       taskMatchesQuery: (task, catalog, query) => taskBoardTaskMatchesQuery(task, query, catalog),
       resetReadState: resetTaskBoardReadStateForTests,
       refresh: refreshTaskBoardData,
@@ -10532,6 +11147,7 @@
         menuOpen: !!taskBoardState.statusMenu,
       }),
       openCreateModalForTest: openTaskBoardCreateModal,
+      openAttachModalForTest: openTaskBoardAttachModal,
       openCreateDropdownForTest: (kind) => {
         const modal = taskBoardState.createModal || openTaskBoardCreateModal();
         if (kind === "project") return openTaskBoardCreateProjectMenu(modal.projectSelect);
@@ -10665,13 +11281,19 @@
         const modal = taskBoardState.createModal;
         return {
           open: !!modal,
+          purpose: modal?.purpose || "",
           busy: !!modal?.busy,
           mode: modal?.mode || "",
           title: modal?.title || "",
           projectCwd: modal?.projectCwd || "",
           initialStatus: modal?.initialStatus || "new",
           selectedSessionIds: Array.from(modal?.selectedSessionIds || []),
-          availableSessionIds: modal ? taskBoardCreateSessionsForProject(modal.projectCwd).map((session) => session.sessionId) : [],
+          availableSessionIds: modal
+            ? taskBoardCreateSessionsForProject(
+              modal.projectCwd,
+              modal.attachedSessionIds,
+            ).map((session) => session.sessionId)
+            : [],
           projectOptionCwds: modal ? taskBoardCreateModalProjects().map((project) => project.cwd) : [],
           feedback: modal?.feedback || "",
         };

@@ -80,6 +80,18 @@ fn cwd_normalization_is_lexical_and_uses_platform_path_identity() {
         "E:\\code\\codexelves"
     );
     assert_eq!(
+        normalize_task_project_cwd(r"\\?\E:\Code\CodexElves").unwrap(),
+        "E:\\code\\codexelves"
+    );
+    assert_eq!(
+        normalize_task_project_cwd(r"\\?\UNC\SERVER\Share\Team").unwrap(),
+        r"\\server\share\team"
+    );
+    assert_eq!(
+        normalize_task_project_cwd("//?/e:/Code/CodexElves/").unwrap(),
+        "E:\\code\\codexelves"
+    );
+    assert_eq!(
         normalize_task_project_cwd(r"\\SERVER\Share\Team\\").unwrap(),
         r"\\server\share\team"
     );

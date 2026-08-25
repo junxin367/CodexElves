@@ -6,9 +6,9 @@ use codex_elves_core::routes::task_board::TASK_BOARD_MOVE_PATH;
 use codex_elves_core::routes::{BridgeContext, CoreRuntimeService, handle_bridge_request};
 use codex_elves_core::status::StatusStore;
 use codex_elves_core::task_board::{
-    TaskBoardConversation, TaskBoardCreateCommand, TaskBoardDocument, TaskBoardMoveCommand,
-    TaskBoardMutationResult, TaskBoardProject, TaskBoardStatus, TaskBoardStore,
-    TaskBoardStoreError, TaskBoardTask,
+    TaskBoardAttachConversationsCommand, TaskBoardConversation, TaskBoardCreateCommand,
+    TaskBoardDocument, TaskBoardMoveCommand, TaskBoardMutationResult, TaskBoardProject,
+    TaskBoardStatus, TaskBoardStore, TaskBoardStoreError, TaskBoardTask,
 };
 use serde_json::{Value, json};
 
@@ -484,6 +484,13 @@ impl TaskBoardStore for FakeMoveStore {
         _command: TaskBoardCreateCommand,
     ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
         panic!("T-008 move route must not call create_task")
+    }
+
+    fn attach_conversations(
+        &self,
+        _command: TaskBoardAttachConversationsCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        panic!("T-008 move route must not call attach_conversations")
     }
 
     fn move_task(

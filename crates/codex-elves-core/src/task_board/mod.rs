@@ -1,3 +1,4 @@
+mod attach_conversations;
 mod create;
 mod model;
 mod move_task;
@@ -5,10 +6,11 @@ mod store;
 mod validation;
 
 pub use model::{
-    TASK_BOARD_SCHEMA_VERSION, TaskBoardCatalogProject, TaskBoardCatalogSession,
-    TaskBoardCatalogWarning, TaskBoardCatalogWarningCode, TaskBoardConversation,
-    TaskBoardCreateCommand, TaskBoardDocument, TaskBoardMoveCommand, TaskBoardMutationResult,
-    TaskBoardProject, TaskBoardSessionCatalog, TaskBoardStatus, TaskBoardTask,
+    TASK_BOARD_SCHEMA_VERSION, TaskBoardAttachConversationsCommand, TaskBoardCatalogProject,
+    TaskBoardCatalogSession, TaskBoardCatalogWarning, TaskBoardCatalogWarningCode,
+    TaskBoardConversation, TaskBoardCreateCommand, TaskBoardDocument, TaskBoardMoveCommand,
+    TaskBoardMutationResult, TaskBoardProject, TaskBoardSessionCatalog, TaskBoardStatus,
+    TaskBoardTask,
 };
 pub use store::{FileTaskBoardStore, TaskBoardStore, TaskBoardStoreError};
 pub use validation::{

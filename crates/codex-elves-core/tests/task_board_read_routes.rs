@@ -6,8 +6,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use codex_elves_core::models::{DeleteResult, ExportResult, SessionRef};
 use codex_elves_core::routes::task_board::{
-    TASK_BOARD_CREATE_PATH, TASK_BOARD_MOVE_PATH, TASK_BOARD_SESSION_CATALOG_PATH,
-    TASK_BOARD_SNAPSHOT_PATH,
+    TASK_BOARD_ATTACH_CONVERSATIONS_PATH, TASK_BOARD_CREATE_PATH, TASK_BOARD_MOVE_PATH,
+    TASK_BOARD_SESSION_CATALOG_PATH, TASK_BOARD_SNAPSHOT_PATH,
 };
 use codex_elves_core::routes::{
     BridgeContext, BridgeDataService, CoreRuntimeService, CoreSettingsService,
@@ -15,10 +15,11 @@ use codex_elves_core::routes::{
 };
 use codex_elves_core::status::StatusStore;
 use codex_elves_core::task_board::{
-    FileTaskBoardStore, TaskBoardCatalogProject, TaskBoardCatalogSession, TaskBoardCatalogWarning,
-    TaskBoardCatalogWarningCode, TaskBoardConversation, TaskBoardCreateCommand, TaskBoardDocument,
-    TaskBoardMoveCommand, TaskBoardMutationResult, TaskBoardProject, TaskBoardSessionCatalog,
-    TaskBoardStatus, TaskBoardStore, TaskBoardStoreError, TaskBoardTask,
+    FileTaskBoardStore, TaskBoardAttachConversationsCommand, TaskBoardCatalogProject,
+    TaskBoardCatalogSession, TaskBoardCatalogWarning, TaskBoardCatalogWarningCode,
+    TaskBoardConversation, TaskBoardCreateCommand, TaskBoardDocument, TaskBoardMoveCommand,
+    TaskBoardMutationResult, TaskBoardProject, TaskBoardSessionCatalog, TaskBoardStatus,
+    TaskBoardStore, TaskBoardStoreError, TaskBoardTask,
 };
 use fs2::FileExt;
 use serde_json::{Value, json};
@@ -77,13 +78,17 @@ fn context(store: Arc<dyn TaskBoardStore>, data: Arc<dyn BridgeDataService>) -> 
 }
 
 #[tokio::test]
-async fn four_task_board_route_constants_dispatch_through_the_existing_bridge_match() {
+async fn five_task_board_route_constants_dispatch_through_the_existing_bridge_match() {
     assert_eq!(TASK_BOARD_SNAPSHOT_PATH, "/task-board/snapshot");
     assert_eq!(
         TASK_BOARD_SESSION_CATALOG_PATH,
         "/task-board/session-catalog"
     );
     assert_eq!(TASK_BOARD_CREATE_PATH, "/task-board/task-create");
+    assert_eq!(
+        TASK_BOARD_ATTACH_CONVERSATIONS_PATH,
+        "/task-board/task-conversations-attach"
+    );
     assert_eq!(TASK_BOARD_MOVE_PATH, "/task-board/task-move");
 
     let ctx = context(
@@ -99,7 +104,11 @@ async fn four_task_board_route_constants_dispatch_through_the_existing_bridge_ma
         handle_bridge_request(ctx.clone(), TASK_BOARD_SESSION_CATALOG_PATH, json!({})).await["status"],
         "ok"
     );
-    for path in [TASK_BOARD_CREATE_PATH, TASK_BOARD_MOVE_PATH] {
+    for path in [
+        TASK_BOARD_CREATE_PATH,
+        TASK_BOARD_ATTACH_CONVERSATIONS_PATH,
+        TASK_BOARD_MOVE_PATH,
+    ] {
         let response = handle_bridge_request(ctx.clone(), path, json!({})).await;
         assert_eq!(response["status"], "failed");
         assert_eq!(response["code"], "invalid_input");
@@ -538,6 +547,13 @@ impl TaskBoardStore for FakeStore {
     fn create_task(
         &self,
         _command: TaskBoardCreateCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        panic!("T-006 placeholder must not call the store")
+    }
+
+    fn attach_conversations(
+        &self,
+        _command: TaskBoardAttachConversationsCommand,
     ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
         panic!("T-006 placeholder must not call the store")
     }

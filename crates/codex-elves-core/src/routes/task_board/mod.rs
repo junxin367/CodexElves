@@ -8,6 +8,7 @@ use crate::task_board::{TaskBoardDocument, TaskBoardStore, TaskBoardStoreError};
 
 use super::BridgeDataService;
 
+mod attach_conversations;
 mod catalog;
 mod create;
 mod move_task;
@@ -16,6 +17,7 @@ mod snapshot;
 pub const TASK_BOARD_SNAPSHOT_PATH: &str = "/task-board/snapshot";
 pub const TASK_BOARD_SESSION_CATALOG_PATH: &str = "/task-board/session-catalog";
 pub const TASK_BOARD_CREATE_PATH: &str = "/task-board/task-create";
+pub const TASK_BOARD_ATTACH_CONVERSATIONS_PATH: &str = "/task-board/task-conversations-attach";
 pub const TASK_BOARD_MOVE_PATH: &str = "/task-board/task-move";
 
 #[derive(Deserialize)]
@@ -36,6 +38,14 @@ pub(super) async fn handle_create(
     payload: Value,
 ) -> Value {
     create::handle(store, data, payload).await
+}
+
+pub(super) async fn handle_attach_conversations(
+    store: Arc<dyn TaskBoardStore>,
+    data: Arc<dyn BridgeDataService>,
+    payload: Value,
+) -> Value {
+    attach_conversations::handle(store, data, payload).await
 }
 
 pub(super) async fn handle_move(store: Arc<dyn TaskBoardStore>, payload: Value) -> Value {
@@ -83,6 +93,10 @@ fn store_error(error: TaskBoardStoreError) -> Value {
         TaskBoardStoreError::TaskIdConflict => failed(
             "task_id_conflict",
             "Task id conflicts with an existing task",
+        ),
+        TaskBoardStoreError::ProjectMismatch => failed(
+            "project_mismatch",
+            "Task board conversations must belong to the task project",
         ),
         TaskBoardStoreError::TaskNotFound => failed("task_not_found", "Task was not found"),
         TaskBoardStoreError::Unavailable { .. } => task_board_unavailable(),

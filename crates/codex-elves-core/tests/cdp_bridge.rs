@@ -239,6 +239,24 @@ fn renderer_task_board_view_projects_read_only_bridge_snapshots_responsively() {
     assert!(script.contains("const gap = 6"));
     assert!(script.contains("border-radius: 10px"));
     assert!(script.contains("--task-board-action-background"));
+    assert!(
+        script.contains("--task-board-action-background: var(--color-background-button-secondary,")
+    );
+    assert!(script.contains("--task-board-action-foreground: var(--color-token-text-primary,"));
+    assert!(script.contains(
+        "--task-board-action-background-hover: var(--color-background-button-secondary-hover,"
+    ));
+    assert!(script.contains(
+        "--task-board-action-background-active: var(--color-background-button-secondary-active,"
+    ));
+    assert!(!script.contains("--task-board-action-background: var(--color-token-primary,"));
+    assert_eq!(
+        script
+            .matches("background: var(--task-board-action-background);")
+            .count(),
+        2
+    );
+    assert!(!script.contains("background: #ececec;"));
     assert!(script.contains("menu.setAttribute(\"role\", \"listbox\")"));
     assert!(script.contains("grid-template-rows: auto minmax(180px, 1fr)"));
     assert!(script.contains("min-height: 180px"));
@@ -306,6 +324,53 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
         runtime_refresh
             .contains("closeTaskBoardCreateModal();\n    closeTaskBoardConversationPopover();\n    reconcileTaskBoardRuntime();")
     );
+}
+
+#[test]
+fn renderer_task_board_preserves_debug_spike_column_and_card_surface_hierarchy() {
+    let script = assets::renderer_features_script();
+    let board_styles = script
+        .split(".codex-task-board-columns {")
+        .nth(1)
+        .and_then(|section| section.split(".codex-task-board-dropdown-menu {").next())
+        .expect("task board column and card styles should be present");
+    let conversation_styles = script
+        .split(".codex-task-board-conversation {")
+        .nth(1)
+        .and_then(|section| {
+            section
+                .split(".codex-task-board-conversation:hover {")
+                .next()
+        })
+        .expect("task board conversation styles should be present");
+
+    assert!(board_styles.contains("border-radius: 10px"));
+    assert!(board_styles.contains(
+        "background: color-mix(in srgb, var(--task-board-panel-background) 78%, transparent);"
+    ));
+    assert!(board_styles.contains(".codex-task-board-card {\n        display: grid;"));
+    assert!(board_styles.contains("gap: 10px;"));
+    assert!(board_styles.contains("border-radius: 9px"));
+    assert!(board_styles.contains("background: var(--task-board-card-background);"));
+    assert!(board_styles.contains(".codex-task-board-card:hover {"));
+    assert!(conversation_styles.contains("min-height: 0;"));
+    assert!(conversation_styles.contains("padding: 0;"));
+}
+
+#[test]
+fn renderer_task_board_exposes_conversation_statuses_and_card_level_attach_flow() {
+    let script = assets::renderer_features_script();
+
+    assert!(script.contains("\"/task-board/task-conversations-attach\""));
+    assert!(script.contains("\"/thread-usage-summary\""));
+    assert!(script.contains("function taskBoardConversationStatus("));
+    assert!(script.contains("function refreshTaskBoardConversationStatuses("));
+    assert!(script.contains("已完成 · 未读"));
+    assert!(script.contains("data-conversation-status"));
+    assert!(script.contains("codex-task-board-conversation-status-indicator"));
+    assert!(script.contains("codex-task-board-card-add"));
+    assert!(script.contains("function openTaskBoardAttachModal("));
+    assert!(script.contains("创建并添加"));
 }
 
 #[test]
@@ -378,6 +443,19 @@ fn renderer_task_board_dynamic_contracts_apply_latest_catalog_and_independent_re
     assert_eq!(cases["catalog"]["partialMissingLabel"], "目录部分不可用");
     assert!(
         !cases["catalog"]["completeMissingAvailable"]
+            .as_bool()
+            .unwrap()
+    );
+    assert_eq!(cases["conversationStatuses"]["running"], "running");
+    assert_eq!(
+        cases["conversationStatuses"]["completedUnread"],
+        "completed-unread"
+    );
+    assert_eq!(cases["conversationStatuses"]["completed"], "completed");
+    assert_eq!(cases["conversationStatuses"]["unknown"], "unknown");
+    assert_eq!(cases["conversationStatuses"]["unavailable"], "unavailable");
+    assert!(
+        cases["conversationStatuses"]["usageRouteAndProjection"]
             .as_bool()
             .unwrap()
     );
@@ -507,6 +585,23 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
     assert!(cases["success"]["exactPayload"].as_bool().unwrap());
     assert!(cases["success"]["closed"].as_bool().unwrap());
     assert!(!cases["success"]["busy"].as_bool().unwrap());
+    assert!(
+        cases["attach"]["existing"]["excludesAlreadyLinked"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["attach"]["existing"]["exactPayloadAndSnapshot"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(cases["attach"]["existing"]["closed"].as_bool().unwrap());
+    assert!(
+        cases["attach"]["native"]["createsThenAttaches"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(cases["attach"]["native"]["closed"].as_bool().unwrap());
     assert!(cases["initialStatus"]["createThenMove"].as_bool().unwrap());
     assert!(
         cases["initialStatus"]["moveUsesCreatedRevision"]
@@ -823,6 +918,7 @@ fn renderer_task_board_move_drag_menu_and_recovery_contracts() {
     );
     assert!(cases["dom"]["sameColumnDownward"].as_bool().unwrap());
     assert!(cases["dom"]["selfDropNoRequest"].as_bool().unwrap());
+    assert!(cases["dom"]["cardStructureMatchesDebug"].as_bool().unwrap());
     assert!(cases["dom"]["menuOutsideMain"].as_bool().unwrap());
     assert!(
         cases["dom"]["enterMovesAndRestoresFocus"]
@@ -2939,6 +3035,59 @@ async function tick() {
     { sessionId: "session-missing", title: "保留标题", cwd: "/repo", updatedAtMs: 1 },
     { warnings: [], projects: [], sessions: [] },
   );
+  const conversationStatuses = {
+    running: api.conversationStatusForTest({
+      available: true,
+      usageKnown: true,
+      isRunning: true,
+      unread: true,
+    }).id,
+    completedUnread: api.conversationStatusForTest({
+      available: true,
+      usageKnown: true,
+      unread: true,
+    }).id,
+    completed: api.conversationStatusForTest({
+      available: true,
+      usageKnown: true,
+    }).id,
+    unknown: api.conversationStatusForTest({
+      available: true,
+      usageKnown: false,
+      checking: false,
+    }).id,
+    unavailable: api.conversationStatusForTest({ available: false }).id,
+  };
+  const usageRequests = [];
+  api.resetCreateStateForTest({
+    snapshot: {
+      status: "ok",
+      schemaVersion: 1,
+      revision: 1,
+      tasks: [{
+        id: "task-status",
+        title: "状态任务",
+        project: { cwd: "/repo", label: "repo" },
+        status: "executing",
+        order: 0,
+        conversations: [linkedConversation],
+      }],
+    },
+    catalog: { status: "ok", ...latestCatalog },
+  });
+  window.__codexElvesTaskBoardMock = {
+    request(route, payload) {
+      usageRequests.push({ route, payload });
+      return { status: "ok", summary: { isRunning: true } };
+    },
+  };
+  await api.refreshConversationStatusesForTest();
+  const runningProjection = api.conversationProjection(linkedConversation, latestCatalog);
+  conversationStatuses.usageRouteAndProjection =
+    usageRequests.length === 1 &&
+    usageRequests[0]?.route === "/thread-usage-summary" &&
+    usageRequests[0]?.payload?.session_id === "session-1" &&
+    runningProjection.status?.id === "running";
   api.resetReadState();
   api.openPopoverForTest();
   const popoverNodeBeforeRefresh = api.popoverNodeForTest();
@@ -2998,6 +3147,7 @@ async function tick() {
       partialMissingLabel: partial.label,
       completeMissingAvailable: complete.available,
     },
+    conversationStatuses,
     popover: {
       openBeforeRefresh: popoverOpenBeforeRefresh,
       bodyChildrenBeforeRefresh,
@@ -3321,6 +3471,15 @@ function settle() { return new Promise((resolve) => setTimeout(resolve, 0)); }
   if (!dragCard || !planningList || !planningCard) {
     throw new Error(`drag DOM unavailable: root=${!!mainSurface.querySelector('[data-codex-task-board-root="true"]')} cards=${mainSurface.querySelectorAll(".codex-task-board-card").length} lists=${mainSurface.querySelectorAll(".codex-task-board-card-list").length}`);
   }
+  const conversationRow = dragCard.querySelector(".codex-task-board-conversations");
+  const cardFooter = dragCard.querySelector(".codex-task-board-card-footer");
+  const cardStructureMatchesDebug =
+    conversationRow?.parentElement === dragCard &&
+    cardFooter?.parentElement === dragCard &&
+    dragCard.children.indexOf(conversationRow) < dragCard.children.indexOf(cardFooter) &&
+    cardFooter.children.length === 2 &&
+    cardFooter.children[0]?.classList.contains("codex-task-board-card-add") &&
+    cardFooter.children[1]?.classList.contains("codex-task-board-card-move");
   dragCard.dispatchEvent(event("dragstart", dragCard));
   planningList.dispatchEvent(event("dragover", planningList));
   const activeBeforeDrop = planningList.getAttribute("data-drop-active") === "true";
@@ -3389,6 +3548,7 @@ function settle() { return new Promise((resolve) => setTimeout(resolve, 0)); }
     optimisticOrdersContinuous,
     sameColumnDownward: sameColumnPayloads[0]?.taskId === "a" && sameColumnPayloads[0]?.toStatus === "new" && sameColumnPayloads[0]?.targetIndex === 2,
     selfDropNoRequest: sameColumnPayloads.length === 1,
+    cardStructureMatchesDebug,
     menuOutsideMain,
     enterMovesAndRestoresFocus: menuPayloadsDom[0]?.toStatus === "done" && focusReturned,
     escapeRestoresOriginalFocus: escapeReturnsOriginal,
@@ -4138,8 +4298,9 @@ function recoveryKey() { return "codexElvesTaskBoardNativeCreateRecoveryV1"; }
   const bridgeFailurePersistsAllowedFields =
     persisted?.taskId && persisted?.title === "恢复任务" && persisted?.project?.cwd === "c:/repo-a" &&
     persisted?.sessionId === "session-recover-1" && persisted?.createdAtMs > 0 &&
+    persisted?.kind === "create-task" &&
     persisted?.initialStatus === "new" &&
-    JSON.stringify(Object.keys(persisted).sort()) === JSON.stringify(["createdAtMs", "initialStatus", "project", "sessionId", "taskId", "title"]);
+    JSON.stringify(Object.keys(persisted).sort()) === JSON.stringify(["createdAtMs", "initialStatus", "kind", "project", "sessionId", "taskId", "title"]);
   let recoveryCalls = 0;
   window.__codexElvesTaskBoardMock = { request(route, payload) {
     if (route !== "/task-board/task-create") throw new Error("unexpected route");
@@ -4646,6 +4807,115 @@ function createState() {
     busy: successState.busy,
   };
 
+  const attachTaskId = "11111111-1111-4111-8111-111111111111";
+  function attachSnapshot(revision, sessionIds) {
+    const sessions = catalog().sessions;
+    return {
+      status: "ok",
+      schemaVersion: 1,
+      revision,
+      tasks: [{
+        id: attachTaskId,
+        title: "追加会话任务",
+        project: { cwd: "/repo-a", label: "项目 A" },
+        status: "executing",
+        order: 0,
+        conversations: sessionIds.map((sessionId) => {
+          const session = sessions.find((candidate) => candidate.sessionId === sessionId);
+          return {
+            sessionId,
+            title: session?.title || sessionId,
+            cwd: "/repo-a",
+            updatedAtMs: session?.updatedAtMs || 0,
+          };
+        }),
+      }],
+    };
+  }
+  const attachExistingRequests = [];
+  window.__codexElvesTaskBoardMock = {
+    request(route, payload) {
+      if (route === "/thread-usage-summary") {
+        return { status: "ok", summary: { isRunning: false } };
+      }
+      if (route !== "/task-board/task-conversations-attach") {
+        throw new Error(`unexpected route ${route}`);
+      }
+      attachExistingRequests.push(payload);
+      return attachSnapshot(4, ["session-a1", "session-a2"]);
+    },
+  };
+  window.__codexElvesTaskBoardNativeAdapter = null;
+  api.resetCreateStateForTest({
+    snapshot: attachSnapshot(3, ["session-a1"]),
+    catalog: catalog(),
+  });
+  api.openAttachModalForTest(attachTaskId);
+  const attachExistingBefore = createState();
+  api.setCreateDraftForTest({ mode: "existing", sessionIds: ["session-a2"] });
+  await api.submitCreateForTest();
+  const attachExistingPayload = attachExistingRequests[0] || {};
+  const attachExistingAfter = createState();
+  const attachExistingRevision = api.createSnapshotForTest().revision;
+
+  let attachNativeStarts = 0;
+  const attachNativeRequests = [];
+  window.__codexElvesTaskBoardMock = {
+    request(route, payload) {
+      if (route === "/thread-usage-summary") {
+        return { status: "ok", summary: { isRunning: false } };
+      }
+      if (route !== "/task-board/task-conversations-attach") {
+        throw new Error(`unexpected route ${route}`);
+      }
+      attachNativeRequests.push(payload);
+      return attachSnapshot(5, ["session-a1", "session-native"]);
+    },
+  };
+  window.__codexElvesTaskBoardNativeAdapter = {
+    probe: () => ({ status: "ok", canStart: true, canOpen: false }),
+    startConversation: () => {
+      attachNativeStarts += 1;
+      return { status: "ok", sessionId: "session-native" };
+    },
+  };
+  api.resetCreateStateForTest({
+    snapshot: attachSnapshot(4, ["session-a1"]),
+    catalog: catalog(),
+  });
+  api.openAttachModalForTest(attachTaskId);
+  api.setCreateDraftForTest({
+    mode: "new",
+    firstInstruction: "为当前任务继续实现状态展示",
+    sessionIds: [],
+  });
+  await api.submitCreateForTest();
+  const attachNativeAfter = createState();
+  const attach = {
+    existing: {
+      excludesAlreadyLinked:
+        attachExistingBefore.purpose === "attach" &&
+        JSON.stringify(attachExistingBefore.availableSessionIds) === JSON.stringify(["session-a2"]),
+      exactPayloadAndSnapshot:
+        JSON.stringify(Object.keys(attachExistingPayload).sort()) ===
+          JSON.stringify(["expectedRevision", "sessionIds", "taskId"]) &&
+        attachExistingPayload.taskId === attachTaskId &&
+        attachExistingPayload.expectedRevision === 3 &&
+        JSON.stringify(attachExistingPayload.sessionIds) === JSON.stringify(["session-a2"]) &&
+        attachExistingRevision === 4,
+      closed: !attachExistingAfter.open,
+    },
+    native: {
+      createsThenAttaches:
+        attachNativeStarts === 1 &&
+        attachNativeRequests.length === 1 &&
+        attachNativeRequests[0]?.taskId === attachTaskId &&
+        attachNativeRequests[0]?.expectedRevision === 4 &&
+        JSON.stringify(attachNativeRequests[0]?.sessionIds) === JSON.stringify(["session-native"]),
+      closed: !attachNativeAfter.open,
+    },
+  };
+
   const initialStatusRequests = [];
   reset({
     snapshot: { status: "ok", schemaVersion: 1, revision: 3, tasks: [] },
@@ -4903,6 +5173,7 @@ function createState() {
     projectSelection,
     validation,
     success,
+    attach,
     initialStatus,
     stableErrors,
     sessionNotFound,
