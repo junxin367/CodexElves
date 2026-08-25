@@ -64,9 +64,6 @@
   const codexStatsigModelVisibilityMaxWaitMs = 60000;
   const codexPluginMarketplaceUnlockVersion = "19";
   const codexPluginApiKeyUnsupportedMarketplaceKinds = new Set(["created-by-me-remote"]);
-  const codexPluginAutoExpandVersion = "1";
-  const codexPluginAutoExpandMaxClicks = 24;
-  const codexPluginAutoExpandClickDelayMs = 180;
   const codexBackendHeartbeatIntervalMs = 30000;
   const codexBackendBridgeReadyTimeoutMs = 2000;
   const codexBackendBridgeTimeoutMs = 2000;
@@ -185,11 +182,6 @@
     window.__codexTokenUsageSummaryCache = new Map();
   }
   window.__codexTokenUsageRequestSeq = (window.__codexTokenUsageRequestSeq || 0) + 1;
-  window.__codexPluginAutoExpandContainer = null;
-  window.__codexPluginAutoExpandCandidates = [];
-  window.__codexPluginAutoExpandIdleUntil = 0;
-  window.__codexPluginAutoExpandLastRouteSignature = "";
-  window.__codexPluginAutoExpandLastContainerSignature = "";
   function cleanupLegacyForcePluginInstallRuntime() {
     window.__codexForcePluginInstallObserver?.disconnect?.();
     window.__codexForcePluginInstallObserver = null;
@@ -2439,7 +2431,6 @@
     return {
       pluginEntryUnlock: true,
       pluginMarketplaceUnlock: true,
-      pluginAutoExpand: true,
       taskBoard: true,
       sessionDelete: true,
       markdownExport: true,
@@ -2456,7 +2447,6 @@
   const codexElvesBackendSettingMap = {
     pluginEntryUnlock: "codexAppPluginEntryUnlock",
     pluginMarketplaceUnlock: "codexAppPluginMarketplaceUnlock",
-    pluginAutoExpand: "codexAppPluginAutoExpand",
     taskBoard: "codexAppTaskBoard",
     sessionDelete: "codexAppSessionDelete",
     markdownExport: "codexAppMarkdownExport",
@@ -2486,7 +2476,6 @@
     return {
       pluginEntryUnlock: false,
       pluginMarketplaceUnlock: false,
-      pluginAutoExpand: false,
       taskBoard: false,
       sessionDelete: false,
       markdownExport: false,
@@ -2515,7 +2504,6 @@
       if (relayPatchDisabled) {
         settings.pluginEntryUnlock = false;
         settings.pluginMarketplaceUnlock = false;
-        settings.pluginAutoExpand = false;
       }
       codexElvesSettingsCache = settings;
     } catch {
@@ -2523,7 +2511,6 @@
       if (relayPatchDisabled) {
         settings.pluginEntryUnlock = false;
         settings.pluginMarketplaceUnlock = false;
-        settings.pluginAutoExpand = false;
       }
       codexElvesSettingsCache = settings;
     }
@@ -2553,19 +2540,13 @@
         refreshCodexServiceTierControls();
       }
     }
-    if (key === "pluginAutoExpand" && !value) {
-      clearTimeout(window.__codexPluginAutoExpandTimer);
-      window.__codexPluginAutoExpandTimer = null;
-      window.__codexPluginAutoExpandRunning = false;
-      window.__codexPluginAutoExpandLastSignature = "";
-    }
     renderCodexElvesMenu();
     scan(scanDirtyForSetting(key));
   }
 
   function scanDirtyForSetting(key) {
     const dirty = emptyScanDirty();
-    if (["pluginEntryUnlock", "pluginMarketplaceUnlock", "pluginAutoExpand"].includes(key)) {
+    if (["pluginEntryUnlock", "pluginMarketplaceUnlock"].includes(key)) {
       dirty.plugins = true;
       return dirty;
     }
@@ -4213,10 +4194,6 @@
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="pluginEntryUnlock" ${codexElvesBackendSettings.launchMode === "relay" ? 'disabled data-relay-unneeded="true"' : ""}><span></span></button>
             </div>
             <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">插件列表全量展示</div><div class="codex-elves-row-description">进入插件页后自动连续展开“更多”，尽量一次显示完整插件列表。</div></div>
-              <button type="button" class="codex-elves-toggle" data-codex-elves-setting="pluginAutoExpand"><span></span></button>
-            </div>
-            <div class="codex-elves-row">
               <div><div class="codex-elves-row-title">任务看板</div><div class="codex-elves-row-description">在左侧导航的“插件”下方显示内置任务看板入口；关闭时退出看板并恢复原生页面。默认开启。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="taskBoard"><span></span></button>
             </div>
@@ -4878,138 +4855,6 @@
       });
     }
     return result;
-  }
-
-  function pluginAutoExpandVisibleElement(el) {
-    if (!(el instanceof HTMLElement) || !el.isConnected) return false;
-    const style = getComputedStyle(el);
-    if (style.display === "none" || style.visibility === "hidden" || style.pointerEvents === "none") return false;
-    const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  }
-
-  function pluginAutoExpandPageActive() {
-    const pluginButton = pluginEntryButton();
-    return pluginButton?.getAttribute("aria-current") === "page";
-  }
-
-  function pluginAutoExpandPageLooksRelevant() {
-    if (pluginAutoExpandPageActive()) return true;
-    const routeText = `${location.pathname || ""} ${location.hash || ""} ${document.title || ""}`;
-    if (/插件|Plugins?|Marketplace|市场/i.test(routeText)) return true;
-    return !!document.querySelector('[data-testid*="plugin" i], [class*="plugin" i], [class*="marketplace" i]');
-  }
-
-  function pluginAutoExpandContainer() {
-    const pageActive = pluginAutoExpandPageActive();
-    const routeSignature = `${location.pathname || ""}\n${location.hash || ""}\n${pageActive}`;
-    const cached = window.__codexPluginAutoExpandContainer;
-    if (
-      cached?.isConnected
-      && window.__codexPluginAutoExpandLastRouteSignature === routeSignature
-    ) {
-      return cached;
-    }
-    const selectorsForContainer = [
-      '[data-testid*="plugin" i]',
-      '[class*="plugin" i]',
-      '[class*="marketplace" i]',
-    ];
-    const seed = selectorsForContainer
-      .map((selector) => document.querySelector(selector))
-      .find(Boolean);
-    const latestPluginPage = pageActive
-      ? document.querySelector("main, [role='main']")
-      : null;
-    const container = latestPluginPage || seed?.closest?.(
-      '[role="main"], main, [role="dialog"], [data-radix-popper-content-wrapper], [class*="panel" i]'
-    ) || seed || null;
-    window.__codexPluginAutoExpandContainer = container;
-    window.__codexPluginAutoExpandLastRouteSignature = routeSignature;
-    window.__codexPluginAutoExpandCandidates = [];
-    window.__codexPluginAutoExpandLastContainerSignature = "";
-    return container;
-  }
-
-  function pluginAutoExpandButtonLooksScoped(button) {
-    let node = button;
-    for (let depth = 0; node instanceof HTMLElement && node !== document.body && depth < 8; depth += 1, node = node.parentElement) {
-      const text = String(node.innerText || "");
-      if (text.length > 16000) continue;
-      if (/插件|Plugins?|Marketplace|市场/i.test(text)) return true;
-    }
-    return false;
-  }
-
-  function pluginAutoExpandButtonText(button) {
-    return String(button?.textContent || button?.getAttribute?.("aria-label") || button?.getAttribute?.("title") || "")
-      .replace(/\s+/g, " ")
-      .trim();
-  }
-
-  function pluginAutoExpandButtonLooksLikeMore(button) {
-    const text = pluginAutoExpandButtonText(button);
-    if (!text || text.length > 120) return false;
-    // Current Codex builds use compound "View ... and N more" labels for
-    // category navigation, so only generic labels are safe to auto-click.
-    if (/^(更多|显示更多|查看更多|加载更多|Show more|Load more|More)$/i.test(text)) return true;
-    return false;
-  }
-
-  function pluginAutoExpandButtonCandidates() {
-    if (!codexElvesSettings().pluginAutoExpand || !pluginAutoExpandPageLooksRelevant()) return [];
-    return Array.from(document.querySelectorAll('button, [role="button"]'))
-      .filter(pluginAutoExpandVisibleElement)
-      .filter((button) => !button.disabled && button.getAttribute("aria-disabled") !== "true")
-      .filter(pluginAutoExpandButtonLooksLikeMore)
-      .filter(pluginAutoExpandButtonLooksScoped)
-      .filter((button) => !button.closest?.(`.${moreMenuClass}, #${codexElvesMenuId}, .codex-elves-modal-overlay`));
-  }
-
-  function pluginAutoExpandSignature() {
-    return pluginAutoExpandButtonCandidates()
-      .map((button) => {
-        const rect = button.getBoundingClientRect();
-        return `${pluginAutoExpandButtonText(button)}:${Math.round(rect.top)}:${Math.round(rect.left)}`;
-      })
-      .join("|");
-  }
-
-  function schedulePluginAutoExpand(force = false) {
-    if (!codexElvesSettings().pluginAutoExpand) return;
-    if (window.__codexPluginAutoExpandRunning && !force) return;
-    clearTimeout(window.__codexPluginAutoExpandTimer);
-    window.__codexPluginAutoExpandTimer = setTimeout(() => runPluginAutoExpand(force), force ? 30 : 180);
-  }
-
-  function runPluginAutoExpand(force = false) {
-    if (!codexElvesSettings().pluginAutoExpand) return;
-    const currentSignature = pluginAutoExpandSignature();
-    if (!force && currentSignature && currentSignature === window.__codexPluginAutoExpandLastSignature) return;
-    window.__codexPluginAutoExpandLastSignature = currentSignature;
-    window.__codexPluginAutoExpandRunning = true;
-    window.__codexPluginAutoExpandClicks = 0;
-    const clickNext = () => {
-      if (!codexElvesSettings().pluginAutoExpand) {
-        window.__codexPluginAutoExpandRunning = false;
-        return;
-      }
-      const button = pluginAutoExpandButtonCandidates()[0];
-      if (!button || window.__codexPluginAutoExpandClicks >= codexPluginAutoExpandMaxClicks) {
-        window.__codexPluginAutoExpandRunning = false;
-        sendCodexElvesDiagnostic("plugin_auto_expand_finished", {
-          version: codexPluginAutoExpandVersion,
-          clicks: window.__codexPluginAutoExpandClicks || 0,
-          exhausted: !!button,
-        });
-        return;
-      }
-      window.__codexPluginAutoExpandClicks = (window.__codexPluginAutoExpandClicks || 0) + 1;
-      button.dataset.codexPluginAutoExpandClicked = String(Date.now());
-      button.click();
-      setTimeout(clickNext, codexPluginAutoExpandClickDelayMs);
-    };
-    clickNext();
   }
 
   function patchPluginMarketplaceRequestClient(client) {
@@ -7549,16 +7394,6 @@
       setDispatcher: (dispatcher) => {
         codexServiceTierDispatcher = dispatcher;
       },
-    };
-  }
-
-  if (window.__CODEX_ELVES_TEST_PLUGIN_AUTO_EXPAND__) {
-    window.__codexElvesPluginAutoExpandTest = {
-      matchesText: (text) =>
-        pluginAutoExpandButtonLooksLikeMore({
-          textContent: String(text || ""),
-          getAttribute: () => "",
-        }),
     };
   }
 
@@ -14536,7 +14371,7 @@
       sidebar: true,
       conversation: true,
       header: true,
-      plugins: pluginAutoExpandPageLooksRelevant(),
+      plugins: false,
       shell: false,
     };
   }
@@ -14666,7 +14501,6 @@
           }
         }
       }
-      schedulePluginAutoExpand();
     }
     if (sidebarDirty || shellDirty) {
       reconcileTaskBoardRuntime();
@@ -14870,38 +14704,12 @@
       !Array.from(mutation.removedNodes).some((node) => node.nodeType === 1 && isScanRelevantNode(node, "conversation"));
   }
 
-  function pluginAutoExpandMutationRelevant(mutation) {
-    const container = pluginAutoExpandContainer();
-    if (!container) return false;
-    const changedNodes = [
-      ...Array.from(mutation.addedNodes || []),
-      ...Array.from(mutation.removedNodes || []),
-    ];
-    const relevant = mutation.target === container
-      || container.contains?.(mutation.target)
-      || changedNodes.some((node) => node === container || container.contains?.(node));
-    if (relevant) {
-      window.__codexPluginAutoExpandCandidates = [];
-      window.__codexPluginAutoExpandIdleUntil = 0;
-    }
-    return relevant;
-  }
-
   function shouldScheduleScan(mutations, domain) {
     if (!mutations) return true;
     const appServerRestartDirty = (
       domain === "conversation" || domain === "shell"
     ) && mutations.some(codexAppServerRestartMutationRelevant);
-    const pluginMutationRelevant = (
-      (domain === "conversation" || domain === "shell")
-      && codexElvesSettings().pluginAutoExpand
-      && pluginAutoExpandPageLooksRelevant()
-    ) && mutations.some((mutation) =>
-        !isExtensionUiNode(mutation.target)
-        && (mutation.type === "childList" || mutation.type === "attributes")
-        && pluginAutoExpandMutationRelevant(mutation)
-      );
-    return appServerRestartDirty || pluginMutationRelevant || mutations.some((mutation) => {
+    return appServerRestartDirty || mutations.some((mutation) => {
       if (domain === "conversation" && isChatContentMutation(mutation)) return false;
       const target = mutation.target;
       if (isExtensionUiNode(target)) return false;
@@ -14913,7 +14721,6 @@
 
   function runScheduledScan() {
     const dirty = window.__codexSessionDeleteScanDirty || allScanDirty();
-    if (pluginAutoExpandPageLooksRelevant()) dirty.plugins = true;
     window.__codexSessionDeleteScanPending = false;
     window.__codexSessionDeleteScanDirty = emptyScanDirty();
     clearTimeout(window.__codexSessionDeleteScanTimer);

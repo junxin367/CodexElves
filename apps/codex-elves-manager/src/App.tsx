@@ -194,7 +194,6 @@ type BackendSettings = {
   computerUseGuardEnabled: boolean;
   codexAppPluginEntryUnlock: boolean;
   codexAppPluginMarketplaceUnlock: boolean;
-  codexAppPluginAutoExpand: boolean;
   codexAppTaskBoard: boolean;
   codexAppSessionDelete: boolean;
   codexAppMarkdownExport: boolean;
@@ -853,7 +852,6 @@ const defaultSettings: BackendSettings = {
   computerUseGuardEnabled: true,
   codexAppPluginEntryUnlock: true,
   codexAppPluginMarketplaceUnlock: true,
-  codexAppPluginAutoExpand: true,
   codexAppTaskBoard: true,
   codexAppSessionDelete: true,
   codexAppMarkdownExport: false,
@@ -5145,13 +5143,12 @@ function EnhanceScreen({
           {form.launchMode === "relay" ? (
             <div className="hint-line">
               <ShieldCheck className="h-4 w-4" />
-              <span>当前为兼容增强模式，插件市场解锁、强制解锁入口和插件列表全量展示不会启用；其他页面功能仍可用。</span>
+              <span>当前为兼容增强模式，插件市场解锁和强制解锁入口不会启用；其他页面功能仍可用。</span>
             </div>
           ) : null}
           <div className="feature-switch-grid">
             <FeatureToggle title="插件市场解锁" detail="API Key 模式下扩展插件市场请求，尽量显示完整插件列表；官方/混合模式通常不需要。" checked={form.codexAppPluginMarketplaceUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginMarketplaceUnlock", value)} />
             <FeatureToggle title="强制解锁入口" detail="恢复 1.1.9 的入口解锁方式，强制显示并启用插件入口。" checked={form.codexAppPluginEntryUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginEntryUnlock", value)} />
-            <FeatureToggle title="插件列表全量展示" detail="进入插件页后自动连续展开“更多”，尽量一次显示完整插件列表。" checked={form.codexAppPluginAutoExpand} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginAutoExpand", value)} />
             <FeatureToggle title="任务看板" detail="在 Codex 左侧导航的“插件”下方显示内置任务看板入口；关闭时退出看板并恢复原生页面。默认开启。" checked={form.codexAppTaskBoard} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppTaskBoard", value)} />
             <FeatureToggle title="Fast 按钮" detail="显示服务模式切换按钮。Fast 仅支持 gpt-5.4+。" checked={form.codexAppServiceTierControls} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppServiceTierControls", value)} />
             <FeatureToggle title="会话删除" detail="在会话列表悬停显示删除按钮；删除后不可恢复。" checked={form.codexAppSessionDelete} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppSessionDelete", value)} />
@@ -5172,7 +5169,7 @@ function EnhanceScreen({
           <TaskProgressBox progress={pluginMarketplaceProgress} title="插件市场修复进度" />
           <div className="hint-line">
             <Info className="h-4 w-4" />
-            <span>如果使用官方模式或官方混入 API 模式，通常不需要开启插件市场解锁、强制解锁入口和插件列表全量展示。</span>
+            <span>如果使用官方模式或官方混入 API 模式，通常不需要开启插件市场解锁和强制解锁入口。</span>
           </div>
           <Toolbar>
             <Button onClick={() => void actions.saveSettings()}>保存增强设置</Button>
@@ -6443,10 +6440,6 @@ function SettingsScreen({
               onChange={(event) => onFormChange({ ...form, cliWrapperApiKey: event.currentTarget.value })}
             />
           </Field>
-          <div className="hint-line">
-            <Palette className="h-4 w-4" />
-            <span>界面背景主题已升级为“皮肤管理”，请到左侧“皮肤管理”页创建和切换。</span>
-          </div>
           <Toolbar>
             <Button onClick={() => void actions.saveSettings()}>保存设置</Button>
           </Toolbar>
@@ -10936,13 +10929,33 @@ function relayProfileKnownModels(profile: RelayProfile, fallbackModel = ""): str
   );
 }
 
-function relayModelMappingCatalogIdentifier(mapping: RelayModelMapping): string {
+function relayModelMappingCatalogIdentifier(
+  mapping: RelayModelMapping,
+  includeContextWindow: boolean,
+): string {
   const requestModel = mapping.requestModel.trim();
   if (!requestModel) return "";
   const alias = mapping.alias.trim();
   if (alias) return alias;
   const contextWindow = mapping.contextWindow.trim();
-  return contextWindow ? `${requestModel} ${contextWindow}` : requestModel;
+  return includeContextWindow && contextWindow ? `${requestModel} ${contextWindow}` : requestModel;
+}
+
+function relayModelMappingCatalogIdentifiers(mappings: RelayModelMapping[]): string[] {
+  const unaliasedCounts = new Map<string, number>();
+  for (const mapping of mappings) {
+    const requestModel = mapping.requestModel.trim();
+    if (requestModel && !mapping.alias.trim()) {
+      unaliasedCounts.set(requestModel, (unaliasedCounts.get(requestModel) ?? 0) + 1);
+    }
+  }
+  return mappings.map((mapping) => {
+    const requestModel = mapping.requestModel.trim();
+    return relayModelMappingCatalogIdentifier(
+      mapping,
+      (unaliasedCounts.get(requestModel) ?? 0) > 1,
+    );
+  });
 }
 
 function normalizedRelayMappingContextWindow(value: string): string {
@@ -10990,20 +11003,25 @@ function legacyRelayModelMappingCatalogIdentifiers(mappings: RelayModelMapping[]
 }
 
 function relayModelMappingsHaveValidCatalogIdentifiers(mappings: RelayModelMapping[]): boolean {
-  const catalogIdentifiers = mappings.map(relayModelMappingCatalogIdentifier);
+  const catalogIdentifiers = relayModelMappingCatalogIdentifiers(mappings);
   const legacyIdentifiers = legacyRelayModelMappingCatalogIdentifiers(mappings);
   const seen = new Set<string>();
   for (let index = 0; index < mappings.length; index += 1) {
     const catalogIdentifier = catalogIdentifiers[index];
+    const requestModel = mappings[index].requestModel.trim();
     if (!catalogIdentifier || seen.has(catalogIdentifier)) return false;
     seen.add(catalogIdentifier);
     if (mappings.some(
       (candidate, candidateIndex) =>
-        candidateIndex !== index && candidate.requestModel.trim() === catalogIdentifier,
+        candidateIndex !== index
+        && candidate.requestModel.trim() === catalogIdentifier
+        && candidate.requestModel.trim() !== requestModel,
     )) return false;
     if (legacyIdentifiers.some(
       (legacyIdentifier, candidateIndex) =>
-        candidateIndex !== index && legacyIdentifier === catalogIdentifier,
+        candidateIndex !== index
+        && legacyIdentifier === catalogIdentifier
+        && mappings[candidateIndex].requestModel.trim() !== requestModel,
     )) return false;
   }
   return true;
@@ -11028,7 +11046,7 @@ function relayProfileCatalogModels(profile: RelayProfile): string[] {
   const mappings = relayProfileCatalogMappings(profile);
   if (!mappings.length) return relayProfileKnownModels(profile);
   return uniqueStrings(
-    mappings.map(relayModelMappingCatalogIdentifier).filter(Boolean),
+    relayModelMappingCatalogIdentifiers(mappings).filter(Boolean),
   ).sort((left, right) => left.localeCompare(right));
 }
 
@@ -11039,16 +11057,18 @@ function relayProfileMappingForCatalogModel(
   const normalizedModel = model.trim();
   if (!normalizedModel) return undefined;
   const mappings = normalizeRelayModelMappings(profile.modelMappings);
+  const catalogIdentifiers = relayModelMappingCatalogIdentifiers(mappings);
   const catalogMapping = mappings.find(
-    (item) => relayModelMappingCatalogIdentifier(item) === normalizedModel,
+    (_, index) => catalogIdentifiers[index] === normalizedModel,
   );
   const legacyIdentifiers = legacyRelayModelMappingCatalogIdentifiers(mappings);
   const legacyMapping = mappings.find(
     (_, index) => legacyIdentifiers[index] === normalizedModel,
   );
   const catalogMappings = relayProfileCatalogMappings(profile);
+  const migratedCatalogIdentifiers = relayModelMappingCatalogIdentifiers(catalogMappings);
   const migratedMapping = catalogMappings.find(
-    (item) => relayModelMappingCatalogIdentifier(item) === normalizedModel,
+    (_, index) => migratedCatalogIdentifiers[index] === normalizedModel,
   );
   const originalMigratedMapping = migratedMapping
     ? mappings.find(

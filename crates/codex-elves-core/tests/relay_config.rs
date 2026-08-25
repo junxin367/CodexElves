@@ -1527,14 +1527,14 @@ experimental_bearer_token = "sk-new"
 
     let config = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
     assert!(config.contains(r#"model_catalog_json = "codex-elves-model-catalog.json""#));
-    assert!(config.contains(r#"model = "qwen3-coder 200000""#));
+    assert!(config.contains(r#"model = "qwen3-coder""#));
     assert!(!config.contains("model_context_window"));
     assert!(config.contains("model_auto_compact_token_limit = 160000"));
     let catalog: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(temp.path().join("codex-elves-model-catalog.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(catalog["models"][0]["slug"], "deepseek-coder 128000");
+    assert_eq!(catalog["models"][0]["slug"], "deepseek-coder");
     assert_eq!(catalog["models"][0]["shell_type"], "shell_command");
     assert_eq!(catalog["models"][0]["apply_patch_tool_type"], "freeform");
     assert_eq!(
@@ -1582,10 +1582,10 @@ experimental_bearer_token = "sk-new"
             { "effort": "max", "description": "Max reasoning" }
         ])
     );
-    assert_eq!(catalog["models"][1]["slug"], "qwen3-coder 200000");
+    assert_eq!(catalog["models"][1]["slug"], "qwen3-coder");
     assert_eq!(catalog["models"][1]["context_window"], 200000);
     assert_eq!(catalog["models"][1]["default_reasoning_level"], "xhigh");
-    assert_eq!(catalog["models"][2]["slug"], "glm-5.2 1000000");
+    assert_eq!(catalog["models"][2]["slug"], "glm-5.2");
     assert_eq!(catalog["models"][2]["default_reasoning_level"], "max");
     assert_eq!(
         catalog["models"][2]["supported_reasoning_levels"],
@@ -1648,7 +1648,7 @@ experimental_bearer_token = "sk-new"
 }
 
 #[test]
-fn apply_relay_profile_migrates_legacy_ambiguous_alias_to_model_context_ids() {
+fn apply_relay_profile_migrates_legacy_ambiguous_alias_to_plain_request_model_ids() {
     let temp = tempfile::tempdir().unwrap();
     let profile = RelayProfile {
         id: "legacy-ambiguous-alias".to_string(),
@@ -1696,9 +1696,9 @@ experimental_bearer_token = "sk-new"
         .iter()
         .map(|model| model["slug"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(slugs, vec!["model-a 400000", "model-b 500000"]);
+    assert_eq!(slugs, vec!["model-a", "model-b"]);
     let config = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
-    assert!(config.contains(r#"model = "model-b 500000""#));
+    assert!(config.contains(r#"model = "model-b""#));
 }
 
 #[test]

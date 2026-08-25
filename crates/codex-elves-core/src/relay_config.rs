@@ -3882,7 +3882,7 @@ mod tests {
 
         assert_eq!(profile.model_mappings[0].context_window, "1000000");
         assert!(profile.model_mappings[1].context_window.is_empty());
-        assert_eq!(profile.local_proxy_enabled, Some(true));
+        assert_eq!(profile.local_proxy_enabled, None);
     }
 
     #[test]
@@ -3914,7 +3914,7 @@ mod tests {
         let context_config = complete_relay_profile_config(&context_profile).unwrap();
 
         assert!(alias_config.contains("model = \"gpt-5.6-sol [500K]\""));
-        assert!(context_config.contains("model = \"gpt-5.6-sol 372000\""));
+        assert!(context_config.contains("model = \"gpt-5.6-sol\""));
     }
 
     #[test]
@@ -4443,7 +4443,7 @@ mod tests {
 
         let fast_model = models
             .iter()
-            .find(|m| m.get("slug").and_then(Value::as_str) == Some("gpt-5.5 400000"))
+            .find(|m| m.get("slug").and_then(Value::as_str) == Some("gpt-5.5"))
             .expect("应存在 gpt-5.5");
         let tiers = fast_model
             .get("service_tiers")
@@ -4463,7 +4463,7 @@ mod tests {
 
         let standard_model = models
             .iter()
-            .find(|m| m.get("slug").and_then(Value::as_str) == Some("gpt-5.2 400000"))
+            .find(|m| m.get("slug").and_then(Value::as_str) == Some("gpt-5.2"))
             .expect("应存在 gpt-5.2");
         let standard_tiers = standard_model
             .get("service_tiers")
@@ -4473,7 +4473,7 @@ mod tests {
 
         let gpt56_model = models
             .iter()
-            .find(|m| m.get("slug").and_then(Value::as_str) == Some("openai/gpt-5.6-terra 1000000"))
+            .find(|m| m.get("slug").and_then(Value::as_str) == Some("openai/gpt-5.6-terra"))
             .expect("应存在 openai/gpt-5.6-terra");
         assert!(
             gpt56_model
@@ -4519,7 +4519,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_model_catalog_uses_model_context_when_alias_is_blank() {
+    fn generated_model_catalog_keeps_request_model_when_only_other_mapping_has_alias() {
         let profile: RelayProfile = serde_json::from_value(json!({
             "id": "relay-a",
             "name": "供应商 A",
@@ -4544,11 +4544,11 @@ mod tests {
         let models = catalog["models"].as_array().unwrap();
 
         assert_eq!(models.len(), 2);
-        assert_eq!(models[0]["display_name"], "gpt-5.6-sol 372000");
+        assert_eq!(models[0]["display_name"], "gpt-5.6-sol");
         assert_eq!(models[1]["display_name"], "gpt-5.6-sol [500K]");
         assert_eq!(models[0]["description"], "gpt-5.6-sol");
         assert_eq!(models[1]["description"], "gpt-5.6-sol");
-        assert_eq!(models[0]["slug"], "gpt-5.6-sol 372000");
+        assert_eq!(models[0]["slug"], "gpt-5.6-sol");
         assert_eq!(models[1]["slug"], "gpt-5.6-sol [500K]");
     }
 
@@ -4579,7 +4579,7 @@ mod tests {
         let models = catalog["models"].as_array().unwrap();
 
         assert_eq!(models.len(), 1);
-        assert_eq!(models[0]["slug"], "gpt-5.6-sol 500000");
+        assert_eq!(models[0]["slug"], "gpt-5.6-sol");
     }
 
     #[test]
@@ -4616,11 +4616,11 @@ mod tests {
         let models = catalog["models"].as_array().unwrap();
         let responses = models
             .iter()
-            .find(|model| model["slug"] == "gpt-5.6-sol 372000")
+            .find(|model| model["slug"] == "gpt-5.6-sol")
             .unwrap();
         let anthropic = models
             .iter()
-            .find(|model| model["slug"] == "claude-sonnet-5 1000000")
+            .find(|model| model["slug"] == "claude-sonnet-5")
             .unwrap();
 
         assert_eq!(responses["prefer_websockets"], true);
@@ -4939,10 +4939,7 @@ base_url = "http://127.0.0.1:45221/v1"
             .iter()
             .filter_map(|model| model.get("slug").and_then(Value::as_str))
             .collect::<Vec<_>>();
-        assert_eq!(
-            first_models,
-            vec!["deepseek-coder 128000", "qwen3-coder 200000"]
-        );
+        assert_eq!(first_models, vec!["deepseek-coder", "qwen3-coder"]);
 
         profile.model_mappings = vec![
             crate::settings::RelayModelMapping {
@@ -4978,11 +4975,7 @@ base_url = "http://127.0.0.1:45221/v1"
             .collect::<Vec<_>>();
         assert_eq!(
             updated_models,
-            vec![
-                "claude-opus-4.6 1000000",
-                "qwen3-coder 200000",
-                "deepseek-coder 128000"
-            ]
+            vec!["claude-opus-4.6", "qwen3-coder", "deepseek-coder"]
         );
         assert_eq!(updated_catalog["models"][0]["context_window"], 1_000_000);
     }

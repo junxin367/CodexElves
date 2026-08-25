@@ -292,11 +292,13 @@ impl RelayProfile {
             return model.to_string();
         };
         let catalog_mappings = relay_model_mappings_for_catalog(&self.model_mappings);
-        let canonical_mapping = catalog_mappings
+        let catalog_slugs = relay_model_mapping_catalog_slugs(&catalog_mappings);
+        let catalog_model = catalog_mappings
             .iter()
-            .find(|candidate| relay_model_mapping_parameters_match(candidate, mapping))
-            .unwrap_or(mapping);
-        let catalog_model = relay_model_mapping_catalog_slug(canonical_mapping);
+            .position(|candidate| relay_model_mapping_parameters_match(candidate, mapping))
+            .and_then(|index| catalog_slugs.get(index))
+            .cloned()
+            .unwrap_or_default();
         if catalog_model.is_empty() {
             model.to_string()
         } else {
@@ -463,7 +465,10 @@ fn validate_catalog_model_identifiers_only(mappings: &[RelayModelMapping]) -> an
             .iter()
             .enumerate()
             .any(|(candidate_index, candidate)| {
-                candidate_index != index && candidate.request_model.trim() == catalog_slug
+                let candidate_request_model = candidate.request_model.trim();
+                candidate_index != index
+                    && candidate_request_model == catalog_slug
+                    && candidate_request_model != mapping.request_model.trim()
             })
         {
             anyhow::bail!(
@@ -474,7 +479,10 @@ fn validate_catalog_model_identifiers_only(mappings: &[RelayModelMapping]) -> an
             .iter()
             .enumerate()
             .any(|(candidate_index, legacy_slug)| {
-                candidate_index != index && legacy_slug == catalog_slug
+                candidate_index != index
+                    && legacy_slug == catalog_slug
+                    && mappings[candidate_index].request_model.trim()
+                        != mapping.request_model.trim()
             })
         {
             anyhow::bail!("模型标识「{catalog_slug}」与另一条旧版模型标识冲突；请更换别名");
@@ -484,13 +492,32 @@ fn validate_catalog_model_identifiers_only(mappings: &[RelayModelMapping]) -> an
 }
 
 pub(crate) fn relay_model_mapping_catalog_slugs(mappings: &[RelayModelMapping]) -> Vec<String> {
+    let mut unaliased_counts = HashMap::<&str, usize>::new();
+    for mapping in mappings {
+        let request_model = mapping.request_model.trim();
+        if !request_model.is_empty() && mapping.alias.trim().is_empty() {
+            *unaliased_counts.entry(request_model).or_default() += 1;
+        }
+    }
+
     mappings
         .iter()
-        .map(relay_model_mapping_catalog_slug)
+        .map(|mapping| {
+            let request_model = mapping.request_model.trim();
+            let include_context_window = unaliased_counts
+                .get(request_model)
+                .copied()
+                .unwrap_or_default()
+                > 1;
+            relay_model_mapping_catalog_slug(mapping, include_context_window)
+        })
         .collect()
 }
 
-fn relay_model_mapping_catalog_slug(mapping: &RelayModelMapping) -> String {
+fn relay_model_mapping_catalog_slug(
+    mapping: &RelayModelMapping,
+    include_context_window: bool,
+) -> String {
     let request_model = mapping.request_model.trim();
     if request_model.is_empty() {
         return String::new();
@@ -500,7 +527,7 @@ fn relay_model_mapping_catalog_slug(mapping: &RelayModelMapping) -> String {
         return alias.to_string();
     }
     let context_window = mapping.context_window.trim();
-    if context_window.is_empty() {
+    if !include_context_window || context_window.is_empty() {
         request_model.to_string()
     } else {
         format!("{request_model} {context_window}")
@@ -668,8 +695,6 @@ pub struct BackendSettings {
     pub codex_app_plugin_entry_unlock: bool,
     #[serde(rename = "codexAppPluginMarketplaceUnlock", default = "default_true")]
     pub codex_app_plugin_marketplace_unlock: bool,
-    #[serde(rename = "codexAppPluginAutoExpand", default = "default_true")]
-    pub codex_app_plugin_auto_expand: bool,
     #[serde(rename = "codexAppTaskBoard", default = "default_true")]
     pub codex_app_task_board: bool,
     #[serde(rename = "codexAppSessionDelete", default = "default_true")]
@@ -785,7 +810,6 @@ impl Default for BackendSettings {
             computer_use_guard_enabled: true,
             codex_app_plugin_entry_unlock: true,
             codex_app_plugin_marketplace_unlock: true,
-            codex_app_plugin_auto_expand: true,
             codex_app_task_board: true,
             codex_app_session_delete: true,
             codex_app_markdown_export: false,
@@ -1248,7 +1272,6 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
     }
     merge_bool_setting(target, source, "codexAppPluginEntryUnlock");
     merge_bool_setting(target, source, "codexAppPluginMarketplaceUnlock");
-    merge_bool_setting(target, source, "codexAppPluginAutoExpand");
     merge_bool_setting(target, source, "codexAppTaskBoard");
     merge_bool_setting(target, source, "codexAppSessionDelete");
     merge_bool_setting(target, source, "codexAppMarkdownExport");
@@ -1626,7 +1649,6 @@ mod tests {
         assert!(settings.computer_use_guard_enabled);
         assert!(settings.codex_app_plugin_entry_unlock);
         assert!(settings.codex_app_plugin_marketplace_unlock);
-        assert!(settings.codex_app_plugin_auto_expand);
         assert!(settings.codex_app_task_board);
         assert!(settings.codex_app_session_delete);
         assert!(!settings.codex_app_markdown_export);
@@ -1648,6 +1670,12 @@ mod tests {
         assert_eq!(settings.cli_wrapper_api_key_env, "CUSTOM_OPENAI_API_KEY");
         assert_eq!(settings.gpt_reasoning_continuation_max_rounds, 3);
         assert!(settings.codex_home_path.is_empty());
+        assert!(
+            serde_json::to_value(&settings)
+                .unwrap()
+                .get("codexAppPluginAutoExpand")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1719,15 +1747,13 @@ mod tests {
         let settings: BackendSettings = serde_json::from_str(
             r#"{
                 "codexAppPluginEntryUnlock": false,
-                "codexAppPluginMarketplaceUnlock": true,
-                "codexAppPluginAutoExpand": false
+                "codexAppPluginMarketplaceUnlock": true
             }"#,
         )
         .unwrap();
 
         assert!(!settings.codex_app_plugin_entry_unlock);
         assert!(settings.codex_app_plugin_marketplace_unlock);
-        assert!(!settings.codex_app_plugin_auto_expand);
 
         let legacy_settings: BackendSettings = serde_json::from_str(
             r#"{
@@ -1738,7 +1764,6 @@ mod tests {
 
         assert!(!legacy_settings.codex_app_plugin_entry_unlock);
         assert!(legacy_settings.codex_app_plugin_marketplace_unlock);
-        assert!(legacy_settings.codex_app_plugin_auto_expand);
     }
 
     #[test]
@@ -1923,7 +1948,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_profile_uses_alias_or_model_context_as_catalog_slug() {
+    fn relay_profile_keeps_plain_request_model_when_only_other_mapping_has_alias() {
         let profile = RelayProfile {
             model_mappings: vec![
                 RelayModelMapping {
@@ -1944,18 +1969,20 @@ mod tests {
 
         assert_eq!(
             relay_model_mapping_catalog_slugs(&profile.model_mappings),
-            vec!["gpt-5.6-sol 372000", "gpt-5.6-sol [500K]"]
+            vec!["gpt-5.6-sol", "gpt-5.6-sol [500K]"]
         );
 
         assert_eq!(
-            profile
-                .resolve_protocol_for_model("gpt-5.6-sol 372000")
-                .unwrap(),
+            profile.resolve_protocol_for_model("gpt-5.6-sol").unwrap(),
             RelayProtocol::Responses
         );
         assert_eq!(
-            profile.context_window_for_model("gpt-5.6-sol 372000"),
+            profile.context_window_for_model("gpt-5.6-sol"),
             Some(372_000)
+        );
+        assert_eq!(
+            profile.catalog_model_for_configured_model("gpt-5.6-sol"),
+            "gpt-5.6-sol"
         );
         assert_eq!(
             profile
@@ -1965,6 +1992,63 @@ mod tests {
         );
         assert_eq!(
             profile.context_window_for_model("gpt-5.6-sol [500K]"),
+            Some(500_000)
+        );
+    }
+
+    #[test]
+    fn relay_profile_keeps_plain_request_models_when_each_unaliased_model_is_unique() {
+        let mappings = vec![
+            RelayModelMapping {
+                request_model: "gpt-5.6-terra".to_string(),
+                alias: String::new(),
+                protocol: RelayProtocol::Responses,
+                context_window: "372000".to_string(),
+            },
+            RelayModelMapping {
+                request_model: "gpt-5.6-luna".to_string(),
+                alias: String::new(),
+                protocol: RelayProtocol::Responses,
+                context_window: "500000".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            relay_model_mapping_catalog_slugs(&mappings),
+            vec!["gpt-5.6-terra", "gpt-5.6-luna"]
+        );
+    }
+
+    #[test]
+    fn relay_profile_adds_context_for_duplicate_unaliased_request_models() {
+        let profile = RelayProfile {
+            model_mappings: vec![
+                RelayModelMapping {
+                    request_model: "gpt-5.6-sol".to_string(),
+                    alias: String::new(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "372000".to_string(),
+                },
+                RelayModelMapping {
+                    request_model: "gpt-5.6-sol".to_string(),
+                    alias: String::new(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "500000".to_string(),
+                },
+            ],
+            ..RelayProfile::default()
+        };
+
+        assert_eq!(
+            relay_model_mapping_catalog_slugs(&profile.model_mappings),
+            vec!["gpt-5.6-sol 372000", "gpt-5.6-sol 500000"]
+        );
+        assert_eq!(
+            profile.context_window_for_model("gpt-5.6-sol 372000"),
+            Some(372_000)
+        );
+        assert_eq!(
+            profile.context_window_for_model("gpt-5.6-sol 500000"),
             Some(500_000)
         );
     }
@@ -1994,12 +2078,12 @@ mod tests {
             "model-b"
         );
         assert_eq!(
-            profile.request_model_for_catalog_model("model-a 400000"),
+            profile.request_model_for_catalog_model("model-a"),
             "model-a"
         );
         assert_eq!(
             profile.catalog_model_for_configured_model("model-b"),
-            "model-b 500000"
+            "model-b"
         );
         assert_eq!(
             profile.resolve_protocol_for_model("model-b").unwrap(),

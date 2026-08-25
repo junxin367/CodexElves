@@ -1068,25 +1068,23 @@ fn injection_script_menu_exposes_plugin_entry_and_marketplace_switches() {
 }
 
 #[test]
-fn injection_script_exposes_plugin_list_auto_expand_switch() {
+fn injection_script_omits_removed_plugin_list_auto_expand_feature() {
     let script = assets::injection_script(45221);
 
-    assert!(script.contains("codexPluginAutoExpandVersion = \"1\""));
-    assert!(script.contains("pluginAutoExpand: true"));
-    assert!(script.contains("pluginAutoExpand: \"codexAppPluginAutoExpand\""));
-    assert!(script.contains("function pluginAutoExpandPageActive()"));
-    assert!(script.contains("pluginButton?.getAttribute(\"aria-current\") === \"page\""));
-    assert!(script.contains("document.querySelector(\"main, [role='main']\")"));
-    assert!(script.contains("function pluginAutoExpandButtonLooksLikeMore"));
-    assert!(!script.contains(r#"/^(另有|还有)\s*\d+\s*个(?:插件)?$/i"#));
-    assert!(script.contains("function schedulePluginAutoExpand"));
-    assert!(script.contains("plugins: pluginAutoExpandPageLooksRelevant()"));
-    assert!(script.contains("codexElvesSettings().pluginAutoExpand"));
-    assert!(script.contains("&& pluginAutoExpandPageLooksRelevant()"));
-    assert!(script.contains("if (pluginAutoExpandPageLooksRelevant()) dirty.plugins = true"));
-    assert!(script.contains("plugin_auto_expand_finished"));
-    assert!(script.contains("插件列表全量展示"));
-    assert!(script.contains("data-codex-elves-setting=\"pluginAutoExpand\""));
+    for removed_marker in [
+        "codexPluginAutoExpand",
+        "pluginAutoExpand",
+        "codexAppPluginAutoExpand",
+        "plugin_auto_expand_finished",
+        "插件列表全量展示",
+        "__CODEX_ELVES_TEST_PLUGIN_AUTO_EXPAND__",
+        "__codexElvesPluginAutoExpandTest",
+    ] {
+        assert!(
+            !script.contains(removed_marker),
+            "removed plugin auto-expand marker remains: {removed_marker}"
+        );
+    }
 }
 
 #[test]
@@ -1097,15 +1095,6 @@ fn injection_script_skips_plugin_patch_work_in_relay_mode() {
     assert!(script.contains("!codexElvesBackendSettingsLoaded"));
     assert!(script.contains("if (pluginPatchDisabledInRelayMode()) return"));
     assert!(script.contains("clearPluginPatchArtifacts()"));
-}
-
-#[test]
-fn injection_script_disables_plugin_auto_expand_in_relay_mode() {
-    let script = assets::injection_script(45221);
-
-    assert!(script.contains("settings.pluginAutoExpand = false"));
-    assert!(script.contains("if (pluginPatchDisabledInRelayMode()) return"));
-    assert!(script.contains("if (!codexElvesSettings().pluginAutoExpand) return"));
 }
 
 #[test]
@@ -1916,19 +1905,6 @@ fn injection_script_applies_fast_service_tier_contract() {
             "available_models": ["gpt-5.4"]
         })
     );
-    assert_eq!(cases["pluginAutoExpandLabels"]["latestChinese"], false);
-    assert_eq!(
-        cases["pluginAutoExpandLabels"]["latestChineseCompact"],
-        false
-    );
-    assert_eq!(cases["pluginAutoExpandLabels"]["categoryChinese"], false);
-    assert_eq!(cases["pluginAutoExpandLabels"]["categoryEnglish"], false);
-    assert_eq!(
-        cases["pluginAutoExpandLabels"]["categoryShowEnglish"],
-        false
-    );
-    assert_eq!(cases["pluginAutoExpandLabels"]["legacyChinese"], true);
-    assert_eq!(cases["pluginAutoExpandLabels"]["unrelatedCount"], false);
     assert_eq!(
         cases["badgeTooltip"]["dataCodexTooltip"],
         serde_json::Value::Null
@@ -2134,7 +2110,6 @@ globalThis.getComputedStyle = () => ({{
 }});
 globalThis.window = globalThis;
 window.__CODEX_ELVES_TEST_SERVICE_TIER__ = true;
-window.__CODEX_ELVES_TEST_PLUGIN_AUTO_EXPAND__ = true;
 window.__CODEX_ELVES_TEST_APP_SERVER_RESTART__ = true;
 window.dispatchEvent = () => true;
 globalThis.CustomEvent = class CustomEvent {{
@@ -2171,7 +2146,6 @@ globalThis.navigator = {{ userAgent: "node-test" }};
 globalThis.performance = {{ getEntriesByType: () => [] }};
 require(scriptPath);
 const api = window.__codexElvesServiceTierTest;
-const pluginAutoExpandApi = window.__codexElvesPluginAutoExpandTest;
 const appServerRestartApi = window.__codexElvesAppServerRestartTest;
 const appServerRestartError = "failed to start turn: internal error; agent loop died unexpectedly";
 const transientFailedTurn = {{
@@ -2319,15 +2293,6 @@ const appServerRestart = {{
   remainingIslandKeys: cleanupConversation.turnHistory.history.islands[0].entries.map(
     (entry) => entry.value
   ),
-}};
-const pluginAutoExpandLabels = {{
-  latestChinese: pluginAutoExpandApi.matchesText("另有 4 个"),
-  latestChineseCompact: pluginAutoExpandApi.matchesText("另有4个插件"),
-  categoryChinese: pluginAutoExpandApi.matchesText("查看 Computer Use, Visualize，以及另外 2 个"),
-  categoryEnglish: pluginAutoExpandApi.matchesText("View Computer Use and 2 more"),
-  categoryShowEnglish: pluginAutoExpandApi.matchesText("Show Computer Use and 2 more"),
-  legacyChinese: pluginAutoExpandApi.matchesText("显示更多"),
-  unrelatedCount: pluginAutoExpandApi.matchesText("已安装 4 个"),
 }};
 api.setServiceTierState({{ serviceTier: "priority", fastTierValue: "priority" }});
 api.setModelCatalog({{ status: "ok", model: "gpt-5.4", default_model: "gpt-5.4", models: ["gpt-5.4", "gpt-5.5"] }});
@@ -2768,7 +2733,6 @@ async function runAppServerRestartDispatchCase() {{
     pluginMarketplaceRequestParams,
     pluginMarketplaceRequestClient: pluginMarketplaceRequestClientCase,
     pluginScopedFilters,
-    pluginAutoExpandLabels,
     badgeTooltip,
     appServerRestart,
     appServerRestartDispatch,
@@ -5344,9 +5308,9 @@ fn manager_ui_exposes_remote_plugin_marketplace_controls() {
     assert!(source.contains("refreshRemoteContextOptions"));
     assert!(source.contains("RemotePluginMarketplacePromptDialog"));
     assert!(source.contains("repair_remote_plugin_marketplace"));
-    assert!(source.contains(
-        "checked={form.codexAppPluginAutoExpand} disabled={!masterEnabled || !patchMode}"
-    ));
+    assert!(!source.contains("codexAppPluginAutoExpand"));
+    assert!(!source.contains("插件列表全量展示"));
+    assert!(!source.contains("界面背景主题已升级为"));
     assert!(commands.contains("commands::remote_plugin_marketplace_status"));
     assert!(commands.contains("commands::repair_remote_plugin_marketplace"));
     assert!(commands.contains("commands::read_remote_context_options"));
