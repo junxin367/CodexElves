@@ -338,7 +338,12 @@ impl SQLiteStorageAdapter {
         let columns = table_columns(&db, "threads")?
             .into_iter()
             .collect::<HashSet<_>>();
-        let title = optional_column_expression(&columns, "title", "''");
+        let title = match (columns.contains("name"), columns.contains("title")) {
+            (true, true) => "COALESCE(NULLIF(TRIM(name), ''), title, '')",
+            (true, false) => "COALESCE(NULLIF(TRIM(name), ''), '')",
+            (false, true) => "COALESCE(title, '')",
+            (false, false) => "''",
+        };
         let cwd = optional_column_expression(&columns, "cwd", "''");
         let model_provider = optional_column_expression(&columns, "model_provider", "''");
         let archived = optional_column_expression(&columns, "archived", "0");

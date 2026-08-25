@@ -379,6 +379,61 @@ fn list_local_sessions_reads_codex_threads_ordered_by_update_time() {
 }
 
 #[test]
+fn list_local_sessions_prefers_codex_thread_name_over_first_message_title() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let adapter = SQLiteStorageAdapter::new(&db_path);
+    let db = Connection::open(&db_path).unwrap();
+    db.execute(
+        "CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            rollout_path TEXT,
+            title TEXT,
+            name TEXT,
+            cwd TEXT,
+            archived INTEGER,
+            updated_at_ms INTEGER
+        )",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO threads VALUES (
+            'named',
+            'named.jsonl',
+            'first message content',
+            'Visible conversation title',
+            'C:/named',
+            0,
+            200
+        )",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO threads VALUES (
+            'legacy',
+            'legacy.jsonl',
+            'Legacy conversation title',
+            '   ',
+            'C:/legacy',
+            0,
+            100
+        )",
+        [],
+    )
+    .unwrap();
+    drop(db);
+
+    let sessions = adapter.list_local_sessions().unwrap();
+
+    assert_eq!(sessions[0].id, "named");
+    assert_eq!(sessions[0].title, "Visible conversation title");
+    assert_eq!(sessions[1].id, "legacy");
+    assert_eq!(sessions[1].title, "Legacy conversation title");
+}
+
+#[test]
 fn list_local_sessions_reads_codex_automation_runs_schema() {
     let tmp = tempdir().unwrap();
     let db_path = tmp.path().join("codex-dev.db");
