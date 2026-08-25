@@ -962,6 +962,12 @@ fn renderer_task_board_native_create_uses_host_adapter_and_recovers_without_inst
             .as_bool()
             .unwrap()
     );
+    assert!(
+        cases["navigationRace"]["waitsForReplacementBeforeSettings"]
+            .as_bool()
+            .unwrap(),
+        "native create navigation race cases: {cases}"
+    );
     assert!(cases["supported"]["temporaryIdIgnored"].as_bool().unwrap());
     assert!(
         cases["supported"]["createAfterPermanentId"]
@@ -4392,9 +4398,14 @@ globalThis.performance = { getEntriesByType: () => [] };
 globalThis.CustomEvent = class CustomEvent extends Event { constructor(type, options = {}) { super(type, options); this.detail = options.detail; } };
 let now = 1000;
 const waits = [];
+let nativeClockWaitHook = null;
 window.__codexElvesTaskBoardNativeClock = {
   now: () => now,
-  wait: (delay) => { waits.push(delay); now += delay; },
+  wait: (delay) => {
+    waits.push(delay);
+    now += delay;
+    nativeClockWaitHook?.(delay);
+  },
 };
 const capturedLogs = [];
 globalThis.console = {
@@ -4419,6 +4430,7 @@ let effortSubmenuClicks = 0;
 let effortOptionClicks = 0;
 const nativeSequence = [];
 let permanentOnSubmit = true;
+let nativeStartHook = null;
 const projectRow = node("div");
 projectRow.setAttribute("data-app-action-sidebar-project-row", "true");
 projectRow.setAttribute("data-app-action-sidebar-project-id", "c:\\repo-a\\");
@@ -4426,7 +4438,10 @@ const projectMenu = node("button");
 projectMenu.setAttribute("aria-haspopup", "menu");
 projectMenu.addEventListener("click", () => { menuClicks += 1; });
 const nativeStartButton = node("button");
-nativeStartButton.addEventListener("click", () => { nativeStartClicks += 1; });
+nativeStartButton.addEventListener("click", () => {
+  nativeStartClicks += 1;
+  nativeStartHook?.();
+});
 const projectSelectButton = node("button");
 projectSelectButton.setAttribute("data-app-action-sidebar-select-project", "true");
 projectSelectButton.addEventListener("click", () => { selectClicks += 1; });
@@ -4450,6 +4465,7 @@ const controller = {
   view: { dispatchEvent() { return true; } },
 };
 const composerOwner = node("div");
+composerOwner.setAttribute("data-composer-footer-responsive", "true");
 composerOwner.__reactFiber$test = { memoizedProps: { composerController: controller }, return: null };
 composerOwner.appendChild(composer);
 composer.addEventListener("keydown", (event) => {
@@ -4458,10 +4474,51 @@ composer.addEventListener("keydown", (event) => {
   nativeSequence.push("submit");
   if (permanentOnSubmit) conversationSignal.setAttribute("data-above-composer-conversation-id", "session-permanent-1");
 });
+let activeComposerOwner = composerOwner;
+function mountFreshNativeComposer() {
+  const nextComposer = node("div");
+  nextComposer.setAttribute("data-codex-composer", "true");
+  nextComposer.setAttribute("contenteditable", "true");
+  nextComposer.setAttribute("role", "textbox");
+  const nextController = {
+    text: "",
+    focus() {},
+    setText(value) {
+      setTextCalls += 1;
+      nativeSequence.push("instruction");
+      this.text = String(value);
+    },
+    getText() { return this.text; },
+    getPersistedText() { return this.text; },
+    view: { dispatchEvent() { return true; } },
+  };
+  const nextOwner = node("div");
+  nextOwner.setAttribute("data-composer-footer-responsive", "true");
+  nextOwner.__reactFiber$test = {
+    memoizedProps: { composerController: nextController },
+    return: null,
+  };
+  nextOwner.append(nextComposer, modelTrigger);
+  nextComposer.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    submitEvents += 1;
+    nativeSequence.push("submit");
+    if (permanentOnSubmit) {
+      conversationSignal.setAttribute(
+        "data-above-composer-conversation-id",
+        "session-permanent-1",
+      );
+    }
+  });
+  activeComposerOwner.remove();
+  activeComposerOwner = nextOwner;
+  document.body.appendChild(nextOwner);
+}
 const modelTrigger = node("button");
 modelTrigger.setAttribute("data-codex-intelligence-trigger", "true");
 modelTrigger.setAttribute("data-composer-navigation-target", "reasoning");
 modelTrigger.setAttribute("aria-expanded", "false");
+modelTrigger.setAttribute("aria-haspopup", "menu");
 modelTrigger.setAttribute("data-selected-reasoning-effort", "low");
 const modelTriggerLabel = node("span");
 modelTriggerLabel.setAttribute("data-tooltip-overflow-target", "true");
@@ -4474,6 +4531,7 @@ modelTrigger.addEventListener("click", () => {
     modelTrigger.getAttribute("aria-expanded") === "true" ? "false" : "true",
   );
 });
+composerOwner.appendChild(modelTrigger);
 const modelSubmenu = node("div");
 modelSubmenu.setAttribute("role", "menuitem");
 modelSubmenu.setAttribute("aria-haspopup", "menu");
@@ -4515,12 +4573,12 @@ document.body.append(
   projectRow,
   composerOwner,
   conversationSignal,
-  modelTrigger,
   modelSubmenu,
   modelOption,
   effortSubmenu,
   effortOption,
 );
+nativeStartHook = mountFreshNativeComposer;
 
 require(scriptPath);
 const api = window.__codexElvesTaskBoardTest;
@@ -4810,6 +4868,210 @@ function recoveryKey() { return "codexElvesTaskBoardNativeCreateRecoveryV1"; }
       !window.__codexElvesTaskBoardNativeOperationLease,
   };
 
+  now = 0;
+  waits.length = 0;
+  conversationSignal.setAttribute(
+    "data-above-composer-conversation-id",
+    "local:client-new-thread:navigation-race",
+  );
+  nativeStartHook = null;
+  const oldTriggerClicksBeforeRace = modelTriggerClicks;
+  let oldReadyTriggerClickCalls = 0;
+  modelTriggerLabel.textContent = "5.6 Sol";
+  modelTrigger.setAttribute("aria-expanded", "false");
+  modelTrigger.setAttribute("data-selected-reasoning-effort", "low");
+  modelTrigger.disabled = false;
+  modelTrigger.click = () => {
+    oldReadyTriggerClickCalls += 1;
+  };
+  modelTrigger.getBoundingClientRect = () => ({
+    left: 0,
+    top: 32,
+    right: 100,
+    bottom: 64,
+    width: 100,
+    height: 32,
+  });
+  const hiddenRect = () => ({
+    left: 0,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    width: 0,
+    height: 0,
+  });
+  modelSubmenu.getBoundingClientRect = hiddenRect;
+  modelOption.getBoundingClientRect = hiddenRect;
+  effortSubmenu.getBoundingClientRect = hiddenRect;
+  effortOption.getBoundingClientRect = hiddenRect;
+
+  let raceSetTextCalls = 0;
+  let raceSubmitEvents = 0;
+  let raceModelTriggerClicks = 0;
+  let raceModelSubmenuClicks = 0;
+  let raceModelOptionClicks = 0;
+  let raceEffortSubmenuClicks = 0;
+  let raceEffortOptionClicks = 0;
+  const raceSequence = [];
+  const raceComposer = node("div");
+  raceComposer.setAttribute("data-codex-composer", "true");
+  raceComposer.setAttribute("contenteditable", "true");
+  raceComposer.setAttribute("role", "textbox");
+  const raceController = {
+    text: "",
+    focus() {},
+    setText(value) {
+      raceSetTextCalls += 1;
+      raceSequence.push("instruction");
+      this.text = String(value);
+    },
+    getText() { return this.text; },
+    getPersistedText() { return this.text; },
+    view: { dispatchEvent() { return true; } },
+  };
+  const raceComposerOwner = node("div");
+  raceComposerOwner.setAttribute("data-composer-footer-responsive", "true");
+  raceComposerOwner.__reactFiber$test = {
+    memoizedProps: { composerController: raceController },
+    return: null,
+  };
+  raceComposerOwner.appendChild(raceComposer);
+  raceComposer.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    raceSubmitEvents += 1;
+    raceSequence.push("submit");
+    conversationSignal.setAttribute(
+      "data-above-composer-conversation-id",
+      "session-navigation-race",
+    );
+  });
+
+  const raceModelTrigger = node("button");
+  raceModelTrigger.setAttribute("data-codex-intelligence-trigger", "true");
+  raceModelTrigger.setAttribute("data-composer-navigation-target", "reasoning");
+  raceModelTrigger.setAttribute("aria-expanded", "false");
+  raceModelTrigger.setAttribute("aria-haspopup", "menu");
+  raceModelTrigger.setAttribute("data-selected-reasoning-effort", "low");
+  const raceModelTriggerLabel = node("span");
+  raceModelTriggerLabel.setAttribute("data-tooltip-overflow-target", "true");
+  raceModelTriggerLabel.textContent = "5.6 Sol";
+  raceModelTrigger.appendChild(raceModelTriggerLabel);
+  raceModelTrigger.addEventListener("click", () => {
+    raceModelTriggerClicks += 1;
+    raceModelTrigger.setAttribute(
+      "aria-expanded",
+      raceModelTrigger.getAttribute("aria-expanded") === "true"
+        ? "false"
+      : "true",
+    );
+  });
+  raceComposerOwner.appendChild(raceModelTrigger);
+
+  const raceModelSubmenu = node("div");
+  raceModelSubmenu.setAttribute("role", "menuitem");
+  raceModelSubmenu.setAttribute("aria-haspopup", "menu");
+  raceModelSubmenu.setAttribute("aria-expanded", "false");
+  raceModelSubmenu.setAttribute("aria-label", "模型 5.6 Sol");
+  raceModelSubmenu.addEventListener("click", () => {
+    raceModelSubmenuClicks += 1;
+    raceModelSubmenu.setAttribute("aria-expanded", "true");
+  });
+  const raceModelOption = node("div");
+  raceModelOption.setAttribute("role", "menuitem");
+  raceModelOption.textContent = "Claude Sonnet 4.6";
+  raceModelOption.addEventListener("click", () => {
+    raceModelOptionClicks += 1;
+    raceSequence.push("model");
+    raceModelTriggerLabel.textContent = "Claude Sonnet 4.6";
+    raceModelSubmenu.setAttribute("aria-expanded", "false");
+    raceModelTrigger.setAttribute("aria-expanded", "false");
+  });
+  const raceEffortSubmenu = node("div");
+  raceEffortSubmenu.setAttribute("role", "menuitem");
+  raceEffortSubmenu.setAttribute("aria-haspopup", "menu");
+  raceEffortSubmenu.setAttribute("aria-expanded", "false");
+  raceEffortSubmenu.setAttribute("aria-label", "推理强度 低");
+  raceEffortSubmenu.addEventListener("click", () => {
+    raceEffortSubmenuClicks += 1;
+    raceEffortSubmenu.setAttribute("aria-expanded", "true");
+  });
+  const raceEffortOption = node("div");
+  raceEffortOption.setAttribute("role", "menuitemradio");
+  raceEffortOption.setAttribute("data-value", "high");
+  raceEffortOption.textContent = "高";
+  raceEffortOption.addEventListener("click", () => {
+    raceEffortOptionClicks += 1;
+    raceSequence.push("effort");
+    raceModelTrigger.setAttribute("data-selected-reasoning-effort", "high");
+    raceEffortSubmenu.setAttribute("aria-expanded", "false");
+    raceModelTrigger.setAttribute("aria-expanded", "false");
+  });
+  const visibleRect = () => ({
+    left: 0,
+    top: 0,
+    right: 100,
+    bottom: 32,
+    width: 100,
+    height: 32,
+  });
+  raceModelSubmenu.getBoundingClientRect = () =>
+    raceModelTrigger.getAttribute("aria-expanded") === "true"
+      ? visibleRect()
+      : hiddenRect();
+  raceModelOption.getBoundingClientRect = () =>
+    raceModelSubmenu.getAttribute("aria-expanded") === "true"
+      ? visibleRect()
+      : hiddenRect();
+  raceEffortSubmenu.getBoundingClientRect = () =>
+    raceModelTrigger.getAttribute("aria-expanded") === "true"
+      ? visibleRect()
+      : hiddenRect();
+  raceEffortOption.getBoundingClientRect = () =>
+    raceEffortSubmenu.getAttribute("aria-expanded") === "true"
+      ? visibleRect()
+      : hiddenRect();
+
+  let raceReplacementInstalled = false;
+  nativeClockWaitHook = () => {
+    if (raceReplacementInstalled || now < 100) return;
+    raceReplacementInstalled = true;
+    activeComposerOwner.querySelector(
+      '[data-codex-composer][contenteditable="true"][role="textbox"]',
+    )?.remove();
+    document.body.append(
+      raceComposerOwner,
+      raceModelSubmenu,
+      raceModelOption,
+      raceEffortSubmenu,
+      raceEffortOption,
+    );
+    activeComposerOwner = raceComposerOwner;
+  };
+  const navigationRaceResult = await api.nativeStartForTest(
+    { cwd: "c:/repo-a", label: "项目 A" },
+    instruction,
+    "claude-sonnet-4-6",
+    "high",
+  );
+  nativeClockWaitHook = null;
+  const navigationRace = {
+    waitsForReplacementBeforeSettings:
+      navigationRaceResult.status === "ok" &&
+      navigationRaceResult.sessionId === "session-navigation-race" &&
+      raceReplacementInstalled &&
+      oldReadyTriggerClickCalls === 0 &&
+      modelTriggerClicks === oldTriggerClicksBeforeRace &&
+      raceModelTriggerClicks === 2 &&
+      raceModelSubmenuClicks === 1 &&
+      raceModelOptionClicks === 1 &&
+      raceEffortSubmenuClicks === 1 &&
+      raceEffortOptionClicks === 1 &&
+      raceSetTextCalls === 1 &&
+      raceSubmitEvents === 1 &&
+      JSON.stringify(raceSequence) ===
+        JSON.stringify(["model", "effort", "instruction", "submit"]),
+  };
+
   const privacy = {
     payloadStorageAndOutputExcludeInstruction:
       !JSON.stringify(supportedPayloads).includes(instruction) &&
@@ -4817,7 +5079,7 @@ function recoveryKey() { return "codexElvesTaskBoardNativeCreateRecoveryV1"; }
       !storageWrites.join("\n").includes(instruction) &&
       !capturedLogs.join("\n").includes(instruction),
   };
-  process.stdout.write(JSON.stringify({ supported, unsupported, timeout, retry, recovery: {
+  process.stdout.write(JSON.stringify({ supported, navigationRace, unsupported, timeout, retry, recovery: {
     bridgeFailurePersistsAllowedFields,
     nextActivationRetriesOnceAndClears,
     retryFailureKeepsRecordAndWarns,

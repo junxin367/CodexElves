@@ -8434,11 +8434,17 @@
     return window.__codexElvesTaskBoardNativeRuntimeId === runtimeId;
   }
 
-  async function taskBoardNativeWaitForComposer(runtimeId, deadlineMs) {
+  async function taskBoardNativeWaitForComposer(
+    runtimeId,
+    deadlineMs,
+    previousComposer = null,
+  ) {
     while (taskBoardNativeRuntimeCurrent(runtimeId) && taskBoardNativeNow() <= deadlineMs) {
       const composer = taskBoardNativeComposer();
       const controller = taskBoardNativeComposerController(composer);
-      if (composer && controller) return { composer, controller };
+      if (composer && composer !== previousComposer && controller) {
+        return { composer, controller };
+      }
       const remainingMs = deadlineMs - taskBoardNativeNow();
       if (remainingMs <= 0) break;
       await taskBoardNativeWait(Math.min(100, remainingMs));
@@ -8457,22 +8463,40 @@
     return null;
   }
 
-  function taskBoardNativeModelTrigger() {
+  function taskBoardNativeComposerControlSurface(composer) {
+    if (!(composer instanceof HTMLElement)) return null;
+    return composer.closest?.([
+      "[data-composer-footer-responsive]",
+      "[data-codex-composer-root]",
+      ".composer-footer",
+      '[class*="ComposerLayoutFooter"]',
+      '[class*="_footer_"]',
+    ].join(", ")) || null;
+  }
+
+  function taskBoardNativeModelTrigger(composer = taskBoardNativeComposer()) {
     const selector = '[data-codex-intelligence-trigger="true"], [data-composer-navigation-target="reasoning"]';
-    const composer = taskBoardNativeComposer();
-    const composerSurface = composer?.closest?.("form") ||
-      composer?.parentElement?.parentElement?.parentElement ||
-      composer?.parentElement ||
-      null;
-    const candidates = Array.from(new Set([
-      ...Array.from(composerSurface?.querySelectorAll?.(selector) || []),
-      ...Array.from(document.querySelectorAll(selector)),
-    ])).filter(codexServiceTierBadgeVisibleElement);
+    const composerSurface = taskBoardNativeComposerControlSurface(composer);
+    if (!composerSurface) return null;
+    const candidates = Array.from(composerSurface.querySelectorAll?.(selector) || [])
+      .filter(codexServiceTierBadgeVisibleElement);
     return candidates.sort((left, right) => {
       const leftRect = left.getBoundingClientRect?.() || { bottom: 0 };
       const rightRect = right.getBoundingClientRect?.() || { bottom: 0 };
       return Number(rightRect.bottom || 0) - Number(leftRect.bottom || 0);
     })[0] || null;
+  }
+
+  function taskBoardNativeReadyModelTrigger(composer = taskBoardNativeComposer()) {
+    const trigger = taskBoardNativeModelTrigger(composer);
+    if (!trigger?.isConnected || trigger.disabled) return null;
+    if (trigger.getAttribute?.("aria-haspopup") !== "menu") return null;
+    if (trigger.getAttribute?.("aria-expanded") === null) return null;
+    return codexServiceTierSelectedModelTexts(trigger).some((text) => {
+      return !!String(text || "").replace(/\s+/g, " ").trim();
+    })
+      ? trigger
+      : null;
   }
 
   function taskBoardNativeModelTextMatches(modelId, value) {
@@ -8489,9 +8513,13 @@
       normalizeCodexServiceTierModelName(partial.slug) === desired;
   }
 
-  function taskBoardNativeCurrentModelMatches(modelId) {
+  function taskBoardNativeCurrentModelMatches(modelId, knownTrigger = null) {
     const desired = normalizeCodexServiceTierModelName(modelId);
     if (!desired) return true;
+    if (knownTrigger) {
+      return codexServiceTierSelectedModelTexts(knownTrigger)
+        .some((text) => taskBoardNativeModelTextMatches(modelId, text));
+    }
     const selected = codexServiceTierComposerSelectedModel();
     if (selected && normalizeCodexServiceTierModelName(selected) === desired) return true;
     const trigger = taskBoardNativeModelTrigger();
@@ -8561,9 +8589,15 @@
     }) || null;
   }
 
-  function taskBoardNativeCurrentEffortMatches(effortId) {
+  function taskBoardNativeCurrentEffortMatches(effortId, knownTrigger = null) {
     const desired = String(effortId || "").trim().toLowerCase();
     if (!desired) return true;
+    if (knownTrigger) {
+      return String(
+        knownTrigger.getAttribute?.("data-selected-reasoning-effort") ||
+        "",
+      ).trim().toLowerCase() === desired;
+    }
     return taskBoardCurrentComposerReasoningEffort() === desired;
   }
 
@@ -8582,19 +8616,20 @@
     taskBoardNativeActivateControl(trigger);
   }
 
-  async function taskBoardNativeSelectModel(runtimeId, modelId) {
+  async function taskBoardNativeSelectModel(runtimeId, modelId, composer) {
     const desired = String(modelId || "").trim();
-    if (!desired || taskBoardNativeCurrentModelMatches(desired)) {
-      return { status: "ok", modelId: desired };
-    }
+    if (!desired) return { status: "ok", modelId: desired };
     const deadlineMs = taskBoardNativeNow() + taskBoardNativeModelSelectionTimeoutMs;
     const trigger = await taskBoardNativeWaitForValue(
       runtimeId,
       deadlineMs,
-      taskBoardNativeModelTrigger,
+      () => taskBoardNativeReadyModelTrigger(composer),
     );
     if (!trigger) {
       return taskBoardNativeFailure("native_model_unavailable", "未找到原生模型选择控件");
+    }
+    if (taskBoardNativeCurrentModelMatches(desired, trigger)) {
+      return { status: "ok", modelId: desired };
     }
     if (trigger.getAttribute?.("aria-expanded") !== "true" &&
       !taskBoardNativeActivateControl(trigger)) {
@@ -8630,7 +8665,11 @@
     const selected = await taskBoardNativeWaitForValue(
       runtimeId,
       deadlineMs,
-      () => taskBoardNativeCurrentModelMatches(desired),
+      () => {
+        const currentTrigger = taskBoardNativeReadyModelTrigger(composer);
+        return currentTrigger &&
+          taskBoardNativeCurrentModelMatches(desired, currentTrigger);
+      },
     );
     if (!selected) {
       taskBoardNativeCloseModelMenu(trigger);
@@ -8639,19 +8678,24 @@
     return { status: "ok", modelId: desired };
   }
 
-  async function taskBoardNativeSelectReasoningEffort(runtimeId, effortId) {
+  async function taskBoardNativeSelectReasoningEffort(
+    runtimeId,
+    effortId,
+    composer,
+  ) {
     const desired = String(effortId || "").trim().toLowerCase();
-    if (!desired || taskBoardNativeCurrentEffortMatches(desired)) {
-      return { status: "ok", effortId: desired };
-    }
+    if (!desired) return { status: "ok", effortId: desired };
     const deadlineMs = taskBoardNativeNow() + taskBoardNativeModelSelectionTimeoutMs;
     const trigger = await taskBoardNativeWaitForValue(
       runtimeId,
       deadlineMs,
-      taskBoardNativeModelTrigger,
+      () => taskBoardNativeReadyModelTrigger(composer),
     );
     if (!trigger) {
       return taskBoardNativeFailure("native_effort_unavailable", "未找到原生推理强度控件");
+    }
+    if (taskBoardNativeCurrentEffortMatches(desired, trigger)) {
+      return { status: "ok", effortId: desired };
     }
     if (trigger.getAttribute?.("aria-expanded") !== "true" &&
       !taskBoardNativeActivateControl(trigger)) {
@@ -8687,7 +8731,11 @@
     const selected = await taskBoardNativeWaitForValue(
       runtimeId,
       deadlineMs,
-      () => taskBoardNativeCurrentEffortMatches(desired),
+      () => {
+        const currentTrigger = taskBoardNativeReadyModelTrigger(composer);
+        return currentTrigger &&
+          taskBoardNativeCurrentEffortMatches(desired, currentTrigger);
+      },
     );
     if (!selected) {
       taskBoardNativeCloseModelMenu(trigger);
@@ -8736,19 +8784,32 @@
     const button = taskBoardNativeStartButton(row);
     if (!row || !button) return taskBoardNativeFailure("native_create_unavailable", "当前项目暂不支持新建关联会话");
     const previousSessionId = taskBoardNativePermanentSessionId();
+    const previousComposer = taskBoardNativeComposer();
     try {
       button.click?.();
     } catch {
       return taskBoardNativeFailure("native_create_unavailable", "无法启动当前项目的新会话");
     }
     const composerDeadlineMs = taskBoardNativeNow() + taskBoardNativeCreatePermanentIdTimeoutMs;
-    const composerState = await taskBoardNativeWaitForComposer(runtimeId, composerDeadlineMs);
+    const composerState = await taskBoardNativeWaitForComposer(
+      runtimeId,
+      composerDeadlineMs,
+      previousComposer,
+    );
     if (!taskBoardNativeRuntimeCurrent(runtimeId)) return taskBoardNativeFailure("runtime_replaced", "Codex 页面已更新，请重试");
     if (!composerState) return taskBoardNativeFailure("composer_unavailable", "未找到原生会话编辑器");
     const { composer, controller } = composerState;
-    const modelSelection = await taskBoardNativeSelectModel(runtimeId, modelId);
+    const modelSelection = await taskBoardNativeSelectModel(
+      runtimeId,
+      modelId,
+      composer,
+    );
     if (modelSelection?.status !== "ok") return modelSelection;
-    const effortSelection = await taskBoardNativeSelectReasoningEffort(runtimeId, effortId);
+    const effortSelection = await taskBoardNativeSelectReasoningEffort(
+      runtimeId,
+      effortId,
+      composer,
+    );
     if (effortSelection?.status !== "ok") return effortSelection;
     try {
       controller.focus?.();
