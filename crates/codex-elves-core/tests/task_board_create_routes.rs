@@ -67,6 +67,7 @@ fn session(
         title: title.to_string(),
         cwd: cwd.to_string(),
         updated_at_ms,
+        session_aliases: Vec::new(),
     }
 }
 

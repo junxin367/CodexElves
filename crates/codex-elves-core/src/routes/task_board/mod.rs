@@ -123,6 +123,10 @@ fn store_error(error: TaskBoardStoreError) -> Value {
             &path,
         ),
         TaskBoardStoreError::InvalidInput { message } => failed("invalid_input", message),
+        TaskBoardStoreError::SessionNotFound { .. } => failed(
+            "session_not_found",
+            "One or more task board sessions were not found",
+        ),
         TaskBoardStoreError::RevisionConflict { current } => json!({
             "status": "conflict",
             "code": "revision_conflict",

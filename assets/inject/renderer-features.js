@@ -9096,13 +9096,19 @@
     return String(value || "").trim().replace(/^local:/i, "");
   }
 
-  function taskBoardNativeSessionIdVariants(value) {
-    const sessionId = taskBoardNativeSessionId(value);
-    return sessionId ? new Set([sessionId, `local:${sessionId}`]) : new Set();
+  function taskBoardNativeSessionIdVariants(value, aliases = []) {
+    const variants = new Set();
+    [value, ...(Array.isArray(aliases) ? aliases : [])].forEach((candidate) => {
+      const sessionId = taskBoardNativeSessionId(candidate);
+      if (!sessionId) return;
+      variants.add(sessionId);
+      variants.add(`local:${sessionId}`);
+    });
+    return variants;
   }
 
-  function taskBoardNativeThreadRow(sessionId) {
-    const variants = taskBoardNativeSessionIdVariants(sessionId);
+  function taskBoardNativeThreadRow(sessionId, aliases = []) {
+    const variants = taskBoardNativeSessionIdVariants(sessionId, aliases);
     if (!variants.size) return null;
     return Array.from(document.querySelectorAll("[data-app-action-sidebar-thread-id]")).find((row) => {
       return variants.has(String(row.getAttribute?.("data-app-action-sidebar-thread-id") || "").trim());
@@ -9163,7 +9169,6 @@
         break;
       }
     }
-    const source = catalogSession || fallback || taskConversation;
     const cwd = taskBoardNormalizedCwd(
       catalogSession?.cwd || fallback?.cwd || taskConversation?.cwd || taskProject?.cwd,
     );
@@ -9173,7 +9178,28 @@
     const projectLabel = normalizeProjectLabel(
       catalogProject?.label || taskProject?.label || "",
     );
-    return { sessionId: normalizedSessionId, cwd, projectLabel };
+    const sessionAliases = Array.from(
+      new Set(
+        [
+          ...(Array.isArray(catalogSession?.sessionAliases)
+            ? catalogSession.sessionAliases
+            : []),
+          ...(Array.isArray(fallback?.sessionAliases)
+            ? fallback.sessionAliases
+            : []),
+          ...(Array.isArray(taskConversation?.sessionAliases)
+            ? taskConversation.sessionAliases
+            : []),
+        ]
+          .map(taskBoardNativeSessionId)
+          .filter((alias) => (
+            alias &&
+            alias !== normalizedSessionId &&
+            isTemporaryThreadId(alias)
+          )),
+      ),
+    );
+    return { sessionId: normalizedSessionId, cwd, projectLabel, sessionAliases };
   }
 
   function taskBoardNativeProjectTarget(location) {
@@ -9258,7 +9284,10 @@
     }
 
     while (taskBoardNativeRuntimeCurrent(runtimeId) && taskBoardNativeNow() <= deadlineMs) {
-      const threadRow = taskBoardNativeThreadRow(location.sessionId);
+      const threadRow = taskBoardNativeThreadRow(
+        location.sessionId,
+        location.sessionAliases,
+      );
       if (threadRow) return { threadRow };
       const project = taskBoardNativeProjectTarget(location);
       if (project?.row) return { project };
@@ -9333,7 +9362,10 @@
       }
     }
     while (taskBoardNativeRuntimeCurrent(runtimeId) && taskBoardNativeNow() <= deadlineMs) {
-      const row = taskBoardNativeThreadRow(location.sessionId);
+      const row = taskBoardNativeThreadRow(
+        location.sessionId,
+        location.sessionAliases,
+      );
       if (row) {
         try {
           row.click?.();

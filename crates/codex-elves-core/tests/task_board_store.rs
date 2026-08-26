@@ -500,6 +500,7 @@ fn session_catalog_dtos_use_the_frozen_camel_case_shape() {
             title: "session".to_string(),
             cwd: "E:\\code\\codexelves".to_string(),
             updated_at_ms: Some(1_787_544_000_000),
+            session_aliases: vec!["client-new-thread:temporary".to_string()],
         }],
         warnings: vec![TaskBoardCatalogWarning {
             code: TaskBoardCatalogWarningCode::CodexDbReadFailed,
@@ -513,6 +514,10 @@ fn session_catalog_dtos_use_the_frozen_camel_case_shape() {
     assert_eq!(
         json["sessions"][0]["sessionId"],
         "019c89c0-0000-7000-8000-000000000001"
+    );
+    assert_eq!(
+        json["sessions"][0]["sessionAliases"],
+        serde_json::json!(["client-new-thread:temporary"])
     );
     assert_eq!(json["warnings"][0]["code"], "codex_db_read_failed");
 }

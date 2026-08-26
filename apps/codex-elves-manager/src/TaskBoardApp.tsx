@@ -63,6 +63,7 @@ type CatalogSession = {
   title: string;
   cwd: string;
   updatedAtMs?: number | null;
+  sessionAliases?: string[];
 };
 
 type DropdownOption = {
@@ -2194,6 +2195,23 @@ export function TaskBoardApp() {
     return titles;
   }, [catalog.sessions]);
 
+  const catalogSessionAliases = useMemo(() => {
+    const aliases = new Map<string, string[]>();
+    catalog.sessions.forEach((session) => {
+      const sessionId = normalizeSessionId(session.sessionId);
+      if (!sessionId || !Array.isArray(session.sessionAliases)) return;
+      const values = Array.from(
+        new Set(
+          session.sessionAliases
+            .map((alias) => String(alias || "").trim())
+            .filter(Boolean),
+        ),
+      );
+      if (values.length) aliases.set(sessionId, values);
+    });
+    return aliases;
+  }, [catalog.sessions]);
+
   const catalogProjectsByCwd = useMemo(() => {
     const projects = new Map<string, CatalogProject>();
     catalog.projects.forEach((project) => projects.set(project.cwd, project));
@@ -2330,7 +2348,10 @@ export function TaskBoardApp() {
       };
       try {
         const result = await invoke<BoardResponse>("task_board_open_session", {
-          request: conversation,
+          request: {
+            ...conversation,
+            sessionAliases: catalogSessionAliases.get(sessionKey) ?? [],
+          },
         });
         if (result.status !== "ok") {
           restoreUnread();
@@ -2341,7 +2362,7 @@ export function TaskBoardApp() {
         showToast(messageFromError(error, "无法打开关联会话"));
       }
     },
-    [conversationStatuses, showToast],
+    [catalogSessionAliases, conversationStatuses, showToast],
   );
 
   const closeEditor = useCallback(() => {

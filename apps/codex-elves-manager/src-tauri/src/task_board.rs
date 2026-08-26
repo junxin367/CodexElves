@@ -125,6 +125,8 @@ pub struct OpenSessionRequest {
     title: String,
     cwd: String,
     updated_at_ms: Option<u64>,
+    #[serde(default)]
+    session_aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -423,19 +425,21 @@ pub async fn task_board_open_session(request: OpenSessionRequest) -> Value {
     if session_id.is_empty() {
         return failed("invalid_input", "会话 ID 不能为空");
     }
-    call_codex_host(
-        "openSession",
-        json!([
-            session_id,
-            {
-                "sessionId": request.session_id,
-                "title": request.title,
-                "cwd": request.cwd,
-                "updatedAtMs": request.updated_at_ms
-            }
-        ]),
-    )
-    .await
+    let arguments = task_board_open_session_arguments(&request, &session_id);
+    call_codex_host("openSession", arguments).await
+}
+
+fn task_board_open_session_arguments(request: &OpenSessionRequest, session_id: &str) -> Value {
+    json!([
+        session_id,
+        {
+            "sessionId": request.session_id,
+            "title": request.title,
+            "cwd": request.cwd,
+            "updatedAtMs": request.updated_at_ms,
+            "sessionAliases": request.session_aliases,
+        }
+    ])
 }
 
 #[tauri::command]
@@ -555,8 +559,8 @@ fn conversations_from_catalog(
             continue;
         }
         let Some(session) = sessions.get(&key).copied() else {
-            return Err(TaskBoardStoreError::InvalidInput {
-                message: format!("会话不存在或尚未写入本地目录：{session_id}"),
+            return Err(TaskBoardStoreError::SessionNotFound {
+                session_id: session_id.to_string(),
             });
         };
         conversations.push(TaskBoardConversation {
@@ -1214,6 +1218,10 @@ fn store_error_value(error: TaskBoardStoreError) -> Value {
             "path": path.to_string_lossy(),
         }),
         TaskBoardStoreError::InvalidInput { message } => failed("invalid_input", message),
+        TaskBoardStoreError::SessionNotFound { session_id } => failed(
+            "session_not_found",
+            format!("会话不存在或尚未写入本地目录：{session_id}"),
+        ),
         TaskBoardStoreError::RevisionConflict { current } => json!({
             "status": "conflict",
             "code": "revision_conflict",
@@ -1480,6 +1488,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn standalone_missing_catalog_session_is_retryable() {
+        let catalog = TaskBoardSessionCatalog {
+            projects: Vec::new(),
+            sessions: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        let error = conversations_from_catalog(&catalog, &["session-missing".to_string()])
+            .expect_err("missing catalog session should fail");
+        let response = store_error_value(error);
+
+        assert_eq!(response["status"], "failed");
+        assert_eq!(response["code"], "session_not_found");
+        assert_eq!(
+            response["message"],
+            "会话不存在或尚未写入本地目录：session-missing"
+        );
+    }
+
+    #[test]
+    fn standalone_open_session_forwards_session_aliases_to_host() {
+        let request = OpenSessionRequest {
+            session_id: "session-permanent".to_string(),
+            title: "会话标题".to_string(),
+            cwd: "E:\\code\\project".to_string(),
+            updated_at_ms: Some(123),
+            session_aliases: vec!["client-new-thread:temporary".to_string()],
+        };
+
+        assert_eq!(
+            task_board_open_session_arguments(&request, "session-permanent"),
+            json!([
+                "session-permanent",
+                {
+                    "sessionId": "session-permanent",
+                    "title": "会话标题",
+                    "cwd": "E:\\code\\project",
+                    "updatedAtMs": 123,
+                    "sessionAliases": ["client-new-thread:temporary"]
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn saved_window_requires_a_stable_visible_area() {
         let visible = TaskBoardWindowState {
             x: 100,
@@ -1542,7 +1595,7 @@ mod tests {
             "operation-1",
             "startConversation",
             &json!([
-                {"cwd": "E:\\code\\junes\\github\\CodexPlusPlus", "label": "CodexPlusPlus"},
+                {"cwd": "E:\\code\\junes\\github\\CodexElves", "label": "CodexElves"},
                 "验证首条指令",
                 "gpt-5.6-sol",
                 "max"

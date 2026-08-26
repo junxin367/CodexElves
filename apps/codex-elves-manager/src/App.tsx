@@ -1705,7 +1705,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.3.14",
+        currentVersion: "0.3.15",
         latestVersion: "0.4.0",
         releaseSummary: [
           "CodexElves 0.4.0",
@@ -1720,7 +1720,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       }, "发现可用更新。") as T);
     case "perform_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.3.14",
+        currentVersion: "0.3.15",
         latestVersion: "0.4.0",
         releaseSummary: "浏览器预览不会下载真实安装包。",
         installedPath: "C:\\Temp\\CodexElves-0.4.0-windows-x64-setup.exe",
@@ -1730,7 +1730,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({
         report: [
           "CodexElves 诊断报告",
-          "版本: 0.3.14",
+          "版本: 0.3.15",
           "平台: windows-x64",
           "Codex 应用: C:\\Users\\junes\\AppData\\Local\\Programs\\CodexElves\\CodexElves.exe",
           "配置目录: C:\\Users\\junes\\.codex",
@@ -1751,7 +1751,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.3.14",
+        current_version: "0.3.15",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",

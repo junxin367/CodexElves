@@ -68,6 +68,7 @@ fn sample_catalog() -> TaskBoardSessionCatalog {
             title: "private-session-title".to_string(),
             cwd: "E:\\private\\project".to_string(),
             updated_at_ms: Some(1_787_544_000_000),
+            session_aliases: Vec::new(),
         }],
         warnings: vec![TaskBoardCatalogWarning {
             code: TaskBoardCatalogWarningCode::CodexDbReadFailed,

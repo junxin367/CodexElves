@@ -471,6 +471,8 @@ pub enum TaskBoardStoreError {
     InvalidFile { path: PathBuf, message: String },
     #[error("task board input is invalid: {message}")]
     InvalidInput { message: String },
+    #[error("task board session was not found: {session_id}")]
+    SessionNotFound { session_id: String },
     #[error("task board revision conflicts with the current snapshot")]
     RevisionConflict { current: TaskBoardDocument },
     #[error("task id conflicts with an existing task")]

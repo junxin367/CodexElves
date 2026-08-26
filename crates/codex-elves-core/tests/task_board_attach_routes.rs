@@ -69,6 +69,7 @@ fn catalog() -> TaskBoardSessionCatalog {
             title: "目录权威标题".to_string(),
             cwd: "e:/CODE/CodexElves/".to_string(),
             updated_at_ms: Some(20),
+            session_aliases: Vec::new(),
         }],
         warnings: Vec::new(),
     }

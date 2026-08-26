@@ -256,6 +256,8 @@ pub struct TaskBoardCatalogSession {
     pub title: String,
     pub cwd: String,
     pub updated_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_aliases: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

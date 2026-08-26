@@ -21,6 +21,7 @@ pub struct CodexProjectCatalog {
     local_project_id_by_thread: HashMap<String, String>,
     assigned_thread_ids: HashSet<String>,
     projectless_thread_ids: HashSet<String>,
+    session_aliases_by_thread: HashMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -159,6 +160,11 @@ pub fn task_board_catalog_from_local_catalog(
             title: session.title,
             cwd: projects[project_index].cwd.clone(),
             updated_at_ms,
+            session_aliases: project_catalog
+                .session_aliases_by_thread
+                .get(&session_identity)
+                .cloned()
+                .unwrap_or_default(),
         });
     }
 
@@ -330,6 +336,33 @@ fn populate_thread_project_state(state: &Value, catalog: &mut CodexProjectCatalo
             .map(|thread_id| normalized_session_identity(&thread_id))
             .filter(|thread_id| !thread_id.is_empty()),
     );
+
+    if let Some(bindings) = state
+        .get("electron-persisted-atom-state")
+        .and_then(Value::as_object)
+        .and_then(|electron_state| electron_state.get("client-thread-bindings-v1"))
+        .and_then(Value::as_object)
+    {
+        for (alias, session_id) in bindings {
+            let Some(session_id) = nonempty_string(Some(session_id)) else {
+                continue;
+            };
+            let alias = normalized_session_identity(alias);
+            let session_id = normalized_session_identity(&session_id);
+            if alias.is_empty() || session_id.is_empty() || alias == session_id {
+                continue;
+            }
+            catalog
+                .session_aliases_by_thread
+                .entry(session_id)
+                .or_default()
+                .push(alias);
+        }
+        for aliases in catalog.session_aliases_by_thread.values_mut() {
+            aliases.sort();
+            aliases.dedup();
+        }
+    }
 }
 
 fn append_path_array(paths: &mut Vec<String>, value: Option<&Value>) {
@@ -492,6 +525,44 @@ mod tests {
                 ("assigned-second", "D:\\projects\\second"),
                 ("legacy-root-match", "C:\\workspace\\real-folder"),
             ]
+        );
+    }
+
+    #[test]
+    fn modern_catalog_exposes_client_thread_aliases_for_permanent_sessions() {
+        let state = json!({
+            "local-projects": {
+                "project-a": {
+                    "id": "project-a",
+                    "name": "项目 A",
+                    "rootPaths": ["C:/Workspace/project-a"]
+                }
+            },
+            "thread-project-assignments": {
+                "session-permanent": {"projectKind": "local", "projectId": "project-a"}
+            },
+            "electron-persisted-atom-state": {
+                "client-thread-bindings-v1": {
+                    "client-new-thread:temporary-alias": "session-permanent"
+                }
+            }
+        });
+        let catalog = task_board_catalog_from_local_catalog(
+            LocalSessionCatalog {
+                sessions: vec![session(
+                    "session-permanent",
+                    "C:/Workspace/project-a",
+                    Some(1),
+                )],
+                warnings: Vec::new(),
+            },
+            codex_project_catalog_from_state(&state),
+        )
+        .unwrap();
+
+        assert_eq!(
+            catalog.sessions[0].session_aliases,
+            vec!["client-new-thread:temporary-alias"]
         );
     }
 

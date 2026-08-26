@@ -1375,6 +1375,24 @@ fn renderer_task_board_open_session_uses_native_rows_and_bounded_project_expansi
     assert!(cases["mounted"]["rawIdClickedOnce"].as_bool().unwrap());
     assert!(cases["mounted"]["localIdClickedOnce"].as_bool().unwrap());
     assert!(
+        cases["temporaryAlias"]["permanentIdOpensTemporaryRow"]
+            .as_bool()
+            .unwrap(),
+        "open session cases: {cases}"
+    );
+    assert!(
+        cases["fallbackAlias"]["standaloneAliasesSurviveStaleHostCatalog"]
+            .as_bool()
+            .unwrap(),
+        "open session cases: {cases}"
+    );
+    assert!(
+        cases["unboundAlias"]["sameTitleTemporaryRowStaysUnavailable"]
+            .as_bool()
+            .unwrap(),
+        "open session cases: {cases}"
+    );
+    assert!(
         cases["expanded"]["projectThenThreadClickedOnce"]
             .as_bool()
             .unwrap()
@@ -4803,12 +4821,31 @@ const threadClicks = new Map();
 function removeThreads() {
   document.querySelectorAll("[data-app-action-sidebar-thread-id]").forEach((row) => row.remove());
 }
-function addThread(id) {
+function addThread(id, title = "", parent = document.body) {
   const row = node("button");
   row.setAttribute("data-app-action-sidebar-thread-id", id);
+  if (title) {
+    row.setAttribute("data-app-action-sidebar-thread-title", title);
+    row.textContent = title;
+  }
   row.addEventListener("click", () => threadClicks.set(id, (threadClicks.get(id) || 0) + 1));
-  document.body.appendChild(row);
+  parent.appendChild(row);
   return row;
+}
+function addProjectListItem(id, label) {
+  const listItem = node("div");
+  listItem.setAttribute("role", "listitem");
+  listItem.setAttribute("aria-label", label);
+  const row = node("button");
+  row.setAttribute("data-app-action-sidebar-project-row", "true");
+  row.setAttribute("data-app-action-sidebar-project-id", id);
+  row.setAttribute("data-app-action-sidebar-project-label", label);
+  row.setAttribute("aria-label", label);
+  row.setAttribute("aria-expanded", "true");
+  const threads = node("div");
+  listItem.append(row, threads);
+  document.body.appendChild(listItem);
+  return { listItem, row, threads };
 }
 function snapshot() {
   return {
@@ -4877,6 +4914,92 @@ function reset(options = {}) {
   addThread("local:session-local");
   const local = await api.nativeOpenSessionForTest("session-local");
   mounted.localIdClickedOnce = local.status === "ok" && threadClicks.get("local:session-local") === 1 && projectClicks === 0;
+
+  const aliasSnapshot = {
+    status: "ok",
+    schemaVersion: 1,
+    revision: 7,
+    tasks: [{
+      id: "task-alias",
+      title: "打开临时别名会话",
+      project: { cwd: "c:/repo-alias", label: "项目别名" },
+      status: "new",
+      order: 0,
+      conversations: [
+        { sessionId: "session-permanent-alias", title: "临时别名会话", cwd: "c:/repo-alias" },
+      ],
+    }],
+  };
+  const aliasCatalog = {
+    status: "ok",
+    projects: [{ cwd: "c:/repo-alias", label: "项目别名" }],
+    sessions: [
+      {
+        sessionId: "session-permanent-alias",
+        title: "临时别名会话",
+        cwd: "c:/repo-alias",
+        updatedAtMs: 4,
+        sessionAliases: ["client-new-thread:temporary-alias"],
+      },
+    ],
+    warnings: [],
+  };
+  reset({ snapshot: aliasSnapshot, catalog: aliasCatalog });
+  const aliasProject = addProjectListItem("opaque-project-alias", "项目别名");
+  addThread(
+    "local:client-new-thread:temporary-alias",
+    "侧边栏临时标题",
+    aliasProject.threads,
+  );
+  const aliasResult = await api.nativeOpenSessionForTest("session-permanent-alias");
+  const temporaryAlias = {
+    permanentIdOpensTemporaryRow:
+      aliasResult.status === "ok" &&
+      threadClicks.get("local:client-new-thread:temporary-alias") === 1,
+  };
+  aliasProject.listItem.remove();
+
+  const staleAliasCatalog = {
+    ...aliasCatalog,
+    sessions: aliasCatalog.sessions.map(({ sessionAliases, ...session }) => session),
+  };
+  reset({ snapshot: aliasSnapshot, catalog: staleAliasCatalog });
+  const fallbackProject = addProjectListItem("opaque-project-fallback", "项目别名");
+  addThread(
+    "local:client-new-thread:temporary-fallback",
+    "另一条侧边栏标题",
+    fallbackProject.threads,
+  );
+  const fallbackResult = await api.nativeOpenSessionForTest(
+    "session-permanent-alias",
+    {
+      sessionId: "session-permanent-alias",
+      title: "临时别名会话",
+      cwd: "c:/repo-alias",
+      sessionAliases: ["client-new-thread:temporary-fallback"],
+    },
+  );
+  const fallbackAlias = {
+    standaloneAliasesSurviveStaleHostCatalog:
+      fallbackResult.status === "ok" &&
+      threadClicks.get("local:client-new-thread:temporary-fallback") === 1,
+  };
+  fallbackProject.listItem.remove();
+
+  reset({ snapshot: aliasSnapshot, catalog: aliasCatalog });
+  const unboundProject = addProjectListItem("opaque-project-unbound", "项目别名");
+  addThread(
+    "local:client-new-thread:unbound-same-title",
+    "临时别名会话",
+    unboundProject.threads,
+  );
+  const unboundResult = await api.nativeOpenSessionForTest("session-permanent-alias");
+  const unboundAlias = {
+    sameTitleTemporaryRowStaysUnavailable:
+      unboundResult.code === "session_unavailable" &&
+      !threadClicks.get("local:client-new-thread:unbound-same-title"),
+  };
+  unboundProject.listItem.remove();
 
   reset({ catalog: { status: "ok", projects: [{ cwd: "c:/repo-a", label: "项目 A" }], sessions: [], warnings: [] } });
   projectRow.setAttribute("aria-expanded", "false");
@@ -4955,7 +5078,19 @@ function reset(options = {}) {
   reset({ adapter: { openSession(sessionId) { seamCalls += 1; return { status: "ok", sessionId }; } } });
   await api.openConversationForTest({ sessionId: "session-raw", title: "原始 ID" });
   const seam = { injectedAdapterStillUsed: seamCalls === 1 };
-  process.stdout.write(JSON.stringify({ mounted, expanded, sidebarCollapsed, deadline, errors, runtimeReplacement, repeat, seam }));
+  process.stdout.write(JSON.stringify({
+    mounted,
+    temporaryAlias,
+    fallbackAlias,
+    unboundAlias,
+    expanded,
+    sidebarCollapsed,
+    deadline,
+    errors,
+    runtimeReplacement,
+    repeat,
+    seam,
+  }));
   process.exit(0);
 })().catch((error) => { process.stderr.write(String(error?.stack || error)); process.exit(1); });
 "##,
