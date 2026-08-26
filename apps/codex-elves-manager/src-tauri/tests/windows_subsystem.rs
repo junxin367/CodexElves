@@ -511,9 +511,15 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     assert!(app.contains("const taskBoardStatusIconPaths = ["));
     assert!(app.contains("function taskBoardStatusIconIndex("));
     assert!(app.contains("data-task-board-status-icon={iconIndex}"));
+    assert!(app.contains("data-searchable={searchable || undefined}"));
     assert!(app.contains("searchPlaceholder=\"搜索项目名称或路径\""));
     assert!(app.matches("searchable").count() >= 4);
     assert!(!app.contains("task-board-dropdown-option-marker"));
+    assert!(app.contains("className=\"task-board-board-action-slot\""));
+    assert!(app.contains("task-board-board-mode-action"));
+    assert!(app.contains("value={editingBoardId ? editingLabel : manager.label}"));
+    assert!(app.contains("event.dataTransfer.setDragImage("));
+    assert!(!app.contains("task-board-board-edit-form"));
     assert!(app.contains("aria-label={`拖动看板 ${board.label} 调整排序`}"));
     assert!(app.contains("aria-label={`编辑看板 ${board.label}`}"));
     assert!(task_board_commands.contains("task_board_create_board"));
@@ -538,6 +544,12 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     assert!(styles.contains(".task-board-dropdown-status-icon"));
     assert!(styles.contains(".task-board-dropdown-search"));
     assert!(styles.contains(".task-board-dropdown-options"));
+    assert_eq!(
+        styles.matches("--task-board-status-icon-color: #").count(),
+        10
+    );
+    assert!(styles.contains(".task-board-dropdown-menu[data-searchable=\"true\"]"));
+    assert!(styles.contains("margin-bottom: 5px"));
     assert!(!styles.contains("--task-board-status-color"));
     assert!(styles.contains(".task-board-conversation-state"));
     assert!(styles.contains(r#"[data-conversation-status="unread"]"#));
@@ -623,9 +635,9 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     assert!(!dropdown_button_styles.contains("align-items: flex-start"));
     assert!(!styles.contains(".task-board-dropdown-option-marker"));
     assert!(styles.contains(".task-board-create-settings-chevron svg"));
-    assert!(styles.contains(
-        ".task-board-board-edit,\n.task-board-board-delete,\n.task-board-board-edit-form button {\n  cursor: pointer;"
-    ));
+    assert!(
+        styles.contains(".task-board-board-edit,\n.task-board-board-delete {\n  cursor: pointer;")
+    );
     let icon_button_styles = styles
         .split(".task-board-icon-button {")
         .nth(1)
@@ -688,7 +700,11 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     assert!(styles.contains(".task-board-board-manager"));
     assert!(styles.contains(".task-board-board-list"));
     assert!(styles.contains(".task-board-board-drag-handle"));
-    assert!(styles.contains(".task-board-board-edit-form"));
+    assert!(styles.contains("grid-template-columns: minmax(0, 1fr) 98px"));
+    assert!(styles.contains(".task-board-board-action-slot"));
+    assert!(styles.contains(".task-board-board-mode-action"));
+    assert!(styles.contains("flex: 1 1 0"));
+    assert!(!styles.contains(".task-board-board-edit-form"));
     assert!(styles.contains(".task-board-board-item[data-drop-position=\"before\"]"));
     assert!(styles.contains(".task-board-board-manager *"));
     assert!(styles.contains(".task-board-board-delete-confirm"));

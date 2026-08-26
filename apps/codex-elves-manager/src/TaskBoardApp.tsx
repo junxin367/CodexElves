@@ -1084,6 +1084,7 @@ function TaskBoardDropdown({
             ref={menuRef}
             role="listbox"
             aria-label={ariaLabel}
+            data-searchable={searchable || undefined}
             style={{ left: 8, top: 8, visibility: "hidden" }}
           >
             {searchable ? (
@@ -3548,7 +3549,6 @@ function TaskBoardManager({
 }) {
   const dialogRef = useRef<HTMLElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const editInputRef = useRef<HTMLInputElement>(null);
   const dragHandleRefs = useRef(new Map<string, HTMLButtonElement>());
   const previousFocusRef = useRef<HTMLElement | null>(
     document.activeElement instanceof HTMLElement ? document.activeElement : null,
@@ -3568,6 +3568,7 @@ function TaskBoardManager({
   const pendingBoard = boards.find(
     (board) => board.id === manager.pendingDeleteId,
   );
+  const editingBoard = boards.find((board) => board.id === editingBoardId);
   const pendingTaskCount = pendingBoard
     ? tasks.filter((task) => task.status === pendingBoard.id).length
     : 0;
@@ -3586,8 +3587,8 @@ function TaskBoardManager({
   useEffect(() => {
     if (!editingBoardId || manager.busy) return;
     window.requestAnimationFrame(() => {
-      editInputRef.current?.focus();
-      editInputRef.current?.select();
+      inputRef.current?.focus();
+      inputRef.current?.select();
     });
   }, [editingBoardId, manager.busy]);
 
@@ -3730,40 +3731,99 @@ function TaskBoardManager({
             className="task-board-board-add"
             onSubmit={(event) => {
               event.preventDefault();
-              onCreate();
+              if (editingBoardId) {
+                void submitBoardRename();
+              } else {
+                onCreate();
+              }
             }}
           >
             <label className="task-board-field">
               <span>新看板名称</span>
               <input
                 ref={inputRef}
-                value={manager.label}
+                value={editingBoardId ? editingLabel : manager.label}
                 maxLength={40}
                 placeholder="例如：待发布"
-                aria-label="新看板名称"
+                aria-label={
+                  editingBoard
+                    ? `看板 ${editingBoard.label} 的新名称`
+                    : "新看板名称"
+                }
                 disabled={manager.busy}
-                onChange={(event) =>
+                onChange={(event) => {
+                  if (editingBoardId) {
+                    setEditingLabel(event.target.value);
+                    onChange({
+                      ...manager,
+                      feedback: "",
+                      pendingDeleteId: "",
+                    });
+                    return;
+                  }
                   onChange({
                     ...manager,
                     label: event.target.value,
                     feedback: "",
                     pendingDeleteId: "",
-                  })
-                }
+                  });
+                }}
               />
             </label>
-            <button
-              className="task-board-button primary"
-              type="submit"
-              disabled={manager.busy || !manager.label.trim()}
-            >
-              {manager.busyKind === "create" ? (
-                <LoaderCircle className="spinning" size={14} aria-hidden="true" />
+            <div className="task-board-board-action-slot">
+              {editingBoardId ? (
+                <>
+                  <button
+                    className="task-board-button primary task-board-board-mode-action"
+                    type="submit"
+                    aria-label={`保存看板 ${editingBoard?.label || ""} 的名称`}
+                    title="保存名称"
+                    disabled={manager.busy || !editingLabel.trim()}
+                  >
+                    {manager.busyKind === "rename" &&
+                    manager.busyBoardId === editingBoardId ? (
+                      <LoaderCircle
+                        className="spinning"
+                        size={14}
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <Check size={14} strokeWidth={1.5} aria-hidden="true" />
+                    )}
+                  </button>
+                  <button
+                    className="task-board-button task-board-board-mode-action"
+                    type="button"
+                    aria-label={`取消编辑看板 ${editingBoard?.label || ""}`}
+                    title="取消编辑"
+                    disabled={manager.busy}
+                    onClick={() => {
+                      setEditingBoardId("");
+                      setEditingLabel("");
+                    }}
+                  >
+                    <X size={14} strokeWidth={1.4} aria-hidden="true" />
+                  </button>
+                </>
               ) : (
-                <Plus size={14} strokeWidth={1.3} aria-hidden="true" />
+                <button
+                  className="task-board-button primary task-board-board-add-button"
+                  type="submit"
+                  disabled={manager.busy || !manager.label.trim()}
+                >
+                  {manager.busyKind === "create" ? (
+                    <LoaderCircle
+                      className="spinning"
+                      size={14}
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <Plus size={14} strokeWidth={1.3} aria-hidden="true" />
+                  )}
+                  添加看板
+                </button>
               )}
-              添加看板
-            </button>
+            </div>
           </form>
 
           <div className="task-board-board-list" aria-label="现有看板">
@@ -3863,6 +3923,24 @@ function TaskBoardManager({
                         setDropTarget(null);
                         event.dataTransfer.effectAllowed = "move";
                         event.dataTransfer.setData("text/plain", board.id);
+                        const row =
+                          event.currentTarget.closest<HTMLElement>(
+                            ".task-board-board-item",
+                          );
+                        if (row) {
+                          const bounds = row.getBoundingClientRect();
+                          event.dataTransfer.setDragImage(
+                            row,
+                            Math.max(
+                              0,
+                              Math.min(bounds.width, event.clientX - bounds.left),
+                            ),
+                            Math.max(
+                              0,
+                              Math.min(bounds.height, event.clientY - bounds.top),
+                            ),
+                          );
+                        }
                       }}
                       onDragEnd={clearBoardDrag}
                       onKeyDown={(event) => {
@@ -3905,72 +3983,9 @@ function TaskBoardManager({
                       )}
                     </button>
                     <TaskBoardStatusIcon statusId={board.id} />
-                    {editing ? (
-                      <form
-                        className="task-board-board-edit-form"
-                        onSubmit={(event) => {
-                          event.preventDefault();
-                          void submitBoardRename();
-                        }}
-                      >
-                        <input
-                          ref={editInputRef}
-                          value={editingLabel}
-                          maxLength={40}
-                          aria-label={`看板 ${board.label} 的新名称`}
-                          disabled={manager.busy}
-                          onChange={(event) => {
-                            setEditingLabel(event.target.value);
-                            onChange({
-                              ...manager,
-                              feedback: "",
-                              pendingDeleteId: "",
-                            });
-                          }}
-                        />
-                        <button
-                          type="submit"
-                          aria-label={`保存看板 ${board.label} 的名称`}
-                          title="保存名称"
-                          disabled={manager.busy || !editingLabel.trim()}
-                        >
-                          {manager.busyKind === "rename" &&
-                          manager.busyBoardId === board.id ? (
-                            <LoaderCircle
-                              className="spinning"
-                              size={14}
-                              aria-hidden="true"
-                            />
-                          ) : (
-                            <Check
-                              size={14}
-                              strokeWidth={1.5}
-                              aria-hidden="true"
-                            />
-                          )}
-                        </button>
-                        <button
-                          type="button"
-                          aria-label={`取消编辑看板 ${board.label}`}
-                          title="取消编辑"
-                          disabled={manager.busy}
-                          onClick={() => {
-                            setEditingBoardId("");
-                            setEditingLabel("");
-                          }}
-                        >
-                          <X
-                            size={14}
-                            strokeWidth={1.4}
-                            aria-hidden="true"
-                          />
-                        </button>
-                      </form>
-                    ) : (
-                      <span className="task-board-board-name" title={board.label}>
-                        {board.label}
-                      </span>
-                    )}
+                    <span className="task-board-board-name" title={board.label}>
+                      {board.label}
+                    </span>
                     <span className="task-board-board-task-count">
                       {taskCount} 个任务
                     </span>

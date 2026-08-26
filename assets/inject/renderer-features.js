@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "67";
+  const codexDeleteStyleVersion = "70";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -82,7 +82,7 @@
   const codexPluginRequestIdMaxEntries = 256;
   const codexFailureHistoryMaxEntries = 64;
   const codexManagerReactDiscoveryCooldownMs = 15000;
-  const taskBoardRuntimeVersion = "49";
+  const taskBoardRuntimeVersion = "55";
   const taskBoardNativeOperationLeaseTtlMs = 2 * 60 * 1000;
   const taskBoardNativeCreateBusyMessage = "另一个窗口正在创建原生会话，请稍后重试";
   const taskBoardEntryAttribute = "data-codex-task-board-entry";
@@ -249,6 +249,27 @@
   ) {
     return installedVersion === taskBoardRuntimeVersion && typeof refreshRuntime === "function";
   }
+  function cleanupStaleTaskBoardRuntimeDom() {
+    document
+      .querySelectorAll(
+        [
+          taskBoardRootSelector,
+          taskBoardEntrySelector,
+          ".codex-task-board-create-modal-backdrop",
+          ".codex-task-board-dropdown-menu",
+          `.${taskBoardEntryContextMenuClass}`,
+        ].join(","),
+      )
+      .forEach((element) => element.remove?.());
+    document
+      .querySelectorAll(`.${taskBoardMainHostClass}`)
+      .forEach((element) => element.classList?.remove?.(taskBoardMainHostClass));
+    document
+      .querySelectorAll(`[${taskBoardNativeSelectionAttribute}="true"]`)
+      .forEach((element) =>
+        element.removeAttribute?.(taskBoardNativeSelectionAttribute),
+      );
+  }
   function taskBoardNativeOperationLease() {
     const lease = window.__codexElvesTaskBoardNativeOperationLease;
     const runtimeId = Number(lease?.runtimeId);
@@ -281,6 +302,7 @@
     });
   } catch (_) {}
   window.__codexElvesTaskBoardCleanup = null;
+  cleanupStaleTaskBoardRuntimeDom();
   window.__codexSessionPrewarmRuntimeId = (window.__codexSessionPrewarmRuntimeId || 0) + 1;
   const codexSessionPrewarmRuntimeId = window.__codexSessionPrewarmRuntimeId;
   let codexElvesAppearanceRegistryPromise = null;
@@ -1898,15 +1920,33 @@
       }
       .codex-task-board-board-add {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-columns: minmax(0, 1fr) 98px;
         align-items: end;
         gap: 10px;
       }
       .codex-task-board-board-add > .codex-task-board-create-field {
         min-width: 0;
       }
-      .codex-task-board-board-add .codex-task-board-create-submit {
+      .codex-task-board-board-action-slot {
+        display: flex;
+        width: 98px;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 6px;
+      }
+      .codex-task-board-board-add-button {
+        width: 100%;
+      }
+      .codex-task-board-board-add .codex-task-board-create-submit,
+      .codex-task-board-board-add .codex-task-board-board-mode-action {
+        height: 38px;
         min-height: 38px;
+      }
+      .codex-task-board-board-mode-action {
+        width: auto;
+        min-width: 0;
+        flex: 1 1 0;
+        padding: 0;
       }
       .codex-task-board-board-list {
         display: grid;
@@ -1930,7 +1970,10 @@
         padding: 0 9px;
       }
       .codex-task-board-board-item:last-child { border-bottom: 0; }
-      .codex-task-board-board-item[data-dragging="true"] { opacity: .52; }
+      .codex-task-board-board-item[data-dragging="true"] {
+        opacity: .52;
+        background: color-mix(in srgb, var(--task-board-accent) 7%, transparent);
+      }
       .codex-task-board-board-item[data-drop-position="before"]::before,
       .codex-task-board-board-item[data-drop-position="after"]::after {
         position: absolute;
@@ -1947,8 +1990,7 @@
       .codex-task-board-board-item[data-drop-position="after"]::after { bottom: -1px; }
       .codex-task-board-board-drag-handle,
       .codex-task-board-board-edit,
-      .codex-task-board-board-delete,
-      .codex-task-board-board-edit-form button {
+      .codex-task-board-board-delete {
         display: inline-grid;
         width: 28px;
         height: 28px;
@@ -1967,9 +2009,7 @@
       .codex-task-board-board-drag-handle:hover,
       .codex-task-board-board-drag-handle:focus-visible,
       .codex-task-board-board-edit:hover,
-      .codex-task-board-board-edit:focus-visible,
-      .codex-task-board-board-edit-form button:hover,
-      .codex-task-board-board-edit-form button:focus-visible {
+      .codex-task-board-board-edit:focus-visible {
         outline: none;
         background: color-mix(in srgb, currentColor 9%, transparent);
         color: inherit;
@@ -1981,33 +2021,6 @@
         font-weight: 600;
         text-overflow: ellipsis;
         white-space: nowrap;
-      }
-      .codex-task-board-board-edit-form {
-        display: grid;
-        min-width: 0;
-        grid-template-columns: minmax(0, 1fr) 28px 28px;
-        align-items: center;
-        gap: 4px;
-      }
-      .codex-task-board-board-edit-form input {
-        width: 100%;
-        min-width: 0;
-        height: 30px;
-        border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
-        border-radius: 7px;
-        outline: none;
-        background: color-mix(
-          in srgb,
-          var(--color-background-secondary, var(--color-token-main-surface-secondary, #2b2b2b)) 86%,
-          transparent
-        );
-        color: inherit;
-        font-size: 12px;
-        padding: 0 8px;
-      }
-      .codex-task-board-board-edit-form input:focus {
-        border-color: var(--task-board-accent);
-        box-shadow: 0 0 0 1px color-mix(in srgb, var(--task-board-accent) 25%, transparent);
       }
       .codex-task-board-board-task-count {
         color: color-mix(in srgb, currentColor 54%, transparent);
@@ -2396,7 +2409,10 @@
         .codex-task-board-board-add {
           grid-template-columns: 1fr;
         }
-        .codex-task-board-board-add .codex-task-board-create-submit {
+        .codex-task-board-board-action-slot {
+          width: 100%;
+        }
+        .codex-task-board-board-add-button {
           width: 100%;
         }
         .codex-task-board-board-delete-confirm {
@@ -2466,7 +2482,6 @@
       .codex-task-board-board-drag-handle:disabled,
       .codex-task-board-board-edit:disabled,
       .codex-task-board-board-delete:disabled,
-      .codex-task-board-board-edit-form button:disabled,
       .codex-task-board-board-delete-confirm button:disabled,
       .codex-task-board-create-submit:disabled,
       .codex-task-board-create-cancel:disabled {
@@ -2549,8 +2564,18 @@
         width: 11px;
         height: 11px;
         flex: 0 0 auto;
-        color: color-mix(in srgb, currentColor 72%, transparent);
+        color: var(--task-board-status-icon-color, currentColor);
       }
+      [data-task-board-status-icon="0"] { --task-board-status-icon-color: #2dd4bf; }
+      [data-task-board-status-icon="1"] { --task-board-status-icon-color: #60a5fa; }
+      [data-task-board-status-icon="2"] { --task-board-status-icon-color: #c084fc; }
+      [data-task-board-status-icon="3"] { --task-board-status-icon-color: #fbbf24; }
+      [data-task-board-status-icon="4"] { --task-board-status-icon-color: #34d399; }
+      [data-task-board-status-icon="5"] { --task-board-status-icon-color: #fb7185; }
+      [data-task-board-status-icon="6"] { --task-board-status-icon-color: #22d3ee; }
+      [data-task-board-status-icon="7"] { --task-board-status-icon-color: #fb923c; }
+      [data-task-board-status-icon="8"] { --task-board-status-icon-color: #818cf8; }
+      [data-task-board-status-icon="9"] { --task-board-status-icon-color: #a3e635; }
       .codex-task-board-status-icon svg,
       .codex-task-board-dropdown-status-icon svg {
         display: block;
@@ -2626,6 +2651,9 @@
         color-scheme: dark;
         padding: 5px;
       }
+      .codex-task-board-dropdown-menu[data-searchable="true"] {
+        gap: 0;
+      }
       .codex-task-board-dropdown-search {
         display: flex;
         min-height: 34px;
@@ -2635,6 +2663,7 @@
         border-radius: 7px;
         background: color-mix(in srgb, currentColor 5%, transparent);
         color: color-mix(in srgb, currentColor 58%, transparent);
+        margin-bottom: 5px;
         padding: 0 9px;
       }
       .codex-task-board-dropdown-search:focus-within {
@@ -10869,8 +10898,15 @@
   }
 
   function taskBoardEnsureScaffold(root) {
-    if (root.dataset.taskBoardScaffold === "true") return;
+    if (
+      root.dataset.taskBoardScaffold === "true" &&
+      root.dataset.taskBoardScaffoldVersion === taskBoardRuntimeVersion
+    ) {
+      return;
+    }
+    root.replaceChildren();
     root.dataset.taskBoardScaffold = "true";
+    root.dataset.taskBoardScaffoldVersion = taskBoardRuntimeVersion;
     const page = taskBoardElement("section", "codex-task-board-page");
     page.setAttribute("aria-label", "任务看板");
     const heading = taskBoardElement("div", "codex-task-board-heading");
@@ -14138,16 +14174,46 @@
       manager.editingBoardId = "";
       manager.editingLabel = "";
     }
-    manager.input.value = manager.label;
+    const editingBoard = boards.find(
+      (board) => board.id === manager.editingBoardId,
+    );
+    const editing = !!editingBoard;
+    manager.input.value = editing ? manager.editingLabel : manager.label;
+    manager.input.setAttribute(
+      "aria-label",
+      editing ? `看板 ${editingBoard.label} 的新名称` : "新看板名称",
+    );
     manager.input.disabled = manager.busy;
     manager.closeButton.disabled = manager.busy;
+    manager.actionHost.setAttribute(
+      "data-mode",
+      editing ? "edit" : "create",
+    );
+    manager.addButton.hidden = editing;
     manager.addButton.disabled = manager.busy || !manager.label.trim();
     manager.addButton.innerHTML = manager.busyKind === "create"
       ? `<span class="codex-task-board-spinner" aria-hidden="true"></span><span>正在添加…</span>`
       : `<svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M8 3v10M3 8h10" stroke-linecap="round"></path></svg><span>添加看板</span>`;
+    manager.editSaveButton.hidden = !editing;
+    manager.editSaveButton.disabled =
+      manager.busy || !editing || !manager.editingLabel.trim();
+    manager.editSaveButton.setAttribute(
+      "aria-label",
+      `保存看板 ${editingBoard?.label || ""} 的名称`,
+    );
+    manager.editSaveButton.innerHTML =
+      manager.busyKind === "rename" &&
+      manager.busyBoardId === manager.editingBoardId
+        ? `<span class="codex-task-board-spinner" aria-hidden="true"></span>`
+        : `<svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m3.5 8.2 2.8 2.8 6.2-6.2" stroke-linecap="round" stroke-linejoin="round"></path></svg>`;
+    manager.editCancelButton.hidden = !editing;
+    manager.editCancelButton.disabled = manager.busy || !editing;
+    manager.editCancelButton.setAttribute(
+      "aria-label",
+      `取消编辑看板 ${editingBoard?.label || ""}`,
+    );
+    manager.editInput = editing ? manager.input : null;
     manager.list.replaceChildren();
-    manager.editInput = null;
-    manager.editSaveButton = null;
     if (!boards.length) {
       manager.list.appendChild(taskBoardElement(
         "p",
@@ -14244,6 +14310,31 @@
           item.setAttribute("data-dragging", "true");
           if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
           event.dataTransfer?.setData?.("text/plain", board.id);
+          if (event.dataTransfer?.setDragImage) {
+            const bounds = item.getBoundingClientRect?.() || {
+              top: 0,
+              left: 0,
+              width: 0,
+              height: 0,
+            };
+            event.dataTransfer.setDragImage(
+              item,
+              Math.max(
+                0,
+                Math.min(
+                  Number(bounds.width || 0),
+                  Number(event.clientX || 0) - Number(bounds.left || 0),
+                ),
+              ),
+              Math.max(
+                0,
+                Math.min(
+                  Number(bounds.height || 0),
+                  Number(event.clientY || 0) - Number(bounds.top || 0),
+                ),
+              ),
+            );
+          }
         });
         dragHandle.addEventListener("dragend", () => {
           const active = taskBoardState.boardManager;
@@ -14262,60 +14353,12 @@
           });
         });
         const boardIcon = taskBoardStatusIcon(board.id);
-        let name;
-        if (manager.editingBoardId === board.id) {
-          const editForm = taskBoardElement(
-            "form",
-            "codex-task-board-board-edit-form",
-          );
-          const editInput = taskBoardElement("input");
-          editInput.value = manager.editingLabel;
-          editInput.maxLength = 40;
-          editInput.disabled = manager.busy;
-          editInput.setAttribute("aria-label", `看板 ${board.label} 的新名称`);
-          const save = taskBoardElement("button");
-          save.type = "submit";
-          save.disabled = manager.busy || !manager.editingLabel.trim();
-          save.title = "保存名称";
-          save.setAttribute("aria-label", `保存看板 ${board.label} 的名称`);
-          if (manager.busyKind === "rename" && manager.busyBoardId === board.id) {
-            save.appendChild(taskBoardElement("span", "codex-task-board-spinner"));
-          } else {
-            save.innerHTML = `<svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m3.5 8.2 2.8 2.8 6.2-6.2" stroke-linecap="round" stroke-linejoin="round"></path></svg>`;
-          }
-          editInput.addEventListener("input", () => {
-            const active = taskBoardState.boardManager;
-            if (!active || active.busy) return;
-            active.editingLabel = editInput.value;
-            active.feedback = "";
-            active.feedbackNode.textContent = "";
-            save.disabled = !active.editingLabel.trim();
-          });
-          const cancel = taskBoardElement("button");
-          cancel.type = "button";
-          cancel.disabled = manager.busy;
-          cancel.title = "取消编辑";
-          cancel.setAttribute("aria-label", `取消编辑看板 ${board.label}`);
-          cancel.innerHTML = `<svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4"><path d="m4 4 8 8M12 4l-8 8" stroke-linecap="round"></path></svg>`;
-          cancel.addEventListener("click", () => {
-            const active = taskBoardState.boardManager;
-            if (!active || active.busy) return;
-            active.editingBoardId = "";
-            active.editingLabel = "";
-            renderTaskBoardManager();
-          });
-          editForm.addEventListener("submit", (event) => {
-            event.preventDefault?.();
-            void taskBoardRenameManagedBoard(board.id, editInput.value);
-          });
-          editForm.append(editInput, save, cancel);
-          manager.editInput = editInput;
-          manager.editSaveButton = save;
-          name = editForm;
-        } else {
-          name = taskBoardElement("span", "codex-task-board-board-name", board.label);
-          name.title = board.label;
-        }
+        const name = taskBoardElement(
+          "span",
+          "codex-task-board-board-name",
+          board.label,
+        );
+        name.title = board.label;
         const taskCount = (taskBoardState.snapshot?.tasks || [])
           .filter((task) => String(task?.status || "") === board.id)
           .length;
@@ -14849,11 +14892,36 @@
     field.appendChild(input);
     const addButton = taskBoardElement(
       "button",
-      "codex-task-board-create-submit",
+      "codex-task-board-create-submit codex-task-board-board-add-button",
       "添加看板",
     );
     addButton.type = "submit";
-    form.append(field, addButton);
+    const editSaveButton = taskBoardElement(
+      "button",
+      "codex-task-board-create-submit codex-task-board-board-mode-action",
+    );
+    editSaveButton.type = "submit";
+    editSaveButton.title = "保存名称";
+    const editCancelButton = taskBoardElement(
+      "button",
+      "codex-task-board-create-cancel codex-task-board-board-mode-action",
+    );
+    editCancelButton.type = "button";
+    editCancelButton.title = "取消编辑";
+    editCancelButton.innerHTML = `<svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4"><path d="m4 4 8 8M12 4l-8 8" stroke-linecap="round"></path></svg>`;
+    editCancelButton.addEventListener("click", () => {
+      const active = taskBoardState.boardManager;
+      if (!active || active.busy) return;
+      active.editingBoardId = "";
+      active.editingLabel = "";
+      renderTaskBoardManager();
+    });
+    const actionHost = taskBoardElement(
+      "div",
+      "codex-task-board-board-action-slot",
+    );
+    actionHost.append(addButton, editSaveButton, editCancelButton);
+    form.append(field, actionHost);
     const list = taskBoardElement("div", "codex-task-board-board-list");
     list.setAttribute("aria-label", "现有看板");
     const confirmHost = taskBoardElement("div");
@@ -14868,6 +14936,9 @@
       closeButton,
       input,
       addButton,
+      actionHost,
+      editSaveButton,
+      editCancelButton,
       list,
       confirmHost,
       feedbackNode,
@@ -14880,7 +14951,6 @@
       editingBoardId: "",
       editingLabel: "",
       editInput: null,
-      editSaveButton: null,
       dragBoardId: "",
       dropTarget: null,
     };
@@ -14889,6 +14959,14 @@
     input.addEventListener("input", () => {
       const active = taskBoardState.boardManager;
       if (!active || active.busy) return;
+      if (active.editingBoardId) {
+        active.editingLabel = input.value;
+        active.feedback = "";
+        active.pendingDeleteId = "";
+        active.feedbackNode.textContent = "";
+        active.editSaveButton.disabled = !active.editingLabel.trim();
+        return;
+      }
       active.label = input.value;
       active.feedback = "";
       active.pendingDeleteId = "";
@@ -14896,7 +14974,16 @@
     });
     form.addEventListener("submit", (event) => {
       event.preventDefault?.();
-      void taskBoardCreateManagedBoard();
+      const active = taskBoardState.boardManager;
+      if (!active || active.busy) return;
+      if (active.editingBoardId) {
+        void taskBoardRenameManagedBoard(
+          active.editingBoardId,
+          active.editingLabel,
+        );
+      } else {
+        void taskBoardCreateManagedBoard();
+      }
     });
     let backdropPressStarted = false;
     let backdropPressCompleted = false;
@@ -15128,6 +15215,7 @@
     );
     menu.setAttribute("role", menuRole);
     menu.setAttribute("aria-label", ariaLabel);
+    if (searchable) menu.setAttribute("data-searchable", "true");
     const normalizedOptions = Array.isArray(options) ? options : [];
     const optionsHost = taskBoardElement(
       "div",
@@ -15974,6 +16062,8 @@
     window.__codexElvesTaskBoardTest = {
       runtimeVersion: () => taskBoardRuntimeVersion,
       runtimeCanRefresh: (version, refresh) => taskBoardRuntimeCanRefresh(version, refresh),
+      cleanupStaleRuntimeDomForTest: cleanupStaleTaskBoardRuntimeDom,
+      ensureScaffoldForTest: taskBoardEnsureScaffold,
       taskBoardFeatureEnabledForTest: taskBoardFeatureEnabled,
       setBackendSettingsForTest: (settings = {}) => {
         codexElvesBackendSettings = { ...codexElvesBackendSettings, ...settings };
@@ -16173,6 +16263,34 @@
           ?.querySelector?.(".codex-task-board-board-drag-handle")
           ?.focus?.();
       },
+      boardManagerDragPreviewForTest: (boardId) => {
+        const manager = taskBoardState.boardManager;
+        const item = taskBoardBoardManagerItem(manager, boardId);
+        const handle = item?.querySelector?.(
+          ".codex-task-board-board-drag-handle",
+        );
+        let dragImage = null;
+        handle?.dispatchEvent?.({
+          type: "dragstart",
+          clientX: 10,
+          clientY: 10,
+          dataTransfer: {
+            effectAllowed: "",
+            setData() {},
+            setDragImage(element, x, y) {
+              dragImage = {
+                boardId:
+                  element?.getAttribute?.("data-task-board-board-id") || "",
+                className: element?.className || "",
+                x,
+                y,
+              };
+            },
+          },
+        });
+        handle?.dispatchEvent?.({ type: "dragend" });
+        return dragImage;
+      },
       submitBoardCreateForTest: taskBoardCreateManagedBoard,
       submitBoardDeleteForTest: taskBoardDeleteManagedBoard,
       submitBoardRenameForTest: (boardId, label) =>
@@ -16195,6 +16313,15 @@
           label: manager?.label || "",
           editingBoardId: manager?.editingBoardId || "",
           editingLabel: manager?.editingLabel || "",
+          inputValue: manager?.input?.value || "",
+          inputAriaLabel: manager?.input?.getAttribute?.("aria-label") || "",
+          actionMode: manager?.actionHost?.getAttribute?.("data-mode") || "",
+          addButtonHidden: !!manager?.addButton?.hidden,
+          editSaveHidden: !!manager?.editSaveButton?.hidden,
+          editCancelHidden: !!manager?.editCancelButton?.hidden,
+          editCancelHasIcon: String(
+            manager?.editCancelButton?.innerHTML || "",
+          ).includes("<svg"),
           editSaveDisabled: !!manager?.editSaveButton?.disabled,
           pendingDeleteId: manager?.pendingDeleteId || "",
           pendingTaskCount: pendingBoard

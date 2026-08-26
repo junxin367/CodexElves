@@ -232,7 +232,47 @@ body:has(.task-board-app) {
   width: 11px;
   height: 11px;
   flex: 0 0 auto;
-  color: color-mix(in srgb, currentColor 72%, transparent);
+  color: var(--task-board-status-icon-color, currentColor);
+}
+
+[data-task-board-status-icon="0"] {
+  --task-board-status-icon-color: #2dd4bf;
+}
+
+[data-task-board-status-icon="1"] {
+  --task-board-status-icon-color: #60a5fa;
+}
+
+[data-task-board-status-icon="2"] {
+  --task-board-status-icon-color: #c084fc;
+}
+
+[data-task-board-status-icon="3"] {
+  --task-board-status-icon-color: #fbbf24;
+}
+
+[data-task-board-status-icon="4"] {
+  --task-board-status-icon-color: #34d399;
+}
+
+[data-task-board-status-icon="5"] {
+  --task-board-status-icon-color: #fb7185;
+}
+
+[data-task-board-status-icon="6"] {
+  --task-board-status-icon-color: #22d3ee;
+}
+
+[data-task-board-status-icon="7"] {
+  --task-board-status-icon-color: #fb923c;
+}
+
+[data-task-board-status-icon="8"] {
+  --task-board-status-icon-color: #818cf8;
+}
+
+[data-task-board-status-icon="9"] {
+  --task-board-status-icon-color: #a3e635;
 }
 
 .task-board-dropdown-chevron {
@@ -274,6 +314,10 @@ body:has(.task-board-app) {
   padding: 5px;
 }
 
+.task-board-dropdown-menu[data-searchable="true"] {
+  gap: 0;
+}
+
 .task-board-dropdown-search {
   display: flex;
   min-height: 34px;
@@ -283,6 +327,7 @@ body:has(.task-board-app) {
   border-radius: 7px;
   background: color-mix(in srgb, currentColor 5%, transparent);
   color: color-mix(in srgb, currentColor 58%, transparent);
+  margin-bottom: 5px;
   padding: 0 9px;
 }
 
@@ -983,7 +1028,7 @@ body:has(.task-board-app) {
 
 .task-board-board-add {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) 98px;
   align-items: end;
   gap: 10px;
 }
@@ -992,8 +1037,28 @@ body:has(.task-board-app) {
   min-width: 0;
 }
 
-.task-board-board-add .task-board-button {
+.task-board-board-action-slot {
+  display: flex;
+  width: 98px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.task-board-board-add-button {
+  width: 100%;
+}
+
+.task-board-board-add .task-board-button,
+.task-board-board-mode-action {
   min-height: 38px;
+}
+
+.task-board-board-mode-action {
+  width: auto;
+  min-width: 0;
+  flex: 1 1 0;
+  padding: 0;
 }
 
 .task-board-board-list {
@@ -1021,6 +1086,7 @@ body:has(.task-board-app) {
 
 .task-board-board-item[data-dragging="true"] {
   opacity: 0.52;
+  background: color-mix(in srgb, var(--task-board-accent) 7%, transparent);
 }
 
 .task-board-board-item[data-drop-position="before"]::before,
@@ -1046,8 +1112,7 @@ body:has(.task-board-app) {
 
 .task-board-board-drag-handle,
 .task-board-board-edit,
-.task-board-board-delete,
-.task-board-board-edit-form button {
+.task-board-board-delete {
   display: inline-grid;
   width: 28px;
   height: 28px;
@@ -1062,8 +1127,7 @@ body:has(.task-board-app) {
 }
 
 .task-board-board-edit,
-.task-board-board-delete,
-.task-board-board-edit-form button {
+.task-board-board-delete {
   cursor: pointer;
 }
 
@@ -1078,9 +1142,7 @@ body:has(.task-board-app) {
 .task-board-board-drag-handle:hover,
 .task-board-board-drag-handle:focus-visible,
 .task-board-board-edit:hover,
-.task-board-board-edit:focus-visible,
-.task-board-board-edit-form button:hover,
-.task-board-board-edit-form button:focus-visible {
+.task-board-board-edit:focus-visible {
   outline: none;
   background: color-mix(in srgb, currentColor 9%, transparent);
   color: inherit;
@@ -1093,32 +1155,6 @@ body:has(.task-board-app) {
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.task-board-board-edit-form {
-  display: grid;
-  min-width: 0;
-  grid-template-columns: minmax(0, 1fr) 28px 28px;
-  align-items: center;
-  gap: 4px;
-}
-
-.task-board-board-edit-form input {
-  width: 100%;
-  min-width: 0;
-  height: 30px;
-  border: 1px solid var(--task-board-modal-border);
-  border-radius: 7px;
-  outline: none;
-  background: var(--task-board-field-background);
-  color: inherit;
-  font-size: 12px;
-  padding: 0 8px;
-}
-
-.task-board-board-edit-form input:focus {
-  border-color: var(--task-board-accent);
-  box-shadow: 0 0 0 1px rgb(99 174 224 / 20%);
 }
 
 .task-board-board-task-count {
@@ -1774,7 +1810,6 @@ body:has(.task-board-app) {
 .task-board-board-drag-handle:disabled,
 .task-board-board-edit:disabled,
 .task-board-board-delete:disabled,
-.task-board-board-edit-form button:disabled,
 .task-board-board-delete-confirm button:disabled,
 .task-board-manage:disabled,
 .task-board-button:disabled {
@@ -1904,7 +1939,11 @@ body:has(.task-board-app) {
     grid-template-columns: 1fr;
   }
 
-  .task-board-board-add .task-board-button {
+  .task-board-board-action-slot {
+    width: 100%;
+  }
+
+  .task-board-board-add-button {
     width: 100%;
   }
 

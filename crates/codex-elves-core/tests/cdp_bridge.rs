@@ -283,6 +283,20 @@ fn renderer_task_board_view_projects_read_only_bridge_snapshots_responsively() {
     assert!(script.contains(".codex-task-board-create-settings-chevron svg"));
     assert!(script.contains(".codex-task-board-dropdown-search"));
     assert!(script.contains(".codex-task-board-dropdown-options"));
+    assert_eq!(
+        script.matches("--task-board-status-icon-color: #").count(),
+        10
+    );
+    assert!(script.contains(".codex-task-board-dropdown-menu[data-searchable=\"true\"]"));
+    assert!(script.contains("margin-bottom: 5px"));
+    assert!(script.contains("codex-task-board-board-action-slot"));
+    assert!(script.contains("codex-task-board-board-mode-action"));
+    assert!(script.contains(
+        ".codex-task-board-board-add .codex-task-board-board-mode-action {\n        height: 38px;"
+    ));
+    assert!(script.contains("flex: 1 1 0;"));
+    assert!(script.contains("event.dataTransfer.setDragImage("));
+    assert!(!script.contains("codex-task-board-board-edit-form"));
     assert!(!script.contains("--task-board-status-color"));
     assert!(!script.contains("taskBoardElement(\"select\", \"codex-task-board-create-select\")"));
     assert!(script.contains("codex-task-board-dropdown-trigger"));
@@ -324,7 +338,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "67";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "70";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -342,6 +356,10 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
     assert!(script.contains("taskBoardRuntimeCanRefresh()"));
     assert!(script.contains("window.__codexElvesTaskBoardRuntimeVersion"));
     assert!(script.contains("window.__codexElvesTaskBoardRefreshRuntime"));
+    assert!(script.contains("function cleanupStaleTaskBoardRuntimeDom()"));
+    assert!(script.contains("cleanupStaleTaskBoardRuntimeDom();"));
+    assert!(script.contains("root.dataset.taskBoardScaffoldVersion"));
+    assert!(script.contains("root.replaceChildren();"));
     assert!(script.contains("function taskBoardEntryButtons()"));
     assert!(!script.contains("function taskBoardEntryButton()"));
     assert!(script.contains("function reconcileTaskBoardEntry()"));
@@ -522,7 +540,7 @@ fn renderer_task_board_navigation_opens_inline_and_offers_new_window_on_context_
         .and_then(|section| section.split("function reconcileTaskBoardEntry()").next())
         .expect("standalone task board opener should be present");
 
-    assert!(script.contains(r#"const taskBoardRuntimeVersion = "49";"#));
+    assert!(script.contains(r#"const taskBoardRuntimeVersion = "55";"#));
     assert!(script.contains("codex-task-board-entry-context-menu"));
     assert!(script.contains("showChevron = true"));
     assert!(script.contains("status.id,\n          false,\n        );"));
@@ -669,6 +687,36 @@ fn renderer_task_board_dynamic_contracts_apply_latest_catalog_and_independent_re
     );
     assert!(
         cases["runtimeGate"]["currentRuntimeAccepted"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["scaffoldRecovery"]["staleChildRemoved"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["scaffoldRecovery"]["versionUpdated"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["scaffoldRecovery"]["currentScaffoldReused"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["staleRuntimeDomCleanup"]["surfacesRemoved"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["staleRuntimeDomCleanup"]["hostReleased"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["staleRuntimeDomCleanup"]["selectionSuppressionReleased"]
             .as_bool()
             .unwrap()
     );
@@ -1275,6 +1323,7 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
         "createApplied",
         "editContract",
         "iconContract",
+        "dragPreviewContract",
         "renamePayload",
         "renameApplied",
         "movePayload",
@@ -3646,6 +3695,63 @@ async function tick() {
     oldRuntimeAccepted: api.runtimeCanRefresh("old-runtime", () => {}),
     currentRuntimeAccepted: api.runtimeCanRefresh(api.runtimeVersion(), () => {}),
   };
+  const staleScaffoldRoot = node();
+  const staleScaffoldChild = node();
+  staleScaffoldRoot.dataset.taskBoardScaffold = "true";
+  staleScaffoldRoot.dataset.taskBoardScaffoldVersion = "old-runtime";
+  staleScaffoldRoot.appendChild(staleScaffoldChild);
+  api.ensureScaffoldForTest(staleScaffoldRoot);
+  const rebuiltScaffoldChild = staleScaffoldRoot.children[0] || null;
+  api.ensureScaffoldForTest(staleScaffoldRoot);
+  const scaffoldRecovery = {
+    staleChildRemoved: staleScaffoldChild.removed,
+    versionUpdated:
+      staleScaffoldRoot.dataset.taskBoardScaffoldVersion === api.runtimeVersion(),
+    currentScaffoldReused:
+      !!rebuiltScaffoldChild &&
+      staleScaffoldRoot.children[0] === rebuiltScaffoldChild,
+  };
+  const staleRuntimeRoot = node();
+  const staleRuntimeOverlay = node();
+  const staleRuntimeEntry = node();
+  const staleRuntimeHost = node();
+  const staleNativeSelection = node();
+  staleRuntimeHost.classList.remove = (name) => {
+    staleRuntimeHost.releasedClass = name;
+  };
+  staleNativeSelection.removeAttribute = (name) => {
+    staleNativeSelection.releasedAttribute = name;
+  };
+  const originalRuntimeQuerySelectorAll = document.querySelectorAll;
+  document.querySelectorAll = (selector) => {
+    if (
+      selector.includes('[data-codex-task-board-root="true"]') &&
+      selector.includes(".codex-task-board-create-modal-backdrop")
+    ) {
+      return [staleRuntimeRoot, staleRuntimeOverlay, staleRuntimeEntry];
+    }
+    if (selector === ".codex-task-board-main-host") return [staleRuntimeHost];
+    if (
+      selector ===
+      '[data-codex-task-board-native-selection-suppressed="true"]'
+    ) {
+      return [staleNativeSelection];
+    }
+    return [];
+  };
+  api.cleanupStaleRuntimeDomForTest();
+  document.querySelectorAll = originalRuntimeQuerySelectorAll;
+  const staleRuntimeDomCleanup = {
+    surfacesRemoved:
+      staleRuntimeRoot.removed &&
+      staleRuntimeOverlay.removed &&
+      staleRuntimeEntry.removed,
+    hostReleased:
+      staleRuntimeHost.releasedClass === "codex-task-board-main-host",
+    selectionSuppressionReleased:
+      staleNativeSelection.releasedAttribute ===
+      "data-codex-task-board-native-selection-suppressed",
+  };
   function pluginControl({
     text = "",
     ariaLabel = "",
@@ -4016,6 +4122,8 @@ async function tick() {
   const afterCatalog = api.readState();
   process.stdout.write(JSON.stringify({
     runtimeGate,
+    scaffoldRecovery,
+    staleRuntimeDomCleanup,
     entryDiscovery,
     featureSwitch: {
       defaultEnabled: defaultTaskBoardEnabled,
@@ -7693,6 +7801,8 @@ function createState() {
   await api.submitBoardRenameForTest(createdBoardId, "  发布队列  ");
   const boardManagerRenamed = api.boardManagerStateForTest();
   const createdBoardIconAfterRename = api.statusIconIndexForTest(createdBoardId);
+  const boardManagerDragPreview =
+    api.boardManagerDragPreviewForTest(createdBoardId);
   api.focusBoardManagerDragHandleForTest(createdBoardId);
   await api.moveBoardForTest(createdBoardId, 0, true);
   const boardManagerMoved = api.boardManagerStateForTest();
@@ -7729,9 +7839,20 @@ function createState() {
     editContract:
       boardManagerInitial.dragHandleCount === 4 &&
       boardManagerInitial.editButtonCount === 4 &&
+      boardManagerInitial.actionMode === "create" &&
+      !boardManagerInitial.addButtonHidden &&
+      boardManagerInitial.editSaveHidden &&
+      boardManagerInitial.editCancelHidden &&
       boardManagerEditingEmpty.editSaveDisabled &&
+      boardManagerEditingEmpty.actionMode === "edit" &&
+      boardManagerEditingEmpty.addButtonHidden &&
+      !boardManagerEditingEmpty.editSaveHidden &&
+      !boardManagerEditingEmpty.editCancelHidden &&
+      boardManagerEditingEmpty.editCancelHasIcon &&
       boardManagerEditing.editingBoardId === createdBoardId &&
       boardManagerEditing.editingLabel === "发布队列" &&
+      boardManagerEditing.inputValue === "发布队列" &&
+      boardManagerEditing.inputAriaLabel === "看板 待发布 的新名称" &&
       !boardManagerEditing.editSaveDisabled,
     iconContract:
       api.statusIconPaletteSizeForTest() === 10 &&
@@ -7739,6 +7860,11 @@ function createState() {
       boardManagerCreated.boardIconCount === 5 &&
       createdBoardIconBeforeRename === createdBoardIconAfterRename &&
       createdBoardIconBeforeRename === createdBoardIconAfterMove,
+    dragPreviewContract:
+      boardManagerDragPreview?.boardId === createdBoardId &&
+      boardManagerDragPreview?.className
+        ?.split(/\s+/)
+        .includes("codex-task-board-board-item"),
     renamePayload:
       boardRequests[1]?.route === "/task-board/board-rename" &&
       boardRequests[1]?.payload?.boardId === createdBoardId &&
