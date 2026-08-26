@@ -6,13 +6,12 @@ use std::time::Duration;
 
 use codex_elves_core::status::StatusStore;
 use codex_elves_core::task_board::{
-    FileTaskBoardStore, TaskBoardAttachConversationsCommand, TaskBoardCatalogProject,
-    TaskBoardCatalogSession, TaskBoardCatalogWarning, TaskBoardCatalogWarningCode,
-    TaskBoardConversation, TaskBoardCreateCommand, TaskBoardDeleteCommand,
-    TaskBoardDetachConversationsCommand, TaskBoardDocument, TaskBoardMoveCommand,
-    TaskBoardMutationResult, TaskBoardProject, TaskBoardSessionCatalog, TaskBoardStatus,
-    TaskBoardStore, TaskBoardStoreError, normalize_task_project_cwd,
-    task_board_timestamp_from_bridge_i64,
+    FileTaskBoardStore, TaskBoardAttachConversationsCommand, TaskBoardConversation,
+    TaskBoardCreateBoardCommand, TaskBoardCreateCommand, TaskBoardDeleteBoardCommand,
+    TaskBoardDeleteCommand, TaskBoardDetachConversationsCommand, TaskBoardDocument,
+    TaskBoardMoveBoardCommand, TaskBoardMoveCommand, TaskBoardMutationResult, TaskBoardProject,
+    TaskBoardRenameBoardCommand, TaskBoardSessionCatalog, TaskBoardStatus, TaskBoardStore,
+    TaskBoardStoreError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -76,6 +75,37 @@ pub struct DetachConversationsRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeleteTaskRequest {
     task_id: String,
+    expected_revision: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateBoardRequest {
+    board_id: TaskBoardStatus,
+    expected_revision: u64,
+    label: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteBoardRequest {
+    board_id: TaskBoardStatus,
+    expected_revision: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenameBoardRequest {
+    board_id: TaskBoardStatus,
+    expected_revision: u64,
+    label: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MoveBoardRequest {
+    board_id: TaskBoardStatus,
+    target_index: u32,
     expected_revision: u64,
 }
 
@@ -185,6 +215,10 @@ pub fn run() {
             task_board_attach_conversations,
             task_board_detach_conversations,
             task_board_delete_task,
+            task_board_create_board,
+            task_board_delete_board,
+            task_board_rename_board,
+            task_board_move_board,
             task_board_move_task,
             task_board_open_session,
             task_board_probe_host,
@@ -317,6 +351,53 @@ pub async fn task_board_delete_task(request: DeleteTaskRequest) -> Value {
     mutate_store(move || {
         FileTaskBoardStore::from_default_paths().delete_task(TaskBoardDeleteCommand {
             task_id: request.task_id,
+            expected_revision: request.expected_revision,
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn task_board_create_board(request: CreateBoardRequest) -> Value {
+    mutate_store(move || {
+        FileTaskBoardStore::from_default_paths().create_board(TaskBoardCreateBoardCommand {
+            board_id: request.board_id,
+            expected_revision: request.expected_revision,
+            label: request.label,
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn task_board_delete_board(request: DeleteBoardRequest) -> Value {
+    mutate_store(move || {
+        FileTaskBoardStore::from_default_paths().delete_board(TaskBoardDeleteBoardCommand {
+            board_id: request.board_id,
+            expected_revision: request.expected_revision,
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn task_board_rename_board(request: RenameBoardRequest) -> Value {
+    mutate_store(move || {
+        FileTaskBoardStore::from_default_paths().rename_board(TaskBoardRenameBoardCommand {
+            board_id: request.board_id,
+            expected_revision: request.expected_revision,
+            label: request.label,
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn task_board_move_board(request: MoveBoardRequest) -> Value {
+    mutate_store(move || {
+        FileTaskBoardStore::from_default_paths().move_board(TaskBoardMoveBoardCommand {
+            board_id: request.board_id,
+            target_index: request.target_index,
             expected_revision: request.expected_revision,
         })
     })
@@ -494,10 +575,14 @@ fn conversations_from_catalog(
 }
 
 fn load_session_catalog() -> anyhow::Result<TaskBoardSessionCatalog> {
+    let codex_home = codex_elves_core::codex_sqlite::default_codex_home_dir();
     let db_paths = candidate_codex_db_paths();
     let local_catalog = codex_elves_data::aggregate_local_session_catalog(&db_paths)
         .map_err(|_| anyhow::anyhow!("无法读取 Codex 本地会话目录"))?;
-    catalog_from_local_catalog(local_catalog)
+    let project_catalog = codex_elves_data::load_codex_project_catalog(&codex_home)
+        .map_err(|_| anyhow::anyhow!("无法读取 Codex 项目目录"))?;
+    codex_elves_data::task_board_catalog_from_local_catalog(local_catalog, project_catalog)
+        .map_err(|_| anyhow::anyhow!("无法构建 Codex 项目与会话目录"))
 }
 
 fn candidate_codex_db_paths() -> Vec<PathBuf> {
@@ -514,69 +599,6 @@ fn candidate_codex_db_paths() -> Vec<PathBuf> {
         paths.push(default);
     }
     paths
-}
-
-fn catalog_from_local_catalog(
-    local_catalog: codex_elves_data::LocalSessionCatalog,
-) -> anyhow::Result<TaskBoardSessionCatalog> {
-    let mut projects: Vec<TaskBoardCatalogProject> = Vec::new();
-    let mut project_indexes: HashMap<String, usize> = HashMap::new();
-    let mut sessions = Vec::new();
-
-    for session in local_catalog.sessions {
-        let Ok(cwd) = normalize_task_project_cwd(&session.cwd) else {
-            continue;
-        };
-        let updated_at_ms = task_board_timestamp_from_bridge_i64(session.updated_at_ms)
-            .map_err(|_| anyhow::anyhow!("会话目录包含无效时间戳"))?;
-        if let Some(index) = project_indexes.get(&cwd).copied() {
-            projects[index].session_count = projects[index]
-                .session_count
-                .checked_add(1)
-                .ok_or_else(|| anyhow::anyhow!("项目会话数量超出支持范围"))?;
-        } else {
-            project_indexes.insert(cwd.clone(), projects.len());
-            projects.push(TaskBoardCatalogProject {
-                label: project_label(&cwd),
-                cwd: cwd.clone(),
-                session_count: 1,
-            });
-        }
-        sessions.push(TaskBoardCatalogSession {
-            session_id: session.id,
-            title: session.title,
-            cwd,
-            updated_at_ms,
-        });
-    }
-
-    let warnings = local_catalog
-        .warnings
-        .into_iter()
-        .map(|warning| match warning {
-            codex_elves_data::LocalSessionCatalogWarning::DatabaseReadFailed { count } => {
-                Ok(TaskBoardCatalogWarning {
-                    code: TaskBoardCatalogWarningCode::CodexDbReadFailed,
-                    count: u32::try_from(count)
-                        .map_err(|_| anyhow::anyhow!("数据库失败数量超出支持范围"))?,
-                })
-            }
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
-    Ok(TaskBoardSessionCatalog {
-        projects,
-        sessions,
-        warnings,
-    })
-}
-
-fn project_label(cwd: &str) -> String {
-    cwd.trim_end_matches(['\\', '/'])
-        .rsplit(['\\', '/'])
-        .find(|component| !component.is_empty())
-        .unwrap_or(cwd)
-        .to_string()
 }
 
 async fn call_codex_host(method: &str, arguments: Value) -> Value {
@@ -1159,6 +1181,7 @@ fn snapshot_value(document: TaskBoardDocument) -> Value {
         "status": "ok",
         "schemaVersion": document.schema_version,
         "revision": document.revision,
+        "boards": document.boards,
         "tasks": document.tasks,
     })
 }
@@ -1197,9 +1220,14 @@ fn store_error_value(error: TaskBoardStoreError) -> Value {
             "message": "任务看板已发生变化，请重试",
             "schemaVersion": current.schema_version,
             "revision": current.revision,
+            "boards": current.boards,
             "tasks": current.tasks,
         }),
         TaskBoardStoreError::TaskIdConflict => failed("task_id_conflict", "任务 ID 与现有任务冲突"),
+        TaskBoardStoreError::BoardIdConflict => {
+            failed("board_id_conflict", "看板 ID 与现有看板冲突")
+        }
+        TaskBoardStoreError::BoardNotFound => failed("board_not_found", "看板不存在"),
         TaskBoardStoreError::ProjectMismatch => {
             failed("project_mismatch", "只能关联属于同一项目的会话")
         }

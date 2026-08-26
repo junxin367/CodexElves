@@ -219,12 +219,22 @@ fn renderer_task_board_view_projects_read_only_bridge_snapshots_responsively() {
 
     assert!(script.contains("\"/task-board/snapshot\""));
     assert!(script.contains("\"/task-board/session-catalog\""));
+    assert!(script.contains("\"/task-board/board-create\""));
+    assert!(script.contains("\"/task-board/board-delete\""));
+    assert!(script.contains("\"/task-board/board-rename\""));
+    assert!(script.contains("\"/task-board/board-move\""));
     assert!(script.contains("window.__codexElvesTaskBoardMock"));
     assert!(script.contains("新任务"));
-    assert!(script.contains("规划中"));
-    assert!(script.contains("执行中"));
-    assert!(script.contains("验收中"));
-    assert!(script.contains("已完成"));
+    assert!(script.contains(r##"{ id: "planning", label: "规划", color: "#60a5fa" }"##));
+    assert!(script.contains(r##"{ id: "executing", label: "执行", color: "#c084fc" }"##));
+    assert!(script.contains(r##"{ id: "review", label: "验收", color: "#fbbf24" }"##));
+    assert!(script.contains(r##"{ id: "done", label: "完成", color: "#34d399" }"##));
+    assert!(script.contains("管理看板"));
+    assert!(script.contains("function openTaskBoardManager()"));
+    assert!(script.contains("function taskBoardCreateManagedBoard()"));
+    assert!(script.contains("function taskBoardDeleteManagedBoard()"));
+    assert!(script.contains("function taskBoardRenameManagedBoard("));
+    assert!(script.contains("function taskBoardMoveManagedBoard("));
     assert!(script.contains("search.setAttribute(\"aria-label\", \"搜索任务、项目或关联会话\")"));
     assert!(
         script.contains("taskBoardConfigureDropdownTrigger(filter, \"全部项目\", \"筛选项目\")")
@@ -237,6 +247,17 @@ fn renderer_task_board_view_projects_read_only_bridge_snapshots_responsively() {
     assert!(script.contains("function openTaskBoardDropdownMenu({"));
     assert!(script.contains("function openTaskBoardCreateProjectMenu(trigger)"));
     assert!(script.contains("function openTaskBoardCreateStatusMenu(trigger)"));
+    assert!(script.contains("const taskBoardStatusIconPaths = ["));
+    assert!(script.contains("function taskBoardStatusIconIndex("));
+    assert!(script.contains("data-task-board-status-icon"));
+    assert!(script.contains("searchPlaceholder: \"搜索项目名称或路径\""));
+    assert_eq!(
+        script
+            .matches("searchPlaceholder: \"搜索项目名称或路径\"")
+            .count(),
+        2
+    );
+    assert!(!script.contains("function taskBoardDropdownCheck()"));
     assert!(script.contains("const taskBoardProjectDropdownWidth = 320;"));
     assert_eq!(
         script
@@ -246,7 +267,8 @@ fn renderer_task_board_view_projects_read_only_bridge_snapshots_responsively() {
     );
     assert!(script.contains("function taskBoardDropdownLeft("));
     assert!(script.contains("const viewportRight = Math.max(8, viewportWidth - menuWidth - 8);"));
-    assert!(script.contains("Number(parentRect.left || menuRect.left || 8)"));
+    assert!(script.contains("Number(menuRect.left || 8)"));
+    assert!(!script.contains("Number(parentRect.left || menuRect.left || 8)"));
     assert!(!script.contains("align = \"end\""));
     assert!(!script.contains("align: \"start\""));
     assert!(!script.contains("const fitsRight = Number(menuRect.right"));
@@ -257,15 +279,11 @@ fn renderer_task_board_view_projects_read_only_bridge_snapshots_responsively() {
         .expect("task board dropdown button styles should be present");
     assert!(dropdown_button_styles.contains("align-items: center"));
     assert!(!dropdown_button_styles.contains("align-items: flex-start"));
-    let dropdown_marker_styles = script
-        .split(".codex-task-board-dropdown-option-marker {")
-        .nth(1)
-        .and_then(|section| section.split('}').next())
-        .expect("task board dropdown marker styles should be present");
-    assert!(dropdown_marker_styles.contains("margin-top: 0"));
-    assert!(script.contains(
-        ".codex-task-board-dropdown-option-marker svg,\n      .codex-task-board-create-settings-chevron svg"
-    ));
+    assert!(!script.contains(".codex-task-board-dropdown-option-marker"));
+    assert!(script.contains(".codex-task-board-create-settings-chevron svg"));
+    assert!(script.contains(".codex-task-board-dropdown-search"));
+    assert!(script.contains(".codex-task-board-dropdown-options"));
+    assert!(!script.contains("--task-board-status-color"));
     assert!(!script.contains("taskBoardElement(\"select\", \"codex-task-board-create-select\")"));
     assert!(script.contains("codex-task-board-dropdown-trigger"));
     assert!(script.contains("codex-task-board-dropdown-menu"));
@@ -306,7 +324,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "66";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "67";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -354,7 +372,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
     assert!(script.contains("version: 2"));
     assert!(script.contains("appearance()"));
     assert!(script.contains("conversationStatuses(conversations = [])"));
-    assert!(script.contains("codex-task-board-dropdown-status-dot"));
+    assert!(script.contains("codex-task-board-dropdown-status-icon"));
     assert!(!script.contains("Array.from(linked.keys())[index]"));
     assert!(script.contains("if (resultsChanged) renderTaskBoardCards();"));
     assert!(script.contains("const tasksByStatus = new Map("));
@@ -427,8 +445,28 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
         .expect("task board runtime refresh should be present");
     assert!(
         runtime_refresh
-            .contains("closeTaskBoardCreateModal();\n    closeTaskBoardDetachDialog({ restoreFocus: false });\n    reconcileTaskBoardRuntime();")
+            .contains("closeTaskBoardCreateModal();\n    closeTaskBoardManager({ restoreFocus: false });\n    closeTaskBoardDetachDialog({ restoreFocus: false });\n    reconcileTaskBoardRuntime();")
     );
+}
+
+#[test]
+fn renderer_task_board_project_options_use_only_the_authoritative_catalog() {
+    let script = assets::renderer_features_script();
+    let project_options = script
+        .split("function taskBoardProjectOptions()")
+        .nth(1)
+        .and_then(|section| {
+            section
+                .split("function taskBoardCatalogProjectForCwd(")
+                .next()
+        })
+        .expect("task board project options implementation should be present");
+
+    assert!(project_options.contains("taskBoardState.catalog.projects.forEach"));
+    assert!(!project_options.contains("nativeProjectTargets()"));
+    assert!(!project_options.contains("taskBoardState.snapshot.tasks"));
+    assert!(script.contains("function taskBoardEffectiveProjectLabel("));
+    assert!(script.contains("projectOptionsForTest: taskBoardProjectOptions"));
 }
 
 #[test]
@@ -484,10 +522,10 @@ fn renderer_task_board_navigation_opens_inline_and_offers_new_window_on_context_
         .and_then(|section| section.split("function reconcileTaskBoardEntry()").next())
         .expect("standalone task board opener should be present");
 
-    assert!(script.contains(r#"const taskBoardRuntimeVersion = "44";"#));
+    assert!(script.contains(r#"const taskBoardRuntimeVersion = "49";"#));
     assert!(script.contains("codex-task-board-entry-context-menu"));
     assert!(script.contains("showChevron = true"));
-    assert!(script.contains("status.color,\n          false,\n        );"));
+    assert!(script.contains("status.id,\n          false,\n        );"));
     let card_move_styles = script
         .split(".codex-task-board-card-move {")
         .nth(1)
@@ -590,6 +628,7 @@ fn renderer_task_board_exposes_conversation_statuses_and_card_level_attach_flow(
     assert!(script.contains("\"/task-board/task-delete\""));
     assert!(script.contains("\"/thread-usage-summary\""));
     assert!(script.contains("function taskBoardConversationStatus("));
+    assert!(script.contains("function taskBoardConversationShouldDisplay("));
     assert!(script.contains("function refreshTaskBoardConversationStatuses("));
     assert!(script.contains(r#"return { id: "unread", label: "未读" }"#));
     assert!(!script.contains("已完成 · 未读"));
@@ -610,6 +649,11 @@ fn renderer_task_board_exposes_conversation_statuses_and_card_level_attach_flow(
     assert!(script.contains("function openTaskBoardDetachDialog("));
     assert!(script.contains("function openTaskBoardDeleteDialog("));
     assert!(script.contains("function taskBoardDeleteTask("));
+    assert!(
+        script.contains(
+            ".filter((conversation) => taskBoardConversationShouldDisplay(conversation))"
+        )
+    );
     assert!(script.contains("不会删除 Codex 中的原始会话"));
     assert!(script.contains("创建并添加"));
 }
@@ -711,6 +755,26 @@ fn renderer_task_board_dynamic_contracts_apply_latest_catalog_and_independent_re
             .as_bool()
             .unwrap()
     );
+    assert!(
+        cases["catalog"]["conversationVisibility"]["activeShown"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["catalog"]["conversationVisibility"]["missingHiddenAfterCatalogLoad"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["catalog"]["conversationVisibility"]["missingRetainedWhenCatalogFails"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["catalog"]["conversationVisibility"]["hiddenConversationExcludedFromSearch"]
+            .as_bool()
+            .unwrap()
+    );
     assert_eq!(cases["conversationStatuses"]["running"], "running");
     assert_eq!(cases["conversationStatuses"]["unread"], "unread");
     assert_eq!(cases["conversationStatuses"]["completed"], "completed");
@@ -769,8 +833,17 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
     let cases = run_task_board_create_contract_harness();
 
     assert!(script.contains("\"/task-board/task-create\""));
-    assert!(script.contains("toolbar.append(searchControl, filter, create, hint)"));
+    assert!(script.contains("\"/task-board/board-create\""));
+    assert!(script.contains("\"/task-board/board-delete\""));
+    assert!(script.contains("\"/task-board/board-rename\""));
+    assert!(script.contains("\"/task-board/board-move\""));
+    assert!(script.contains("toolbar.append(searchControl, filter, create, manage, hint)"));
     assert!(script.contains("create.title = \"新建任务\""));
+    assert!(script.contains("manage.title = \"管理看板\""));
+    assert!(script.contains("function taskBoardRenameManagedBoard("));
+    assert!(script.contains("function taskBoardMoveManagedBoard("));
+    assert!(script.contains("aria-keyshortcuts\", \"ArrowUp ArrowDown\""));
+    assert!(script.contains("data-empty-unassigned"));
     assert!(script.contains("role\", \"dialog\""));
     assert!(script.contains("aria-modal\", \"true\""));
     assert!(script.contains("height: min(650px, calc(100vh - 32px))"));
@@ -811,7 +884,9 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
     assert!(script.contains("const rightLeft = menuRight + gap;"));
     assert!(script.contains("if (rightLeft + submenuWidth <= viewportWidth - edge)"));
     assert!(script.contains("menuLeft - gap - submenuWidth"));
-    assert!(script.contains("Number(parentRect.top || menuRect.top || 8) - 5"));
+    assert!(script.contains("function taskBoardCreateSubmenuTop("));
+    assert!(script.contains("anchorTop + (anchorHeight - submenuHeight) / 2"));
+    assert!(!script.contains("Number(parentRect.top || menuRect.top || 8) - 5"));
     assert!(script.contains("menuitemradio"));
     assert!(!script.contains("taskBoardConfigureDropdownTrigger(model"));
     assert!(script.contains("新会话模型"));
@@ -929,6 +1004,16 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
         cases["dropdowns"]
     );
     assert!(
+        cases["dropdowns"]["projectSearch"].as_bool().unwrap(),
+        "project dropdown search state: {}",
+        cases["dropdowns"]
+    );
+    assert!(
+        cases["dropdowns"]["noOptionMarkers"].as_bool().unwrap(),
+        "dropdown option marker state: {}",
+        cases["dropdowns"]
+    );
+    assert!(
         cases["dropdowns"]["allRootMenusLeftAligned"]
             .as_bool()
             .unwrap(),
@@ -945,6 +1030,13 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
             .as_bool()
             .unwrap(),
         "left-fallback submenu alignment state: {}",
+        cases["dropdowns"]
+    );
+    assert!(
+        cases["dropdowns"]["submenusVerticallyCentered"]
+            .as_bool()
+            .unwrap(),
+        "vertically centered submenu state: {}",
         cases["dropdowns"]
     );
     assert!(
@@ -1176,6 +1268,38 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
             .as_bool()
             .unwrap()
     );
+    for contract in [
+        "defaultColumns",
+        "modalContract",
+        "createPayload",
+        "createApplied",
+        "editContract",
+        "iconContract",
+        "renamePayload",
+        "renameApplied",
+        "movePayload",
+        "moveApplied",
+        "deleteConfirmation",
+        "deletePayload",
+        "deleteApplied",
+    ] {
+        assert!(
+            cases["boardManager"][contract].as_bool().unwrap(),
+            "board manager contract {contract} failed: {}",
+            cases["boardManager"]
+        );
+    }
+    for contract in [
+        "hiddenWhenEmpty",
+        "revealedDuringDrag",
+        "hiddenAgainAfterDrag",
+    ] {
+        assert!(
+            cases["unassignedColumn"][contract].as_bool().unwrap(),
+            "unassigned column contract {contract} failed: {}",
+            cases["unassignedColumn"]
+        );
+    }
 }
 
 #[test]
@@ -1189,8 +1313,12 @@ fn renderer_task_board_open_session_uses_native_rows_and_bounded_project_expansi
         .expect("native open session implementation should exist");
 
     assert!(script.contains("[data-app-action-sidebar-thread-id]"));
-    assert!(open_session.contains("taskBoardNativeProjectTarget(location.cwd)"));
+    assert!(
+        open_session.contains("taskBoardNativeFindOpenTarget(location, runtimeId, deadlineMs)")
+    );
     assert!(open_session.contains("taskBoardNativeOpenSessionTimeoutMs"));
+    assert!(script.contains(r#"[data-app-shell-sidebar-trigger="true"]"#));
+    assert!(script.contains("function taskBoardNativeProjectSectionToggles()"));
     assert!(!open_session.contains("dispatcher"));
     assert!(!open_session.contains("window.location"));
     assert!(!open_session.contains("sqlite"));
@@ -1199,6 +1327,16 @@ fn renderer_task_board_open_session_uses_native_rows_and_bounded_project_expansi
     assert!(cases["mounted"]["localIdClickedOnce"].as_bool().unwrap());
     assert!(
         cases["expanded"]["projectThenThreadClickedOnce"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["expanded"]["opaqueProjectIdMatchedByLabel"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["sidebarCollapsed"]["sidebarProjectAndThreadOpened"]
             .as_bool()
             .unwrap()
     );
@@ -3651,6 +3789,37 @@ async function tick() {
     { sessionId: "session-missing", title: "保留标题", cwd: "/repo", updatedAtMs: 1 },
     { warnings: [], projects: [], sessions: [] },
   );
+  const missingConversation = {
+    sessionId: "session-missing",
+    title: "已归档或删除会话",
+    cwd: "/repo",
+    updatedAtMs: 1,
+  };
+  const conversationVisibility = {
+    activeShown: api.conversationShouldDisplayForTest(
+      linkedConversation,
+      latestCatalog,
+      true,
+      "",
+    ),
+    missingHiddenAfterCatalogLoad: !api.conversationShouldDisplayForTest(
+      missingConversation,
+      latestCatalog,
+      true,
+      "",
+    ),
+    missingRetainedWhenCatalogFails: api.conversationShouldDisplayForTest(
+      missingConversation,
+      latestCatalog,
+      false,
+      "会话目录加载失败",
+    ),
+    hiddenConversationExcludedFromSearch: !api.taskMatchesQuery({
+      title: "任务 A",
+      project: { cwd: "/repo", label: "repo" },
+      conversations: [missingConversation],
+    }, latestCatalog, "已归档或删除会话"),
+  };
   const conversationStatuses = {
     running: api.conversationStatusForTest({
       available: true,
@@ -3862,6 +4031,7 @@ async function tick() {
       partialMissingAvailable: partial.available,
       partialMissingLabel: partial.label,
       completeMissingAvailable: complete.available,
+      conversationVisibility,
     },
     conversationStatuses,
     runtimeRefresh: {
@@ -4491,10 +4661,29 @@ window.__codexSessionDeleteBridge = async (path) => path === "/settings/get"
   ? { launchMode: "direct", enhancementsEnabled: true, providerSyncEnabled: true }
   : { status: "ok", ids: [] };
 
+let sidebarClicks = 0;
+let mountProjectOnSidebarOpen = false;
+const sidebarTrigger = node("button");
+sidebarTrigger.setAttribute("data-app-shell-sidebar-trigger", "true");
+sidebarTrigger.setAttribute("aria-controls", "app-shell-sidebar");
+sidebarTrigger.setAttribute("aria-expanded", "true");
+sidebarTrigger.setAttribute("aria-label", "隐藏侧边栏");
+sidebarTrigger.addEventListener("click", () => {
+  sidebarClicks += 1;
+  sidebarTrigger.setAttribute("aria-expanded", "true");
+  sidebarTrigger.setAttribute("aria-label", "隐藏侧边栏");
+  if (mountProjectOnSidebarOpen) {
+    mountProjectOnSidebarOpen = false;
+    document.body.appendChild(projectRow);
+  }
+});
+document.body.appendChild(sidebarTrigger);
 let projectClicks = 0;
 const projectRow = node("button");
 projectRow.setAttribute("data-app-action-sidebar-project-row", "true");
-projectRow.setAttribute("data-app-action-sidebar-project-id", "c:/repo-a");
+projectRow.setAttribute("data-app-action-sidebar-project-id", "local-opaque-project-a");
+projectRow.setAttribute("data-app-action-sidebar-project-label", "项目 A");
+projectRow.setAttribute("aria-label", "项目 A");
 projectRow.setAttribute("aria-expanded", "true");
 projectRow.addEventListener("click", () => {
   projectClicks += 1;
@@ -4552,8 +4741,13 @@ function reset(options = {}) {
   waits.length = 0;
   mountThreadOnWait = false;
   replaceRuntimeOnWait = false;
+  mountProjectOnSidebarOpen = false;
+  sidebarClicks = 0;
+  sidebarTrigger.setAttribute("aria-expanded", "true");
+  sidebarTrigger.setAttribute("aria-label", "隐藏侧边栏");
   projectClicks = 0;
   threadClicks.clear();
+  if (!projectRow.isConnected) document.body.appendChild(projectRow);
   projectRow.setAttribute("aria-expanded", "true");
   projectRow.removeAttribute("data-app-action-sidebar-project-collapsed");
   removeThreads();
@@ -4585,6 +4779,25 @@ function reset(options = {}) {
     projectThenThreadClickedOnce:
       expandedResult.status === "ok" && projectClicks === 1 && threadClicks.get("session-expand") === 1 &&
       waits.reduce((sum, delay) => sum + delay, 0) <= 5000,
+    opaqueProjectIdMatchedByLabel:
+      projectRow.getAttribute("data-app-action-sidebar-project-id") === "local-opaque-project-a",
+  };
+
+  reset();
+  projectRow.remove();
+  projectRow.setAttribute("aria-expanded", "false");
+  projectRow.setAttribute("data-app-action-sidebar-project-collapsed", "true");
+  sidebarTrigger.setAttribute("aria-expanded", "false");
+  sidebarTrigger.setAttribute("aria-label", "显示侧边栏");
+  mountProjectOnSidebarOpen = true;
+  mountThreadOnWait = true;
+  const sidebarResult = await api.nativeOpenSessionForTest("session-expand");
+  const sidebarCollapsed = {
+    sidebarProjectAndThreadOpened:
+      sidebarResult.status === "ok" &&
+      sidebarClicks === 1 &&
+      projectClicks === 1 &&
+      threadClicks.get("session-expand") === 1,
   };
 
   reset();
@@ -4634,7 +4847,7 @@ function reset(options = {}) {
   reset({ adapter: { openSession(sessionId) { seamCalls += 1; return { status: "ok", sessionId }; } } });
   await api.openConversationForTest({ sessionId: "session-raw", title: "原始 ID" });
   const seam = { injectedAdapterStillUsed: seamCalls === 1 };
-  process.stdout.write(JSON.stringify({ mounted, expanded, deadline, errors, runtimeReplacement, repeat, seam }));
+  process.stdout.write(JSON.stringify({ mounted, expanded, sidebarCollapsed, deadline, errors, runtimeReplacement, repeat, seam }));
   process.exit(0);
 })().catch((error) => { process.stderr.write(String(error?.stack || error)); process.exit(1); });
 "##,
@@ -6105,13 +6318,33 @@ function node(tagName = "div") {
     }
     return entries;
   };
-  const descendants = (root) => root.children.flatMap((child) => [child, ...descendants(child)]);
+  const descendants = (root) => (root.children || [])
+    .flatMap((child) => [child, ...descendants(child)]);
   const matches = (candidate, selector) => {
     if (selector.includes("button") && candidate.tagName === "BUTTON") return !candidate.disabled;
     if (selector.includes("input") && candidate.tagName === "INPUT") return !candidate.disabled;
     if (selector.includes("select") && candidate.tagName === "SELECT") return !candidate.disabled;
+    const className = selector.match(/^\.([a-z0-9_-]+)/i)?.[1] || "";
+    if (
+      className &&
+      !String(candidate.className || "").split(/\s+/).includes(className)
+    ) {
+      return false;
+    }
+    const attributes = Array.from(
+      selector.matchAll(/\[([^=\]]+)(?:="([^"]*)")?\]/g),
+    );
+    if (className || attributes.length) {
+      return attributes.every(([, name, value]) => {
+        const actual = candidate.getAttribute?.(name) ?? null;
+        return value === undefined ? actual !== null : actual === value;
+      });
+    }
     const attribute = selector.match(/^\[([^=]+)="([^"]+)"\]$/);
-    return !!attribute && candidate.getAttribute(attribute[1]) === attribute[2];
+    return (
+      !!attribute &&
+      candidate.getAttribute?.(attribute[1]) === attribute[2]
+    );
   };
   return {
     tagName: String(tagName).toUpperCase(),
@@ -6497,6 +6730,11 @@ function createState() {
   });
   api.openBoardProjectMenuForTest({ left: 40, top: 40, width: 132, height: 36 });
   const boardProjectDropdownOpen = api.dropdownMenuStateForTest();
+  api.setDropdownSearchForTest("missing-project");
+  const boardProjectDropdownEmpty = api.dropdownMenuStateForTest();
+  api.setDropdownSearchForTest("/repo-b");
+  const boardProjectDropdownFiltered = api.dropdownMenuStateForTest();
+  api.dispatchDropdownMenuKeyForTest("ArrowDown");
   api.dispatchDropdownMenuKeyForTest("Enter");
   api.openCreateDropdownForTest("project");
   const projectDropdownOpen = api.dropdownMenuStateForTest();
@@ -6583,6 +6821,21 @@ function createState() {
     submenusFallbackLeft:
       leftFallbackModelMenuOpen.left === "796px" &&
       leftFallbackModelMenuOpen.submenuLeft === "570px",
+    submenusVerticallyCentered:
+      api.createSubmenuTopForTest(240, 37, 178, 428) === 169.5 &&
+      api.createSubmenuTopForTest(315, 37, 315, 428) === 105 &&
+      api.createSubmenuTopForTest(87, 37, 315, 430) === 8,
+    projectSearch:
+      boardProjectDropdownOpen.searchPresent &&
+      boardProjectDropdownOpen.searchFocused &&
+      boardProjectDropdownFiltered.searchValue === "/repo-b" &&
+      boardProjectDropdownFiltered.visibleItemCount === 1 &&
+      JSON.stringify(boardProjectDropdownFiltered.visibleValues) ===
+        JSON.stringify(["/repo-b"]) &&
+      boardProjectDropdownEmpty.visibleItemCount === 0 &&
+      boardProjectDropdownEmpty.emptyVisible &&
+      projectDropdownOpen.searchPresent &&
+      projectDropdownOpen.searchFocused,
     projectMenusConsistent:
       boardProjectDropdownOpen.kind === "project" &&
       boardProjectDropdownOpen.role === "listbox" &&
@@ -6604,7 +6857,14 @@ function createState() {
       statusDropdownOpen.kind === "create-status" &&
       statusDropdownOpen.role === "listbox" &&
       statusDropdownOpen.itemCount === 5 &&
-      statusDropdownOpen.selectedIndex === 0,
+      statusDropdownOpen.selectedIndex === 0 &&
+      statusDropdownOpen.statusIconCount === 5,
+    noOptionMarkers:
+      boardProjectDropdownOpen.optionTrailingContentCount === 0 &&
+      projectDropdownOpen.optionTrailingContentCount === 0 &&
+      statusDropdownOpen.optionTrailingContentCount === 0 &&
+      modelMenuOpen.submenuTrailingContentCount === 0 &&
+      fullEffortMenuOpen.submenuTrailingContentCount === 0,
     nativeSettingsMenu:
       settingsMenuOpen.kind === "create-settings" &&
       settingsMenuOpen.role === "menu" &&
@@ -7339,16 +7599,227 @@ function createState() {
   const lifecycle = {
     deferredClosePreventsLateWrite: !createState().open && api.createSnapshotForTest().revision === 3,
   };
+  const colorPrefix = String.fromCharCode(35);
+  const defaultBoards = [
+    { id: "planning", label: "规划", color: `${colorPrefix}60a5fa` },
+    { id: "executing", label: "执行", color: `${colorPrefix}c084fc` },
+    { id: "review", label: "验收", color: `${colorPrefix}fbbf24` },
+    { id: "done", label: "完成", color: `${colorPrefix}34d399` },
+  ];
+  const boardRequests = [];
+  let createdBoardId = "";
+  reset({
+    snapshot: { ...snapshot(3), boards: defaultBoards },
+    mock: {
+      request(route, payload) {
+        boardRequests.push({ route, payload });
+        if (route === "/task-board/board-create") {
+          createdBoardId = payload.boardId;
+          return {
+            status: "ok",
+            schemaVersion: 1,
+            revision: 4,
+            boards: [
+              ...defaultBoards,
+              { id: createdBoardId, label: payload.label, color: `${colorPrefix}fb7185` },
+            ],
+            tasks: [{
+              ...snapshot(3).tasks[0],
+              status: createdBoardId,
+              order: 0,
+            }],
+          };
+        }
+        if (route === "/task-board/board-rename") {
+          return {
+            status: "ok",
+            schemaVersion: 1,
+            revision: 5,
+            boards: [
+              ...defaultBoards,
+              { id: createdBoardId, label: payload.label, color: `${colorPrefix}fb7185` },
+            ],
+            tasks: [{
+              ...snapshot(3).tasks[0],
+              status: createdBoardId,
+              order: 0,
+            }],
+          };
+        }
+        if (route === "/task-board/board-move") {
+          return {
+            status: "ok",
+            schemaVersion: 1,
+            revision: 6,
+            boards: [
+              { id: createdBoardId, label: "发布队列", color: `${colorPrefix}fb7185` },
+              ...defaultBoards,
+            ],
+            tasks: [{
+              ...snapshot(3).tasks[0],
+              status: createdBoardId,
+              order: 0,
+            }],
+          };
+        }
+        if (route === "/task-board/board-delete") {
+          return {
+            status: "ok",
+            schemaVersion: 1,
+            revision: 7,
+            boards: defaultBoards,
+            tasks: [{
+              ...snapshot(3).tasks[0],
+              status: "new",
+              order: 0,
+            }],
+          };
+        }
+        throw new Error(`unexpected route ${route}`);
+      },
+    },
+  });
+  api.openBoardManagerForTest();
+  const boardManagerInitial = api.boardManagerStateForTest();
+  const statusDefinitions = api.boardStatusDefinitionsForTest();
+  api.setBoardManagerLabelForTest("  待发布  ");
+  await api.submitBoardCreateForTest();
+  const boardManagerCreated = api.boardManagerStateForTest();
+  const createdBoardIconBeforeRename = api.statusIconIndexForTest(createdBoardId);
+  api.setBoardManagerEditForTest(createdBoardId, "");
+  const boardManagerEditingEmpty = api.boardManagerStateForTest();
+  api.setBoardManagerEditingInputForTest("发布队列");
+  const boardManagerEditing = api.boardManagerStateForTest();
+  await api.submitBoardRenameForTest(createdBoardId, "  发布队列  ");
+  const boardManagerRenamed = api.boardManagerStateForTest();
+  const createdBoardIconAfterRename = api.statusIconIndexForTest(createdBoardId);
+  api.focusBoardManagerDragHandleForTest(createdBoardId);
+  await api.moveBoardForTest(createdBoardId, 0, true);
+  const boardManagerMoved = api.boardManagerStateForTest();
+  const createdBoardIconAfterMove = api.statusIconIndexForTest(createdBoardId);
+  api.requestBoardDeleteForTest(createdBoardId);
+  const boardManagerPendingDelete = api.boardManagerStateForTest();
+  await api.submitBoardDeleteForTest();
+  const boardManagerDeleted = api.boardManagerStateForTest();
+  api.closeBoardManagerForTest();
+  const boardManager = {
+    defaultColumns:
+      JSON.stringify(boardManagerInitial.boardLabels) ===
+        JSON.stringify(["规划", "执行", "验收", "完成"]) &&
+      statusDefinitions[0]?.id === "new" &&
+      statusDefinitions[0]?.label === "未分配",
+    modalContract:
+      boardManagerInitial.open &&
+      boardManagerInitial.role === "dialog" &&
+      boardManagerInitial.ariaModal &&
+      boardManagerInitial.bodyMounted &&
+      boardManagerInitial.initialFocus,
+    createPayload:
+      boardRequests[0]?.route === "/task-board/board-create" &&
+      boardRequests[0]?.payload?.expectedRevision === 3 &&
+      boardRequests[0]?.payload?.label === "待发布" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        boardRequests[0]?.payload?.boardId || "",
+      ),
+    createApplied:
+      boardManagerCreated.boardIds.includes(createdBoardId) &&
+      boardManagerCreated.boardLabels.includes("待发布") &&
+      boardManagerCreated.label === "" &&
+      !boardManagerCreated.busy,
+    editContract:
+      boardManagerInitial.dragHandleCount === 4 &&
+      boardManagerInitial.editButtonCount === 4 &&
+      boardManagerEditingEmpty.editSaveDisabled &&
+      boardManagerEditing.editingBoardId === createdBoardId &&
+      boardManagerEditing.editingLabel === "发布队列" &&
+      !boardManagerEditing.editSaveDisabled,
+    iconContract:
+      api.statusIconPaletteSizeForTest() === 10 &&
+      boardManagerInitial.boardIconCount === 4 &&
+      boardManagerCreated.boardIconCount === 5 &&
+      createdBoardIconBeforeRename === createdBoardIconAfterRename &&
+      createdBoardIconBeforeRename === createdBoardIconAfterMove,
+    renamePayload:
+      boardRequests[1]?.route === "/task-board/board-rename" &&
+      boardRequests[1]?.payload?.boardId === createdBoardId &&
+      boardRequests[1]?.payload?.expectedRevision === 4 &&
+      boardRequests[1]?.payload?.label === "发布队列",
+    renameApplied:
+      boardManagerRenamed.boardLabels.includes("发布队列") &&
+      boardManagerRenamed.editingBoardId === "" &&
+      !boardManagerRenamed.busy,
+    movePayload:
+      boardRequests[2]?.route === "/task-board/board-move" &&
+      boardRequests[2]?.payload?.boardId === createdBoardId &&
+      boardRequests[2]?.payload?.targetIndex === 0 &&
+      boardRequests[2]?.payload?.expectedRevision === 5,
+    moveApplied:
+      boardManagerMoved.boardIds[0] === createdBoardId &&
+      boardManagerMoved.boardLabels[0] === "发布队列" &&
+      boardManagerMoved.focusedDragBoardId === createdBoardId &&
+      !boardManagerMoved.busy,
+    deleteConfirmation:
+      boardManagerPendingDelete.pendingDeleteId === createdBoardId &&
+      boardManagerPendingDelete.pendingTaskCount === 1,
+    deletePayload:
+      boardRequests[3]?.route === "/task-board/board-delete" &&
+      boardRequests[3]?.payload?.boardId === createdBoardId &&
+      boardRequests[3]?.payload?.expectedRevision === 6,
+    deleteApplied:
+      !boardManagerDeleted.boardIds.includes(createdBoardId) &&
+      boardManagerDeleted.pendingDeleteId === "" &&
+      api.createSnapshotForTest().tasks[0]?.status === "new" &&
+      !api.boardManagerStateForTest().open,
+  };
+  api.resetCreateStateForTest({
+    snapshot: {
+      status: "ok",
+      schemaVersion: 1,
+      revision: 8,
+      boards: defaultBoards,
+      tasks: [{
+        ...snapshot(3).tasks[0],
+        id: "task-managed",
+        status: "executing",
+        order: 0,
+      }],
+    },
+    catalog: catalog(),
+    catalogError: "",
+  });
+  const emptyUnassignedHidden = api.boardColumnStateForTest();
+  api.setTaskDragForTest("task-managed");
+  const emptyUnassignedRevealed = api.boardColumnStateForTest();
+  api.dragEndForTest();
+  const emptyUnassignedRestored = api.boardColumnStateForTest();
+  const unassignedColumn = {
+    hiddenWhenEmpty:
+      emptyUnassignedHidden.emptyUnassigned &&
+      emptyUnassignedHidden.visibleColumnCount === 4 &&
+      emptyUnassignedHidden.totalColumnCount === 5 &&
+      emptyUnassignedHidden.appliedColumnCount === 4 &&
+      !emptyUnassignedHidden.dragActive,
+    revealedDuringDrag:
+      emptyUnassignedRevealed.emptyUnassigned &&
+      emptyUnassignedRevealed.appliedColumnCount === 5 &&
+      emptyUnassignedRevealed.dragActive,
+    hiddenAgainAfterDrag:
+      emptyUnassignedRestored.appliedColumnCount === 4 &&
+      !emptyUnassignedRestored.dragActive,
+    hiddenState: emptyUnassignedHidden,
+    revealedState: emptyUnassignedRevealed,
+    restoredState: emptyUnassignedRestored,
+  };
   const wideToolbar = api.toolbarLayoutForTest(996, 785);
   const narrowToolbar = api.toolbarLayoutForTest(780, 400);
   const toolbar = {
     wideInlineAdjacent:
       wideToolbar.mode === "inline" &&
-      JSON.stringify(wideToolbar.controls) === JSON.stringify(["search", "filter", "create"]),
+      JSON.stringify(wideToolbar.controls) === JSON.stringify(["search", "filter", "create", "manage"]),
     narrowWrapsWith36pxCreate:
       narrowToolbar.mode === "wrapped" &&
       narrowToolbar.createMinHeight === 36 &&
-      JSON.stringify(narrowToolbar.controls) === JSON.stringify(["search", "filter", "create"]),
+      JSON.stringify(narrowToolbar.controls) === JSON.stringify(["search", "filter", "create", "manage"]),
   };
 
   process.stdout.write(JSON.stringify({
@@ -7368,6 +7839,8 @@ function createState() {
     nativeMode,
     idempotency,
     lifecycle,
+    boardManager,
+    unassignedColumn,
     toolbar,
   }));
   process.exit(0);

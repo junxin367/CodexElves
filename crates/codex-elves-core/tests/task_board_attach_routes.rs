@@ -27,6 +27,7 @@ fn response_document(revision: u64) -> TaskBoardDocument {
     TaskBoardDocument {
         schema_version: 1,
         revision,
+        boards: TaskBoardDocument::default_boards(),
         tasks: vec![TaskBoardTask {
             id: TASK_ID.to_string(),
             title: "完善任务看板".to_string(),

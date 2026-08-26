@@ -46,6 +46,7 @@ fn document(tasks: Vec<TaskBoardTask>) -> TaskBoardDocument {
     TaskBoardDocument {
         schema_version: 1,
         revision: 7,
+        boards: TaskBoardDocument::default_boards(),
         tasks,
     }
 }

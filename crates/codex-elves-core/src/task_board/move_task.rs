@@ -15,6 +15,9 @@ pub(super) fn move_task(
         if current.revision != command.expected_revision {
             return Err(TaskBoardStoreError::RevisionConflict { current });
         }
+        if !current.contains_status(command.to_status) {
+            return Err(TaskBoardStoreError::BoardNotFound);
+        }
 
         let source_index = current
             .tasks

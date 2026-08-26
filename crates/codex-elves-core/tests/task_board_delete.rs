@@ -41,6 +41,7 @@ fn document() -> TaskBoardDocument {
     TaskBoardDocument {
         schema_version: 1,
         revision: 7,
+        boards: TaskBoardDocument::default_boards(),
         tasks: vec![
             task(TASK_A, TaskBoardStatus::New, 0),
             task(TASK_B, TaskBoardStatus::New, 1),

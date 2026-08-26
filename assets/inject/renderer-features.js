@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "66";
+  const codexDeleteStyleVersion = "67";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -82,7 +82,7 @@
   const codexPluginRequestIdMaxEntries = 256;
   const codexFailureHistoryMaxEntries = 64;
   const codexManagerReactDiscoveryCooldownMs = 15000;
-  const taskBoardRuntimeVersion = "44";
+  const taskBoardRuntimeVersion = "49";
   const taskBoardNativeOperationLeaseTtlMs = 2 * 60 * 1000;
   const taskBoardNativeCreateBusyMessage = "另一个窗口正在创建原生会话，请稍后重试";
   const taskBoardEntryAttribute = "data-codex-task-board-entry";
@@ -111,13 +111,45 @@
     "data-app-action-sidebar-thread-selected",
     "data-app-action-sidebar-thread-active",
   ];
-  const taskBoardStatusDefinitions = [
-    { id: "new", label: "新任务", color: "#94a3b8" },
-    { id: "planning", label: "规划中", color: "#60a5fa" },
-    { id: "executing", label: "执行中", color: "#c084fc" },
-    { id: "review", label: "验收中", color: "#fbbf24" },
-    { id: "done", label: "已完成", color: "#34d399" },
+  const taskBoardUnassignedStatusDefinition = {
+    id: "new",
+    label: "未分配",
+    color: "#94a3b8",
+  };
+  const taskBoardDefaultBoardDefinitions = [
+    { id: "planning", label: "规划", color: "#60a5fa" },
+    { id: "executing", label: "执行", color: "#c084fc" },
+    { id: "review", label: "验收", color: "#fbbf24" },
+    { id: "done", label: "完成", color: "#34d399" },
   ];
+  const taskBoardStatusIconPaths = [
+    ["M3 3.5h10l-1 8H4l-1-8Z", "M3.6 8.5h2.5l1 1h1.8l1-1h2.5"],
+    ["M6 4h7", "M6 8h7", "M6 12h7", "M3 4h.01", "M3 8h.01", "M3 12h.01"],
+    ["m5 3.5 7 4.5-7 4.5Z"],
+    [
+      "M2.5 8s2-3.5 5.5-3.5S13.5 8 13.5 8 11.5 11.5 8 11.5 2.5 8 2.5 8Z",
+      "M8 6.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 1 0 0-3Z",
+    ],
+    ["M8 3a5 5 0 1 0 0 10A5 5 0 0 0 8 3Z", "m5.5 8 1.6 1.6 3.5-3.5"],
+    ["M4 13V3.5", "M4 4h7l-1.2 2L11 8H4"],
+    ["M4.5 2.5h7v11L8 11.5l-3.5 2Z"],
+    ["m8 2.8 5 2.7-5 2.7-5-2.7Z", "m3 8 5 2.7L13 8", "m3 10.5 5 2.5 5-2.5"],
+    [
+      "M8 3a5 5 0 1 0 0 10A5 5 0 0 0 8 3Z",
+      "M8 6a2 2 0 1 0 0 4 2 2 0 1 0 0-4Z",
+    ],
+    [
+      "M8 2.5 9 5l2.5 1L9 7l-1 2.5L7 7 4.5 6 7 5Z",
+      "m12 10 .5 1.2 1.2.5-1.2.5-.5 1.3-.5-1.3-1.2-.5 1.2-.5Z",
+    ],
+  ];
+  const taskBoardBuiltInStatusIconIndexes = {
+    new: 0,
+    planning: 1,
+    executing: 2,
+    review: 3,
+    done: 4,
+  };
   const taskBoardReasoningEffortDefinitions = [
     { id: "none", label: "无" },
     { id: "minimal", label: "最低" },
@@ -135,6 +167,10 @@
     catalog: "/task-board/session-catalog",
     createTask: "/task-board/task-create",
     deleteTask: "/task-board/task-delete",
+    createBoard: "/task-board/board-create",
+    deleteBoard: "/task-board/board-delete",
+    renameBoard: "/task-board/board-rename",
+    moveBoard: "/task-board/board-move",
     attachConversations: "/task-board/task-conversations-attach",
     detachConversations: "/task-board/task-conversations-detach",
     moveTask: "/task-board/task-move",
@@ -1683,7 +1719,8 @@
       }
       .codex-task-board-search-control,
       .codex-task-board-project-filter,
-      .codex-task-board-create {
+      .codex-task-board-create,
+      .codex-task-board-manage {
         min-height: 36px;
         border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
         border-radius: 8px;
@@ -1695,7 +1732,7 @@
         display: flex;
         align-items: center;
         gap: 8px;
-        width: min(320px, 100%);
+        width: min(305px, 100%);
         min-width: 160px;
         padding: 0 10px;
       }
@@ -1747,7 +1784,8 @@
         border-color: color-mix(in srgb, currentColor 30%, #63aee0);
         background: color-mix(in srgb, currentColor 7%, transparent);
       }
-      .codex-task-board-create {
+      .codex-task-board-create,
+      .codex-task-board-manage {
         display: inline-flex;
         align-items: center;
         justify-content: center;
@@ -1792,11 +1830,13 @@
         flex: 1 1 180px;
         max-width: none;
       }
-      [${taskBoardRootAttribute}="true"][data-toolbar-layout="collapsed"] .codex-task-board-create {
+      [${taskBoardRootAttribute}="true"][data-toolbar-layout="collapsed"] .codex-task-board-create,
+      [${taskBoardRootAttribute}="true"][data-toolbar-layout="collapsed"] .codex-task-board-manage {
         min-width: 36px;
         padding: 0 9px;
       }
-      [${taskBoardRootAttribute}="true"][data-toolbar-layout="collapsed"] .codex-task-board-create span {
+      [${taskBoardRootAttribute}="true"][data-toolbar-layout="collapsed"] .codex-task-board-create span,
+      [${taskBoardRootAttribute}="true"][data-toolbar-layout="collapsed"] .codex-task-board-manage span {
         display: none;
       }
       .codex-task-board-search-control:focus-within {
@@ -1812,10 +1852,12 @@
         outline: 2px solid #38bdf8;
         outline-offset: 2px;
       }
-      .codex-task-board-create:hover {
+      .codex-task-board-create:hover,
+      .codex-task-board-manage:hover {
         background: var(--task-board-action-background-hover);
       }
-      .codex-task-board-create:active {
+      .codex-task-board-create:active,
+      .codex-task-board-manage:active {
         background: var(--task-board-action-background-active);
       }
       .codex-task-board-create-modal-backdrop {
@@ -1841,6 +1883,193 @@
         background: color-mix(in srgb, var(--color-token-dropdown-background, #363636) 96%, transparent);
         color: var(--color-token-text-primary, #f4f4f5);
         box-shadow: 0 24px 70px rgba(0,0,0,.48);
+      }
+      .codex-task-board-board-manager {
+        width: min(560px, calc(100vw - 32px));
+        height: auto;
+        max-height: min(680px, calc(100vh - 32px));
+      }
+      .codex-task-board-board-manager-body {
+        display: grid;
+        min-height: 0;
+        gap: 14px;
+        overflow-y: auto;
+        padding: 17px 20px 20px;
+      }
+      .codex-task-board-board-add {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: end;
+        gap: 10px;
+      }
+      .codex-task-board-board-add > .codex-task-board-create-field {
+        min-width: 0;
+      }
+      .codex-task-board-board-add .codex-task-board-create-submit {
+        min-height: 38px;
+      }
+      .codex-task-board-board-list {
+        display: grid;
+        overflow: hidden;
+        border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+        border-radius: 10px;
+        background: color-mix(
+          in srgb,
+          var(--color-background-secondary, var(--color-token-main-surface-secondary, #2b2b2b)) 86%,
+          transparent
+        );
+      }
+      .codex-task-board-board-item {
+        position: relative;
+        display: grid;
+        min-height: 46px;
+        grid-template-columns: 30px 12px minmax(0, 1fr) auto 30px 30px;
+        align-items: center;
+        gap: 8px;
+        border-bottom: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+        padding: 0 9px;
+      }
+      .codex-task-board-board-item:last-child { border-bottom: 0; }
+      .codex-task-board-board-item[data-dragging="true"] { opacity: .52; }
+      .codex-task-board-board-item[data-drop-position="before"]::before,
+      .codex-task-board-board-item[data-drop-position="after"]::after {
+        position: absolute;
+        z-index: 1;
+        right: 8px;
+        left: 8px;
+        height: 2px;
+        border-radius: 999px;
+        background: var(--task-board-accent);
+        content: "";
+        pointer-events: none;
+      }
+      .codex-task-board-board-item[data-drop-position="before"]::before { top: -1px; }
+      .codex-task-board-board-item[data-drop-position="after"]::after { bottom: -1px; }
+      .codex-task-board-board-drag-handle,
+      .codex-task-board-board-edit,
+      .codex-task-board-board-delete,
+      .codex-task-board-board-edit-form button {
+        display: inline-grid;
+        width: 28px;
+        height: 28px;
+        min-width: 28px;
+        min-height: 28px;
+        place-items: center;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        color: color-mix(in srgb, currentColor 54%, transparent);
+        cursor: pointer;
+        padding: 0;
+      }
+      .codex-task-board-board-drag-handle { cursor: grab; }
+      .codex-task-board-board-drag-handle:active { cursor: grabbing; }
+      .codex-task-board-board-drag-handle:hover,
+      .codex-task-board-board-drag-handle:focus-visible,
+      .codex-task-board-board-edit:hover,
+      .codex-task-board-board-edit:focus-visible,
+      .codex-task-board-board-edit-form button:hover,
+      .codex-task-board-board-edit-form button:focus-visible {
+        outline: none;
+        background: color-mix(in srgb, currentColor 9%, transparent);
+        color: inherit;
+      }
+      .codex-task-board-board-name {
+        min-width: 0;
+        overflow: hidden;
+        font-size: 12px;
+        font-weight: 600;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .codex-task-board-board-edit-form {
+        display: grid;
+        min-width: 0;
+        grid-template-columns: minmax(0, 1fr) 28px 28px;
+        align-items: center;
+        gap: 4px;
+      }
+      .codex-task-board-board-edit-form input {
+        width: 100%;
+        min-width: 0;
+        height: 30px;
+        border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+        border-radius: 7px;
+        outline: none;
+        background: color-mix(
+          in srgb,
+          var(--color-background-secondary, var(--color-token-main-surface-secondary, #2b2b2b)) 86%,
+          transparent
+        );
+        color: inherit;
+        font-size: 12px;
+        padding: 0 8px;
+      }
+      .codex-task-board-board-edit-form input:focus {
+        border-color: var(--task-board-accent);
+        box-shadow: 0 0 0 1px color-mix(in srgb, var(--task-board-accent) 25%, transparent);
+      }
+      .codex-task-board-board-task-count {
+        color: color-mix(in srgb, currentColor 54%, transparent);
+        font-size: 10px;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .codex-task-board-board-delete {
+        color: color-mix(in srgb, currentColor 54%, transparent);
+      }
+      .codex-task-board-board-delete:hover,
+      .codex-task-board-board-delete:focus-visible {
+        outline: none;
+        background: color-mix(in srgb, #ef4444 12%, transparent);
+        color: #ef6b6b;
+      }
+      .codex-task-board-board-empty {
+        margin: 0;
+        color: color-mix(in srgb, currentColor 54%, transparent);
+        font-size: 11px;
+        padding: 22px 14px;
+        text-align: center;
+      }
+      .codex-task-board-board-delete-confirm {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        border: 1px solid color-mix(in srgb, #ef4444 28%, transparent);
+        border-radius: 9px;
+        background: color-mix(in srgb, #ef4444 8%, transparent);
+        padding: 10px 11px;
+      }
+      .codex-task-board-board-delete-confirm p {
+        margin: 0;
+        color: color-mix(in srgb, currentColor 72%, transparent);
+        font-size: 11px;
+        line-height: 1.45;
+      }
+      .codex-task-board-board-delete-confirm > div {
+        display: flex;
+        flex: 0 0 auto;
+        gap: 7px;
+      }
+      .codex-task-board-board-delete-confirm button {
+        min-height: 30px;
+        border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+        border-radius: 7px;
+        background: transparent;
+        color: color-mix(in srgb, currentColor 72%, transparent);
+        cursor: pointer;
+        font: 600 11px/1 system-ui, sans-serif;
+        padding: 0 10px;
+      }
+      .codex-task-board-board-delete-confirm button:hover {
+        background: color-mix(in srgb, currentColor 6%, transparent);
+        color: inherit;
+      }
+      .codex-task-board-board-delete-confirm button[data-danger="true"] {
+        border-color: color-mix(in srgb, #ef4444 45%, transparent);
+        background: color-mix(in srgb, #ef4444 14%, transparent);
+        color: #ff8582;
       }
       .codex-task-board-create-modal-head {
         display: flex;
@@ -2163,6 +2392,21 @@
       .codex-task-board-create-modal-footer-actions-only {
         justify-content: flex-end;
       }
+      @media (max-width: 540px) {
+        .codex-task-board-board-add {
+          grid-template-columns: 1fr;
+        }
+        .codex-task-board-board-add .codex-task-board-create-submit {
+          width: 100%;
+        }
+        .codex-task-board-board-delete-confirm {
+          align-items: stretch;
+          flex-direction: column;
+        }
+        .codex-task-board-board-delete-confirm > div {
+          justify-content: flex-end;
+        }
+      }
       @media (max-height: 620px) {
         .codex-task-board-create-fields {
           overflow-y: auto;
@@ -2219,6 +2463,11 @@
       .codex-task-board-create-close:disabled,
       .codex-task-board-create-mode:disabled,
       .codex-task-board-create-model-trigger:disabled,
+      .codex-task-board-board-drag-handle:disabled,
+      .codex-task-board-board-edit:disabled,
+      .codex-task-board-board-delete:disabled,
+      .codex-task-board-board-edit-form button:disabled,
+      .codex-task-board-board-delete-confirm button:disabled,
       .codex-task-board-create-submit:disabled,
       .codex-task-board-create-cancel:disabled {
         cursor: not-allowed;
@@ -2269,6 +2518,13 @@
         background: color-mix(in srgb, var(--task-board-panel-background) 78%, transparent);
         overflow: hidden;
       }
+      .codex-task-board-column[data-empty-unassigned="true"] {
+        display: none;
+      }
+      [${taskBoardRootAttribute}="true"][data-task-board-drag-active="true"]
+        .codex-task-board-column[data-empty-unassigned="true"] {
+        display: grid;
+      }
       .codex-task-board-column-head {
         display: flex;
         min-height: 46px;
@@ -2287,13 +2543,19 @@
         font-size: 12px;
         font-weight: 600;
       }
-      .codex-task-board-status-dot {
-        width: 7px;
-        height: 7px;
+      .codex-task-board-status-icon,
+      .codex-task-board-dropdown-status-icon {
+        display: inline-flex;
+        width: 11px;
+        height: 11px;
         flex: 0 0 auto;
-        border-radius: 999px;
-        background: var(--task-board-status-color);
-        box-shadow: 0 0 0 3px color-mix(in srgb, var(--task-board-status-color) 14%, transparent);
+        color: color-mix(in srgb, currentColor 72%, transparent);
+      }
+      .codex-task-board-status-icon svg,
+      .codex-task-board-dropdown-status-icon svg {
+        display: block;
+        width: 100%;
+        height: 100%;
       }
       .codex-task-board-count {
         display: inline-flex;
@@ -2349,7 +2611,7 @@
         display: grid;
         gap: 3px;
         max-height: min(340px, calc(100vh - 16px));
-        overflow-y: auto;
+        overflow: hidden;
         border: 1px solid var(
           --color-border-primary-outline,
           var(--color-token-border-primary, rgba(212, 212, 212, .16))
@@ -2364,12 +2626,48 @@
         color-scheme: dark;
         padding: 5px;
       }
+      .codex-task-board-dropdown-search {
+        display: flex;
+        min-height: 34px;
+        align-items: center;
+        gap: 7px;
+        border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+        border-radius: 7px;
+        background: color-mix(in srgb, currentColor 5%, transparent);
+        color: color-mix(in srgb, currentColor 58%, transparent);
+        padding: 0 9px;
+      }
+      .codex-task-board-dropdown-search:focus-within {
+        border-color: var(--task-board-accent);
+        box-shadow: 0 0 0 1px color-mix(in srgb, var(--task-board-accent) 25%, transparent);
+      }
+      .codex-task-board-dropdown-search input {
+        width: 100%;
+        min-width: 0;
+        min-height: 32px;
+        border: 0;
+        outline: none;
+        background: transparent;
+        color: inherit;
+        font: 12px/1.3 system-ui, sans-serif;
+        padding: 0;
+      }
+      .codex-task-board-dropdown-search input::placeholder {
+        color: color-mix(in srgb, currentColor 72%, transparent);
+      }
+      .codex-task-board-dropdown-options {
+        display: grid;
+        min-height: 0;
+        max-height: min(286px, calc(100vh - 60px));
+        gap: 3px;
+        overflow-y: auto;
+      }
       .codex-task-board-dropdown-menu button {
         display: flex;
         min-height: 34px;
         align-items: center;
-        justify-content: space-between;
-        gap: 14px;
+        justify-content: flex-start;
+        gap: 8px;
         border: 0;
         border-radius: 6px;
         background: transparent;
@@ -2399,18 +2697,6 @@
       .codex-task-board-dropdown-option-title-row {
         max-width: 100%;
       }
-      .codex-task-board-dropdown-status-dot {
-        width: 7px;
-        height: 7px;
-        flex: 0 0 auto;
-        border-radius: 999px;
-        background: var(--task-board-status-color);
-        box-shadow: 0 0 0 2px color-mix(
-          in srgb,
-          var(--task-board-status-color) 14%,
-          transparent
-        );
-      }
       .codex-task-board-dropdown-option-title,
       .codex-task-board-dropdown-option-description {
         min-width: 0;
@@ -2423,17 +2709,14 @@
         font-size: 10px;
         line-height: 1.35;
       }
-      .codex-task-board-dropdown-option-marker {
-        display: inline-flex;
-        flex: 0 0 14px;
-        min-height: 14px;
-        align-items: center;
-        justify-content: center;
-        margin-top: 0;
-      }
-      .codex-task-board-dropdown-option-marker svg,
       .codex-task-board-create-settings-chevron svg {
         display: block;
+      }
+      .codex-task-board-dropdown-empty {
+        color: color-mix(in srgb, currentColor 48%, transparent);
+        font-size: 11px;
+        padding: 18px 10px;
+        text-align: center;
       }
       .codex-task-board-dropdown-menu button:hover,
       .codex-task-board-dropdown-menu button:focus-visible {
@@ -2492,14 +2775,22 @@
       }
       .codex-task-board-create-model-menu button[aria-checked="true"],
       .codex-task-board-create-effort-menu button[aria-checked="true"] {
-        background: transparent;
-        color: inherit;
+        background: color-mix(
+          in srgb,
+          var(--color-text-accent, var(--color-token-text-accent, #63aee0)) 14%,
+          transparent
+        );
+        color: var(--color-text-accent, var(--color-token-text-accent, #63aee0));
       }
       .codex-task-board-create-model-menu button[aria-checked="true"]:hover,
       .codex-task-board-create-model-menu button[aria-checked="true"]:focus-visible,
       .codex-task-board-create-effort-menu button[aria-checked="true"]:hover,
       .codex-task-board-create-effort-menu button[aria-checked="true"]:focus-visible {
-        background: rgba(148,163,184,.18);
+        background: color-mix(
+          in srgb,
+          var(--color-text-accent, var(--color-token-text-accent, #63aee0)) 20%,
+          transparent
+        );
       }
       .codex-task-board-card-move {
         flex: 0 0 auto;
@@ -2818,8 +3109,10 @@
         .codex-task-board-column-head { padding: 10px; }
         .codex-task-board-card-list { gap: 8px; padding: 8px; }
         .codex-task-board-card { padding: 10px; }
-        .codex-task-board-create { min-width: 36px; padding: 0 9px; }
-        .codex-task-board-create span { display: none; }
+        .codex-task-board-create,
+        .codex-task-board-manage { min-width: 36px; padding: 0 9px; }
+        .codex-task-board-create span,
+        .codex-task-board-manage span { display: none; }
       }
       [${taskBoardRootAttribute}="true"][data-low-height="true"] .codex-task-board-page {
         gap: 8px;
@@ -8336,8 +8629,9 @@
     entryTemplateSignature: "",
     entryContextMenu: null,
     requestRevision: 0,
-    snapshot: { schemaVersion: 1, revision: 0, tasks: [] },
+    snapshot: taskBoardEmptySnapshot(),
     catalog: { projects: [], sessions: [], warnings: [] },
+    catalogLoaded: false,
     snapshotError: "",
     catalogError: "",
     loading: false,
@@ -8359,6 +8653,10 @@
     createModalKeydownHandler: null,
     createModalPreviousFocus: null,
     createModalRequestId: 0,
+    boardManager: null,
+    boardManagerKeydownHandler: null,
+    boardManagerPreviousFocus: null,
+    boardManagerRequestId: 0,
     nativeCreateOperation: null,
     nativeCreateRecoveryAttempted: false,
     moveBusy: false,
@@ -8840,20 +9138,137 @@
     const cwd = taskBoardNormalizedCwd(
       catalogSession?.cwd || fallback?.cwd || taskConversation?.cwd || taskProject?.cwd,
     );
-    return { sessionId: normalizedSessionId, cwd };
+    const catalogProject = (taskBoardState.catalog?.projects || []).find((project) => {
+      return taskBoardNormalizedCwd(project?.cwd) === cwd;
+    }) || null;
+    const projectLabel = normalizeProjectLabel(
+      catalogProject?.label || taskProject?.label || "",
+    );
+    return { sessionId: normalizedSessionId, cwd, projectLabel };
   }
 
-  function taskBoardNativeProjectTarget(cwd) {
-    const normalizedCwd = taskBoardNormalizedCwd(cwd);
-    if (!normalizedCwd) return null;
-    return nativeProjectTargets().find((target) => {
-      return taskBoardNormalizedCwd(target?.path) === normalizedCwd;
-    }) || null;
+  function taskBoardNativeProjectTarget(location) {
+    const normalizedCwd = taskBoardNormalizedCwd(location?.cwd);
+    const projectLabel = normalizeProjectLabel(location?.projectLabel);
+    const exact = normalizedCwd
+      ? nativeProjectTargets().find((target) => {
+        return taskBoardNormalizedCwd(target?.path) === normalizedCwd;
+      })
+      : null;
+    if (exact) return exact;
+    const row = taskBoardNativeProjectRow({
+      cwd: normalizedCwd,
+      label: projectLabel,
+    });
+    if (!row) return null;
+    const path = row.getAttribute?.("data-app-action-sidebar-project-id") || "";
+    const label = row.getAttribute?.("data-app-action-sidebar-project-label") ||
+      row.getAttribute?.("aria-label") ||
+      projectLabel ||
+      displayProjectName(path);
+    return {
+      kind: "project",
+      label,
+      description: path,
+      path,
+      normalizedPath: normalizeWorkspacePath(path),
+      row,
+      listItem: projectRowListItem(row),
+    };
   }
 
   function taskBoardNativeProjectCollapsed(row) {
     const collapsed = row?.getAttribute?.("data-app-action-sidebar-project-collapsed");
     return (collapsed !== null && collapsed !== "false") || row?.getAttribute?.("aria-expanded") === "false";
+  }
+
+  function taskBoardNativeSidebarTrigger() {
+    return document.querySelector('[data-app-shell-sidebar-trigger="true"]') ||
+      document.querySelector('[aria-controls="app-shell-sidebar"]');
+  }
+
+  function taskBoardNativeControlCollapsed(control) {
+    if (!control) return false;
+    if (control.getAttribute?.("aria-expanded") === "false") return true;
+    const label = String(
+      control.getAttribute?.("aria-label") ||
+      control.getAttribute?.("title") ||
+      "",
+    ).trim();
+    return /^(显示侧边栏|show sidebar)$/i.test(label);
+  }
+
+  function taskBoardNativeProjectSectionToggles() {
+    return ["Pinned", "Projects"].flatMap((sectionName) => {
+      const section = document.querySelector(
+        `[data-app-action-sidebar-section-heading="${sectionName}"]`,
+      );
+      const toggle = section?.querySelector?.(
+        "[data-app-action-sidebar-section-toggle]",
+      );
+      return toggle ? [toggle] : [];
+    });
+  }
+
+  async function taskBoardNativeFindOpenTarget(location, runtimeId, deadlineMs) {
+    let recoveryAttempted = false;
+    const expandedSectionToggles = new Set();
+    const sidebarTrigger = taskBoardNativeSidebarTrigger();
+    if (taskBoardNativeControlCollapsed(sidebarTrigger)) {
+      try {
+        sidebarTrigger.click?.();
+        recoveryAttempted = true;
+      } catch {
+        return {
+          failure: taskBoardNativeFailure(
+            "native_navigation_unavailable",
+            "无法展开 Codex 会话侧边栏",
+          ),
+        };
+      }
+    }
+
+    while (taskBoardNativeRuntimeCurrent(runtimeId) && taskBoardNativeNow() <= deadlineMs) {
+      const threadRow = taskBoardNativeThreadRow(location.sessionId);
+      if (threadRow) return { threadRow };
+      const project = taskBoardNativeProjectTarget(location);
+      if (project?.row) return { project };
+
+      let expandedSection = false;
+      for (const toggle of taskBoardNativeProjectSectionToggles()) {
+        if (
+          !taskBoardNativeControlCollapsed(toggle) ||
+          expandedSectionToggles.has(toggle)
+        ) {
+          continue;
+        }
+        try {
+          expandedSectionToggles.add(toggle);
+          toggle.click?.();
+          expandedSection = true;
+          recoveryAttempted = true;
+        } catch {
+          return {
+            failure: taskBoardNativeFailure(
+              "native_navigation_unavailable",
+              "无法展开 Codex 项目列表",
+            ),
+          };
+        }
+      }
+      if (!recoveryAttempted && !expandedSection) return {};
+      const remainingMs = deadlineMs - taskBoardNativeNow();
+      if (remainingMs <= 0) break;
+      await taskBoardNativeWait(Math.min(100, remainingMs));
+    }
+    return taskBoardNativeRuntimeCurrent(runtimeId)
+      ? {}
+      : {
+        failure: taskBoardNativeFailure(
+          "runtime_replaced",
+          "Codex 页面已更新，请重试",
+        ),
+      };
   }
 
   async function taskBoardNativeOpenSession(sessionId, fallbackConversation = null) {
@@ -8863,20 +9278,22 @@
     }
     const location = taskBoardNativeConversationLocation(sessionId, fallbackConversation);
     if (!location) return taskBoardNativeFailure("session_unavailable", "关联会话不可用");
-    const directRow = taskBoardNativeThreadRow(location.sessionId);
-    if (directRow) {
+    const deadlineMs = taskBoardNativeNow() + taskBoardNativeOpenSessionTimeoutMs;
+    const target = await taskBoardNativeFindOpenTarget(location, runtimeId, deadlineMs);
+    if (target.failure) return target.failure;
+    if (target.threadRow) {
       try {
-        directRow.click?.();
+        target.threadRow.click?.();
         return { status: "ok" };
       } catch {
         return taskBoardNativeFailure("native_navigation_unavailable", "无法打开关联会话");
       }
     }
-    const project = taskBoardNativeProjectTarget(location.cwd);
+    const project = target.project;
     if (!project?.row) {
       return taskBoardNativeFailure(
         location.cwd ? "native_navigation_unavailable" : "session_unavailable",
-        location.cwd ? "关联会话所在项目不可用" : "关联会话不可用",
+        location.cwd ? "无法在 Codex 侧边栏定位关联会话所在项目" : "关联会话不可用",
       );
     }
     if (taskBoardNativeProjectCollapsed(project.row)) {
@@ -8886,7 +9303,6 @@
         return taskBoardNativeFailure("native_navigation_unavailable", "无法展开关联会话所在项目");
       }
     }
-    const deadlineMs = taskBoardNativeNow() + taskBoardNativeOpenSessionTimeoutMs;
     while (taskBoardNativeRuntimeCurrent(runtimeId) && taskBoardNativeNow() <= deadlineMs) {
       const row = taskBoardNativeThreadRow(location.sessionId);
       if (row) {
@@ -9644,7 +10060,7 @@
 
   function taskBoardStatusId(value) {
     const status = String(value || "").trim();
-    return taskBoardStatusDefinitions.some((item) => item.id === status) ? status : "new";
+    return taskBoardStatusDefinitions().some((item) => item.id === status) ? status : "new";
   }
 
   function taskBoardElement(tag, className, text = "") {
@@ -9660,26 +10076,35 @@
     return icon;
   }
 
-  function taskBoardDropdownCheck() {
-    const marker = taskBoardElement("span", "codex-task-board-dropdown-option-marker");
-    marker.innerHTML = `<svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4"><path d="m3.5 8.2 2.8 2.8 6.2-6.2" stroke-linecap="round" stroke-linejoin="round"></path></svg>`;
-    return marker;
+  function taskBoardStatusIconIndex(statusId) {
+    const normalized = String(statusId || "").trim().toLocaleLowerCase("en-US");
+    const builtInIndex = taskBoardBuiltInStatusIconIndexes[normalized];
+    if (builtInIndex !== undefined) return builtInIndex;
+    let hash = 2166136261;
+    for (let index = 0; index < normalized.length; index += 1) {
+      hash ^= normalized.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0) % taskBoardStatusIconPaths.length;
   }
 
-  function taskBoardDropdownStatusDot(color = "") {
-    const normalized = String(color || "").trim();
-    if (!normalized) return null;
-    const dot = taskBoardElement("span", "codex-task-board-dropdown-status-dot");
-    dot.style.setProperty("--task-board-status-color", normalized);
-    dot.setAttribute("aria-hidden", "true");
-    return dot;
+  function taskBoardStatusIcon(
+    statusId,
+    className = "codex-task-board-status-icon",
+  ) {
+    const iconIndex = taskBoardStatusIconIndex(statusId);
+    const icon = taskBoardElement("span", className);
+    icon.setAttribute("data-task-board-status-icon", String(iconIndex));
+    icon.setAttribute("aria-hidden", "true");
+    icon.innerHTML = `<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round">${taskBoardStatusIconPaths[iconIndex].map((path) => `<path d="${path}"></path>`).join("")}</svg>`;
+    return icon;
   }
 
   function taskBoardConfigureDropdownTrigger(
     trigger,
     label,
     ariaLabel,
-    color = "",
+    iconId = "",
     showChevron = true,
   ) {
     if (!trigger) return trigger;
@@ -9689,26 +10114,29 @@
     trigger.setAttribute("aria-expanded", "false");
     const labelNode = taskBoardElement("span", "codex-task-board-dropdown-label", label);
     const copy = taskBoardElement("span", "codex-task-board-dropdown-trigger-copy");
-    const dot = taskBoardDropdownStatusDot(color);
-    if (dot) copy.appendChild(dot);
+    if (iconId) {
+      copy.appendChild(taskBoardStatusIcon(
+        iconId,
+        "codex-task-board-dropdown-status-icon",
+      ));
+    }
     copy.appendChild(labelNode);
     trigger.replaceChildren(copy);
     if (showChevron) trigger.appendChild(taskBoardDropdownChevron());
     return trigger;
   }
 
-  function taskBoardSetDropdownTriggerLabel(trigger, label, color = "") {
+  function taskBoardSetDropdownTriggerLabel(trigger, label, iconId = "") {
     const labelNode = trigger?.querySelector?.(".codex-task-board-dropdown-label");
     if (labelNode) labelNode.textContent = String(label || "");
     const copy = trigger?.querySelector?.(".codex-task-board-dropdown-trigger-copy");
-    const currentDot = copy?.querySelector?.(".codex-task-board-dropdown-status-dot");
-    const nextColor = String(color || "").trim();
-    if (nextColor) {
-      const dot = currentDot || taskBoardDropdownStatusDot(nextColor);
-      dot?.style?.setProperty?.("--task-board-status-color", nextColor);
-      if (!currentDot && dot) copy?.prepend?.(dot);
-    } else {
-      currentDot?.remove?.();
+    copy?.querySelector?.(".codex-task-board-dropdown-status-icon")?.remove?.();
+    const normalizedIconId = String(iconId || "").trim();
+    if (normalizedIconId) {
+      copy?.prepend?.(taskBoardStatusIcon(
+        normalizedIconId,
+        "codex-task-board-dropdown-status-icon",
+      ));
     }
     if (trigger) trigger.title = String(label || "");
   }
@@ -9747,11 +10175,91 @@
     return String(result?.message || fallback || "读取任务看板失败").trim();
   }
 
+  function taskBoardStatusIdValid(value) {
+    const status = String(value || "").trim().toLocaleLowerCase();
+    return ["new", "planning", "executing", "review", "done"].includes(status) ||
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(status);
+  }
+
+  function taskBoardManagedBoardDefinitions(value) {
+    const source = Array.isArray(value) ? value : taskBoardDefaultBoardDefinitions;
+    const seenIds = new Set();
+    const seenLabels = new Set();
+    return source.flatMap((entry) => {
+      const id = String(entry?.id || "").trim().toLocaleLowerCase();
+      const label = String(entry?.label || "").trim();
+      const color = String(entry?.color || "").trim();
+      const labelKey = label.toLocaleLowerCase();
+      if (
+        id === "new" ||
+        !taskBoardStatusIdValid(id) ||
+        !label ||
+        Array.from(label).length > 40 ||
+        !/^#[0-9a-f]{6}$/i.test(color) ||
+        seenIds.has(id) ||
+        seenLabels.has(labelKey)
+      ) {
+        return [];
+      }
+      seenIds.add(id);
+      seenLabels.add(labelKey);
+      return [{ id, label, color }];
+    });
+  }
+
+  function taskBoardStatusDefinitions(snapshot = taskBoardState.snapshot) {
+    return [
+      taskBoardUnassignedStatusDefinition,
+      ...taskBoardManagedBoardDefinitions(snapshot?.boards),
+    ];
+  }
+
+  function taskBoardMoveBoardDefinitions(boards, boardId, targetIndex) {
+    const source = taskBoardManagedBoardDefinitions(boards);
+    const sourceIndex = source.findIndex((board) => board.id === String(boardId || ""));
+    if (sourceIndex < 0) return source;
+    const next = source.slice();
+    const [board] = next.splice(sourceIndex, 1);
+    const index = Math.max(
+      0,
+      Math.min(Math.trunc(Number(targetIndex) || 0), next.length),
+    );
+    next.splice(index, 0, board);
+    return next;
+  }
+
+  function taskBoardMoveBoardTargetIndex(
+    boards,
+    sourceBoardId,
+    targetBoardId,
+    placeAfter = false,
+  ) {
+    const source = taskBoardManagedBoardDefinitions(boards);
+    const sourceId = String(sourceBoardId || "");
+    const targetId = String(targetBoardId || "");
+    const sourceIndex = source.findIndex((board) => board.id === sourceId);
+    if (sourceIndex < 0 || sourceId === targetId) return Math.max(0, sourceIndex);
+    const remaining = source.filter((board) => board.id !== sourceId);
+    const targetIndex = remaining.findIndex((board) => board.id === targetId);
+    if (targetIndex < 0) return Math.max(0, sourceIndex);
+    return targetIndex + (placeAfter ? 1 : 0);
+  }
+
+  function taskBoardEmptySnapshot() {
+    return {
+      schemaVersion: 1,
+      revision: 0,
+      boards: taskBoardManagedBoardDefinitions(),
+      tasks: [],
+    };
+  }
+
   function taskBoardSnapshotResult(result) {
     if (!result || (result.status && result.status !== "ok") || !Array.isArray(result.tasks)) return null;
     return {
       schemaVersion: Number.isSafeInteger(result.schemaVersion) ? result.schemaVersion : 1,
       revision: Number.isSafeInteger(result.revision) && result.revision >= 0 ? result.revision : 0,
+      boards: taskBoardManagedBoardDefinitions(result.boards),
       tasks: result.tasks,
     };
   }
@@ -9761,6 +10269,7 @@
     return {
       schemaVersion: Number.isSafeInteger(result.schemaVersion) ? result.schemaVersion : 1,
       revision: Number.isSafeInteger(result.revision) && result.revision >= 0 ? result.revision : 0,
+      boards: taskBoardManagedBoardDefinitions(result.boards),
       tasks: result.tasks,
     };
   }
@@ -10336,7 +10845,7 @@
         : normalizedWidth > 0 && normalizedWidth < 860
           ? "wrapped"
           : "inline",
-      controls: ["search", "filter", "create"],
+      controls: ["search", "filter", "create", "manage"],
       createMinHeight: 36,
     };
   }
@@ -10394,11 +10903,17 @@
     create.setAttribute("aria-label", "新建任务");
     create.innerHTML = `<svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"></path></svg><span>新建任务</span>`;
     create.addEventListener("click", () => openTaskBoardCreateModal());
+    const manage = taskBoardElement("button", "codex-task-board-manage", "管理看板");
+    manage.type = "button";
+    manage.title = "管理看板";
+    manage.setAttribute("aria-label", "管理看板");
+    manage.innerHTML = `<svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 5h5v14H5zM14 5h5v8h-5z"></path><path d="M16.5 16v5M14 18.5h5" stroke-linecap="round"></path></svg><span>管理看板</span>`;
+    manage.addEventListener("click", () => openTaskBoardManager());
     const hint = taskBoardElement("span", "codex-task-board-hint", "拖动任务卡片可切换状态");
     hint.dataset.status = "ok";
     hint.setAttribute("aria-live", "polite");
     hint.setAttribute("aria-atomic", "true");
-    toolbar.append(searchControl, filter, create, hint);
+    toolbar.append(searchControl, filter, create, manage, hint);
     const scroll = taskBoardElement("div", "codex-task-board-scroll");
     scroll.tabIndex = 0;
     scroll.setAttribute("aria-label", "任务看板列，可横向和纵向滚动");
@@ -10434,43 +10949,42 @@
 
   function taskBoardProjectOptions() {
     const cached = taskBoardState.projectOptionsCache;
-    if (
-      cached?.snapshot === taskBoardState.snapshot &&
-      cached?.catalog === taskBoardState.catalog &&
-      cached?.navigationVersion === taskBoardState.navigationVersion
-    ) {
+    if (cached?.catalog === taskBoardState.catalog) {
       return cached.options;
     }
-    const projects = new Map();
-    const concreteLabels = new Set();
-    const opaqueProjectId = (cwd) => {
-      return /^local-[0-9a-f]+$/i.test(cwd) ||
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cwd);
-    };
-    const add = (project) => {
-      const cwd = taskBoardNormalizedCwd(project?.cwd || project?.path || "");
-      if (!cwd || projects.has(cwd)) return;
-      const label = String(project?.label || displayProjectName(project?.cwd || project?.path || cwd));
-      const labelKey = label.trim().toLocaleLowerCase("zh-Hans-CN");
-      if (opaqueProjectId(cwd) && labelKey && concreteLabels.has(labelKey)) return;
-      projects.set(cwd, {
+    const seen = new Set();
+    const options = [];
+    taskBoardState.catalog.projects.forEach((project) => {
+      const cwd = taskBoardNormalizedCwd(project?.cwd);
+      if (!cwd || seen.has(cwd)) return;
+      seen.add(cwd);
+      options.push({
         cwd,
-        label,
+        label: String(project?.label || displayProjectName(cwd)),
       });
-      if (!opaqueProjectId(cwd) && labelKey) concreteLabels.add(labelKey);
-    };
-    taskBoardState.catalog.projects.forEach(add);
-    nativeProjectTargets().forEach((target) => add({ cwd: target.path, label: target.label }));
-    taskBoardState.snapshot.tasks.forEach((task) => add(task?.project));
-    const options = Array.from(projects.values())
-      .sort((left, right) => left.label.localeCompare(right.label, "zh-Hans-CN"));
+    });
     taskBoardState.projectOptionsCache = {
-      snapshot: taskBoardState.snapshot,
       catalog: taskBoardState.catalog,
-      navigationVersion: taskBoardState.navigationVersion,
       options,
     };
     return options;
+  }
+
+  function taskBoardCatalogProjectForCwd(cwd, catalog = taskBoardState.catalog) {
+    const normalizedCwd = taskBoardNormalizedCwd(cwd);
+    if (!normalizedCwd) return null;
+    return (catalog?.projects || []).find((project) => {
+      return taskBoardNormalizedCwd(project?.cwd) === normalizedCwd;
+    }) || null;
+  }
+
+  function taskBoardEffectiveProjectLabel(task, catalog = taskBoardState.catalog) {
+    const catalogProject = taskBoardCatalogProjectForCwd(task?.project?.cwd, catalog);
+    return String(
+      catalogProject?.label ||
+      task?.project?.label ||
+      displayProjectName(task?.project?.cwd || ""),
+    );
   }
 
   function taskBoardVisibleTasks() {
@@ -10491,7 +11005,7 @@
     const sessions = Array.isArray(catalog?.sessions) ? catalog.sessions : [];
     const result = new Map();
     sessions.forEach((session) => {
-      const sessionId = String(session?.sessionId || "").trim();
+      const sessionId = taskBoardConversationStatusKey(session?.sessionId);
       if (!sessionId) return;
       const current = result.get(sessionId);
       const currentUpdatedAt = Number(current?.updatedAtMs || -1);
@@ -10511,6 +11025,18 @@
     return Array.isArray(catalog?.warnings) && catalog.warnings.length > 0;
   }
 
+  function taskBoardConversationShouldDisplay(
+    conversation,
+    catalog = taskBoardState.catalog,
+    catalogLoaded = taskBoardState.catalogLoaded,
+    catalogError = taskBoardState.catalogError,
+  ) {
+    const sessionId = taskBoardConversationStatusKey(conversation?.sessionId);
+    if (!sessionId) return false;
+    if (!catalogLoaded || catalogError) return true;
+    return taskBoardCatalogSessionMapFor(catalog).has(sessionId);
+  }
+
   function taskBoardConversationProjectionForCatalog(conversation, catalog, catalogError = "") {
     const sessionId = String(conversation?.sessionId || "").trim();
     if (!sessionId) {
@@ -10520,7 +11046,9 @@
         status: taskBoardConversationStatus({ available: false }),
       };
     }
-    const catalogSession = taskBoardCatalogSessionMapFor(catalog).get(sessionId);
+    const catalogSession = taskBoardCatalogSessionMapFor(catalog).get(
+      taskBoardConversationStatusKey(sessionId),
+    );
     const fallbackTitle = String(conversation?.title || "未命名会话");
     const runtimeStatus = taskBoardState.conversationStatuses.get(
       taskBoardConversationStatusKey(sessionId),
@@ -10596,17 +11124,34 @@
     const snapshot = taskBoardState.snapshot;
     if (snapshot && typeof snapshot === "object") {
       const cached = taskBoardLinkedConversationsCache.get(snapshot);
-      if (cached) return cached;
+      if (
+        cached?.catalog === taskBoardState.catalog &&
+        cached?.catalogLoaded === taskBoardState.catalogLoaded &&
+        cached?.catalogError === taskBoardState.catalogError
+      ) {
+        return cached.conversations;
+      }
     }
     const conversations = new Map();
     (snapshot?.tasks || []).forEach((task) => {
       (Array.isArray(task?.conversations) ? task.conversations : []).forEach((conversation) => {
         const key = taskBoardConversationStatusKey(conversation?.sessionId);
-        if (key && !conversations.has(key)) conversations.set(key, conversation);
+        if (
+          key &&
+          taskBoardConversationShouldDisplay(conversation) &&
+          !conversations.has(key)
+        ) {
+          conversations.set(key, conversation);
+        }
       });
     });
     if (snapshot && typeof snapshot === "object") {
-      taskBoardLinkedConversationsCache.set(snapshot, conversations);
+      taskBoardLinkedConversationsCache.set(snapshot, {
+        catalog: taskBoardState.catalog,
+        catalogLoaded: taskBoardState.catalogLoaded,
+        catalogError: taskBoardState.catalogError,
+        conversations,
+      });
     }
     return conversations;
   }
@@ -10812,36 +11357,72 @@
     return refreshPromise;
   }
 
-  function taskBoardTaskSearchText(task, catalog = taskBoardState.catalog) {
+  function taskBoardTaskSearchText(
+    task,
+    catalog = taskBoardState.catalog,
+    catalogLoaded = taskBoardState.catalogLoaded,
+    catalogError = taskBoardState.catalogError,
+  ) {
     if (task && typeof task === "object") {
       const cached = taskBoardTaskSearchTextCache.get(task);
-      if (cached?.catalog === catalog) return cached.text;
+      if (
+        cached?.catalog === catalog &&
+        cached?.catalogLoaded === catalogLoaded &&
+        cached?.catalogError === catalogError
+      ) {
+        return cached.text;
+      }
     }
     const catalogSessions = taskBoardCatalogSessionMapFor(catalog);
     const text = [
       task?.title,
-      task?.project?.label,
+      taskBoardEffectiveProjectLabel(task, catalog),
       task?.project?.cwd,
       ...(Array.isArray(task?.conversations)
-        ? task.conversations.flatMap((conversation) => {
-          const sessionId = String(conversation?.sessionId || "").trim();
-          const catalogSession = catalogSessions.get(sessionId);
-          return [
-            String(catalogSession?.title || conversation?.title || "未命名会话"),
-            sessionId,
-          ];
-        })
+        ? task.conversations
+          .filter((conversation) => taskBoardConversationShouldDisplay(
+            conversation,
+            catalog,
+            catalogLoaded,
+            catalogError,
+          ))
+          .flatMap((conversation) => {
+            const sessionId = String(conversation?.sessionId || "").trim();
+            const catalogSession = catalogSessions.get(
+              taskBoardConversationStatusKey(sessionId),
+            );
+            return [
+              String(catalogSession?.title || conversation?.title || "未命名会话"),
+              sessionId,
+            ];
+          })
         : []),
     ].join("\n").toLocaleLowerCase();
     if (task && typeof task === "object") {
-      taskBoardTaskSearchTextCache.set(task, { catalog, text });
+      taskBoardTaskSearchTextCache.set(task, {
+        catalog,
+        catalogLoaded,
+        catalogError,
+        text,
+      });
     }
     return text;
   }
 
-  function taskBoardTaskMatchesQuery(task, query, catalog = taskBoardState.catalog) {
+  function taskBoardTaskMatchesQuery(
+    task,
+    query,
+    catalog = taskBoardState.catalog,
+    catalogLoaded = taskBoardState.catalogLoaded,
+    catalogError = taskBoardState.catalogError,
+  ) {
     const normalizedQuery = String(query || "").trim().toLocaleLowerCase();
-    return !normalizedQuery || taskBoardTaskSearchText(task, catalog).includes(normalizedQuery);
+    return !normalizedQuery || taskBoardTaskSearchText(
+      task,
+      catalog,
+      catalogLoaded,
+      catalogError,
+    ).includes(normalizedQuery);
   }
 
   async function openTaskBoardConversation(conversation) {
@@ -11223,6 +11804,8 @@
       currentValue: modal.projectCwd,
       ariaLabel: "选择所属项目",
       fixedWidth: taskBoardProjectDropdownWidth,
+      searchable: true,
+      searchPlaceholder: "搜索项目名称或路径",
       onSelect: (cwd) => taskBoardSetCreateProject(cwd),
     });
   }
@@ -11272,6 +11855,18 @@
     );
   }
 
+  function taskBoardCreateSubmenuTop(
+    anchorTop,
+    anchorHeight,
+    submenuHeight,
+    viewportHeight,
+  ) {
+    const edge = 8;
+    const viewportBottom = Math.max(edge, viewportHeight - submenuHeight - edge);
+    const centeredTop = anchorTop + (anchorHeight - submenuHeight) / 2;
+    return Math.max(edge, Math.min(viewportBottom, centeredTop));
+  }
+
   function taskBoardPositionCreateSettingsSubmenu(
     submenu,
     menu,
@@ -11288,6 +11883,8 @@
     const parentRect = parentButton?.getBoundingClientRect?.() || {
       left: Number(menuRect.left || 8),
       top: Number(menuRect.top || 8) + 5,
+      bottom: Number(menuRect.top || 8) + 36,
+      height: 31,
     };
     const submenuRect = submenu.getBoundingClientRect?.() || {
       width: 220,
@@ -11297,12 +11894,17 @@
     const viewportHeight = Number(window.innerHeight || 768);
     const width = Number(submenuRect.width || 220);
     const height = Number(submenuRect.height || 0);
-    const top = Math.max(
-      8,
-      Math.min(
-        viewportHeight - height - 8,
-        Number(parentRect.top || menuRect.top || 8) - 5,
-      ),
+    const anchorTop = Number(parentRect.top ?? menuRect.top ?? 8);
+    const anchorHeight = Number(
+      parentRect.height ||
+      Math.max(0, Number(parentRect.bottom || anchorTop) - anchorTop) ||
+      31,
+    );
+    const top = taskBoardCreateSubmenuTop(
+      anchorTop,
+      anchorHeight,
+      height,
+      viewportHeight,
     );
     submenu.style.left = `${taskBoardCreateSubmenuLeft(
       Number(menuRect.left || 8),
@@ -11362,16 +11964,11 @@
       button.setAttribute("data-value", value);
       button.setAttribute("aria-checked", String(selected));
       button.setAttribute("aria-label", String(option?.label || ""));
-      button.append(
-        taskBoardElement(
-          "span",
-          "codex-task-board-dropdown-option-title",
-          String(option?.label || ""),
-        ),
-        selected
-          ? taskBoardDropdownCheck()
-          : taskBoardElement("span", "codex-task-board-dropdown-option-marker"),
-      );
+      button.appendChild(taskBoardElement(
+        "span",
+        "codex-task-board-dropdown-option-title",
+        String(option?.label || ""),
+      ));
       button.addEventListener("click", () => {
         if (button.disabled) return;
         closeTaskBoardDropdownMenu();
@@ -11585,10 +12182,10 @@
     return openTaskBoardDropdownMenu({
       kind: "create-status",
       trigger,
-      options: taskBoardStatusDefinitions.map((status) => ({
+      options: taskBoardStatusDefinitions().map((status) => ({
         value: status.id,
         label: status.label,
-        color: status.color,
+        iconId: status.id,
       })),
       currentValue: taskBoardStatusId(modal.initialStatus),
       ariaLabel: "选择初始状态",
@@ -11772,13 +12369,13 @@
       ? `${selectedProject.label}\n${selectedProject.cwd}`
       : "请选择项目";
     modal.statusSelect.value = taskBoardStatusId(modal.initialStatus);
-    const selectedStatus = taskBoardStatusDefinitions.find(
+    const selectedStatus = taskBoardStatusDefinitions().find(
       (status) => status.id === modal.statusSelect.value,
     );
     taskBoardSetDropdownTriggerLabel(
       modal.statusSelect,
       selectedStatus?.label || "新任务",
-      selectedStatus?.color || "",
+      selectedStatus?.id || "",
     );
     const modelOptions = taskBoardCreateModelOptions();
     const selectedModel = modelOptions.find((option) => option.value === modal.modelId) ||
@@ -12019,9 +12616,9 @@
     statusSelect.type = "button";
     taskBoardConfigureDropdownTrigger(
       statusSelect,
-      taskBoardStatusDefinitions[0].label,
+      taskBoardStatusDefinitions()[0].label,
       "选择初始状态",
-      taskBoardStatusDefinitions[0].color,
+      taskBoardStatusDefinitions()[0].id,
     );
     statusSelect.addEventListener("click", () => openTaskBoardCreateStatusMenu(statusSelect));
     statusLabel.appendChild(statusSelect);
@@ -12150,10 +12747,7 @@
     const targetProject = attaching
       ? {
         cwd: taskBoardNormalizedCwd(targetTask?.project?.cwd),
-        label: String(
-          targetTask?.project?.label ||
-          displayProjectName(targetTask?.project?.cwd || ""),
-        ),
+        label: taskBoardEffectiveProjectLabel(targetTask),
       }
       : null;
     const defaultProject = targetProject || currentProject || nativeProjects.find(
@@ -13467,6 +14061,908 @@
     return dialog;
   }
 
+  function taskBoardBoardFailureMessage(result, fallback) {
+    const code = String(result?.code || "").trim();
+    if (code === "board_id_conflict") return "看板标识冲突，请重试";
+    if (code === "board_not_found") return "看板不存在或已被删除";
+    if (code === "revision_conflict") return "看板已被其他更改更新，请重试";
+    if (code === "task_board_busy") return "任务看板正忙，请稍后重试";
+    if (code === "task_file_invalid") return "任务文件无效，请检查后重试";
+    if (code === "invalid_input") {
+      return String(result?.message || "").includes("label")
+        ? "看板名称已存在或格式无效"
+        : "看板信息无效，请刷新后重试";
+    }
+    if (code === "task_board_unavailable" || code === "bridge_unavailable") {
+      return "任务看板暂不可用，请稍后重试";
+    }
+    return taskBoardMessageFromResult(result, fallback);
+  }
+
+  function taskBoardBoardManagerFocusableElements(manager = taskBoardState.boardManager) {
+    return Array.from(
+      manager?.dialog?.querySelectorAll?.("button:not(:disabled), input:not(:disabled)") || [],
+    );
+  }
+
+  function taskBoardBoardManagerItem(manager, boardId) {
+    return Array.from(
+      manager?.list?.querySelectorAll?.(".codex-task-board-board-item") || [],
+    ).find(
+      (item) =>
+        item.getAttribute?.("data-task-board-board-id") === String(boardId || ""),
+    ) || null;
+  }
+
+  function taskBoardRestoreBoardManagerDragHandleFocus(manager, boardId) {
+    requestAnimationFrame(() => {
+      if (taskBoardState.boardManager !== manager) return;
+      const handle = taskBoardBoardManagerItem(manager, boardId)
+        ?.querySelector?.(".codex-task-board-board-drag-handle");
+      if (handle?.isConnected !== false) handle?.focus?.();
+    });
+  }
+
+  function closeTaskBoardManager({ restoreFocus = true } = {}) {
+    const manager = taskBoardState.boardManager;
+    if (!manager) return;
+    document.removeEventListener("keydown", taskBoardState.boardManagerKeydownHandler, true);
+    taskBoardState.boardManagerKeydownHandler = null;
+    manager.overlay?.remove?.();
+    taskBoardState.boardManager = null;
+    taskBoardState.boardManagerRequestId += 1;
+    if (restoreFocus) {
+      requestAnimationFrame(() => {
+        if (taskBoardState.boardManagerPreviousFocus?.isConnected !== false) {
+          taskBoardState.boardManagerPreviousFocus?.focus?.();
+        }
+      });
+    }
+    taskBoardState.boardManagerPreviousFocus = null;
+  }
+
+  function renderTaskBoardManager() {
+    const manager = taskBoardState.boardManager;
+    if (!manager) return;
+    const boards = taskBoardManagedBoardDefinitions(taskBoardState.snapshot?.boards);
+    if (
+      manager.pendingDeleteId &&
+      !boards.some((board) => board.id === manager.pendingDeleteId)
+    ) {
+      manager.pendingDeleteId = "";
+    }
+    if (
+      manager.editingBoardId &&
+      !boards.some((board) => board.id === manager.editingBoardId)
+    ) {
+      manager.editingBoardId = "";
+      manager.editingLabel = "";
+    }
+    manager.input.value = manager.label;
+    manager.input.disabled = manager.busy;
+    manager.closeButton.disabled = manager.busy;
+    manager.addButton.disabled = manager.busy || !manager.label.trim();
+    manager.addButton.innerHTML = manager.busyKind === "create"
+      ? `<span class="codex-task-board-spinner" aria-hidden="true"></span><span>正在添加…</span>`
+      : `<svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M8 3v10M3 8h10" stroke-linecap="round"></path></svg><span>添加看板</span>`;
+    manager.list.replaceChildren();
+    manager.editInput = null;
+    manager.editSaveButton = null;
+    if (!boards.length) {
+      manager.list.appendChild(taskBoardElement(
+        "p",
+        "codex-task-board-board-empty",
+        "当前没有可管理看板，任务都会显示在“未分配”。",
+      ));
+    } else {
+      boards.forEach((board, boardIndex) => {
+        const item = taskBoardElement("div", "codex-task-board-board-item");
+        item.setAttribute("data-task-board-board-id", board.id);
+        if (manager.dragBoardId === board.id) {
+          item.setAttribute("data-dragging", "true");
+        }
+        if (manager.dropTarget?.boardId === board.id) {
+          item.setAttribute("data-drop-position", manager.dropTarget.position);
+        }
+        if (manager.busy && manager.busyBoardId === board.id) {
+          item.setAttribute("aria-busy", "true");
+        }
+        item.addEventListener("dragover", (event) => {
+          const active = taskBoardState.boardManager;
+          if (!active?.dragBoardId || active.busy) return;
+          event.preventDefault?.();
+          if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+          const bounds = item.getBoundingClientRect?.() || {
+            top: 0,
+            height: 0,
+          };
+          const placeAfter =
+            Number(event.clientY || 0) >= Number(bounds.top || 0) + Number(bounds.height || 0) / 2;
+          active.dropTarget = {
+            boardId: board.id,
+            position: placeAfter ? "after" : "before",
+            targetIndex: taskBoardMoveBoardTargetIndex(
+              boards,
+              active.dragBoardId,
+              board.id,
+              placeAfter,
+            ),
+          };
+          active.list
+            ?.querySelectorAll?.(".codex-task-board-board-item[data-drop-position]")
+            ?.forEach?.((candidate) => candidate.removeAttribute?.("data-drop-position"));
+          item.setAttribute("data-drop-position", active.dropTarget.position);
+        });
+        item.addEventListener("dragleave", (event) => {
+          if (item.contains?.(event.relatedTarget)) return;
+          const active = taskBoardState.boardManager;
+          if (active?.dropTarget?.boardId === board.id) active.dropTarget = null;
+          item.removeAttribute("data-drop-position");
+        });
+        item.addEventListener("drop", (event) => {
+          event.preventDefault?.();
+          const active = taskBoardState.boardManager;
+          if (!active || active.busy) return;
+          const sourceBoardId =
+            active.dragBoardId ||
+            String(event.dataTransfer?.getData?.("text/plain") || "").trim();
+          const targetIndex = active.dropTarget?.boardId === board.id
+            ? active.dropTarget.targetIndex
+            : taskBoardMoveBoardTargetIndex(
+              boards,
+              sourceBoardId,
+              board.id,
+              false,
+            );
+          active.dragBoardId = "";
+          active.dropTarget = null;
+          if (sourceBoardId) void taskBoardMoveManagedBoard(sourceBoardId, targetIndex);
+        });
+        const dragHandle = taskBoardElement(
+          "button",
+          "codex-task-board-board-drag-handle",
+        );
+        dragHandle.type = "button";
+        dragHandle.draggable = !manager.busy && manager.editingBoardId !== board.id;
+        dragHandle.disabled = manager.busy || manager.editingBoardId === board.id;
+        dragHandle.title = "拖动排序；也可使用上下方向键";
+        dragHandle.setAttribute("aria-label", `拖动看板 ${board.label} 调整排序`);
+        dragHandle.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown");
+        if (manager.busyKind === "move" && manager.busyBoardId === board.id) {
+          dragHandle.appendChild(taskBoardElement("span", "codex-task-board-spinner"));
+        } else {
+          dragHandle.innerHTML = `<svg aria-hidden="true" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 4h.01M10 4h.01M6 8h.01M10 8h.01M6 12h.01M10 12h.01" stroke-linecap="round"></path></svg>`;
+        }
+        dragHandle.addEventListener("dragstart", (event) => {
+          const active = taskBoardState.boardManager;
+          if (!active || active.busy || active.editingBoardId === board.id) {
+            event.preventDefault?.();
+            return;
+          }
+          active.dragBoardId = board.id;
+          active.dropTarget = null;
+          item.setAttribute("data-dragging", "true");
+          if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer?.setData?.("text/plain", board.id);
+        });
+        dragHandle.addEventListener("dragend", () => {
+          const active = taskBoardState.boardManager;
+          if (!active) return;
+          active.dragBoardId = "";
+          active.dropTarget = null;
+          renderTaskBoardManager();
+        });
+        dragHandle.addEventListener("keydown", (event) => {
+          if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+          const targetIndex = boardIndex + (event.key === "ArrowUp" ? -1 : 1);
+          if (targetIndex < 0 || targetIndex >= boards.length || manager.busy) return;
+          event.preventDefault?.();
+          void taskBoardMoveManagedBoard(board.id, targetIndex, {
+            restoreFocus: true,
+          });
+        });
+        const boardIcon = taskBoardStatusIcon(board.id);
+        let name;
+        if (manager.editingBoardId === board.id) {
+          const editForm = taskBoardElement(
+            "form",
+            "codex-task-board-board-edit-form",
+          );
+          const editInput = taskBoardElement("input");
+          editInput.value = manager.editingLabel;
+          editInput.maxLength = 40;
+          editInput.disabled = manager.busy;
+          editInput.setAttribute("aria-label", `看板 ${board.label} 的新名称`);
+          const save = taskBoardElement("button");
+          save.type = "submit";
+          save.disabled = manager.busy || !manager.editingLabel.trim();
+          save.title = "保存名称";
+          save.setAttribute("aria-label", `保存看板 ${board.label} 的名称`);
+          if (manager.busyKind === "rename" && manager.busyBoardId === board.id) {
+            save.appendChild(taskBoardElement("span", "codex-task-board-spinner"));
+          } else {
+            save.innerHTML = `<svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m3.5 8.2 2.8 2.8 6.2-6.2" stroke-linecap="round" stroke-linejoin="round"></path></svg>`;
+          }
+          editInput.addEventListener("input", () => {
+            const active = taskBoardState.boardManager;
+            if (!active || active.busy) return;
+            active.editingLabel = editInput.value;
+            active.feedback = "";
+            active.feedbackNode.textContent = "";
+            save.disabled = !active.editingLabel.trim();
+          });
+          const cancel = taskBoardElement("button");
+          cancel.type = "button";
+          cancel.disabled = manager.busy;
+          cancel.title = "取消编辑";
+          cancel.setAttribute("aria-label", `取消编辑看板 ${board.label}`);
+          cancel.innerHTML = `<svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4"><path d="m4 4 8 8M12 4l-8 8" stroke-linecap="round"></path></svg>`;
+          cancel.addEventListener("click", () => {
+            const active = taskBoardState.boardManager;
+            if (!active || active.busy) return;
+            active.editingBoardId = "";
+            active.editingLabel = "";
+            renderTaskBoardManager();
+          });
+          editForm.addEventListener("submit", (event) => {
+            event.preventDefault?.();
+            void taskBoardRenameManagedBoard(board.id, editInput.value);
+          });
+          editForm.append(editInput, save, cancel);
+          manager.editInput = editInput;
+          manager.editSaveButton = save;
+          name = editForm;
+        } else {
+          name = taskBoardElement("span", "codex-task-board-board-name", board.label);
+          name.title = board.label;
+        }
+        const taskCount = (taskBoardState.snapshot?.tasks || [])
+          .filter((task) => String(task?.status || "") === board.id)
+          .length;
+        const count = taskBoardElement(
+          "span",
+          "codex-task-board-board-task-count",
+          `${taskCount} 个任务`,
+        );
+        const editButton = taskBoardElement(
+          "button",
+          "codex-task-board-board-edit",
+        );
+        editButton.type = "button";
+        editButton.disabled = manager.busy || manager.editingBoardId === board.id;
+        editButton.title = "编辑看板名称";
+        editButton.setAttribute("aria-label", `编辑看板 ${board.label}`);
+        editButton.innerHTML = `<svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4"><path d="m10.8 3.2 2 2-7.3 7.3-2.5.5.5-2.5 7.3-7.3Z" stroke-linecap="round" stroke-linejoin="round"></path></svg>`;
+        editButton.addEventListener("click", () => {
+          const active = taskBoardState.boardManager;
+          if (!active || active.busy) return;
+          active.editingBoardId = board.id;
+          active.editingLabel = board.label;
+          active.pendingDeleteId = "";
+          active.feedback = "";
+          renderTaskBoardManager();
+        });
+        const deleteButton = taskBoardElement(
+          "button",
+          "codex-task-board-board-delete",
+        );
+        deleteButton.type = "button";
+        deleteButton.disabled = manager.busy;
+        deleteButton.title = "删除看板";
+        deleteButton.setAttribute("aria-label", `删除看板 ${board.label}`);
+        deleteButton.appendChild(taskBoardConversationRemoveIcon());
+        deleteButton.addEventListener("click", () => {
+          const active = taskBoardState.boardManager;
+          if (!active || active.busy) return;
+          active.pendingDeleteId = board.id;
+          active.feedback = "";
+          renderTaskBoardManager();
+        });
+        item.append(dragHandle, boardIcon, name, count, editButton, deleteButton);
+        manager.list.appendChild(item);
+      });
+    }
+
+    manager.confirmHost.replaceChildren();
+    const pendingBoard = boards.find((board) => board.id === manager.pendingDeleteId);
+    if (pendingBoard) {
+      const taskCount = (taskBoardState.snapshot?.tasks || [])
+        .filter((task) => String(task?.status || "") === pendingBoard.id)
+        .length;
+      const confirmation = taskBoardElement(
+        "div",
+        "codex-task-board-board-delete-confirm",
+      );
+      confirmation.setAttribute("role", "alert");
+      confirmation.appendChild(taskBoardElement(
+        "p",
+        "",
+        `删除“${pendingBoard.label}”后，其中 ${taskCount} 个任务将移至“未分配”。`,
+      ));
+      const actions = taskBoardElement("div");
+      const cancel = taskBoardElement("button", "", "取消");
+      cancel.type = "button";
+      cancel.disabled = manager.busy;
+      cancel.addEventListener("click", () => {
+        const active = taskBoardState.boardManager;
+        if (!active || active.busy) return;
+        active.pendingDeleteId = "";
+        active.feedback = "";
+        renderTaskBoardManager();
+      });
+      const confirm = taskBoardElement(
+        "button",
+        "",
+        manager.busyKind === "delete" ? "正在删除…" : "确认删除",
+      );
+      confirm.type = "button";
+      confirm.disabled = manager.busy;
+      confirm.setAttribute("data-danger", "true");
+      confirm.addEventListener("click", () => void taskBoardDeleteManagedBoard());
+      actions.append(cancel, confirm);
+      confirmation.appendChild(actions);
+      manager.confirmHost.appendChild(confirmation);
+    }
+    manager.feedbackNode.textContent = manager.feedback;
+    if (manager.editInput && !manager.busy) {
+      requestAnimationFrame(() => {
+        if (taskBoardState.boardManager === manager) {
+          manager.editInput?.focus?.();
+          manager.editInput?.select?.();
+        }
+      });
+    }
+  }
+
+  async function taskBoardRenameManagedBoard(boardId, rawLabel) {
+    const manager = taskBoardState.boardManager;
+    if (!manager || manager.busy) return false;
+    const boards = taskBoardManagedBoardDefinitions(taskBoardState.snapshot?.boards);
+    const board = boards.find((candidate) => candidate.id === String(boardId || ""));
+    if (!board) {
+      manager.feedback = "看板不存在或已被删除";
+      renderTaskBoardManager();
+      return false;
+    }
+    const label = String(rawLabel || "").trim();
+    const labelLength = Array.from(label).length;
+    if (!label || labelLength > 40) {
+      manager.feedback = "看板名称必须为 1 到 40 个字符";
+      renderTaskBoardManager();
+      return false;
+    }
+    if (
+      boards.some(
+        (candidate) =>
+          candidate.id !== board.id &&
+          candidate.label.toLocaleLowerCase() === label.toLocaleLowerCase(),
+      )
+    ) {
+      manager.feedback = "看板名称已存在";
+      renderTaskBoardManager();
+      return false;
+    }
+    if (board.label === label) {
+      manager.editingBoardId = "";
+      manager.editingLabel = "";
+      manager.feedback = "";
+      renderTaskBoardManager();
+      return true;
+    }
+
+    const requestId = ++taskBoardState.boardManagerRequestId;
+    manager.busy = true;
+    manager.busyKind = "rename";
+    manager.busyBoardId = board.id;
+    manager.feedback = "";
+    manager.pendingDeleteId = "";
+    renderTaskBoardManager();
+    let expectedRevision = taskBoardState.snapshot.revision;
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let result;
+        try {
+          result = await taskBoardMockOrBridgeResult("renameBoard", {
+            boardId: board.id,
+            expectedRevision,
+            label,
+          });
+        } catch (error) {
+          result = {
+            status: "failed",
+            code: "bridge_unavailable",
+            message: taskBoardMessageFromResult(error, ""),
+          };
+        }
+        if (
+          taskBoardState.boardManager !== manager ||
+          requestId !== taskBoardState.boardManagerRequestId
+        ) {
+          return false;
+        }
+        const snapshot = result?.status === "conflict"
+          ? taskBoardConflictSnapshotResult(result)
+          : taskBoardSnapshotResult(result);
+        if (snapshot) {
+          taskBoardState.snapshot = snapshot;
+          taskBoardState.snapshotError = "";
+          renderTaskBoard();
+        }
+        const renamedBoard = snapshot?.boards?.find(
+          (candidate) => candidate.id === board.id,
+        );
+        if (
+          (result?.status === "ok" && snapshot) ||
+          renamedBoard?.label === label
+        ) {
+          manager.editingBoardId = "";
+          manager.editingLabel = "";
+          manager.feedback = "";
+          showToast(`已将看板“${board.label}”改名为“${label}”`);
+          return true;
+        }
+        if (
+          (result?.status === "conflict" || result?.code === "revision_conflict") &&
+          snapshot &&
+          attempt === 0
+        ) {
+          expectedRevision = snapshot.revision;
+          continue;
+        }
+        manager.feedback = taskBoardBoardFailureMessage(result, "看板改名失败");
+        return false;
+      }
+    } finally {
+      if (
+        taskBoardState.boardManager === manager &&
+        requestId === taskBoardState.boardManagerRequestId
+      ) {
+        manager.busy = false;
+        manager.busyKind = "";
+        manager.busyBoardId = "";
+        renderTaskBoardManager();
+      }
+    }
+    return false;
+  }
+
+  async function taskBoardMoveManagedBoard(
+    boardId,
+    targetIndex,
+    { restoreFocus = false } = {},
+  ) {
+    const manager = taskBoardState.boardManager;
+    if (!manager || manager.busy) return false;
+    const boards = taskBoardManagedBoardDefinitions(taskBoardState.snapshot?.boards);
+    const sourceIndex = boards.findIndex(
+      (candidate) => candidate.id === String(boardId || ""),
+    );
+    if (sourceIndex < 0) {
+      manager.feedback = "看板不存在或已被删除";
+      renderTaskBoardManager();
+      return false;
+    }
+    const reordered = taskBoardMoveBoardDefinitions(boards, boardId, targetIndex);
+    const normalizedTargetIndex = reordered.findIndex(
+      (candidate) => candidate.id === String(boardId || ""),
+    );
+    if (sourceIndex === normalizedTargetIndex) {
+      manager.dragBoardId = "";
+      manager.dropTarget = null;
+      renderTaskBoardManager();
+      if (restoreFocus) {
+        taskBoardRestoreBoardManagerDragHandleFocus(manager, boardId);
+      }
+      return true;
+    }
+
+    const requestId = ++taskBoardState.boardManagerRequestId;
+    manager.busy = true;
+    manager.busyKind = "move";
+    manager.busyBoardId = String(boardId || "");
+    manager.feedback = "";
+    manager.pendingDeleteId = "";
+    manager.dragBoardId = "";
+    manager.dropTarget = null;
+    renderTaskBoardManager();
+    let expectedRevision = taskBoardState.snapshot.revision;
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let result;
+        try {
+          result = await taskBoardMockOrBridgeResult("moveBoard", {
+            boardId: String(boardId || ""),
+            targetIndex: normalizedTargetIndex,
+            expectedRevision,
+          });
+        } catch (error) {
+          result = {
+            status: "failed",
+            code: "bridge_unavailable",
+            message: taskBoardMessageFromResult(error, ""),
+          };
+        }
+        if (
+          taskBoardState.boardManager !== manager ||
+          requestId !== taskBoardState.boardManagerRequestId
+        ) {
+          return false;
+        }
+        const snapshot = result?.status === "conflict"
+          ? taskBoardConflictSnapshotResult(result)
+          : taskBoardSnapshotResult(result);
+        if (snapshot) {
+          taskBoardState.snapshot = snapshot;
+          taskBoardState.snapshotError = "";
+          renderTaskBoard();
+        }
+        const appliedIndex = snapshot?.boards?.findIndex(
+          (candidate) => candidate.id === String(boardId || ""),
+        ) ?? -1;
+        if (
+          (result?.status === "ok" && snapshot) ||
+          appliedIndex === normalizedTargetIndex
+        ) {
+          manager.feedback = "";
+          showToast("已调整看板排序");
+          return true;
+        }
+        if (
+          (result?.status === "conflict" || result?.code === "revision_conflict") &&
+          snapshot &&
+          attempt === 0
+        ) {
+          expectedRevision = snapshot.revision;
+          continue;
+        }
+        manager.feedback = taskBoardBoardFailureMessage(
+          result,
+          "调整看板排序失败",
+        );
+        return false;
+      }
+    } finally {
+      if (
+        taskBoardState.boardManager === manager &&
+        requestId === taskBoardState.boardManagerRequestId
+      ) {
+        manager.busy = false;
+        manager.busyKind = "";
+        manager.busyBoardId = "";
+        renderTaskBoardManager();
+        if (restoreFocus) {
+          taskBoardRestoreBoardManagerDragHandleFocus(manager, boardId);
+        }
+      }
+    }
+    return false;
+  }
+
+  async function taskBoardCreateManagedBoard() {
+    const manager = taskBoardState.boardManager;
+    if (!manager || manager.busy) return;
+    const label = manager.label.trim();
+    const labelLength = Array.from(label).length;
+    if (!label || labelLength > 40) {
+      manager.feedback = "看板名称必须为 1 到 40 个字符";
+      renderTaskBoardManager();
+      return;
+    }
+    const boardId = crypto.randomUUID();
+    const requestId = ++taskBoardState.boardManagerRequestId;
+    manager.busy = true;
+    manager.busyKind = "create";
+    manager.busyBoardId = "";
+    manager.feedback = "";
+    manager.pendingDeleteId = "";
+    renderTaskBoardManager();
+    let expectedRevision = taskBoardState.snapshot.revision;
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let result;
+        try {
+          result = await taskBoardMockOrBridgeResult("createBoard", {
+            boardId,
+            expectedRevision,
+            label,
+          });
+        } catch (error) {
+          result = {
+            status: "failed",
+            code: "bridge_unavailable",
+            message: taskBoardMessageFromResult(error, ""),
+          };
+        }
+        if (
+          taskBoardState.boardManager !== manager ||
+          requestId !== taskBoardState.boardManagerRequestId
+        ) {
+          return;
+        }
+        const snapshot = result?.status === "conflict"
+          ? taskBoardConflictSnapshotResult(result)
+          : taskBoardSnapshotResult(result);
+        if (snapshot) {
+          taskBoardState.snapshot = snapshot;
+          taskBoardState.snapshotError = "";
+          renderTaskBoard();
+        }
+        if (result?.status === "ok" && snapshot) {
+          manager.label = "";
+          manager.feedback = "";
+          showToast(`已添加看板“${label}”`);
+          return;
+        }
+        if (
+          (result?.status === "conflict" || result?.code === "revision_conflict") &&
+          snapshot &&
+          attempt === 0
+        ) {
+          expectedRevision = snapshot.revision;
+          continue;
+        }
+        manager.feedback = taskBoardBoardFailureMessage(result, "添加看板失败");
+        return;
+      }
+    } finally {
+      if (
+        taskBoardState.boardManager === manager &&
+        requestId === taskBoardState.boardManagerRequestId
+      ) {
+        manager.busy = false;
+        manager.busyKind = "";
+        manager.busyBoardId = "";
+        renderTaskBoardManager();
+        requestAnimationFrame(() => manager.input?.focus?.());
+      }
+    }
+  }
+
+  async function taskBoardDeleteManagedBoard() {
+    const manager = taskBoardState.boardManager;
+    const boardId = String(manager?.pendingDeleteId || "");
+    if (!manager || manager.busy || !boardId) return;
+    const board = taskBoardManagedBoardDefinitions(taskBoardState.snapshot?.boards)
+      .find((candidate) => candidate.id === boardId);
+    const requestId = ++taskBoardState.boardManagerRequestId;
+    manager.busy = true;
+    manager.busyKind = "delete";
+    manager.busyBoardId = boardId;
+    manager.feedback = "";
+    renderTaskBoardManager();
+    let expectedRevision = taskBoardState.snapshot.revision;
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let result;
+        try {
+          result = await taskBoardMockOrBridgeResult("deleteBoard", {
+            boardId,
+            expectedRevision,
+          });
+        } catch (error) {
+          result = {
+            status: "failed",
+            code: "bridge_unavailable",
+            message: taskBoardMessageFromResult(error, ""),
+          };
+        }
+        if (
+          taskBoardState.boardManager !== manager ||
+          requestId !== taskBoardState.boardManagerRequestId
+        ) {
+          return;
+        }
+        const snapshot = result?.status === "conflict"
+          ? taskBoardConflictSnapshotResult(result)
+          : taskBoardSnapshotResult(result);
+        if (snapshot) {
+          taskBoardState.snapshot = snapshot;
+          taskBoardState.snapshotError = "";
+          renderTaskBoard();
+        }
+        const boardStillExists = snapshot?.boards?.some(
+          (candidate) => candidate.id === boardId,
+        ) ?? true;
+        if ((result?.status === "ok" && snapshot) || !boardStillExists) {
+          manager.pendingDeleteId = "";
+          manager.feedback = "";
+          showToast(
+            board
+              ? `已删除看板“${board.label}”，原任务已移至未分配`
+              : "看板已删除",
+          );
+          return;
+        }
+        if (
+          (result?.status === "conflict" || result?.code === "revision_conflict") &&
+          snapshot &&
+          attempt === 0
+        ) {
+          expectedRevision = snapshot.revision;
+          continue;
+        }
+        manager.feedback = taskBoardBoardFailureMessage(result, "删除看板失败");
+        return;
+      }
+    } finally {
+      if (
+        taskBoardState.boardManager === manager &&
+        requestId === taskBoardState.boardManagerRequestId
+      ) {
+        manager.busy = false;
+        manager.busyKind = "";
+        manager.busyBoardId = "";
+        renderTaskBoardManager();
+      }
+    }
+  }
+
+  function openTaskBoardManager() {
+    if (taskBoardState.boardManager) return taskBoardState.boardManager;
+    closeTaskBoardDropdownMenu({ restoreFocus: false });
+    closeTaskBoardCreateModal({ restoreFocus: false });
+    closeTaskBoardDetachDialog({ restoreFocus: false });
+    const overlay = taskBoardElement(
+      "div",
+      "codex-task-board-create-modal-backdrop",
+    );
+    const dialog = taskBoardElement(
+      "section",
+      "codex-task-board-create-modal codex-task-board-board-manager",
+    );
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-labelledby", "codex-task-board-manager-title");
+    dialog.tabIndex = -1;
+    const heading = taskBoardElement("header", "codex-task-board-create-modal-head");
+    const headingCopy = taskBoardElement("div");
+    const title = taskBoardElement("h2", "", "管理看板");
+    title.id = "codex-task-board-manager-title";
+    headingCopy.append(
+      title,
+      taskBoardElement(
+        "p",
+        "",
+        "添加、改名、排序或删除任务状态列；“未分配”是固定的系统列。",
+      ),
+    );
+    const closeButton = taskBoardElement("button", "codex-task-board-create-close");
+    closeButton.type = "button";
+    closeButton.setAttribute("aria-label", "关闭看板管理");
+    closeButton.innerHTML = `<svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="m4 4 8 8M12 4l-8 8" stroke-linecap="round"></path></svg>`;
+    closeButton.addEventListener("click", () => {
+      if (!taskBoardState.boardManager?.busy) closeTaskBoardManager();
+    });
+    heading.append(headingCopy, closeButton);
+    const body = taskBoardElement("div", "codex-task-board-board-manager-body");
+    const form = taskBoardElement("form", "codex-task-board-board-add");
+    const field = taskBoardElement("label", "codex-task-board-create-field");
+    field.appendChild(taskBoardElement(
+      "span",
+      "codex-task-board-create-field-label",
+      "新看板名称",
+    ));
+    const input = taskBoardElement("input", "codex-task-board-create-input");
+    input.maxLength = 40;
+    input.placeholder = "例如：待发布";
+    input.setAttribute("aria-label", "新看板名称");
+    field.appendChild(input);
+    const addButton = taskBoardElement(
+      "button",
+      "codex-task-board-create-submit",
+      "添加看板",
+    );
+    addButton.type = "submit";
+    form.append(field, addButton);
+    const list = taskBoardElement("div", "codex-task-board-board-list");
+    list.setAttribute("aria-label", "现有看板");
+    const confirmHost = taskBoardElement("div");
+    const feedbackNode = taskBoardElement("p", "codex-task-board-create-feedback");
+    feedbackNode.setAttribute("aria-live", "polite");
+    body.append(form, list, confirmHost, feedbackNode);
+    dialog.append(heading, body);
+    overlay.appendChild(dialog);
+    const manager = {
+      overlay,
+      dialog,
+      closeButton,
+      input,
+      addButton,
+      list,
+      confirmHost,
+      feedbackNode,
+      label: "",
+      pendingDeleteId: "",
+      feedback: "",
+      busy: false,
+      busyKind: "",
+      busyBoardId: "",
+      editingBoardId: "",
+      editingLabel: "",
+      editInput: null,
+      editSaveButton: null,
+      dragBoardId: "",
+      dropTarget: null,
+    };
+    taskBoardState.boardManager = manager;
+    taskBoardState.boardManagerPreviousFocus = document.activeElement;
+    input.addEventListener("input", () => {
+      const active = taskBoardState.boardManager;
+      if (!active || active.busy) return;
+      active.label = input.value;
+      active.feedback = "";
+      active.pendingDeleteId = "";
+      renderTaskBoardManager();
+    });
+    form.addEventListener("submit", (event) => {
+      event.preventDefault?.();
+      void taskBoardCreateManagedBoard();
+    });
+    let backdropPressStarted = false;
+    let backdropPressCompleted = false;
+    overlay.addEventListener("pointerdown", (event) => {
+      backdropPressStarted = event.target === overlay;
+      backdropPressCompleted = false;
+    });
+    overlay.addEventListener("pointerup", (event) => {
+      backdropPressCompleted = backdropPressStarted && event.target === overlay;
+    });
+    overlay.addEventListener("pointercancel", () => {
+      backdropPressStarted = false;
+      backdropPressCompleted = false;
+    });
+    overlay.addEventListener("click", (event) => {
+      const shouldClose = event.target === overlay && backdropPressCompleted;
+      backdropPressStarted = false;
+      backdropPressCompleted = false;
+      if (shouldClose && !taskBoardState.boardManager?.busy) closeTaskBoardManager();
+    });
+    taskBoardState.boardManagerKeydownHandler = (event) => {
+      const active = taskBoardState.boardManager;
+      if (!active) return;
+      if (event.key === "Escape") {
+        event.preventDefault?.();
+        if (active.busy) return;
+        if (active.editingBoardId) {
+          active.editingBoardId = "";
+          active.editingLabel = "";
+          renderTaskBoardManager();
+          return;
+        }
+        if (active.dragBoardId) {
+          active.dragBoardId = "";
+          active.dropTarget = null;
+          renderTaskBoardManager();
+          return;
+        }
+        closeTaskBoardManager();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = taskBoardBoardManagerFocusableElements(active);
+      if (!focusable.length) {
+        event.preventDefault?.();
+        active.dialog.focus?.();
+        return;
+      }
+      const currentIndex = focusable.indexOf(document.activeElement);
+      const nextIndex = event.shiftKey
+        ? currentIndex <= 0
+          ? focusable.length - 1
+          : currentIndex - 1
+        : currentIndex === focusable.length - 1
+          ? 0
+          : currentIndex + 1;
+      event.preventDefault?.();
+      focusable[nextIndex]?.focus?.();
+    };
+    document.addEventListener("keydown", taskBoardState.boardManagerKeydownHandler, true);
+    document.body.appendChild(overlay);
+    renderTaskBoardManager();
+    requestAnimationFrame(() => input.focus?.());
+    return manager;
+  }
+
   function taskBoardFullColumnTasks(status, snapshot = taskBoardState.snapshot) {
     return (snapshot?.tasks || [])
       .filter((task) => taskBoardStatusId(task?.status) === status)
@@ -13495,7 +14991,7 @@
     if (!source) return null;
     source.status = toStatus;
     const tasksByStatus = new Map(
-      taskBoardStatusDefinitions.map((status) => [status.id, []]),
+      taskBoardStatusDefinitions(snapshot).map((status) => [status.id, []]),
     );
     tasks.forEach((task) => {
       tasksByStatus.get(taskBoardStatusId(task?.status))?.push(task);
@@ -13616,6 +15112,8 @@
     itemRole = "option",
     selectionAttribute = "aria-selected",
     showDescriptions = true,
+    searchable = false,
+    searchPlaceholder = "搜索选项",
     onSelect,
   }) {
     if (!trigger) return null;
@@ -13631,6 +15129,10 @@
     menu.setAttribute("role", menuRole);
     menu.setAttribute("aria-label", ariaLabel);
     const normalizedOptions = Array.isArray(options) ? options : [];
+    const optionsHost = taskBoardElement(
+      "div",
+      "codex-task-board-dropdown-options",
+    );
     const buttons = normalizedOptions.map((option) => {
       const value = String(option?.value || "");
       const selected = value === String(currentValue || "");
@@ -13642,13 +15144,18 @@
       button.setAttribute(selectionAttribute, String(selected));
       const label = String(option?.label || "");
       const description = String(option?.description || "").trim();
+      button.setAttribute("aria-label", label);
       const copy = taskBoardElement("span", "codex-task-board-dropdown-option-copy");
       const titleRow = taskBoardElement(
         "span",
         "codex-task-board-dropdown-option-title-row",
       );
-      const dot = taskBoardDropdownStatusDot(option?.color);
-      if (dot) titleRow.appendChild(dot);
+      if (option?.iconId) {
+        titleRow.appendChild(taskBoardStatusIcon(
+          option.iconId,
+          "codex-task-board-dropdown-status-icon",
+        ));
+      }
       titleRow.appendChild(taskBoardElement(
         "span",
         "codex-task-board-dropdown-option-title",
@@ -13663,20 +15170,65 @@
         ));
       }
       button.title = description ? `${label}\n${description}` : label;
-      button.append(
-        copy,
-        selected
-          ? taskBoardDropdownCheck()
-          : taskBoardElement("span", "codex-task-board-dropdown-option-marker"),
-      );
+      button.appendChild(copy);
       button.addEventListener("click", () => {
         if (button.disabled) return;
         closeTaskBoardDropdownMenu();
         onSelect?.(value, option);
       });
-      menu.appendChild(button);
+      optionsHost.appendChild(button);
       return button;
     });
+    const emptyNode = taskBoardElement(
+      "div",
+      "codex-task-board-dropdown-empty",
+      "没有匹配的项目",
+    );
+    emptyNode.setAttribute("role", "status");
+    emptyNode.hidden = true;
+    optionsHost.appendChild(emptyNode);
+    let searchInput = null;
+    if (searchable) {
+      const searchControl = taskBoardElement(
+        "label",
+        "codex-task-board-dropdown-search",
+      );
+      const searchIcon = taskBoardElement("span");
+      searchIcon.setAttribute("aria-hidden", "true");
+      searchIcon.innerHTML = `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="7" cy="7" r="4"></circle><path d="m10 10 3 3" stroke-linecap="round"></path></svg>`;
+      searchInput = taskBoardElement("input");
+      searchInput.type = "search";
+      searchInput.placeholder = searchPlaceholder;
+      searchInput.setAttribute("aria-label", searchPlaceholder);
+      searchControl.append(searchIcon, searchInput);
+      menu.append(searchControl, optionsHost);
+      searchInput.addEventListener("input", () => {
+        const query = String(searchInput.value || "")
+          .trim()
+          .toLocaleLowerCase("zh-CN");
+        let visibleCount = 0;
+        normalizedOptions.forEach((option, index) => {
+          const searchableText = [
+            String(option?.label || ""),
+            String(option?.description || ""),
+          ]
+            .join("\n")
+            .toLocaleLowerCase("zh-CN");
+          const visible = !query || searchableText.includes(query);
+          buttons[index].hidden = !visible;
+          if (visible) visibleCount += 1;
+        });
+        emptyNode.hidden = visibleCount !== 0;
+        taskBoardPositionDropdownMenu(menu, trigger, {
+          minWidth,
+          matchTriggerWidth,
+          fixedWidth,
+          placement,
+        });
+      });
+    } else {
+      menu.appendChild(optionsHost);
+    }
     document.body.appendChild(menu);
     trigger.setAttribute("aria-expanded", "true");
     taskBoardPositionDropdownMenu(menu, trigger, {
@@ -13692,17 +15244,32 @@
       trigger,
       options: normalizedOptions,
       selectionAttribute,
+      searchInput,
+      emptyNode,
     };
     taskBoardState.dropdownMenu = state;
     taskBoardState.projectMenu = kind === "project" ? state : null;
     taskBoardState.statusMenu = kind === "status" ? state : null;
     taskBoardState.dropdownMenuPreviousFocus = trigger;
     taskBoardState.dropdownMenuKeydownHandler = (event) => {
-      const enabledButtons = buttons.filter((button) => !button.disabled);
+      const enabledButtons = buttons.filter(
+        (button) => !button.disabled && !button.hidden,
+      );
       const current = enabledButtons.indexOf(document.activeElement);
+      const searchActive = searchInput && document.activeElement === searchInput;
       if (event.key === "Escape") {
         event.preventDefault?.();
         closeTaskBoardDropdownMenu();
+      } else if (searchActive) {
+        if (
+          (event.key === "ArrowDown" || event.key === "ArrowUp") &&
+          enabledButtons.length
+        ) {
+          event.preventDefault?.();
+          enabledButtons[
+            event.key === "ArrowDown" ? 0 : enabledButtons.length - 1
+          ]?.focus?.();
+        }
       } else if (
         event.key === "ArrowDown" ||
         event.key === "ArrowUp" ||
@@ -13736,6 +15303,10 @@
     window.addEventListener("resize", taskBoardState.dropdownMenuViewportHandler);
     window.addEventListener("scroll", taskBoardState.dropdownMenuViewportHandler, true);
     requestAnimationFrame(() => {
+      if (searchInput && searchInput.isConnected !== false) {
+        searchInput.focus?.({ preventScroll: true });
+        return;
+      }
       const selected = buttons.find(
         (button) => button.getAttribute(selectionAttribute) === "true" && !button.disabled,
       );
@@ -13764,6 +15335,8 @@
       currentValue: taskBoardState.projectCwd,
       ariaLabel: "筛选项目",
       fixedWidth: taskBoardProjectDropdownWidth,
+      searchable: true,
+      searchPlaceholder: "搜索项目名称或路径",
       onSelect: (cwd) => {
         taskBoardState.projectCwd = cwd;
         renderTaskBoardCards();
@@ -13776,8 +15349,33 @@
     closeTaskBoardDropdownMenu({ restoreFocus });
   }
 
+  function taskBoardApplyColumnCount(columns, columnCount) {
+    if (!columns) return;
+    const count = Math.max(1, Math.trunc(Number(columnCount) || 1));
+    columns.style.gridTemplateColumns = `repeat(${count}, minmax(292px, 1fr))`;
+    columns.style.minWidth = `${count * 304 + Math.max(0, count - 1) * 12}px`;
+  }
+
+  function taskBoardSetEmptyUnassignedVisible(visible) {
+    const root = taskBoardState.root;
+    const columns = root?.querySelector?.(".codex-task-board-columns");
+    if (!root || !columns) return;
+    if (visible) {
+      root.setAttribute("data-task-board-drag-active", "true");
+    } else {
+      root.removeAttribute("data-task-board-drag-active");
+    }
+    const columnCount = Number(
+      visible
+        ? columns.getAttribute("data-total-column-count")
+        : columns.getAttribute("data-visible-column-count"),
+    );
+    taskBoardApplyColumnCount(columns, columnCount);
+  }
+
   function clearTaskBoardDragVisuals() {
     taskBoardState.dragTaskId = "";
+    taskBoardSetEmptyUnassignedVisible(false);
     document.querySelectorAll?.(".codex-task-board-card[data-dragging=\"true\"]")
       .forEach((card) => card.removeAttribute?.("data-dragging"));
     document.querySelectorAll?.(".codex-task-board-card-list[data-drop-active=\"true\"]")
@@ -13816,6 +15414,7 @@
   function taskBoardMoveFailureMessage(result) {
     const code = String(result?.code || "").trim();
     if (code === "task_not_found") return "任务不存在，已恢复到最近快照";
+    if (code === "board_not_found") return "目标看板不存在，已恢复到最近快照";
     if (code === "task_board_busy") return "任务看板正忙，已恢复到最近快照";
     if (code === "task_file_invalid") return "任务文件无效，已恢复到最近快照";
     if (code === "task_board_unavailable") return "任务看板暂不可用，已恢复到最近快照";
@@ -13892,16 +15491,16 @@
     const state = openTaskBoardDropdownMenu({
       kind: "status",
       trigger,
-      options: taskBoardStatusDefinitions.map((status) => ({
+      options: taskBoardStatusDefinitions().map((status) => ({
         value: status.id,
         label: status.label,
-        color: status.color,
+        iconId: status.id,
       })),
       currentValue: taskBoardStatusId(task?.status),
       ariaLabel: "移动任务状态",
       minWidth: 150,
       onSelect: (statusId) => {
-        const status = taskBoardStatusDefinitions.find((item) => item.id === statusId);
+        const status = taskBoardStatusDefinitions().find((item) => item.id === statusId);
         if (!status) return;
         const targetIndex = taskBoardMoveTargetIndex(taskId, status.id);
         taskBoardState.moveFocusTaskId = taskId;
@@ -13926,8 +15525,9 @@
     const filterText = selectedProject?.label || "全部项目";
     taskBoardSetDropdownTriggerLabel(filter, filterText);
     const tasks = taskBoardVisibleTasks();
+    const statusDefinitions = taskBoardStatusDefinitions();
     const tasksByStatus = new Map(
-      taskBoardStatusDefinitions.map((status) => [status.id, []]),
+      statusDefinitions.map((status) => [status.id, []]),
     );
     tasks.forEach((task) => {
       tasksByStatus.get(taskBoardStatusId(task?.status))?.push(task);
@@ -13938,13 +15538,34 @@
       );
     });
     columns.replaceChildren();
-    taskBoardStatusDefinitions.forEach((status) => {
+    const emptyUnassigned =
+      (tasksByStatus.get(taskBoardUnassignedStatusDefinition.id) || []).length === 0;
+    const totalColumnCount = Math.max(1, statusDefinitions.length);
+    const visibleColumnCount = Math.max(
+      1,
+      totalColumnCount - (emptyUnassigned ? 1 : 0),
+    );
+    columns.setAttribute("data-total-column-count", String(totalColumnCount));
+    columns.setAttribute("data-visible-column-count", String(visibleColumnCount));
+    taskBoardApplyColumnCount(
+      columns,
+      taskBoardState.dragTaskId ? totalColumnCount : visibleColumnCount,
+    );
+    if (taskBoardState.dragTaskId) {
+      root.setAttribute("data-task-board-drag-active", "true");
+    } else {
+      root.removeAttribute("data-task-board-drag-active");
+    }
+    statusDefinitions.forEach((status) => {
       const statusTasks = tasksByStatus.get(status.id) || [];
       const column = taskBoardElement("section", "codex-task-board-column");
-      column.style.setProperty("--task-board-status-color", status.color);
+      column.setAttribute("data-task-board-column-status", status.id);
+      if (status.id === taskBoardUnassignedStatusDefinition.id && !statusTasks.length) {
+        column.setAttribute("data-empty-unassigned", "true");
+      }
       const header = taskBoardElement("header", "codex-task-board-column-head");
       const title = taskBoardElement("div", "codex-task-board-column-title");
-      title.append(taskBoardElement("span", "codex-task-board-status-dot"), document.createTextNode(status.label));
+      title.append(taskBoardStatusIcon(status.id), document.createTextNode(status.label));
       const count = taskBoardElement("span", "codex-task-board-count", String(statusTasks.length));
       header.append(title, count);
       const list = taskBoardElement("div", "codex-task-board-card-list");
@@ -13984,13 +15605,14 @@
           }
           taskBoardState.dragTaskId = String(task?.id || "");
           card.setAttribute("data-dragging", "true");
+          taskBoardSetEmptyUnassignedVisible(true);
           event.dataTransfer?.setData?.("text/plain", taskBoardState.dragTaskId);
         });
         card.addEventListener("dragend", () => clearTaskBoardDragVisuals());
         const project = taskBoardElement(
           "div",
           "codex-task-board-project",
-          String(task?.project?.label || displayProjectName(task?.project?.cwd || "")),
+          taskBoardEffectiveProjectLabel(task),
         );
         const deleteButton = taskBoardElement(
           "button",
@@ -14025,7 +15647,7 @@
           moveButton,
           status.label,
           `移动任务 ${String(task?.title || "未命名任务")} 的状态`,
-          status.color,
+          status.id,
           false,
         );
         moveButton.disabled = taskBoardState.moveBusy;
@@ -14046,7 +15668,8 @@
           () => openTaskBoardAttachModal(task),
         );
         const conversations = taskBoardElement("div", "codex-task-board-conversations");
-        const linked = Array.isArray(task?.conversations) ? task.conversations : [];
+        const linked = (Array.isArray(task?.conversations) ? task.conversations : [])
+          .filter((conversation) => taskBoardConversationShouldDisplay(conversation));
         if (!linked.length) {
           conversations.appendChild(taskBoardElement("div", "codex-task-board-empty", "未关联会话"));
         } else {
@@ -14116,6 +15739,7 @@
     if (search && search.value !== taskBoardState.query) search.value = taskBoardState.query;
     renderTaskBoardStatus(root);
     renderTaskBoardCards();
+    if (taskBoardState.boardManager) renderTaskBoardManager();
   }
 
   function taskBoardApplyReadOutcome(requestRevision, kind, outcome) {
@@ -14137,11 +15761,13 @@
       const catalog = fulfilled ? taskBoardCatalogResult(outcome.value) : null;
       if (catalog) {
         taskBoardState.catalog = catalog;
+        taskBoardState.catalogLoaded = true;
         taskBoardState.catalogError = "";
         cardsChanged = true;
         taskBoardReconcileCreateSelectedSessions();
         if (taskBoardState.createModal) renderTaskBoardCreateModal();
       } else {
+        taskBoardState.catalogLoaded = false;
         taskBoardState.catalogError = fulfilled
           ? taskBoardMessageFromResult(outcome.value, "会话目录加载失败")
           : taskBoardMessageFromResult(outcome.reason, "会话目录加载失败");
@@ -14175,6 +15801,7 @@
   } = {}) {
     cancelTaskBoardMoveInteraction({ restoreFocus: false });
     closeTaskBoardCreateModal();
+    closeTaskBoardManager({ restoreFocus: false });
     closeTaskBoardDetachDialog({ restoreFocus: false });
     stopTaskBoardConversationStatusRefresh();
     cancelScheduledTaskBoardCardsRender();
@@ -14267,6 +15894,7 @@
     cancelTaskBoardMoveInteraction({ restoreFocus: false });
     closeTaskBoardEntryContextMenu({ restoreFocus: false });
     closeTaskBoardCreateModal();
+    closeTaskBoardManager({ restoreFocus: false });
     closeTaskBoardDetachDialog({ restoreFocus: false });
     reconcileTaskBoardRuntime();
   }
@@ -14282,14 +15910,16 @@
   function resetTaskBoardReadStateForTests() {
     cancelTaskBoardMoveInteraction({ restoreFocus: false });
     closeTaskBoardCreateModal({ restoreFocus: false });
+    closeTaskBoardManager({ restoreFocus: false });
     closeTaskBoardDetachDialog({ restoreFocus: false });
     stopTaskBoardConversationStatusRefresh();
     taskBoardState.active = true;
     taskBoardState.root = null;
     taskBoardState.host = null;
     taskBoardState.requestRevision += 1;
-    taskBoardState.snapshot = { schemaVersion: 1, revision: 0, tasks: [] };
+    taskBoardState.snapshot = taskBoardEmptySnapshot();
     taskBoardState.catalog = { projects: [], sessions: [], warnings: [] };
+    taskBoardState.catalogLoaded = false;
     taskBoardState.snapshotError = "";
     taskBoardState.catalogError = "";
     taskBoardState.loading = false;
@@ -14302,14 +15932,17 @@
     taskBoardCancelNativeCreateOperation();
     cancelTaskBoardMoveInteraction({ restoreFocus: false });
     closeTaskBoardCreateModal({ restoreFocus: false });
+    closeTaskBoardManager({ restoreFocus: false });
     closeTaskBoardDetachDialog({ restoreFocus: false });
     stopTaskBoardConversationStatusRefresh();
     taskBoardState.active = true;
     taskBoardState.root = null;
     taskBoardState.host = null;
     taskBoardState.requestRevision += 1;
-    taskBoardState.snapshot = taskBoardSnapshotResult(options.snapshot) || { schemaVersion: 1, revision: 0, tasks: [] };
-    taskBoardState.catalog = taskBoardCatalogResult(options.catalog) || { projects: [], sessions: [], warnings: [] };
+    taskBoardState.snapshot = taskBoardSnapshotResult(options.snapshot) || taskBoardEmptySnapshot();
+    const catalog = taskBoardCatalogResult(options.catalog);
+    taskBoardState.catalog = catalog || { projects: [], sessions: [], warnings: [] };
+    taskBoardState.catalogLoaded = !!catalog && !options.catalogError;
     taskBoardState.snapshotError = "";
     taskBoardState.catalogError = String(options.catalogError || "");
     taskBoardState.loading = false;
@@ -14321,13 +15954,15 @@
 
   function resetTaskBoardMoveStateForTests(snapshot) {
     cancelTaskBoardMoveInteraction({ restoreFocus: false });
+    closeTaskBoardManager({ restoreFocus: false });
     closeTaskBoardDetachDialog({ restoreFocus: false });
     stopTaskBoardConversationStatusRefresh();
     taskBoardState.active = true;
     taskBoardState.root = null;
     taskBoardState.host = null;
     taskBoardState.requestRevision += 1;
-    taskBoardState.snapshot = taskBoardSnapshotResult(snapshot) || { schemaVersion: 1, revision: 0, tasks: [] };
+    taskBoardState.snapshot = taskBoardSnapshotResult(snapshot) || taskBoardEmptySnapshot();
+    taskBoardState.catalogLoaded = false;
     taskBoardState.snapshotError = "";
     taskBoardState.catalogError = "";
     taskBoardState.moveFeedback = "";
@@ -14362,6 +15997,17 @@
       }),
       conversationProjection: (conversation, catalog) =>
         taskBoardConversationProjectionForCatalog(conversation, catalog),
+      conversationShouldDisplayForTest: (
+        conversation,
+        catalog,
+        catalogLoaded = true,
+        catalogError = "",
+      ) => taskBoardConversationShouldDisplay(
+        conversation,
+        catalog,
+        catalogLoaded,
+        catalogError,
+      ),
       conversationStatusForTest: taskBoardConversationStatus,
       conversationStatusNodeForTest: taskBoardConversationStatusNode,
       setConversationRuntimeStatusForTest: (sessionId, status) => {
@@ -14375,7 +16021,12 @@
         ) || null,
       refreshConversationStatusesForTest: (options = {}) =>
         refreshTaskBoardConversationStatuses({ schedule: false, ...options }),
-      taskMatchesQuery: (task, catalog, query) => taskBoardTaskMatchesQuery(task, query, catalog),
+      taskMatchesQuery: (task, catalog, query) =>
+        taskBoardTaskMatchesQuery(task, query, catalog, true, ""),
+      projectOptionsForTest: taskBoardProjectOptions,
+      effectiveProjectLabelForTest: (task, catalog) =>
+        taskBoardEffectiveProjectLabel(task, catalog),
+      createSubmenuTopForTest: taskBoardCreateSubmenuTop,
       statusPresentationForTest: (overrides = {}) => taskBoardStatusPresentation({
         ...taskBoardState,
         ...overrides,
@@ -14429,6 +16080,12 @@
       },
       moveTargetIndexForTest: taskBoardMoveTargetIndex,
       moveTaskForTest: taskBoardMoveTask,
+      setTaskDragForTest: (taskId) => {
+        if (!taskBoardState.root) mountTaskBoardRoot();
+        taskBoardState.dragTaskId = String(taskId || "");
+        renderTaskBoardCards();
+        taskBoardSetEmptyUnassignedVisible(!!taskBoardState.dragTaskId);
+      },
       dragEndForTest: clearTaskBoardDragVisuals,
       openStatusMenuForTest: (taskId, rect = {}) => {
         const trigger = document.createElement("button");
@@ -14479,6 +16136,124 @@
         tasks: taskBoardState.snapshot.tasks,
         menuOpen: !!taskBoardState.statusMenu,
       }),
+      openBoardManagerForTest: openTaskBoardManager,
+      closeBoardManagerForTest: () => closeTaskBoardManager(),
+      setBoardManagerLabelForTest: (label) => {
+        const manager = taskBoardState.boardManager || openTaskBoardManager();
+        manager.label = String(label || "");
+        manager.feedback = "";
+        manager.pendingDeleteId = "";
+        renderTaskBoardManager();
+      },
+      requestBoardDeleteForTest: (boardId) => {
+        const manager = taskBoardState.boardManager || openTaskBoardManager();
+        manager.pendingDeleteId = String(boardId || "");
+        manager.feedback = "";
+        renderTaskBoardManager();
+      },
+      setBoardManagerEditForTest: (boardId, label) => {
+        const manager = taskBoardState.boardManager || openTaskBoardManager();
+        manager.editingBoardId = String(boardId || "");
+        const board = taskBoardManagedBoardDefinitions(taskBoardState.snapshot?.boards)
+          .find((candidate) => candidate.id === manager.editingBoardId);
+        manager.editingLabel = String(label ?? board?.label ?? "");
+        manager.feedback = "";
+        manager.pendingDeleteId = "";
+        renderTaskBoardManager();
+      },
+      setBoardManagerEditingInputForTest: (label) => {
+        const manager = taskBoardState.boardManager;
+        if (!manager?.editInput) return;
+        manager.editInput.value = String(label || "");
+        manager.editInput.dispatchEvent?.({ type: "input" });
+      },
+      focusBoardManagerDragHandleForTest: (boardId) => {
+        const manager = taskBoardState.boardManager;
+        taskBoardBoardManagerItem(manager, boardId)
+          ?.querySelector?.(".codex-task-board-board-drag-handle")
+          ?.focus?.();
+      },
+      submitBoardCreateForTest: taskBoardCreateManagedBoard,
+      submitBoardDeleteForTest: taskBoardDeleteManagedBoard,
+      submitBoardRenameForTest: (boardId, label) =>
+        taskBoardRenameManagedBoard(boardId, label),
+      moveBoardForTest: (boardId, targetIndex, restoreFocus = false) =>
+        taskBoardMoveManagedBoard(boardId, targetIndex, { restoreFocus }),
+      boardMoveTargetIndexForTest: taskBoardMoveBoardTargetIndex,
+      boardManagerStateForTest: () => {
+        const manager = taskBoardState.boardManager;
+        const boards = taskBoardManagedBoardDefinitions(taskBoardState.snapshot?.boards);
+        const pendingBoard = boards.find(
+          (board) => board.id === manager?.pendingDeleteId,
+        );
+        return {
+          open: !!manager,
+          busy: !!manager?.busy,
+          busyKind: manager?.busyKind || "",
+          busyBoardId: manager?.busyBoardId || "",
+          feedback: manager?.feedback || "",
+          label: manager?.label || "",
+          editingBoardId: manager?.editingBoardId || "",
+          editingLabel: manager?.editingLabel || "",
+          editSaveDisabled: !!manager?.editSaveButton?.disabled,
+          pendingDeleteId: manager?.pendingDeleteId || "",
+          pendingTaskCount: pendingBoard
+            ? (taskBoardState.snapshot?.tasks || [])
+              .filter((task) => String(task?.status || "") === pendingBoard.id)
+              .length
+            : 0,
+          boardIds: boards.map((board) => board.id),
+          boardLabels: boards.map((board) => board.label),
+          role: manager?.dialog?.getAttribute?.("role") || "",
+          ariaModal: manager?.dialog?.getAttribute?.("aria-modal") === "true",
+          bodyMounted: manager?.overlay?.parentElement === document.body,
+          initialFocus: document.activeElement === manager?.input,
+          dragHandleCount:
+            manager?.list?.querySelectorAll?.(".codex-task-board-board-drag-handle")
+              ?.length || 0,
+          editButtonCount:
+            manager?.list?.querySelectorAll?.(".codex-task-board-board-edit")
+              ?.length || 0,
+          boardIconCount:
+            manager?.list?.querySelectorAll?.("[data-task-board-status-icon]")
+              ?.length || 0,
+          focusedDragBoardId:
+            boards.find((board) => {
+              const handle = taskBoardBoardManagerItem(manager, board.id)
+                ?.querySelector?.(".codex-task-board-board-drag-handle");
+              return handle === document.activeElement;
+            })?.id || "",
+          keydownListeners: document.listenerCount?.("keydown") || 0,
+        };
+      },
+      boardColumnStateForTest: () => {
+        if (!taskBoardState.root) mountTaskBoardRoot();
+        renderTaskBoardCards();
+        const root = taskBoardState.root;
+        const columns = root?.querySelector?.(".codex-task-board-columns");
+        return {
+          visibleColumnCount: Number(
+            columns?.getAttribute?.("data-visible-column-count") || 0,
+          ),
+          totalColumnCount: Number(
+            columns?.getAttribute?.("data-total-column-count") || 0,
+          ),
+          appliedColumnCount: Number(
+            String(columns?.style?.gridTemplateColumns || "")
+              .match(/^repeat\((\d+)/)?.[1] || 0,
+          ),
+          emptyUnassigned:
+            !!columns?.querySelector?.(
+              '.codex-task-board-column[data-task-board-column-status="new"][data-empty-unassigned="true"]',
+            ),
+          dragActive:
+            root?.getAttribute?.("data-task-board-drag-active") === "true",
+        };
+      },
+      boardStatusDefinitionsForTest: () =>
+        taskBoardStatusDefinitions().map((status) => ({ ...status })),
+      statusIconIndexForTest: taskBoardStatusIconIndex,
+      statusIconPaletteSizeForTest: () => taskBoardStatusIconPaths.length,
       openCreateModalForTest: openTaskBoardCreateModal,
       openAttachModalForTest: openTaskBoardAttachModal,
       openCreateDropdownForTest: (kind) => {
@@ -14514,13 +16289,45 @@
         left: taskBoardState.dropdownMenu?.element?.style?.left || "",
         top: taskBoardState.dropdownMenu?.element?.style?.top || "",
         itemCount: taskBoardState.dropdownMenu?.buttons?.length || 0,
+        visibleItemCount:
+          taskBoardState.dropdownMenu?.buttons?.filter?.(
+            (button) => !button.hidden,
+          )?.length || 0,
         focusedIndex: taskBoardState.dropdownMenu?.buttons?.indexOf(document.activeElement) ?? -1,
+        searchPresent: !!taskBoardState.dropdownMenu?.searchInput,
+        searchFocused:
+          document.activeElement === taskBoardState.dropdownMenu?.searchInput,
+        searchValue: taskBoardState.dropdownMenu?.searchInput?.value || "",
         buttonTexts: Array.from(taskBoardState.dropdownMenu?.buttons || [])
           .map((button) => String(
             button?.getAttribute?.("aria-label") ||
             button?.textContent ||
             "",
           ).replace(/\s+/g, " ").trim()),
+        visibleButtonTexts: Array.from(taskBoardState.dropdownMenu?.buttons || [])
+          .filter((button) => !button.hidden)
+          .map((button) => String(
+            button?.getAttribute?.("aria-label") ||
+            button?.textContent ||
+            "",
+          ).replace(/\s+/g, " ").trim()),
+        visibleValues: Array.from(taskBoardState.dropdownMenu?.buttons || [])
+          .filter((button) => !button.hidden)
+          .map((button) => button.getAttribute?.("data-value") || ""),
+        emptyVisible:
+          !!taskBoardState.dropdownMenu?.emptyNode &&
+          !taskBoardState.dropdownMenu.emptyNode.hidden,
+        optionTrailingContentCount:
+          Array.from(taskBoardState.dropdownMenu?.buttons || [])
+            .reduce(
+              (count, button) =>
+                count + Math.max(0, Number(button?.children?.length || 0) - 1),
+              0,
+            ),
+        statusIconCount:
+          taskBoardState.dropdownMenu?.element?.querySelectorAll?.(
+            "[data-task-board-status-icon]",
+          )?.length || 0,
         selectedIndex: taskBoardState.dropdownMenu?.buttons?.findIndex?.(
           (button) => {
             const selectionAttribute = taskBoardState.dropdownMenu?.selectionAttribute || "aria-selected";
@@ -14538,6 +16345,13 @@
         submenuSelectedIndex: taskBoardState.dropdownMenu?.submenuButtons?.findIndex?.(
           (button) => button.getAttribute?.("aria-checked") === "true",
         ) ?? -1,
+        submenuTrailingContentCount:
+          Array.from(taskBoardState.dropdownMenu?.submenuButtons || [])
+            .reduce(
+              (count, button) =>
+                count + Math.max(0, Number(button?.children?.length || 0) - 1),
+              0,
+            ),
         submenuTexts: Array.from(taskBoardState.dropdownMenu?.submenuButtons || [])
           .map((button) => String(
             button?.getAttribute?.("aria-label") ||
@@ -14548,6 +16362,12 @@
           .map((option) => String(option?.description || "")),
         triggerExpanded: taskBoardState.dropdownMenu?.trigger?.getAttribute?.("aria-expanded") || "false",
       }),
+      setDropdownSearchForTest: (value) => {
+        const input = taskBoardState.dropdownMenu?.searchInput;
+        if (!input) return;
+        input.value = String(value || "");
+        input.dispatchEvent?.({ type: "input" });
+      },
       dispatchDropdownMenuKeyForTest: (key, shiftKey = false) => {
         const event = {
           type: "keydown",

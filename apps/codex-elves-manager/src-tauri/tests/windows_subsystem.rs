@@ -462,6 +462,8 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
             .expect("read standalone task board entry styles");
     let main = std::fs::read_to_string(frontend_dir.join("src/main.tsx"))
         .expect("read standalone task board entry");
+    let task_board_commands = std::fs::read_to_string(manifest_dir.join("src/task_board.rs"))
+        .expect("read standalone task board commands");
 
     assert!(app.contains("跨项目观察任务状态，并集中关联项目下的多个会话"));
     assert!(app.contains("搜索任务、项目或关联会话"));
@@ -477,6 +479,10 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     assert!(app.contains("project: taskProjectRef(project)"));
     assert!(app.contains("const hostProject = taskProjectRef(project)"));
     assert!(app.contains("task-board-conversation-state"));
+    assert!(app.contains("const [catalogReady, setCatalogReady] = useState(false);"));
+    assert!(app.contains("function taskBoardConversationShouldDisplay("));
+    assert!(app.contains("const visibleConversations = task.conversations.filter"));
+    assert!(app.contains("setCatalogReady(true);"));
     assert!(app.contains(r#"return { id: "unread", label: "未读" }"#));
     assert!(!app.contains("已完成 · 未读"));
     assert!(app.contains(r#"const showStatus = status.id !== "completed";"#));
@@ -489,6 +495,31 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     assert!(app.contains("TaskBoardDetachConfirmation"));
     assert!(app.contains("TaskBoardDeleteConfirmation"));
     assert!(app.contains("\"task_board_delete_task\""));
+    assert!(app.contains("\"task_board_create_board\""));
+    assert!(app.contains("\"task_board_delete_board\""));
+    assert!(app.contains("\"task_board_rename_board\""));
+    assert!(app.contains("\"task_board_move_board\""));
+    assert!(app.contains(r##"{ id: "planning", label: "规划", color: "#60a5fa" }"##));
+    assert!(app.contains(r##"{ id: "executing", label: "执行", color: "#c084fc" }"##));
+    assert!(app.contains(r##"{ id: "review", label: "验收", color: "#fbbf24" }"##));
+    assert!(app.contains(r##"{ id: "done", label: "完成", color: "#34d399" }"##));
+    assert!(app.contains("className=\"task-board-manage\""));
+    assert!(app.contains("function TaskBoardManager("));
+    assert!(app.contains("添加、改名、排序或删除任务状态列；“未分配”是固定的系统列。"));
+    assert!(app.contains("visibleStatusDefinitions"));
+    assert!(app.contains("taskBoardMoveBoardTargetIndex("));
+    assert!(app.contains("const taskBoardStatusIconPaths = ["));
+    assert!(app.contains("function taskBoardStatusIconIndex("));
+    assert!(app.contains("data-task-board-status-icon={iconIndex}"));
+    assert!(app.contains("searchPlaceholder=\"搜索项目名称或路径\""));
+    assert!(app.matches("searchable").count() >= 4);
+    assert!(!app.contains("task-board-dropdown-option-marker"));
+    assert!(app.contains("aria-label={`拖动看板 ${board.label} 调整排序`}"));
+    assert!(app.contains("aria-label={`编辑看板 ${board.label}`}"));
+    assert!(task_board_commands.contains("task_board_create_board"));
+    assert!(task_board_commands.contains("task_board_delete_board"));
+    assert!(task_board_commands.contains("task_board_rename_board"));
+    assert!(task_board_commands.contains("task_board_move_board"));
     assert!(app.contains("aria-label={`删除任务 ${task.title}`}"));
     assert!(app.contains("<X size={13} strokeWidth={1.35} aria-hidden=\"true\" />"));
     assert!(!app.contains("Trash2"));
@@ -504,7 +535,10 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     assert!(styles.contains(".task-board-session-copy"));
     assert!(styles.contains(".task-board-session-time"));
     assert!(styles.contains("--task-board-modal-background"));
-    assert!(styles.contains(".task-board-dropdown-status-dot"));
+    assert!(styles.contains(".task-board-dropdown-status-icon"));
+    assert!(styles.contains(".task-board-dropdown-search"));
+    assert!(styles.contains(".task-board-dropdown-options"));
+    assert!(!styles.contains("--task-board-status-color"));
     assert!(styles.contains(".task-board-conversation-state"));
     assert!(styles.contains(r#"[data-conversation-status="unread"]"#));
     assert!(styles.contains("animation: task-board-status-spin 1.1s linear infinite;"));
@@ -560,9 +594,9 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     assert!(app.contains("const rightLeft = menuRight + gap;"));
     assert!(app.contains("if (rightLeft + submenuWidth <= viewportWidth - edge)"));
     assert!(app.contains("menuLeft - gap - submenuWidth"));
-    assert!(app.contains("function taskBoardCenteredMenuTop("));
-    assert!(app.contains("const centeredTop = (viewportHeight - menuHeight) / 2;"));
-    assert!(app.contains("taskBoardCenteredMenuTop("));
+    assert!(app.contains("function taskBoardCreateSubmenuTop("));
+    assert!(app.contains("const centeredTop = anchorTop + (anchorHeight - submenuHeight) / 2;"));
+    assert!(app.contains("taskBoardCreateSubmenuTop("));
     assert!(!app.contains("parentRect.top - 5"));
     assert!(!app.contains("align?: \"start\" | \"end\""));
     assert!(!app.contains("align=\"start\""));
@@ -587,15 +621,23 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
         .expect("standalone dropdown button styles should be present");
     assert!(dropdown_button_styles.contains("align-items: center"));
     assert!(!dropdown_button_styles.contains("align-items: flex-start"));
-    let dropdown_marker_styles = styles
-        .split(".task-board-dropdown-option-marker {")
+    assert!(!styles.contains(".task-board-dropdown-option-marker"));
+    assert!(styles.contains(".task-board-create-settings-chevron svg"));
+    assert!(styles.contains(
+        ".task-board-board-edit,\n.task-board-board-delete,\n.task-board-board-edit-form button {\n  cursor: pointer;"
+    ));
+    let icon_button_styles = styles
+        .split(".task-board-icon-button {")
         .nth(1)
         .and_then(|section| section.split('}').next())
-        .expect("standalone dropdown marker styles should be present");
-    assert!(dropdown_marker_styles.contains("margin-top: 0"));
-    assert!(styles.contains(
-        ".task-board-dropdown-option-marker svg,\n.task-board-create-settings-chevron svg"
-    ));
+        .expect("standalone task-board icon button styles should be present");
+    assert!(icon_button_styles.contains("cursor: pointer"));
+    let modal_button_styles = styles
+        .split("\n.task-board-button {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("standalone task-board modal button styles should be present");
+    assert!(modal_button_styles.contains("cursor: pointer"));
     assert!(styles.contains("grid-template-columns: 18px 16px minmax(0, 1fr)"));
     assert!(styles.contains("height: min(650px, calc(100vh - 32px))"));
     let search_focus_styles = styles
@@ -643,6 +685,13 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     assert!(styles.contains("z-index: 2147483646"));
     assert!(styles.contains(".task-board-confirm-backdrop"));
     assert!(styles.contains("z-index: 2147483200"));
+    assert!(styles.contains(".task-board-board-manager"));
+    assert!(styles.contains(".task-board-board-list"));
+    assert!(styles.contains(".task-board-board-drag-handle"));
+    assert!(styles.contains(".task-board-board-edit-form"));
+    assert!(styles.contains(".task-board-board-item[data-drop-position=\"before\"]"));
+    assert!(styles.contains(".task-board-board-manager *"));
+    assert!(styles.contains(".task-board-board-delete-confirm"));
     assert!(standalone_styles.contains(".task-board-app button"));
     assert!(standalone_styles.contains("transition: none"));
     assert!(main.contains("if (taskBoardMode)"));

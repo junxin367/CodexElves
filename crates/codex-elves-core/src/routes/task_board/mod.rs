@@ -11,9 +11,13 @@ use super::BridgeDataService;
 mod attach_conversations;
 mod catalog;
 mod create;
+mod create_board;
+mod delete_board;
 mod delete_task;
 mod detach_conversations;
+mod move_board;
 mod move_task;
+mod rename_board;
 mod snapshot;
 
 pub const TASK_BOARD_SNAPSHOT_PATH: &str = "/task-board/snapshot";
@@ -21,6 +25,10 @@ pub const TASK_BOARD_OPEN_WINDOW_PATH: &str = "/task-board/open-window";
 pub const TASK_BOARD_SESSION_CATALOG_PATH: &str = "/task-board/session-catalog";
 pub const TASK_BOARD_CREATE_PATH: &str = "/task-board/task-create";
 pub const TASK_BOARD_DELETE_PATH: &str = "/task-board/task-delete";
+pub const TASK_BOARD_CREATE_BOARD_PATH: &str = "/task-board/board-create";
+pub const TASK_BOARD_DELETE_BOARD_PATH: &str = "/task-board/board-delete";
+pub const TASK_BOARD_RENAME_BOARD_PATH: &str = "/task-board/board-rename";
+pub const TASK_BOARD_MOVE_BOARD_PATH: &str = "/task-board/board-move";
 pub const TASK_BOARD_ATTACH_CONVERSATIONS_PATH: &str = "/task-board/task-conversations-attach";
 pub const TASK_BOARD_DETACH_CONVERSATIONS_PATH: &str = "/task-board/task-conversations-detach";
 pub const TASK_BOARD_MOVE_PATH: &str = "/task-board/task-move";
@@ -64,6 +72,22 @@ pub(super) async fn handle_delete(store: Arc<dyn TaskBoardStore>, payload: Value
     delete_task::handle(store, payload).await
 }
 
+pub(super) async fn handle_create_board(store: Arc<dyn TaskBoardStore>, payload: Value) -> Value {
+    create_board::handle(store, payload).await
+}
+
+pub(super) async fn handle_delete_board(store: Arc<dyn TaskBoardStore>, payload: Value) -> Value {
+    delete_board::handle(store, payload).await
+}
+
+pub(super) async fn handle_rename_board(store: Arc<dyn TaskBoardStore>, payload: Value) -> Value {
+    rename_board::handle(store, payload).await
+}
+
+pub(super) async fn handle_move_board(store: Arc<dyn TaskBoardStore>, payload: Value) -> Value {
+    move_board::handle(store, payload).await
+}
+
 pub(super) async fn handle_move(store: Arc<dyn TaskBoardStore>, payload: Value) -> Value {
     move_task::handle(store, payload).await
 }
@@ -85,6 +109,7 @@ fn snapshot_success(document: TaskBoardDocument) -> Value {
         "status": "ok",
         "schemaVersion": document.schema_version,
         "revision": document.revision,
+        "boards": document.boards,
         "tasks": document.tasks
     })
 }
@@ -104,12 +129,18 @@ fn store_error(error: TaskBoardStoreError) -> Value {
             "message": "Task board revision conflicts with the current snapshot",
             "schemaVersion": current.schema_version,
             "revision": current.revision,
+            "boards": current.boards,
             "tasks": current.tasks
         }),
         TaskBoardStoreError::TaskIdConflict => failed(
             "task_id_conflict",
             "Task id conflicts with an existing task",
         ),
+        TaskBoardStoreError::BoardIdConflict => failed(
+            "board_id_conflict",
+            "Task board id conflicts with an existing board",
+        ),
+        TaskBoardStoreError::BoardNotFound => failed("board_not_found", "Task board was not found"),
         TaskBoardStoreError::ProjectMismatch => failed(
             "project_mismatch",
             "Task board conversations must belong to the task project",

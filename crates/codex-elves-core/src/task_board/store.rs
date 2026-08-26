@@ -1,7 +1,8 @@
 use super::{
-    TaskBoardAttachConversationsCommand, TaskBoardCreateCommand, TaskBoardDeleteCommand,
-    TaskBoardDetachConversationsCommand, TaskBoardDocument, TaskBoardMoveCommand,
-    TaskBoardMutationResult, parse_task_board_document, validate_task_board_document,
+    TaskBoardAttachConversationsCommand, TaskBoardCreateBoardCommand, TaskBoardCreateCommand,
+    TaskBoardDeleteBoardCommand, TaskBoardDeleteCommand, TaskBoardDetachConversationsCommand,
+    TaskBoardDocument, TaskBoardMoveBoardCommand, TaskBoardMoveCommand, TaskBoardMutationResult,
+    TaskBoardRenameBoardCommand, parse_task_board_document, validate_task_board_document,
 };
 use fs2::FileExt;
 use std::fs::{File, OpenOptions};
@@ -43,6 +44,38 @@ pub trait TaskBoardStore: Send + Sync {
     ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
         Err(TaskBoardStoreError::InvalidInput {
             message: "deleting tasks is not supported by this task board store".to_string(),
+        })
+    }
+    fn create_board(
+        &self,
+        _command: TaskBoardCreateBoardCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        Err(TaskBoardStoreError::InvalidInput {
+            message: "creating task boards is not supported by this task board store".to_string(),
+        })
+    }
+    fn delete_board(
+        &self,
+        _command: TaskBoardDeleteBoardCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        Err(TaskBoardStoreError::InvalidInput {
+            message: "deleting task boards is not supported by this task board store".to_string(),
+        })
+    }
+    fn rename_board(
+        &self,
+        _command: TaskBoardRenameBoardCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        Err(TaskBoardStoreError::InvalidInput {
+            message: "renaming task boards is not supported by this task board store".to_string(),
+        })
+    }
+    fn move_board(
+        &self,
+        _command: TaskBoardMoveBoardCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        Err(TaskBoardStoreError::InvalidInput {
+            message: "moving task boards is not supported by this task board store".to_string(),
         })
     }
     fn move_task(
@@ -319,6 +352,34 @@ impl TaskBoardStore for FileTaskBoardStore {
         super::delete_task::delete_task(self, command)
     }
 
+    fn create_board(
+        &self,
+        command: TaskBoardCreateBoardCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        super::create_board::create_board(self, command)
+    }
+
+    fn delete_board(
+        &self,
+        command: TaskBoardDeleteBoardCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        super::delete_board::delete_board(self, command)
+    }
+
+    fn rename_board(
+        &self,
+        command: TaskBoardRenameBoardCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        super::rename_board::rename_board(self, command)
+    }
+
+    fn move_board(
+        &self,
+        command: TaskBoardMoveBoardCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        super::move_board::move_board(self, command)
+    }
+
     fn move_task(
         &self,
         command: TaskBoardMoveCommand,
@@ -414,6 +475,10 @@ pub enum TaskBoardStoreError {
     RevisionConflict { current: TaskBoardDocument },
     #[error("task id conflicts with an existing task")]
     TaskIdConflict,
+    #[error("task board id conflicts with an existing board")]
+    BoardIdConflict,
+    #[error("task board was not found")]
+    BoardNotFound,
     #[error("task board conversations must belong to the task project")]
     ProjectMismatch,
     #[error("task was not found")]

@@ -4,6 +4,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 const MAX_TITLE_CHARS: usize = 120;
+pub(crate) const MAX_BOARD_LABEL_CHARS: usize = 40;
+pub(crate) const MAX_TASK_BOARD_COUNT: usize = 32;
 pub const TASK_BOARD_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const TEMPORARY_NEW_THREAD_SEGMENT: &str = "new-thread:";
 const TEMPORARY_CLIENT_NEW_THREAD_SEGMENT: &str = "client-new-thread:";
@@ -22,6 +24,20 @@ pub enum TaskBoardValidationError {
     DuplicateTaskId { task_id: String },
     #[error("task title must contain between 1 and 120 Unicode characters")]
     InvalidTitle,
+    #[error("task board contains too many managed boards")]
+    TooManyBoards,
+    #[error("the unassigned column cannot be stored as a managed board")]
+    ReservedBoardId,
+    #[error("task board id is duplicated: {board_id}")]
+    DuplicateBoardId { board_id: String },
+    #[error("task board label must contain between 1 and 40 Unicode characters")]
+    InvalidBoardLabel,
+    #[error("task board label is duplicated: {label}")]
+    DuplicateBoardLabel { label: String },
+    #[error("task board color must use #RRGGBB format")]
+    InvalidBoardColor,
+    #[error("task {task_id} references a missing board: {board_id}")]
+    MissingBoard { task_id: String, board_id: String },
     #[error("task {task_id} contains an empty session id")]
     EmptySessionId { task_id: String },
     #[error("task {task_id} contains a temporary session id")]
@@ -68,6 +84,33 @@ pub fn validate_task_board_document(
         return Err(TaskBoardValidationError::RevisionOutOfRange);
     }
 
+    if document.boards.len() > MAX_TASK_BOARD_COUNT {
+        return Err(TaskBoardValidationError::TooManyBoards);
+    }
+    let mut board_ids = HashSet::new();
+    let mut board_labels = HashSet::new();
+    for board in &mut document.boards {
+        if board.id.is_unassigned() {
+            return Err(TaskBoardValidationError::ReservedBoardId);
+        }
+        if !board_ids.insert(board.id) {
+            return Err(TaskBoardValidationError::DuplicateBoardId {
+                board_id: board.id.persisted_id(),
+            });
+        }
+        board.label = normalize_task_board_label(&board.label)?;
+        let label_identity = board.label.to_lowercase();
+        if !board_labels.insert(label_identity) {
+            return Err(TaskBoardValidationError::DuplicateBoardLabel {
+                label: board.label.clone(),
+            });
+        }
+        board.color = board.color.trim().to_string();
+        if !valid_task_board_color(&board.color) {
+            return Err(TaskBoardValidationError::InvalidBoardColor);
+        }
+    }
+
     let mut task_ids = HashSet::new();
     for task in &mut document.tasks {
         let raw_task_id = task.id.trim();
@@ -91,6 +134,12 @@ pub fn validate_task_board_document(
             || task.updated_at_ms > TASK_BOARD_MAX_SAFE_INTEGER
         {
             return Err(TaskBoardValidationError::TimestampOutOfRange);
+        }
+        if !task.status.is_unassigned() && !board_ids.contains(&task.status) {
+            return Err(TaskBoardValidationError::MissingBoard {
+                task_id: task.id.clone(),
+                board_id: task.status.persisted_id(),
+            });
         }
 
         task.project.cwd = normalize_task_project_cwd(&task.project.cwd)?;
@@ -129,7 +178,9 @@ pub fn validate_task_board_document(
         }
     }
 
-    for status in TaskBoardStatus::ALL {
+    for status in
+        std::iter::once(TaskBoardStatus::New).chain(document.boards.iter().map(|board| board.id))
+    {
         let mut orders = document
             .tasks
             .iter()
@@ -150,6 +201,21 @@ pub fn validate_task_board_document(
     }
 
     Ok(())
+}
+
+pub(crate) fn normalize_task_board_label(label: &str) -> Result<String, TaskBoardValidationError> {
+    let label = label.trim().to_string();
+    let label_chars = label.chars().count();
+    if label_chars == 0 || label_chars > MAX_BOARD_LABEL_CHARS {
+        return Err(TaskBoardValidationError::InvalidBoardLabel);
+    }
+    Ok(label)
+}
+
+fn valid_task_board_color(color: &str) -> bool {
+    color.len() == 7
+        && color.starts_with('#')
+        && color.as_bytes().iter().skip(1).all(u8::is_ascii_hexdigit)
 }
 
 /// Converts nullable signed timestamps from data providers before W2 Bridge DTO construction.

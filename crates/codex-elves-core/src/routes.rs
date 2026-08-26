@@ -171,6 +171,24 @@ pub async fn handle_bridge_request(
         task_board::TASK_BOARD_DELETE_PATH => {
             Ok(task_board::handle_delete(ctx.task_board_store.clone(), payload.clone()).await)
         }
+        task_board::TASK_BOARD_CREATE_BOARD_PATH => Ok(task_board::handle_create_board(
+            ctx.task_board_store.clone(),
+            payload.clone(),
+        )
+        .await),
+        task_board::TASK_BOARD_DELETE_BOARD_PATH => Ok(task_board::handle_delete_board(
+            ctx.task_board_store.clone(),
+            payload.clone(),
+        )
+        .await),
+        task_board::TASK_BOARD_RENAME_BOARD_PATH => Ok(task_board::handle_rename_board(
+            ctx.task_board_store.clone(),
+            payload.clone(),
+        )
+        .await),
+        task_board::TASK_BOARD_MOVE_BOARD_PATH => {
+            Ok(task_board::handle_move_board(ctx.task_board_store.clone(), payload.clone()).await)
+        }
         task_board::TASK_BOARD_MOVE_PATH => {
             Ok(task_board::handle_move(ctx.task_board_store.clone(), payload.clone()).await)
         }

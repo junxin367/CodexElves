@@ -90,6 +90,7 @@ fn normalize_command(
     let mut document = TaskBoardDocument {
         schema_version: TASK_BOARD_SCHEMA_VERSION,
         revision: expected_revision,
+        boards: TaskBoardDocument::default_boards(),
         tasks: vec![TaskBoardTask {
             id: command.task_id,
             title: command.title,

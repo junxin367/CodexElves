@@ -45,6 +45,7 @@ fn document(revision: u64, status: TaskBoardStatus) -> TaskBoardDocument {
     TaskBoardDocument {
         schema_version: 1,
         revision,
+        boards: TaskBoardDocument::default_boards(),
         tasks: vec![task(status)],
     }
 }
@@ -63,6 +64,7 @@ fn expected_snapshot(revision: u64, status: &str) -> Value {
         "status": "ok",
         "schemaVersion": 1,
         "revision": revision,
+        "boards": TaskBoardDocument::default_boards(),
         "tasks": [{
             "id": TASK_ID,
             "title": "完善任务看板",
@@ -359,6 +361,7 @@ async fn revision_conflict_returns_the_exact_latest_flattened_snapshot() {
             "message": "Task board revision conflicts with the current snapshot",
             "schemaVersion": 1,
             "revision": 12,
+            "boards": TaskBoardDocument::default_boards(),
             "tasks": [{
                 "id": TASK_ID,
                 "title": "完善任务看板",

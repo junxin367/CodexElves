@@ -24,6 +24,7 @@ async fn delete_route_forwards_exact_command_and_returns_flattened_snapshot() {
     let document = TaskBoardDocument {
         schema_version: 1,
         revision: 8,
+        boards: TaskBoardDocument::default_boards(),
         tasks: Vec::new(),
     };
     let store = Arc::new(FakeDeleteStore::success(document.clone()));
@@ -51,6 +52,7 @@ async fn delete_route_forwards_exact_command_and_returns_flattened_snapshot() {
             "status": "ok",
             "schemaVersion": 1,
             "revision": 8,
+            "boards": TaskBoardDocument::default_boards(),
             "tasks": []
         })
     );
@@ -82,6 +84,7 @@ async fn delete_route_exposes_latest_snapshot_on_revision_conflict() {
     let latest = TaskBoardDocument {
         schema_version: 1,
         revision: 12,
+        boards: TaskBoardDocument::default_boards(),
         tasks: Vec::new(),
     };
     let store = Arc::new(FakeDeleteStore::error(
@@ -108,6 +111,7 @@ async fn delete_route_exposes_latest_snapshot_on_revision_conflict() {
             "message": "Task board revision conflicts with the current snapshot",
             "schemaVersion": 1,
             "revision": 12,
+            "boards": TaskBoardDocument::default_boards(),
             "tasks": []
         })
     );

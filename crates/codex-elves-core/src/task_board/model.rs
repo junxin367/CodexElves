@@ -1,4 +1,6 @@
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use uuid::Uuid;
 
 pub const TASK_BOARD_SCHEMA_VERSION: u32 = 1;
 
@@ -7,6 +9,8 @@ pub const TASK_BOARD_SCHEMA_VERSION: u32 = 1;
 pub struct TaskBoardDocument {
     pub schema_version: u32,
     pub revision: u64,
+    #[serde(default = "TaskBoardDocument::default_boards")]
+    pub boards: Vec<TaskBoardColumn>,
     pub tasks: Vec<TaskBoardTask>,
 }
 
@@ -15,19 +19,49 @@ impl TaskBoardDocument {
         Self {
             schema_version: TASK_BOARD_SCHEMA_VERSION,
             revision: 0,
+            boards: Self::default_boards(),
             tasks: Vec::new(),
         }
     }
+
+    pub fn default_boards() -> Vec<TaskBoardColumn> {
+        vec![
+            TaskBoardColumn {
+                id: TaskBoardStatus::Planning,
+                label: "规划".to_string(),
+                color: "#60a5fa".to_string(),
+            },
+            TaskBoardColumn {
+                id: TaskBoardStatus::Executing,
+                label: "执行".to_string(),
+                color: "#c084fc".to_string(),
+            },
+            TaskBoardColumn {
+                id: TaskBoardStatus::Review,
+                label: "验收".to_string(),
+                color: "#fbbf24".to_string(),
+            },
+            TaskBoardColumn {
+                id: TaskBoardStatus::Done,
+                label: "完成".to_string(),
+                color: "#34d399".to_string(),
+            },
+        ]
+    }
+
+    pub fn contains_status(&self, status: TaskBoardStatus) -> bool {
+        status == TaskBoardStatus::New || self.boards.iter().any(|board| board.id == status)
+    }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TaskBoardStatus {
     New,
     Planning,
     Executing,
     Review,
     Done,
+    Custom(Uuid),
 }
 
 impl TaskBoardStatus {
@@ -38,6 +72,65 @@ impl TaskBoardStatus {
         Self::Review,
         Self::Done,
     ];
+
+    pub fn custom(id: Uuid) -> Self {
+        Self::Custom(id)
+    }
+
+    pub fn is_custom(self) -> bool {
+        matches!(self, Self::Custom(_))
+    }
+
+    pub fn is_unassigned(self) -> bool {
+        self == Self::New
+    }
+
+    pub fn persisted_id(self) -> String {
+        match self {
+            Self::New => "new".to_string(),
+            Self::Planning => "planning".to_string(),
+            Self::Executing => "executing".to_string(),
+            Self::Review => "review".to_string(),
+            Self::Done => "done".to_string(),
+            Self::Custom(id) => id.hyphenated().to_string(),
+        }
+    }
+}
+
+impl Serialize for TaskBoardStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.persisted_id())
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskBoardStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.trim() {
+            "new" => Ok(Self::New),
+            "planning" => Ok(Self::Planning),
+            "executing" => Ok(Self::Executing),
+            "review" => Ok(Self::Review),
+            "done" => Ok(Self::Done),
+            custom => Uuid::parse_str(custom)
+                .map(Self::Custom)
+                .map_err(|_| D::Error::custom("task board status must be a known id or UUID")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskBoardColumn {
+    pub id: TaskBoardStatus,
+    pub label: String,
+    pub color: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -95,6 +188,33 @@ pub struct TaskBoardDetachConversationsCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskBoardDeleteCommand {
     pub task_id: String,
+    pub expected_revision: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskBoardCreateBoardCommand {
+    pub board_id: TaskBoardStatus,
+    pub expected_revision: u64,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskBoardDeleteBoardCommand {
+    pub board_id: TaskBoardStatus,
+    pub expected_revision: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskBoardRenameBoardCommand {
+    pub board_id: TaskBoardStatus,
+    pub expected_revision: u64,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskBoardMoveBoardCommand {
+    pub board_id: TaskBoardStatus,
+    pub target_index: u32,
     pub expected_revision: u64,
 }
 

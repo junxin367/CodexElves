@@ -1,6 +1,7 @@
 pub mod markdown;
 pub mod provider_sync;
 pub mod storage;
+pub mod task_board_catalog;
 
 pub use markdown::{MarkdownExportService, export_markdown_from_paths};
 pub use provider_sync::{
@@ -14,4 +15,9 @@ pub use storage::{
     LocalSessionCatalogWarning, SQLiteStorageAdapter, aggregate_local_session_catalog,
     codex_thread_usage_history_from_paths, codex_thread_usage_summary_from_paths,
     delete_local_from_paths, move_codex_thread_workspace_from_paths,
+};
+pub use task_board_catalog::{
+    CodexProjectCatalog, CodexProjectCatalogError, TaskBoardCatalogBuildError,
+    codex_project_catalog_from_state, load_codex_project_catalog,
+    task_board_catalog_from_local_catalog,
 };

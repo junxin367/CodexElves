@@ -74,6 +74,7 @@ fn response_document(revision: u64) -> TaskBoardDocument {
     TaskBoardDocument {
         schema_version: 1,
         revision,
+        boards: TaskBoardDocument::default_boards(),
         tasks: vec![TaskBoardTask {
             id: TASK_ID.to_string(),
             title: "完善任务看板".to_string(),
@@ -127,6 +128,7 @@ async fn single_session_create_returns_exact_snapshot_and_uses_authoritative_met
             "status": "ok",
             "schemaVersion": 1,
             "revision": 8,
+            "boards": TaskBoardDocument::default_boards(),
             "tasks": [{
                 "id": TASK_ID,
                 "title": "完善任务看板",
@@ -296,6 +298,7 @@ async fn idempotent_no_op_returns_the_complete_current_snapshot() {
             "status": "ok",
             "schemaVersion": 1,
             "revision": 12,
+            "boards": document.boards,
             "tasks": document.tasks
         })
     );
@@ -521,6 +524,7 @@ async fn revision_conflict_returns_the_exact_latest_snapshot() {
             "message": "Task board revision conflicts with the current snapshot",
             "schemaVersion": 1,
             "revision": 9,
+            "boards": current.boards,
             "tasks": current.tasks
         })
     );

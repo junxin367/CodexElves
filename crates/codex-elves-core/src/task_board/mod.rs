@@ -1,9 +1,13 @@
 mod attach_conversations;
 mod create;
+mod create_board;
+mod delete_board;
 mod delete_task;
 mod detach_conversations;
 mod model;
+mod move_board;
 mod move_task;
+mod rename_board;
 mod store;
 mod validation;
 
@@ -11,10 +15,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use model::{
     TASK_BOARD_SCHEMA_VERSION, TaskBoardAttachConversationsCommand, TaskBoardCatalogProject,
-    TaskBoardCatalogSession, TaskBoardCatalogWarning, TaskBoardCatalogWarningCode,
-    TaskBoardConversation, TaskBoardCreateCommand, TaskBoardDeleteCommand,
-    TaskBoardDetachConversationsCommand, TaskBoardDocument, TaskBoardMoveCommand,
-    TaskBoardMutationResult, TaskBoardProject, TaskBoardSessionCatalog, TaskBoardStatus,
+    TaskBoardCatalogSession, TaskBoardCatalogWarning, TaskBoardCatalogWarningCode, TaskBoardColumn,
+    TaskBoardConversation, TaskBoardCreateBoardCommand, TaskBoardCreateCommand,
+    TaskBoardDeleteBoardCommand, TaskBoardDeleteCommand, TaskBoardDetachConversationsCommand,
+    TaskBoardDocument, TaskBoardMoveBoardCommand, TaskBoardMoveCommand, TaskBoardMutationResult,
+    TaskBoardProject, TaskBoardRenameBoardCommand, TaskBoardSessionCatalog, TaskBoardStatus,
     TaskBoardTask,
 };
 pub use store::{FileTaskBoardStore, TaskBoardStore, TaskBoardStoreError};

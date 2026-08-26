@@ -10,11 +10,13 @@ use codex_elves_core::task_board::{
 use fs2::FileExt;
 use std::fs::OpenOptions;
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 fn valid_document() -> TaskBoardDocument {
     TaskBoardDocument {
         schema_version: 1,
         revision: 7,
+        boards: TaskBoardDocument::default_boards(),
         tasks: vec![TaskBoardTask {
             id: "62a0a38e-65bd-4c49-b6ef-3d19d06f2d4e".to_string(),
             title: "完善任务看板".to_string(),
@@ -49,6 +51,15 @@ fn schema_v1_empty_document_round_trips_with_camel_case_fields() {
     let json = serde_json::to_value(&document).unwrap();
     assert_eq!(json["schemaVersion"], 1);
     assert_eq!(json["revision"], 0);
+    assert_eq!(
+        json["boards"],
+        serde_json::json!([
+            {"id": "planning", "label": "规划", "color": "#60a5fa"},
+            {"id": "executing", "label": "执行", "color": "#c084fc"},
+            {"id": "review", "label": "验收", "color": "#fbbf24"},
+            {"id": "done", "label": "完成", "color": "#34d399"}
+        ])
+    );
     assert_eq!(json["tasks"], serde_json::json!([]));
     assert!(json.get("schema_version").is_none());
     assert_eq!(
@@ -58,18 +69,46 @@ fn schema_v1_empty_document_round_trips_with_camel_case_fields() {
 }
 
 #[test]
-fn task_board_status_uses_the_five_stable_persisted_values() {
+fn task_board_status_preserves_known_ids_and_round_trips_custom_uuid_ids() {
+    let custom_id = Uuid::parse_str("44d5ad90-897a-4c28-a09d-88d05d5b64f6").unwrap();
     let statuses = [
         TaskBoardStatus::New,
         TaskBoardStatus::Planning,
         TaskBoardStatus::Executing,
         TaskBoardStatus::Review,
         TaskBoardStatus::Done,
+        TaskBoardStatus::custom(custom_id),
     ];
 
+    let json = serde_json::to_value(statuses).unwrap();
     assert_eq!(
-        serde_json::to_value(statuses).unwrap(),
-        serde_json::json!(["new", "planning", "executing", "review", "done"])
+        json,
+        serde_json::json!([
+            "new",
+            "planning",
+            "executing",
+            "review",
+            "done",
+            "44d5ad90-897a-4c28-a09d-88d05d5b64f6"
+        ])
+    );
+    assert_eq!(
+        serde_json::from_value::<[TaskBoardStatus; 6]>(json).unwrap(),
+        statuses
+    );
+}
+
+#[test]
+fn legacy_schema_v1_document_without_boards_gets_the_default_managed_columns() {
+    let document =
+        parse_task_board_document(br#"{"schemaVersion":1,"revision":0,"tasks":[]}"#).unwrap();
+
+    assert_eq!(document.boards, TaskBoardDocument::default_boards());
+    assert!(
+        document
+            .boards
+            .iter()
+            .all(|board| board.id != TaskBoardStatus::New)
     );
 }
 
