@@ -1,5 +1,6 @@
 mod attach_conversations;
 mod create;
+mod delete_task;
 mod detach_conversations;
 mod model;
 mod move_task;
@@ -11,9 +12,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub use model::{
     TASK_BOARD_SCHEMA_VERSION, TaskBoardAttachConversationsCommand, TaskBoardCatalogProject,
     TaskBoardCatalogSession, TaskBoardCatalogWarning, TaskBoardCatalogWarningCode,
-    TaskBoardConversation, TaskBoardCreateCommand, TaskBoardDetachConversationsCommand,
-    TaskBoardDocument, TaskBoardMoveCommand, TaskBoardMutationResult, TaskBoardProject,
-    TaskBoardSessionCatalog, TaskBoardStatus, TaskBoardTask,
+    TaskBoardConversation, TaskBoardCreateCommand, TaskBoardDeleteCommand,
+    TaskBoardDetachConversationsCommand, TaskBoardDocument, TaskBoardMoveCommand,
+    TaskBoardMutationResult, TaskBoardProject, TaskBoardSessionCatalog, TaskBoardStatus,
+    TaskBoardTask,
 };
 pub use store::{FileTaskBoardStore, TaskBoardStore, TaskBoardStoreError};
 pub(crate) use validation::is_temporary_session_id;

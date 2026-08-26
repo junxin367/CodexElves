@@ -25,7 +25,7 @@ codex-elves-data = { path = "../../../crates/codex-elves-data" }
 directories.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2", features = ["custom-protocol", "protocol-asset", "tray-icon"] }
+tauri = { version = "2", features = ["custom-protocol", "image-png", "protocol-asset", "tray-icon"] }
 tauri-plugin-dialog = "2"
 tokio.workspace = true
 uuid.workspace = true

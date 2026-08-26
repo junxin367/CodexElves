@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "60";
+  const codexDeleteStyleVersion = "66";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -82,7 +82,7 @@
   const codexPluginRequestIdMaxEntries = 256;
   const codexFailureHistoryMaxEntries = 64;
   const codexManagerReactDiscoveryCooldownMs = 15000;
-  const taskBoardRuntimeVersion = "39";
+  const taskBoardRuntimeVersion = "44";
   const taskBoardNativeOperationLeaseTtlMs = 2 * 60 * 1000;
   const taskBoardNativeCreateBusyMessage = "另一个窗口正在创建原生会话，请稍后重试";
   const taskBoardEntryAttribute = "data-codex-task-board-entry";
@@ -134,6 +134,7 @@
     snapshot: "/task-board/snapshot",
     catalog: "/task-board/session-catalog",
     createTask: "/task-board/task-create",
+    deleteTask: "/task-board/task-delete",
     attachConversations: "/task-board/task-conversations-attach",
     detachConversations: "/task-board/task-conversations-detach",
     moveTask: "/task-board/task-move",
@@ -1798,7 +1799,14 @@
       [${taskBoardRootAttribute}="true"][data-toolbar-layout="collapsed"] .codex-task-board-create span {
         display: none;
       }
-      .codex-task-board-search-control:focus-within,
+      .codex-task-board-search-control:focus-within {
+        outline: 1px solid #38bdf8;
+        outline-offset: 2px;
+      }
+      .codex-task-board-search:focus-visible {
+        outline: none;
+        box-shadow: none;
+      }
       .codex-task-board-dropdown-trigger:focus-visible,
       .codex-task-board-conversation:focus-visible {
         outline: 2px solid #38bdf8;
@@ -2002,7 +2010,9 @@
         box-shadow: 0 0 0 2px color-mix(in srgb, #63aee0 20%, transparent);
       }
       .codex-task-board-create-mode-row {
+        box-sizing: border-box;
         display: grid;
+        height: 32px;
         grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
         overflow: hidden;
         border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
@@ -2011,8 +2021,9 @@
       }
       .codex-task-board-create-mode {
         display: inline-flex;
+        height: 100%;
         min-width: 0;
-        min-height: 42px;
+        min-height: 0;
         align-items: center;
         justify-content: flex-start;
         gap: 8px;
@@ -2308,6 +2319,7 @@
         transition: background .15s ease, box-shadow .15s ease;
       }
       .codex-task-board-card {
+        position: relative;
         display: grid;
         box-sizing: border-box;
         min-width: 0;
@@ -2491,25 +2503,62 @@
       }
       .codex-task-board-card-move {
         flex: 0 0 auto;
-        width: 92px;
+        width: auto;
+        min-width: 0;
         min-height: 29px;
-        border: 1px solid var(--task-board-border);
-        border-radius: 7px;
-        background: color-mix(in srgb, var(--task-board-card-background) 82%, currentColor 4%);
-        color: inherit;
+        justify-content: flex-start;
+        gap: 0;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        color: var(--task-board-text-tertiary);
         font: 11px/1.3 system-ui, sans-serif;
-        padding: 0 8px 0 9px;
+        padding: 0 2px;
       }
-      .codex-task-board-card-move:hover {
-        background: var(--task-board-card-background-hover);
+      .codex-task-board-card-move .codex-task-board-dropdown-trigger-copy {
+        flex: 0 1 auto;
+      }
+      .codex-task-board-card-move:hover,
+      .codex-task-board-card-move[aria-expanded="true"] {
+        border-color: transparent;
+        background: transparent;
+        color: inherit;
       }
       .codex-task-board-project {
         min-width: 0;
         overflow: hidden;
         color: var(--task-board-text-tertiary);
         font-size: 10px;
+        padding-right: 22px;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      .codex-task-board-card-delete {
+        position: absolute;
+        top: 5px;
+        right: 5px;
+        z-index: 1;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: color-mix(in srgb, var(--task-board-text-tertiary) 72%, transparent);
+        cursor: pointer;
+        padding: 0;
+      }
+      .codex-task-board-card-delete:hover,
+      .codex-task-board-card-delete:focus-visible {
+        background: color-mix(in srgb, #ef4444 12%, transparent);
+        color: #ef6b6b;
+        outline: none;
+      }
+      .codex-task-board-card-delete:disabled {
+        cursor: wait;
+        opacity: .52;
       }
       .codex-task-board-card-title {
         display: -webkit-box;
@@ -2559,9 +2608,10 @@
         min-width: 0;
       }
       .codex-task-board-conversation-row {
+        position: relative;
         display: flex;
         align-items: center;
-        gap: 3px;
+        gap: 0;
         flex: 1 1 auto;
         width: 100%;
         min-width: 0;
@@ -2585,7 +2635,7 @@
         background: transparent;
         color: var(--task-board-text-tertiary);
         cursor: pointer;
-        font: 10px/1.3 system-ui, sans-serif;
+        font: 11px/1.3 system-ui, sans-serif;
         padding: 0 4px 0 0;
         text-align: left;
       }
@@ -2597,18 +2647,39 @@
         opacity: .52;
       }
       .codex-task-board-conversation-remove {
+        position: absolute;
+        z-index: 1;
+        top: 50%;
+        left: 4px;
         display: inline-flex;
         width: 24px;
         height: 24px;
         align-items: center;
         justify-content: center;
-        flex: 0 0 auto;
+        transform: translateY(-50%);
         border: 0;
         border-radius: 6px;
         background: transparent;
         color: color-mix(in srgb, var(--task-board-text-tertiary) 72%, transparent);
         cursor: pointer;
+        opacity: 0;
         padding: 0;
+        pointer-events: none;
+        transition: background-color .12s ease, color .12s ease, opacity .12s ease;
+      }
+      .codex-task-board-conversation-row:hover .codex-task-board-conversation-icon,
+      .codex-task-board-conversation-row:focus-within .codex-task-board-conversation-icon {
+        opacity: 0;
+      }
+      .codex-task-board-conversation-row:hover .codex-task-board-conversation-remove,
+      .codex-task-board-conversation-row:focus-within .codex-task-board-conversation-remove {
+        opacity: 1;
+        pointer-events: auto;
+      }
+      .codex-task-board-conversation-row:not(:hover):not(:focus-within)
+      .codex-task-board-conversation-remove {
+        opacity: 0;
+        pointer-events: none;
       }
       .codex-task-board-conversation-remove:hover,
       .codex-task-board-conversation-remove:focus-visible {
@@ -2618,16 +2689,23 @@
       }
       .codex-task-board-conversation-remove:disabled {
         cursor: wait;
+      }
+      .codex-task-board-conversation-row:hover
+      .codex-task-board-conversation-remove:disabled,
+      .codex-task-board-conversation-row:focus-within
+      .codex-task-board-conversation-remove:disabled {
         opacity: .52;
+        pointer-events: none;
       }
       .codex-task-board-conversation-icon {
         display: inline-flex;
         align-items: center;
         justify-content: center;
         flex: 0 0 auto;
-        width: 14px;
-        height: 14px;
+        width: 24px;
+        height: 24px;
         color: color-mix(in srgb, currentColor 64%, transparent);
+        transition: opacity .12s ease;
       }
       .codex-task-board-conversation-title {
         flex: 1 1 auto;
@@ -2659,30 +2737,31 @@
         border-radius: 999px;
         background: currentColor;
       }
-      .codex-task-board-conversation-state[data-conversation-status="running"] {
-        background: color-mix(in srgb, var(--task-board-accent) 12%, transparent);
+      .codex-task-board-conversation-state[data-conversation-status="running"],
+      .codex-task-board-conversation-state[data-conversation-status="unread"] {
+        width: 14px;
+        min-width: 14px;
+        justify-content: center;
+        gap: 0;
+        padding: 0;
+        background: transparent;
         color: var(--task-board-accent);
       }
       .codex-task-board-conversation-state[data-conversation-status="running"]
       .codex-task-board-conversation-status-indicator {
-        width: 8px;
-        height: 8px;
+        width: 10px;
+        height: 10px;
         border: 1.5px solid currentColor;
         border-right-color: transparent;
         background: transparent;
-        animation: codex-task-board-status-spin .8s linear infinite;
+        animation: codex-task-board-status-spin 1.1s linear infinite;
+        transform-origin: center;
+        will-change: transform;
       }
-      .codex-task-board-conversation-state[data-conversation-status="completed-unread"] {
-        background: color-mix(in srgb, var(--task-board-accent) 12%, transparent);
-        color: var(--task-board-accent);
-      }
-      .codex-task-board-conversation-state[data-conversation-status="completed-unread"]
+      .codex-task-board-conversation-state[data-conversation-status="unread"]
       .codex-task-board-conversation-status-indicator {
-        box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 18%, transparent);
-      }
-      .codex-task-board-conversation-state[data-conversation-status="completed"]
-      .codex-task-board-conversation-status-indicator {
-        background: #72a987;
+        width: 7px;
+        height: 7px;
       }
       .codex-task-board-conversation-state[data-conversation-status="checking"]
       .codex-task-board-conversation-status-indicator,
@@ -2769,7 +2848,10 @@
         .codex-task-board-conversation { transition: none !important; }
         .codex-task-board-card:hover { transform: none; }
         .codex-task-board-conversation-state[data-conversation-status="running"]
-        .codex-task-board-conversation-status-indicator { animation: none !important; }
+        .codex-task-board-conversation-status-indicator {
+          animation: none !important;
+          will-change: auto;
+        }
       }
     `;
     document.documentElement.appendChild(style);
@@ -8261,6 +8343,7 @@
     loading: false,
     pendingReadCount: 0,
     conversationStatuses: new Map(),
+    conversationReadSuppressions: new Set(),
     conversationStatusRequestId: 0,
     conversationStatusTimer: null,
     conversationStatusRefreshPromise: null,
@@ -9592,7 +9675,13 @@
     return dot;
   }
 
-  function taskBoardConfigureDropdownTrigger(trigger, label, ariaLabel, color = "") {
+  function taskBoardConfigureDropdownTrigger(
+    trigger,
+    label,
+    ariaLabel,
+    color = "",
+    showChevron = true,
+  ) {
     if (!trigger) return trigger;
     trigger.classList.add("codex-task-board-dropdown-trigger");
     trigger.setAttribute("aria-label", ariaLabel);
@@ -9603,7 +9692,8 @@
     const dot = taskBoardDropdownStatusDot(color);
     if (dot) copy.appendChild(dot);
     copy.appendChild(labelNode);
-    trigger.replaceChildren(copy, taskBoardDropdownChevron());
+    trigger.replaceChildren(copy);
+    if (showChevron) trigger.appendChild(taskBoardDropdownChevron());
     return trigger;
   }
 
@@ -10490,7 +10580,7 @@
         ? { id: "checking", label: "检查中" }
         : { id: "unknown", label: "状态未知" };
     }
-    if (unread) return { id: "completed-unread", label: "已完成 · 未读" };
+    if (unread) return { id: "unread", label: "未读" };
     return { id: "completed", label: "已完成" };
   }
 
@@ -10598,6 +10688,7 @@
     Array.from(taskBoardState.conversationStatuses.keys()).forEach((key) => {
       if (activeKeys.has(key)) return;
       taskBoardState.conversationStatuses.delete(key);
+      taskBoardState.conversationReadSuppressions.delete(key);
       statusesChanged = true;
     });
     if (!linked.size) {
@@ -10637,16 +10728,21 @@
     const unreadBySession = taskBoardNativeThreadUnreadIndex();
     refreshEntries.forEach(([key, conversation]) => {
       const current = taskBoardState.conversationStatuses.get(key);
+      const nativeUnread = taskBoardNativeThreadUnread(conversation?.sessionId, unreadBySession);
+      const readSuppressed = taskBoardState.conversationReadSuppressions.has(key);
+      if (readSuppressed && !nativeUnread) {
+        taskBoardState.conversationReadSuppressions.delete(key);
+      }
       const next = current
         ? {
           ...current,
-          unread: taskBoardNativeThreadUnread(conversation?.sessionId, unreadBySession),
+          unread: readSuppressed ? false : nativeUnread,
         }
         : {
           known: false,
           checking: true,
           isRunning: false,
-          unread: taskBoardNativeThreadUnread(conversation?.sessionId, unreadBySession),
+          unread: readSuppressed ? false : nativeUnread,
           checkedAtMs: 0,
         };
       statusesChanged = taskBoardSetConversationRuntimeStatus(key, next) || statusesChanged;
@@ -10749,8 +10845,36 @@
   }
 
   async function openTaskBoardConversation(conversation) {
-    const result = await taskBoardNativeAdapter.openSession(String(conversation?.sessionId || ""), conversation);
+    const key = taskBoardConversationStatusKey(conversation?.sessionId);
+    const previous = taskBoardState.conversationStatuses.get(key);
+    const wasUnread = previous?.unread === true;
+    if (wasUnread) {
+      taskBoardState.conversationReadSuppressions.add(key);
+      taskBoardSetConversationRuntimeStatus(key, { ...previous, unread: false });
+      renderTaskBoardCards();
+    }
+    const restoreUnread = () => {
+      if (!wasUnread) return;
+      taskBoardState.conversationReadSuppressions.delete(key);
+      const current = taskBoardState.conversationStatuses.get(key);
+      if (current) {
+        taskBoardSetConversationRuntimeStatus(key, { ...current, unread: true });
+        renderTaskBoardCards();
+      }
+    };
+    let result = null;
+    try {
+      result = await taskBoardNativeAdapter.openSession(
+        String(conversation?.sessionId || ""),
+        conversation,
+      );
+    } catch (error) {
+      restoreUnread();
+      showToast(String(error?.message || error || "无法打开关联会话"));
+      return;
+    }
     if (result?.status === "ok") return;
+    restoreUnread();
     showToast(result?.message || "无法打开关联会话");
   }
 
@@ -11131,11 +11255,27 @@
     }
   }
 
+  function taskBoardCreateSubmenuLeft(
+    menuLeft,
+    menuRight,
+    submenuWidth,
+    viewportWidth,
+  ) {
+    const edge = 8;
+    const gap = 6;
+    const rightLeft = menuRight + gap;
+    if (rightLeft + submenuWidth <= viewportWidth - edge) return rightLeft;
+    const viewportRight = Math.max(edge, viewportWidth - submenuWidth - edge);
+    return Math.max(
+      edge,
+      Math.min(viewportRight, menuLeft - gap - submenuWidth),
+    );
+  }
+
   function taskBoardPositionCreateSettingsSubmenu(
     submenu,
     menu,
     parentButton,
-    trigger,
   ) {
     const fallbackMenuLeft = Number.parseFloat(menu?.style?.left || "") || 8;
     const fallbackMenuTop = Number.parseFloat(menu?.style?.top || "") || 8;
@@ -11147,7 +11287,7 @@
     };
     const parentRect = parentButton?.getBoundingClientRect?.() || {
       left: Number(menuRect.left || 8),
-      top: 8,
+      top: Number(menuRect.top || 8) + 5,
     };
     const submenuRect = submenu.getBoundingClientRect?.() || {
       width: 220,
@@ -11157,32 +11297,20 @@
     const viewportHeight = Number(window.innerHeight || 768);
     const width = Number(submenuRect.width || 220);
     const height = Number(submenuRect.height || 0);
-    const gap = 6;
-    const triggerRect = trigger?.getBoundingClientRect?.() || {
-      top: Number(menuRect.bottom || 85) + gap,
-    };
-    const opensAbove = Number(menuRect.bottom || 85) <= Number(triggerRect.top || 91);
-    const spaceAbove = Math.max(0, Number(menuRect.top || 8) - gap - 8);
-    const spaceBelow = Math.max(
-      0,
-      viewportHeight - Number(menuRect.bottom || 85) - gap - 8,
+    const top = Math.max(
+      8,
+      Math.min(
+        viewportHeight - height - 8,
+        Number(parentRect.top || menuRect.top || 8) - 5,
+      ),
     );
-    const placeAbove = opensAbove
-      ? spaceAbove >= height || spaceAbove >= spaceBelow
-      : spaceBelow < height && spaceAbove > spaceBelow;
-    const preferredTop = placeAbove
-      ? Number(menuRect.top || 8) - gap - height
-      : Number(menuRect.bottom || 85) + gap;
-    const top = Math.min(
-      viewportHeight - height - 8,
-      Math.max(8, preferredTop),
-    );
-    submenu.style.left = `${taskBoardDropdownLeft(
-      Number(parentRect.left || menuRect.left || 8),
+    submenu.style.left = `${taskBoardCreateSubmenuLeft(
+      Number(menuRect.left || 8),
+      Number(menuRect.right || Number(menuRect.left || 8) + 220),
       width,
       viewportWidth,
     )}px`;
-    submenu.style.top = `${Math.max(8, top)}px`;
+    submenu.style.top = `${top}px`;
   }
 
   function taskBoardOpenCreateSettingsSubmenu(state, kind, { focus = true } = {}) {
@@ -11263,7 +11391,6 @@
       submenu,
       state.element,
       parentButton,
-      state.trigger,
     );
     if (focus) {
       requestAnimationFrame(() => {
@@ -12173,6 +12300,13 @@
     };
   }
 
+  function taskBoardDeletePayload(taskId, expectedRevision) {
+    return {
+      taskId,
+      expectedRevision,
+    };
+  }
+
   async function taskBoardApplyInitialStatus(taskId, initialStatus) {
     const targetStatus = taskBoardStatusId(initialStatus);
     if (targetStatus === "new") return { status: "ok" };
@@ -12806,17 +12940,21 @@
     const normalized = status && typeof status === "object"
       ? status
       : { id: "unknown", label: "状态未知" };
+    if (normalized.id === "completed") return null;
     const node = taskBoardElement(
       "span",
       "codex-task-board-conversation-state",
     );
     node.setAttribute("data-conversation-status", String(normalized.id || "unknown"));
+    node.setAttribute("aria-hidden", "true");
     const indicator = taskBoardElement(
       "span",
       "codex-task-board-conversation-status-indicator",
     );
-    indicator.setAttribute("aria-hidden", "true");
-    node.append(indicator, document.createTextNode(String(normalized.label || "状态未知")));
+    node.appendChild(indicator);
+    if (normalized.id !== "running" && normalized.id !== "unread") {
+      node.appendChild(document.createTextNode(String(normalized.label || "状态未知")));
+    }
     return node;
   }
 
@@ -12826,12 +12964,14 @@
     { showState = true, projection = null } = {},
   ) {
     const resolvedProjection = projection || taskBoardConversationProjection(conversation);
+    const status = resolvedProjection.status || { id: "unknown", label: "状态未知" };
+    const showStatus = status.id !== "completed";
     const button = taskBoardElement("button", className);
     button.type = "button";
     button.disabled = !resolvedProjection.available;
     button.setAttribute(
       "aria-label",
-      `${resolvedProjection.title}，${resolvedProjection.status?.label || "状态未知"}，${resolvedProjection.label}`,
+      `${resolvedProjection.title}${showStatus ? `，${status.label}` : ""}，${resolvedProjection.label}`,
     );
     const title = taskBoardElement(
       "span",
@@ -12839,9 +12979,10 @@
       resolvedProjection.title,
     );
     button.append(taskBoardConversationIcon(), title);
-    if (showState || !resolvedProjection.available) button.appendChild(
-      taskBoardConversationStatusNode(resolvedProjection.status),
-    );
+    if (showState || !resolvedProjection.available) {
+      const statusNode = taskBoardConversationStatusNode(status);
+      if (statusNode) button.appendChild(statusNode);
+    }
     if (resolvedProjection.available) {
       button.addEventListener("click", () => void openTaskBoardConversation(conversation));
     }
@@ -12927,7 +13068,9 @@
     dialog.overlay.setAttribute("aria-busy", String(!!busy));
     dialog.cancelButton.disabled = !!busy;
     dialog.confirmButton.disabled = !!busy;
-    dialog.confirmButton.textContent = busy ? "正在移除…" : "移除";
+    dialog.confirmButton.textContent = busy
+      ? String(dialog.busyText || "正在处理…")
+      : String(dialog.confirmText || "确认");
   }
 
   function taskBoardSetDetachDialogFeedback(dialog, message = "") {
@@ -13063,6 +13206,89 @@
     }
   }
 
+  function taskBoardDeleteFailureMessage(result) {
+    const code = String(result?.code || "").trim();
+    if (code === "invalid_input") return "任务信息无效，请刷新任务看板后重试";
+    if (code === "task_not_found") return "任务不存在或已被删除";
+    if (code === "revision_conflict") return "任务已被其他更改更新，请确认后重试";
+    if (code === "bridge_unavailable") return "任务看板桥接暂不可用，请稍后重试";
+    if (code === "task_board_busy") return "任务看板正忙，请稍后重试";
+    if (code === "task_file_invalid") return "任务文件无效，请检查后重试";
+    if (code === "task_board_unavailable") return "任务看板暂不可用，请稍后重试";
+    return taskBoardMessageFromResult(result, "删除任务失败，请稍后重试");
+  }
+
+  function taskBoardRestoreAfterDelete() {
+    requestAnimationFrame(() => {
+      (
+        taskBoardState.root?.querySelector?.(".codex-task-board-card-delete") ||
+        taskBoardState.root?.querySelector?.(".codex-task-board-create") ||
+        taskBoardState.root?.querySelector?.(".codex-task-board-scroll")
+      )?.focus?.();
+    });
+  }
+
+  async function taskBoardDeleteTask(dialog) {
+    if (!dialog || taskBoardState.detachBusy) return { status: "blocked" };
+    const requestId = ++taskBoardState.detachRequestId;
+    taskBoardSetDetachDialogFeedback(dialog, "");
+    taskBoardSetDetachDialogBusy(dialog, true);
+    let expectedRevision = taskBoardState.snapshot.revision;
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let result;
+        try {
+          result = await taskBoardMockOrBridgeResult(
+            "deleteTask",
+            taskBoardDeletePayload(dialog.taskId, expectedRevision),
+          );
+        } catch (error) {
+          result = {
+            status: "failed",
+            code: "bridge_unavailable",
+            message: taskBoardMessageFromResult(error, ""),
+          };
+        }
+        if (!taskBoardDetachRequestIsCurrent(dialog, requestId)) {
+          return { status: "stale" };
+        }
+        const snapshot = taskBoardSnapshotResult(result);
+        const taskStillExists = snapshot?.tasks?.some(
+          (task) => String(task?.id || "") === dialog.taskId,
+        ) ?? true;
+        if ((result?.status === "ok" && snapshot) || (snapshot && !taskStillExists)) {
+          taskBoardState.snapshot = snapshot;
+          taskBoardState.snapshotError = "";
+          closeTaskBoardDetachDialog({ restoreFocus: false });
+          renderTaskBoard();
+          void refreshTaskBoardConversationStatuses();
+          showToast("任务已从看板删除");
+          taskBoardRestoreAfterDelete();
+          return { status: "ok" };
+        }
+        if (result?.status === "conflict" || result?.code === "revision_conflict") {
+          const conflictSnapshot = taskBoardConflictSnapshotResult(result);
+          if (conflictSnapshot) {
+            taskBoardState.snapshot = conflictSnapshot;
+            taskBoardState.snapshotError = "";
+            renderTaskBoard();
+          }
+          if (attempt === 0 && conflictSnapshot) {
+            expectedRevision = conflictSnapshot.revision;
+            continue;
+          }
+        }
+        taskBoardSetDetachDialogFeedback(dialog, taskBoardDeleteFailureMessage(result));
+        return { status: "failed" };
+      }
+      return { status: "failed" };
+    } finally {
+      if (taskBoardDetachRequestIsCurrent(dialog, requestId)) {
+        taskBoardSetDetachDialogBusy(dialog, false);
+      }
+    }
+  }
+
   function openTaskBoardDetachDialog(task, conversation, trigger) {
     closeTaskBoardDetachDialog({ restoreFocus: false });
     const taskId = String(task?.id || "");
@@ -13113,6 +13339,7 @@
     content.append(title, message, feedback, actions);
     overlay.appendChild(content);
     const dialog = {
+      kind: "detach-conversation",
       overlay,
       content,
       cancelButton,
@@ -13122,6 +13349,8 @@
       message,
       taskId,
       sessionId,
+      confirmText: "移除",
+      busyText: "正在移除…",
     };
     taskBoardState.detachDialog = dialog;
     taskBoardState.detachDialogPreviousFocus = trigger || document.activeElement;
@@ -13142,6 +13371,93 @@
         event.preventDefault?.();
         event.stopPropagation?.();
         void taskBoardDetachConversation(dialog);
+      }
+    }, true);
+    window.addEventListener("keydown", taskBoardState.detachDialogKeydownHandler, true);
+    window.addEventListener("keyup", taskBoardState.detachDialogKeydownHandler, true);
+    document.body.appendChild(overlay);
+    requestAnimationFrame(() => cancelButton.focus?.());
+    return dialog;
+  }
+
+  function openTaskBoardDeleteDialog(task, trigger) {
+    closeTaskBoardDetachDialog({ restoreFocus: false });
+    const taskId = String(task?.id || "").trim();
+    if (!taskId) {
+      showToast("缺少任务标识，无法删除任务");
+      return null;
+    }
+    const taskLabel = taskBoardDetachDialogLabel(
+      task?.title || "未命名任务",
+      60,
+    );
+    const overlay = taskBoardElement("div", "codex-delete-confirm-overlay");
+    const content = taskBoardElement("div", "codex-delete-confirm-content");
+    const titleId = "codex-task-board-delete-task-title";
+    const messageId = "codex-task-board-delete-task-message";
+    content.setAttribute("role", "dialog");
+    content.setAttribute("aria-modal", "true");
+    content.setAttribute("aria-labelledby", titleId);
+    content.setAttribute("aria-describedby", messageId);
+    const title = taskBoardElement(
+      "div",
+      "codex-delete-confirm-title",
+      "删除任务？",
+    );
+    title.id = titleId;
+    const message = taskBoardElement(
+      "div",
+      "codex-delete-confirm-message",
+      `将从任务看板删除“${taskLabel}”及其所有关联。不会删除 Codex 中的原始会话。`,
+    );
+    message.id = messageId;
+    const feedback = taskBoardElement("div", "codex-task-board-detach-feedback");
+    feedback.setAttribute("role", "alert");
+    feedback.setAttribute("aria-live", "polite");
+    const actions = taskBoardElement("div", "codex-delete-confirm-actions");
+    const cancelButton = taskBoardElement("button", "", "取消");
+    cancelButton.type = "button";
+    cancelButton.setAttribute("data-codex-task-board-delete-cancel", "true");
+    const confirmButton = taskBoardElement("button", "", "删除任务");
+    confirmButton.type = "button";
+    confirmButton.setAttribute("data-codex-delete-confirm", "true");
+    confirmButton.setAttribute("data-codex-task-board-delete-confirm", "true");
+    actions.append(cancelButton, confirmButton);
+    content.append(title, message, feedback, actions);
+    overlay.appendChild(content);
+    const dialog = {
+      kind: "delete-task",
+      overlay,
+      content,
+      cancelButton,
+      confirmButton,
+      feedback,
+      title,
+      message,
+      taskId,
+      sessionId: "",
+      confirmText: "删除任务",
+      busyText: "正在删除…",
+    };
+    taskBoardState.detachDialog = dialog;
+    taskBoardState.detachDialogPreviousFocus = trigger || document.activeElement;
+    taskBoardState.detachDialogKeydownHandler = taskBoardDetachDialogKeydown;
+    overlay.addEventListener("click", (event) => {
+      const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+      if (
+        !taskBoardState.detachBusy &&
+        (event.target === overlay ||
+          target?.closest?.("[data-codex-task-board-delete-cancel]"))
+      ) {
+        event.preventDefault?.();
+        event.stopPropagation?.();
+        closeTaskBoardDetachDialog();
+        return;
+      }
+      if (target?.closest?.("[data-codex-task-board-delete-confirm]")) {
+        event.preventDefault?.();
+        event.stopPropagation?.();
+        void taskBoardDeleteTask(dialog);
       }
     }, true);
     window.addEventListener("keydown", taskBoardState.detachDialogKeydownHandler, true);
@@ -13671,7 +13987,37 @@
           event.dataTransfer?.setData?.("text/plain", taskBoardState.dragTaskId);
         });
         card.addEventListener("dragend", () => clearTaskBoardDragVisuals());
-        card.appendChild(taskBoardElement("div", "codex-task-board-project", String(task?.project?.label || displayProjectName(task?.project?.cwd || ""))));
+        const project = taskBoardElement(
+          "div",
+          "codex-task-board-project",
+          String(task?.project?.label || displayProjectName(task?.project?.cwd || "")),
+        );
+        const deleteButton = taskBoardElement(
+          "button",
+          "codex-task-board-card-delete",
+        );
+        deleteButton.type = "button";
+        deleteButton.draggable = false;
+        deleteButton.disabled = taskBoardState.detachBusy || taskBoardState.moveBusy;
+        deleteButton.title = "删除任务";
+        deleteButton.setAttribute(
+          "aria-label",
+          `删除任务 ${String(task?.title || "未命名任务")}`,
+        );
+        deleteButton.appendChild(taskBoardConversationRemoveIcon());
+        deleteButton.addEventListener("pointerdown", (event) => {
+          event.stopPropagation?.();
+        });
+        deleteButton.addEventListener("dragstart", (event) => {
+          event.preventDefault?.();
+          event.stopPropagation?.();
+        });
+        deleteButton.addEventListener("click", (event) => {
+          event.preventDefault?.();
+          event.stopPropagation?.();
+          openTaskBoardDeleteDialog(task, deleteButton);
+        });
+        card.append(deleteButton, project);
         card.appendChild(taskBoardElement("div", "codex-task-board-card-title", String(task?.title || "未命名任务")));
         const moveButton = taskBoardElement("button", "codex-task-board-card-move");
         moveButton.type = "button";
@@ -13680,6 +14026,7 @@
           status.label,
           `移动任务 ${String(task?.title || "未命名任务")} 的状态`,
           status.color,
+          false,
         );
         moveButton.disabled = taskBoardState.moveBusy;
         moveButton.addEventListener("click", () => openTaskBoardStatusMenu(moveButton, String(task?.id || "")));
@@ -13948,6 +14295,7 @@
     taskBoardState.loading = false;
     taskBoardState.pendingReadCount = 0;
     taskBoardState.conversationStatuses = new Map();
+    taskBoardState.conversationReadSuppressions = new Set();
   }
 
   function resetTaskBoardCreateStateForTests(options = {}) {
@@ -13967,6 +14315,7 @@
     taskBoardState.loading = false;
     taskBoardState.pendingReadCount = 0;
     taskBoardState.conversationStatuses = new Map();
+    taskBoardState.conversationReadSuppressions = new Set();
     taskBoardState.nativeCreateRecoveryAttempted = false;
   }
 
@@ -13983,6 +14332,7 @@
     taskBoardState.catalogError = "";
     taskBoardState.moveFeedback = "";
     taskBoardState.conversationStatuses = new Map();
+    taskBoardState.conversationReadSuppressions = new Set();
   }
 
   if (window.__CODEX_ELVES_TEST_TASK_BOARD__ === true) {
@@ -14013,6 +14363,16 @@
       conversationProjection: (conversation, catalog) =>
         taskBoardConversationProjectionForCatalog(conversation, catalog),
       conversationStatusForTest: taskBoardConversationStatus,
+      conversationStatusNodeForTest: taskBoardConversationStatusNode,
+      setConversationRuntimeStatusForTest: (sessionId, status) => {
+        const key = taskBoardConversationStatusKey(sessionId);
+        if (!key) return false;
+        return taskBoardSetConversationRuntimeStatus(key, status);
+      },
+      conversationRuntimeStatusForTest: (sessionId) =>
+        taskBoardState.conversationStatuses.get(
+          taskBoardConversationStatusKey(sessionId),
+        ) || null,
       refreshConversationStatusesForTest: (options = {}) =>
         refreshTaskBoardConversationStatuses({ schedule: false, ...options }),
       taskMatchesQuery: (task, catalog, query) => taskBoardTaskMatchesQuery(task, query, catalog),
@@ -14041,6 +14401,23 @@
       }),
       submitDetachForTest: () => taskBoardDetachConversation(taskBoardState.detachDialog),
       closeDetachForTest: () => closeTaskBoardDetachDialog(),
+      openDeleteDialogForTest: (task, trigger = null) =>
+        openTaskBoardDeleteDialog(task, trigger),
+      deleteDialogStateForTest: () => ({
+        open: taskBoardState.detachDialog?.kind === "delete-task",
+        busy: taskBoardState.detachBusy,
+        feedback: taskBoardState.detachDialog?.feedback?.textContent || "",
+      }),
+      deleteDialogContractForTest: () => ({
+        role: taskBoardState.detachDialog?.content?.getAttribute?.("role") || "",
+        ariaModal:
+          taskBoardState.detachDialog?.content?.getAttribute?.("aria-modal") === "true",
+        title: taskBoardState.detachDialog?.title?.textContent || "",
+        message: taskBoardState.detachDialog?.message?.textContent || "",
+        initialFocus:
+          document.activeElement === taskBoardState.detachDialog?.cancelButton,
+      }),
+      submitDeleteForTest: () => taskBoardDeleteTask(taskBoardState.detachDialog),
       refreshRuntimeForTest: refreshTaskBoardRuntime,
       reconcileRuntimeForTest: reconcileTaskBoardRuntime,
       activeForTest: () => taskBoardState.active,

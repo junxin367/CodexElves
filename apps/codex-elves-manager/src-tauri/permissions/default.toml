@@ -78,6 +78,7 @@ commands.allow = [
   "test_relay_profile",
   "task_board_attach_conversations",
   "task_board_create_task",
+  "task_board_delete_task",
   "task_board_detach_conversations",
   "task_board_load_catalog",
   "task_board_load_conversation_statuses",

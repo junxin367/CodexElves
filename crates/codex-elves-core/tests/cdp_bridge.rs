@@ -306,7 +306,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "60";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "66";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -382,6 +382,36 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
     assert!(!script.contains(r#"taskBoardElement("p", "codex-task-board-state")"#));
     assert!(!script.contains(r#"root.querySelector(".codex-task-board-state")"#));
 
+    let search_focus_styles = script
+        .split(".codex-task-board-search-control:focus-within {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("inline task-board search focus styles should be present");
+    assert!(search_focus_styles.contains("outline: 1px solid #38bdf8"));
+    assert!(!search_focus_styles.contains("outline: 2px"));
+    let search_input_focus_styles = script
+        .split(".codex-task-board-search:focus-visible {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("inline task-board search input focus reset should be present");
+    assert!(search_input_focus_styles.contains("outline: none"));
+    assert!(search_input_focus_styles.contains("box-shadow: none"));
+
+    let create_mode_row_styles = script
+        .split(".codex-task-board-create-mode-row {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("inline create-mode group styles should be present");
+    assert!(create_mode_row_styles.contains("box-sizing: border-box"));
+    assert!(create_mode_row_styles.contains("height: 32px"));
+    let create_mode_button_styles = script
+        .split(".codex-task-board-create-mode {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("inline create-mode button styles should be present");
+    assert!(create_mode_button_styles.contains("height: 100%"));
+    assert!(create_mode_button_styles.contains("min-height: 0"));
+
     let sidebar_relevance = script
         .split("if (domain === \"sidebar\")")
         .nth(1)
@@ -454,8 +484,19 @@ fn renderer_task_board_navigation_opens_inline_and_offers_new_window_on_context_
         .and_then(|section| section.split("function reconcileTaskBoardEntry()").next())
         .expect("standalone task board opener should be present");
 
-    assert!(script.contains(r#"const taskBoardRuntimeVersion = "39";"#));
+    assert!(script.contains(r#"const taskBoardRuntimeVersion = "44";"#));
     assert!(script.contains("codex-task-board-entry-context-menu"));
+    assert!(script.contains("showChevron = true"));
+    assert!(script.contains("status.color,\n          false,\n        );"));
+    let card_move_styles = script
+        .split(".codex-task-board-card-move {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("inline task-card status trigger styles should be present");
+    assert!(card_move_styles.contains("width: auto"));
+    assert!(card_move_styles.contains("border: 0"));
+    assert!(card_move_styles.contains("background: transparent"));
+    assert!(card_move_styles.contains("padding: 0 2px"));
     assert!(script.contains("function openTaskBoardEntryContextMenu(entry, event)"));
     assert!(script.contains(r#"menu.setAttribute("role", "menu")"#));
     assert!(script.contains(r#"openWindow.setAttribute("role", "menuitem")"#));
@@ -489,19 +530,55 @@ fn renderer_task_board_preserves_debug_spike_column_and_card_surface_hierarchy()
                 .next()
         })
         .expect("task board conversation styles should be present");
+    let conversation_row_styles = script
+        .split(".codex-task-board-conversation-row {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("task board conversation row styles should be present");
+    let conversation_remove_styles = script
+        .split(".codex-task-board-conversation-remove {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("task board conversation remove styles should be present");
+    let conversation_icon_styles = script
+        .split("\n      .codex-task-board-conversation-icon {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("task board conversation icon styles should be present");
 
     assert!(board_styles.contains("border-radius: 10px"));
     assert!(board_styles.contains(
         "background: color-mix(in srgb, var(--task-board-panel-background) 78%, transparent);"
     ));
-    assert!(board_styles.contains(".codex-task-board-card {\n        display: grid;"));
+    assert!(
+        board_styles.contains(
+            ".codex-task-board-card {\n        position: relative;\n        display: grid;"
+        )
+    );
     assert!(board_styles.contains("gap: 10px;"));
     assert!(board_styles.contains("border-radius: 9px"));
     assert!(board_styles.contains("background: var(--task-board-card-background);"));
     assert!(board_styles.contains(".codex-task-board-card:hover {"));
     assert!(script.contains(".codex-task-board-conversations {\n        display: grid;"));
+    assert!(conversation_row_styles.contains("position: relative"));
+    assert!(conversation_row_styles.contains("gap: 0"));
     assert!(conversation_styles.contains("min-height: 24px;"));
+    assert!(conversation_styles.contains("font: 11px/1.3 system-ui, sans-serif"));
     assert!(conversation_styles.contains("padding: 0 4px 0 0;"));
+    assert!(conversation_remove_styles.contains("position: absolute"));
+    assert!(conversation_remove_styles.contains("left: 4px"));
+    assert!(conversation_remove_styles.contains("opacity: 0"));
+    assert!(conversation_remove_styles.contains("pointer-events: none"));
+    assert!(conversation_icon_styles.contains("width: 24px"));
+    assert!(conversation_icon_styles.contains("height: 24px"));
+    assert!(
+        script.contains(
+            ".codex-task-board-conversation-row:hover .codex-task-board-conversation-icon,"
+        )
+    );
+    assert!(script.contains(
+        ".codex-task-board-conversation-row:focus-within .codex-task-board-conversation-remove"
+    ));
 }
 
 #[test]
@@ -510,16 +587,29 @@ fn renderer_task_board_exposes_conversation_statuses_and_card_level_attach_flow(
 
     assert!(script.contains("\"/task-board/task-conversations-attach\""));
     assert!(script.contains("\"/task-board/task-conversations-detach\""));
+    assert!(script.contains("\"/task-board/task-delete\""));
     assert!(script.contains("\"/thread-usage-summary\""));
     assert!(script.contains("function taskBoardConversationStatus("));
     assert!(script.contains("function refreshTaskBoardConversationStatuses("));
-    assert!(script.contains("已完成 · 未读"));
+    assert!(script.contains(r#"return { id: "unread", label: "未读" }"#));
+    assert!(!script.contains("已完成 · 未读"));
+    assert!(script.contains(r#"if (normalized.id === "completed") return null;"#));
+    assert!(script.contains(r#"if (normalized.id !== "running" && normalized.id !== "unread")"#));
+    assert!(script.contains("animation: codex-task-board-status-spin 1.1s linear infinite"));
     assert!(script.contains("data-conversation-status"));
     assert!(script.contains("codex-task-board-conversation-status-indicator"));
     assert!(script.contains("codex-task-board-card-add"));
     assert!(script.contains("codex-task-board-conversation-remove"));
+    assert!(script.contains("codex-task-board-card-delete"));
+    assert!(script.contains("deleteButton.appendChild(taskBoardConversationRemoveIcon())"));
+    assert!(!script.contains("function taskBoardTaskDeleteIcon("));
+    assert!(script.contains(".codex-task-board-card {\n        position: relative;"));
+    assert!(script.contains(".codex-task-board-card-delete {\n        position: absolute;"));
+    assert!(script.contains("top: 5px;\n        right: 5px;"));
     assert!(script.contains("function openTaskBoardAttachModal("));
     assert!(script.contains("function openTaskBoardDetachDialog("));
+    assert!(script.contains("function openTaskBoardDeleteDialog("));
+    assert!(script.contains("function taskBoardDeleteTask("));
     assert!(script.contains("不会删除 Codex 中的原始会话"));
     assert!(script.contains("创建并添加"));
 }
@@ -622,13 +712,30 @@ fn renderer_task_board_dynamic_contracts_apply_latest_catalog_and_independent_re
             .unwrap()
     );
     assert_eq!(cases["conversationStatuses"]["running"], "running");
-    assert_eq!(
-        cases["conversationStatuses"]["completedUnread"],
-        "completed-unread"
-    );
+    assert_eq!(cases["conversationStatuses"]["unread"], "unread");
     assert_eq!(cases["conversationStatuses"]["completed"], "completed");
     assert_eq!(cases["conversationStatuses"]["unknown"], "unknown");
     assert_eq!(cases["conversationStatuses"]["unavailable"], "unavailable");
+    assert!(
+        cases["conversationStatuses"]["runningIconOnly"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["conversationStatuses"]["unreadIconOnly"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["conversationStatuses"]["completedHidden"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["conversationStatuses"]["clickClearsUnread"]
+            .as_bool()
+            .unwrap()
+    );
     assert!(
         cases["conversationStatuses"]["usageRouteAndProjection"]
             .as_bool()
@@ -700,7 +807,11 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
         r#"const taskBoardDefaultReasoningEffortIds = ["low", "medium", "high", "xhigh", "max"];"#
     ));
     assert!(script.contains(r#"placement: "top""#));
-    assert!(script.contains("const opensAbove ="));
+    assert!(script.contains("function taskBoardCreateSubmenuLeft("));
+    assert!(script.contains("const rightLeft = menuRight + gap;"));
+    assert!(script.contains("if (rightLeft + submenuWidth <= viewportWidth - edge)"));
+    assert!(script.contains("menuLeft - gap - submenuWidth"));
+    assert!(script.contains("Number(parentRect.top || menuRect.top || 8) - 5"));
     assert!(script.contains("menuitemradio"));
     assert!(!script.contains("taskBoardConfigureDropdownTrigger(model"));
     assert!(script.contains("新会话模型"));
@@ -825,8 +936,15 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
         cases["dropdowns"]
     );
     assert!(
-        cases["dropdowns"]["allMenusLeftAligned"].as_bool().unwrap(),
-        "all dropdown alignment state: {}",
+        cases["dropdowns"]["submenusPreferRight"].as_bool().unwrap(),
+        "right-first submenu alignment state: {}",
+        cases["dropdowns"]
+    );
+    assert!(
+        cases["dropdowns"]["submenusFallbackLeft"]
+            .as_bool()
+            .unwrap(),
+        "left-fallback submenu alignment state: {}",
         cases["dropdowns"]
     );
     assert!(
@@ -925,6 +1043,24 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
         cases["detach"]["revisionConflictRetriesOnce"]
             .as_bool()
             .unwrap()
+    );
+    assert!(cases["deleteTask"]["confirmation"].as_bool().unwrap());
+    assert!(
+        cases["deleteTask"]["cancelledWithoutRequest"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(
+        cases["deleteTask"]["exactPayloadAndSnapshot"]
+            .as_bool()
+            .unwrap(),
+        "delete task cases: {cases}"
+    );
+    assert!(
+        cases["deleteTask"]["revisionConflictRetriesOnce"]
+            .as_bool()
+            .unwrap(),
+        "delete task conflict cases: {cases}"
     );
     assert!(cases["initialStatus"]["createThenMove"].as_bool().unwrap());
     assert!(
@@ -3522,7 +3658,7 @@ async function tick() {
       isRunning: true,
       unread: true,
     }).id,
-    completedUnread: api.conversationStatusForTest({
+    unread: api.conversationStatusForTest({
       available: true,
       usageKnown: true,
       unread: true,
@@ -3538,6 +3674,25 @@ async function tick() {
     }).id,
     unavailable: api.conversationStatusForTest({ available: false }).id,
   };
+  const runningStatusNode = api.conversationStatusNodeForTest({
+    id: "running",
+    label: "运行中",
+  });
+  const unreadStatusNode = api.conversationStatusNodeForTest({
+    id: "unread",
+    label: "未读",
+  });
+  conversationStatuses.runningIconOnly =
+    runningStatusNode?.textContent === "" &&
+    runningStatusNode?.children?.length === 1;
+  conversationStatuses.unreadIconOnly =
+    unreadStatusNode?.textContent === "" &&
+    unreadStatusNode?.children?.length === 1;
+  conversationStatuses.completedHidden =
+    api.conversationStatusNodeForTest({
+      id: "completed",
+      label: "已完成",
+    }) === null;
   const usageRequests = [];
   api.resetCreateStateForTest({
     snapshot: {
@@ -3568,6 +3723,28 @@ async function tick() {
     usageRequests[0]?.route === "/thread-usage-summary" &&
     usageRequests[0]?.payload?.session_id === "session-1" &&
     runningProjection.status?.id === "running";
+  api.setConversationRuntimeStatusForTest("session-1", {
+    known: true,
+    checking: false,
+    isRunning: false,
+    unread: true,
+    checkedAtMs: Date.now(),
+  });
+  const originalNativeAdapter = window.__codexElvesTaskBoardNativeAdapter;
+  window.__codexElvesTaskBoardNativeAdapter = {
+    ...originalNativeAdapter,
+    openSession() {
+      return Promise.resolve({ status: "ok" });
+    },
+  };
+  await api.openConversationForTest(linkedConversation);
+  conversationStatuses.clickClearsUnread =
+    api.conversationRuntimeStatusForTest("session-1")?.unread === false;
+  if (originalNativeAdapter === undefined) {
+    delete window.__codexElvesTaskBoardNativeAdapter;
+  } else {
+    window.__codexElvesTaskBoardNativeAdapter = originalNativeAdapter;
+  }
   const boundedConversations = Array.from({ length: 6 }, (_, index) => ({
     sessionId: `bounded-${index}`,
     title: `并发会话 ${index}`,
@@ -4033,13 +4210,16 @@ function settle() { return new Promise((resolve) => setTimeout(resolve, 0)); }
   }
   const conversationRow = dragCard.querySelector(".codex-task-board-conversations");
   const cardFooter = dragCard.querySelector(".codex-task-board-card-footer");
+  const projectFilter = mainSurface.querySelector(".codex-task-board-project-filter");
   const cardStructureMatchesDebug =
     conversationRow?.parentElement === dragCard &&
     cardFooter?.parentElement === dragCard &&
     dragCard.children.indexOf(conversationRow) < dragCard.children.indexOf(cardFooter) &&
     cardFooter.children.length === 2 &&
     cardFooter.children[0]?.classList.contains("codex-task-board-card-add") &&
-    cardFooter.children[1]?.classList.contains("codex-task-board-card-move");
+    cardFooter.children[1]?.classList.contains("codex-task-board-card-move") &&
+    !cardFooter.children[1]?.querySelector?.(".codex-task-board-dropdown-chevron") &&
+    !!projectFilter?.querySelector?.(".codex-task-board-dropdown-chevron");
   dragCard.dispatchEvent(event("dragstart", dragCard));
   planningList.dispatchEvent(event("dragover", planningList));
   const activeBeforeDrop = planningList.getAttribute("data-drop-active") === "true";
@@ -5224,7 +5404,7 @@ function recoveryKey() { return "codexElvesTaskBoardNativeCreateRecoveryV1"; }
     v3LeaseCapability:
       host?.version === 3 &&
       capabilities?.nativeCreateLease === true &&
-      capabilities?.nativeCreateRuntime === 39,
+      capabilities?.nativeCreateRuntime === Number(api.runtimeVersion()),
     stableCapabilities:
       host?.capabilities === capabilities &&
       Object.isFrozen(capabilities),
@@ -6362,6 +6542,18 @@ function createState() {
     afterSubmenuEscape.focusedIndex === 1 &&
     !afterSettingsEscape.open &&
     document.activeElement === dropdownContract.modelTrigger;
+  dropdownContract.modelTrigger.getBoundingClientRect = () => ({
+    left: 840,
+    right: 920,
+    top: 500,
+    bottom: 530,
+    width: 80,
+    height: 30,
+  });
+  api.openCreateModelMenuForTest();
+  const leftFallbackModelMenuOpen = api.dropdownMenuStateForTest();
+  api.dispatchDropdownMenuKeyForTest("Escape");
+  api.dispatchDropdownMenuKeyForTest("Escape");
   const dropdowns = {
     projectEscapeReturnsFocus,
     projectExpandedAfterEscape,
@@ -6384,15 +6576,13 @@ function createState() {
       projectDropdownOpen.left === "260px" &&
       statusDropdownOpen.left === "420px" &&
       settingsMenuOpen.left === "500px",
-    allMenusLeftAligned:
-      boardProjectDropdownOpen.left === "40px" &&
-      cardStatusDropdownOpen.left === "700px" &&
-      projectDropdownOpen.left === "260px" &&
-      statusDropdownOpen.left === "420px" &&
-      settingsMenuOpen.left === "500px" &&
-      fullEffortMenuOpen.submenuLeft === "500px" &&
-      modelMenuOpen.submenuLeft === "500px" &&
-      effortMenuOpen.submenuLeft === "500px",
+    submenusPreferRight:
+      fullEffortMenuOpen.submenuLeft === "726px" &&
+      modelMenuOpen.submenuLeft === "726px" &&
+      effortMenuOpen.submenuLeft === "726px",
+    submenusFallbackLeft:
+      leftFallbackModelMenuOpen.left === "796px" &&
+      leftFallbackModelMenuOpen.submenuLeft === "570px",
     projectMenusConsistent:
       boardProjectDropdownOpen.kind === "project" &&
       boardProjectDropdownOpen.role === "listbox" &&
@@ -6426,7 +6616,7 @@ function createState() {
       settingsMenuOpen.triggerExpanded === "true" &&
       fullEffortMenuOpen.submenuOpen &&
       fullEffortMenuOpen.submenuKind === "effort" &&
-      fullEffortMenuOpen.submenuLeft === "500px" &&
+      fullEffortMenuOpen.submenuLeft === "726px" &&
       fullEffortMenuOpen.submenuItemCount === 5 &&
       fullEffortMenuOpen.submenuSelectedIndex === 3 &&
       JSON.stringify(fullEffortMenuOpen.submenuTexts) ===
@@ -6434,7 +6624,7 @@ function createState() {
       modelMenuOpen.submenuOpen &&
       modelMenuOpen.submenuKind === "model" &&
       modelMenuOpen.submenuRole === "menu" &&
-      modelMenuOpen.submenuLeft === "500px" &&
+      modelMenuOpen.submenuLeft === "726px" &&
       modelMenuOpen.submenuItemCount === 2 &&
       modelMenuOpen.submenuSelectedIndex === 0 &&
       JSON.stringify(modelMenuOpen.submenuTexts) ===
@@ -6442,7 +6632,7 @@ function createState() {
       effortMenuOpen.submenuOpen &&
       effortMenuOpen.submenuKind === "effort" &&
       effortMenuOpen.submenuRole === "menu" &&
-      effortMenuOpen.submenuLeft === "500px" &&
+      effortMenuOpen.submenuLeft === "726px" &&
       effortMenuOpen.submenuItemCount === 2 &&
       effortMenuOpen.submenuSelectedIndex === 1 &&
       JSON.stringify(effortMenuOpen.submenuTexts) === JSON.stringify(["轻度", "高"]) &&
@@ -6807,6 +6997,109 @@ function createState() {
       !api.detachDialogStateForTest().open,
   };
 
+  const deleteRequests = [];
+  const deleteStart = attachSnapshot(8, ["session-a2"]);
+  window.__codexElvesTaskBoardMock = {
+    request(route, payload) {
+      if (route === "/thread-usage-summary") {
+        return { status: "ok", summary: { isRunning: false } };
+      }
+      if (route !== "/task-board/task-delete") {
+        throw new Error(`unexpected route ${route}`);
+      }
+      deleteRequests.push(payload);
+      return {
+        status: "ok",
+        schemaVersion: 1,
+        revision: 9,
+        tasks: [],
+      };
+    },
+  };
+  api.resetCreateStateForTest({
+    snapshot: deleteStart,
+    catalog: catalog(),
+  });
+  const deleteTrigger = document.createElement("button");
+  document.body.appendChild(deleteTrigger);
+  deleteTrigger.focus();
+  api.openDeleteDialogForTest(deleteStart.tasks[0], deleteTrigger);
+  const deleteContract = api.deleteDialogContractForTest();
+  api.closeDetachForTest();
+  const deleteCancelledWithoutRequest =
+    deleteRequests.length === 0 &&
+    !api.deleteDialogStateForTest().open &&
+    document.activeElement === deleteTrigger;
+
+  api.openDeleteDialogForTest(deleteStart.tasks[0], deleteTrigger);
+  await api.submitDeleteForTest();
+  const deletePayload = deleteRequests[0] || {};
+  const deletedTaskSnapshot = api.createSnapshotForTest();
+
+  const deleteConflictPayloads = [];
+  let deleteConflictCalls = 0;
+  const deleteConflictStart = attachSnapshot(10, ["session-a2"]);
+  window.__codexElvesTaskBoardMock = {
+    request(route, payload) {
+      if (route === "/thread-usage-summary") {
+        return { status: "ok", summary: { isRunning: false } };
+      }
+      if (route !== "/task-board/task-delete") {
+        throw new Error(`unexpected route ${route}`);
+      }
+      deleteConflictPayloads.push(payload);
+      deleteConflictCalls += 1;
+      if (deleteConflictCalls === 1) {
+        const latest = attachSnapshot(11, ["session-a2"]);
+        return {
+          status: "conflict",
+          code: "revision_conflict",
+          schemaVersion: latest.schemaVersion,
+          revision: latest.revision,
+          tasks: latest.tasks,
+        };
+      }
+      return {
+        status: "ok",
+        schemaVersion: 1,
+        revision: 12,
+        tasks: [],
+      };
+    },
+  };
+  api.resetCreateStateForTest({
+    snapshot: deleteConflictStart,
+    catalog: catalog(),
+  });
+  api.openDeleteDialogForTest(deleteConflictStart.tasks[0], deleteTrigger);
+  await api.submitDeleteForTest();
+  const deleteTask = {
+    confirmation:
+      deleteContract.role === "dialog" &&
+      deleteContract.ariaModal &&
+      deleteContract.initialFocus &&
+      deleteContract.title === "删除任务？" &&
+      deleteContract.message ===
+        "将从任务看板删除“追加会话任务”及其所有关联。不会删除 Codex 中的原始会话。",
+    cancelledWithoutRequest: deleteCancelledWithoutRequest,
+    exactPayloadAndSnapshot:
+      JSON.stringify(Object.keys(deletePayload).sort()) ===
+        JSON.stringify(["expectedRevision", "taskId"]) &&
+      deletePayload.taskId === attachTaskId &&
+      deletePayload.expectedRevision === 8 &&
+      deletedTaskSnapshot.revision === 9 &&
+      deletedTaskSnapshot.tasks.length === 0 &&
+      !api.deleteDialogStateForTest().open,
+    revisionConflictRetriesOnce:
+      deleteConflictPayloads.length === 2 &&
+      JSON.stringify(
+        deleteConflictPayloads.map((payload) => payload.expectedRevision),
+      ) === JSON.stringify([10, 11]) &&
+      api.createSnapshotForTest().revision === 12 &&
+      api.createSnapshotForTest().tasks.length === 0 &&
+      !api.deleteDialogStateForTest().open,
+  };
+
   const initialStatusRequests = [];
   reset({
     snapshot: { status: "ok", schemaVersion: 1, revision: 3, tasks: [] },
@@ -7067,6 +7360,7 @@ function createState() {
     success,
     attach,
     detach,
+    deleteTask,
     initialStatus,
     stableErrors,
     sessionNotFound,

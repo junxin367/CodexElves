@@ -1,5 +1,5 @@
 use super::{
-    TaskBoardAttachConversationsCommand, TaskBoardCreateCommand,
+    TaskBoardAttachConversationsCommand, TaskBoardCreateCommand, TaskBoardDeleteCommand,
     TaskBoardDetachConversationsCommand, TaskBoardDocument, TaskBoardMoveCommand,
     TaskBoardMutationResult, parse_task_board_document, validate_task_board_document,
 };
@@ -35,6 +35,14 @@ pub trait TaskBoardStore: Send + Sync {
         Err(TaskBoardStoreError::InvalidInput {
             message: "detaching conversations is not supported by this task board store"
                 .to_string(),
+        })
+    }
+    fn delete_task(
+        &self,
+        _command: TaskBoardDeleteCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        Err(TaskBoardStoreError::InvalidInput {
+            message: "deleting tasks is not supported by this task board store".to_string(),
         })
     }
     fn move_task(
@@ -302,6 +310,13 @@ impl TaskBoardStore for FileTaskBoardStore {
         command: TaskBoardDetachConversationsCommand,
     ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
         super::detach_conversations::detach_conversations(self, command)
+    }
+
+    fn delete_task(
+        &self,
+        command: TaskBoardDeleteCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        super::delete_task::delete_task(self, command)
     }
 
     fn move_task(

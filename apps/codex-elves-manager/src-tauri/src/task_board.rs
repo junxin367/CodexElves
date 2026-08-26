@@ -8,10 +8,11 @@ use codex_elves_core::status::StatusStore;
 use codex_elves_core::task_board::{
     FileTaskBoardStore, TaskBoardAttachConversationsCommand, TaskBoardCatalogProject,
     TaskBoardCatalogSession, TaskBoardCatalogWarning, TaskBoardCatalogWarningCode,
-    TaskBoardConversation, TaskBoardCreateCommand, TaskBoardDetachConversationsCommand,
-    TaskBoardDocument, TaskBoardMoveCommand, TaskBoardMutationResult, TaskBoardProject,
-    TaskBoardSessionCatalog, TaskBoardStatus, TaskBoardStore, TaskBoardStoreError,
-    normalize_task_project_cwd, task_board_timestamp_from_bridge_i64,
+    TaskBoardConversation, TaskBoardCreateCommand, TaskBoardDeleteCommand,
+    TaskBoardDetachConversationsCommand, TaskBoardDocument, TaskBoardMoveCommand,
+    TaskBoardMutationResult, TaskBoardProject, TaskBoardSessionCatalog, TaskBoardStatus,
+    TaskBoardStore, TaskBoardStoreError, normalize_task_project_cwd,
+    task_board_timestamp_from_bridge_i64,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -19,6 +20,7 @@ use tauri::{Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewUrl,
 
 const TASK_BOARD_WINDOW_STATE_FILE: &str = "task-board-window-state.json";
 const DEV_TASK_BOARD_WINDOW_STATE_FILE: &str = "task-board-window-state-dev.json";
+const TASK_BOARD_ICON_PNG: &[u8] = include_bytes!("../icons/task-board.png");
 const TASK_BOARD_WAKE_SHOW: u8 = 1;
 const TASK_BOARD_WAKE_ACK: &[u8] = b"codex-elves-task-board:shown\n";
 const TASK_BOARD_CONTROL_TIMEOUT: Duration = Duration::from_millis(750);
@@ -68,6 +70,13 @@ pub struct DetachConversationsRequest {
     task_id: String,
     expected_revision: u64,
     session_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteTaskRequest {
+    task_id: String,
+    expected_revision: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -124,6 +133,20 @@ pub fn run() {
         return;
     };
     let wake_listener = guard.try_clone_listener().ok().flatten();
+    let task_board_icon = match task_board_window_icon() {
+        Ok(icon) => icon,
+        Err(error) => {
+            let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+                "task_board_app.icon_failed",
+                json!({
+                    "error": error.to_string()
+                }),
+            );
+            return;
+        }
+    };
+    let mut context = tauri::generate_context!();
+    context.set_default_window_icon(Some(task_board_icon.clone()));
 
     let run_result = tauri::Builder::default()
         .setup(move |app| {
@@ -137,11 +160,13 @@ pub fn run() {
                     .min_inner_size(f64::from(MIN_WINDOW_WIDTH), f64::from(MIN_WINDOW_HEIGHT))
                     .visible(false)
                     .data_directory(task_board_webview_data_directory())
-                    .disable_drag_drop_handler();
+                    .disable_drag_drop_handler()
+                    .icon(task_board_icon.clone())?;
             if restore_state.is_none() {
                 builder = builder.center();
             }
             let window = builder.build()?;
+            set_task_board_windows_taskbar_icon(&window)?;
             if let Some(state) = restore_state {
                 apply_window_state(&window, state);
             }
@@ -159,6 +184,7 @@ pub fn run() {
             task_board_create_task,
             task_board_attach_conversations,
             task_board_detach_conversations,
+            task_board_delete_task,
             task_board_move_task,
             task_board_open_session,
             task_board_probe_host,
@@ -167,7 +193,7 @@ pub fn run() {
             task_board_load_conversation_statuses,
             task_board_start_conversation,
         ])
-        .run(tauri::generate_context!());
+        .run(context);
 
     drop(guard);
     if let Err(error) = run_result {
@@ -178,6 +204,48 @@ pub fn run() {
             }),
         );
     }
+}
+
+fn task_board_window_icon() -> tauri::Result<tauri::image::Image<'static>> {
+    Ok(tauri::image::Image::from_bytes(TASK_BOARD_ICON_PNG)?.to_owned())
+}
+
+#[cfg(windows)]
+fn set_task_board_windows_taskbar_icon<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+) -> anyhow::Result<()> {
+    const WM_SETICON: u32 = 0x0080;
+    const WM_GETICON: u32 = 0x007f;
+    const ICON_SMALL: usize = 0;
+    const ICON_BIG: usize = 1;
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SendMessageW(
+            window: *mut std::ffi::c_void,
+            message: u32,
+            wparam: usize,
+            lparam: isize,
+        ) -> isize;
+    }
+
+    let window = window.hwnd()?;
+    let small_icon = unsafe { SendMessageW(window.0, WM_GETICON, ICON_SMALL, 0) };
+    anyhow::ensure!(
+        small_icon != 0,
+        "task-board window icon was not available for the Windows taskbar"
+    );
+    unsafe {
+        SendMessageW(window.0, WM_SETICON, ICON_BIG, small_icon);
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn set_task_board_windows_taskbar_icon<R: tauri::Runtime>(
+    _window: &tauri::WebviewWindow<R>,
+) -> anyhow::Result<()> {
+    Ok(())
 }
 
 #[tauri::command]
@@ -240,6 +308,17 @@ pub async fn task_board_detach_conversations(request: DetachConversationsRequest
                 session_ids: request.session_ids,
             },
         )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn task_board_delete_task(request: DeleteTaskRequest) -> Value {
+    mutate_store(move || {
+        FileTaskBoardStore::from_default_paths().delete_task(TaskBoardDeleteCommand {
+            task_id: request.task_id,
+            expected_revision: request.expected_revision,
+        })
     })
     .await
 }

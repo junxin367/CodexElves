@@ -93,6 +93,12 @@ pub struct TaskBoardDetachConversationsCommand {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskBoardDeleteCommand {
+    pub task_id: String,
+    pub expected_revision: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskBoardMoveCommand {
     pub task_id: String,
     pub to_status: TaskBoardStatus,

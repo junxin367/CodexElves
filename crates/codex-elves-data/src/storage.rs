@@ -1337,7 +1337,14 @@ impl RolloutUsageParser {
             last_turn_completed_at: self.turn_completed_at.get(&self.latest_turn_id).cloned(),
             observed_at: self.latest_observed_at.clone(),
             turn_count: self.turn_ids.len(),
-            task_running: !self.active_task_turns.is_empty(),
+            // Forked rollout files replay the parent's history before the
+            // child's own turns. If the fork happened while the parent was
+            // running, that inherited task_started event has no matching
+            // completion in the child file and must not keep the child
+            // running forever. A thread's runtime state is determined by its
+            // latest turn; older unmatched turns are only inherited history.
+            task_running: !self.latest_turn_id.is_empty()
+                && self.active_task_turns.contains(&self.latest_turn_id),
             spawned_child_turns: self.spawned_child_turns.clone(),
             forked_from_id: self.forked_from_id.clone(),
         }

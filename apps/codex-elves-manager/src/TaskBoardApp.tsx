@@ -16,6 +16,7 @@ import {
   useState,
   type CSSProperties,
   type DragEvent,
+  type ReactNode,
 } from "react";
 import "./task-board.css";
 
@@ -179,6 +180,12 @@ type DetachConfirmationState = {
   feedback: string;
 };
 
+type DeleteTaskConfirmationState = {
+  task: Task;
+  busy: boolean;
+  feedback: string;
+};
+
 type ConversationRuntimeStatus = {
   sessionId: string;
   known: boolean;
@@ -188,7 +195,7 @@ type ConversationRuntimeStatus = {
 };
 
 type ConversationStatusPresentation = {
-  id: "running" | "completed-unread" | "completed" | "checking" | "unknown" | "unavailable";
+  id: "running" | "unread" | "completed" | "checking" | "unknown" | "unavailable";
   label: string;
 };
 
@@ -577,6 +584,30 @@ function taskBoardDropdownLeft(
   return Math.max(8, Math.min(viewportRight, triggerLeft));
 }
 
+function taskBoardCreateSubmenuLeft(
+  menuLeft: number,
+  menuRight: number,
+  submenuWidth: number,
+  viewportWidth: number,
+) {
+  const edge = 8;
+  const gap = 6;
+  const rightLeft = menuRight + gap;
+  if (rightLeft + submenuWidth <= viewportWidth - edge) return rightLeft;
+  const viewportRight = Math.max(edge, viewportWidth - submenuWidth - edge);
+  return Math.max(
+    edge,
+    Math.min(viewportRight, menuLeft - gap - submenuWidth),
+  );
+}
+
+function taskBoardCenteredMenuTop(menuHeight: number, viewportHeight: number) {
+  const edge = 8;
+  const viewportBottom = Math.max(edge, viewportHeight - menuHeight - edge);
+  const centeredTop = (viewportHeight - menuHeight) / 2;
+  return Math.max(edge, Math.min(viewportBottom, centeredTop));
+}
+
 function conversationStatusPresentation(
   runtimeStatus: ConversationRuntimeStatus | undefined,
   available: boolean,
@@ -588,7 +619,7 @@ function conversationStatusPresentation(
   }
   if (!runtimeStatus.known) return { id: "unknown", label: "状态未知" };
   if (runtimeStatus.unread) {
-    return { id: "completed-unread", label: "已完成 · 未读" };
+    return { id: "unread", label: "未读" };
   }
   return { id: "completed", label: "已完成" };
 }
@@ -637,6 +668,7 @@ function TaskBoardDropdown({
   placement = "auto",
   disabled = false,
   modalFocusTrap = false,
+  showChevron = true,
   onChange,
 }: {
   value: string;
@@ -651,6 +683,7 @@ function TaskBoardDropdown({
   placement?: "auto" | "top" | "bottom";
   disabled?: boolean;
   modalFocusTrap?: boolean;
+  showChevron?: boolean;
   onChange: (value: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -914,23 +947,25 @@ function TaskBoardDropdown({
           ) : null}
           <span className="task-board-dropdown-label">{triggerLabel}</span>
         </span>
-        <span className="task-board-dropdown-chevron">
-          <svg
-            aria-hidden="true"
-            viewBox="0 0 16 16"
-            width="14"
-            height="14"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.4"
-          >
-            <path
-              d="m5 6 3 3 3-3"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </span>
+        {showChevron ? (
+          <span className="task-board-dropdown-chevron">
+            <svg
+              aria-hidden="true"
+              viewBox="0 0 16 16"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.4"
+            >
+              <path
+                d="m5 6 3 3 3-3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </span>
+        ) : null}
       </button>
       {menu}
     </>
@@ -1018,42 +1053,26 @@ function TaskBoardCreateSettings({
 
   useLayoutEffect(() => {
     if (!open || !submenuKind) return;
-    const trigger = triggerRef.current;
     const menu = menuRef.current;
     const submenu = submenuRef.current;
-    const parentButton = menu?.querySelector<HTMLButtonElement>(
-      `[data-settings-kind="${submenuKind}"]`,
-    );
-    if (!trigger || !menu || !submenu || !parentButton) return;
+    if (!menu || !submenu) return;
     submenu.style.minWidth = "220px";
     const menuRect = menu.getBoundingClientRect();
-    const parentRect = parentButton.getBoundingClientRect();
     const submenuRect = submenu.getBoundingClientRect();
-    const triggerRect = trigger.getBoundingClientRect();
     const viewportWidth = window.innerWidth || 1024;
     const viewportHeight = window.innerHeight || 768;
     const width = submenuRect.width || 220;
     const height = submenuRect.height || 0;
-    const gap = 6;
-    const opensAbove = menuRect.bottom <= triggerRect.top;
-    const spaceAbove = Math.max(0, menuRect.top - gap - 8);
-    const spaceBelow = Math.max(0, viewportHeight - menuRect.bottom - gap - 8);
-    const placeAbove = opensAbove
-      ? spaceAbove >= height || spaceAbove >= spaceBelow
-      : spaceBelow < height && spaceAbove > spaceBelow;
-    const preferredTop = placeAbove
-      ? menuRect.top - gap - height
-      : menuRect.bottom + gap;
-    const top = Math.min(
-      viewportHeight - height - 8,
-      Math.max(8, preferredTop),
-    );
-    submenu.style.left = `${taskBoardDropdownLeft(
-      parentRect.left,
+    submenu.style.left = `${taskBoardCreateSubmenuLeft(
+      menuRect.left,
+      menuRect.right,
       width,
       viewportWidth,
     )}px`;
-    submenu.style.top = `${Math.max(8, top)}px`;
+    submenu.style.top = `${taskBoardCenteredMenuTop(
+      height,
+      viewportHeight,
+    )}px`;
     submenu.style.visibility = "visible";
   }, [open, submenuKind, submenuOptions]);
 
@@ -1413,9 +1432,12 @@ export function TaskBoardApp() {
   const [appearance, setAppearance] = useState<TaskBoardAppearance | null>(null);
   const [detachConfirmation, setDetachConfirmation] =
     useState<DetachConfirmationState | null>(null);
+  const [deleteTaskConfirmation, setDeleteTaskConfirmation] =
+    useState<DeleteTaskConfirmationState | null>(null);
   const [conversationStatuses, setConversationStatuses] = useState<
     Map<string, ConversationRuntimeStatus>
   >(new Map());
+  const conversationReadSuppressionsRef = useRef(new Set<string>());
   const [query, setQuery] = useState("");
   const [projectFilter, setProjectFilter] = useState("");
   const [loading, setLoading] = useState(true);
@@ -1751,6 +1773,11 @@ export function TaskBoardApp() {
           normalizeSessionId(conversation.sessionId),
         ),
       );
+      conversationReadSuppressionsRef.current.forEach((key) => {
+        if (!activeKeys.has(key)) {
+          conversationReadSuppressionsRef.current.delete(key);
+        }
+      });
       setConversationStatuses((current) => {
         const next = new Map<string, ConversationRuntimeStatus>();
         linkedConversations.forEach((conversation) => {
@@ -1788,7 +1815,15 @@ export function TaskBoardApp() {
           const statuses = new Map<string, ConversationRuntimeStatus>();
           result.statuses.forEach((status) => {
             const key = normalizeSessionId(status.sessionId);
-            if (key && activeKeys.has(key)) statuses.set(key, status);
+            if (!key || !activeKeys.has(key)) return;
+            const readSuppressed = conversationReadSuppressionsRef.current.has(key);
+            if (readSuppressed && !status.unread) {
+              conversationReadSuppressionsRef.current.delete(key);
+            }
+            statuses.set(
+              key,
+              readSuppressed && status.unread ? { ...status, unread: false } : status,
+            );
           });
           linkedConversations.forEach((conversation) => {
             const key = normalizeSessionId(conversation.sessionId);
@@ -1967,18 +2002,43 @@ export function TaskBoardApp() {
 
   const openConversation = useCallback(
     async (conversation: TaskConversation) => {
+      const sessionKey = normalizeSessionId(conversation.sessionId);
+      const wasUnread = conversationStatuses.get(sessionKey)?.unread === true;
+      if (wasUnread) {
+        conversationReadSuppressionsRef.current.add(sessionKey);
+        setConversationStatuses((current) => {
+          const status = current.get(sessionKey);
+          if (!status?.unread) return current;
+          const next = new Map(current);
+          next.set(sessionKey, { ...status, unread: false });
+          return next;
+        });
+      }
+      const restoreUnread = () => {
+        if (!wasUnread) return;
+        conversationReadSuppressionsRef.current.delete(sessionKey);
+        setConversationStatuses((current) => {
+          const status = current.get(sessionKey);
+          if (!status || status.unread) return current;
+          const next = new Map(current);
+          next.set(sessionKey, { ...status, unread: true });
+          return next;
+        });
+      };
       try {
         const result = await invoke<BoardResponse>("task_board_open_session", {
           request: conversation,
         });
         if (result.status !== "ok") {
+          restoreUnread();
           showToast(result.message || "无法打开关联会话");
         }
       } catch (error) {
+        restoreUnread();
         showToast(messageFromError(error, "无法打开关联会话"));
       }
     },
-    [showToast],
+    [conversationStatuses, showToast],
   );
 
   const closeEditor = useCallback(() => {
@@ -1987,6 +2047,7 @@ export function TaskBoardApp() {
 
   const requestDetachConfirmation = useCallback(
     (task: Task, conversation: TaskConversation) => {
+      setDeleteTaskConfirmation(null);
       setDetachConfirmation({
         task,
         conversation,
@@ -1999,6 +2060,19 @@ export function TaskBoardApp() {
 
   const closeDetachConfirmation = useCallback(() => {
     setDetachConfirmation((current) => (current?.busy ? current : null));
+  }, []);
+
+  const requestDeleteTaskConfirmation = useCallback((task: Task) => {
+    setDetachConfirmation(null);
+    setDeleteTaskConfirmation({
+      task,
+      busy: false,
+      feedback: "",
+    });
+  }, []);
+
+  const closeDeleteTaskConfirmation = useCallback(() => {
+    setDeleteTaskConfirmation((current) => (current?.busy ? current : null));
   }, []);
 
   const detachConversation = useCallback(
@@ -2039,6 +2113,63 @@ export function TaskBoardApp() {
         : current,
     );
   }, [detachConfirmation, detachConversation]);
+
+  const confirmDeleteTask = useCallback(async () => {
+    const pending = deleteTaskConfirmation;
+    if (!pending || pending.busy) return;
+    setDeleteTaskConfirmation({ ...pending, busy: true, feedback: "" });
+    let expectedRevision = snapshot.revision;
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const result = await invoke<BoardResponse>("task_board_delete_task", {
+          request: {
+            taskId: pending.task.id,
+            expectedRevision,
+          },
+        });
+        const nextSnapshot = taskBoardSnapshotFromResponse(result);
+        if (nextSnapshot) setSnapshot(nextSnapshot);
+        const taskStillExists =
+          nextSnapshot?.tasks.some((task) => task.id === pending.task.id) ?? true;
+        if (result.status === "ok" || !taskStillExists) {
+          setDeleteTaskConfirmation(null);
+          showToast("任务已从看板删除");
+          window.requestAnimationFrame(() => {
+            document.querySelector<HTMLElement>(".task-board-scroll")?.focus();
+          });
+          return;
+        }
+        if (
+          (result.status === "conflict" || result.code === "revision_conflict") &&
+          nextSnapshot &&
+          attempt === 0
+        ) {
+          expectedRevision = nextSnapshot.revision;
+          continue;
+        }
+        setDeleteTaskConfirmation((current) =>
+          current?.task.id === pending.task.id
+            ? {
+                ...current,
+                busy: false,
+                feedback: taskBoardDeleteFailureMessage(result),
+              }
+            : current,
+        );
+        return;
+      }
+    } catch (error) {
+      setDeleteTaskConfirmation((current) =>
+        current?.task.id === pending.task.id
+          ? {
+              ...current,
+              busy: false,
+              feedback: messageFromError(error, "删除任务失败"),
+            }
+          : current,
+      );
+    }
+  }, [deleteTaskConfirmation, showToast, snapshot.revision]);
 
   const openEditor = useCallback(
     (task: Task | null = null) => {
@@ -2482,6 +2613,7 @@ export function TaskBoardApp() {
                         dragging={dragTaskId === task.id}
                         onOpenConversation={openConversation}
                         onDetachConversation={requestDetachConfirmation}
+                        onDeleteTask={() => requestDeleteTaskConfirmation(task)}
                         onAttach={() => openEditor(task)}
                         onMoveStatus={(status) => void moveTask(task, status)}
                         conversationStatuses={conversationStatuses}
@@ -2528,6 +2660,13 @@ export function TaskBoardApp() {
           onConfirm={() => void confirmDetachConversation()}
         />
       ) : null}
+      {deleteTaskConfirmation ? (
+        <TaskBoardDeleteConfirmation
+          confirmation={deleteTaskConfirmation}
+          onClose={closeDeleteTaskConfirmation}
+          onConfirm={() => void confirmDeleteTask()}
+        />
+      ) : null}
     </>
   );
 }
@@ -2539,6 +2678,7 @@ function TaskCard({
   onDragEnd,
   onOpenConversation,
   onDetachConversation,
+  onDeleteTask,
   onAttach,
   onMoveStatus,
   conversationStatuses,
@@ -2551,6 +2691,7 @@ function TaskCard({
   onDragEnd: () => void;
   onOpenConversation: (conversation: TaskConversation) => void;
   onDetachConversation: (task: Task, conversation: TaskConversation) => void;
+  onDeleteTask: () => void;
   onAttach: () => void;
   onMoveStatus: (status: TaskStatus) => void;
   conversationStatuses: Map<string, ConversationRuntimeStatus>;
@@ -2564,6 +2705,21 @@ function TaskCard({
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
     >
+      <button
+        className="task-board-card-delete"
+        type="button"
+        draggable={false}
+        aria-label={`删除任务 ${task.title}`}
+        title="删除任务"
+        onPointerDown={(event) => event.stopPropagation()}
+        onDragStart={(event) => event.preventDefault()}
+        onClick={(event) => {
+          event.stopPropagation();
+          onDeleteTask();
+        }}
+      >
+        <X size={13} strokeWidth={1.35} aria-hidden="true" />
+      </button>
       <div className="task-board-project">{task.project.label}</div>
       <h2 className="task-board-card-title">{task.title}</h2>
       <div className="task-board-conversations">
@@ -2578,6 +2734,9 @@ function TaskCard({
               available,
             );
             const title = conversation.title || "未命名会话";
+            const showStatus = status.id !== "completed";
+            const iconOnlyStatus =
+              status.id === "running" || status.id === "unread";
             return (
               <div
                 className="task-board-conversation-row"
@@ -2588,8 +2747,8 @@ function TaskCard({
                   type="button"
                   onClick={() => onOpenConversation(conversation)}
                   disabled={!available}
-                  title={`${title}\n${status.label}`}
-                  aria-label={`${title}，${status.label}，${
+                  title={showStatus ? `${title}\n${status.label}` : title}
+                  aria-label={`${title}${showStatus ? `，${status.label}` : ""}，${
                     available ? "打开会话" : "会话不可用"
                   }`}
                 >
@@ -2600,16 +2759,16 @@ function TaskCard({
                     <MessageSquare size={14} strokeWidth={1.2} />
                   </span>
                   <span className="task-board-conversation-title">{title}</span>
-                  <span
-                    className="task-board-conversation-state"
-                    data-conversation-status={status.id}
-                  >
+                  {showStatus ? (
                     <span
-                      className="task-board-conversation-status-indicator"
+                      className="task-board-conversation-state"
+                      data-conversation-status={status.id}
                       aria-hidden="true"
-                    />
-                    {status.label}
-                  </span>
+                    >
+                      <span className="task-board-conversation-status-indicator" />
+                      {iconOnlyStatus ? null : status.label}
+                    </span>
+                  ) : null}
                 </button>
                 <button
                   className="task-board-conversation-remove"
@@ -2646,6 +2805,7 @@ function TaskCard({
             color: status.color,
           }))}
           minWidth={150}
+          showChevron={false}
           onChange={(status) => onMoveStatus(status as TaskStatus)}
         />
       </footer>
@@ -2704,15 +2864,85 @@ function TaskBoardDetachConfirmation({
   onClose: () => void;
   onConfirm: () => void;
 }) {
+  return (
+    <TaskBoardConfirmationDialog
+      idPrefix="task-board-detach"
+      title="移除关联会话？"
+      description={
+        <>
+          仅解除与任务“{confirmation.task.title || "未命名任务"}”的关联，不会删除
+          Codex 中的原始会话。
+        </>
+      }
+      busy={confirmation.busy}
+      feedback={confirmation.feedback}
+      confirmLabel="移除"
+      busyLabel="正在移除…"
+      onClose={onClose}
+      onConfirm={onConfirm}
+    />
+  );
+}
+
+function TaskBoardDeleteConfirmation({
+  confirmation,
+  onClose,
+  onConfirm,
+}: {
+  confirmation: DeleteTaskConfirmationState;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <TaskBoardConfirmationDialog
+      idPrefix="task-board-delete-task"
+      title="删除任务？"
+      description={
+        <>
+          将从任务看板删除“{confirmation.task.title || "未命名任务"}”及其所有关联。
+          不会删除 Codex 中的原始会话。
+        </>
+      }
+      busy={confirmation.busy}
+      feedback={confirmation.feedback}
+      confirmLabel="删除任务"
+      busyLabel="正在删除…"
+      onClose={onClose}
+      onConfirm={onConfirm}
+    />
+  );
+}
+
+function TaskBoardConfirmationDialog({
+  idPrefix,
+  title,
+  description,
+  busy,
+  feedback,
+  confirmLabel,
+  busyLabel,
+  onClose,
+  onConfirm,
+}: {
+  idPrefix: string;
+  title: string;
+  description: ReactNode;
+  busy: boolean;
+  feedback: string;
+  confirmLabel: string;
+  busyLabel: string;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
   const dialogRef = useRef<HTMLElement>(null);
   const cancelButtonRef = useRef<HTMLButtonElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(
     document.activeElement instanceof HTMLElement ? document.activeElement : null,
   );
-  const busyRef = useRef(confirmation.busy);
+  const busyRef = useRef(busy);
   const backdropPressStartedRef = useRef(false);
   const backdropPressCompletedRef = useRef(false);
-  busyRef.current = confirmation.busy;
+  busyRef.current = busy;
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -2783,7 +3013,7 @@ function TaskBoardDetachConfirmation({
           event.target === event.currentTarget && backdropPressCompletedRef.current;
         backdropPressStartedRef.current = false;
         backdropPressCompletedRef.current = false;
-        if (shouldClose && !confirmation.busy) onClose();
+        if (shouldClose && !busy) onClose();
       }}
     >
       <section
@@ -2791,18 +3021,15 @@ function TaskBoardDetachConfirmation({
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-labelledby="task-board-detach-title"
-        aria-describedby="task-board-detach-description"
+        aria-labelledby={`${idPrefix}-title`}
+        aria-describedby={`${idPrefix}-description`}
         tabIndex={-1}
       >
-        <h2 id="task-board-detach-title">移除关联会话？</h2>
-        <p id="task-board-detach-description">
-          仅解除与任务“{confirmation.task.title || "未命名任务"}”的关联，不会删除
-          Codex 中的原始会话。
-        </p>
-        {confirmation.feedback ? (
+        <h2 id={`${idPrefix}-title`}>{title}</h2>
+        <p id={`${idPrefix}-description`}>{description}</p>
+        {feedback ? (
           <p className="task-board-confirm-feedback" role="alert">
-            {confirmation.feedback}
+            {feedback}
           </p>
         ) : null}
         <div className="task-board-confirm-actions">
@@ -2810,7 +3037,7 @@ function TaskBoardDetachConfirmation({
             ref={cancelButtonRef}
             type="button"
             onClick={onClose}
-            disabled={confirmation.busy}
+            disabled={busy}
           >
             取消
           </button>
@@ -2818,9 +3045,9 @@ function TaskBoardDetachConfirmation({
             className="danger"
             type="button"
             onClick={onConfirm}
-            disabled={confirmation.busy}
+            disabled={busy}
           >
-            {confirmation.busy ? "正在移除…" : "移除"}
+            {busy ? busyLabel : confirmLabel}
           </button>
         </div>
       </section>
@@ -3321,6 +3548,16 @@ function messageFromError(error: unknown, fallback: string) {
   if (error instanceof Error && error.message.trim()) return error.message;
   const message = String(error || "").trim();
   return message || fallback;
+}
+
+function taskBoardDeleteFailureMessage(result: BoardResponse) {
+  if (result.code === "invalid_input") return "任务信息无效，请刷新任务看板后重试";
+  if (result.code === "task_not_found") return "任务不存在或已被删除";
+  if (result.code === "revision_conflict") return "任务已被其他更改更新，请确认后重试";
+  if (result.code === "task_board_busy") return "任务看板正忙，请稍后重试";
+  if (result.code === "task_file_invalid") return "任务文件无效，请检查后重试";
+  if (result.code === "task_board_unavailable") return "任务看板暂不可用，请稍后重试";
+  return result.message || "删除任务失败";
 }
 
 function wait(delay: number) {

@@ -1056,6 +1056,59 @@ fn thread_usage_history_includes_latest_turn_execution_window() {
 }
 
 #[test]
+fn thread_usage_history_ignores_superseded_inherited_running_turns() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let root_rollout = tmp.path().join("root-rollout.jsonl");
+    let child_rollout = tmp.path().join("child-rollout.jsonl");
+    fs::write(
+        &root_rollout,
+        concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"parent-turn\"}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"parent-turn\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":100,\"total_tokens\":1100},\"last_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":100,\"total_tokens\":1100}}}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"parent-turn\"}}\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &child_rollout,
+        concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"child\",\"forked_from_id\":\"t1\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"inherited-parent-turn\"}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"inherited-parent-turn\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":100,\"total_tokens\":1100},\"last_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":400,\"output_tokens\":100,\"total_tokens\":1100}}}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"child-turn\"}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"child-turn\"}}\n",
+            "{\"timestamp\":\"2026-06-02T05:01:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1500,\"cached_input_tokens\":600,\"output_tokens\":150,\"total_tokens\":1650},\"last_token_usage\":{\"input_tokens\":500,\"cached_input_tokens\":200,\"output_tokens\":50,\"total_tokens\":550}}}}\n",
+            "{\"timestamp\":\"2026-06-02T05:01:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"child-turn\"}}\n"
+        ),
+    )
+    .unwrap();
+    create_codex_thread_db(&db_path, &root_rollout);
+    let db = Connection::open(&db_path).unwrap();
+    db.execute(
+        "INSERT INTO threads (id, rollout_path, title, cwd, archived, archived_at, updated_at, updated_at_ms) VALUES ('child', ?1, 'Child', '/old/project', 0, NULL, 101, 101000)",
+        [child_rollout.to_string_lossy().to_string()],
+    )
+    .unwrap();
+    drop(db);
+    let adapter = SQLiteStorageAdapter::new(&db_path);
+
+    let child = adapter.codex_thread_usage_summary(&session("local:child", "Child"));
+    assert_eq!(child["summary"]["lastTurnId"], "child-turn");
+    assert_eq!(
+        child["summary"]["lastTurnCompletedAt"],
+        "2026-06-02T05:01:01Z"
+    );
+    assert!(child["summary"].get("isRunning").is_none());
+
+    let root = adapter.codex_thread_usage_summary(&session("local:t1", "Codex Thread"));
+    assert!(root["summary"].get("isRunning").is_none());
+    assert!(root["summary"].get("activeThreadCount").is_none());
+}
+
+#[test]
 fn thread_usage_history_searches_all_databases_and_resolves_temporary_id_by_title() {
     let tmp = tempdir().unwrap();
     let unsupported_path = tmp.path().join("automation.sqlite");
