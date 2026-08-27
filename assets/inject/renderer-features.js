@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "70";
+  const codexDeleteStyleVersion = "71";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -82,7 +82,7 @@
   const codexPluginRequestIdMaxEntries = 256;
   const codexFailureHistoryMaxEntries = 64;
   const codexManagerReactDiscoveryCooldownMs = 15000;
-  const taskBoardRuntimeVersion = "57";
+  const taskBoardRuntimeVersion = "58";
   const taskBoardNativeOperationLeaseTtlMs = 2 * 60 * 1000;
   const taskBoardNativeCreateBusyMessage = "另一个窗口正在创建原生会话，请稍后重试";
   const taskBoardEntryAttribute = "data-codex-task-board-entry";
@@ -1734,6 +1734,7 @@
         font-size: 13px;
       }
       .codex-task-board-toolbar {
+        position: relative;
         display: flex;
         align-items: center;
         gap: 8px;
@@ -1835,6 +1836,55 @@
       .codex-task-board-hint[data-status="failed"] { color: #fca5a5; }
       .codex-task-board-hint[data-status="warning"] { color: #fbbf24; }
       .codex-task-board-hint[data-status="loading"] { color: #cbd5e1; }
+      .codex-task-board-unassigned-drop-zone {
+        position: absolute;
+        z-index: 12;
+        top: calc(100% + 8px);
+        right: 0;
+        display: flex;
+        box-sizing: border-box;
+        width: min(280px, 100%);
+        min-height: 52px;
+        align-items: center;
+        gap: 10px;
+        border: 1px dashed color-mix(in srgb, var(--task-board-accent) 58%, transparent);
+        border-radius: 10px;
+        background: color-mix(in srgb, var(--task-board-panel-background) 94%, transparent);
+        box-shadow: 0 10px 28px rgba(0,0,0,.24);
+        color: var(--task-board-text-secondary);
+        opacity: 0;
+        padding: 9px 12px;
+        pointer-events: none;
+        transform: translateY(-4px);
+        transition: opacity .12s ease, transform .12s ease, visibility .12s ease;
+        visibility: hidden;
+      }
+      .codex-task-board-unassigned-drop-zone[data-active="true"] {
+        opacity: 1;
+        pointer-events: auto;
+        transform: translateY(0);
+        visibility: visible;
+      }
+      .codex-task-board-unassigned-drop-zone[data-drop-active="true"] {
+        border-style: solid;
+        background: color-mix(in srgb, var(--task-board-accent) 14%, var(--task-board-panel-background));
+        box-shadow:
+          0 10px 28px rgba(0,0,0,.24),
+          inset 0 0 0 1px color-mix(in srgb, var(--task-board-accent) 55%, transparent);
+      }
+      .codex-task-board-unassigned-drop-zone > span {
+        display: grid;
+        min-width: 0;
+        gap: 1px;
+      }
+      .codex-task-board-unassigned-drop-zone strong {
+        font-size: 12px;
+        font-weight: 650;
+      }
+      .codex-task-board-unassigned-drop-zone small {
+        color: var(--task-board-text-tertiary);
+        font-size: 11px;
+      }
       [${taskBoardRootAttribute}="true"][data-toolbar-layout="wrapped"] .codex-task-board-toolbar {
         flex-wrap: wrap;
       }
@@ -2535,10 +2585,6 @@
       }
       .codex-task-board-column[data-empty-unassigned="true"] {
         display: none;
-      }
-      [${taskBoardRootAttribute}="true"][data-task-board-drag-active="true"]
-        .codex-task-board-column[data-empty-unassigned="true"] {
-        display: grid;
       }
       .codex-task-board-column-head {
         display: flex;
@@ -11038,7 +11084,67 @@
     hint.dataset.status = "ok";
     hint.setAttribute("aria-live", "polite");
     hint.setAttribute("aria-atomic", "true");
-    toolbar.append(searchControl, filter, create, manage, hint);
+    const unassignedDropZone = taskBoardElement(
+      "div",
+      "codex-task-board-unassigned-drop-zone",
+    );
+    unassignedDropZone.setAttribute("aria-label", "将任务移到未分配");
+    unassignedDropZone.setAttribute("aria-hidden", "true");
+    const unassignedDropLabel = taskBoardElement("span");
+    unassignedDropLabel.append(
+      taskBoardElement("strong", "", "未分配"),
+      taskBoardElement("small", "", "拖到这里移除当前状态"),
+    );
+    unassignedDropZone.append(
+      taskBoardStatusIcon(taskBoardUnassignedStatusDefinition.id),
+      unassignedDropLabel,
+    );
+    unassignedDropZone.addEventListener("dragover", (event) => {
+      if (
+        unassignedDropZone.getAttribute("data-active") !== "true" ||
+        !taskBoardState.dragTaskId ||
+        taskBoardState.moveBusy
+      ) {
+        return;
+      }
+      event.preventDefault?.();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+      unassignedDropZone.setAttribute("data-drop-active", "true");
+    });
+    unassignedDropZone.addEventListener("dragleave", (event) => {
+      if (
+        event.relatedTarget &&
+        unassignedDropZone.contains?.(event.relatedTarget)
+      ) {
+        return;
+      }
+      unassignedDropZone.removeAttribute("data-drop-active");
+    });
+    unassignedDropZone.addEventListener("drop", (event) => {
+      event.preventDefault?.();
+      unassignedDropZone.removeAttribute("data-drop-active");
+      const taskId =
+        taskBoardState.dragTaskId ||
+        String(event.dataTransfer?.getData?.("text/plain") || "").trim();
+      if (!taskId || taskBoardState.moveBusy) return;
+      const sourceTask = taskBoardState.snapshot.tasks.find(
+        (task) => String(task?.id || "") === taskId,
+      );
+      if (sourceTask?.status === taskBoardUnassignedStatusDefinition.id) {
+        clearTaskBoardDragVisuals();
+        return;
+      }
+      const targetIndex = taskBoardMoveTargetIndex(
+        taskId,
+        taskBoardUnassignedStatusDefinition.id,
+      );
+      void taskBoardMoveTask(
+        taskId,
+        taskBoardUnassignedStatusDefinition.id,
+        targetIndex,
+      );
+    });
+    toolbar.append(searchControl, filter, create, manage, hint, unassignedDropZone);
     const scroll = taskBoardElement("div", "codex-task-board-scroll");
     scroll.tabIndex = 0;
     scroll.setAttribute("aria-label", "任务看板列，可横向和纵向滚动");
@@ -15552,26 +15658,34 @@
     columns.style.minWidth = `${count * 304 + Math.max(0, count - 1) * 12}px`;
   }
 
-  function taskBoardSetEmptyUnassignedVisible(visible) {
+  function taskBoardSetTaskDragActive(active) {
     const root = taskBoardState.root;
-    const columns = root?.querySelector?.(".codex-task-board-columns");
-    if (!root || !columns) return;
-    if (visible) {
+    if (!root) return;
+    if (active) {
       root.setAttribute("data-task-board-drag-active", "true");
     } else {
       root.removeAttribute("data-task-board-drag-active");
     }
-    const columnCount = Number(
-      visible
-        ? columns.getAttribute("data-total-column-count")
-        : columns.getAttribute("data-visible-column-count"),
+    const dropZone = root.querySelector?.(
+      ".codex-task-board-unassigned-drop-zone",
     );
-    taskBoardApplyColumnCount(columns, columnCount);
+    const dropZoneActive =
+      active &&
+      !taskBoardState.moveBusy &&
+      dropZone?.getAttribute?.("data-available") === "true";
+    if (dropZoneActive) {
+      dropZone.setAttribute("data-active", "true");
+      dropZone.setAttribute("aria-hidden", "false");
+    } else {
+      dropZone?.removeAttribute?.("data-active");
+      dropZone?.removeAttribute?.("data-drop-active");
+      dropZone?.setAttribute?.("aria-hidden", "true");
+    }
   }
 
   function clearTaskBoardDragVisuals() {
     taskBoardState.dragTaskId = "";
-    taskBoardSetEmptyUnassignedVisible(false);
+    taskBoardSetTaskDragActive(false);
     document.querySelectorAll?.(".codex-task-board-card[data-dragging=\"true\"]")
       .forEach((card) => card.removeAttribute?.("data-dragging"));
     document.querySelectorAll?.(".codex-task-board-card-list[data-drop-active=\"true\"]")
@@ -15743,15 +15857,16 @@
     );
     columns.setAttribute("data-total-column-count", String(totalColumnCount));
     columns.setAttribute("data-visible-column-count", String(visibleColumnCount));
-    taskBoardApplyColumnCount(
-      columns,
-      taskBoardState.dragTaskId ? totalColumnCount : visibleColumnCount,
+    taskBoardApplyColumnCount(columns, visibleColumnCount);
+    const unassignedDropZone = root.querySelector?.(
+      ".codex-task-board-unassigned-drop-zone",
     );
-    if (taskBoardState.dragTaskId) {
-      root.setAttribute("data-task-board-drag-active", "true");
+    if (emptyUnassigned) {
+      unassignedDropZone?.setAttribute?.("data-available", "true");
     } else {
-      root.removeAttribute("data-task-board-drag-active");
+      unassignedDropZone?.removeAttribute?.("data-available");
     }
+    taskBoardSetTaskDragActive(!!taskBoardState.dragTaskId);
     statusDefinitions.forEach((status) => {
       const statusTasks = tasksByStatus.get(status.id) || [];
       const column = taskBoardElement("section", "codex-task-board-column");
@@ -15801,7 +15916,7 @@
           }
           taskBoardState.dragTaskId = String(task?.id || "");
           card.setAttribute("data-dragging", "true");
-          taskBoardSetEmptyUnassignedVisible(true);
+          taskBoardSetTaskDragActive(true);
           event.dataTransfer?.setData?.("text/plain", taskBoardState.dragTaskId);
         });
         card.addEventListener("dragend", () => clearTaskBoardDragVisuals());
@@ -16280,9 +16395,12 @@
       moveTaskForTest: taskBoardMoveTask,
       setTaskDragForTest: (taskId) => {
         if (!taskBoardState.root) mountTaskBoardRoot();
+        const columns = taskBoardState.root?.querySelector?.(
+          ".codex-task-board-columns",
+        );
+        if (!columns?.children?.length) renderTaskBoardCards();
         taskBoardState.dragTaskId = String(taskId || "");
-        renderTaskBoardCards();
-        taskBoardSetEmptyUnassignedVisible(!!taskBoardState.dragTaskId);
+        taskBoardSetTaskDragActive(!!taskBoardState.dragTaskId);
       },
       dragEndForTest: clearTaskBoardDragVisuals,
       openStatusMenuForTest: (taskId, rect = {}) => {
@@ -16463,9 +16581,16 @@
       },
       boardColumnStateForTest: () => {
         if (!taskBoardState.root) mountTaskBoardRoot();
-        renderTaskBoardCards();
-        const root = taskBoardState.root;
-        const columns = root?.querySelector?.(".codex-task-board-columns");
+        let root = taskBoardState.root;
+        let columns = root?.querySelector?.(".codex-task-board-columns");
+        if (!columns?.children?.length) {
+          renderTaskBoardCards();
+          root = taskBoardState.root;
+          columns = root?.querySelector?.(".codex-task-board-columns");
+        }
+        const unassignedDropZone = root?.querySelector?.(
+          ".codex-task-board-unassigned-drop-zone",
+        );
         return {
           visibleColumnCount: Number(
             columns?.getAttribute?.("data-visible-column-count") || 0,
@@ -16481,6 +16606,22 @@
             !!columns?.querySelector?.(
               '.codex-task-board-column[data-task-board-column-status="new"][data-empty-unassigned="true"]',
             ),
+          visibleColumnOrder: Array.from(
+            columns?.querySelectorAll?.(".codex-task-board-column") || [],
+          )
+            .filter(
+              (column) =>
+                column.getAttribute?.("data-empty-unassigned") !== "true",
+            )
+            .map((column) =>
+              column.getAttribute?.("data-task-board-column-status"),
+            ),
+          unassignedDropZoneActive:
+            unassignedDropZone?.getAttribute?.("data-active") === "true",
+          unassignedDropZoneDropActive:
+            unassignedDropZone?.getAttribute?.("data-drop-active") === "true",
+          unassignedDropZoneAriaHidden:
+            unassignedDropZone?.getAttribute?.("aria-hidden") || "",
           dragActive:
             root?.getAttribute?.("data-task-board-drag-active") === "true",
         };

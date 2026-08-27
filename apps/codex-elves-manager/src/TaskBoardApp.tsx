@@ -392,11 +392,10 @@ function taskBoardColumnsStyle(columnCount: number): CSSProperties {
 function taskBoardVisibleStatusDefinitions(
   statusDefinitions: BoardDefinition[],
   visibleTasks: Task[],
-  revealUnassigned: boolean,
 ) {
   const unassignedHasTasks = visibleTasks.some((task) => task.status === "new");
   return statusDefinitions.filter(
-    (status) => status.id !== "new" || unassignedHasTasks || revealUnassigned,
+    (status) => status.id !== "new" || unassignedHasTasks,
   );
 }
 
@@ -2289,10 +2288,12 @@ export function TaskBoardApp() {
       taskBoardVisibleStatusDefinitions(
         statusDefinitions,
         visibleTasks,
-        Boolean(dragTaskId),
       ),
-    [dragTaskId, statusDefinitions, visibleTasks],
+    [statusDefinitions, visibleTasks],
   );
+  const unassignedDropActive =
+    Boolean(dragTaskId) &&
+    !visibleStatusDefinitions.some((status) => status.id === "new");
 
   const columnTasks = useCallback(
     (status: TaskStatus) =>
@@ -2323,6 +2324,21 @@ export function TaskBoardApp() {
       }
     },
     [applySnapshotResponse, showToast, snapshot.revision, snapshot.tasks],
+  );
+
+  const dropTaskIntoStatus = useCallback(
+    (event: DragEvent<HTMLElement>, status: TaskStatus) => {
+      event.preventDefault();
+      setDropStatus("");
+      const taskId =
+        dragTaskId || event.dataTransfer.getData("text/plain").trim();
+      const task = snapshot.tasks.find((candidate) => candidate.id === taskId);
+      setDragTaskId("");
+      if (task && task.status !== status) {
+        void moveTask(task, status);
+      }
+    },
+    [dragTaskId, moveTask, snapshot.tasks],
   );
 
   const openConversation = useCallback(
@@ -3266,6 +3282,34 @@ export function TaskBoardApp() {
                 ? "目录部分不可用"
                 : "拖动任务卡片可切换状态"}
           </span>
+          <div
+            className="task-board-unassigned-drop-zone"
+            data-active={unassignedDropActive || undefined}
+            data-drop-active={
+              unassignedDropActive && dropStatus === "new" ? true : undefined
+            }
+            aria-hidden={!unassignedDropActive}
+            onDragOver={(event) => {
+              if (!unassignedDropActive) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "move";
+              setDropStatus("new");
+            }}
+            onDragLeave={(event) => {
+              if (
+                !event.currentTarget.contains(event.relatedTarget as Node | null)
+              ) {
+                setDropStatus("");
+              }
+            }}
+            onDrop={(event) => dropTaskIntoStatus(event, "new")}
+          >
+            <TaskBoardStatusIcon statusId="new" />
+            <span>
+              <strong>未分配</strong>
+              <small>拖到这里移除当前状态</small>
+            </span>
+          </div>
         </div>
 
         <div
@@ -3309,15 +3353,7 @@ export function TaskBoardApp() {
                       }
                     }}
                     onDrop={(event) => {
-                      event.preventDefault();
-                      setDropStatus("");
-                      const task = snapshot.tasks.find(
-                        (candidate) => candidate.id === dragTaskId,
-                      );
-                      setDragTaskId("");
-                      if (task && task.status !== status.id) {
-                        void moveTask(task, status.id);
-                      }
+                      dropTaskIntoStatus(event, status.id);
                     }}
                   >
                     {tasks.map((task) => (
@@ -3325,8 +3361,9 @@ export function TaskBoardApp() {
                         key={task.id}
                         task={task}
                         onDragStart={(event) => {
-                          setDragTaskId(task.id);
                           event.dataTransfer.effectAllowed = "move";
+                          event.dataTransfer.setData("text/plain", task.id);
+                          setDragTaskId(task.id);
                         }}
                         onDragEnd={() => {
                           setDragTaskId("");

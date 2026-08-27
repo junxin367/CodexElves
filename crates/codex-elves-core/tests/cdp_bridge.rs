@@ -338,7 +338,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "70";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "71";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -540,7 +540,7 @@ fn renderer_task_board_navigation_opens_inline_and_offers_new_window_on_context_
         .and_then(|section| section.split("function reconcileTaskBoardEntry()").next())
         .expect("standalone task board opener should be present");
 
-    assert!(script.contains(r#"const taskBoardRuntimeVersion = "57";"#));
+    assert!(script.contains(r#"const taskBoardRuntimeVersion = "58";"#));
     assert!(script.contains("codex-task-board-entry-context-menu"));
     assert!(script.contains("showChevron = true"));
     assert!(script.contains("status.id,\n          false,\n        );"));
@@ -885,7 +885,9 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
     assert!(script.contains("\"/task-board/board-delete\""));
     assert!(script.contains("\"/task-board/board-rename\""));
     assert!(script.contains("\"/task-board/board-move\""));
-    assert!(script.contains("toolbar.append(searchControl, filter, create, manage, hint)"));
+    assert!(script.contains(
+        "toolbar.append(searchControl, filter, create, manage, hint, unassignedDropZone)"
+    ));
     assert!(script.contains("create.title = \"新建任务\""));
     assert!(script.contains("manage.title = \"管理看板\""));
     assert!(script.contains("function taskBoardRenameManagedBoard("));
@@ -1340,8 +1342,9 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
     }
     for contract in [
         "hiddenWhenEmpty",
-        "revealedDuringDrag",
-        "hiddenAgainAfterDrag",
+        "preservesConfiguredOrder",
+        "stableDuringDrag",
+        "idleAfterDrag",
     ] {
         assert!(
             cases["unassignedColumn"][contract].as_bool().unwrap(),
@@ -1721,6 +1724,10 @@ fn renderer_task_board_move_drag_menu_and_recovery_contracts() {
     );
     assert!(cases["dom"]["sameColumnDownward"].as_bool().unwrap());
     assert!(cases["dom"]["selfDropNoRequest"].as_bool().unwrap());
+    assert!(
+        cases["dom"]["unassignedOverlayDrop"].as_bool().unwrap(),
+        "DOM move cases: {cases}"
+    );
     assert!(
         cases["dom"]["allConversationsRenderedInline"]
             .as_bool()
@@ -4567,6 +4574,56 @@ function settle() { return new Promise((resolve) => setTimeout(resolve, 0)); }
   selfCard.dispatchEvent(event("drop", selfCard));
   await settle();
 
+  const unassignedDropPayloads = [];
+  mountDom({
+    request(route, payload) {
+      unassignedDropPayloads.push({ route, payload });
+      return snapshot(8, [task("a", "new", 0)]);
+    },
+  }, snapshot(7, [task("a", "planning", 0)]));
+  const unassignedCard = mainSurface.querySelector(
+    '.codex-task-board-card[data-task-board-id="a"]',
+  );
+  const unassignedDropZone = mainSurface.querySelector(
+    ".codex-task-board-unassigned-drop-zone",
+  );
+  if (!unassignedCard || !unassignedDropZone) {
+    throw new Error(
+      `unassigned drop DOM unavailable: card=${!!unassignedCard} zone=${!!unassignedDropZone}`,
+    );
+  }
+  const unassignedBeforeDrag = api.boardColumnStateForTest();
+  unassignedCard.dispatchEvent(event("dragstart", unassignedCard));
+  const unassignedDuringDrag = api.boardColumnStateForTest();
+  const unassignedDragOver = event("dragover", unassignedDropZone);
+  unassignedDropZone.dispatchEvent(unassignedDragOver);
+  const unassignedOverState = api.boardColumnStateForTest();
+  unassignedDropZone.dispatchEvent(event("drop", unassignedDropZone));
+  await settle();
+  const unassignedAfterDrop = api.boardColumnStateForTest();
+  const unassignedOverlayDrop =
+    unassignedBeforeDrag.appliedColumnCount === 4 &&
+    !unassignedBeforeDrag.unassignedDropZoneActive &&
+    unassignedBeforeDrag.unassignedDropZoneAriaHidden === "true" &&
+    unassignedDuringDrag.appliedColumnCount === 4 &&
+    unassignedDuringDrag.unassignedDropZoneActive &&
+    unassignedDuringDrag.unassignedDropZoneAriaHidden === "false" &&
+    unassignedDragOver.defaultPrevented === true &&
+    unassignedOverState.unassignedDropZoneDropActive &&
+    JSON.stringify(unassignedDropPayloads[0]) === JSON.stringify({
+      route: "/task-board/task-move",
+      payload: {
+        taskId: "a",
+        toStatus: "new",
+        targetIndex: 0,
+        expectedRevision: 7,
+      },
+    }) &&
+    !unassignedAfterDrop.unassignedDropZoneActive &&
+    !unassignedAfterDrop.unassignedDropZoneDropActive &&
+    unassignedAfterDrop.unassignedDropZoneAriaHidden === "true" &&
+    api.moveStateForTest().tasks[0]?.status === "new";
+
   const menuPayloadsDom = [];
   mountDom({ request(route, payload) { menuPayloadsDom.push(payload); return snapshot(8, [task("a", "done", 0)]); }});
   const menuTrigger = mainSurface.querySelector('.codex-task-board-card[data-task-board-id="a"]').querySelector(".codex-task-board-card-move");
@@ -4608,6 +4665,7 @@ function settle() { return new Promise((resolve) => setTimeout(resolve, 0)); }
     optimisticOrdersContinuous,
     sameColumnDownward: sameColumnPayloads[0]?.taskId === "a" && sameColumnPayloads[0]?.toStatus === "new" && sameColumnPayloads[0]?.targetIndex === 2,
     selfDropNoRequest: sameColumnPayloads.length === 1,
+    unassignedOverlayDrop,
     allConversationsRenderedInline,
     cardStructureMatchesDebug,
     menuOutsideMain,
@@ -7944,6 +8002,24 @@ function createState() {
     { id: "review", label: "验收", color: `${colorPrefix}fbbf24` },
     { id: "done", label: "完成", color: `${colorPrefix}34d399` },
   ];
+  const extraBoardA = {
+    id: "11111111-1111-4111-8111-111111111111",
+    label: "待确认",
+    color: `${colorPrefix}22d3ee`,
+  };
+  const extraBoardB = {
+    id: "22222222-2222-4222-8222-222222222222",
+    label: "已搁置",
+    color: `${colorPrefix}f472b6`,
+  };
+  const reorderedBoards = [
+    defaultBoards[2],
+    extraBoardA,
+    defaultBoards[0],
+    defaultBoards[3],
+    defaultBoards[1],
+    extraBoardB,
+  ];
   const boardRequests = [];
   let createdBoardId = "";
   reset({
@@ -8132,7 +8208,7 @@ function createState() {
       status: "ok",
       schemaVersion: 1,
       revision: 8,
-      boards: defaultBoards,
+      boards: reorderedBoards,
       tasks: [{
         ...snapshot(3).tasks[0],
         id: "task-managed",
@@ -8145,26 +8221,45 @@ function createState() {
   });
   const emptyUnassignedHidden = api.boardColumnStateForTest();
   api.setTaskDragForTest("task-managed");
-  const emptyUnassignedRevealed = api.boardColumnStateForTest();
+  const emptyUnassignedDragging = api.boardColumnStateForTest();
   api.dragEndForTest();
-  const emptyUnassignedRestored = api.boardColumnStateForTest();
+  const emptyUnassignedIdle = api.boardColumnStateForTest();
   const unassignedColumn = {
     hiddenWhenEmpty:
       emptyUnassignedHidden.emptyUnassigned &&
-      emptyUnassignedHidden.visibleColumnCount === 4 &&
-      emptyUnassignedHidden.totalColumnCount === 5 &&
-      emptyUnassignedHidden.appliedColumnCount === 4 &&
+      emptyUnassignedHidden.visibleColumnCount === 6 &&
+      emptyUnassignedHidden.totalColumnCount === 7 &&
+      emptyUnassignedHidden.appliedColumnCount === 6 &&
+      !emptyUnassignedHidden.unassignedDropZoneActive &&
+      emptyUnassignedHidden.unassignedDropZoneAriaHidden === "true" &&
       !emptyUnassignedHidden.dragActive,
-    revealedDuringDrag:
-      emptyUnassignedRevealed.emptyUnassigned &&
-      emptyUnassignedRevealed.appliedColumnCount === 5 &&
-      emptyUnassignedRevealed.dragActive,
-    hiddenAgainAfterDrag:
-      emptyUnassignedRestored.appliedColumnCount === 4 &&
-      !emptyUnassignedRestored.dragActive,
+    preservesConfiguredOrder:
+      JSON.stringify(emptyUnassignedHidden.visibleColumnOrder) ===
+      JSON.stringify([
+        "review",
+        extraBoardA.id,
+        "planning",
+        "done",
+        "executing",
+        extraBoardB.id,
+      ]),
+    stableDuringDrag:
+      emptyUnassignedDragging.emptyUnassigned &&
+      emptyUnassignedDragging.appliedColumnCount === 6 &&
+      emptyUnassignedDragging.unassignedDropZoneActive &&
+      emptyUnassignedDragging.unassignedDropZoneAriaHidden === "false" &&
+      emptyUnassignedDragging.dragActive &&
+      JSON.stringify(emptyUnassignedDragging.visibleColumnOrder) ===
+      JSON.stringify(emptyUnassignedHidden.visibleColumnOrder),
+    idleAfterDrag:
+      emptyUnassignedIdle.appliedColumnCount === 6 &&
+      !emptyUnassignedIdle.unassignedDropZoneActive &&
+      !emptyUnassignedIdle.unassignedDropZoneDropActive &&
+      emptyUnassignedIdle.unassignedDropZoneAriaHidden === "true" &&
+      !emptyUnassignedIdle.dragActive,
     hiddenState: emptyUnassignedHidden,
-    revealedState: emptyUnassignedRevealed,
-    restoredState: emptyUnassignedRestored,
+    draggingState: emptyUnassignedDragging,
+    idleState: emptyUnassignedIdle,
   };
   const wideToolbar = api.toolbarLayoutForTest(996, 785);
   const narrowToolbar = api.toolbarLayoutForTest(780, 400);

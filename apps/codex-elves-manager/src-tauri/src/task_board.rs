@@ -29,7 +29,7 @@ const TASK_BOARD_HOST_OPERATION_MAX_CONSECUTIVE_POLL_FAILURES: u32 = 3;
 const TASK_BOARD_HOST_OPERATION_RETENTION_MS: u64 = 5 * 60 * 1_000;
 const TASK_BOARD_HOST_OPERATION_MAX_ENTRIES: usize = 32;
 const TASK_BOARD_MIN_HOST_VERSION: u64 = 3;
-const TASK_BOARD_MIN_RUNTIME_VERSION: u64 = 57;
+const TASK_BOARD_MIN_RUNTIME_VERSION: u64 = 58;
 const DEFAULT_WINDOW_WIDTH: f64 = 1280.0;
 const DEFAULT_WINDOW_HEIGHT: f64 = 860.0;
 const MIN_WINDOW_WIDTH: u32 = 840;
@@ -1688,7 +1688,7 @@ mod tests {
 
         assert!(script.contains(r#"code: "host_version_unsupported""#));
         assert!(script.contains("hostVersion < 3"));
-        assert!(script.contains("runtimeVersion < 57"));
+        assert!(script.contains("runtimeVersion < 58"));
         assert!(script.contains("Codex 任务看板宿主版本过旧，请重启 CodexElves 完成升级"));
     }
 
@@ -1710,7 +1710,7 @@ mod tests {
         assert!(script.contains("native_create_busy"));
         assert!(script.contains(r#"code: "host_version_unsupported""#));
         assert!(script.contains("hostVersion < 3"));
-        assert!(script.contains("runtimeVersion < 57"));
+        assert!(script.contains("runtimeVersion < 58"));
         assert!(script.contains("supportsNativeCreateLease"));
         assert!(script.contains("supportsNativeCreateRuntime"));
         assert!(script.contains("capabilities?.nativeCreateLease === true"));

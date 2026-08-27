@@ -513,6 +513,19 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     assert!(app.contains("function TaskBoardManager("));
     assert!(app.contains("添加、改名、排序或删除任务状态列；“未分配”是固定的系统列。"));
     assert!(app.contains("visibleStatusDefinitions"));
+    let visible_statuses = app
+        .split("const visibleStatusDefinitions = useMemo(")
+        .nth(1)
+        .and_then(|section| section.split("const unassignedDropActive").next())
+        .expect("standalone visible task-board statuses");
+    assert!(!visible_statuses.contains("dragTaskId"));
+    assert!(!app.contains("Boolean(dragTaskId),"));
+    assert!(app.contains("taskBoardColumnsStyle(visibleStatusDefinitions.length)"));
+    assert!(app.contains("className=\"task-board-unassigned-drop-zone\""));
+    assert!(app.contains("aria-hidden={!unassignedDropActive}"));
+    assert!(app.contains("event.dataTransfer.setData(\"text/plain\", task.id);"));
+    assert!(styles.contains(".task-board-unassigned-drop-zone"));
+    assert!(styles.contains("position: absolute;"));
     assert!(app.contains("taskBoardMoveBoardTargetIndex("));
     assert!(app.contains("const taskBoardStatusIconPaths = ["));
     assert!(app.contains("function taskBoardStatusIconIndex("));
