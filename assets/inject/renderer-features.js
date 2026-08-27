@@ -82,7 +82,7 @@
   const codexPluginRequestIdMaxEntries = 256;
   const codexFailureHistoryMaxEntries = 64;
   const codexManagerReactDiscoveryCooldownMs = 15000;
-  const taskBoardRuntimeVersion = "55";
+  const taskBoardRuntimeVersion = "57";
   const taskBoardNativeOperationLeaseTtlMs = 2 * 60 * 1000;
   const taskBoardNativeCreateBusyMessage = "另一个窗口正在创建原生会话，请稍后重试";
   const taskBoardEntryAttribute = "data-codex-task-board-entry";
@@ -8991,6 +8991,10 @@
       taskBoardConversationStatusMaxConcurrency,
       async (conversation) => {
         const sessionId = String(conversation?.sessionId || "").trim();
+        const sessionAliases = taskBoardConversationSessionAliases(
+          sessionId,
+          conversation?.sessionAliases,
+        );
         let result = null;
         try {
           result = await postJson(taskBoardBridgeRoutes.conversationStatus, {
@@ -9012,7 +9016,11 @@
           isRunning:
             summary?.isRunning === true ||
             summary?.lastTurnRunning === true,
-          unread: taskBoardNativeThreadUnread(sessionId, unreadBySession),
+          unread: taskBoardNativeThreadUnread(
+            sessionId,
+            sessionAliases,
+            unreadBySession,
+          ),
         };
       },
     );
@@ -9022,12 +9030,20 @@
         if (outcome?.status === "fulfilled") return outcome.value;
         const conversation = values[index];
         const sessionId = String(conversation?.sessionId || "").trim();
+        const sessionAliases = taskBoardConversationSessionAliases(
+          sessionId,
+          conversation?.sessionAliases,
+        );
         return {
           sessionId,
           known: false,
           checking: false,
           isRunning: false,
-          unread: taskBoardNativeThreadUnread(sessionId, unreadBySession),
+          unread: taskBoardNativeThreadUnread(
+            sessionId,
+            sessionAliases,
+            unreadBySession,
+          ),
         };
       }),
     };
@@ -9119,6 +9135,42 @@
     return taskBoardNativeSessionId(sessionId).toLocaleLowerCase();
   }
 
+  function taskBoardConversationIdentityKeys(sessionId, aliases = []) {
+    const keys = new Set();
+    [sessionId, ...(Array.isArray(aliases) ? aliases : [])].forEach((candidate) => {
+      const key = taskBoardConversationStatusKey(candidate);
+      if (key) keys.add(key);
+    });
+    return keys;
+  }
+
+  function taskBoardConversationSessionAliases(
+    sessionId,
+    aliases = [],
+    catalog = taskBoardState.catalog,
+  ) {
+    const sessionKey = taskBoardConversationStatusKey(sessionId);
+    if (!sessionKey) return [];
+    const providedAliases = Array.isArray(aliases) ? aliases : [];
+    const catalogSession = taskBoardCatalogSessionMapFor(catalog).get(sessionKey) || null;
+    const candidates = [
+      ...providedAliases,
+      catalogSession?.sessionId,
+      ...(Array.isArray(catalogSession?.sessionAliases)
+        ? catalogSession.sessionAliases
+        : []),
+    ];
+    const seen = new Set([sessionKey]);
+    return candidates
+      .map(taskBoardNativeSessionId)
+      .filter((alias) => {
+        const key = taskBoardConversationStatusKey(alias);
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  }
+
   function taskBoardNativeThreadUnreadIndex() {
     const unreadBySession = new Map();
     document.querySelectorAll("[data-app-action-sidebar-thread-id]").forEach((row) => {
@@ -9130,30 +9182,41 @@
         const text = String(node?.textContent || "").replace(/\s+/g, " ").trim();
         return text === "未读" || /^unread$/i.test(text);
       });
-      unreadBySession.set(key, unread);
+      unreadBySession.set(key, unreadBySession.get(key) === true || unread);
     });
     return unreadBySession;
   }
 
-  function taskBoardNativeThreadUnread(sessionId, unreadBySession = null) {
-    const key = taskBoardConversationStatusKey(sessionId);
-    if (!key) return false;
-    if (unreadBySession instanceof Map) return unreadBySession.get(key) === true;
-    const row = taskBoardNativeThreadRow(sessionId);
-    if (!row) return false;
-    return Array.from(row.querySelectorAll?.(".sr-only") || []).some((node) => {
-      const text = String(node?.textContent || "").replace(/\s+/g, " ").trim();
-      return text === "未读" || /^unread$/i.test(text);
-    });
+  function taskBoardNativeThreadUnread(
+    sessionId,
+    aliases = [],
+    unreadBySession = null,
+  ) {
+    const keys = taskBoardConversationIdentityKeys(sessionId, aliases);
+    if (!keys.size) return false;
+    const index = unreadBySession instanceof Map
+      ? unreadBySession
+      : taskBoardNativeThreadUnreadIndex();
+    return Array.from(keys).some((key) => index.get(key) === true);
   }
 
   function taskBoardNativeConversationLocation(sessionId, fallbackConversation = null) {
     const normalizedSessionId = taskBoardNativeSessionId(sessionId);
     if (!normalizedSessionId) return null;
-    const variants = taskBoardNativeSessionIdVariants(normalizedSessionId);
-    const catalogSession = (taskBoardState.catalog?.sessions || []).find((session) => {
-      return variants.has(String(session?.sessionId || "").trim());
-    }) || null;
+    const fallbackAliases = Array.isArray(fallbackConversation?.sessionAliases)
+      ? fallbackConversation.sessionAliases
+      : [];
+    const catalogSession = taskBoardCatalogSessionMapFor(taskBoardState.catalog).get(
+      taskBoardConversationStatusKey(normalizedSessionId),
+    ) || null;
+    const sessionAliases = taskBoardConversationSessionAliases(
+      normalizedSessionId,
+      fallbackAliases,
+    );
+    const variants = taskBoardNativeSessionIdVariants(
+      normalizedSessionId,
+      sessionAliases,
+    );
     const fallback = fallbackConversation && variants.has(String(fallbackConversation?.sessionId || "").trim())
       ? fallbackConversation
       : null;
@@ -9176,30 +9239,24 @@
       return taskBoardNormalizedCwd(project?.cwd) === cwd;
     }) || null;
     const projectLabel = normalizeProjectLabel(
-      catalogProject?.label || taskProject?.label || "",
+      catalogProject?.label || fallback?.projectLabel || taskProject?.label || "",
     );
-    const sessionAliases = Array.from(
-      new Set(
-        [
-          ...(Array.isArray(catalogSession?.sessionAliases)
-            ? catalogSession.sessionAliases
-            : []),
-          ...(Array.isArray(fallback?.sessionAliases)
-            ? fallback.sessionAliases
-            : []),
-          ...(Array.isArray(taskConversation?.sessionAliases)
-            ? taskConversation.sessionAliases
-            : []),
-        ]
-          .map(taskBoardNativeSessionId)
-          .filter((alias) => (
-            alias &&
-            alias !== normalizedSessionId &&
-            isTemporaryThreadId(alias)
-          )),
-      ),
+    const mergedSessionAliases = taskBoardConversationSessionAliases(
+      normalizedSessionId,
+      [
+        ...sessionAliases,
+        ...(Array.isArray(fallback?.sessionAliases) ? fallback.sessionAliases : []),
+        ...(Array.isArray(taskConversation?.sessionAliases)
+          ? taskConversation.sessionAliases
+          : []),
+      ],
     );
-    return { sessionId: normalizedSessionId, cwd, projectLabel, sessionAliases };
+    return {
+      sessionId: normalizedSessionId,
+      cwd,
+      projectLabel,
+      sessionAliases: mergedSessionAliases,
+    };
   }
 
   function taskBoardNativeProjectTarget(location) {
@@ -11073,12 +11130,18 @@
     const sessions = Array.isArray(catalog?.sessions) ? catalog.sessions : [];
     const result = new Map();
     sessions.forEach((session) => {
-      const sessionId = taskBoardConversationStatusKey(session?.sessionId);
-      if (!sessionId) return;
-      const current = result.get(sessionId);
-      const currentUpdatedAt = Number(current?.updatedAtMs || -1);
+      const sessionIds = taskBoardConversationIdentityKeys(
+        session?.sessionId,
+        session?.sessionAliases,
+      );
       const nextUpdatedAt = Number(session?.updatedAtMs || -1);
-      if (!current || nextUpdatedAt >= currentUpdatedAt) result.set(sessionId, session);
+      sessionIds.forEach((sessionId) => {
+        const current = result.get(sessionId);
+        const currentUpdatedAt = Number(current?.updatedAtMs || -1);
+        if (!current || nextUpdatedAt >= currentUpdatedAt) {
+          result.set(sessionId, session);
+        }
+      });
     });
     if (catalog && typeof catalog === "object") {
       taskBoardCatalogSessionMapCache.set(catalog, {
@@ -11121,6 +11184,11 @@
     const runtimeStatus = taskBoardState.conversationStatuses.get(
       taskBoardConversationStatusKey(sessionId),
     );
+    const sessionAliases = taskBoardConversationSessionAliases(
+      sessionId,
+      conversation?.sessionAliases,
+      catalog,
+    );
     const status = taskBoardConversationStatus({
       available: !!catalogSession || !!catalogError || taskBoardCatalogPartiallyUnavailable(catalog),
       usageKnown: runtimeStatus?.known === true,
@@ -11128,7 +11196,7 @@
       isRunning: runtimeStatus?.isRunning === true,
       unread: typeof runtimeStatus?.unread === "boolean"
         ? runtimeStatus.unread
-        : taskBoardNativeThreadUnread(sessionId),
+        : taskBoardNativeThreadUnread(sessionId, sessionAliases),
     });
     if (catalogSession) {
       return {
@@ -11341,7 +11409,15 @@
     const unreadBySession = taskBoardNativeThreadUnreadIndex();
     refreshEntries.forEach(([key, conversation]) => {
       const current = taskBoardState.conversationStatuses.get(key);
-      const nativeUnread = taskBoardNativeThreadUnread(conversation?.sessionId, unreadBySession);
+      const sessionAliases = taskBoardConversationSessionAliases(
+        conversation?.sessionId,
+        conversation?.sessionAliases,
+      );
+      const nativeUnread = taskBoardNativeThreadUnread(
+        conversation?.sessionId,
+        sessionAliases,
+        unreadBySession,
+      );
       const readSuppressed = taskBoardState.conversationReadSuppressions.has(key);
       if (readSuppressed && !nativeUnread) {
         taskBoardState.conversationReadSuppressions.delete(key);

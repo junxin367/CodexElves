@@ -540,7 +540,7 @@ fn renderer_task_board_navigation_opens_inline_and_offers_new_window_on_context_
         .and_then(|section| section.split("function reconcileTaskBoardEntry()").next())
         .expect("standalone task board opener should be present");
 
-    assert!(script.contains(r#"const taskBoardRuntimeVersion = "55";"#));
+    assert!(script.contains(r#"const taskBoardRuntimeVersion = "57";"#));
     assert!(script.contains("codex-task-board-entry-context-menu"));
     assert!(script.contains("showChevron = true"));
     assert!(script.contains("status.id,\n          false,\n        );"));
@@ -1352,7 +1352,7 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
 }
 
 #[test]
-fn renderer_task_board_open_session_uses_native_rows_and_bounded_project_expansion() {
+fn renderer_task_board_native_identity_handles_navigation_and_unread_status() {
     let script = assets::renderer_features_script();
     let cases = run_task_board_open_session_contract_harness();
     let open_session = script
@@ -1381,6 +1381,24 @@ fn renderer_task_board_open_session_uses_native_rows_and_bounded_project_expansi
         "open session cases: {cases}"
     );
     assert!(
+        cases["aliasUnread"]["standaloneHostMatchesTemporaryAlias"]
+            .as_bool()
+            .unwrap(),
+        "native identity cases: {cases}"
+    );
+    assert!(
+        cases["aliasUnread"]["embeddedBoardMatchesCatalogAlias"]
+            .as_bool()
+            .unwrap(),
+        "native identity cases: {cases}"
+    );
+    assert!(
+        cases["aliasUnread"]["anyMatchingRowPreservesUnread"]
+            .as_bool()
+            .unwrap(),
+        "native identity cases: {cases}"
+    );
+    assert!(
         cases["fallbackAlias"]["standaloneAliasesSurviveStaleHostCatalog"]
             .as_bool()
             .unwrap(),
@@ -1388,6 +1406,12 @@ fn renderer_task_board_open_session_uses_native_rows_and_bounded_project_expansi
     );
     assert!(
         cases["unboundAlias"]["sameTitleTemporaryRowStaysUnavailable"]
+            .as_bool()
+            .unwrap(),
+        "open session cases: {cases}"
+    );
+    assert!(
+        cases["standaloneCollapsed"]["fallbackProjectLabelOpensOpaqueProject"]
             .as_bool()
             .unwrap(),
         "open session cases: {cases}"
@@ -4832,6 +4856,13 @@ function addThread(id, title = "", parent = document.body) {
   parent.appendChild(row);
   return row;
 }
+function markUnread(row) {
+  const marker = node("span");
+  marker.className = "sr-only";
+  marker.textContent = "未读";
+  row.appendChild(marker);
+  return row;
+}
 function addProjectListItem(id, label) {
   const listItem = node("div");
   listItem.setAttribute("role", "listitem");
@@ -4959,6 +4990,35 @@ function reset(options = {}) {
   };
   aliasProject.listItem.remove();
 
+  reset({ snapshot: aliasSnapshot, catalog: aliasCatalog });
+  const aliasUnreadProject = addProjectListItem("opaque-project-alias-unread", "项目别名");
+  markUnread(addThread(
+    "local:client-new-thread:temporary-alias",
+    "侧边栏临时标题",
+    aliasUnreadProject.threads,
+  ));
+  addThread(
+    "session-permanent-alias",
+    "永久 ID 非未读副本",
+    aliasUnreadProject.threads,
+  );
+  const standaloneAliasStatuses =
+    await window.__codexElvesTaskBoardHost.conversationStatuses([{
+      sessionId: "session-permanent-alias",
+      title: "临时别名会话",
+      sessionAliases: ["client-new-thread:temporary-alias"],
+    }]);
+  await api.refreshConversationStatusesForTest({ force: true });
+  const aliasUnread = {
+    standaloneHostMatchesTemporaryAlias:
+      standaloneAliasStatuses.statuses?.[0]?.unread === true,
+    embeddedBoardMatchesCatalogAlias:
+      api.conversationRuntimeStatusForTest("session-permanent-alias")?.unread === true,
+    anyMatchingRowPreservesUnread:
+      standaloneAliasStatuses.statuses?.[0]?.unread === true,
+  };
+  aliasUnreadProject.listItem.remove();
+
   const staleAliasCatalog = {
     ...aliasCatalog,
     sessions: aliasCatalog.sessions.map(({ sessionAliases, ...session }) => session),
@@ -5012,6 +5072,39 @@ function reset(options = {}) {
       waits.reduce((sum, delay) => sum + delay, 0) <= 5000,
     opaqueProjectIdMatchedByLabel:
       projectRow.getAttribute("data-app-action-sidebar-project-id") === "local-opaque-project-a",
+  };
+
+  reset({
+    snapshot: {
+      status: "ok",
+      schemaVersion: 1,
+      revision: 7,
+      tasks: [],
+    },
+    catalog: {
+      status: "ok",
+      projects: [],
+      sessions: [],
+      warnings: [],
+    },
+  });
+  projectRow.setAttribute("aria-expanded", "false");
+  projectRow.setAttribute("data-app-action-sidebar-project-collapsed", "true");
+  mountThreadOnWait = true;
+  const standaloneCollapsedResult = await api.nativeOpenSessionForTest(
+    "session-expand",
+    {
+      sessionId: "session-expand",
+      title: "折叠项目",
+      cwd: "c:/repo-a",
+      projectLabel: "项目 A",
+    },
+  );
+  const standaloneCollapsed = {
+    fallbackProjectLabelOpensOpaqueProject:
+      standaloneCollapsedResult.status === "ok" &&
+      projectClicks === 1 &&
+      threadClicks.get("session-expand") === 1,
   };
 
   reset();
@@ -5081,8 +5174,10 @@ function reset(options = {}) {
   process.stdout.write(JSON.stringify({
     mounted,
     temporaryAlias,
+    aliasUnread,
     fallbackAlias,
     unboundAlias,
+    standaloneCollapsed,
     expanded,
     sidebarCollapsed,
     deadline,

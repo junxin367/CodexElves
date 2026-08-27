@@ -489,6 +489,12 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     assert!(app.contains(r#"status.id === "running" || status.id === "unread""#));
     assert!(app.contains("{iconOnlyStatus ? null : status.label}"));
     assert!(app.contains("conversationReadSuppressionsRef.current.add(sessionKey)"));
+    let status_refresh = app
+        .split("const refreshStatuses = async () => {")
+        .nth(1)
+        .and_then(|section| section.split("void refreshStatuses();").next())
+        .expect("standalone conversation status refresh");
+    assert!(status_refresh.contains("sessionAliases: catalogSessionAliases.get("));
     assert!(app.contains("TaskBoardAppearanceOverlay"));
     assert!(app.contains("appearanceRefreshIntervalMs = 20_000"));
     assert!(app.contains("codexElvesAppearance="));

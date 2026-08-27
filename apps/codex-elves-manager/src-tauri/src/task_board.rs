@@ -29,7 +29,7 @@ const TASK_BOARD_HOST_OPERATION_MAX_CONSECUTIVE_POLL_FAILURES: u32 = 3;
 const TASK_BOARD_HOST_OPERATION_RETENTION_MS: u64 = 5 * 60 * 1_000;
 const TASK_BOARD_HOST_OPERATION_MAX_ENTRIES: usize = 32;
 const TASK_BOARD_MIN_HOST_VERSION: u64 = 3;
-const TASK_BOARD_MIN_RUNTIME_VERSION: u64 = 39;
+const TASK_BOARD_MIN_RUNTIME_VERSION: u64 = 57;
 const DEFAULT_WINDOW_WIDTH: f64 = 1280.0;
 const DEFAULT_WINDOW_HEIGHT: f64 = 860.0;
 const MIN_WINDOW_WIDTH: u32 = 840;
@@ -124,6 +124,8 @@ pub struct OpenSessionRequest {
     session_id: String,
     title: String,
     cwd: String,
+    #[serde(default)]
+    project_label: String,
     updated_at_ms: Option<u64>,
     #[serde(default)]
     session_aliases: Vec<String>,
@@ -145,6 +147,8 @@ pub struct StartConversationRequest {
 pub struct ConversationStatusRef {
     session_id: String,
     title: String,
+    #[serde(default)]
+    session_aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -436,6 +440,7 @@ fn task_board_open_session_arguments(request: &OpenSessionRequest, session_id: &
             "sessionId": request.session_id,
             "title": request.title,
             "cwd": request.cwd,
+            "projectLabel": request.project_label,
             "updatedAtMs": request.updated_at_ms,
             "sessionAliases": request.session_aliases,
         }
@@ -459,24 +464,59 @@ pub async fn task_board_load_host_appearance() -> Value {
 
 #[tauri::command]
 pub async fn task_board_load_conversation_statuses(request: ConversationStatusesRequest) -> Value {
+    call_codex_host(
+        "conversationStatuses",
+        task_board_conversation_status_arguments(request),
+    )
+    .await
+}
+
+fn task_board_conversation_status_arguments(request: ConversationStatusesRequest) -> Value {
     let mut seen = HashSet::new();
     let conversations = request
         .conversations
         .into_iter()
         .filter_map(|conversation| {
             let session_id = conversation.session_id.trim().to_string();
-            let key = session_id.trim_start_matches("local:").to_ascii_lowercase();
+            let key = task_board_session_id_key(&session_id);
             if session_id.is_empty() || !seen.insert(key) {
                 return None;
             }
+            let mut seen_aliases = HashSet::new();
+            let session_aliases = conversation
+                .session_aliases
+                .into_iter()
+                .filter_map(|alias| {
+                    let alias = alias.trim().to_string();
+                    let alias_key = task_board_session_id_key(&alias);
+                    if alias.is_empty()
+                        || alias_key == task_board_session_id_key(&session_id)
+                        || !seen_aliases.insert(alias_key)
+                    {
+                        return None;
+                    }
+                    Some(alias)
+                })
+                .collect();
             Some(ConversationStatusRef {
                 session_id,
                 title: conversation.title,
+                session_aliases,
             })
         })
         .take(256)
         .collect::<Vec<_>>();
-    call_codex_host("conversationStatuses", json!([conversations])).await
+    json!([conversations])
+}
+
+fn task_board_session_id_key(value: &str) -> String {
+    let value = value.trim();
+    let value = value
+        .get(..6)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("local:"))
+        .map(|_| &value[6..])
+        .unwrap_or(value);
+    value.to_ascii_lowercase()
 }
 
 #[tauri::command]
@@ -775,6 +815,25 @@ fn task_board_host_call_script(method: &str, arguments: &Value) -> String {
   if (!host || typeof host[method] !== "function") {{
     return {{ status: "failed", code: "host_unavailable", message: "Codex 任务看板宿主接口尚未就绪" }};
   }}
+  const hostVersion = Number(host.version);
+  const runtimeVersionText = String(
+    window.__codexElvesTaskBoardRuntimeVersion || "",
+  ).trim();
+  const runtimeVersion = Number.parseInt(runtimeVersionText, 10);
+  if (
+    !Number.isSafeInteger(hostVersion) ||
+    hostVersion < {min_host_version} ||
+    !Number.isSafeInteger(runtimeVersion) ||
+    runtimeVersion < {min_runtime_version}
+  ) {{
+    return {{
+      status: "failed",
+      code: "host_version_unsupported",
+      message: "Codex 任务看板宿主版本过旧，请重启 CodexElves 完成升级",
+      hostVersion: Number.isFinite(hostVersion) ? hostVersion : null,
+      runtimeVersion: runtimeVersionText,
+    }};
+  }}
   return Promise.resolve(host[method](...args))
     .then((result) => JSON.stringify(result ?? null))
     .catch((error) => JSON.stringify({{
@@ -783,7 +842,9 @@ fn task_board_host_call_script(method: &str, arguments: &Value) -> String {
       message: String(error?.message || error || "宿主动作失败"),
     }}));
 }})()
-"#
+"#,
+        min_host_version = TASK_BOARD_MIN_HOST_VERSION,
+        min_runtime_version = TASK_BOARD_MIN_RUNTIME_VERSION,
     )
 }
 
@@ -1513,6 +1574,7 @@ mod tests {
             session_id: "session-permanent".to_string(),
             title: "会话标题".to_string(),
             cwd: "E:\\code\\project".to_string(),
+            project_label: "项目".to_string(),
             updated_at_ms: Some(123),
             session_aliases: vec!["client-new-thread:temporary".to_string()],
         };
@@ -1525,10 +1587,38 @@ mod tests {
                     "sessionId": "session-permanent",
                     "title": "会话标题",
                     "cwd": "E:\\code\\project",
+                    "projectLabel": "项目",
                     "updatedAtMs": 123,
                     "sessionAliases": ["client-new-thread:temporary"]
                 }
             ])
+        );
+    }
+
+    #[test]
+    fn standalone_status_request_forwards_normalized_session_aliases_to_host() {
+        let arguments = task_board_conversation_status_arguments(ConversationStatusesRequest {
+            conversations: vec![ConversationStatusRef {
+                session_id: " session-permanent ".to_string(),
+                title: "会话标题".to_string(),
+                session_aliases: vec![
+                    " client-new-thread:temporary ".to_string(),
+                    "local:client-new-thread:temporary".to_string(),
+                    String::new(),
+                    "local:session-permanent".to_string(),
+                ],
+            }],
+        });
+
+        assert_eq!(
+            arguments,
+            json!([[
+                {
+                    "sessionId": "session-permanent",
+                    "title": "会话标题",
+                    "sessionAliases": ["client-new-thread:temporary"]
+                }
+            ]])
         );
     }
 
@@ -1590,6 +1680,19 @@ mod tests {
     }
 
     #[test]
+    fn standalone_host_calls_require_current_runtime() {
+        let script = task_board_host_call_script(
+            "openSession",
+            &json!(["session-1", {"projectLabel": "项目"}]),
+        );
+
+        assert!(script.contains(r#"code: "host_version_unsupported""#));
+        assert!(script.contains("hostVersion < 3"));
+        assert!(script.contains("runtimeVersion < 57"));
+        assert!(script.contains("Codex 任务看板宿主版本过旧，请重启 CodexElves 完成升级"));
+    }
+
+    #[test]
     fn standalone_start_operation_requires_v3_capabilities_without_dom_overrides() {
         let script = task_board_host_operation_start_script(
             "operation-1",
@@ -1607,7 +1710,7 @@ mod tests {
         assert!(script.contains("native_create_busy"));
         assert!(script.contains(r#"code: "host_version_unsupported""#));
         assert!(script.contains("hostVersion < 3"));
-        assert!(script.contains("runtimeVersion < 39"));
+        assert!(script.contains("runtimeVersion < 57"));
         assert!(script.contains("supportsNativeCreateLease"));
         assert!(script.contains("supportsNativeCreateRuntime"));
         assert!(script.contains("capabilities?.nativeCreateLease === true"));

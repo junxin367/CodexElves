@@ -2006,6 +2006,23 @@ export function TaskBoardApp() {
     return sessionIds;
   }, [catalog.sessions]);
 
+  const catalogSessionAliases = useMemo(() => {
+    const aliases = new Map<string, string[]>();
+    catalog.sessions.forEach((session) => {
+      const sessionId = normalizeSessionId(session.sessionId);
+      if (!sessionId || !Array.isArray(session.sessionAliases)) return;
+      const values = Array.from(
+        new Set(
+          session.sessionAliases
+            .map((alias) => String(alias || "").trim())
+            .filter(Boolean),
+        ),
+      );
+      if (values.length) aliases.set(sessionId, values);
+    });
+    return aliases;
+  }, [catalog.sessions]);
+
   const linkedConversations = useMemo(() => {
     const conversations = new Map<string, TaskConversation>();
     snapshot.tasks.forEach((task) => {
@@ -2066,10 +2083,14 @@ export function TaskBoardApp() {
           "task_board_load_conversation_statuses",
           {
             request: {
-              conversations: linkedConversations.map((conversation) => ({
-                sessionId: conversation.sessionId,
-                title: conversation.title,
-              })),
+              conversations: linkedConversations.map((conversation) => {
+                const sessionKey = normalizeSessionId(conversation.sessionId);
+                return {
+                  sessionId: conversation.sessionId,
+                  title: conversation.title,
+                  sessionAliases: catalogSessionAliases.get(sessionKey) ?? [],
+                };
+              }),
             },
           },
         );
@@ -2140,7 +2161,7 @@ export function TaskBoardApp() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [linkedConversations]);
+  }, [catalogSessionAliases, linkedConversations]);
 
   useEffect(() => {
     if (!editor) return;
@@ -2193,23 +2214,6 @@ export function TaskBoardApp() {
       if (sessionId && title) titles.set(sessionId, title);
     });
     return titles;
-  }, [catalog.sessions]);
-
-  const catalogSessionAliases = useMemo(() => {
-    const aliases = new Map<string, string[]>();
-    catalog.sessions.forEach((session) => {
-      const sessionId = normalizeSessionId(session.sessionId);
-      if (!sessionId || !Array.isArray(session.sessionAliases)) return;
-      const values = Array.from(
-        new Set(
-          session.sessionAliases
-            .map((alias) => String(alias || "").trim())
-            .filter(Boolean),
-        ),
-      );
-      if (values.length) aliases.set(sessionId, values);
-    });
-    return aliases;
   }, [catalog.sessions]);
 
   const catalogProjectsByCwd = useMemo(() => {
@@ -2322,7 +2326,7 @@ export function TaskBoardApp() {
   );
 
   const openConversation = useCallback(
-    async (conversation: TaskConversation) => {
+    async (conversation: TaskConversation, project: TaskProject) => {
       const sessionKey = normalizeSessionId(conversation.sessionId);
       const wasUnread = conversationStatuses.get(sessionKey)?.unread === true;
       if (wasUnread) {
@@ -2350,6 +2354,7 @@ export function TaskBoardApp() {
         const result = await invoke<BoardResponse>("task_board_open_session", {
           request: {
             ...conversation,
+            projectLabel: project.label,
             sessionAliases: catalogSessionAliases.get(sessionKey) ?? [],
           },
         });
@@ -3422,7 +3427,10 @@ function TaskCard({
   dragging: boolean;
   onDragStart: (event: DragEvent<HTMLElement>) => void;
   onDragEnd: () => void;
-  onOpenConversation: (conversation: TaskConversation) => void;
+  onOpenConversation: (
+    conversation: TaskConversation,
+    project: TaskProject,
+  ) => void;
   onDetachConversation: (task: Task, conversation: TaskConversation) => void;
   onDeleteTask: () => void;
   onAttach: () => void;
@@ -3479,7 +3487,7 @@ function TaskCard({
                 <button
                   className="task-board-conversation"
                   type="button"
-                  onClick={() => onOpenConversation(conversation)}
+                  onClick={() => onOpenConversation(conversation, task.project)}
                   disabled={!available}
                   title={showStatus ? `${title}\n${status.label}` : title}
                   aria-label={`${title}${showStatus ? `，${status.label}` : ""}，${
