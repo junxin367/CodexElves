@@ -126,6 +126,128 @@ fn catalog_excludes_subagent_threads_from_spawn_edges() {
 }
 
 #[test]
+fn catalog_excludes_subagent_threads_from_source_without_spawn_edges() {
+    let temp = tempdir().unwrap();
+    let threads = temp.path().join("state.sqlite");
+    let db = Connection::open(&threads).unwrap();
+    db.execute(
+        "CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            rollout_path TEXT,
+            title TEXT,
+            cwd TEXT,
+            archived INTEGER,
+            updated_at_ms INTEGER,
+            source TEXT,
+            thread_source TEXT
+        )",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "CREATE TABLE thread_spawn_edges (
+            parent_thread_id TEXT NOT NULL,
+            child_thread_id TEXT NOT NULL,
+            status TEXT
+        )",
+        [],
+    )
+    .unwrap();
+    let rows = [
+        ("main-thread", "main session", r#"{"cli":{}}"#, "user", 500),
+        (
+            "source-sub-thread",
+            "source subagent",
+            r#"{"subagent":{"thread_spawn":{"parent_thread_id":"main-thread"}}}"#,
+            "subagent",
+            400,
+        ),
+        (
+            "source-agent-thread",
+            "legacy agent source",
+            r#"{"agent":{"parent_thread_id":"main-thread"}}"#,
+            "",
+            300,
+        ),
+        (
+            "thread-source-sub-thread",
+            "thread source subagent",
+            "",
+            "subagent",
+            200,
+        ),
+        (
+            "standalone",
+            "standalone session",
+            r#"{"cli":{}}"#,
+            "user",
+            100,
+        ),
+    ];
+    for (id, title, source, thread_source, updated_at_ms) in rows {
+        db.execute(
+            "INSERT INTO threads VALUES (?1, '', ?2, 'C:/workspace', 0, ?3, ?4, ?5)",
+            (id, title, updated_at_ms, source, thread_source),
+        )
+        .unwrap();
+    }
+    drop(db);
+
+    let catalog = aggregate_local_session_catalog(&[threads]).unwrap();
+
+    let session_ids = catalog
+        .sessions
+        .iter()
+        .map(|session| session.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(session_ids, vec!["main-thread", "standalone"]);
+}
+
+#[test]
+fn catalog_excludes_spawn_child_when_edge_and_thread_are_in_different_databases() {
+    let temp = tempdir().unwrap();
+    let current = temp.path().join("sqlite").join("state_5.sqlite");
+    let legacy = temp.path().join("state_5.sqlite");
+    fs::create_dir_all(current.parent().unwrap()).unwrap();
+    create_thread_db(
+        &current,
+        &[
+            ("cross-db-child", "subagent", "C:/workspace", false, 300),
+            ("current-main", "current main", "C:/workspace", false, 200),
+        ],
+    );
+    create_thread_db(
+        &legacy,
+        &[("legacy-main", "legacy main", "C:/workspace", false, 100)],
+    );
+    let db = Connection::open(&legacy).unwrap();
+    db.execute(
+        "CREATE TABLE thread_spawn_edges (
+            parent_thread_id TEXT NOT NULL,
+            child_thread_id TEXT NOT NULL,
+            status TEXT
+        )",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO thread_spawn_edges VALUES ('legacy-main', 'cross-db-child', 'running')",
+        [],
+    )
+    .unwrap();
+    drop(db);
+
+    let catalog = aggregate_local_session_catalog(&[current, legacy]).unwrap();
+
+    let session_ids = catalog
+        .sessions
+        .iter()
+        .map(|session| session.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(session_ids, vec!["current-main", "legacy-main"]);
+}
+
+#[test]
 fn catalog_aggregates_thread_and_automation_sessions_with_latest_id_winner() {
     let temp = tempdir().unwrap();
     let threads = temp.path().join("state.sqlite");
@@ -249,6 +371,7 @@ fn catalog_serialization_never_exposes_database_or_rollout_paths() {
     assert!(session.get("dbPath").is_none());
     assert!(session.get("rolloutPath").is_none());
     assert!(session.get("archived").is_none());
+    assert!(session.get("isSubagent").is_none());
 }
 
 #[test]

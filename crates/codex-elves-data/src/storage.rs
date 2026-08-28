@@ -175,6 +175,8 @@ pub struct LocalSession {
     pub updated_at_ms: Option<i64>,
     pub rollout_path: String,
     pub db_path: String,
+    #[serde(skip)]
+    is_subagent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,6 +225,7 @@ pub fn aggregate_local_session_catalog(
 ) -> Result<LocalSessionCatalog, LocalSessionCatalogError> {
     let mut seen_paths = HashSet::new();
     let mut sessions = Vec::new();
+    let mut subagent_thread_ids = HashSet::new();
     let mut existing_database_count = 0usize;
     let mut successful_database_count = 0usize;
     let mut failed_database_count = 0usize;
@@ -239,16 +242,20 @@ pub fn aggregate_local_session_catalog(
 
         existing_database_count += 1;
         let adapter = SQLiteStorageAdapter::new(candidate_path);
-        let spawn_child_thread_ids = adapter
-            .list_codex_spawn_child_thread_ids()
-            .unwrap_or_default();
+        subagent_thread_ids.extend(
+            adapter
+                .list_codex_spawn_child_thread_ids()
+                .unwrap_or_default(),
+        );
         match adapter.list_local_sessions() {
             Ok(mut database_sessions) => {
                 successful_database_count += 1;
-                // 任务看板目录只面向用户可操作的顶层会话，subagent 子线程不进入。
-                database_sessions.retain(|session| {
-                    !spawn_child_thread_ids.contains(&normalized_thread_id_key(&session.id))
-                });
+                subagent_thread_ids.extend(
+                    database_sessions
+                        .iter()
+                        .filter(|session| session.is_subagent)
+                        .map(|session| normalized_thread_id_key(&session.id)),
+                );
                 sessions.append(&mut database_sessions);
             }
             Err(_) => failed_database_count += 1,
@@ -261,6 +268,10 @@ pub fn aggregate_local_session_catalog(
         });
     }
 
+    // 任务看板目录只面向用户可操作的顶层会话，subagent 子线程不进入。
+    // 在读取完所有候选数据库后统一过滤，兼容 thread 行与 spawn edge 分散在不同数据库的情况。
+    sessions
+        .retain(|session| !subagent_thread_ids.contains(&normalized_thread_id_key(&session.id)));
     sessions.retain(|session| {
         !session.archived && !session.id.trim().is_empty() && !session.cwd.trim().is_empty()
     });
@@ -298,6 +309,23 @@ fn normalized_thread_id_key(value: &str) -> String {
         .map(|_| &trimmed[6..])
         .unwrap_or(trimmed);
     without_local_prefix.to_ascii_lowercase()
+}
+
+fn codex_thread_source_is_subagent(source: &str, thread_source: &str) -> bool {
+    if source_label_is_subagent(thread_source) {
+        return true;
+    }
+    match serde_json::from_str::<Value>(source.trim()) {
+        Ok(Value::Object(source)) => {
+            source.contains_key("subagent") || source.contains_key("agent")
+        }
+        Ok(Value::String(source)) => source_label_is_subagent(&source),
+        _ => false,
+    }
+}
+
+fn source_label_is_subagent(source: &str) -> bool {
+    source.trim().eq_ignore_ascii_case("subagent") || source.trim().eq_ignore_ascii_case("agent")
 }
 
 fn canonical_database_path_key(path: &Path) -> PathBuf {
@@ -402,13 +430,18 @@ impl SQLiteStorageAdapter {
             "NULL"
         };
         let rollout_path = optional_column_expression(&columns, "rollout_path", "''");
+        let source = optional_column_expression(&columns, "source", "''");
+        let thread_source = optional_column_expression(&columns, "thread_source", "''");
         let sql = format!(
-            "SELECT id, {title}, {cwd}, {model_provider}, {archived}, {updated_at_ms}, {rollout_path}
+            "SELECT id, {title}, {cwd}, {model_provider}, {archived}, {updated_at_ms}, {rollout_path},
+                    {source}, {thread_source}
              FROM threads
              ORDER BY COALESCE({updated_at_ms}, 0) DESC, id DESC"
         );
         let mut stmt = db.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
+            let source = row.get::<_, Option<String>>(7)?.unwrap_or_default();
+            let thread_source = row.get::<_, Option<String>>(8)?.unwrap_or_default();
             Ok(LocalSession {
                 id: row.get(0)?,
                 title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
@@ -418,6 +451,7 @@ impl SQLiteStorageAdapter {
                 updated_at_ms: row.get(5)?,
                 rollout_path: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
                 db_path: self.db_path.to_string_lossy().to_string(),
+                is_subagent: codex_thread_source_is_subagent(&source, &thread_source),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -455,6 +489,7 @@ impl SQLiteStorageAdapter {
                 updated_at_ms,
                 rollout_path: String::new(),
                 db_path: self.db_path.to_string_lossy().to_string(),
+                is_subagent: false,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
