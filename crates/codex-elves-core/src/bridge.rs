@@ -103,8 +103,18 @@ pub fn build_bridge_script_with_generation(binding_name: &str, generation: &str)
 }
 
 pub fn bridge_health_check_script() -> &'static str {
-    r#"
+    r##"
 (() => {
+  const pageUrl = String(window.location?.href || "").toLowerCase();
+  const mainPageUrl = "app://-/index.html";
+  if (!pageUrl.startsWith(mainPageUrl)) return false;
+  const pageUrlSuffix = pageUrl.slice(mainPageUrl.length);
+  if (pageUrlSuffix && !pageUrlSuffix.startsWith("?") && !pageUrlSuffix.startsWith("#")) return false;
+  if (
+    pageUrl.includes("initialroute=%2favatar-overlay") ||
+    pageUrl.includes("initialroute=/avatar-overlay") ||
+    pageUrl.includes("/avatar-overlay")
+  ) return false;
   const bridge = window.__codexSessionDeleteBridge;
   if (typeof bridge !== "function") return false;
   try {
@@ -116,7 +126,7 @@ pub fn bridge_health_check_script() -> &'static str {
     return false;
   }
 })()
-"#
+"##
 }
 
 pub async fn evaluate_script(websocket_url: &str, script: &str) -> anyhow::Result<Value> {

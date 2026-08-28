@@ -2404,6 +2404,210 @@ fn injection_script_removes_timeline_and_sidebar_thread_id_badge_controls() {
 }
 
 #[test]
+fn injection_script_restores_titlebar_open_in_quick_access() {
+    let script = assets::injection_script(45221);
+
+    assert!(script.contains("openInQuickAccess: true"));
+    assert!(script.contains(r#"data-codex-elves-setting="openInQuickAccess""#));
+    assert!(script.contains("快速打开工作区"));
+    assert!(script.contains("data-codex-open-in-button"));
+    assert!(script.contains("codex-open-in-menu"));
+    assert!(script.contains(r#"const codexOpenInVersion = "5";"#));
+    assert!(script.contains(r#"const codexDeleteStyleVersion = "79";"#));
+    assert!(script.contains(r#"[data-codex-open-in-role="primary"]"#));
+    assert!(script.contains(r#"[data-codex-open-in-role="arrow"]"#));
+    assert!(script.contains("margin-right: 6px;"));
+    assert!(script.contains("width: 30px !important;"));
+    assert!(script.contains("width: 14px !important;"));
+    let group_style = script
+        .split(".codex-open-in-group {")
+        .nth(1)
+        .expect("open in group style should be present")
+        .split("\n      }")
+        .next()
+        .expect("open in group style should be closed");
+    assert!(group_style.contains(
+        "color-mix(in srgb, var(--color-border-primary-outline, currentColor) 64%, transparent)"
+    ));
+    let arrow_style = script
+        .split(r#".codex-open-in-group [data-codex-open-in-role="arrow"] {"#)
+        .nth(1)
+        .expect("open in arrow style should be present")
+        .split("\n      }")
+        .next()
+        .expect("open in arrow style should be closed");
+    assert!(arrow_style.contains(
+        "color-mix(in srgb, var(--color-border-primary-outline, currentColor) 48%, transparent)"
+    ));
+    assert!(script.contains("function codexOpenInTargetIconUrl"));
+    assert!(script.contains("function renderCodexOpenInPrimaryTarget"));
+    assert!(script.contains("codex-open-in-primary-icon"));
+    let primary_icon_style = script
+        .split(".codex-open-in-primary-icon {")
+        .nth(1)
+        .expect("open in primary icon style should be present")
+        .split("\n      }")
+        .next()
+        .expect("open in primary icon style should be closed");
+    assert!(primary_icon_style.contains("width: 14px;"));
+    assert!(primary_icon_style.contains("height: 14px;"));
+    let primary_image_style = script
+        .split(".codex-open-in-primary-icon img {")
+        .nth(1)
+        .expect("open in primary image style should be present")
+        .split("\n      }")
+        .next()
+        .expect("open in primary image style should be closed");
+    assert!(primary_image_style.contains("width: 14px;"));
+    assert!(primary_image_style.contains("height: 14px;"));
+    assert!(script.contains("function handleCodexOpenInMenuToggle(event)"));
+    assert!(script.contains("function handleCodexOpenInMenuPointerDown(event)"));
+    assert!(script.contains("event.stopImmediatePropagation?.();"));
+    assert!(script.contains(
+        r#"arrow.addEventListener("pointerdown", handleCodexOpenInMenuPointerDown, true);"#
+    ));
+    assert!(
+        script.contains(r#"arrow.addEventListener("click", handleCodexOpenInMenuToggle, true);"#)
+    );
+    assert!(
+        script.contains("let codexOpenInControlGroup = window.__codexOpenInControlGroup || null;")
+    );
+    assert!(script.contains("const existingGroups = Array.from(document.querySelectorAll("));
+    assert!(script.contains(
+        "existingGroups.filter((candidate) => candidate !== group).forEach((candidate) => candidate.remove());"
+    ));
+    assert!(script.contains("window.__codexOpenInControlGroup = group;"));
+    assert!(script.contains("Open in"));
+    assert!(script.contains("用首选应用打开工作区"));
+    assert!(script.contains("选择打开方式"));
+    assert!(script.contains("正在加载可用应用"));
+    assert!(script.contains("无法加载应用列表，请重试"));
+    assert!(script.contains(r#"openMode: "workspace""#));
+    assert!(script.contains("persistPreferredTargetPath: context.cwd"));
+    assert!(script.contains("hostId: context.hostId"));
+    assert!(script.contains("sendCodexElvesDiagnostic(\"open_in_service_unavailable\""));
+    assert!(script.contains("void refreshCodexOpenInButton();"));
+
+    let dismiss_block = script
+        .split("function installCodexOpenInMenuDismissHandlers(state)")
+        .nth(1)
+        .expect("open in dismiss handlers should be present")
+        .split("function closeCodexOpenInMenu")
+        .next()
+        .expect("open in dismiss handlers should be closed");
+    assert!(dismiss_block.contains("state.element?.contains?.(target)"));
+    assert!(dismiss_block.contains("state.group?.contains?.(target)"));
+    assert!(
+        dismiss_block
+            .contains(r#"document.addEventListener("pointerdown", state.dismissHandler, true);"#)
+    );
+
+    let open_menu_block = script
+        .split("async function openCodexOpenInMenu")
+        .nth(1)
+        .expect("open in menu opener should be present")
+        .split("function toggleCodexOpenInMenu")
+        .next()
+        .expect("open in menu opener should be closed");
+    let append_index = open_menu_block
+        .find("document.body.appendChild(menu);")
+        .expect("open in menu should be attached immediately");
+    let load_index = open_menu_block
+        .find("await loadCodexOpenInTargets(context)")
+        .expect("open in targets should load asynchronously");
+    assert!(
+        append_index < load_index,
+        "the loading menu must appear on the first click before target discovery completes"
+    );
+
+    let toggle_block = script
+        .split("function toggleCodexOpenInMenu")
+        .nth(1)
+        .expect("open in menu toggle should be present")
+        .split("async function refreshCodexOpenInButton")
+        .next()
+        .expect("open in menu toggle should be closed");
+    assert!(
+        toggle_block
+            .contains("const menuIsOpen = codexOpenInMenuState.element?.isConnected === true;")
+    );
+    assert!(toggle_block.contains("if (menuIsOpen) return;"));
+}
+
+#[test]
+fn injection_script_open_in_resolves_workspace_from_conversation_manager() {
+    let script = assets::injection_script(45221);
+
+    let context_block = script
+        .split("function codexOpenInContext()")
+        .nth(1)
+        .expect("open in context resolver should be present")
+        .split("\n  }")
+        .next()
+        .expect("open in context resolver should be closed");
+    assert!(context_block.contains("activeConversationIdFromDom()"));
+    assert!(context_block.contains("findCodexConversationManagerInReactTree()"));
+    assert!(context_block.contains("getConversation?.(conversationId)"));
+    assert!(context_block.contains("conversation?.cwd"));
+    assert!(context_block.contains("conversation?.hostId"));
+
+    let available_block = script
+        .split("function codexOpenInAvailableTargets")
+        .nth(1)
+        .expect("open in available target filter should be present")
+        .split("\n  }")
+        .next()
+        .expect("open in available target filter should be closed");
+    assert!(available_block.contains("availableTargets"));
+    assert!(available_block.contains("available === true"));
+
+    let visible_block = script
+        .split("function codexOpenInVisibleTargets")
+        .nth(1)
+        .expect("open in visible target filter should be present")
+        .split("\n  }")
+        .next()
+        .expect("open in visible target filter should be closed");
+    assert!(visible_block.contains("codexOpenInAvailableTargets"));
+    assert!(visible_block.contains("!target.hidden"));
+
+    let primary_block = script
+        .split("function codexOpenInPrimaryTarget")
+        .nth(1)
+        .expect("open in primary target resolver should be present")
+        .split("\n  }")
+        .next()
+        .expect("open in primary target resolver should be closed");
+    assert!(primary_block.contains("codexOpenInAvailableTargets"));
+    assert!(primary_block.contains("preferredTarget"));
+}
+
+#[test]
+fn injection_script_open_in_reuses_native_service_without_local_detection() {
+    let script = assets::injection_script(45221);
+
+    assert!(script.contains("function isCodexOpenInService"));
+    assert!(script.contains("typeof service.getTargets === \"function\""));
+    assert!(script.contains("typeof service.open === \"function\""));
+    assert!(script.contains("typeof service.setGlobalPreferredTarget === \"function\""));
+    let loader_block = script
+        .split("async function loadCodexOpenInService()")
+        .nth(1)
+        .expect("open in service loader should be present")
+        .split("\n  }")
+        .next()
+        .expect("open in service loader should be closed");
+    assert!(loader_block.contains("app-initial-"));
+    assert!(loader_block.contains("value?.openIn"));
+    assert!(loader_block.contains("[object RpcPromise]"));
+    assert!(loader_block.contains("[object RpcStub]"));
+    assert!(!loader_block.contains("Code.exe"));
+    assert!(!loader_block.contains("spawn"));
+    assert!(script.contains("function codexOpenInNativeButtonExists"));
+    assert!(script.contains("removeCodexOpenInControls()"));
+}
+
+#[test]
 fn injection_script_reuses_native_session_action_button_style_with_fallback() {
     let script = assets::injection_script(45221);
 
@@ -8712,6 +8916,9 @@ fn bridge_health_check_script_uses_real_backend_round_trip() {
     assert!(script.contains("/backend/status"));
     assert!(script.contains("Promise.race"));
     assert!(script.contains("setTimeout"));
+    assert!(script.contains("app://-/index.html"));
+    assert!(script.contains("window.location"));
+    assert!(script.contains("avatar-overlay"));
 }
 
 #[test]
@@ -8800,6 +9007,76 @@ fn pick_page_target_accepts_app_shell_when_title_changes() {
     let picked = pick_injectable_codex_page_target(&targets).expect("app shell should be selected");
 
     assert_eq!(picked.id, "app-shell");
+}
+
+#[test]
+fn pick_injectable_codex_page_target_prefers_main_shell_over_codex_named_debug_page() {
+    let targets = vec![
+        target(
+            "manager-debug",
+            "page",
+            "CodexElves 管理工具",
+            "http://127.0.0.1:1420/?debug=open-in",
+            Some("ws://manager-debug"),
+        ),
+        target(
+            "workspace",
+            "page",
+            "ChatGPT",
+            "app://-/index.html",
+            Some("ws://workspace"),
+        ),
+    ];
+
+    let picked = pick_injectable_codex_page_target(&targets)
+        .expect("the canonical Codex app shell should win over local debug pages");
+
+    assert_eq!(picked.id, "workspace");
+}
+
+#[test]
+fn pick_page_target_prefers_main_shell_over_codex_named_debug_page() {
+    let targets = vec![
+        target(
+            "manager-debug",
+            "page",
+            "CodexElves 管理工具",
+            "http://127.0.0.1:1420/?debug=open-in",
+            Some("ws://manager-debug"),
+        ),
+        target(
+            "workspace",
+            "page",
+            "ChatGPT",
+            "app://-/index.html",
+            Some("ws://workspace"),
+        ),
+    ];
+
+    let picked =
+        pick_page_target(&targets).expect("the canonical app shell should have highest priority");
+
+    assert_eq!(picked.id, "workspace");
+}
+
+#[test]
+fn pick_injectable_codex_page_target_rejects_codex_named_debug_page_without_main_shell() {
+    let targets = vec![target(
+        "manager-debug",
+        "page",
+        "CodexElves 管理工具",
+        "http://127.0.0.1:1420/?debug=open-in",
+        Some("ws://manager-debug"),
+    )];
+
+    let error = pick_injectable_codex_page_target(&targets)
+        .expect_err("a local CodexElves debug page must never receive the Codex bridge");
+
+    assert!(
+        error
+            .to_string()
+            .contains("No injectable ChatGPT/Codex page target found")
+    );
 }
 
 #[test]

@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::time::Duration;
 
 const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(3);
+const CODEX_MAIN_PAGE_URL: &str = "app://-/index.html";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct CdpTarget {
@@ -88,7 +89,7 @@ pub fn pick_injectable_codex_page_target(targets: &[CdpTarget]) -> anyhow::Resul
     let mut best_score = 0;
     for target in targets
         .iter()
-        .filter(|target| is_injectable_page_target(target))
+        .filter(|target| is_injectable_page_target(target) && is_codex_main_page_target(target))
     {
         let score = codex_page_target_score(target);
         if score > best_score {
@@ -124,7 +125,9 @@ fn codex_page_target_score(target: &CdpTarget) -> u8 {
     if is_auxiliary_codex_page_url(&url) {
         return 0;
     }
-    if title.contains("codex") || url.contains("codex") {
+    if is_codex_main_page_url(&url) {
+        5
+    } else if title.contains("codex") || url.contains("codex") {
         4
     } else if title.contains("chatgpt") || url.contains("chatgpt") {
         if url.starts_with("app://-/") { 3 } else { 2 }
@@ -133,6 +136,18 @@ fn codex_page_target_score(target: &CdpTarget) -> u8 {
     } else {
         0
     }
+}
+
+fn is_codex_main_page_target(target: &CdpTarget) -> bool {
+    let url = target.url.to_ascii_lowercase();
+    is_codex_main_page_url(&url) && !is_auxiliary_codex_page_url(&url)
+}
+
+fn is_codex_main_page_url(url: &str) -> bool {
+    let Some(suffix) = url.strip_prefix(CODEX_MAIN_PAGE_URL) else {
+        return false;
+    };
+    suffix.is_empty() || suffix.starts_with('?') || suffix.starts_with('#')
 }
 
 fn is_auxiliary_codex_page_url(url: &str) -> bool {

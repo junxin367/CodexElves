@@ -11,8 +11,16 @@ import "@fontsource/jetbrains-mono";
 const app = document.getElementById("app");
 
 if (app instanceof HTMLElement) {
-  const taskBoardMode = new URLSearchParams(window.location.search).get("taskBoard") === "1";
-  if (taskBoardMode) {
+  const params = new URLSearchParams(window.location.search);
+  const openInDebugMode = params.get("debug") === "open-in";
+  const taskBoardMode = params.get("taskBoard") === "1";
+  if (openInDebugMode) {
+    void Promise.all([import("./open-in-debug.css"), import("./OpenInDebugApp")]).then(
+      ([, { OpenInDebugApp }]) => {
+        createRoot(app).render(<OpenInDebugApp />);
+      },
+    );
+  } else if (taskBoardMode) {
     void import("./task-board-standalone.css").then(() => {
       createRoot(app).render(<TaskBoardApp />);
     });
