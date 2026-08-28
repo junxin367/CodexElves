@@ -159,6 +159,13 @@ pub trait LaunchHooks: Send + Sync {
         Ok(())
     }
     async fn start_helper(&self, helper_port: u16) -> anyhow::Result<()>;
+    async fn start_helper_with_settings(
+        &self,
+        helper_port: u16,
+        _settings: &BackendSettings,
+    ) -> anyhow::Result<()> {
+        self.start_helper(helper_port).await
+    }
     async fn launch_codex(
         &self,
         app_dir: &Path,
@@ -307,7 +314,9 @@ where
             }
         }
         if settings.enhancements_enabled || protocol_proxy_enabled {
-            hooks.start_helper(helper_port).await?;
+            hooks
+                .start_helper_with_settings(helper_port, &settings)
+                .await?;
             helper_started = true;
         }
 
@@ -418,6 +427,73 @@ impl IntoLaunchHooks for DefaultLaunchHooks {
 impl DefaultLaunchHooks {
     pub fn shared() -> Arc<dyn LaunchHooks> {
         Arc::new(Self::default())
+    }
+
+    async fn start_helper_on_host(
+        &self,
+        helper_port: u16,
+        bind_host: &'static str,
+    ) -> anyhow::Result<()> {
+        let listener = tokio::net::TcpListener::bind((bind_host, helper_port))
+            .await
+            .with_context(|| {
+                format!("failed to bind helper runtime on {bind_host}:{helper_port}")
+            })?;
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "helper.listening",
+            serde_json::json!({
+                "helper_port": helper_port,
+                "address": format!("http://{bind_host}:{helper_port}")
+            }),
+        );
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let connection_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_HELPER_CONNECTIONS));
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accepted = listener.accept() => {
+                        if let Ok((mut stream, addr)) = accepted {
+                            let permit = connection_permits.clone().try_acquire_owned();
+                            match permit {
+                                Ok(permit) => {
+                                    tokio::spawn(async move {
+                                        let _permit = permit;
+                                        let _ = handle_helper_connection(stream, Some(addr)).await;
+                                    });
+                                }
+                                Err(_) => {
+                                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                                        "helper.connection_rejected",
+                                        serde_json::json!({
+                                            "remote_addr": addr.to_string(),
+                                            "reason": "connection_limit",
+                                            "limit": MAX_CONCURRENT_HELPER_CONNECTIONS
+                                        }),
+                                    );
+                                    let _ = tokio::time::timeout(
+                                        Duration::from_secs(1),
+                                        write_http_response(
+                                            &mut stream,
+                                            "503 Service Unavailable",
+                                            "application/json; charset=utf-8",
+                                            r#"{"status":"busy","message":"CodexElves helper 连接数已达上限"}"#
+                                                .as_bytes(),
+                                        ),
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        *self.helper.lock().await = Some(HelperRuntime {
+            shutdown: shutdown_tx,
+            task,
+        });
+        Ok(())
     }
 }
 
@@ -552,64 +628,22 @@ impl LaunchHooks for DefaultLaunchHooks {
     }
 
     async fn start_helper(&self, helper_port: u16) -> anyhow::Result<()> {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", helper_port))
+        self.start_helper_on_host(helper_port, crate::lan_proxy::LOOPBACK_BIND_HOST)
             .await
-            .with_context(|| format!("failed to bind helper runtime on 127.0.0.1:{helper_port}"))?;
-        let _ = crate::diagnostic_log::append_diagnostic_log(
-            "helper.listening",
-            serde_json::json!({
-                "helper_port": helper_port,
-                "address": format!("http://127.0.0.1:{helper_port}")
-            }),
-        );
-        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
-        let connection_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_HELPER_CONNECTIONS));
-        let task = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = &mut shutdown_rx => break,
-                    accepted = listener.accept() => {
-                        if let Ok((mut stream, addr)) = accepted {
-                            let permit = connection_permits.clone().try_acquire_owned();
-                            match permit {
-                                Ok(permit) => {
-                                    tokio::spawn(async move {
-                                        let _permit = permit;
-                                        let _ = handle_helper_connection(stream, Some(addr)).await;
-                                    });
-                                }
-                                Err(_) => {
-                                    let _ = crate::diagnostic_log::append_diagnostic_log(
-                                        "helper.connection_rejected",
-                                        serde_json::json!({
-                                            "remote_addr": addr.to_string(),
-                                            "reason": "connection_limit",
-                                            "limit": MAX_CONCURRENT_HELPER_CONNECTIONS
-                                        }),
-                                    );
-                                    let _ = tokio::time::timeout(
-                                        Duration::from_secs(1),
-                                        write_http_response(
-                                            &mut stream,
-                                            "503 Service Unavailable",
-                                            "application/json; charset=utf-8",
-                                            r#"{"status":"busy","message":"CodexElves helper 连接数已达上限"}"#
-                                                .as_bytes(),
-                                        ),
-                                    )
-                                    .await;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        *self.helper.lock().await = Some(HelperRuntime {
-            shutdown: shutdown_tx,
-            task,
-        });
-        Ok(())
+    }
+
+    async fn start_helper_with_settings(
+        &self,
+        helper_port: u16,
+        settings: &BackendSettings,
+    ) -> anyhow::Result<()> {
+        let lan_proxy_enabled =
+            settings.lan_proxy_enabled && settings.active_relay_uses_protocol_proxy();
+        self.start_helper_on_host(
+            helper_port,
+            crate::lan_proxy::helper_bind_host(lan_proxy_enabled),
+        )
+        .await
     }
 
     async fn launch_codex(
@@ -874,6 +908,66 @@ async fn handle_helper_connection(
     remote_addr: Option<SocketAddr>,
 ) -> anyhow::Result<()> {
     let request_bytes = read_http_request(&mut stream).await?;
+    let request = String::from_utf8_lossy(&request_bytes);
+    let request_line = request.lines().next().unwrap_or_default().to_string();
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_string();
+    let raw_path = parts.next().unwrap_or_default();
+    let path = raw_path.split('?').next().unwrap_or(raw_path).to_string();
+    drop(request);
+
+    if remote_addr.is_some_and(|address| !address.ip().is_loopback()) {
+        let settings = SettingsStore::default().load().unwrap_or_default();
+        if let Err(error) = crate::lan_proxy::remote_request_access(
+            remote_addr,
+            settings.lan_proxy_enabled,
+            settings.active_relay_uses_protocol_proxy(),
+            &method,
+            &path,
+        ) {
+            let (status, code, message) = match error {
+                crate::lan_proxy::RemoteAccessError::Disabled => {
+                    ("403 Forbidden", "lan_proxy_disabled", "局域网代理未启用")
+                }
+                crate::lan_proxy::RemoteAccessError::ForbiddenNetwork => (
+                    "403 Forbidden",
+                    "lan_network_forbidden",
+                    "只允许局域网设备访问此代理",
+                ),
+                crate::lan_proxy::RemoteAccessError::ForbiddenRoute => (
+                    "403 Forbidden",
+                    "lan_route_forbidden",
+                    "局域网只允许访问模型代理接口",
+                ),
+            };
+            let remote_addr_text = remote_addr.map(|address| address.to_string());
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "helper.lan_access_rejected",
+                serde_json::json!({
+                    "method": method,
+                    "path": path,
+                    "remote_addr": remote_addr_text,
+                    "reason": code
+                }),
+            );
+            let body = serde_json::to_vec(&serde_json::json!({
+                "error": {
+                    "code": code,
+                    "message": message
+                }
+            }))?;
+            write_http_response(
+                &mut stream,
+                status,
+                "application/json; charset=utf-8",
+                &body,
+            )
+            .await?;
+            stream.shutdown().await?;
+            return Ok(());
+        }
+    }
+
     if crate::responses_websocket_bridge::is_responses_websocket_upgrade(&request_bytes) {
         return crate::responses_websocket_bridge::handle_responses_websocket_connection(
             stream,
@@ -882,14 +976,9 @@ async fn handle_helper_connection(
         )
         .await;
     }
-    let request = String::from_utf8_lossy(&request_bytes);
-    let request_line = request.lines().next().unwrap_or_default();
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or_default();
-    let raw_path = parts.next().unwrap_or_default();
-    let path = raw_path.split('?').next().unwrap_or(raw_path);
-    let request_body = http_request_body(&request);
     let request_context = crate::request_headers::RequestContext::from_http_request(&request_bytes);
+    let request = String::from_utf8_lossy(&request_bytes);
+    let request_body = http_request_body(&request);
     let request_user_agent = request_context.user_agent();
     let remote_addr_text = remote_addr.map(|addr| addr.to_string());
 
@@ -904,42 +993,44 @@ async fn handle_helper_connection(
         }),
     );
 
-    if crate::protocol_proxy::is_responses_proxy_path(path) && method == "POST" {
+    if crate::protocol_proxy::is_responses_proxy_path(&path) && method == "POST" {
         return handle_protocol_proxy_connection(
             &mut stream,
             request_body,
             &request_context,
-            method,
-            path,
+            &method,
+            &path,
             remote_addr_text,
         )
         .await;
     }
-    if crate::protocol_proxy::is_chat_completions_proxy_path(path) && method == "POST" {
+    if crate::protocol_proxy::is_chat_completions_proxy_path(&path) && method == "POST" {
         return handle_chat_completions_proxy_connection(
             &mut stream,
             request_body,
             request_user_agent,
-            method,
-            path,
+            &method,
+            &path,
             remote_addr_text,
         )
         .await;
     }
-    if crate::protocol_proxy::is_models_proxy_path(path) && matches!(method, "GET" | "OPTIONS") {
+    if crate::protocol_proxy::is_models_proxy_path(&path)
+        && matches!(method.as_str(), "GET" | "OPTIONS")
+    {
         return handle_models_proxy_connection(
             &mut stream,
             request_user_agent,
-            method,
-            path,
+            &method,
+            &path,
             remote_addr_text,
         )
         .await;
     }
 
     let (status, body, content_type, log_event) =
-        if matches!(path, "/backend/status" | "/backend/repair")
-            && matches!(method, "GET" | "POST" | "OPTIONS")
+        if matches!(path.as_str(), "/backend/status" | "/backend/repair")
+            && matches!(method.as_str(), "GET" | "POST" | "OPTIONS")
         {
             (
                 "200 OK".to_string(),
@@ -956,7 +1047,7 @@ async fn handle_helper_connection(
                     "helper.backend_repair_ok"
                 },
             )
-        } else if path == "/diagnostics/log" && matches!(method, "POST" | "OPTIONS") {
+        } else if path == "/diagnostics/log" && matches!(method.as_str(), "POST" | "OPTIONS") {
             if method == "POST" {
                 let detail = serde_json::from_str::<serde_json::Value>(request_body)
                     .unwrap_or_else(|error| {
@@ -984,7 +1075,7 @@ async fn handle_helper_connection(
                 "application/json; charset=utf-8".to_string(),
                 "helper.diagnostics_log_ok",
             )
-        } else if path == "/overlay/image" && matches!(method, "GET" | "OPTIONS") {
+        } else if path == "/overlay/image" && matches!(method.as_str(), "GET" | "OPTIONS") {
             if method == "OPTIONS" {
                 (
                     "200 OK".to_string(),
@@ -995,7 +1086,9 @@ async fn handle_helper_connection(
             } else {
                 overlay_image_response()
             }
-        } else if path == "/inject/renderer-features.js" && matches!(method, "GET" | "OPTIONS") {
+        } else if path == "/inject/renderer-features.js"
+            && matches!(method.as_str(), "GET" | "OPTIONS")
+        {
             if method == "OPTIONS" {
                 (
                     "200 OK".to_string(),
@@ -1013,7 +1106,8 @@ async fn handle_helper_connection(
                     "helper.renderer_features_ok",
                 )
             }
-        } else if path == "/inject/user-scripts.js" && matches!(method, "GET" | "OPTIONS") {
+        } else if path == "/inject/user-scripts.js" && matches!(method.as_str(), "GET" | "OPTIONS")
+        {
             if method == "OPTIONS" {
                 (
                     "200 OK".to_string(),

@@ -208,6 +208,7 @@ type BackendSettings = {
   codexAppImageOverlayOpacity: number;
   codexAppActiveSkinId: string;
   codexGoalsEnabled: boolean;
+  lanProxyEnabled: boolean;
   gptReasoningContinuation: boolean;
   gptReasoningContinuationMaxRounds: number;
   layeredCompactionEnabled: boolean;
@@ -866,6 +867,7 @@ const defaultSettings: BackendSettings = {
   codexAppImageOverlayOpacity: 35,
   codexAppActiveSkinId: "",
   codexGoalsEnabled: false,
+  lanProxyEnabled: false,
   gptReasoningContinuation: false,
   gptReasoningContinuationMaxRounds: 3,
   layeredCompactionEnabled: false,
@@ -1784,6 +1786,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       }, "浏览器预览已重新加载启用脚本。") as T);
     case "save_settings": {
       const next = (args?.settings as BackendSettings | undefined) || settings;
+      const lanProxyJustEnabled = !settings.lanProxyEnabled && next.lanProxyEnabled;
       const normalized = updateBrowserPreviewSettings(next);
       return Promise.resolve(browserPreviewResult({
         settings: normalized,
@@ -1791,7 +1794,9 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         codex_home: browserPreviewCodexHome(normalized),
         user_scripts: { enabled: true, scripts: [] },
         layered_compaction_default_prompt: browserPreviewCompactionDefaultPrompt,
-      }, "浏览器预览已保存到内存。") as T);
+      }, lanProxyJustEnabled
+        ? "局域网代理已开启，启动代理后生效；代理正在运行时请重新启动。"
+        : "浏览器预览已保存到内存。") as T);
     }
     case "list_skins":
       return Promise.resolve(browserPreviewSkinsResult("已读取皮肤列表。") as unknown as T);
@@ -4210,6 +4215,22 @@ function LocalProxyScreen({
           detail="当前运行状态与最近代理活动"
           actions={
             <>
+              <label
+                className="proxy-inline-toggle"
+                data-tooltip="开启后，下一次启动代理时使用局域网监听；代理已运行时需重新启动后生效"
+              >
+                <input
+                  checked={form.lanProxyEnabled}
+                  onChange={(event) =>
+                    void actions.saveSettingsValue(
+                      { ...form, lanProxyEnabled: event.currentTarget.checked },
+                      false,
+                    )
+                  }
+                  type="checkbox"
+                />
+                <span>局域网代理</span>
+              </label>
               <div className="proxy-continue-thinking-control">
                 <label
                   className="proxy-inline-toggle"
@@ -10731,6 +10752,7 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
     codexHomePath: (settings.codexHomePath || "").trim(),
     relayProfilesEnabled: settings.relayProfilesEnabled !== false,
     computerUseGuardEnabled: settings.computerUseGuardEnabled !== false,
+    lanProxyEnabled: settings.lanProxyEnabled === true,
     codexAppImageOverlayOpacity: clampNumber(settings.codexAppImageOverlayOpacity || 35, 1, 100),
     gptReasoningContinuationMaxRounds: clampNumber(settings.gptReasoningContinuationMaxRounds || 3, 1, 9),
     layeredCompactionRetainTokens: clampNumber(

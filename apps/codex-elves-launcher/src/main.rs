@@ -496,6 +496,16 @@ impl LaunchHooks for LauncherHooks {
         self.core.start_helper(helper_port).await
     }
 
+    async fn start_helper_with_settings(
+        &self,
+        helper_port: u16,
+        settings: &codex_elves_core::settings::BackendSettings,
+    ) -> anyhow::Result<()> {
+        self.core
+            .start_helper_with_settings(helper_port, settings)
+            .await
+    }
+
     async fn launch_codex(
         &self,
         app_dir: &Path,

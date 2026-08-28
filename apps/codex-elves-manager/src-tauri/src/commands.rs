@@ -563,9 +563,11 @@ pub async fn save_settings(settings: BackendSettings) -> CommandResult<SettingsP
     let store = SettingsStore::default();
     let mut settings = normalize_settings_before_save(settings);
     let mut previous_overlay: Option<ImageOverlaySnapshot> = None;
+    let mut previous_lan_proxy_enabled = false;
     if let Ok(saved_settings) = store.load() {
         merge_saved_responses_websocket_capabilities(&mut settings, &saved_settings);
         previous_overlay = Some(ImageOverlaySnapshot::from(&saved_settings));
+        previous_lan_proxy_enabled = saved_settings.lan_proxy_enabled;
     }
     if let Err(error) = ensure_codex_home_path_ready(&settings) {
         return failed(
@@ -601,9 +603,14 @@ pub async fn save_settings(settings: BackendSettings) -> CommandResult<SettingsP
             } else {
                 String::new()
             };
+            let lan_proxy_message = if !previous_lan_proxy_enabled && settings.lan_proxy_enabled {
+                " 局域网代理已开启，启动代理后生效；代理正在运行时请重新启动。".to_string()
+            } else {
+                String::new()
+            };
             settings_payload(
                 &format!(
-                    "设置已保存。{wrapper_message}{provider_name_message}{base_url_message}{stream_idle_timeout_message}{catalog_message}{websocket_message}{overlay_message}"
+                    "设置已保存。{wrapper_message}{provider_name_message}{base_url_message}{stream_idle_timeout_message}{catalog_message}{websocket_message}{overlay_message}{lan_proxy_message}"
                 ),
                 "设置保存后重新读取失败",
             )

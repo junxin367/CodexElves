@@ -13,6 +13,7 @@ pub mod diagnostic_log;
 pub mod env_conflicts;
 pub mod http_client;
 pub mod install;
+mod lan_proxy;
 pub mod launcher;
 pub mod layered_compaction;
 mod log_limits;
