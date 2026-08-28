@@ -8,6 +8,7 @@ mod model;
 mod move_board;
 mod move_task;
 mod rename_board;
+mod rename_task;
 mod store;
 mod validation;
 
@@ -19,8 +20,8 @@ pub use model::{
     TaskBoardConversation, TaskBoardCreateBoardCommand, TaskBoardCreateCommand,
     TaskBoardDeleteBoardCommand, TaskBoardDeleteCommand, TaskBoardDetachConversationsCommand,
     TaskBoardDocument, TaskBoardMoveBoardCommand, TaskBoardMoveCommand, TaskBoardMutationResult,
-    TaskBoardProject, TaskBoardRenameBoardCommand, TaskBoardSessionCatalog, TaskBoardStatus,
-    TaskBoardTask,
+    TaskBoardProject, TaskBoardRenameBoardCommand, TaskBoardRenameTaskCommand,
+    TaskBoardSessionCatalog, TaskBoardStatus, TaskBoardTask,
 };
 pub use store::{FileTaskBoardStore, TaskBoardStore, TaskBoardStoreError};
 pub(crate) use validation::is_temporary_session_id;

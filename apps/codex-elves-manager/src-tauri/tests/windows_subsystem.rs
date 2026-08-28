@@ -407,7 +407,11 @@ fn task_board_runs_as_a_separate_window_with_persistent_placement() {
     assert!(task_board_rs.contains("task_board_load_conversation_statuses"));
     assert!(task_board_rs.contains("task_board_delete_task"));
     assert!(task_board_rs.contains("TaskBoardDeleteCommand"));
+    assert!(task_board_rs.contains("task_board_rename_task"));
+    assert!(task_board_rs.contains("TaskBoardRenameTaskCommand"));
     assert!(task_board_rs.contains("call_codex_host_operation("));
+    assert!(task_board_rs.contains("call_codex_host_with_min_runtime("));
+    assert!(task_board_rs.contains("TASK_BOARD_MIN_CONVERSATION_STATUS_RUNTIME_VERSION: u64 = 58"));
     assert!(task_board_rs.contains("__codexElvesTaskBoardStandaloneOperations"));
     assert!(task_board_rs.contains("task_board_host_operation_abandon_script"));
     assert!(task_board_rs.contains("host_version_unsupported"));
@@ -424,6 +428,7 @@ fn task_board_runs_as_a_separate_window_with_persistent_placement() {
     assert!(permissions.contains("\"task_board_load_host_appearance\""));
     assert!(permissions.contains("\"task_board_load_conversation_statuses\""));
     assert!(permissions.contains("\"task_board_delete_task\""));
+    assert!(permissions.contains("\"task_board_rename_task\""));
 }
 
 #[test]
@@ -467,7 +472,7 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
 
     assert!(app.contains("跨项目观察任务状态，并集中关联项目下的多个会话"));
     assert!(app.contains("搜索任务、项目或关联会话"));
-    assert!(app.contains("拖动任务卡片可切换状态"));
+    assert!(app.contains("拖动任务卡片可调整顺序或切换状态"));
     assert!(app.contains("formatSessionUpdatedTime(session.updatedAtMs)"));
     assert!(app.contains("task-board-session-time"));
     assert!(app.contains("\"task_board_load_host_appearance\""));
@@ -501,6 +506,7 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     assert!(app.contains("TaskBoardDetachConfirmation"));
     assert!(app.contains("TaskBoardDeleteConfirmation"));
     assert!(app.contains("\"task_board_delete_task\""));
+    assert!(app.contains("\"task_board_rename_task\""));
     assert!(app.contains("\"task_board_create_board\""));
     assert!(app.contains("\"task_board_delete_board\""));
     assert!(app.contains("\"task_board_rename_board\""));
@@ -523,6 +529,9 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     assert!(app.contains("taskBoardColumnsStyle(visibleStatusDefinitions.length)"));
     assert!(app.contains("className=\"task-board-unassigned-drop-zone\""));
     assert!(app.contains("aria-hidden={!unassignedDropActive}"));
+    assert!(app.contains("className=\"task-board-sticky-header\""));
+    assert!(app.contains("aria-label=\"任务看板，可横向和纵向滚动\""));
+    assert!(!app.contains("aria-label=\"任务看板列，可横向和纵向滚动\""));
     assert!(app.contains("event.dataTransfer.setData(\"text/plain\", task.id);"));
     assert!(styles.contains(".task-board-unassigned-drop-zone"));
     assert!(styles.contains("position: absolute;"));
@@ -545,7 +554,17 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     assert!(task_board_commands.contains("task_board_delete_board"));
     assert!(task_board_commands.contains("task_board_rename_board"));
     assert!(task_board_commands.contains("task_board_move_board"));
+    assert!(task_board_commands.contains("task_board_rename_task"));
     assert!(app.contains("aria-label={`删除任务 ${task.title}`}"));
+    assert!(app.contains("task-board-card-title-input"));
+    assert!(app.contains("titleLength < 1 || titleLength > 120"));
+    assert!(app.contains("event.key === \"Enter\""));
+    assert!(app.contains("event.key === \"Escape\""));
+    assert!(app.contains("function taskBoardMoveTaskTargetIndex("));
+    assert!(app.contains("function taskBoardTaskMoveIsNoOp("));
+    assert!(app.contains("event.clientY >= bounds.top + bounds.height / 2"));
+    assert!(app.contains("data-drop-position={dropPosition}"));
+    assert!(app.contains("拖动任务卡片可调整顺序或切换状态"));
     assert!(app.contains("<X size={13} strokeWidth={1.35} aria-hidden=\"true\" />"));
     assert!(!app.contains("Trash2"));
     assert!(app.contains("不会删除 Codex 中的原始会话"));
@@ -563,6 +582,58 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     assert!(styles.contains(".task-board-dropdown-status-icon"));
     assert!(styles.contains(".task-board-dropdown-search"));
     assert!(styles.contains(".task-board-dropdown-options"));
+    let card_title_button_styles = styles
+        .split(".task-board-app .task-board-card-title-button {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("standalone task-card title button styles should override global buttons");
+    assert!(card_title_button_styles.contains("cursor: text"));
+    assert!(styles.contains(".task-board-app .task-board-card-title-button:focus-visible {"));
+    let card_title_input_styles = styles
+        .split(".task-board-card-title-input {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("standalone task-card title input styles should be present");
+    assert!(card_title_input_styles.contains("border: 1px solid"));
+    let card_title_focus_styles = styles
+        .split(".task-board-app .task-board-card-title-input:focus {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("standalone task-card title focus styles should be present");
+    assert!(card_title_focus_styles.contains("border-color: var(--task-board-accent)"));
+    assert!(card_title_focus_styles.contains("box-shadow: none"));
+    assert!(card_title_focus_styles.contains("outline: none"));
+    assert!(card_title_focus_styles.contains("outline-offset: 0"));
+    assert!(!card_title_focus_styles.contains("box-shadow: 0 0 0"));
+    assert!(styles.contains(".task-board-card[data-drop-position=\"before\"]"));
+    assert!(styles.contains(".task-board-card[data-drop-position=\"after\"]"));
+    let page_styles = styles
+        .split(".task-board-page {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("standalone task-board page styles should be present");
+    assert!(page_styles.contains("overflow: auto"));
+    assert!(page_styles.contains("overscroll-behavior: contain"));
+    assert!(!page_styles.contains("padding: 24px 28px"));
+    let sticky_header_styles = styles
+        .split(".task-board-sticky-header {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("standalone task-board sticky header styles should be present");
+    assert!(sticky_header_styles.contains("position: sticky"));
+    assert!(sticky_header_styles.contains("top: 0"));
+    assert!(sticky_header_styles.contains("left: 0"));
+    assert!(sticky_header_styles.contains("padding: 12px 14px 8px"));
+    let board_scroll_styles = styles
+        .split(".task-board-scroll {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("standalone task-board content styles should be present");
+    assert!(board_scroll_styles.contains("overflow: visible"));
+    assert!(board_scroll_styles.contains("padding: 8px 14px 12px"));
+    assert!(!board_scroll_styles.contains("overflow: auto"));
+    assert!(styles.contains(".task-board-page::-webkit-scrollbar"));
+    assert!(!styles.contains(".task-board-scroll::-webkit-scrollbar"));
     assert_eq!(
         styles.matches("--task-board-status-icon-color: #").count(),
         10

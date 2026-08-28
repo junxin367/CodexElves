@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
+const ROLLOUT_SUMMARY_TAIL_SCAN_MIN_FILE_BYTES: u64 = 24 * 1024 * 1024;
+const ROLLOUT_SUMMARY_TAIL_SCAN_BYTES: u64 = 2 * 1024 * 1024;
+
 pub fn delete_local_from_paths(
     db_paths: impl IntoIterator<Item = PathBuf>,
     session: &SessionRef,
@@ -235,9 +238,17 @@ pub fn aggregate_local_session_catalog(
         }
 
         existing_database_count += 1;
-        match SQLiteStorageAdapter::new(candidate_path).list_local_sessions() {
+        let adapter = SQLiteStorageAdapter::new(candidate_path);
+        let spawn_child_thread_ids = adapter
+            .list_codex_spawn_child_thread_ids()
+            .unwrap_or_default();
+        match adapter.list_local_sessions() {
             Ok(mut database_sessions) => {
                 successful_database_count += 1;
+                // 任务看板目录只面向用户可操作的顶层会话，subagent 子线程不进入。
+                database_sessions.retain(|session| {
+                    !spawn_child_thread_ids.contains(&normalized_thread_id_key(&session.id))
+                });
                 sessions.append(&mut database_sessions);
             }
             Err(_) => failed_database_count += 1,
@@ -277,6 +288,16 @@ pub fn aggregate_local_session_catalog(
             .collect(),
         warnings,
     })
+}
+
+fn normalized_thread_id_key(value: &str) -> String {
+    let trimmed = value.trim();
+    let without_local_prefix = trimmed
+        .get(..6)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("local:"))
+        .map(|_| &trimmed[6..])
+        .unwrap_or(trimmed);
+    without_local_prefix.to_ascii_lowercase()
 }
 
 fn canonical_database_path_key(path: &Path) -> PathBuf {
@@ -320,6 +341,30 @@ impl SQLiteStorageAdapter {
             }
         })();
         result.unwrap_or_else(|err| failed(&session.session_id, err.to_string()))
+    }
+
+    /// thread_spawn_edges.child_thread_id 指向被父会话派生的 subagent 线程。
+    pub fn list_codex_spawn_child_thread_ids(&self) -> anyhow::Result<HashSet<String>> {
+        if !self.db_path.exists() {
+            return Ok(HashSet::new());
+        }
+        let db = Connection::open(&self.db_path)?;
+        if schema_kind(&db)? != Some(SchemaKind::CodexThreads)
+            || !has_table(&db, "thread_spawn_edges")?
+        {
+            return Ok(HashSet::new());
+        }
+        let mut stmt = db.prepare(
+            "SELECT DISTINCT child_thread_id FROM thread_spawn_edges
+             WHERE COALESCE(child_thread_id, '') <> ''",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut ids = HashSet::new();
+        for row in rows {
+            let id = row?;
+            ids.insert(normalized_thread_id_key(&id));
+        }
+        Ok(ids)
     }
 
     pub fn list_local_sessions(&self) -> anyhow::Result<Vec<LocalSession>> {
@@ -648,7 +693,12 @@ impl SQLiteStorageAdapter {
             let mut reports = HashMap::new();
             reports.insert(
                 thread.id.clone(),
-                read_rollout_usage_history(&rollout, &thread.id, include_history)?,
+                read_rollout_usage_report(
+                    &rollout,
+                    &thread.id,
+                    include_history,
+                    ROLLOUT_SUMMARY_TAIL_SCAN_MIN_FILE_BYTES,
+                )?,
             );
             let mut partial_errors = Vec::new();
             for node in graph.iter().skip(1) {
@@ -674,7 +724,12 @@ impl SQLiteStorageAdapter {
                     }));
                     continue;
                 }
-                match read_rollout_usage_history(&path, &record.id, include_history) {
+                match read_rollout_usage_report(
+                    &path,
+                    &record.id,
+                    include_history,
+                    ROLLOUT_SUMMARY_TAIL_SCAN_MIN_FILE_BYTES,
+                ) {
                     Ok(report) => {
                         reports.insert(record.id.clone(), report);
                     }
@@ -1740,7 +1795,12 @@ fn rollout_only_usage_value(
     include_history: bool,
 ) -> anyhow::Result<Value> {
     let thread_id = normalize_codex_thread_id(session_id);
-    let report = read_rollout_usage_history(rollout_path, &thread_id, include_history)?;
+    let report = read_rollout_usage_report(
+        rollout_path,
+        &thread_id,
+        include_history,
+        ROLLOUT_SUMMARY_TAIL_SCAN_MIN_FILE_BYTES,
+    )?;
     let mut summary = serde_json::Map::new();
     summary.insert(
         "totalUsage".to_string(),
@@ -1809,6 +1869,145 @@ fn spawned_child_thread_id(payload: &Value) -> Option<String> {
     let text = output.as_str()?.trim();
     let parsed = serde_json::from_str::<Value>(text).ok()?;
     from_value(&parsed)
+}
+
+fn read_rollout_usage_report(
+    rollout_path: &Path,
+    thread_id: &str,
+    include_history: bool,
+    tail_scan_min_file_bytes: u64,
+) -> anyhow::Result<RolloutUsageReport> {
+    if !include_history && rollout_file_len(rollout_path)? >= tail_scan_min_file_bytes {
+        // Summary callers only need running state and recent totals. The first
+        // full parse of a multi-GB rollout can take minutes and blocks task
+        // board status requests. total_token_usage is cumulative, so a tail
+        // window still yields an accurate running flag and accumulated total.
+        return read_rollout_usage_tail_report(rollout_path, thread_id);
+    }
+    read_rollout_usage_history(rollout_path, thread_id, include_history)
+}
+
+fn rollout_file_len(rollout_path: &Path) -> anyhow::Result<u64> {
+    Ok(fs::metadata(rollout_path)?.len())
+}
+
+const ROLLOUT_TAIL_USAGE_CACHE_CAPACITY: usize = 64;
+
+struct CachedRolloutTailUsage {
+    stamp: RolloutFileStamp,
+    report: RolloutUsageReport,
+    last_access: u64,
+}
+
+type RolloutTailUsageCacheKey = (PathBuf, String);
+
+#[derive(Default)]
+struct RolloutTailUsageCache {
+    entries: HashMap<RolloutTailUsageCacheKey, CachedRolloutTailUsage>,
+    access_tick: u64,
+}
+
+fn rollout_tail_usage_cache() -> &'static Mutex<RolloutTailUsageCache> {
+    static CACHE: OnceLock<Mutex<RolloutTailUsageCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(RolloutTailUsageCache::default()))
+}
+
+fn read_rollout_usage_tail_report(
+    rollout_path: &Path,
+    thread_id: &str,
+) -> anyhow::Result<RolloutUsageReport> {
+    // 轮询场景每几秒就会对同一批 rollout 重复尾扫；文件未变时直接命中缓存。
+    let stamp = rollout_file_stamp(rollout_path)?;
+    let cache_key = (rollout_path.to_path_buf(), thread_id.to_string());
+    let cached_report = {
+        let mut cache = rollout_tail_usage_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.access_tick = cache.access_tick.saturating_add(1);
+        let access_tick = cache.access_tick;
+        cache
+            .entries
+            .get_mut(&cache_key)
+            .filter(|entry| entry.stamp == stamp)
+            .map(|entry| {
+                entry.last_access = access_tick;
+                entry.report.clone()
+            })
+    };
+    if let Some(report) = cached_report {
+        return Ok(report);
+    }
+    let report = read_rollout_usage_tail_scan(rollout_path, thread_id)?;
+    insert_rollout_tail_usage_cache(cache_key, stamp, report.clone());
+    Ok(report)
+}
+
+fn insert_rollout_tail_usage_cache(
+    cache_key: RolloutTailUsageCacheKey,
+    stamp: RolloutFileStamp,
+    report: RolloutUsageReport,
+) {
+    let mut cache = rollout_tail_usage_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache.access_tick = cache.access_tick.saturating_add(1);
+    let access_tick = cache.access_tick;
+    if !cache.entries.contains_key(&cache_key)
+        && cache.entries.len() >= ROLLOUT_TAIL_USAGE_CACHE_CAPACITY
+    {
+        if let Some(oldest_key) = cache
+            .entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_access)
+            .map(|(path, _)| path.clone())
+        {
+            cache.entries.remove(&oldest_key);
+        }
+    }
+    cache.entries.insert(
+        cache_key,
+        CachedRolloutTailUsage {
+            stamp,
+            report,
+            last_access: access_tick,
+        },
+    );
+}
+
+fn read_rollout_usage_tail_scan(
+    rollout_path: &Path,
+    thread_id: &str,
+) -> anyhow::Result<RolloutUsageReport> {
+    let mut file = File::open(rollout_path)?;
+    let file_len = file.metadata()?.len();
+    let scan_len = file_len.min(ROLLOUT_SUMMARY_TAIL_SCAN_BYTES);
+    let scan_start = file_len - scan_len;
+    file.seek(SeekFrom::Start(scan_start))?;
+    let mut buffer = Vec::with_capacity(scan_len as usize);
+    file.take(scan_len).read_to_end(&mut buffer)?;
+
+    // The tail window may start inside a line; drop that partial line.
+    let first_complete_line = if scan_start == 0 {
+        0
+    } else {
+        buffer
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .ok_or_else(|| anyhow::anyhow!("rollout tail has no complete line"))?
+    };
+    let payload = &buffer[first_complete_line..];
+    let mut parser = RolloutUsageParser::default();
+    let mut lines = payload.split_inclusive(|byte| *byte == b'\n').peekable();
+    while let Some(line) = lines.next() {
+        // A final chunk without a newline was cut mid-line by the window.
+        if lines.peek().is_none() && !line.ends_with(&[b'\n']) {
+            break;
+        }
+        let line = std::str::from_utf8(line)?;
+        parser.consume_line(line.trim_end_matches(['\r', '\n']), thread_id, false);
+    }
+    Ok(parser.report())
 }
 
 fn read_rollout_usage_history(
@@ -2082,6 +2281,161 @@ fn sql_value_to_json(value: ValueRef<'_>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rollout_line(value: &serde_json::Value) -> String {
+        value.to_string()
+    }
+
+    #[test]
+    fn tail_scan_summary_reports_running_and_cumulative_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout-tail-running.jsonl");
+        let thread_id = "t-tail-running";
+        let lines = [
+            rollout_line(&json!({
+                "type": "session_meta",
+                "payload": {"id": thread_id, "cwd": "/tmp/project"}
+            })),
+            rollout_line(&json!({
+                "type": "turn_context",
+                "payload": {"turn_id": "turn-1"}
+            })),
+            rollout_line(&json!({
+                "type": "event_msg",
+                "timestamp": "2026-08-28T01:00:00.000Z",
+                "payload": {"type": "task_started", "turn_id": "turn-1"}
+            })),
+            rollout_line(&json!({
+                "type": "event_msg",
+                "timestamp": "2026-08-28T01:00:05.000Z",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                        "total_token_usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}
+                    }
+                }
+            })),
+        ];
+        fs::write(&rollout, format!("{}\n", lines.join("\n"))).unwrap();
+
+        let report = read_rollout_usage_report(
+            &rollout, thread_id, false, /* tail_scan_min_file_bytes */ 1,
+        )
+        .unwrap();
+
+        assert!(report.task_running);
+        assert_eq!(report.total_usage.input_tokens, 100);
+        assert_eq!(report.total_usage.output_tokens, 50);
+        assert_eq!(report.total_usage.total_tokens, 150);
+        assert!(report.history.is_empty());
+        assert_eq!(report.last_turn_id, "turn-1");
+    }
+
+    #[test]
+    fn tail_scan_summary_caches_until_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout-tail-cache.jsonl");
+        let thread_id = "t-tail-cache";
+        let lines = [
+            rollout_line(&json!({
+                "type": "session_meta",
+                "payload": {"id": thread_id, "cwd": "/tmp/project"}
+            })),
+            rollout_line(&json!({
+                "type": "turn_context",
+                "payload": {"turn_id": "turn-1"}
+            })),
+            rollout_line(&json!({
+                "type": "event_msg",
+                "timestamp": "2026-08-28T01:00:00.000Z",
+                "payload": {"type": "task_started", "turn_id": "turn-1"}
+            })),
+            rollout_line(&json!({
+                "type": "event_msg",
+                "timestamp": "2026-08-28T01:00:05.000Z",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                        "total_token_usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}
+                    }
+                }
+            })),
+            rollout_line(&json!({
+                "type": "event_msg",
+                "timestamp": "2026-08-28T01:00:10.000Z",
+                "payload": {"type": "task_complete", "turn_id": "turn-1"}
+            })),
+        ];
+        fs::write(&rollout, format!("{}\n", lines.join("\n"))).unwrap();
+
+        let first = read_rollout_usage_tail_report(&rollout, thread_id).unwrap();
+        assert!(!first.task_running);
+        let cached = read_rollout_usage_tail_report(&rollout, thread_id).unwrap();
+        assert_eq!(cached.total_usage.total_tokens, 150);
+        assert!(!cached.task_running);
+
+        let mut appended = fs::read_to_string(&rollout).unwrap();
+        appended.push_str(&rollout_line(&json!({
+            "type": "event_msg",
+            "timestamp": "2026-08-28T01:05:00.000Z",
+            "payload": {"type": "task_started", "turn_id": "turn-2"}
+        })));
+        appended.push('\n');
+        fs::write(&rollout, appended).unwrap();
+
+        let updated = read_rollout_usage_tail_report(&rollout, thread_id).unwrap();
+        assert!(updated.task_running);
+        assert_eq!(updated.last_turn_id, "turn-2");
+    }
+
+    #[test]
+    fn tail_scan_summary_reports_completed_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout-tail-completed.jsonl");
+        let thread_id = "t-tail-completed";
+        let lines = [
+            rollout_line(&json!({
+                "type": "session_meta",
+                "payload": {"id": thread_id, "cwd": "/tmp/project"}
+            })),
+            rollout_line(&json!({
+                "type": "turn_context",
+                "payload": {"turn_id": "turn-1"}
+            })),
+            rollout_line(&json!({
+                "type": "event_msg",
+                "timestamp": "2026-08-28T01:00:00.000Z",
+                "payload": {"type": "task_started", "turn_id": "turn-1"}
+            })),
+            rollout_line(&json!({
+                "type": "event_msg",
+                "timestamp": "2026-08-28T01:00:05.000Z",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                        "total_token_usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}
+                    }
+                }
+            })),
+            rollout_line(&json!({
+                "type": "event_msg",
+                "timestamp": "2026-08-28T01:00:10.000Z",
+                "payload": {"type": "task_complete", "turn_id": "turn-1"}
+            })),
+        ];
+        fs::write(&rollout, format!("{}\n", lines.join("\n"))).unwrap();
+
+        let report = read_rollout_usage_report(
+            &rollout, thread_id, false, /* tail_scan_min_file_bytes */ 1,
+        )
+        .unwrap();
+
+        assert!(!report.task_running);
+        assert_eq!(report.total_usage.total_tokens, 150);
+    }
 
     #[test]
     fn rollout_usage_cache_retains_large_parent_thread_graph() {

@@ -192,6 +192,13 @@ pub struct TaskBoardDeleteCommand {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskBoardRenameTaskCommand {
+    pub task_id: String,
+    pub expected_revision: u64,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskBoardCreateBoardCommand {
     pub board_id: TaskBoardStatus,
     pub expected_revision: u64,

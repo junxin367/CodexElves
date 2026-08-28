@@ -171,6 +171,9 @@ pub async fn handle_bridge_request(
         task_board::TASK_BOARD_DELETE_PATH => {
             Ok(task_board::handle_delete(ctx.task_board_store.clone(), payload.clone()).await)
         }
+        task_board::TASK_BOARD_RENAME_TASK_PATH => {
+            Ok(task_board::handle_rename_task(ctx.task_board_store.clone(), payload.clone()).await)
+        }
         task_board::TASK_BOARD_CREATE_BOARD_PATH => Ok(task_board::handle_create_board(
             ctx.task_board_store.clone(),
             payload.clone(),

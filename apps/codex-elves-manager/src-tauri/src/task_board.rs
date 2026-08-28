@@ -4,14 +4,15 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use codex_elves_core::models::SessionRef;
 use codex_elves_core::status::StatusStore;
 use codex_elves_core::task_board::{
     FileTaskBoardStore, TaskBoardAttachConversationsCommand, TaskBoardConversation,
     TaskBoardCreateBoardCommand, TaskBoardCreateCommand, TaskBoardDeleteBoardCommand,
     TaskBoardDeleteCommand, TaskBoardDetachConversationsCommand, TaskBoardDocument,
     TaskBoardMoveBoardCommand, TaskBoardMoveCommand, TaskBoardMutationResult, TaskBoardProject,
-    TaskBoardRenameBoardCommand, TaskBoardSessionCatalog, TaskBoardStatus, TaskBoardStore,
-    TaskBoardStoreError,
+    TaskBoardRenameBoardCommand, TaskBoardRenameTaskCommand, TaskBoardSessionCatalog,
+    TaskBoardStatus, TaskBoardStore, TaskBoardStoreError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -29,7 +30,8 @@ const TASK_BOARD_HOST_OPERATION_MAX_CONSECUTIVE_POLL_FAILURES: u32 = 3;
 const TASK_BOARD_HOST_OPERATION_RETENTION_MS: u64 = 5 * 60 * 1_000;
 const TASK_BOARD_HOST_OPERATION_MAX_ENTRIES: usize = 32;
 const TASK_BOARD_MIN_HOST_VERSION: u64 = 3;
-const TASK_BOARD_MIN_RUNTIME_VERSION: u64 = 58;
+const TASK_BOARD_MIN_RUNTIME_VERSION: u64 = 61;
+const TASK_BOARD_MIN_CONVERSATION_STATUS_RUNTIME_VERSION: u64 = 58;
 const DEFAULT_WINDOW_WIDTH: f64 = 1280.0;
 const DEFAULT_WINDOW_HEIGHT: f64 = 860.0;
 const MIN_WINDOW_WIDTH: u32 = 840;
@@ -76,6 +78,14 @@ pub struct DetachConversationsRequest {
 pub struct DeleteTaskRequest {
     task_id: String,
     expected_revision: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenameTaskRequest {
+    task_id: String,
+    expected_revision: u64,
+    title: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -221,6 +231,7 @@ pub fn run() {
             task_board_attach_conversations,
             task_board_detach_conversations,
             task_board_delete_task,
+            task_board_rename_task,
             task_board_create_board,
             task_board_delete_board,
             task_board_rename_board,
@@ -364,6 +375,18 @@ pub async fn task_board_delete_task(request: DeleteTaskRequest) -> Value {
 }
 
 #[tauri::command]
+pub async fn task_board_rename_task(request: RenameTaskRequest) -> Value {
+    mutate_store(move || {
+        FileTaskBoardStore::from_default_paths().rename_task(TaskBoardRenameTaskCommand {
+            task_id: request.task_id,
+            expected_revision: request.expected_revision,
+            title: request.title,
+        })
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn task_board_create_board(request: CreateBoardRequest) -> Value {
     mutate_store(move || {
         FileTaskBoardStore::from_default_paths().create_board(TaskBoardCreateBoardCommand {
@@ -464,16 +487,32 @@ pub async fn task_board_load_host_appearance() -> Value {
 
 #[tauri::command]
 pub async fn task_board_load_conversation_statuses(request: ConversationStatusesRequest) -> Value {
-    call_codex_host(
+    let conversations = normalized_conversation_status_refs(request);
+    let host_arguments = task_board_conversation_status_arguments(&conversations);
+    let local_conversations = conversations.clone();
+    let local_statuses = tauri::async_runtime::spawn_blocking(move || {
+        task_board_local_conversation_statuses(&local_conversations, candidate_codex_db_paths())
+    });
+    let host_statuses = call_codex_host_with_min_runtime(
         "conversationStatuses",
-        task_board_conversation_status_arguments(request),
-    )
-    .await
+        host_arguments,
+        TASK_BOARD_MIN_CONVERSATION_STATUS_RUNTIME_VERSION,
+    );
+    let (host_statuses, local_statuses) = tokio::join!(host_statuses, local_statuses);
+    let local_statuses = local_statuses.unwrap_or_else(|_| {
+        conversations
+            .iter()
+            .map(|conversation| task_board_unknown_conversation_status(conversation, false))
+            .collect()
+    });
+    task_board_merge_conversation_statuses(&conversations, host_statuses, local_statuses)
 }
 
-fn task_board_conversation_status_arguments(request: ConversationStatusesRequest) -> Value {
+fn normalized_conversation_status_refs(
+    request: ConversationStatusesRequest,
+) -> Vec<ConversationStatusRef> {
     let mut seen = HashSet::new();
-    let conversations = request
+    request
         .conversations
         .into_iter()
         .filter_map(|conversation| {
@@ -505,8 +544,158 @@ fn task_board_conversation_status_arguments(request: ConversationStatusesRequest
             })
         })
         .take(256)
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn task_board_conversation_status_arguments(conversations: &[ConversationStatusRef]) -> Value {
     json!([conversations])
+}
+
+fn task_board_local_conversation_statuses(
+    conversations: &[ConversationStatusRef],
+    db_paths: Vec<PathBuf>,
+) -> Vec<Value> {
+    // 会话状态查询是 IO 密集型；会话多时串行磁盘读取会放大看板刷新耗时。
+    const MAX_LOCAL_STATUS_THREADS: usize = 8;
+    if conversations.len() <= 1 || MAX_LOCAL_STATUS_THREADS <= 1 {
+        return conversations
+            .iter()
+            .map(|conversation| task_board_local_conversation_status(conversation, &db_paths))
+            .collect();
+    }
+    let chunk_size =
+        (conversations.len() + MAX_LOCAL_STATUS_THREADS - 1) / MAX_LOCAL_STATUS_THREADS;
+    let joined_chunks = std::thread::scope(|scope| {
+        let db_paths = &db_paths;
+        conversations
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|conversation| {
+                            task_board_local_conversation_status(conversation, &db_paths)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join())
+            .collect::<Vec<_>>()
+    });
+    let mut statuses = Vec::with_capacity(conversations.len());
+    let mut index = 0;
+    for joined in joined_chunks {
+        match joined {
+            Ok(chunk) => statuses.extend(chunk),
+            Err(_) => {
+                let end = (index + chunk_size).min(conversations.len());
+                statuses.extend(conversations[index..end].iter().map(|conversation| {
+                    task_board_unknown_conversation_status(conversation, false)
+                }));
+            }
+        }
+        index += chunk_size;
+    }
+    statuses
+}
+
+fn task_board_local_conversation_status(
+    conversation: &ConversationStatusRef,
+    db_paths: &[PathBuf],
+) -> Value {
+    let usage = codex_elves_data::codex_thread_usage_summary_from_paths(
+        db_paths.to_vec(),
+        &SessionRef {
+            session_id: conversation.session_id.clone(),
+            title: conversation.title.clone(),
+        },
+    );
+    task_board_conversation_status_from_usage(conversation, &usage)
+}
+
+fn task_board_conversation_status_from_usage(
+    conversation: &ConversationStatusRef,
+    usage: &Value,
+) -> Value {
+    let summary = usage
+        .get("summary")
+        .filter(|summary| summary.is_object())
+        .filter(|_| usage.get("status").and_then(Value::as_str) == Some("ok"));
+    json!({
+        "sessionId": conversation.session_id,
+        "known": summary.is_some(),
+        "checking": false,
+        "isRunning": summary.is_some_and(|summary| {
+            summary.get("isRunning").and_then(Value::as_bool) == Some(true)
+                || summary.get("lastTurnRunning").and_then(Value::as_bool) == Some(true)
+        }),
+        "unread": false,
+    })
+}
+
+fn task_board_unknown_conversation_status(
+    conversation: &ConversationStatusRef,
+    unread: bool,
+) -> Value {
+    json!({
+        "sessionId": conversation.session_id,
+        "known": false,
+        "checking": false,
+        "isRunning": false,
+        "unread": unread,
+    })
+}
+
+fn task_board_merge_conversation_statuses(
+    conversations: &[ConversationStatusRef],
+    host_result: Value,
+    local_statuses: Vec<Value>,
+) -> Value {
+    let host_statuses = host_result
+        .get("statuses")
+        .and_then(Value::as_array)
+        .map(|statuses| {
+            statuses
+                .iter()
+                .filter_map(|status| {
+                    let session_id = status.get("sessionId").and_then(Value::as_str)?;
+                    let key = task_board_session_id_key(session_id);
+                    (!key.is_empty()).then(|| (key, status))
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let local_statuses = local_statuses
+        .iter()
+        .filter_map(|status| {
+            let session_id = status.get("sessionId").and_then(Value::as_str)?;
+            let key = task_board_session_id_key(session_id);
+            (!key.is_empty()).then(|| (key, status))
+        })
+        .collect::<HashMap<_, _>>();
+    let statuses = conversations
+        .iter()
+        .map(|conversation| {
+            let key = task_board_session_id_key(&conversation.session_id);
+            let host = host_statuses.get(&key).copied();
+            let local = local_statuses.get(&key).copied();
+            json!({
+                "sessionId": conversation.session_id,
+                "known": host.and_then(|status| status.get("known")).and_then(Value::as_bool) == Some(true)
+                    || local.and_then(|status| status.get("known")).and_then(Value::as_bool) == Some(true),
+                "checking": false,
+                "isRunning": host.and_then(|status| status.get("isRunning")).and_then(Value::as_bool) == Some(true)
+                    || local.and_then(|status| status.get("isRunning")).and_then(Value::as_bool) == Some(true),
+                "unread": host.and_then(|status| status.get("unread")).and_then(Value::as_bool) == Some(true),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "status": "ok",
+        "statuses": statuses,
+    })
 }
 
 fn task_board_session_id_key(value: &str) -> String {
@@ -646,11 +835,19 @@ fn candidate_codex_db_paths() -> Vec<PathBuf> {
 }
 
 async fn call_codex_host(method: &str, arguments: Value) -> Value {
+    call_codex_host_with_min_runtime(method, arguments, TASK_BOARD_MIN_RUNTIME_VERSION).await
+}
+
+async fn call_codex_host_with_min_runtime(
+    method: &str,
+    arguments: Value,
+    min_runtime_version: u64,
+) -> Value {
     let websocket_url = match codex_host_websocket_url().await {
         Ok(websocket_url) => websocket_url,
         Err(failure) => return failure,
     };
-    let script = task_board_host_call_script(method, &arguments);
+    let script = task_board_host_call_script(method, &arguments, min_runtime_version);
     match codex_elves_core::bridge::evaluate_script_with_await_promise(
         &websocket_url,
         &script,
@@ -803,7 +1000,11 @@ async fn codex_host_websocket_url() -> Result<String, Value> {
     Ok(websocket_url.to_string())
 }
 
-fn task_board_host_call_script(method: &str, arguments: &Value) -> String {
+fn task_board_host_call_script(
+    method: &str,
+    arguments: &Value,
+    min_runtime_version: u64,
+) -> String {
     let method_json = serde_json::to_string(method).unwrap_or_else(|_| "\"\"".to_string());
     let arguments_json = serde_json::to_string(arguments).unwrap_or_else(|_| "[]".to_string());
     format!(
@@ -844,7 +1045,7 @@ fn task_board_host_call_script(method: &str, arguments: &Value) -> String {
 }})()
 "#,
         min_host_version = TASK_BOARD_MIN_HOST_VERSION,
-        min_runtime_version = TASK_BOARD_MIN_RUNTIME_VERSION,
+        min_runtime_version = min_runtime_version,
     )
 }
 
@@ -1597,7 +1798,7 @@ mod tests {
 
     #[test]
     fn standalone_status_request_forwards_normalized_session_aliases_to_host() {
-        let arguments = task_board_conversation_status_arguments(ConversationStatusesRequest {
+        let conversations = normalized_conversation_status_refs(ConversationStatusesRequest {
             conversations: vec![ConversationStatusRef {
                 session_id: " session-permanent ".to_string(),
                 title: "会话标题".to_string(),
@@ -1609,6 +1810,7 @@ mod tests {
                 ],
             }],
         });
+        let arguments = task_board_conversation_status_arguments(&conversations);
 
         assert_eq!(
             arguments,
@@ -1620,6 +1822,99 @@ mod tests {
                 }
             ]])
         );
+    }
+
+    #[test]
+    fn local_conversation_statuses_run_in_parallel_and_preserve_order() {
+        let conversations = (0..20)
+            .map(|index| ConversationStatusRef {
+                session_id: format!("session-{index:02}"),
+                title: format!("会话 {index}"),
+                session_aliases: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+
+        let statuses = task_board_local_conversation_statuses(&conversations, Vec::new());
+
+        assert_eq!(statuses.len(), conversations.len());
+        for (conversation, status) in conversations.iter().zip(statuses.iter()) {
+            assert_eq!(status["sessionId"], conversation.session_id);
+            assert_eq!(status["known"], false);
+            assert_eq!(status["checking"], false);
+        }
+    }
+
+    #[test]
+    fn standalone_status_uses_local_summary_when_host_reports_unknown() {
+        let conversations = vec![ConversationStatusRef {
+            session_id: "session-1".to_string(),
+            title: "会话".to_string(),
+            session_aliases: Vec::new(),
+        }];
+        let local = vec![task_board_conversation_status_from_usage(
+            &conversations[0],
+            &json!({
+                "status": "ok",
+                "summary": {
+                    "isRunning": true,
+                    "lastTurnRunning": true
+                }
+            }),
+        )];
+        let merged = task_board_merge_conversation_statuses(
+            &conversations,
+            json!({
+                "status": "ok",
+                "statuses": [{
+                    "sessionId": "session-1",
+                    "known": false,
+                    "checking": false,
+                    "isRunning": false,
+                    "unread": false
+                }]
+            }),
+            local,
+        );
+
+        assert_eq!(merged["status"], "ok");
+        assert_eq!(merged["statuses"][0]["known"], true);
+        assert_eq!(merged["statuses"][0]["checking"], false);
+        assert_eq!(merged["statuses"][0]["isRunning"], true);
+    }
+
+    #[test]
+    fn standalone_status_preserves_host_unread_while_local_summary_supplies_known_state() {
+        let conversations = vec![ConversationStatusRef {
+            session_id: "local:session-1".to_string(),
+            title: "会话".to_string(),
+            session_aliases: Vec::new(),
+        }];
+        let local = vec![task_board_conversation_status_from_usage(
+            &conversations[0],
+            &json!({
+                "status": "ok",
+                "summary": {}
+            }),
+        )];
+        let merged = task_board_merge_conversation_statuses(
+            &conversations,
+            json!({
+                "status": "ok",
+                "statuses": [{
+                    "sessionId": "session-1",
+                    "known": false,
+                    "checking": false,
+                    "isRunning": false,
+                    "unread": true
+                }]
+            }),
+            local,
+        );
+
+        assert_eq!(merged["statuses"][0]["sessionId"], "local:session-1");
+        assert_eq!(merged["statuses"][0]["known"], true);
+        assert_eq!(merged["statuses"][0]["isRunning"], false);
+        assert_eq!(merged["statuses"][0]["unread"], true);
     }
 
     #[test]
@@ -1684,12 +1979,25 @@ mod tests {
         let script = task_board_host_call_script(
             "openSession",
             &json!(["session-1", {"projectLabel": "项目"}]),
+            TASK_BOARD_MIN_RUNTIME_VERSION,
         );
 
         assert!(script.contains(r#"code: "host_version_unsupported""#));
         assert!(script.contains("hostVersion < 3"));
-        assert!(script.contains("runtimeVersion < 58"));
+        assert!(script.contains("runtimeVersion < 61"));
         assert!(script.contains("Codex 任务看板宿主版本过旧，请重启 CodexElves 完成升级"));
+    }
+
+    #[test]
+    fn standalone_conversation_statuses_accept_the_stable_v58_host_contract() {
+        let script = task_board_host_call_script(
+            "conversationStatuses",
+            &json!([[{"sessionId": "session-1", "title": "会话"}]]),
+            TASK_BOARD_MIN_CONVERSATION_STATUS_RUNTIME_VERSION,
+        );
+
+        assert!(script.contains("runtimeVersion < 58"));
+        assert!(!script.contains("runtimeVersion < 61"));
     }
 
     #[test]
@@ -1710,7 +2018,7 @@ mod tests {
         assert!(script.contains("native_create_busy"));
         assert!(script.contains(r#"code: "host_version_unsupported""#));
         assert!(script.contains("hostVersion < 3"));
-        assert!(script.contains("runtimeVersion < 58"));
+        assert!(script.contains("runtimeVersion < 61"));
         assert!(script.contains("supportsNativeCreateLease"));
         assert!(script.contains("supportsNativeCreateRuntime"));
         assert!(script.contains("capabilities?.nativeCreateLease === true"));

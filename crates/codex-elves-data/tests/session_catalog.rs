@@ -80,6 +80,52 @@ fn create_thread_db_with_optional_updated_at(
 }
 
 #[test]
+fn catalog_excludes_subagent_threads_from_spawn_edges() {
+    let temp = tempdir().unwrap();
+    let threads = temp.path().join("state.sqlite");
+    create_thread_db(
+        &threads,
+        &[
+            ("main-thread", "main session", "C:/workspace", false, 300),
+            ("sub-thread", "subagent session", "C:/workspace", false, 200),
+            (
+                "standalone",
+                "standalone session",
+                "C:/workspace",
+                false,
+                100,
+            ),
+        ],
+    );
+    {
+        let db = Connection::open(&threads).unwrap();
+        db.execute(
+            "CREATE TABLE thread_spawn_edges (
+                parent_thread_id TEXT NOT NULL,
+                child_thread_id TEXT NOT NULL,
+                status TEXT
+            )",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO thread_spawn_edges VALUES ('main-thread', 'sub-thread', 'running')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let catalog = aggregate_local_session_catalog(&[threads]).unwrap();
+
+    let session_ids = catalog
+        .sessions
+        .iter()
+        .map(|session| session.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(session_ids, vec!["main-thread", "standalone"]);
+}
+
+#[test]
 fn catalog_aggregates_thread_and_automation_sessions_with_latest_id_winner() {
     let temp = tempdir().unwrap();
     let threads = temp.path().join("state.sqlite");

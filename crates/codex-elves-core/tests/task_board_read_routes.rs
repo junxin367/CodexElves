@@ -9,7 +9,7 @@ use codex_elves_core::routes::task_board::{
     TASK_BOARD_ATTACH_CONVERSATIONS_PATH, TASK_BOARD_CREATE_BOARD_PATH, TASK_BOARD_CREATE_PATH,
     TASK_BOARD_DELETE_BOARD_PATH, TASK_BOARD_DELETE_PATH, TASK_BOARD_DETACH_CONVERSATIONS_PATH,
     TASK_BOARD_MOVE_BOARD_PATH, TASK_BOARD_MOVE_PATH, TASK_BOARD_RENAME_BOARD_PATH,
-    TASK_BOARD_SESSION_CATALOG_PATH, TASK_BOARD_SNAPSHOT_PATH,
+    TASK_BOARD_RENAME_TASK_PATH, TASK_BOARD_SESSION_CATALOG_PATH, TASK_BOARD_SNAPSHOT_PATH,
 };
 use codex_elves_core::routes::{
     BridgeContext, BridgeDataService, CoreRuntimeService, CoreSettingsService,
@@ -82,7 +82,7 @@ fn context(store: Arc<dyn TaskBoardStore>, data: Arc<dyn BridgeDataService>) -> 
 }
 
 #[tokio::test]
-async fn eleven_task_board_route_constants_dispatch_through_the_existing_bridge_match() {
+async fn twelve_task_board_route_constants_dispatch_through_the_existing_bridge_match() {
     assert_eq!(TASK_BOARD_SNAPSHOT_PATH, "/task-board/snapshot");
     assert_eq!(
         TASK_BOARD_SESSION_CATALOG_PATH,
@@ -90,6 +90,7 @@ async fn eleven_task_board_route_constants_dispatch_through_the_existing_bridge_
     );
     assert_eq!(TASK_BOARD_CREATE_PATH, "/task-board/task-create");
     assert_eq!(TASK_BOARD_DELETE_PATH, "/task-board/task-delete");
+    assert_eq!(TASK_BOARD_RENAME_TASK_PATH, "/task-board/task-rename");
     assert_eq!(TASK_BOARD_CREATE_BOARD_PATH, "/task-board/board-create");
     assert_eq!(TASK_BOARD_DELETE_BOARD_PATH, "/task-board/board-delete");
     assert_eq!(TASK_BOARD_RENAME_BOARD_PATH, "/task-board/board-rename");
@@ -120,6 +121,7 @@ async fn eleven_task_board_route_constants_dispatch_through_the_existing_bridge_
     for path in [
         TASK_BOARD_CREATE_PATH,
         TASK_BOARD_DELETE_PATH,
+        TASK_BOARD_RENAME_TASK_PATH,
         TASK_BOARD_CREATE_BOARD_PATH,
         TASK_BOARD_DELETE_BOARD_PATH,
         TASK_BOARD_RENAME_BOARD_PATH,

@@ -2,7 +2,8 @@ use super::{
     TaskBoardAttachConversationsCommand, TaskBoardCreateBoardCommand, TaskBoardCreateCommand,
     TaskBoardDeleteBoardCommand, TaskBoardDeleteCommand, TaskBoardDetachConversationsCommand,
     TaskBoardDocument, TaskBoardMoveBoardCommand, TaskBoardMoveCommand, TaskBoardMutationResult,
-    TaskBoardRenameBoardCommand, parse_task_board_document, validate_task_board_document,
+    TaskBoardRenameBoardCommand, TaskBoardRenameTaskCommand, parse_task_board_document,
+    validate_task_board_document,
 };
 use fs2::FileExt;
 use std::fs::{File, OpenOptions};
@@ -44,6 +45,14 @@ pub trait TaskBoardStore: Send + Sync {
     ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
         Err(TaskBoardStoreError::InvalidInput {
             message: "deleting tasks is not supported by this task board store".to_string(),
+        })
+    }
+    fn rename_task(
+        &self,
+        _command: TaskBoardRenameTaskCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        Err(TaskBoardStoreError::InvalidInput {
+            message: "renaming tasks is not supported by this task board store".to_string(),
         })
     }
     fn create_board(
@@ -350,6 +359,13 @@ impl TaskBoardStore for FileTaskBoardStore {
         command: TaskBoardDeleteCommand,
     ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
         super::delete_task::delete_task(self, command)
+    }
+
+    fn rename_task(
+        &self,
+        command: TaskBoardRenameTaskCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        super::rename_task::rename_task(self, command)
     }
 
     fn create_board(

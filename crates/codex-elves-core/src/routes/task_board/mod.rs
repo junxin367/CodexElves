@@ -18,6 +18,7 @@ mod detach_conversations;
 mod move_board;
 mod move_task;
 mod rename_board;
+mod rename_task;
 mod snapshot;
 
 pub const TASK_BOARD_SNAPSHOT_PATH: &str = "/task-board/snapshot";
@@ -25,6 +26,7 @@ pub const TASK_BOARD_OPEN_WINDOW_PATH: &str = "/task-board/open-window";
 pub const TASK_BOARD_SESSION_CATALOG_PATH: &str = "/task-board/session-catalog";
 pub const TASK_BOARD_CREATE_PATH: &str = "/task-board/task-create";
 pub const TASK_BOARD_DELETE_PATH: &str = "/task-board/task-delete";
+pub const TASK_BOARD_RENAME_TASK_PATH: &str = "/task-board/task-rename";
 pub const TASK_BOARD_CREATE_BOARD_PATH: &str = "/task-board/board-create";
 pub const TASK_BOARD_DELETE_BOARD_PATH: &str = "/task-board/board-delete";
 pub const TASK_BOARD_RENAME_BOARD_PATH: &str = "/task-board/board-rename";
@@ -70,6 +72,10 @@ pub(super) async fn handle_detach_conversations(
 
 pub(super) async fn handle_delete(store: Arc<dyn TaskBoardStore>, payload: Value) -> Value {
     delete_task::handle(store, payload).await
+}
+
+pub(super) async fn handle_rename_task(store: Arc<dyn TaskBoardStore>, payload: Value) -> Value {
+    rename_task::handle(store, payload).await
 }
 
 pub(super) async fn handle_create_board(store: Arc<dyn TaskBoardStore>, payload: Value) -> Value {

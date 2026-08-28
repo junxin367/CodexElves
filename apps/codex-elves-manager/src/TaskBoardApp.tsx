@@ -215,6 +215,8 @@ type ConversationRuntimeStatus = {
   unread: boolean;
 };
 
+const conversationStatusRequestTimeoutMs = 20_000;
+
 type ConversationStatusPresentation = {
   id: "running" | "unread" | "completed" | "checking" | "unknown" | "unavailable";
   label: string;
@@ -427,6 +429,60 @@ function taskBoardMoveBoardTargetIndex(
   const targetIndex = remaining.findIndex((board) => board.id === targetBoardId);
   if (targetIndex < 0) return Math.max(0, sourceIndex);
   return targetIndex + (placeAfter ? 1 : 0);
+}
+
+type TaskCardDropPosition = "before" | "after";
+
+type TaskCardDropTarget = {
+  status: TaskStatus;
+  taskId: string;
+  position: TaskCardDropPosition;
+  targetIndex: number;
+};
+
+function taskBoardColumnTasks(tasks: Task[], status: TaskStatus) {
+  return tasks
+    .filter((task) => task.status === status)
+    .slice()
+    .sort((left, right) => left.order - right.order);
+}
+
+function taskBoardMoveTaskTargetIndex(
+  tasks: Task[],
+  sourceTaskId: string,
+  toStatus: TaskStatus,
+  targetTaskId = "",
+  placeAfter = false,
+) {
+  const targetTasks = taskBoardColumnTasks(tasks, toStatus).filter(
+    (task) => task.id !== sourceTaskId,
+  );
+  const targetIndex = targetTasks.findIndex((task) => task.id === targetTaskId);
+  return targetIndex >= 0
+    ? targetIndex + (placeAfter ? 1 : 0)
+    : targetTasks.length;
+}
+
+function taskBoardTaskMoveIsNoOp(
+  tasks: Task[],
+  sourceTaskId: string,
+  toStatus: TaskStatus,
+  targetIndex: number,
+) {
+  const source = tasks.find((task) => task.id === sourceTaskId);
+  if (!source || source.status !== toStatus) return false;
+  const sourceIndex = taskBoardColumnTasks(tasks, toStatus).findIndex(
+    (task) => task.id === sourceTaskId,
+  );
+  const targetLength = Math.max(
+    0,
+    taskBoardColumnTasks(tasks, toStatus).length - 1,
+  );
+  const normalizedTargetIndex = Math.max(
+    0,
+    Math.min(Math.trunc(targetIndex), targetLength),
+  );
+  return sourceIndex === normalizedTargetIndex;
 }
 
 function normalizeProjectCwd(value: string) {
@@ -1671,6 +1727,8 @@ export function TaskBoardApp() {
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [dragTaskId, setDragTaskId] = useState("");
   const [dropStatus, setDropStatus] = useState<TaskStatus | "">("");
+  const [taskDropTarget, setTaskDropTarget] =
+    useState<TaskCardDropTarget | null>(null);
   const [toast, setToast] = useState("");
   const appearanceRequestRef = useRef<Promise<void> | null>(null);
   const appearanceMountedRef = useRef(false);
@@ -2077,22 +2135,33 @@ export function TaskBoardApp() {
       });
       if (!linkedConversations.length) return;
       let nextDelay = 10_000;
+      let timeoutHandle = 0;
       try {
-        const result = await invoke<BoardResponse>(
-          "task_board_load_conversation_statuses",
-          {
-            request: {
-              conversations: linkedConversations.map((conversation) => {
-                const sessionKey = normalizeSessionId(conversation.sessionId);
-                return {
-                  sessionId: conversation.sessionId,
-                  title: conversation.title,
-                  sessionAliases: catalogSessionAliases.get(sessionKey) ?? [],
-                };
-              }),
+        // 状态请求长时间挂起时收敛到“状态未知”，避免会话一直停在“检查中”。
+        const result = await Promise.race([
+          invoke<BoardResponse>(
+            "task_board_load_conversation_statuses",
+            {
+              request: {
+                conversations: linkedConversations.map((conversation) => {
+                  const sessionKey = normalizeSessionId(conversation.sessionId);
+                  return {
+                    sessionId: conversation.sessionId,
+                    title: conversation.title,
+                    sessionAliases: catalogSessionAliases.get(sessionKey) ?? [],
+                  };
+                }),
+              },
             },
-          },
-        );
+          ),
+          new Promise<never>((_, reject) => {
+            timeoutHandle = window.setTimeout(
+              () => reject(new Error("conversation status request timeout")),
+              conversationStatusRequestTimeoutMs,
+            );
+          }),
+        ]);
+        window.clearTimeout(timeoutHandle);
         if (cancelled) return;
         if (result.status === "ok" && Array.isArray(result.statuses)) {
           const statuses = new Map<string, ConversationRuntimeStatus>();
@@ -2326,16 +2395,89 @@ export function TaskBoardApp() {
     [applySnapshotResponse, showToast, snapshot.revision, snapshot.tasks],
   );
 
+  const renameTask = useCallback(
+    async (task: Task, nextTitle: string) => {
+      const title = nextTitle.trim();
+      if (title === task.title) return true;
+      let expectedRevision = snapshot.revision;
+      try {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const result = await invoke<BoardResponse>("task_board_rename_task", {
+            request: {
+              taskId: task.id,
+              expectedRevision,
+              title,
+            },
+          });
+          const nextSnapshot = taskBoardSnapshotFromResponse(result);
+          if (nextSnapshot) setSnapshot(nextSnapshot);
+          if (result.status === "ok" && nextSnapshot) {
+            showToast("任务名称已更新");
+            return true;
+          }
+          if (
+            attempt === 0 &&
+            (result.status === "conflict" ||
+              result.code === "revision_conflict") &&
+            nextSnapshot
+          ) {
+            expectedRevision = nextSnapshot.revision;
+            continue;
+          }
+          showToast(taskBoardRenameFailureMessage(result));
+          return false;
+        }
+      } catch (error) {
+        showToast(messageFromError(error, "任务名称修改失败"));
+      }
+      return false;
+    },
+    [showToast, snapshot.revision],
+  );
+
   const dropTaskIntoStatus = useCallback(
     (event: DragEvent<HTMLElement>, status: TaskStatus) => {
       event.preventDefault();
       setDropStatus("");
+      setTaskDropTarget(null);
       const taskId =
         dragTaskId || event.dataTransfer.getData("text/plain").trim();
       const task = snapshot.tasks.find((candidate) => candidate.id === taskId);
+      const targetElement =
+        event.target instanceof Element
+          ? event.target.closest<HTMLElement>(".task-board-card")
+          : null;
+      const targetTaskId =
+        targetElement?.getAttribute("data-task-board-id") || "";
+      if (task && targetTaskId === task.id && task.status === status) {
+        setDragTaskId("");
+        return;
+      }
+      const targetBounds = targetElement?.getBoundingClientRect();
+      const placeAfter = Boolean(
+        targetBounds &&
+          event.clientY >= targetBounds.top + targetBounds.height / 2,
+      );
+      const targetIndex = task
+        ? taskBoardMoveTaskTargetIndex(
+            snapshot.tasks,
+            task.id,
+            status,
+            targetTaskId,
+            placeAfter,
+          )
+        : 0;
       setDragTaskId("");
-      if (task && task.status !== status) {
-        void moveTask(task, status);
+      if (
+        task &&
+        !taskBoardTaskMoveIsNoOp(
+          snapshot.tasks,
+          task.id,
+          status,
+          targetIndex,
+        )
+      ) {
+        void moveTask(task, status, targetIndex);
       }
     },
     [dragTaskId, moveTask, snapshot.tasks],
@@ -2936,7 +3078,8 @@ export function TaskBoardApp() {
           cwd: defaultProject,
           label: defaultProject,
         };
-      const initialStatus: TaskStatus = "new";
+      // 新建任务默认落到第一个看板；“未分配”只作为看板列存在，不作为初始状态选项。
+      const initialStatus: TaskStatus = snapshot.boards[0]?.id || "planning";
       const kind: NativeCreateRecoveryKind = task
         ? "attach-conversation"
         : "create-task";
@@ -2967,7 +3110,7 @@ export function TaskBoardApp() {
         modelSelectionTouched: false,
       });
     },
-    [catalog.projects, catalog.sessions, projectFilter],
+    [catalog.projects, catalog.sessions, projectFilter, snapshot.boards],
   );
 
   const submitEditor = useCallback(async () => {
@@ -3220,103 +3363,105 @@ export function TaskBoardApp() {
         className="task-board-app"
         style={taskBoardAppearanceStyle(appearance)}
       >
-      <section className="task-board-page" aria-label="任务看板">
-        <div className="task-board-heading">
-          <h1>任务看板</h1>
-        </div>
-        <p className="task-board-description">
-          跨项目观察任务状态，并集中关联项目下的多个会话
-        </p>
-        <div className="task-board-toolbar">
-          <label className="task-board-search">
-            <span className="sr-only">搜索任务或会话</span>
-            <Search size={17} aria-hidden="true" />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索任务、项目或关联会话"
-              type="search"
+      <section
+        className="task-board-page"
+        aria-label="任务看板，可横向和纵向滚动"
+        tabIndex={0}
+      >
+        <div className="task-board-sticky-header">
+          <div className="task-board-heading">
+            <h1>任务看板</h1>
+          </div>
+          <p className="task-board-description">
+            跨项目观察任务状态，并集中关联项目下的多个会话
+          </p>
+          <div className="task-board-toolbar">
+            <label className="task-board-search">
+              <span className="sr-only">搜索任务或会话</span>
+              <Search size={17} aria-hidden="true" />
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="搜索任务、项目或关联会话"
+                type="search"
+              />
+            </label>
+            <TaskBoardDropdown
+              className="task-board-select"
+              value={projectFilter}
+              options={[
+                { value: "", label: "全部项目" },
+                ...catalog.projects.map((project) => ({
+                  value: project.cwd,
+                  label: project.label,
+                  description: project.cwd,
+                })),
+              ]}
+              ariaLabel="筛选项目"
+              fixedWidth={320}
+              searchable
+              searchPlaceholder="搜索项目名称或路径"
+              onChange={setProjectFilter}
             />
-          </label>
-          <TaskBoardDropdown
-            className="task-board-select"
-            value={projectFilter}
-            options={[
-              { value: "", label: "全部项目" },
-              ...catalog.projects.map((project) => ({
-                value: project.cwd,
-                label: project.label,
-                description: project.cwd,
-              })),
-            ]}
-            ariaLabel="筛选项目"
-            fixedWidth={320}
-            searchable
-            searchPlaceholder="搜索项目名称或路径"
-            onChange={setProjectFilter}
-          />
-          <button
-            className="task-board-create"
-            type="button"
-            onClick={() => openEditor()}
-            disabled={catalog.projects.length === 0}
-          >
-            <Plus size={17} aria-hidden="true" />
-            新建任务
-          </button>
-          <button
-            className="task-board-manage"
-            type="button"
-            onClick={openBoardManager}
-          >
-            <Plus size={17} aria-hidden="true" />
-            管理看板
-          </button>
-          <span
-            className="task-board-hint"
-            data-status={catalog.warnings.length ? "warning" : loading ? "loading" : "ok"}
-          >
-            {loading
-              ? "正在加载任务与会话目录…"
-              : catalog.warnings.length
-                ? "目录部分不可用"
-                : "拖动任务卡片可切换状态"}
-          </span>
-          <div
-            className="task-board-unassigned-drop-zone"
-            data-active={unassignedDropActive || undefined}
-            data-drop-active={
-              unassignedDropActive && dropStatus === "new" ? true : undefined
-            }
-            aria-hidden={!unassignedDropActive}
-            onDragOver={(event) => {
-              if (!unassignedDropActive) return;
-              event.preventDefault();
-              event.dataTransfer.dropEffect = "move";
-              setDropStatus("new");
-            }}
-            onDragLeave={(event) => {
-              if (
-                !event.currentTarget.contains(event.relatedTarget as Node | null)
-              ) {
-                setDropStatus("");
-              }
-            }}
-            onDrop={(event) => dropTaskIntoStatus(event, "new")}
-          >
-            <TaskBoardStatusIcon statusId="new" />
-            <span>
-              <strong>未分配</strong>
-              <small>拖到这里移除当前状态</small>
+            <button
+              className="task-board-create"
+              type="button"
+              onClick={() => openEditor()}
+              disabled={catalog.projects.length === 0}
+            >
+              <Plus size={17} aria-hidden="true" />
+              新建任务
+            </button>
+            <button
+              className="task-board-manage"
+              type="button"
+              onClick={openBoardManager}
+            >
+              <Plus size={17} aria-hidden="true" />
+              管理看板
+            </button>
+            <span
+              className="task-board-hint"
+              data-status={catalog.warnings.length ? "warning" : loading ? "loading" : "ok"}
+            >
+              {loading
+                ? "正在加载任务与会话目录…"
+                : catalog.warnings.length
+                  ? "目录部分不可用"
+                  : "拖动任务卡片可调整顺序或切换状态"}
             </span>
+            <div
+              className="task-board-unassigned-drop-zone"
+              data-active={unassignedDropActive || undefined}
+              data-drop-active={
+                unassignedDropActive && dropStatus === "new" ? true : undefined
+              }
+              aria-hidden={!unassignedDropActive}
+              onDragOver={(event) => {
+                if (!unassignedDropActive) return;
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                setDropStatus("new");
+              }}
+              onDragLeave={(event) => {
+                if (
+                  !event.currentTarget.contains(event.relatedTarget as Node | null)
+                ) {
+                  setDropStatus("");
+                }
+              }}
+              onDrop={(event) => dropTaskIntoStatus(event, "new")}
+            >
+              <TaskBoardStatusIcon statusId="new" />
+              <span>
+                <strong>未分配</strong>
+                <small>拖到这里移除当前状态</small>
+              </span>
+            </div>
           </div>
         </div>
 
-        <div
-          className="task-board-scroll"
-          tabIndex={0}
-          aria-label="任务看板列，可横向和纵向滚动"
-        >
+        <div className="task-board-scroll">
           {loading ? (
             <div className="task-board-loading">
               <LoaderCircle className="spinning" aria-hidden="true" />
@@ -3345,11 +3490,44 @@ export function TaskBoardApp() {
                     }`}
                     onDragOver={(event) => {
                       event.preventDefault();
+                      event.dataTransfer.dropEffect = "move";
                       setDropStatus(status.id);
+                      const targetElement =
+                        event.target instanceof Element
+                          ? event.target.closest<HTMLElement>(
+                              ".task-board-card",
+                            )
+                          : null;
+                      const targetTaskId =
+                        targetElement?.getAttribute("data-task-board-id") || "";
+                      if (!dragTaskId || targetTaskId === dragTaskId) {
+                        setTaskDropTarget(null);
+                        return;
+                      }
+                      const bounds = targetElement?.getBoundingClientRect();
+                      if (!bounds) {
+                        setTaskDropTarget(null);
+                        return;
+                      }
+                      const placeAfter =
+                        event.clientY >= bounds.top + bounds.height / 2;
+                      setTaskDropTarget({
+                        status: status.id,
+                        taskId: targetTaskId,
+                        position: placeAfter ? "after" : "before",
+                        targetIndex: taskBoardMoveTaskTargetIndex(
+                          snapshot.tasks,
+                          dragTaskId,
+                          status.id,
+                          targetTaskId,
+                          placeAfter,
+                        ),
+                      });
                     }}
                     onDragLeave={(event) => {
                       if (!event.currentTarget.contains(event.relatedTarget as Node)) {
                         setDropStatus("");
+                        setTaskDropTarget(null);
                       }
                     }}
                     onDrop={(event) => {
@@ -3368,12 +3546,20 @@ export function TaskBoardApp() {
                         onDragEnd={() => {
                           setDragTaskId("");
                           setDropStatus("");
+                          setTaskDropTarget(null);
                         }}
                         dragging={dragTaskId === task.id}
+                        dropPosition={
+                          taskDropTarget?.status === status.id &&
+                          taskDropTarget.taskId === task.id
+                            ? taskDropTarget.position
+                            : undefined
+                        }
                         onOpenConversation={openConversation}
                         onDetachConversation={requestDetachConfirmation}
                         onDeleteTask={() => requestDeleteTaskConfirmation(task)}
                         onAttach={() => openEditor(task)}
+                        onRenameTitle={(title) => renameTask(task, title)}
                         onMoveStatus={(status) => void moveTask(task, status)}
                         statusDefinitions={statusDefinitions}
                         conversationStatuses={conversationStatuses}
@@ -3448,12 +3634,14 @@ export function TaskBoardApp() {
 function TaskCard({
   task,
   dragging,
+  dropPosition,
   onDragStart,
   onDragEnd,
   onOpenConversation,
   onDetachConversation,
   onDeleteTask,
   onAttach,
+  onRenameTitle,
   onMoveStatus,
   statusDefinitions,
   conversationStatuses,
@@ -3462,6 +3650,7 @@ function TaskCard({
 }: {
   task: Task;
   dragging: boolean;
+  dropPosition?: TaskCardDropPosition;
   onDragStart: (event: DragEvent<HTMLElement>) => void;
   onDragEnd: () => void;
   onOpenConversation: (
@@ -3471,17 +3660,72 @@ function TaskCard({
   onDetachConversation: (task: Task, conversation: TaskConversation) => void;
   onDeleteTask: () => void;
   onAttach: () => void;
+  onRenameTitle: (title: string) => Promise<boolean>;
   onMoveStatus: (status: TaskStatus) => void;
   statusDefinitions: BoardDefinition[];
   conversationStatuses: Map<string, ConversationRuntimeStatus>;
   availableSessionIds: Set<string>;
   catalogPartiallyUnavailable: boolean;
 }) {
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(task.title);
+  const [titleBusy, setTitleBusy] = useState(false);
+  const [titleFeedback, setTitleFeedback] = useState("");
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  const titleSaveBusyRef = useRef(false);
+  const titleCancelRef = useRef(false);
+
+  useEffect(() => {
+    if (!editingTitle) setTitleDraft(task.title);
+  }, [editingTitle, task.title]);
+
+  useEffect(() => {
+    if (!editingTitle) return;
+    titleInputRef.current?.focus();
+    titleInputRef.current?.select();
+  }, [editingTitle]);
+
+  const submitTitle = useCallback(async () => {
+    if (titleCancelRef.current || titleSaveBusyRef.current) return;
+    const title = titleDraft.trim();
+    const titleLength = Array.from(title).length;
+    if (titleLength < 1 || titleLength > 120) {
+      setTitleFeedback("任务名称必须为 1 到 120 个字符");
+      titleInputRef.current?.focus();
+      return;
+    }
+    if (title === task.title) {
+      setTitleFeedback("");
+      setEditingTitle(false);
+      return;
+    }
+    titleSaveBusyRef.current = true;
+    setTitleBusy(true);
+    setTitleFeedback("");
+    const renamed = await onRenameTitle(title);
+    titleSaveBusyRef.current = false;
+    setTitleBusy(false);
+    if (renamed) {
+      setEditingTitle(false);
+    } else {
+      setTitleFeedback("任务名称修改失败，请重试");
+      window.requestAnimationFrame(() => titleInputRef.current?.focus());
+    }
+  }, [onRenameTitle, task.title, titleDraft]);
+
   return (
     <article
       className={`task-board-card ${dragging ? "dragging" : ""}`}
-      draggable
-      onDragStart={onDragStart}
+      data-task-board-id={task.id}
+      data-drop-position={dropPosition}
+      draggable={!editingTitle && !titleBusy}
+      onDragStart={(event) => {
+        if (editingTitle || titleBusy) {
+          event.preventDefault();
+          return;
+        }
+        onDragStart(event);
+      }}
       onDragEnd={onDragEnd}
     >
       <button
@@ -3500,7 +3744,70 @@ function TaskCard({
         <X size={13} strokeWidth={1.35} aria-hidden="true" />
       </button>
       <div className="task-board-project">{task.project.label}</div>
-      <h2 className="task-board-card-title">{task.title}</h2>
+      {editingTitle ? (
+        <div
+          className="task-board-card-title-editor"
+          onPointerDown={(event) => event.stopPropagation()}
+          onDragStart={(event) => event.preventDefault()}
+        >
+          <input
+            ref={titleInputRef}
+            className="task-board-card-title-input"
+            value={titleDraft}
+            maxLength={120}
+            disabled={titleBusy}
+            aria-label={`编辑任务名称 ${task.title}`}
+            aria-invalid={Boolean(titleFeedback)}
+            onChange={(event) => {
+              setTitleDraft(event.target.value);
+              setTitleFeedback("");
+            }}
+            onBlur={() => {
+              if (titleCancelRef.current) {
+                titleCancelRef.current = false;
+                return;
+              }
+              void submitTitle();
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void submitTitle();
+              } else if (event.key === "Escape" && !titleBusy) {
+                event.preventDefault();
+                titleCancelRef.current = true;
+                setTitleDraft(task.title);
+                setTitleFeedback("");
+                setEditingTitle(false);
+              }
+            }}
+          />
+          {titleFeedback ? (
+            <span className="task-board-card-title-feedback" role="alert">
+              {titleFeedback}
+            </span>
+          ) : null}
+        </div>
+      ) : (
+        <button
+          className="task-board-card-title task-board-card-title-button"
+          type="button"
+          draggable={false}
+          title={`${task.title}\n点击修改任务名称`}
+          aria-label={`编辑任务名称 ${task.title}`}
+          onPointerDown={(event) => event.stopPropagation()}
+          onDragStart={(event) => event.preventDefault()}
+          onClick={(event) => {
+            event.stopPropagation();
+            titleCancelRef.current = false;
+            setTitleDraft(task.title);
+            setTitleFeedback("");
+            setEditingTitle(true);
+          }}
+        >
+          {task.title}
+        </button>
+      )}
       <div className="task-board-conversations">
         {task.conversations.length ? (
           task.conversations.map((conversation) => {
@@ -4567,11 +4874,13 @@ function TaskEditor({
                 <TaskBoardDropdown
                   className="task-board-create-select"
                   value={editor.initialStatus}
-                  options={statusDefinitions.map((status) => ({
-                    value: status.id,
-                    label: status.label,
-                    iconId: status.id,
-                  }))}
+                  options={statusDefinitions
+                    .filter((status) => status.id !== unassignedStatus.id)
+                    .map((status) => ({
+                      value: status.id,
+                      label: status.label,
+                      iconId: status.id,
+                    }))}
                   ariaLabel="选择初始状态"
                   minWidth={160}
                   matchTriggerWidth
@@ -4911,6 +5220,17 @@ function taskBoardDeleteFailureMessage(result: BoardResponse) {
   if (result.code === "task_file_invalid") return "任务文件无效，请检查后重试";
   if (result.code === "task_board_unavailable") return "任务看板暂不可用，请稍后重试";
   return result.message || "删除任务失败";
+}
+
+function taskBoardRenameFailureMessage(result: BoardResponse) {
+  if (result.code === "invalid_input") {
+    return "任务名称必须为 1 到 120 个字符";
+  }
+  if (result.code === "task_not_found") return "任务不存在或已被删除";
+  if (result.code === "revision_conflict") {
+    return "任务已被其他更改更新，请确认后重试";
+  }
+  return result.message || "任务名称修改失败";
 }
 
 function wait(delay: number) {

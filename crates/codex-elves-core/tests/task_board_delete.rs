@@ -1,7 +1,7 @@
 use codex_elves_core::task_board::{
     FileTaskBoardStore, TASK_BOARD_MAX_SAFE_INTEGER, TaskBoardConversation, TaskBoardDeleteCommand,
-    TaskBoardDocument, TaskBoardProject, TaskBoardStatus, TaskBoardStore, TaskBoardStoreError,
-    TaskBoardTask,
+    TaskBoardDocument, TaskBoardProject, TaskBoardRenameTaskCommand, TaskBoardStatus,
+    TaskBoardStore, TaskBoardStoreError, TaskBoardTask,
 };
 
 const TASK_A: &str = "62a0a38e-65bd-4c49-b6ef-3d19d06f2d4e";
@@ -134,6 +134,88 @@ fn stale_revision_and_invalid_commands_preserve_the_file() {
     ] {
         assert!(matches!(
             store.delete_task(invalid),
+            Err(TaskBoardStoreError::InvalidInput { .. })
+        ));
+        assert_eq!(std::fs::read(store.document_path()).unwrap(), original);
+    }
+}
+
+#[test]
+fn rename_task_updates_only_the_normalized_title_and_timestamp() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store_in(&temp);
+    let original = document();
+    write_document(&store, &original);
+
+    let result = store
+        .rename_task(TaskBoardRenameTaskCommand {
+            task_id: TASK_B.to_string(),
+            expected_revision: 7,
+            title: "  已修改的任务名称  ".to_string(),
+        })
+        .unwrap();
+
+    assert!(result.changed);
+    assert!(!result.idempotent);
+    assert_eq!(result.document.revision, 8);
+    let renamed = result
+        .document
+        .tasks
+        .iter()
+        .find(|task| task.id == TASK_B)
+        .unwrap();
+    assert_eq!(renamed.title, "已修改的任务名称");
+    assert!(renamed.updated_at_ms > original.tasks[1].updated_at_ms);
+    assert_eq!(renamed.project, original.tasks[1].project);
+    assert_eq!(renamed.status, original.tasks[1].status);
+    assert_eq!(renamed.order, original.tasks[1].order);
+    assert_eq!(renamed.conversations, original.tasks[1].conversations);
+    assert_eq!(store.snapshot().unwrap(), result.document);
+}
+
+#[test]
+fn rename_task_retry_is_idempotent_before_revision_check() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store_in(&temp);
+    write_document(&store, &document());
+    let command = TaskBoardRenameTaskCommand {
+        task_id: TASK_B.to_string(),
+        expected_revision: 7,
+        title: "新名称".to_string(),
+    };
+    let renamed = store.rename_task(command.clone()).unwrap();
+
+    let retry = store.rename_task(command).unwrap();
+
+    assert!(!retry.changed);
+    assert!(retry.idempotent);
+    assert_eq!(retry.document, renamed.document);
+}
+
+#[test]
+fn rename_task_rejects_stale_revision_and_invalid_titles_without_changing_the_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = store_in(&temp);
+    write_document(&store, &document());
+    let original = std::fs::read(store.document_path()).unwrap();
+
+    let stale = store.rename_task(TaskBoardRenameTaskCommand {
+        task_id: TASK_B.to_string(),
+        expected_revision: 6,
+        title: "新名称".to_string(),
+    });
+    assert!(matches!(
+        stale,
+        Err(TaskBoardStoreError::RevisionConflict { current }) if current == document()
+    ));
+
+    for title in ["", "   ", &"字".repeat(121)] {
+        assert!(matches!(
+            store.rename_task(TaskBoardRenameTaskCommand {
+                task_id: TASK_B.to_string(),
+                expected_revision: 7,
+                title: title.to_string(),
+            }),
             Err(TaskBoardStoreError::InvalidInput { .. })
         ));
         assert_eq!(std::fs::read(store.document_path()).unwrap(), original);

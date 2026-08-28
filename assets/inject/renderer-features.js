@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "71";
+  const codexDeleteStyleVersion = "75";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -67,6 +67,7 @@
   const codexBackendHeartbeatIntervalMs = 30000;
   const codexBackendBridgeReadyTimeoutMs = 2000;
   const codexBackendBridgeTimeoutMs = 2000;
+  const taskBoardConversationStatusTimeoutMs = 10000;
   const codexBackendStatusTimeoutMs = 5000;
   const codexElvesImageOverlayId = "codex-elves-image-overlay";
   const codexTokenUsageCardClass = "codex-token-usage-card";
@@ -82,7 +83,7 @@
   const codexPluginRequestIdMaxEntries = 256;
   const codexFailureHistoryMaxEntries = 64;
   const codexManagerReactDiscoveryCooldownMs = 15000;
-  const taskBoardRuntimeVersion = "58";
+  const taskBoardRuntimeVersion = "61";
   const taskBoardNativeOperationLeaseTtlMs = 2 * 60 * 1000;
   const taskBoardNativeCreateBusyMessage = "另一个窗口正在创建原生会话，请稍后重试";
   const taskBoardEntryAttribute = "data-codex-task-board-entry";
@@ -167,6 +168,7 @@
     catalog: "/task-board/session-catalog",
     createTask: "/task-board/task-create",
     deleteTask: "/task-board/task-delete",
+    renameTask: "/task-board/task-rename",
     createBoard: "/task-board/board-create",
     deleteBoard: "/task-board/board-delete",
     renameBoard: "/task-board/board-rename",
@@ -1711,8 +1713,42 @@
         flex-direction: column;
         min-width: 0;
         min-height: 0;
+        overflow: auto;
+        overscroll-behavior: contain;
+        scrollbar-color: rgba(148,163,184,.78) rgba(148,163,184,.12);
+        scrollbar-width: thin;
+      }
+      .codex-task-board-page::-webkit-scrollbar {
+        width: 12px;
+        height: 12px;
+      }
+      .codex-task-board-page::-webkit-scrollbar-track {
+        background: rgba(148,163,184,.12);
+        border-radius: 999px;
+      }
+      .codex-task-board-page::-webkit-scrollbar-thumb {
+        min-height: 38px;
+        border: 3px solid transparent;
+        border-radius: 999px;
+        background: rgba(148,163,184,.78);
+        background-clip: padding-box;
+      }
+      .codex-task-board-page::-webkit-scrollbar-corner {
+        background: rgba(148,163,184,.12);
+      }
+      .codex-task-board-sticky-header {
+        position: sticky;
+        z-index: 20;
+        top: 0;
+        left: 0;
+        display: flex;
+        width: 100%;
+        min-width: 0;
+        flex: 0 0 auto;
+        flex-direction: column;
         gap: 16px;
-        padding: 24px 28px;
+        background: var(--color-token-main-surface-primary, #1f1f1f);
+        padding: 12px 14px 8px;
       }
       .codex-task-board-heading {
         display: flex;
@@ -2542,29 +2578,8 @@
         flex: 1 1 auto;
         min-width: 0;
         min-height: 0;
-        overflow: auto;
-        overscroll-behavior: contain;
-        padding-bottom: 4px;
-        scrollbar-color: rgba(148,163,184,.78) rgba(148,163,184,.12);
-        scrollbar-width: thin;
-      }
-      .codex-task-board-scroll::-webkit-scrollbar {
-        width: 12px;
-        height: 12px;
-      }
-      .codex-task-board-scroll::-webkit-scrollbar-track {
-        background: rgba(148,163,184,.12);
-        border-radius: 999px;
-      }
-      .codex-task-board-scroll::-webkit-scrollbar-thumb {
-        min-height: 38px;
-        border: 3px solid transparent;
-        border-radius: 999px;
-        background: rgba(148,163,184,.78);
-        background-clip: padding-box;
-      }
-      .codex-task-board-scroll::-webkit-scrollbar-corner {
-        background: rgba(148,163,184,.12);
+        overflow: visible;
+        padding: 8px 14px 12px;
       }
       .codex-task-board-columns {
         display: grid;
@@ -2666,6 +2681,20 @@
       }
       .codex-task-board-card[draggable="true"] { cursor: grab; }
       .codex-task-board-card[data-dragging="true"] { opacity: .48; }
+      .codex-task-board-card[data-drop-position="before"]::before,
+      .codex-task-board-card[data-drop-position="after"]::after {
+        position: absolute;
+        z-index: 2;
+        right: 8px;
+        left: 8px;
+        height: 2px;
+        border-radius: 999px;
+        background: var(--task-board-accent);
+        content: "";
+        pointer-events: none;
+      }
+      .codex-task-board-card[data-drop-position="before"]::before { top: -6px; }
+      .codex-task-board-card[data-drop-position="after"]::after { bottom: -6px; }
       .codex-task-board-card:hover {
         border-color: var(--task-board-border);
         background: var(--task-board-card-background-hover);
@@ -2927,15 +2956,65 @@
         opacity: .52;
       }
       .codex-task-board-card-title {
-        display: -webkit-box;
+        width: 100%;
         margin: 0;
         overflow: hidden;
         color: inherit;
         font-size: 13px;
         font-weight: 600;
         line-height: 1.45;
-        -webkit-box-orient: vertical;
-        -webkit-line-clamp: 2;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .codex-task-board-card-title-button {
+        border: 0;
+        background: transparent;
+        cursor: text;
+        font: inherit;
+        padding: 0;
+        text-align: left;
+      }
+      .codex-task-board-card-title-button:hover,
+      .codex-task-board-card-title-button:focus-visible {
+        outline: none;
+        color: var(--task-board-accent);
+      }
+      .codex-task-board-card-title-editor {
+        display: grid;
+        min-width: 0;
+        gap: 4px;
+      }
+      .codex-task-board-card-title-input {
+        width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+        border: 1px solid color-mix(in srgb, var(--task-board-accent) 70%, transparent);
+        border-radius: 6px;
+        outline: none;
+        background: color-mix(in srgb, var(--task-board-card-background) 88%, black);
+        color: inherit;
+        font-family: inherit;
+        font-size: 13px;
+        font-weight: 600;
+        line-height: 1.45;
+        padding: 4px 6px;
+      }
+      .codex-task-board-card-title-input:focus {
+        border-color: var(--task-board-accent);
+        box-shadow: none;
+        outline: none;
+      }
+      .codex-task-board-card-title-input[aria-invalid="true"] {
+        border-color: #ef6b6b;
+      }
+      .codex-task-board-card-title-input:disabled {
+        cursor: wait;
+        opacity: .7;
+      }
+      .codex-task-board-card-title-feedback {
+        color: #ef6b6b;
+        font-size: 10px;
+        line-height: 1.35;
       }
       .codex-task-board-card-footer {
         display: flex;
@@ -3168,7 +3247,8 @@
         text-align: center;
       }
       @container (max-width: 860px) {
-        .codex-task-board-page { gap: 12px; padding: 18px 20px; }
+        .codex-task-board-sticky-header { gap: 12px; padding: 9px 10px 6px; }
+        .codex-task-board-scroll { padding: 6px 10px 9px; }
         .codex-task-board-toolbar { flex-wrap: wrap; }
         .codex-task-board-search-control { flex: 1 1 100%; width: 100%; }
         .codex-task-board-project-filter { flex: 1 1 auto; width: auto; max-width: none; }
@@ -3176,7 +3256,8 @@
         .codex-task-board-columns { min-width: 1450px; }
       }
       @container (max-width: 540px) {
-        .codex-task-board-page { padding: 14px 12px; }
+        .codex-task-board-sticky-header { padding: 7px 6px 6px; }
+        .codex-task-board-scroll { padding: 6px 6px 7px; }
         .codex-task-board-heading h1 { font-size: 20px; }
         .codex-task-board-description { font-size: 12px; }
         .codex-task-board-project-filter { max-width: none; }
@@ -3189,9 +3270,12 @@
         .codex-task-board-create span,
         .codex-task-board-manage span { display: none; }
       }
-      [${taskBoardRootAttribute}="true"][data-low-height="true"] .codex-task-board-page {
+      [${taskBoardRootAttribute}="true"][data-low-height="true"] .codex-task-board-sticky-header {
         gap: 8px;
-        padding-block: 10px;
+        padding-block: 5px 4px;
+      }
+      [${taskBoardRootAttribute}="true"][data-low-height="true"] .codex-task-board-scroll {
+        padding-block: 4px 5px;
       }
       [${taskBoardRootAttribute}="true"][data-low-height="true"] .codex-task-board-description,
       [${taskBoardRootAttribute}="true"][data-low-height="true"] .codex-task-board-hint {
@@ -8724,6 +8808,11 @@
     detachDialogPreviousFocus: null,
     detachRequestId: 0,
     detachBusy: false,
+    renameTaskId: "",
+    renameTitle: "",
+    renameFeedback: "",
+    renameBusy: false,
+    renameRequestId: 0,
     createModal: null,
     createModalKeydownHandler: null,
     createModalPreviousFocus: null,
@@ -9043,10 +9132,20 @@
         );
         let result = null;
         try {
-          result = await postJson(taskBoardBridgeRoutes.conversationStatus, {
-            session_id: sessionId,
-            title: String(conversation?.title || "").trim(),
-          });
+          // 后端解析超大 rollout 可能长时间挂起；超时先按失败处理，避免会话一直停在“检查中”。
+          result = await Promise.race([
+            postJson(taskBoardBridgeRoutes.conversationStatus, {
+              session_id: sessionId,
+              title: String(conversation?.title || "").trim(),
+            }),
+            new Promise((resolve) =>
+              setTimeout(
+                () =>
+                  resolve({ status: "failed", message: "conversation status timeout" }),
+                taskBoardConversationStatusTimeoutMs,
+              ),
+            ),
+          ]);
         } catch {
           result = null;
         }
@@ -10994,7 +11093,11 @@
   }
 
   function scheduleTaskBoardCardsRender() {
-    if (taskBoardState.cardsRenderFrame || !taskBoardState.active) return;
+    if (
+      taskBoardState.cardsRenderFrame ||
+      !taskBoardState.active ||
+      taskBoardState.renameTaskId
+    ) return;
     taskBoardState.cardsRenderFrame = requestAnimationFrame(() => {
       taskBoardState.cardsRenderFrame = 0;
       if (taskBoardState.active) renderTaskBoardCards();
@@ -11043,7 +11146,9 @@
     root.dataset.taskBoardScaffold = "true";
     root.dataset.taskBoardScaffoldVersion = taskBoardRuntimeVersion;
     const page = taskBoardElement("section", "codex-task-board-page");
-    page.setAttribute("aria-label", "任务看板");
+    page.tabIndex = 0;
+    page.setAttribute("aria-label", "任务看板，可横向和纵向滚动");
+    const stickyHeader = taskBoardElement("div", "codex-task-board-sticky-header");
     const heading = taskBoardElement("div", "codex-task-board-heading");
     const title = taskBoardElement("h1", "", "任务看板");
     heading.appendChild(title);
@@ -11080,7 +11185,7 @@
     manage.setAttribute("aria-label", "管理看板");
     manage.innerHTML = `<svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 5h5v14H5zM14 5h5v8h-5z"></path><path d="M16.5 16v5M14 18.5h5" stroke-linecap="round"></path></svg><span>管理看板</span>`;
     manage.addEventListener("click", () => openTaskBoardManager());
-    const hint = taskBoardElement("span", "codex-task-board-hint", "拖动任务卡片可切换状态");
+    const hint = taskBoardElement("span", "codex-task-board-hint", "拖动任务卡片可调整顺序或切换状态");
     hint.dataset.status = "ok";
     hint.setAttribute("aria-live", "polite");
     hint.setAttribute("aria-atomic", "true");
@@ -11146,11 +11251,10 @@
     });
     toolbar.append(searchControl, filter, create, manage, hint, unassignedDropZone);
     const scroll = taskBoardElement("div", "codex-task-board-scroll");
-    scroll.tabIndex = 0;
-    scroll.setAttribute("aria-label", "任务看板列，可横向和纵向滚动");
     const columns = taskBoardElement("div", "codex-task-board-columns");
     scroll.appendChild(columns);
-    page.append(heading, description, toolbar, scroll);
+    stickyHeader.append(heading, description, toolbar);
+    page.append(stickyHeader, scroll);
     root.appendChild(page);
   }
 
@@ -12432,11 +12536,13 @@
     return openTaskBoardDropdownMenu({
       kind: "create-status",
       trigger,
-      options: taskBoardStatusDefinitions().map((status) => ({
-        value: status.id,
-        label: status.label,
-        iconId: status.id,
-      })),
+      options: taskBoardStatusDefinitions()
+        .filter((status) => status.id !== taskBoardUnassignedStatusDefinition.id)
+        .map((status) => ({
+          value: status.id,
+          label: status.label,
+          iconId: status.id,
+        })),
       currentValue: taskBoardStatusId(modal.initialStatus),
       ariaLabel: "选择初始状态",
       minWidth: 160,
@@ -13036,7 +13142,11 @@
       mode: "existing",
       title: attaching ? String(targetTask?.title || "未命名任务") : "",
       projectCwd: defaultProject?.cwd || "",
-      initialStatus: "new",
+      // 新建任务默认落到第一个看板；“未分配”只是固定系统列，不作为初始状态选项。
+      initialStatus:
+        taskBoardStatusDefinitions().find(
+          (status) => status.id !== taskBoardUnassignedStatusDefinition.id,
+        )?.id || "planning",
       modelId: defaultModelId,
       effortId: defaultEffortId,
       modelSelectionTouched: false,
@@ -13148,6 +13258,14 @@
     return {
       taskId,
       expectedRevision,
+    };
+  }
+
+  function taskBoardRenamePayload(taskId, expectedRevision, title) {
+    return {
+      taskId,
+      expectedRevision,
+      title,
     };
   }
 
@@ -14050,6 +14168,137 @@
     }
   }
 
+  function taskBoardRenameFailureMessage(result) {
+    const code = String(result?.code || "").trim();
+    if (code === "invalid_input") return "任务名称必须为 1 到 120 个字符";
+    if (code === "task_not_found") return "任务不存在或已被删除";
+    if (code === "revision_conflict") return "任务已被其他更改更新，请确认后重试";
+    if (code === "bridge_unavailable") return "任务看板桥接暂不可用，请稍后重试";
+    if (code === "task_board_busy") return "任务看板正忙，请稍后重试";
+    if (code === "task_file_invalid") return "任务文件无效，请检查后重试";
+    if (code === "task_board_unavailable") return "任务看板暂不可用，请稍后重试";
+    return taskBoardMessageFromResult(result, "任务名称修改失败，请稍后重试");
+  }
+
+  function taskBoardClearTaskRename({ render = true } = {}) {
+    taskBoardState.renameTaskId = "";
+    taskBoardState.renameTitle = "";
+    taskBoardState.renameFeedback = "";
+    taskBoardState.renameBusy = false;
+    taskBoardState.renameRequestId += 1;
+    if (render && taskBoardState.active) renderTaskBoardCards();
+  }
+
+  function taskBoardStartTaskRename(task) {
+    if (taskBoardState.renameBusy || taskBoardState.moveBusy) return;
+    const taskId = String(task?.id || "").trim();
+    if (!taskId) return;
+    taskBoardState.renameTaskId = taskId;
+    taskBoardState.renameTitle = String(task?.title || "");
+    taskBoardState.renameFeedback = "";
+    renderTaskBoardCards();
+    requestAnimationFrame(() => {
+      const input = taskBoardState.root?.querySelector?.(
+        ".codex-task-board-card-title-input",
+      );
+      input?.focus?.();
+      input?.select?.();
+    });
+  }
+
+  async function taskBoardSubmitTaskRename(input, feedback) {
+    const taskId = String(taskBoardState.renameTaskId || "");
+    if (!taskId || taskBoardState.renameBusy) return { status: "blocked" };
+    const title = String(taskBoardState.renameTitle || "").trim();
+    const titleLength = Array.from(title).length;
+    if (titleLength < 1 || titleLength > 120) {
+      taskBoardState.renameFeedback = "任务名称必须为 1 到 120 个字符";
+      input?.setAttribute?.("aria-invalid", "true");
+      if (feedback) feedback.textContent = taskBoardState.renameFeedback;
+      input?.focus?.();
+      return { status: "invalid" };
+    }
+    const currentTask = (taskBoardState.snapshot.tasks || []).find(
+      (task) => String(task?.id || "") === taskId,
+    );
+    if (!currentTask) {
+      taskBoardState.renameFeedback = "任务不存在或已被删除";
+      input?.setAttribute?.("aria-invalid", "true");
+      if (feedback) feedback.textContent = taskBoardState.renameFeedback;
+      return { status: "missing" };
+    }
+    if (String(currentTask.title || "") === title) {
+      taskBoardClearTaskRename();
+      return { status: "unchanged" };
+    }
+
+    const requestId = ++taskBoardState.renameRequestId;
+    taskBoardState.renameBusy = true;
+    taskBoardState.renameFeedback = "";
+    if (input) {
+      input.disabled = true;
+      input.removeAttribute?.("aria-invalid");
+    }
+    if (feedback) feedback.textContent = "";
+    let expectedRevision = taskBoardState.snapshot.revision;
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let result;
+        try {
+          result = await taskBoardMockOrBridgeResult(
+            "renameTask",
+            taskBoardRenamePayload(taskId, expectedRevision, title),
+          );
+        } catch (error) {
+          result = {
+            status: "failed",
+            code: "bridge_unavailable",
+            message: taskBoardMessageFromResult(error, ""),
+          };
+        }
+        if (
+          requestId !== taskBoardState.renameRequestId ||
+          taskId !== taskBoardState.renameTaskId
+        ) {
+          return { status: "stale" };
+        }
+        const snapshot = taskBoardSnapshotResult(result);
+        if (result?.status === "ok" && snapshot) {
+          taskBoardState.snapshot = snapshot;
+          taskBoardState.snapshotError = "";
+          taskBoardClearTaskRename({ render: false });
+          renderTaskBoard();
+          showToast("任务名称已更新");
+          return { status: "ok" };
+        }
+        if (result?.status === "conflict" || result?.code === "revision_conflict") {
+          const conflictSnapshot = taskBoardConflictSnapshotResult(result);
+          if (conflictSnapshot) {
+            taskBoardState.snapshot = conflictSnapshot;
+            taskBoardState.snapshotError = "";
+          }
+          if (attempt === 0 && conflictSnapshot) {
+            expectedRevision = conflictSnapshot.revision;
+            continue;
+          }
+        }
+        taskBoardState.renameFeedback = taskBoardRenameFailureMessage(result);
+        input?.setAttribute?.("aria-invalid", "true");
+        if (feedback) feedback.textContent = taskBoardState.renameFeedback;
+        return { status: "failed" };
+      }
+      return { status: "failed" };
+    } finally {
+      if (
+        requestId === taskBoardState.renameRequestId &&
+        taskId === taskBoardState.renameTaskId
+      ) {
+        taskBoardState.renameBusy = false;
+        if (input) input.disabled = false;
+      }
+    }
+  }
+
   function taskBoardDeleteFailureMessage(result) {
     const code = String(result?.code || "").trim();
     if (code === "invalid_input") return "任务信息无效，请刷新任务看板后重试";
@@ -14067,7 +14316,7 @@
       (
         taskBoardState.root?.querySelector?.(".codex-task-board-card-delete") ||
         taskBoardState.root?.querySelector?.(".codex-task-board-create") ||
-        taskBoardState.root?.querySelector?.(".codex-task-board-scroll")
+        taskBoardState.root?.querySelector?.(".codex-task-board-page")
       )?.focus?.();
     });
   }
@@ -15271,16 +15520,105 @@
       .sort((left, right) => Number(left?.order || 0) - Number(right?.order || 0));
   }
 
-  function taskBoardMoveTargetIndex(taskId, toStatus, beforeTaskId = "") {
+  function taskBoardMoveTargetIndex(
+    taskId,
+    toStatus,
+    targetTaskId = "",
+    placeAfter = false,
+  ) {
     const source = taskBoardState.snapshot.tasks.find((task) => String(task?.id || "") === String(taskId || ""));
-    if (beforeTaskId === taskId && taskBoardStatusId(source?.status) === toStatus) {
+    if (targetTaskId === taskId && taskBoardStatusId(source?.status) === toStatus) {
       const sourceIndex = taskBoardFullColumnTasks(toStatus).findIndex((task) => String(task?.id || "") === String(taskId || ""));
       return Math.max(0, sourceIndex);
     }
     const target = taskBoardFullColumnTasks(toStatus)
       .filter((task) => String(task?.id || "") !== String(taskId || ""));
-    const beforeIndex = target.findIndex((task) => String(task?.id || "") === String(beforeTaskId || ""));
-    return beforeIndex >= 0 ? beforeIndex : target.length;
+    const targetIndex = target.findIndex((task) => String(task?.id || "") === String(targetTaskId || ""));
+    return targetIndex >= 0
+      ? targetIndex + (placeAfter ? 1 : 0)
+      : target.length;
+  }
+
+  function taskBoardTaskMoveIsNoOp(taskId, toStatus, targetIndex) {
+    const source = taskBoardState.snapshot.tasks.find(
+      (task) => String(task?.id || "") === String(taskId || ""),
+    );
+    if (!source || taskBoardStatusId(source?.status) !== toStatus) return false;
+    const columnTasks = taskBoardFullColumnTasks(toStatus);
+    const sourceIndex = columnTasks.findIndex(
+      (task) => String(task?.id || "") === String(taskId || ""),
+    );
+    const normalizedTargetIndex = Math.max(
+      0,
+      Math.min(
+        Math.trunc(Number(targetIndex) || 0),
+        Math.max(0, columnTasks.length - 1),
+      ),
+    );
+    return sourceIndex === normalizedTargetIndex;
+  }
+
+  function taskBoardCardDropTarget(event, list, taskId, toStatus) {
+    const target =
+      event.target instanceof Element
+        ? event.target
+        : event.target?.parentElement;
+    const card = target?.closest?.(".codex-task-board-card");
+    if (!card || !list?.contains?.(card)) {
+      return {
+        card: null,
+        position: "",
+        targetIndex: taskBoardMoveTargetIndex(taskId, toStatus),
+        self: false,
+      };
+    }
+    const targetTaskId =
+      card.getAttribute?.("data-task-board-id") || "";
+    const source = taskBoardState.snapshot.tasks.find(
+      (task) => String(task?.id || "") === String(taskId || ""),
+    );
+    if (
+      targetTaskId === taskId &&
+      taskBoardStatusId(source?.status) === toStatus
+    ) {
+      return {
+        card,
+        position: "",
+        targetIndex: taskBoardMoveTargetIndex(
+          taskId,
+          toStatus,
+          targetTaskId,
+        ),
+        self: true,
+      };
+    }
+    const bounds = card.getBoundingClientRect?.();
+    const placeAfter = Boolean(
+      bounds &&
+        Number(event.clientY) >= Number(bounds.top) + Number(bounds.height) / 2,
+    );
+    return {
+      card,
+      position: placeAfter ? "after" : "before",
+      targetIndex: taskBoardMoveTargetIndex(
+        taskId,
+        toStatus,
+        targetTaskId,
+        placeAfter,
+      ),
+      self: false,
+    };
+  }
+
+  function taskBoardSetCardDropTarget(card, position) {
+    document
+      .querySelectorAll?.(".codex-task-board-card[data-drop-position]")
+      .forEach((candidate) =>
+        candidate.removeAttribute?.("data-drop-position"),
+      );
+    if (card && position) {
+      card.setAttribute?.("data-drop-position", position);
+    }
   }
 
   function taskBoardOptimisticMoveSnapshot(snapshot, taskId, toStatus, targetIndex) {
@@ -15690,6 +16028,7 @@
       .forEach((card) => card.removeAttribute?.("data-dragging"));
     document.querySelectorAll?.(".codex-task-board-card-list[data-drop-active=\"true\"]")
       .forEach((list) => list.removeAttribute?.("data-drop-active"));
+    taskBoardSetCardDropTarget(null, "");
   }
 
   function cancelTaskBoardMoveInteraction({ restoreFocus = false } = {}) {
@@ -15884,37 +16223,68 @@
       list.addEventListener("dragover", (event) => {
         if (!taskBoardState.dragTaskId || taskBoardState.moveBusy) return;
         event.preventDefault?.();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
         list.setAttribute("data-drop-active", "true");
+        const dropTarget = taskBoardCardDropTarget(
+          event,
+          list,
+          taskBoardState.dragTaskId,
+          status.id,
+        );
+        taskBoardSetCardDropTarget(
+          dropTarget.self ? null : dropTarget.card,
+          dropTarget.position,
+        );
       });
-      list.addEventListener("dragleave", () => list.removeAttribute("data-drop-active"));
+      list.addEventListener("dragleave", (event) => {
+        if (list.contains?.(event.relatedTarget)) return;
+        list.removeAttribute("data-drop-active");
+        taskBoardSetCardDropTarget(null, "");
+      });
       list.addEventListener("drop", (event) => {
         event.preventDefault?.();
         const taskId = taskBoardState.dragTaskId;
         list.removeAttribute("data-drop-active");
         if (!taskId || taskBoardState.moveBusy) return;
-        const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-        const beforeTaskId = target?.closest?.(".codex-task-board-card")?.getAttribute?.("data-task-board-id") || "";
-        const sourceTask = taskBoardState.snapshot.tasks.find((task) => String(task?.id || "") === taskId);
-        if (beforeTaskId === taskId && sourceTask?.status === status.id) {
+        const dropTarget = taskBoardCardDropTarget(
+          event,
+          list,
+          taskId,
+          status.id,
+        );
+        if (
+          dropTarget.self ||
+          taskBoardTaskMoveIsNoOp(
+            taskId,
+            status.id,
+            dropTarget.targetIndex,
+          )
+        ) {
           clearTaskBoardDragVisuals();
           return;
         }
-        const targetIndex = taskBoardMoveTargetIndex(taskId, status.id, beforeTaskId);
-        void taskBoardMoveTask(taskId, status.id, targetIndex);
+        void taskBoardMoveTask(
+          taskId,
+          status.id,
+          dropTarget.targetIndex,
+        );
       });
       if (!statusTasks.length) {
         list.appendChild(taskBoardElement("div", "codex-task-board-empty-column", "暂无任务"));
       }
       statusTasks.forEach((task) => {
         const card = taskBoardElement("article", "codex-task-board-card");
-        card.setAttribute("data-task-board-id", String(task?.id || ""));
-        card.draggable = !taskBoardState.moveBusy;
+        const taskId = String(task?.id || "");
+        const taskTitle = String(task?.title || "未命名任务");
+        const editingTitle = taskBoardState.renameTaskId === taskId;
+        card.setAttribute("data-task-board-id", taskId);
+        card.draggable = !taskBoardState.moveBusy && !editingTitle;
         card.addEventListener("dragstart", (event) => {
-          if (taskBoardState.moveBusy) {
+          if (taskBoardState.moveBusy || editingTitle) {
             event.preventDefault?.();
             return;
           }
-          taskBoardState.dragTaskId = String(task?.id || "");
+          taskBoardState.dragTaskId = taskId;
           card.setAttribute("data-dragging", "true");
           taskBoardSetTaskDragActive(true);
           event.dataTransfer?.setData?.("text/plain", taskBoardState.dragTaskId);
@@ -15935,7 +16305,7 @@
         deleteButton.title = "删除任务";
         deleteButton.setAttribute(
           "aria-label",
-          `删除任务 ${String(task?.title || "未命名任务")}`,
+          `删除任务 ${taskTitle}`,
         );
         deleteButton.appendChild(taskBoardConversationRemoveIcon());
         deleteButton.addEventListener("pointerdown", (event) => {
@@ -15951,18 +16321,93 @@
           openTaskBoardDeleteDialog(task, deleteButton);
         });
         card.append(deleteButton, project);
-        card.appendChild(taskBoardElement("div", "codex-task-board-card-title", String(task?.title || "未命名任务")));
+        if (editingTitle) {
+          const titleEditor = taskBoardElement(
+            "div",
+            "codex-task-board-card-title-editor",
+          );
+          const titleInput = taskBoardElement(
+            "input",
+            "codex-task-board-card-title-input",
+          );
+          titleInput.type = "text";
+          titleInput.value = taskBoardState.renameTitle;
+          titleInput.maxLength = 120;
+          titleInput.disabled = taskBoardState.renameBusy;
+          titleInput.setAttribute("aria-label", `编辑任务名称 ${taskTitle}`);
+          if (taskBoardState.renameFeedback) {
+            titleInput.setAttribute("aria-invalid", "true");
+          }
+          const titleFeedback = taskBoardElement(
+            "span",
+            "codex-task-board-card-title-feedback",
+            taskBoardState.renameFeedback,
+          );
+          titleFeedback.setAttribute("role", "alert");
+          titleInput.addEventListener("pointerdown", (event) => {
+            event.stopPropagation?.();
+          });
+          titleInput.addEventListener("dragstart", (event) => {
+            event.preventDefault?.();
+            event.stopPropagation?.();
+          });
+          titleInput.addEventListener("input", () => {
+            taskBoardState.renameTitle = titleInput.value;
+            taskBoardState.renameFeedback = "";
+            titleInput.removeAttribute?.("aria-invalid");
+            titleFeedback.textContent = "";
+          });
+          titleInput.addEventListener("blur", () => {
+            if (taskBoardState.renameTaskId === taskId) {
+              void taskBoardSubmitTaskRename(titleInput, titleFeedback);
+            }
+          });
+          titleInput.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") {
+              event.preventDefault?.();
+              void taskBoardSubmitTaskRename(titleInput, titleFeedback);
+            } else if (event.key === "Escape" && !taskBoardState.renameBusy) {
+              event.preventDefault?.();
+              taskBoardClearTaskRename();
+            }
+          });
+          titleEditor.append(titleInput, titleFeedback);
+          card.appendChild(titleEditor);
+        } else {
+          const titleButton = taskBoardElement(
+            "button",
+            "codex-task-board-card-title codex-task-board-card-title-button",
+            taskTitle,
+          );
+          titleButton.type = "button";
+          titleButton.draggable = false;
+          titleButton.title = `${taskTitle}\n点击修改任务名称`;
+          titleButton.setAttribute("aria-label", `编辑任务名称 ${taskTitle}`);
+          titleButton.addEventListener("pointerdown", (event) => {
+            event.stopPropagation?.();
+          });
+          titleButton.addEventListener("dragstart", (event) => {
+            event.preventDefault?.();
+            event.stopPropagation?.();
+          });
+          titleButton.addEventListener("click", (event) => {
+            event.preventDefault?.();
+            event.stopPropagation?.();
+            taskBoardStartTaskRename(task);
+          });
+          card.appendChild(titleButton);
+        }
         const moveButton = taskBoardElement("button", "codex-task-board-card-move");
         moveButton.type = "button";
         taskBoardConfigureDropdownTrigger(
           moveButton,
           status.label,
-          `移动任务 ${String(task?.title || "未命名任务")} 的状态`,
+          `移动任务 ${taskTitle} 的状态`,
           status.id,
           false,
         );
         moveButton.disabled = taskBoardState.moveBusy;
-        moveButton.addEventListener("click", () => openTaskBoardStatusMenu(moveButton, String(task?.id || "")));
+        moveButton.addEventListener("click", () => openTaskBoardStatusMenu(moveButton, taskId));
         const addConversationButton = taskBoardElement(
           "button",
           "codex-task-board-card-add",
@@ -15971,7 +16416,7 @@
         addConversationButton.disabled = taskBoardState.moveBusy;
         addConversationButton.setAttribute(
           "aria-label",
-          `为任务 ${String(task?.title || "未命名任务")} 添加会话`,
+          `为任务 ${taskTitle} 添加会话`,
         );
         addConversationButton.innerHTML = `<svg aria-hidden="true" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.35"><path d="M8 3v10M3 8h10" stroke-linecap="round"></path></svg><span>添加会话</span>`;
         addConversationButton.addEventListener(
@@ -16027,7 +16472,7 @@
     }
     return {
       status: "ok",
-      text: "拖动任务卡片可切换状态",
+      text: "拖动任务卡片可调整顺序或切换状态",
     };
   }
 
@@ -16114,6 +16559,7 @@
     closeTaskBoardCreateModal();
     closeTaskBoardManager({ restoreFocus: false });
     closeTaskBoardDetachDialog({ restoreFocus: false });
+    taskBoardClearTaskRename({ render: false });
     stopTaskBoardConversationStatusRefresh();
     cancelScheduledTaskBoardCardsRender();
     if (!taskBoardState.active && !taskBoardState.root) return;
@@ -16382,6 +16828,51 @@
           document.activeElement === taskBoardState.detachDialog?.cancelButton,
       }),
       submitDeleteForTest: () => taskBoardDeleteTask(taskBoardState.detachDialog),
+      openTaskRenameForTest: (taskId) => {
+        if (!taskBoardState.root) mountTaskBoardRoot();
+        renderTaskBoardCards();
+        const task = (taskBoardState.snapshot.tasks || []).find(
+          (candidate) => String(candidate?.id || "") === String(taskId || ""),
+        );
+        if (task) taskBoardStartTaskRename(task);
+        return !!task;
+      },
+      setTaskRenameTitleForTest: (title) => {
+        taskBoardState.renameTitle = String(title || "");
+        const input = taskBoardState.root?.querySelector?.(
+          ".codex-task-board-card-title-input",
+        );
+        if (input) {
+          input.value = taskBoardState.renameTitle;
+          input.dispatchEvent?.({ type: "input" });
+        }
+      },
+      submitTaskRenameForTest: () => {
+        const input = taskBoardState.root?.querySelector?.(
+          ".codex-task-board-card-title-input",
+        );
+        const feedback = taskBoardState.root?.querySelector?.(
+          ".codex-task-board-card-title-feedback",
+        );
+        return taskBoardSubmitTaskRename(input, feedback);
+      },
+      cancelTaskRenameForTest: () => taskBoardClearTaskRename(),
+      taskRenameStateForTest: () => {
+        const input = taskBoardState.root?.querySelector?.(
+          ".codex-task-board-card-title-input",
+        );
+        const card = input?.parentElement?.parentElement;
+        return {
+          open: !!taskBoardState.renameTaskId,
+          busy: taskBoardState.renameBusy,
+          feedback: taskBoardState.renameFeedback,
+          title: taskBoardState.renameTitle,
+          inputPresent: !!input,
+          inputFocused: document.activeElement === input,
+          cardDraggable: card?.draggable === true,
+          snapshot: taskBoardState.snapshot,
+        };
+      },
       refreshRuntimeForTest: refreshTaskBoardRuntime,
       reconcileRuntimeForTest: reconcileTaskBoardRuntime,
       activeForTest: () => taskBoardState.active,

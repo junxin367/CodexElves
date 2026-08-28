@@ -338,7 +338,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "71";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "75";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -409,14 +409,52 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
     assert!(!script.contains("function openTaskBoardConversationPopover("));
     assert!(!script.contains("codex-task-board-conversation-popover"));
     assert!(!script.contains("Debug 原型"));
-    assert!(script.contains("拖动任务卡片可切换状态"));
+    assert!(script.contains("拖动任务卡片可调整顺序或切换状态"));
     assert!(script.contains("min-width: 1580px"));
     assert!(script.contains("codex-task-board-card-footer"));
     assert!(script.contains("function taskBoardStatusPresentation("));
+    assert!(script.contains(
+        r#"const stickyHeader = taskBoardElement("div", "codex-task-board-sticky-header")"#
+    ));
+    assert!(script.contains(r#"page.setAttribute("aria-label", "任务看板，可横向和纵向滚动")"#));
+    assert!(script.contains("page.tabIndex = 0"));
+    assert!(script.contains("stickyHeader.append(heading, description, toolbar)"));
+    assert!(script.contains("page.append(stickyHeader, scroll)"));
+    assert!(!script.contains(
+        r#"scroll.setAttribute("aria-label", "任务看板列，可横向和纵向滚动")"#
+    ));
     assert!(script.contains(r#"const hint = root.querySelector(".codex-task-board-hint")"#));
     assert!(script.contains(r#"hint.setAttribute("aria-live", "polite")"#));
     assert!(!script.contains(r#"taskBoardElement("p", "codex-task-board-state")"#));
     assert!(!script.contains(r#"root.querySelector(".codex-task-board-state")"#));
+
+    let page_styles = script
+        .split(".codex-task-board-page {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("inline task-board page styles should be present");
+    assert!(page_styles.contains("overflow: auto"));
+    assert!(page_styles.contains("overscroll-behavior: contain"));
+    assert!(!page_styles.contains("padding: 24px 28px"));
+    let sticky_header_styles = script
+        .split(".codex-task-board-sticky-header {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("inline task-board sticky header styles should be present");
+    assert!(sticky_header_styles.contains("position: sticky"));
+    assert!(sticky_header_styles.contains("top: 0"));
+    assert!(sticky_header_styles.contains("left: 0"));
+    assert!(sticky_header_styles.contains("padding: 12px 14px 8px"));
+    let board_scroll_styles = script
+        .split(".codex-task-board-scroll {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("inline task-board content styles should be present");
+    assert!(board_scroll_styles.contains("overflow: visible"));
+    assert!(board_scroll_styles.contains("padding: 8px 14px 12px"));
+    assert!(!board_scroll_styles.contains("overflow: auto"));
+    assert!(script.contains(".codex-task-board-page::-webkit-scrollbar"));
+    assert!(!script.contains(".codex-task-board-scroll::-webkit-scrollbar"));
 
     let search_focus_styles = script
         .split(".codex-task-board-search-control:focus-within {")
@@ -540,7 +578,25 @@ fn renderer_task_board_navigation_opens_inline_and_offers_new_window_on_context_
         .and_then(|section| section.split("function reconcileTaskBoardEntry()").next())
         .expect("standalone task board opener should be present");
 
-    assert!(script.contains(r#"const taskBoardRuntimeVersion = "58";"#));
+    assert!(script.contains(r#"const taskBoardRuntimeVersion = "61";"#));
+    assert!(script.contains(r#"renameTask: "/task-board/task-rename""#));
+    assert!(script.contains("function taskBoardSubmitTaskRename("));
+    let card_title_input_styles = script
+        .split(".codex-task-board-card-title-input {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("inline task-card title input styles should be present");
+    assert!(card_title_input_styles.contains("border: 1px solid"));
+    let card_title_focus_styles = script
+        .split(".codex-task-board-card-title-input:focus {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("inline task-card title focus styles should be present");
+    assert!(card_title_focus_styles.contains("border-color: var(--task-board-accent)"));
+    assert!(card_title_focus_styles.contains("box-shadow: none"));
+    assert!(card_title_focus_styles.contains("outline: none"));
+    assert!(!card_title_focus_styles.contains("box-shadow: 0 0 0"));
+    assert!(script.contains("taskBoardState.renameTaskId"));
     assert!(script.contains("codex-task-board-entry-context-menu"));
     assert!(script.contains("showChevron = true"));
     assert!(script.contains("status.id,\n          false,\n        );"));
@@ -740,7 +796,7 @@ fn renderer_task_board_dynamic_contracts_apply_latest_catalog_and_independent_re
     assert_eq!(cases["statusSlot"]["normal"]["status"], "ok");
     assert_eq!(
         cases["statusSlot"]["normal"]["text"],
-        "拖动任务卡片可切换状态"
+        "拖动任务卡片可调整顺序或切换状态"
     );
     assert_eq!(cases["statusSlot"]["loading"]["status"], "loading");
     assert_eq!(
@@ -1204,6 +1260,19 @@ fn renderer_task_board_create_modal_preserves_accessibility_payload_and_recovery
             .unwrap(),
         "delete task conflict cases: {cases}"
     );
+    for contract in [
+        "opensFocusedAndDisablesDrag",
+        "emptyTitleRejectedWithoutRequest",
+        "exactPayloadAndConflictRetry",
+        "savedTitleApplied",
+        "cancelPreservesOriginal",
+    ] {
+        assert!(
+            cases["renameTask"][contract].as_bool().unwrap(),
+            "rename task contract {contract} failed: {}",
+            cases["renameTask"]
+        );
+    }
     assert!(cases["initialStatus"]["createThenMove"].as_bool().unwrap());
     assert!(
         cases["initialStatus"]["moveUsesCreatedRevision"]
@@ -1658,13 +1727,18 @@ fn renderer_task_board_move_drag_menu_and_recovery_contracts() {
 
     assert!(script.contains("\"/task-board/task-move\""));
     assert!(script.contains("function taskBoardMoveTargetIndex("));
+    assert!(script.contains("function taskBoardTaskMoveIsNoOp("));
+    assert!(script.contains("function taskBoardCardDropTarget("));
     assert!(script.contains("function taskBoardMoveTask("));
     assert!(script.contains("function openTaskBoardStatusMenu("));
+    assert!(script.contains(".codex-task-board-card[data-drop-position=\"before\"]"));
+    assert!(script.contains(".codex-task-board-card[data-drop-position=\"after\"]"));
     assert!(script.contains("menuRole = \"listbox\""));
     assert!(script.contains("taskBoardMoveTargetIndex(taskId, status.id)"));
 
     assert!(cases["payloads"]["crossColumn"].as_bool().unwrap());
     assert!(cases["payloads"]["sameColumn"].as_bool().unwrap());
+    assert!(cases["payloads"]["sameColumnAfter"].as_bool().unwrap());
     assert!(cases["payloads"]["filteredIndex"].as_bool().unwrap());
     assert!(cases["payloads"]["zeroAndEnd"].as_bool().unwrap());
     assert!(cases["payloads"]["selfDropNoOp"].as_bool().unwrap());
@@ -1723,6 +1797,12 @@ fn renderer_task_board_move_drag_menu_and_recovery_contracts() {
             .unwrap()
     );
     assert!(cases["dom"]["sameColumnDownward"].as_bool().unwrap());
+    assert!(cases["dom"]["cardHalfInsertionLines"].as_bool().unwrap());
+    assert!(
+        cases["dom"]["originalPlacementNoRequest"]
+            .as_bool()
+            .unwrap()
+    );
     assert!(cases["dom"]["selfDropNoRequest"].as_bool().unwrap());
     assert!(
         cases["dom"]["unassignedOverlayDrop"].as_bool().unwrap(),
@@ -4309,6 +4389,7 @@ function node(tagName = "div") {
     closest(selector) { let current = this; while (current) { if (selectorMatches(current, selector)) return current; current = current.parentElement; } return null; },
     matches(selector) { return selectorMatches(this, selector); },
     contains(other) { return other === this || descendantsOf(this).includes(other); },
+    getBoundingClientRect() { return { left: 0, top: 0, right: 100, bottom: 30, width: 100, height: 30 }; },
   });
   Object.defineProperty(value, "className", {
     get() { return [...classes].join(" "); },
@@ -4369,6 +4450,7 @@ function settle() { return new Promise((resolve) => setTimeout(resolve, 0)); }
   reset();
   const crossIndex = api.moveTargetIndexForTest("a", "planning", "d");
   const sameBefore = api.moveTargetIndexForTest("c", "new", "a");
+  const sameAfter = api.moveTargetIndexForTest("a", "new", "b", true);
   const sameEnd = api.moveTargetIndexForTest("a", "new");
   const selfIndex = api.moveTargetIndexForTest("b", "new", "b");
   api.setMoveFiltersForTest("alpha", "/repo");
@@ -4383,6 +4465,7 @@ function settle() { return new Promise((resolve) => setTimeout(resolve, 0)); }
   const payloads = {
     crossColumn: JSON.stringify(payloadLog[0]) === JSON.stringify({ taskId: "a", toStatus: "planning", targetIndex: 0, expectedRevision: 7 }),
     sameColumn: sameBefore === 0,
+    sameColumnAfter: sameAfter === 1,
     filteredIndex: filteredIndex === 0,
     zeroAndEnd: crossIndex === 0 && sameEnd === 2,
     selfDropNoOp: selfIndex === 1,
@@ -4490,10 +4573,12 @@ function settle() { return new Promise((resolve) => setTimeout(resolve, 0)); }
     api.reconcileRuntimeForTest();
     return mainSurface.querySelector('[data-codex-task-board-root="true"]');
   }
-  function event(type, target) {
+  function event(type, target, options = {}) {
     return {
       type,
       target,
+      clientY: Number(options.clientY ?? 0),
+      relatedTarget: options.relatedTarget ?? null,
       dataTransfer: { setData() {} },
       preventDefault() { this.defaultPrevented = true; },
       stopPropagation() { this.cancelBubble = true; },
@@ -4548,9 +4633,11 @@ function settle() { return new Promise((resolve) => setTimeout(resolve, 0)); }
     !cardFooter.children[1]?.querySelector?.(".codex-task-board-dropdown-chevron") &&
     !!projectFilter?.querySelector?.(".codex-task-board-dropdown-chevron");
   dragCard.dispatchEvent(event("dragstart", dragCard));
-  planningList.dispatchEvent(event("dragover", planningList));
+  planningCard.dispatchEvent(event("dragover", planningCard, { clientY: 5 }));
   const activeBeforeDrop = planningList.getAttribute("data-drop-active") === "true";
-  planningCard.dispatchEvent(event("drop", planningCard));
+  const beforeInsertionVisible =
+    planningCard.getAttribute("data-drop-position") === "before";
+  planningCard.dispatchEvent(event("drop", planningCard, { clientY: 5 }));
   dragCard.dispatchEvent(event("dragend", dragCard));
   const optimistic = api.moveStateForTest();
   const optimisticOrdersContinuous =
@@ -4560,6 +4647,17 @@ function settle() { return new Promise((resolve) => setTimeout(resolve, 0)); }
   domPending.resolve(snapshot(8, [task("b", "new", 0), task("c", "new", 1), task("a", "planning", 0), task("d", "planning", 1)]));
   await settle();
 
+  const positionedPayloads = [];
+  mountDom({ request(route, payload) { positionedPayloads.push(payload); return snapshot(8, base().tasks); }});
+  const positionedDragCard = mainSurface.querySelector('.codex-task-board-card[data-task-board-id="a"]');
+  const positionedTargetCard = mainSurface.querySelector('.codex-task-board-card[data-task-board-id="b"]');
+  positionedDragCard.dispatchEvent(event("dragstart", positionedDragCard));
+  positionedTargetCard.dispatchEvent(event("dragover", positionedTargetCard, { clientY: 25 }));
+  const afterInsertionVisible =
+    positionedTargetCard.getAttribute("data-drop-position") === "after";
+  positionedTargetCard.dispatchEvent(event("drop", positionedTargetCard, { clientY: 25 }));
+  await settle();
+
   const sameColumnPayloads = [];
   mountDom({ request(route, payload) { sameColumnPayloads.push(payload); return snapshot(8, base().tasks); }});
   const sameDragCard = mainSurface.querySelector('.codex-task-board-card[data-task-board-id="a"]');
@@ -4567,7 +4665,20 @@ function settle() { return new Promise((resolve) => setTimeout(resolve, 0)); }
   sameDragCard.dispatchEvent(event("dragstart", sameDragCard));
   newList.dispatchEvent(event("drop", newList));
   await settle();
-  const selfRoot = mountDom({ request(route, payload) { sameColumnPayloads.push(payload); return snapshot(8, base().tasks); }});
+
+  const originalPlacementPayloads = [];
+  mountDom({ request(route, payload) { originalPlacementPayloads.push(payload); return snapshot(8, base().tasks); }});
+  const originalDragCard = mainSurface.querySelector('.codex-task-board-card[data-task-board-id="b"]');
+  const originalTargetCard = mainSurface.querySelector('.codex-task-board-card[data-task-board-id="c"]');
+  originalDragCard.dispatchEvent(event("dragstart", originalDragCard));
+  originalTargetCard.dispatchEvent(event("dragover", originalTargetCard, { clientY: 5 }));
+  const originalPlacementLineVisible =
+    originalTargetCard.getAttribute("data-drop-position") === "before";
+  originalTargetCard.dispatchEvent(event("drop", originalTargetCard, { clientY: 5 }));
+  await settle();
+
+  const selfDropPayloads = [];
+  mountDom({ request(route, payload) { selfDropPayloads.push(payload); return snapshot(8, base().tasks); }});
   const selfCard = mainSurface.querySelector('.codex-task-board-card[data-task-board-id="b"]');
   if (!selfCard) throw new Error(`self-drop card unavailable: ${mainSurface.querySelectorAll(".codex-task-board-card").map((card) => card.getAttribute("data-task-board-id")).join(",")}`);
   selfCard.dispatchEvent(event("dragstart", selfCard));
@@ -4659,12 +4770,20 @@ function settle() { return new Promise((resolve) => setTimeout(resolve, 0)); }
     !api.moveStateForTest().busy;
 
   const dom = {
-    dragPathExactPayload: activeBeforeDrop &&
+    dragPathExactPayload: activeBeforeDrop && beforeInsertionVisible &&
       JSON.stringify(domPayloads[0]) === JSON.stringify({ route: "/task-board/task-move", payload: { taskId: "a", toStatus: "planning", targetIndex: 0, expectedRevision: 7 } }),
     dragEndKeepsMoveAlive: dragEndKeepsDomMoveAlive,
     optimisticOrdersContinuous,
     sameColumnDownward: sameColumnPayloads[0]?.taskId === "a" && sameColumnPayloads[0]?.toStatus === "new" && sameColumnPayloads[0]?.targetIndex === 2,
-    selfDropNoRequest: sameColumnPayloads.length === 1,
+    cardHalfInsertionLines:
+      beforeInsertionVisible &&
+      afterInsertionVisible &&
+      positionedPayloads[0]?.taskId === "a" &&
+      positionedPayloads[0]?.toStatus === "new" &&
+      positionedPayloads[0]?.targetIndex === 1,
+    originalPlacementNoRequest:
+      originalPlacementLineVisible && originalPlacementPayloads.length === 0,
+    selfDropNoRequest: selfDropPayloads.length === 0,
     unassignedOverlayDrop,
     allConversationsRenderedInline,
     cardStructureMatchesDebug,
@@ -7756,6 +7875,88 @@ function createState() {
       !api.deleteDialogStateForTest().open,
   };
 
+  const renameRequests = [];
+  let renameCalls = 0;
+  const renameStart = attachSnapshot(20, ["session-a1"]);
+  window.__codexElvesTaskBoardMock = {
+    request(route, payload) {
+      if (route !== "/task-board/task-rename") {
+        throw new Error(`unexpected route ${route}`);
+      }
+      renameCalls += 1;
+      renameRequests.push(payload);
+      if (renameCalls === 1) {
+        return {
+          status: "conflict",
+          code: "revision_conflict",
+          message: "changed",
+          schemaVersion: 1,
+          revision: 21,
+          tasks: renameStart.tasks,
+        };
+      }
+      return {
+        status: "ok",
+        schemaVersion: 1,
+        revision: 22,
+        tasks: [{
+          ...renameStart.tasks[0],
+          title: payload.title,
+        }],
+      };
+    },
+  };
+  api.resetCreateStateForTest({
+    snapshot: renameStart,
+    catalog: catalog(),
+  });
+  api.openTaskRenameForTest(attachTaskId);
+  const renameOpened = api.taskRenameStateForTest();
+  api.setTaskRenameTitleForTest("   ");
+  await api.submitTaskRenameForTest();
+  const renameInvalid = api.taskRenameStateForTest();
+  const requestsAfterInvalid = renameRequests.length;
+  api.setTaskRenameTitleForTest("  更新后的任务名称  ");
+  await api.submitTaskRenameForTest();
+  const renameSaved = api.taskRenameStateForTest();
+
+  const requestsBeforeCancel = renameRequests.length;
+  api.resetCreateStateForTest({
+    snapshot: renameStart,
+    catalog: catalog(),
+  });
+  api.openTaskRenameForTest(attachTaskId);
+  api.setTaskRenameTitleForTest("不应保存的名称");
+  api.cancelTaskRenameForTest();
+  const renameCancelled = api.taskRenameStateForTest();
+  const renameTask = {
+    opensFocusedAndDisablesDrag:
+      renameOpened.open &&
+      renameOpened.inputPresent &&
+      renameOpened.inputFocused &&
+      !renameOpened.cardDraggable,
+    emptyTitleRejectedWithoutRequest:
+      renameInvalid.open &&
+      renameInvalid.feedback.includes("1 到 120") &&
+      requestsAfterInvalid === 0,
+    exactPayloadAndConflictRetry:
+      renameRequests.length === 2 &&
+      JSON.stringify(renameRequests.map((payload) => payload.expectedRevision)) ===
+        JSON.stringify([20, 21]) &&
+      renameRequests[0]?.taskId === attachTaskId &&
+      renameRequests[0]?.title === "更新后的任务名称" &&
+      JSON.stringify(Object.keys(renameRequests[0] || {}).sort()) ===
+        JSON.stringify(["expectedRevision", "taskId", "title"]),
+    savedTitleApplied:
+      !renameSaved.open &&
+      renameSaved.snapshot.revision === 22 &&
+      renameSaved.snapshot.tasks[0]?.title === "更新后的任务名称",
+    cancelPreservesOriginal:
+      !renameCancelled.open &&
+      renameCancelled.snapshot.tasks[0]?.title === renameStart.tasks[0].title &&
+      renameRequests.length === requestsBeforeCancel,
+  };
+
   const initialStatusRequests = [];
   reset({
     snapshot: { status: "ok", schemaVersion: 1, revision: 3, tasks: [] },
@@ -8283,6 +8484,7 @@ function createState() {
     attach,
     detach,
     deleteTask,
+    renameTask,
     initialStatus,
     stableErrors,
     sessionNotFound,

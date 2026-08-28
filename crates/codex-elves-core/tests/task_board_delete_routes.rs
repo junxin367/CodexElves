@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use codex_elves_core::routes::task_board::TASK_BOARD_DELETE_PATH;
+use codex_elves_core::routes::task_board::{TASK_BOARD_DELETE_PATH, TASK_BOARD_RENAME_TASK_PATH};
 use codex_elves_core::routes::{BridgeContext, CoreRuntimeService, handle_bridge_request};
 use codex_elves_core::status::StatusStore;
 use codex_elves_core::task_board::{
     TaskBoardAttachConversationsCommand, TaskBoardCreateCommand, TaskBoardDeleteCommand,
-    TaskBoardDocument, TaskBoardMoveCommand, TaskBoardMutationResult, TaskBoardStore,
-    TaskBoardStoreError,
+    TaskBoardDocument, TaskBoardMoveCommand, TaskBoardMutationResult, TaskBoardRenameTaskCommand,
+    TaskBoardStore, TaskBoardStoreError,
 };
 use serde_json::json;
 
@@ -59,6 +59,47 @@ async fn delete_route_forwards_exact_command_and_returns_flattened_snapshot() {
 }
 
 #[tokio::test]
+async fn rename_route_forwards_exact_command_and_returns_flattened_snapshot() {
+    let document = TaskBoardDocument {
+        schema_version: 1,
+        revision: 8,
+        boards: TaskBoardDocument::default_boards(),
+        tasks: Vec::new(),
+    };
+    let store = Arc::new(FakeDeleteStore::success(document.clone()));
+
+    let response = handle_bridge_request(
+        context(store.clone()),
+        TASK_BOARD_RENAME_TASK_PATH,
+        json!({
+            "taskId": TASK_ID,
+            "expectedRevision": 7,
+            "title": "更新后的任务"
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        store.rename_calls(),
+        vec![TaskBoardRenameTaskCommand {
+            task_id: TASK_ID.to_string(),
+            expected_revision: 7,
+            title: "更新后的任务".to_string(),
+        }]
+    );
+    assert_eq!(
+        response,
+        json!({
+            "status": "ok",
+            "schemaVersion": 1,
+            "revision": 8,
+            "boards": TaskBoardDocument::default_boards(),
+            "tasks": []
+        })
+    );
+}
+
+#[tokio::test]
 async fn delete_route_rejects_invalid_payloads_without_calling_the_store() {
     let cases = [
         json!({}),
@@ -76,6 +117,28 @@ async fn delete_route_rejects_invalid_payloads_without_calling_the_store() {
         assert_eq!(response["status"], "failed");
         assert_eq!(response["code"], "invalid_input");
         assert!(store.calls().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn rename_route_rejects_invalid_payloads_without_calling_the_store() {
+    let cases = [
+        json!({}),
+        json!({"taskId": TASK_ID, "expectedRevision": 7}),
+        json!({"taskId": "not-a-uuid", "expectedRevision": 7, "title": "名称"}),
+        json!({"taskId": TASK_ID, "expectedRevision": JS_MAX_SAFE_INTEGER + 1, "title": "名称"}),
+        json!({"taskId": TASK_ID, "expectedRevision": 7, "title": "名称", "extra": true}),
+        json!([]),
+    ];
+
+    for payload in cases {
+        let store = Arc::new(FakeDeleteStore::success(TaskBoardDocument::empty()));
+        let response =
+            handle_bridge_request(context(store.clone()), TASK_BOARD_RENAME_TASK_PATH, payload)
+                .await;
+        assert_eq!(response["status"], "failed");
+        assert_eq!(response["code"], "invalid_input");
+        assert!(store.rename_calls().is_empty());
     }
 }
 
@@ -167,6 +230,7 @@ enum DeleteOutcome {
 struct FakeDeleteStore {
     outcome: DeleteOutcome,
     calls: Mutex<Vec<TaskBoardDeleteCommand>>,
+    rename_calls: Mutex<Vec<TaskBoardRenameTaskCommand>>,
 }
 
 impl FakeDeleteStore {
@@ -174,6 +238,7 @@ impl FakeDeleteStore {
         Self {
             outcome: DeleteOutcome::Success(document),
             calls: Mutex::new(Vec::new()),
+            rename_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -181,11 +246,16 @@ impl FakeDeleteStore {
         Self {
             outcome: DeleteOutcome::Error(Mutex::new(Some(error))),
             calls: Mutex::new(Vec::new()),
+            rename_calls: Mutex::new(Vec::new()),
         }
     }
 
     fn calls(&self) -> Vec<TaskBoardDeleteCommand> {
         self.calls.lock().unwrap().clone()
+    }
+
+    fn rename_calls(&self) -> Vec<TaskBoardRenameTaskCommand> {
+        self.rename_calls.lock().unwrap().clone()
     }
 }
 
@@ -213,6 +283,21 @@ impl TaskBoardStore for FakeDeleteStore {
         command: TaskBoardDeleteCommand,
     ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
         self.calls.lock().unwrap().push(command);
+        match &self.outcome {
+            DeleteOutcome::Success(document) => Ok(TaskBoardMutationResult {
+                document: document.clone(),
+                changed: true,
+                idempotent: false,
+            }),
+            DeleteOutcome::Error(error) => Err(error.lock().unwrap().take().unwrap()),
+        }
+    }
+
+    fn rename_task(
+        &self,
+        command: TaskBoardRenameTaskCommand,
+    ) -> Result<TaskBoardMutationResult, TaskBoardStoreError> {
+        self.rename_calls.lock().unwrap().push(command);
         match &self.outcome {
             DeleteOutcome::Success(document) => Ok(TaskBoardMutationResult {
                 document: document.clone(),

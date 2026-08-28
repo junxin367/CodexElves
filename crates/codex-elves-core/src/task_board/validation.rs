@@ -125,11 +125,7 @@ pub fn validate_task_board_document(
             });
         }
 
-        task.title = task.title.trim().to_string();
-        let title_chars = task.title.chars().count();
-        if title_chars == 0 || title_chars > MAX_TITLE_CHARS {
-            return Err(TaskBoardValidationError::InvalidTitle);
-        }
+        task.title = normalize_task_title(&task.title)?;
         if task.created_at_ms > TASK_BOARD_MAX_SAFE_INTEGER
             || task.updated_at_ms > TASK_BOARD_MAX_SAFE_INTEGER
         {
@@ -201,6 +197,15 @@ pub fn validate_task_board_document(
     }
 
     Ok(())
+}
+
+pub(crate) fn normalize_task_title(title: &str) -> Result<String, TaskBoardValidationError> {
+    let title = title.trim().to_string();
+    let title_chars = title.chars().count();
+    if title_chars == 0 || title_chars > MAX_TITLE_CHARS {
+        return Err(TaskBoardValidationError::InvalidTitle);
+    }
+    Ok(title)
 }
 
 pub(crate) fn normalize_task_board_label(label: &str) -> Result<String, TaskBoardValidationError> {
