@@ -570,6 +570,8 @@ type LocalProxyStatusResult = CommandResult<{
   listening: boolean;
   host: string;
   port: number;
+  lanListening?: boolean;
+  lanAddresses?: string[];
   activeRelayId: string;
   activeRelayName: string;
   activeRelayMode: RelayMode | string;
@@ -936,6 +938,7 @@ function createBrowserPreviewSettings(): BackendSettings {
   return normalizeSettings({
     ...defaultSettings,
     codexAppPath: "C:\\Users\\junes\\AppData\\Local\\Programs\\CodexElves\\CodexElves.exe",
+    lanProxyEnabled: true,
     launchMode: "patch",
     relayBaseUrl: "https://api.vendor.example/v1",
     relayApiKey: "sk-preview-browser",
@@ -1370,6 +1373,12 @@ function browserPreviewRemotePluginMarketplaceMissing(): boolean {
   return params.get("mockRemotePluginMarketplace") === "missing";
 }
 
+function browserPreviewLanProxyState(): "active" | "restart" | "start" {
+  if (typeof window === "undefined") return "active";
+  const state = new URLSearchParams(window.location.search).get("mockLanProxy");
+  return state === "restart" || state === "start" ? state : "active";
+}
+
 function browserPreviewRelayPayload(): RelayPayload {
   const settings = browserPreviewSettings();
   const active = activeRelayProfile(settings);
@@ -1388,11 +1397,16 @@ function browserPreviewRelayPayload(): RelayPayload {
 function browserPreviewLocalProxyStatus(): Omit<LocalProxyStatusResult, "status" | "message"> {
   const settings = browserPreviewSettings();
   const active = activeRelayProfile(settings);
+  const previewState = browserPreviewLanProxyState();
+  const listening = active.localProxyEnabled && previewState !== "start";
+  const lanListening = listening && settings.lanProxyEnabled && previewState !== "restart";
   return {
     enabled: active.localProxyEnabled,
-    listening: active.localProxyEnabled,
+    listening,
     host: "127.0.0.1",
     port: 45221,
+    lanListening,
+    lanAddresses: lanListening ? ["192.168.31.108"] : [],
     activeRelayId: active.id,
     activeRelayName: active.name,
     activeRelayMode: active.relayMode,
@@ -1707,7 +1721,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.3.15",
+        currentVersion: "0.3.16",
         latestVersion: "0.4.0",
         releaseSummary: [
           "CodexElves 0.4.0",
@@ -1722,7 +1736,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       }, "发现可用更新。") as T);
     case "perform_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.3.15",
+        currentVersion: "0.3.16",
         latestVersion: "0.4.0",
         releaseSummary: "浏览器预览不会下载真实安装包。",
         installedPath: "C:\\Temp\\CodexElves-0.4.0-windows-x64-setup.exe",
@@ -1732,7 +1746,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({
         report: [
           "CodexElves 诊断报告",
-          "版本: 0.3.15",
+          "版本: 0.3.16",
           "平台: windows-x64",
           "Codex 应用: C:\\Users\\junes\\AppData\\Local\\Programs\\CodexElves\\CodexElves.exe",
           "配置目录: C:\\Users\\junes\\.codex",
@@ -1753,7 +1767,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.3.15",
+        current_version: "0.3.16",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -3685,6 +3699,8 @@ export function App() {
         copyText(text ?? localProxyDetail?.entry?.requestBody ?? "", "请求内容已复制。"),
       copyLocalProxyResponse: (text?: string) =>
         copyText(text ?? localProxyDetail?.entry?.responseBody ?? "", "返回内容已复制。"),
+      copyLocalProxyAddress: (text: string) =>
+        copyText(text, "局域网代理地址已复制。"),
       copyDiagnostics: () => copyText(diagnostics?.report ?? "", "诊断报告已复制。"),
       goLogs: () => navigate("about"),
       checkHealth: async () => {
@@ -4013,6 +4029,7 @@ type Actions = {
   copyLogs: () => Promise<void>;
   copyLocalProxyRequest: (text?: string) => Promise<void>;
   copyLocalProxyResponse: (text?: string) => Promise<void>;
+  copyLocalProxyAddress: (text: string) => Promise<void>;
   copyDiagnostics: () => Promise<void>;
   goLogs: () => Promise<void>;
   installWatcher: () => Promise<void>;
@@ -4190,6 +4207,18 @@ function LocalProxyScreen({
     [modelFilteredEntries, logFilter],
   );
   const totalPages = Math.max(1, Math.ceil(filteredEntries.length / LOCAL_PROXY_LOG_PAGE_SIZE));
+  const lanListening = status?.listening === true && status.lanListening === true;
+  const lanAddress = lanListening ? (status?.lanAddresses?.[0]?.trim() ?? "") : "";
+  const lanProxyBaseUrl = lanAddress && status
+    ? `http://${lanAddress}:${status.port}/v1`
+    : "";
+  const lanPendingText = !status
+    ? "正在读取状态"
+    : !status.listening
+      ? "启动后生效"
+      : !status.lanListening
+        ? "重启后生效"
+        : "未检测到局域网 IPv4";
   const visibleEntries = useMemo(
     () => filteredEntries.slice((page - 1) * LOCAL_PROXY_LOG_PAGE_SIZE, page * LOCAL_PROXY_LOG_PAGE_SIZE),
     [filteredEntries, page],
@@ -4215,10 +4244,7 @@ function LocalProxyScreen({
           detail="当前运行状态与最近代理活动"
           actions={
             <>
-              <label
-                className="proxy-inline-toggle"
-                data-tooltip="开启后，下一次启动代理时使用局域网监听；代理已运行时需重新启动后生效"
-              >
+              <label className="proxy-inline-toggle">
                 <input
                   checked={form.lanProxyEnabled}
                   onChange={(event) =>
@@ -4287,9 +4313,40 @@ function LocalProxyScreen({
           <div className="proxy-status-strip">
             <div className={`proxy-status-cell proxy-status-state ${localProxyState(status)}`}>
               <span className="proxy-status-dot" />
-              <div>
+              <div className="proxy-status-state-content">
                 <strong>{localProxyStateLabel(status)}</strong>
-                <small>{status ? `${status.host}:${status.port}` : "尚未读取监听地址"}</small>
+                <div className="proxy-status-address-list">
+                  <div className="proxy-status-address-row">
+                    <span className="proxy-status-address-label">本机</span>
+                    <code className="proxy-status-address-value">
+                      {status ? `${status.host}:${status.port}` : "尚未读取监听地址"}
+                    </code>
+                  </div>
+                  {form.lanProxyEnabled ? (
+                    lanProxyBaseUrl ? (
+                      <div className="proxy-status-address-row lan">
+                        <span className="proxy-status-address-label">局域网</span>
+                        <code className="proxy-status-address-value">
+                          {lanAddress}:{status?.port}
+                        </code>
+                        <button
+                          aria-label="复制局域网代理地址"
+                          className="proxy-status-address-copy"
+                          data-tooltip={`复制 ${lanProxyBaseUrl}`}
+                          onClick={() => void actions.copyLocalProxyAddress(lanProxyBaseUrl)}
+                          type="button"
+                        >
+                          <Copy aria-hidden="true" />
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="proxy-status-address-row lan pending">
+                        <span className="proxy-status-address-label">局域网</span>
+                        <span className="proxy-status-address-value">{lanPendingText}</span>
+                      </div>
+                    )
+                  ) : null}
+                </div>
               </div>
             </div>
             <div className="proxy-status-cell">

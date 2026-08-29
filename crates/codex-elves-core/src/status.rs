@@ -10,6 +10,8 @@ pub struct LaunchStatus {
     pub started_at_ms: u64,
     pub debug_port: Option<u16>,
     pub helper_port: Option<u16>,
+    #[serde(default)]
+    pub lan_proxy_listening: bool,
     pub codex_app: Option<String>,
 }
 
@@ -76,6 +78,7 @@ mod tests {
             started_at_ms: 12345,
             debug_port: Some(9222),
             helper_port: Some(4545),
+            lan_proxy_listening: true,
             codex_app: Some("Codex".to_string()),
         };
 
@@ -100,5 +103,27 @@ mod tests {
         let store = StatusStore::new(path);
 
         assert_eq!(store.load_latest().unwrap(), None);
+    }
+
+    #[test]
+    fn status_store_loads_legacy_status_without_lan_listener_state() {
+        let dir = temp_dir();
+        let path = dir.join("latest-status.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "status": "running",
+  "message": "ready",
+  "started_at_ms": 12345,
+  "debug_port": 9222,
+  "helper_port": 45221,
+  "codex_app": "Codex"
+}"#,
+        )
+        .unwrap();
+        let store = StatusStore::new(path);
+
+        let status = store.load_latest().unwrap().unwrap();
+        assert!(!status.lan_proxy_listening);
     }
 }

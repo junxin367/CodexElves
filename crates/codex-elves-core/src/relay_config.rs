@@ -12,6 +12,8 @@ use crate::responses_websocket::{
 };
 use crate::settings::{RelayContextSelection, RelayProfile, RelayProtocol};
 
+mod codex_builtin_catalog;
+
 const RELAY_PROVIDER: &str = "custom";
 const LEGACY_RELAY_PROVIDERS: &[&str] = &["CodexElves", "CodexPP"];
 const CHAT_UPSTREAM_BASE_URL_KEY: &str = "codex_elves_chat_base_url";
@@ -528,11 +530,8 @@ fn apply_owned_model_catalog_to_config(
         "model_catalog_json",
         GENERATED_MODEL_CATALOG_FILENAME,
     );
-    let catalog = generated_model_catalog_json(profile, &config_with_catalog, rows)?;
-    let path = home.join(GENERATED_MODEL_CATALOG_FILENAME);
-    std::fs::create_dir_all(home)?;
-    let bytes = serde_json::to_vec_pretty(&catalog)?;
-    crate::settings::atomic_write(&path, &bytes).context("写入模型目录失败")?;
+    let catalog = generated_model_catalog_json_for_home(home, profile, &config_with_catalog, rows)?;
+    write_generated_model_catalog_if_changed(home, &catalog)?;
     Ok(config_with_catalog)
 }
 
@@ -560,12 +559,32 @@ pub fn sync_applied_relay_profile_model_catalog_to_home(
     if config_with_catalog != live_config {
         write_codex_live_atomic(home, Some(&config_with_catalog), None, false)?;
     }
-    let catalog = generated_model_catalog_json(profile, &config_with_catalog, rows)?;
-    let path = home.join(GENERATED_MODEL_CATALOG_FILENAME);
-    std::fs::create_dir_all(home)?;
-    let bytes = serde_json::to_vec_pretty(&catalog)?;
-    crate::settings::atomic_write(&path, &bytes).context("写入模型目录失败")?;
+    let catalog = generated_model_catalog_json_for_home(home, profile, &config_with_catalog, rows)?;
+    write_generated_model_catalog_if_changed(home, &catalog)?;
     Ok(true)
+}
+
+pub(crate) async fn refresh_applied_relay_profile_model_catalog_if_stale_to_home(
+    home: &Path,
+    profile: &RelayProfile,
+    codex_executable: Option<&Path>,
+) -> anyhow::Result<bool> {
+    let outcome = codex_builtin_catalog::refresh_if_stale(home, codex_executable).await?;
+    let synced = sync_applied_relay_profile_model_catalog_to_home(home, profile)?;
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "relay.codex_builtin_model_catalog_refresh",
+        json!({
+            "attempted": outcome.attempted,
+            "refreshed": outcome.refreshed,
+            "catalogAvailable": outcome.catalog_available,
+            "generatedCatalogSynced": synced,
+            "warning": outcome.warning,
+            "sourceExecutable": outcome.source_executable,
+            "sourceVersion": outcome.source_version,
+            "refreshIntervalHours": 48
+        }),
+    );
+    Ok(synced)
 }
 
 /// 为 CodexElves 自己管理的既有模型目录补齐缺失的 `prefer_websockets`。
@@ -2345,12 +2364,22 @@ fn apply_generated_model_catalog_to_config(
     // 因此在 catalog 模式下移除顶层覆盖，让各模型使用各自的 context_window。
     doc.as_table_mut().remove("model_context_window");
     let config_with_catalog = normalize_optional_toml(doc);
-    let catalog = generated_model_catalog_json(profile, &config_with_catalog, rows)?;
-    let path = home.join(GENERATED_MODEL_CATALOG_FILENAME);
-    std::fs::create_dir_all(home)?;
-    let bytes = serde_json::to_vec_pretty(&catalog)?;
-    crate::settings::atomic_write(&path, &bytes).context("写入模型目录失败")?;
+    let catalog = generated_model_catalog_json_for_home(home, profile, &config_with_catalog, rows)?;
+    write_generated_model_catalog_if_changed(home, &catalog)?;
     Ok(config_with_catalog)
+}
+
+fn write_generated_model_catalog_if_changed(home: &Path, catalog: &Value) -> anyhow::Result<bool> {
+    let path = home.join(GENERATED_MODEL_CATALOG_FILENAME);
+    let bytes = serde_json::to_vec_pretty(catalog)?;
+    if std::fs::read(&path)
+        .ok()
+        .is_some_and(|existing| existing == bytes)
+    {
+        return Ok(false);
+    }
+    crate::settings::atomic_write(&path, &bytes).context("写入模型目录失败")?;
+    Ok(true)
 }
 
 /// 从打包的 codex-models.json 中按模型 slug 取出 fast 能力字段。
@@ -2424,43 +2453,51 @@ fn packaged_model_catalog() -> Option<&'static Value> {
         .as_ref()
 }
 
-fn packaged_model_catalog_entry(slug: &str) -> Option<Value> {
+fn model_catalog_entry<'a>(source: &'a Value, slug: &str) -> Option<&'a Value> {
     let normalized = slug.trim().to_ascii_lowercase();
     let normalized = normalized
         .rsplit('/')
         .next()
         .filter(|value| !value.is_empty())?;
-    let source = packaged_model_catalog()?;
     let models = source.get("models").and_then(Value::as_array)?;
 
-    if let Some(model) = models
-        .iter()
-        .find(|model| model.get("slug").and_then(Value::as_str) == Some(normalized))
-    {
-        return Some(model.clone());
+    if let Some(model) = models.iter().find(|model| {
+        model
+            .get("slug")
+            .and_then(Value::as_str)
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(normalized))
+    }) {
+        return Some(model);
     }
 
     // 主线名（如 gpt-5.6）在快照目录里没有独立条目，回退到同版本的 sol 快照，
     // 不把版本写死，新版本（如 gpt-5.7）只要快照入库就能自动命中。
     let sol_alias = format!("{normalized}-sol");
-    if let Some(model) = models
-        .iter()
-        .find(|model| model.get("slug").and_then(Value::as_str) == Some(sol_alias.as_str()))
-    {
-        return Some(model.clone());
+    if let Some(model) = models.iter().find(|model| {
+        model
+            .get("slug")
+            .and_then(Value::as_str)
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&sol_alias))
+    }) {
+        return Some(model);
     }
 
     models
         .iter()
         .filter_map(|model| {
             let candidate = model.get("slug").and_then(Value::as_str)?;
+            let candidate_normalized = candidate.to_ascii_lowercase();
             normalized
-                .strip_prefix(candidate)
+                .strip_prefix(&candidate_normalized)
                 .filter(|suffix| suffix.starts_with('-'))
                 .map(|_| (candidate.len(), model))
         })
         .max_by_key(|(length, _)| *length)
-        .map(|(_, model)| model.clone())
+        .map(|(_, model)| model)
+}
+
+fn packaged_model_catalog_entry(slug: &str) -> Option<Value> {
+    model_catalog_entry(packaged_model_catalog()?, slug).cloned()
 }
 
 fn rewrite_generated_catalog_prompt_text_for_model(text: &str, model: &str) -> String {
@@ -2496,6 +2533,7 @@ fn rewrite_generated_catalog_prompt_value_for_model(value: Value, model: &str) -
 fn generated_catalog_prompt_fields(
     profile: &RelayProfile,
     model: &str,
+    codex_catalog: Option<&Value>,
     packaged_model: Option<&Value>,
 ) -> (String, Value) {
     let override_prompt = profile.system_prompt_override.trim();
@@ -2513,19 +2551,34 @@ fn generated_catalog_prompt_fields(
         );
     }
 
-    let rewrite_prompt_model = packaged_model.is_none();
-    let source_model = packaged_model
-        .cloned()
-        .or_else(|| packaged_model_catalog_entry(PACKAGED_CATALOG_FALLBACK_MODEL_SLUG));
+    let codex_model = codex_catalog
+        .and_then(|catalog| model_catalog_entry(catalog, model))
+        .filter(|model| model_has_usable_prompt(model));
+    let packaged_model = packaged_model.filter(|model| model_has_usable_prompt(model));
+    let direct_source_model = codex_model.or(packaged_model);
+    let rewrite_prompt_model = direct_source_model.is_none();
+    let source_model = direct_source_model
+        .or_else(|| {
+            codex_catalog
+                .and_then(|catalog| {
+                    model_catalog_entry(catalog, PACKAGED_CATALOG_FALLBACK_MODEL_SLUG)
+                })
+                .filter(|model| model_has_usable_prompt(model))
+        })
+        .or_else(|| {
+            packaged_model_catalog()
+                .and_then(|catalog| {
+                    model_catalog_entry(catalog, PACKAGED_CATALOG_FALLBACK_MODEL_SLUG)
+                })
+                .filter(|model| model_has_usable_prompt(model))
+        });
     let base_instructions = source_model
-        .as_ref()
         .and_then(|model| model.get("base_instructions"))
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| GENERATED_CATALOG_FALLBACK_BASE_INSTRUCTIONS.to_string());
     let model_messages = source_model
-        .as_ref()
         .and_then(|model| model.get("model_messages"))
         .cloned()
         .unwrap_or_else(|| {
@@ -2547,6 +2600,13 @@ fn generated_catalog_prompt_fields(
     }
 }
 
+fn model_has_usable_prompt(model: &Value) -> bool {
+    model
+        .get("base_instructions")
+        .and_then(Value::as_str)
+        .is_some_and(|prompt| !prompt.trim().is_empty())
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CatalogModelRow {
     model: String,
@@ -2555,10 +2615,35 @@ pub(crate) struct CatalogModelRow {
     protocol: RelayProtocol,
 }
 
+#[cfg(test)]
 pub(crate) fn generated_model_catalog_json(
     profile: &RelayProfile,
     config_text: &str,
     rows: Vec<CatalogModelRow>,
+) -> anyhow::Result<Value> {
+    generated_model_catalog_json_with_codex_catalog(profile, config_text, rows, None)
+}
+
+fn generated_model_catalog_json_for_home(
+    home: &Path,
+    profile: &RelayProfile,
+    config_text: &str,
+    rows: Vec<CatalogModelRow>,
+) -> anyhow::Result<Value> {
+    let codex_catalog = codex_builtin_catalog::load_cached_catalog(home);
+    generated_model_catalog_json_with_codex_catalog(
+        profile,
+        config_text,
+        rows,
+        codex_catalog.as_ref(),
+    )
+}
+
+fn generated_model_catalog_json_with_codex_catalog(
+    profile: &RelayProfile,
+    config_text: &str,
+    rows: Vec<CatalogModelRow>,
+    codex_catalog: Option<&Value>,
 ) -> anyhow::Result<Value> {
     profile.validate_model_catalog_identifiers()?;
     let reasoning_effort = catalog_reasoning_effort(config_text);
@@ -2571,8 +2656,12 @@ pub(crate) fn generated_model_catalog_json(
         let catalog_slug = row.catalog_slug;
         let display_name = catalog_slug.clone();
         let packaged_model = packaged_model_catalog_entry(&model);
-        let (model_base_instructions, model_messages) =
-            generated_catalog_prompt_fields(profile, &model, packaged_model.as_ref());
+        let (model_base_instructions, model_messages) = generated_catalog_prompt_fields(
+            profile,
+            &model,
+            codex_catalog,
+            packaged_model.as_ref(),
+        );
         let fast_capability = fast_service_tier_capability(&model);
         let prefer_websockets = row.protocol == RelayProtocol::Responses
             && crate::responses_websocket::relay_prefers_native_responses_websocket(profile);
@@ -4771,7 +4860,23 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].model, "gpt-5.6-sol");
 
-        let catalog = generated_model_catalog_json(&profile, "", rows).unwrap();
+        let codex_catalog = json!({
+            "models": [{
+                "slug": "gpt-5.6-sol",
+                "base_instructions": "Codex 当前提示词",
+                "model_messages": {
+                    "instructions_template": "Codex 当前提示词",
+                    "instructions_variables": {}
+                }
+            }]
+        });
+        let catalog = generated_model_catalog_json_with_codex_catalog(
+            &profile,
+            "",
+            rows,
+            Some(&codex_catalog),
+        )
+        .unwrap();
         let model = &catalog["models"][0];
         assert_eq!(model["base_instructions"], "第一行\n第二行");
         assert_eq!(
@@ -4779,6 +4884,140 @@ mod tests {
             "第一行\n第二行"
         );
         assert_eq!(model["use_responses_lite"], false);
+    }
+
+    #[test]
+    fn generated_model_catalog_prefers_codex_prompt_over_packaged_prompt() {
+        let profile = RelayProfile {
+            protocol: RelayProtocol::Responses,
+            model_mappings: vec![crate::settings::RelayModelMapping {
+                request_model: "gpt-5.6-sol".to_string(),
+                alias: String::new(),
+                context_window: String::new(),
+                protocol: RelayProtocol::Responses,
+            }],
+            ..RelayProfile::default()
+        };
+        let rows = relay_profile_catalog_rows(&profile).unwrap();
+        let codex_catalog = json!({
+            "models": [{
+                "slug": "gpt-5.6-sol",
+                "base_instructions": "来自当前 Codex 的提示词",
+                "model_messages": {
+                    "instructions_template": "来自当前 Codex 的消息模板",
+                    "instructions_variables": {
+                        "personality_default": "current"
+                    }
+                }
+            }]
+        });
+
+        let catalog = generated_model_catalog_json_with_codex_catalog(
+            &profile,
+            "",
+            rows,
+            Some(&codex_catalog),
+        )
+        .unwrap();
+        let model = &catalog["models"][0];
+        assert_eq!(model["base_instructions"], "来自当前 Codex 的提示词");
+        assert_eq!(
+            model["model_messages"]["instructions_template"],
+            "来自当前 Codex 的消息模板"
+        );
+        assert_eq!(model["use_responses_lite"], false);
+    }
+
+    #[test]
+    fn generated_model_catalog_falls_back_to_packaged_prompt_when_codex_model_is_missing() {
+        let profile = RelayProfile {
+            protocol: RelayProtocol::Responses,
+            model_mappings: vec![crate::settings::RelayModelMapping {
+                request_model: "gpt-5.6-sol".to_string(),
+                alias: String::new(),
+                context_window: String::new(),
+                protocol: RelayProtocol::Responses,
+            }],
+            ..RelayProfile::default()
+        };
+        let rows = relay_profile_catalog_rows(&profile).unwrap();
+        let codex_catalog = json!({
+            "models": [{
+                "slug": "other-model",
+                "base_instructions": "不应使用",
+                "model_messages": {
+                    "instructions_template": "不应使用",
+                    "instructions_variables": {}
+                }
+            }]
+        });
+
+        let catalog = generated_model_catalog_json_with_codex_catalog(
+            &profile,
+            "",
+            rows,
+            Some(&codex_catalog),
+        )
+        .unwrap();
+        let packaged = packaged_model_catalog_entry("gpt-5.6-sol").unwrap();
+        assert_eq!(
+            catalog["models"][0]["base_instructions"],
+            packaged["base_instructions"]
+        );
+        assert_eq!(
+            catalog["models"][0]["model_messages"],
+            packaged["model_messages"]
+        );
+    }
+
+    #[test]
+    fn generated_model_catalog_uses_codex_fallback_before_packaged_default_for_unknown_model() {
+        let profile = RelayProfile {
+            protocol: RelayProtocol::Responses,
+            model_mappings: vec![crate::settings::RelayModelMapping {
+                request_model: "qwen3-coder".to_string(),
+                alias: String::new(),
+                context_window: String::new(),
+                protocol: RelayProtocol::Responses,
+            }],
+            ..RelayProfile::default()
+        };
+        let rows = relay_profile_catalog_rows(&profile).unwrap();
+        let codex_catalog = json!({
+            "models": [{
+                "slug": PACKAGED_CATALOG_FALLBACK_MODEL_SLUG,
+                "base_instructions": "You are GPT-5 from the current Codex binary.",
+                "model_messages": {
+                    "instructions_template": "You are GPT-5 from the current Codex binary.",
+                    "instructions_variables": {}
+                }
+            }]
+        });
+
+        let catalog = generated_model_catalog_json_with_codex_catalog(
+            &profile,
+            "",
+            rows,
+            Some(&codex_catalog),
+        )
+        .unwrap();
+        let prompt = catalog["models"][0]["base_instructions"].as_str().unwrap();
+        assert!(prompt.contains("qwen3-coder"));
+        assert!(prompt.contains("current Codex binary"));
+    }
+
+    #[test]
+    fn generated_model_catalog_writer_skips_identical_contents() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog = json!({
+            "models": [{
+                "slug": "gpt-test",
+                "base_instructions": "prompt"
+            }]
+        });
+
+        assert!(write_generated_model_catalog_if_changed(temp.path(), &catalog).unwrap());
+        assert!(!write_generated_model_catalog_if_changed(temp.path(), &catalog).unwrap());
     }
 
     #[test]

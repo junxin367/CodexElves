@@ -338,7 +338,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "75";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "80";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -420,9 +420,9 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
     assert!(script.contains("page.tabIndex = 0"));
     assert!(script.contains("stickyHeader.append(heading, description, toolbar)"));
     assert!(script.contains("page.append(stickyHeader, scroll)"));
-    assert!(!script.contains(
-        r#"scroll.setAttribute("aria-label", "任务看板列，可横向和纵向滚动")"#
-    ));
+    assert!(
+        !script.contains(r#"scroll.setAttribute("aria-label", "任务看板列，可横向和纵向滚动")"#)
+    );
     assert!(script.contains(r#"const hint = root.querySelector(".codex-task-board-hint")"#));
     assert!(script.contains(r#"hint.setAttribute("aria-live", "polite")"#));
     assert!(!script.contains(r#"taskBoardElement("p", "codex-task-board-state")"#));
@@ -2412,11 +2412,10 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
     assert!(script.contains("快速打开工作区"));
     assert!(script.contains("data-codex-open-in-button"));
     assert!(script.contains("codex-open-in-menu"));
-    assert!(script.contains(r#"const codexOpenInVersion = "5";"#));
-    assert!(script.contains(r#"const codexDeleteStyleVersion = "79";"#));
+    assert!(script.contains(r#"const codexOpenInVersion = "7";"#));
+    assert!(script.contains(r#"const codexDeleteStyleVersion = "80";"#));
     assert!(script.contains(r#"[data-codex-open-in-role="primary"]"#));
     assert!(script.contains(r#"[data-codex-open-in-role="arrow"]"#));
-    assert!(script.contains("margin-right: 6px;"));
     assert!(script.contains("width: 30px !important;"));
     assert!(script.contains("width: 14px !important;"));
     let group_style = script
@@ -2426,9 +2425,36 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
         .split("\n      }")
         .next()
         .expect("open in group style should be closed");
-    assert!(group_style.contains(
-        "color-mix(in srgb, var(--color-border-primary-outline, currentColor) 64%, transparent)"
-    ));
+    assert!(group_style.contains("margin: 0;"));
+    assert!(!group_style.contains("margin-right: 6px;"));
+    assert!(group_style.contains("border: 1px solid transparent;"));
+    assert!(group_style.contains("in oklab"));
+    assert!(
+        group_style.contains("var(--color-text, var(--color-token-text-primary, currentColor)) 5%")
+    );
+    assert!(group_style.contains("box-shadow: none;"));
+    let summary_anchor_style = script
+        .split(r#".codex-open-in-group[data-codex-open-in-anchor="summary"] {"#)
+        .nth(1)
+        .expect("summary-adjacent open in style should be present")
+        .split("\n      }")
+        .next()
+        .expect("summary-adjacent open in style should be closed");
+    assert!(summary_anchor_style.contains("margin-right: 6px;"));
+    let button_style = script
+        .split(".codex-open-in-group button {")
+        .nth(1)
+        .expect("open in button style should be present")
+        .split("\n      }")
+        .next()
+        .expect("open in button style should be closed");
+    assert!(button_style.contains("margin: 0 !important;"));
+    assert!(
+        script.contains("var(--color-text, var(--color-token-text-primary, currentColor)) 10%")
+    );
+    assert!(script.contains(r#"anchorType: "summary""#));
+    assert!(script.contains(r#"anchorType: "toolbar""#));
+    assert!(script.contains("group.dataset.codexOpenInAnchor = anchor.anchorType;"));
     let arrow_style = script
         .split(r#".codex-open-in-group [data-codex-open-in-role="arrow"] {"#)
         .nth(1)
@@ -2605,6 +2631,33 @@ fn injection_script_open_in_reuses_native_service_without_local_detection() {
     assert!(!loader_block.contains("spawn"));
     assert!(script.contains("function codexOpenInNativeButtonExists"));
     assert!(script.contains("removeCodexOpenInControls()"));
+}
+
+#[test]
+fn injection_script_open_in_does_not_block_repeat_activation_on_native_promise() {
+    let script = assets::injection_script(45221);
+    let activation_block = script
+        .split("async function activateCodexOpenInPrimary(button)")
+        .nth(1)
+        .expect("open in primary activation should be present")
+        .split("function installCodexOpenInMenuDismissHandlers")
+        .next()
+        .expect("open in primary activation should be closed");
+    assert!(activation_block.contains("dispatchCodexOpenInTarget(context, target);"));
+    assert!(!activation_block.contains("await openCodexOpenInTarget(context, target);"));
+    assert!(activation_block.contains("codexOpenInActivationDebounceMs"));
+
+    let dispatch_block = script
+        .split("function dispatchCodexOpenInTarget(context, target)")
+        .nth(1)
+        .expect("open in non-blocking dispatcher should be present")
+        .split("function codexOpenInOpenIcon")
+        .next()
+        .expect("open in non-blocking dispatcher should be closed");
+    assert!(dispatch_block.contains("result?.success !== true"));
+    assert!(dispatch_block.contains(".catch((error) =>"));
+    assert!(dispatch_block.contains("reportCodexOpenInFailure"));
+    assert!(script.contains(r#"sendCodexElvesDiagnostic("open_in_open_failed""#));
 }
 
 #[test]

@@ -277,6 +277,8 @@ where
     let settings = hooks.load_settings().await?;
     let app_dir = hooks.resolve_app_dir(options.app_dir.as_deref(), &settings)?;
     let status_store = options.status_store.clone();
+    let protocol_proxy_enabled = relay_protocol_proxy_enabled(&settings);
+    let lan_proxy_listening = settings.lan_proxy_enabled && protocol_proxy_enabled;
     let mut helper_started = false;
     let mut launched = None;
     let mut keep_launched_on_error = false;
@@ -301,7 +303,6 @@ where
         if settings.computer_use_guard_enabled {
             hooks.ensure_computer_use_config(&settings).await?;
         }
-        let protocol_proxy_enabled = relay_protocol_proxy_enabled(&settings);
         if protocol_proxy_enabled {
             helper_port = crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT;
             if let Err(error) = crate::proxy_log::clear_records() {
@@ -343,6 +344,7 @@ where
                     "ChatGPT/Codex launched; CodexElves enhancements are still waiting for the page bridge.",
                     debug_port,
                     helper_port,
+                    helper_started && lan_proxy_listening,
                     &app_dir,
                 );
                 options.status_store.save_latest(&degraded)?;
@@ -357,6 +359,7 @@ where
                 "CodexElves launcher ready",
                 debug_port,
                 helper_port,
+                helper_started && lan_proxy_listening,
                 &app_dir,
             );
             options.status_store.save_latest(&status)?;
@@ -387,7 +390,8 @@ where
                 }
             }
             let message = error.to_string();
-            let failure = launch_status("failed", &message, debug_port, helper_port, &app_dir);
+            let failure =
+                launch_status("failed", &message, debug_port, helper_port, false, &app_dir);
             let _ = status_store.save_latest(&failure);
             hooks.write_status("failed").await;
             Err(error)
@@ -397,6 +401,11 @@ where
 
 fn relay_protocol_proxy_enabled(settings: &BackendSettings) -> bool {
     settings.active_relay_uses_protocol_proxy()
+}
+
+fn should_refresh_codex_builtin_model_catalog(settings: &BackendSettings) -> bool {
+    settings.active_relay_uses_protocol_proxy()
+        && settings.active_aggregate_relay_profile().is_none()
 }
 
 pub trait IntoLaunchHooks {
@@ -637,6 +646,28 @@ impl LaunchHooks for DefaultLaunchHooks {
         helper_port: u16,
         settings: &BackendSettings,
     ) -> anyhow::Result<()> {
+        if should_refresh_codex_builtin_model_catalog(settings) {
+            let home = crate::codex_home::codex_home_dir_for_settings(settings);
+            let profile = settings.active_relay_profile();
+            let codex_executable = crate::cli_wrapper::resolve_real_codex_for_settings(settings);
+            if let Err(error) =
+                crate::relay_config::refresh_applied_relay_profile_model_catalog_if_stale_to_home(
+                    &home,
+                    &profile,
+                    codex_executable.as_deref(),
+                )
+                .await
+            {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "launcher.codex_builtin_model_catalog_refresh_failed_nonfatal",
+                    serde_json::json!({
+                        "home": home,
+                        "codexExecutable": codex_executable,
+                        "message": error.to_string()
+                    }),
+                );
+            }
+        }
         let lan_proxy_enabled =
             settings.lan_proxy_enabled && settings.active_relay_uses_protocol_proxy();
         self.start_helper_on_host(
@@ -4591,6 +4622,7 @@ fn launch_status(
     message: &str,
     debug_port: u16,
     helper_port: u16,
+    lan_proxy_listening: bool,
     app_dir: &Path,
 ) -> LaunchStatus {
     LaunchStatus {
@@ -4599,6 +4631,7 @@ fn launch_status(
         started_at_ms: now_ms(),
         debug_port: Some(debug_port),
         helper_port: Some(helper_port),
+        lan_proxy_listening,
         codex_app: Some(app_dir.to_string_lossy().to_string()),
     }
 }
@@ -4707,6 +4740,40 @@ fn activate_packaged_app_blocking(app_user_model_id: &str, arguments: &str) -> a
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_model_catalog_refresh_only_runs_for_non_aggregate_local_proxy() {
+        let local_proxy = BackendSettings {
+            relay_profiles_enabled: true,
+            relay_profiles: vec![crate::settings::RelayProfile {
+                id: "relay".to_string(),
+                local_proxy_enabled: Some(true),
+                ..crate::settings::RelayProfile::default()
+            }],
+            active_relay_id: "relay".to_string(),
+            ..BackendSettings::default()
+        };
+        assert!(should_refresh_codex_builtin_model_catalog(&local_proxy));
+
+        let aggregate = BackendSettings {
+            relay_profiles_enabled: true,
+            relay_profiles: vec![crate::settings::RelayProfile {
+                id: "aggregate".to_string(),
+                relay_mode: crate::settings::RelayMode::Aggregate,
+                ..crate::settings::RelayProfile::default()
+            }],
+            active_relay_id: "aggregate".to_string(),
+            aggregate_relay_profiles: vec![crate::settings::AggregateRelayProfile {
+                id: "aggregate".to_string(),
+                name: "聚合".to_string(),
+                strategy: crate::settings::AggregateRelayStrategy::Failover,
+                members: Vec::new(),
+            }],
+            active_aggregate_relay_id: "aggregate".to_string(),
+            ..BackendSettings::default()
+        };
+        assert!(!should_refresh_codex_builtin_model_catalog(&aggregate));
+    }
 
     #[test]
     fn bridge_watchdog_checks_every_five_seconds() {

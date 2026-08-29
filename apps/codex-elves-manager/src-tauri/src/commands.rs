@@ -353,6 +353,8 @@ pub struct LocalProxyStatusPayload {
     pub listening: bool,
     pub host: String,
     pub port: u16,
+    pub lan_listening: bool,
+    pub lan_addresses: Vec<String>,
     pub active_relay_id: String,
     pub active_relay_name: String,
     pub active_relay_mode: String,
@@ -1978,6 +1980,16 @@ pub async fn local_proxy_status() -> CommandResult<LocalProxyStatusPayload> {
         Duration::from_millis(200),
     )
     .is_ok();
+    let latest_launch = StatusStore::default().load_latest().ok().flatten();
+    let lan_listening = latest_launch_uses_lan_listener(latest_launch.as_ref(), listening, port);
+    let lan_addresses = if lan_listening {
+        codex_elves_core::lan_proxy::lan_ipv4_addresses()
+            .into_iter()
+            .map(|address| address.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
     let summaries =
         tauri::async_runtime::spawn_blocking(|| codex_elves_core::proxy_log::read_summaries(200))
             .await
@@ -2005,6 +2017,8 @@ pub async fn local_proxy_status() -> CommandResult<LocalProxyStatusPayload> {
         listening,
         host: "127.0.0.1".to_string(),
         port,
+        lan_listening,
+        lan_addresses,
         active_relay_id: active_relay.id,
         active_relay_name: active_relay.name,
         active_relay_mode: serde_json::to_value(active_relay.relay_mode)
@@ -2019,7 +2033,9 @@ pub async fn local_proxy_status() -> CommandResult<LocalProxyStatusPayload> {
         latest_request_at_ms,
         recent_count,
     };
-    let message = if enabled && listening {
+    let message = if enabled && lan_listening {
+        "本地代理正在通过局域网监听。"
+    } else if enabled && listening {
         "本地代理正在监听。"
     } else if enabled {
         "本地代理已启用，但当前未监听端口。"
@@ -2027,6 +2043,20 @@ pub async fn local_proxy_status() -> CommandResult<LocalProxyStatusPayload> {
         "当前供应商未启用本地代理。"
     };
     ok(message, payload)
+}
+
+fn latest_launch_uses_lan_listener(
+    latest: Option<&LaunchStatus>,
+    listening: bool,
+    port: u16,
+) -> bool {
+    let Some(latest) = latest else {
+        return false;
+    };
+    listening
+        && matches!(latest.status.as_str(), "running" | "running_degraded")
+        && latest.helper_port == Some(port)
+        && latest.lan_proxy_listening
 }
 
 #[tauri::command]
@@ -4338,6 +4368,7 @@ mod tests {
                 started_at_ms: 1,
                 debug_port: Some(9229),
                 helper_port: Some(45221),
+                lan_proxy_listening: false,
                 codex_app: None,
             }))
             .is_err()
@@ -4349,11 +4380,42 @@ mod tests {
                 started_at_ms: 1,
                 debug_port: Some(9229),
                 helper_port: Some(45221),
+                lan_proxy_listening: false,
                 codex_app: None,
             }))
             .unwrap(),
             9229
         );
+    }
+
+    #[test]
+    fn lan_listener_status_requires_current_running_launch_bound_to_lan() {
+        let mut latest = LaunchStatus {
+            status: "running".to_string(),
+            message: "运行中".to_string(),
+            started_at_ms: 1,
+            debug_port: Some(9229),
+            helper_port: Some(45221),
+            lan_proxy_listening: true,
+            codex_app: None,
+        };
+
+        assert!(latest_launch_uses_lan_listener(Some(&latest), true, 45221));
+
+        latest.lan_proxy_listening = false;
+        assert!(!latest_launch_uses_lan_listener(Some(&latest), true, 45221));
+
+        latest.lan_proxy_listening = true;
+        latest.status = "failed".to_string();
+        assert!(!latest_launch_uses_lan_listener(Some(&latest), true, 45221));
+
+        latest.status = "running".to_string();
+        assert!(!latest_launch_uses_lan_listener(
+            Some(&latest),
+            false,
+            45221
+        ));
+        assert!(!latest_launch_uses_lan_listener(Some(&latest), true, 45222));
     }
 
     #[test]

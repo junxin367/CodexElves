@@ -1285,16 +1285,12 @@ async fn launch_lifecycle_runs_sync_before_launch_writes_success_and_shutdowns_o
             "shutdown-helper:45221",
         ]
     );
+    let latest = handle.status_store.load_latest().unwrap().unwrap();
     assert_eq!(
-        handle
-            .status_store
-            .load_latest()
-            .unwrap()
-            .unwrap()
-            .codex_app
-            .as_deref(),
+        latest.codex_app.as_deref(),
         Some(app_dir.to_string_lossy().as_ref())
     );
+    assert!(!latest.lan_proxy_listening);
 }
 
 #[tokio::test]
@@ -1713,6 +1709,7 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
     let events = Arc::new(Mutex::new(Vec::<String>::new()));
     let settings = BackendSettings {
         enhancements_enabled: false,
+        lan_proxy_enabled: true,
         relay_profiles: vec![RelayProfile {
             id: "relay-chat".to_string(),
             name: "Chat".to_string(),
@@ -1753,7 +1750,7 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
             app_dir: Some(app_dir),
             debug_port: 9229,
             helper_port: 58000,
-            status_store,
+            status_store: status_store.clone(),
         },
         &hooks,
     )
@@ -1764,6 +1761,13 @@ async fn launch_starts_helper_when_chat_protocol_proxy_is_enabled() {
     assert!(before_stop.contains(&"select-helper:58000".to_string()));
     assert!(before_stop.contains(&"start-helper:45221".to_string()));
     assert!(!before_stop.contains(&"inject:9229:45221".to_string()));
+    assert!(
+        status_store
+            .load_latest()
+            .unwrap()
+            .unwrap()
+            .lan_proxy_listening
+    );
     let proxy_log = std::fs::read_to_string(&proxy_log_path).unwrap();
     assert_eq!(
         proxy_log.lines().next(),

@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "79";
+  const codexDeleteStyleVersion = "80";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -84,11 +84,12 @@
   const codexFailureHistoryMaxEntries = 64;
   const codexManagerReactDiscoveryCooldownMs = 15000;
   const codexOpenInButtonAttribute = "data-codex-open-in-button";
-  const codexOpenInVersion = "5";
+  const codexOpenInVersion = "7";
   const codexOpenInGroupClass = "codex-open-in-group";
   const codexOpenInMenuClass = "codex-open-in-menu";
   const codexOpenInTargetsCacheLimit = 12;
   const codexOpenInTargetsCacheTtlMs = 5000;
+  const codexOpenInActivationDebounceMs = 500;
   const codexOpenInServiceDiscoveryCooldownMs = 30000;
   const codexOpenInContextMissingCooldownMs = 5000;
   const taskBoardRuntimeVersion = "61";
@@ -783,18 +784,20 @@
         flex: 0 0 auto;
         align-items: center;
         gap: 0;
-        margin-right: 6px;
+        margin: 0;
         overflow: hidden;
-        border: 1px solid color-mix(in srgb, var(--color-border-primary-outline, currentColor) 64%, transparent);
+        border: 1px solid transparent;
         border-radius: 7px;
-        background: var(
-          --color-background-primary-soft,
-          color-mix(in srgb, currentColor 8%, transparent)
+        background: color-mix(
+          in oklab,
+          var(--color-text, var(--color-token-text-primary, currentColor)) 5%,
+          transparent
         );
         color: var(--color-token-text-secondary, currentColor);
-        box-shadow:
-          0 1px 0 color-mix(in srgb, white 4%, transparent) inset,
-          0 1px 2px rgba(0, 0, 0, .2);
+        box-shadow: none;
+      }
+      .codex-open-in-group[data-codex-open-in-anchor="summary"] {
+        margin-right: 6px;
       }
       .codex-open-in-group button {
         display: inline-grid !important;
@@ -805,14 +808,16 @@
         border-radius: 0 !important;
         background: transparent !important;
         color: inherit !important;
+        margin: 0 !important;
         padding: 0 !important;
         pointer-events: auto;
       }
       .codex-open-in-group button:hover:not(:disabled),
       .codex-open-in-group button:focus-visible:not(:disabled) {
-        background: var(
-          --color-background-primary-soft-hover,
-          color-mix(in srgb, currentColor 11%, transparent)
+        background: color-mix(
+          in oklab,
+          var(--color-text, var(--color-token-text-primary, currentColor)) 10%,
+          transparent
         ) !important;
         outline: none;
       }
@@ -21091,6 +21096,34 @@
     });
   }
 
+  function reportCodexOpenInFailure(error, context, target) {
+    showToast(error?.message || "无法打开工作区，请稍后重试");
+    sendCodexElvesDiagnostic("open_in_open_failed", {
+      errorName: error?.name || "",
+      errorMessage: error?.message || String(error),
+      target: target?.target || "",
+      hostId: context?.hostId || "",
+    });
+  }
+
+  function dispatchCodexOpenInTarget(context, target) {
+    void Promise.resolve()
+      .then(() => openCodexOpenInTarget(context, target))
+      .then((result) => {
+        if (result?.success !== true) {
+          const message = typeof result?.message === "string" && result.message.trim()
+            ? result.message.trim()
+            : typeof result?.error === "string" && result.error.trim()
+              ? result.error.trim()
+              : "无法打开工作区，请稍后重试";
+          reportCodexOpenInFailure(new Error(message), context, target);
+        }
+      })
+      .catch((error) => {
+        reportCodexOpenInFailure(error, context, target);
+      });
+  }
+
   function codexOpenInOpenIcon() {
     return '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M11.949 3.47949C12.0997 3.46465 12.2553 3.51279 12.3709 3.62793C12.4863 3.74328 12.5338 3.89898 12.5193 4.0498C12.5206 4.06633 12.5251 4.08275 12.5252 4.09961V10.667C12.525 10.9565 12.2902 11.191 12.0007 11.1914C11.7109 11.1914 11.4755 10.9568 11.4754 10.667V5.2666L4.37184 12.376C4.16684 12.5807 3.83365 12.5808 3.62867 12.376C3.42385 12.1711 3.42396 11.8388 3.62867 11.6338L10.7332 4.52539H5.33375C5.0438 4.52539 4.80836 4.28995 4.80836 4C4.80836 3.71005 5.0438 3.47461 5.33375 3.47461H11.9002C11.9167 3.47462 11.9328 3.47822 11.949 3.47949Z" fill="currentColor"></path></svg>';
   }
@@ -21166,6 +21199,7 @@
           parent: wrapper.parentElement,
           before: wrapper,
           nativeClass: summaryToggle.className || headerIconTextButtonClass,
+          anchorType: "summary",
         };
       }
     }
@@ -21179,6 +21213,7 @@
         parent: group,
         before: group.firstChild,
         nativeClass: group.querySelector("button")?.className || headerIconTextButtonClass,
+        anchorType: "toolbar",
       };
     }
     return null;
@@ -21312,6 +21347,7 @@
     codexOpenInControlGroup = group;
     window.__codexOpenInControlGroup = group;
     group.dataset.codexOpenInVersion = codexOpenInVersion;
+    group.dataset.codexOpenInAnchor = anchor.anchorType;
     group.querySelectorAll("button").forEach((button) => {
       button.className = anchor.nativeClass;
     });
@@ -21350,16 +21386,13 @@
         return;
       }
       renderCodexOpenInPrimaryTarget(button, target);
-      await openCodexOpenInTarget(context, target);
+      dispatchCodexOpenInTarget(context, target);
     } catch (error) {
-      showToast(error?.message || "无法打开工作区，请稍后重试");
-      sendCodexElvesDiagnostic("open_in_open_failed", {
-        errorName: error?.name || "",
-        errorMessage: error?.message || String(error),
-        hostId: context.hostId,
-      });
+      reportCodexOpenInFailure(error, context, null);
     } finally {
-      button.dataset.busy = "false";
+      window.setTimeout(() => {
+        button.dataset.busy = "false";
+      }, codexOpenInActivationDebounceMs);
     }
   }
 
@@ -21462,21 +21495,9 @@
       `[${codexOpenInButtonAttribute}="true"] [data-codex-open-in-role="primary"]`
     );
     renderCodexOpenInPrimaryTarget(primary, target);
-    try {
-      await openCodexOpenInTarget(context, target);
-      invalidateCodexOpenInTargets(context);
-      window.setTimeout(() => void refreshCodexOpenInButton(), 250);
-    } catch (error) {
-      showToast(error?.message || "无法打开工作区，请稍后重试");
-      sendCodexElvesDiagnostic("open_in_open_failed", {
-        errorName: error?.name || "",
-        errorMessage: error?.message || String(error),
-        target: target?.target || "",
-        hostId: context.hostId,
-      });
-      invalidateCodexOpenInTargets(context);
-      window.setTimeout(() => void refreshCodexOpenInButton(), 250);
-    }
+    dispatchCodexOpenInTarget(context, target);
+    invalidateCodexOpenInTargets(context);
+    window.setTimeout(() => void refreshCodexOpenInButton(), 250);
   }
 
   async function openCodexOpenInMenu({ group, button }) {

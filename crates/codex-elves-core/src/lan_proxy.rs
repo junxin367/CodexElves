@@ -1,4 +1,5 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 
 pub(crate) const LOOPBACK_BIND_HOST: &str = "127.0.0.1";
 pub(crate) const LAN_BIND_HOST: &str = "0.0.0.0";
@@ -16,6 +17,51 @@ pub(crate) fn helper_bind_host(lan_proxy_enabled: bool) -> &'static str {
     } else {
         LOOPBACK_BIND_HOST
     }
+}
+
+pub fn lan_ipv4_addresses() -> Vec<Ipv4Addr> {
+    let preferred = preferred_lan_ipv4();
+    let addresses = if_addrs::get_if_addrs()
+        .map(|interfaces| {
+            interfaces
+                .into_iter()
+                .map(|interface| interface.ip())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    collect_lan_ipv4_addresses(addresses, preferred)
+}
+
+fn preferred_lan_ipv4() -> Option<Ipv4Addr> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect((Ipv4Addr::new(1, 1, 1, 1), 80)).ok()?;
+    let IpAddr::V4(ip) = socket.local_addr().ok()?.ip() else {
+        return None;
+    };
+    is_lan_ipv4(ip).then_some(ip)
+}
+
+fn collect_lan_ipv4_addresses(
+    addresses: impl IntoIterator<Item = IpAddr>,
+    preferred: Option<Ipv4Addr>,
+) -> Vec<Ipv4Addr> {
+    let mut seen = HashSet::new();
+    let mut collected = addresses
+        .into_iter()
+        .filter_map(|address| match address {
+            IpAddr::V4(ip) if is_lan_ipv4(ip) && seen.insert(ip) => Some(ip),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if let Some(preferred) = preferred.filter(|ip| is_lan_ipv4(*ip)) {
+        if let Some(index) = collected.iter().position(|ip| *ip == preferred) {
+            collected.remove(index);
+        }
+        collected.insert(0, preferred);
+    }
+
+    collected
 }
 
 fn is_lan_ipv4(ip: Ipv4Addr) -> bool {
@@ -72,11 +118,11 @@ fn is_proxy_path(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use super::{
-        LAN_BIND_HOST, LOOPBACK_BIND_HOST, RemoteAccessError, helper_bind_host, is_lan_ipv4,
-        remote_request_access,
+        LAN_BIND_HOST, LOOPBACK_BIND_HOST, RemoteAccessError, collect_lan_ipv4_addresses,
+        helper_bind_host, is_lan_ipv4, remote_request_access,
     };
 
     #[test]
@@ -155,5 +201,23 @@ mod tests {
             remote_request_access(remote, true, true, "OPTIONS", "/v1/chat/completions"),
             Ok(())
         );
+    }
+
+    #[test]
+    fn collects_unique_lan_ipv4_addresses_with_preferred_address_first() {
+        let preferred = Ipv4Addr::new(192, 168, 1, 20);
+        let addresses = collect_lan_ipv4_addresses(
+            [
+                IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)),
+                IpAddr::V4(preferred),
+                IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)),
+                IpAddr::V6("fe80::1".parse().unwrap()),
+            ],
+            Some(preferred),
+        );
+
+        assert_eq!(addresses, vec![preferred, Ipv4Addr::new(10, 0, 0, 4)]);
     }
 }
