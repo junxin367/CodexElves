@@ -8890,6 +8890,22 @@ fn manager_ui_exposes_default_enabled_task_board_page_enhancement() {
 }
 
 #[test]
+fn manager_ui_exposes_default_enabled_open_in_quick_access_page_enhancement() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("core crate should live under crates/codex-elves-core");
+    let source =
+        std::fs::read_to_string(repo.join("apps/codex-elves-manager/src/App.tsx")).unwrap();
+
+    assert!(source.contains("codexAppOpenInQuickAccess: boolean"));
+    assert!(source.contains("codexAppOpenInQuickAccess: true"));
+    assert!(source.contains("title=\"快速打开工作区\""));
+    assert!(source.contains("checked={form.codexAppOpenInQuickAccess}"));
+    assert!(source.contains("setEnhanceFlag(\"codexAppOpenInQuickAccess\", value)"));
+}
+
+#[test]
 fn manager_ui_exposes_remote_plugin_marketplace_controls() {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

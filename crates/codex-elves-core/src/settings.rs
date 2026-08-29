@@ -711,6 +711,8 @@ pub struct BackendSettings {
     pub codex_app_upstream_worktree_create: bool,
     #[serde(rename = "codexAppNativeMenuPlacement", default = "default_true")]
     pub codex_app_native_menu_placement: bool,
+    #[serde(rename = "codexAppOpenInQuickAccess", default = "default_true")]
+    pub codex_app_open_in_quick_access: bool,
     #[serde(rename = "codexAppServiceTierControls", default)]
     pub codex_app_service_tier_controls: bool,
     #[serde(rename = "codexAppImageOverlayEnabled", default)]
@@ -820,6 +822,7 @@ impl Default for BackendSettings {
             codex_app_token_usage: false,
             codex_app_upstream_worktree_create: false,
             codex_app_native_menu_placement: true,
+            codex_app_open_in_quick_access: true,
             codex_app_service_tier_controls: false,
             codex_app_image_overlay_enabled: false,
             codex_app_image_overlay_path: String::new(),
@@ -1283,6 +1286,7 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
     merge_bool_setting(target, source, "codexAppTokenUsage");
     merge_bool_setting(target, source, "codexAppUpstreamWorktreeCreate");
     merge_bool_setting(target, source, "codexAppNativeMenuPlacement");
+    merge_bool_setting(target, source, "codexAppOpenInQuickAccess");
     merge_bool_setting(target, source, "codexAppServiceTierControls");
     merge_bool_setting(target, source, "codexAppImageOverlayEnabled");
     if let Some(value) = source
@@ -1703,6 +1707,34 @@ mod tests {
         assert!(settings.codex_app_task_board);
         assert_eq!(settings.gpt_reasoning_continuation_max_rounds, 3);
         assert_eq!(settings.layered_compaction_retain_tokens, 20_000);
+    }
+
+    #[test]
+    fn settings_missing_open_in_quick_access_defaults_enabled() {
+        let settings: BackendSettings = serde_json::from_str("{}").unwrap();
+        let serialized = serde_json::to_value(settings).unwrap();
+
+        assert_eq!(serialized["codexAppOpenInQuickAccess"], json!(true));
+    }
+
+    #[test]
+    fn settings_store_update_persists_open_in_quick_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(temp.path().join("settings.json"));
+
+        let updated = store
+            .update(json!({ "codexAppOpenInQuickAccess": false }))
+            .unwrap();
+        let loaded = store.load().unwrap();
+
+        assert_eq!(
+            serde_json::to_value(updated).unwrap()["codexAppOpenInQuickAccess"],
+            json!(false)
+        );
+        assert_eq!(
+            serde_json::to_value(loaded).unwrap()["codexAppOpenInQuickAccess"],
+            json!(false)
+        );
     }
 
     #[test]
