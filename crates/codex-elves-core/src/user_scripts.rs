@@ -9,6 +9,8 @@ use serde_json::{Map, Value, json};
 
 use crate::script_market::MarketScript;
 
+const BUILTIN_REPLACED_MARKET_SCRIPT_IDS: &[&str] = &["prompt-optimize"];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UserScriptConfig {
     pub enabled: bool,
@@ -193,7 +195,7 @@ impl UserScriptManager {
         }
         let mut blocks = Vec::new();
         for script in self.scan_script_files(&config)? {
-            if !script.enabled {
+            if !script.enabled || script_superseded_by_builtin(&script, &config) {
                 continue;
             }
             let source = fs::read_to_string(&script.path)
@@ -209,7 +211,10 @@ impl UserScriptManager {
             .into_iter()
             .map(|script| {
                 let market = config.market.get(&script.key);
-                let status = if !config.enabled || !script.enabled {
+                let superseded_by_builtin = script_superseded_by_builtin(&script, config);
+                let status = if superseded_by_builtin {
+                    "built_in"
+                } else if !config.enabled || !script.enabled {
                     "disabled"
                 } else {
                     "not_loaded"
@@ -221,6 +226,7 @@ impl UserScriptManager {
                     "enabled": script.enabled,
                     "status": status,
                     "error": "",
+                    "superseded_by_builtin": superseded_by_builtin,
                     "market_id": market.as_ref().map(|item| item.id.as_str()).unwrap_or(""),
                     "version": market.as_ref().map(|item| item.version.as_str()).unwrap_or(""),
                     "installed": market.is_some(),
@@ -323,6 +329,17 @@ struct UserScriptFile {
     source: String,
     path: PathBuf,
     enabled: bool,
+}
+
+fn script_superseded_by_builtin(script: &UserScriptFile, config: &UserScriptConfig) -> bool {
+    config
+        .market
+        .get(&script.key)
+        .is_some_and(|install| BUILTIN_REPLACED_MARKET_SCRIPT_IDS.contains(&install.id.trim()))
+        || (script.source == "user"
+            && script
+                .name
+                .eq_ignore_ascii_case("market-prompt-optimize.js"))
 }
 
 fn wrap_script(script: &UserScriptFile, source: &str) -> String {

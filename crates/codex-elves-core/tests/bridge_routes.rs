@@ -38,6 +38,8 @@ async fn bridge_routes_cover_all_current_paths() {
         ("/runtime/install-renderer-features", json!({})),
         ("/codex-model-catalog", json!({})),
         ("/codex-config-model", json!({})),
+        ("/prompt-optimize", json!({})),
+        ("/prompt-optimize/cancel", json!({"requestId": "missing"})),
         ("/upstream-worktree/status", json!({})),
         ("/upstream-worktree/defaults", json!({"repoPath": "/repo"})),
         (
@@ -734,6 +736,47 @@ fn user_script_inventory_includes_market_metadata() {
     assert_eq!(
         inventory["scripts"][0]["homepage"],
         "https://example.com/demo"
+    );
+}
+
+#[test]
+fn built_in_prompt_optimization_suppresses_the_legacy_market_script_without_deleting_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let user_dir = temp.path().join("user");
+    std::fs::create_dir_all(&user_dir).unwrap();
+    let script_path = user_dir.join("market-prompt-optimize.js");
+    std::fs::write(&script_path, "window.legacyPromptOptimizeLoaded = true;").unwrap();
+    let manager = UserScriptManager::new(
+        temp.path().join("builtin"),
+        user_dir,
+        temp.path().join("user_scripts.json"),
+    );
+    manager
+        .record_market_install(&codex_elves_core::script_market::MarketScript {
+            id: "prompt-optimize".to_string(),
+            name: "Prompt optimize".to_string(),
+            description: String::new(),
+            version: "1.0.3".to_string(),
+            author: String::new(),
+            tags: vec!["prompt".to_string()],
+            homepage: "https://example.com/prompt-optimize".to_string(),
+            script_url: "https://example.com/prompt-optimize.js".to_string(),
+            sha256: String::new(),
+        })
+        .unwrap();
+
+    let inventory = manager.inventory().unwrap();
+    let bundle = manager.build_enabled_bundle().unwrap();
+
+    assert_eq!(inventory["scripts"][0]["status"], "built_in");
+    assert_eq!(
+        inventory["scripts"][0]["superseded_by_builtin"],
+        json!(true)
+    );
+    assert!(!bundle.contains("legacyPromptOptimizeLoaded"));
+    assert!(
+        script_path.exists(),
+        "the compatibility guard must not delete user files"
     );
 }
 

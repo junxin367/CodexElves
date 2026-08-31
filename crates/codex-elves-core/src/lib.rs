@@ -23,6 +23,7 @@ pub mod models;
 pub mod paths;
 pub mod plugin_marketplace;
 pub mod ports;
+pub mod prompt_optimize;
 pub mod protocol_proxy;
 pub mod proxy;
 pub mod proxy_log;

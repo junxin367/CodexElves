@@ -2017,7 +2017,7 @@ export function TaskBoardApp() {
       return {
         ...current,
         nativeCreateAvailable: null,
-        nativeCreateMessage: "正在确认 Codex 新会话能力…",
+        nativeCreateMessage: "",
       };
     });
     void invoke<BoardResponse>("task_board_probe_host", {
@@ -3103,7 +3103,7 @@ export function TaskBoardApp() {
         busy: false,
         feedback: "",
         nativeCreateAvailable: null,
-        nativeCreateMessage: "正在确认 Codex 新会话能力…",
+        nativeCreateMessage: "",
         modelId: "",
         effortId: "medium",
         modelOptions: fallbackModelOptions,
@@ -4863,7 +4863,7 @@ function TaskEditor({
                       selectedSessionIds: [],
                       feedback: "",
                       nativeCreateAvailable: null,
-                      nativeCreateMessage: "正在确认 Codex 新会话能力…",
+                      nativeCreateMessage: "",
                     })
                   }
                   disabled={editor.busy}
@@ -5054,14 +5054,10 @@ function TaskEditor({
               </div>
             ) : (
               <div className="task-board-new-session">
-                {editor.nativeCreateAvailable !== true ? (
+                {editor.nativeCreateAvailable === false ? (
                   <p
                     className="task-board-create-availability"
-                    data-status={
-                      editor.nativeCreateAvailable === null
-                        ? "checking"
-                        : "unavailable"
-                    }
+                    data-status="unavailable"
                   >
                     {editor.nativeCreateMessage ||
                       "提交时会重新检查 Codex 新会话能力"}

@@ -234,6 +234,17 @@ pub async fn handle_bridge_request(
         "/backend/repair" => ctx.runtime.repair_backend().await,
         "/runtime/install-renderer-features" => ctx.runtime.install_renderer_features().await,
         "/codex-model-catalog" | "/codex-config-model" => ctx.runtime.codex_model_catalog().await,
+        crate::prompt_optimize::PROMPT_OPTIMIZE_PATH => match ctx.settings.get_settings().await {
+            Ok(settings) => {
+                crate::prompt_optimize::service()
+                    .optimize(settings, payload.clone())
+                    .await
+            }
+            Err(error) => Err(error),
+        },
+        crate::prompt_optimize::PROMPT_OPTIMIZE_CANCEL_PATH => {
+            crate::prompt_optimize::service().cancel(&payload)
+        }
         "/diagnostics/log" => diagnostic_log_value(payload.clone()),
         "/upstream-worktree/status" => ctx.runtime.upstream_worktree_status().await,
         "/upstream-worktree/defaults" => {

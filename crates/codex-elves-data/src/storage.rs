@@ -1395,6 +1395,7 @@ struct RolloutUsageParser {
     turn_ids: HashSet<String>,
     turn_usage: HashMap<String, TokenUsageTotals>,
     active_task_turns: HashSet<String>,
+    task_started_turns: HashSet<String>,
     turn_started_at: HashMap<String, String>,
     turn_completed_at: HashMap<String, String>,
     spawned_child_turns: HashMap<String, String>,
@@ -1407,6 +1408,14 @@ struct RolloutUsageParser {
 }
 
 impl RolloutUsageParser {
+    fn latest_turn_start_is_known(&self) -> bool {
+        !self.latest_turn_id.is_empty() && self.task_started_turns.contains(&self.latest_turn_id)
+    }
+
+    fn has_usage_snapshot(&self) -> bool {
+        self.latest_cumulative_total.is_some() || self.accumulated_total.has_usage()
+    }
+
     fn report(&self) -> RolloutUsageReport {
         let mut total_usage = self
             .latest_cumulative_total
@@ -1502,6 +1511,7 @@ impl RolloutUsageParser {
                                 .entry(turn_id.clone())
                                 .or_insert(timestamp);
                         }
+                        self.task_started_turns.insert(turn_id.clone());
                         self.active_task_turns.insert(turn_id.clone());
                         self.latest_turn_id = turn_id;
                     }
@@ -1928,9 +1938,13 @@ fn rollout_file_len(rollout_path: &Path) -> anyhow::Result<u64> {
 
 const ROLLOUT_TAIL_USAGE_CACHE_CAPACITY: usize = 64;
 
+#[derive(Debug, Clone)]
 struct CachedRolloutTailUsage {
+    observed_len: u64,
+    parsed_offset: u64,
     stamp: RolloutFileStamp,
-    report: RolloutUsageReport,
+    tail: Vec<u8>,
+    parser: RolloutUsageParser,
     last_access: u64,
 }
 
@@ -1951,42 +1965,83 @@ fn read_rollout_usage_tail_report(
     rollout_path: &Path,
     thread_id: &str,
 ) -> anyhow::Result<RolloutUsageReport> {
-    // 轮询场景每几秒就会对同一批 rollout 重复尾扫；文件未变时直接命中缓存。
+    // 轮询场景每几秒就会对同一批 rollout 重复尾扫；文件未变时直接命中缓存，
+    // 仅追加时则沿用解析器状态，只消费新增的完整行。
     let stamp = rollout_file_stamp(rollout_path)?;
     let cache_key = (rollout_path.to_path_buf(), thread_id.to_string());
-    let cached_report = {
+    let cached_entry = {
         let mut cache = rollout_tail_usage_cache()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.access_tick = cache.access_tick.saturating_add(1);
         let access_tick = cache.access_tick;
-        cache
-            .entries
-            .get_mut(&cache_key)
-            .filter(|entry| entry.stamp == stamp)
-            .map(|entry| {
-                entry.last_access = access_tick;
-                entry.report.clone()
-            })
+        if let Some(entry) = cache.entries.get_mut(&cache_key) {
+            entry.last_access = access_tick;
+            if entry.stamp == stamp {
+                return Ok(entry.parser.report());
+            }
+            Some(entry.clone())
+        } else {
+            None
+        }
     };
-    if let Some(report) = cached_report {
-        return Ok(report);
+    if let Some(entry) = cached_entry {
+        let can_continue = stamp.len > entry.observed_len
+            && entry.stamp.created == stamp.created
+            && rollout_tail_matches(rollout_path, entry.parsed_offset, &entry.tail)?;
+        if can_continue {
+            let mut parser = entry.parser;
+            let parsed_offset = consume_rollout_usage_range(
+                rollout_path,
+                thread_id,
+                false,
+                &mut parser,
+                entry.parsed_offset,
+                stamp.len,
+            )?;
+            let report = parser.report();
+            insert_rollout_tail_usage_cache(
+                cache_key,
+                CachedRolloutTailUsage {
+                    observed_len: stamp.len,
+                    parsed_offset,
+                    stamp,
+                    tail: rollout_tail(rollout_path, parsed_offset)?,
+                    parser,
+                    last_access: 0,
+                },
+            );
+            return Ok(report);
+        }
     }
-    let report = read_rollout_usage_tail_scan(rollout_path, thread_id)?;
-    insert_rollout_tail_usage_cache(cache_key, stamp, report.clone());
+
+    let (parser, parsed_offset) = read_rollout_usage_tail_scan(rollout_path, thread_id, &stamp)?;
+    let report = parser.report();
+    insert_rollout_tail_usage_cache(
+        cache_key,
+        CachedRolloutTailUsage {
+            observed_len: stamp.len,
+            parsed_offset,
+            stamp,
+            tail: rollout_tail(rollout_path, parsed_offset)?,
+            parser,
+            last_access: 0,
+        },
+    );
     Ok(report)
 }
 
 fn insert_rollout_tail_usage_cache(
     cache_key: RolloutTailUsageCacheKey,
-    stamp: RolloutFileStamp,
-    report: RolloutUsageReport,
+    entry: CachedRolloutTailUsage,
 ) {
     let mut cache = rollout_tail_usage_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     cache.access_tick = cache.access_tick.saturating_add(1);
     let access_tick = cache.access_tick;
+    let mut entry = entry;
+    entry.last_access = access_tick;
     if !cache.entries.contains_key(&cache_key)
         && cache.entries.len() >= ROLLOUT_TAIL_USAGE_CACHE_CAPACITY
     {
@@ -1999,50 +2054,98 @@ fn insert_rollout_tail_usage_cache(
             cache.entries.remove(&oldest_key);
         }
     }
-    cache.entries.insert(
-        cache_key,
-        CachedRolloutTailUsage {
-            stamp,
-            report,
-            last_access: access_tick,
-        },
-    );
+    cache.entries.insert(cache_key, entry);
 }
 
 fn read_rollout_usage_tail_scan(
     rollout_path: &Path,
     thread_id: &str,
-) -> anyhow::Result<RolloutUsageReport> {
-    let mut file = File::open(rollout_path)?;
-    let file_len = file.metadata()?.len();
-    let scan_len = file_len.min(ROLLOUT_SUMMARY_TAIL_SCAN_BYTES);
-    let scan_start = file_len - scan_len;
-    file.seek(SeekFrom::Start(scan_start))?;
-    let mut buffer = Vec::with_capacity(scan_len as usize);
-    file.take(scan_len).read_to_end(&mut buffer)?;
+    stamp: &RolloutFileStamp,
+) -> anyhow::Result<(RolloutUsageParser, u64)> {
+    let file_len = stamp.len;
+    let mut scan_len = file_len.min(ROLLOUT_SUMMARY_TAIL_SCAN_BYTES);
+    loop {
+        let scan_start = file_len.saturating_sub(scan_len);
+        let start_offset = rollout_first_complete_line_offset(rollout_path, scan_start, file_len)?;
+        let mut parser = RolloutUsageParser::default();
+        let parsed_offset = consume_rollout_usage_range(
+            rollout_path,
+            thread_id,
+            false,
+            &mut parser,
+            start_offset,
+            file_len,
+        )?;
+        if scan_start == 0 || (parser.latest_turn_start_is_known() && parser.has_usage_snapshot()) {
+            return Ok((parser, parsed_offset));
+        }
+        let next_scan_len = scan_len.saturating_mul(2).min(file_len);
+        if next_scan_len == scan_len {
+            return Ok((parser, parsed_offset));
+        }
+        scan_len = next_scan_len;
+    }
+}
 
-    // The tail window may start inside a line; drop that partial line.
-    let first_complete_line = if scan_start == 0 {
-        0
-    } else {
-        buffer
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map(|index| index + 1)
-            .ok_or_else(|| anyhow::anyhow!("rollout tail has no complete line"))?
-    };
-    let payload = &buffer[first_complete_line..];
-    let mut parser = RolloutUsageParser::default();
-    let mut lines = payload.split_inclusive(|byte| *byte == b'\n').peekable();
-    while let Some(line) = lines.next() {
-        // A final chunk without a newline was cut mid-line by the window.
-        if lines.peek().is_none() && !line.ends_with(&[b'\n']) {
+fn rollout_first_complete_line_offset(
+    rollout_path: &Path,
+    scan_start: u64,
+    end_offset: u64,
+) -> anyhow::Result<u64> {
+    if scan_start == 0 || scan_start >= end_offset {
+        return Ok(scan_start.min(end_offset));
+    }
+
+    let mut file = File::open(rollout_path)?;
+    file.seek(SeekFrom::Start(scan_start - 1))?;
+    let mut previous_byte = [0u8; 1];
+    file.read_exact(&mut previous_byte)?;
+    if previous_byte[0] == b'\n' {
+        return Ok(scan_start);
+    }
+
+    file.seek(SeekFrom::Start(scan_start))?;
+    let mut reader = BufReader::new(file.take(end_offset - scan_start));
+    let mut partial_line = Vec::new();
+    let bytes_read = reader.read_until(b'\n', &mut partial_line)?;
+    if bytes_read == 0 || partial_line.last().copied() != Some(b'\n') {
+        return Ok(end_offset);
+    }
+    Ok(scan_start.saturating_add(bytes_read as u64))
+}
+
+fn consume_rollout_usage_range(
+    rollout_path: &Path,
+    thread_id: &str,
+    include_history: bool,
+    parser: &mut RolloutUsageParser,
+    start_offset: u64,
+    end_offset: u64,
+) -> anyhow::Result<u64> {
+    if start_offset >= end_offset {
+        return Ok(start_offset.min(end_offset));
+    }
+
+    let mut file = File::open(rollout_path)?;
+    file.seek(SeekFrom::Start(start_offset))?;
+    let mut reader = BufReader::new(file.take(end_offset - start_offset));
+    let mut parsed_offset = start_offset;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let bytes_read = reader.read_until(b'\n', &mut line)?;
+        if bytes_read == 0 || line.last().copied() != Some(b'\n') {
             break;
         }
-        let line = std::str::from_utf8(line)?;
-        parser.consume_line(line.trim_end_matches(['\r', '\n']), thread_id, false);
+        let line = std::str::from_utf8(&line)?;
+        parser.consume_line(
+            line.trim_end_matches(['\r', '\n']),
+            thread_id,
+            include_history,
+        );
+        parsed_offset = parsed_offset.saturating_add(bytes_read as u64);
     }
-    Ok(parser.report())
+    Ok(parsed_offset)
 }
 
 fn read_rollout_usage_history(
@@ -2365,6 +2468,100 @@ mod tests {
         assert_eq!(report.total_usage.total_tokens, 150);
         assert!(report.history.is_empty());
         assert_eq!(report.last_turn_id, "turn-1");
+    }
+
+    #[test]
+    fn tail_scan_summary_recovers_running_turn_outside_initial_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout-tail-long-running.jsonl");
+        let thread_id = "t-tail-long-running";
+        let mut content = [
+            rollout_line(&json!({
+                "type": "session_meta",
+                "payload": {"id": thread_id, "cwd": "/tmp/project"}
+            })),
+            rollout_line(&json!({
+                "type": "turn_context",
+                "payload": {"turn_id": "turn-1"}
+            })),
+            rollout_line(&json!({
+                "type": "event_msg",
+                "timestamp": "2026-08-31T01:00:00.000Z",
+                "payload": {"type": "task_started", "turn_id": "turn-1"}
+            })),
+            rollout_line(&json!({
+                "type": "event_msg",
+                "timestamp": "2026-08-31T01:00:05.000Z",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150},
+                        "total_token_usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}
+                    }
+                }
+            })),
+            rollout_line(&json!({
+                "type": "event_msg",
+                "timestamp": "2026-08-31T01:00:10.000Z",
+                "payload": {"type": "task_complete", "turn_id": "turn-1"}
+            })),
+            rollout_line(&json!({
+                "type": "event_msg",
+                "timestamp": "2026-08-31T01:01:00.000Z",
+                "payload": {"type": "task_started", "turn_id": "turn-2"}
+            })),
+            rollout_line(&json!({
+                "type": "turn_context",
+                "payload": {"turn_id": "turn-2"}
+            })),
+        ]
+        .join("\n");
+        content.push('\n');
+        let padding_line = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"content\":\"padding\"}}\n";
+        let padding_count = (ROLLOUT_SUMMARY_TAIL_SCAN_BYTES as usize / padding_line.len()) + 1024;
+        content.push_str(&padding_line.repeat(padding_count));
+        content.push_str(&rollout_line(&json!({
+            "type": "event_msg",
+            "timestamp": "2026-08-31T01:02:00.000Z",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {"input_tokens": 200, "output_tokens": 50, "total_tokens": 250},
+                    "total_token_usage": {"input_tokens": 300, "output_tokens": 100, "total_tokens": 400}
+                }
+            }
+        })));
+        content.push('\n');
+        fs::write(&rollout, content).unwrap();
+
+        let running = read_rollout_usage_report(
+            &rollout, thread_id, false, /* tail_scan_min_file_bytes */ 1,
+        )
+        .unwrap();
+
+        assert!(running.task_running);
+        assert_eq!(running.last_turn_id, "turn-2");
+        assert_eq!(running.last_turn_usage.total_tokens, 250);
+        assert_eq!(running.total_usage.total_tokens, 400);
+
+        let mut completed = fs::read_to_string(&rollout).unwrap();
+        completed.push_str(&rollout_line(&json!({
+            "type": "event_msg",
+            "timestamp": "2026-08-31T01:02:05.000Z",
+            "payload": {"type": "task_complete", "turn_id": "turn-2"}
+        })));
+        completed.push('\n');
+        fs::write(&rollout, completed).unwrap();
+
+        let completed = read_rollout_usage_report(
+            &rollout, thread_id, false, /* tail_scan_min_file_bytes */ 1,
+        )
+        .unwrap();
+
+        assert!(!completed.task_running);
+        assert_eq!(completed.last_turn_id, "turn-2");
+        assert_eq!(completed.last_turn_usage.total_tokens, 250);
+        assert_eq!(completed.total_usage.total_tokens, 400);
     }
 
     #[test]

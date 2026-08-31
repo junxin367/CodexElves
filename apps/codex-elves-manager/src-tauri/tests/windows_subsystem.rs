@@ -480,6 +480,17 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
     assert!(app.contains("nativeCreateAvailable: null"));
     assert!(app.contains("probe.canStart !== true"));
     assert!(app.contains("disabled={editor.busy || !editor.projectCwd}"));
+    assert!(!app.contains("正在确认 Codex 新会话能力…"));
+    let native_create_panel = app
+        .split("<div className=\"task-board-new-session\">")
+        .nth(1)
+        .and_then(|section| {
+            section
+                .split("<label className=\"task-board-field task-board-instruction\">")
+                .next()
+        })
+        .expect("standalone native create panel");
+    assert!(native_create_panel.contains("editor.nativeCreateAvailable === false ? ("));
     assert!(app.contains("function taskProjectRef(project: TaskProject)"));
     assert!(app.contains("project: taskProjectRef(project)"));
     assert!(app.contains("const hostProject = taskProjectRef(project)"));
