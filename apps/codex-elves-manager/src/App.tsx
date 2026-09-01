@@ -1723,7 +1723,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.3.16",
+        currentVersion: "0.3.17",
         latestVersion: "0.4.0",
         releaseSummary: [
           "CodexElves 0.4.0",
@@ -1738,7 +1738,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       }, "发现可用更新。") as T);
     case "perform_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.3.16",
+        currentVersion: "0.3.17",
         latestVersion: "0.4.0",
         releaseSummary: "浏览器预览不会下载真实安装包。",
         installedPath: "C:\\Temp\\CodexElves-0.4.0-windows-x64-setup.exe",
@@ -1748,7 +1748,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({
         report: [
           "CodexElves 诊断报告",
-          "版本: 0.3.16",
+          "版本: 0.3.17",
           "平台: windows-x64",
           "Codex 应用: C:\\Users\\junes\\AppData\\Local\\Programs\\CodexElves\\CodexElves.exe",
           "配置目录: C:\\Users\\junes\\.codex",
@@ -1769,7 +1769,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.3.16",
+        current_version: "0.3.17",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -7268,7 +7268,7 @@ function RelayProfileEditor({
                   disabled={fetchingModelChoices}
                   onClick={autoAddModels}
                   size="sm"
-                  title="从供应商的模型接口拉取模型，并按当前供应商协议自动加入列表；已有模型不会重复添加。"
+                  title="从供应商的模型接口拉取模型，并按模型名称自动选择协议；已有模型不会重复添加。"
                   type="button"
                   variant="secondary"
                 >
@@ -7303,7 +7303,7 @@ function RelayProfileEditor({
       {showApiFields && profile.localProxyEnabled ? (
         <div className="hint-line relay-protocol-hint">
           <MessageCircle className="h-4 w-4" />
-          <span>本地代理优先按模型列表分流；未列入模型时按当前供应商协议转发，不再拒绝请求。</span>
+          <span>本地代理优先使用模型列表中的显式协议；未列入时按模型名称推断，无法识别则使用 Responses API。</span>
         </div>
       ) : null}
       {showApiFields ? (
@@ -7557,7 +7557,7 @@ function RelayModelMappingTable({
     };
     onChange(next);
   };
-  const selectRowModel = (index: number, row: RelayModelMapping, requestModel: string) => {
+  const updateRowModel = (index: number, row: RelayModelMapping, requestModel: string) => {
     const nextContextWindow = knownModelContextWindow(requestModel);
     const currentContextWindow = row.contextWindow.trim();
     const previousContextWindow = knownModelContextWindow(row.requestModel);
@@ -7607,7 +7607,7 @@ function RelayModelMappingTable({
                 key={relayModelMappingRowId(index)}
                 mappingsLength={mappings.length}
                 onRemove={removeRow}
-                onSelectModel={selectRowModel}
+                onUpdateModel={updateRowModel}
                 onUpdate={updateRow}
                 row={row}
               />
@@ -7626,7 +7626,7 @@ function SortableRelayModelMappingRow({
   canSort,
   mappingsLength,
   onUpdate,
-  onSelectModel,
+  onUpdateModel,
   onRemove,
 }: {
   row: RelayModelMapping;
@@ -7635,7 +7635,7 @@ function SortableRelayModelMappingRow({
   canSort: boolean;
   mappingsLength: number;
   onUpdate: (index: number, patch: Partial<RelayModelMapping>) => void;
-  onSelectModel: (index: number, row: RelayModelMapping, requestModel: string) => void;
+  onUpdateModel: (index: number, row: RelayModelMapping, requestModel: string) => void;
   onRemove: (index: number) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -7666,13 +7666,7 @@ function SortableRelayModelMappingRow({
         <ModelChoiceInput
           choices={choices[row.protocol]}
           value={row.requestModel}
-          onChange={(value, source) => {
-            if (source === "select") {
-              onSelectModel(index, row, value);
-              return;
-            }
-            onUpdate(index, { requestModel: value });
-          }}
+          onChange={(value) => onUpdateModel(index, row, value)}
           placeholder="点击选择或输入模型"
         />
       </div>
@@ -10978,12 +10972,66 @@ function normalizeRelayProtocol(protocol: RelayProtocol | undefined): RelayProto
   return "responses";
 }
 
-// 只有 GPT / OpenAI o 系列走 Responses，其余模型默认优先 Anthropic 协议。
+const chatCompletionsModelPrefixes = [
+  "deepseek",
+  "qwen",
+  "qwq",
+  "glm",
+  "chatglm",
+  "zhipu",
+  "zhipuai",
+  "kimi",
+  "moonshot",
+  "minimax",
+  "mimo",
+  "gemini",
+  "gemma",
+  "grok",
+  "mistral",
+  "mixtral",
+  "llama",
+  "step",
+  "stepfun",
+  "qianfan",
+  "ernie",
+  "hunyuan",
+  "doubao",
+  "longcat",
+  "baichuan",
+  "yi",
+  "command",
+  "cohere",
+  "phi",
+  "nova",
+  "ark",
+];
+
 export function defaultProtocolForModel(model: string): RelayProtocol {
   const slug = (model.trim().toLowerCase().split("/").filter(Boolean).pop() || "").trim();
-  if (!slug) return "anthropic";
-  if (slug.startsWith("gpt-") || slug === "gpt" || /^o\d/.test(slug)) return "responses";
-  return "anthropic";
+  if (slug === "claude" || slug.startsWith("claude-") || slug.startsWith("anthropic.claude")) {
+    return "anthropic";
+  }
+  if (
+    slug === "gpt"
+    || slug.startsWith("gpt-")
+    || slug === "chatgpt"
+    || slug.startsWith("chatgpt-")
+    || slug === "codex"
+    || slug.startsWith("codex-")
+    || /^o\d/.test(slug)
+  ) {
+    return "responses";
+  }
+  if (chatCompletionsModelPrefixes.some((prefix) => modelSlugMatchesFamily(slug, prefix))) {
+    return "chatCompletions";
+  }
+  return "responses";
+}
+
+function modelSlugMatchesFamily(slug: string, family: string): boolean {
+  if (slug === family) return true;
+  if (!slug.startsWith(family)) return false;
+  return /^[-_.\d]/.test(slug.slice(family.length));
 }
 
 function uniqueStrings(values: string[]): string[] {

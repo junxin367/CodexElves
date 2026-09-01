@@ -1005,18 +1005,15 @@ fn relay_profile_test_protocols(
     profile: &RelayProfile,
     model: &str,
 ) -> anyhow::Result<Vec<RelayProtocol>> {
-    if let Ok(protocol) = profile.resolve_protocol_for_model(model) {
+    let model = model.trim();
+    if model.is_empty() {
+        anyhow::bail!("模型不能为空，无法确定测试协议");
+    }
+    if let Some(protocol) = profile.configured_protocol_for_model(model)? {
         return Ok(vec![protocol]);
     }
-    profile.validate_model_protocol_assignments()?;
 
-    let normalized = model.trim().to_ascii_lowercase();
-    let primary = if normalized.starts_with("gpt") {
-        RelayProtocol::Responses
-    } else {
-        // 除 GPT 外的模型默认优先 Anthropic 协议，与管理器添加模型时的默认一致。
-        RelayProtocol::Anthropic
-    };
+    let primary = crate::settings::infer_relay_protocol_for_model(model);
     let mut protocols = vec![primary];
     if primary != RelayProtocol::ChatCompletions {
         protocols.push(RelayProtocol::ChatCompletions);
@@ -4277,10 +4274,13 @@ mod tests {
             relay_profile_test_protocols(&default_profile, "claude-sonnet-4").unwrap(),
             vec![RelayProtocol::Anthropic, RelayProtocol::ChatCompletions]
         );
-        // 非 GPT 模型默认优先 Anthropic，不再跟随供应商协议。
         assert_eq!(
             relay_profile_test_protocols(&default_profile, "deepseek-v3").unwrap(),
-            vec![RelayProtocol::Anthropic, RelayProtocol::ChatCompletions]
+            vec![RelayProtocol::ChatCompletions]
+        );
+        assert_eq!(
+            relay_profile_test_protocols(&default_profile, "future-model").unwrap(),
+            vec![RelayProtocol::Responses, RelayProtocol::ChatCompletions]
         );
 
         let chat_profile = RelayProfile {
@@ -4289,7 +4289,7 @@ mod tests {
         };
         assert_eq!(
             relay_profile_test_protocols(&chat_profile, "deepseek-v3").unwrap(),
-            vec![RelayProtocol::Anthropic, RelayProtocol::ChatCompletions]
+            vec![RelayProtocol::ChatCompletions]
         );
     }
 

@@ -85,7 +85,7 @@
 - 展示模型列表时聚合排序，但配置仍保留协议归属。
 - Responses API 模型请求不得被翻译成 Chat Completions；必须直接调用 Responses 上游 Base URL。
 - Chat Completions 和 Anthropic 转换逻辑必须保留，并用协议测试覆盖。
-- 不恢复“兜底协议”行为；模型缺少协议归属时应明确失败或要求配置。
+- 显式模型协议配置优先；缺少归属时按模型名称推断：GPT/OpenAI 系列使用 Responses API，Claude 使用 Anthropic，常见兼容模型使用 Chat Completions，无法识别时兜底 Responses API。
 - 思考深度按模型能力处理：GPT 类最高 `xhigh`，Claude 类最高 `max`，其他模型按能力表处理，不能用单一固定等级覆盖全部模型。
 - 常见模型上下文大小表必须保留；选择模型后应填充上下文大小。
 - 模型配置 UI 保持表格交互：请求模型、协议、上下文大小、删除 icon；协议为下拉选择。

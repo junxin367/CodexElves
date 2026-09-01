@@ -1289,7 +1289,7 @@ async fn local_proxy_falls_back_same_turn_when_websocket_request_exceeds_16_mib(
 }
 
 #[tokio::test]
-async fn unassigned_model_is_rejected_with_explicit_websocket_error() {
+async fn unassigned_gpt_model_uses_inferred_responses_websocket_protocol() {
     let _settings_lock = websocket_settings_test_lock().lock().await;
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_address = upstream_listener.local_addr().unwrap();
@@ -1300,12 +1300,24 @@ async fn unassigned_model_is_rejected_with_explicit_websocket_error() {
         })
         .await
         .unwrap();
-        while let Some(message) = socket.next().await {
-            if matches!(message.unwrap(), Message::Close(_)) {
-                socket.flush().await.unwrap();
-                return;
-            }
-        }
+        let message = socket.next().await.unwrap().unwrap();
+        let Message::Text(text) = message else {
+            panic!("expected response.create text message");
+        };
+        let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+        assert_eq!(payload["model"], "gpt-5.3-codex-spark");
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "response.completed",
+                    "response": {"id": "resp_inferred_protocol"}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let _ = socket.close(None).await;
     });
 
     let temp = tempfile::tempdir().unwrap();
@@ -1328,7 +1340,7 @@ async fn unassigned_model_is_rejected_with_explicit_websocket_error() {
         .send(Message::Text(
             serde_json::json!({
                 "type": "response.create",
-                "model": "gpt-unassigned",
+                "model": "gpt-5.3-codex-spark",
                 "input": [{"role": "user", "content": "hi"}]
             })
             .to_string()
@@ -1337,18 +1349,13 @@ async fn unassigned_model_is_rejected_with_explicit_websocket_error() {
         .await
         .unwrap();
 
-    let message = client.next().await.unwrap().unwrap();
-    let Message::Close(Some(close)) = message else {
-        panic!("未归属模型应收到带具体原因的 Policy Close");
+    let response = client.next().await.unwrap().unwrap();
+    let Message::Text(text) = response else {
+        panic!("expected response.completed text message");
     };
-    assert_eq!(close.code, CloseCode::Policy);
-    assert!(
-        close
-            .reason
-            .contains("模型「gpt-unassigned」没有明确协议归属"),
-        "{}",
-        close.reason
-    );
+    let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+    assert_eq!(payload["type"], "response.completed");
+    let _ = client.close(None).await;
 
     local_server.await.unwrap().unwrap();
     upstream.await.unwrap();

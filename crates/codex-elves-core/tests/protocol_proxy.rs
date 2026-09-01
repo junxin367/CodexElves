@@ -9645,60 +9645,79 @@ async fn responses_proxy_preserves_deepseek_high_for_cli_proxy_api_gateway() {
 }
 
 #[tokio::test]
-async fn responses_proxy_rejects_models_missing_from_protocol_mappings() {
+async fn responses_proxy_infers_responses_for_unlisted_gpt_model() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
-    write_mixed_relay_settings(temp.path(), "http://127.0.0.1:9/v1");
+    let server = spawn_chat_server();
+    write_mixed_relay_settings(temp.path(), &server.base_url);
 
-    let error = match open_responses_proxy_request(
-        r#"{"model":"gpt-unlisted","input":"hello","stream":false}"#,
+    let upstream = open_responses_proxy_request(
+        r#"{"model":"gpt-5.3-codex-spark","input":"hello","stream":false}"#,
         Some("Original-Codex-UA/1.0"),
     )
     .await
-    {
-        Ok(_) => panic!("无协议归属模型应拒绝请求"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("没有明确协议归属"), "{error:#}");
+    .unwrap();
+    assert_eq!(
+        upstream.response_protocol,
+        UpstreamResponseProtocol::Responses
+    );
+
+    let request = server.finish();
+    assert_eq!(request.path, "/v1/responses");
+    let body: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["model"], "gpt-5.3-codex-spark");
 }
 
 #[tokio::test]
-async fn responses_proxy_rejects_unlisted_models_for_chat_relay() {
+async fn responses_proxy_infers_chat_completions_for_unlisted_compatible_model() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
-    write_chat_relay_settings(temp.path(), "http://127.0.0.1:9/v1", "");
+    let server = spawn_chat_server();
+    write_chat_relay_settings(temp.path(), &server.base_url, "");
 
-    let error = match open_responses_proxy_request(
-        r#"{"model":"gpt-unlisted","input":"hello","stream":false}"#,
+    let upstream = open_responses_proxy_request(
+        r#"{"model":"deepseek-v5","input":"hello","stream":false}"#,
         Some("Original-Codex-UA/1.0"),
     )
     .await
-    {
-        Ok(_) => panic!("Chat relay 中无协议归属模型应拒绝请求"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("没有明确协议归属"), "{error:#}");
+    .unwrap();
+    assert_eq!(
+        upstream.response_protocol,
+        UpstreamResponseProtocol::ChatCompletions
+    );
+
+    let request = server.finish();
+    assert_eq!(request.path, "/v1/chat/completions");
+    let body: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["model"], "deepseek-v5");
 }
 
 #[tokio::test]
-async fn responses_proxy_rejects_unlisted_models_for_anthropic_relay() {
+async fn responses_proxy_infers_anthropic_for_unlisted_claude_model() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
-    write_anthropic_relay_settings(temp.path(), "http://127.0.0.1:9/v1");
+    let server = spawn_chat_server();
+    write_anthropic_relay_settings(temp.path(), &server.base_url);
 
-    let error = match open_responses_proxy_request(
+    let upstream = open_responses_proxy_request(
         r#"{"model":"claude-unlisted","input":"hello","stream":false}"#,
         Some("Original-Codex-UA/1.0"),
     )
     .await
-    {
-        Ok(_) => panic!("Anthropic relay 中无协议归属模型应拒绝请求"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("没有明确协议归属"), "{error:#}");
+    .unwrap();
+    assert_eq!(
+        upstream.response_protocol,
+        UpstreamResponseProtocol::Anthropic
+    );
+
+    let request = server.finish();
+    assert_eq!(request.path, "/v1/messages");
+    assert_eq!(request.x_api_key, "sk-test");
+    let body: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["model"], "claude-unlisted");
 }
 
 #[tokio::test]

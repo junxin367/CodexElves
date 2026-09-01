@@ -340,13 +340,21 @@ impl RelayProfile {
         if model.is_empty() {
             anyhow::bail!("模型不能为空，无法确定协议归属");
         }
-        self.validate_model_protocol_assignments()?;
+        Ok(self
+            .configured_protocol_for_model(model)?
+            .unwrap_or_else(|| infer_relay_protocol_for_model(model)))
+    }
 
+    pub(crate) fn configured_protocol_for_model(
+        &self,
+        model: &str,
+    ) -> anyhow::Result<Option<RelayProtocol>> {
+        let model = model.trim();
+        self.validate_model_protocol_assignments()?;
         if !self.model_mappings.is_empty() {
-            return self
+            return Ok(self
                 .model_mapping_for_catalog_model(model)
-                .map(|mapping| mapping.protocol)
-                .with_context(|| format!("模型「{model}」没有明确协议归属"));
+                .map(|mapping| mapping.protocol));
         }
 
         let mut resolved = None;
@@ -363,7 +371,7 @@ impl RelayProfile {
                 break;
             }
         }
-        resolved.with_context(|| format!("模型「{model}」没有明确协议归属"))
+        Ok(resolved)
     }
 
     pub fn validate_model_protocol_assignments(&self) -> anyhow::Result<()> {
@@ -602,6 +610,56 @@ fn split_relay_model_ids(value: &str) -> impl Iterator<Item = &str> {
         .split(['\r', '\n', ','])
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+pub fn infer_relay_protocol_for_model(model: &str) -> RelayProtocol {
+    let normalized = model.trim().to_ascii_lowercase();
+    let slug = normalized
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(normalized.as_str());
+
+    if slug == "claude" || slug.starts_with("claude-") || slug.starts_with("anthropic.claude") {
+        return RelayProtocol::Anthropic;
+    }
+
+    if slug == "gpt"
+        || slug.starts_with("gpt-")
+        || slug == "chatgpt"
+        || slug.starts_with("chatgpt-")
+        || slug == "codex"
+        || slug.starts_with("codex-")
+        || slug
+            .strip_prefix('o')
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|ch| ch.is_ascii_digit())
+    {
+        return RelayProtocol::Responses;
+    }
+
+    const CHAT_COMPLETIONS_PREFIXES: &[&str] = &[
+        "deepseek", "qwen", "qwq", "glm", "chatglm", "zhipu", "zhipuai", "kimi", "moonshot",
+        "minimax", "mimo", "gemini", "gemma", "grok", "mistral", "mixtral", "llama", "step",
+        "stepfun", "qianfan", "ernie", "hunyuan", "doubao", "longcat", "baichuan", "yi", "command",
+        "cohere", "phi", "nova", "ark",
+    ];
+    if CHAT_COMPLETIONS_PREFIXES
+        .iter()
+        .any(|prefix| model_slug_matches_family(slug, prefix))
+    {
+        return RelayProtocol::ChatCompletions;
+    }
+
+    RelayProtocol::Responses
+}
+
+fn model_slug_matches_family(slug: &str, family: &str) -> bool {
+    if slug == family {
+        return true;
+    }
+    slug.strip_prefix(family)
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|ch| matches!(ch, '-' | '_' | '.') || ch.is_ascii_digit())
 }
 
 fn insert_model_protocol_assignment(
@@ -1956,7 +2014,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_profile_protocol_resolution_requires_explicit_model_mapping() {
+    fn relay_profile_protocol_resolution_prefers_explicit_model_mapping() {
         let profile = RelayProfile {
             protocol: RelayProtocol::Responses,
             model_mappings: vec![
@@ -1990,8 +2048,50 @@ mod tests {
                 .unwrap(),
             RelayProtocol::Anthropic
         );
-        let error = profile.resolve_protocol_for_model("gpt-other").unwrap_err();
-        assert!(error.to_string().contains("没有明确协议归属"), "{error:#}");
+        assert_eq!(
+            profile.resolve_protocol_for_model("gpt-other").unwrap(),
+            RelayProtocol::Responses
+        );
+    }
+
+    #[test]
+    fn relay_protocol_inference_matches_model_family_and_falls_back_to_responses() {
+        for model in [
+            "gpt-5.3-codex-spark",
+            "openai/gpt-5.6-sol",
+            "o4-mini",
+            "codex-auto-review",
+        ] {
+            assert_eq!(
+                infer_relay_protocol_for_model(model),
+                RelayProtocol::Responses,
+                "{model}"
+            );
+        }
+        for model in ["claude-sonnet-4-6", "anthropic/claude-opus-5"] {
+            assert_eq!(
+                infer_relay_protocol_for_model(model),
+                RelayProtocol::Anthropic,
+                "{model}"
+            );
+        }
+        for model in [
+            "deepseek-v4-flash",
+            "zai-org/glm-5.1",
+            "google/gemini-3.1-pro",
+            "Qwen/Qwen3-Coder",
+        ] {
+            assert_eq!(
+                infer_relay_protocol_for_model(model),
+                RelayProtocol::ChatCompletions,
+                "{model}"
+            );
+        }
+        assert_eq!(
+            infer_relay_protocol_for_model("vendor/future-model"),
+            RelayProtocol::Responses
+        );
+        assert_eq!(infer_relay_protocol_for_model(""), RelayProtocol::Responses);
     }
 
     #[test]

@@ -159,7 +159,11 @@ async fn responses_optimization_uses_active_supplier_and_ignores_its_prompt_over
                     "text": "```markdown\noptimized responses\n```",
                     "annotations": []
                 }]
-            }]
+            }],
+            "usage": {
+                "input_tokens": 2300,
+                "output_tokens": 50
+            }
         })
         .to_string(),
         Duration::ZERO,
@@ -181,6 +185,7 @@ async fn responses_optimization_uses_active_supplier_and_ignores_its_prompt_over
     assert_eq!(result["status"], "ok");
     assert_eq!(result["text"], "optimized responses");
     assert_eq!(result["protocol"], "responses");
+    assert_eq!(result["totalTokens"], 2350);
     assert_eq!(request.path, "/v1/responses");
     assert_eq!(
         request.body["instructions"],
@@ -190,6 +195,58 @@ async fn responses_optimization_uses_active_supplier_and_ignores_its_prompt_over
         request.body["instructions"],
         "SUPPLIER OVERRIDE MUST NOT WIN"
     );
+}
+
+#[tokio::test]
+async fn responses_optimization_sends_recent_context_with_reference_markers() {
+    let server = spawn_server(
+        json!({
+            "id": "resp-context",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-responses",
+            "output": [{
+                "id": "msg-context",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{
+                    "type": "output_text",
+                    "text": "optimized with context",
+                    "annotations": []
+                }]
+            }]
+        })
+        .to_string(),
+        Duration::ZERO,
+    );
+    let settings = settings_for(&server, "gpt-responses", RelayProtocol::Responses, "");
+    let service = PromptOptimizeService::with_timeout(Duration::from_secs(2));
+    let mut request_payload = payload("responses-context", "gpt-responses");
+    request_payload["recentContext"] = json!({
+        "user": "previous user request",
+        "assistant": "previous assistant response",
+    });
+
+    let result = service.optimize(settings, request_payload).await.unwrap();
+    let request = server.finish();
+    let instructions = request.body["instructions"].as_str().unwrap();
+    let input = request.body["input"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+
+    assert_eq!(result["text"], "optimized with context");
+    assert!(instructions.contains("当前执行过程中的最近一轮上下文"));
+    assert!(instructions.contains("提示词相关背景信息"));
+    assert!(instructions.contains("未经你的独立验证"));
+    assert!(instructions.contains("保留“根据上一轮上下文”等来源"));
+    assert!(instructions.contains("保留不确定性"));
+    assert!(input.contains("【当前执行过程中的最近一轮上下文】"));
+    assert!(input.contains("【用途：提示词相关背景信息】"));
+    assert!(input.contains("可能包含未经独立验证的事实、判断或结论"));
+    assert!(input.contains("用户：\nprevious user request"));
+    assert!(input.contains("助手：\nprevious assistant response"));
+    assert!(input.ends_with("【本次待优化提示词】\ndraft"));
 }
 
 #[tokio::test]
@@ -221,6 +278,7 @@ async fn chat_completions_optimization_is_converted_back_to_responses_text() {
 
     assert_eq!(result["text"], "optimized chat");
     assert_eq!(result["protocol"], "chatCompletions");
+    assert_eq!(result["totalTokens"], 3);
     assert_eq!(request.path, "/v1/chat/completions");
     assert_eq!(request.body["messages"][0]["role"], "system");
     assert_eq!(
@@ -255,6 +313,7 @@ async fn anthropic_optimization_is_converted_back_to_responses_text() {
 
     assert_eq!(result["text"], "optimized anthropic");
     assert_eq!(result["protocol"], "anthropic");
+    assert_eq!(result["totalTokens"], 3);
     assert_eq!(request.path, "/v1/messages");
     assert_eq!(
         request.body["system"],
@@ -263,13 +322,28 @@ async fn anthropic_optimization_is_converted_back_to_responses_text() {
 }
 
 #[tokio::test]
-async fn optimization_requires_explicit_model_protocol_assignment() {
+async fn optimization_infers_responses_for_unassigned_gpt_model() {
+    let server = spawn_server(
+        json!({
+            "id": "resp-inferred",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5.3-codex-spark",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "optimized inferred"}]
+            }]
+        })
+        .to_string(),
+        Duration::ZERO,
+    );
     let settings = BackendSettings {
         relay_profiles: vec![RelayProfile {
             id: "active".to_string(),
             name: "Active supplier".to_string(),
-            base_url: "http://127.0.0.1:9/v1".to_string(),
-            upstream_base_url: "http://127.0.0.1:9/v1".to_string(),
+            base_url: server.base_url.clone(),
+            upstream_base_url: server.base_url.clone(),
             api_key: "sk-test".to_string(),
             local_proxy_enabled: Some(true),
             relay_mode: RelayMode::MixedApi,
@@ -278,14 +352,21 @@ async fn optimization_requires_explicit_model_protocol_assignment() {
         active_relay_id: "active".to_string(),
         ..BackendSettings::default()
     };
-    let service = PromptOptimizeService::with_timeout(Duration::from_secs(1));
+    let service = PromptOptimizeService::with_timeout(Duration::from_secs(2));
 
-    let error = service
-        .optimize(settings, payload("missing-protocol", "unassigned-model"))
+    let result = service
+        .optimize(
+            settings,
+            payload("inferred-protocol", "gpt-5.3-codex-spark"),
+        )
         .await
-        .unwrap_err();
+        .unwrap();
+    let request = server.finish();
 
-    assert!(error.to_string().contains("协议"));
+    assert_eq!(result["text"], "optimized inferred");
+    assert_eq!(result["protocol"], "responses");
+    assert_eq!(request.path, "/v1/responses");
+    assert_eq!(request.body["model"], "gpt-5.3-codex-spark");
 }
 
 #[tokio::test]
