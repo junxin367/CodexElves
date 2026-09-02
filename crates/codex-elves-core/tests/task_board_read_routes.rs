@@ -1,3 +1,5 @@
+mod support;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
@@ -25,6 +27,7 @@ use codex_elves_core::task_board::{
 };
 use fs2::FileExt;
 use serde_json::{Value, json};
+use support::DiagnosticLogCapture;
 
 fn runtime() -> Arc<CoreRuntimeService> {
     Arc::new(CoreRuntimeService::new(0, StatusStore::default()))
@@ -299,7 +302,7 @@ async fn busy_snapshot_returns_the_stable_busy_error_without_a_path() {
 async fn storage_unavailable_snapshot_is_fixed_and_does_not_leak_storage_details() {
     let temp = tempfile::tempdir().unwrap();
     let log_path = temp.path().join("diagnostic.log");
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
+    let diagnostic_log = DiagnosticLogCapture::new(log_path);
     let path = PathBuf::from("E:\\private\\task-board.lock");
     let path_text = path.to_string_lossy().to_string();
     let private_message = concat!(
@@ -314,7 +317,6 @@ async fn storage_unavailable_snapshot_is_fixed_and_does_not_leak_storage_details
 
     let response = handle_bridge_request(ctx, TASK_BOARD_SNAPSHOT_PATH, json!({})).await;
 
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
     assert_eq!(
         response,
         json!({
@@ -324,7 +326,7 @@ async fn storage_unavailable_snapshot_is_fixed_and_does_not_leak_storage_details
         })
     );
     let response_text = serde_json::to_string(&response).unwrap();
-    let diagnostics = std::fs::read_to_string(log_path).unwrap();
+    let diagnostics = diagnostic_log.read();
     for private_text in [
         private_message,
         path_text.as_str(),
@@ -359,7 +361,7 @@ async fn snapshot_runs_the_store_on_a_blocking_worker() {
 async fn snapshot_join_failure_is_fixed_and_does_not_leak_panic_details() {
     let temp = tempfile::tempdir().unwrap();
     let log_path = temp.path().join("diagnostic.log");
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
+    let diagnostic_log = DiagnosticLogCapture::new(log_path);
     let panic_message = concat!(
         "dbPath=C:\\private\\snapshot.sqlite ",
         "rolloutPath=E:\\secret\\snapshot-rollout.json ",
@@ -372,7 +374,6 @@ async fn snapshot_join_failure_is_fixed_and_does_not_leak_panic_details() {
 
     let response = handle_bridge_request(ctx, TASK_BOARD_SNAPSHOT_PATH, json!({})).await;
 
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
     assert_eq!(
         response,
         json!({
@@ -382,7 +383,7 @@ async fn snapshot_join_failure_is_fixed_and_does_not_leak_panic_details() {
         })
     );
     let response_text = serde_json::to_string(&response).unwrap();
-    let diagnostics = std::fs::read_to_string(log_path).unwrap();
+    let diagnostics = diagnostic_log.read();
     for private_text in [
         panic_message,
         "dbPath",
@@ -398,7 +399,7 @@ async fn snapshot_join_failure_is_fixed_and_does_not_leak_panic_details() {
 async fn catalog_returns_the_exact_private_safe_shape_with_warnings_and_redacted_diagnostics() {
     let temp = tempfile::tempdir().unwrap();
     let log_path = temp.path().join("diagnostic.log");
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
+    let diagnostic_log = DiagnosticLogCapture::new(log_path);
     let ctx = context(
         Arc::new(FakeStore::document(TaskBoardDocument::empty())),
         Arc::new(CatalogData::success(sample_catalog())),
@@ -406,7 +407,6 @@ async fn catalog_returns_the_exact_private_safe_shape_with_warnings_and_redacted
 
     let response = handle_bridge_request(ctx, TASK_BOARD_SESSION_CATALOG_PATH, json!({})).await;
 
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
     assert_eq!(
         response,
         json!({
@@ -432,7 +432,7 @@ async fn catalog_returns_the_exact_private_safe_shape_with_warnings_and_redacted
     for forbidden_key in ["dbPath", "rolloutPath", "body", "content"] {
         assert!(!encoded.contains(forbidden_key));
     }
-    let diagnostics = std::fs::read_to_string(log_path).unwrap();
+    let diagnostics = diagnostic_log.read();
     for private_text in [
         "private-session-id",
         "private-session-title",
@@ -447,7 +447,7 @@ async fn catalog_returns_the_exact_private_safe_shape_with_warnings_and_redacted
 async fn catalog_failure_is_redacted_and_does_not_prevent_snapshot_success() {
     let temp = tempfile::tempdir().unwrap();
     let log_path = temp.path().join("diagnostic.log");
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
+    let diagnostic_log = DiagnosticLogCapture::new(log_path);
     let provider_error = concat!(
         "catalog provider failed: ",
         "dbPath=C:\\Users\\alice\\.codex\\state_5.sqlite ",
@@ -463,7 +463,6 @@ async fn catalog_failure_is_redacted_and_does_not_prevent_snapshot_success() {
         handle_bridge_request(ctx.clone(), TASK_BOARD_SESSION_CATALOG_PATH, json!({})).await;
     let snapshot = handle_bridge_request(ctx, TASK_BOARD_SNAPSHOT_PATH, json!({})).await;
 
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
     assert_eq!(
         catalog,
         json!({
@@ -472,7 +471,7 @@ async fn catalog_failure_is_redacted_and_does_not_prevent_snapshot_success() {
             "message": "Task board session catalog service is unavailable"
         })
     );
-    let diagnostics = std::fs::read_to_string(log_path).unwrap();
+    let diagnostics = diagnostic_log.read();
     for private_text in [
         provider_error,
         "dbPath",

@@ -25,6 +25,7 @@ import {
   CheckCircle2,
   CircleArrowUp,
   ChevronDown,
+  ChevronRight,
   Cloud,
   Copy,
   Download,
@@ -32,6 +33,9 @@ import {
   Eye,
   EyeOff,
   GripVertical,
+  HardDrive,
+  FolderOpen,
+  History,
   Info,
   ExternalLink,
   Hammer,
@@ -201,6 +205,8 @@ type BackendSettings = {
   codexAppConversationView: boolean;
   codexAppTokenUsage: boolean;
   codexAppWorkspaceCheckpoint: boolean;
+  codexAppWorkspaceCheckpointStoragePath: string;
+  codexAppWorkspaceCheckpointRetentionRounds: number;
   codexAppUpstreamWorktreeCreate: boolean;
   codexAppNativeMenuPlacement: boolean;
   codexAppOpenInQuickAccess: boolean;
@@ -429,6 +435,85 @@ type DeleteLocalSessionResult = CommandResult<{
   session_id: string;
   message: string;
 }>;
+
+type WorkspaceCheckpointKind = "turnStart" | "restoreSafety";
+
+type WorkspaceCheckpointRecord = {
+  schemaVersion: number;
+  id: string;
+  requestId: string;
+  workspace: string;
+  threadId: string;
+  turnId?: string | null;
+  commitHash: string;
+  createdAtMs: number;
+  promptPreview: string;
+  kind: WorkspaceCheckpointKind;
+  accepted: boolean;
+  changedFileCount: number;
+  changedFiles: Array<{
+    path: string;
+    status: string;
+    additions?: number | null;
+    deletions?: number | null;
+  }>;
+};
+
+type WorkspaceCheckpointThreadSummary = {
+  threadId: string;
+  checkpointCount: number;
+  turnCount: number;
+  safetyCount: number;
+  pendingCount: number;
+  lastActivityMs: number;
+  checkpoints: WorkspaceCheckpointRecord[];
+};
+
+type WorkspaceCheckpointWorkspaceSummary = {
+  key: string;
+  workspace: string;
+  storagePath: string;
+  bytes: number;
+  checkpointCount: number;
+  turnCount: number;
+  safetyCount: number;
+  pendingCount: number;
+  lastActivityMs: number;
+  threads: WorkspaceCheckpointThreadSummary[];
+};
+
+type WorkspaceCheckpointManagementSummary = {
+  root: string;
+  totalBytes: number;
+  workspaceCount: number;
+  threadCount: number;
+  checkpointCount: number;
+  turnCount: number;
+  safetyCount: number;
+  pendingCount: number;
+  retentionRounds: number;
+  workspaces: WorkspaceCheckpointWorkspaceSummary[];
+};
+
+type WorkspaceCheckpointManagementResult = CommandResult<{
+  settings: BackendSettings;
+  summary: WorkspaceCheckpointManagementSummary;
+  deletedCheckpoints: number;
+  compactedWorkspaces: number;
+  reclaimedBytes: number;
+}>;
+
+type DeleteWorkspaceCheckpointRequest = {
+  scope: "checkpoint" | "thread" | "workspace" | "all";
+  workspaceKey?: string;
+  threadId?: string;
+  checkpointId?: string;
+};
+
+type SaveWorkspaceCheckpointSettingsRequest = {
+  storagePath: string;
+  retentionRounds: number;
+};
 
 type ContextEntriesResult = CommandResult<{
   settings: BackendSettings;
@@ -791,7 +876,7 @@ type StartupResult = CommandResult<{
   showUpdate: boolean;
 }>;
 
-type Route = "overview" | "relay" | "localProxy" | "sessions" | "context" | "enhance" | "skins" | "userScripts" | "radar" | "maintenance" | "about" | "settings";
+type Route = "overview" | "relay" | "localProxy" | "sessions" | "checkpoint" | "context" | "enhance" | "skins" | "userScripts" | "radar" | "maintenance" | "about" | "settings";
 type Theme = "dark" | "light";
 
 const routes: Array<{ id: Route; label: string; icon: LucideIcon; badge?: string }> = [
@@ -799,6 +884,7 @@ const routes: Array<{ id: Route; label: string; icon: LucideIcon; badge?: string
   { id: "relay", label: "供应商配置", icon: KeyRound },
   { id: "localProxy", label: "本地代理", icon: Network },
   { id: "sessions", label: "会话管理", icon: MessageCircle },
+  { id: "checkpoint", label: "Checkpoint", icon: History },
   { id: "context", label: "工具与插件", icon: Network },
   { id: "enhance", label: "功能增强", icon: Hammer },
   { id: "skins", label: "皮肤管理", icon: Palette },
@@ -863,7 +949,9 @@ const defaultSettings: BackendSettings = {
   codexAppProjectMove: false,
   codexAppConversationView: true,
   codexAppTokenUsage: false,
-  codexAppWorkspaceCheckpoint: true,
+  codexAppWorkspaceCheckpoint: false,
+  codexAppWorkspaceCheckpointStoragePath: "",
+  codexAppWorkspaceCheckpointRetentionRounds: 20,
   codexAppUpstreamWorktreeCreate: false,
   codexAppNativeMenuPlacement: true,
   codexAppOpenInQuickAccess: true,
@@ -1717,6 +1805,104 @@ function codexRadarRun(
   };
 }
 
+function browserPreviewCheckpointManagement(
+  settings = browserPreviewSettings(),
+  message = "浏览器预览已加载 Checkpoint 管理数据。",
+): WorkspaceCheckpointManagementResult {
+  const root =
+    settings.codexAppWorkspaceCheckpointStoragePath ||
+    "C:\\Users\\junes\\.codex-session-delete\\workspace-checkpoints";
+  const now = Date.now();
+  const checkpoints: WorkspaceCheckpointRecord[] = [
+    {
+      schemaVersion: 1,
+      id: "checkpoint-preview-3",
+      requestId: "request-preview-3",
+      workspace: "E:\\code\\junes\\github\\CodexElves",
+      threadId: "thread-preview-checkpoint",
+      turnId: "turn-preview-3",
+      commitHash: "9d3f2fd1d76f97f848ba932d2c55eb6d958ec988",
+      createdAtMs: now - 6 * 60 * 1000,
+      promptPreview: "增加 Checkpoint 独立管理页面和磁盘空间统计",
+      kind: "turnStart",
+      accepted: true,
+      changedFileCount: 5,
+      changedFiles: [],
+    },
+    {
+      schemaVersion: 1,
+      id: "checkpoint-preview-2",
+      requestId: "request-preview-2",
+      workspace: "E:\\code\\junes\\github\\CodexElves",
+      threadId: "thread-preview-checkpoint",
+      turnId: "turn-preview-2",
+      commitHash: "6ed92da6ec62fb59e0f040691405908cf0ef9fd1",
+      createdAtMs: now - 34 * 60 * 1000,
+      promptPreview: "实现每个对话最多保留 20 轮",
+      kind: "turnStart",
+      accepted: true,
+      changedFileCount: 3,
+      changedFiles: [],
+    },
+    {
+      schemaVersion: 1,
+      id: "checkpoint-preview-safety",
+      requestId: "request-preview-safety",
+      workspace: "E:\\code\\junes\\github\\CodexElves",
+      threadId: "thread-preview-checkpoint",
+      commitHash: "eb9f24c129387dcbb196d982e389a04f5daee1dd",
+      createdAtMs: now - 58 * 60 * 1000,
+      promptPreview: "恢复历史 Checkpoint 前的安全快照",
+      kind: "restoreSafety",
+      accepted: true,
+      changedFileCount: 1,
+      changedFiles: [],
+    },
+  ];
+  const thread: WorkspaceCheckpointThreadSummary = {
+    threadId: "thread-preview-checkpoint",
+    checkpointCount: checkpoints.length,
+    turnCount: 2,
+    safetyCount: 1,
+    pendingCount: 0,
+    lastActivityMs: checkpoints[0].createdAtMs,
+    checkpoints,
+  };
+  const workspace: WorkspaceCheckpointWorkspaceSummary = {
+    key: "62f89ae2b79858d9ed950ca8e04e5c36cc73dc5e0907e314c9fe2b17558668fc",
+    workspace: "E:\\code\\junes\\github\\CodexElves",
+    storagePath: `${root}\\62f89ae2b79858d9ed950ca8e04e5c36cc73dc5e0907e314c9fe2b17558668fc`,
+    bytes: 15_347_712,
+    checkpointCount: checkpoints.length,
+    turnCount: 2,
+    safetyCount: 1,
+    pendingCount: 0,
+    lastActivityMs: thread.lastActivityMs,
+    threads: [thread],
+  };
+  return browserPreviewResult(
+    {
+      settings,
+      summary: {
+        root,
+        totalBytes: workspace.bytes,
+        workspaceCount: 1,
+        threadCount: 1,
+        checkpointCount: checkpoints.length,
+        turnCount: 2,
+        safetyCount: 1,
+        pendingCount: 0,
+        retentionRounds: settings.codexAppWorkspaceCheckpointRetentionRounds,
+        workspaces: [workspace],
+      },
+      deletedCheckpoints: 0,
+      compactedWorkspaces: 0,
+      reclaimedBytes: 0,
+    },
+    message,
+  );
+}
+
 function browserPreviewCommand<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const settings = browserPreviewSettings();
   const active = activeRelayProfile(settings);
@@ -1816,6 +2002,92 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         ? "局域网代理已开启，启动代理后生效；代理正在运行时请重新启动。"
         : "浏览器预览已保存到内存。") as T);
     }
+    case "load_workspace_checkpoint_management":
+      return Promise.resolve(browserPreviewCheckpointManagement(settings) as T);
+    case "save_workspace_checkpoint_settings": {
+      const request = args?.request as {
+        storagePath?: string;
+        retentionRounds?: number;
+      } | undefined;
+      const normalized = updateBrowserPreviewSettings({
+        ...settings,
+        codexAppWorkspaceCheckpointStoragePath: request?.storagePath?.trim() || "",
+        codexAppWorkspaceCheckpointRetentionRounds: clampNumber(
+          request?.retentionRounds ?? settings.codexAppWorkspaceCheckpointRetentionRounds,
+          0,
+          500,
+        ),
+      });
+      return Promise.resolve(
+        browserPreviewCheckpointManagement(normalized, "浏览器预览已保存 Checkpoint 设置。") as T,
+      );
+    }
+    case "set_workspace_checkpoint_enabled": {
+      const enabled = args?.enabled === true;
+      const normalized = updateBrowserPreviewSettings({
+        ...settings,
+        codexAppWorkspaceCheckpoint: enabled,
+      });
+      return Promise.resolve(
+        browserPreviewCheckpointManagement(
+          normalized,
+          enabled
+            ? "浏览器预览已启用 Checkpoint。"
+            : "浏览器预览已停用 Checkpoint。",
+        ) as T,
+      );
+    }
+    case "cleanup_workspace_checkpoint_storage": {
+      const result = browserPreviewCheckpointManagement(
+        settings,
+        "浏览器预览已模拟整理 Checkpoint 存储，移除 1 个规则外快照并释放 2.3 MB。",
+      );
+      return Promise.resolve({
+        ...result,
+        deletedCheckpoints: 1,
+        reclaimedBytes: 2_359_296,
+        compactedWorkspaces: 1,
+      } as T);
+    }
+    case "delete_workspace_checkpoint_data": {
+      const request = args?.request as DeleteWorkspaceCheckpointRequest | undefined;
+      const result = browserPreviewCheckpointManagement(settings);
+      if (request?.scope === "all") {
+        const deletedCheckpoints = result.summary.checkpointCount;
+        const reclaimedBytes = result.summary.totalBytes;
+        return Promise.resolve({
+          ...result,
+          message: `浏览器预览已模拟清空全部 Checkpoint，共删除 ${deletedCheckpoints} 个快照，释放 ${formatBytes(reclaimedBytes)}。`,
+          summary: {
+            ...result.summary,
+            totalBytes: 0,
+            workspaceCount: 0,
+            threadCount: 0,
+            checkpointCount: 0,
+            turnCount: 0,
+            safetyCount: 0,
+            pendingCount: 0,
+            workspaces: [],
+          },
+          deletedCheckpoints,
+          reclaimedBytes,
+        } as T);
+      }
+      return Promise.resolve({
+        ...result,
+        message: "浏览器预览已模拟删除 1 个 Checkpoint，释放 2.3 MB。",
+        deletedCheckpoints: 1,
+        reclaimedBytes: 2_359_296,
+      } as T);
+    }
+    case "open_workspace_checkpoint_storage":
+      return Promise.resolve(
+        browserPreviewResult({
+          path:
+            settings.codexAppWorkspaceCheckpointStoragePath ||
+            "C:\\Users\\junes\\.codex-session-delete\\workspace-checkpoints",
+        }, "浏览器预览不打开本地目录。") as T,
+      );
     case "list_skins":
       return Promise.resolve(browserPreviewSkinsResult("已读取皮肤列表。") as unknown as T);
     case "install_builtin_skin_presets":
@@ -2093,6 +2365,9 @@ export function App() {
   const [envConflicts, setEnvConflicts] = useState<EnvConflictsResult | null>(null);
   const [ccsProviders, setCcsProviders] = useState<CcsProvidersResult | null>(null);
   const [localSessions, setLocalSessions] = useState<LocalSessionsResult | null>(null);
+  const [workspaceCheckpointManagement, setWorkspaceCheckpointManagement] =
+    useState<WorkspaceCheckpointManagementResult | null>(null);
+  const [workspaceCheckpointBusy, setWorkspaceCheckpointBusy] = useState<string | null>(null);
   const [liveContextEntries, setLiveContextEntries] = useState<CodexContextEntries | null>(null);
   const [pluginCacheInfos, setPluginCacheInfos] = useState<PluginCacheInfo[]>([]);
   const [pluginCacheRefreshConfirm, setPluginCacheRefreshConfirm] = useState<PluginCacheInfo | null>(null);
@@ -2332,6 +2607,136 @@ export function App() {
     return result;
   };
 
+  const applyWorkspaceCheckpointManagement = (
+    result: WorkspaceCheckpointManagementResult,
+    silent = false,
+    announceSuccess = false,
+  ) => {
+    setWorkspaceCheckpointManagement(result);
+    const normalized = normalizeSettings(result.settings);
+    setSettingsForm(normalized);
+    setSettings((current) => (current ? { ...current, settings: normalized } : current));
+    if (!silent || !isSuccessStatus(result.status)) {
+      showResultNotice("Checkpoint 管理", result, { silentSuccess: !announceSuccess });
+    }
+    return result;
+  };
+
+  const refreshWorkspaceCheckpointManagement = async (silent = false) => {
+    const result = await run(() =>
+      call<WorkspaceCheckpointManagementResult>("load_workspace_checkpoint_management"),
+    );
+    return result ? applyWorkspaceCheckpointManagement(result, silent) : null;
+  };
+
+  const chooseWorkspaceCheckpointStoragePath = async () => {
+    let selected: unknown;
+    try {
+      selected = await open({
+        directory: true,
+        multiple: false,
+        title: "选择 Checkpoint 储存目录",
+      });
+    } catch (error) {
+      showNotice("Checkpoint 储存目录", `打开选择器失败：${stringifyError(error)}`, "failed");
+      return;
+    }
+    if (typeof selected !== "string" || !selected.trim()) return;
+    setSettingsForm((current) => ({
+      ...current,
+      codexAppWorkspaceCheckpointStoragePath: selected.trim(),
+    }));
+  };
+
+  const saveWorkspaceCheckpointSettings = async (
+    request?: SaveWorkspaceCheckpointSettingsRequest,
+  ) => {
+    if (workspaceCheckpointBusy) return;
+    setWorkspaceCheckpointBusy("save");
+    try {
+      const result = await run(() =>
+        call<WorkspaceCheckpointManagementResult>("save_workspace_checkpoint_settings", {
+          request: {
+            storagePath:
+              request?.storagePath ??
+              settingsForm.codexAppWorkspaceCheckpointStoragePath,
+            retentionRounds:
+              request?.retentionRounds ??
+              settingsForm.codexAppWorkspaceCheckpointRetentionRounds,
+          },
+        }),
+      );
+      if (result) applyWorkspaceCheckpointManagement(result);
+    } finally {
+      setWorkspaceCheckpointBusy(null);
+    }
+  };
+
+  const setWorkspaceCheckpointEnabled = async (enabled: boolean) => {
+    if (workspaceCheckpointBusy) return;
+    setWorkspaceCheckpointBusy("toggle");
+    try {
+      const result = await run(() =>
+        call<WorkspaceCheckpointManagementResult>(
+          "set_workspace_checkpoint_enabled",
+          { enabled },
+        ),
+      );
+      if (result) {
+        setWorkspaceCheckpointManagement(result);
+        const normalized = normalizeSettings(result.settings);
+        setSettingsForm((current) => ({
+          ...current,
+          codexAppWorkspaceCheckpoint:
+            normalized.codexAppWorkspaceCheckpoint,
+        }));
+        setSettings((current) =>
+          current ? { ...current, settings: normalized } : current,
+        );
+        showResultNotice("Checkpoint 开关", result);
+      }
+    } finally {
+      setWorkspaceCheckpointBusy(null);
+    }
+  };
+
+  const releaseWorkspaceCheckpointStorage = async () => {
+    if (workspaceCheckpointBusy) return;
+    setWorkspaceCheckpointBusy("cleanup");
+    try {
+      const result = await run(() =>
+        call<WorkspaceCheckpointManagementResult>("cleanup_workspace_checkpoint_storage"),
+      );
+      if (result) applyWorkspaceCheckpointManagement(result, false, true);
+    } finally {
+      setWorkspaceCheckpointBusy(null);
+    }
+  };
+
+  const deleteWorkspaceCheckpointData = async (
+    request: DeleteWorkspaceCheckpointRequest,
+  ) => {
+    if (workspaceCheckpointBusy) return;
+    setWorkspaceCheckpointBusy("delete");
+    try {
+      const result = await run(() =>
+        call<WorkspaceCheckpointManagementResult>("delete_workspace_checkpoint_data", {
+          request,
+        }),
+      );
+      if (result) applyWorkspaceCheckpointManagement(result, false, true);
+    } finally {
+      setWorkspaceCheckpointBusy(null);
+    }
+  };
+
+  const openWorkspaceCheckpointStorage = async () => {
+    const result = await run(() =>
+      call<CommandResult<{ path?: string }>>("open_workspace_checkpoint_storage"),
+    );
+    if (result) showResultNotice("Checkpoint 储存目录", result, { silentSuccess: true });
+  };
+
   const deleteLocalSession = async (session: LocalSession) => {
     const title = session.title || session.id;
     if (
@@ -2568,6 +2973,13 @@ export function App() {
       await refreshSettings(true);
       await refreshLocalSessions(true);
       await refreshProviderSyncTargets(true);
+    }
+    if (next === "checkpoint") {
+      await Promise.all([
+        refreshSettings(true),
+        refreshWorkspaceCheckpointManagement(true),
+        refreshLocalSessions(true),
+      ]);
     }
     if (next === "context") {
       await refreshSettings(true);
@@ -3387,6 +3799,10 @@ export function App() {
       await refreshLocalProxyStatus(true);
       if (route === "localProxy") await refreshLocalProxyLogs(true);
       if (route === "radar") await refreshCodexRadar();
+      if (route === "checkpoint") {
+        await refreshWorkspaceCheckpointManagement(true);
+        await refreshLocalSessions(true);
+      }
       if (route === "context") {
         await refreshPluginCacheInfos(true);
         await refreshRemoteContextOptions(true);
@@ -3676,6 +4092,13 @@ export function App() {
       refreshLocalSessions,
       deleteLocalSession,
       deleteLocalSessionsBatch,
+      refreshWorkspaceCheckpointManagement,
+      chooseWorkspaceCheckpointStoragePath,
+      saveWorkspaceCheckpointSettings,
+      setWorkspaceCheckpointEnabled,
+      releaseWorkspaceCheckpointStorage,
+      deleteWorkspaceCheckpointData,
+      openWorkspaceCheckpointStorage,
       openExternalUrl,
       applyRelayInjection,
       applyPureApiInjection,
@@ -3719,7 +4142,7 @@ export function App() {
       disableWatcher: () => watcherAction("disable_watcher"),
       toggleTheme: () => setTheme((current) => (current === "dark" ? "light" : "dark")),
     }),
-    [route, launchForm, settingsForm, settings, removeOwnedData, update, logs, localProxyDetail, diagnostics, theme, relayFiles, localSessions, pluginCacheInfos, remotePluginMarketplaceProgress, selectedProviderSyncTarget, envConflicts, ccsProviders],
+    [route, launchForm, settingsForm, settings, removeOwnedData, update, logs, localProxyDetail, diagnostics, theme, relayFiles, localSessions, pluginCacheInfos, remotePluginMarketplaceProgress, selectedProviderSyncTarget, envConflicts, ccsProviders, workspaceCheckpointBusy],
   );
   const hasUpdate = update?.updateAvailable === true;
 
@@ -3832,6 +4255,16 @@ export function App() {
               providerSyncProgressVisible={providerSyncProgressVisible}
               providerSyncTargets={providerSyncTargets}
               selectedProviderSyncTarget={selectedProviderSyncTarget}
+              onFormChange={setSettingsForm}
+              actions={actions}
+            />
+          ) : null}
+          {route === "checkpoint" ? (
+            <WorkspaceCheckpointScreen
+              management={workspaceCheckpointManagement}
+              form={settingsForm}
+              sessions={localSessions}
+              busy={workspaceCheckpointBusy}
               onFormChange={setSettingsForm}
               actions={actions}
             />
@@ -4003,6 +4436,19 @@ type Actions = {
   refreshLocalSessions: () => Promise<LocalSessionsResult | null>;
   deleteLocalSession: (session: LocalSession) => Promise<void>;
   deleteLocalSessionsBatch: (sessions: LocalSession[]) => Promise<void>;
+  refreshWorkspaceCheckpointManagement: (
+    silent?: boolean,
+  ) => Promise<WorkspaceCheckpointManagementResult | null>;
+  chooseWorkspaceCheckpointStoragePath: () => Promise<void>;
+  saveWorkspaceCheckpointSettings: (
+    request?: SaveWorkspaceCheckpointSettingsRequest,
+  ) => Promise<void>;
+  setWorkspaceCheckpointEnabled: (enabled: boolean) => Promise<void>;
+  releaseWorkspaceCheckpointStorage: () => Promise<void>;
+  deleteWorkspaceCheckpointData: (
+    request: DeleteWorkspaceCheckpointRequest,
+  ) => Promise<void>;
+  openWorkspaceCheckpointStorage: () => Promise<void>;
   openExternalUrl: (url: string) => Promise<void>;
   applyRelayInjection: () => Promise<boolean>;
   applyPureApiInjection: () => Promise<boolean>;
@@ -5239,7 +5685,6 @@ function EnhanceScreen({
             <FeatureToggle title="会话项目移动" detail="把会话移动到普通对话或其他本地项目。" checked={form.codexAppProjectMove} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppProjectMove", value)} />
             <FeatureToggle title="对话居中宽度" detail="把主对话和输入框限制到固定最大宽度，适合大屏阅读。" checked={form.codexAppConversationView} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppConversationView", value)} />
             <FeatureToggle title="会话 Token 统计" detail="在右上角置顶摘要底部紧凑显示当前会话（含递归子代理）的总消耗和最近一轮输入、输出、缓存；默认关闭。" checked={form.codexAppTokenUsage} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppTokenUsage", value)} />
-            <FeatureToggle title="Checkpoint" detail="在提示词优化图标旁显示 Checkpoint 入口；开启后每轮保存工作区快照，关闭后不显示入口且不创建或恢复快照。" checked={form.codexAppWorkspaceCheckpoint} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppWorkspaceCheckpoint", value)} />
             <FeatureToggle title="Upstream worktree" detail="从最新 upstream 分支创建 Git worktree。" checked={form.codexAppUpstreamWorktreeCreate} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppUpstreamWorktreeCreate", value)} />
             <FeatureToggle title="原生菜单栏位置" detail="把 CodexElves 菜单插入 Codex 顶部原生菜单栏。" checked={form.codexAppNativeMenuPlacement} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppNativeMenuPlacement", value)} />
           </div>
@@ -6224,6 +6669,568 @@ function SessionsScreen({
           value={form.layeredCompactionPromptOverride}
         />
       ) : null}
+    </>
+  );
+}
+
+function WorkspaceCheckpointScreen({
+  management,
+  form,
+  sessions,
+  busy,
+  onFormChange,
+  actions,
+}: {
+  management: WorkspaceCheckpointManagementResult | null;
+  form: BackendSettings;
+  sessions: LocalSessionsResult | null;
+  busy: string | null;
+  onFormChange: (value: BackendSettings) => void;
+  actions: Actions;
+}) {
+  const summary = management?.summary;
+  const checkpointEnabled =
+    form.enhancementsEnabled && form.codexAppWorkspaceCheckpoint;
+  const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [expandedThreads, setExpandedThreads] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [retentionInput, setRetentionInput] = useState(
+    () => String(form.codexAppWorkspaceCheckpointRetentionRounds),
+  );
+  const sessionTitles = useMemo(
+    () =>
+      new Map(
+        (sessions?.sessions ?? []).map((session) => [
+          session.id,
+          session.title || "未命名会话",
+        ]),
+      ),
+    [sessions],
+  );
+
+  useEffect(() => {
+    setRetentionInput(
+      String(form.codexAppWorkspaceCheckpointRetentionRounds),
+    );
+  }, [form.codexAppWorkspaceCheckpointRetentionRounds]);
+
+  const toggleExpanded = (
+    key: string,
+    setter: React.Dispatch<React.SetStateAction<Set<string>>>,
+  ) => {
+    setter((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+  const commitRetentionInput = () => {
+    const parsed = Number.parseInt(retentionInput || "0", 10);
+    const retentionRounds = Number.isFinite(parsed)
+      ? clampNumber(parsed, 0, 500)
+      : form.codexAppWorkspaceCheckpointRetentionRounds;
+    setRetentionInput(String(retentionRounds));
+    if (
+      retentionRounds !== form.codexAppWorkspaceCheckpointRetentionRounds
+    ) {
+      onFormChange({
+        ...form,
+        codexAppWorkspaceCheckpointRetentionRounds: retentionRounds,
+      });
+    }
+    return retentionRounds;
+  };
+  const deleteScope = async (
+    request: DeleteWorkspaceCheckpointRequest,
+    prompt: string,
+  ) => {
+    if (!window.confirm(prompt)) return;
+    await actions.deleteWorkspaceCheckpointData(request);
+  };
+  const busyLabel =
+    busy === "save"
+      ? "正在迁移并保存…"
+      : busy === "toggle"
+        ? "正在更新开关…"
+      : busy === "cleanup"
+        ? "正在整理并释放空间…"
+          : busy === "delete"
+            ? "正在删除…"
+            : "";
+
+  return (
+    <>
+      <Panel>
+        <CardHead
+          title="Checkpoint 概览"
+          detail="每轮会话自动保存工作区文件修改状态，可随时恢复到之前版本。"
+          actions={
+            <Toolbar>
+              <Button
+                onClick={() =>
+                  void actions.openWorkspaceCheckpointStorage()
+                }
+                size="sm"
+                variant="outline"
+              >
+                <FolderOpen className="h-4 w-4" />
+                打开目录
+              </Button>
+              <button
+                aria-checked={checkpointEnabled}
+                aria-label="启用 Checkpoint"
+                className={`context-enabled-switch checkpoint-enabled-switch ${
+                  checkpointEnabled ? "active" : ""
+                }`}
+                disabled={Boolean(busy) || !form.enhancementsEnabled}
+                onClick={() =>
+                  void actions.setWorkspaceCheckpointEnabled(
+                    !form.codexAppWorkspaceCheckpoint,
+                  )
+                }
+                role="switch"
+                title={
+                  form.enhancementsEnabled
+                    ? checkpointEnabled
+                      ? "停用 Checkpoint"
+                      : "启用 Checkpoint"
+                    : "请先在功能增强中启用总开关"
+                }
+                type="button"
+              >
+                <span className="context-switch-track" aria-hidden="true">
+                  <span className="context-switch-thumb" />
+                </span>
+                <span>{checkpointEnabled ? "已启用" : "已停用"}</span>
+              </button>
+            </Toolbar>
+          }
+        />
+        <CardContent>
+          <div className="checkpoint-summary-grid">
+            <div className="checkpoint-summary-card checkpoint-summary-card-primary">
+              <HardDrive className="h-5 w-5" />
+              <span>实际占用</span>
+              <strong>{formatBytes(summary?.totalBytes ?? 0)}</strong>
+            </div>
+            <div className="checkpoint-summary-card">
+              <span>工作区</span>
+              <strong>{summary?.workspaceCount ?? 0}</strong>
+              <small>个独立对象库</small>
+            </div>
+            <div className="checkpoint-summary-card">
+              <span>对话</span>
+              <strong>{summary?.threadCount ?? 0}</strong>
+              <small>个 thread</small>
+            </div>
+            <div className="checkpoint-summary-card">
+              <span>普通轮次</span>
+              <strong>{summary?.turnCount ?? 0}</strong>
+              <small>
+                {form.codexAppWorkspaceCheckpointRetentionRounds === 0
+                  ? "不限轮次"
+                  : `每对话最多 ${form.codexAppWorkspaceCheckpointRetentionRounds} 轮`}
+              </small>
+            </div>
+            <div className="checkpoint-summary-card">
+              <span>安全快照</span>
+              <strong>{summary?.safetyCount ?? 0}</strong>
+              <small>每对话最近 3 个</small>
+            </div>
+            <div className="checkpoint-summary-card">
+              <span>待绑定</span>
+              <strong>{summary?.pendingCount ?? 0}</strong>
+              <small>超过 24 小时自动清理</small>
+            </div>
+          </div>
+          <div className="checkpoint-status-line">
+            <Badge
+              status={checkpointEnabled ? "ok" : "disabled"}
+            />
+            <span>
+              {!form.enhancementsEnabled
+                ? "功能增强总开关已关闭，Checkpoint 暂不可用；已有数据仍可管理。"
+                : checkpointEnabled
+                  ? "Codex 中的新对话轮次会继续创建 Checkpoint。"
+                  : "创建和恢复已关闭，但这里仍可查看、迁移和清理已有数据。"}
+            </span>
+            {busyLabel ? <strong>{busyLabel}</strong> : null}
+          </div>
+        </CardContent>
+      </Panel>
+
+      <Panel>
+        <CardHead
+          title="储存与保留策略"
+          detail="切换目录时自动迁移并校验；失败会继续使用当前目录"
+          actions={
+            <Button
+              disabled={Boolean(busy)}
+              onClick={() => {
+                const retentionRounds = commitRetentionInput();
+                void actions.saveWorkspaceCheckpointSettings({
+                  storagePath:
+                    form.codexAppWorkspaceCheckpointStoragePath,
+                  retentionRounds,
+                });
+              }}
+              size="sm"
+            >
+              <Save className="h-4 w-4" />
+              保存并应用
+            </Button>
+          }
+        />
+        <CardContent>
+          <div className="checkpoint-settings-grid">
+            <Field
+              className="checkpoint-retention-field"
+              label="每个对话保留轮次"
+            >
+              <div className="checkpoint-retention-control">
+                <Input
+                  disabled={Boolean(busy)}
+                  inputMode="numeric"
+                  maxLength={3}
+                  onBlur={commitRetentionInput}
+                  onChange={(event) => {
+                    const value = event.currentTarget.value
+                      .replace(/[^0-9]/g, "")
+                      .slice(0, 3);
+                    setRetentionInput(value);
+                    if (value !== "") {
+                      onFormChange({
+                        ...form,
+                        codexAppWorkspaceCheckpointRetentionRounds:
+                          clampNumber(Number.parseInt(value, 10), 0, 500),
+                      });
+                    }
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") event.currentTarget.blur();
+                  }}
+                  value={retentionInput}
+                />
+                <span>轮</span>
+              </div>
+            </Field>
+            <Field
+              className="checkpoint-storage-field"
+              label="储存目录"
+            >
+              <Input
+                disabled={Boolean(busy)}
+                onChange={(event) =>
+                  onFormChange({
+                    ...form,
+                    codexAppWorkspaceCheckpointStoragePath:
+                      event.currentTarget.value,
+                  })
+                }
+                placeholder={
+                  summary?.root ||
+                  "~/.codex-session-delete/workspace-checkpoints"
+                }
+                value={form.codexAppWorkspaceCheckpointStoragePath}
+              />
+            </Field>
+            <div className="checkpoint-path-actions">
+              <Button
+                aria-label="选择目录"
+                className="checkpoint-path-picker"
+                disabled={Boolean(busy)}
+                onClick={() =>
+                  void actions.chooseWorkspaceCheckpointStoragePath()
+                }
+                size="icon"
+                title="选择目录"
+                variant="outline"
+              >
+                <FolderOpen className="h-4 w-4" />
+              </Button>
+              <Button
+                disabled={
+                  Boolean(busy) ||
+                  !form.codexAppWorkspaceCheckpointStoragePath
+                }
+                onClick={() =>
+                  onFormChange({
+                    ...form,
+                    codexAppWorkspaceCheckpointStoragePath: "",
+                  })
+                }
+                variant="secondary"
+              >
+                默认
+              </Button>
+            </div>
+          </div>
+          <div className="checkpoint-retention-help">
+            0 表示不设上限；新轮次保存成功并超出上限时，将自动清理最早的普通轮次。
+          </div>
+          <code className="checkpoint-current-root">
+            当前使用：{summary?.root || "尚未读取储存目录"}
+          </code>
+        </CardContent>
+      </Panel>
+
+      <Panel>
+        <CardHead
+          title="空间明细"
+          detail="工作区占用为准确值；单个对话共享去重对象。“释放空间”保留规则内快照，“清空全部”删除所有 Checkpoint。"
+          actions={
+            <Toolbar>
+              <Button
+                disabled={Boolean(busy)}
+                onClick={() =>
+                  void actions.releaseWorkspaceCheckpointStorage()
+                }
+                size="sm"
+                title="按保留规则整理并压缩全部 Checkpoint 存储"
+                variant="outline"
+              >
+                <HardDrive className="h-4 w-4" />
+                释放空间
+              </Button>
+              <Button
+                disabled={Boolean(busy) || !(summary?.checkpointCount ?? 0)}
+                onClick={() =>
+                  void deleteScope(
+                    { scope: "all" },
+                    `清空全部 Checkpoint 数据？\n\n将删除 ${
+                      summary?.checkpointCount ?? 0
+                    } 个快照，占用 ${formatBytes(
+                      summary?.totalBytes ?? 0,
+                    )}。不会删除 Codex 原始对话或工作区文件，但删除后无法再通过 Checkpoint 恢复。`,
+                  )
+                }
+                size="sm"
+                variant="destructive"
+              >
+                <Trash2 className="h-4 w-4" />
+                清空全部
+              </Button>
+            </Toolbar>
+          }
+        />
+        <CardContent>
+          {summary?.workspaces.length ? (
+            <div className="checkpoint-workspace-list">
+              {summary.workspaces.map((workspace) => {
+                const workspaceExpanded = expandedWorkspaces.has(
+                  workspace.key,
+                );
+                return (
+                  <section
+                    className="checkpoint-workspace"
+                    key={workspace.key}
+                  >
+                    <div className="checkpoint-workspace-head">
+                      <button
+                        aria-expanded={workspaceExpanded}
+                        className="checkpoint-expand-button"
+                        onClick={() =>
+                          toggleExpanded(
+                            workspace.key,
+                            setExpandedWorkspaces,
+                          )
+                        }
+                        type="button"
+                      >
+                        {workspaceExpanded ? (
+                          <ChevronDown className="h-4 w-4" />
+                        ) : (
+                          <ChevronRight className="h-4 w-4" />
+                        )}
+                        <span>
+                          <strong>
+                            {checkpointWorkspaceLabel(workspace.workspace)}
+                          </strong>
+                          <small>{workspace.workspace}</small>
+                        </span>
+                      </button>
+                      <div className="checkpoint-workspace-stats">
+                        <strong>{formatBytes(workspace.bytes)}</strong>
+                        <span>
+                          {workspace.threads.length} 对话 ·{" "}
+                          {workspace.turnCount} 轮 ·{" "}
+                          {workspace.safetyCount} 安全快照
+                        </span>
+                      </div>
+                      <Button
+                        disabled={Boolean(busy)}
+                        onClick={() =>
+                          void deleteScope(
+                            {
+                              scope: "workspace",
+                              workspaceKey: workspace.key,
+                            },
+                            `删除工作区“${workspace.workspace}”的全部 Checkpoint？\n\n预计释放 ${formatBytes(
+                              workspace.bytes,
+                            )}，不会删除工作区文件。`,
+                          )
+                        }
+                        size="sm"
+                        variant="outline"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                        删除
+                      </Button>
+                    </div>
+                    {workspaceExpanded ? (
+                      <div className="checkpoint-thread-list">
+                        {workspace.threads.map((thread) => {
+                          const threadKey = `${workspace.key}:${thread.threadId || "pending"}`;
+                          const threadExpanded =
+                            expandedThreads.has(threadKey);
+                          const title = thread.threadId
+                            ? sessionTitles.get(thread.threadId) ||
+                              "未命名或已删除的对话"
+                            : "尚未绑定到对话";
+                          return (
+                            <div
+                              className="checkpoint-thread"
+                              key={threadKey}
+                            >
+                              <div className="checkpoint-thread-head">
+                                <button
+                                  aria-expanded={threadExpanded}
+                                  className="checkpoint-expand-button"
+                                  onClick={() =>
+                                    toggleExpanded(
+                                      threadKey,
+                                      setExpandedThreads,
+                                    )
+                                  }
+                                  type="button"
+                                >
+                                  {threadExpanded ? (
+                                    <ChevronDown className="h-4 w-4" />
+                                  ) : (
+                                    <ChevronRight className="h-4 w-4" />
+                                  )}
+                                  <span>
+                                    <strong>{title}</strong>
+                                    <small>
+                                      {thread.threadId ||
+                                        "pending checkpoints"}
+                                    </small>
+                                  </span>
+                                </button>
+                                <div className="checkpoint-thread-stats">
+                                  <span>{thread.turnCount} 普通轮次</span>
+                                  <span>{thread.safetyCount} 安全快照</span>
+                                  {thread.pendingCount ? (
+                                    <span>{thread.pendingCount} 待绑定</span>
+                                  ) : null}
+                                  <span>
+                                    {formatTime(thread.lastActivityMs)}
+                                  </span>
+                                </div>
+                                <Button
+                                  disabled={Boolean(busy)}
+                                  onClick={() =>
+                                    void deleteScope(
+                                      {
+                                        scope: "thread",
+                                        workspaceKey: workspace.key,
+                                        threadId: thread.threadId,
+                                      },
+                                      `删除对话“${title}”的 ${thread.checkpointCount} 个 Checkpoint？\n\n不会删除 Codex 原始对话。`,
+                                    )
+                                  }
+                                  size="sm"
+                                  variant="outline"
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                  删除对话快照
+                                </Button>
+                              </div>
+                              {threadExpanded ? (
+                                <div className="checkpoint-record-list">
+                                  {thread.checkpoints.map((checkpoint) => (
+                                    <div
+                                      className="checkpoint-record"
+                                      key={checkpoint.id}
+                                    >
+                                      <span
+                                        className="checkpoint-kind"
+                                        data-kind={checkpoint.kind}
+                                      >
+                                        {checkpoint.kind ===
+                                        "restoreSafety"
+                                          ? "安全快照"
+                                          : checkpoint.accepted
+                                            ? "普通轮次"
+                                            : "待绑定"}
+                                      </span>
+                                      <div className="checkpoint-record-copy">
+                                        <strong>
+                                          {checkpoint.promptPreview ||
+                                            "未记录提示词摘要"}
+                                        </strong>
+                                        <small>
+                                          {formatTime(
+                                            checkpoint.createdAtMs,
+                                          )}{" "}
+                                          · 变更{" "}
+                                          {checkpoint.changedFileCount} 个文件
+                                          {checkpoint.turnId
+                                            ? ` · ${checkpoint.turnId}`
+                                            : ""}
+                                        </small>
+                                      </div>
+                                      <code
+                                        data-tooltip={
+                                          checkpoint.commitHash
+                                        }
+                                      >
+                                        {checkpoint.commitHash.slice(0, 8)}
+                                      </code>
+                                      <Button
+                                        disabled={Boolean(busy)}
+                                        onClick={() =>
+                                          void deleteScope(
+                                            {
+                                              scope: "checkpoint",
+                                              workspaceKey: workspace.key,
+                                              checkpointId:
+                                                checkpoint.id,
+                                            },
+                                            `删除这个 Checkpoint？\n\n${checkpoint.promptPreview || formatTime(checkpoint.createdAtMs)}`,
+                                          )
+                                        }
+                                        size="sm"
+                                        variant="ghost"
+                                      >
+                                        <Trash2 className="h-4 w-4" />
+                                      </Button>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </section>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="empty">
+              {management
+                ? "当前储存目录没有 Checkpoint 数据。新对话发送消息后会在这里出现。"
+                : "正在读取 Checkpoint 储存状态…"}
+            </div>
+          )}
+        </CardContent>
+      </Panel>
     </>
   );
 }
@@ -8102,6 +9109,10 @@ function sessionProjectLabel(pathOrKey: string): string {
   return projectLabel(pathOrKey);
 }
 
+function checkpointWorkspaceLabel(path: string): string {
+  return projectLabel(path || "未知工作区");
+}
+
 function isCodexConversationProjectPath(path: string): boolean {
   return /(?:^|[\\/])Codex[\\/]\d{4}-\d{2}-\d{2}[\\/][^\\/]+[\\/]?$/i.test(path.trim());
 }
@@ -9941,6 +10952,7 @@ function routeSubtitle(route: Route) {
     relay: "管理 API 供应商、协议、Key 与配置文件",
     localProxy: "查看本地代理状态、请求日志和完整返回内容",
     sessions: "查看、删除和修复 Codex 本地会话",
+    checkpoint: "管理工作区状态",
     context: "独立管理 MCP、Skills、Plugins",
     enhance: "会话删除、导出、项目移动和脚本能力",
     skins: "为 Codex 界面设置背景主题与切换",
@@ -10811,6 +11823,14 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
     computerUseGuardEnabled: settings.computerUseGuardEnabled !== false,
     lanProxyEnabled: settings.lanProxyEnabled === true,
     codexAppImageOverlayOpacity: clampNumber(settings.codexAppImageOverlayOpacity || 35, 1, 100),
+    codexAppWorkspaceCheckpointStoragePath: (
+      settings.codexAppWorkspaceCheckpointStoragePath || ""
+    ).trim(),
+    codexAppWorkspaceCheckpointRetentionRounds: Number.isFinite(
+      settings.codexAppWorkspaceCheckpointRetentionRounds,
+    )
+      ? clampNumber(settings.codexAppWorkspaceCheckpointRetentionRounds, 0, 500)
+      : 20,
     gptReasoningContinuationMaxRounds: clampNumber(settings.gptReasoningContinuationMaxRounds || 3, 1, 9),
     layeredCompactionRetainTokens: clampNumber(
       settings.layeredCompactionRetainTokens || 20000,

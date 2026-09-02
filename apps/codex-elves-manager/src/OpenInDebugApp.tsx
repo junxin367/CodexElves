@@ -197,7 +197,7 @@ export function OpenInDebugApp() {
               </button>
             </div>
             <div className="open-in-debug-project">
-              <strong>CodexPlusPlus</strong>
+              <strong>CodexElves</strong>
               <span>main</span>
             </div>
             <div className="open-in-debug-titlebar-actions">

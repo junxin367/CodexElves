@@ -1,3 +1,5 @@
+mod support;
+
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -16,6 +18,7 @@ use codex_elves_core::status::StatusStore;
 use codex_elves_core::user_scripts::UserScriptManager;
 use codex_elves_core::workspace_checkpoint::WorkspaceCheckpointService;
 use serde_json::{Value, json};
+use support::DiagnosticLogCapture;
 
 #[tokio::test]
 async fn bridge_routes_cover_all_current_paths() {
@@ -107,7 +110,12 @@ async fn settings_get_includes_runtime_codex_app_version() {
     assert_eq!(result["codexAppVersion"], json!("26.601.21317"));
     assert_eq!(result["codexAppPluginEntryUnlock"], json!(true));
     assert_eq!(result["codexAppPluginMarketplaceUnlock"], json!(true));
-    assert_eq!(result["codexAppWorkspaceCheckpoint"], json!(true));
+    assert_eq!(result["codexAppWorkspaceCheckpoint"], json!(false));
+    assert_eq!(result["codexAppWorkspaceCheckpointStoragePath"], json!(""));
+    assert_eq!(
+        result["codexAppWorkspaceCheckpointRetentionRounds"],
+        json!(20)
+    );
     assert!(result.get("codexAppForcePluginInstall").is_none());
     assert!(result.get("codexAppConversationTimeline").is_none());
     assert!(result.get("codexAppThreadIdBadge").is_none());
@@ -260,6 +268,13 @@ async fn workspace_checkpoint_routes_create_bind_list_and_restore() {
     let ctx = test_context().with_workspace_checkpoint_service(WorkspaceCheckpointService::new(
         temp.path().join("checkpoint-state"),
     ));
+    let enabled = handle_bridge_request(
+        ctx.clone(),
+        "/settings/set",
+        json!({"codexAppWorkspaceCheckpoint": true}),
+    )
+    .await;
+    assert_eq!(enabled["codexAppWorkspaceCheckpoint"], json!(true));
 
     let created = handle_bridge_request(
         ctx.clone(),
@@ -357,6 +372,125 @@ async fn workspace_checkpoint_routes_create_bind_list_and_restore() {
     assert_eq!(
         std::fs::read_to_string(workspace.join("value.txt")).unwrap(),
         "before"
+    );
+}
+
+#[tokio::test]
+async fn workspace_checkpoint_routes_use_configured_storage_retention_and_feature_gate() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let checkpoint_root = temp.path().join("checkpoint-state");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("value.txt"), "before").unwrap();
+    let settings = Arc::new(FakeSettings::default());
+    let ctx = BridgeContext::new(
+        settings,
+        Arc::new(FakeRuntime::default()),
+        Arc::new(FakeData::default()),
+    );
+
+    let configured = handle_bridge_request(
+        ctx.clone(),
+        "/settings/set",
+        json!({
+            "codexAppWorkspaceCheckpoint": true,
+            "codexAppWorkspaceCheckpointStoragePath": checkpoint_root,
+            "codexAppWorkspaceCheckpointRetentionRounds": 1
+        }),
+    )
+    .await;
+    assert_eq!(
+        configured["codexAppWorkspaceCheckpointRetentionRounds"],
+        json!(1)
+    );
+
+    let mut first_checkpoint_id = String::new();
+    for (index, value) in ["before", "after"].into_iter().enumerate() {
+        std::fs::write(workspace.join("value.txt"), value).unwrap();
+        let created = handle_bridge_request(
+            ctx.clone(),
+            "/workspace-checkpoint/create",
+            json!({
+                "cwd": workspace,
+                "threadId": "thread-1",
+                "requestId": format!("request-{}", index + 1),
+                "promptPreview": value
+            }),
+        )
+        .await;
+        assert_eq!(created["status"], "ok");
+        let checkpoint_id = created["checkpoint"]["id"].as_str().unwrap().to_string();
+        if index == 0 {
+            first_checkpoint_id = checkpoint_id.clone();
+        }
+        let bound = handle_bridge_request(
+            ctx.clone(),
+            "/workspace-checkpoint/bind-turn",
+            json!({
+                "cwd": workspace,
+                "checkpointId": checkpoint_id,
+                "threadId": "thread-1",
+                "turnId": format!("turn-{}", index + 1)
+            }),
+        )
+        .await;
+        assert_eq!(bound["status"], "ok");
+    }
+
+    let listed = handle_bridge_request(
+        ctx.clone(),
+        "/workspace-checkpoint/list",
+        json!({
+            "cwd": workspace,
+            "threadId": "thread-1"
+        }),
+    )
+    .await;
+    assert_eq!(listed["checkpoints"].as_array().unwrap().len(), 1);
+    assert_ne!(listed["checkpoints"][0]["id"], first_checkpoint_id);
+    assert!(checkpoint_root.is_dir());
+
+    handle_bridge_request(
+        ctx.clone(),
+        "/settings/set",
+        json!({"codexAppWorkspaceCheckpoint": false}),
+    )
+    .await;
+    let disabled = handle_bridge_request(
+        ctx.clone(),
+        "/workspace-checkpoint/list",
+        json!({"cwd": workspace, "threadId": "thread-1"}),
+    )
+    .await;
+    assert_eq!(disabled["status"], "failed");
+    assert!(
+        disabled["message"]
+            .as_str()
+            .unwrap()
+            .contains("Checkpoint 功能已关闭")
+    );
+
+    handle_bridge_request(
+        ctx.clone(),
+        "/settings/set",
+        json!({
+            "codexAppWorkspaceCheckpoint": true,
+            "enhancementsEnabled": false
+        }),
+    )
+    .await;
+    let master_disabled = handle_bridge_request(
+        ctx,
+        "/workspace-checkpoint/list",
+        json!({"cwd": workspace, "threadId": "thread-1"}),
+    )
+    .await;
+    assert_eq!(master_disabled["status"], "failed");
+    assert!(
+        master_disabled["message"]
+            .as_str()
+            .unwrap()
+            .contains("Checkpoint 功能已关闭")
     );
 }
 
@@ -740,7 +874,7 @@ async fn core_runtime_manager_route_attempts_to_open_manager_binary() {
 async fn bridge_backend_status_writes_diagnostic_log() {
     let temp = tempfile::tempdir().unwrap();
     let log_path = temp.path().join("codex-elves.log");
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
+    let diagnostic_log = DiagnosticLogCapture::new(log_path);
     let ctx = BridgeContext::core(Arc::new(CoreRuntimeService::new(
         9229,
         StatusStore::default(),
@@ -749,11 +883,10 @@ async fn bridge_backend_status_writes_diagnostic_log() {
     let result = handle_bridge_request(ctx, "/backend/status", json!({})).await;
 
     assert_eq!(result["status"], "ok");
-    let contents = std::fs::read_to_string(&log_path).unwrap();
+    let contents = diagnostic_log.read();
     assert!(contents.contains("bridge.request"));
     assert!(contents.contains("bridge.backend_status_ok"));
     assert!(contents.contains("/backend/status"));
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
 }
 
 #[test]
@@ -1071,6 +1204,24 @@ impl BridgeSettingsService for FakeSettings {
                 } else {
                     value
                 }),
+            );
+        }
+        if let Some(value) = payload
+            .get("codexAppWorkspaceCheckpointStoragePath")
+            .and_then(Value::as_str)
+        {
+            raw.insert(
+                "codexAppWorkspaceCheckpointStoragePath".to_string(),
+                json!(value),
+            );
+        }
+        if let Some(value) = payload
+            .get("codexAppWorkspaceCheckpointRetentionRounds")
+            .and_then(Value::as_u64)
+        {
+            raw.insert(
+                "codexAppWorkspaceCheckpointRetentionRounds".to_string(),
+                json!(value),
             );
         }
         let updated: BackendSettings = serde_json::from_value(Value::Object(raw.clone())).unwrap();

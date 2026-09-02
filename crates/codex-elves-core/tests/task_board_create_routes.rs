@@ -1,3 +1,5 @@
+mod support;
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,6 +19,7 @@ use codex_elves_core::task_board::{
     TaskBoardStatus, TaskBoardStore, TaskBoardStoreError, TaskBoardTask,
 };
 use serde_json::{Value, json};
+use support::DiagnosticLogCapture;
 
 const TASK_ID: &str = "62a0a38e-65bd-4c49-b6ef-3d19d06f2d4e";
 const SESSION_A: &str = "019c89c0-0000-7000-8000-000000000001";
@@ -449,7 +452,7 @@ async fn cross_project_authoritative_session_fails_before_store() {
 async fn catalog_failure_is_private_and_never_calls_store() {
     let temp = tempfile::tempdir().unwrap();
     let log_path = temp.path().join("diagnostic.log");
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
+    let diagnostic_log = DiagnosticLogCapture::new(log_path);
     let provider_error = concat!(
         "catalog provider failed: ",
         "dbPath=C:\\Users\\alice\\.codex\\state_5.sqlite ",
@@ -471,7 +474,6 @@ async fn catalog_failure_is_private_and_never_calls_store() {
     )
     .await;
 
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
     assert_eq!(
         response,
         json!({
@@ -481,7 +483,7 @@ async fn catalog_failure_is_private_and_never_calls_store() {
         })
     );
     let response_text = serde_json::to_string(&response).unwrap();
-    let diagnostics = std::fs::read_to_string(log_path).unwrap();
+    let diagnostics = diagnostic_log.read();
     for private_text in [
         provider_error,
         "dbPath",
@@ -577,7 +579,7 @@ async fn store_failures_use_the_frozen_error_codes() {
 async fn unavailable_create_store_error_is_fixed_and_private() {
     let temp = tempfile::tempdir().unwrap();
     let log_path = temp.path().join("diagnostic.log");
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
+    let diagnostic_log = DiagnosticLogCapture::new(log_path);
     let unavailable_path = PathBuf::from("E:\\private\\task-board.lock");
     let unavailable_message = concat!(
         "dbPath=C:\\private\\codex.sqlite ",
@@ -602,7 +604,6 @@ async fn unavailable_create_store_error_is_fixed_and_private() {
     )
     .await;
 
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
     assert_eq!(
         response,
         json!({
@@ -612,7 +613,7 @@ async fn unavailable_create_store_error_is_fixed_and_private() {
         })
     );
     let response_text = serde_json::to_string(&response).unwrap();
-    let diagnostics = std::fs::read_to_string(log_path).unwrap_or_default();
+    let diagnostics = diagnostic_log.read();
     for private_text in [
         unavailable_path.to_string_lossy().as_ref(),
         unavailable_message,
@@ -657,7 +658,7 @@ async fn create_runs_the_store_on_a_blocking_worker() {
 async fn create_join_failure_returns_a_fixed_private_safe_unavailable_error() {
     let temp = tempfile::tempdir().unwrap();
     let log_path = temp.path().join("diagnostic.log");
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
+    let diagnostic_log = DiagnosticLogCapture::new(log_path);
     let panic_message =
         "dbPath=C:\\private\\task-board.json rolloutPath=E:\\secret\\rollout body=secret";
     let store = Arc::new(FakeStore::new(StoreOutcome::Panic(
@@ -678,7 +679,6 @@ async fn create_join_failure_returns_a_fixed_private_safe_unavailable_error() {
     )
     .await;
 
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
     assert_eq!(
         response,
         json!({
@@ -687,7 +687,7 @@ async fn create_join_failure_returns_a_fixed_private_safe_unavailable_error() {
             "message": "Task board storage is unavailable"
         })
     );
-    let diagnostics = std::fs::read_to_string(log_path).unwrap();
+    let diagnostics = diagnostic_log.read();
     assert!(
         !serde_json::to_string(&response)
             .unwrap()

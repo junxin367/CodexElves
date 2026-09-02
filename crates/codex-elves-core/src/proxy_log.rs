@@ -1406,10 +1406,10 @@ fn value_to_u64(value: &Value) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProxyRequestRecord, ProxyRequestState, append_record, append_record_at_path,
-        clear_records_at_path, current_timestamp_ms, extract_reasoning_tokens_from_response_body,
-        extract_request_metadata, find_record, find_record_at_path, read_summaries,
-        read_summaries_at_path, serialize_record_for_log,
+        ProxyRequestRecord, ProxyRequestState, append_record_at_path, clear_records_at_path,
+        current_timestamp_ms, extract_reasoning_tokens_from_response_body,
+        extract_request_metadata, find_record_at_path, read_summaries_at_path,
+        serialize_record_for_log,
     };
 
     fn temp_proxy_log_path(name: &str) -> std::path::PathBuf {
@@ -1649,7 +1649,6 @@ data: [DONE]
     #[test]
     fn append_record_writes_locked_jsonl_file() {
         let path = temp_proxy_log_path("append-record");
-        let previous = crate::paths::set_proxy_log_path_for_tests(Some(path.clone()));
         let record = ProxyRequestRecord {
             id: "test-record".to_string(),
             state: ProxyRequestState::Completed,
@@ -1691,8 +1690,8 @@ data: [DONE]
             error: None,
         };
 
-        append_record(&record).expect("append proxy log record");
-        let found = find_record("test-record")
+        append_record_at_path(&path, &record).expect("append proxy log record");
+        let found = find_record_at_path(&path, "test-record")
             .expect("read proxy log record")
             .expect("record should exist");
 
@@ -1710,9 +1709,9 @@ data: [DONE]
             let mut next = record.clone();
             next.id = format!("test-record-{index}");
             next.timestamp_ms += index as u64 + 1;
-            append_record(&next).expect("append proxy log record");
+            append_record_at_path(&path, &next).expect("append proxy log record");
         }
-        let summaries = read_summaries(20).expect("read proxy log summaries");
+        let summaries = read_summaries_at_path(&path, 20).expect("read proxy log summaries");
         assert_eq!(summaries.len(), 13);
         assert_eq!(
             summaries.first().map(|entry| entry.id.as_str()),
@@ -1724,7 +1723,6 @@ data: [DONE]
         );
 
         remove_proxy_log_artifacts(&path);
-        crate::paths::set_proxy_log_path_for_tests(previous);
     }
 
     #[test]

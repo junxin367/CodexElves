@@ -1,3 +1,5 @@
+mod support;
+
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -24,6 +26,7 @@ use codex_elves_core::proxy_log::{ProxyRequestRecord, ProxyRequestState, ProxyRe
 use codex_elves_core::request_headers::{RequestContext, UpstreamHeaderRoute};
 use codex_elves_core::settings::{BackendSettings, RelayProfile, RelayProtocol};
 use codex_elves_core::status::StatusStore;
+use support::DiagnosticLogCapture;
 
 #[test]
 fn request_context_rebuilds_only_native_responses_semantic_headers() {
@@ -609,7 +612,7 @@ async fn default_helper_serves_backend_status_over_http() {
 async fn default_helper_accepts_diagnostic_log_events_over_http() {
     let temp = tempfile::tempdir().unwrap();
     let log_path = temp.path().join("codex-elves.log");
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
+    let diagnostic_log = DiagnosticLogCapture::new(log_path);
     let hooks = DefaultLaunchHooks::default();
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -635,10 +638,9 @@ async fn default_helper_accepts_diagnostic_log_events_over_http() {
     assert_eq!(payload["status"], "ok");
     hooks.shutdown_helper(port).await;
 
-    let contents = std::fs::read_to_string(&log_path).unwrap();
+    let contents = diagnostic_log.read();
     assert!(contents.contains("renderer.backend_check_failed"));
     assert!(contents.contains("fetch failed"));
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
 }
 
 #[test]

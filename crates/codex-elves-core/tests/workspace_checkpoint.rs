@@ -4,8 +4,9 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use codex_elves_core::workspace_checkpoint::{
-    BindTurnRequest, CreateCheckpointRequest, ListCheckpointsRequest, RestoreCheckpointRequest,
-    RestoreForRevertRequest, WorkspaceCheckpointKind, WorkspaceCheckpointService,
+    BindTurnRequest, CreateCheckpointRequest, DeleteWorkspaceCheckpointDataRequest,
+    ListCheckpointsRequest, RestoreCheckpointRequest, RestoreForRevertRequest,
+    WorkspaceCheckpointKind, WorkspaceCheckpointService,
 };
 
 #[test]
@@ -366,6 +367,366 @@ fn preview_revert_reports_current_workspace_changes_without_mutating_history() {
     assert!(workspace.join("ignored.txt").is_file());
 }
 
+#[test]
+fn retention_is_applied_per_bound_thread_after_the_new_turn_is_durable() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(workspace.join("value.txt"), "zero").unwrap();
+    let service =
+        WorkspaceCheckpointService::new(temp.path().join("state")).with_retention_rounds(2);
+
+    let first = create_bound_checkpoint_for_thread(
+        &service,
+        &workspace,
+        "thread-a",
+        "request-a1",
+        "turn-a1",
+        "first",
+    );
+    fs::write(workspace.join("value.txt"), "one").unwrap();
+    let second = create_bound_checkpoint_for_thread(
+        &service,
+        &workspace,
+        "thread-a",
+        "request-a2",
+        "turn-a2",
+        "second",
+    );
+    fs::write(workspace.join("value.txt"), "two").unwrap();
+    let third_pending = service
+        .create_checkpoint(CreateCheckpointRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            thread_id: "thread-a".to_string(),
+            request_id: "request-a3".to_string(),
+            prompt_preview: "third".to_string(),
+        })
+        .unwrap()
+        .checkpoint;
+
+    let before_bind = service
+        .list_checkpoints(ListCheckpointsRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            thread_id: "thread-a".to_string(),
+            limit: Some(10),
+        })
+        .unwrap();
+    assert_eq!(before_bind.checkpoints.len(), 3);
+    assert!(
+        before_bind
+            .checkpoints
+            .iter()
+            .any(|item| item.id == first.id)
+    );
+
+    let third = service
+        .bind_turn(BindTurnRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            checkpoint_id: third_pending.id.clone(),
+            thread_id: "thread-a".to_string(),
+            turn_id: "turn-a3".to_string(),
+        })
+        .unwrap();
+    assert_eq!(third.checkpoint.id, third_pending.id);
+    assert!(third.checkpoint.accepted);
+    assert_eq!(third.pruned_count, 1);
+
+    let thread_a = service
+        .list_checkpoints(ListCheckpointsRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            thread_id: "thread-a".to_string(),
+            limit: Some(10),
+        })
+        .unwrap();
+    assert_eq!(thread_a.checkpoints.len(), 2);
+    assert!(!thread_a.checkpoints.iter().any(|item| item.id == first.id));
+    assert!(thread_a.checkpoints.iter().any(|item| item.id == second.id));
+    assert!(
+        thread_a
+            .checkpoints
+            .iter()
+            .any(|item| item.id == third.checkpoint.id)
+    );
+
+    fs::write(workspace.join("value.txt"), "pending").unwrap();
+    let pending = service
+        .create_checkpoint(CreateCheckpointRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            thread_id: "thread-a".to_string(),
+            request_id: "request-a4".to_string(),
+            prompt_preview: "pending".to_string(),
+        })
+        .unwrap()
+        .checkpoint;
+    assert!(!pending.accepted);
+
+    for (index, value) in ["b-zero", "b-one", "b-two"].into_iter().enumerate() {
+        fs::write(workspace.join("value.txt"), value).unwrap();
+        create_bound_checkpoint_for_thread(
+            &service,
+            &workspace,
+            "thread-b",
+            &format!("request-b{}", index + 1),
+            &format!("turn-b{}", index + 1),
+            value,
+        );
+    }
+
+    let thread_a = service
+        .list_checkpoints(ListCheckpointsRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            thread_id: "thread-a".to_string(),
+            limit: Some(10),
+        })
+        .unwrap();
+    let thread_b = service
+        .list_checkpoints(ListCheckpointsRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            thread_id: "thread-b".to_string(),
+            limit: Some(10),
+        })
+        .unwrap();
+    assert_eq!(
+        thread_a
+            .checkpoints
+            .iter()
+            .filter(|item| item.accepted)
+            .count(),
+        2
+    );
+    assert_eq!(
+        thread_a
+            .checkpoints
+            .iter()
+            .filter(|item| !item.accepted)
+            .count(),
+        1
+    );
+    assert_eq!(thread_b.checkpoints.len(), 2);
+
+    let summary = service.management_summary().unwrap();
+    assert_eq!(summary.thread_count, 2);
+    assert_eq!(summary.turn_count, 4);
+    assert_eq!(summary.pending_count, 1);
+    assert_eq!(summary.retention_rounds, 2);
+}
+
+#[test]
+fn binding_can_attach_a_pending_checkpoint_to_its_thread() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(workspace.join("value.txt"), "before").unwrap();
+    let service = WorkspaceCheckpointService::new(temp.path().join("state"));
+
+    let pending = service
+        .create_checkpoint(CreateCheckpointRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            thread_id: String::new(),
+            request_id: "request-1".to_string(),
+            prompt_preview: "prompt".to_string(),
+        })
+        .unwrap()
+        .checkpoint;
+    let bound = service
+        .bind_turn(BindTurnRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            checkpoint_id: pending.id.clone(),
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+        })
+        .unwrap()
+        .checkpoint;
+
+    assert_eq!(bound.thread_id, "thread-1");
+    let listed = service
+        .list_checkpoints(ListCheckpointsRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            thread_id: "thread-1".to_string(),
+            limit: Some(10),
+        })
+        .unwrap();
+    assert_eq!(listed.checkpoints.len(), 1);
+    assert_eq!(listed.checkpoints[0].id, pending.id);
+}
+
+#[test]
+fn cleanup_expires_pending_checkpoints_and_keeps_only_three_safety_snapshots() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(workspace.join("value.txt"), "baseline").unwrap();
+    let service = WorkspaceCheckpointService::new(temp.path().join("state"));
+    let original = create_bound_checkpoint(&service, &workspace, "request-1", "turn-1", "prompt");
+
+    for index in 0..4 {
+        fs::write(workspace.join("value.txt"), format!("changed-{index}")).unwrap();
+        service
+            .restore_checkpoint(RestoreCheckpointRequest {
+                cwd: workspace.to_string_lossy().into_owned(),
+                checkpoint_id: original.id.clone(),
+                thread_id: "thread-1".to_string(),
+            })
+            .unwrap();
+    }
+
+    let pending = service
+        .create_checkpoint(CreateCheckpointRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            thread_id: "thread-1".to_string(),
+            request_id: "pending-request".to_string(),
+            prompt_preview: "pending".to_string(),
+        })
+        .unwrap()
+        .checkpoint;
+    let summary = service.management_summary().unwrap();
+    let workspace_state = Path::new(&summary.workspaces[0].storage_path);
+    let events_path = workspace_state.join("events.jsonl");
+    let rewritten = fs::read_to_string(&events_path)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
+            if event["event"] == "created" && event["checkpoint"]["id"] == pending.id {
+                event["checkpoint"]["createdAtMs"] = serde_json::json!(0);
+            }
+            serde_json::to_string(&event).unwrap()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&events_path, format!("{rewritten}\n")).unwrap();
+
+    let maintenance = service.cleanup_storage().unwrap();
+    assert_eq!(maintenance.deleted_checkpoints, 1);
+    assert_eq!(maintenance.summary.turn_count, 1);
+    assert_eq!(maintenance.summary.safety_count, 3);
+    assert_eq!(maintenance.summary.pending_count, 0);
+    assert_eq!(maintenance.summary.checkpoint_count, 4);
+}
+
+#[test]
+fn compact_storage_reclaims_pruned_parentless_checkpoint_commits() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(workspace.join("value.txt"), "zero").unwrap();
+    let service =
+        WorkspaceCheckpointService::new(temp.path().join("state")).with_retention_rounds(2);
+
+    let first = create_bound_checkpoint(&service, &workspace, "request-1", "turn-1", "first");
+    fs::write(workspace.join("value.txt"), "one").unwrap();
+    create_bound_checkpoint(&service, &workspace, "request-2", "turn-2", "second");
+    fs::write(workspace.join("value.txt"), "two").unwrap();
+    let third = create_bound_checkpoint(&service, &workspace, "request-3", "turn-3", "third");
+
+    let summary = service.management_summary().unwrap();
+    let git_dir = Path::new(&summary.workspaces[0].storage_path)
+        .join("repository")
+        .join(".git");
+    let parents = shadow_git_stdout(
+        &git_dir,
+        [
+            "rev-list",
+            "--parents",
+            "-n",
+            "1",
+            third.commit_hash.as_str(),
+        ],
+    );
+    assert_eq!(parents.split_whitespace().count(), 1);
+
+    let compacted = service.compact_storage().unwrap();
+    assert_eq!(compacted.compacted_workspaces, 1);
+    assert_eq!(compacted.summary.turn_count, 2);
+    let object = format!("{}^{{commit}}", first.commit_hash);
+    assert!(
+        !run_shadow_git(&git_dir, ["cat-file", "-e", object.as_str()])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn management_delete_scopes_and_storage_migration_preserve_recoverability() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let source = temp.path().join("source-state");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(workspace.join("value.txt"), "before").unwrap();
+    let service = WorkspaceCheckpointService::new(source.clone());
+    let checkpoint = create_bound_checkpoint(&service, &workspace, "request-1", "turn-1", "prompt");
+
+    let nested_target = source.join("nested-target");
+    assert!(
+        service
+            .migrate_storage(nested_target.clone(), |_| Ok(()))
+            .is_err()
+    );
+    assert!(!nested_target.exists());
+
+    let failed_target = temp.path().join("failed-target");
+    fs::create_dir_all(&failed_target).unwrap();
+    assert!(
+        service
+            .migrate_storage(failed_target.clone(), |_| anyhow::bail!("save failed"))
+            .is_err()
+    );
+    assert!(failed_target.is_dir());
+    assert!(fs::read_dir(&failed_target).unwrap().next().is_none());
+    assert_eq!(
+        service
+            .list_checkpoints(ListCheckpointsRequest {
+                cwd: workspace.to_string_lossy().into_owned(),
+                thread_id: "thread-1".to_string(),
+                limit: Some(10),
+            })
+            .unwrap()
+            .checkpoints[0]
+            .id,
+        checkpoint.id
+    );
+
+    let target = temp.path().join("migrated-state");
+    let mut committed_target = None;
+    let migrated = service
+        .migrate_storage(target, |resolved| {
+            committed_target = Some(resolved.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(committed_target.as_deref(), Some(migrated.as_path()));
+    assert!(!source.exists());
+
+    let migrated_service = WorkspaceCheckpointService::new(migrated);
+    let summary = migrated_service.management_summary().unwrap();
+    assert_eq!(summary.workspace_count, 1);
+    assert_eq!(summary.thread_count, 1);
+    assert_eq!(summary.checkpoint_count, 1);
+    assert!(summary.total_bytes > 0);
+    let workspace_key = summary.workspaces[0].key.clone();
+
+    let deleted = migrated_service
+        .delete_data(DeleteWorkspaceCheckpointDataRequest {
+            scope: "checkpoint".to_string(),
+            workspace_key: workspace_key.clone(),
+            thread_id: String::new(),
+            checkpoint_id: checkpoint.id,
+        })
+        .unwrap();
+    assert_eq!(deleted.deleted_checkpoints, 1);
+    assert_eq!(deleted.summary.checkpoint_count, 0);
+
+    let deleted_workspace = migrated_service
+        .delete_data(DeleteWorkspaceCheckpointDataRequest {
+            scope: "workspace".to_string(),
+            workspace_key,
+            thread_id: String::new(),
+            checkpoint_id: String::new(),
+        })
+        .unwrap();
+    assert_eq!(deleted_workspace.summary.workspace_count, 0);
+}
+
 fn create_bound_checkpoint(
     service: &WorkspaceCheckpointService,
     workspace: &Path,
@@ -373,10 +734,21 @@ fn create_bound_checkpoint(
     turn_id: &str,
     prompt: &str,
 ) -> codex_elves_core::workspace_checkpoint::WorkspaceCheckpoint {
+    create_bound_checkpoint_for_thread(service, workspace, "thread-1", request_id, turn_id, prompt)
+}
+
+fn create_bound_checkpoint_for_thread(
+    service: &WorkspaceCheckpointService,
+    workspace: &Path,
+    thread_id: &str,
+    request_id: &str,
+    turn_id: &str,
+    prompt: &str,
+) -> codex_elves_core::workspace_checkpoint::WorkspaceCheckpoint {
     let checkpoint = service
         .create_checkpoint(CreateCheckpointRequest {
             cwd: workspace.to_string_lossy().into_owned(),
-            thread_id: "thread-1".to_string(),
+            thread_id: thread_id.to_string(),
             request_id: request_id.to_string(),
             prompt_preview: prompt.to_string(),
         })
@@ -386,7 +758,7 @@ fn create_bound_checkpoint(
         .bind_turn(BindTurnRequest {
             cwd: workspace.to_string_lossy().into_owned(),
             checkpoint_id: checkpoint.id.clone(),
-            thread_id: "thread-1".to_string(),
+            thread_id: thread_id.to_string(),
             turn_id: turn_id.to_string(),
         })
         .unwrap()
@@ -420,6 +792,29 @@ where
     Command::new("git")
         .args(args)
         .current_dir(workspace)
+        .output()
+        .expect("git should be available for checkpoint tests")
+}
+
+fn shadow_git_stdout<const N: usize>(git_dir: &Path, args: [&str; N]) -> String {
+    let output = run_shadow_git(git_dir, args);
+    assert!(
+        output.status.success(),
+        "shadow git command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn run_shadow_git<I, S>(git_dir: &Path, args: I) -> Output
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    Command::new("git")
+        .arg("--git-dir")
+        .arg(git_dir)
+        .args(args)
         .output()
         .expect("git should be available for checkpoint tests")
 }

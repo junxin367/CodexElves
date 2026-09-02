@@ -1,3 +1,5 @@
+mod support;
+
 use base64::Engine;
 use codex_elves_core::assets;
 use codex_elves_core::bridge::{self, BRIDGE_BINDING_NAME};
@@ -15,6 +17,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use support::DiagnosticLogCapture;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_tungstenite::accept_async;
@@ -11001,21 +11004,35 @@ fn manager_ui_exposes_default_enabled_open_in_quick_access_page_enhancement() {
 }
 
 #[test]
-fn manager_ui_exposes_default_enabled_workspace_checkpoint_page_enhancement() {
+fn manager_ui_exposes_default_disabled_workspace_checkpoint_management() {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
         .expect("core crate should live under crates/codex-elves-core");
     let source =
         std::fs::read_to_string(repo.join("apps/codex-elves-manager/src/App.tsx")).unwrap();
+    let commands =
+        std::fs::read_to_string(repo.join("apps/codex-elves-manager/src-tauri/src/commands.rs"))
+            .unwrap();
 
     assert!(source.contains("codexAppWorkspaceCheckpoint: boolean"));
-    assert!(source.contains("codexAppWorkspaceCheckpoint: true"));
-    assert!(source.contains("title=\"Checkpoint\""));
-    assert!(source.contains("在提示词优化图标旁显示 Checkpoint 入口"));
-    assert!(source.contains("checked={form.codexAppWorkspaceCheckpoint}"));
-    assert!(source.contains("disabled={!masterEnabled}"));
-    assert!(source.contains("setEnhanceFlag(\"codexAppWorkspaceCheckpoint\", value)"));
+    assert!(source.contains("codexAppWorkspaceCheckpoint: false"));
+    assert!(source.contains("codexAppWorkspaceCheckpointStoragePath: string"));
+    assert!(source.contains("codexAppWorkspaceCheckpointRetentionRounds: number"));
+    assert!(source.contains("function WorkspaceCheckpointScreen"));
+    assert!(source.contains("储存与保留策略"));
+    assert!(source.contains("save_workspace_checkpoint_settings"));
+    assert!(source.contains("set_workspace_checkpoint_enabled"));
+    assert!(source.contains("cleanup_workspace_checkpoint_storage"));
+    assert!(source.contains("delete_workspace_checkpoint_data"));
+    assert!(source.contains("releaseWorkspaceCheckpointStorage"));
+    assert!(source.contains("释放空间"));
+    assert!(!source.contains("立即清理"));
+    assert!(source.contains("aria-label=\"启用 Checkpoint\""));
+    assert!(!source.contains("在提示词优化图标旁显示 Checkpoint 入口"));
+    assert!(!source.contains("compact_workspace_checkpoint_storage"));
+    assert!(commands.contains("Checkpoint 空间释放完成"));
+    assert!(commands.contains("已清空全部 Checkpoint"));
 }
 
 #[test]
@@ -11471,7 +11488,7 @@ async fn list_targets_can_query_ipv6_loopback_cdp_endpoint() {
 async fn install_bridge_routes_binding_while_waiting_for_command_response() {
     let temp = tempfile::tempdir().unwrap();
     let log_path = temp.path().join("codex-elves.log");
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
+    let diagnostic_log = DiagnosticLogCapture::new(log_path);
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
         for expected_id in 1..=4 {
             let command = recv_json(&mut socket).await;
@@ -11537,10 +11554,9 @@ async fn install_bridge_routes_binding_while_waiting_for_command_response() {
         .await
         .expect("server task should finish without panicking");
     assert!(handled.load(Ordering::SeqCst));
-    let contents = std::fs::read_to_string(&log_path).unwrap();
+    let contents = diagnostic_log.read();
     assert!(contents.contains("bridge.resolve_start"));
     assert!(contents.contains("bridge.resolve_ok"));
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
 }
 
 #[tokio::test]

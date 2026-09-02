@@ -765,8 +765,16 @@ pub struct BackendSettings {
     pub codex_app_conversation_view: bool,
     #[serde(rename = "codexAppTokenUsage", default)]
     pub codex_app_token_usage: bool,
-    #[serde(rename = "codexAppWorkspaceCheckpoint", default = "default_true")]
+    #[serde(rename = "codexAppWorkspaceCheckpoint", default)]
     pub codex_app_workspace_checkpoint: bool,
+    #[serde(rename = "codexAppWorkspaceCheckpointStoragePath", default)]
+    pub codex_app_workspace_checkpoint_storage_path: String,
+    #[serde(
+        rename = "codexAppWorkspaceCheckpointRetentionRounds",
+        default = "default_workspace_checkpoint_retention_rounds",
+        deserialize_with = "deserialize_workspace_checkpoint_retention_rounds"
+    )]
+    pub codex_app_workspace_checkpoint_retention_rounds: u16,
     #[serde(rename = "codexAppUpstreamWorktreeCreate", default)]
     pub codex_app_upstream_worktree_create: bool,
     #[serde(rename = "codexAppNativeMenuPlacement", default = "default_true")]
@@ -880,7 +888,10 @@ impl Default for BackendSettings {
             codex_app_project_move: false,
             codex_app_conversation_view: true,
             codex_app_token_usage: false,
-            codex_app_workspace_checkpoint: true,
+            codex_app_workspace_checkpoint: false,
+            codex_app_workspace_checkpoint_storage_path: String::new(),
+            codex_app_workspace_checkpoint_retention_rounds:
+                default_workspace_checkpoint_retention_rounds(),
             codex_app_upstream_worktree_create: false,
             codex_app_native_menu_placement: true,
             codex_app_open_in_quick_access: true,
@@ -1084,6 +1095,16 @@ fn default_gpt_reasoning_continuation_max_rounds() -> u8 {
     crate::continue_thinking::MAX_CONTINUE_ROUNDS as u8
 }
 
+pub const MAX_WORKSPACE_CHECKPOINT_RETENTION_ROUNDS: u16 = 500;
+
+pub fn default_workspace_checkpoint_retention_rounds() -> u16 {
+    20
+}
+
+pub fn clamp_workspace_checkpoint_retention_rounds(value: u64) -> u16 {
+    value.min(u64::from(MAX_WORKSPACE_CHECKPOINT_RETENTION_ROUNDS)) as u16
+}
+
 fn clamp_gpt_reasoning_continuation_max_rounds(value: u64) -> u8 {
     value.clamp(1, 9) as u8
 }
@@ -1151,6 +1172,17 @@ where
     Ok(Option::<u64>::deserialize(deserializer)?
         .map(clamp_gpt_reasoning_continuation_max_rounds)
         .unwrap_or_else(default_gpt_reasoning_continuation_max_rounds))
+}
+
+fn deserialize_workspace_checkpoint_retention_rounds<'de, D>(
+    deserializer: D,
+) -> Result<u16, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?
+        .map(clamp_workspace_checkpoint_retention_rounds)
+        .unwrap_or_else(default_workspace_checkpoint_retention_rounds))
 }
 
 fn deserialize_layered_compaction_retain_tokens<'de, D>(deserializer: D) -> Result<u32, D::Error>
@@ -1346,6 +1378,26 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
     merge_bool_setting(target, source, "codexAppConversationView");
     merge_bool_setting(target, source, "codexAppTokenUsage");
     merge_bool_setting(target, source, "codexAppWorkspaceCheckpoint");
+    if let Some(value) = source
+        .get("codexAppWorkspaceCheckpointStoragePath")
+        .and_then(Value::as_str)
+    {
+        target.insert(
+            "codexAppWorkspaceCheckpointStoragePath".to_string(),
+            Value::String(value.trim().trim_matches('"').to_string()),
+        );
+    }
+    if let Some(value) = source
+        .get("codexAppWorkspaceCheckpointRetentionRounds")
+        .and_then(Value::as_u64)
+    {
+        target.insert(
+            "codexAppWorkspaceCheckpointRetentionRounds".to_string(),
+            Value::Number(serde_json::Number::from(
+                clamp_workspace_checkpoint_retention_rounds(value),
+            )),
+        );
+    }
     merge_bool_setting(target, source, "codexAppUpstreamWorktreeCreate");
     merge_bool_setting(target, source, "codexAppNativeMenuPlacement");
     merge_bool_setting(target, source, "codexAppOpenInQuickAccess");
@@ -1725,7 +1777,13 @@ mod tests {
         assert!(!settings.codex_app_project_move);
         assert!(settings.codex_app_conversation_view);
         assert!(!settings.codex_app_token_usage);
-        assert!(settings.codex_app_workspace_checkpoint);
+        assert!(!settings.codex_app_workspace_checkpoint);
+        assert!(
+            settings
+                .codex_app_workspace_checkpoint_storage_path
+                .is_empty()
+        );
+        assert_eq!(settings.codex_app_workspace_checkpoint_retention_rounds, 20);
         assert!(!settings.codex_app_upstream_worktree_create);
         assert!(settings.codex_app_native_menu_placement);
         assert!(!settings.codex_goals_enabled);
@@ -1781,11 +1839,11 @@ mod tests {
     }
 
     #[test]
-    fn settings_missing_workspace_checkpoint_defaults_enabled() {
+    fn settings_missing_workspace_checkpoint_defaults_disabled() {
         let settings: BackendSettings = serde_json::from_str("{}").unwrap();
         let serialized = serde_json::to_value(settings).unwrap();
 
-        assert_eq!(serialized["codexAppWorkspaceCheckpoint"], json!(true));
+        assert_eq!(serialized["codexAppWorkspaceCheckpoint"], json!(false));
     }
 
     #[test]
@@ -1794,12 +1852,39 @@ mod tests {
         let store = SettingsStore::new(temp.path().join("settings.json"));
 
         let updated = store
-            .update(json!({ "codexAppWorkspaceCheckpoint": false }))
+            .update(json!({
+                "codexAppWorkspaceCheckpoint": false,
+                "codexAppWorkspaceCheckpointStoragePath": "  C:\\checkpoint-state  ",
+                "codexAppWorkspaceCheckpointRetentionRounds": 42
+            }))
             .unwrap();
         let loaded = store.load().unwrap();
 
         assert!(!updated.codex_app_workspace_checkpoint);
         assert!(!loaded.codex_app_workspace_checkpoint);
+        assert_eq!(
+            loaded.codex_app_workspace_checkpoint_storage_path,
+            "C:\\checkpoint-state"
+        );
+        assert_eq!(loaded.codex_app_workspace_checkpoint_retention_rounds, 42);
+    }
+
+    #[test]
+    fn settings_workspace_checkpoint_retention_rounds_clamps_and_allows_unlimited() {
+        let unlimited: BackendSettings = serde_json::from_value(json!({
+            "codexAppWorkspaceCheckpointRetentionRounds": 0
+        }))
+        .unwrap();
+        let clamped: BackendSettings = serde_json::from_value(json!({
+            "codexAppWorkspaceCheckpointRetentionRounds": 9999
+        }))
+        .unwrap();
+
+        assert_eq!(unlimited.codex_app_workspace_checkpoint_retention_rounds, 0);
+        assert_eq!(
+            clamped.codex_app_workspace_checkpoint_retention_rounds,
+            MAX_WORKSPACE_CHECKPOINT_RETENTION_ROUNDS
+        );
     }
 
     #[test]

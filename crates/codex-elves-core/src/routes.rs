@@ -206,43 +206,59 @@ pub async fn handle_bridge_request(
         task_board::TASK_BOARD_MOVE_PATH => {
             Ok(task_board::handle_move(ctx.task_board_store.clone(), payload.clone()).await)
         }
-        crate::workspace_checkpoint::CREATE_PATH => Ok(crate::workspace_checkpoint::handle_create(
-            ctx.workspace_checkpoints.clone(),
-            payload.clone(),
-        )
-        .await),
-        crate::workspace_checkpoint::BIND_TURN_PATH => {
-            Ok(crate::workspace_checkpoint::handle_bind_turn(
-                ctx.workspace_checkpoints.clone(),
-                payload.clone(),
-            )
-            .await)
+        crate::workspace_checkpoint::CREATE_PATH => {
+            match active_workspace_checkpoint_service(&ctx).await {
+                Ok(service) => {
+                    Ok(crate::workspace_checkpoint::handle_create(service, payload.clone()).await)
+                }
+                Err(error) => Err(error),
+            }
         }
-        crate::workspace_checkpoint::LIST_PATH => Ok(crate::workspace_checkpoint::handle_list(
-            ctx.workspace_checkpoints.clone(),
-            payload.clone(),
-        )
-        .await),
+        crate::workspace_checkpoint::BIND_TURN_PATH => {
+            match active_workspace_checkpoint_service(&ctx).await {
+                Ok(service) => Ok(crate::workspace_checkpoint::handle_bind_turn(
+                    service,
+                    payload.clone(),
+                )
+                .await),
+                Err(error) => Err(error),
+            }
+        }
+        crate::workspace_checkpoint::LIST_PATH => {
+            match active_workspace_checkpoint_service(&ctx).await {
+                Ok(service) => {
+                    Ok(crate::workspace_checkpoint::handle_list(service, payload.clone()).await)
+                }
+                Err(error) => Err(error),
+            }
+        }
         crate::workspace_checkpoint::RESTORE_PATH => {
-            Ok(crate::workspace_checkpoint::handle_restore(
-                ctx.workspace_checkpoints.clone(),
-                payload.clone(),
-            )
-            .await)
+            match active_workspace_checkpoint_service(&ctx).await {
+                Ok(service) => {
+                    Ok(crate::workspace_checkpoint::handle_restore(service, payload.clone()).await)
+                }
+                Err(error) => Err(error),
+            }
         }
         crate::workspace_checkpoint::PREVIEW_REVERT_PATH => {
-            Ok(crate::workspace_checkpoint::handle_preview_revert(
-                ctx.workspace_checkpoints.clone(),
-                payload.clone(),
-            )
-            .await)
+            match active_workspace_checkpoint_service(&ctx).await {
+                Ok(service) => Ok(crate::workspace_checkpoint::handle_preview_revert(
+                    service,
+                    payload.clone(),
+                )
+                .await),
+                Err(error) => Err(error),
+            }
         }
         crate::workspace_checkpoint::RESTORE_FOR_REVERT_PATH => {
-            Ok(crate::workspace_checkpoint::handle_restore_for_revert(
-                ctx.workspace_checkpoints.clone(),
-                payload.clone(),
-            )
-            .await)
+            match active_workspace_checkpoint_service(&ctx).await {
+                Ok(service) => Ok(crate::workspace_checkpoint::handle_restore_for_revert(
+                    service,
+                    payload.clone(),
+                )
+                .await),
+                Err(error) => Err(error),
+            }
         }
         "/settings/get" => settings_value(&ctx, ctx.settings.get_settings().await).await,
         "/settings/set" => {
@@ -380,6 +396,16 @@ pub async fn handle_bridge_request(
         }),
     );
     response
+}
+
+async fn active_workspace_checkpoint_service(
+    ctx: &BridgeContext,
+) -> anyhow::Result<WorkspaceCheckpointService> {
+    let settings = ctx.settings.get_settings().await?;
+    if !settings.enhancements_enabled || !settings.codex_app_workspace_checkpoint {
+        anyhow::bail!("Checkpoint 功能已关闭");
+    }
+    ctx.workspace_checkpoints.for_settings(&settings)
 }
 
 #[derive(Default)]

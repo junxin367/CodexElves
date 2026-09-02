@@ -1,10 +1,10 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
 use fs2::FileExt;
@@ -21,10 +21,15 @@ pub const PREVIEW_REVERT_PATH: &str = "/workspace-checkpoint/preview-revert";
 pub const RESTORE_FOR_REVERT_PATH: &str = "/workspace-checkpoint/restore-for-revert";
 
 const SCHEMA_VERSION: u32 = 1;
+const STORAGE_VERSION: u32 = 2;
 const MAX_LIST_LIMIT: usize = 200;
 const DEFAULT_LIST_LIMIT: usize = 50;
 const MAX_PROMPT_PREVIEW_CHARS: usize = 280;
 const MAX_GIT_ERROR_CHARS: usize = 2_000;
+const MAX_RESTORE_SAFETY_CHECKPOINTS_PER_THREAD: usize = 3;
+const PENDING_CHECKPOINT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const ROOT_LOCK_FILE: &str = ".checkpoint-root.lock";
+const CHECKPOINT_REF_PREFIX: &str = "refs/codexelves/checkpoints/";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -122,6 +127,8 @@ pub struct RestoreForRevertRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CreateCheckpointResult {
     pub checkpoint: WorkspaceCheckpoint,
+    #[serde(default)]
+    pub pruned_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -151,6 +158,69 @@ pub struct PreviewRevertResult {
     pub has_changes: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceCheckpointThreadSummary {
+    pub thread_id: String,
+    pub checkpoint_count: usize,
+    pub turn_count: usize,
+    pub safety_count: usize,
+    pub pending_count: usize,
+    pub last_activity_ms: u64,
+    pub checkpoints: Vec<WorkspaceCheckpoint>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceCheckpointWorkspaceSummary {
+    pub key: String,
+    pub workspace: String,
+    pub storage_path: String,
+    pub bytes: u64,
+    pub checkpoint_count: usize,
+    pub turn_count: usize,
+    pub safety_count: usize,
+    pub pending_count: usize,
+    pub last_activity_ms: u64,
+    pub threads: Vec<WorkspaceCheckpointThreadSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceCheckpointManagementSummary {
+    pub root: String,
+    pub total_bytes: u64,
+    pub workspace_count: usize,
+    pub thread_count: usize,
+    pub checkpoint_count: usize,
+    pub turn_count: usize,
+    pub safety_count: usize,
+    pub pending_count: usize,
+    pub retention_rounds: u16,
+    pub workspaces: Vec<WorkspaceCheckpointWorkspaceSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceCheckpointMaintenanceResult {
+    pub deleted_checkpoints: usize,
+    pub compacted_workspaces: usize,
+    pub reclaimed_bytes: u64,
+    pub summary: WorkspaceCheckpointManagementSummary,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteWorkspaceCheckpointDataRequest {
+    pub scope: String,
+    #[serde(default)]
+    pub workspace_key: String,
+    #[serde(default)]
+    pub thread_id: String,
+    #[serde(default)]
+    pub checkpoint_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "camelCase")]
 enum CheckpointEvent {
@@ -160,6 +230,8 @@ enum CheckpointEvent {
     Bound {
         checkpoint_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_id: Option<String>,
     },
 }
@@ -167,31 +239,68 @@ enum CheckpointEvent {
 #[derive(Debug, Clone)]
 pub struct WorkspaceCheckpointService {
     root: PathBuf,
+    retention_rounds: Option<usize>,
+    dynamic_settings: bool,
 }
 
 impl Default for WorkspaceCheckpointService {
     fn default() -> Self {
-        Self::new(crate::paths::default_workspace_checkpoints_dir())
+        Self {
+            root: crate::paths::default_workspace_checkpoints_dir(),
+            retention_rounds: Some(usize::from(
+                crate::settings::default_workspace_checkpoint_retention_rounds(),
+            )),
+            dynamic_settings: true,
+        }
     }
 }
 
 impl WorkspaceCheckpointService {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            retention_rounds: Some(usize::from(
+                crate::settings::default_workspace_checkpoint_retention_rounds(),
+            )),
+            dynamic_settings: false,
+        }
+    }
+
+    pub fn with_retention_rounds(mut self, retention_rounds: u16) -> Self {
+        self.retention_rounds = (retention_rounds > 0).then_some(usize::from(retention_rounds));
+        self
+    }
+
+    pub fn for_settings(
+        &self,
+        settings: &crate::settings::BackendSettings,
+    ) -> anyhow::Result<Self> {
+        if !self.dynamic_settings {
+            return Ok(self.clone());
+        }
+        let root = configured_root(settings)?;
+        Ok(Self::new(root)
+            .with_retention_rounds(settings.codex_app_workspace_checkpoint_retention_rounds))
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    pub fn retention_rounds(&self) -> Option<usize> {
+        self.retention_rounds
+    }
+
     pub fn create_checkpoint(
         &self,
         request: CreateCheckpointRequest,
     ) -> anyhow::Result<CreateCheckpointResult> {
+        let _root_lock = self.lock_root_shared()?;
         let workspace = resolve_workspace(&request.cwd)?;
         let state = self.workspace_state(&workspace);
         let _lock = self.lock_workspace(&state)?;
         self.prepare_repository(&workspace, &state)?;
+        let pruned_count = self.cleanup_workspace_locked(&workspace, &state, false)?;
 
         let request_id = non_empty_or_uuid(&request.request_id);
         let existing = self
@@ -203,7 +312,10 @@ impl WorkspaceCheckpointService {
                     && checkpoint.request_id == request_id
             });
         if let Some(checkpoint) = existing {
-            return Ok(CreateCheckpointResult { checkpoint });
+            return Ok(CreateCheckpointResult {
+                checkpoint,
+                pruned_count,
+            });
         }
 
         let checkpoint = self.snapshot_locked(
@@ -221,10 +333,14 @@ impl WorkspaceCheckpointService {
                 accepted: false,
             },
         )?;
-        Ok(CreateCheckpointResult { checkpoint })
+        Ok(CreateCheckpointResult {
+            checkpoint,
+            pruned_count,
+        })
     }
 
     pub fn bind_turn(&self, request: BindTurnRequest) -> anyhow::Result<CreateCheckpointResult> {
+        let _root_lock = self.lock_root_shared()?;
         let workspace = resolve_workspace(&request.cwd)?;
         let state = self.workspace_state(&workspace);
         let _lock = self.lock_workspace(&state)?;
@@ -236,28 +352,39 @@ impl WorkspaceCheckpointService {
             .ok_or_else(|| anyhow!("未找到待绑定的工作区 Checkpoint"))?;
         validate_thread_scope(&checkpoint, &request.thread_id)?;
 
+        let thread_id = optional_trimmed(&request.thread_id)
+            .or_else(|| optional_trimmed(&checkpoint.thread_id));
         let turn_id = optional_trimmed(&request.turn_id);
-        if !checkpoint.accepted || checkpoint.turn_id != turn_id {
+        if !checkpoint.accepted
+            || checkpoint.thread_id != thread_id.as_deref().unwrap_or_default()
+            || checkpoint.turn_id != turn_id
+        {
             self.append_event(
                 &state,
                 &CheckpointEvent::Bound {
                     checkpoint_id: checkpoint.id.clone(),
+                    thread_id,
                     turn_id,
                 },
             )?;
         }
+        let pruned_count = self.cleanup_workspace_locked(&workspace, &state, true)?;
         let checkpoint = self
             .load_checkpoints(&state)?
             .into_iter()
             .find(|candidate| candidate.id == checkpoint.id)
             .ok_or_else(|| anyhow!("Checkpoint 绑定后状态读取失败"))?;
-        Ok(CreateCheckpointResult { checkpoint })
+        Ok(CreateCheckpointResult {
+            checkpoint,
+            pruned_count,
+        })
     }
 
     pub fn list_checkpoints(
         &self,
         request: ListCheckpointsRequest,
     ) -> anyhow::Result<ListCheckpointsResult> {
+        let _root_lock = self.lock_root_shared()?;
         let workspace = resolve_workspace(&request.cwd)?;
         let state = self.workspace_state(&workspace);
         let _lock = self.lock_workspace(&state)?;
@@ -283,6 +410,7 @@ impl WorkspaceCheckpointService {
         &self,
         request: RestoreCheckpointRequest,
     ) -> anyhow::Result<RestoreCheckpointResult> {
+        let _root_lock = self.lock_root_shared()?;
         let workspace = resolve_workspace(&request.cwd)?;
         let state = self.workspace_state(&workspace);
         let _lock = self.lock_workspace(&state)?;
@@ -300,6 +428,7 @@ impl WorkspaceCheckpointService {
         &self,
         request: RestoreForRevertRequest,
     ) -> anyhow::Result<RestoreCheckpointResult> {
+        let _root_lock = self.lock_root_shared()?;
         let workspace = resolve_workspace(&request.cwd)?;
         let state = self.workspace_state(&workspace);
         let _lock = self.lock_workspace(&state)?;
@@ -313,6 +442,7 @@ impl WorkspaceCheckpointService {
         &self,
         request: RestoreForRevertRequest,
     ) -> anyhow::Result<PreviewRevertResult> {
+        let _root_lock = self.lock_root_shared()?;
         let workspace = resolve_workspace(&request.cwd)?;
         let state = self.workspace_state(&workspace);
         let _lock = self.lock_workspace(&state)?;
@@ -328,6 +458,317 @@ impl WorkspaceCheckpointService {
             checkpoint,
             changed_paths,
             has_changes,
+        })
+    }
+
+    pub fn management_summary(&self) -> anyhow::Result<WorkspaceCheckpointManagementSummary> {
+        let _root_lock = self.lock_root_shared()?;
+        self.management_summary_locked()
+    }
+
+    pub fn cleanup_storage(&self) -> anyhow::Result<WorkspaceCheckpointMaintenanceResult> {
+        let _root_lock = self.lock_root_shared()?;
+        let before = directory_size(&self.root)?;
+        let mut deleted_checkpoints = 0;
+        for (_, state) in self.workspace_states()? {
+            let workspace = workspace_path_for_state(&state);
+            let _workspace_lock = self.lock_workspace(&state)?;
+            deleted_checkpoints += self.cleanup_workspace_locked(&workspace, &state, true)?;
+        }
+        let summary = self.management_summary_locked()?;
+        Ok(WorkspaceCheckpointMaintenanceResult {
+            deleted_checkpoints,
+            compacted_workspaces: 0,
+            reclaimed_bytes: before.saturating_sub(summary.total_bytes),
+            summary,
+        })
+    }
+
+    pub fn compact_storage(&self) -> anyhow::Result<WorkspaceCheckpointMaintenanceResult> {
+        let _root_lock = self.lock_root_shared()?;
+        let before = directory_size(&self.root)?;
+        let mut deleted_checkpoints = 0;
+        let mut compacted_workspaces = 0;
+        for (_, state) in self.workspace_states()? {
+            let workspace = workspace_path_for_state(&state);
+            let _workspace_lock = self.lock_workspace(&state)?;
+            deleted_checkpoints += self.cleanup_workspace_locked(&workspace, &state, false)?;
+            if state.git_dir.is_dir() {
+                self.reconcile_checkpoint_refs_locked(&workspace, &state)?;
+                self.run_git_checked(
+                    &state,
+                    &workspace,
+                    ["reflog", "expire", "--expire=now", "--all"],
+                    "清理 Checkpoint 引用日志",
+                )?;
+                self.run_git_checked(
+                    &state,
+                    &workspace,
+                    ["gc", "--quiet", "--prune=now"],
+                    "压缩 Checkpoint 存储",
+                )?;
+                compacted_workspaces += 1;
+            }
+        }
+        let summary = self.management_summary_locked()?;
+        Ok(WorkspaceCheckpointMaintenanceResult {
+            deleted_checkpoints,
+            compacted_workspaces,
+            reclaimed_bytes: before.saturating_sub(summary.total_bytes),
+            summary,
+        })
+    }
+
+    pub fn delete_data(
+        &self,
+        request: DeleteWorkspaceCheckpointDataRequest,
+    ) -> anyhow::Result<WorkspaceCheckpointMaintenanceResult> {
+        let _root_lock = self.lock_root_shared()?;
+        let before = directory_size(&self.root)?;
+        let scope = request.scope.trim();
+        let mut deleted_checkpoints = 0;
+        match scope {
+            "all" => {
+                for (_, state) in self.workspace_states()? {
+                    deleted_checkpoints += self.delete_workspace_state(state)?;
+                }
+            }
+            "workspace" => {
+                let state = self.state_for_management_key(&request.workspace_key)?;
+                deleted_checkpoints += self.delete_workspace_state(state)?;
+            }
+            "thread" | "checkpoint" => {
+                let state = self.state_for_management_key(&request.workspace_key)?;
+                let workspace = workspace_path_for_state(&state);
+                let _workspace_lock = self.lock_workspace(&state)?;
+                let checkpoints = self.load_checkpoints(&state)?;
+                let remaining = checkpoints
+                    .iter()
+                    .filter(|checkpoint| {
+                        if scope == "thread" {
+                            checkpoint.thread_id != request.thread_id.trim()
+                        } else {
+                            checkpoint.id != request.checkpoint_id.trim()
+                        }
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                deleted_checkpoints = checkpoints.len().saturating_sub(remaining.len());
+                if deleted_checkpoints > 0 {
+                    self.replace_checkpoints_locked(&workspace, &state, &remaining)?;
+                    self.run_git_checked(
+                        &state,
+                        &workspace,
+                        ["gc", "--auto", "--quiet"],
+                        "整理 Checkpoint 存储",
+                    )?;
+                }
+            }
+            _ => bail!("不支持的 Checkpoint 删除范围"),
+        }
+        let summary = self.management_summary_locked()?;
+        Ok(WorkspaceCheckpointMaintenanceResult {
+            deleted_checkpoints,
+            compacted_workspaces: 0,
+            reclaimed_bytes: before.saturating_sub(summary.total_bytes),
+            summary,
+        })
+    }
+
+    pub fn migrate_storage<F>(&self, target: PathBuf, commit_settings: F) -> anyhow::Result<PathBuf>
+    where
+        F: FnOnce(&Path) -> anyhow::Result<()>,
+    {
+        validate_storage_root_path(&target)?;
+        if same_path(&self.root, &target) {
+            commit_settings(&target)?;
+            return Ok(target);
+        }
+        if path_is_within(&target, &self.root) || path_is_within(&self.root, &target) {
+            bail!("新的 Checkpoint 储存目录不能与当前目录互相嵌套");
+        }
+
+        let root_lock = self.lock_root_exclusive()?;
+        for (_, state) in self.workspace_states()? {
+            if let Some(descriptor) = read_workspace_descriptor(&state.dir) {
+                let workspace = PathBuf::from(descriptor.workspace);
+                if path_is_within(&target, &workspace) {
+                    bail!("Checkpoint 储存目录不能位于已管理的工作区内部");
+                }
+            }
+        }
+        let target_existed = target.exists();
+        let target = prepare_storage_target(&target)?;
+        if same_path(&self.root, &target) {
+            commit_settings(&target)?;
+            return Ok(target);
+        }
+        if path_is_within(&target, &self.root) || path_is_within(&self.root, &target) {
+            if !target_existed {
+                let _ = fs::remove_dir(&target);
+            }
+            bail!("新的 Checkpoint 储存目录不能与当前目录互相嵌套");
+        }
+        for (_, state) in self.workspace_states()? {
+            if let Some(descriptor) = read_workspace_descriptor(&state.dir) {
+                let workspace = PathBuf::from(descriptor.workspace);
+                if path_is_within(&target, &workspace) {
+                    if !target_existed {
+                        let _ = fs::remove_dir(&target);
+                    }
+                    bail!("Checkpoint 储存目录不能位于已管理的工作区内部");
+                }
+            }
+        }
+        if fs::read_dir(&target)?.next().transpose()?.is_some() {
+            bail!("新的 Checkpoint 储存目录必须为空");
+        }
+
+        let migration_result = (|| {
+            copy_directory_contents(&self.root, &target, &[ROOT_LOCK_FILE])?;
+            let source_bytes = directory_size_excluding(&self.root, &[ROOT_LOCK_FILE])?;
+            let target_bytes = directory_size(&target)?;
+            if source_bytes != target_bytes {
+                bail!(
+                    "Checkpoint 数据迁移校验失败：源目录 {source_bytes} 字节，目标目录 {target_bytes} 字节"
+                );
+            }
+            commit_settings(&target)?;
+            Ok(())
+        })();
+        if let Err(error) = migration_result {
+            let _ = clear_directory_contents(&target, &[]);
+            if !target_existed {
+                let _ = fs::remove_dir(&target);
+            }
+            return Err(error);
+        }
+
+        let _ = clear_directory_contents(&self.root, &[ROOT_LOCK_FILE]);
+        drop(root_lock);
+        let _ = fs::remove_file(self.root.join(ROOT_LOCK_FILE));
+        let _ = fs::remove_dir(&self.root);
+        Ok(target)
+    }
+
+    fn management_summary_locked(&self) -> anyhow::Result<WorkspaceCheckpointManagementSummary> {
+        let mut workspaces = Vec::new();
+        let mut thread_count = 0;
+        let mut checkpoint_count = 0;
+        let mut turn_count = 0;
+        let mut safety_count = 0;
+        let mut pending_count = 0;
+
+        for (key, state) in self.workspace_states()? {
+            let _workspace_lock = self.lock_workspace(&state)?;
+            let checkpoints = self.load_checkpoints(&state)?;
+            let descriptor = read_workspace_descriptor(&state.dir);
+            let workspace = descriptor
+                .as_ref()
+                .map(|descriptor| descriptor.workspace.clone())
+                .or_else(|| {
+                    checkpoints
+                        .first()
+                        .map(|checkpoint| checkpoint.workspace.clone())
+                })
+                .unwrap_or_else(|| "未知工作区".to_string());
+            let mut grouped = BTreeMap::<String, Vec<WorkspaceCheckpoint>>::new();
+            for checkpoint in checkpoints {
+                grouped
+                    .entry(checkpoint.thread_id.clone())
+                    .or_default()
+                    .push(checkpoint);
+            }
+            let mut threads = grouped
+                .into_iter()
+                .map(|(thread_id, mut checkpoints)| {
+                    checkpoints.sort_by_key(|checkpoint| checkpoint.created_at_ms);
+                    let turn_count = checkpoints
+                        .iter()
+                        .filter(|checkpoint| {
+                            checkpoint.kind == WorkspaceCheckpointKind::TurnStart
+                                && checkpoint.accepted
+                        })
+                        .count();
+                    let safety_count = checkpoints
+                        .iter()
+                        .filter(|checkpoint| {
+                            checkpoint.kind == WorkspaceCheckpointKind::RestoreSafety
+                        })
+                        .count();
+                    let pending_count = checkpoints
+                        .iter()
+                        .filter(|checkpoint| {
+                            checkpoint.kind == WorkspaceCheckpointKind::TurnStart
+                                && !checkpoint.accepted
+                        })
+                        .count();
+                    let last_activity_ms = checkpoints
+                        .iter()
+                        .map(|checkpoint| checkpoint.created_at_ms)
+                        .max()
+                        .unwrap_or_default();
+                    checkpoints.reverse();
+                    WorkspaceCheckpointThreadSummary {
+                        thread_id,
+                        checkpoint_count: checkpoints.len(),
+                        turn_count,
+                        safety_count,
+                        pending_count,
+                        last_activity_ms,
+                        checkpoints,
+                    }
+                })
+                .collect::<Vec<_>>();
+            threads.sort_by_key(|thread| std::cmp::Reverse(thread.last_activity_ms));
+
+            let workspace_checkpoint_count =
+                threads.iter().map(|thread| thread.checkpoint_count).sum();
+            let workspace_turn_count = threads.iter().map(|thread| thread.turn_count).sum();
+            let workspace_safety_count = threads.iter().map(|thread| thread.safety_count).sum();
+            let workspace_pending_count = threads.iter().map(|thread| thread.pending_count).sum();
+            let last_activity_ms = threads
+                .iter()
+                .map(|thread| thread.last_activity_ms)
+                .max()
+                .unwrap_or_default();
+            thread_count += threads
+                .iter()
+                .filter(|thread| !thread.thread_id.is_empty())
+                .count();
+            checkpoint_count += workspace_checkpoint_count;
+            turn_count += workspace_turn_count;
+            safety_count += workspace_safety_count;
+            pending_count += workspace_pending_count;
+            workspaces.push(WorkspaceCheckpointWorkspaceSummary {
+                key,
+                workspace,
+                storage_path: state.dir.to_string_lossy().into_owned(),
+                bytes: directory_size(&state.dir)?,
+                checkpoint_count: workspace_checkpoint_count,
+                turn_count: workspace_turn_count,
+                safety_count: workspace_safety_count,
+                pending_count: workspace_pending_count,
+                last_activity_ms,
+                threads,
+            });
+        }
+        workspaces.sort_by_key(|workspace| std::cmp::Reverse(workspace.last_activity_ms));
+
+        Ok(WorkspaceCheckpointManagementSummary {
+            root: self.root.to_string_lossy().into_owned(),
+            total_bytes: directory_size(&self.root)?,
+            workspace_count: workspaces.len(),
+            thread_count,
+            checkpoint_count,
+            turn_count,
+            safety_count,
+            pending_count,
+            retention_rounds: self
+                .retention_rounds
+                .map(|value| value.min(usize::from(u16::MAX)) as u16)
+                .unwrap_or_default(),
+            workspaces,
         })
     }
 
@@ -433,11 +874,16 @@ impl WorkspaceCheckpointService {
             "检查恢复结果",
         )?;
         let partial = !worktree_clean || !untracked.stdout.is_empty();
-        let warnings = if partial {
+        let mut warnings = if partial {
             vec!["部分嵌套仓库或并发写入的文件未能恢复；已保留恢复前安全 Checkpoint。".to_string()]
         } else {
             Vec::new()
         };
+        if let Err(error) = self.cleanup_workspace_locked(workspace, state, true) {
+            warnings.push(format!(
+                "工作区已恢复，但自动清理旧 Checkpoint 失败：{error}"
+            ));
+        }
 
         Ok(RestoreCheckpointResult {
             workspace: workspace_string(workspace),
@@ -463,24 +909,38 @@ impl WorkspaceCheckpointService {
         let commit_hash = if head.is_some() && changed_file_count == 0 {
             head.unwrap_or_default()
         } else {
+            let tree =
+                self.run_git_checked(state, workspace, ["write-tree"], "写入 Checkpoint 文件树")?;
+            let tree = String::from_utf8_lossy(&tree.stdout).trim().to_string();
+            if tree.is_empty() {
+                bail!("Git 未返回 Checkpoint 文件树");
+            }
             let message = format!("CodexElves checkpoint {}", metadata.id);
+            let commit = self.run_git_checked(
+                state,
+                workspace,
+                ["commit-tree", tree.as_str(), "-m", message.as_str()],
+                "创建工作区 Checkpoint",
+            )?;
+            let commit_hash = String::from_utf8_lossy(&commit.stdout).trim().to_string();
+            if commit_hash.is_empty() {
+                bail!("Checkpoint 提交创建成功但无法读取 commit");
+            }
             self.run_git_checked(
                 state,
                 workspace,
-                [
-                    "commit",
-                    "--quiet",
-                    "--allow-empty",
-                    "--no-verify",
-                    "--no-gpg-sign",
-                    "-m",
-                    message.as_str(),
-                ],
-                "创建工作区 Checkpoint",
+                ["update-ref", "refs/heads/checkpoint", commit_hash.as_str()],
+                "更新 Checkpoint 基线",
             )?;
-            self.try_head(state, workspace)?
-                .ok_or_else(|| anyhow!("Checkpoint 提交创建成功但无法读取 commit"))?
+            commit_hash
         };
+        let checkpoint_ref = checkpoint_ref_name(&metadata.id);
+        self.run_git_checked(
+            state,
+            workspace,
+            ["update-ref", checkpoint_ref.as_str(), commit_hash.as_str()],
+            "保存 Checkpoint 引用",
+        )?;
 
         let checkpoint = WorkspaceCheckpoint {
             schema_version: SCHEMA_VERSION,
@@ -710,6 +1170,9 @@ impl WorkspaceCheckpointService {
         fs::create_dir_all(&state.dir).with_context(|| {
             format!("无法创建 Checkpoint 目录：{}", state.dir.to_string_lossy())
         })?;
+        let previous_storage_version = read_workspace_descriptor(&state.dir)
+            .map(|descriptor| descriptor.schema_version)
+            .unwrap_or_default();
         if !state.git_dir.is_dir() {
             fs::create_dir_all(&state.repository_dir)?;
             let output = self.run_plain_git(
@@ -748,10 +1211,13 @@ impl WorkspaceCheckpointService {
             b"* -text -eol -filter -ident -working-tree-encoding\n",
         )?;
 
-        let descriptor = json!({
-            "schemaVersion": SCHEMA_VERSION,
-            "workspace": workspace_string(workspace),
-        });
+        if previous_storage_version < STORAGE_VERSION && state.events_path.is_file() {
+            self.migrate_legacy_history_locked(workspace, state)?;
+        }
+        let descriptor = WorkspaceDescriptor {
+            schema_version: STORAGE_VERSION,
+            workspace: workspace_string(workspace),
+        };
         fs::write(
             state.dir.join("workspace.json"),
             serde_json::to_vec_pretty(&descriptor)?,
@@ -761,6 +1227,10 @@ impl WorkspaceCheckpointService {
 
     fn workspace_state(&self, workspace: &Path) -> WorkspaceState {
         let key = workspace_key(workspace);
+        self.workspace_state_from_key(&key)
+    }
+
+    fn workspace_state_from_key(&self, key: &str) -> WorkspaceState {
         let dir = self.root.join(key);
         let repository_dir = dir.join("repository");
         WorkspaceState {
@@ -784,6 +1254,412 @@ impl WorkspaceCheckpointService {
         file.lock_exclusive()
             .with_context(|| "无法锁定工作区 Checkpoint 存储")?;
         Ok(file)
+    }
+
+    fn lock_root_shared(&self) -> anyhow::Result<File> {
+        fs::create_dir_all(&self.root).with_context(|| {
+            format!(
+                "无法创建 Checkpoint 储存目录：{}",
+                self.root.to_string_lossy()
+            )
+        })?;
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(self.root.join(ROOT_LOCK_FILE))?;
+        FileExt::lock_shared(&file).with_context(|| "无法锁定 Checkpoint 储存目录")?;
+        Ok(file)
+    }
+
+    fn lock_root_exclusive(&self) -> anyhow::Result<File> {
+        fs::create_dir_all(&self.root).with_context(|| {
+            format!(
+                "无法创建 Checkpoint 储存目录：{}",
+                self.root.to_string_lossy()
+            )
+        })?;
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(self.root.join(ROOT_LOCK_FILE))?;
+        FileExt::lock_exclusive(&file).with_context(|| "无法独占 Checkpoint 储存目录")?;
+        Ok(file)
+    }
+
+    fn workspace_states(&self) -> anyhow::Result<Vec<(String, WorkspaceState)>> {
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut states = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let key = entry.file_name().to_string_lossy().into_owned();
+            if !valid_workspace_key(&key) {
+                continue;
+            }
+            let state = self.workspace_state_from_key(&key);
+            if state.events_path.is_file()
+                || state.git_dir.is_dir()
+                || state.dir.join("workspace.json").is_file()
+            {
+                states.push((key, state));
+            }
+        }
+        states.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(states)
+    }
+
+    fn state_for_management_key(&self, raw_key: &str) -> anyhow::Result<WorkspaceState> {
+        let key = raw_key.trim();
+        if !valid_workspace_key(key) {
+            bail!("无效的 Checkpoint 工作区标识");
+        }
+        let state = self.workspace_state_from_key(key);
+        if !state.dir.is_dir() {
+            bail!("未找到指定的 Checkpoint 工作区");
+        }
+        Ok(state)
+    }
+
+    fn delete_workspace_state(&self, state: WorkspaceState) -> anyhow::Result<usize> {
+        if !state.dir.is_dir() {
+            return Ok(0);
+        }
+        let checkpoint_count;
+        {
+            let _workspace_lock = self.lock_workspace(&state)?;
+            checkpoint_count = self.load_checkpoints(&state)?.len();
+            for entry in fs::read_dir(&state.dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path == state.lock_path {
+                    continue;
+                }
+                remove_path(&path)?;
+            }
+        }
+        match fs::remove_file(&state.lock_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        match fs::remove_dir(&state.dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(checkpoint_count)
+    }
+
+    fn cleanup_workspace_locked(
+        &self,
+        workspace: &Path,
+        state: &WorkspaceState,
+        auto_gc: bool,
+    ) -> anyhow::Result<usize> {
+        let checkpoints = self.load_checkpoints(state)?;
+        if checkpoints.is_empty() {
+            return Ok(0);
+        }
+        let mut deleted_ids = HashSet::<String>::new();
+        let now = now_ms();
+        let pending_ttl_ms = PENDING_CHECKPOINT_TTL.as_millis() as u64;
+        for checkpoint in &checkpoints {
+            if checkpoint.kind == WorkspaceCheckpointKind::TurnStart
+                && !checkpoint.accepted
+                && now.saturating_sub(checkpoint.created_at_ms) >= pending_ttl_ms
+            {
+                deleted_ids.insert(checkpoint.id.clone());
+            }
+        }
+
+        if let Some(limit) = self.retention_rounds {
+            let mut turns_by_thread = BTreeMap::<String, Vec<&WorkspaceCheckpoint>>::new();
+            for checkpoint in &checkpoints {
+                if checkpoint.kind == WorkspaceCheckpointKind::TurnStart && checkpoint.accepted {
+                    turns_by_thread
+                        .entry(checkpoint.thread_id.clone())
+                        .or_default()
+                        .push(checkpoint);
+                }
+            }
+            for turns in turns_by_thread.values() {
+                let remove_count = turns.len().saturating_sub(limit);
+                for checkpoint in turns.iter().take(remove_count) {
+                    deleted_ids.insert(checkpoint.id.clone());
+                }
+            }
+        }
+
+        let mut safety_by_thread = BTreeMap::<String, Vec<&WorkspaceCheckpoint>>::new();
+        for checkpoint in &checkpoints {
+            if checkpoint.kind == WorkspaceCheckpointKind::RestoreSafety {
+                safety_by_thread
+                    .entry(checkpoint.thread_id.clone())
+                    .or_default()
+                    .push(checkpoint);
+            }
+        }
+        for safety_checkpoints in safety_by_thread.values() {
+            let remove_count = safety_checkpoints
+                .len()
+                .saturating_sub(MAX_RESTORE_SAFETY_CHECKPOINTS_PER_THREAD);
+            for checkpoint in safety_checkpoints.iter().take(remove_count) {
+                deleted_ids.insert(checkpoint.id.clone());
+            }
+        }
+
+        if deleted_ids.is_empty() {
+            return Ok(0);
+        }
+        let remaining = checkpoints
+            .into_iter()
+            .filter(|checkpoint| !deleted_ids.contains(&checkpoint.id))
+            .collect::<Vec<_>>();
+        self.replace_checkpoints_locked(workspace, state, &remaining)?;
+        if auto_gc && state.git_dir.is_dir() {
+            self.run_git_checked(
+                state,
+                workspace,
+                ["gc", "--auto", "--quiet"],
+                "整理 Checkpoint 存储",
+            )?;
+        }
+        Ok(deleted_ids.len())
+    }
+
+    fn replace_checkpoints_locked(
+        &self,
+        workspace: &Path,
+        state: &WorkspaceState,
+        remaining: &[WorkspaceCheckpoint],
+    ) -> anyhow::Result<()> {
+        let previous = self.load_checkpoints(state)?;
+        let remaining_ids = remaining
+            .iter()
+            .map(|checkpoint| checkpoint.id.as_str())
+            .collect::<HashSet<_>>();
+        let removed = previous
+            .iter()
+            .filter(|checkpoint| !remaining_ids.contains(checkpoint.id.as_str()))
+            .collect::<Vec<_>>();
+        self.rewrite_events(state, remaining)?;
+        if state.git_dir.is_dir() {
+            for checkpoint in removed {
+                self.delete_checkpoint_ref(state, workspace, &checkpoint.id)?;
+            }
+            self.refresh_baseline_ref(state, workspace, remaining)?;
+        }
+        Ok(())
+    }
+
+    fn rewrite_events(
+        &self,
+        state: &WorkspaceState,
+        checkpoints: &[WorkspaceCheckpoint],
+    ) -> anyhow::Result<()> {
+        fs::create_dir_all(&state.dir)?;
+        let temp_path = state
+            .dir
+            .join(format!("events-{}.jsonl.tmp", Uuid::new_v4().hyphenated()));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temp_path)?;
+            for checkpoint in checkpoints {
+                let mut bytes = serde_json::to_vec(&CheckpointEvent::Created {
+                    checkpoint: checkpoint.clone(),
+                })?;
+                bytes.push(b'\n');
+                file.write_all(&bytes)?;
+                if checkpoint.accepted {
+                    let mut bytes = serde_json::to_vec(&CheckpointEvent::Bound {
+                        checkpoint_id: checkpoint.id.clone(),
+                        thread_id: optional_trimmed(&checkpoint.thread_id),
+                        turn_id: checkpoint.turn_id.clone(),
+                    })?;
+                    bytes.push(b'\n');
+                    file.write_all(&bytes)?;
+                }
+            }
+            file.sync_all()?;
+            replace_file(&temp_path, &state.events_path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        result
+    }
+
+    fn delete_checkpoint_ref(
+        &self,
+        state: &WorkspaceState,
+        workspace: &Path,
+        checkpoint_id: &str,
+    ) -> anyhow::Result<()> {
+        let reference = checkpoint_ref_name(checkpoint_id);
+        self.run_git_checked(
+            state,
+            workspace,
+            ["update-ref", "-d", reference.as_str()],
+            "删除 Checkpoint 引用",
+        )?;
+        Ok(())
+    }
+
+    fn refresh_baseline_ref(
+        &self,
+        state: &WorkspaceState,
+        workspace: &Path,
+        checkpoints: &[WorkspaceCheckpoint],
+    ) -> anyhow::Result<()> {
+        if let Some(checkpoint) = checkpoints.last() {
+            self.verify_commit(state, workspace, &checkpoint.commit_hash)?;
+            self.run_git_checked(
+                state,
+                workspace,
+                [
+                    "update-ref",
+                    "refs/heads/checkpoint",
+                    checkpoint.commit_hash.as_str(),
+                ],
+                "更新 Checkpoint 基线",
+            )?;
+            self.run_git_checked(
+                state,
+                workspace,
+                ["read-tree", checkpoint.commit_hash.as_str()],
+                "同步 Checkpoint 索引",
+            )?;
+        } else {
+            self.run_git_checked(
+                state,
+                workspace,
+                ["update-ref", "-d", "refs/heads/checkpoint"],
+                "清除 Checkpoint 基线",
+            )?;
+            match fs::remove_file(state.git_dir.join("index")) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_checkpoint_refs_locked(
+        &self,
+        workspace: &Path,
+        state: &WorkspaceState,
+    ) -> anyhow::Result<()> {
+        let checkpoints = self.load_checkpoints(state)?;
+        let active_refs = checkpoints
+            .iter()
+            .map(|checkpoint| checkpoint_ref_name(&checkpoint.id))
+            .collect::<HashSet<_>>();
+        for checkpoint in &checkpoints {
+            let reference = checkpoint_ref_name(&checkpoint.id);
+            self.run_git_checked(
+                state,
+                workspace,
+                [
+                    "update-ref",
+                    reference.as_str(),
+                    checkpoint.commit_hash.as_str(),
+                ],
+                "修复 Checkpoint 引用",
+            )?;
+        }
+        let refs = self.run_git_checked(
+            state,
+            workspace,
+            ["for-each-ref", "--format=%(refname)", CHECKPOINT_REF_PREFIX],
+            "读取 Checkpoint 引用",
+        )?;
+        for reference in String::from_utf8_lossy(&refs.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|reference| !reference.is_empty())
+        {
+            if !active_refs.contains(reference) {
+                self.run_git_checked(
+                    state,
+                    workspace,
+                    ["update-ref", "-d", reference],
+                    "清理失效 Checkpoint 引用",
+                )?;
+            }
+        }
+        self.refresh_baseline_ref(state, workspace, &checkpoints)
+    }
+
+    fn migrate_legacy_history_locked(
+        &self,
+        workspace: &Path,
+        state: &WorkspaceState,
+    ) -> anyhow::Result<()> {
+        let mut checkpoints = self.load_checkpoints(state)?;
+        if checkpoints.is_empty() {
+            return Ok(());
+        }
+        for checkpoint in &mut checkpoints {
+            self.verify_commit(state, workspace, &checkpoint.commit_hash)?;
+            let parents = self.run_git_checked(
+                state,
+                workspace,
+                [
+                    "rev-list",
+                    "--parents",
+                    "-n",
+                    "1",
+                    checkpoint.commit_hash.as_str(),
+                ],
+                "检查旧版 Checkpoint 历史",
+            )?;
+            if String::from_utf8_lossy(&parents.stdout)
+                .split_whitespace()
+                .count()
+                > 1
+            {
+                let object = format!("{}^{{tree}}", checkpoint.commit_hash);
+                let tree = self.run_git_checked(
+                    state,
+                    workspace,
+                    ["rev-parse", object.as_str()],
+                    "读取旧版 Checkpoint 文件树",
+                )?;
+                let tree = String::from_utf8_lossy(&tree.stdout).trim().to_string();
+                let message = format!("CodexElves checkpoint {}", checkpoint.id);
+                let commit = self.run_git_checked(
+                    state,
+                    workspace,
+                    ["commit-tree", tree.as_str(), "-m", message.as_str()],
+                    "迁移旧版 Checkpoint",
+                )?;
+                checkpoint.commit_hash = String::from_utf8_lossy(&commit.stdout).trim().to_string();
+            }
+            let reference = checkpoint_ref_name(&checkpoint.id);
+            self.run_git_checked(
+                state,
+                workspace,
+                [
+                    "update-ref",
+                    reference.as_str(),
+                    checkpoint.commit_hash.as_str(),
+                ],
+                "迁移 Checkpoint 引用",
+            )?;
+        }
+        self.rewrite_events(state, &checkpoints)?;
+        self.refresh_baseline_ref(state, workspace, &checkpoints)
     }
 
     fn load_checkpoints(&self, state: &WorkspaceState) -> anyhow::Result<Vec<WorkspaceCheckpoint>> {
@@ -813,10 +1689,15 @@ impl WorkspaceCheckpointService {
                 }
                 CheckpointEvent::Bound {
                     checkpoint_id,
+                    thread_id,
                     turn_id,
                 } => {
                     if let Some(index) = indexes.get(&checkpoint_id).copied() {
                         checkpoints[index].accepted = true;
+                        if let Some(thread_id) = thread_id.filter(|value| !value.trim().is_empty())
+                        {
+                            checkpoints[index].thread_id = thread_id;
+                        }
                         checkpoints[index].turn_id = turn_id;
                     }
                 }
@@ -859,12 +1740,14 @@ impl WorkspaceCheckpointService {
             .arg("-c")
             .arg("core.longpaths=true")
             .arg("-c")
+            .arg("commit.gpgSign=false")
+            .arg("-c")
             .arg(format!(
                 "core.hooksPath={}",
                 state.hooks_dir.to_string_lossy()
             ))
             .args(args)
-            .current_dir(workspace);
+            .current_dir(git_current_dir(workspace, state));
         command
             .output()
             .with_context(|| "无法执行 Git；Checkpoint 功能需要本机 Git")
@@ -908,12 +1791,14 @@ impl WorkspaceCheckpointService {
             .arg("-c")
             .arg("core.longpaths=true")
             .arg("-c")
+            .arg("commit.gpgSign=false")
+            .arg("-c")
             .arg(format!(
                 "core.hooksPath={}",
                 state.hooks_dir.to_string_lossy()
             ))
             .args(args)
-            .current_dir(workspace);
+            .current_dir(git_current_dir(workspace, state));
         command
             .output()
             .with_context(|| "无法执行 Git；Checkpoint 功能需要本机 Git")
@@ -1000,6 +1885,13 @@ struct WorkspaceState {
     hooks_dir: PathBuf,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceDescriptor {
+    schema_version: u32,
+    workspace: String,
+}
+
 pub async fn handle_create(service: WorkspaceCheckpointService, payload: Value) -> Value {
     let request = match serde_json::from_value::<CreateCheckpointRequest>(payload) {
         Ok(request) => request,
@@ -1077,6 +1969,228 @@ fn failed(code: &str, error: impl std::fmt::Display) -> Value {
         "code": code,
         "message": error.to_string(),
     })
+}
+
+pub fn configured_root(settings: &crate::settings::BackendSettings) -> anyhow::Result<PathBuf> {
+    let raw = settings
+        .codex_app_workspace_checkpoint_storage_path
+        .trim()
+        .trim_matches('"');
+    if raw.is_empty() {
+        return Ok(crate::paths::default_workspace_checkpoints_dir());
+    }
+    let path = PathBuf::from(raw);
+    validate_storage_root_path(&path)?;
+    Ok(path)
+}
+
+fn checkpoint_ref_name(checkpoint_id: &str) -> String {
+    let digest = Sha256::digest(checkpoint_id.as_bytes());
+    let key = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{CHECKPOINT_REF_PREFIX}{key}")
+}
+
+fn valid_workspace_key(key: &str) -> bool {
+    key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn read_workspace_descriptor(dir: &Path) -> Option<WorkspaceDescriptor> {
+    let contents = fs::read(dir.join("workspace.json")).ok()?;
+    serde_json::from_slice(&contents).ok()
+}
+
+fn workspace_path_for_state(state: &WorkspaceState) -> PathBuf {
+    read_workspace_descriptor(&state.dir)
+        .map(|descriptor| PathBuf::from(descriptor.workspace))
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| state.dir.clone())
+}
+
+fn git_current_dir<'a>(workspace: &'a Path, state: &'a WorkspaceState) -> &'a Path {
+    if workspace.is_dir() {
+        workspace
+    } else {
+        &state.dir
+    }
+}
+
+fn directory_size(path: &Path) -> anyhow::Result<u64> {
+    directory_size_excluding(path, &[])
+}
+
+fn directory_size_excluding(path: &Path, excluded_names: &[&str]) -> anyhow::Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let mut total = 0_u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        for entry in fs::read_dir(&current)? {
+            let entry = entry?;
+            if current == path
+                && excluded_names
+                    .iter()
+                    .any(|name| entry.file_name() == OsStr::new(name))
+            {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if metadata.file_type().is_symlink() || metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+            } else if metadata.is_dir() {
+                stack.push(entry.path());
+            }
+        }
+    }
+    Ok(total)
+}
+
+fn replace_file(source: &Path, target: &Path) -> anyhow::Result<()> {
+    match fs::remove_file(target) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    fs::rename(source, target)
+        .with_context(|| format!("无法替换 Checkpoint 索引：{}", target.to_string_lossy()))
+}
+
+fn remove_path(path: &Path) -> anyhow::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn clear_directory_contents(path: &Path, excluded_names: &[&str]) -> anyhow::Result<()> {
+    if !path.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        if excluded_names
+            .iter()
+            .any(|name| entry.file_name() == OsStr::new(name))
+        {
+            continue;
+        }
+        remove_path(&entry.path())?;
+    }
+    Ok(())
+}
+
+fn copy_directory_contents(
+    source: &Path,
+    target: &Path,
+    excluded_names: &[&str],
+) -> anyhow::Result<()> {
+    fs::create_dir_all(target)?;
+    if !source.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        if excluded_names
+            .iter()
+            .any(|name| entry.file_name() == OsStr::new(name))
+        {
+            continue;
+        }
+        copy_path(&entry.path(), &target.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+fn copy_path(source: &Path, target: &Path) -> anyhow::Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() {
+        bail!(
+            "Checkpoint 储存目录包含不支持迁移的符号链接：{}",
+            source.to_string_lossy()
+        );
+    }
+    if metadata.is_dir() {
+        fs::create_dir_all(target)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            copy_path(&entry.path(), &target.join(entry.file_name()))?;
+        }
+    } else {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(source, target)?;
+    }
+    Ok(())
+}
+
+fn prepare_storage_target(path: &Path) -> anyhow::Result<PathBuf> {
+    validate_storage_root_path(path)?;
+    fs::create_dir_all(path)
+        .with_context(|| format!("无法创建 Checkpoint 储存目录：{}", path.to_string_lossy()))?;
+    let path = without_verbatim_prefix(fs::canonicalize(path)?);
+    validate_storage_root_path(&path)?;
+    Ok(path)
+}
+
+fn validate_storage_root_path(path: &Path) -> anyhow::Result<()> {
+    if !path.is_absolute() {
+        bail!("Checkpoint 储存目录必须是绝对路径");
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        bail!("Checkpoint 储存目录不能包含上级目录跳转");
+    }
+    if !path
+        .components()
+        .any(|component| matches!(component, Component::Normal(_)))
+    {
+        bail!("拒绝把磁盘根目录用作 Checkpoint 储存目录");
+    }
+    Ok(())
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    normalized_path_for_comparison(left) == normalized_path_for_comparison(right)
+}
+
+fn path_is_within(path: &Path, parent: &Path) -> bool {
+    let path = normalized_path_for_comparison(path);
+    let mut parent = normalized_path_for_comparison(parent);
+    if path == parent {
+        return true;
+    }
+    if !parent.ends_with('/') {
+        parent.push('/');
+    }
+    path.starts_with(&parent)
+}
+
+fn normalized_path_for_comparison(path: &Path) -> String {
+    let path = fs::canonicalize(path)
+        .map(without_verbatim_prefix)
+        .unwrap_or_else(|_| path.to_path_buf());
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    #[cfg(windows)]
+    {
+        return normalized.to_lowercase();
+    }
+    #[cfg(not(windows))]
+    {
+        normalized
+    }
 }
 
 fn resolve_workspace(raw: &str) -> anyhow::Result<PathBuf> {

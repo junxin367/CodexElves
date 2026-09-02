@@ -13,6 +13,10 @@ use codex_elves_core::settings::{
 };
 use codex_elves_core::status::{LaunchStatus, StatusStore};
 use codex_elves_core::user_scripts::UserScriptManager;
+use codex_elves_core::workspace_checkpoint::{
+    DeleteWorkspaceCheckpointDataRequest, WorkspaceCheckpointMaintenanceResult,
+    WorkspaceCheckpointManagementSummary, WorkspaceCheckpointService, configured_root,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -59,6 +63,24 @@ pub struct SettingsPayload {
     pub codex_home: String,
     pub user_scripts: Value,
     pub layered_compaction_default_prompt: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceCheckpointManagementPayload {
+    pub settings: BackendSettings,
+    pub summary: WorkspaceCheckpointManagementSummary,
+    pub deleted_checkpoints: usize,
+    pub compacted_workspaces: usize,
+    pub reclaimed_bytes: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveWorkspaceCheckpointSettingsRequest {
+    #[serde(default)]
+    pub storage_path: String,
+    pub retention_rounds: u16,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -567,6 +589,10 @@ pub async fn save_settings(settings: BackendSettings) -> CommandResult<SettingsP
     let mut previous_overlay: Option<ImageOverlaySnapshot> = None;
     let mut previous_lan_proxy_enabled = false;
     if let Ok(saved_settings) = store.load() {
+        // Storage-path changes must go through the dedicated migration command.
+        settings.codex_app_workspace_checkpoint_storage_path = saved_settings
+            .codex_app_workspace_checkpoint_storage_path
+            .clone();
         merge_saved_responses_websocket_capabilities(&mut settings, &saved_settings);
         previous_overlay = Some(ImageOverlaySnapshot::from(&saved_settings));
         previous_lan_proxy_enabled = saved_settings.lan_proxy_enabled;
@@ -631,6 +657,204 @@ pub async fn save_settings(settings: BackendSettings) -> CommandResult<SettingsP
                 layered_compaction_default_prompt:
                     codex_elves_core::layered_compaction::DEFAULT_COMPACTION_PROMPT,
             },
+        ),
+    }
+}
+
+#[tauri::command]
+pub async fn load_workspace_checkpoint_management()
+-> CommandResult<WorkspaceCheckpointManagementPayload> {
+    match tauri::async_runtime::spawn_blocking(workspace_checkpoint_management_payload).await {
+        Ok(Ok(payload)) => ok("Checkpoint 储存状态已加载。", payload),
+        Ok(Err(error)) => failed(
+            &format!("读取 Checkpoint 储存状态失败：{error}"),
+            fallback_workspace_checkpoint_management_payload(),
+        ),
+        Err(error) => failed(
+            &format!("读取 Checkpoint 储存状态失败：{error}"),
+            fallback_workspace_checkpoint_management_payload(),
+        ),
+    }
+}
+
+#[tauri::command]
+pub async fn save_workspace_checkpoint_settings(
+    request: SaveWorkspaceCheckpointSettingsRequest,
+) -> CommandResult<WorkspaceCheckpointManagementPayload> {
+    let _guard = settings_write_mutex().lock().await;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let store = SettingsStore::default();
+        let current = store.load().unwrap_or_default();
+        let mut next = current.clone();
+        next.codex_app_workspace_checkpoint_storage_path =
+            request.storage_path.trim().trim_matches('"').to_string();
+        next.codex_app_workspace_checkpoint_retention_rounds =
+            codex_elves_core::settings::clamp_workspace_checkpoint_retention_rounds(u64::from(
+                request.retention_rounds,
+            ));
+        next = normalize_settings_before_save(next);
+
+        let old_root = configured_root(&current)?;
+        let target_root = configured_root(&next)?;
+        let old_service = WorkspaceCheckpointService::new(old_root)
+            .with_retention_rounds(current.codex_app_workspace_checkpoint_retention_rounds);
+        let store_for_commit = store.clone();
+        let path_is_default = next
+            .codex_app_workspace_checkpoint_storage_path
+            .trim()
+            .is_empty();
+        old_service.migrate_storage(target_root, move |resolved_target| {
+            if path_is_default {
+                next.codex_app_workspace_checkpoint_storage_path.clear();
+            } else {
+                next.codex_app_workspace_checkpoint_storage_path =
+                    resolved_target.to_string_lossy().into_owned();
+            }
+            store_for_commit.save(&next)
+        })?;
+        workspace_checkpoint_management_payload()
+    })
+    .await;
+
+    match result {
+        Ok(Ok(payload)) => ok("Checkpoint 设置已保存，储存目录已完成校验。", payload),
+        Ok(Err(error)) => failed(
+            &format!("保存 Checkpoint 设置失败：{error}"),
+            fallback_workspace_checkpoint_management_payload(),
+        ),
+        Err(error) => failed(
+            &format!("保存 Checkpoint 设置失败：{error}"),
+            fallback_workspace_checkpoint_management_payload(),
+        ),
+    }
+}
+
+#[tauri::command]
+pub async fn set_workspace_checkpoint_enabled(
+    enabled: bool,
+) -> CommandResult<WorkspaceCheckpointManagementPayload> {
+    let _guard = settings_write_mutex().lock().await;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let store = SettingsStore::default();
+        let mut settings = store.load().unwrap_or_default();
+        settings.codex_app_workspace_checkpoint = enabled;
+        let settings = normalize_settings_before_save(settings);
+        store.save(&settings)?;
+        workspace_checkpoint_management_payload()
+    })
+    .await;
+
+    match result {
+        Ok(Ok(payload)) => ok(
+            if enabled {
+                "Checkpoint 已启用，新轮次将继续创建快照。"
+            } else {
+                "Checkpoint 已停用，不再创建或恢复快照；已有数据仍可管理。"
+            },
+            payload,
+        ),
+        Ok(Err(error)) => failed(
+            &format!("更新 Checkpoint 开关失败：{error}"),
+            fallback_workspace_checkpoint_management_payload(),
+        ),
+        Err(error) => failed(
+            &format!("更新 Checkpoint 开关失败：{error}"),
+            fallback_workspace_checkpoint_management_payload(),
+        ),
+    }
+}
+
+#[tauri::command]
+pub async fn cleanup_workspace_checkpoint_storage()
+-> CommandResult<WorkspaceCheckpointManagementPayload> {
+    let result = tauri::async_runtime::spawn_blocking(|| {
+        let settings = SettingsStore::default().load().unwrap_or_default();
+        let service = workspace_checkpoint_service(&settings)?;
+        let maintenance = service.compact_storage()?;
+        Ok::<_, anyhow::Error>(workspace_checkpoint_payload(settings, maintenance))
+    })
+    .await;
+    match result {
+        Ok(Ok(payload)) => ok(
+            &format!(
+                "Checkpoint 空间释放完成，共移除 {} 个规则外快照，释放 {}。",
+                payload.deleted_checkpoints,
+                format_bytes(payload.reclaimed_bytes)
+            ),
+            payload,
+        ),
+        Ok(Err(error)) => failed(
+            &format!("释放 Checkpoint 空间失败：{error}"),
+            fallback_workspace_checkpoint_management_payload(),
+        ),
+        Err(error) => failed(
+            &format!("释放 Checkpoint 空间失败：{error}"),
+            fallback_workspace_checkpoint_management_payload(),
+        ),
+    }
+}
+
+#[tauri::command]
+pub async fn delete_workspace_checkpoint_data(
+    request: DeleteWorkspaceCheckpointDataRequest,
+) -> CommandResult<WorkspaceCheckpointManagementPayload> {
+    let deleting_all = request.scope.trim() == "all";
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let settings = SettingsStore::default().load().unwrap_or_default();
+        let service = workspace_checkpoint_service(&settings)?;
+        let maintenance = service.delete_data(request)?;
+        Ok::<_, anyhow::Error>(workspace_checkpoint_payload(settings, maintenance))
+    })
+    .await;
+    match result {
+        Ok(Ok(payload)) => {
+            let message = if deleting_all {
+                format!(
+                    "已清空全部 Checkpoint，共删除 {} 个快照，释放 {}。",
+                    payload.deleted_checkpoints,
+                    format_bytes(payload.reclaimed_bytes)
+                )
+            } else {
+                format!(
+                    "已删除 {} 个 Checkpoint，释放 {}。",
+                    payload.deleted_checkpoints,
+                    format_bytes(payload.reclaimed_bytes)
+                )
+            };
+            ok(&message, payload)
+        }
+        Ok(Err(error)) => failed(
+            &format!("删除 Checkpoint 数据失败：{error}"),
+            fallback_workspace_checkpoint_management_payload(),
+        ),
+        Err(error) => failed(
+            &format!("删除 Checkpoint 数据失败：{error}"),
+            fallback_workspace_checkpoint_management_payload(),
+        ),
+    }
+}
+
+#[tauri::command]
+pub fn open_workspace_checkpoint_storage() -> CommandResult<Value> {
+    let settings = SettingsStore::default().load().unwrap_or_default();
+    let root = match configured_root(&settings) {
+        Ok(root) => root,
+        Err(error) => return failed(&format!("Checkpoint 储存目录无效：{error}"), json!({})),
+    };
+    if let Err(error) = fs::create_dir_all(&root) {
+        return failed(
+            &format!("无法创建 Checkpoint 储存目录：{error}"),
+            json!({ "path": root.to_string_lossy() }),
+        );
+    }
+    match open_local_directory(&root) {
+        Ok(()) => ok(
+            "已打开 Checkpoint 储存目录。",
+            json!({ "path": root.to_string_lossy() }),
+        ),
+        Err(error) => failed(
+            &format!("打开 Checkpoint 储存目录失败：{error}"),
+            json!({ "path": root.to_string_lossy() }),
         ),
     }
 }
@@ -844,6 +1068,15 @@ fn normalize_settings_before_save(mut settings: BackendSettings) -> BackendSetti
     }
     settings.codex_home_path =
         codex_elves_core::settings::normalize_codex_home_path(&settings.codex_home_path);
+    settings.codex_app_workspace_checkpoint_storage_path = settings
+        .codex_app_workspace_checkpoint_storage_path
+        .trim()
+        .trim_matches('"')
+        .to_string();
+    settings.codex_app_workspace_checkpoint_retention_rounds =
+        codex_elves_core::settings::clamp_workspace_checkpoint_retention_rounds(u64::from(
+            settings.codex_app_workspace_checkpoint_retention_rounds,
+        ));
     settings.relay_common_config_contents =
         codex_elves_core::relay_config::sanitize_common_config_contents(
             &settings.relay_common_config_contents,
@@ -3670,6 +3903,110 @@ fn open_url(url: &str) -> anyhow::Result<()> {
             .spawn()
             .map(|_| ())
             .map_err(|error| anyhow::anyhow!("启动系统浏览器失败：{error}"))
+    }
+}
+
+fn open_local_directory(path: &Path) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new("explorer");
+        command
+            .arg(path)
+            .creation_flags(codex_elves_core::windows_create_no_window());
+        command
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!("启动资源管理器失败：{error}"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!("启动 Finder 失败：{error}"))
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!("启动文件管理器失败：{error}"))
+    }
+}
+
+fn workspace_checkpoint_service(
+    settings: &BackendSettings,
+) -> anyhow::Result<WorkspaceCheckpointService> {
+    Ok(WorkspaceCheckpointService::new(configured_root(settings)?)
+        .with_retention_rounds(settings.codex_app_workspace_checkpoint_retention_rounds))
+}
+
+fn workspace_checkpoint_management_payload() -> anyhow::Result<WorkspaceCheckpointManagementPayload>
+{
+    let settings = SettingsStore::default().load().unwrap_or_default();
+    let summary = workspace_checkpoint_service(&settings)?.management_summary()?;
+    Ok(WorkspaceCheckpointManagementPayload {
+        settings,
+        summary,
+        deleted_checkpoints: 0,
+        compacted_workspaces: 0,
+        reclaimed_bytes: 0,
+    })
+}
+
+fn workspace_checkpoint_payload(
+    settings: BackendSettings,
+    maintenance: WorkspaceCheckpointMaintenanceResult,
+) -> WorkspaceCheckpointManagementPayload {
+    WorkspaceCheckpointManagementPayload {
+        settings,
+        summary: maintenance.summary,
+        deleted_checkpoints: maintenance.deleted_checkpoints,
+        compacted_workspaces: maintenance.compacted_workspaces,
+        reclaimed_bytes: maintenance.reclaimed_bytes,
+    }
+}
+
+fn fallback_workspace_checkpoint_management_payload() -> WorkspaceCheckpointManagementPayload {
+    let settings = SettingsStore::default().load().unwrap_or_default();
+    let root = configured_root(&settings)
+        .unwrap_or_else(|_| codex_elves_core::paths::default_workspace_checkpoints_dir());
+    WorkspaceCheckpointManagementPayload {
+        summary: WorkspaceCheckpointManagementSummary {
+            root: root.to_string_lossy().into_owned(),
+            total_bytes: 0,
+            workspace_count: 0,
+            thread_count: 0,
+            checkpoint_count: 0,
+            turn_count: 0,
+            safety_count: 0,
+            pending_count: 0,
+            retention_rounds: settings.codex_app_workspace_checkpoint_retention_rounds,
+            workspaces: Vec::new(),
+        },
+        settings,
+        deleted_checkpoints: 0,
+        compacted_workspaces: 0,
+        reclaimed_bytes: 0,
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes / GIB)
+    } else if bytes >= MIB {
+        format!("{:.2} MiB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes / KIB)
+    } else {
+        format!("{} B", bytes as u64)
     }
 }
 

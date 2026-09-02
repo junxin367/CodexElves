@@ -1,3 +1,5 @@
+mod support;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
@@ -11,6 +13,7 @@ use codex_elves_core::task_board::{
     TaskBoardStatus, TaskBoardStore, TaskBoardStoreError, TaskBoardTask,
 };
 use serde_json::{Value, json};
+use support::DiagnosticLogCapture;
 
 const TASK_ID: &str = "62a0a38e-65bd-4c49-b6ef-3d19d06f2d4e";
 const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -292,7 +295,7 @@ async fn move_store_errors_use_the_shared_frozen_error_envelopes() {
 async fn unavailable_move_store_error_is_fixed_and_private() {
     let temp = tempfile::tempdir().unwrap();
     let log_path = temp.path().join("diagnostic.log");
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
+    let diagnostic_log = DiagnosticLogCapture::new(log_path);
     let unavailable_path = PathBuf::from("E:\\private\\task-board.lock");
     let unavailable_message = concat!(
         "dbPath=C:\\private\\codex.sqlite ",
@@ -314,7 +317,6 @@ async fn unavailable_move_store_error_is_fixed_and_private() {
     )
     .await;
 
-    codex_elves_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
     assert_eq!(
         response,
         json!({
@@ -324,7 +326,7 @@ async fn unavailable_move_store_error_is_fixed_and_private() {
         })
     );
     let response_text = serde_json::to_string(&response).unwrap();
-    let diagnostics = std::fs::read_to_string(log_path).unwrap_or_default();
+    let diagnostics = diagnostic_log.read();
     for private_text in [
         unavailable_path.to_string_lossy().as_ref(),
         unavailable_message,
