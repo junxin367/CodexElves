@@ -214,6 +214,542 @@ fn renderer_task_board_lifecycle_keeps_the_native_main_surface_recoverable() {
 }
 
 #[test]
+fn renderer_workspace_checkpoint_wraps_turns_and_native_message_edits() {
+    let script = assets::renderer_features_script();
+
+    assert!(script.contains("workspaceCheckpoint: true"));
+    assert!(script.contains("workspaceCheckpoint: \"codexAppWorkspaceCheckpoint\""));
+    assert!(script.contains("\"/workspace-checkpoint/create\""));
+    assert!(script.contains("\"/workspace-checkpoint/bind-turn\""));
+    assert!(script.contains("\"/workspace-checkpoint/list\""));
+    assert!(script.contains("\"/workspace-checkpoint/restore\""));
+    assert!(script.contains("\"/workspace-checkpoint/preview-revert\""));
+    assert!(script.contains("\"/workspace-checkpoint/restore-for-revert\""));
+    assert!(script.contains("methodName === \"turn/start\""));
+    assert!(script.contains("methodName === \"thread/revert\""));
+    assert!(script.contains("params?.beforeTurnId"));
+    assert!(script.contains("params?.numTurns"));
+    assert!(script.contains("发送并恢复文件"));
+    assert!(script.contains("无文件变化"));
+    assert!(script.contains("撤销上一轮"));
+    assert!(script.contains("发送前备份"));
+    assert!(script.contains("恢复前保护"));
+    assert!(script.contains("发送未完成"));
+    assert!(script.contains("恢复到此处"));
+    assert!(script.contains("恢复前会自动保存当前文件状态"));
+    assert!(script.contains("data-codex-workspace-checkpoint-file-toggle=\"true\""));
+    assert!(script.contains(".checkpoint-file-row:nth-child(n+6)"));
+    assert!(script.contains("var(--checkpoint-file-row-height) * 10 +"));
+    assert!(script.contains("scrollbar-gutter: stable"));
+    assert!(script.contains("width: min(640px, calc(100vw - 48px))"));
+    assert!(script.contains("data-codex-workspace-checkpoint-button"));
+    assert!(script.contains("button.setAttribute?.(\"aria-label\", \"打开 Checkpoint\")"));
+    assert!(script.contains("function codexWorkspaceCheckpointFeatureEnabled()"));
+    assert!(script.contains("promptOptimizeRemoveCheckpointButton();"));
+    assert!(script.contains("在提示词优化图标旁显示 Checkpoint 入口"));
+    assert!(!script.contains("data-codex-workspace-checkpoint-open=\"true\""));
+    assert!(script.contains("function installCodexWorkspaceCheckpointEditButtons()"));
+    assert!(script.contains("function openCodexWorkspaceCheckpointDialog()"));
+    assert!(script.contains("patchCodexWorkspaceCheckpointRequestClientPrototype"));
+}
+
+#[test]
+fn renderer_workspace_checkpoint_request_contract_is_fail_closed_and_restore_first() {
+    let result = run_workspace_checkpoint_contract_harness();
+
+    assert_eq!(
+        result["turnOrder"],
+        json!([
+            "bridge:/workspace-checkpoint/create",
+            "original:turn/start",
+            "bridge:/workspace-checkpoint/bind-turn"
+        ])
+    );
+    assert_eq!(result["boundTurnId"], "turn-1");
+    assert_eq!(result["promptPreview"], "first line\nsecond line");
+    assert_eq!(
+        result["revertOrder"],
+        json!([
+            "bridge:/workspace-checkpoint/restore-for-revert",
+            "original:thread/revert"
+        ])
+    );
+    assert_eq!(result["revertBeforeTurnId"], "turn-1");
+    assert_eq!(result["createFailureBlockedOriginal"], true);
+    assert_eq!(result["remoteSkippedCheckpoint"], true);
+    assert_eq!(result["disabledSkippedCheckpoint"], true);
+    assert_eq!(result["activeManagerFallbackInstalled"], true);
+    assert_eq!(
+        result["activeManagerFallbackTurnOrder"],
+        json!([
+            "bridge:/workspace-checkpoint/create",
+            "manager-original:turn/start",
+            "bridge:/workspace-checkpoint/bind-turn"
+        ])
+    );
+    assert_eq!(result["activeManagerFallbackBoundTurnId"], "manager-turn");
+    assert_eq!(result["editButtonText"], "发送并恢复文件");
+    assert_eq!(result["editButtonType"], "button");
+    assert_eq!(result["editButtonDisabledWhenNoChanges"], true);
+    assert_eq!(result["editButtonTitle"], "无文件变化");
+    assert_eq!(result["editButtonPreviewNumTurns"], 1);
+    assert_eq!(result["checkpointDialogHasStages"], true);
+    assert_eq!(result["checkpointDialogRestoreButtonCount"], 4);
+    assert_eq!(result["checkpointDialogFileRowCount"], 6);
+    assert_eq!(result["checkpointDialogEscapesContent"], true);
+    assert_eq!(result["checkpointDialogHasTotalStat"], true);
+    assert_eq!(result["checkpointDialogHasNoChange"], true);
+    assert_eq!(result["checkpointDialogHasLegacyFallback"], true);
+    assert_eq!(result["checkpointDialogHasDefaultCollapse"], true);
+    assert_eq!(result["checkpointDialogHasToggle"], true);
+    assert_eq!(result["checkpointDialogTimeLabels"], true);
+    assert_eq!(result["checkpointDialogExpanded"], true);
+    assert_eq!(
+        result["checkpointDialogExpandedLabel"],
+        "收起，仅显示前 5 个文件"
+    );
+    assert_eq!(result["checkpointDialogCollapsed"], true);
+    assert_eq!(
+        result["checkpointDialogCollapsedLabel"],
+        "展开其余 2 个文件"
+    );
+}
+
+fn run_workspace_checkpoint_contract_harness() -> serde_json::Value {
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+    let script_path = temp.path().join("renderer-features.js");
+    let harness_path = temp.path().join("workspace-checkpoint-harness.cjs");
+    std::fs::write(&script_path, assets::renderer_features_script())
+        .expect("renderer features should be written");
+    let mut harness = std::fs::File::create(&harness_path).expect("harness should be created");
+    write!(
+        harness,
+        r#"
+const scriptPath = {script_path};
+const store = new Map();
+let editorQueryEnabled = false;
+let insertedEditButton = null;
+function node() {{
+  return {{
+    appendChild() {{}},
+    prepend() {{}},
+    remove() {{}},
+    setAttribute(name, value) {{ this.attributes = this.attributes || {{}}; this.attributes[name] = String(value); }},
+    getAttribute(name) {{ return this.attributes?.[name] ?? null; }},
+    removeAttribute() {{}},
+    addEventListener(type, listener) {{ this.listeners = this.listeners || {{}}; this.listeners[type] = listener; }},
+    querySelector() {{ return null; }},
+    querySelectorAll() {{ return []; }},
+    closest() {{ return null; }},
+    classList: {{ add() {{}}, remove() {{}}, toggle() {{}}, contains() {{ return false; }} }},
+    dataset: {{}},
+    style: {{}},
+    children: [],
+    isConnected: true,
+    textContent: "",
+    innerHTML: "",
+  }};
+}}
+const submit = {{
+  ...node(),
+  className: "native-send",
+  disabled: false,
+  type: "submit",
+  parentElement: {{
+    insertBefore(button) {{
+      insertedEditButton = button;
+    }},
+  }},
+  click() {{}},
+}};
+const cancel = {{ ...node(), textContent: "取消" }};
+const form = {{
+  ...node(),
+  querySelector(selector) {{
+    if (selector === 'button[type="submit"]') return submit;
+    if (selector.includes("data-codex-workspace-checkpoint-edit-button")) return insertedEditButton;
+    return null;
+  }},
+  querySelectorAll(selector) {{
+    return selector === "button" ? [cancel, submit] : [];
+  }},
+}};
+const editor = {{ ...node(), closest(selector) {{ return selector === "form" ? form : null; }} }};
+globalThis.HTMLElement = Object;
+globalThis.Element = Object;
+globalThis.MutationObserver = class MutationObserver {{
+  observe() {{}}
+  disconnect() {{}}
+}};
+globalThis.getComputedStyle = () => ({{
+  display: "block",
+  visibility: "visible",
+  pointerEvents: "auto",
+}});
+globalThis.window = globalThis;
+window.__CODEX_ELVES_TEST_SERVICE_TIER__ = true;
+window.__CODEX_ELVES_TEST_WORKSPACE_CHECKPOINT__ = true;
+window.__CODEX_ELVES_TEST_APP_SERVER_RESTART__ = true;
+window.dispatchEvent = () => true;
+window.confirm = () => true;
+globalThis.CustomEvent = class CustomEvent {{
+  constructor(type, options = {{}}) {{
+    this.type = type;
+    this.detail = options.detail;
+  }}
+}};
+globalThis.Event = class Event {{
+  constructor(type) {{
+    this.type = type;
+  }}
+}};
+globalThis.document = {{
+  scripts: [],
+  visibilityState: "visible",
+  documentElement: node(),
+  body: node(),
+  createElement: () => node(),
+  getElementById: () => null,
+  querySelector: () => null,
+  querySelectorAll: (selector) =>
+    editorQueryEnabled && String(selector).includes('[aria-label="编辑消息"]') ? [editor] : [],
+  addEventListener() {{}},
+  removeEventListener() {{}},
+}};
+globalThis.localStorage = {{
+  getItem: (key) => store.has(key) ? store.get(key) : null,
+  setItem: (key, value) => store.set(key, String(value)),
+  removeItem: (key) => store.delete(key),
+}};
+globalThis.location = {{
+  href: "https://codex.test/local/thread-12345678",
+  pathname: "/local/thread-12345678",
+  protocol: "https:",
+  search: "",
+  hash: "",
+}};
+window.location = globalThis.location;
+globalThis.navigator = {{ userAgent: "node-test" }};
+globalThis.performance = {{ getEntriesByType: () => [] }};
+
+let bridgeMode = "ok";
+let activeOrder = [];
+let lastBindPayload = null;
+let lastRevertPayload = null;
+let lastPreviewPayload = null;
+window.__codexSessionDeleteBridge = async (path, payload) => {{
+  if (path === "/settings/get") {{
+    return {{
+      launchMode: "patch",
+      enhancementsEnabled: true,
+      providerSyncEnabled: false,
+      codexAppWorkspaceCheckpoint: false,
+    }};
+  }}
+  if (path === "/session/suppressed") return {{ status: "ok", ids: [] }};
+  if (path === "/backend/status") return {{ status: "ok" }};
+  if (path.startsWith("/workspace-checkpoint/")) activeOrder.push(`bridge:${{path}}`);
+  if (path === "/workspace-checkpoint/create") {{
+    if (bridgeMode === "create-failed") return {{ status: "failed", message: "snapshot failed" }};
+    return {{ status: "ok", checkpoint: {{ id: "checkpoint-1" }} }};
+  }}
+  if (path === "/workspace-checkpoint/bind-turn") {{
+    lastBindPayload = payload;
+    return {{ status: "ok", checkpoint: {{ id: "checkpoint-1", accepted: true }} }};
+  }}
+  if (path === "/workspace-checkpoint/preview-revert") {{
+    lastPreviewPayload = payload;
+    return {{ status: "ok", hasChanges: false, changedPaths: [] }};
+  }}
+  if (path === "/workspace-checkpoint/restore-for-revert") {{
+    lastRevertPayload = payload;
+    return {{ status: "ok", changedPaths: ["a.txt"], partial: false }};
+  }}
+  return {{ status: "ok" }};
+}};
+
+require(scriptPath);
+const api = window.__codexWorkspaceCheckpointTest;
+if (!api) throw new Error("workspace checkpoint test api unavailable");
+api.setBackendSettingsForTest({{
+  enhancementsEnabled: true,
+  codexAppWorkspaceCheckpoint: true,
+}});
+
+(async () => {{
+  const client = {{ hostId: "local" }};
+  const turnParams = {{
+    threadId: "thread-12345678",
+    cwd: "C:\\repo",
+    input: [
+      {{ type: "text", text: "first line" }},
+      {{ type: "text", text: "second line" }},
+    ],
+  }};
+  activeOrder = [];
+  const turnOriginal = async function(method) {{
+    activeOrder.push(`original:${{method}}`);
+    return {{ turn: {{ id: "turn-1" }} }};
+  }};
+  await api.sendRequest(turnOriginal, client, "turn/start", turnParams);
+  const turnOrder = [...activeOrder];
+  const boundTurnId = lastBindPayload?.turnId || "";
+
+  activeOrder = [];
+  api.setRestoreIntent({{ cwd: "C:\\repo", threadId: "thread-12345678" }});
+  const revertOriginal = async function(method) {{
+    activeOrder.push(`original:${{method}}`);
+    return {{ thread: {{ cwd: "C:\\repo" }} }};
+  }};
+  await api.sendRequest(revertOriginal, client, "thread/revert", {{
+    threadId: "thread-12345678",
+    beforeTurnId: "turn-1",
+  }});
+  const revertOrder = [...activeOrder];
+
+  bridgeMode = "create-failed";
+  let failedOriginalCalls = 0;
+  let createFailureBlockedOriginal = false;
+  try {{
+    await api.sendRequest(async () => {{
+      failedOriginalCalls += 1;
+      return {{}};
+    }}, client, "turn/start", {{
+      threadId: "thread-12345678",
+      cwd: "C:\\repo",
+      input: [{{ type: "text", text: "blocked" }}],
+    }});
+  }} catch {{
+    createFailureBlockedOriginal = failedOriginalCalls === 0;
+  }}
+
+  bridgeMode = "ok";
+  activeOrder = [];
+  await api.sendRequest(async function(method) {{
+    activeOrder.push(`original:${{method}}`);
+    return {{ turn: {{ id: "remote-turn" }} }};
+  }}, {{ hostId: "remote-host" }}, "turn/start", {{
+    threadId: "thread-remote",
+    cwd: "/remote/repo",
+    input: [{{ type: "text", text: "remote" }}],
+  }});
+  const remoteSkippedCheckpoint =
+    activeOrder.length === 1 && activeOrder[0] === "original:turn/start";
+
+  api.setBackendSettingsForTest({{
+    enhancementsEnabled: true,
+    codexAppWorkspaceCheckpoint: false,
+  }});
+  activeOrder = [];
+  await api.sendRequest(async function(method) {{
+    activeOrder.push(`original:${{method}}`);
+    return {{ turn: {{ id: "disabled-turn" }} }};
+  }}, client, "turn/start", {{
+    threadId: "thread-disabled",
+    cwd: "C:\\disabled-repo",
+    input: [{{ type: "text", text: "disabled" }}],
+  }});
+  const disabledSkippedCheckpoint =
+    api.featureEnabled() === false &&
+    activeOrder.length === 1 &&
+    activeOrder[0] === "original:turn/start";
+  api.setBackendSettingsForTest({{
+    codexAppWorkspaceCheckpoint: true,
+  }});
+
+  class ActiveManagerRequestClient {{
+    constructor() {{
+      this.hostId = "local";
+    }}
+    createRequest() {{}}
+    prewarmThreadStart() {{}}
+    async sendRequest(method) {{
+      activeOrder.push(`manager-original:${{method}}`);
+      return {{ turn: {{ id: "manager-turn" }} }};
+    }}
+  }}
+  const activeManagerRequestClient = new ActiveManagerRequestClient();
+  window.__codexElvesConversationStateManager = {{
+    requestClient: activeManagerRequestClient,
+  }};
+  window.__codexElvesServiceTierTest.setModuleLoader(async () => ({{}}));
+  activeOrder = [];
+  lastBindPayload = null;
+  const activeManagerFallbackInstalled = await api.installRequestClientPatch();
+  await activeManagerRequestClient.sendRequest("turn/start", {{
+    threadId: "thread-manager",
+    cwd: "C:\\manager-repo",
+    input: [{{ type: "text", text: "manager fallback" }}],
+  }});
+  const activeManagerFallbackTurnOrder = [...activeOrder];
+  const activeManagerFallbackBoundTurnId = lastBindPayload?.turnId || "";
+  window.__codexElvesServiceTierTest.setModuleLoader(null);
+
+  window.__codexElvesAppServerRestartTest.setConversationManager({{
+    hostId: "local",
+    getCachedConversations() {{ return []; }},
+    getConversation(threadId) {{
+      return {{ id: threadId, cwd: "C:\\repo", hostId: "local", turns: [] }};
+    }},
+    updateConversationState() {{}},
+    threadStore: {{}},
+    requestClient: activeManagerRequestClient,
+  }});
+  editorQueryEnabled = true;
+  api.installEditButtons();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  const checkpointDialogHtml = api.listHtml([
+    {{
+      id: "safety&1",
+      kind: "restoreSafety",
+      accepted: true,
+      createdAtMs: Date.now(),
+      promptPreview: "ignored <title>",
+      changedFileCount: 6,
+      changedFiles: [
+        {{ path: "src/<unsafe>.rs", status: "M", additions: 12, deletions: 3 }},
+        {{ path: "src/added.rs", status: "A", additions: 4, deletions: 2 }},
+        {{ path: "src/third.rs", status: "M", additions: 1, deletions: 0 }},
+        {{ path: "src/deleted.rs", status: "D", additions: 0, deletions: 1 }},
+        {{ path: "src/fifth.rs", status: "M", additions: 2, deletions: 0 }},
+        {{ path: "src/sixth.rs", status: "M", additions: 3, deletions: 1 }},
+      ],
+    }},
+    {{
+      id: "incomplete-1",
+      accepted: false,
+      createdAtMs: Date.now(),
+      promptPreview: "未完成请求",
+      changedFileCount: 0,
+      changedFiles: [],
+    }},
+    {{
+      id: "normal-1",
+      accepted: true,
+      createdAtMs: Date.now(),
+      promptPreview: "<unsafe prompt>",
+      changedFileCount: 0,
+      changedFiles: [],
+    }},
+    {{
+      id: "legacy-1",
+      accepted: true,
+      createdAtMs: Date.now(),
+      promptPreview: "旧记录",
+      changedFileCount: 2,
+    }},
+  ]);
+  const checkpointDialogRestoreButtonCount =
+    (checkpointDialogHtml.match(/data-codex-workspace-checkpoint-restore=/g) || []).length;
+  const checkpointDialogFileRowCount =
+    (checkpointDialogHtml.match(/class="checkpoint-file-row"/g) || []).length;
+  const labelNode = {{ textContent: "" }};
+  const toggleNode = {{
+    ariaExpanded: "",
+    setAttribute(name, value) {{
+      if (name === "aria-expanded") this.ariaExpanded = String(value);
+    }},
+  }};
+  const fileListNode = {{
+    dataset: {{ expanded: "false" }},
+    expandedAttribute: "false",
+    setAttribute(name, value) {{
+      if (name === "data-expanded") this.expandedAttribute = String(value);
+    }},
+    querySelectorAll(selector) {{
+      return selector === ".checkpoint-file-row" ? Array.from({{ length: 7 }}, () => ({{}})) : [];
+    }},
+    querySelector(selector) {{
+      if (selector === "[data-codex-workspace-checkpoint-file-toggle]") return toggleNode;
+      if (selector === "[data-codex-workspace-checkpoint-file-toggle-label]") return labelNode;
+      return null;
+    }},
+  }};
+  const checkpointDialogExpanded =
+    api.setFileListExpanded(fileListNode, true) === true &&
+    fileListNode.dataset.expanded === "true" &&
+    fileListNode.expandedAttribute === "true" &&
+    toggleNode.ariaExpanded === "true";
+  const checkpointDialogExpandedLabel = labelNode.textContent;
+  const checkpointDialogCollapsed =
+    api.setFileListExpanded(fileListNode, false) === false &&
+    fileListNode.dataset.expanded === "false" &&
+    fileListNode.expandedAttribute === "false" &&
+    toggleNode.ariaExpanded === "false";
+  const checkpointDialogCollapsedLabel = labelNode.textContent;
+  const checkpointNow = new Date(2026, 8, 2, 13, 50).getTime();
+  const checkpointToday = new Date(2026, 8, 2, 13, 42).getTime();
+  const checkpointYesterday = new Date(2026, 8, 1, 13, 42).getTime();
+
+  process.stdout.write(JSON.stringify({{
+    turnOrder,
+    boundTurnId,
+    promptPreview: api.promptPreview(turnParams),
+    revertOrder,
+    revertBeforeTurnId: lastRevertPayload?.beforeTurnId || "",
+    createFailureBlockedOriginal,
+    remoteSkippedCheckpoint,
+    disabledSkippedCheckpoint,
+    activeManagerFallbackInstalled,
+    activeManagerFallbackTurnOrder,
+    activeManagerFallbackBoundTurnId,
+    editButtonText: insertedEditButton?.textContent || "",
+    editButtonType: insertedEditButton?.type || "",
+    editButtonDisabledWhenNoChanges: insertedEditButton?.disabled === true,
+    editButtonTitle: insertedEditButton?.title || "",
+    editButtonPreviewNumTurns: lastPreviewPayload?.numTurns || 0,
+    checkpointDialogHasStages:
+      checkpointDialogHtml.includes("发送前备份") &&
+      checkpointDialogHtml.includes("恢复前保护") &&
+      checkpointDialogHtml.includes("发送未完成"),
+    checkpointDialogRestoreButtonCount,
+    checkpointDialogFileRowCount,
+    checkpointDialogEscapesContent:
+      checkpointDialogHtml.includes("src/&lt;unsafe&gt;.rs") &&
+      checkpointDialogHtml.includes("&lt;unsafe prompt&gt;") &&
+      !checkpointDialogHtml.includes("src/<unsafe>.rs") &&
+      !checkpointDialogHtml.includes("<unsafe prompt>"),
+    checkpointDialogHasTotalStat:
+      checkpointDialogHtml.includes("+22") && checkpointDialogHtml.includes("-7"),
+    checkpointDialogHasNoChange: checkpointDialogHtml.includes("无文件变化"),
+    checkpointDialogHasLegacyFallback: checkpointDialogHtml.includes("文件明细不可用"),
+    checkpointDialogHasDefaultCollapse: checkpointDialogHtml.includes('data-expanded="false"'),
+    checkpointDialogHasToggle: checkpointDialogHtml.includes("展开其余 1 个文件"),
+    checkpointDialogTimeLabels:
+      api.timeLabel(checkpointToday, checkpointNow).startsWith("今天 ") &&
+      api.timeLabel(checkpointYesterday, checkpointNow).startsWith("昨天 "),
+    checkpointDialogExpanded,
+    checkpointDialogExpandedLabel,
+    checkpointDialogCollapsed,
+    checkpointDialogCollapsedLabel,
+  }}));
+  process.exit(0);
+}})().catch((error) => {{
+  console.error(error);
+  process.exit(1);
+}});
+"#,
+        script_path = serde_json::to_string(&script_path.to_string_lossy()).unwrap(),
+    )
+    .expect("workspace checkpoint harness should be written");
+
+    let output = Command::new("node")
+        .arg(&harness_path)
+        .output()
+        .expect("node should run workspace checkpoint harness");
+    assert!(
+        output.status.success(),
+        "node workspace checkpoint harness failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout)
+        .expect("workspace checkpoint harness stdout should be JSON")
+}
+
+#[test]
 fn renderer_task_board_view_projects_read_only_bridge_snapshots_responsively() {
     let script = assets::renderer_features_script();
 
@@ -578,7 +1114,7 @@ fn renderer_task_board_navigation_opens_inline_and_offers_new_window_on_context_
         .and_then(|section| section.split("function reconcileTaskBoardEntry()").next())
         .expect("standalone task board opener should be present");
 
-    assert!(script.contains(r#"const taskBoardRuntimeVersion = "61";"#));
+    assert!(script.contains(r#"const taskBoardRuntimeVersion = "62";"#));
     assert!(script.contains(r#"renameTask: "/task-board/task-rename""#));
     assert!(script.contains("function taskBoardSubmitTaskRename("));
     let card_title_input_styles = script
@@ -1661,6 +2197,12 @@ fn renderer_task_board_native_create_uses_host_adapter_and_recovers_without_inst
         cases["supported"]["createAfterPermanentId"]
             .as_bool()
             .unwrap()
+    );
+    assert!(
+        cases["coldProbe"]["availableBeforeComposerMountAndStarts"]
+            .as_bool()
+            .unwrap(),
+        "native create cold-probe cases: {cases}"
     );
     assert!(
         cases["unsupported"]["newDisabledExistingWorks"]
@@ -3297,10 +3839,17 @@ fn injection_script_includes_builtin_prompt_optimization_without_edge_fallbacks(
         .and_then(|tail| tail.split("function promptOptimizeFeatureEnabled()").next())
         .expect("prompt optimization settings dialog should exist");
 
-    assert!(script.contains(r#"const codexPromptOptimizeVersion = "16";"#));
+    assert!(script.contains(r#"const codexPromptOptimizeVersion = "17";"#));
     assert!(feature.contains("const promptOptimizeSettingsVersion = 4;"));
     assert!(script.contains("const codexPromptOptimizeButtonSize = 16;"));
     assert!(script.contains("const codexPromptOptimizeAnchorGap = 8;"));
+    assert!(script.contains(
+        r#"const codexWorkspaceCheckpointButtonAttribute = "data-codex-workspace-checkpoint-button";"#
+    ));
+    assert!(script.contains("const codexWorkspaceCheckpointButtonGap = 6;"));
+    assert!(feature.contains("function promptOptimizeSyncCheckpointButton(portal)"));
+    assert!(feature.contains("function promptOptimizeCheckpointPosition(anchor, promptPosition)"));
+    assert!(feature.contains("openCodexWorkspaceCheckpointDialog();"));
     assert!(script.contains(r#"font: 14px/1 "Segoe UI Emoji", system-ui, sans-serif;"#));
     assert!(feature.contains(r#"postJson("/prompt-optimize", {"#));
     assert!(feature.contains(r#"postJson("/prompt-optimize/cancel", { requestId })"#));
@@ -3522,6 +4071,41 @@ fn prompt_optimization_renderer_contract_handles_anchor_rebuild_write_restore_an
     assert_eq!(cases["position"]["initial"]["top"], "112px");
     assert_eq!(cases["position"]["initial"]["right"], "");
     assert_eq!(cases["position"]["initial"]["bottom"], "");
+    assert_eq!(cases["position"]["initial"]["checkpoint"]["exists"], true);
+    assert_eq!(
+        cases["position"]["initial"]["checkpoint"]["visibility"],
+        "visible"
+    );
+    assert_eq!(cases["position"]["initial"]["checkpoint"]["left"], "134px");
+    assert_eq!(cases["position"]["initial"]["checkpoint"]["top"], "112px");
+    assert_eq!(
+        cases["position"]["initial"]["checkpoint"]["title"],
+        "打开 Checkpoint"
+    );
+    assert_eq!(
+        cases["position"]["initial"]["checkpoint"]["ariaLabel"],
+        "打开 Checkpoint"
+    );
+    assert_eq!(
+        cases["position"]["checkpointDisabled"]["checkpoint"]["exists"],
+        false
+    );
+    assert_eq!(
+        cases["position"]["checkpointReenabled"]["checkpoint"]["exists"],
+        true
+    );
+    assert_eq!(
+        cases["position"]["checkpointReenabled"]["checkpoint"]["visibility"],
+        "visible"
+    );
+    assert_eq!(
+        cases["position"]["checkpointReenabled"]["checkpoint"]["left"],
+        "134px"
+    );
+    assert_eq!(
+        cases["position"]["checkpointReenabled"]["checkpoint"]["top"],
+        "112px"
+    );
     assert_eq!(cases["position"]["unrelatedMutationScheduledFrame"], false);
     assert_eq!(cases["position"]["taskBoardActive"]["visibility"], "hidden");
     assert_eq!(cases["position"]["taskBoardActive"]["left"], "");
@@ -4022,6 +4606,10 @@ window.__codexSessionDeleteBridge = async (path, payload) => {
 vm.runInThisContext(fs.readFileSync(scriptPath, "utf8"), { filename: scriptPath });
 const api = window.__codexElvesPromptOptimizeForTest;
 if (!api) throw new Error("prompt optimization test API was not installed");
+api.setBackendSettings({
+  enhancementsEnabled: true,
+  codexAppWorkspaceCheckpoint: true,
+});
 
 const flush = (delay = 40) => new Promise((resolve) => setTimeout(resolve, delay));
 function element(tag, rect) {
@@ -4301,6 +4889,18 @@ function element(tag, rect) {
   await flush(1100);
   await flush(1);
   const initial = api.snapshot();
+  api.setBackendSettings({
+    codexAppWorkspaceCheckpoint: false,
+  });
+  api.schedule({ hideImmediately: false });
+  await flush();
+  const checkpointDisabled = api.snapshot();
+  api.setBackendSettings({
+    codexAppWorkspaceCheckpoint: true,
+  });
+  api.schedule({ hideImmediately: false });
+  await flush();
+  const checkpointReenabled = api.snapshot();
   const unrelatedMutationTarget = element("div", {
     left: 0,
     top: 0,
@@ -4625,6 +5225,8 @@ function element(tag, rect) {
     newSessionFallback,
     position: {
       initial,
+      checkpointDisabled,
+      checkpointReenabled,
       unrelatedMutationScheduledFrame,
       taskBoardActive,
       afterTaskBoard,
@@ -7690,6 +8292,33 @@ function recoveryKey() { return "codexElvesTaskBoardNativeCreateRecoveryV1"; }
 
   conversationSignal.setAttribute(
     "data-above-composer-conversation-id",
+    "local:client-new-thread:cold-probe",
+  );
+  activeComposerOwner.remove();
+  nativeStartHook = mountFreshNativeComposer;
+  nativeSubmitSessionId = "session-cold-probe";
+  const coldProbeStartClicksBefore = nativeStartClicks;
+  const coldProbeSubmitClicksBefore = submitButtonClicks;
+  const coldProbeResult = await api.nativeProbeForTest(
+    { cwd: "c:/repo-a", label: "项目 A" },
+  );
+  const coldProbeStartResult = await api.nativeStartForTest(
+    { cwd: "c:/repo-a", label: "项目 A" },
+    instruction,
+  );
+  nativeSubmitSessionId = "session-permanent-1";
+  const coldProbe = {
+    availableBeforeComposerMountAndStarts:
+      coldProbeResult.status === "ok" &&
+      coldProbeResult.canStart === true &&
+      coldProbeStartResult.status === "ok" &&
+      coldProbeStartResult.sessionId === "session-cold-probe" &&
+      nativeStartClicks === coldProbeStartClicksBefore + 1 &&
+      submitButtonClicks === coldProbeSubmitClicksBefore + 1,
+  };
+
+  conversationSignal.setAttribute(
+    "data-above-composer-conversation-id",
     "local:client-new-thread:shared-prefix",
   );
   modelTriggerLabel.textContent = "Claude Sonnet 4.6";
@@ -8509,7 +9138,7 @@ function recoveryKey() { return "codexElvesTaskBoardNativeCreateRecoveryV1"; }
       !storageWrites.join("\n").includes(instruction) &&
       !capturedLogs.join("\n").includes(instruction),
   };
-  process.stdout.write(JSON.stringify({ supported, sharedPrefix, reusedComposer, submissionReliability, hostContract, sharedLease, navigationRace, unsupported, timeout, retry, recovery: {
+  process.stdout.write(JSON.stringify({ supported, coldProbe, sharedPrefix, reusedComposer, submissionReliability, hostContract, sharedLease, navigationRace, unsupported, timeout, retry, recovery: {
     bridgeFailurePersistsAllowedFields,
     nextActivationRetriesOnceAndClears,
     retryFailureKeepsRecordAndWarns,
@@ -10369,6 +10998,24 @@ fn manager_ui_exposes_default_enabled_open_in_quick_access_page_enhancement() {
     assert!(source.contains("title=\"快速打开工作区\""));
     assert!(source.contains("checked={form.codexAppOpenInQuickAccess}"));
     assert!(source.contains("setEnhanceFlag(\"codexAppOpenInQuickAccess\", value)"));
+}
+
+#[test]
+fn manager_ui_exposes_default_enabled_workspace_checkpoint_page_enhancement() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("core crate should live under crates/codex-elves-core");
+    let source =
+        std::fs::read_to_string(repo.join("apps/codex-elves-manager/src/App.tsx")).unwrap();
+
+    assert!(source.contains("codexAppWorkspaceCheckpoint: boolean"));
+    assert!(source.contains("codexAppWorkspaceCheckpoint: true"));
+    assert!(source.contains("title=\"Checkpoint\""));
+    assert!(source.contains("在提示词优化图标旁显示 Checkpoint 入口"));
+    assert!(source.contains("checked={form.codexAppWorkspaceCheckpoint}"));
+    assert!(source.contains("disabled={!masterEnabled}"));
+    assert!(source.contains("setEnhanceFlag(\"codexAppWorkspaceCheckpoint\", value)"));
 }
 
 #[test]

@@ -200,6 +200,7 @@ type BackendSettings = {
   codexAppProjectMove: boolean;
   codexAppConversationView: boolean;
   codexAppTokenUsage: boolean;
+  codexAppWorkspaceCheckpoint: boolean;
   codexAppUpstreamWorktreeCreate: boolean;
   codexAppNativeMenuPlacement: boolean;
   codexAppOpenInQuickAccess: boolean;
@@ -799,7 +800,7 @@ const routes: Array<{ id: Route; label: string; icon: LucideIcon; badge?: string
   { id: "localProxy", label: "本地代理", icon: Network },
   { id: "sessions", label: "会话管理", icon: MessageCircle },
   { id: "context", label: "工具与插件", icon: Network },
-  { id: "enhance", label: "页面增强", icon: Hammer },
+  { id: "enhance", label: "功能增强", icon: Hammer },
   { id: "skins", label: "皮肤管理", icon: Palette },
   { id: "userScripts", label: "脚本市场", icon: FileCode2 },
   { id: "maintenance", label: "安装维护", icon: Wrench },
@@ -862,6 +863,7 @@ const defaultSettings: BackendSettings = {
   codexAppProjectMove: false,
   codexAppConversationView: true,
   codexAppTokenUsage: false,
+  codexAppWorkspaceCheckpoint: true,
   codexAppUpstreamWorktreeCreate: false,
   codexAppNativeMenuPlacement: true,
   codexAppOpenInQuickAccess: true,
@@ -3114,7 +3116,7 @@ export function App() {
     if (result) {
       setSettings(result);
       setSettingsForm(normalizeSettings(result.settings));
-      if (!silent) showNotice("页面增强模式", result.message, result.status);
+      if (!silent) showNotice("功能增强模式", result.message, result.status);
     }
     return result;
   };
@@ -3221,14 +3223,14 @@ export function App() {
     const switched = await clearRelayInjection(true);
     if (!switched) return;
     const result = await saveLaunchMode("relay", true);
-    if (result) showNotice("官方登录模式", "已切回官方登录；页面增强已设为兼容增强。", result.status);
+    if (result) showNotice("官方登录模式", "已切回官方登录；功能增强已设为兼容增强。", result.status);
   };
 
   const switchPureApiMode = async () => {
     const switched = await applyPureApiInjection(true);
     if (!switched) return;
     const result = await saveLaunchMode("patch", true);
-    if (result) showNotice("纯 API 模式", "已切换到纯 API；页面增强已设为完整增强。", result.status);
+    if (result) showNotice("纯 API 模式", "已切换到纯 API；功能增强已设为完整增强。", result.status);
   };
 
   const switchRelayProfile = async (next: BackendSettings, previousActiveRelayId = settingsForm.activeRelayId) => {
@@ -5193,7 +5195,7 @@ function EnhanceScreen({
         <TaskProgressBox progress={remotePluginMarketplaceProgress} title="官方远端插件缓存进度" />
       </div>
       <Panel>
-        <CardHead title="页面功能增强" detail="任务看板、会话删除、导出、项目移动和用户脚本等界面能力" />
+        <CardHead title="功能增强" detail="任务看板、会话删除、导出、项目移动和用户脚本等界面能力" />
         <CardContent>
           <div className="enhancement-master-grid">
             <label className="switch-row">
@@ -5203,7 +5205,7 @@ function EnhanceScreen({
                 type="checkbox"
               />
               <span>
-                <strong>启用 CodexElves 页面增强</strong>
+                <strong>启用 CodexElves 功能增强</strong>
                 <small>关闭后会停用任务看板、删除、导出、项目移动、Fast 按钮、插件相关和菜单位置增强。</small>
               </span>
             </label>
@@ -5237,6 +5239,7 @@ function EnhanceScreen({
             <FeatureToggle title="会话项目移动" detail="把会话移动到普通对话或其他本地项目。" checked={form.codexAppProjectMove} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppProjectMove", value)} />
             <FeatureToggle title="对话居中宽度" detail="把主对话和输入框限制到固定最大宽度，适合大屏阅读。" checked={form.codexAppConversationView} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppConversationView", value)} />
             <FeatureToggle title="会话 Token 统计" detail="在右上角置顶摘要底部紧凑显示当前会话（含递归子代理）的总消耗和最近一轮输入、输出、缓存；默认关闭。" checked={form.codexAppTokenUsage} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppTokenUsage", value)} />
+            <FeatureToggle title="Checkpoint" detail="在提示词优化图标旁显示 Checkpoint 入口；开启后每轮保存工作区快照，关闭后不显示入口且不创建或恢复快照。" checked={form.codexAppWorkspaceCheckpoint} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppWorkspaceCheckpoint", value)} />
             <FeatureToggle title="Upstream worktree" detail="从最新 upstream 分支创建 Git worktree。" checked={form.codexAppUpstreamWorktreeCreate} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppUpstreamWorktreeCreate", value)} />
             <FeatureToggle title="原生菜单栏位置" detail="把 CodexElves 菜单插入 Codex 顶部原生菜单栏。" checked={form.codexAppNativeMenuPlacement} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppNativeMenuPlacement", value)} />
           </div>
@@ -11306,14 +11309,14 @@ function relayProfileModeHelp(profile: RelayProfile): string {
   }
   if (profile.relayMode === "official") {
     if (profile.officialMixApiKey) {
-      return "此供应商会保留官方登录模式，并把请求混入当前 API Key；页面增强仍使用兼容模式。";
+      return "此供应商会保留官方登录模式，并把请求混入当前 API Key；功能增强仍使用兼容模式。";
     }
     return "此供应商会切回官方登录模式，使用 ChatGPT 官方账号，不写入 API Key。";
   }
   if (profile.relayMode === "pureApi") {
     return "此供应商会同时写入 config.toml 和 auth.json；API Key 也会注入到 provider bearer token。";
   }
-  return "此供应商会保留官方登录模式，并把请求混入当前 API Key；页面增强仍使用兼容模式。";
+  return "此供应商会保留官方登录模式，并把请求混入当前 API Key；功能增强仍使用兼容模式。";
 }
 
 function relayProfileReadinessText(profile: RelayProfile, relay: RelayResult | null): string {
@@ -11348,9 +11351,9 @@ function relayProfileSwitchCommand(profile: RelayProfile): "clear_relay_injectio
 }
 function relayProfileModeSwitchedText(profile: RelayProfile): string {
   if (isAggregateRelayProfile(profile)) return "已切换到聚合供应商；真实对话会按所选策略轮转成员。";
-  if (profile.relayMode === "pureApi") return "已按此供应商切换到纯 API；页面增强已设为完整增强。";
-  if (profile.officialMixApiKey) return "已按此供应商使用官方登录，并混入 API Key；页面增强已设为兼容增强。";
-  return "已按此供应商切回官方登录；页面增强已设为兼容增强。";
+  if (profile.relayMode === "pureApi") return "已按此供应商切换到纯 API；功能增强已设为完整增强。";
+  if (profile.officialMixApiKey) return "已按此供应商使用官方登录，并混入 API Key；功能增强已设为兼容增强。";
+  return "已按此供应商切回官方登录；功能增强已设为兼容增强。";
 }
 
 function emptyResponsesWebsocketCapability(): ResponsesWebsocketCapability {

@@ -12,6 +12,7 @@ const SUPPRESSED_THREADS_FILE: &str = "suppressed-threads.json";
 const SKINS_FILE: &str = "skins.json";
 const TASK_BOARD_FILE: &str = "task-board.json";
 const TASK_BOARD_LOCK_FILE: &str = "task-board.lock";
+const WORKSPACE_CHECKPOINTS_DIR: &str = "workspace-checkpoints";
 const OBSOLETE_SESSION_BACKUPS_DIR: &str = "backups";
 const MIGRATIONS_DIR: &str = "migrations";
 const SESSION_BACKUP_CLEANUP_MARKER: &str = "session-backups-v1.done";
@@ -60,6 +61,10 @@ pub fn default_task_board_path() -> PathBuf {
 
 pub fn default_task_board_lock_path() -> PathBuf {
     default_app_state_dir().join(TASK_BOARD_LOCK_FILE)
+}
+
+pub fn default_workspace_checkpoints_dir() -> PathBuf {
+    default_app_state_dir().join(WORKSPACE_CHECKPOINTS_DIR)
 }
 
 pub fn default_proxy_log_path() -> PathBuf {

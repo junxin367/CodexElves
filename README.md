@@ -49,6 +49,7 @@ Windows 安装包会创建桌面和开始菜单快捷方式。macOS DMG 会安�
 - 外部 CDP 注入，不改 `app.asar`，不向 ChatGPT/Codex 安装目录写入 DLL。
 - 中转注入模式：支持多个中转配置，写入 `CodexElves` provider，并可切回官方 ChatGPT 登录态。
 - 传统增强模式：插件入口解锁、插件市场解锁、会话删除、Markdown 导出、项目移动等。
+- 工作区 Checkpoint：每轮 AI 开始前保存外部 shadow Git 快照，可撤销上一轮文件修改、编辑历史消息时恢复对应轮次，并恢复任意历史快照；遵循 `.gitignore`，不写入项目 Git。
 - 用户脚本独立管理，可在启动时注入自定义脚本。
 - Provider 同步：启动前同步本地会话 metadata，切换供应商后旧会话仍可见。
 - Upstream worktree 创建：可从 `upstream/<base-branch>` 创建新 worktree，创建前自动 fetch 远端分支，降低从陈旧本地 HEAD 派生导致的冲突风险。

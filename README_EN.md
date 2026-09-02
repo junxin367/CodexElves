@@ -47,6 +47,7 @@ The Windows installer creates desktop and Start Menu shortcuts. The macOS DMG in
 - External CDP injection. No `app.asar` patching and no DLL writes into the ChatGPT/Codex installation.
 - Relay injection mode with multiple relay profiles, `CodexElves` provider configuration, and a one-click switch back to official ChatGPT login mode.
 - Traditional enhancement mode with plugin entry unlock, forced plugin install, session delete, Markdown export, project move, and more.
+- Workspace Checkpoints: save an external shadow-Git snapshot before each AI turn, undo the latest file changes, restore the matching state when editing an earlier message, or restore any checkpoint. It honors `.gitignore` and never writes to the project's Git history or index.
 - Independent user script management with startup injection.
 - Provider Sync to keep historical sessions visible after switching providers.
 - Upstream worktree creation: create new worktrees from `upstream/<base-branch>` after fetching the remote branch, reducing conflicts caused by stale local HEAD state.

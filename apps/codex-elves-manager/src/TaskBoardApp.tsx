@@ -5054,17 +5054,24 @@ function TaskEditor({
               </div>
             ) : (
               <div className="task-board-new-session">
-                {editor.nativeCreateAvailable === false ? (
-                  <p
-                    className="task-board-create-availability"
-                    data-status="unavailable"
-                  >
-                    {editor.nativeCreateMessage ||
-                      "提交时会重新检查 Codex 新会话能力"}
-                  </p>
-                ) : null}
                 <label className="task-board-field task-board-instruction">
-                  <span>新会话首条指令</span>
+                  <span className="task-board-instruction-heading">
+                    <span>新会话首条指令</span>
+                    {editor.nativeCreateAvailable === false ? (
+                      <span
+                        className="task-board-create-availability"
+                        data-status="unavailable"
+                        title={
+                          editor.nativeCreateMessage ||
+                          "提交时会重新检查 Codex 新会话能力"
+                        }
+                        aria-live="polite"
+                      >
+                        {editor.nativeCreateMessage ||
+                          "提交时会重新检查 Codex 新会话能力"}
+                      </span>
+                    ) : null}
+                  </span>
                   <div className="task-board-create-composer">
                     <textarea
                       value={editor.instruction}

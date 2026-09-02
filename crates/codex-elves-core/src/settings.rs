@@ -765,6 +765,8 @@ pub struct BackendSettings {
     pub codex_app_conversation_view: bool,
     #[serde(rename = "codexAppTokenUsage", default)]
     pub codex_app_token_usage: bool,
+    #[serde(rename = "codexAppWorkspaceCheckpoint", default = "default_true")]
+    pub codex_app_workspace_checkpoint: bool,
     #[serde(rename = "codexAppUpstreamWorktreeCreate", default)]
     pub codex_app_upstream_worktree_create: bool,
     #[serde(rename = "codexAppNativeMenuPlacement", default = "default_true")]
@@ -878,6 +880,7 @@ impl Default for BackendSettings {
             codex_app_project_move: false,
             codex_app_conversation_view: true,
             codex_app_token_usage: false,
+            codex_app_workspace_checkpoint: true,
             codex_app_upstream_worktree_create: false,
             codex_app_native_menu_placement: true,
             codex_app_open_in_quick_access: true,
@@ -1342,6 +1345,7 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
     merge_bool_setting(target, source, "codexAppProjectMove");
     merge_bool_setting(target, source, "codexAppConversationView");
     merge_bool_setting(target, source, "codexAppTokenUsage");
+    merge_bool_setting(target, source, "codexAppWorkspaceCheckpoint");
     merge_bool_setting(target, source, "codexAppUpstreamWorktreeCreate");
     merge_bool_setting(target, source, "codexAppNativeMenuPlacement");
     merge_bool_setting(target, source, "codexAppOpenInQuickAccess");
@@ -1721,6 +1725,7 @@ mod tests {
         assert!(!settings.codex_app_project_move);
         assert!(settings.codex_app_conversation_view);
         assert!(!settings.codex_app_token_usage);
+        assert!(settings.codex_app_workspace_checkpoint);
         assert!(!settings.codex_app_upstream_worktree_create);
         assert!(settings.codex_app_native_menu_placement);
         assert!(!settings.codex_goals_enabled);
@@ -1773,6 +1778,28 @@ mod tests {
         let serialized = serde_json::to_value(settings).unwrap();
 
         assert_eq!(serialized["codexAppOpenInQuickAccess"], json!(true));
+    }
+
+    #[test]
+    fn settings_missing_workspace_checkpoint_defaults_enabled() {
+        let settings: BackendSettings = serde_json::from_str("{}").unwrap();
+        let serialized = serde_json::to_value(settings).unwrap();
+
+        assert_eq!(serialized["codexAppWorkspaceCheckpoint"], json!(true));
+    }
+
+    #[test]
+    fn settings_store_update_persists_workspace_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(temp.path().join("settings.json"));
+
+        let updated = store
+            .update(json!({ "codexAppWorkspaceCheckpoint": false }))
+            .unwrap();
+        let loaded = store.load().unwrap();
+
+        assert!(!updated.codex_app_workspace_checkpoint);
+        assert!(!loaded.codex_app_workspace_checkpoint);
     }
 
     #[test]

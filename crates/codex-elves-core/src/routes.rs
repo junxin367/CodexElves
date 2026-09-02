@@ -10,6 +10,7 @@ use crate::settings::{BackendSettings, SettingsStore};
 use crate::status::StatusStore;
 use crate::task_board::{FileTaskBoardStore, TaskBoardSessionCatalog, TaskBoardStore};
 use crate::user_scripts::UserScriptManager;
+use crate::workspace_checkpoint::WorkspaceCheckpointService;
 
 pub mod task_board;
 
@@ -22,6 +23,7 @@ pub struct BridgeContext {
     runtime: Arc<dyn BridgeRuntimeService>,
     data: Arc<dyn BridgeDataService>,
     task_board_store: Arc<dyn TaskBoardStore>,
+    workspace_checkpoints: WorkspaceCheckpointService,
 }
 
 impl BridgeContext {
@@ -35,11 +37,20 @@ impl BridgeContext {
             runtime,
             data,
             task_board_store: Arc::new(FileTaskBoardStore::from_default_paths()),
+            workspace_checkpoints: WorkspaceCheckpointService::default(),
         }
     }
 
     pub fn with_task_board_store(mut self, store: Arc<dyn TaskBoardStore>) -> Self {
         self.task_board_store = store;
+        self
+    }
+
+    pub fn with_workspace_checkpoint_service(
+        mut self,
+        service: WorkspaceCheckpointService,
+    ) -> Self {
+        self.workspace_checkpoints = service;
         self
     }
 
@@ -194,6 +205,44 @@ pub async fn handle_bridge_request(
         }
         task_board::TASK_BOARD_MOVE_PATH => {
             Ok(task_board::handle_move(ctx.task_board_store.clone(), payload.clone()).await)
+        }
+        crate::workspace_checkpoint::CREATE_PATH => Ok(crate::workspace_checkpoint::handle_create(
+            ctx.workspace_checkpoints.clone(),
+            payload.clone(),
+        )
+        .await),
+        crate::workspace_checkpoint::BIND_TURN_PATH => {
+            Ok(crate::workspace_checkpoint::handle_bind_turn(
+                ctx.workspace_checkpoints.clone(),
+                payload.clone(),
+            )
+            .await)
+        }
+        crate::workspace_checkpoint::LIST_PATH => Ok(crate::workspace_checkpoint::handle_list(
+            ctx.workspace_checkpoints.clone(),
+            payload.clone(),
+        )
+        .await),
+        crate::workspace_checkpoint::RESTORE_PATH => {
+            Ok(crate::workspace_checkpoint::handle_restore(
+                ctx.workspace_checkpoints.clone(),
+                payload.clone(),
+            )
+            .await)
+        }
+        crate::workspace_checkpoint::PREVIEW_REVERT_PATH => {
+            Ok(crate::workspace_checkpoint::handle_preview_revert(
+                ctx.workspace_checkpoints.clone(),
+                payload.clone(),
+            )
+            .await)
+        }
+        crate::workspace_checkpoint::RESTORE_FOR_REVERT_PATH => {
+            Ok(crate::workspace_checkpoint::handle_restore_for_revert(
+                ctx.workspace_checkpoints.clone(),
+                payload.clone(),
+            )
+            .await)
         }
         "/settings/get" => settings_value(&ctx, ctx.settings.get_settings().await).await,
         "/settings/set" => {

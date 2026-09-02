@@ -1781,12 +1781,29 @@ body:has(.task-board-app) {
   gap: 7px;
 }
 
-.task-board-create-availability {
+.task-board-instruction-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-board-instruction-heading > span:first-child {
   flex: 0 0 auto;
-  margin: 0;
+}
+
+.task-board-create-availability {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
   color: color-mix(in srgb, currentColor 52%, transparent);
   font-size: 10px;
+  font-weight: 400;
   line-height: 1.4;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .task-board-create-availability[data-status="unavailable"] {

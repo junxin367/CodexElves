@@ -14,6 +14,7 @@ use codex_elves_core::routes::{
 use codex_elves_core::settings::BackendSettings;
 use codex_elves_core::status::StatusStore;
 use codex_elves_core::user_scripts::UserScriptManager;
+use codex_elves_core::workspace_checkpoint::WorkspaceCheckpointService;
 use serde_json::{Value, json};
 
 #[tokio::test]
@@ -50,6 +51,12 @@ async fn bridge_routes_cover_all_current_paths() {
             "/upstream-worktree/create",
             json!({"repoPath": "/repo", "branchName": "feature/demo"}),
         ),
+        ("/workspace-checkpoint/create", json!({})),
+        ("/workspace-checkpoint/bind-turn", json!({})),
+        ("/workspace-checkpoint/list", json!({})),
+        ("/workspace-checkpoint/restore", json!({})),
+        ("/workspace-checkpoint/preview-revert", json!({})),
+        ("/workspace-checkpoint/restore-for-revert", json!({})),
         ("/delete", json!({"session_id": "s1", "title": "First"})),
         (
             "/export-markdown",
@@ -100,6 +107,7 @@ async fn settings_get_includes_runtime_codex_app_version() {
     assert_eq!(result["codexAppVersion"], json!("26.601.21317"));
     assert_eq!(result["codexAppPluginEntryUnlock"], json!(true));
     assert_eq!(result["codexAppPluginMarketplaceUnlock"], json!(true));
+    assert_eq!(result["codexAppWorkspaceCheckpoint"], json!(true));
     assert!(result.get("codexAppForcePluginInstall").is_none());
     assert!(result.get("codexAppConversationTimeline").is_none());
     assert!(result.get("codexAppThreadIdBadge").is_none());
@@ -230,7 +238,7 @@ async fn settings_routes_use_settings_service() {
     let updated = handle_bridge_request(
         ctx.clone(),
         "/settings/set",
-        json!({"providerSyncEnabled": true, "codexAppSessionDelete": false, "codexAppServiceTierControls": true, "cliWrapperApiKeyEnv": ""}),
+        json!({"providerSyncEnabled": true, "codexAppSessionDelete": false, "codexAppServiceTierControls": true, "codexAppWorkspaceCheckpoint": false, "cliWrapperApiKeyEnv": ""}),
     )
     .await;
     let loaded = handle_bridge_request(ctx, "/settings/get", json!({})).await;
@@ -238,8 +246,118 @@ async fn settings_routes_use_settings_service() {
     assert_eq!(updated["providerSyncEnabled"], true);
     assert_eq!(updated["codexAppSessionDelete"], false);
     assert_eq!(updated["codexAppServiceTierControls"], true);
+    assert_eq!(updated["codexAppWorkspaceCheckpoint"], false);
     assert_eq!(updated["cliWrapperApiKeyEnv"], "CUSTOM_OPENAI_API_KEY");
     assert_eq!(loaded, updated);
+}
+
+#[tokio::test]
+async fn workspace_checkpoint_routes_create_bind_list_and_restore() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("value.txt"), "before").unwrap();
+    let ctx = test_context().with_workspace_checkpoint_service(WorkspaceCheckpointService::new(
+        temp.path().join("checkpoint-state"),
+    ));
+
+    let created = handle_bridge_request(
+        ctx.clone(),
+        "/workspace-checkpoint/create",
+        json!({
+            "cwd": workspace,
+            "threadId": "thread-1",
+            "requestId": "request-1",
+            "promptPreview": "prompt"
+        }),
+    )
+    .await;
+    assert_eq!(created["status"], "ok");
+    assert_eq!(created["checkpoint"]["changedFileCount"], 1);
+    assert_eq!(
+        created["checkpoint"]["changedFiles"][0]["path"],
+        "value.txt"
+    );
+    assert_eq!(created["checkpoint"]["changedFiles"][0]["status"], "A");
+    assert_eq!(created["checkpoint"]["changedFiles"][0]["additions"], 1);
+    assert_eq!(created["checkpoint"]["changedFiles"][0]["deletions"], 0);
+    let checkpoint_id = created["checkpoint"]["id"].as_str().unwrap().to_string();
+
+    let bound = handle_bridge_request(
+        ctx.clone(),
+        "/workspace-checkpoint/bind-turn",
+        json!({
+            "cwd": workspace,
+            "checkpointId": checkpoint_id,
+            "threadId": "thread-1",
+            "turnId": "turn-1"
+        }),
+    )
+    .await;
+    assert_eq!(bound["checkpoint"]["turnId"], "turn-1");
+    assert_eq!(bound["checkpoint"]["accepted"], true);
+
+    let listed = handle_bridge_request(
+        ctx.clone(),
+        "/workspace-checkpoint/list",
+        json!({
+            "cwd": workspace,
+            "threadId": "thread-1"
+        }),
+    )
+    .await;
+    assert_eq!(listed["checkpoints"][0]["id"], checkpoint_id);
+    assert_eq!(
+        listed["checkpoints"][0]["changedFiles"],
+        created["checkpoint"]["changedFiles"]
+    );
+
+    let unchanged = handle_bridge_request(
+        ctx.clone(),
+        "/workspace-checkpoint/preview-revert",
+        json!({
+            "cwd": workspace,
+            "threadId": "thread-1",
+            "beforeTurnId": "",
+            "numTurns": 1
+        }),
+    )
+    .await;
+    assert_eq!(unchanged["status"], "ok");
+    assert_eq!(unchanged["hasChanges"], false);
+    assert_eq!(unchanged["changedPaths"], json!([]));
+
+    std::fs::write(workspace.join("value.txt"), "after").unwrap();
+    let changed = handle_bridge_request(
+        ctx.clone(),
+        "/workspace-checkpoint/preview-revert",
+        json!({
+            "cwd": workspace,
+            "threadId": "thread-1",
+            "beforeTurnId": "",
+            "numTurns": 1
+        }),
+    )
+    .await;
+    assert_eq!(changed["status"], "ok");
+    assert_eq!(changed["hasChanges"], true);
+    assert_eq!(changed["changedPaths"], json!(["value.txt"]));
+
+    let restored = handle_bridge_request(
+        ctx,
+        "/workspace-checkpoint/restore",
+        json!({
+            "cwd": workspace,
+            "checkpointId": checkpoint_id,
+            "threadId": "thread-1"
+        }),
+    )
+    .await;
+    assert_eq!(restored["status"], "ok");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("value.txt")).unwrap(),
+        "before"
+    );
 }
 
 #[tokio::test]
@@ -927,6 +1045,7 @@ impl BridgeSettingsService for FakeSettings {
             "codexAppProjectMove",
             "codexAppConversationView",
             "codexAppTokenUsage",
+            "codexAppWorkspaceCheckpoint",
             "codexAppUpstreamWorktreeCreate",
             "codexAppNativeMenuPlacement",
             "codexAppServiceTierControls",

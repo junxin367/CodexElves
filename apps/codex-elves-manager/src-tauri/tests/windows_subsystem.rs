@@ -490,7 +490,33 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
                 .next()
         })
         .expect("standalone native create panel");
-    assert!(native_create_panel.contains("editor.nativeCreateAvailable === false ? ("));
+    assert!(!native_create_panel.contains("task-board-create-availability"));
+    let instruction_heading = app
+        .split("<span className=\"task-board-instruction-heading\">")
+        .nth(1)
+        .and_then(|section| {
+            section
+                .split("<div className=\"task-board-create-composer\">")
+                .next()
+        })
+        .expect("standalone native create instruction heading");
+    assert!(instruction_heading.contains("editor.nativeCreateAvailable === false ? ("));
+    assert!(instruction_heading.contains("task-board-create-availability"));
+    let instruction_heading_styles = styles
+        .split(".task-board-instruction-heading {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("standalone native create instruction heading styles");
+    assert!(instruction_heading_styles.contains("display: flex;"));
+    assert!(instruction_heading_styles.contains("justify-content: space-between;"));
+    let availability_styles = styles
+        .split(".task-board-create-availability {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("standalone native create availability styles");
+    assert!(availability_styles.contains("overflow: hidden;"));
+    assert!(availability_styles.contains("text-overflow: ellipsis;"));
+    assert!(availability_styles.contains("white-space: nowrap;"));
     assert!(app.contains("function taskProjectRef(project: TaskProject)"));
     assert!(app.contains("project: taskProjectRef(project)"));
     assert!(app.contains("const hostProject = taskProjectRef(project)"));
