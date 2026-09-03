@@ -4,9 +4,10 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use codex_elves_core::workspace_checkpoint::{
-    BindTurnRequest, CreateCheckpointRequest, DeleteWorkspaceCheckpointDataRequest,
-    ListCheckpointsRequest, RestoreCheckpointRequest, RestoreForRevertRequest,
-    WorkspaceCheckpointKind, WorkspaceCheckpointService,
+    BindTurnRequest, CompleteTurnRequest, CreateCheckpointRequest,
+    DeleteWorkspaceCheckpointDataRequest, ListCheckpointsRequest, RestoreCheckpointRequest,
+    RestoreForRevertRequest, WorkspaceCheckpointChangeScope, WorkspaceCheckpointKind,
+    WorkspaceCheckpointService, WorkspaceCheckpointTurnStatus,
 };
 
 #[test]
@@ -43,6 +44,14 @@ fn shadow_git_checkpoints_restore_turn_state_without_touching_project_git() {
 
     fs::write(workspace.join("tracked.txt"), "after first AI turn\n").unwrap();
     fs::write(workspace.join("created-by-first.txt"), "first\n").unwrap();
+    service
+        .complete_turn(CompleteTurnRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            status: WorkspaceCheckpointTurnStatus::Completed,
+        })
+        .unwrap();
     let second = service
         .create_checkpoint(CreateCheckpointRequest {
             cwd: workspace.to_string_lossy().into_owned(),
@@ -64,6 +73,14 @@ fn shadow_git_checkpoints_restore_turn_state_without_touching_project_git() {
     fs::write(workspace.join("tracked.txt"), "after second AI turn\n").unwrap();
     fs::write(workspace.join("created-by-second.txt"), "second\n").unwrap();
     fs::write(workspace.join("ignored.txt"), "ignored current value\n").unwrap();
+    service
+        .complete_turn(CompleteTurnRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-2".to_string(),
+            status: WorkspaceCheckpointTurnStatus::Completed,
+        })
+        .unwrap();
 
     let restored = service
         .restore_for_revert(RestoreForRevertRequest {
@@ -157,7 +174,7 @@ fn checkpoint_requests_are_idempotent_and_rollback_count_selects_the_target_turn
 }
 
 #[test]
-fn checkpoint_records_per_file_status_and_line_changes() {
+fn completed_turn_records_changes_on_the_same_checkpoint() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     fs::create_dir_all(&workspace).unwrap();
@@ -165,14 +182,37 @@ fn checkpoint_records_per_file_status_and_line_changes() {
     fs::write(workspace.join("deleted.txt"), "delete me\n").unwrap();
     let service = WorkspaceCheckpointService::new(temp.path().join("state"));
 
-    create_bound_checkpoint(&service, &workspace, "request-1", "turn-1", "first");
+    let checkpoint = create_bound_checkpoint(&service, &workspace, "request-1", "turn-1", "first");
+    assert_eq!(
+        checkpoint.change_scope,
+        WorkspaceCheckpointChangeScope::Turn
+    );
+    assert_eq!(checkpoint.turn_status, None);
+    assert_eq!(checkpoint.changed_file_count, 0);
+    assert!(checkpoint.changed_files.is_empty());
+
     fs::write(workspace.join("value.txt"), "after\n").unwrap();
     fs::write(workspace.join("created.txt"), "created\n").unwrap();
     fs::remove_file(workspace.join("deleted.txt")).unwrap();
 
-    let checkpoint = create_bound_checkpoint(&service, &workspace, "request-2", "turn-2", "second");
-    assert_eq!(checkpoint.changed_file_count, 3);
-    let changes = checkpoint
+    let completed = service
+        .complete_turn(CompleteTurnRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            status: WorkspaceCheckpointTurnStatus::Completed,
+        })
+        .unwrap()
+        .checkpoint;
+
+    assert_eq!(completed.id, checkpoint.id);
+    assert_eq!(
+        completed.turn_status,
+        Some(WorkspaceCheckpointTurnStatus::Completed)
+    );
+    assert!(completed.completed_at_ms.is_some());
+    assert_eq!(completed.changed_file_count, 3);
+    let changes = completed
         .changed_files
         .iter()
         .map(|change| (change.path.as_str(), change))
@@ -193,17 +233,170 @@ fn checkpoint_records_per_file_status_and_line_changes() {
     assert_eq!(deleted.additions, Some(0));
     assert_eq!(deleted.deletions, Some(1));
 
+    let next = create_bound_checkpoint(&service, &workspace, "request-2", "turn-2", "second");
+    assert_eq!(next.turn_status, None);
+    assert_eq!(next.changed_file_count, 0);
+    assert!(next.changed_files.is_empty());
+
     let listed = service
         .list_checkpoints(ListCheckpointsRequest {
             cwd: workspace.to_string_lossy().into_owned(),
             thread_id: "thread-1".to_string(),
-            limit: Some(1),
+            limit: Some(2),
         })
         .unwrap();
-    assert_eq!(
-        listed.checkpoints[0].changed_files,
-        checkpoint.changed_files
+    assert_eq!(listed.checkpoints[0].id, next.id);
+    assert!(listed.checkpoints[0].changed_files.is_empty());
+    assert_eq!(listed.checkpoints[1].id, completed.id);
+    assert_eq!(listed.checkpoints[1].changed_files, completed.changed_files);
+}
+
+#[test]
+fn first_turn_checkpoint_is_an_initialization_summary_without_baseline_file_rows() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(workspace.join("src")).unwrap();
+    fs::write(workspace.join(".gitignore"), "ignored.txt\n").unwrap();
+    fs::write(workspace.join("value.txt"), "before\n").unwrap();
+    fs::write(workspace.join("src").join("one.rs"), "one\n").unwrap();
+    fs::write(workspace.join("src").join("two.rs"), "two\n").unwrap();
+    fs::write(workspace.join("ignored.txt"), "ignored\n").unwrap();
+    let service = WorkspaceCheckpointService::new(temp.path().join("state"));
+
+    let first = create_bound_checkpoint(&service, &workspace, "request-1", "turn-1", "initialize");
+    assert!(first.initialization);
+    assert_eq!(first.initial_file_count, Some(4));
+    assert_eq!(first.changed_file_count, 0);
+    assert!(first.changed_files.is_empty());
+
+    fs::write(workspace.join("value.txt"), "after\n").unwrap();
+    let completed = service
+        .complete_turn(CompleteTurnRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            status: WorkspaceCheckpointTurnStatus::Completed,
+        })
+        .unwrap()
+        .checkpoint;
+    assert!(completed.initialization);
+    assert_eq!(completed.initial_file_count, Some(4));
+    assert_eq!(completed.changed_file_count, 1);
+
+    let second = create_bound_checkpoint(&service, &workspace, "request-2", "turn-2", "second");
+    assert!(!second.initialization);
+    assert_eq!(second.initial_file_count, None);
+
+    let other_thread = create_bound_checkpoint_for_thread(
+        &service,
+        &workspace,
+        "thread-2",
+        "request-other",
+        "turn-other",
+        "other thread",
     );
+    assert!(other_thread.initialization);
+    assert_eq!(other_thread.initial_file_count, Some(4));
+}
+
+#[test]
+fn completing_a_turn_twice_keeps_the_first_terminal_result() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(workspace.join("value.txt"), "before\n").unwrap();
+    let service = WorkspaceCheckpointService::new(temp.path().join("state"));
+
+    let checkpoint = create_bound_checkpoint(&service, &workspace, "request-1", "turn-1", "first");
+    fs::write(workspace.join("value.txt"), "first result\n").unwrap();
+    let failed = service
+        .complete_turn(CompleteTurnRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            status: WorkspaceCheckpointTurnStatus::Failed,
+        })
+        .unwrap()
+        .checkpoint;
+
+    fs::write(workspace.join("value.txt"), "later result\n").unwrap();
+    fs::write(workspace.join("later.txt"), "later\n").unwrap();
+    let duplicate = service
+        .complete_turn(CompleteTurnRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            status: WorkspaceCheckpointTurnStatus::Completed,
+        })
+        .unwrap()
+        .checkpoint;
+
+    assert_eq!(duplicate.id, checkpoint.id);
+    assert_eq!(duplicate, failed);
+    assert_eq!(
+        duplicate.turn_status,
+        Some(WorkspaceCheckpointTurnStatus::Failed)
+    );
+    assert_eq!(duplicate.changed_file_count, 1);
+    assert_eq!(duplicate.changed_files[0].path, "value.txt");
+}
+
+#[test]
+fn legacy_checkpoint_records_without_turn_fields_remain_readable() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(workspace.join("value.txt"), "before\n").unwrap();
+    let service = WorkspaceCheckpointService::new(temp.path().join("state"));
+
+    let checkpoint = create_bound_checkpoint(&service, &workspace, "request-1", "turn-1", "legacy");
+    let summary = service.management_summary().unwrap();
+    let events_path = Path::new(&summary.workspaces[0].storage_path).join("events.jsonl");
+    let rewritten = fs::read_to_string(&events_path)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
+            if event["event"] == "created" && event["checkpoint"]["id"] == checkpoint.id {
+                let record = event["checkpoint"].as_object_mut().unwrap();
+                record.remove("initialization");
+                record.remove("initialFileCount");
+                record.remove("changeScope");
+                record.remove("turnStatus");
+                record.remove("completedAtMs");
+                record.insert("changedFileCount".to_string(), serde_json::json!(1));
+                record.insert(
+                    "changedFiles".to_string(),
+                    serde_json::json!([{
+                        "path": "legacy.txt",
+                        "status": "M",
+                        "additions": 1,
+                        "deletions": 0
+                    }]),
+                );
+            }
+            serde_json::to_string(&event).unwrap()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&events_path, format!("{rewritten}\n")).unwrap();
+
+    let listed = service
+        .list_checkpoints(ListCheckpointsRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            thread_id: "thread-1".to_string(),
+            limit: Some(10),
+        })
+        .unwrap();
+    assert_eq!(listed.checkpoints.len(), 1);
+    assert_eq!(
+        listed.checkpoints[0].change_scope,
+        WorkspaceCheckpointChangeScope::LegacyBeforeTurn
+    );
+    assert!(!listed.checkpoints[0].initialization);
+    assert_eq!(listed.checkpoints[0].initial_file_count, None);
+    assert_eq!(listed.checkpoints[0].turn_status, None);
+    assert_eq!(listed.checkpoints[0].changed_files[0].path, "legacy.txt");
 }
 
 #[test]
@@ -215,28 +408,32 @@ fn checkpoint_store_inside_workspace_is_excluded_from_its_own_snapshots() {
     let checkpoint_root = workspace.join(".codex-elves-state");
     let service = WorkspaceCheckpointService::new(checkpoint_root.clone());
 
-    let first = service
-        .create_checkpoint(CreateCheckpointRequest {
-            cwd: workspace.to_string_lossy().into_owned(),
-            thread_id: "thread-1".to_string(),
-            request_id: "request-1".to_string(),
-            prompt_preview: String::new(),
-        })
-        .unwrap()
-        .checkpoint;
+    create_bound_checkpoint(&service, &workspace, "request-1", "turn-1", "");
     fs::write(workspace.join("value.txt"), "two").unwrap();
-    let second = service
-        .create_checkpoint(CreateCheckpointRequest {
+    let first = service
+        .complete_turn(CompleteTurnRequest {
             cwd: workspace.to_string_lossy().into_owned(),
             thread_id: "thread-1".to_string(),
-            request_id: "request-2".to_string(),
-            prompt_preview: String::new(),
+            turn_id: "turn-1".to_string(),
+            status: WorkspaceCheckpointTurnStatus::Completed,
         })
         .unwrap()
         .checkpoint;
-
     assert_eq!(first.changed_file_count, 1);
-    assert_eq!(second.changed_file_count, 1);
+    assert_eq!(first.changed_files[0].path, "value.txt");
+
+    create_bound_checkpoint(&service, &workspace, "request-2", "turn-2", "");
+    let second = service
+        .complete_turn(CompleteTurnRequest {
+            cwd: workspace.to_string_lossy().into_owned(),
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-2".to_string(),
+            status: WorkspaceCheckpointTurnStatus::Completed,
+        })
+        .unwrap()
+        .checkpoint;
+    assert_eq!(second.changed_file_count, 0);
+    assert!(second.changed_files.is_empty());
     assert!(checkpoint_root.is_dir());
 }
 
@@ -539,6 +736,8 @@ fn binding_can_attach_a_pending_checkpoint_to_its_thread() {
         .checkpoint;
 
     assert_eq!(bound.thread_id, "thread-1");
+    assert!(bound.initialization);
+    assert_eq!(bound.initial_file_count, Some(1));
     let listed = service
         .list_checkpoints(ListCheckpointsRequest {
             cwd: workspace.to_string_lossy().into_owned(),

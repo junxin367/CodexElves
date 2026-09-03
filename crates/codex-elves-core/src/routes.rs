@@ -224,6 +224,16 @@ pub async fn handle_bridge_request(
                 Err(error) => Err(error),
             }
         }
+        crate::workspace_checkpoint::COMPLETE_TURN_PATH => {
+            match active_workspace_checkpoint_service(&ctx).await {
+                Ok(service) => Ok(crate::workspace_checkpoint::handle_complete_turn(
+                    service,
+                    payload.clone(),
+                )
+                .await),
+                Err(error) => Err(error),
+            }
+        }
         crate::workspace_checkpoint::LIST_PATH => {
             match active_workspace_checkpoint_service(&ctx).await {
                 Ok(service) => {

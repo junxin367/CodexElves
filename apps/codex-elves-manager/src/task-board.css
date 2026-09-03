@@ -18,9 +18,13 @@
   --task-board-action-background-active: rgb(212 212 212 / 12%);
   --task-board-action-foreground: #d4d4d4;
   --task-board-action-border: rgb(212 212 212 / 16%);
-  --task-board-modal-background: rgb(47 47 47 / 96%);
-  --task-board-modal-foreground: #d4d4d4;
-  --task-board-modal-border: rgb(212 212 212 / 18%);
+  --task-board-modal-background: #2b2b2b;
+  --task-board-modal-foreground: #f3f4f6;
+  --task-board-modal-border: rgb(255 255 255 / 12%);
+  --task-board-modal-overlay-background: rgb(0 0 0 / 45%);
+  --task-board-modal-radius: 18px;
+  --task-board-modal-shadow: 0 24px 80px rgb(0 0 0 / 45%);
+  --task-board-modal-viewport-gap: 48px;
   --task-board-field-background: rgb(43 43 43 / 86%);
   --task-board-menu-background: #363636;
   --task-board-root-font-family: system-ui, sans-serif;
@@ -1023,16 +1027,16 @@ body:has(.task-board-app) {
   inset: 0;
   display: grid;
   place-items: center;
-  background: rgb(0 0 0 / 58%);
-  backdrop-filter: blur(4px);
-  padding: 16px;
+  background: var(--task-board-modal-overlay-background);
+  backdrop-filter: none;
+  padding: 24px;
 }
 
 .task-board-confirm-backdrop {
   --task-board-confirm-surface: var(--task-board-modal-background);
   --task-board-confirm-foreground: var(--task-board-modal-foreground);
   --task-board-confirm-muted: var(--task-board-text-secondary);
-  --task-board-confirm-border: var(--task-board-action-border);
+  --task-board-confirm-border: var(--task-board-modal-border);
   --task-board-confirm-action-background: var(--task-board-action-background);
   --task-board-confirm-action-background-hover:
     var(--task-board-action-background-hover);
@@ -1053,17 +1057,17 @@ body:has(.task-board-app) {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgb(0 0 0 / 58%);
-  backdrop-filter: blur(4px);
+  background: var(--task-board-modal-overlay-background);
+  backdrop-filter: none;
 }
 
 .task-board-confirm-dialog {
-  width: min(420px, calc(100vw - 48px));
+  width: min(420px, calc(100vw - var(--task-board-modal-viewport-gap)));
   border: 1px solid var(--task-board-confirm-border);
-  border-radius: 12px;
+  border-radius: var(--task-board-modal-radius);
   background: var(--task-board-confirm-surface);
   color: var(--task-board-confirm-foreground);
-  box-shadow: 0 24px 80px rgb(0 0 0 / 42%);
+  box-shadow: var(--task-board-modal-shadow);
   font: 14px/1.45 system-ui, sans-serif;
   padding: 18px;
 }
@@ -1144,24 +1148,27 @@ body:has(.task-board-app) {
 
 .task-board-modal {
   display: flex;
-  width: 650px;
-  height: min(650px, calc(100vh - 32px));
-  max-width: calc(100vw - 32px);
-  max-height: calc(100vh - 32px);
+  width: 640px;
+  height: min(650px, calc(100vh - var(--task-board-modal-viewport-gap)));
+  max-width: calc(100vw - var(--task-board-modal-viewport-gap));
+  max-height: calc(100vh - var(--task-board-modal-viewport-gap));
   flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--task-board-modal-border);
-  border-radius: 14px;
+  border-radius: var(--task-board-modal-radius);
   background: var(--task-board-modal-background);
   color: var(--task-board-modal-foreground);
-  box-shadow: 0 24px 70px rgb(0 0 0 / 48%);
+  box-shadow: var(--task-board-modal-shadow);
   font: 445 16px/1.5 var(--task-board-modal-font-family);
 }
 
 .task-board-board-manager {
-  width: min(560px, calc(100vw - 32px));
+  width: min(600px, calc(100vw - var(--task-board-modal-viewport-gap)));
   height: auto;
-  max-height: min(680px, calc(100vh - 32px));
+  max-height: min(
+    680px,
+    calc(100vh - var(--task-board-modal-viewport-gap))
+  );
 }
 
 .task-board-board-manager,

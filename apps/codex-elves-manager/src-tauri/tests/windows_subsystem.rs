@@ -778,7 +778,21 @@ fn standalone_task_board_reuses_codex_board_visual_language() {
         .expect("standalone task-board modal button styles should be present");
     assert!(modal_button_styles.contains("cursor: pointer"));
     assert!(styles.contains("grid-template-columns: 18px 16px minmax(0, 1fr)"));
-    assert!(styles.contains("height: min(650px, calc(100vh - 32px))"));
+    assert!(styles.contains("--task-board-modal-overlay-background: rgb(0 0 0 / 45%)"));
+    assert!(styles.contains("--task-board-modal-radius: 18px"));
+    assert!(styles.contains("--task-board-modal-shadow: 0 24px 80px rgb(0 0 0 / 45%)"));
+    assert!(styles.contains("--task-board-modal-viewport-gap: 48px"));
+    assert!(
+        styles.contains("height: min(650px, calc(100vh - var(--task-board-modal-viewport-gap)))")
+    );
+    assert!(
+        styles.contains("width: min(420px, calc(100vw - var(--task-board-modal-viewport-gap)))")
+    );
+    assert!(
+        styles.contains("width: min(600px, calc(100vw - var(--task-board-modal-viewport-gap)))")
+    );
+    assert!(!styles.contains("backdrop-filter: blur(4px)"));
+    assert!(!styles.contains("background: rgb(0 0 0 / 58%)"));
     let search_focus_styles = styles
         .split(".task-board-search:focus-within {")
         .nth(1)

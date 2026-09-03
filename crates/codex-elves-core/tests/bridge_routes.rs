@@ -56,6 +56,7 @@ async fn bridge_routes_cover_all_current_paths() {
         ),
         ("/workspace-checkpoint/create", json!({})),
         ("/workspace-checkpoint/bind-turn", json!({})),
+        ("/workspace-checkpoint/complete-turn", json!({})),
         ("/workspace-checkpoint/list", json!({})),
         ("/workspace-checkpoint/restore", json!({})),
         ("/workspace-checkpoint/preview-revert", json!({})),
@@ -260,7 +261,7 @@ async fn settings_routes_use_settings_service() {
 }
 
 #[tokio::test]
-async fn workspace_checkpoint_routes_create_bind_list_and_restore() {
+async fn workspace_checkpoint_routes_create_bind_complete_list_and_restore() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -288,14 +289,11 @@ async fn workspace_checkpoint_routes_create_bind_list_and_restore() {
     )
     .await;
     assert_eq!(created["status"], "ok");
-    assert_eq!(created["checkpoint"]["changedFileCount"], 1);
-    assert_eq!(
-        created["checkpoint"]["changedFiles"][0]["path"],
-        "value.txt"
-    );
-    assert_eq!(created["checkpoint"]["changedFiles"][0]["status"], "A");
-    assert_eq!(created["checkpoint"]["changedFiles"][0]["additions"], 1);
-    assert_eq!(created["checkpoint"]["changedFiles"][0]["deletions"], 0);
+    assert_eq!(created["checkpoint"]["initialization"], true);
+    assert_eq!(created["checkpoint"]["initialFileCount"], 1);
+    assert_eq!(created["checkpoint"]["changeScope"], "turn");
+    assert_eq!(created["checkpoint"]["changedFileCount"], 0);
+    assert_eq!(created["checkpoint"]["changedFiles"], json!([]));
     let checkpoint_id = created["checkpoint"]["id"].as_str().unwrap().to_string();
 
     let bound = handle_bridge_request(
@@ -311,21 +309,6 @@ async fn workspace_checkpoint_routes_create_bind_list_and_restore() {
     .await;
     assert_eq!(bound["checkpoint"]["turnId"], "turn-1");
     assert_eq!(bound["checkpoint"]["accepted"], true);
-
-    let listed = handle_bridge_request(
-        ctx.clone(),
-        "/workspace-checkpoint/list",
-        json!({
-            "cwd": workspace,
-            "threadId": "thread-1"
-        }),
-    )
-    .await;
-    assert_eq!(listed["checkpoints"][0]["id"], checkpoint_id);
-    assert_eq!(
-        listed["checkpoints"][0]["changedFiles"],
-        created["checkpoint"]["changedFiles"]
-    );
 
     let unchanged = handle_bridge_request(
         ctx.clone(),
@@ -343,6 +326,38 @@ async fn workspace_checkpoint_routes_create_bind_list_and_restore() {
     assert_eq!(unchanged["changedPaths"], json!([]));
 
     std::fs::write(workspace.join("value.txt"), "after").unwrap();
+    let completed = handle_bridge_request(
+        ctx.clone(),
+        "/workspace-checkpoint/complete-turn",
+        json!({
+            "cwd": workspace,
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "status": "completed"
+        }),
+    )
+    .await;
+    assert_eq!(completed["status"], "ok");
+    assert_eq!(completed["checkpoint"]["id"], checkpoint_id);
+    assert_eq!(completed["checkpoint"]["turnStatus"], "completed");
+    assert_eq!(completed["checkpoint"]["changedFileCount"], 1);
+    assert_eq!(
+        completed["checkpoint"]["changedFiles"][0]["path"],
+        "value.txt"
+    );
+    assert_eq!(completed["checkpoint"]["changedFiles"][0]["status"], "M");
+
+    let listed = handle_bridge_request(
+        ctx.clone(),
+        "/workspace-checkpoint/list",
+        json!({
+            "cwd": workspace,
+            "threadId": "thread-1"
+        }),
+    )
+    .await;
+    assert_eq!(listed["checkpoints"][0], completed["checkpoint"]);
+
     let changed = handle_bridge_request(
         ctx.clone(),
         "/workspace-checkpoint/preview-revert",

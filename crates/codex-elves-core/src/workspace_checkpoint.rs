@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 pub const CREATE_PATH: &str = "/workspace-checkpoint/create";
 pub const BIND_TURN_PATH: &str = "/workspace-checkpoint/bind-turn";
+pub const COMPLETE_TURN_PATH: &str = "/workspace-checkpoint/complete-turn";
 pub const LIST_PATH: &str = "/workspace-checkpoint/list";
 pub const RESTORE_PATH: &str = "/workspace-checkpoint/restore";
 pub const PREVIEW_REVERT_PATH: &str = "/workspace-checkpoint/preview-revert";
@@ -36,6 +37,28 @@ const CHECKPOINT_REF_PREFIX: &str = "refs/codexelves/checkpoints/";
 pub enum WorkspaceCheckpointKind {
     TurnStart,
     RestoreSafety,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceCheckpointChangeScope {
+    LegacyBeforeTurn,
+    Turn,
+    Snapshot,
+}
+
+impl Default for WorkspaceCheckpointChangeScope {
+    fn default() -> Self {
+        Self::LegacyBeforeTurn
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceCheckpointTurnStatus {
+    Completed,
+    Interrupted,
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +87,16 @@ pub struct WorkspaceCheckpoint {
     pub prompt_preview: String,
     pub kind: WorkspaceCheckpointKind,
     pub accepted: bool,
+    #[serde(default)]
+    pub initialization: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_file_count: Option<usize>,
+    #[serde(default)]
+    pub change_scope: WorkspaceCheckpointChangeScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_status: Option<WorkspaceCheckpointTurnStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<u64>,
     pub changed_file_count: usize,
     #[serde(default)]
     pub changed_files: Vec<WorkspaceCheckpointFileChange>,
@@ -90,6 +123,17 @@ pub struct BindTurnRequest {
     pub thread_id: String,
     #[serde(default)]
     pub turn_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteTurnRequest {
+    pub cwd: String,
+    #[serde(default)]
+    pub thread_id: String,
+    #[serde(default)]
+    pub turn_id: String,
+    pub status: WorkspaceCheckpointTurnStatus,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -129,6 +173,12 @@ pub struct CreateCheckpointResult {
     pub checkpoint: WorkspaceCheckpoint,
     #[serde(default)]
     pub pruned_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteTurnResult {
+    pub checkpoint: WorkspaceCheckpoint,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -234,6 +284,17 @@ enum CheckpointEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_id: Option<String>,
     },
+    Initialized {
+        checkpoint_id: String,
+        initial_file_count: usize,
+    },
+    Completed {
+        checkpoint_id: String,
+        status: WorkspaceCheckpointTurnStatus,
+        completed_at_ms: u64,
+        #[serde(default)]
+        changed_files: Vec<WorkspaceCheckpointFileChange>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -303,20 +364,27 @@ impl WorkspaceCheckpointService {
         let pruned_count = self.cleanup_workspace_locked(&workspace, &state, false)?;
 
         let request_id = non_empty_or_uuid(&request.request_id);
-        let existing = self
-            .load_checkpoints(&state)?
-            .into_iter()
+        let thread_id = request.thread_id.trim().to_string();
+        let checkpoints = self.load_checkpoints(&state)?;
+        let existing = checkpoints
+            .iter()
             .find(|checkpoint| {
                 checkpoint.kind == WorkspaceCheckpointKind::TurnStart
-                    && checkpoint.thread_id == request.thread_id.trim()
+                    && checkpoint.thread_id == thread_id
                     && checkpoint.request_id == request_id
-            });
+            })
+            .cloned();
         if let Some(checkpoint) = existing {
             return Ok(CreateCheckpointResult {
                 checkpoint,
                 pruned_count,
             });
         }
+        let initialization = !thread_id.is_empty()
+            && !checkpoints.iter().any(|checkpoint| {
+                checkpoint.kind == WorkspaceCheckpointKind::TurnStart
+                    && checkpoint.thread_id == thread_id
+            });
 
         let checkpoint = self.snapshot_locked(
             &workspace,
@@ -324,13 +392,15 @@ impl WorkspaceCheckpointService {
             SnapshotMetadata {
                 id: Uuid::new_v4().hyphenated().to_string(),
                 request_id,
-                thread_id: request.thread_id.trim().to_string(),
+                thread_id,
                 prompt_preview: truncate_chars(
                     request.prompt_preview.trim(),
                     MAX_PROMPT_PREVIEW_CHARS,
                 ),
                 kind: WorkspaceCheckpointKind::TurnStart,
                 accepted: false,
+                initialization,
+                change_scope: WorkspaceCheckpointChangeScope::Turn,
             },
         )?;
         Ok(CreateCheckpointResult {
@@ -344,6 +414,7 @@ impl WorkspaceCheckpointService {
         let workspace = resolve_workspace(&request.cwd)?;
         let state = self.workspace_state(&workspace);
         let _lock = self.lock_workspace(&state)?;
+        self.prepare_repository(&workspace, &state)?;
         let checkpoints = self.load_checkpoints(&state)?;
         let checkpoint = checkpoints
             .iter()
@@ -355,6 +426,29 @@ impl WorkspaceCheckpointService {
         let thread_id = optional_trimmed(&request.thread_id)
             .or_else(|| optional_trimmed(&checkpoint.thread_id));
         let turn_id = optional_trimmed(&request.turn_id);
+        let initialize_on_bind = !checkpoint.initialization
+            && checkpoint.thread_id.trim().is_empty()
+            && thread_id.as_ref().is_some_and(|thread_id| {
+                !checkpoints.iter().any(|candidate| {
+                    candidate.id != checkpoint.id
+                        && candidate.kind == WorkspaceCheckpointKind::TurnStart
+                        && candidate.thread_id == *thread_id
+                })
+            });
+        if initialize_on_bind {
+            self.verify_commit(&state, &workspace, &checkpoint.commit_hash)?;
+            self.append_event(
+                &state,
+                &CheckpointEvent::Initialized {
+                    checkpoint_id: checkpoint.id.clone(),
+                    initial_file_count: self.commit_file_count(
+                        &state,
+                        &workspace,
+                        &checkpoint.commit_hash,
+                    )?,
+                },
+            )?;
+        }
         if !checkpoint.accepted
             || checkpoint.thread_id != thread_id.as_deref().unwrap_or_default()
             || checkpoint.turn_id != turn_id
@@ -378,6 +472,60 @@ impl WorkspaceCheckpointService {
             checkpoint,
             pruned_count,
         })
+    }
+
+    pub fn complete_turn(
+        &self,
+        request: CompleteTurnRequest,
+    ) -> anyhow::Result<CompleteTurnResult> {
+        let _root_lock = self.lock_root_shared()?;
+        let workspace = resolve_workspace(&request.cwd)?;
+        let state = self.workspace_state(&workspace);
+        let _lock = self.lock_workspace(&state)?;
+        self.prepare_repository(&workspace, &state)?;
+
+        let thread_id = request.thread_id.trim();
+        if thread_id.is_empty() {
+            bail!("完成工作区 Checkpoint 必须提供 threadId");
+        }
+        let turn_id = request.turn_id.trim();
+        if turn_id.is_empty() {
+            bail!("完成工作区 Checkpoint 必须提供 turnId");
+        }
+
+        let checkpoint = self
+            .load_checkpoints(&state)?
+            .into_iter()
+            .rev()
+            .find(|checkpoint| {
+                checkpoint.kind == WorkspaceCheckpointKind::TurnStart
+                    && checkpoint.accepted
+                    && checkpoint.thread_id == thread_id
+                    && checkpoint.turn_id.as_deref() == Some(turn_id)
+            })
+            .ok_or_else(|| anyhow!("未找到与该轮次对应的工作区 Checkpoint"))?;
+        if checkpoint.turn_status.is_some() {
+            return Ok(CompleteTurnResult { checkpoint });
+        }
+
+        self.verify_commit(&state, &workspace, &checkpoint.commit_hash)?;
+        let changed_files =
+            self.worktree_file_changes(&state, &workspace, &checkpoint.commit_hash)?;
+        self.append_event(
+            &state,
+            &CheckpointEvent::Completed {
+                checkpoint_id: checkpoint.id.clone(),
+                status: request.status,
+                completed_at_ms: now_ms(),
+                changed_files,
+            },
+        )?;
+        let checkpoint = self
+            .load_checkpoints(&state)?
+            .into_iter()
+            .find(|candidate| candidate.id == checkpoint.id)
+            .ok_or_else(|| anyhow!("Checkpoint 完成后状态读取失败"))?;
+        Ok(CompleteTurnResult { checkpoint })
     }
 
     pub fn list_checkpoints(
@@ -826,6 +974,8 @@ impl WorkspaceCheckpointService {
                 prompt_preview: "恢复历史 Checkpoint 前的安全快照".to_string(),
                 kind: WorkspaceCheckpointKind::RestoreSafety,
                 accepted: true,
+                initialization: false,
+                change_scope: WorkspaceCheckpointChangeScope::Snapshot,
             },
         )?;
         let changed_paths = self.changed_paths(
@@ -903,10 +1053,21 @@ impl WorkspaceCheckpointService {
     ) -> anyhow::Result<WorkspaceCheckpoint> {
         self.prepare_repository(workspace, state)?;
         self.run_git_checked(state, workspace, ["add", "-A", "--", "."], "收集工作区文件")?;
-        let changed_files = self.staged_file_changes(state, workspace)?;
-        let changed_file_count = changed_files.len();
         let head = self.try_head(state, workspace)?;
-        let commit_hash = if head.is_some() && changed_file_count == 0 {
+        let snapshot_changed_files =
+            if metadata.change_scope == WorkspaceCheckpointChangeScope::Snapshot {
+                self.staged_file_changes(state, workspace)?
+            } else {
+                Vec::new()
+            };
+        let snapshot_changed = if head.is_none() {
+            true
+        } else if metadata.change_scope == WorkspaceCheckpointChangeScope::Snapshot {
+            !snapshot_changed_files.is_empty()
+        } else {
+            self.staged_changes_present(state, workspace)?
+        };
+        let commit_hash = if head.is_some() && !snapshot_changed {
             head.unwrap_or_default()
         } else {
             let tree =
@@ -934,6 +1095,17 @@ impl WorkspaceCheckpointService {
             )?;
             commit_hash
         };
+        let initial_file_count = if metadata.initialization {
+            Some(self.commit_file_count(state, workspace, &commit_hash)?)
+        } else {
+            None
+        };
+        let changed_files = if metadata.change_scope == WorkspaceCheckpointChangeScope::Turn {
+            Vec::new()
+        } else {
+            snapshot_changed_files
+        };
+        let changed_file_count = changed_files.len();
         let checkpoint_ref = checkpoint_ref_name(&metadata.id);
         self.run_git_checked(
             state,
@@ -954,6 +1126,11 @@ impl WorkspaceCheckpointService {
             prompt_preview: metadata.prompt_preview,
             kind: metadata.kind,
             accepted: metadata.accepted,
+            initialization: metadata.initialization,
+            initial_file_count,
+            change_scope: metadata.change_scope,
+            turn_status: None,
+            completed_at_ms: None,
             changed_file_count,
             changed_files,
         };
@@ -999,48 +1176,38 @@ impl WorkspaceCheckpointService {
             ],
             "统计 Checkpoint 文件增删",
         )?;
+        parse_file_changes(&status_output.stdout, &numstat_output.stdout)
+    }
 
-        let mut stats = HashMap::<Vec<u8>, (Option<usize>, Option<usize>)>::new();
-        for record in split_nul(&numstat_output.stdout) {
-            let mut fields = record.splitn(3, |byte| *byte == b'\t');
-            let Some(additions) = fields.next() else {
-                continue;
-            };
-            let Some(deletions) = fields.next() else {
-                continue;
-            };
-            let Some(path) = fields.next() else {
-                continue;
-            };
-            stats.insert(
-                path.to_vec(),
-                (
-                    parse_numstat_value(additions),
-                    parse_numstat_value(deletions),
-                ),
-            );
+    fn staged_changes_present(
+        &self,
+        state: &WorkspaceState,
+        workspace: &Path,
+    ) -> anyhow::Result<bool> {
+        let output = self.run_git(state, workspace, ["diff", "--cached", "--quiet", "--", "."])?;
+        match output.status.code() {
+            Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            _ => {
+                ensure_success(output, "检查 Checkpoint 文件变化")?;
+                Ok(false)
+            }
         }
+    }
 
-        let mut changes = Vec::new();
-        let mut fields = split_nul(&status_output.stdout);
-        while let Some(status) = fields.next() {
-            let path = fields
-                .next()
-                .ok_or_else(|| anyhow!("Git 返回了不完整的 Checkpoint 文件状态"))?;
-            let status = String::from_utf8_lossy(status)
-                .chars()
-                .next()
-                .unwrap_or('M')
-                .to_string();
-            let (additions, deletions) = stats.remove(path).unwrap_or((None, None));
-            changes.push(WorkspaceCheckpointFileChange {
-                path: String::from_utf8_lossy(path).into_owned(),
-                status,
-                additions,
-                deletions,
-            });
-        }
-        Ok(changes)
+    fn commit_file_count(
+        &self,
+        state: &WorkspaceState,
+        workspace: &Path,
+        commit_hash: &str,
+    ) -> anyhow::Result<usize> {
+        let output = self.run_git_checked(
+            state,
+            workspace,
+            ["ls-tree", "-r", "--name-only", "-z", commit_hash, "--"],
+            "统计初始化 Checkpoint 文件",
+        )?;
+        Ok(split_nul(&output.stdout).count())
     }
 
     fn changed_paths(
@@ -1137,6 +1304,84 @@ impl WorkspaceCheckpointService {
         match (result, cleanup_result) {
             (Ok(changed_paths), Ok(())) => Ok(changed_paths),
             (Ok(_), Err(error)) => Err(error).with_context(|| "无法清理 Checkpoint 预检索引"),
+            (Err(error), _) => Err(error),
+        }
+    }
+
+    fn worktree_file_changes(
+        &self,
+        state: &WorkspaceState,
+        workspace: &Path,
+        target: &str,
+    ) -> anyhow::Result<Vec<WorkspaceCheckpointFileChange>> {
+        let index_path = state.dir.join(format!(
+            "turn-completion-index-{}.index",
+            Uuid::new_v4().hyphenated()
+        ));
+        let mut lock_path = index_path.as_os_str().to_os_string();
+        lock_path.push(".lock");
+        let lock_path = PathBuf::from(lock_path);
+
+        let result = (|| {
+            self.run_git_with_index_checked(
+                state,
+                workspace,
+                &index_path,
+                ["read-tree", target],
+                "准备轮次文件变化索引",
+            )?;
+            self.run_git_with_index_checked(
+                state,
+                workspace,
+                &index_path,
+                ["add", "-A", "--", "."],
+                "收集本轮文件变化",
+            )?;
+            let status_output = self.run_git_with_index_checked(
+                state,
+                workspace,
+                &index_path,
+                [
+                    "diff",
+                    "--cached",
+                    "--name-status",
+                    "-z",
+                    "--no-renames",
+                    target,
+                    "--",
+                    ".",
+                ],
+                "读取本轮文件状态",
+            )?;
+            let numstat_output = self.run_git_with_index_checked(
+                state,
+                workspace,
+                &index_path,
+                [
+                    "diff",
+                    "--cached",
+                    "--numstat",
+                    "-z",
+                    "--no-renames",
+                    target,
+                    "--",
+                    ".",
+                ],
+                "统计本轮文件增删",
+            )?;
+            parse_file_changes(&status_output.stdout, &numstat_output.stdout)
+        })();
+
+        let cleanup_result = [index_path.as_path(), lock_path.as_path()]
+            .into_iter()
+            .try_for_each(|path| match fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            });
+        match (result, cleanup_result) {
+            (Ok(changed_files), Ok(())) => Ok(changed_files),
+            (Ok(_), Err(error)) => Err(error).with_context(|| "无法清理轮次文件变化索引"),
             (Err(error), _) => Err(error),
         }
     }
@@ -1701,6 +1946,31 @@ impl WorkspaceCheckpointService {
                         checkpoints[index].turn_id = turn_id;
                     }
                 }
+                CheckpointEvent::Initialized {
+                    checkpoint_id,
+                    initial_file_count,
+                } => {
+                    if let Some(index) = indexes.get(&checkpoint_id).copied() {
+                        checkpoints[index].initialization = true;
+                        checkpoints[index].initial_file_count = Some(initial_file_count);
+                    }
+                }
+                CheckpointEvent::Completed {
+                    checkpoint_id,
+                    status,
+                    completed_at_ms,
+                    changed_files,
+                } => {
+                    if let Some(index) = indexes.get(&checkpoint_id).copied()
+                        && checkpoints[index].turn_status.is_none()
+                    {
+                        checkpoints[index].change_scope = WorkspaceCheckpointChangeScope::Turn;
+                        checkpoints[index].turn_status = Some(status);
+                        checkpoints[index].completed_at_ms = Some(completed_at_ms);
+                        checkpoints[index].changed_file_count = changed_files.len();
+                        checkpoints[index].changed_files = changed_files;
+                    }
+                }
             }
         }
         Ok(checkpoints)
@@ -1872,6 +2142,8 @@ struct SnapshotMetadata {
     prompt_preview: String,
     kind: WorkspaceCheckpointKind,
     accepted: bool,
+    initialization: bool,
+    change_scope: WorkspaceCheckpointChangeScope,
 }
 
 #[derive(Debug)]
@@ -1906,6 +2178,14 @@ pub async fn handle_bind_turn(service: WorkspaceCheckpointService, payload: Valu
         Err(error) => return failed("invalid_input", error),
     };
     blocking_response(move || service.bind_turn(request)).await
+}
+
+pub async fn handle_complete_turn(service: WorkspaceCheckpointService, payload: Value) -> Value {
+    let request = match serde_json::from_value::<CompleteTurnRequest>(payload) {
+        Ok(request) => request,
+        Err(error) => return failed("invalid_input", error),
+    };
+    blocking_response(move || service.complete_turn(request)).await
 }
 
 pub async fn handle_list(service: WorkspaceCheckpointService, payload: Value) -> Value {
@@ -2300,6 +2580,53 @@ fn split_nul(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     bytes
         .split(|byte| *byte == 0)
         .filter(|part| !part.is_empty())
+}
+
+fn parse_file_changes(
+    status_bytes: &[u8],
+    numstat_bytes: &[u8],
+) -> anyhow::Result<Vec<WorkspaceCheckpointFileChange>> {
+    let mut stats = HashMap::<Vec<u8>, (Option<usize>, Option<usize>)>::new();
+    for record in split_nul(numstat_bytes) {
+        let mut fields = record.splitn(3, |byte| *byte == b'\t');
+        let Some(additions) = fields.next() else {
+            continue;
+        };
+        let Some(deletions) = fields.next() else {
+            continue;
+        };
+        let Some(path) = fields.next() else {
+            continue;
+        };
+        stats.insert(
+            path.to_vec(),
+            (
+                parse_numstat_value(additions),
+                parse_numstat_value(deletions),
+            ),
+        );
+    }
+
+    let mut changes = Vec::new();
+    let mut fields = split_nul(status_bytes);
+    while let Some(status) = fields.next() {
+        let path = fields
+            .next()
+            .ok_or_else(|| anyhow!("Git 返回了不完整的 Checkpoint 文件状态"))?;
+        let status = String::from_utf8_lossy(status)
+            .chars()
+            .next()
+            .unwrap_or('M')
+            .to_string();
+        let (additions, deletions) = stats.remove(path).unwrap_or((None, None));
+        changes.push(WorkspaceCheckpointFileChange {
+            path: String::from_utf8_lossy(path).into_owned(),
+            status,
+            additions,
+            deletions,
+        });
+    }
+    Ok(changes)
 }
 
 fn parse_numstat_value(value: &[u8]) -> Option<usize> {

@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "84";
+  const codexDeleteStyleVersion = "87";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -106,7 +106,7 @@
   const codexPromptOptimizeCompactCollisionMaxWidth = 140;
   const codexPromptOptimizeCompactCollisionMaxHeight = 84;
   const codexPromptOptimizeMaxRecentContextChars = 100000;
-  const codexWorkspaceCheckpointVersion = "1";
+  const codexWorkspaceCheckpointVersion = "2";
   const codexWorkspaceCheckpointButtonAttribute = "data-codex-workspace-checkpoint-button";
   const codexWorkspaceCheckpointButtonGap = 6;
   const codexWorkspaceCheckpointDialogClass = "codex-workspace-checkpoint-dialog";
@@ -670,6 +670,24 @@
     style.id = styleId;
     style.dataset.codexDeleteStyleVersion = codexDeleteStyleVersion;
     style.textContent = `
+      :root {
+        --codex-elves-modal-overlay-background: rgba(0,0,0,.45);
+        --codex-elves-modal-surface: var(
+          --color-background-elevated-primary-opaque,
+          var(--color-token-main-surface-primary, #2b2b2b)
+        );
+        --codex-elves-modal-foreground: var(
+          --color-text-primary,
+          var(--color-token-text-primary, #f3f4f6)
+        );
+        --codex-elves-modal-border: rgba(255,255,255,.12);
+        --codex-elves-modal-radius: 18px;
+        --codex-elves-modal-shadow: 0 24px 80px rgba(0,0,0,.45);
+        --codex-elves-modal-width-small: 420px;
+        --codex-elves-modal-width-standard: 600px;
+        --codex-elves-modal-width-large: 640px;
+        --codex-elves-modal-viewport-gap: 48px;
+      }
       .${actionGroupClass} {
         position: absolute;
         right: var(--codex-session-actions-right, 28px);
@@ -1048,21 +1066,25 @@
         position: fixed;
         inset: 0;
         z-index: 2147483200;
-        background: rgba(15,23,42,.28);
+        background: var(--codex-elves-modal-overlay-background);
+        backdrop-filter: none;
       }
       .codex-project-move-panel {
         position: fixed;
-        width: min(360px, calc(100vw - 32px));
-        max-height: min(520px, calc(100vh - 32px));
+        width: min(
+          var(--codex-elves-modal-width-small),
+          calc(100vw - var(--codex-elves-modal-viewport-gap))
+        );
+        max-height: min(520px, calc(100vh - var(--codex-elves-modal-viewport-gap)));
         overflow: hidden;
-        border: 1px solid rgba(15,23,42,.14);
-        border-radius: 10px;
-        background: #ffffff;
-        color: #111827;
+        border: 1px solid var(--codex-elves-modal-border);
+        border-radius: var(--codex-elves-modal-radius);
+        background: var(--codex-elves-modal-surface);
+        color: var(--codex-elves-modal-foreground);
         font: 13px system-ui, sans-serif;
-        box-shadow: 0 18px 60px rgba(15,23,42,.25);
+        box-shadow: var(--codex-elves-modal-shadow);
       }
-      .codex-project-move-header { border-bottom: 1px solid #e5e7eb; padding: 10px 12px; }
+      .codex-project-move-header { border-bottom: 1px solid rgba(255,255,255,.1); padding: 10px 12px; }
       .codex-project-move-title { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .codex-project-move-list { max-height: min(440px, calc(100vh - 110px)); overflow-y: auto; padding: 6px; }
       .codex-project-move-item {
@@ -1071,16 +1093,16 @@
         border: 0;
         border-radius: 7px;
         background: transparent;
-        color: #111827;
+        color: var(--codex-elves-modal-foreground);
         padding: 8px 9px;
         text-align: left;
         cursor: pointer;
       }
       .codex-project-move-item:hover,
-      .codex-project-move-item:focus-visible { background: #f3f4f6; outline: none; }
+      .codex-project-move-item:focus-visible { background: rgba(255,255,255,.08); outline: none; }
       .codex-project-move-item-title { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .codex-project-move-item-path { margin-top: 2px; color: #6b7280; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .codex-project-move-empty { padding: 18px 12px; color: #6b7280; text-align: center; }
+      .codex-project-move-item-path { margin-top: 2px; color: #9ca3af; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .codex-project-move-empty { padding: 18px 12px; color: #9ca3af; text-align: center; }
       .codex-project-move-hidden { display: none !important; }
       [data-codex-project-move-injected-list="true"] { display: flex; flex-direction: column; }
       .codex-archive-delete-all {
@@ -1155,17 +1177,8 @@
       }
       .codex-delete-toast button { margin-left: 10px; pointer-events: auto; }
       .codex-delete-confirm-overlay {
-        --codex-confirm-surface: var(
-          --color-background-elevated-primary-opaque,
-          var(
-            --color-background-elevated-primary,
-            var(--color-token-dropdown-background, Canvas)
-          )
-        );
-        --codex-confirm-foreground: var(
-          --color-text-primary,
-          var(--color-token-text-primary, CanvasText)
-        );
+        --codex-confirm-surface: var(--codex-elves-modal-surface);
+        --codex-confirm-foreground: var(--codex-elves-modal-foreground);
         --codex-confirm-muted: var(
           --color-text-secondary,
           var(
@@ -1173,10 +1186,7 @@
             color-mix(in srgb, var(--codex-confirm-foreground) 72%, transparent)
           )
         );
-        --codex-confirm-border: var(
-          --color-border-primary-outline,
-          color-mix(in srgb, var(--codex-confirm-foreground) 16%, transparent)
-        );
+        --codex-confirm-border: var(--codex-elves-modal-border);
         --codex-confirm-action-background: var(
           --color-background-button-secondary,
           color-mix(in srgb, var(--codex-confirm-foreground) 6%, transparent)
@@ -1209,23 +1219,31 @@
           --color-text-danger-soft,
           var(--color-text-danger, #ef4444)
         );
+        --codex-confirm-warning-background: color-mix(in srgb, #f59e0b 10%, transparent);
+        --codex-confirm-warning-background-hover: color-mix(in srgb, #f59e0b 18%, transparent);
+        --codex-confirm-warning-background-active: color-mix(in srgb, #f59e0b 24%, transparent);
+        --codex-confirm-warning-border: color-mix(in srgb, #f59e0b 28%, transparent);
+        --codex-confirm-warning-foreground: #fcd34d;
         position: fixed;
         inset: 0;
         z-index: 2147483200;
         display: flex;
         align-items: center;
         justify-content: center;
-        background: rgba(0,0,0,.58);
-        backdrop-filter: blur(4px);
+        background: var(--codex-elves-modal-overlay-background);
+        backdrop-filter: none;
       }
       .codex-delete-confirm-content {
-        width: min(420px, calc(100vw - 48px));
+        width: min(
+          var(--codex-elves-modal-width-small),
+          calc(100vw - var(--codex-elves-modal-viewport-gap))
+        );
         border: 1px solid var(--codex-confirm-border);
-        border-radius: 12px;
+        border-radius: var(--codex-elves-modal-radius);
         background: var(--codex-confirm-surface);
         color: var(--codex-confirm-foreground);
         font: 14px system-ui, sans-serif;
-        box-shadow: 0 24px 80px rgba(0,0,0,.42);
+        box-shadow: var(--codex-elves-modal-shadow);
         padding: 18px;
       }
       .codex-delete-confirm-title { font-size: 16px; font-weight: 650; }
@@ -1282,6 +1300,20 @@
       .codex-delete-confirm-actions [data-codex-delete-confirm="true"]:focus-visible {
         outline-color: var(--color-ring-danger-soft, var(--codex-confirm-danger-foreground));
       }
+      .codex-delete-confirm-actions [data-codex-confirm-tone="warning"] {
+        border-color: var(--codex-confirm-warning-border);
+        background: var(--codex-confirm-warning-background);
+        color: var(--codex-confirm-warning-foreground);
+      }
+      .codex-delete-confirm-actions [data-codex-confirm-tone="warning"]:hover {
+        background: var(--codex-confirm-warning-background-hover);
+      }
+      .codex-delete-confirm-actions [data-codex-confirm-tone="warning"]:active {
+        background: var(--codex-confirm-warning-background-active);
+      }
+      .codex-delete-confirm-actions [data-codex-confirm-tone="warning"]:focus-visible {
+        outline-color: var(--codex-confirm-warning-foreground);
+      }
       /* Dark theme fallbacks for project-move surfaces and restart controls.
          Triggered either by Codex applying a "dark" class / data-theme="dark"
          on its document root, or by the OS-level prefers-color-scheme hint.
@@ -1296,15 +1328,15 @@
       html.dark .${projectMoveOverlayClass},
       html[data-theme="dark"] .${projectMoveOverlayClass},
       :root[data-theme="dark"] .${projectMoveOverlayClass} {
-        background: rgba(0,0,0,.55);
+        background: var(--codex-elves-modal-overlay-background);
       }
       html.dark .codex-project-move-panel,
       html[data-theme="dark"] .codex-project-move-panel,
       :root[data-theme="dark"] .codex-project-move-panel {
-        border-color: rgba(255,255,255,.12);
-        background: #2b2b2b;
-        color: #f3f4f6;
-        box-shadow: 0 18px 60px rgba(0,0,0,.55);
+        border-color: var(--codex-elves-modal-border);
+        background: var(--codex-elves-modal-surface);
+        color: var(--codex-elves-modal-foreground);
+        box-shadow: var(--codex-elves-modal-shadow);
       }
       html.dark .codex-project-move-header,
       html[data-theme="dark"] .codex-project-move-header,
@@ -1339,13 +1371,13 @@
           color: #f3f4f6;
         }
         html:not(.light):not([data-theme="light"]) .${projectMoveOverlayClass} {
-          background: rgba(0,0,0,.55);
+          background: var(--codex-elves-modal-overlay-background);
         }
         html:not(.light):not([data-theme="light"]) .codex-project-move-panel {
-          border-color: rgba(255,255,255,.12);
-          background: #2b2b2b;
-          color: #f3f4f6;
-          box-shadow: 0 18px 60px rgba(0,0,0,.55);
+          border-color: var(--codex-elves-modal-border);
+          background: var(--codex-elves-modal-surface);
+          color: var(--codex-elves-modal-foreground);
+          box-shadow: var(--codex-elves-modal-shadow);
         }
         html:not(.light):not([data-theme="light"]) .codex-project-move-header {
           border-bottom-color: rgba(255,255,255,.1);
@@ -1413,23 +1445,27 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        background: rgba(0,0,0,.45);
+        background: var(--codex-elves-modal-overlay-background);
+        backdrop-filter: none;
         pointer-events: auto;
         -webkit-app-region: no-drag;
       }
       .codex-elves-modal-content {
-        width: min(600px, calc(100vw - 48px));
-        min-width: 600px;
-        max-height: min(680px, calc(100vh - 40px));
+        width: min(
+          var(--codex-elves-modal-width-standard),
+          calc(100vw - var(--codex-elves-modal-viewport-gap))
+        );
+        min-width: 0;
+        max-height: min(680px, calc(100vh - var(--codex-elves-modal-viewport-gap)));
         display: flex;
         flex-direction: column;
         overflow: hidden;
-        border: 1px solid rgba(255,255,255,.12);
-        border-radius: 18px;
-        background: #2b2b2b;
-        color: #f3f4f6;
+        border: 1px solid var(--codex-elves-modal-border);
+        border-radius: var(--codex-elves-modal-radius);
+        background: var(--codex-elves-modal-surface);
+        color: var(--codex-elves-modal-foreground);
         font: 14px system-ui, sans-serif;
-        box-shadow: 0 24px 80px rgba(0,0,0,.45);
+        box-shadow: var(--codex-elves-modal-shadow);
         pointer-events: auto;
         -webkit-app-region: no-drag;
       }
@@ -1539,21 +1575,25 @@
         display: grid;
         place-items: center;
         padding: 24px;
-        background: rgba(0,0,0,.62);
+        background: var(--codex-elves-modal-overlay-background);
+        backdrop-filter: none;
         pointer-events: auto;
         -webkit-app-region: no-drag;
       }
       .codex-workspace-checkpoint-dialog {
-        width: min(640px, calc(100vw - 48px));
-        max-height: min(790px, calc(100vh - 48px));
+        width: min(
+          var(--codex-elves-modal-width-large),
+          calc(100vw - var(--codex-elves-modal-viewport-gap))
+        );
+        max-height: min(790px, calc(100vh - var(--codex-elves-modal-viewport-gap)));
         display: flex;
         flex-direction: column;
         overflow: hidden;
-        border: 1px solid rgba(255,255,255,.13);
-        border-radius: 16px;
-        background: #202123;
-        color: #f3f4f6;
-        box-shadow: 0 28px 100px rgba(0,0,0,.5);
+        border: 1px solid var(--codex-elves-modal-border);
+        border-radius: var(--codex-elves-modal-radius);
+        background: var(--codex-elves-modal-surface);
+        color: var(--codex-elves-modal-foreground);
+        box-shadow: var(--codex-elves-modal-shadow);
         font: 13px/1.5 "Segoe UI Variable Text", "Microsoft YaHei UI", system-ui, sans-serif;
       }
       .codex-workspace-checkpoint-header,
@@ -1579,17 +1619,24 @@
         font-weight: 620;
       }
       .codex-workspace-checkpoint-list {
+        min-width: 0;
         min-height: 120px;
         flex: 1 1 auto;
-        overflow: auto;
+        overflow-x: hidden;
+        overflow-y: auto;
         display: grid;
+        grid-template-columns: minmax(0, 1fr);
         gap: 10px;
         padding: 12px 14px 14px;
-        background: #1b1c1e;
+        background: transparent;
         scrollbar-color: rgba(255,255,255,.24) transparent;
         scrollbar-width: thin;
       }
       .codex-workspace-checkpoint-item {
+        min-width: 0;
+        max-width: 100%;
+        box-sizing: border-box;
+        overflow: hidden;
         padding: 13px;
         border: 1px solid rgba(255,255,255,.09);
         border-radius: 11px;
@@ -1627,6 +1674,26 @@
         background: rgba(161,161,170,.08);
         color: #c4c4cc;
       }
+      .codex-workspace-checkpoint-dialog .checkpoint-stage[data-kind="failed"] {
+        border-color: rgba(248,113,113,.24);
+        background: rgba(239,68,68,.1);
+        color: #fca5a5;
+      }
+      .codex-workspace-checkpoint-dialog .checkpoint-stage[data-kind="interrupted"] {
+        border-color: rgba(251,191,36,.22);
+        background: rgba(245,158,11,.08);
+        color: #fcd34d;
+      }
+      .codex-workspace-checkpoint-dialog .checkpoint-stage[data-kind="legacy"] {
+        border-color: rgba(161,161,170,.2);
+        background: rgba(161,161,170,.08);
+        color: #c4c4cc;
+      }
+      .codex-workspace-checkpoint-dialog .checkpoint-stage[data-kind="initialization"] {
+        border-color: rgba(52,211,153,.24);
+        background: rgba(16,185,129,.1);
+        color: #6ee7b7;
+      }
       .codex-workspace-checkpoint-dialog .checkpoint-time {
         flex: 0 0 auto;
         color: #8f8f98;
@@ -1634,13 +1701,18 @@
         font-variant-numeric: tabular-nums;
       }
       .codex-workspace-checkpoint-dialog .checkpoint-title-line {
+        width: 100%;
         min-width: 0;
         display: flex;
         align-items: center;
         gap: 7px;
+        overflow: hidden;
       }
       .codex-workspace-checkpoint-item-title {
+        display: block;
         min-width: 0;
+        max-width: 100%;
+        flex: 1 1 auto;
         overflow: hidden;
         color: #f1f1f3;
         text-overflow: ellipsis;
@@ -1765,6 +1837,7 @@
         border-top: 1px solid rgba(255,255,255,.055);
         background: transparent;
         color: #92929b;
+        cursor: pointer;
         font: 11px "Segoe UI Variable Text", "Microsoft YaHei UI", system-ui, sans-serif;
       }
       .codex-workspace-checkpoint-dialog .checkpoint-file-toggle:hover { color: #c8c8ce; }
@@ -1805,11 +1878,13 @@
       .codex-workspace-checkpoint-dialog .codex-elves-modal-close:hover {
         background: rgba(255,255,255,.07);
       }
+      .codex-workspace-checkpoint-dialog button:not(:disabled) { cursor: pointer; }
+      .codex-workspace-checkpoint-dialog button:disabled { cursor: not-allowed; }
       .codex-workspace-checkpoint-dialog .codex-elves-action-button {
         padding: 6px 9px;
         font: 11.5px "Segoe UI Variable Text", "Microsoft YaHei UI", system-ui, sans-serif;
       }
-      .codex-workspace-checkpoint-dialog .codex-elves-action-button:hover {
+      .codex-workspace-checkpoint-dialog .codex-elves-action-button:not(:disabled):hover {
         border-color: rgba(255,255,255,.3);
         background: #4a4a51;
       }
@@ -1818,9 +1893,18 @@
         background: rgba(59,130,246,.11);
         color: #bfdbfe;
       }
-      .codex-workspace-checkpoint-dialog .checkpoint-restore-button:hover {
+      .codex-workspace-checkpoint-dialog .checkpoint-restore-button:not(:disabled):hover {
         border-color: rgba(96,165,250,.4);
         background: rgba(59,130,246,.18);
+      }
+      .codex-workspace-checkpoint-dialog .checkpoint-undo-button {
+        border-color: rgba(245,158,11,.28);
+        background: rgba(245,158,11,.1);
+        color: #fcd34d;
+      }
+      .codex-workspace-checkpoint-dialog .checkpoint-undo-button:not(:disabled):hover {
+        border-color: rgba(245,158,11,.45);
+        background: rgba(245,158,11,.18);
       }
       .codex-workspace-checkpoint-empty {
         align-self: center;
@@ -2005,24 +2089,28 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        padding: 20px;
+        padding: 24px;
         box-sizing: border-box;
-        background: rgba(0,0,0,.52);
+        background: var(--codex-elves-modal-overlay-background);
+        backdrop-filter: none;
         pointer-events: auto;
         -webkit-app-region: no-drag;
       }
       .codex-prompt-optimize-settings {
-        width: min(600px, calc(100vw - 40px));
-        max-height: min(760px, calc(100vh - 40px));
+        width: min(
+          var(--codex-elves-modal-width-standard),
+          calc(100vw - var(--codex-elves-modal-viewport-gap))
+        );
+        max-height: min(760px, calc(100vh - var(--codex-elves-modal-viewport-gap)));
         display: flex;
         flex-direction: column;
         overflow: hidden;
-        border: 1px solid rgba(255,255,255,.12);
-        border-radius: 18px;
-        background: var(--color-token-main-surface-primary, #2b2b2b);
-        color: var(--color-token-text-primary, #f3f4f6);
+        border: 1px solid var(--codex-elves-modal-border);
+        border-radius: var(--codex-elves-modal-radius);
+        background: var(--codex-elves-modal-surface);
+        color: var(--codex-elves-modal-foreground);
         font: 14px/1.45 system-ui, sans-serif;
-        box-shadow: 0 24px 80px rgba(0,0,0,.48);
+        box-shadow: var(--codex-elves-modal-shadow);
       }
       .codex-prompt-optimize-settings-header {
         display: flex;
@@ -2853,28 +2941,31 @@
         inset: 0;
         display: grid;
         place-items: center;
-        background: rgba(0, 0, 0, .58);
-        backdrop-filter: blur(4px);
-        padding: 16px;
+        background: var(--codex-elves-modal-overlay-background);
+        backdrop-filter: none;
+        padding: 24px;
       }
       .codex-task-board-create-modal {
         display: flex;
-        height: min(650px, calc(100vh - 32px));
-        width: 650px;
+        height: min(650px, calc(100vh - var(--codex-elves-modal-viewport-gap)));
+        width: var(--codex-elves-modal-width-large);
         flex-direction: column;
-        max-width: calc(100vw - 32px);
-        max-height: calc(100vh - 32px);
+        max-width: calc(100vw - var(--codex-elves-modal-viewport-gap));
+        max-height: calc(100vh - var(--codex-elves-modal-viewport-gap));
         overflow: hidden;
-        border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
-        border-radius: 14px;
-        background: color-mix(in srgb, var(--color-token-dropdown-background, #363636) 96%, transparent);
-        color: var(--color-token-text-primary, #f4f4f5);
-        box-shadow: 0 24px 70px rgba(0,0,0,.48);
+        border: 1px solid var(--codex-elves-modal-border);
+        border-radius: var(--codex-elves-modal-radius);
+        background: var(--codex-elves-modal-surface);
+        color: var(--codex-elves-modal-foreground);
+        box-shadow: var(--codex-elves-modal-shadow);
       }
       .codex-task-board-board-manager {
-        width: min(560px, calc(100vw - 32px));
+        width: min(
+          var(--codex-elves-modal-width-standard),
+          calc(100vw - var(--codex-elves-modal-viewport-gap))
+        );
         height: auto;
-        max-height: min(680px, calc(100vh - 32px));
+        max-height: min(680px, calc(100vh - var(--codex-elves-modal-viewport-gap)));
       }
       .codex-task-board-board-manager-body {
         display: grid;
@@ -5907,6 +5998,179 @@
     }
   }
 
+  function codexWorkspaceCheckpointBindingKey(threadId, turnId) {
+    const normalizedThreadId = String(threadId || "").trim();
+    const normalizedTurnId = String(turnId || "").trim();
+    return normalizedThreadId && normalizedTurnId
+      ? `${normalizedThreadId}\u0000${normalizedTurnId}`
+      : "";
+  }
+
+  function codexWorkspaceCheckpointBindings() {
+    if (!(window.__codexWorkspaceCheckpointBindings instanceof Map)) {
+      window.__codexWorkspaceCheckpointBindings = new Map();
+    }
+    return window.__codexWorkspaceCheckpointBindings;
+  }
+
+  function trackCodexWorkspaceCheckpointBinding(created, turnResult, bindingPromise) {
+    const key = codexWorkspaceCheckpointBindingKey(
+      created?.context?.threadId,
+      codexWorkspaceCheckpointTurnId(turnResult)
+    );
+    if (!key) return bindingPromise;
+    const bindings = codexWorkspaceCheckpointBindings();
+    const tracked = Promise.resolve(bindingPromise).finally(() => {
+      if (bindings.get(key) === tracked) bindings.delete(key);
+    });
+    bindings.set(key, tracked);
+    return tracked;
+  }
+
+  async function waitForCodexWorkspaceCheckpointBinding(threadId, turnId) {
+    const key = codexWorkspaceCheckpointBindingKey(threadId, turnId);
+    const binding = key ? codexWorkspaceCheckpointBindings().get(key) : null;
+    if (!binding) return;
+    try {
+      await binding;
+    } catch {
+    }
+  }
+
+  function codexWorkspaceCheckpointCompletionStatus(value) {
+    const status = String(value || "").trim().toLowerCase();
+    if (status === "completed") return "completed";
+    if (status === "interrupted" || status === "cancelled" || status === "canceled") {
+      return "interrupted";
+    }
+    if (status === "failed") return "failed";
+    return "";
+  }
+
+  function codexWorkspaceCheckpointCompletionPayload(notification) {
+    const params = notification?.params && typeof notification.params === "object"
+      ? notification.params
+      : notification;
+    const threadId = validThreadSessionKey(params?.threadId);
+    const turnId = String(params?.turn?.id || params?.turnId || "").trim();
+    const status = codexWorkspaceCheckpointCompletionStatus(
+      params?.turn?.status || params?.status
+    );
+    if (!threadId || !turnId || !status) return null;
+    return { threadId, turnId, status, params };
+  }
+
+  function codexWorkspaceCheckpointConversationManager() {
+    const activeManager = window.__codexElvesConversationStateManager || null;
+    if (typeof activeManager?.addNotificationCallback === "function") return activeManager;
+    try {
+      const manager = findCodexConversationManagerInReactTree()?.manager || null;
+      return typeof manager?.addNotificationCallback === "function" ? manager : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function refreshOpenCodexWorkspaceCheckpointDialog(threadId) {
+    document.querySelectorAll(".codex-workspace-checkpoint-overlay").forEach((dialog) => {
+      const context = dialog.__codexWorkspaceCheckpointContext;
+      if (context?.threadId === threadId) {
+        void loadCodexWorkspaceCheckpointDialogList(dialog, context);
+      }
+    });
+  }
+
+  async function completeCodexWorkspaceCheckpointTurn(manager, notification) {
+    if (!codexWorkspaceCheckpointFeatureEnabled()) return false;
+    const completion = codexWorkspaceCheckpointCompletionPayload(notification);
+    if (!completion) return false;
+    let conversation = null;
+    try {
+      conversation = manager?.getConversation?.(completion.threadId) || null;
+    } catch {
+      conversation = null;
+    }
+    const cwd = String(completion.params?.cwd || conversation?.cwd || "").trim();
+    const hostId = String(
+      completion.params?.hostId ||
+      conversation?.hostId ||
+      manager?.hostId ||
+      "local"
+    ).trim();
+    if (hostId && hostId !== "local") return false;
+    if (!cwd) throw new Error("未识别到已完成轮次的工作目录");
+
+    await waitForCodexWorkspaceCheckpointBinding(
+      completion.threadId,
+      completion.turnId
+    );
+    const result = await postJson("/workspace-checkpoint/complete-turn", {
+      cwd,
+      threadId: completion.threadId,
+      turnId: completion.turnId,
+      status: completion.status,
+    });
+    if (result?.status !== "ok" || !result?.checkpoint?.id) {
+      throw new Error(result?.message || "完成工作区 Checkpoint 失败");
+    }
+    refreshOpenCodexWorkspaceCheckpointDialog(completion.threadId);
+    return true;
+  }
+
+  function removeCodexWorkspaceCheckpointTurnCompletionListener() {
+    const unsubscribe = window.__codexWorkspaceCheckpointCompletionUnsubscribe;
+    window.__codexWorkspaceCheckpointCompletionUnsubscribe = null;
+    window.__codexWorkspaceCheckpointCompletionManager = null;
+    window.__codexWorkspaceCheckpointCompletionVersion = "";
+    try {
+      unsubscribe?.();
+    } catch {
+    }
+  }
+
+  function installCodexWorkspaceCheckpointTurnCompletionListener() {
+    if (!codexWorkspaceCheckpointFeatureEnabled()) {
+      removeCodexWorkspaceCheckpointTurnCompletionListener();
+      return false;
+    }
+    const manager = codexWorkspaceCheckpointConversationManager();
+    if (!manager) return false;
+    if (
+      window.__codexWorkspaceCheckpointCompletionManager === manager &&
+      window.__codexWorkspaceCheckpointCompletionVersion === codexWorkspaceCheckpointVersion &&
+      typeof window.__codexWorkspaceCheckpointCompletionUnsubscribe === "function"
+    ) {
+      return true;
+    }
+
+    removeCodexWorkspaceCheckpointTurnCompletionListener();
+    const callback = (notification) =>
+      completeCodexWorkspaceCheckpointTurn(manager, notification).catch((error) => {
+        sendCodexElvesDiagnostic("workspace_checkpoint_complete_turn_failed", {
+          threadId: String(notification?.params?.threadId || ""),
+          turnId: String(notification?.params?.turn?.id || ""),
+          errorName: error?.name || "",
+          errorMessage: error?.message || String(error),
+        });
+        return false;
+      });
+    let unsubscribe = null;
+    try {
+      unsubscribe = manager.addNotificationCallback("turn/completed", callback);
+    } catch (error) {
+      sendCodexElvesDiagnostic("workspace_checkpoint_completion_listener_failed", {
+        errorName: error?.name || "",
+        errorMessage: error?.message || String(error),
+      });
+      return false;
+    }
+    window.__codexWorkspaceCheckpointCompletionManager = manager;
+    window.__codexWorkspaceCheckpointCompletionVersion = codexWorkspaceCheckpointVersion;
+    window.__codexWorkspaceCheckpointCompletionUnsubscribe =
+      typeof unsubscribe === "function" ? unsubscribe : () => {};
+    return true;
+  }
+
   function codexWorkspaceCheckpointRestoreIntent() {
     const intent = window.__codexWorkspaceCheckpointRestoreIntent;
     if (!intent) return null;
@@ -6012,6 +6276,7 @@
         }
       }
       if (codexElvesSettings().workspaceCheckpoint && methodName === "turn/start") {
+        installCodexWorkspaceCheckpointTurnCompletionListener();
         let created;
         try {
           created = await createCodexWorkspaceCheckpoint(client, params);
@@ -6024,8 +6289,13 @@
           throw error;
         }
         const result = await original.call(client, method, params, options);
+        installCodexWorkspaceCheckpointTurnCompletionListener();
         try {
-          await bindCodexWorkspaceCheckpoint(created, result);
+          await trackCodexWorkspaceCheckpointBinding(
+            created,
+            result,
+            bindCodexWorkspaceCheckpoint(created, result)
+          );
         } catch (error) {
           sendCodexElvesDiagnostic("workspace_checkpoint_bind_failed", {
             checkpointId: created?.checkpoint?.id || "",
@@ -6045,7 +6315,9 @@
     const prototype = requestClientClass?.prototype;
     if (!prototype || typeof prototype.sendRequest !== "function") return false;
     if (prototype.__codexWorkspaceCheckpointPatchVersion === codexWorkspaceCheckpointVersion) return true;
-    const original = prototype.sendRequest;
+    const original = typeof prototype.__codexWorkspaceCheckpointOriginalSendRequest === "function"
+      ? prototype.__codexWorkspaceCheckpointOriginalSendRequest
+      : prototype.sendRequest;
     prototype.__codexWorkspaceCheckpointOriginalSendRequest = original;
     prototype.sendRequest = function codexWorkspaceCheckpointPatchedSendRequest(method, params, options) {
       return codexWorkspaceCheckpointSendRequest(original, this, method, params, options);
@@ -6297,7 +6569,10 @@
   }
 
   function closeCodexWorkspaceCheckpointDialog() {
-    document.querySelectorAll(".codex-workspace-checkpoint-overlay").forEach((node) => node.remove());
+    document.querySelectorAll(".codex-workspace-checkpoint-overlay").forEach((node) => {
+      dismissCodexElvesActionConfirmations(node);
+      node.remove();
+    });
   }
 
   function codexWorkspaceCheckpointFeatureEnabled() {
@@ -6308,17 +6583,33 @@
     if (checkpoint?.kind === "restoreSafety") {
       return { kind: "safety", label: "恢复前保护" };
     }
+    if (checkpoint?.initialization === true) {
+      return { kind: "initialization", label: "初始化" };
+    }
     if (checkpoint?.accepted === false) {
       return { kind: "incomplete", label: "发送未完成" };
     }
-    return { kind: "turn", label: "发送前备份" };
+    if (checkpoint?.changeScope === "turn") {
+      switch (checkpoint?.turnStatus) {
+        case "completed":
+          return { kind: "turn", label: "本轮完成" };
+        case "failed":
+          return { kind: "failed", label: "本轮失败" };
+        case "interrupted":
+          return { kind: "interrupted", label: "本轮已中断" };
+        default:
+          return { kind: "turn", label: "本轮执行中" };
+      }
+    }
+    return { kind: "legacy", label: "旧版·发送前差异" };
   }
 
   function codexWorkspaceCheckpointItemTitle(checkpoint) {
     if (checkpoint?.kind === "restoreSafety") return "恢复操作前自动保存";
     const preview = String(checkpoint?.promptPreview || "").replace(/\s+/g, " ").trim();
     if (preview) return preview;
-    return checkpoint?.accepted === false ? "未完成的发送请求" : "发送前工作区备份";
+    if (checkpoint?.accepted === false) return "未完成的发送请求";
+    return checkpoint?.changeScope === "turn" ? "本轮工作区变化" : "发送前工作区备份";
   }
 
   function codexWorkspaceCheckpointTimeLabel(createdAtMs, nowMs = Date.now()) {
@@ -6417,17 +6708,44 @@
     const deletions = completeStats
       ? files.reduce((total, file) => total + file.deletions, 0)
       : null;
-    const changeDetails = changedFileCount === 0
-      ? '<div class="checkpoint-no-change">无文件变化</div>'
-      : `
-        <div class="checkpoint-summary">
-          <strong>${changedFileCount} 个文件发生变化</strong>
-          ${codexWorkspaceCheckpointChangeStatHtml(additions, deletions)}
+    const turnScoped = checkpoint?.accepted !== false && checkpoint?.changeScope === "turn";
+    const turnTerminal = turnScoped &&
+      ["completed", "failed", "interrupted"].includes(String(checkpoint?.turnStatus || ""));
+    const initialization = checkpoint?.initialization === true;
+    const initialFileCount = codexWorkspaceCheckpointLineCount(checkpoint?.initialFileCount);
+    const initializationTurnLabel = checkpoint?.accepted === false
+      ? "发送未完成"
+      : !turnTerminal
+        ? "正在记录第一轮文件变化…"
+        : checkpoint?.turnStatus === "failed"
+          ? `本轮失败${changedFileCount > 0 ? `，${changedFileCount} 个文件发生变化` : "，无文件变化"}`
+          : checkpoint?.turnStatus === "interrupted"
+            ? `本轮已中断${changedFileCount > 0 ? `，${changedFileCount} 个文件发生变化` : "，无文件变化"}`
+            : changedFileCount > 0
+              ? `本轮完成，${changedFileCount} 个文件发生变化`
+              : "本轮完成，无文件变化";
+    const changeDetails = initialization
+      ? `
+        <div class="checkpoint-summary checkpoint-initialization-summary">
+          <strong>已建立工作区初始基线 · ${initialFileCount === null ? "文件总数未知" : `共 ${initialFileCount} 个文件`} · ${initializationTurnLabel}</strong>
+          ${turnTerminal && changedFileCount > 0 && completeStats
+            ? codexWorkspaceCheckpointChangeStatHtml(additions, deletions)
+            : ""}
         </div>
-        ${files.length
-          ? codexWorkspaceCheckpointFileListHtml(files)
-          : '<div class="checkpoint-no-change">文件明细不可用</div>'}
-      `;
+      `
+      : turnScoped && !turnTerminal
+        ? '<div class="checkpoint-no-change">正在记录本轮文件变化…</div>'
+        : changedFileCount === 0
+          ? `<div class="checkpoint-no-change">${turnTerminal ? "本轮无文件变化" : "无文件变化"}</div>`
+        : `
+          <div class="checkpoint-summary">
+            <strong>${changedFileCount} 个文件发生变化</strong>
+            ${codexWorkspaceCheckpointChangeStatHtml(additions, deletions)}
+          </div>
+          ${files.length
+            ? codexWorkspaceCheckpointFileListHtml(files)
+            : '<div class="checkpoint-no-change">文件明细不可用</div>'}
+        `;
     const checkpointId = String(checkpoint?.id || "").trim();
     return `
       <div class="codex-workspace-checkpoint-item" data-codex-workspace-checkpoint-id="${escapeHtml(checkpointId)}">
@@ -6471,12 +6789,15 @@
   async function loadCodexWorkspaceCheckpointDialogList(dialog, context) {
     const list = dialog.querySelector("[data-codex-workspace-checkpoint-list]");
     if (!list) return;
+    const requestId = Number(dialog.__codexWorkspaceCheckpointListRequestId || 0) + 1;
+    dialog.__codexWorkspaceCheckpointListRequestId = requestId;
     list.innerHTML = '<div class="codex-workspace-checkpoint-empty">正在读取 Checkpoint…</div>';
     const result = await postJson("/workspace-checkpoint/list", {
       cwd: context.cwd,
       threadId: context.threadId,
       limit: 100,
     });
+    if (dialog.__codexWorkspaceCheckpointListRequestId !== requestId) return;
     if (result?.status !== "ok") {
       list.innerHTML = `<div class="codex-workspace-checkpoint-empty">${escapeHtml(result?.message || "读取 Checkpoint 失败")}</div>`;
       return;
@@ -6501,7 +6822,15 @@
       showToast("AI 正在运行，结束后才能恢复 Checkpoint");
       return;
     }
-    if (!window.confirm("恢复会覆盖当前工作区中由 Checkpoint 管理的文件。恢复前会自动创建一个安全快照，是否继续？")) return;
+    const confirmed = await confirmCodexElvesAction({
+      title: "恢复 Checkpoint？",
+      message: "恢复会覆盖当前工作区中由 Checkpoint 管理的文件。恢复前会自动创建一个安全快照。",
+      confirmLabel: "继续恢复",
+      tone: "warning",
+      mount: dialog.closest(".codex-workspace-checkpoint-overlay"),
+      background: dialog.querySelector(".codex-workspace-checkpoint-dialog"),
+    });
+    if (!confirmed) return;
     button.disabled = true;
     button.textContent = "恢复中…";
     try {
@@ -6539,7 +6868,15 @@
       showToast("AI 正在运行，结束后才能撤销文件修改");
       return;
     }
-    if (!window.confirm("撤销上一轮 AI 的文件修改？当前状态会先保存为安全 Checkpoint。")) return;
+    const confirmed = await confirmCodexElvesAction({
+      title: "撤销上一轮修改？",
+      message: "将撤销上一轮 AI 的文件修改，当前状态会先保存为安全 Checkpoint。",
+      confirmLabel: "继续撤销",
+      tone: "warning",
+      mount: button?.closest?.(".codex-workspace-checkpoint-overlay"),
+      background: button?.closest?.(".codex-workspace-checkpoint-dialog"),
+    });
+    if (!confirmed) return;
     if (button) {
       button.disabled = true;
       button.textContent = "撤销中…";
@@ -6582,6 +6919,7 @@
     const overlay = document.createElement("div");
     overlay.className = "codex-workspace-checkpoint-overlay";
     overlay.setAttribute("data-codex-elves-dialog", "true");
+    overlay.__codexWorkspaceCheckpointContext = context;
     overlay.innerHTML = `
       <div class="${codexWorkspaceCheckpointDialogClass}" role="dialog" aria-modal="true" aria-label="工作区 Checkpoint">
         <div class="codex-workspace-checkpoint-header">
@@ -6592,7 +6930,7 @@
         <div class="codex-workspace-checkpoint-footer">
           <span class="checkpoint-footer-note">恢复前会自动保存当前文件状态</span>
           <div class="checkpoint-footer-actions">
-            <button type="button" class="codex-elves-action-button" data-codex-workspace-checkpoint-undo-latest="true">撤销上一轮</button>
+            <button type="button" class="codex-elves-action-button checkpoint-undo-button" data-codex-workspace-checkpoint-undo-latest="true">撤销上一轮</button>
             <button type="button" class="codex-elves-action-button" data-codex-workspace-checkpoint-refresh="true">刷新</button>
             <button type="button" class="codex-elves-action-button" data-codex-workspace-checkpoint-close="true">关闭</button>
           </div>
@@ -6636,9 +6974,11 @@
   function refreshCodexWorkspaceCheckpointFeatureState() {
     if (codexWorkspaceCheckpointFeatureEnabled()) {
       void installCodexWorkspaceCheckpointRequestClientPatch();
+      installCodexWorkspaceCheckpointTurnCompletionListener();
       installCodexWorkspaceCheckpointEditButtons();
     } else {
       clearCodexWorkspaceCheckpointPatchRetry(true);
+      removeCodexWorkspaceCheckpointTurnCompletionListener();
       clearCodexWorkspaceCheckpointRestoreIntent();
       closeCodexWorkspaceCheckpointDialog();
       removeCodexWorkspaceCheckpointEditButtons();
@@ -6657,6 +6997,8 @@
         patchCodexWorkspaceCheckpointRequestClientPrototype(klass),
       installRequestClientPatch: () =>
         installCodexWorkspaceCheckpointRequestClientPatch(),
+      installCompletionListener: () =>
+        installCodexWorkspaceCheckpointTurnCompletionListener(),
       installEditButtons: () => installCodexWorkspaceCheckpointEditButtons(),
       editForms: () => codexWorkspaceCheckpointEditForms(),
       listHtml: (checkpoints) =>
@@ -6665,6 +7007,10 @@
         codexWorkspaceCheckpointTimeLabel(createdAtMs, nowMs),
       setFileListExpanded: (list, expanded) =>
         setCodexWorkspaceCheckpointFileListExpanded(list, expanded),
+      restoreFromDialog: (button, dialog, context) =>
+        restoreCodexWorkspaceCheckpointFromDialog(button, dialog, context),
+      undoLatest: (button, context) =>
+        undoLatestCodexWorkspaceCheckpoint(button, context),
       featureEnabled: () => codexWorkspaceCheckpointFeatureEnabled(),
       setRestoreIntent: (intent) => {
         window.__codexWorkspaceCheckpointRestoreIntent = {
@@ -23168,6 +23514,142 @@
       .replaceAll("'", "&#39;");
   }
 
+  function dismissCodexElvesActionConfirmations(root = document) {
+    root?.querySelectorAll?.('[data-codex-elves-confirm-action="true"]')
+      .forEach((node) => {
+        if (typeof node.__codexElvesConfirmFinish === "function") {
+          node.__codexElvesConfirmFinish(false);
+        } else {
+          node.remove?.();
+        }
+      });
+  }
+
+  function confirmCodexElvesAction({
+    title = "确认操作",
+    message = "",
+    confirmLabel = "确认",
+    cancelLabel = "取消",
+    tone = "default",
+    mount = null,
+    background = null,
+  } = {}) {
+    const root = mount && typeof mount.appendChild === "function"
+      ? mount
+      : document.body;
+    const previousFocus = document.activeElement;
+    dismissCodexElvesActionConfirmations(root);
+    const backgroundElement =
+      background && typeof background.setAttribute === "function"
+        ? background
+        : null;
+    const backgroundWasInert = backgroundElement?.inert === true;
+    const backgroundHadInertAttribute =
+      backgroundElement?.hasAttribute?.("inert") === true;
+    const backgroundAriaHidden =
+      backgroundElement?.getAttribute?.("aria-hidden") ?? null;
+    return new Promise((resolve) => {
+      const overlay = document.createElement("div");
+      const normalizedTone = ["warning", "danger"].includes(tone)
+        ? tone
+        : "default";
+      const toneAttribute = normalizedTone === "default"
+        ? ""
+        : ` data-codex-confirm-tone="${escapeHtml(normalizedTone)}"`;
+      overlay.className = "codex-delete-confirm-overlay";
+      overlay.setAttribute("data-codex-elves-confirm-action", "true");
+      overlay.innerHTML = `
+        <div class="codex-delete-confirm-content" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
+          <div class="codex-delete-confirm-title">${escapeHtml(title)}</div>
+          <div class="codex-delete-confirm-message">${escapeHtml(message)}</div>
+          <div class="codex-delete-confirm-actions">
+            <button type="button" data-codex-confirm-cancel="true">${escapeHtml(cancelLabel)}</button>
+            <button type="button" data-codex-confirm-accept="true"${toneAttribute}>${escapeHtml(confirmLabel)}</button>
+          </div>
+        </div>
+      `;
+      let settled = false;
+      const finish = (value, event) => {
+        if (settled) return;
+        settled = true;
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        event?.stopImmediatePropagation?.();
+        event?.target?.blur?.();
+        overlay.__codexElvesConfirmFinish = null;
+        overlay.remove();
+        if (backgroundElement) {
+          backgroundElement.inert = backgroundWasInert;
+          if (backgroundHadInertAttribute) {
+            backgroundElement.setAttribute("inert", "");
+          } else {
+            backgroundElement.removeAttribute?.("inert");
+          }
+          if (backgroundAriaHidden === null) {
+            backgroundElement.removeAttribute?.("aria-hidden");
+          } else {
+            backgroundElement.setAttribute("aria-hidden", backgroundAriaHidden);
+          }
+        }
+        if (
+          previousFocus &&
+          previousFocus.isConnected !== false &&
+          typeof previousFocus.focus === "function"
+        ) {
+          previousFocus.focus();
+        }
+        resolve(value);
+      };
+      overlay.__codexElvesConfirmFinish = finish;
+      overlay.addEventListener("click", (event) => {
+        const target = event.target instanceof Element
+          ? event.target
+          : event.target?.parentElement;
+        if (
+          event.target === overlay ||
+          target?.closest?.("[data-codex-confirm-cancel]")
+        ) {
+          finish(false, event);
+          return;
+        }
+        if (target?.closest?.("[data-codex-confirm-accept]")) {
+          finish(true, event);
+        }
+      }, true);
+      overlay.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          finish(false, event);
+          return;
+        }
+        if (event.key !== "Tab") return;
+        const focusable = Array.from(
+          overlay.querySelectorAll("button:not(:disabled)"),
+        );
+        if (!focusable.length) {
+          event.preventDefault?.();
+          event.stopPropagation?.();
+          event.stopImmediatePropagation?.();
+          return;
+        }
+        const currentIndex = focusable.indexOf(document.activeElement);
+        const nextIndex = event.shiftKey
+          ? (currentIndex <= 0 ? focusable.length - 1 : currentIndex - 1)
+          : (currentIndex === focusable.length - 1 ? 0 : currentIndex + 1);
+        event.preventDefault?.();
+        event.stopPropagation?.();
+        event.stopImmediatePropagation?.();
+        focusable[nextIndex]?.focus?.();
+      }, true);
+      root?.appendChild?.(overlay);
+      overlay.querySelector("[data-codex-confirm-cancel]")?.focus();
+      if (backgroundElement) {
+        backgroundElement.inert = true;
+        backgroundElement.setAttribute("inert", "");
+        backgroundElement.setAttribute("aria-hidden", "true");
+      }
+    });
+  }
+
   function confirmDelete(title) {
     document.querySelectorAll(".codex-delete-confirm-overlay").forEach((node) => node.remove());
     return new Promise((resolve) => {
@@ -25522,6 +26004,7 @@
     installCodexServiceTierDispatcherPatch();
     installCodexServiceTierRequestClientPatch();
     installCodexWorkspaceCheckpointRequestClientPatch();
+    installCodexWorkspaceCheckpointTurnCompletionListener();
     installSuppressedThreadObserver();
     scheduleBackendHeartbeat();
     installDeleteButtonEventDelegation();
@@ -25584,6 +26067,7 @@
     if (conversationDirty) {
       refreshConversationView();
       installCodexAppServerRestartButtons();
+      installCodexWorkspaceCheckpointTurnCompletionListener();
       installCodexWorkspaceCheckpointEditButtons();
     }
     if (headerDirty || conversationDirty) {
