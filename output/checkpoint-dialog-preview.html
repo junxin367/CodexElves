@@ -1,0 +1,1343 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Checkpoint 弹窗验收模型</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family:
+          "Segoe UI Variable Text", "Microsoft YaHei UI", system-ui, sans-serif;
+        --codex-elves-modal-overlay-background: rgba(0, 0, 0, 0.45);
+        --codex-elves-modal-surface: #2b2b2b;
+        --codex-elves-modal-foreground: #f3f4f6;
+        --codex-elves-modal-border: rgba(255, 255, 255, 0.12);
+        --codex-elves-modal-radius: 18px;
+        --codex-elves-modal-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        min-width: 320px;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: #17181a;
+        color: #f3f4f6;
+      }
+
+      button {
+        color: inherit;
+        font: inherit;
+      }
+
+      .codex-shell {
+        min-width: 0;
+        height: 100%;
+        display: grid;
+        grid-template-columns: 252px minmax(0, 1fr);
+        background: #191a1c;
+      }
+
+      .codex-sidebar {
+        min-width: 0;
+        padding: 14px 10px;
+        border-right: 1px solid rgba(255, 255, 255, 0.07);
+        background: #202123;
+      }
+
+      .sidebar-brand {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 6px 10px 14px;
+        color: #ececef;
+        font-size: 14px;
+        font-weight: 650;
+      }
+
+      .brand-mark {
+        width: 24px;
+        height: 24px;
+        display: grid;
+        place-items: center;
+        border-radius: 7px;
+        background: #f4f4f5;
+        color: #202123;
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      .new-thread {
+        width: 100%;
+        height: 34px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 10px;
+        border: 1px solid rgba(255, 255, 255, 0.09);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.025);
+        color: #dedee2;
+        text-align: left;
+      }
+
+      .sidebar-section-label {
+        margin: 20px 10px 7px;
+        color: #777780;
+        font-size: 10px;
+        font-weight: 650;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .thread-row {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 2px 0;
+        padding: 8px 10px;
+        border-radius: 8px;
+        color: #a6a6ae;
+        font-size: 12px;
+      }
+
+      .thread-row.active {
+        background: rgba(255, 255, 255, 0.065);
+        color: #ececef;
+      }
+
+      .thread-dot {
+        width: 7px;
+        height: 7px;
+        flex: 0 0 7px;
+        border-radius: 999px;
+        background: #73737c;
+      }
+
+      .thread-row.active .thread-dot {
+        background: #60a5fa;
+        box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.12);
+      }
+
+      .thread-name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .codex-main {
+        min-width: 0;
+        display: grid;
+        grid-template-rows: 48px minmax(0, 1fr) auto;
+        background: transparent;
+      }
+
+      .codex-titlebar {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 0 18px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+        background: #202123;
+      }
+
+      .titlebar-copy {
+        min-width: 0;
+      }
+
+      .titlebar-title {
+        overflow: hidden;
+        color: #e8e8eb;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 13px;
+        font-weight: 620;
+      }
+
+      .titlebar-subtitle {
+        color: #777780;
+        font-size: 10px;
+      }
+
+      .titlebar-actions {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+      }
+
+      .ghost-control {
+        width: 28px;
+        height: 28px;
+        display: grid;
+        place-items: center;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 7px;
+        background: rgba(255, 255, 255, 0.025);
+        color: #8f8f98;
+      }
+
+      .conversation {
+        min-width: 0;
+        overflow: hidden;
+        padding: 58px max(40px, calc((100% - 760px) / 2));
+      }
+
+      .message {
+        max-width: 650px;
+        margin: 0 auto 28px;
+      }
+
+      .message.user {
+        width: fit-content;
+        max-width: min(650px, 80%);
+        margin-right: 0;
+        padding: 10px 13px;
+        border-radius: 14px 14px 4px 14px;
+        background: #2c2d31;
+        color: #d9d9dd;
+        font-size: 13px;
+      }
+
+      .message.assistant {
+        color: #b9b9c0;
+        font-size: 13px;
+        line-height: 1.7;
+      }
+
+      .assistant-line {
+        height: 8px;
+        margin: 10px 0;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.06);
+      }
+
+      .assistant-line:nth-child(1) {
+        width: 92%;
+      }
+
+      .assistant-line:nth-child(2) {
+        width: 76%;
+      }
+
+      .assistant-line:nth-child(3) {
+        width: 84%;
+      }
+
+      .composer-wrap {
+        padding: 0 max(30px, calc((100% - 760px) / 2)) 22px;
+      }
+
+      .composer {
+        min-height: 94px;
+        padding: 13px 14px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 14px;
+        background: #242529;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+      }
+
+      .composer-placeholder {
+        color: #7f7f88;
+        font-size: 13px;
+      }
+
+      .composer-tools {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-top: 29px;
+      }
+
+      .composer-tool-row {
+        display: flex;
+        gap: 7px;
+      }
+
+      .composer-pill {
+        min-height: 26px;
+        padding: 4px 9px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.025);
+        color: #8d8d95;
+        font-size: 10px;
+      }
+
+      .send-button {
+        width: 28px;
+        height: 28px;
+        display: grid;
+        place-items: center;
+        border: 0;
+        border-radius: 999px;
+        background: #ececef;
+        color: #202123;
+        font-size: 15px;
+      }
+
+      .codex-workspace-checkpoint-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483646;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: var(--codex-elves-modal-overlay-background);
+        backdrop-filter: none;
+        pointer-events: auto;
+        -webkit-app-region: no-drag;
+      }
+
+      .codex-workspace-checkpoint-dialog {
+        width: min(640px, calc(100vw - 48px));
+        max-height: min(790px, calc(100vh - 48px));
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        border: 1px solid var(--codex-elves-modal-border);
+        border-radius: var(--codex-elves-modal-radius);
+        background: var(--codex-elves-modal-surface);
+        color: var(--codex-elves-modal-foreground);
+        box-shadow: var(--codex-elves-modal-shadow);
+        font:
+          13px/1.5 "Segoe UI Variable Text",
+          "Microsoft YaHei UI", system-ui, sans-serif;
+      }
+
+      .codex-workspace-checkpoint-header,
+      .codex-workspace-checkpoint-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex: 0 0 auto;
+      }
+
+      .codex-workspace-checkpoint-header {
+        padding: 13px 18px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      }
+
+      .codex-workspace-checkpoint-footer {
+        padding: 12px 14px;
+        border-top: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(0, 0, 0, 0.1);
+      }
+
+      .codex-workspace-checkpoint-title {
+        letter-spacing: -0.01em;
+        font-size: 17px;
+        font-weight: 620;
+      }
+
+      .codex-workspace-checkpoint-list {
+        min-width: 0;
+        min-height: 120px;
+        flex: 1 1 auto;
+        overflow-x: hidden;
+        overflow-y: auto;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 10px;
+        padding: 12px 14px 14px;
+        background: transparent;
+        scrollbar-color: rgba(255, 255, 255, 0.24) transparent;
+        scrollbar-width: thin;
+      }
+
+      .codex-workspace-checkpoint-item {
+        min-width: 0;
+        max-width: 100%;
+        padding: 13px;
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.09);
+        border-radius: 11px;
+        background: rgba(255, 255, 255, 0.025);
+      }
+
+      .codex-workspace-checkpoint-item:hover {
+        border-color: rgba(255, 255, 255, 0.15);
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .checkpoint-item-main,
+      .checkpoint-footer-actions {
+        display: flex;
+        align-items: center;
+      }
+
+      .checkpoint-item-main {
+        gap: 10px;
+      }
+
+      .checkpoint-item-copy {
+        min-width: 0;
+        flex: 1 1 auto;
+      }
+
+      .checkpoint-title-line {
+        width: 100%;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        overflow: hidden;
+      }
+
+      .checkpoint-stage {
+        min-height: 20px;
+        display: inline-flex;
+        align-items: center;
+        flex: 0 0 auto;
+        padding: 0 7px;
+        border: 1px solid rgba(96, 165, 250, 0.22);
+        border-radius: 999px;
+        background: rgba(59, 130, 246, 0.1);
+        color: #93c5fd;
+        font-size: 10.5px;
+        font-weight: 580;
+      }
+
+      .checkpoint-stage[data-kind="initialization"] {
+        border-color: rgba(52, 211, 153, 0.24);
+        background: rgba(16, 185, 129, 0.1);
+        color: #6ee7b7;
+      }
+
+      .checkpoint-stage[data-kind="safety"] {
+        border-color: rgba(245, 158, 11, 0.24);
+        background: rgba(245, 158, 11, 0.1);
+        color: #fbbf24;
+      }
+
+      .codex-workspace-checkpoint-item-title {
+        min-width: 0;
+        max-width: 100%;
+        display: block;
+        flex: 1 1 auto;
+        overflow: hidden;
+        color: #f1f1f3;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        letter-spacing: -0.005em;
+        font-size: 13.5px;
+        font-weight: 590;
+      }
+
+      .checkpoint-time {
+        flex: 0 0 auto;
+        color: #8f8f98;
+        font-size: 11.5px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .checkpoint-summary {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 10px;
+        margin-top: 10px;
+        padding-right: 16px;
+        color: #b7b7be;
+        font-size: 11.5px;
+      }
+
+      .checkpoint-summary strong {
+        color: #d8d8dc;
+        font-weight: 580;
+      }
+
+      .checkpoint-change-stat {
+        display: grid;
+        grid-template-columns: 38px 38px;
+        column-gap: 4px;
+        justify-content: end;
+        font-family: "Cascadia Mono", Consolas, monospace;
+        font-size: 11.5px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .checkpoint-change-stat > span {
+        min-width: 0;
+        text-align: right;
+      }
+
+      .checkpoint-added {
+        color: #6ee7a8;
+      }
+
+      .checkpoint-deleted {
+        color: #fda4af;
+      }
+
+      .checkpoint-file-list {
+        --checkpoint-file-row-height: 18px;
+        --checkpoint-file-row-gap: 6px;
+        --checkpoint-file-scrollbar-size: 6px;
+        margin-top: 7px;
+        padding: 8px 9px;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 8px;
+        background: rgba(0, 0, 0, 0.16);
+      }
+
+      .checkpoint-file-viewport {
+        display: grid;
+        gap: var(--checkpoint-file-row-gap);
+        max-height: calc(
+          var(--checkpoint-file-row-height) * 10 +
+            var(--checkpoint-file-row-gap) * 9
+        );
+        margin-right: calc(-1 * var(--checkpoint-file-scrollbar-size));
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+        scrollbar-gutter: stable;
+        scrollbar-width: thin;
+      }
+
+      .checkpoint-file-viewport::-webkit-scrollbar {
+        width: var(--checkpoint-file-scrollbar-size);
+      }
+
+      .checkpoint-file-viewport::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      .checkpoint-file-viewport::-webkit-scrollbar-thumb {
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.2);
+      }
+
+      .checkpoint-file-list[data-expanded="false"]
+        .checkpoint-file-row:nth-child(n + 6) {
+        display: none;
+      }
+
+      .checkpoint-file-row {
+        min-width: 0;
+        min-height: var(--checkpoint-file-row-height);
+        display: grid;
+        grid-template-columns: 17px minmax(0, 1fr) auto;
+        align-items: center;
+        column-gap: 7px;
+        padding-right: 6px;
+        color: #c8c8ce;
+        font-size: 11.5px;
+      }
+
+      .checkpoint-file-status {
+        width: 17px;
+        flex: 0 0 17px;
+        color: #a5b4fc;
+        font-family: "Cascadia Mono", Consolas, monospace;
+        font-weight: 650;
+        text-align: center;
+      }
+
+      .checkpoint-file-status[data-status="A"] {
+        color: #6ee7a8;
+      }
+
+      .checkpoint-file-status[data-status="D"] {
+        color: #fda4af;
+      }
+
+      .checkpoint-file-path {
+        min-width: 0;
+        overflow: hidden;
+        direction: rtl;
+        text-align: left;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        unicode-bidi: plaintext;
+      }
+
+      .checkpoint-file-toggle {
+        width: 100%;
+        min-height: 25px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 5px;
+        margin-top: 5px;
+        padding: 4px 0 1px;
+        border: 0;
+        border-top: 1px solid rgba(255, 255, 255, 0.055);
+        background: transparent;
+        color: #92929b;
+        cursor: pointer;
+        font:
+          11px "Segoe UI Variable Text",
+          "Microsoft YaHei UI", system-ui, sans-serif;
+      }
+
+      .checkpoint-file-toggle:hover {
+        color: #c8c8ce;
+      }
+
+      .checkpoint-file-toggle-chevron {
+        width: 12px;
+        height: 12px;
+        display: block;
+        flex: 0 0 12px;
+        color: #7f7f89;
+        stroke: currentColor;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        stroke-width: 1.5;
+        transition: transform 0.14s ease;
+      }
+
+      .checkpoint-file-list[data-expanded="true"]
+        .checkpoint-file-toggle-chevron {
+        transform: rotate(180deg);
+      }
+
+      .checkpoint-footer-note {
+        color: #8f8f98;
+        font-size: 11px;
+      }
+
+      .checkpoint-footer-actions {
+        gap: 7px;
+      }
+
+      .codex-elves-modal-close {
+        border: 0;
+        background: transparent;
+        color: #d1d5db;
+        cursor: pointer;
+        pointer-events: auto;
+        -webkit-app-region: no-drag;
+        width: 30px;
+        height: 30px;
+        border-radius: 7px;
+        font-size: 19px;
+      }
+
+      .codex-elves-modal-close:hover {
+        background: rgba(255, 255, 255, 0.07);
+      }
+
+      .codex-workspace-checkpoint-dialog button:not(:disabled) {
+        cursor: pointer;
+      }
+
+      .codex-workspace-checkpoint-dialog button:disabled {
+        cursor: not-allowed;
+      }
+
+      .codex-elves-action-button {
+        flex-shrink: 0;
+        align-self: center;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 7px;
+        background: #3f3f46;
+        color: #f3f4f6;
+        padding: 6px 9px;
+        font:
+          11.5px "Segoe UI Variable Text",
+          "Microsoft YaHei UI", system-ui, sans-serif;
+      }
+
+      .codex-elves-action-button:not(:disabled):hover {
+        border-color: rgba(255, 255, 255, 0.3);
+        background: #4a4a51;
+      }
+
+      .checkpoint-restore-button {
+        border-color: rgba(96, 165, 250, 0.25);
+        background: rgba(59, 130, 246, 0.11);
+        color: #bfdbfe;
+      }
+
+      .checkpoint-restore-button:not(:disabled):hover {
+        border-color: rgba(96, 165, 250, 0.4);
+        background: rgba(59, 130, 246, 0.18);
+      }
+
+      .checkpoint-undo-button {
+        border-color: rgba(245, 158, 11, 0.28);
+        background: rgba(245, 158, 11, 0.1);
+        color: #fcd34d;
+      }
+
+      .checkpoint-undo-button:not(:disabled):hover {
+        border-color: rgba(245, 158, 11, 0.45);
+        background: rgba(245, 158, 11, 0.18);
+      }
+
+      .codex-delete-confirm-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483200;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--codex-elves-modal-overlay-background);
+        backdrop-filter: none;
+      }
+
+      .codex-delete-confirm-overlay[hidden] {
+        display: none;
+      }
+
+      .codex-delete-confirm-content {
+        width: min(420px, calc(100vw - 48px));
+        padding: 18px;
+        border: 1px solid var(--codex-elves-modal-border);
+        border-radius: var(--codex-elves-modal-radius);
+        background: var(--codex-elves-modal-surface);
+        color: var(--codex-elves-modal-foreground);
+        box-shadow: var(--codex-elves-modal-shadow);
+        font: 14px/1.45 system-ui, sans-serif;
+      }
+
+      .codex-delete-confirm-title {
+        font-size: 16px;
+        font-weight: 650;
+      }
+
+      .codex-delete-confirm-message {
+        margin-top: 8px;
+        color: #b7b7be;
+      }
+
+      .codex-delete-confirm-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 10px;
+        margin-top: 18px;
+      }
+
+      .codex-delete-confirm-actions button {
+        min-height: 32px;
+        padding: 6px 12px;
+        border: 1px solid var(--codex-elves-modal-border);
+        border-radius: 7px;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--codex-elves-modal-foreground);
+        cursor: pointer;
+        font: 13px system-ui, sans-serif;
+      }
+
+      .codex-delete-confirm-actions button:hover {
+        background: rgba(255, 255, 255, 0.1);
+      }
+
+      .codex-delete-confirm-actions [data-codex-confirm-tone="warning"] {
+        border-color: rgba(245, 158, 11, 0.28);
+        background: rgba(245, 158, 11, 0.1);
+        color: #fcd34d;
+      }
+
+      .codex-delete-confirm-actions
+        [data-codex-confirm-tone="warning"]:hover {
+        background: rgba(245, 158, 11, 0.18);
+      }
+
+      .model-toast {
+        position: fixed;
+        z-index: 20;
+        left: 50%;
+        bottom: 24px;
+        max-width: calc(100vw - 40px);
+        padding: 8px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 9px;
+        background: #313238;
+        color: #e4e4e7;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+        opacity: 0;
+        pointer-events: none;
+        transform: translate(-50%, 10px);
+        transition:
+          opacity 0.15s ease,
+          transform 0.15s ease;
+        font-size: 12px;
+      }
+
+      .model-toast[data-visible="true"] {
+        opacity: 1;
+        transform: translate(-50%, 0);
+      }
+
+      .reopen {
+        position: fixed;
+        z-index: 5;
+        left: 50%;
+        top: 50%;
+        display: none;
+        padding: 9px 14px;
+        border: 1px solid rgba(96, 165, 250, 0.28);
+        border-radius: 9px;
+        background: #25262a;
+        color: #bfdbfe;
+        transform: translate(-50%, -50%);
+        cursor: pointer;
+      }
+
+      .reopen[data-visible="true"] {
+        display: block;
+      }
+
+      @media (max-width: 760px) {
+        .codex-shell {
+          grid-template-columns: 1fr;
+        }
+
+        .codex-sidebar {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="codex-shell" aria-hidden="true">
+      <aside class="codex-sidebar">
+        <div class="sidebar-brand">
+          <div class="brand-mark">C</div>
+          <span>Codex</span>
+        </div>
+        <button class="new-thread">＋ 新建任务</button>
+        <div class="sidebar-section-label">最近任务</div>
+        <div class="thread-row active">
+          <span class="thread-dot"></span>
+          <span class="thread-name">优化 Checkpoint 初始化展示</span>
+        </div>
+        <div class="thread-row">
+          <span class="thread-dot"></span>
+          <span class="thread-name">修复工作区恢复边界条件</span>
+        </div>
+        <div class="thread-row">
+          <span class="thread-dot"></span>
+          <span class="thread-name">检查渲染层交互契约</span>
+        </div>
+      </aside>
+
+      <section class="codex-main">
+        <header class="codex-titlebar">
+          <div class="titlebar-copy">
+            <div class="titlebar-title">优化 Checkpoint 初始化展示</div>
+            <div class="titlebar-subtitle">CodexPlusPlus · main</div>
+          </div>
+          <div class="titlebar-actions">
+            <button class="ghost-control">↶</button>
+            <button class="ghost-control">⋯</button>
+          </div>
+        </header>
+        <main class="conversation">
+          <div class="message user">
+            新会话第一次备份文件很多，增加初始化分类，只显示汇总信息。
+          </div>
+          <div class="message assistant">
+            <div class="assistant-line"></div>
+            <div class="assistant-line"></div>
+            <div class="assistant-line"></div>
+          </div>
+        </main>
+        <div class="composer-wrap">
+          <div class="composer">
+            <div class="composer-placeholder">询问后续修改或继续验收界面……</div>
+            <div class="composer-tools">
+              <div class="composer-tool-row">
+                <button class="composer-pill">本地</button>
+                <button class="composer-pill">GPT-5.6</button>
+              </div>
+              <button class="send-button">↑</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <button class="reopen" type="button" data-reopen>重新打开 Checkpoint 弹窗</button>
+
+    <div class="codex-workspace-checkpoint-overlay" data-overlay>
+      <div
+        class="codex-workspace-checkpoint-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label="工作区 Checkpoint"
+      >
+        <div class="codex-workspace-checkpoint-header">
+          <div class="codex-workspace-checkpoint-title">工作区 Checkpoint</div>
+          <button
+            type="button"
+            class="codex-elves-modal-close"
+            data-close
+            aria-label="关闭"
+          >
+            ×
+          </button>
+        </div>
+
+        <div class="codex-workspace-checkpoint-list">
+          <div class="codex-workspace-checkpoint-item">
+            <div class="checkpoint-item-main">
+              <div class="checkpoint-item-copy">
+                <div class="checkpoint-title-line">
+                  <span class="checkpoint-stage" data-kind="safety">
+                    恢复前保护
+                  </span>
+                  <div
+                    class="codex-workspace-checkpoint-item-title"
+                    title="恢复操作前自动保存"
+                  >
+                    恢复操作前自动保存
+                  </div>
+                </div>
+              </div>
+              <span class="checkpoint-time">今天 12:18</span>
+              <button
+                type="button"
+                class="codex-elves-action-button checkpoint-restore-button"
+                data-model-action="恢复到安全快照"
+              >
+                恢复到此处
+              </button>
+            </div>
+            <div class="checkpoint-summary">
+              <strong>1 个文件发生变化</strong>
+              <span class="checkpoint-change-stat">
+                <span class="checkpoint-added">+4</span>
+                <span class="checkpoint-deleted">-1</span>
+              </span>
+            </div>
+            <div class="checkpoint-file-list" data-expanded="false">
+              <div class="checkpoint-file-viewport">
+                <div class="checkpoint-file-row">
+                  <span class="checkpoint-file-status" data-status="M">M</span>
+                  <span class="checkpoint-file-path" title="README.md">
+                    README.md
+                  </span>
+                  <span class="checkpoint-change-stat">
+                    <span class="checkpoint-added">+4</span>
+                    <span class="checkpoint-deleted">-1</span>
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="codex-workspace-checkpoint-item">
+            <div class="checkpoint-item-main">
+              <div class="checkpoint-item-copy">
+                <div class="checkpoint-title-line">
+                  <span class="checkpoint-stage" data-kind="turn">
+                    本轮完成
+                  </span>
+                  <div
+                    class="codex-workspace-checkpoint-item-title"
+                    title="完善同轮文件变化记录和状态展示"
+                  >
+                    完善同轮文件变化记录和状态展示
+                  </div>
+                </div>
+              </div>
+              <span class="checkpoint-time">今天 11:42</span>
+              <button
+                type="button"
+                class="codex-elves-action-button checkpoint-restore-button"
+                data-model-action="恢复到普通轮次"
+              >
+                恢复到此处
+              </button>
+            </div>
+            <div class="checkpoint-summary">
+              <strong>7 个文件发生变化</strong>
+              <span class="checkpoint-change-stat">
+                <span class="checkpoint-added">+298</span>
+                <span class="checkpoint-deleted">-43</span>
+              </span>
+            </div>
+            <div class="checkpoint-file-list" data-file-list data-expanded="false">
+              <div class="checkpoint-file-viewport">
+                <div class="checkpoint-file-row">
+                  <span class="checkpoint-file-status" data-status="M">M</span>
+                  <span
+                    class="checkpoint-file-path"
+                    title="assets/inject/renderer-features.js"
+                  >
+                    assets/inject/renderer-features.js
+                  </span>
+                  <span class="checkpoint-change-stat">
+                    <span class="checkpoint-added">+91</span>
+                    <span class="checkpoint-deleted">-12</span>
+                  </span>
+                </div>
+                <div class="checkpoint-file-row">
+                  <span class="checkpoint-file-status" data-status="M">M</span>
+                  <span
+                    class="checkpoint-file-path"
+                    title="crates/codex-elves-core/src/workspace_checkpoint.rs"
+                  >
+                    crates/codex-elves-core/src/workspace_checkpoint.rs
+                  </span>
+                  <span class="checkpoint-change-stat">
+                    <span class="checkpoint-added">+84</span>
+                    <span class="checkpoint-deleted">-16</span>
+                  </span>
+                </div>
+                <div class="checkpoint-file-row">
+                  <span class="checkpoint-file-status" data-status="M">M</span>
+                  <span
+                    class="checkpoint-file-path"
+                    title="crates/codex-elves-core/tests/workspace_checkpoint.rs"
+                  >
+                    crates/codex-elves-core/tests/workspace_checkpoint.rs
+                  </span>
+                  <span class="checkpoint-change-stat">
+                    <span class="checkpoint-added">+52</span>
+                    <span class="checkpoint-deleted">-7</span>
+                  </span>
+                </div>
+                <div class="checkpoint-file-row">
+                  <span class="checkpoint-file-status" data-status="M">M</span>
+                  <span
+                    class="checkpoint-file-path"
+                    title="crates/codex-elves-core/tests/cdp_bridge.rs"
+                  >
+                    crates/codex-elves-core/tests/cdp_bridge.rs
+                  </span>
+                  <span class="checkpoint-change-stat">
+                    <span class="checkpoint-added">+39</span>
+                    <span class="checkpoint-deleted">-5</span>
+                  </span>
+                </div>
+                <div class="checkpoint-file-row">
+                  <span class="checkpoint-file-status" data-status="M">M</span>
+                  <span
+                    class="checkpoint-file-path"
+                    title="crates/codex-elves-core/tests/bridge_routes.rs"
+                  >
+                    crates/codex-elves-core/tests/bridge_routes.rs
+                  </span>
+                  <span class="checkpoint-change-stat">
+                    <span class="checkpoint-added">+19</span>
+                    <span class="checkpoint-deleted">-2</span>
+                  </span>
+                </div>
+                <div class="checkpoint-file-row">
+                  <span class="checkpoint-file-status" data-status="M">M</span>
+                  <span
+                    class="checkpoint-file-path"
+                    title="crates/codex-elves-core/src/routes.rs"
+                  >
+                    crates/codex-elves-core/src/routes.rs
+                  </span>
+                  <span class="checkpoint-change-stat">
+                    <span class="checkpoint-added">+10</span>
+                    <span class="checkpoint-deleted">-1</span>
+                  </span>
+                </div>
+                <div class="checkpoint-file-row">
+                  <span class="checkpoint-file-status" data-status="A">A</span>
+                  <span
+                    class="checkpoint-file-path"
+                    title="docs/checkpoint-initialization.md"
+                  >
+                    docs/checkpoint-initialization.md
+                  </span>
+                  <span class="checkpoint-change-stat">
+                    <span class="checkpoint-added">+3</span>
+                    <span class="checkpoint-deleted">-0</span>
+                  </span>
+                </div>
+              </div>
+              <button type="button" class="checkpoint-file-toggle" data-toggle-files>
+                <span data-toggle-label>展开其余 2 个文件</span>
+                <svg
+                  class="checkpoint-file-toggle-chevron"
+                  viewBox="0 0 16 16"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="m3.5 5.75 4.5 4.5 4.5-4.5"
+                    fill="none"
+                  ></path>
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="codex-workspace-checkpoint-item">
+            <div class="checkpoint-item-main">
+              <div class="checkpoint-item-copy">
+                <div class="checkpoint-title-line">
+                  <span class="checkpoint-stage" data-kind="initialization">
+                    初始化
+                  </span>
+                  <div
+                    class="codex-workspace-checkpoint-item-title"
+                    title="优化 Checkpoint 初始化展示"
+                  >
+                    优化 Checkpoint 初始化展示
+                  </div>
+                </div>
+              </div>
+              <span class="checkpoint-time">今天 10:56</span>
+              <button
+                type="button"
+                class="codex-elves-action-button checkpoint-restore-button"
+                data-model-action="恢复到初始化状态"
+              >
+                恢复到此处
+              </button>
+            </div>
+            <div class="checkpoint-summary checkpoint-initialization-summary">
+              <strong>
+                已建立工作区初始基线 · 共 12486 个文件 · 本轮完成，2
+                个文件发生变化
+              </strong>
+              <span class="checkpoint-change-stat">
+                <span class="checkpoint-added">+36</span>
+                <span class="checkpoint-deleted">-8</span>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="codex-workspace-checkpoint-footer">
+          <span class="checkpoint-footer-note">
+            恢复前会自动保存当前文件状态
+          </span>
+          <div class="checkpoint-footer-actions">
+            <button
+              type="button"
+              class="codex-elves-action-button checkpoint-undo-button"
+              data-model-action="撤销上一轮"
+            >
+              撤销上一轮
+            </button>
+            <button
+              type="button"
+              class="codex-elves-action-button"
+              data-model-action="刷新列表"
+            >
+              刷新
+            </button>
+            <button type="button" class="codex-elves-action-button" data-close>
+              关闭
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="codex-delete-confirm-overlay" data-confirm-overlay hidden>
+        <div
+          class="codex-delete-confirm-content"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="checkpoint-model-confirm-title"
+        >
+          <div
+            class="codex-delete-confirm-title"
+            id="checkpoint-model-confirm-title"
+            data-confirm-title
+          ></div>
+          <div
+            class="codex-delete-confirm-message"
+            data-confirm-message
+          ></div>
+          <div class="codex-delete-confirm-actions">
+            <button type="button" data-confirm-cancel>取消</button>
+            <button
+              type="button"
+              data-confirm-accept
+              data-codex-confirm-tone="warning"
+            ></button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="model-toast" data-toast></div>
+
+    <script>
+      const overlay = document.querySelector("[data-overlay]");
+      const reopenButton = document.querySelector("[data-reopen]");
+      const toast = document.querySelector("[data-toast]");
+      const confirmOverlay = document.querySelector("[data-confirm-overlay]");
+      const confirmTitle = document.querySelector("[data-confirm-title]");
+      const confirmMessage = document.querySelector("[data-confirm-message]");
+      const confirmAccept = document.querySelector("[data-confirm-accept]");
+      const dialogSurface = overlay.querySelector(
+        ".codex-workspace-checkpoint-dialog",
+      );
+      let toastTimer = 0;
+      let pendingModelAction = "";
+      let confirmationPreviousFocus = null;
+      let confirmationBackgroundState = null;
+
+      function showToast(message) {
+        window.clearTimeout(toastTimer);
+        toast.textContent = `${message}（HTML 模型，不会执行真实操作）`;
+        toast.dataset.visible = "true";
+        toastTimer = window.setTimeout(() => {
+          toast.dataset.visible = "false";
+        }, 2200);
+      }
+
+      function closeDialog() {
+        closeConfirmation({ restoreFocus: false });
+        overlay.hidden = true;
+        reopenButton.dataset.visible = "true";
+      }
+
+      function openDialog() {
+        overlay.hidden = false;
+        reopenButton.dataset.visible = "false";
+      }
+
+      function closeConfirmation({ restoreFocus = true } = {}) {
+        confirmOverlay.hidden = true;
+        pendingModelAction = "";
+        if (confirmationBackgroundState) {
+          dialogSurface.inert = confirmationBackgroundState.inert;
+          if (confirmationBackgroundState.hadInertAttribute) {
+            dialogSurface.setAttribute("inert", "");
+          } else {
+            dialogSurface.removeAttribute("inert");
+          }
+          if (confirmationBackgroundState.ariaHidden === null) {
+            dialogSurface.removeAttribute("aria-hidden");
+          } else {
+            dialogSurface.setAttribute(
+              "aria-hidden",
+              confirmationBackgroundState.ariaHidden,
+            );
+          }
+          confirmationBackgroundState = null;
+        }
+        const previousFocus = confirmationPreviousFocus;
+        confirmationPreviousFocus = null;
+        if (
+          restoreFocus &&
+          previousFocus &&
+          previousFocus.isConnected &&
+          typeof previousFocus.focus === "function"
+        ) {
+          previousFocus.focus();
+        }
+      }
+
+      function openConfirmation(action) {
+        const previousFocus = document.activeElement;
+        if (!confirmOverlay.hidden) {
+          closeConfirmation({ restoreFocus: false });
+        }
+        confirmationPreviousFocus = previousFocus;
+        confirmationBackgroundState = {
+          inert: dialogSurface.inert === true,
+          hadInertAttribute: dialogSurface.hasAttribute("inert"),
+          ariaHidden: dialogSurface.getAttribute("aria-hidden"),
+        };
+        const restoring = action.startsWith("恢复");
+        pendingModelAction = action;
+        confirmTitle.textContent = restoring
+          ? "恢复 Checkpoint？"
+          : "撤销上一轮修改？";
+        confirmMessage.textContent = restoring
+          ? "恢复会覆盖当前工作区中由 Checkpoint 管理的文件。恢复前会自动创建一个安全快照。"
+          : "将撤销上一轮 AI 的文件修改，当前状态会先保存为安全 Checkpoint。";
+        confirmAccept.textContent = restoring ? "继续恢复" : "继续撤销";
+        confirmOverlay.hidden = false;
+        confirmOverlay.querySelector("[data-confirm-cancel]")?.focus();
+        dialogSurface.inert = true;
+        dialogSurface.setAttribute("inert", "");
+        dialogSurface.setAttribute("aria-hidden", "true");
+      }
+
+      document.querySelectorAll("[data-close]").forEach((button) => {
+        button.addEventListener("click", closeDialog);
+      });
+
+      reopenButton.addEventListener("click", openDialog);
+
+      overlay.addEventListener("click", (event) => {
+        if (event.target === overlay) {
+          closeDialog();
+        }
+      });
+
+      document.querySelectorAll("[data-model-action]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const action = button.dataset.modelAction || "操作";
+          if (action === "刷新列表") {
+            showToast(action);
+            return;
+          }
+          openConfirmation(action);
+        });
+      });
+
+      confirmOverlay.addEventListener("click", (event) => {
+        if (
+          event.target === confirmOverlay ||
+          event.target.closest("[data-confirm-cancel]")
+        ) {
+          closeConfirmation();
+          return;
+        }
+        if (event.target.closest("[data-confirm-accept]")) {
+          const action = pendingModelAction;
+          closeConfirmation();
+          showToast(action);
+        }
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if (confirmOverlay.hidden) return;
+        if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          closeConfirmation();
+          return;
+        }
+        if (event.key !== "Tab") return;
+        const focusable = Array.from(
+          confirmOverlay.querySelectorAll("button:not(:disabled)"),
+        );
+        if (!focusable.length) {
+          event.preventDefault();
+          return;
+        }
+        const currentIndex = focusable.indexOf(document.activeElement);
+        const nextIndex = event.shiftKey
+          ? currentIndex <= 0
+            ? focusable.length - 1
+            : currentIndex - 1
+          : currentIndex === focusable.length - 1
+            ? 0
+            : currentIndex + 1;
+        event.preventDefault();
+        focusable[nextIndex].focus();
+      });
+
+      document.querySelectorAll("[data-toggle-files]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const list = button.closest("[data-file-list]");
+          const nextExpanded = list.dataset.expanded !== "true";
+          list.dataset.expanded = String(nextExpanded);
+          button.querySelector("[data-toggle-label]").textContent = nextExpanded
+            ? "收起，仅显示前 5 个文件"
+            : "展开其余 2 个文件";
+        });
+      });
+    </script>
+  </body>
+</html>

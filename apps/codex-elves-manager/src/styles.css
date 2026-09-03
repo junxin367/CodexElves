@@ -264,7 +264,7 @@ body {
   background: transparent;
   color: hsl(var(--foreground));
   cursor: pointer;
-  min-height: 38px;
+  min-height: 35px;
   padding: 0 9px;
   text-align: left;
   transition:
