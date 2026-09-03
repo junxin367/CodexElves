@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -9,7 +10,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, create_response, write_response};
@@ -23,10 +24,106 @@ use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 use crate::settings::{RelayProtocol, SettingsStore};
 
 const FRAME_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+const BRIDGE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const UPSTREAM_LIVENESS_PING_INTERVAL: Duration = Duration::from_secs(30);
+const UPSTREAM_LIVENESS_PONG_TIMEOUT: Duration = Duration::from_secs(15);
 const UPSTREAM_APPLICATION_IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
-const UPSTREAM_TRANSPORT_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
-const EARLY_DISCONNECT_HTTP_FALLBACK_TTL: Duration = Duration::from_secs(30);
+const OVERSIZED_REQUEST_HTTP_FALLBACK_TTL: Duration = Duration::from_secs(30);
+static NEXT_WEBSOCKET_CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebSocketBridgeTask {
+    UpstreamWriter,
+    DownstreamWriter,
+    DownstreamReader,
+    UpstreamReader,
+}
+
+impl WebSocketBridgeTask {
+    fn label(self) -> &'static str {
+        match self {
+            Self::UpstreamWriter => "upstream_writer",
+            Self::DownstreamWriter => "downstream_writer",
+            Self::DownstreamReader => "downstream_reader",
+            Self::UpstreamReader => "upstream_reader",
+        }
+    }
+
+    fn is_upstream(self) -> bool {
+        matches!(self, Self::UpstreamWriter | Self::UpstreamReader)
+    }
+}
+
+#[derive(Default)]
+struct WebSocketTransportLiveness {
+    next_ping_sequence: u64,
+    pending_ping: Option<PendingWebSocketPing>,
+    last_ping_at: Option<Instant>,
+    last_pong_at: Option<Instant>,
+    last_pong_rtt: Option<Duration>,
+    last_transport_activity_at: Option<Instant>,
+}
+
+struct PendingWebSocketPing {
+    payload: Vec<u8>,
+    sent_at: Instant,
+}
+
+impl WebSocketTransportLiveness {
+    fn begin_ping(&mut self, now: Instant) -> Option<Vec<u8>> {
+        if self.pending_ping.is_some() {
+            return None;
+        }
+        self.next_ping_sequence = self.next_ping_sequence.wrapping_add(1);
+        let payload = format!("codex-elves:{}", self.next_ping_sequence).into_bytes();
+        self.pending_ping = Some(PendingWebSocketPing {
+            payload: payload.clone(),
+            sent_at: now,
+        });
+        self.last_ping_at = Some(now);
+        Some(payload)
+    }
+
+    fn observe_frame(&mut self, message: &Message, now: Instant) -> Option<Duration> {
+        self.last_transport_activity_at = Some(now);
+        let pending_ping = self.pending_ping.take();
+        let matched_pong = pending_ping.as_ref().is_some_and(|pending| {
+            matches!(message, Message::Pong(payload) if payload.as_ref() == pending.payload.as_slice())
+        });
+        let pong_rtt = matched_pong
+            .then(|| {
+                pending_ping
+                    .as_ref()
+                    .map(|pending| now.duration_since(pending.sent_at))
+            })
+            .flatten();
+        if matched_pong {
+            self.last_pong_at = Some(now);
+            self.last_pong_rtt = pong_rtt;
+        }
+        pong_rtt
+    }
+
+    fn timeout_elapsed(&self, timeout: Duration, now: Instant) -> Option<Duration> {
+        let pending = self.pending_ping.as_ref()?;
+        let elapsed = now.duration_since(pending.sent_at);
+        (elapsed >= timeout).then_some(elapsed)
+    }
+}
+
+async fn queue_upstream_liveness_ping(
+    upstream_tx: &mpsc::Sender<Message>,
+    liveness: &mut WebSocketTransportLiveness,
+    now: Instant,
+) -> anyhow::Result<()> {
+    let Some(payload) = liveness.begin_ping(now) else {
+        return Ok(());
+    };
+    upstream_tx
+        .send(Message::Ping(payload.into()))
+        .await
+        .map_err(|_| anyhow::anyhow!("Responses WebSocket 上游发送队列已关闭"))
+}
 
 pub fn is_responses_websocket_upgrade(request_bytes: &[u8]) -> bool {
     let Ok((request, _)) = parse_websocket_upgrade_request(request_bytes) else {
@@ -106,8 +203,11 @@ pub async fn handle_responses_websocket_connection(
         reject_upgrade(&mut stream, StatusCode::UPGRADE_REQUIRED, message).await?;
         return Ok(());
     }
-    if should_temporarily_fallback_responses_websocket_to_http(&relay.id, &connection_context) {
-        let message = "当前会话轮次的 Responses WebSocket 在首个请求前异常断开，临时回退 HTTP";
+    if should_temporarily_fallback_oversized_responses_websocket_to_http(
+        &relay.id,
+        &connection_context,
+    ) {
+        let message = "当前会话轮次的请求超过 Responses WebSocket 消息上限，临时改走 HTTP";
         log_websocket_event(
             "helper.responses_websocket_http_fallback",
             &relay,
@@ -185,17 +285,6 @@ pub async fn handle_responses_websocket_connection(
     );
     let result =
         bridge_responses_websockets(downstream, upstream, &relay, request_logger.clone()).await;
-    if !request_logger.has_recorded_application_requests()
-        && arm_temporary_responses_websocket_http_fallback(&relay.id, &connection_context)
-    {
-        log_websocket_event(
-            "helper.responses_websocket_http_fallback_armed",
-            &relay,
-            remote_addr.as_deref(),
-            &connection_context,
-            Some("本地连接在首个 response.create 前结束"),
-        );
-    }
     let error_detail = result.as_ref().err().map(|error| format!("{error:#}"));
     log_websocket_event(
         if result.is_ok() {
@@ -221,50 +310,116 @@ async fn bridge_responses_websockets(
     let (mut upstream_sink, mut upstream_stream) = upstream.split();
     let (to_upstream_tx, mut to_upstream_rx) = mpsc::channel::<Message>(64);
     let (to_downstream_tx, mut to_downstream_rx) = mpsc::channel::<Message>(64);
+    let (upstream_shutdown_tx, mut upstream_shutdown_rx) = oneshot::channel::<Message>();
+    let (downstream_shutdown_tx, mut downstream_shutdown_rx) = oneshot::channel::<Message>();
     let continuation = WebSocketContinuationCoordinator::default();
 
     let upstream_writer = async move {
-        while let Some(message) = to_upstream_rx.recv().await {
-            if forward_websocket_message(
-                &mut upstream_sink,
-                message,
-                "转发 Responses WebSocket 请求超时",
-                "转发 Responses WebSocket 请求失败",
-            )
-            .await?
-            {
-                return Ok::<(), anyhow::Error>(());
+        loop {
+            tokio::select! {
+                biased;
+                shutdown = &mut upstream_shutdown_rx => {
+                    if let Ok(close) = shutdown {
+                        let _ = forward_websocket_message(
+                            &mut upstream_sink,
+                            close,
+                            "关闭 Responses WebSocket 上游超时",
+                            "关闭 Responses WebSocket 上游失败",
+                        )
+                        .await?;
+                    } else {
+                        close_websocket_sink(
+                            &mut upstream_sink,
+                            "关闭 Responses WebSocket 上游超时",
+                            "关闭 Responses WebSocket 上游失败",
+                        )
+                        .await?;
+                    }
+                    return Ok::<(), anyhow::Error>(());
+                }
+                message = to_upstream_rx.recv() => {
+                    let Some(message) = message else {
+                        close_websocket_sink(
+                            &mut upstream_sink,
+                            "关闭 Responses WebSocket 上游超时",
+                            "关闭 Responses WebSocket 上游失败",
+                        )
+                        .await?;
+                        return Ok::<(), anyhow::Error>(());
+                    };
+                    if forward_websocket_message(
+                        &mut upstream_sink,
+                        message,
+                        "转发 Responses WebSocket 请求超时",
+                        "转发 Responses WebSocket 请求失败",
+                    )
+                    .await?
+                    {
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                }
             }
         }
-        close_websocket_sink(
-            &mut upstream_sink,
-            "关闭 Responses WebSocket 上游超时",
-            "关闭 Responses WebSocket 上游失败",
-        )
-        .await?;
-        Ok::<(), anyhow::Error>(())
     };
 
     let downstream_writer = async move {
-        while let Some(message) = to_downstream_rx.recv().await {
-            if forward_websocket_message(
-                &mut downstream_sink,
-                message,
-                "转发 Responses WebSocket 响应超时",
-                "转发 Responses WebSocket 响应失败",
-            )
-            .await?
-            {
-                return Ok::<(), anyhow::Error>(());
+        loop {
+            tokio::select! {
+                biased;
+                shutdown = &mut downstream_shutdown_rx => {
+                    if let Ok(close) = shutdown {
+                        while let Ok(message) = to_downstream_rx.try_recv() {
+                            if forward_websocket_message(
+                                &mut downstream_sink,
+                                message,
+                                "转发 Responses WebSocket 响应超时",
+                                "转发 Responses WebSocket 响应失败",
+                            )
+                            .await?
+                            {
+                                return Ok::<(), anyhow::Error>(());
+                            }
+                        }
+                        let _ = forward_websocket_message(
+                            &mut downstream_sink,
+                            close,
+                            "关闭本地 Responses WebSocket 超时",
+                            "关闭本地 Responses WebSocket 失败",
+                        )
+                        .await?;
+                    } else {
+                        close_websocket_sink(
+                            &mut downstream_sink,
+                            "关闭本地 Responses WebSocket 超时",
+                            "关闭本地 Responses WebSocket 失败",
+                        )
+                        .await?;
+                    }
+                    return Ok::<(), anyhow::Error>(());
+                }
+                message = to_downstream_rx.recv() => {
+                    let Some(message) = message else {
+                        close_websocket_sink(
+                            &mut downstream_sink,
+                            "关闭本地 Responses WebSocket 超时",
+                            "关闭本地 Responses WebSocket 失败",
+                        )
+                        .await?;
+                        return Ok::<(), anyhow::Error>(());
+                    };
+                    if forward_websocket_message(
+                        &mut downstream_sink,
+                        message,
+                        "转发 Responses WebSocket 响应超时",
+                        "转发 Responses WebSocket 响应失败",
+                    )
+                    .await?
+                    {
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                }
             }
         }
-        close_websocket_sink(
-            &mut downstream_sink,
-            "关闭本地 Responses WebSocket 超时",
-            "关闭本地 Responses WebSocket 失败",
-        )
-        .await?;
-        Ok::<(), anyhow::Error>(())
     };
 
     let relay = relay.clone();
@@ -436,38 +591,46 @@ async fn bridge_responses_websockets(
             UPSTREAM_APPLICATION_IDLE_CHECK_INTERVAL,
         );
         application_idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut last_upstream_transport_activity = Instant::now();
+        let mut transport_liveness = WebSocketTransportLiveness::default();
         loop {
             let message = tokio::select! {
                 message = upstream_stream.next() => message,
                 _ = liveness_ping.tick() => {
-                    if !upstream_request_logger.has_pending_requests() {
-                        continue;
-                    }
-                    if continuation_upstream_tx
-                        .send(Message::Ping(b"codex-elves".to_vec().into()))
-                        .await
-                        .is_err()
+                    let now = Instant::now();
+                    if let Some(idle_for) =
+                        transport_liveness.timeout_elapsed(UPSTREAM_LIVENESS_PONG_TIMEOUT, now)
                     {
-                        anyhow::bail!("Responses WebSocket 上游发送队列已关闭");
+                        upstream_request_logger.log_transport_timeout(
+                            idle_for,
+                            &transport_liveness,
+                            now,
+                        );
+                        anyhow::bail!(
+                            "Responses WebSocket 上游连接在 Ping 后超过 {} 秒没有返回任何帧",
+                            UPSTREAM_LIVENESS_PONG_TIMEOUT.as_secs()
+                        );
                     }
+                    queue_upstream_liveness_ping(
+                        &continuation_upstream_tx,
+                        &mut transport_liveness,
+                        now,
+                    )
+                    .await?;
                     continue;
                 }
                 _ = application_idle_check.tick() => {
                     let now = Instant::now();
-                    if !upstream_request_logger.has_pending_requests() {
-                        last_upstream_transport_activity = now;
-                        continue;
-                    }
-                    if let Some(idle_for) = websocket_idle_timeout_elapsed(
-                        last_upstream_transport_activity,
-                        UPSTREAM_TRANSPORT_IDLE_TIMEOUT,
-                        now,
-                    ) {
-                        upstream_request_logger.log_transport_timeout(idle_for);
+                    if let Some(idle_for) =
+                        transport_liveness.timeout_elapsed(UPSTREAM_LIVENESS_PONG_TIMEOUT, now)
+                    {
+                        upstream_request_logger.log_transport_timeout(
+                            idle_for,
+                            &transport_liveness,
+                            now,
+                        );
                         anyhow::bail!(
-                            "Responses WebSocket 上游连接超过 {} 秒没有返回任何帧",
-                            UPSTREAM_TRANSPORT_IDLE_TIMEOUT.as_secs()
+                            "Responses WebSocket 上游连接在 Ping 后超过 {} 秒没有返回任何帧",
+                            UPSTREAM_LIVENESS_PONG_TIMEOUT.as_secs()
                         );
                     }
                     if let Some(expired) =
@@ -510,15 +673,14 @@ async fn bridge_responses_websockets(
                         compaction_failed_closed = true;
                     }
                     if compaction_failed_closed {
-                        // 返回 Err 会让 try_join! 立即取消 downstream_writer，刚入队的
-                        // response.failed 可能来不及发出；压缩请求已规范终结后按正常关闭处理。
+                        // 让监督器按正常关闭路径排空 response.failed 和 Close。
                         received_close = true;
                         break;
                     }
                     return Err(error).context("读取上游 Responses WebSocket 消息失败");
                 }
             };
-            last_upstream_transport_activity = Instant::now();
+            let _ = transport_liveness.observe_frame(&message, Instant::now());
             upstream_request_logger.record_upstream_application_activity(&message);
             let is_close = matches!(message, Message::Close(_));
             upstream_request_logger.record_first_response_event(&message);
@@ -586,23 +748,103 @@ async fn bridge_responses_websockets(
                     }
                 }
             } else {
-                let _ = to_downstream_tx.send(Message::Close(None)).await;
+                let _ = to_downstream_tx
+                    .send(Message::Close(Some(CloseFrame {
+                        code: CloseCode::Restart,
+                        reason: "upstream websocket reconnect required".into(),
+                    })))
+                    .await;
+                anyhow::bail!("Responses WebSocket 上游未发送 Close 帧就结束连接");
             }
         }
         Ok::<(), anyhow::Error>(())
     };
 
-    let result = tokio::try_join!(
-        upstream_writer,
-        downstream_writer,
-        downstream_reader,
-        upstream_reader
-    );
-    match &result {
-        Ok(_) => request_logger.finish_pending("Responses WebSocket 连接在响应完成前关闭", 499),
-        Err(error) => request_logger.finish_pending(&format!("{error:#}"), 502),
+    tokio::pin!(upstream_writer);
+    tokio::pin!(downstream_writer);
+    tokio::pin!(downstream_reader);
+    tokio::pin!(upstream_reader);
+
+    let (exit_task, task_result) = tokio::select! {
+        result = &mut upstream_writer => (WebSocketBridgeTask::UpstreamWriter, result),
+        result = &mut downstream_writer => (WebSocketBridgeTask::DownstreamWriter, result),
+        result = &mut downstream_reader => (WebSocketBridgeTask::DownstreamReader, result),
+        result = &mut upstream_reader => (WebSocketBridgeTask::UpstreamReader, result),
+    };
+    let task_failed = task_result.is_err();
+    let close = Message::Close(Some(CloseFrame {
+        code: if task_failed && exit_task.is_upstream() {
+            CloseCode::Restart
+        } else if task_failed {
+            CloseCode::Error
+        } else {
+            CloseCode::Normal
+        },
+        reason: if task_failed && exit_task.is_upstream() {
+            "upstream websocket reconnect required"
+        } else if task_failed {
+            "websocket bridge failed"
+        } else {
+            "websocket bridge closed"
+        }
+        .into(),
+    }));
+
+    let mut shutdown_notes = Vec::new();
+    if exit_task != WebSocketBridgeTask::DownstreamWriter
+        && downstream_shutdown_tx.send(close.clone()).is_err()
+    {
+        shutdown_notes.push("downstream_shutdown_receiver_closed".to_string());
     }
-    result?;
+    if exit_task != WebSocketBridgeTask::UpstreamWriter && upstream_shutdown_tx.send(close).is_err()
+    {
+        shutdown_notes.push("upstream_shutdown_receiver_closed".to_string());
+    }
+
+    let mut final_error = task_result.err();
+    if exit_task != WebSocketBridgeTask::DownstreamWriter {
+        match tokio::time::timeout(BRIDGE_SHUTDOWN_TIMEOUT, &mut downstream_writer).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                shutdown_notes.push(format!("downstream_writer_failed:{error:#}"));
+                if final_error.is_none() {
+                    final_error = Some(error);
+                }
+            }
+            Err(_) => {
+                let error = anyhow::anyhow!("等待本地 Responses WebSocket Close 写入超时");
+                shutdown_notes.push("downstream_writer_timeout".to_string());
+                if final_error.is_none() {
+                    final_error = Some(error);
+                }
+            }
+        }
+    }
+    if exit_task != WebSocketBridgeTask::UpstreamWriter {
+        match tokio::time::timeout(BRIDGE_SHUTDOWN_TIMEOUT, &mut upstream_writer).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                shutdown_notes.push(format!("upstream_writer_failed:{error:#}"));
+                if final_error.is_none() {
+                    final_error = Some(error);
+                }
+            }
+            Err(_) => {
+                let error = anyhow::anyhow!("等待上游 Responses WebSocket Close 写入超时");
+                shutdown_notes.push("upstream_writer_timeout".to_string());
+                if final_error.is_none() {
+                    final_error = Some(error);
+                }
+            }
+        }
+    }
+    request_logger.log_bridge_shutdown(exit_task.label(), task_failed, &shutdown_notes);
+
+    if let Some(error) = final_error {
+        request_logger.finish_pending(&format!("{error:#}"), 502);
+        return Err(error);
+    }
+    request_logger.finish_pending("Responses WebSocket 连接在响应完成前关闭", 499);
     Ok(())
 }
 
@@ -1696,11 +1938,12 @@ struct WebSocketRequestLogState {
     relay_name: String,
     endpoint: Option<String>,
     connection_context: WebSocketConnectionContext,
+    connection_generation: u64,
+    connected_at: Instant,
     requests: HashMap<String, TrackedWebSocketRequest>,
     active_order: VecDeque<String>,
     unassigned_order: VecDeque<String>,
     response_ids: HashMap<String, String>,
-    application_request_count: usize,
 }
 
 struct TrackedWebSocketRequest {
@@ -1729,6 +1972,7 @@ impl WebSocketRequestLogger {
         path: String,
         connection_context: WebSocketConnectionContext,
     ) -> Self {
+        let connected_at = Instant::now();
         Self {
             state: Arc::new(Mutex::new(WebSocketRequestLogState {
                 remote_addr,
@@ -1739,11 +1983,13 @@ impl WebSocketRequestLogger {
                     crate::responses_websocket::relay_responses_base_url(relay),
                 ),
                 connection_context,
+                connection_generation: NEXT_WEBSOCKET_CONNECTION_GENERATION
+                    .fetch_add(1, Ordering::Relaxed),
+                connected_at,
                 requests: HashMap::new(),
                 active_order: VecDeque::new(),
                 unassigned_order: VecDeque::new(),
                 response_ids: HashMap::new(),
-                application_request_count: 0,
             })),
         }
     }
@@ -1757,7 +2003,6 @@ impl WebSocketRequestLogger {
         let Ok(mut state) = self.state.lock() else {
             return None;
         };
-        state.application_request_count += 1;
         let record = crate::proxy_log::ProxyRequestRecord {
             id: id.clone(),
             state: crate::proxy_log::ProxyRequestState::Pending,
@@ -1831,23 +2076,13 @@ impl WebSocketRequestLogger {
                     "turnId": state.connection_context.turn_id,
                     "requestKind": state.connection_context.request_kind,
                     "windowId": state.connection_context.window_id,
+                    "connectionGeneration": state.connection_generation,
+                    "socketAgeMs": state.connected_at.elapsed().as_millis(),
                     "streamIdleTimeoutMs": idle_timeout.as_millis(),
                 }),
             );
         }
         Some(id)
-    }
-
-    fn has_pending_requests(&self) -> bool {
-        self.state
-            .lock()
-            .is_ok_and(|state| !state.requests.is_empty())
-    }
-
-    fn has_recorded_application_requests(&self) -> bool {
-        self.state
-            .lock()
-            .is_ok_and(|state| state.application_request_count > 0)
     }
 
     fn record_upstream_application_activity(&self, message: &Message) {
@@ -1911,13 +2146,20 @@ impl WebSocketRequestLogger {
                 "turnId": state.connection_context.turn_id,
                 "requestKind": state.connection_context.request_kind,
                 "windowId": state.connection_context.window_id,
+                "connectionGeneration": state.connection_generation,
+                "socketAgeMs": state.connected_at.elapsed().as_millis(),
                 "streamIdleTimeoutMs": expired.idle_timeout.as_millis(),
                 "idleForMs": expired.idle_for.as_millis(),
             }),
         );
     }
 
-    fn log_transport_timeout(&self, idle_for: Duration) {
+    fn log_transport_timeout(
+        &self,
+        idle_for: Duration,
+        liveness: &WebSocketTransportLiveness,
+        now: Instant,
+    ) {
         let Ok(state) = self.state.lock() else {
             return;
         };
@@ -1932,8 +2174,40 @@ impl WebSocketRequestLogger {
                 "turnId": state.connection_context.turn_id,
                 "requestKind": state.connection_context.request_kind,
                 "windowId": state.connection_context.window_id,
-                "transportIdleTimeoutMs": UPSTREAM_TRANSPORT_IDLE_TIMEOUT.as_millis(),
+                "connectionGeneration": state.connection_generation,
+                "socketAgeMs": state.connected_at.elapsed().as_millis(),
+                "transportIdleTimeoutMs": UPSTREAM_LIVENESS_PONG_TIMEOUT.as_millis(),
                 "idleForMs": idle_for.as_millis(),
+                "lastPingAgoMs": liveness.last_ping_at.map(|at| now.duration_since(at).as_millis()),
+                "lastPongAgoMs": liveness.last_pong_at.map(|at| now.duration_since(at).as_millis()),
+                "lastPongRttMs": liveness.last_pong_rtt.map(|rtt| rtt.as_millis()),
+                "lastTransportActivityAgoMs": liveness
+                    .last_transport_activity_at
+                    .map(|at| now.duration_since(at).as_millis()),
+            }),
+        );
+    }
+
+    fn log_bridge_shutdown(&self, exit_task: &str, task_failed: bool, shutdown_notes: &[String]) {
+        let Ok(state) = self.state.lock() else {
+            return;
+        };
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "protocol_proxy.responses_websocket_bridge_shutdown",
+            serde_json::json!({
+                "relayId": state.relay_id,
+                "relayName": state.relay_name,
+                "endpoint": state.endpoint,
+                "sessionId": state.connection_context.session_id,
+                "threadId": state.connection_context.thread_id,
+                "turnId": state.connection_context.turn_id,
+                "requestKind": state.connection_context.request_kind,
+                "windowId": state.connection_context.window_id,
+                "connectionGeneration": state.connection_generation,
+                "socketAgeMs": state.connected_at.elapsed().as_millis(),
+                "exitTask": exit_task,
+                "taskFailed": task_failed,
+                "shutdownNotes": shutdown_notes,
             }),
         );
     }
@@ -2106,6 +2380,8 @@ impl WebSocketRequestLogger {
         let relay_id = state.relay_id.clone();
         let relay_name = state.relay_name.clone();
         let endpoint = state.endpoint.clone();
+        let connection_generation = state.connection_generation;
+        let socket_age_ms = state.connected_at.elapsed().as_millis();
         for (_, mut tracked) in state.requests.drain() {
             tracked.record.state = crate::proxy_log::ProxyRequestState::Completed;
             tracked.record.status_code = Some(status_code);
@@ -2144,6 +2420,8 @@ impl WebSocketRequestLogger {
                     "turnId": connection_context.turn_id,
                     "requestKind": connection_context.request_kind,
                     "windowId": connection_context.window_id,
+                    "connectionGeneration": connection_generation,
+                    "socketAgeMs": socket_age_ms,
                     "requestCount": interrupted_request_count,
                     "statusCode": status_code,
                     "error": error,
@@ -2187,7 +2465,7 @@ impl WebSocketRequestLogger {
             let record = tracked.record;
             drop(state);
             let fallback_armed =
-                arm_temporary_responses_websocket_http_fallback(&relay_id, &connection_context);
+                arm_oversized_responses_websocket_http_fallback(&relay_id, &connection_context);
             (
                 record,
                 relay_id,
@@ -2875,61 +3153,61 @@ fn log_websocket_event(
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct ResponsesWebSocketHttpFallbackKey {
+struct ResponsesWebSocketOversizedFallbackKey {
     relay_id: String,
     thread_id: String,
     turn_id: String,
 }
 
-fn responses_websocket_http_fallback_key(
+fn responses_websocket_oversized_fallback_key(
     relay_id: &str,
     connection_context: &WebSocketConnectionContext,
-) -> Option<ResponsesWebSocketHttpFallbackKey> {
+) -> Option<ResponsesWebSocketOversizedFallbackKey> {
     if connection_context.request_kind.as_deref() != Some("turn") {
         return None;
     }
-    Some(ResponsesWebSocketHttpFallbackKey {
+    Some(ResponsesWebSocketOversizedFallbackKey {
         relay_id: relay_id.to_string(),
         thread_id: connection_context.thread_id.clone()?,
         turn_id: connection_context.turn_id.clone()?,
     })
 }
 
-fn responses_websocket_http_fallbacks()
--> &'static Mutex<HashMap<ResponsesWebSocketHttpFallbackKey, Instant>> {
-    static FALLBACKS: OnceLock<Mutex<HashMap<ResponsesWebSocketHttpFallbackKey, Instant>>> =
+fn responses_websocket_oversized_fallbacks()
+-> &'static Mutex<HashMap<ResponsesWebSocketOversizedFallbackKey, Instant>> {
+    static FALLBACKS: OnceLock<Mutex<HashMap<ResponsesWebSocketOversizedFallbackKey, Instant>>> =
         OnceLock::new();
     FALLBACKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn should_temporarily_fallback_responses_websocket_to_http(
+fn should_temporarily_fallback_oversized_responses_websocket_to_http(
     relay_id: &str,
     connection_context: &WebSocketConnectionContext,
 ) -> bool {
-    let Some(key) = responses_websocket_http_fallback_key(relay_id, connection_context) else {
+    let Some(key) = responses_websocket_oversized_fallback_key(relay_id, connection_context) else {
         return false;
     };
     let now = Instant::now();
-    let Ok(mut fallbacks) = responses_websocket_http_fallbacks().lock() else {
+    let Ok(mut fallbacks) = responses_websocket_oversized_fallbacks().lock() else {
         return false;
     };
     fallbacks.retain(|_, expires_at| *expires_at > now);
     fallbacks.contains_key(&key)
 }
 
-fn arm_temporary_responses_websocket_http_fallback(
+fn arm_oversized_responses_websocket_http_fallback(
     relay_id: &str,
     connection_context: &WebSocketConnectionContext,
 ) -> bool {
-    let Some(key) = responses_websocket_http_fallback_key(relay_id, connection_context) else {
+    let Some(key) = responses_websocket_oversized_fallback_key(relay_id, connection_context) else {
         return false;
     };
-    let Ok(mut fallbacks) = responses_websocket_http_fallbacks().lock() else {
+    let Ok(mut fallbacks) = responses_websocket_oversized_fallbacks().lock() else {
         return false;
     };
     let now = Instant::now();
     fallbacks.retain(|_, expires_at| *expires_at > now);
-    fallbacks.insert(key, now + EARLY_DISCONNECT_HTTP_FALLBACK_TTL);
+    fallbacks.insert(key, now + OVERSIZED_REQUEST_HTTP_FALLBACK_TTL);
     true
 }
 
@@ -3018,11 +3296,12 @@ mod tests {
     use super::{
         ActiveWebSocketContinuation, ActiveWebSocketMode, WebSocketConnectionContext,
         WebSocketContinuationAction, WebSocketContinuationCoordinator, WebSocketContinuationState,
-        WebSocketRequestLogger, activate_next_queued_websocket_request,
+        WebSocketRequestLogger, WebSocketTransportLiveness, activate_next_queued_websocket_request,
         is_responses_websocket_proxy_path, is_responses_websocket_upgrade,
         local_compaction_wait_websocket_messages, prepare_downstream_response_create_payload,
-        prepare_downstream_response_create_payload_with_settings, resolve_websocket_log_id,
-        websocket_application_event_payload, websocket_idle_timeout_elapsed,
+        prepare_downstream_response_create_payload_with_settings, queue_upstream_liveness_ping,
+        resolve_websocket_log_id, websocket_application_event_payload,
+        websocket_idle_timeout_elapsed,
     };
     use crate::settings::{
         BackendSettings, LayeredCompactionModels, RelayModelMapping, RelayProfile, RelayProtocol,
@@ -3184,6 +3463,86 @@ mod tests {
             websocket_idle_timeout_elapsed(started_at, idle_timeout, started_at + idle_timeout),
             Some(idle_timeout)
         );
+    }
+
+    #[test]
+    fn websocket_transport_liveness_pings_idle_connections_and_times_out_without_activity() {
+        let started_at = Instant::now();
+        let mut liveness = WebSocketTransportLiveness::default();
+
+        let payload = liveness
+            .begin_ping(started_at)
+            .expect("idle websocket should still create a ping");
+
+        assert!(payload.starts_with(b"codex-elves:"));
+        assert!(liveness.begin_ping(started_at).is_none());
+        assert_eq!(
+            liveness.timeout_elapsed(
+                Duration::from_secs(15),
+                started_at + Duration::from_secs(14)
+            ),
+            None
+        );
+        assert_eq!(
+            liveness.timeout_elapsed(
+                Duration::from_secs(15),
+                started_at + Duration::from_secs(15)
+            ),
+            Some(Duration::from_secs(15))
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_transport_liveness_queues_ping_without_application_request() {
+        let (upstream_tx, mut upstream_rx) = tokio::sync::mpsc::channel(1);
+        let mut liveness = WebSocketTransportLiveness::default();
+
+        queue_upstream_liveness_ping(&upstream_tx, &mut liveness, Instant::now())
+            .await
+            .unwrap();
+
+        let message = upstream_rx.recv().await.expect("ping should be queued");
+        assert!(matches!(message, Message::Ping(_)));
+    }
+
+    #[test]
+    fn websocket_transport_liveness_accepts_any_upstream_frame_as_transport_activity() {
+        let started_at = Instant::now();
+        let mut liveness = WebSocketTransportLiveness::default();
+        liveness
+            .begin_ping(started_at)
+            .expect("ping should be created");
+
+        let pong_rtt = liveness.observe_frame(
+            &Message::Text(r#"{"type":"response.created"}"#.into()),
+            started_at + Duration::from_secs(5),
+        );
+
+        assert_eq!(pong_rtt, None);
+        assert_eq!(
+            liveness.timeout_elapsed(
+                Duration::from_secs(15),
+                started_at + Duration::from_secs(30)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn websocket_transport_liveness_records_matching_pong_round_trip() {
+        let started_at = Instant::now();
+        let mut liveness = WebSocketTransportLiveness::default();
+        let payload = liveness
+            .begin_ping(started_at)
+            .expect("ping should be created");
+
+        let pong_rtt = liveness.observe_frame(
+            &Message::Pong(payload.into()),
+            started_at + Duration::from_millis(125),
+        );
+
+        assert_eq!(pong_rtt, Some(Duration::from_millis(125)));
+        assert_eq!(liveness.last_pong_rtt, Some(Duration::from_millis(125)));
     }
 
     #[test]

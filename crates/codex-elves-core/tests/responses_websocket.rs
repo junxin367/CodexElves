@@ -867,6 +867,72 @@ async fn local_proxy_does_not_turn_upstream_pong_into_application_event() {
 }
 
 #[tokio::test]
+async fn local_proxy_closes_downstream_promptly_when_upstream_ends_without_close_frame() {
+    let _settings_lock = websocket_settings_test_lock().lock().await;
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        let (stream, _) = upstream_listener.accept().await.unwrap();
+        let mut socket = accept_hdr_async(stream, |_request: &Request, response: Response| {
+            Ok(response)
+        })
+        .await
+        .unwrap();
+        let request = socket.next().await.unwrap().unwrap();
+        assert!(matches!(request, Message::Text(_)));
+        drop(socket);
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
+    save_supported_websocket_settings(upstream_address, false, "gpt-upstream-eof");
+
+    let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_address = local_listener.local_addr().unwrap();
+    let local_server = tokio::spawn(async move {
+        let (mut stream, remote_addr) = local_listener.accept().await.unwrap();
+        let request_bytes = read_upgrade_request(&mut stream).await;
+        handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr)).await
+    });
+
+    let (mut client, _) = connect_async(format!("ws://{local_address}/v1/responses"))
+        .await
+        .unwrap();
+    client
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-upstream-eof",
+                "input": [{"role": "user", "content": "hi"}],
+                "stream": true
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let close = tokio::time::timeout(Duration::from_secs(2), client.next())
+        .await
+        .expect("upstream EOF should close the downstream websocket promptly")
+        .expect("downstream websocket should yield a close frame")
+        .expect("downstream websocket close should be readable");
+    let Message::Close(Some(close)) = close else {
+        panic!("expected retryable websocket close after upstream EOF");
+    };
+    assert_eq!(close.code, CloseCode::Restart);
+
+    upstream.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), local_server)
+            .await
+            .is_ok(),
+        "local websocket bridge should not wait for the application idle timeout"
+    );
+}
+
+#[tokio::test]
 async fn local_proxy_preserves_a_websocket_frame_read_with_the_upgrade_request() {
     let _settings_lock = websocket_settings_test_lock().lock().await;
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1423,7 +1489,7 @@ async fn explicitly_disabled_websocket_rejects_upgrade_before_connecting_upstrea
 }
 
 #[tokio::test]
-async fn local_proxy_downgrades_same_turn_after_disconnect_before_first_request() {
+async fn local_proxy_keeps_websocket_for_same_turn_after_disconnect_before_first_request() {
     let _settings_lock = websocket_settings_test_lock().lock().await;
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_address = upstream_listener.local_addr().unwrap();
@@ -1518,12 +1584,22 @@ async fn local_proxy_downgrades_same_turn_after_disconnect_before_first_request(
         .unwrap();
     let second_response = read_upgrade_request(&mut second_client).await;
     assert!(
-        second_response.starts_with(b"HTTP/1.1 426"),
+        second_response.starts_with(b"HTTP/1.1 101"),
         "{}",
         String::from_utf8_lossy(&second_response)
     );
+    second_client.shutdown().await.unwrap();
     drop(second_client);
-    second_local_server.await.unwrap().unwrap();
+    let second_result = tokio::time::timeout(Duration::from_secs(2), second_local_server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        second_result
+            .unwrap_err()
+            .to_string()
+            .contains("读取本地 Responses WebSocket 消息失败")
+    );
 
     let third_listener = local_listener.clone();
     let third_local_server = tokio::spawn(async move {
@@ -1558,7 +1634,7 @@ async fn local_proxy_downgrades_same_turn_after_disconnect_before_first_request(
     );
 
     upstream.await.unwrap();
-    assert_eq!(upstream_connection_count.load(Ordering::SeqCst), 2);
+    assert_eq!(upstream_connection_count.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]
