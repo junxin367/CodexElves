@@ -207,13 +207,48 @@ body {
 }
 
 .nav {
-  display: grid;
-  gap: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: calc(100vh - 82px);
   margin-top: 12px;
+  overflow: hidden;
+  padding-right: 2px;
+}
+
+.nav-groups {
+  display: grid;
+  min-height: 0;
+  gap: 13px;
   overflow-x: hidden;
   overflow-y: auto;
-  max-height: calc(100vh - 82px);
-  padding-right: 2px;
+  padding-bottom: 4px;
+}
+
+.nav-group {
+  display: grid;
+  gap: 4px;
+}
+
+.nav-group-label {
+  padding: 0 4px;
+  color: hsl(var(--muted-foreground));
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  line-height: 18px;
+}
+
+.nav-group-items,
+.nav-utility {
+  display: grid;
+  gap: 3px;
+}
+
+.nav-utility {
+  flex: 0 0 auto;
+  padding-top: 10px;
+  border-top: 1px solid hsl(var(--sidebar-border));
 }
 
 .nav-item {
@@ -235,6 +270,7 @@ body {
   transition:
     background-color 140ms ease,
     border-color 140ms ease,
+    box-shadow 140ms ease,
     color 140ms ease,
     transform 140ms ease;
 }
@@ -277,13 +313,18 @@ body {
 }
 
 .nav-item.active {
-  border-color: hsl(var(--sidebar-border));
-  background: hsl(var(--sidebar-muted));
+  border-color: hsl(var(--brand-accent) / 0.2);
+  background: hsl(var(--brand-accent) / 0.1);
+  box-shadow: inset 3px 0 0 hsl(var(--brand-accent));
 }
 
 .nav-item.active .nav-icon {
   background: hsl(var(--brand-accent) / 0.18);
   color: hsl(var(--brand-accent));
+}
+
+.nav-item.active .nav-label {
+  font-weight: 700;
 }
 
 .workspace {
@@ -5820,6 +5861,37 @@ body {
   }
 }
 
+@media (max-height: 720px) and (min-width: 861px) {
+  .nav {
+    gap: 8px;
+  }
+
+  .nav-groups {
+    gap: 8px;
+  }
+
+  .nav-group {
+    gap: 2px;
+  }
+
+  .nav-group-label {
+    font-size: 9px;
+    line-height: 14px;
+  }
+
+  .nav-group-items {
+    gap: 1px;
+  }
+
+  .nav-utility {
+    padding-top: 8px;
+  }
+
+  .nav-item {
+    min-height: 32px;
+  }
+}
+
 @media (max-width: 860px) {
   body {
     min-width: 0;
@@ -5834,15 +5906,49 @@ body {
     padding: 6px 0 16px;
   }
 
-  .brand > div:not(.brand-mark),
+  .brand-copy {
+    display: none;
+  }
+
   .nav-label {
     font-size: 0;
+  }
+
+  .nav {
+    gap: 8px;
+    padding-right: 0;
+  }
+
+  .nav-groups {
+    gap: 4px;
+  }
+
+  .nav-group {
+    gap: 0;
+  }
+
+  .nav-group-label {
+    display: none;
+  }
+
+  .nav-utility {
+    padding-top: 8px;
+  }
+
+  .nav-group-items,
+  .nav-utility {
+    gap: 1px;
   }
 
   .nav-item {
     grid-template-columns: 1fr;
     justify-items: center;
+    min-height: 32px;
     padding: 0;
+  }
+
+  .nav-badge {
+    display: none;
   }
 
   .grid.two,

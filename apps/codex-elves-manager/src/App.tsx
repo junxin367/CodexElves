@@ -879,20 +879,55 @@ type StartupResult = CommandResult<{
 type Route = "overview" | "relay" | "localProxy" | "sessions" | "checkpoint" | "context" | "enhance" | "skins" | "userScripts" | "radar" | "maintenance" | "about" | "settings";
 type Theme = "dark" | "light";
 
-const routes: Array<{ id: Route; label: string; icon: LucideIcon; badge?: string }> = [
-  { id: "overview", label: "概览", icon: LayoutDashboard },
-  { id: "relay", label: "供应商配置", icon: KeyRound },
-  { id: "localProxy", label: "本地代理", icon: Network },
-  { id: "sessions", label: "会话管理", icon: MessageCircle },
-  { id: "checkpoint", label: "Checkpoint", icon: History },
-  { id: "context", label: "工具与插件", icon: Network },
-  { id: "enhance", label: "功能增强", icon: Hammer },
-  { id: "skins", label: "皮肤管理", icon: Palette },
-  { id: "userScripts", label: "脚本市场", icon: FileCode2 },
-  { id: "maintenance", label: "安装维护", icon: Wrench },
-  { id: "radar", label: "降智雷达", icon: TestTube },
-  { id: "settings", label: "设置", icon: Settings },
+type NavItem = { id: Route; label: string; icon: LucideIcon; badge?: string };
+type NavGroup = { id: string; label: string; items: NavItem[] };
+
+const routeGroups: NavGroup[] = [
+  {
+    id: "workspace",
+    label: "工作台",
+    items: [
+      { id: "overview", label: "概览", icon: LayoutDashboard },
+      { id: "relay", label: "供应商配置", icon: KeyRound },
+      { id: "localProxy", label: "本地代理", icon: Network },
+    ],
+  },
+  {
+    id: "enhancements",
+    label: "功能增强",
+    items: [
+      { id: "sessions", label: "会话管理", icon: MessageCircle },
+      { id: "enhance", label: "功能增强", icon: Hammer },
+      { id: "checkpoint", label: "Checkpoint", icon: History },
+    ],
+  },
+  {
+    id: "extensions",
+    label: "扩展与外观",
+    items: [
+      { id: "context", label: "工具与插件", icon: Sparkles },
+      { id: "userScripts", label: "脚本市场", icon: FileCode2 },
+      { id: "skins", label: "皮肤管理", icon: Palette },
+    ],
+  },
+  {
+    id: "system",
+    label: "系统管理",
+    items: [
+      { id: "radar", label: "降智雷达", icon: TestTube },
+      { id: "maintenance", label: "安装维护", icon: Wrench },
+      { id: "settings", label: "设置", icon: Settings },
+    ],
+  },
+];
+
+const utilityRoutes: NavItem[] = [
   { id: "about", label: "关于", icon: Info },
+];
+
+const routes: NavItem[] = [
+  ...routeGroups.flatMap((group) => group.items),
+  ...utilityRoutes,
 ];
 
 const LOCAL_PROXY_LOG_PAGE_SIZE = 6;
@@ -1911,7 +1946,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.3.17",
+        currentVersion: "0.4.0",
         latestVersion: "0.4.0",
         releaseSummary: [
           "CodexElves 0.4.0",
@@ -1922,11 +1957,11 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         ].join("\n"),
         assetName: "CodexElves-0.4.0-windows-x64-setup.exe",
         assetUrl: "https://example.test/CodexElves-0.4.0-windows-x64-setup.exe",
-        updateAvailable: true,
+        updateAvailable: false,
       }, "发现可用更新。") as T);
     case "perform_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.3.17",
+        currentVersion: "0.4.0",
         latestVersion: "0.4.0",
         releaseSummary: "浏览器预览不会下载真实安装包。",
         installedPath: "C:\\Temp\\CodexElves-0.4.0-windows-x64-setup.exe",
@@ -1936,7 +1971,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({
         report: [
           "CodexElves 诊断报告",
-          "版本: 0.3.17",
+          "版本: 0.4.0",
           "平台: windows-x64",
           "Codex 应用: C:\\Users\\junes\\AppData\\Local\\Programs\\CodexElves\\CodexElves.exe",
           "配置目录: C:\\Users\\junes\\.codex",
@@ -1957,7 +1992,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.3.17",
+        current_version: "0.4.0",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -4145,6 +4180,25 @@ export function App() {
     [route, launchForm, settingsForm, settings, removeOwnedData, update, logs, localProxyDetail, diagnostics, theme, relayFiles, localSessions, pluginCacheInfos, remotePluginMarketplaceProgress, selectedProviderSyncTarget, envConflicts, ccsProviders, workspaceCheckpointBusy],
   );
   const hasUpdate = update?.updateAvailable === true;
+  const renderNavItem = (item: NavItem) => {
+    const Icon = item.icon;
+    const active = route === item.id;
+    return (
+      <button
+        aria-current={active ? "page" : undefined}
+        className={`nav-item ${active ? "active" : ""}`}
+        key={item.id}
+        onClick={() => void navigate(item.id)}
+        type="button"
+      >
+        <span className="nav-icon" data-tooltip={item.label}>
+          <Icon className="h-4 w-4" aria-hidden="true" />
+        </span>
+        <span className="nav-label">{item.label}</span>
+        {item.badge ? <span className="nav-badge">{item.badge}</span> : null}
+      </button>
+    );
+  };
 
   return (
     <div className={`shell ${theme}`}>
@@ -4171,24 +4225,25 @@ export function App() {
             <div className="brand-subtitle">管理控制台</div>
           </div>
         </div>
-        <nav className="nav">
-          {routes.map((item) => {
-            const Icon = item.icon;
-            return (
-            <button
-              className={`nav-item ${route === item.id ? "active" : ""}`}
-              key={item.id}
-              onClick={() => void navigate(item.id)}
-              type="button"
-            >
-              <span className="nav-icon">
-                <Icon className="h-4 w-4" aria-hidden="true" />
-              </span>
-              <span className="nav-label">{item.label}</span>
-              {item.badge ? <span className="nav-badge">{item.badge}</span> : null}
-            </button>
-          );
-          })}
+        <nav aria-label="主导航" className="nav">
+          <div className="nav-groups">
+            {routeGroups.map((group) => (
+              <div
+                aria-labelledby={`nav-group-${group.id}`}
+                className="nav-group"
+                key={group.id}
+                role="group"
+              >
+                <div className="nav-group-label" id={`nav-group-${group.id}`}>
+                  {group.label}
+                </div>
+                <div className="nav-group-items">{group.items.map(renderNavItem)}</div>
+              </div>
+            ))}
+          </div>
+          <div aria-label="其他" className="nav-utility" role="group">
+            {utilityRoutes.map(renderNavItem)}
+          </div>
         </nav>
       </aside>
       <main className="workspace">
