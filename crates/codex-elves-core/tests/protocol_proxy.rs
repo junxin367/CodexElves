@@ -430,6 +430,8 @@ fn structured_compaction_restores_real_roles_and_tool_pairing_across_protocols()
     assert!(anthropic_text.contains("推荐方案：执行方案 1"));
     assert!(anthropic_text.contains("较早历史摘要"));
     assert!(anthropic_text.contains("\"id\":\"call-probe\""));
+    assert_eq!(anthropic["thinking"], json!({ "type": "disabled" }));
+    assert!(anthropic.get("output_config").is_none());
     let last = anthropic_messages.last().unwrap();
     assert_eq!(last["role"], "user");
     assert!(

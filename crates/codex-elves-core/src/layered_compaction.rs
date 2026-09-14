@@ -194,7 +194,6 @@ fn split_local_compaction_input(
         .enumerate()
         .filter(|(index, item)| {
             !is_local_compaction_control_item(input, *index, item, control_kind)
-                && item.get("type").and_then(Value::as_str) != Some("reasoning")
         })
         .map(|(_, item)| item.clone())
         .collect::<Vec<_>>();
@@ -208,8 +207,13 @@ fn split_local_compaction_input(
         .iter()
         .rposition(is_visible_assistant_message)
         .unwrap_or(last_user);
+    let summary_input = conversation[..retained_start]
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) != Some("reasoning"))
+        .cloned()
+        .collect();
     LocalCompactionSplit {
-        summary_input: conversation[..retained_start].to_vec(),
+        summary_input,
         retained_tail: conversation[retained_start..].to_vec(),
     }
 }
@@ -2939,6 +2943,46 @@ mod tests {
             payload.retained_tail,
             vec![anchor, user, call, output],
             "roles, content blocks and call ids must remain byte-for-byte JSON equivalent"
+        );
+    }
+
+    #[test]
+    fn structured_payload_retains_reasoning_with_the_assistant_tail() {
+        let reasoning = json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "summary": [{ "type": "summary_text", "text": "保留思考" }],
+            "encrypted_content": "sig_1"
+        });
+        let anchor = assistant_message("上一轮回答");
+        let user = user_message("继续处理");
+        let request = json!({
+            "input": [
+                user_message("更早历史"),
+                anchor.clone(),
+                reasoning.clone(),
+                user.clone(),
+                compaction_prompt_item()
+            ]
+        });
+
+        let result = apply_layered_compaction_to_responses_sse(
+            &request,
+            true,
+            DEFAULT_RETAIN_TOKENS,
+            summary_sse("较早历史摘要"),
+        );
+        let response = crate::continue_thinking::extract_terminal_response_object(&result.sse_text)
+            .expect("structured response");
+        let encoded = extract_message_text(&response).expect("structured payload text");
+        let payload =
+            structured_local_compaction_payload(&encoded).expect("v3 payload should decode");
+
+        assert!(payload.retained_tail.contains(&reasoning));
+        assert_eq!(
+            payload.retained_tail,
+            vec![anchor, reasoning, user],
+            "reasoning must stay adjacent to the retained assistant history"
         );
     }
 

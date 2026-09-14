@@ -22,7 +22,13 @@ const STREAM_IDLE_TIMEOUT_HIGH_OR_LOWER: Duration = Duration::from_secs(900);
 const STREAM_IDLE_TIMEOUT_XHIGH: Duration = Duration::from_secs(1500);
 const STREAM_IDLE_TIMEOUT_MAX: Duration = Duration::from_secs(1800);
 const REMOTE_COMPACTION_CANDIDATE_BODY_TIMEOUT: Duration = Duration::from_secs(900);
-const MODEL_CAPACITY_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(2)];
+const MODEL_CAPACITY_RETRY_DELAYS: [Duration; 5] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(16),
+];
 const THINK_OPEN_TAG: &str = "<think>";
 const THINK_CLOSE_TAG: &str = "</think>";
 const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
@@ -878,6 +884,8 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
     body: Value,
     diagnostic_id: Option<&str>,
 ) -> anyhow::Result<Value> {
+    let legacy_compaction_recovery =
+        crate::layered_compaction::contains_synthetic_local_compaction(&body);
     let body = crate::layered_compaction::expand_synthetic_local_compaction_request(&body);
     let body = crate::layered_compaction::prepare_remote_compaction_v2_bridge_request(&body);
     let mut result = json!({});
@@ -965,7 +973,17 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
         }
     }
 
-    apply_anthropic_reasoning_options(&mut result, &body, model);
+    if legacy_compaction_recovery {
+        // 已存在的旧会话可能在压缩时丢失 Responses reasoning 项，无法重建
+        // Anthropic thinking 所需的历史 content[].thinking。关闭本轮 thinking，
+        // 让会话可以继续；新发生的压缩会保留 reasoning，不会进入此分支。
+        result["thinking"] = json!({ "type": "disabled" });
+        result.as_object_mut().map(|object| {
+            object.remove("output_config");
+        });
+    } else {
+        apply_anthropic_reasoning_options(&mut result, &body, model);
+    }
     log_anthropic_request_shape(&result, &body, diagnostic_id);
 
     Ok(result)
@@ -2977,31 +2995,8 @@ fn is_gpt_model(model: &str) -> bool {
     model.trim().to_ascii_lowercase().starts_with("gpt")
 }
 
-fn responses_stream_has_retryable_model_capacity_error(sse_text: &str) -> bool {
-    let Some(response) = crate::continue_thinking::extract_terminal_response_object(sse_text)
-    else {
-        return false;
-    };
-    let error = response.get("error").unwrap_or(&response);
-    let code = error
-        .get("code")
-        .or_else(|| error.get("type"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if matches!(
-        code.as_str(),
-        "server_is_overloaded" | "model_overloaded" | "model_at_capacity"
-    ) {
-        return true;
-    }
-
-    let message = error
-        .get("message")
-        .or_else(|| error.get("detail"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+fn retryable_model_capacity_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
     [
         "selected model is at capacity",
         "model is at capacity",
@@ -3010,6 +3005,78 @@ fn responses_stream_has_retryable_model_capacity_error(sse_text: &str) -> bool {
     ]
     .iter()
     .any(|pattern| message.contains(pattern))
+}
+
+fn value_has_retryable_model_capacity_error(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            let code = object
+                .get("code")
+                .or_else(|| object.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if matches!(
+                code.as_str(),
+                "server_is_overloaded" | "model_overloaded" | "model_at_capacity"
+            ) {
+                return true;
+            }
+
+            if ["message", "detail"].iter().any(|key| {
+                object
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .is_some_and(retryable_model_capacity_message)
+            }) {
+                return true;
+            }
+
+            ["error", "response", "data"].iter().any(|key| {
+                object
+                    .get(*key)
+                    .is_some_and(value_has_retryable_model_capacity_error)
+            })
+        }
+        Value::Array(items) => items.iter().any(value_has_retryable_model_capacity_error),
+        _ => false,
+    }
+}
+
+pub(crate) fn responses_stream_has_retryable_model_capacity_error(sse_text: &str) -> bool {
+    let Some(response) = crate::continue_thinking::extract_terminal_response_object(sse_text)
+    else {
+        return false;
+    };
+    value_has_retryable_model_capacity_error(&response)
+}
+
+fn responses_body_has_retryable_model_capacity_error(body: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(body);
+    if responses_stream_has_retryable_model_capacity_error(&text) {
+        return true;
+    }
+
+    if let Ok(value) = serde_json::from_slice::<Value>(body)
+        && value_has_retryable_model_capacity_error(&value)
+    {
+        return true;
+    }
+
+    text.lines().any(|line| {
+        let Some(data) = line.trim().strip_prefix("data:") else {
+            return false;
+        };
+        serde_json::from_str::<Value>(data.trim())
+            .ok()
+            .is_some_and(|value| value_has_retryable_model_capacity_error(&value))
+    })
+}
+
+fn upstream_response_has_retryable_model_capacity_error(status_code: u16, body: &[u8]) -> bool {
+    responses_body_has_retryable_model_capacity_error(body)
+        || (!(200..300).contains(&status_code)
+            && retryable_model_capacity_message(&String::from_utf8_lossy(body)))
 }
 
 async fn retry_model_capacity_responses_stream(
@@ -3059,12 +3126,10 @@ async fn retry_model_capacity_responses_stream(
             Ok(upstream) => upstream,
             Err(_) => break,
         };
-
-        if upstream.status_code == 429
-            || !upstream.is_success()
-            || !upstream.is_stream
-            || upstream.response_protocol != UpstreamResponseProtocol::Responses
-        {
+        let status_code = upstream.status_code;
+        let is_success = upstream.is_success();
+        let is_stream = upstream.is_stream;
+        if upstream.response_protocol != UpstreamResponseProtocol::Responses {
             break;
         }
 
@@ -3085,10 +3150,34 @@ async fn retry_model_capacity_responses_stream(
                 break;
             }
         };
-        current_sse_text = String::from_utf8_lossy(&body).into_owned();
-        if !responses_stream_has_retryable_model_capacity_error(&current_sse_text) {
-            return current_sse_text;
+
+        let is_capacity_error =
+            upstream_response_has_retryable_model_capacity_error(status_code, &body);
+        if is_capacity_error {
+            if is_success || status_code == 503 {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "protocol_proxy.model_capacity_retry_response",
+                    json!({
+                        "model": model,
+                        "attempt": retry_index + 1,
+                        "statusCode": status_code,
+                        "isStream": is_stream,
+                        "bodyMatched": true
+                    }),
+                );
+                if is_success && is_stream {
+                    current_sse_text = String::from_utf8_lossy(&body).into_owned();
+                }
+                continue;
+            }
+            break;
         }
+        if !is_success || !is_stream {
+            break;
+        }
+
+        current_sse_text = String::from_utf8_lossy(&body).into_owned();
+        return current_sse_text;
     }
 
     current_sse_text
@@ -11422,7 +11511,23 @@ mod compaction_model_override_tests {
 
 #[cfg(test)]
 mod model_capacity_retry_tests {
-    use super::responses_stream_has_retryable_model_capacity_error;
+    use super::{
+        MODEL_CAPACITY_RETRY_DELAYS, responses_body_has_retryable_model_capacity_error,
+        responses_stream_has_retryable_model_capacity_error,
+        upstream_response_has_retryable_model_capacity_error,
+    };
+
+    #[test]
+    fn allows_five_capacity_retries_with_exponential_backoff() {
+        assert_eq!(MODEL_CAPACITY_RETRY_DELAYS.len(), 5);
+        assert_eq!(
+            MODEL_CAPACITY_RETRY_DELAYS
+                .iter()
+                .map(|delay| delay.as_secs())
+                .collect::<Vec<_>>(),
+            vec![1, 2, 4, 8, 16]
+        );
+    }
 
     #[test]
     fn detects_observed_responses_capacity_errors() {
@@ -11462,5 +11567,37 @@ data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded
         assert!(!responses_stream_has_retryable_model_capacity_error(
             rate_limited
         ));
+    }
+
+    #[test]
+    fn detects_capacity_error_in_http_503_json_body() {
+        let body = br#"{"error":{"type":"server_error","code":"server_is_overloaded","message":"Selected model is at capacity. Please try a different model."}}"#;
+        assert!(responses_body_has_retryable_model_capacity_error(body));
+    }
+
+    #[test]
+    fn excludes_unrelated_http_503_body() {
+        let body = br#"{"error":{"type":"server_error","message":"Temporary upstream failure."}}"#;
+        assert!(!responses_body_has_retryable_model_capacity_error(body));
+    }
+
+    #[test]
+    fn detects_plain_text_capacity_error_only_for_non_success_status() {
+        let body = b"Selected model is at capacity. Please try a different model.";
+        assert!(upstream_response_has_retryable_model_capacity_error(
+            503, body
+        ));
+        assert!(!upstream_response_has_retryable_model_capacity_error(
+            200, body
+        ));
+    }
+
+    #[test]
+    fn ignores_capacity_phrase_in_successful_response_output() {
+        let body = br#"event: response.completed
+data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Selected model is at capacity. Please try a different model."}]}]}}
+
+"#;
+        assert!(!responses_body_has_retryable_model_capacity_error(body));
     }
 }

@@ -217,6 +217,7 @@ type BackendSettings = {
   codexAppActiveSkinId: string;
   codexGoalsEnabled: boolean;
   lanProxyEnabled: boolean;
+  wsFailureFallbackToHttp: boolean;
   gptReasoningContinuation: boolean;
   gptReasoningContinuationMaxRounds: number;
   layeredCompactionEnabled: boolean;
@@ -998,6 +999,7 @@ const defaultSettings: BackendSettings = {
   codexAppActiveSkinId: "",
   codexGoalsEnabled: false,
   lanProxyEnabled: false,
+  wsFailureFallbackToHttp: false,
   gptReasoningContinuation: false,
   gptReasoningContinuationMaxRounds: 3,
   layeredCompactionEnabled: false,
@@ -4762,6 +4764,22 @@ function LocalProxyScreen({
                   type="checkbox"
                 />
                 <span>局域网代理</span>
+              </label>
+              <label
+                className="proxy-inline-toggle"
+                data-tooltip="WebSocket 连续失败或当前轮次无法承载时，允许本地代理临时改走 HTTP；默认关闭。"
+              >
+                <input
+                  checked={form.wsFailureFallbackToHttp}
+                  onChange={(event) =>
+                    void actions.saveSettingsValue(
+                      { ...form, wsFailureFallbackToHttp: event.currentTarget.checked },
+                      false,
+                    )
+                  }
+                  type="checkbox"
+                />
+                <span>WS 失败切 HTTP</span>
               </label>
               <div className="proxy-continue-thinking-control">
                 <label
@@ -11944,6 +11962,7 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
     relayProfilesEnabled: settings.relayProfilesEnabled !== false,
     computerUseGuardEnabled: settings.computerUseGuardEnabled !== false,
     lanProxyEnabled: settings.lanProxyEnabled === true,
+    wsFailureFallbackToHttp: settings.wsFailureFallbackToHttp === true,
     codexAppImageOverlayOpacity: clampNumber(settings.codexAppImageOverlayOpacity || 35, 1, 100),
     codexAppWorkspaceCheckpointStoragePath: (
       settings.codexAppWorkspaceCheckpointStoragePath || ""

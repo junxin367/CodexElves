@@ -10,7 +10,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot};
+#[cfg(test)]
+use tokio::sync::mpsc;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, create_response, write_response};
@@ -24,35 +25,22 @@ use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 use crate::settings::{RelayProtocol, SettingsStore};
 
 const FRAME_SEND_TIMEOUT: Duration = Duration::from_secs(30);
-const BRIDGE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const UPSTREAM_LIVENESS_PING_INTERVAL: Duration = Duration::from_secs(30);
 const UPSTREAM_LIVENESS_PONG_TIMEOUT: Duration = Duration::from_secs(15);
 const UPSTREAM_APPLICATION_IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const OVERSIZED_REQUEST_HTTP_FALLBACK_TTL: Duration = Duration::from_secs(30);
+const EARLY_DISCONNECT_HTTP_FALLBACK_TTL: Duration = Duration::from_secs(30);
+const UPSTREAM_FAILURE_HTTP_FALLBACK_TTL: Duration = Duration::from_secs(30);
+const INITIAL_UPSTREAM_RETRY_DELAYS: [Duration; 2] =
+    [Duration::from_millis(300), Duration::from_secs(1)];
+const MODEL_CAPACITY_RETRY_DELAYS: [Duration; 5] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(16),
+];
 static NEXT_WEBSOCKET_CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(1);
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WebSocketBridgeTask {
-    UpstreamWriter,
-    DownstreamWriter,
-    DownstreamReader,
-    UpstreamReader,
-}
-
-impl WebSocketBridgeTask {
-    fn label(self) -> &'static str {
-        match self {
-            Self::UpstreamWriter => "upstream_writer",
-            Self::DownstreamWriter => "downstream_writer",
-            Self::DownstreamReader => "downstream_reader",
-            Self::UpstreamReader => "upstream_reader",
-        }
-    }
-
-    fn is_upstream(self) -> bool {
-        matches!(self, Self::UpstreamWriter | Self::UpstreamReader)
-    }
-}
 
 #[derive(Default)]
 struct WebSocketTransportLiveness {
@@ -111,6 +99,7 @@ impl WebSocketTransportLiveness {
     }
 }
 
+#[cfg(test)]
 async fn queue_upstream_liveness_ping(
     upstream_tx: &mpsc::Sender<Message>,
     liveness: &mut WebSocketTransportLiveness,
@@ -206,8 +195,41 @@ pub async fn handle_responses_websocket_connection(
     if should_temporarily_fallback_oversized_responses_websocket_to_http(
         &relay.id,
         &connection_context,
+        settings.ws_failure_fallback_to_http,
     ) {
         let message = "当前会话轮次的请求超过 Responses WebSocket 消息上限，临时改走 HTTP";
+        log_websocket_event(
+            "helper.responses_websocket_http_fallback",
+            &relay,
+            remote_addr.as_deref(),
+            &connection_context,
+            Some(message),
+        );
+        reject_upgrade(&mut stream, StatusCode::UPGRADE_REQUIRED, message).await?;
+        return Ok(());
+    }
+    if should_temporarily_fallback_early_disconnect_responses_websocket_to_http(
+        &relay.id,
+        &connection_context,
+        settings.ws_failure_fallback_to_http,
+    ) {
+        let message = "当前会话轮次的 Responses WebSocket 在首个请求前异常断开，临时回退 HTTP";
+        log_websocket_event(
+            "helper.responses_websocket_http_fallback",
+            &relay,
+            remote_addr.as_deref(),
+            &connection_context,
+            Some(message),
+        );
+        reject_upgrade(&mut stream, StatusCode::UPGRADE_REQUIRED, message).await?;
+        return Ok(());
+    }
+    if should_temporarily_fallback_upstream_failure_responses_websocket_to_http(
+        &relay.id,
+        &connection_context,
+        settings.ws_failure_fallback_to_http,
+    ) {
+        let message = "当前会话轮次的 Responses WebSocket 上游连续失败，临时回退 HTTP";
         log_websocket_event(
             "helper.responses_websocket_http_fallback",
             &relay,
@@ -221,31 +243,53 @@ pub async fn handle_responses_websocket_connection(
 
     let request_context =
         crate::request_headers::RequestContext::from_headers(request.headers().clone());
-    let upstream =
-        match crate::responses_websocket::open_responses_websocket_upstream_with_request_context(
-            &relay,
-            &request_context,
-        )
-        .await
-        {
-            Ok(upstream) => upstream,
-            Err(error) => {
+    let upstream = match open_responses_websocket_upstream_with_initial_retries(
+        &relay,
+        &request_context,
+    )
+    .await
+    {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            let fallback_armed = arm_upstream_failure_responses_websocket_http_fallback(
+                &relay.id,
+                &connection_context,
+                settings.ws_failure_fallback_to_http,
+            );
+            log_websocket_event(
+                "helper.responses_websocket_upstream_failed",
+                &relay,
+                remote_addr.as_deref(),
+                &connection_context,
+                Some(&error.to_string()),
+            );
+            if fallback_armed {
                 log_websocket_event(
-                    "helper.responses_websocket_upstream_failed",
+                    "helper.responses_websocket_http_fallback_armed",
                     &relay,
                     remote_addr.as_deref(),
                     &connection_context,
-                    Some(&error.to_string()),
+                    Some("初始上游连接重试耗尽"),
                 );
-                reject_upgrade(
-                    &mut stream,
-                    StatusCode::BAD_GATEWAY,
-                    "Responses WebSocket 上游连接失败，Codex 将按客户端重试策略处理",
-                )
-                .await?;
-                return Ok(());
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "protocol_proxy.responses_websocket_http_fallback_armed",
+                    serde_json::json!({
+                        "relayId": relay.id,
+                        "relayName": relay.name,
+                        "reason": "initial_upstream_connection_exhausted",
+                        "retryCount": INITIAL_UPSTREAM_RETRY_DELAYS.len(),
+                    }),
+                );
             }
-        };
+            reject_upgrade(
+                &mut stream,
+                StatusCode::BAD_GATEWAY,
+                "Responses WebSocket 上游连接失败，Codex 将按客户端重试策略处理",
+            )
+            .await?;
+            return Ok(());
+        }
+    };
     if let Err(error) = ensure_websocket_relay_still_current(&relay) {
         reject_upgrade(&mut stream, StatusCode::CONFLICT, &error.to_string()).await?;
         return Ok(());
@@ -283,8 +327,58 @@ pub async fn handle_responses_websocket_connection(
         request_path,
         connection_context.clone(),
     );
-    let result =
-        bridge_responses_websockets(downstream, upstream, &relay, request_logger.clone()).await;
+    let result = bridge_responses_websockets(
+        downstream,
+        upstream,
+        &relay,
+        request_logger.clone(),
+        request_context,
+        settings.ws_failure_fallback_to_http,
+    )
+    .await;
+    if !request_logger.has_recorded_application_requests()
+        && arm_early_disconnect_responses_websocket_http_fallback(
+            &relay.id,
+            &connection_context,
+            settings.ws_failure_fallback_to_http,
+        )
+    {
+        log_websocket_event(
+            "helper.responses_websocket_http_fallback_armed",
+            &relay,
+            remote_addr.as_deref(),
+            &connection_context,
+            Some("本地连接在首个 response.create 前结束"),
+        );
+    }
+    if result.is_err()
+        && request_logger.has_recorded_application_requests()
+        && !request_logger.has_recorded_first_response_event()
+    {
+        let fallback_armed = arm_upstream_failure_responses_websocket_http_fallback(
+            &relay.id,
+            &connection_context,
+            settings.ws_failure_fallback_to_http,
+        );
+        if fallback_armed {
+            log_websocket_event(
+                "helper.responses_websocket_http_fallback_armed",
+                &relay,
+                remote_addr.as_deref(),
+                &connection_context,
+                Some("首个应用响应前的上游重连耗尽"),
+            );
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "protocol_proxy.responses_websocket_http_fallback_armed",
+                serde_json::json!({
+                    "relayId": relay.id,
+                    "relayName": relay.name,
+                    "reason": "upstream_failure_before_first_application_response",
+                    "retryCount": INITIAL_UPSTREAM_RETRY_DELAYS.len(),
+                }),
+            );
+        }
+    }
     let error_detail = result.as_ref().err().map(|error| format!("{error:#}"));
     log_websocket_event(
         if result.is_ok() {
@@ -301,551 +395,657 @@ pub async fn handle_responses_websocket_connection(
 }
 
 async fn bridge_responses_websockets(
-    downstream: WebSocketStream<TcpStream>,
-    upstream: crate::responses_websocket::UpstreamResponsesWebsocket,
+    mut downstream: WebSocketStream<TcpStream>,
+    mut upstream: crate::responses_websocket::UpstreamResponsesWebsocket,
     relay: &crate::settings::RelayProfile,
     request_logger: WebSocketRequestLogger,
+    request_context: crate::request_headers::RequestContext,
+    allow_http_fallback: bool,
 ) -> anyhow::Result<()> {
-    let (mut downstream_sink, mut downstream_stream) = downstream.split();
-    let (mut upstream_sink, mut upstream_stream) = upstream.split();
-    let (to_upstream_tx, mut to_upstream_rx) = mpsc::channel::<Message>(64);
-    let (to_downstream_tx, mut to_downstream_rx) = mpsc::channel::<Message>(64);
-    let (upstream_shutdown_tx, mut upstream_shutdown_rx) = oneshot::channel::<Message>();
-    let (downstream_shutdown_tx, mut downstream_shutdown_rx) = oneshot::channel::<Message>();
     let continuation = WebSocketContinuationCoordinator::default();
+    enum BridgeEvent {
+        Downstream(Option<Result<Message, WebSocketError>>),
+        Upstream(Option<Result<Message, WebSocketError>>),
+        LivenessPing,
+        ApplicationIdleCheck,
+    }
 
-    let upstream_writer = async move {
-        loop {
-            tokio::select! {
+    let relay = relay.clone();
+    let request_context = request_context.clone();
+    let mut downstream_closed = false;
+    let mut upstream_closed = false;
+    let mut reconnect_attempts = 0usize;
+    let mut liveness_ping = tokio::time::interval_at(
+        tokio::time::Instant::now() + UPSTREAM_LIVENESS_PING_INTERVAL,
+        UPSTREAM_LIVENESS_PING_INTERVAL,
+    );
+    liveness_ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut application_idle_check = tokio::time::interval_at(
+        tokio::time::Instant::now() + UPSTREAM_APPLICATION_IDLE_CHECK_INTERVAL,
+        UPSTREAM_APPLICATION_IDLE_CHECK_INTERVAL,
+    );
+    application_idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut transport_liveness = WebSocketTransportLiveness::default();
+
+    let result: anyhow::Result<()> = async {
+        'bridge: loop {
+            let event = tokio::select! {
                 biased;
-                shutdown = &mut upstream_shutdown_rx => {
-                    if let Ok(close) = shutdown {
-                        let _ = forward_websocket_message(
-                            &mut upstream_sink,
-                            close,
-                            "关闭 Responses WebSocket 上游超时",
-                            "关闭 Responses WebSocket 上游失败",
-                        )
-                        .await?;
-                    } else {
-                        close_websocket_sink(
-                            &mut upstream_sink,
-                            "关闭 Responses WebSocket 上游超时",
-                            "关闭 Responses WebSocket 上游失败",
-                        )
-                        .await?;
-                    }
-                    return Ok::<(), anyhow::Error>(());
+                message = downstream.next(), if !downstream_closed => {
+                    BridgeEvent::Downstream(message)
                 }
-                message = to_upstream_rx.recv() => {
+                message = upstream.next() => BridgeEvent::Upstream(message),
+                _ = liveness_ping.tick() => BridgeEvent::LivenessPing,
+                _ = application_idle_check.tick() => BridgeEvent::ApplicationIdleCheck,
+            };
+
+            match event {
+                BridgeEvent::Downstream(message) => {
                     let Some(message) = message else {
-                        close_websocket_sink(
-                            &mut upstream_sink,
-                            "关闭 Responses WebSocket 上游超时",
-                            "关闭 Responses WebSocket 上游失败",
-                        )
-                        .await?;
-                        return Ok::<(), anyhow::Error>(());
+                        downstream_closed = true;
+                        break;
                     };
+                    let message = message.context("读取本地 Responses WebSocket 消息失败")?;
+                    let payload = match validate_downstream_message(&message, &relay) {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            let close = Message::Close(Some(CloseFrame {
+                                code: CloseCode::Policy,
+                                reason: error.to_string().into(),
+                            }));
+                            let _ = forward_websocket_message(
+                                &mut downstream,
+                                close.clone(),
+                                "关闭本地 Responses WebSocket 超时",
+                                "关闭本地 Responses WebSocket 失败",
+                            )
+                            .await;
+                            let _ = forward_websocket_message(
+                                &mut upstream,
+                                close,
+                                "关闭 Responses WebSocket 上游超时",
+                                "关闭 Responses WebSocket 上游失败",
+                            )
+                            .await;
+                            downstream_closed = true;
+                            upstream_closed = true;
+                            break;
+                        }
+                    };
+                    let (
+                        message,
+                        request_payload,
+                        layered_compaction_options,
+                        request_settings,
+                        original_compaction_model,
+                        compaction_fallback,
+                    ) = if let Some((payload, settings, payload_rewritten)) = payload {
+                        let (
+                            request_payload,
+                            forwarded_payload,
+                            layered_compaction_options,
+                            original_compaction_model,
+                            compaction_fallback,
+                        ) = prepare_downstream_response_create_payload_with_snapshot(&payload, &settings)
+                            .await;
+                        let message = if !payload_rewritten && forwarded_payload == payload {
+                            message
+                        } else {
+                            Message::Text(
+                                serde_json::to_string(&forwarded_payload)
+                                    .context("序列化处理后的 Responses WebSocket 请求失败")?
+                                    .into(),
+                            )
+                        };
+                        (
+                            message,
+                            Some(request_payload),
+                            layered_compaction_options,
+                            Some(settings),
+                            original_compaction_model,
+                            compaction_fallback,
+                        )
+                    } else {
+                        (message, None, None, None, None, None)
+                    };
+
+                    if let Some(request_payload) = request_payload.as_ref() {
+                        if let Some(response_messages) =
+                            local_compaction_wait_websocket_messages(request_payload)
+                        {
+                            if let Message::Text(text) = &message {
+                                let _ = request_logger.record_request(request_payload, text.as_str());
+                            }
+                            let model = request_payload
+                                .get("model")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            let _ = crate::diagnostic_log::append_diagnostic_log(
+                                "protocol_proxy.local_compaction_wait_for_user",
+                                serde_json::json!({
+                                    "transport": "ws",
+                                    "model": model,
+                                    "reason": "restored local compaction history ends on the assistant side"
+                                }),
+                            );
+                            for response_message in response_messages {
+                                if forward_websocket_message(
+                                    &mut downstream,
+                                    response_message,
+                                    "转发 Responses WebSocket 响应超时",
+                                    "转发 Responses WebSocket 响应失败",
+                                )
+                                .await?
+                                {
+                                    downstream_closed = true;
+                                    break 'bridge;
+                                }
+                            }
+                            continue;
+                        }
+                    }
+
+                    if let (Some(request_payload), Message::Text(text)) =
+                        (request_payload.as_ref(), &message)
+                    {
+                        let log_id = request_logger.record_request(request_payload, text.as_str());
+                        if text.len()
+                            > crate::responses_websocket::RESPONSES_UPSTREAM_WEBSOCKET_SAFE_MAX_BYTES
+                        {
+                            request_logger.finish_oversized_request(
+                                log_id.as_deref(),
+                                text.len(),
+                                crate::responses_websocket::RESPONSES_UPSTREAM_WEBSOCKET_SAFE_MAX_BYTES,
+                                allow_http_fallback,
+                            );
+                            let downstream_close = Message::Close(Some(
+                                websocket_failure_close_frame(
+                                    allow_http_fallback,
+                                    CloseCode::Size,
+                                    "request exceeds upstream websocket limit; retry over HTTP",
+                                    "request exceeds upstream websocket limit; HTTP fallback disabled",
+                                ),
+                            ));
+                            let upstream_close = Message::Close(Some(CloseFrame {
+                                code: CloseCode::Normal,
+                                reason: "oversized request routed to HTTP".into(),
+                            }));
+                            let _ = forward_websocket_message(
+                                &mut downstream,
+                                downstream_close,
+                                "关闭本地 Responses WebSocket 超时",
+                                "关闭本地 Responses WebSocket 失败",
+                            )
+                            .await;
+                            let _ = forward_websocket_message(
+                                &mut upstream,
+                                upstream_close,
+                                "关闭 Responses WebSocket 上游超时",
+                                "关闭 Responses WebSocket 上游失败",
+                            )
+                            .await;
+                            downstream_closed = true;
+                            upstream_closed = true;
+                            break;
+                        }
+                        if let Err(error) = continuation
+                            .register_request_with_settings_and_original_model(
+                                request_payload,
+                                log_id,
+                                layered_compaction_options,
+                                request_settings
+                                    .as_ref()
+                                    .expect("response.create should include a settings snapshot"),
+                                original_compaction_model,
+                                compaction_fallback,
+                            )
+                        {
+                            let close = Message::Close(Some(CloseFrame {
+                                code: CloseCode::Policy,
+                                reason: error.to_string().into(),
+                            }));
+                            let _ = forward_websocket_message(
+                                &mut downstream,
+                                close.clone(),
+                                "关闭本地 Responses WebSocket 超时",
+                                "关闭本地 Responses WebSocket 失败",
+                            )
+                            .await;
+                            let _ = forward_websocket_message(
+                                &mut upstream,
+                                close,
+                                "关闭 Responses WebSocket 上游超时",
+                                "关闭 Responses WebSocket 上游失败",
+                            )
+                            .await;
+                            downstream_closed = true;
+                            upstream_closed = true;
+                            break;
+                        }
+                    }
+
+                    let is_close = matches!(message, Message::Close(_));
                     if forward_websocket_message(
-                        &mut upstream_sink,
+                        &mut upstream,
                         message,
                         "转发 Responses WebSocket 请求超时",
                         "转发 Responses WebSocket 请求失败",
                     )
                     .await?
                     {
-                        return Ok::<(), anyhow::Error>(());
+                        upstream_closed = true;
+                        downstream_closed = true;
+                        break;
+                    }
+                    if is_close {
+                        downstream_closed = true;
+                        break;
                     }
                 }
-            }
-        }
-    };
+                BridgeEvent::Upstream(message) => {
+                    let message = match message {
+                        Some(Ok(message)) => message,
+                        Some(Err(error)) => {
+                            let error_message = format!("upstream WebSocket read failed: {error}");
+                            if let Some(WebSocketContinuationAction::Flush { messages, metadata }) =
+                                continuation
+                                    .fail_active_compaction("websocket_read_failed", &error_message)?
+                            {
+                                request_logger.record_continue_metadata(&metadata);
+                                for message in messages {
+                                    let message_is_close = matches!(message, Message::Close(_));
+                                    request_logger
+                                        .record_response_for(&message, metadata.log_id.as_deref());
+                                    if forward_websocket_message(
+                                        &mut downstream,
+                                        message,
+                                        "转发 Responses WebSocket 响应超时",
+                                        "转发 Responses WebSocket 响应失败",
+                                    )
+                                    .await?
+                                    {
+                                        downstream_closed = true;
+                                        break;
+                                    }
+                                    if message_is_close {
+                                        downstream_closed = true;
+                                        break;
+                                    }
+                                }
+                                if downstream_closed {
+                                    break;
+                                }
+                                continue;
+                            }
+                            if request_logger.has_recorded_application_requests()
+                                && !request_logger.has_recorded_first_response_event()
+                                && reconnect_attempts < INITIAL_UPSTREAM_RETRY_DELAYS.len()
+                            {
+                                let retry_index = reconnect_attempts;
+                                reconnect_attempts += 1;
+                                match reconnect_upstream_with_replay(
+                                    &relay,
+                                    &request_context,
+                                    &request_logger,
+                                    retry_index,
+                                )
+                                .await
+                                {
+                                    Ok(new_upstream) => {
+                                        upstream = new_upstream;
+                                        transport_liveness = WebSocketTransportLiveness::default();
+                                        continue 'bridge;
+                                    }
+                                    Err(reconnect_error) => {
+                                        if reconnect_attempts < INITIAL_UPSTREAM_RETRY_DELAYS.len() {
+                                            continue 'bridge;
+                                        }
+                                        let _ = send_downstream_failure_close(
+                                            &mut downstream,
+                                            allow_http_fallback,
+                                        )
+                                        .await;
+                                        downstream_closed = true;
+                                        anyhow::bail!(
+                                            "读取上游 Responses WebSocket 消息失败，内部重连已耗尽：{error_message}; 最后一次重连失败：{reconnect_error:#}"
+                                        );
+                                    }
+                                }
+                            }
+                            let _ = send_downstream_failure_close(
+                                &mut downstream,
+                                allow_http_fallback,
+                            )
+                            .await;
+                            downstream_closed = true;
+                            anyhow::bail!("读取上游 Responses WebSocket 消息失败：{error_message}");
+                        }
+                        None => {
+                            if let Some(WebSocketContinuationAction::Flush { messages, metadata }) =
+                                continuation.fail_active_compaction(
+                                    "websocket_ended",
+                                    "upstream WebSocket ended before a terminal response.",
+                                )?
+                            {
+                                request_logger.record_continue_metadata(&metadata);
+                                for message in messages {
+                                    let message_is_close = matches!(message, Message::Close(_));
+                                    request_logger
+                                        .record_response_for(&message, metadata.log_id.as_deref());
+                                    if forward_websocket_message(
+                                        &mut downstream,
+                                        message,
+                                        "转发 Responses WebSocket 响应超时",
+                                        "转发 Responses WebSocket 响应失败",
+                                    )
+                                    .await?
+                                    {
+                                        downstream_closed = true;
+                                        break;
+                                    }
+                                    if message_is_close {
+                                        downstream_closed = true;
+                                        break;
+                                    }
+                                }
+                                if downstream_closed {
+                                    break;
+                                }
+                                continue;
+                            }
+                            let _ = send_downstream_failure_close(
+                                &mut downstream,
+                                allow_http_fallback,
+                            )
+                            .await;
+                            downstream_closed = true;
+                            anyhow::bail!("Responses WebSocket 上游未发送 Close 帧就结束连接");
+                        }
+                    };
 
-    let downstream_writer = async move {
-        loop {
-            tokio::select! {
-                biased;
-                shutdown = &mut downstream_shutdown_rx => {
-                    if let Ok(close) = shutdown {
-                        while let Ok(message) = to_downstream_rx.try_recv() {
+                    let _ = transport_liveness.observe_frame(&message, Instant::now());
+                    request_logger.record_upstream_application_activity(&message);
+                    let is_close = matches!(message, Message::Close(_));
+                    request_logger.record_first_response_event(&message);
+                    match continuation.handle_upstream_message(message)? {
+                        WebSocketContinuationAction::Forward(message) => {
+                            request_logger.record_response(&message);
                             if forward_websocket_message(
-                                &mut downstream_sink,
+                                &mut downstream,
                                 message,
                                 "转发 Responses WebSocket 响应超时",
                                 "转发 Responses WebSocket 响应失败",
                             )
                             .await?
                             {
-                                return Ok::<(), anyhow::Error>(());
+                                downstream_closed = true;
+                                break;
                             }
                         }
-                        let _ = forward_websocket_message(
-                            &mut downstream_sink,
-                            close,
-                            "关闭本地 Responses WebSocket 超时",
-                            "关闭本地 Responses WebSocket 失败",
-                        )
-                        .await?;
-                    } else {
-                        close_websocket_sink(
-                            &mut downstream_sink,
-                            "关闭本地 Responses WebSocket 超时",
-                            "关闭本地 Responses WebSocket 失败",
-                        )
-                        .await?;
-                    }
-                    return Ok::<(), anyhow::Error>(());
-                }
-                message = to_downstream_rx.recv() => {
-                    let Some(message) = message else {
-                        close_websocket_sink(
-                            &mut downstream_sink,
-                            "关闭本地 Responses WebSocket 超时",
-                            "关闭本地 Responses WebSocket 失败",
-                        )
-                        .await?;
-                        return Ok::<(), anyhow::Error>(());
-                    };
-                    if forward_websocket_message(
-                        &mut downstream_sink,
-                        message,
-                        "转发 Responses WebSocket 响应超时",
-                        "转发 Responses WebSocket 响应失败",
-                    )
-                    .await?
-                    {
-                        return Ok::<(), anyhow::Error>(());
-                    }
-                }
-            }
-        }
-    };
-
-    let relay = relay.clone();
-    let downstream_close_tx = to_downstream_tx.clone();
-    let upstream_close_tx = to_upstream_tx.clone();
-    let continuation_upstream_tx = to_upstream_tx.clone();
-    let downstream_request_logger = request_logger.clone();
-    let downstream_continuation = continuation.clone();
-    let downstream_reader = async move {
-        let mut received_close = false;
-        while let Some(message) = downstream_stream.next().await {
-            let message = message.context("读取本地 Responses WebSocket 消息失败")?;
-            let payload = match validate_downstream_message(&message, &relay) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    let close = Message::Close(Some(CloseFrame {
-                        code: CloseCode::Policy,
-                        reason: error.to_string().into(),
-                    }));
-                    let _ = downstream_close_tx.send(close.clone()).await;
-                    let _ = upstream_close_tx.send(close).await;
-                    return Ok::<(), anyhow::Error>(());
-                }
-            };
-            let (
-                message,
-                request_payload,
-                layered_compaction_options,
-                request_settings,
-                original_compaction_model,
-                compaction_fallback,
-            ) = if let Some((payload, settings, payload_rewritten)) = payload {
-                let (
-                    request_payload,
-                    forwarded_payload,
-                    layered_compaction_options,
-                    original_compaction_model,
-                    compaction_fallback,
-                ) = prepare_downstream_response_create_payload_with_snapshot(&payload, &settings)
-                    .await;
-                let message = if !payload_rewritten && forwarded_payload == payload {
-                    message
-                } else {
-                    Message::Text(
-                        serde_json::to_string(&forwarded_payload)
-                            .context("序列化处理后的 Responses WebSocket 请求失败")?
-                            .into(),
-                    )
-                };
-                (
-                    message,
-                    Some(request_payload),
-                    layered_compaction_options,
-                    Some(settings),
-                    original_compaction_model,
-                    compaction_fallback,
-                )
-            } else {
-                (message, None, None, None, None, None)
-            };
-            if let Some(request_payload) = request_payload.as_ref() {
-                if let Some(response_messages) =
-                    local_compaction_wait_websocket_messages(request_payload)
-                {
-                    if let Message::Text(text) = &message {
-                        let _ = downstream_request_logger
-                            .record_request(request_payload, text.as_str());
-                    }
-                    let model = request_payload
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    let _ = crate::diagnostic_log::append_diagnostic_log(
-                        "protocol_proxy.local_compaction_wait_for_user",
-                        serde_json::json!({
-                            "transport": "ws",
-                            "model": model,
-                            "reason": "restored local compaction history ends on the assistant side"
-                        }),
-                    );
-                    for response_message in response_messages {
-                        downstream_close_tx
-                            .send(response_message)
-                            .await
-                            .map_err(|_| {
-                                anyhow::anyhow!(
-                                    "Responses WebSocket 本地压缩等待用户响应队列已关闭"
+                        WebSocketContinuationAction::Buffered => {}
+                        WebSocketContinuationAction::Continue { request, metadata } => {
+                            request_logger.record_continue_metadata(&metadata);
+                            if let Some(delay) = metadata.retry_delay {
+                                tokio::time::sleep(delay).await;
+                            }
+                            if forward_websocket_message(
+                                &mut upstream,
+                                request,
+                                "转发 Responses WebSocket 续接请求超时",
+                                "转发 Responses WebSocket 续接请求失败",
+                            )
+                            .await?
+                            {
+                                upstream_closed = true;
+                                break;
+                            }
+                        }
+                        WebSocketContinuationAction::Flush { messages, metadata } => {
+                            request_logger.record_continue_metadata(&metadata);
+                            let closes_connection = messages
+                                .iter()
+                                .any(|message| matches!(message, Message::Close(_)));
+                            for message in messages {
+                                let message_is_close = matches!(message, Message::Close(_));
+                                request_logger
+                                    .record_response_for(&message, metadata.log_id.as_deref());
+                                if forward_websocket_message(
+                                    &mut downstream,
+                                    message,
+                                    "转发 Responses WebSocket 响应超时",
+                                    "转发 Responses WebSocket 响应失败",
                                 )
-                            })?;
+                                .await?
+                                {
+                                    downstream_closed = true;
+                                    break;
+                                }
+                                if message_is_close {
+                                    downstream_closed = true;
+                                    break;
+                                }
+                            }
+                            if closes_connection || downstream_closed {
+                                break;
+                            }
+                        }
                     }
-                    continue;
+                    if is_close {
+                        upstream_closed = true;
+                        downstream_closed = true;
+                        break;
+                    }
                 }
-            }
-            if let (Some(request_payload), Message::Text(text)) =
-                (request_payload.as_ref(), &message)
-            {
-                let log_id =
-                    downstream_request_logger.record_request(request_payload, text.as_str());
-                if text.len()
-                    > crate::responses_websocket::RESPONSES_UPSTREAM_WEBSOCKET_SAFE_MAX_BYTES
-                {
-                    downstream_request_logger.finish_oversized_request(
-                        log_id.as_deref(),
-                        text.len(),
-                        crate::responses_websocket::RESPONSES_UPSTREAM_WEBSOCKET_SAFE_MAX_BYTES,
-                    );
-                    let downstream_close = Message::Close(Some(CloseFrame {
-                        code: CloseCode::Size,
-                        reason: "request exceeds upstream websocket limit; retry over HTTP".into(),
-                    }));
-                    let upstream_close = Message::Close(Some(CloseFrame {
-                        code: CloseCode::Normal,
-                        reason: "oversized request routed to HTTP".into(),
-                    }));
-                    let _ = downstream_close_tx.send(downstream_close).await;
-                    let _ = upstream_close_tx.send(upstream_close).await;
-                    return Ok::<(), anyhow::Error>(());
-                }
-                if let Err(error) = downstream_continuation
-                    .register_request_with_settings_and_original_model(
-                        request_payload,
-                        log_id,
-                        layered_compaction_options,
-                        request_settings
-                            .as_ref()
-                            .expect("response.create should include a settings snapshot"),
-                        original_compaction_model,
-                        compaction_fallback,
-                    )
-                {
-                    let close = Message::Close(Some(CloseFrame {
-                        code: CloseCode::Policy,
-                        reason: error.to_string().into(),
-                    }));
-                    let _ = downstream_close_tx.send(close.clone()).await;
-                    let _ = upstream_close_tx.send(close).await;
-                    return Ok::<(), anyhow::Error>(());
-                }
-            }
-            let is_close = matches!(message, Message::Close(_));
-            if to_upstream_tx.send(message).await.is_err() {
-                if is_close {
-                    return Ok::<(), anyhow::Error>(());
-                }
-                anyhow::bail!("Responses WebSocket 上游发送队列已关闭");
-            }
-            if is_close {
-                received_close = true;
-                break;
-            }
-        }
-        if !received_close {
-            let _ = to_upstream_tx.send(Message::Close(None)).await;
-        }
-        Ok::<(), anyhow::Error>(())
-    };
-
-    let upstream_request_logger = request_logger.clone();
-    let upstream_continuation = continuation.clone();
-    let upstream_reader = async move {
-        let mut received_close = false;
-        let mut liveness_ping = tokio::time::interval_at(
-            tokio::time::Instant::now() + UPSTREAM_LIVENESS_PING_INTERVAL,
-            UPSTREAM_LIVENESS_PING_INTERVAL,
-        );
-        liveness_ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut application_idle_check = tokio::time::interval_at(
-            tokio::time::Instant::now() + UPSTREAM_APPLICATION_IDLE_CHECK_INTERVAL,
-            UPSTREAM_APPLICATION_IDLE_CHECK_INTERVAL,
-        );
-        application_idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut transport_liveness = WebSocketTransportLiveness::default();
-        loop {
-            let message = tokio::select! {
-                message = upstream_stream.next() => message,
-                _ = liveness_ping.tick() => {
+                BridgeEvent::LivenessPing => {
                     let now = Instant::now();
                     if let Some(idle_for) =
                         transport_liveness.timeout_elapsed(UPSTREAM_LIVENESS_PONG_TIMEOUT, now)
                     {
-                        upstream_request_logger.log_transport_timeout(
+                        request_logger.log_transport_timeout(
                             idle_for,
                             &transport_liveness,
                             now,
                         );
+                        let _ = send_downstream_failure_close(
+                            &mut downstream,
+                            allow_http_fallback,
+                        )
+                        .await;
+                        downstream_closed = true;
                         anyhow::bail!(
                             "Responses WebSocket 上游连接在 Ping 后超过 {} 秒没有返回任何帧",
                             UPSTREAM_LIVENESS_PONG_TIMEOUT.as_secs()
                         );
                     }
-                    queue_upstream_liveness_ping(
-                        &continuation_upstream_tx,
-                        &mut transport_liveness,
-                        now,
-                    )
-                    .await?;
-                    continue;
+                    if let Some(payload) = transport_liveness.begin_ping(now) {
+                        forward_websocket_message(
+                            &mut upstream,
+                            Message::Ping(payload.into()),
+                            "转发 Responses WebSocket Ping 超时",
+                            "转发 Responses WebSocket Ping 失败",
+                        )
+                        .await?;
+                    }
                 }
-                _ = application_idle_check.tick() => {
+                BridgeEvent::ApplicationIdleCheck => {
                     let now = Instant::now();
                     if let Some(idle_for) =
                         transport_liveness.timeout_elapsed(UPSTREAM_LIVENESS_PONG_TIMEOUT, now)
                     {
-                        upstream_request_logger.log_transport_timeout(
+                        request_logger.log_transport_timeout(
                             idle_for,
                             &transport_liveness,
                             now,
                         );
+                        let _ = send_downstream_failure_close(
+                            &mut downstream,
+                            allow_http_fallback,
+                        )
+                        .await;
+                        downstream_closed = true;
                         anyhow::bail!(
                             "Responses WebSocket 上游连接在 Ping 后超过 {} 秒没有返回任何帧",
                             UPSTREAM_LIVENESS_PONG_TIMEOUT.as_secs()
                         );
                     }
-                    if let Some(expired) =
-                        upstream_request_logger.expired_pending_request(now)
-                    {
-                        upstream_request_logger.log_idle_timeout(&expired);
+                    if let Some(expired) = request_logger.expired_pending_request(now) {
+                        request_logger.log_idle_timeout(&expired);
+                        let _ = send_downstream_failure_close(
+                            &mut downstream,
+                            allow_http_fallback,
+                        )
+                        .await;
+                        downstream_closed = true;
                         anyhow::bail!(
                             "Responses WebSocket 上游请求 {} 超过 {} 毫秒没有返回应用事件",
                             expired.log_id,
                             expired.idle_timeout.as_millis()
                         );
                     }
-                    continue;
                 }
-            };
-            let Some(message) = message else {
-                break;
-            };
-            let message = match message {
-                Ok(message) => message,
-                Err(error) => {
-                    let error_message = format!("upstream WebSocket read failed: {error}");
-                    let mut compaction_failed_closed = false;
-                    if let Some(WebSocketContinuationAction::Flush { messages, metadata }) =
-                        upstream_continuation
-                            .fail_active_compaction("websocket_read_failed", &error_message)?
-                    {
-                        upstream_request_logger.record_continue_metadata(&metadata);
-                        for message in messages {
-                            let message_is_close = matches!(message, Message::Close(_));
-                            upstream_request_logger
-                                .record_response_for(&message, metadata.log_id.as_deref());
-                            if to_downstream_tx.send(message).await.is_err() {
-                                if message_is_close {
-                                    return Ok::<(), anyhow::Error>(());
-                                }
-                                anyhow::bail!("Responses WebSocket 本地发送队列已关闭");
-                            }
-                        }
-                        compaction_failed_closed = true;
-                    }
-                    if compaction_failed_closed {
-                        // 让监督器按正常关闭路径排空 response.failed 和 Close。
-                        received_close = true;
-                        break;
-                    }
-                    return Err(error).context("读取上游 Responses WebSocket 消息失败");
-                }
-            };
-            let _ = transport_liveness.observe_frame(&message, Instant::now());
-            upstream_request_logger.record_upstream_application_activity(&message);
-            let is_close = matches!(message, Message::Close(_));
-            upstream_request_logger.record_first_response_event(&message);
-            match upstream_continuation.handle_upstream_message(message)? {
-                WebSocketContinuationAction::Forward(message) => {
-                    upstream_request_logger.record_response(&message);
-                    if to_downstream_tx.send(message).await.is_err() {
-                        if is_close {
-                            return Ok::<(), anyhow::Error>(());
-                        }
-                        anyhow::bail!("Responses WebSocket 本地发送队列已关闭");
-                    }
-                }
-                WebSocketContinuationAction::Buffered => {}
-                WebSocketContinuationAction::Continue { request, metadata } => {
-                    upstream_request_logger.record_continue_metadata(&metadata);
-                    if continuation_upstream_tx.send(request).await.is_err() {
-                        anyhow::bail!("Responses WebSocket 续接请求发送队列已关闭");
-                    }
-                }
-                WebSocketContinuationAction::Flush { messages, metadata } => {
-                    upstream_request_logger.record_continue_metadata(&metadata);
-                    let closes_connection = messages
-                        .iter()
-                        .any(|message| matches!(message, Message::Close(_)));
-                    for message in messages {
-                        let message_is_close = matches!(message, Message::Close(_));
-                        upstream_request_logger
-                            .record_response_for(&message, metadata.log_id.as_deref());
-                        if to_downstream_tx.send(message).await.is_err() {
-                            if message_is_close {
-                                return Ok::<(), anyhow::Error>(());
-                            }
-                            anyhow::bail!("Responses WebSocket 本地发送队列已关闭");
-                        }
-                    }
-                    if closes_connection {
-                        received_close = true;
-                        break;
-                    }
-                }
-            };
-            if is_close {
-                received_close = true;
-                break;
             }
         }
-        if !received_close {
-            if let Some(WebSocketContinuationAction::Flush { messages, metadata }) =
-                upstream_continuation.fail_active_compaction(
-                    "websocket_ended",
-                    "upstream WebSocket ended before a terminal response.",
-                )?
-            {
-                upstream_request_logger.record_continue_metadata(&metadata);
-                for message in messages {
-                    let message_is_close = matches!(message, Message::Close(_));
-                    upstream_request_logger
-                        .record_response_for(&message, metadata.log_id.as_deref());
-                    if to_downstream_tx.send(message).await.is_err() {
-                        if message_is_close {
-                            return Ok::<(), anyhow::Error>(());
-                        }
-                        anyhow::bail!("Responses WebSocket 本地发送队列已关闭");
-                    }
-                }
-            } else {
-                let _ = to_downstream_tx
-                    .send(Message::Close(Some(CloseFrame {
-                        code: CloseCode::Restart,
-                        reason: "upstream websocket reconnect required".into(),
-                    })))
-                    .await;
-                anyhow::bail!("Responses WebSocket 上游未发送 Close 帧就结束连接");
-            }
+
+        if !downstream_closed {
+            let _ = close_websocket_sink(
+                &mut downstream,
+                "关闭本地 Responses WebSocket 超时",
+                "关闭本地 Responses WebSocket 失败",
+            )
+            .await;
         }
-        Ok::<(), anyhow::Error>(())
-    };
+        if !upstream_closed {
+            let _ = close_websocket_sink(
+                &mut upstream,
+                "关闭 Responses WebSocket 上游超时",
+                "关闭 Responses WebSocket 上游失败",
+            )
+            .await;
+        }
+        Ok(())
+    }
+    .await;
 
-    tokio::pin!(upstream_writer);
-    tokio::pin!(downstream_writer);
-    tokio::pin!(downstream_reader);
-    tokio::pin!(upstream_reader);
-
-    let (exit_task, task_result) = tokio::select! {
-        result = &mut upstream_writer => (WebSocketBridgeTask::UpstreamWriter, result),
-        result = &mut downstream_writer => (WebSocketBridgeTask::DownstreamWriter, result),
-        result = &mut downstream_reader => (WebSocketBridgeTask::DownstreamReader, result),
-        result = &mut upstream_reader => (WebSocketBridgeTask::UpstreamReader, result),
-    };
-    let task_failed = task_result.is_err();
-    let close = Message::Close(Some(CloseFrame {
-        code: if task_failed && exit_task.is_upstream() {
-            CloseCode::Restart
-        } else if task_failed {
-            CloseCode::Error
+    request_logger.log_bridge_shutdown(
+        if result.is_err() {
+            "bridge"
+        } else if upstream_closed {
+            "upstream"
         } else {
-            CloseCode::Normal
+            "downstream"
         },
-        reason: if task_failed && exit_task.is_upstream() {
-            "upstream websocket reconnect required"
-        } else if task_failed {
-            "websocket bridge failed"
-        } else {
-            "websocket bridge closed"
-        }
-        .into(),
-    }));
-
-    let mut shutdown_notes = Vec::new();
-    if exit_task != WebSocketBridgeTask::DownstreamWriter
-        && downstream_shutdown_tx.send(close.clone()).is_err()
-    {
-        shutdown_notes.push("downstream_shutdown_receiver_closed".to_string());
-    }
-    if exit_task != WebSocketBridgeTask::UpstreamWriter && upstream_shutdown_tx.send(close).is_err()
-    {
-        shutdown_notes.push("upstream_shutdown_receiver_closed".to_string());
-    }
-
-    let mut final_error = task_result.err();
-    if exit_task != WebSocketBridgeTask::DownstreamWriter {
-        match tokio::time::timeout(BRIDGE_SHUTDOWN_TIMEOUT, &mut downstream_writer).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                shutdown_notes.push(format!("downstream_writer_failed:{error:#}"));
-                if final_error.is_none() {
-                    final_error = Some(error);
-                }
-            }
-            Err(_) => {
-                let error = anyhow::anyhow!("等待本地 Responses WebSocket Close 写入超时");
-                shutdown_notes.push("downstream_writer_timeout".to_string());
-                if final_error.is_none() {
-                    final_error = Some(error);
-                }
-            }
-        }
-    }
-    if exit_task != WebSocketBridgeTask::UpstreamWriter {
-        match tokio::time::timeout(BRIDGE_SHUTDOWN_TIMEOUT, &mut upstream_writer).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                shutdown_notes.push(format!("upstream_writer_failed:{error:#}"));
-                if final_error.is_none() {
-                    final_error = Some(error);
-                }
-            }
-            Err(_) => {
-                let error = anyhow::anyhow!("等待上游 Responses WebSocket Close 写入超时");
-                shutdown_notes.push("upstream_writer_timeout".to_string());
-                if final_error.is_none() {
-                    final_error = Some(error);
-                }
-            }
-        }
-    }
-    request_logger.log_bridge_shutdown(exit_task.label(), task_failed, &shutdown_notes);
-
-    if let Some(error) = final_error {
+        result.is_err(),
+        &[],
+    );
+    if let Err(error) = result {
         request_logger.finish_pending(&format!("{error:#}"), 502);
         return Err(error);
     }
     request_logger.finish_pending("Responses WebSocket 连接在响应完成前关闭", 499);
     Ok(())
+}
+
+async fn open_responses_websocket_upstream_with_initial_retries(
+    relay: &crate::settings::RelayProfile,
+    request_context: &crate::request_headers::RequestContext,
+) -> anyhow::Result<crate::responses_websocket::UpstreamResponsesWebsocket> {
+    let mut last_error = None;
+    for attempt in 0..=INITIAL_UPSTREAM_RETRY_DELAYS.len() {
+        if let Some(delay) = attempt
+            .checked_sub(1)
+            .and_then(|index| INITIAL_UPSTREAM_RETRY_DELAYS.get(index))
+        {
+            tokio::time::sleep(*delay).await;
+        }
+        match crate::responses_websocket::open_responses_websocket_upstream_with_request_context(
+            relay,
+            request_context,
+        )
+        .await
+        {
+            Ok(upstream) => return Ok(upstream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Responses WebSocket 上游连接失败"))).context(
+        format!(
+            "Responses WebSocket 上游初始连接失败（已尝试 {} 次）",
+            INITIAL_UPSTREAM_RETRY_DELAYS.len() + 1
+        ),
+    )
+}
+
+fn websocket_failure_close_frame(
+    allow_http_fallback: bool,
+    fallback_enabled_code: CloseCode,
+    fallback_enabled_reason: &'static str,
+    fallback_disabled_reason: &'static str,
+) -> CloseFrame {
+    CloseFrame {
+        code: if allow_http_fallback {
+            fallback_enabled_code
+        } else {
+            CloseCode::Policy
+        },
+        reason: if allow_http_fallback {
+            fallback_enabled_reason
+        } else {
+            fallback_disabled_reason
+        }
+        .into(),
+    }
+}
+
+async fn send_downstream_failure_close(
+    downstream: &mut WebSocketStream<TcpStream>,
+    allow_http_fallback: bool,
+) -> anyhow::Result<()> {
+    forward_websocket_message(
+        downstream,
+        Message::Close(Some(websocket_failure_close_frame(
+            allow_http_fallback,
+            CloseCode::Restart,
+            "upstream websocket reconnect required",
+            "upstream websocket failed; HTTP fallback disabled",
+        ))),
+        "关闭本地 Responses WebSocket 超时",
+        "关闭本地 Responses WebSocket 失败",
+    )
+    .await?;
+    Ok(())
+}
+
+async fn reconnect_upstream_with_replay(
+    relay: &crate::settings::RelayProfile,
+    request_context: &crate::request_headers::RequestContext,
+    request_logger: &WebSocketRequestLogger,
+    retry_index: usize,
+) -> anyhow::Result<crate::responses_websocket::UpstreamResponsesWebsocket> {
+    let delay = INITIAL_UPSTREAM_RETRY_DELAYS
+        .get(retry_index)
+        .copied()
+        .context("Responses WebSocket 内部重连次数无效")?;
+    tokio::time::sleep(delay).await;
+    let mut upstream =
+        crate::responses_websocket::open_responses_websocket_upstream_with_request_context(
+            relay,
+            request_context,
+        )
+        .await
+        .context("Responses WebSocket 内部重连失败")?;
+    for message in request_logger.pending_request_messages() {
+        if forward_websocket_message(
+            &mut upstream,
+            message,
+            "重放 Responses WebSocket 请求超时",
+            "重放 Responses WebSocket 请求失败",
+        )
+        .await?
+        {
+            anyhow::bail!("Responses WebSocket 内部重连在重放请求时提前关闭");
+        }
+    }
+    Ok(upstream)
 }
 
 #[derive(Clone, Default)]
@@ -877,6 +1077,7 @@ struct ActiveWebSocketContinuation {
     /// 独立压缩模型在产生有效输出前失败时，使用原模型重发的请求。
     compaction_fallback: Option<WebSocketCompactionFallback>,
     compaction_fallback_attempted: bool,
+    capacity_retry_attempts: u8,
 }
 
 #[derive(Clone)]
@@ -912,6 +1113,7 @@ struct WebSocketContinueMetadata {
     layered_compaction_retained_items: Option<u32>,
     layered_compaction_retained_chars: Option<u32>,
     layered_compaction_before_response_body: Option<String>,
+    retry_delay: Option<Duration>,
 }
 
 enum WebSocketContinuationAction {
@@ -1000,6 +1202,7 @@ impl WebSocketContinuationCoordinator {
                     original_compaction_model,
                     compaction_fallback,
                     compaction_fallback_attempted: false,
+                    capacity_retry_attempts: 0,
                 });
             }
             // 原生 Remote Compaction V2 不需要本地续接状态，也不能误进自动推理续接。
@@ -1027,6 +1230,7 @@ impl WebSocketContinuationCoordinator {
                 original_compaction_model,
                 compaction_fallback,
                 compaction_fallback_attempted: false,
+                capacity_retry_attempts: 0,
             });
             return Ok(());
         }
@@ -1049,6 +1253,7 @@ impl WebSocketContinuationCoordinator {
                 original_compaction_model,
                 compaction_fallback,
                 compaction_fallback_attempted: false,
+                capacity_retry_attempts: 0,
             });
             return Ok(());
         }
@@ -1074,6 +1279,7 @@ impl WebSocketContinuationCoordinator {
             original_compaction_model: None,
             compaction_fallback: None,
             compaction_fallback_attempted: false,
+            capacity_retry_attempts: 0,
         });
         Ok(())
     }
@@ -1159,6 +1365,42 @@ impl WebSocketContinuationCoordinator {
             .as_ref()
             .and_then(|payload| payload.get("response"))
             .cloned();
+        if is_retryable_websocket_model_capacity_error(payload.as_ref())
+            && active
+                .original_request
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(|model| model.trim().to_ascii_lowercase().starts_with("gpt"))
+            && usize::from(active.capacity_retry_attempts) < MODEL_CAPACITY_RETRY_DELAYS.len()
+        {
+            let retry_index = usize::from(active.capacity_retry_attempts);
+            active.capacity_retry_attempts += 1;
+            active.buffered_messages.clear();
+            let request_text = serde_json::to_string(&active.original_request)
+                .context("序列化 Responses WebSocket 容量重试请求失败")?;
+            let model = active
+                .original_request
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "protocol_proxy.model_capacity_retry",
+                serde_json::json!({
+                    "transport": "ws",
+                    "model": model,
+                    "attempt": retry_index + 1,
+                    "maxRetries": MODEL_CAPACITY_RETRY_DELAYS.len(),
+                    "delayMs": MODEL_CAPACITY_RETRY_DELAYS[retry_index].as_millis()
+                }),
+            );
+            return Ok(WebSocketContinuationAction::Continue {
+                request: Message::Text(request_text.into()),
+                metadata: WebSocketContinueMetadata {
+                    retry_delay: Some(MODEL_CAPACITY_RETRY_DELAYS[retry_index]),
+                    ..Default::default()
+                },
+            });
+        }
         let reasoning_tokens = response_object
             .as_ref()
             .and_then(crate::continue_thinking::extract_reasoning_tokens);
@@ -1900,6 +2142,39 @@ fn add_websocket_reasoning_tokens(total: &mut Option<u64>, reasoning_tokens: Opt
     }
 }
 
+fn is_retryable_websocket_model_capacity_error(payload: Option<&Value>) -> bool {
+    let Some(payload) = payload else {
+        return false;
+    };
+    let error = payload
+        .get("error")
+        .or_else(|| {
+            payload
+                .get("response")
+                .and_then(|response| response.get("error"))
+        })
+        .unwrap_or(payload);
+    let code = error
+        .get("code")
+        .or_else(|| error.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(
+        code.as_str(),
+        "server_is_overloaded" | "model_overloaded" | "model_at_capacity"
+    ) {
+        return true;
+    }
+    error
+        .get("message")
+        .or_else(|| error.get("detail"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .contains("selected model is at capacity")
+}
+
 fn websocket_continue_metadata(
     active: &ActiveWebSocketContinuation,
     after_response_body: Option<String>,
@@ -1940,6 +2215,8 @@ struct WebSocketRequestLogState {
     connection_context: WebSocketConnectionContext,
     connection_generation: u64,
     connected_at: Instant,
+    application_request_count: usize,
+    first_response_event_recorded: bool,
     requests: HashMap<String, TrackedWebSocketRequest>,
     active_order: VecDeque<String>,
     unassigned_order: VecDeque<String>,
@@ -1986,6 +2263,8 @@ impl WebSocketRequestLogger {
                 connection_generation: NEXT_WEBSOCKET_CONNECTION_GENERATION
                     .fetch_add(1, Ordering::Relaxed),
                 connected_at,
+                application_request_count: 0,
+                first_response_event_recorded: false,
                 requests: HashMap::new(),
                 active_order: VecDeque::new(),
                 unassigned_order: VecDeque::new(),
@@ -2003,6 +2282,7 @@ impl WebSocketRequestLogger {
         let Ok(mut state) = self.state.lock() else {
             return None;
         };
+        state.application_request_count += 1;
         let record = crate::proxy_log::ProxyRequestRecord {
             id: id.clone(),
             state: crate::proxy_log::ProxyRequestState::Pending,
@@ -2083,6 +2363,44 @@ impl WebSocketRequestLogger {
             );
         }
         Some(id)
+    }
+
+    fn has_recorded_application_requests(&self) -> bool {
+        self.state
+            .lock()
+            .is_ok_and(|state| state.application_request_count > 0)
+    }
+
+    fn has_recorded_first_response_event(&self) -> bool {
+        self.state
+            .lock()
+            .is_ok_and(|state| state.first_response_event_recorded)
+    }
+
+    fn pending_request_messages(&self) -> Vec<Message> {
+        let Ok(state) = self.state.lock() else {
+            return Vec::new();
+        };
+        let mut request_ids = Vec::new();
+        for log_id in &state.active_order {
+            if !request_ids.iter().any(|existing| existing == log_id) {
+                request_ids.push(log_id.clone());
+            }
+        }
+        for log_id in &state.unassigned_order {
+            if !request_ids.iter().any(|existing| existing == log_id) {
+                request_ids.push(log_id.clone());
+            }
+        }
+        request_ids
+            .into_iter()
+            .filter_map(|log_id| state.requests.get(&log_id))
+            .filter(|tracked| tracked.record.state == crate::proxy_log::ProxyRequestState::Pending)
+            .filter_map(|tracked| {
+                (!tracked.record.request_body.trim().is_empty())
+                    .then(|| Message::Text(tracked.record.request_body.clone().into()))
+            })
+            .collect()
     }
 
     fn record_upstream_application_activity(&self, message: &Message) {
@@ -2235,6 +2553,7 @@ impl WebSocketRequestLogger {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
+        state.first_response_event_recorded = true;
         let Some(log_id) = resolve_websocket_log_id(&mut state, response_id.as_deref()) else {
             return;
         };
@@ -2277,6 +2596,7 @@ impl WebSocketRequestLogger {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
+        state.first_response_event_recorded = true;
         let log_id = preferred_log_id
             .filter(|log_id| state.requests.contains_key(*log_id))
             .map(ToString::to_string)
@@ -2435,6 +2755,7 @@ impl WebSocketRequestLogger {
         log_id: Option<&str>,
         request_bytes: usize,
         safe_max_bytes: usize,
+        allow_http_fallback: bool,
     ) {
         let Some(log_id) = log_id else {
             return;
@@ -2464,8 +2785,11 @@ impl WebSocketRequestLogger {
             let connection_context = state.connection_context.clone();
             let record = tracked.record;
             drop(state);
-            let fallback_armed =
-                arm_oversized_responses_websocket_http_fallback(&relay_id, &connection_context);
+            let fallback_armed = arm_oversized_responses_websocket_http_fallback(
+                &relay_id,
+                &connection_context,
+                allow_http_fallback,
+            );
             (
                 record,
                 relay_id,
@@ -3180,10 +3504,154 @@ fn responses_websocket_oversized_fallbacks()
     FALLBACKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ResponsesWebSocketEarlyDisconnectFallbackKey {
+    relay_id: String,
+    thread_id: String,
+    turn_id: String,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ResponsesWebSocketUpstreamFailureFallbackKey {
+    relay_id: String,
+    thread_id: String,
+    turn_id: String,
+}
+
+fn responses_websocket_upstream_failure_fallback_key(
+    relay_id: &str,
+    connection_context: &WebSocketConnectionContext,
+) -> Option<ResponsesWebSocketUpstreamFailureFallbackKey> {
+    if connection_context.request_kind.as_deref() != Some("turn") {
+        return None;
+    }
+    Some(ResponsesWebSocketUpstreamFailureFallbackKey {
+        relay_id: relay_id.to_string(),
+        thread_id: connection_context.thread_id.clone()?,
+        turn_id: connection_context.turn_id.clone()?,
+    })
+}
+
+fn responses_websocket_upstream_failure_fallbacks()
+-> &'static Mutex<HashMap<ResponsesWebSocketUpstreamFailureFallbackKey, Instant>> {
+    static FALLBACKS: OnceLock<
+        Mutex<HashMap<ResponsesWebSocketUpstreamFailureFallbackKey, Instant>>,
+    > = OnceLock::new();
+    FALLBACKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn arm_upstream_failure_responses_websocket_http_fallback(
+    relay_id: &str,
+    connection_context: &WebSocketConnectionContext,
+    allow_http_fallback: bool,
+) -> bool {
+    if !allow_http_fallback {
+        return false;
+    }
+    let Some(key) = responses_websocket_upstream_failure_fallback_key(relay_id, connection_context)
+    else {
+        return false;
+    };
+    let Ok(mut fallbacks) = responses_websocket_upstream_failure_fallbacks().lock() else {
+        return false;
+    };
+    let now = Instant::now();
+    fallbacks.retain(|_, expires_at| *expires_at > now);
+    fallbacks.insert(key, now + UPSTREAM_FAILURE_HTTP_FALLBACK_TTL);
+    true
+}
+
+fn should_temporarily_fallback_upstream_failure_responses_websocket_to_http(
+    relay_id: &str,
+    connection_context: &WebSocketConnectionContext,
+    allow_http_fallback: bool,
+) -> bool {
+    if !allow_http_fallback {
+        return false;
+    }
+    let Some(key) = responses_websocket_upstream_failure_fallback_key(relay_id, connection_context)
+    else {
+        return false;
+    };
+    let now = Instant::now();
+    let Ok(mut fallbacks) = responses_websocket_upstream_failure_fallbacks().lock() else {
+        return false;
+    };
+    fallbacks.retain(|_, expires_at| *expires_at > now);
+    fallbacks.contains_key(&key)
+}
+
+fn responses_websocket_early_disconnect_fallback_key(
+    relay_id: &str,
+    connection_context: &WebSocketConnectionContext,
+) -> Option<ResponsesWebSocketEarlyDisconnectFallbackKey> {
+    if connection_context.request_kind.as_deref() != Some("turn") {
+        return None;
+    }
+    Some(ResponsesWebSocketEarlyDisconnectFallbackKey {
+        relay_id: relay_id.to_string(),
+        thread_id: connection_context.thread_id.clone()?,
+        turn_id: connection_context.turn_id.clone()?,
+    })
+}
+
+fn responses_websocket_early_disconnect_fallbacks()
+-> &'static Mutex<HashMap<ResponsesWebSocketEarlyDisconnectFallbackKey, Instant>> {
+    static FALLBACKS: OnceLock<
+        Mutex<HashMap<ResponsesWebSocketEarlyDisconnectFallbackKey, Instant>>,
+    > = OnceLock::new();
+    FALLBACKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn should_temporarily_fallback_early_disconnect_responses_websocket_to_http(
+    relay_id: &str,
+    connection_context: &WebSocketConnectionContext,
+    allow_http_fallback: bool,
+) -> bool {
+    if !allow_http_fallback {
+        return false;
+    }
+    let Some(key) = responses_websocket_early_disconnect_fallback_key(relay_id, connection_context)
+    else {
+        return false;
+    };
+    let now = Instant::now();
+    let Ok(mut fallbacks) = responses_websocket_early_disconnect_fallbacks().lock() else {
+        return false;
+    };
+    fallbacks.retain(|_, expires_at| *expires_at > now);
+    fallbacks.contains_key(&key)
+}
+
+fn arm_early_disconnect_responses_websocket_http_fallback(
+    relay_id: &str,
+    connection_context: &WebSocketConnectionContext,
+    allow_http_fallback: bool,
+) -> bool {
+    if !allow_http_fallback {
+        return false;
+    }
+    let Some(key) = responses_websocket_early_disconnect_fallback_key(relay_id, connection_context)
+    else {
+        return false;
+    };
+    let Ok(mut fallbacks) = responses_websocket_early_disconnect_fallbacks().lock() else {
+        return false;
+    };
+    let now = Instant::now();
+    fallbacks.retain(|_, expires_at| *expires_at > now);
+    fallbacks.insert(key, now + EARLY_DISCONNECT_HTTP_FALLBACK_TTL);
+    true
+}
+
 fn should_temporarily_fallback_oversized_responses_websocket_to_http(
     relay_id: &str,
     connection_context: &WebSocketConnectionContext,
+    allow_http_fallback: bool,
 ) -> bool {
+    if !allow_http_fallback {
+        return false;
+    }
     let Some(key) = responses_websocket_oversized_fallback_key(relay_id, connection_context) else {
         return false;
     };
@@ -3198,7 +3666,11 @@ fn should_temporarily_fallback_oversized_responses_websocket_to_http(
 fn arm_oversized_responses_websocket_http_fallback(
     relay_id: &str,
     connection_context: &WebSocketConnectionContext,
+    allow_http_fallback: bool,
 ) -> bool {
+    if !allow_http_fallback {
+        return false;
+    }
     let Some(key) = responses_websocket_oversized_fallback_key(relay_id, connection_context) else {
         return false;
     };
@@ -3297,10 +3769,17 @@ mod tests {
         ActiveWebSocketContinuation, ActiveWebSocketMode, WebSocketConnectionContext,
         WebSocketContinuationAction, WebSocketContinuationCoordinator, WebSocketContinuationState,
         WebSocketRequestLogger, WebSocketTransportLiveness, activate_next_queued_websocket_request,
-        is_responses_websocket_proxy_path, is_responses_websocket_upgrade,
-        local_compaction_wait_websocket_messages, prepare_downstream_response_create_payload,
+        arm_early_disconnect_responses_websocket_http_fallback,
+        arm_oversized_responses_websocket_http_fallback,
+        arm_upstream_failure_responses_websocket_http_fallback, is_responses_websocket_proxy_path,
+        is_responses_websocket_upgrade, local_compaction_wait_websocket_messages,
+        prepare_downstream_response_create_payload,
         prepare_downstream_response_create_payload_with_settings, queue_upstream_liveness_ping,
-        resolve_websocket_log_id, websocket_application_event_payload,
+        resolve_websocket_log_id,
+        should_temporarily_fallback_early_disconnect_responses_websocket_to_http,
+        should_temporarily_fallback_oversized_responses_websocket_to_http,
+        should_temporarily_fallback_upstream_failure_responses_websocket_to_http,
+        websocket_application_event_payload, websocket_failure_close_frame,
         websocket_idle_timeout_elapsed,
     };
     use crate::settings::{
@@ -3310,6 +3789,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
     #[test]
     fn only_responses_upgrade_paths_are_accepted() {
@@ -3369,6 +3849,102 @@ mod tests {
         );
         assert_ne!(context.session_id.as_deref(), Some("session-a"));
         assert_ne!(context.thread_id.as_deref(), Some("thread-a"));
+    }
+
+    #[test]
+    fn websocket_http_fallback_requires_explicit_setting() {
+        let context = WebSocketConnectionContext {
+            thread_id: Some("sha256:thread".to_string()),
+            turn_id: Some("sha256:turn".to_string()),
+            request_kind: Some("turn".to_string()),
+            ..Default::default()
+        };
+
+        assert!(!arm_oversized_responses_websocket_http_fallback(
+            "relay-test",
+            &context,
+            false,
+        ));
+        assert!(
+            !should_temporarily_fallback_oversized_responses_websocket_to_http(
+                "relay-test",
+                &context,
+                false,
+            )
+        );
+        assert!(arm_oversized_responses_websocket_http_fallback(
+            "relay-test",
+            &context,
+            true,
+        ));
+        assert!(
+            should_temporarily_fallback_oversized_responses_websocket_to_http(
+                "relay-test",
+                &context,
+                true,
+            )
+        );
+        assert!(!arm_early_disconnect_responses_websocket_http_fallback(
+            "relay-test",
+            &context,
+            false,
+        ));
+        assert!(
+            !should_temporarily_fallback_early_disconnect_responses_websocket_to_http(
+                "relay-test",
+                &context,
+                false,
+            )
+        );
+        assert!(arm_early_disconnect_responses_websocket_http_fallback(
+            "relay-test",
+            &context,
+            true,
+        ));
+        assert!(
+            should_temporarily_fallback_early_disconnect_responses_websocket_to_http(
+                "relay-test",
+                &context,
+                true,
+            )
+        );
+        assert!(!arm_upstream_failure_responses_websocket_http_fallback(
+            "relay-test",
+            &context,
+            false,
+        ));
+        assert!(
+            !should_temporarily_fallback_upstream_failure_responses_websocket_to_http(
+                "relay-test",
+                &context,
+                false,
+            )
+        );
+        assert!(arm_upstream_failure_responses_websocket_http_fallback(
+            "relay-test",
+            &context,
+            true,
+        ));
+        assert!(
+            should_temporarily_fallback_upstream_failure_responses_websocket_to_http(
+                "relay-test",
+                &context,
+                true,
+            )
+        );
+    }
+
+    #[test]
+    fn websocket_failure_close_is_not_retryable_when_http_fallback_is_disabled() {
+        let disabled =
+            websocket_failure_close_frame(false, CloseCode::Restart, "retry", "fallback disabled");
+        assert_eq!(disabled.code, CloseCode::Policy);
+        assert_eq!(disabled.reason, "fallback disabled");
+
+        let enabled =
+            websocket_failure_close_frame(true, CloseCode::Restart, "retry", "fallback disabled");
+        assert_eq!(enabled.code, CloseCode::Restart);
+        assert_eq!(enabled.reason, "retry");
     }
 
     #[test]
@@ -4343,6 +4919,7 @@ mod tests {
                     original_compaction_model: None,
                     compaction_fallback: None,
                     compaction_fallback_attempted: false,
+                    capacity_retry_attempts: 0,
                 }),
                 ..Default::default()
             })),
@@ -4469,6 +5046,7 @@ mod tests {
                     original_compaction_model: None,
                     compaction_fallback: None,
                     compaction_fallback_attempted: false,
+                    capacity_retry_attempts: 0,
                 }),
                 ..Default::default()
             })),
@@ -4705,6 +5283,7 @@ mod tests {
                     original_compaction_model: None,
                     compaction_fallback: None,
                     compaction_fallback_attempted: false,
+                    capacity_retry_attempts: 0,
                 }),
                 ..Default::default()
             })),
@@ -4982,6 +5561,7 @@ mod tests {
                     original_compaction_model: None,
                     compaction_fallback: None,
                     compaction_fallback_attempted: false,
+                    capacity_retry_attempts: 0,
                 }),
                 ..Default::default()
             })),

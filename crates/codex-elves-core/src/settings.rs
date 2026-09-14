@@ -799,6 +799,8 @@ pub struct BackendSettings {
     pub codex_goals_enabled: bool,
     #[serde(rename = "lanProxyEnabled", default)]
     pub lan_proxy_enabled: bool,
+    #[serde(rename = "wsFailureFallbackToHttp", default)]
+    pub ws_failure_fallback_to_http: bool,
     #[serde(rename = "gptReasoningContinuation", default)]
     pub gpt_reasoning_continuation: bool,
     #[serde(
@@ -902,6 +904,7 @@ impl Default for BackendSettings {
             codex_app_active_skin_id: String::new(),
             codex_goals_enabled: false,
             lan_proxy_enabled: false,
+            ws_failure_fallback_to_http: false,
             gpt_reasoning_continuation: false,
             gpt_reasoning_continuation_max_rounds: default_gpt_reasoning_continuation_max_rounds(),
             layered_compaction_enabled: false,
@@ -1432,6 +1435,7 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
         target.insert("codexGoalsEnabled".to_string(), Value::Bool(value));
     }
     merge_bool_setting(target, source, "lanProxyEnabled");
+    merge_bool_setting(target, source, "wsFailureFallbackToHttp");
     merge_bool_setting(target, source, "gptReasoningContinuation");
     if let Some(value) = source
         .get("gptReasoningContinuationMaxRounds")
@@ -1788,6 +1792,7 @@ mod tests {
         assert!(settings.codex_app_native_menu_placement);
         assert!(!settings.codex_goals_enabled);
         assert!(!settings.lan_proxy_enabled);
+        assert!(!settings.ws_failure_fallback_to_http);
         assert!(settings.codex_app_path.is_empty());
         assert!(settings.codex_extra_args.is_empty());
         assert_eq!(settings.launch_mode, LaunchMode::Patch);
@@ -1811,7 +1816,7 @@ mod tests {
     #[test]
     fn settings_deserialize_uses_existing_json_keys() {
         let settings: BackendSettings = serde_json::from_str(
-            r#"{"codexAppPath":"C:\\Portable\\Codex\\app","codexHomePath":" C:\\Portable\\CodexHome ","providerSyncEnabled":true,"codexGoalsEnabled":true,"lanProxyEnabled":true,"cliWrapperEnabled":true,"cliWrapperBaseUrl":"https://example.test","cliWrapperApiKey":"sk-test","cliWrapperApiKeyEnv":""}"#,
+            r#"{"codexAppPath":"C:\\Portable\\Codex\\app","codexHomePath":" C:\\Portable\\CodexHome ","providerSyncEnabled":true,"codexGoalsEnabled":true,"lanProxyEnabled":true,"wsFailureFallbackToHttp":true,"cliWrapperEnabled":true,"cliWrapperBaseUrl":"https://example.test","cliWrapperApiKey":"sk-test","cliWrapperApiKeyEnv":""}"#,
         )
         .unwrap();
         assert_eq!(settings.codex_app_path, r"C:\Portable\Codex\app");
@@ -1819,6 +1824,7 @@ mod tests {
         assert!(settings.provider_sync_enabled);
         assert!(settings.codex_goals_enabled);
         assert!(settings.lan_proxy_enabled);
+        assert!(settings.ws_failure_fallback_to_http);
         assert!(settings.cli_wrapper_enabled);
         assert_eq!(settings.cli_wrapper_base_url, "https://example.test");
         assert_eq!(settings.cli_wrapper_api_key, "sk-test");
@@ -1914,6 +1920,17 @@ mod tests {
 
         store.update(json!({ "lanProxyEnabled": true })).unwrap();
         assert!(store.load().unwrap().lan_proxy_enabled);
+    }
+
+    #[test]
+    fn settings_store_update_persists_ws_failure_fallback_to_http() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(temp.path().join("settings.json"));
+
+        store
+            .update(json!({ "wsFailureFallbackToHttp": true }))
+            .unwrap();
+        assert!(store.load().unwrap().ws_failure_fallback_to_http);
     }
 
     #[test]

@@ -1028,6 +1028,77 @@ data: [DONE]
 }
 
 #[tokio::test]
+async fn helper_retries_after_http_503_capacity_body() {
+    let _lock = launcher_settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
+    let overloaded = r#"event: response.failed
+data: {"type":"response.failed","response":{"id":"resp_overloaded","object":"response","status":"failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}
+
+"#;
+    let capacity_503 = r#"{"error":{"type":"server_error","code":"server_is_overloaded","message":"Selected model is at capacity. Please try a different model."}}"#;
+    let recovered = r#"event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_recovered_after_503","object":"response","status":"completed","model":"gpt-responses","output":[],"usage":{"input_tokens":10,"output_tokens":1}}}
+
+data: [DONE]
+
+"#;
+    let upstream = spawn_launcher_upstream_with_status_response_specs(vec![
+        (
+            "200 OK".to_string(),
+            "text/event-stream".to_string(),
+            overloaded.to_string(),
+            std::time::Duration::ZERO,
+        ),
+        (
+            "503 Service Unavailable".to_string(),
+            "application/json".to_string(),
+            capacity_503.to_string(),
+            std::time::Duration::ZERO,
+        ),
+        (
+            "200 OK".to_string(),
+            "text/event-stream".to_string(),
+            recovered.to_string(),
+            std::time::Duration::ZERO,
+        ),
+    ]);
+    write_launcher_mixed_relay_settings(temp.path(), &upstream.base_url);
+
+    let hooks = DefaultLaunchHooks::default();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    hooks.start_helper(port).await.unwrap();
+
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .header("x-codex-beta-features", "remote_compaction_v2")
+        .json(&serde_json::json!({
+            "model": "gpt-responses",
+            "input": "retry after an HTTP 503 capacity response",
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body = response.text().await.unwrap();
+    hooks.shutdown_helper(port).await;
+    let requests = upstream.finish_all();
+
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].body, requests[1].body);
+    assert_eq!(requests[1].body, requests[2].body);
+    assert!(body.contains("resp_recovered_after_503"));
+    assert!(!body.contains("Selected model is at capacity"));
+}
+
+#[tokio::test]
 async fn helper_defers_high_reasoning_stream_header_wait_for_chat_completions_models() {
     let _lock = launcher_settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -2377,6 +2448,51 @@ fn spawn_launcher_upstream_with_response_specs(
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 content_type,
+                response_body.len(),
+                response_body
+            );
+            if !response_delay.is_zero() {
+                std::thread::sleep(response_delay);
+            }
+            stream.write_all(response.as_bytes()).unwrap();
+            requests.push(request);
+        }
+        requests
+    });
+
+    LauncherUpstream { base_url, handle }
+}
+
+fn spawn_launcher_upstream_with_status_response_specs(
+    response_specs: Vec<(String, String, String, std::time::Duration)>,
+) -> LauncherUpstream {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let base_url = format!("http://{address}/v1");
+    listener.set_nonblocking(true).unwrap();
+
+    let handle = std::thread::spawn(move || {
+        let mut requests = Vec::new();
+        for (status, content_type, response_body, response_delay) in response_specs {
+            let started = std::time::Instant::now();
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            started.elapsed() < std::time::Duration::from_secs(10),
+                            "test upstream did not receive a request"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("failed to accept test request: {error}"),
+                }
+            };
+
+            let request = read_launcher_upstream_request(&mut stream);
+            let request = launcher_upstream_request_from_raw(&request);
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 response_body.len(),
                 response_body
             );

@@ -872,15 +872,17 @@ async fn local_proxy_closes_downstream_promptly_when_upstream_ends_without_close
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_address = upstream_listener.local_addr().unwrap();
     let upstream = tokio::spawn(async move {
-        let (stream, _) = upstream_listener.accept().await.unwrap();
-        let mut socket = accept_hdr_async(stream, |_request: &Request, response: Response| {
-            Ok(response)
-        })
-        .await
-        .unwrap();
-        let request = socket.next().await.unwrap().unwrap();
-        assert!(matches!(request, Message::Text(_)));
-        drop(socket);
+        for _ in 0..3 {
+            let (stream, _) = upstream_listener.accept().await.unwrap();
+            let mut socket = accept_hdr_async(stream, |_request: &Request, response: Response| {
+                Ok(response)
+            })
+            .await
+            .unwrap();
+            let request = socket.next().await.unwrap().unwrap();
+            assert!(matches!(request, Message::Text(_)));
+            drop(socket);
+        }
     });
 
     let temp = tempfile::tempdir().unwrap();
@@ -913,15 +915,19 @@ async fn local_proxy_closes_downstream_promptly_when_upstream_ends_without_close
         .await
         .unwrap();
 
-    let close = tokio::time::timeout(Duration::from_secs(2), client.next())
+    let close = tokio::time::timeout(Duration::from_secs(3), client.next())
         .await
         .expect("upstream EOF should close the downstream websocket promptly")
         .expect("downstream websocket should yield a close frame")
         .expect("downstream websocket close should be readable");
     let Message::Close(Some(close)) = close else {
-        panic!("expected retryable websocket close after upstream EOF");
+        panic!("expected websocket failure close after upstream EOF");
     };
-    assert_eq!(close.code, CloseCode::Restart);
+    assert_eq!(close.code, CloseCode::Policy);
+    assert_eq!(
+        close.reason,
+        "upstream websocket failed; HTTP fallback disabled"
+    );
 
     upstream.await.unwrap();
     assert!(
@@ -1289,7 +1295,12 @@ async fn local_proxy_falls_back_same_turn_when_websocket_request_exceeds_16_mib(
     let temp = tempfile::tempdir().unwrap();
     let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
     let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
-    save_supported_websocket_settings(upstream_address, false, "gpt-large-frame");
+    save_supported_websocket_settings_with_http_fallback(
+        upstream_address,
+        false,
+        "gpt-large-frame",
+        true,
+    );
 
     let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_address = local_listener.local_addr().unwrap();
@@ -1635,6 +1646,98 @@ async fn local_proxy_keeps_websocket_for_same_turn_after_disconnect_before_first
 
     upstream.await.unwrap();
     assert_eq!(upstream_connection_count.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn local_proxy_downgrades_same_turn_after_disconnect_when_http_fallback_enabled() {
+    let _settings_lock = websocket_settings_test_lock().lock().await;
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    let upstream_connection_count = Arc::new(AtomicUsize::new(0));
+    let upstream_count = upstream_connection_count.clone();
+    let upstream = tokio::spawn(async move {
+        let Ok((stream, _)) = upstream_listener.accept().await else {
+            return;
+        };
+        upstream_count.fetch_add(1, Ordering::SeqCst);
+        let Ok(mut socket) = accept_hdr_async(stream, |_request: &Request, response: Response| {
+            Ok(response)
+        })
+        .await
+        else {
+            return;
+        };
+        while let Some(message) = socket.next().await {
+            if matches!(message, Ok(Message::Close(_)) | Err(_)) {
+                break;
+            }
+        }
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    save_supported_websocket_settings_with_http_fallback(
+        upstream_address,
+        false,
+        "gpt-side-turn-fallback",
+        true,
+    );
+
+    let local_listener = Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
+    let local_address = local_listener.local_addr().unwrap();
+    let upgrade_request = format!(
+        "GET /v1/responses HTTP/1.1\r\n\
+         Host: {local_address}\r\n\
+         Connection: Upgrade\r\n\
+         Upgrade: websocket\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         session-id: side-session-fallback\r\n\
+         thread-id: side-thread-fallback\r\n\
+         x-codex-window-id: side-window-fallback\r\n\
+         x-codex-turn-metadata: {{\"turn_id\":\"side-turn-fallback\",\"request_kind\":\"turn\",\"window_id\":\"side-window-fallback\"}}\r\n\
+         \r\n"
+    );
+
+    let first_listener = local_listener.clone();
+    let first_local_server = tokio::spawn(async move {
+        let (mut stream, remote_addr) = first_listener.accept().await.unwrap();
+        let request_bytes = read_upgrade_request(&mut stream).await;
+        handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr)).await
+    });
+    let mut first_client = tokio::net::TcpStream::connect(local_address).await.unwrap();
+    first_client
+        .write_all(upgrade_request.as_bytes())
+        .await
+        .unwrap();
+    let first_response = read_upgrade_request(&mut first_client).await;
+    assert!(first_response.starts_with(b"HTTP/1.1 101"));
+    first_client.shutdown().await.unwrap();
+    drop(first_client);
+    let first_result = tokio::time::timeout(Duration::from_secs(2), first_local_server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(first_result.is_err());
+
+    let second_listener = local_listener.clone();
+    let second_local_server = tokio::spawn(async move {
+        let (mut stream, remote_addr) = second_listener.accept().await.unwrap();
+        let request_bytes = read_upgrade_request(&mut stream).await;
+        handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr)).await
+    });
+    let mut second_client = tokio::net::TcpStream::connect(local_address).await.unwrap();
+    second_client
+        .write_all(upgrade_request.as_bytes())
+        .await
+        .unwrap();
+    let second_response = read_upgrade_request(&mut second_client).await;
+    assert!(second_response.starts_with(b"HTTP/1.1 426"));
+    drop(second_client);
+    second_local_server.await.unwrap().unwrap();
+
+    upstream.await.unwrap();
+    assert_eq!(upstream_connection_count.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -2063,6 +2166,20 @@ fn save_supported_websocket_settings(
     reasoning_continuation: bool,
     request_model: &str,
 ) {
+    save_supported_websocket_settings_with_http_fallback(
+        upstream_address,
+        reasoning_continuation,
+        request_model,
+        false,
+    );
+}
+
+fn save_supported_websocket_settings_with_http_fallback(
+    upstream_address: std::net::SocketAddr,
+    reasoning_continuation: bool,
+    request_model: &str,
+    ws_failure_fallback_to_http: bool,
+) {
     let mut profile = RelayProfile {
         id: "relay-websocket-test".to_string(),
         name: "WebSocket Test".to_string(),
@@ -2089,6 +2206,7 @@ fn save_supported_websocket_settings(
             relay_profiles: vec![profile],
             active_relay_id: "relay-websocket-test".to_string(),
             gpt_reasoning_continuation: reasoning_continuation,
+            ws_failure_fallback_to_http,
             ..BackendSettings::default()
         })
         .unwrap();
