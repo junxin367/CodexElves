@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub const CREATE_PATH: &str = "/workspace-checkpoint/create";
+pub const SESSION_CONTEXT_PATH: &str = "/workspace-checkpoint/session-context";
 pub const BIND_TURN_PATH: &str = "/workspace-checkpoint/bind-turn";
 pub const COMPLETE_TURN_PATH: &str = "/workspace-checkpoint/complete-turn";
 pub const LIST_PATH: &str = "/workspace-checkpoint/list";

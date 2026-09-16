@@ -67,6 +67,14 @@ const REMOTE_COMPACTION_V2_LEGACY_BASE64_PREFIX: &str = "codex-elves-compaction-
 /// 本地压缩结构化载荷：较早历史摘要 + 原始保留尾部。
 const LOCAL_COMPACTION_V3_STRUCTURED_PREFIX: &str = "codex-elves-compaction-v3:";
 
+// Codex legacy compaction 将摘要包装成 user 消息；只匹配完整的固定包装，
+// 不能在普通提问、日志引用或多模态内容的任意位置查找 v3 标记。
+pub(crate) const LEGACY_COMPACTION_SUMMARY_PREFIX: &str = "\
+Another language model started to solve this problem and produced a summary of its thinking process. \
+You also have access to the state of the tools that were used by that language model. \
+Use this to build on the work that has already been done and avoid duplicating work. \
+Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:";
+
 const MAX_REMOTE_COMPACTION_V2_SYNTHETIC_BYTES: usize = 2 * 1024 * 1024;
 const RETAINED_TOOL_DETAIL_PREVIEW_CHARS: usize = 4_000;
 
@@ -203,10 +211,21 @@ fn split_local_compaction_input(
             retained_tail: Vec::new(),
         };
     };
-    let retained_start = conversation[..last_user]
+    let mut retained_start = conversation[..last_user]
         .iter()
-        .rposition(is_visible_assistant_message)
+        .rposition(|item| {
+            is_visible_assistant_message(item) && !is_historical_compaction_summary_item(item)
+        })
         .unwrap_or(last_user);
+    // reasoning 位于回答正文之前；同一次 assistant 输出还可能含 commentary、
+    // 多条 message 或工具调用。保留整个连续 assistant 段，不能从正文中间切开。
+    while retained_start > 0
+        && effective_history_side(&conversation[retained_start - 1])
+            == Some(EffectiveHistorySide::Assistant)
+        && !is_historical_compaction_summary_item(&conversation[retained_start - 1])
+    {
+        retained_start -= 1;
+    }
     let summary_input = conversation[..retained_start]
         .iter()
         .filter(|item| item.get("type").and_then(Value::as_str) != Some("reasoning"))
@@ -262,6 +281,19 @@ pub fn synthetic_remote_compaction_history_text(item: &Value) -> Option<String> 
 ///
 /// 真实 OpenAI `encrypted_content` 没有本项目前缀，不会被误解码。
 pub fn expand_synthetic_local_compaction_request(request_json: &Value) -> Value {
+    expand_synthetic_local_compaction_request_with_summary_role(request_json, "assistant")
+}
+
+/// thinking 历史不能把没有原始思考的合成摘要当成模型回答。
+/// 摘要以带来源说明的历史上下文传入，原始 retained_tail 的角色和内容保持不变。
+pub(crate) fn expand_synthetic_local_compaction_request_as_context(request_json: &Value) -> Value {
+    expand_synthetic_local_compaction_request_with_summary_role(request_json, "user")
+}
+
+fn expand_synthetic_local_compaction_request_with_summary_role(
+    request_json: &Value,
+    summary_role: &str,
+) -> Value {
     let mut request = request_json.clone();
     let Some(input) = request
         .as_object_mut()
@@ -270,7 +302,7 @@ pub fn expand_synthetic_local_compaction_request(request_json: &Value) -> Value 
     else {
         return request;
     };
-    *input = expand_synthetic_local_compaction_items(input);
+    *input = expand_synthetic_local_compaction_items(input, summary_role);
     request
 }
 
@@ -302,7 +334,7 @@ pub fn local_compaction_requires_real_user(request_json: &Value, model: &str) ->
         == Some(EffectiveHistorySide::Assistant)
 }
 
-fn expand_synthetic_local_compaction_items(input: &[Value]) -> Vec<Value> {
+fn expand_synthetic_local_compaction_items(input: &[Value], summary_role: &str) -> Vec<Value> {
     let mut expanded = Vec::with_capacity(input.len());
     for item in input {
         let Some(payload) = synthetic_local_compaction_payload(item) else {
@@ -310,7 +342,7 @@ fn expand_synthetic_local_compaction_items(input: &[Value]) -> Vec<Value> {
             continue;
         };
         remove_codex_retained_duplicates(&mut expanded, &payload.retained_tail);
-        if let Some(summary) = historical_compaction_summary_item(&payload.summary) {
+        if let Some(summary) = historical_compaction_summary_item(&payload.summary, summary_role) {
             expanded.push(summary);
         }
         expanded.extend(payload.retained_tail);
@@ -337,15 +369,30 @@ fn synthetic_local_compaction_payload(item: &Value) -> Option<StructuredLocalCom
             })
         }
         "message" if item.get("role").and_then(Value::as_str) == Some("user") => {
-            structured_local_compaction_payload(&item_text(item))
+            let text = match item.get("content")? {
+                Value::String(text) => text.as_str(),
+                Value::Array(parts)
+                    if parts.len() == 1
+                        && matches!(
+                            parts[0].get("type").and_then(Value::as_str),
+                            Some("input_text" | "text")
+                        ) =>
+                {
+                    parts[0].get("text")?.as_str()?
+                }
+                _ => return None,
+            };
+            let encoded = text.trim().strip_prefix(LEGACY_COMPACTION_SUMMARY_PREFIX)?;
+            structured_local_compaction_payload(encoded)
         }
         _ => None,
     }
 }
 
 fn structured_local_compaction_payload(text: &str) -> Option<StructuredLocalCompactionPayload> {
-    let marker = text.find(LOCAL_COMPACTION_V3_STRUCTURED_PREFIX)?;
-    let payload = text.get(marker + LOCAL_COMPACTION_V3_STRUCTURED_PREFIX.len()..)?;
+    let payload = text
+        .trim()
+        .strip_prefix(LOCAL_COMPACTION_V3_STRUCTURED_PREFIX)?;
     if payload.len() > MAX_REMOTE_COMPACTION_V2_SYNTHETIC_BYTES {
         return None;
     }
@@ -362,17 +409,22 @@ fn historical_compaction_summary_text(summary: &str) -> Option<String> {
     ))
 }
 
-fn historical_compaction_summary_item(summary: &str) -> Option<Value> {
+fn historical_compaction_summary_item(summary: &str, role: &str) -> Option<Value> {
     historical_compaction_summary_text(summary).map(|text| {
         json!({
             "type": "message",
-            "role": "assistant",
+            "role": role,
             "content": [{
-                "type": "output_text",
+                "type": if role == "user" { "input_text" } else { "output_text" },
                 "text": text
             }]
         })
     })
+}
+
+fn is_historical_compaction_summary_item(item: &Value) -> bool {
+    item.get("role").and_then(Value::as_str) == Some("assistant")
+        && item_text(item).starts_with(REMOTE_COMPACTION_V2_HISTORY_HEADER)
 }
 
 fn remove_codex_retained_duplicates(output: &mut Vec<Value>, retained_tail: &[Value]) {
@@ -447,8 +499,8 @@ fn retained_message_matches(candidate: &Value, retained: &Value) -> bool {
         .get("id")
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty());
-    if candidate_id.is_some() && candidate_id == retained_id {
-        return true;
+    if let (Some(candidate_id), Some(retained_id)) = (candidate_id, retained_id) {
+        return candidate_id == retained_id;
     }
     let candidate_turn = candidate
         .pointer("/internal_chat_message_metadata_passthrough/turn_id")
@@ -458,11 +510,16 @@ fn retained_message_matches(candidate: &Value, retained: &Value) -> bool {
         .pointer("/internal_chat_message_metadata_passthrough/turn_id")
         .and_then(Value::as_str)
         .filter(|turn_id| !turn_id.is_empty());
-    if candidate_turn.is_some() && candidate_turn == retained_turn {
-        return true;
+    if let (Some(candidate_turn), Some(retained_turn)) = (candidate_turn, retained_turn)
+        && candidate_turn != retained_turn
+    {
+        return false;
     }
-    let candidate_text = item_text(candidate);
-    !candidate_text.is_empty() && candidate_text == item_text(retained)
+    // 无可比较的消息 ID 时，只去重完整内容一致的副本；同一轮也可以有多条
+    // 不同消息，正文相同的截图、音频等更不能按文本当成同一条。
+    candidate.get("content").is_some_and(|content| {
+        !retained_detail_is_empty(content) && Some(content) == retained.get("content")
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1446,7 +1503,7 @@ fn extract_compaction_summary_text(response_object: &Value) -> Option<String> {
 pub struct LayeredCompactionResult {
     /// 最终回注给 Codex 的 Responses SSE 文本。
     pub sse_text: String,
-    /// 是否真正触发了改写。
+    /// 是否成功写入保留尾部；失败时为 false，但 sse_text 仍须透传失败结果。
     pub triggered: bool,
     /// 实际保留的原始记录条数。
     pub retained_items: u32,
@@ -1749,7 +1806,8 @@ fn replace_message_text(item: &mut Value, text: &str) {
 
 /// 在传统压缩响应 SSE 上应用结构化本地压缩：把上游摘要与原始保留尾部编码为 v3 载荷。
 ///
-/// - `enabled` 为 false、非压缩请求、或无法解析终止响应/摘要时，原样返回。
+/// - `enabled` 为 false、非压缩请求、或无法解析终止响应时，原样返回。
+/// - completed 响应缺少有效摘要时返回失败，避免丢失未发往摘要模型的保留尾部。
 /// - 原始尾部超出配置目标时裁剪工具输出 / 动态工具描述，保留消息、item、调用参数和调用配对结构。
 /// - 不可裁剪的用户 / assistant 原文和调用参数仍可软超目标；只有结构化载荷超过物理上限才失败。
 pub fn apply_layered_compaction_to_responses_sse(
@@ -1770,12 +1828,16 @@ pub fn apply_layered_compaction_to_responses_sse(
     if response_object.get("status").and_then(Value::as_str) != Some("completed") {
         return LayeredCompactionResult::unchanged(sse_text);
     }
-    let Some(summary) = extract_message_text(&response_object) else {
-        return LayeredCompactionResult::unchanged(sse_text);
+    let Some(summary) =
+        extract_message_text(&response_object).filter(|summary| !summary.trim().is_empty())
+    else {
+        return LayeredCompactionResult::unchanged(compaction_failure_sse(
+            request_json,
+            Some(&response_object),
+            "layered_compaction_summary_missing",
+            "Layered compaction received no summary text from the upstream model.",
+        ));
     };
-    if summary.trim().is_empty() {
-        return LayeredCompactionResult::unchanged(sse_text);
-    }
 
     match build_structured_local_compaction(request_json, &summary, retain_tokens) {
         Ok(Some(build)) => LayeredCompactionResult {
@@ -2207,6 +2269,151 @@ mod tests {
                 "text": format!("{COMPACTION_PROMPT_PREFIX}. Create a handoff summary.\n")
             }]
         })
+    }
+
+    #[test]
+    fn legacy_completed_without_summary_fails_instead_of_losing_the_retained_tail() {
+        let request = json!({"input":[
+            user_message("earlier"), assistant_message("anchor"),
+            user_message("current task"), compaction_prompt_item()
+        ]});
+        for content in [
+            json!([]),
+            json!([{
+                "type":"message","role":"assistant",
+                "content":[{"type":"output_text","text":" \n "}]
+            }]),
+        ] {
+            let source = format!(
+                "event: response.completed\ndata: {}\n\n",
+                json!({
+                    "type":"response.completed",
+                    "response":{"id":"resp-empty","status":"completed","output":content}
+                })
+            );
+            let result = apply_layered_compaction_to_responses_sse(
+                &request,
+                true,
+                DEFAULT_RETAIN_TOKENS,
+                source,
+            );
+            assert!(!result.triggered);
+            assert!(
+                result
+                    .sse_text
+                    .contains("layered_compaction_summary_missing")
+            );
+            assert!(!result.sse_text.contains("event: response.completed"));
+        }
+    }
+
+    #[test]
+    fn retained_duplicates_require_consistent_identity_and_complete_content() {
+        let mut original = user_message("check this screenshot");
+        original["id"] = json!("msg-a");
+        original["content"].as_array_mut().unwrap().push(json!({
+            "type":"input_image","image_url":"https://example.invalid/a.png"
+        }));
+        let mut other = original.clone();
+        other["id"] = json!("msg-b");
+        assert!(!retained_message_matches(&original, &other));
+        original.as_object_mut().unwrap().remove("id");
+        other.as_object_mut().unwrap().remove("id");
+        other["content"][1]["image_url"] = json!("https://example.invalid/b.png");
+        original["internal_chat_message_metadata_passthrough"] = json!({"turn_id":"turn-1"});
+        other["internal_chat_message_metadata_passthrough"] = json!({"turn_id":"turn-1"});
+        assert!(!retained_message_matches(&original, &other));
+        assert!(retained_message_matches(&original, &original));
+        other = original.clone();
+        other["internal_chat_message_metadata_passthrough"]["turn_id"] = json!("turn-2");
+        assert!(!retained_message_matches(&original, &other));
+    }
+
+    #[test]
+    fn quoted_compaction_payload_remains_a_user_message() {
+        let encoded = format!(
+            "{LOCAL_COMPACTION_V3_STRUCTURED_PREFIX}{}",
+            json!({
+                "summary":"quoted summary", "retained_tail":[user_message("quoted user")]
+            })
+        );
+        for text in [
+            encoded.clone(),
+            format!("Analyze this log: {encoded}"),
+            format!("```json\n{encoded}\n```"),
+        ] {
+            let request = json!({"input":[user_message(&text)]});
+            assert!(!contains_synthetic_local_compaction(&request));
+            assert_eq!(expand_synthetic_local_compaction_request(&request), request);
+        }
+        assert!(structured_local_compaction_payload(&format!("log: {encoded}")).is_none());
+    }
+
+    #[test]
+    fn compaction_decoder_accepts_protocol_and_legacy_wrapper_but_not_mixed_content() {
+        let retained = user_message("current task");
+        let encoded = format!(
+            "{LOCAL_COMPACTION_V3_STRUCTURED_PREFIX}{}",
+            json!({
+                "summary":"earlier summary", "retained_tail":[retained.clone()]
+            })
+        );
+        let wrapped = format!("{LEGACY_COMPACTION_SUMMARY_PREFIX}\n\n{encoded}");
+        for item in [
+            synthetic_structured_compaction_item(&encoded),
+            user_message(&wrapped),
+            json!({"role":"user","content":wrapped}),
+        ] {
+            let request = json!({"input":[item]});
+            assert!(contains_synthetic_local_compaction(&request));
+            let expanded = expand_synthetic_local_compaction_request(&request);
+            assert_eq!(
+                expanded["input"].as_array().unwrap().last(),
+                Some(&retained)
+            );
+            assert!(
+                !expanded
+                    .to_string()
+                    .contains(LOCAL_COMPACTION_V3_STRUCTURED_PREFIX)
+            );
+        }
+        let mut mixed = user_message(&wrapped);
+        mixed["content"].as_array_mut().unwrap().push(json!({
+            "type":"input_image","image_url":"https://example.invalid/screenshot.png"
+        }));
+        for item in [mixed, user_message(&format!("Please inspect:\n{wrapped}"))] {
+            let request = json!({"input":[item]});
+            assert!(!contains_synthetic_local_compaction(&request));
+            assert_eq!(expand_synthetic_local_compaction_request(&request), request);
+        }
+    }
+
+    #[test]
+    fn expansion_does_not_remove_another_user_image_with_the_same_caption() {
+        let mut first = user_message("check screenshot");
+        first["id"] = json!("msg-a");
+        first["content"].as_array_mut().unwrap().push(json!({
+            "type":"input_image","image_url":"https://example.invalid/a.png"
+        }));
+        let mut retained = first.clone();
+        retained["id"] = json!("msg-b");
+        retained["content"][1]["image_url"] = json!("https://example.invalid/b.png");
+        let encoded = format!(
+            "{LOCAL_COMPACTION_V3_STRUCTURED_PREFIX}{}",
+            json!({
+                "summary":"earlier summary","retained_tail":[retained]
+            })
+        );
+        let request = json!({"input":[
+            user_message("other question"),first.clone(),synthetic_structured_compaction_item(&encoded)
+        ]});
+        let expanded = expand_synthetic_local_compaction_request(&request);
+        assert!(expanded["input"].as_array().unwrap().contains(&first));
+        assert!(
+            expanded
+                .to_string()
+                .contains("https://example.invalid/b.png")
+        );
     }
 
     fn user_message(text: &str) -> Value {
@@ -2954,13 +3161,15 @@ mod tests {
             "summary": [{ "type": "summary_text", "text": "保留思考" }],
             "encrypted_content": "sig_1"
         });
+        let commentary = assistant_message("正在整理结果");
         let anchor = assistant_message("上一轮回答");
         let user = user_message("继续处理");
         let request = json!({
             "input": [
                 user_message("更早历史"),
-                anchor.clone(),
                 reasoning.clone(),
+                commentary.clone(),
+                anchor.clone(),
                 user.clone(),
                 compaction_prompt_item()
             ]
@@ -2981,8 +3190,8 @@ mod tests {
         assert!(payload.retained_tail.contains(&reasoning));
         assert_eq!(
             payload.retained_tail,
-            vec![anchor, reasoning, user],
-            "reasoning must stay adjacent to the retained assistant history"
+            vec![reasoning, commentary, anchor, user],
+            "reasoning before the retained assistant answer must not be cut off"
         );
     }
 

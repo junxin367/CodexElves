@@ -660,7 +660,18 @@ fn prompt_model_name(model: &str) -> String {
 }
 
 pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
-    let body = crate::layered_compaction::expand_synthetic_local_compaction_request(&body);
+    let recover_compacted_thinking =
+        crate::layered_compaction::contains_synthetic_local_compaction(&body)
+            && body
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(|model| model.to_ascii_lowercase().contains("deepseek"))
+            && reasoning_requested(&body).unwrap_or(true);
+    let body = if recover_compacted_thinking {
+        crate::layered_compaction::expand_synthetic_local_compaction_request_as_context(&body)
+    } else {
+        crate::layered_compaction::expand_synthetic_local_compaction_request(&body)
+    };
     let body = crate::layered_compaction::prepare_remote_compaction_v2_bridge_request(&body);
     let mut result = json!({});
 
@@ -762,6 +773,9 @@ pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
         if let Some(value) = body.get(*key) {
             result[*key] = value.clone();
         }
+    }
+    if recover_compacted_thinking && has_chat_tools {
+        recover_chat_compacted_reasoning_history(&mut result);
     }
 
     Ok(result)
@@ -884,9 +898,10 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
     body: Value,
     diagnostic_id: Option<&str>,
 ) -> anyhow::Result<Value> {
-    let legacy_compaction_recovery =
+    let has_local_compaction =
         crate::layered_compaction::contains_synthetic_local_compaction(&body);
-    let body = crate::layered_compaction::expand_synthetic_local_compaction_request(&body);
+    let body =
+        crate::layered_compaction::expand_synthetic_local_compaction_request_as_context(&body);
     let body = crate::layered_compaction::prepare_remote_compaction_v2_bridge_request(&body);
     let mut result = json!({});
 
@@ -973,16 +988,26 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
         }
     }
 
-    if legacy_compaction_recovery {
-        // 已存在的旧会话可能在压缩时丢失 Responses reasoning 项，无法重建
-        // Anthropic thinking 所需的历史 content[].thinking。关闭本轮 thinking，
-        // 让会话可以继续；新发生的压缩会保留 reasoning，不会进入此分支。
-        result["thinking"] = json!({ "type": "disabled" });
-        result.as_object_mut().map(|object| {
-            object.remove("output_config");
-        });
-    } else {
-        apply_anthropic_reasoning_options(&mut result, &body, model);
+    apply_anthropic_reasoning_options(&mut result, &body, model);
+    // DeepSeek 携带工具时要求所有历史 assistant 回答都有原始 reasoning。
+    // 旧压缩已丢失的数据不能伪造；仅将缺失的历史改为有来源标记的上下文，
+    // 保留完整 thinking/tool 配对，并保持用户请求的思考深度。
+    if has_local_compaction
+        && has_tools
+        && model.to_ascii_lowercase().contains("deepseek")
+        && result.pointer("/thinking/type").and_then(Value::as_str) == Some("adaptive")
+    {
+        let recovered = recover_anthropic_compacted_reasoning_history(&mut result);
+        if recovered > 0 {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "protocol_proxy.compacted_reasoning_history_recovered",
+                json!({
+                    "diagnosticId": diagnostic_id,
+                    "model": model,
+                    "recoveredAssistantMessages": recovered
+                }),
+            );
+        }
     }
     log_anthropic_request_shape(&result, &body, diagnostic_id);
 
@@ -1287,6 +1312,17 @@ impl std::fmt::Display for UpstreamFailureContext {
 }
 
 impl std::error::Error for UpstreamFailureContext {}
+
+/// A local transport-policy rejection; no HTTP request reached the provider.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "当前模型已启用 WS，且“WS 失败切 HTTP”已关闭；已在本地阻止 HTTP 回退。请重新连接会话以恢复 WS，或开启 HTTP 回退。"
+)]
+pub struct ResponsesHttpFallbackDisabled;
+
+impl ResponsesHttpFallbackDisabled {
+    pub const CODE: &str = "responses_websocket_required";
+}
 
 pub fn upstream_failure_context(error: &anyhow::Error) -> Option<&UpstreamFailureContext> {
     error
@@ -2210,6 +2246,40 @@ async fn open_responses_proxy_request_once(
         };
         let response_protocol = responses_proxy_target_protocol(&relay, &request_json)?;
         let endpoint = upstream_endpoint_for_protocol(&relay, response_protocol);
+        // The client can downgrade independently of our WS close frames / 426
+        // fallback cache, and can keep using HTTP for later turns in the session.
+        // Enforce the currently selected transport at the HTTP send boundary.
+        // Compaction and non-stream requests have separate HTTP-only paths;
+        // converted protocols and aggregates do not use the native WS bridge.
+        if !settings.ws_failure_fallback_to_http
+            && is_stream
+            && compaction_execution_mode == CompactionExecutionMode::None
+            && response_protocol == UpstreamResponseProtocol::Responses
+            && settings.active_aggregate_relay_profile().is_none()
+            && crate::responses_websocket::relay_websocket_enabled_for_settings(&settings, &relay)
+        {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "protocol_proxy.responses_http_fallback_blocked",
+                json!({
+                    "diagnosticId": diagnostic_id,
+                    "relayId": relay.id,
+                    "relayName": relay.name,
+                    "endpoint": endpoint,
+                    "code": ResponsesHttpFallbackDisabled::CODE,
+                    "upstreamRequestSent": false,
+                }),
+            );
+            return Err(anyhow::Error::new(ResponsesHttpFallbackDisabled).context(
+                UpstreamFailureContext {
+                    diagnostic_id,
+                    relay_id: Some(relay.id.clone()),
+                    relay_name: Some(relay.name.clone()),
+                    endpoint: Some(endpoint),
+                    response_protocol: Some(response_protocol),
+                    bridge_remote_compaction_v2: false,
+                },
+            ));
+        }
         let has_more_candidates = attempt + 1 < relay_count;
         let upstream_is_stream = is_stream;
         let header_timeout = if upstream_is_stream {
@@ -5969,6 +6039,139 @@ fn anthropic_tool_use_ids(message: &Value) -> std::collections::BTreeSet<String>
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn recover_chat_compacted_reasoning_history(request: &mut Value) {
+    let Some(messages) = request.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut historical_call_ids = BTreeSet::new();
+    for message in messages {
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+        if role == "assistant"
+            && !message
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+        {
+            let mut content = vec![json!({
+                "type":"text",
+                "text":"[Historical assistant message; original reasoning was not preserved]"
+            })];
+            match message.get("content") {
+                Some(Value::Array(parts)) => content.extend(parts.iter().cloned()),
+                Some(Value::String(text)) if !text.is_empty() => {
+                    content.push(json!({"type":"text","text":text}))
+                }
+                _ => {}
+            }
+            if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+                for call in calls {
+                    if let Some(id) = call.get("id").and_then(Value::as_str) {
+                        historical_call_ids.insert(id.to_string());
+                    }
+                    content.push(json!({
+                        "type":"text",
+                        "text":format!("[Historical tool call] {}", canonical_json_string(call))
+                    }));
+                }
+            }
+            *message = json!({"role":"user","content":content});
+        } else if role == "tool"
+            && message
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| historical_call_ids.contains(id))
+        {
+            // Chat 工具图片已由 split_chat_tool_output 独立保存在后续 user 消息中。
+            let call_id = message["tool_call_id"].as_str().unwrap();
+            *message = json!({
+                "role":"user",
+                "content":format!("[Historical tool result: {call_id}]\n{}",
+                    response_output_text(message.get("content").unwrap_or(&Value::Null)))
+            });
+        }
+    }
+}
+
+fn recover_anthropic_compacted_reasoning_history(request: &mut Value) -> usize {
+    let Some(messages) = request.get_mut("messages").and_then(Value::as_array_mut) else {
+        return 0;
+    };
+    let mut recovered = 0;
+    let mut historical_call_ids = BTreeSet::new();
+    let mut normalized = Vec::with_capacity(messages.len());
+    for message in std::mem::take(messages) {
+        let Some(content) = message.get("content").and_then(Value::as_array) else {
+            normalized.push(message);
+            continue;
+        };
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user");
+        let has_thinking = content.iter().any(|block| {
+            block.get("type").and_then(Value::as_str) == Some("thinking")
+                && block
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.trim().is_empty())
+        });
+        if role == "assistant" && !has_thinking {
+            recovered += 1;
+            historical_call_ids.extend(anthropic_tool_use_ids(&message));
+            let mut historical = vec![json!({
+                "type": "text",
+                "text": "[Historical assistant message; original reasoning was not preserved]"
+            })];
+            for block in content {
+                match block.get("type").and_then(Value::as_str) {
+                    Some("thinking" | "redacted_thinking") => {}
+                    Some("tool_use") => historical.push(json!({
+                        "type": "text",
+                        "text": format!("[Historical tool call] {}", canonical_json_string(block))
+                    })),
+                    _ => historical.push(block.clone()),
+                }
+            }
+            push_anthropic_message(&mut normalized, "user", historical);
+        } else if role == "user" {
+            let mut live_results = Vec::new();
+            let mut other_content = Vec::new();
+            for block in content {
+                if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                    other_content.push(block.clone());
+                    continue;
+                }
+                let call_id = block
+                    .get("tool_use_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if !historical_call_ids.contains(call_id) {
+                    live_results.push(block.clone());
+                    continue;
+                }
+                other_content.push(json!({
+                    "type": "text",
+                    "text": format!("[Historical tool result: {call_id}]")
+                }));
+                match block.get("content") {
+                    // 已经完成 Anthropic 转换的图片保持原生块，不能序列化成正文。
+                    Some(Value::Array(parts)) => other_content.extend(parts.iter().cloned()),
+                    Some(value) => other_content.push(json!({
+                        "type": "text", "text": response_output_text(value)
+                    })),
+                    None => {}
+                }
+            }
+            live_results.extend(other_content);
+            push_anthropic_message(&mut normalized, role, live_results);
+        } else {
+            push_anthropic_message(&mut normalized, role, content.clone());
+        }
+    }
+    *messages = normalized;
+    recovered
 }
 
 fn push_anthropic_message(messages: &mut Vec<Value>, role: &str, content: Vec<Value>) {

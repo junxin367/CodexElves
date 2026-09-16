@@ -201,14 +201,14 @@ export function OpenInDebugApp() {
               <span>main</span>
             </div>
             <div className="open-in-debug-titlebar-actions">
-              <button aria-label="Run" className="open-in-debug-icon-button" type="button">
-                <Play aria-hidden="true" />
-              </button>
               <OpenInControl
                 selected={selectedTarget}
                 onOpen={openTarget}
                 onSelect={setSelectedTarget}
               />
+              <button aria-label="Run" className="open-in-debug-icon-button" type="button">
+                <Play aria-hidden="true" />
+              </button>
             </div>
           </header>
 

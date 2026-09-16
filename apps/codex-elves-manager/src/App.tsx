@@ -1949,32 +1949,32 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.4.0",
-        latestVersion: "0.4.0",
+        currentVersion: "0.4.1",
+        latestVersion: "0.4.1",
         releaseSummary: [
-          "CodexElves 0.4.0",
+          "CodexElves 0.4.1",
           "",
           "- 优化启动与托盘唤醒稳定性",
           "- 改进 GitHub Release 更新体验",
           "- 修复若干协议代理兼容性问题",
         ].join("\n"),
-        assetName: "CodexElves-0.4.0-windows-x64-setup.exe",
-        assetUrl: "https://example.test/CodexElves-0.4.0-windows-x64-setup.exe",
+        assetName: "CodexElves-0.4.1-windows-x64-setup.exe",
+        assetUrl: "https://example.test/CodexElves-0.4.1-windows-x64-setup.exe",
         updateAvailable: false,
       }, "发现可用更新。") as T);
     case "perform_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.4.0",
-        latestVersion: "0.4.0",
+        currentVersion: "0.4.1",
+        latestVersion: "0.4.1",
         releaseSummary: "浏览器预览不会下载真实安装包。",
-        installedPath: "C:\\Temp\\CodexElves-0.4.0-windows-x64-setup.exe",
+        installedPath: "C:\\Temp\\CodexElves-0.4.1-windows-x64-setup.exe",
         launched: true,
       }, "浏览器预览已模拟启动安装包。") as T);
     case "copy_diagnostics":
       return Promise.resolve(browserPreviewResult({
         report: [
           "CodexElves 诊断报告",
-          "版本: 0.4.0",
+          "版本: 0.4.1",
           "平台: windows-x64",
           "Codex 应用: C:\\Users\\junes\\AppData\\Local\\Programs\\CodexElves\\CodexElves.exe",
           "配置目录: C:\\Users\\junes\\.codex",
@@ -1995,7 +1995,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.4.0",
+        current_version: "0.4.1",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -4767,7 +4767,7 @@ function LocalProxyScreen({
               </label>
               <label
                 className="proxy-inline-toggle"
-                data-tooltip="WebSocket 连续失败或当前轮次无法承载时，允许本地代理临时改走 HTTP；默认关闭。"
+                data-tooltip="允许已启用 WS 的模型在失败后改走 HTTP；关闭时会在本地阻止客户端的 HTTP 回退。普通 HTTP 模型和压缩请求不受影响。"
               >
                 <input
                   checked={form.wsFailureFallbackToHttp}
@@ -5753,7 +5753,7 @@ function EnhanceScreen({
             <FeatureToggle title="插件市场解锁" detail="API Key 模式下扩展插件市场请求，尽量显示完整插件列表；官方/混合模式通常不需要。" checked={form.codexAppPluginMarketplaceUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginMarketplaceUnlock", value)} />
             <FeatureToggle title="强制解锁入口" detail="恢复 1.1.9 的入口解锁方式，强制显示并启用插件入口。" checked={form.codexAppPluginEntryUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginEntryUnlock", value)} />
             <FeatureToggle title="任务看板" detail="在 Codex 左侧导航的“插件”下方显示内置任务看板入口；关闭时退出看板并恢复原生页面。默认开启。" checked={form.codexAppTaskBoard} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppTaskBoard", value)} />
-            <FeatureToggle title="快速打开工作区" detail="在 Codex 标题栏显示 Open in 快捷按钮，用首选应用打开当前会话的工作目录。默认开启。" checked={form.codexAppOpenInQuickAccess} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppOpenInQuickAccess", value)} />
+            <FeatureToggle title="快速打开工作区" detail="在 Codex 顶部工具栏最左侧显示 Open in 快捷按钮，用首选应用打开当前会话的工作目录。默认开启。" checked={form.codexAppOpenInQuickAccess} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppOpenInQuickAccess", value)} />
             <FeatureToggle title="Fast 按钮" detail="显示服务模式切换按钮。Fast 仅支持 gpt-5.4+。" checked={form.codexAppServiceTierControls} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppServiceTierControls", value)} />
             <FeatureToggle title="会话删除" detail="在会话列表悬停显示删除按钮；删除后不可恢复。" checked={form.codexAppSessionDelete} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppSessionDelete", value)} />
             <FeatureToggle title="Markdown 导出" detail="在会话列表显示导出按钮，导出带时间戳的 Markdown。" checked={form.codexAppMarkdownExport} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppMarkdownExport", value)} />

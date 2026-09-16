@@ -915,6 +915,21 @@ async fn local_proxy_closes_downstream_promptly_when_upstream_ends_without_close
         .await
         .unwrap();
 
+    let failure = tokio::time::timeout(Duration::from_secs(3), client.next())
+        .await
+        .expect("upstream EOF should close the downstream websocket promptly")
+        .expect("downstream websocket should yield a close frame")
+        .expect("downstream websocket close should be readable");
+    let Message::Text(failure) = failure else {
+        panic!("expected response.failed before websocket close");
+    };
+    let failure: serde_json::Value = serde_json::from_str(failure.as_str()).unwrap();
+    assert_eq!(failure["type"], "response.failed");
+    assert_eq!(
+        failure["response"]["error"]["code"],
+        "responses_websocket_upstream_failed"
+    );
+
     let close = tokio::time::timeout(Duration::from_secs(3), client.next())
         .await
         .expect("upstream EOF should close the downstream websocket promptly")
@@ -923,11 +938,8 @@ async fn local_proxy_closes_downstream_promptly_when_upstream_ends_without_close
     let Message::Close(Some(close)) = close else {
         panic!("expected websocket failure close after upstream EOF");
     };
-    assert_eq!(close.code, CloseCode::Policy);
-    assert_eq!(
-        close.reason,
-        "upstream websocket failed; HTTP fallback disabled"
-    );
+    assert_eq!(close.code, CloseCode::Normal);
+    assert_eq!(close.reason, "response failed; HTTP fallback disabled");
 
     upstream.await.unwrap();
     assert!(
@@ -2123,6 +2135,265 @@ fn websocket_turn_request(
 fn websocket_settings_test_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+#[tokio::test]
+async fn helper_blocks_client_http_retries_after_websocket_failure() {
+    use codex_elves_core::launcher::{DefaultLaunchHooks, LaunchHooks};
+
+    let _settings_lock = websocket_settings_test_lock().lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = listener.local_addr().unwrap();
+    let ws_requests = Arc::new(AtomicUsize::new(0));
+    let http_requests = Arc::new(AtomicUsize::new(0));
+    let ws_count = ws_requests.clone();
+    let http_count = http_requests.clone();
+    let upstream = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut first_byte = [0_u8; 1];
+            if stream.peek(&mut first_byte).await.unwrap() == 0 {
+                continue;
+            }
+            if first_byte[0] == b'G' {
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                if matches!(socket.next().await, Some(Ok(Message::Text(_)))) {
+                    ws_count.fetch_add(1, Ordering::SeqCst);
+                }
+                // Simulate a provider losing the connection before its first response,
+                // including the bridge's internal WS reconnect attempts.
+                drop(socket);
+            } else {
+                let _ = read_upgrade_request(&mut stream).await;
+                http_count.fetch_add(1, Ordering::SeqCst);
+                let body = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_http\",\"object\":\"response\",\"status\":\"completed\",\"output\":[]}}\n\n";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+        }
+    });
+
+    save_supported_websocket_settings_with_http_fallback(
+        upstream_address,
+        false,
+        "gpt-fallback-policy",
+        true,
+    );
+    let hooks = DefaultLaunchHooks::default();
+    let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = local_listener.local_addr().unwrap().port();
+    drop(local_listener);
+    hooks.start_helper(port).await.unwrap();
+    let (mut client, _) = connect_async(format!("ws://127.0.0.1:{port}/v1/responses"))
+        .await
+        .unwrap();
+
+    // Closing the switch must take effect even for a connection opened while
+    // fallback was enabled. HTTP attempts load the current policy independently.
+    SettingsStore::default()
+        .update(serde_json::json!({"wsFailureFallbackToHttp": false}))
+        .unwrap();
+    client
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-fallback-policy",
+                "input": "hi",
+                "stream": true
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while let Some(Ok(message)) = client.next().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(ws_requests.load(Ordering::SeqCst), 3);
+    drop(client);
+
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    // Exercise the real helper HTTP route, not just WS close/event semantics.
+    // A later turn and missing WS metadata must not bypass the outbound policy.
+    for turn in [Some("failed-turn"), Some("next-turn"), None] {
+        let mut request = serde_json::json!({
+            "model": "gpt-fallback-policy", "input": "hi", "stream": true
+        });
+        if let Some(turn) = turn {
+            request["client_metadata"] = serde_json::json!({
+                "thread_id": "persistent-http-session", "turn_id": turn
+            });
+        }
+        let response = http
+            .post(format!("http://127.0.0.1:{port}/v1/responses"))
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.text().await.unwrap();
+        assert_eq!(
+            http_requests.load(Ordering::SeqCst),
+            0,
+            "disabled fallback must never POST to the provider; local status={status}, body={body}"
+        );
+        assert_eq!(status.as_u16(), 409);
+        assert!(body.contains("responses_websocket_required"));
+    }
+
+    // Switching on permits HTTP, and switching off blocks the next attempt
+    // without restarting the helper or relying on a per-turn failure cache.
+    for (enabled, expected_status, expected_http_count) in [(true, 200, 1), (false, 409, 1)] {
+        SettingsStore::default()
+            .update(serde_json::json!({"wsFailureFallbackToHttp": enabled}))
+            .unwrap();
+        let response = http
+            .post(format!("http://127.0.0.1:{port}/v1/responses"))
+            .json(&serde_json::json!({
+                "model": "gpt-fallback-policy", "input": "hi", "stream": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), expected_status);
+        let _ = response.bytes().await.unwrap();
+        assert_eq!(http_requests.load(Ordering::SeqCst), expected_http_count);
+    }
+    hooks.shutdown_helper(port).await;
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn websocket_http_policy_preserves_http_models_and_compaction() {
+    use codex_elves_core::protocol_proxy::open_responses_proxy_request_with_settings;
+
+    let _settings_lock = websocket_settings_test_lock().lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = listener.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        let mut paths = Vec::new();
+        for _ in 0..9 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let head = read_upgrade_request(&mut stream).await;
+            let request = String::from_utf8_lossy(&head);
+            paths.push(request.split_whitespace().nth(1).unwrap().to_string());
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await
+                .unwrap();
+            stream.shutdown().await.unwrap();
+        }
+        paths
+    });
+    save_supported_websocket_settings(upstream_address, false, "gpt-http-policy");
+    let mut settings = SettingsStore::default().load().unwrap();
+    settings.relay_profiles[0].model_mappings.extend([
+        RelayModelMapping {
+            request_model: "claude-http".to_string(),
+            protocol: RelayProtocol::Anthropic,
+            alias: String::new(),
+            context_window: String::new(),
+        },
+        RelayModelMapping {
+            request_model: "chat-http".to_string(),
+            protocol: RelayProtocol::ChatCompletions,
+            alias: String::new(),
+            context_window: String::new(),
+        },
+    ]);
+    let normal = serde_json::json!({
+        "model": "gpt-http-policy", "input": "hi", "stream": true
+    });
+    let mut expected_paths = Vec::new();
+    for case in 0..9 {
+        let mut settings = settings.clone();
+        let mut request = normal.clone();
+        let expected_path = match case {
+            0 => {
+                settings.ws_failure_fallback_to_http = true;
+                "/v1/responses"
+            }
+            1 => {
+                settings.relay_profiles[0].responses_websocket_enabled = Some(false);
+                "/v1/responses"
+            }
+            2 => {
+                settings.relay_profiles[0].responses_websocket.state =
+                    ResponsesWebsocketCapabilityState::Unsupported;
+                "/v1/responses"
+            }
+            3 => {
+                request["stream"] = serde_json::json!(false);
+                "/v1/responses"
+            }
+            4 => {
+                request["input"] = serde_json::json!([{
+                    "type": "message", "role": "user",
+                    "content": "You are performing a CONTEXT CHECKPOINT COMPACTION. Summarize."
+                }]);
+                "/v1/responses"
+            }
+            5 => {
+                request["input"] = serde_json::json!([{"type": "compaction_trigger"}]);
+                "/v1/responses"
+            }
+            6 => {
+                request["model"] = serde_json::json!("claude-http");
+                "/v1/messages"
+            }
+            7 => {
+                request["model"] = serde_json::json!("chat-http");
+                "/v1/chat/completions"
+            }
+            _ => {
+                // An aggregate uses HTTP even when an individual member also
+                // supports WS when selected on its own.
+                settings.relay_profiles.push(RelayProfile {
+                    id: "http-aggregate".to_string(),
+                    relay_mode: RelayMode::Aggregate,
+                    ..RelayProfile::default()
+                });
+                settings.active_relay_id = "http-aggregate".to_string();
+                settings.aggregate_relay_profiles =
+                    vec![codex_elves_core::settings::AggregateRelayProfile {
+                        id: "http-aggregate".to_string(),
+                        name: "HTTP aggregate".to_string(),
+                        strategy: codex_elves_core::settings::AggregateRelayStrategy::Failover,
+                        members: vec![codex_elves_core::settings::AggregateRelayMember {
+                            relay_id: settings.relay_profiles[0].id.clone(),
+                            weight: 1,
+                        }],
+                    }];
+                "/v1/responses"
+            }
+        };
+        let response = tokio::time::timeout(
+            Duration::from_secs(3),
+            open_responses_proxy_request_with_settings(&request.to_string(), settings),
+        )
+        .await
+        .unwrap()
+        .unwrap_or_else(|error| panic!("HTTP compatibility case {case}: {error:#}"));
+        assert_eq!(response.status_code, 200, "HTTP compatibility case {case}");
+        response.response.unwrap().bytes().await.unwrap();
+        expected_paths.push(expected_path);
+    }
+    assert_eq!(upstream.await.unwrap(), expected_paths);
 }
 
 struct SettingsPathGuard {

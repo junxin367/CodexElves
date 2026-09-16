@@ -332,7 +332,7 @@ fn remote_compaction_v2_response_is_single_compaction_and_restores_history() {
             .unwrap()
             .iter()
             .any(|message| {
-                message["role"] == "assistant"
+                message["role"] == "user"
                     && message["content"].as_array().is_some_and(|content| {
                         content.iter().any(|part| {
                             part["text"]
@@ -430,8 +430,8 @@ fn structured_compaction_restores_real_roles_and_tool_pairing_across_protocols()
     assert!(anthropic_text.contains("推荐方案：执行方案 1"));
     assert!(anthropic_text.contains("较早历史摘要"));
     assert!(anthropic_text.contains("\"id\":\"call-probe\""));
-    assert_eq!(anthropic["thinking"], json!({ "type": "disabled" }));
-    assert!(anthropic.get("output_config").is_none());
+    assert_eq!(anthropic["thinking"], json!({ "type": "adaptive" }));
+    assert_eq!(anthropic["output_config"]["effort"], "high");
     let last = anthropic_messages.last().unwrap();
     assert_eq!(last["role"], "user");
     assert!(
@@ -442,6 +442,292 @@ fn structured_compaction_restores_real_roles_and_tool_pairing_across_protocols()
                     && block["tool_use_id"] == "call-probe"
                     && block["content"] == "probe ready"
             }))
+    );
+}
+
+fn compacted_thinking_history(anchor_reasoning: bool, tool_reasoning: bool) -> Value {
+    let reasoning = |text: &str, signature: &str| {
+        json!({
+            "type": "reasoning",
+            "summary": [{ "type": "summary_text", "text": text }],
+            "encrypted_content": signature
+        })
+    };
+    let mut tail = Vec::new();
+    if anchor_reasoning {
+        tail.push(reasoning("anchor reasoning", "anchor-signature"));
+    }
+    tail.push(json!({
+        "type": "message", "role": "assistant",
+        "content": [{ "type": "output_text", "text": "Previous answer" }]
+    }));
+    tail.push(json!({
+        "type": "message", "role": "user",
+        "content": [{ "type": "input_text", "text": "Continue the task" }]
+    }));
+    if tool_reasoning {
+        tail.push(reasoning("tool reasoning", "tool-signature"));
+    }
+    tail.push(json!({
+        "type": "function_call", "call_id": "call-history",
+        "name": "lookup", "arguments": "{\"query\":\"history\"}"
+    }));
+    tail.push(json!({
+        "type": "function_call_output", "call_id": "call-history",
+        "output": [
+            { "type": "input_text", "text": "Historical result" },
+            { "type": "input_image", "image_url": "data:image/png;base64,aGVsbG8=" }
+        ]
+    }));
+    json!({
+        "model": "deepseek-v4.1-flash",
+        "reasoning": { "effort": "max" },
+        "tools": [{ "type": "function", "name": "lookup", "parameters": { "type": "object" } }],
+        "input": [{
+            "type": "compaction",
+            "encrypted_content": format!("codex-elves-compaction-v3:{}", json!({
+                "summary": "Earlier history summary", "retained_tail": tail
+            }))
+        }]
+    })
+}
+
+#[test]
+fn chat_compacted_thinking_history_does_not_create_an_unsigned_assistant_summary() {
+    let converted = responses_to_chat_completions(compacted_thinking_history(true, true)).unwrap();
+    let messages = converted["messages"].as_array().unwrap();
+    let assistants: Vec<_> = messages
+        .iter()
+        .filter(|m| m["role"] == "assistant")
+        .collect();
+    assert_eq!(assistants.len(), 2);
+    assert_eq!(assistants[0]["reasoning_content"], "anchor reasoning");
+    assert_eq!(assistants[1]["reasoning_content"], "tool reasoning");
+    assert_eq!(assistants[1]["tool_calls"][0]["id"], "call-history");
+    assert!(
+        messages
+            .iter()
+            .any(|m| m["role"] == "user" && m.to_string().contains("Earlier history summary"))
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m["role"] == "tool" && m["tool_call_id"] == "call-history")
+    );
+}
+
+#[test]
+fn chat_compacted_legacy_missing_reasoning_keeps_context_images_and_complete_turns() {
+    for complete_tool_turn in [false, true] {
+        let converted =
+            responses_to_chat_completions(compacted_thinking_history(false, complete_tool_turn))
+                .unwrap();
+        let messages = converted["messages"].as_array().unwrap();
+        let assistants: Vec<_> = messages
+            .iter()
+            .filter(|m| m["role"] == "assistant")
+            .collect();
+        assert_eq!(assistants.len(), usize::from(complete_tool_turn));
+        assert!(
+            messages
+                .iter()
+                .any(|m| m["role"] == "user" && m.to_string().contains("Previous answer"))
+        );
+        assert!(messages.iter().any(|m| m["role"] == "user"
+            && m["content"].as_array().is_some_and(|parts| {
+                parts.iter().any(|p| {
+                    p["type"] == "image_url"
+                        && p["image_url"]["url"] == "data:image/png;base64,aGVsbG8="
+                })
+            })));
+        if complete_tool_turn {
+            assert_eq!(assistants[0]["reasoning_content"], "tool reasoning");
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| m["role"] == "tool" && m["tool_call_id"] == "call-history")
+            );
+        } else {
+            assert!(messages.iter().all(|m| m["role"] != "tool"));
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| m["role"] == "user" && m.to_string().contains("call-history"))
+            );
+        }
+    }
+}
+
+#[test]
+fn anthropic_compacted_thinking_history_keeps_signed_blocks_and_requested_effort() {
+    let converted =
+        responses_to_anthropic_messages(compacted_thinking_history(true, true)).unwrap();
+    assert_eq!(converted["thinking"]["type"], "adaptive");
+    assert_eq!(converted["output_config"]["effort"], "max");
+    let messages = converted["messages"].as_array().unwrap();
+    assert_eq!(messages[0]["role"], "user");
+    assert!(
+        messages[0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Earlier history summary")
+    );
+    let assistants: Vec<_> = messages
+        .iter()
+        .filter(|m| m["role"] == "assistant")
+        .collect();
+    assert_eq!(assistants.len(), 2);
+    assert_eq!(
+        assistants[0]["content"][0],
+        json!({
+            "type": "thinking", "thinking": "anchor reasoning", "signature": "anchor-signature"
+        })
+    );
+    assert_eq!(
+        assistants[1]["content"][0],
+        json!({
+            "type": "thinking", "thinking": "tool reasoning", "signature": "tool-signature"
+        })
+    );
+    assert_eq!(assistants[1]["content"][1]["id"], "call-history");
+    assert_eq!(
+        messages.last().unwrap()["content"][0]["tool_use_id"],
+        "call-history"
+    );
+}
+
+#[test]
+fn anthropic_repeated_compaction_preserves_the_anchor_reasoning_before_its_answer() {
+    let mut request = compacted_thinking_history(true, true);
+    let summary_response = json!({
+        "id": "resp-summary", "status": "completed",
+        "output": [{
+            "type": "message", "role": "assistant",
+            "content": [{ "type": "output_text", "text": "Updated history summary" }]
+        }]
+    });
+    for _ in 0..2 {
+        request["input"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "type": "compaction_trigger" }));
+        let compacted = rewrite_remote_compaction_v2_response_with_layered_compaction(
+            &request,
+            &summary_response,
+            true,
+            DEFAULT_RETAIN_TOKENS,
+        )
+        .unwrap();
+        request["input"] = compacted.response["output"].clone();
+        let converted = responses_to_anthropic_messages(request.clone()).unwrap();
+        let assistants: Vec<_> = converted["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "assistant")
+            .collect();
+        assert_eq!(assistants.len(), 2);
+        assert_eq!(assistants[0]["content"][0]["thinking"], "anchor reasoning");
+        assert_eq!(assistants[0]["content"][0]["signature"], "anchor-signature");
+        assert_eq!(assistants[0]["content"][1]["text"], "Previous answer");
+        assert_eq!(assistants[1]["content"][0]["signature"], "tool-signature");
+        assert_eq!(converted["output_config"]["effort"], "max");
+    }
+}
+
+#[test]
+fn anthropic_compaction_recovery_is_scoped_to_deepseek_thinking_with_tools() {
+    for scenario in ["disabled", "no-tools", "claude", "uncompacted"] {
+        let mut request = compacted_thinking_history(false, false);
+        match scenario {
+            "disabled" => request["reasoning"] = json!({ "effort": "none" }),
+            "no-tools" => {
+                request.as_object_mut().unwrap().remove("tools");
+            }
+            "claude" => request["model"] = json!("claude-sonnet-5"),
+            _ => {
+                request =
+                    codex_elves_core::layered_compaction::expand_synthetic_local_compaction_request(
+                        &request,
+                    );
+            }
+        }
+        let converted = responses_to_anthropic_messages(request).unwrap();
+        assert_eq!(
+            converted["thinking"]["type"],
+            if scenario == "disabled" {
+                "disabled"
+            } else {
+                "adaptive"
+            },
+            "{scenario}"
+        );
+        assert!(
+            converted["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|m| m["content"].as_array().unwrap())
+                .any(|b| b["type"] == "tool_use" && b["id"] == "call-history"),
+            "{scenario}"
+        );
+    }
+}
+
+#[test]
+fn anthropic_compacted_legacy_anchor_becomes_context_without_disabling_thinking() {
+    let converted =
+        responses_to_anthropic_messages(compacted_thinking_history(false, true)).unwrap();
+    assert_eq!(converted["thinking"]["type"], "adaptive");
+    assert_eq!(converted["output_config"]["effort"], "max");
+    let messages = converted["messages"].as_array().unwrap();
+    let assistants: Vec<_> = messages
+        .iter()
+        .filter(|m| m["role"] == "assistant")
+        .collect();
+    assert_eq!(assistants.len(), 1);
+    assert_eq!(assistants[0]["content"][0]["thinking"], "tool reasoning");
+    assert_eq!(assistants[0]["content"][1]["id"], "call-history");
+    assert!(
+        messages
+            .iter()
+            .any(|m| m["role"] == "user" && m.to_string().contains("Previous answer"))
+    );
+    assert_eq!(
+        messages.last().unwrap()["content"][0]["tool_use_id"],
+        "call-history"
+    );
+}
+
+#[test]
+fn anthropic_compacted_legacy_tool_pair_becomes_context_and_keeps_images() {
+    let converted =
+        responses_to_anthropic_messages(compacted_thinking_history(false, false)).unwrap();
+    assert_eq!(converted["thinking"]["type"], "adaptive");
+    let messages = converted["messages"].as_array().unwrap();
+    assert!(messages.iter().all(|m| m["role"] == "user"));
+    let text = messages
+        .iter()
+        .flat_map(|m| m["content"].as_array().unwrap())
+        .filter_map(|b| b["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Previous answer"));
+    assert!(text.contains("call-history"));
+    assert!(text.contains("lookup"));
+    assert!(text.contains("Historical result"));
+    assert!(!text.contains("aGVsbG8="));
+    assert!(
+        messages
+            .iter()
+            .flat_map(|m| m["content"].as_array().unwrap())
+            .any(|b| b["type"] == "image" && b["source"]["data"] == "aGVsbG8=")
+    );
+    assert!(
+        !messages
+            .iter()
+            .flat_map(|m| m["content"].as_array().unwrap())
+            .any(|b| b["type"] == "tool_use" || b["type"] == "tool_result")
     );
 }
 

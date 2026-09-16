@@ -127,6 +127,16 @@ pub trait BridgeDataService: Send + Sync {
     ) -> anyhow::Result<Value>;
     async fn thread_sort_key(&self, session: SessionRef) -> anyhow::Result<Value>;
     async fn thread_sort_keys(&self, sessions: Vec<SessionRef>) -> anyhow::Result<Value>;
+    async fn workspace_checkpoint_session_context(
+        &self,
+        session: SessionRef,
+    ) -> anyhow::Result<Value> {
+        Ok(json!({
+            "status": "failed",
+            "session_id": session.session_id,
+            "message": "Workspace checkpoint session context service is unavailable"
+        }))
+    }
 
     async fn task_board_session_catalog(&self) -> anyhow::Result<TaskBoardSessionCatalog> {
         anyhow::bail!("Task board session catalog service is unavailable")
@@ -213,6 +223,11 @@ pub async fn handle_bridge_request(
                 }
                 Err(error) => Err(error),
             }
+        }
+        crate::workspace_checkpoint::SESSION_CONTEXT_PATH => {
+            ctx.data
+                .workspace_checkpoint_session_context(session_from_payload(&payload))
+                .await
         }
         crate::workspace_checkpoint::BIND_TURN_PATH => {
             match active_workspace_checkpoint_service(&ctx).await {
@@ -745,6 +760,17 @@ impl BridgeDataService for UnavailableDataService {
             "status": "failed",
             "message": "Thread sort service is not wired in core launcher hooks",
             "sort_keys": []
+        }))
+    }
+
+    async fn workspace_checkpoint_session_context(
+        &self,
+        session: SessionRef,
+    ) -> anyhow::Result<Value> {
+        Ok(json!({
+            "status": "failed",
+            "session_id": session.session_id,
+            "message": "Workspace checkpoint session context service is not wired in core launcher hooks"
         }))
     }
 

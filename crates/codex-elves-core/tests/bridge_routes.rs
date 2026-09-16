@@ -55,6 +55,10 @@ async fn bridge_routes_cover_all_current_paths() {
             json!({"repoPath": "/repo", "branchName": "feature/demo"}),
         ),
         ("/workspace-checkpoint/create", json!({})),
+        (
+            "/workspace-checkpoint/session-context",
+            json!({"session_id": "s1", "title": "First"}),
+        ),
         ("/workspace-checkpoint/bind-turn", json!({})),
         ("/workspace-checkpoint/complete-turn", json!({})),
         ("/workspace-checkpoint/list", json!({})),
@@ -238,6 +242,21 @@ async fn unknown_bridge_path_preserves_empty_session_id_shape() {
             "message": "Unknown bridge path"
         })
     );
+}
+
+#[tokio::test]
+async fn workspace_checkpoint_session_context_route_uses_exact_thread_cwd() {
+    let result = handle_bridge_request(
+        test_context(),
+        "/workspace-checkpoint/session-context",
+        json!({"session_id": "thread-1", "title": "First"}),
+    )
+    .await;
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["session_id"], "thread-1");
+    assert_eq!(result["cwd"], "C:/workspace/exact");
+    assert_eq!(result["host_id"], "local");
 }
 
 #[tokio::test]
@@ -1474,6 +1493,18 @@ impl BridgeDataService for FakeData {
                 .into_iter()
                 .map(|session| json!({"session_id": session.session_id}))
                 .collect::<Vec<_>>()
+        }))
+    }
+
+    async fn workspace_checkpoint_session_context(
+        &self,
+        session: SessionRef,
+    ) -> anyhow::Result<Value> {
+        Ok(json!({
+            "status": "ok",
+            "session_id": session.session_id,
+            "cwd": "C:/workspace/exact",
+            "host_id": "local"
         }))
     }
 }

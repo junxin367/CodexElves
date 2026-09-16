@@ -777,6 +777,41 @@ impl BridgeDataService for LauncherDataService {
             .map_err(|error| anyhow::anyhow!("thread sort keys task failed: {error}"))
     }
 
+    async fn workspace_checkpoint_session_context(
+        &self,
+        session: SessionRef,
+    ) -> anyhow::Result<Value> {
+        let db_paths = self.candidate_db_paths();
+        let requested_session_id = session.session_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let catalog = codex_elves_data::aggregate_local_session_catalog(&db_paths)
+                .map_err(anyhow::Error::from)?;
+            let requested_key = normalize_local_session_id(&requested_session_id);
+            let matched = catalog
+                .sessions
+                .into_iter()
+                .find(|candidate| normalize_local_session_id(&candidate.id) == requested_key);
+            Ok::<_, anyhow::Error>(match matched {
+                Some(candidate) => json!({
+                    "status": "ok",
+                    "session_id": candidate.id,
+                    "cwd": candidate.cwd,
+                    "host_id": "local"
+                }),
+                None => json!({
+                    "status": "not_found",
+                    "session_id": requested_session_id,
+                    "cwd": "",
+                    "host_id": "local"
+                }),
+            })
+        })
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("workspace checkpoint session context task failed: {error}")
+        })?
+    }
+
     async fn task_board_session_catalog(&self) -> anyhow::Result<TaskBoardSessionCatalog> {
         let db_paths = self.candidate_db_paths();
         let codex_home = codex_elves_core::codex_sqlite::default_codex_home_dir();
@@ -819,6 +854,16 @@ impl BridgeDataService for LauncherDataService {
         codex_elves_data::task_board_catalog_from_local_catalog(local_catalog, project_catalog)
             .map_err(anyhow::Error::from)
     }
+}
+
+fn normalize_local_session_id(value: &str) -> String {
+    let trimmed = value.trim();
+    let bare = trimmed
+        .get(..6)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("local:"))
+        .map(|_| &trimmed[6..])
+        .unwrap_or(trimmed);
+    bare.to_ascii_lowercase()
 }
 
 impl LauncherDataService {

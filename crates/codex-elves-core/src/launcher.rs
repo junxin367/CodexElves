@@ -1433,20 +1433,28 @@ fn apply_layered_compaction_if_enabled(
         settings.layered_compaction_retain_tokens,
         sse_text.clone(),
     );
+    finish_layered_compaction_response(sse_text, result, settings.layered_compaction_retain_tokens)
+}
+
+fn finish_layered_compaction_response(
+    sse_text: String,
+    result: crate::layered_compaction::LayeredCompactionResult,
+    retain_tokens: u32,
+) -> (String, LocalLayeredCompactionLog) {
     if !result.triggered {
-        return (sse_text, LocalLayeredCompactionLog::default());
+        return (result.sse_text, LocalLayeredCompactionLog::default());
     }
     let _ = crate::diagnostic_log::append_diagnostic_log(
         "layered_compaction.applied",
         serde_json::json!({
             "retainedItems": result.retained_items,
             "retainedChars": result.retained_chars,
-            "retainTokens": settings.layered_compaction_retain_tokens
+            "retainTokens": retain_tokens
         }),
     );
     let log = LocalLayeredCompactionLog {
         triggered: true,
-        retain_tokens: Some(settings.layered_compaction_retain_tokens),
+        retain_tokens: Some(retain_tokens),
         retained_items: Some(result.retained_items),
         retained_chars: Some(result.retained_chars),
         // 改写前的原始上游响应（纯摘要），供日志详情对比。
@@ -1636,7 +1644,10 @@ async fn handle_protocol_proxy_connection(
         Ok(upstream) => upstream,
         Err(error) => {
             let failure_context = crate::protocol_proxy::upstream_failure_context(&error).cloned();
-            let error_message = error.to_string();
+            let fallback_blocked =
+                error.downcast_ref::<crate::protocol_proxy::ResponsesHttpFallbackDisabled>();
+            let error_message =
+                fallback_blocked.map_or_else(|| error.to_string(), ToString::to_string);
             let upstream_timed_out = crate::protocol_proxy::upstream_error_is_timeout(&error);
             let bridge_remote_compaction_v2 = failure_context.as_ref().map_or_else(
                 || {
@@ -1648,7 +1659,19 @@ async fn handle_protocol_proxy_connection(
                 },
                 |context| context.bridge_remote_compaction_v2,
             );
-            let (status, status_code, body) = if bridge_remote_compaction_v2 {
+            let (status, status_code, body) = if fallback_blocked.is_some() {
+                (
+                    "409 Conflict",
+                    409,
+                    serde_json::to_vec(&serde_json::json!({
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": crate::protocol_proxy::ResponsesHttpFallbackDisabled::CODE,
+                            "message": error_message,
+                        }
+                    }))?,
+                )
+            } else if bridge_remote_compaction_v2 {
                 let failure = crate::layered_compaction::remote_compaction_v2_failure_response(
                     request_json.as_ref().expect("V2 bridge request must exist"),
                     None,
@@ -4740,6 +4763,44 @@ fn activate_packaged_app_blocking(app_user_model_id: &str, arguments: &str) -> a
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layered_compaction_http_preserves_payload_limit_failure() {
+        use serde_json::json;
+        let request = json!({"input":[
+            {"type":"message","role":"user","content":"Earlier question"},
+            {"type":"message","role":"assistant","content":"Anchor"},
+            {"type":"message","role":"user","content":"Current task"},
+            {"type":"function_call","name":"inspect","call_id":"call-big",
+             "arguments":json!({"blob":"x".repeat(2*1024*1024+256)}).to_string()},
+            {"type":"function_call_output","call_id":"call-big","output":"ok"},
+            {"type":"message","role":"user","content":format!("{} summarize",
+                crate::layered_compaction::COMPACTION_PROMPT_PREFIX)}
+        ]});
+        let sse = format!(
+            "event: response.completed\ndata: {}\n\n",
+            json!({
+                "type":"response.completed","response":{"id":"resp-summary","status":"completed",
+                "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"SUMMARY"}]}]}
+            })
+        );
+        let result = crate::layered_compaction::apply_layered_compaction_to_responses_sse(
+            &request,
+            true,
+            20_000,
+            sse.clone(),
+        );
+        assert!(
+            result
+                .sse_text
+                .contains("local_compaction_payload_too_large")
+        );
+        let (actual, log) = finish_layered_compaction_response(sse, result, 20_000);
+        assert!(actual.contains("local_compaction_payload_too_large"));
+        assert!(actual.contains("event: response.failed"));
+        assert!(!actual.contains("event: response.completed"));
+        assert!(!log.triggered);
+    }
 
     #[test]
     fn builtin_model_catalog_refresh_only_runs_for_non_aggregate_local_proxy() {

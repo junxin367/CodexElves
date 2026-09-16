@@ -700,9 +700,13 @@ async fn bridge_responses_websockets(
                                         if reconnect_attempts < INITIAL_UPSTREAM_RETRY_DELAYS.len() {
                                             continue 'bridge;
                                         }
-                                        let _ = send_downstream_failure_close(
+                                        let _ = send_downstream_terminal_failure(
                                             &mut downstream,
+                                            &request_logger,
                                             allow_http_fallback,
+                                            &format!(
+                                                "{error_message}; 最后一次重连失败：{reconnect_error:#}"
+                                            ),
                                         )
                                         .await;
                                         downstream_closed = true;
@@ -712,9 +716,11 @@ async fn bridge_responses_websockets(
                                     }
                                 }
                             }
-                            let _ = send_downstream_failure_close(
+                            let _ = send_downstream_terminal_failure(
                                 &mut downstream,
+                                &request_logger,
                                 allow_http_fallback,
+                                &error_message,
                             )
                             .await;
                             downstream_closed = true;
@@ -753,9 +759,11 @@ async fn bridge_responses_websockets(
                                 }
                                 continue;
                             }
-                            let _ = send_downstream_failure_close(
+                            let _ = send_downstream_terminal_failure(
                                 &mut downstream,
+                                &request_logger,
                                 allow_http_fallback,
+                                "Responses WebSocket 上游未发送 Close 帧就结束连接",
                             )
                             .await;
                             downstream_closed = true;
@@ -846,9 +854,14 @@ async fn bridge_responses_websockets(
                             &transport_liveness,
                             now,
                         );
-                        let _ = send_downstream_failure_close(
+                        let _ = send_downstream_terminal_failure(
                             &mut downstream,
+                            &request_logger,
                             allow_http_fallback,
+                            &format!(
+                                "Responses WebSocket 上游连接在 Ping 后超过 {} 秒没有返回任何帧",
+                                UPSTREAM_LIVENESS_PONG_TIMEOUT.as_secs()
+                            ),
                         )
                         .await;
                         downstream_closed = true;
@@ -877,9 +890,14 @@ async fn bridge_responses_websockets(
                             &transport_liveness,
                             now,
                         );
-                        let _ = send_downstream_failure_close(
+                        let _ = send_downstream_terminal_failure(
                             &mut downstream,
+                            &request_logger,
                             allow_http_fallback,
+                            &format!(
+                                "Responses WebSocket 上游连接在 Ping 后超过 {} 秒没有返回任何帧",
+                                UPSTREAM_LIVENESS_PONG_TIMEOUT.as_secs()
+                            ),
                         )
                         .await;
                         downstream_closed = true;
@@ -890,9 +908,16 @@ async fn bridge_responses_websockets(
                     }
                     if let Some(expired) = request_logger.expired_pending_request(now) {
                         request_logger.log_idle_timeout(&expired);
-                        let _ = send_downstream_failure_close(
+                        let failure_message = format!(
+                            "Responses WebSocket 上游请求 {} 超过 {} 毫秒没有返回应用事件",
+                            expired.log_id,
+                            expired.idle_timeout.as_millis()
+                        );
+                        let _ = send_downstream_terminal_failure(
                             &mut downstream,
+                            &request_logger,
                             allow_http_fallback,
+                            &failure_message,
                         )
                         .await;
                         downstream_closed = true;
@@ -1008,6 +1033,38 @@ async fn send_downstream_failure_close(
             "upstream websocket reconnect required",
             "upstream websocket failed; HTTP fallback disabled",
         ))),
+        "关闭本地 Responses WebSocket 超时",
+        "关闭本地 Responses WebSocket 失败",
+    )
+    .await?;
+    Ok(())
+}
+
+async fn send_downstream_terminal_failure(
+    downstream: &mut WebSocketStream<TcpStream>,
+    request_logger: &WebSocketRequestLogger,
+    allow_http_fallback: bool,
+    error_message: &str,
+) -> anyhow::Result<()> {
+    if allow_http_fallback {
+        return send_downstream_failure_close(downstream, true).await;
+    }
+
+    if let Some(message) = request_logger.pending_response_failure_message(error_message) {
+        forward_websocket_message(
+            downstream,
+            message,
+            "转发 Responses WebSocket 失败事件超时",
+            "转发 Responses WebSocket 失败事件失败",
+        )
+        .await?;
+    }
+    forward_websocket_message(
+        downstream,
+        Message::Close(Some(CloseFrame {
+            code: CloseCode::Normal,
+            reason: "response failed; HTTP fallback disabled".into(),
+        })),
         "关闭本地 Responses WebSocket 超时",
         "关闭本地 Responses WebSocket 失败",
     )
@@ -2401,6 +2458,40 @@ impl WebSocketRequestLogger {
                     .then(|| Message::Text(tracked.record.request_body.clone().into()))
             })
             .collect()
+    }
+
+    fn pending_response_failure_message(&self, error_message: &str) -> Option<Message> {
+        let state = self.state.lock().ok()?;
+        let log_id = state
+            .active_order
+            .iter()
+            .find(|log_id| state.requests.contains_key(*log_id))?;
+        let tracked = state.requests.get(log_id)?;
+        let response_id = format!(
+            "resp_codex_elves_failed_{}",
+            log_id.trim_start_matches("local-")
+        );
+        let mut response = serde_json::json!({
+            "id": response_id,
+            "object": "response",
+            "status": "failed",
+            "error": {
+                "type": "responses_websocket_upstream_failed",
+                "code": "responses_websocket_upstream_failed",
+                "message": error_message
+            }
+        });
+        if let Some(model) = tracked.record.model.as_deref() {
+            response["model"] = Value::String(model.to_string());
+        }
+        Some(Message::Text(
+            serde_json::json!({
+                "type": "response.failed",
+                "response": response
+            })
+            .to_string()
+            .into(),
+        ))
     }
 
     fn record_upstream_application_activity(&self, message: &Message) {
@@ -5136,12 +5227,17 @@ mod tests {
         let text = done["item"]["content"][0]["text"]
             .as_str()
             .expect("rewritten message should contain text");
+        // Codex 接收 legacy 摘要后添加固定包装，再作为 user 历史发送。
+        let wrapped = format!(
+            "{}\n\n{text}",
+            crate::layered_compaction::LEGACY_COMPACTION_SUMMARY_PREFIX
+        );
         let restored =
             crate::layered_compaction::expand_synthetic_local_compaction_request(&json!({
                 "input": [{
                     "type": "message",
                     "role": "user",
-                    "content": [{ "type": "input_text", "text": text }]
+                    "content": [{ "type": "input_text", "text": wrapped }]
                 }]
             }));
         let restored_input = restored["input"]

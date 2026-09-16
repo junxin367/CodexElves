@@ -223,6 +223,7 @@ fn renderer_workspace_checkpoint_wraps_turns_and_native_message_edits() {
     assert!(script.contains("workspaceCheckpoint: true"));
     assert!(script.contains("workspaceCheckpoint: \"codexAppWorkspaceCheckpoint\""));
     assert!(script.contains("\"/workspace-checkpoint/create\""));
+    assert!(script.contains("\"/workspace-checkpoint/session-context\""));
     assert!(script.contains("\"/workspace-checkpoint/bind-turn\""));
     assert!(script.contains("\"/workspace-checkpoint/complete-turn\""));
     assert!(script.contains("\"/workspace-checkpoint/list\""));
@@ -292,12 +293,21 @@ fn renderer_workspace_checkpoint_wraps_turns_and_native_message_edits() {
     ));
     assert!(script.contains("data-codex-workspace-checkpoint-button"));
     assert!(script.contains("button.setAttribute?.(\"aria-label\", \"打开 Checkpoint\")"));
+    assert!(script.contains(r#"const codexWorkspaceCheckpointVersion = "5";"#));
+    assert!(script.contains(
+        "window.__codexElvesWorkspaceCheckpointRuntimeVersion === codexWorkspaceCheckpointVersion"
+    ));
+    assert!(script.contains(
+        "window.__codexElvesWorkspaceCheckpointRuntimeVersion = codexWorkspaceCheckpointVersion;"
+    ));
     assert!(script.contains("function codexWorkspaceCheckpointFeatureEnabled()"));
     assert!(script.contains("promptOptimizeRemoveCheckpointButton();"));
     assert!(script.contains("在提示词优化图标旁显示 Checkpoint 入口"));
     assert!(!script.contains("data-codex-workspace-checkpoint-open=\"true\""));
     assert!(script.contains("function installCodexWorkspaceCheckpointEditButtons()"));
     assert!(script.contains("function openCodexWorkspaceCheckpointDialog()"));
+    assert!(script.contains("codexWorkspaceCheckpointContextAsync(null, {})"));
+    assert!(script.contains("void openCodexWorkspaceCheckpointDialog();"));
     assert!(script.contains("patchCodexWorkspaceCheckpointRequestClientPrototype"));
 }
 
@@ -500,6 +510,22 @@ fn renderer_workspace_checkpoint_custom_confirmation_gates_restore_and_undo() {
     assert_eq!(result["checkpointNativeConfirmCalls"], 0);
 }
 
+#[test]
+fn renderer_workspace_checkpoint_icon_resolves_exact_cwd_without_cross_thread_cache_leak() {
+    let result = run_workspace_checkpoint_contract_harness();
+
+    assert_eq!(result["catalogContext"]["cwd"], "C:\\catalog-repo");
+    assert_eq!(result["catalogContext"]["threadId"], "thread-catalog");
+    assert_eq!(result["catalogContext"]["hostId"], "local");
+    assert_eq!(result["catalogContext"]["local"], true);
+    assert_eq!(result["catalogContextCached"], "C:\\catalog-repo");
+    assert_eq!(result["iconDialogContext"]["cwd"], "C:\\icon-repo");
+    assert_eq!(result["iconDialogContext"]["threadId"], "thread-icon");
+    assert_eq!(result["iconDialogContext"]["hostId"], "local");
+    assert_eq!(result["iconDialogContext"]["local"], true);
+    assert_eq!(result["catalogContextAfterThreadSwitch"], "");
+}
+
 fn run_workspace_checkpoint_contract_harness() -> serde_json::Value {
     let temp = tempfile::tempdir().expect("temp dir should be created");
     let script_path = temp.path().join("renderer-features.js");
@@ -515,6 +541,7 @@ const store = new Map();
 let editorQueryEnabled = false;
 let insertedEditButton = null;
 let nativeConfirmCalls = 0;
+let activeConversationId = "thread-12345678";
 function node() {{
   return {{
     appendChild(child) {{
@@ -608,6 +635,12 @@ const form = {{
   }},
 }};
 const editor = {{ ...node(), closest(selector) {{ return selector === "form" ? form : null; }} }};
+const conversationSignal = {{
+  ...node(),
+  getAttribute(name) {{
+    return name === "data-above-composer-conversation-id" ? activeConversationId : null;
+  }},
+}};
 globalThis.HTMLElement = Object;
 globalThis.Element = Object;
 globalThis.MutationObserver = class MutationObserver {{
@@ -647,7 +680,10 @@ globalThis.document = {{
   body: node(),
   createElement: () => node(),
   getElementById: () => null,
-  querySelector: () => null,
+  querySelector: (selector) =>
+    selector === "[data-above-composer-conversation-id]"
+      ? conversationSignal
+      : null,
   querySelectorAll: (selector) =>
     editorQueryEnabled && String(selector).includes('[aria-label="编辑消息"]') ? [editor] : [],
   addEventListener() {{}},
@@ -691,6 +727,25 @@ window.__codexSessionDeleteBridge = async (path, payload) => {{
   }}
   if (path === "/session/suppressed") return {{ status: "ok", ids: [] }};
   if (path === "/backend/status") return {{ status: "ok" }};
+  if (path === "/workspace-checkpoint/session-context") {{
+    if (payload.session_id === "thread-icon") {{
+      return {{
+        status: "ok",
+        session_id: "thread-icon",
+        cwd: "C:\\icon-repo",
+        host_id: "local",
+      }};
+    }}
+    if (payload.session_id === "thread-catalog") {{
+      return {{
+        status: "ok",
+        session_id: "thread-catalog",
+        cwd: "C:\\catalog-repo",
+        host_id: "local",
+      }};
+    }}
+    return {{ status: "not_found", session_id: payload.session_id, cwd: "", host_id: "local" }};
+  }}
   if (path.startsWith("/workspace-checkpoint/")) activeOrder.push(`bridge:${{path}}`);
   if (path === "/workspace-checkpoint/create") {{
     if (bridgeMode === "create-failed") return {{ status: "failed", message: "snapshot failed" }};
@@ -864,9 +919,36 @@ api.setBackendSettingsForTest({{
     }}
   }}
   const activeManagerRequestClient = new ActiveManagerRequestClient();
-  window.__codexElvesConversationStateManager = {{
+  const signalManager = {{
+    hostId: "local",
+    getCachedConversations() {{ return []; }},
+    getConversation() {{ return null; }},
+    updateConversationState() {{}},
+    threadStore: {{}},
     requestClient: activeManagerRequestClient,
   }};
+  // 当前 Codex 不导出客户端类，manager 藏在上层 scope 的已绑定 signal 中。
+  const managerAtom = {{}};
+  const scopedStore = {{ get(atom) {{
+    if (atom !== managerAtom) throw new Error("unexpected atom read");
+    return signalManager;
+  }} }};
+  const scopedFamilies = new Map();
+  for (let index = 0; index < 300; index += 1) {{
+    scopedFamilies.set({{}}, new Map([["remote", {{ value: {{}} }}]]));
+  }}
+  scopedFamilies.set({{}}, new Map([["local", {{
+    value: {{ atom: managerAtom, store: scopedStore }},
+  }}]]));
+  const ancestorScope = {{ familyBindings: scopedFamilies }};
+  const providerFiber = {{
+    memoizedProps: {{ value: new Map([["scope", {{ parent: ancestorScope }}]]) }},
+  }};
+  const mainFiberNode = {{ __reactFiberCheckpointTest: {{ return: providerFiber }} }};
+  const originalQuerySelector = document.querySelector;
+  document.querySelector = (selector) =>
+    selector === "main" ? mainFiberNode : originalQuerySelector(selector);
+  window.__codexElvesConversationStateManager = null;
   window.__codexElvesServiceTierTest.setModuleLoader(async () => ({{}}));
   activeOrder = [];
   lastBindPayload = null;
@@ -878,6 +960,7 @@ api.setBackendSettingsForTest({{
   }});
   const activeManagerFallbackTurnOrder = [...activeOrder];
   const activeManagerFallbackBoundTurnId = lastBindPayload?.turnId || "";
+  document.querySelector = originalQuerySelector;
   window.__codexElvesServiceTierTest.setModuleLoader(null);
 
   let turnCompletedCallback = null;
@@ -888,11 +971,17 @@ api.setBackendSettingsForTest({{
     getConversation(threadId) {{
       return {{
         id: threadId,
-        cwd: threadId === "thread-manager"
-          ? "C:\\manager-repo"
-          : threadId === "thread-race"
-            ? "C:\\race-repo"
-            : "C:\\repo",
+        cwd: threadId === "thread-catalog" ||
+          threadId === "thread-icon" ||
+          threadId === "thread-other"
+          ? ""
+          : threadId === "thread-confirm"
+            ? "C:\\confirm-repo"
+          : threadId === "thread-manager"
+            ? "C:\\manager-repo"
+            : threadId === "thread-race"
+              ? "C:\\race-repo"
+              : "C:\\repo",
         hostId: "local",
         turns: [],
       }};
@@ -924,6 +1013,19 @@ api.setBackendSettingsForTest({{
     }},
   }});
   const completedTurnPayload = lastCompletePayload;
+
+  activeConversationId = "thread-catalog";
+  const catalogContext = await api.resolveContext(null, {{}});
+  const catalogContextCached = api.context(null, {{}}).cwd;
+  activeConversationId = "thread-icon";
+  await api.openDialog();
+  const iconDialog = document.body.children.find((child) =>
+    child?.__codexWorkspaceCheckpointContext?.threadId === "thread-icon"
+  );
+  const iconDialogContext = iconDialog?.__codexWorkspaceCheckpointContext || null;
+  activeConversationId = "thread-other";
+  const catalogContextAfterThreadSwitch = api.context(null, {{}}).cwd;
+  activeConversationId = "thread-12345678";
 
   let markDelayedBindStarted = null;
   const delayedBindStartedPromise = new Promise((resolve) => {{
@@ -1173,6 +1275,8 @@ api.setBackendSettingsForTest({{
   let checkpointConfirmationBackgroundRestored = false;
   let checkpointRepeatedConfirmationSettled = false;
   if (checkpointCustomConfirmationAvailable) {{
+    const checkpointPreviousConversationId = activeConversationId;
+    activeConversationId = "thread-confirm";
     const checkpointContext = {{
       cwd: "C:\\confirm-repo",
       threadId: "thread-confirm",
@@ -1333,6 +1437,7 @@ api.setBackendSettingsForTest({{
     checkpointUndoConfirmRan =
       checkpointBridgeCallCount("/workspace-checkpoint/restore-for-revert") ===
       undoBeforeConfirm + 1;
+    activeConversationId = checkpointPreviousConversationId;
   }}
 
   process.stdout.write(JSON.stringify({{
@@ -1353,6 +1458,10 @@ api.setBackendSettingsForTest({{
     completionListenerInstalled,
     completionListenerSubscriptionCount,
     completedTurnPayload,
+    catalogContext,
+    catalogContextCached,
+    iconDialogContext,
+    catalogContextAfterThreadSwitch,
     completionWaitedForBind,
     raceCompletedTurnPayload,
     fastCompletionPayload,
@@ -1569,7 +1678,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "89";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "90";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -1809,7 +1918,7 @@ fn renderer_task_board_navigation_opens_inline_and_offers_new_window_on_context_
         .and_then(|section| section.split("function reconcileTaskBoardEntry()").next())
         .expect("standalone task board opener should be present");
 
-    assert!(script.contains(r#"const taskBoardRuntimeVersion = "62";"#));
+    assert!(script.contains(r#"const taskBoardRuntimeVersion = "63";"#));
     assert!(script.contains(r#"renameTask: "/task-board/task-rename""#));
     assert!(script.contains("function taskBoardSubmitTaskRename("));
     let card_title_input_styles = script
@@ -3651,8 +3760,9 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
     assert!(script.contains("快速打开工作区"));
     assert!(script.contains("data-codex-open-in-button"));
     assert!(script.contains("codex-open-in-menu"));
-    assert!(script.contains(r#"const codexOpenInVersion = "8";"#));
-    assert!(script.contains(r#"const codexDeleteStyleVersion = "89";"#));
+    assert!(script.contains(r#"const codexOpenInVersion = "10";"#));
+    assert!(script.contains("window.__codexElvesOpenInRuntimeVersion === codexOpenInVersion"));
+    assert!(script.contains(r#"const codexDeleteStyleVersion = "90";"#));
     assert!(script.contains(r#"[data-codex-open-in-role="primary"]"#));
     assert!(script.contains(r#"[data-codex-open-in-role="arrow"]"#));
     assert!(script.contains("width: 30px !important;"));
@@ -3672,14 +3782,7 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
         group_style.contains("var(--color-text, var(--color-token-text-primary, currentColor)) 5%")
     );
     assert!(group_style.contains("box-shadow: none;"));
-    let summary_anchor_style = script
-        .split(r#".codex-open-in-group[data-codex-open-in-anchor="summary"] {"#)
-        .nth(1)
-        .expect("summary-adjacent open in style should be present")
-        .split("\n      }")
-        .next()
-        .expect("summary-adjacent open in style should be closed");
-    assert!(summary_anchor_style.contains("margin-right: 6px;"));
+    assert!(!script.contains(r#".codex-open-in-group[data-codex-open-in-anchor="summary"]"#));
     let button_style = script
         .split(".codex-open-in-group button {")
         .nth(1)
@@ -3691,7 +3794,6 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
     assert!(
         script.contains("var(--color-text, var(--color-token-text-primary, currentColor)) 10%")
     );
-    assert!(script.contains(r#"anchorType: "summary""#));
     assert!(script.contains(r#"anchorType: "toolbar""#));
     let anchor_block = script
         .split("function codexOpenInAnchor()")
@@ -3700,6 +3802,8 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
         .split("function removeCodexOpenInControls")
         .next()
         .expect("open in anchor resolver should be closed");
+    assert!(!anchor_block.contains("pinnedSummaryToggle"));
+    assert!(!anchor_block.contains(r#"anchorType: "summary""#));
     assert!(anchor_block.contains("const before = Array.from(group.childNodes || []).find"));
     assert!(anchor_block.contains(
         "node.nodeType !== 1 || node.getAttribute?.(codexOpenInButtonAttribute) !== \"true\""
@@ -3881,6 +3985,21 @@ fn injection_script_open_in_resolves_workspace_from_conversation_manager() {
     assert!(context_block.contains("getConversation?.(conversationId)"));
     assert!(context_block.contains("conversation?.cwd"));
     assert!(context_block.contains("conversation?.hostId"));
+    let resolver_block = script
+        .split("async function resolveCodexOpenInContext()")
+        .nth(1)
+        .expect("open in must support versions without a discoverable React manager")
+        .split("\n  }")
+        .next()
+        .unwrap();
+    assert!(
+        resolver_block.contains("await codexWorkspaceCheckpointSessionContext(conversationId)")
+    );
+    assert!(
+        resolver_block
+            .contains("if (!isCodexOpenInContextCurrent({ conversationId })) return null;")
+    );
+    assert!(resolver_block.contains("codexOpenInSessionContextCache"));
 
     let available_block = script
         .split("function codexOpenInAvailableTargets")

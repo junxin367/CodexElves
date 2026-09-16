@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "89";
+  const codexDeleteStyleVersion = "90";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -84,7 +84,7 @@
   const codexFailureHistoryMaxEntries = 64;
   const codexManagerReactDiscoveryCooldownMs = 15000;
   const codexOpenInButtonAttribute = "data-codex-open-in-button";
-  const codexOpenInVersion = "8";
+  const codexOpenInVersion = "10";
   const codexOpenInGroupClass = "codex-open-in-group";
   const codexOpenInMenuClass = "codex-open-in-menu";
   const codexOpenInTargetsCacheLimit = 12;
@@ -106,16 +106,17 @@
   const codexPromptOptimizeCompactCollisionMaxWidth = 140;
   const codexPromptOptimizeCompactCollisionMaxHeight = 84;
   const codexPromptOptimizeMaxRecentContextChars = 100000;
-  const codexWorkspaceCheckpointVersion = "3";
+  const codexWorkspaceCheckpointVersion = "5";
   const codexWorkspaceCheckpointButtonAttribute = "data-codex-workspace-checkpoint-button";
   const codexWorkspaceCheckpointButtonGap = 6;
   const codexWorkspaceCheckpointDialogClass = "codex-workspace-checkpoint-dialog";
   const codexWorkspaceCheckpointEditButtonAttribute = "data-codex-workspace-checkpoint-edit-button";
+  const codexWorkspaceCheckpointWorkspaceCacheTtlMs = 15 * 1000;
   const codexWorkspaceCheckpointIntentTtlMs = 2 * 60 * 1000;
   const codexWorkspaceCheckpointCompletionHintTtlMs = 10 * 1000;
   const codexWorkspaceCheckpointPatchRetryBaseMs = 1000;
   const codexWorkspaceCheckpointPatchRetryMaxMs = 30000;
-  const taskBoardRuntimeVersion = "62";
+  const taskBoardRuntimeVersion = "63";
   const taskBoardNativeOperationLeaseTtlMs = 2 * 60 * 1000;
   const taskBoardNativeCreateBusyMessage = "另一个窗口正在创建原生会话，请稍后重试";
   const taskBoardEntryAttribute = "data-codex-task-board-entry";
@@ -342,6 +343,8 @@
     window.__codexElvesRuntimeBuild === codexElvesBuild &&
     window.__codexElvesRuntimeHelperBase === helperBase &&
     window.__codexElvesRuntimeManagerDiscoveryVersion === codexAppServerManagerDiscoveryVersion &&
+    window.__codexElvesOpenInRuntimeVersion === codexOpenInVersion &&
+    window.__codexElvesWorkspaceCheckpointRuntimeVersion === codexWorkspaceCheckpointVersion &&
     typeof window.__codexElvesRefreshRuntime === "function" &&
     taskBoardRuntimeCanRefresh() &&
     promptOptimizeRuntimeCanRefresh()
@@ -862,9 +865,6 @@
         );
         color: var(--color-token-text-secondary, currentColor);
         box-shadow: none;
-      }
-      .codex-open-in-group[data-codex-open-in-anchor="summary"] {
-        margin-right: 6px;
       }
       .codex-open-in-group button {
         display: inline-grid !important;
@@ -2611,6 +2611,13 @@
       }
       .${taskBoardMainHostClass} > :not([${taskBoardRootAttribute}="true"]) {
         display: none !important;
+      }
+      /* 浏览器侧栏 portal 挂在 body 下，不受 main 内的会话隐藏规则影响。
+         仅在看板挂载时隐藏其绘制和交互；不卸载 webview 或改动原生面板状态。 */
+      body:has(.${taskBoardMainHostClass} > [${taskBoardRootAttribute}="true"]) [data-browser-sidebar-webview-host-root],
+      body:has(.${taskBoardMainHostClass} > [${taskBoardRootAttribute}="true"]) [data-browser-sidebar-webview-host-root] * {
+        visibility: hidden !important;
+        pointer-events: none !important;
       }
       [${taskBoardNativeSelectionAttribute}="true"] {
         background-color: transparent !important;
@@ -5839,17 +5846,41 @@
       params?.threadId ||
       params?.conversationId ||
       params?.targetConversationId ||
+      activeConversationIdFromDom() ||
       currentSessionRef()?.session_id
     );
   }
 
-  function codexWorkspaceCheckpointConversation(threadId) {
+  function codexWorkspaceCheckpointConversation(threadId, preferredManager = null) {
     if (!threadId) return null;
+    const managers = [
+      preferredManager,
+      window.__codexElvesConversationStateManager,
+    ];
     try {
-      return findCodexConversationManagerInReactTree()?.manager?.getConversation?.(threadId) || null;
+      managers.push(findCodexConversationManagerInReactTree()?.manager || null);
     } catch {
-      return null;
     }
+    const seen = new Set();
+    let firstConversation = null;
+    let firstHostConversation = null;
+    for (const manager of managers) {
+      if (!manager || seen.has(manager) || typeof manager.getConversation !== "function") continue;
+      seen.add(manager);
+      try {
+        const conversation = manager.getConversation(threadId);
+        if (!conversation) continue;
+        firstConversation ||= conversation;
+        if (codexWorkspaceCheckpointConversationCwd(conversation)) {
+          return conversation;
+        }
+        if (!firstHostConversation && String(conversation?.hostId || "").trim()) {
+          firstHostConversation = conversation;
+        }
+      } catch {
+      }
+    }
+    return firstHostConversation || firstConversation;
   }
 
   function codexWorkspaceCheckpointConversationBusy(threadId) {
@@ -5890,38 +5921,356 @@
     return "";
   }
 
-  function codexWorkspaceCheckpointContext(client, params = {}) {
-    const threadId = codexWorkspaceCheckpointRequestThreadId(params);
-    const conversation = codexWorkspaceCheckpointConversation(threadId);
-    const directCwd = [
+  function codexWorkspaceCheckpointAbsoluteCwd(value) {
+    const cwd = String(value || "").trim();
+    return /^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(cwd) ? cwd : "";
+  }
+
+  function codexWorkspaceCheckpointConversationCwd(conversation) {
+    return [
+      conversation?.cwd,
+      conversation?.workdir,
+      conversation?.workingDirectory,
+      conversation?.workspacePath,
+      conversation?.worktreePath,
+      conversation?.project?.cwd,
+      conversation?.project?.path,
+      conversation?.workspace?.cwd,
+      conversation?.workspace?.path,
+      conversation?.metadata?.cwd,
+      conversation?.metadata?.workdir,
+      conversation?.metadata?.workspacePath,
+      conversation?.metadata?.worktreePath,
+      conversation?.metadata?.workspace?.cwd,
+      conversation?.metadata?.workspace?.path,
+      conversation?.context?.cwd,
+      conversation?.context?.workdir,
+      conversation?.context?.workspacePath,
+      conversation?.thread?.cwd,
+      conversation?.thread?.workspace?.cwd,
+    ]
+      .map(codexWorkspaceCheckpointAbsoluteCwd)
+      .find(Boolean) || "";
+  }
+
+  function codexWorkspaceCheckpointDomCwd(threadId) {
+    const attributeNames = [
+      "data-codex-workspace-path",
+      "data-codex-worktree-path",
+      "data-workspace-path",
+      "data-worktree-path",
+      "data-working-directory",
+      "data-workdir",
+      "data-cwd",
+    ];
+    const readNode = (node) => {
+      for (const name of attributeNames) {
+        const cwd = codexWorkspaceCheckpointAbsoluteCwd(node?.getAttribute?.(name));
+        if (cwd) return cwd;
+      }
+      return "";
+    };
+    const readAncestors = (node) => {
+      let current = node;
+      for (let depth = 0; current && depth < 6; depth += 1) {
+        const cwd = readNode(current);
+        if (cwd) return cwd;
+        current = current.parentElement;
+      }
+      return "";
+    };
+
+    try {
+      const signal = document.querySelector?.("[data-above-composer-conversation-id]");
+      const signalId = String(
+        signal?.getAttribute?.("data-above-composer-conversation-id") || ""
+      ).trim();
+      if (
+        threadId &&
+        signalId &&
+        codexWorkspaceCheckpointSessionKey(signalId) ===
+          codexWorkspaceCheckpointSessionKey(threadId)
+      ) {
+        const cwd = readAncestors(signal);
+        if (cwd) return cwd;
+      }
+    } catch {
+    }
+
+    try {
+      const rows = document.querySelectorAll?.("[data-app-action-sidebar-thread-id]") || [];
+      for (const row of Array.from(rows)) {
+        const rowId = String(row?.getAttribute?.("data-app-action-sidebar-thread-id") || "").trim();
+        if (
+          !rowId ||
+          codexWorkspaceCheckpointSessionKey(rowId) !==
+            codexWorkspaceCheckpointSessionKey(threadId)
+        ) {
+          continue;
+        }
+        const cwd = readAncestors(row);
+        if (cwd) return cwd;
+        const projectRow = row.closest?.("[data-app-action-sidebar-project-row]");
+        const projectCwd = readAncestors(projectRow);
+        if (projectCwd) return projectCwd;
+      }
+    } catch {
+    }
+    return "";
+  }
+
+  function codexWorkspaceCheckpointCachedWorkspace(threadId, expectedHostId = "") {
+    const cached = window.__codexWorkspaceCheckpointLastWorkspace;
+    if (!threadId || !cached || cached.threadId !== threadId) return null;
+    const normalizedExpectedHostId = String(expectedHostId || "").trim();
+    if (
+      normalizedExpectedHostId &&
+      cached.hostId &&
+      cached.hostId !== normalizedExpectedHostId
+    ) {
+      return null;
+    }
+    if (
+      !cached.at ||
+      Date.now() - finiteNonNegativeNumber(cached.at) > codexWorkspaceCheckpointWorkspaceCacheTtlMs
+    ) {
+      window.__codexWorkspaceCheckpointLastWorkspace = null;
+      return null;
+    }
+    const cwd = codexWorkspaceCheckpointAbsoluteCwd(cached.cwd);
+    return cwd ? { cwd, hostId: String(cached.hostId || "local").trim() || "local" } : null;
+  }
+
+  function rememberCodexWorkspaceCheckpointWorkspace(threadId, cwd, hostId = "local") {
+    const normalizedThreadId = validThreadSessionKey(threadId);
+    const normalizedCwd = codexWorkspaceCheckpointAbsoluteCwd(cwd);
+    if (!normalizedThreadId || !normalizedCwd) return;
+    window.__codexWorkspaceCheckpointLastWorkspace = {
+      threadId: normalizedThreadId,
+      cwd: normalizedCwd,
+      hostId: String(hostId || "local").trim() || "local",
+      at: Date.now(),
+    };
+  }
+
+  function codexWorkspaceCheckpointSessionKey(value) {
+    return String(value || "").trim().replace(/^local:/i, "").toLowerCase();
+  }
+
+  function codexWorkspaceCheckpointDirectCwd(params) {
+    const candidates = [
       params?.cwd,
       params?.workdir,
       params?.workspacePath,
       params?.worktreePath,
       params?.context?.cwd,
-    ].find((value) => typeof value === "string" && value.trim());
+      params?.context?.workdir,
+      params?.context?.workspacePath,
+      params?.context?.worktreePath,
+    ];
+    for (const value of candidates) {
+      if (value === undefined || value === null || String(value).trim() === "") continue;
+      return {
+        provided: true,
+        cwd: codexWorkspaceCheckpointAbsoluteCwd(value),
+      };
+    }
+    return { provided: false, cwd: "" };
+  }
+
+  function codexWorkspaceCheckpointHasExplicitThread(params) {
+    return Boolean(
+      params?.threadId ||
+      params?.conversationId ||
+      params?.targetConversationId
+    );
+  }
+
+  function codexWorkspaceCheckpointSessionContext(threadId) {
+    const key = codexWorkspaceCheckpointSessionKey(threadId);
+    if (!key) return Promise.resolve(null);
+    if (!(window.__codexWorkspaceCheckpointSessionContextPromises instanceof Map)) {
+      window.__codexWorkspaceCheckpointSessionContextPromises = new Map();
+    }
+    const promises = window.__codexWorkspaceCheckpointSessionContextPromises;
+    const existing = promises.get(key);
+    if (existing) return existing;
+    const promise = postJson("/workspace-checkpoint/session-context", {
+      session_id: threadId,
+    })
+      .then((result) => {
+        const responseThreadId = result?.sessionId || result?.session_id || threadId;
+        if (
+          result?.status !== "ok" ||
+          codexWorkspaceCheckpointSessionKey(responseThreadId) !== key
+        ) {
+          return null;
+        }
+        const cwd = codexWorkspaceCheckpointAbsoluteCwd(result?.cwd);
+        return cwd
+          ? {
+              cwd,
+              hostId: String(result?.hostId || result?.host_id || "local").trim() || "local",
+            }
+          : null;
+      })
+      .catch(() => null)
+      .finally(() => {
+        if (promises.get(key) === promise) promises.delete(key);
+      });
+    promises.set(key, promise);
+    return promise;
+  }
+
+  function codexWorkspaceCheckpointContext(client, params = {}) {
+    const threadId = codexWorkspaceCheckpointRequestThreadId(params);
+    const previousWorkspace = window.__codexWorkspaceCheckpointLastWorkspace;
+    if (
+      threadId &&
+      previousWorkspace?.threadId &&
+      previousWorkspace.threadId !== threadId
+    ) {
+      window.__codexWorkspaceCheckpointLastWorkspace = null;
+    }
+    const conversation = codexWorkspaceCheckpointConversation(threadId, client);
+    const direct = codexWorkspaceCheckpointDirectCwd(params);
+    const directCwd = direct.cwd;
+    const conversationCwd = codexWorkspaceCheckpointConversationCwd(conversation);
     let openInContext = null;
-    if (!directCwd && !conversation?.cwd) {
+    if (!direct.provided && !conversationCwd) {
       try {
         openInContext = codexOpenInContext();
       } catch {
         openInContext = null;
       }
     }
-    const cwd = String(directCwd || conversation?.cwd || openInContext?.cwd || "").trim();
+    const openInContextForThread = openInContext &&
+      (!threadId ||
+        !openInContext.conversationId ||
+        codexWorkspaceCheckpointSessionKey(openInContext.conversationId) ===
+          codexWorkspaceCheckpointSessionKey(threadId))
+      ? openInContext
+      : null;
+    const knownHostId = String(
+      params?.hostId ||
+      codexWorkspaceCheckpointClientHostId(client) ||
+      conversation?.hostId ||
+      openInContextForThread?.hostId ||
+      ""
+    ).trim();
+    const cachedWorkspace = codexWorkspaceCheckpointCachedWorkspace(threadId, knownHostId);
+    const domCwd = cachedWorkspace?.cwd
+      ? ""
+      : codexWorkspaceCheckpointDomCwd(threadId);
+    let cwd = "";
+    let cwdSource = "";
+    if (direct.provided) {
+      cwd = directCwd;
+      cwdSource = directCwd ? "direct" : "invalid";
+    } else if (conversationCwd) {
+      cwd = conversationCwd;
+      cwdSource = "conversation";
+    } else if (codexWorkspaceCheckpointAbsoluteCwd(openInContextForThread?.cwd)) {
+      cwd = codexWorkspaceCheckpointAbsoluteCwd(openInContextForThread.cwd);
+      cwdSource = "open_in";
+    } else if (cachedWorkspace?.cwd) {
+      cwd = cachedWorkspace.cwd;
+      cwdSource = "cache";
+    } else if (domCwd) {
+      cwd = domCwd;
+      cwdSource = "dom";
+    }
     const hostId = String(
       params?.hostId ||
-      conversation?.hostId ||
-      openInContext?.hostId ||
       codexWorkspaceCheckpointClientHostId(client) ||
+      conversation?.hostId ||
+      openInContextForThread?.hostId ||
+      knownHostId ||
+      cachedWorkspace?.hostId ||
       "local"
     ).trim();
+    if (cwd && threadId) rememberCodexWorkspaceCheckpointWorkspace(threadId, cwd, hostId);
     return {
       cwd,
       threadId,
       hostId,
       local: !hostId || hostId === "local",
+      cwdSource,
+      invalidCwd: direct.provided && !directCwd,
     };
+  }
+
+  async function codexWorkspaceCheckpointContextAsync(client, params = {}) {
+    const context = codexWorkspaceCheckpointContext(client, params);
+    const direct = codexWorkspaceCheckpointDirectCwd(params);
+    if (
+      !context.local ||
+      !context.threadId ||
+      context.invalidCwd ||
+      direct.provided
+    ) {
+      return context;
+    }
+    let resolved = context;
+    const sessionContext = await codexWorkspaceCheckpointSessionContext(context.threadId);
+    if (sessionContext?.cwd) {
+      rememberCodexWorkspaceCheckpointWorkspace(
+        context.threadId,
+        sessionContext.cwd,
+        sessionContext.hostId || context.hostId
+      );
+      resolved = {
+        ...context,
+        cwd: sessionContext.cwd,
+        hostId: sessionContext.hostId || context.hostId,
+        local: (sessionContext.hostId || context.hostId || "local") === "local",
+        cwdSource: "session",
+      };
+    }
+    if (!codexWorkspaceCheckpointHasExplicitThread(params)) {
+      const current = codexWorkspaceCheckpointContext(client, {});
+      const hostMatches = !resolved.hostId ||
+        !current.hostId ||
+        resolved.hostId === current.hostId;
+      if (
+        !codexWorkspaceCheckpointFeatureEnabled() ||
+        !current.threadId ||
+        current.threadId !== resolved.threadId ||
+        !hostMatches
+      ) {
+        return {
+          ...current,
+          cwd: "",
+          cwdSource: "",
+          stale: true,
+        };
+      }
+    }
+    return resolved;
+  }
+
+  function codexWorkspaceCheckpointContextMatchesCurrent(client, context) {
+    if (!context?.threadId) return false;
+    const current = codexWorkspaceCheckpointContext(client, {});
+    return current.threadId === context.threadId &&
+      current.local === context.local &&
+      (!context.hostId || !current.hostId || context.hostId === current.hostId);
+  }
+
+  async function codexWorkspaceCheckpointFreshCurrentContext(context) {
+    const current = await codexWorkspaceCheckpointContextAsync(null, {});
+    if (
+      current.stale ||
+      !current.threadId ||
+      current.threadId !== context?.threadId ||
+      current.local !== context?.local ||
+      (context?.hostId && current.hostId && context.hostId !== current.hostId) ||
+      !current.cwd ||
+      (context?.cwd && !sameWorkspacePath(current.cwd, context.cwd))
+    ) {
+      return null;
+    }
+    return current;
   }
 
   function codexWorkspaceCheckpointPromptPreview(params) {
@@ -5964,7 +6313,8 @@
   }
 
   async function createCodexWorkspaceCheckpoint(client, params) {
-    const context = codexWorkspaceCheckpointContext(client, params);
+    const context = await codexWorkspaceCheckpointContextAsync(client, params);
+    if (context.stale) throw new Error("会话已切换，请重试");
     if (!context.local) return { skipped: true, reason: "remote_host", context };
     if (!context.cwd) throw new Error("未识别到当前会话工作目录");
     if (!context.threadId) throw new Error("未识别到当前 thread");
@@ -6178,20 +6528,11 @@
     if (!codexWorkspaceCheckpointFeatureEnabled()) return false;
     const completion = codexWorkspaceCheckpointCompletionPayload(notification);
     if (!completion) return false;
-    let conversation = null;
-    try {
-      conversation = manager?.getConversation?.(completion.threadId) || null;
-    } catch {
-      conversation = null;
-    }
-    const cwd = String(completion.params?.cwd || conversation?.cwd || "").trim();
-    const hostId = String(
-      completion.params?.hostId ||
-      conversation?.hostId ||
-      manager?.hostId ||
-      "local"
-    ).trim();
-    if (hostId && hostId !== "local") return false;
+    const context = await codexWorkspaceCheckpointContextAsync(manager, completion.params);
+    if (context.stale) return false;
+    const cwd = String(context.cwd || "").trim();
+    const hostId = String(context.hostId || manager?.hostId || "local").trim();
+    if (!context.local || (hostId && hostId !== "local")) return false;
     if (!cwd) throw new Error("未识别到已完成轮次的工作目录");
 
     await waitForCodexWorkspaceCheckpointBinding(
@@ -6313,9 +6654,25 @@
   }
 
   async function restoreCodexWorkspaceCheckpointForNativeRevert(client, method, params, intent) {
-    const context = codexWorkspaceCheckpointContext(client, params);
-    const cwd = String(intent.cwd || context.cwd || "").trim();
-    const threadId = String(intent.threadId || context.threadId || "").trim();
+    const context = await codexWorkspaceCheckpointContextAsync(client, params);
+    if (context.stale) throw new Error("会话已切换，请重试");
+    const intentThreadId = validThreadSessionKey(intent?.threadId);
+    const contextThreadId = validThreadSessionKey(context?.threadId);
+    if (
+      !intentThreadId ||
+      !contextThreadId ||
+      codexWorkspaceCheckpointSessionKey(intentThreadId) !==
+        codexWorkspaceCheckpointSessionKey(contextThreadId)
+    ) {
+      throw new Error("会话已切换，请重试");
+    }
+    const intentHostId = String(intent?.hostId || "").trim();
+    if (intentHostId && context.hostId && intentHostId !== context.hostId) {
+      throw new Error("会话已切换，请重试");
+    }
+    const cwd = String(context.cwd || "").trim();
+    if (!cwd) throw new Error("未识别到当前会话工作目录");
+    const threadId = contextThreadId;
     if (!context.local) throw new Error("远程会话暂不支持工作区 Checkpoint");
     const result = await postJson("/workspace-checkpoint/restore-for-revert", {
       cwd,
@@ -6561,7 +6918,8 @@
     const previewToken = String(Number(button.dataset.checkpointPreviewToken || 0) + 1);
     button.dataset.checkpointPreviewToken = previewToken;
     setCodexWorkspaceCheckpointEditButtonAvailability(button, nativeSubmit, "checking");
-    const context = codexWorkspaceCheckpointContext(null, {});
+    let context = await codexWorkspaceCheckpointContextAsync(null, {});
+    if (context.stale) return;
     if (!context.local || !context.cwd || !context.threadId) {
       setCodexWorkspaceCheckpointEditButtonAvailability(button, nativeSubmit, "unknown");
       return;
@@ -6575,6 +6933,15 @@
       ) {
         return;
       }
+      if (
+        !codexWorkspaceCheckpointFeatureEnabled() ||
+        !codexWorkspaceCheckpointContextMatchesCurrent(null, context)
+      ) {
+        return;
+      }
+      const freshContext = await codexWorkspaceCheckpointFreshCurrentContext(context);
+      if (!freshContext) return;
+      context = freshContext;
       if (hintedNoChanges) {
         setCodexWorkspaceCheckpointEditButtonAvailability(button, nativeSubmit, "no_changes");
       }
@@ -6587,6 +6954,12 @@
       if (
         !button.isConnected ||
         button.dataset.checkpointPreviewToken !== previewToken
+      ) {
+        return;
+      }
+      if (
+        !codexWorkspaceCheckpointFeatureEnabled() ||
+        !codexWorkspaceCheckpointContextMatchesCurrent(null, context)
       ) {
         return;
       }
@@ -6618,7 +6991,7 @@
     }
   }
 
-  function beginCodexWorkspaceCheckpointEditSubmit(button, nativeSubmit) {
+  async function beginCodexWorkspaceCheckpointEditSubmit(button, nativeSubmit) {
     if (!codexElvesSettings().workspaceCheckpoint) {
       showToast("请先在功能增强中开启 Checkpoint");
       return;
@@ -6631,7 +7004,8 @@
     ) {
       return;
     }
-    const context = codexWorkspaceCheckpointContext(null, {});
+    let context = await codexWorkspaceCheckpointContextAsync(null, {});
+    if (context.stale) return;
     if (!context.local) {
       showToast("远程会话暂不支持工作区 Checkpoint");
       return;
@@ -6640,9 +7014,13 @@
       showToast("未识别到当前会话工作目录或 thread");
       return;
     }
+    const freshContext = await codexWorkspaceCheckpointFreshCurrentContext(context);
+    if (!freshContext) return;
+    context = freshContext;
     const intent = {
       cwd: context.cwd,
       threadId: context.threadId,
+      hostId: context.hostId,
       createdAt: Date.now(),
       phase: "waiting",
     };
@@ -6680,7 +7058,7 @@
         button.addEventListener("click", (event) => {
           event.preventDefault();
           event.stopPropagation();
-          beginCodexWorkspaceCheckpointEditSubmit(button, submit);
+          void beginCodexWorkspaceCheckpointEditSubmit(button, submit);
         }, true);
         submit.parentElement?.insertBefore(button, submit);
         void refreshCodexWorkspaceCheckpointEditButtonAvailability(button, submit);
@@ -6933,6 +7311,20 @@
   async function loadCodexWorkspaceCheckpointDialogList(dialog, context) {
     const list = dialog.querySelector("[data-codex-workspace-checkpoint-list]");
     if (!list) return;
+    if (
+      !codexWorkspaceCheckpointFeatureEnabled() ||
+      !codexWorkspaceCheckpointContextMatchesCurrent(null, context)
+    ) {
+      dialog.closest(".codex-workspace-checkpoint-overlay")?.remove();
+      return;
+    }
+    const freshContext = await codexWorkspaceCheckpointFreshCurrentContext(context);
+    if (!freshContext) {
+      dialog.closest(".codex-workspace-checkpoint-overlay")?.remove();
+      return;
+    }
+    context = freshContext;
+    await installCodexWorkspaceCheckpointRequestClientPatch();
     const requestId = Number(dialog.__codexWorkspaceCheckpointListRequestId || 0) + 1;
     dialog.__codexWorkspaceCheckpointListRequestId = requestId;
     list.innerHTML = '<div class="codex-workspace-checkpoint-empty">正在读取 Checkpoint…</div>';
@@ -6942,6 +7334,19 @@
       limit: 100,
     });
     if (dialog.__codexWorkspaceCheckpointListRequestId !== requestId) return;
+    if (
+      !codexWorkspaceCheckpointFeatureEnabled() ||
+      !codexWorkspaceCheckpointContextMatchesCurrent(null, context)
+    ) {
+      dialog.closest(".codex-workspace-checkpoint-overlay")?.remove();
+      return;
+    }
+    const latestContext = await codexWorkspaceCheckpointFreshCurrentContext(context);
+    if (!latestContext) {
+      dialog.closest(".codex-workspace-checkpoint-overlay")?.remove();
+      return;
+    }
+    context = latestContext;
     if (result?.status !== "ok") {
       list.innerHTML = `<div class="codex-workspace-checkpoint-empty">${escapeHtml(result?.message || "读取 Checkpoint 失败")}</div>`;
       return;
@@ -6949,7 +7354,13 @@
     const checkpoints = Array.isArray(result.checkpoints) ? result.checkpoints : [];
     const checkpointHtml = codexWorkspaceCheckpointListHtml(checkpoints);
     if (!checkpointHtml) {
-      list.innerHTML = '<div class="codex-workspace-checkpoint-empty">当前会话还没有工作区 Checkpoint。</div>';
+      const ready = window.__codexWorkspaceCheckpointRequestClientPatchInstalled ===
+        codexWorkspaceCheckpointVersion;
+      list.innerHTML = `<div class="codex-workspace-checkpoint-empty">${
+        ready
+          ? "当前会话还没有工作区 Checkpoint。下一次发送消息前会自动保存；此前未保存的轮次无法补建。"
+          : "Checkpoint 自动保存尚未就绪，请稍后刷新。此前未保存的轮次无法恢复。"
+      }</div>`;
       return;
     }
     list.innerHTML = checkpointHtml;
@@ -6976,6 +7387,19 @@
       background: dialog.querySelector(".codex-workspace-checkpoint-dialog"),
     });
     if (!confirmed) return;
+    if (
+      !codexWorkspaceCheckpointFeatureEnabled() ||
+      !codexWorkspaceCheckpointContextMatchesCurrent(null, context)
+    ) {
+      closeCodexWorkspaceCheckpointDialog();
+      return;
+    }
+    const freshContext = await codexWorkspaceCheckpointFreshCurrentContext(context);
+    if (!freshContext) {
+      closeCodexWorkspaceCheckpointDialog();
+      return;
+    }
+    context = freshContext;
     button.disabled = true;
     button.textContent = "恢复中…";
     try {
@@ -7000,7 +7424,8 @@
       showToast("请先在功能增强中开启 Checkpoint");
       return;
     }
-    context = context || codexWorkspaceCheckpointContext(null, {});
+    context = context || await codexWorkspaceCheckpointContextAsync(null, {});
+    if (context.stale) return;
     if (!context.local) {
       showToast("远程会话暂不支持工作区 Checkpoint");
       return;
@@ -7022,6 +7447,19 @@
       background: button?.closest?.(".codex-workspace-checkpoint-dialog"),
     });
     if (!confirmed) return;
+    if (
+      !codexWorkspaceCheckpointFeatureEnabled() ||
+      !codexWorkspaceCheckpointContextMatchesCurrent(null, context)
+    ) {
+      closeCodexWorkspaceCheckpointDialog();
+      return;
+    }
+    const freshContext = await codexWorkspaceCheckpointFreshCurrentContext(context);
+    if (!freshContext) {
+      closeCodexWorkspaceCheckpointDialog();
+      return;
+    }
+    context = freshContext;
     if (button) {
       button.disabled = true;
       button.textContent = "撤销中…";
@@ -7046,12 +7484,14 @@
     }
   }
 
-  function openCodexWorkspaceCheckpointDialog() {
+  async function openCodexWorkspaceCheckpointDialog() {
     if (!codexWorkspaceCheckpointFeatureEnabled()) {
       showToast("请先在功能增强中开启 Checkpoint");
       return;
     }
-    const context = codexWorkspaceCheckpointContext(null, {});
+    const context = await codexWorkspaceCheckpointContextAsync(null, {});
+    if (context.stale) return;
+    if (!codexWorkspaceCheckpointFeatureEnabled()) return;
     if (!context.local) {
       showToast("远程会话暂不支持工作区 Checkpoint");
       return;
@@ -7136,6 +7576,8 @@
   if (window.__CODEX_ELVES_TEST_WORKSPACE_CHECKPOINT__) {
     window.__codexWorkspaceCheckpointTest = {
       context: (client, params) => codexWorkspaceCheckpointContext(client, params),
+      resolveContext: (client, params) => codexWorkspaceCheckpointContextAsync(client, params),
+      openDialog: () => openCodexWorkspaceCheckpointDialog(),
       promptPreview: (params) => codexWorkspaceCheckpointPromptPreview(params),
       sendRequest: (original, client, method, params, options) =>
         codexWorkspaceCheckpointSendRequest(original, client, method, params, options),
@@ -7477,7 +7919,7 @@
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="taskBoard"><span></span></button>
             </div>
             <div class="codex-elves-row">
-              <div><div class="codex-elves-row-title">快速打开工作区</div><div class="codex-elves-row-description">在标题栏摘要按钮左侧显示 Open in 快捷按钮，用首选应用一键打开当前会话目录；默认开启。</div></div>
+              <div><div class="codex-elves-row-title">快速打开工作区</div><div class="codex-elves-row-description">在顶部工具栏最左侧显示 Open in 快捷按钮，用首选应用一键打开当前会话目录；默认开启。</div></div>
               <button type="button" class="codex-elves-toggle" data-codex-elves-setting="openInQuickAccess"><span></span></button>
             </div>
             <div class="codex-elves-row">
@@ -9976,6 +10418,49 @@
       && !!candidate.threadStore;
   }
 
+  function findCodexConversationManagerInScopedSignals() {
+    // 新版客户端类不再导出；已创建的 manager 存在上层 React scope 的
+    // signal-family binding 中，其值由 store 持有，普通属性遍历无法读到。
+    const visitedFibers = new Set();
+    const visitedScopes = new Set();
+    const roots = codexSessionPrewarmReactObjectRoots();
+    for (const root of roots) {
+      for (let fiber = root, depth = 0; fiber && depth < 160; fiber = fiber.return, depth += 1) {
+        if (visitedFibers.has(fiber)) break;
+        visitedFibers.add(fiber);
+        const contexts = [fiber.memoizedProps?.value];
+        let dependency = fiber.dependencies?.firstContext;
+        for (let count = 0; dependency && count < 32; count += 1, dependency = dependency.next) {
+          contexts.push(dependency.memoizedValue);
+        }
+        for (const context of contexts) {
+          if (!(context instanceof Map)) continue;
+          for (const initialScope of Array.from(context.values()).slice(0, 32)) {
+            let scope = initialScope;
+            for (let count = 0; scope && count < 16; count += 1, scope = scope.parent) {
+              if (visitedScopes.has(scope)) break;
+              visitedScopes.add(scope);
+              if (!(scope.familyBindings instanceof Map)) continue;
+              // 只读已经绑定的 local 实例，不调用 family.resolve/get 创建新客户端，
+              // 也不读取远程 host 或无关 family 参数的状态。
+              for (const bindings of Array.from(scope.familyBindings.values()).slice(0, 2048)) {
+                if (!(bindings instanceof Map)) continue;
+                const signal = bindings.get("local")?.value;
+                if (!signal?.atom || typeof signal.store?.get !== "function") continue;
+                try {
+                  const candidate = signal.store.get(signal.atom);
+                  if (isCodexConversationManager(candidate)) return candidate;
+                } catch {
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return null;
+  }
+
   function findCodexConversationManagerInObjectGraph(roots, maxNodes = 30000) {
     const priorityQueue = [];
     const queue = [];
@@ -10057,6 +10542,12 @@
     }
     if (!force && isCodexConversationManager(codexConversationManager)) {
       return { manager: codexConversationManager, scanned: 0, exhausted: false, cached: true };
+    }
+    const scopedManager = findCodexConversationManagerInScopedSignals();
+    if (scopedManager) {
+      codexConversationManager = scopedManager;
+      window.__codexElvesConversationStateManager = scopedManager;
+      return { manager: scopedManager, scanned: 0, exhausted: false, source: "scoped_signal" };
     }
     const result = findCodexConversationManagerInObjectGraph(
       codexSessionPrewarmReactObjectRoots()
@@ -15448,7 +15939,7 @@
     button.addEventListener?.("click", (event) => {
       event.preventDefault?.();
       event.stopImmediatePropagation?.();
-      openCodexWorkspaceCheckpointDialog();
+      void openCodexWorkspaceCheckpointDialog();
     });
     portal.appendChild?.(button);
     promptOptimizePositionState.checkpointButton = button;
@@ -25449,7 +25940,9 @@
   let codexOpenInServiceUnavailableAt = 0;
   let codexOpenInServiceFailureLogged = false;
   let codexOpenInContextMissingAt = 0;
+  let codexOpenInSessionContextCache = null;
   let codexOpenInMenuState = null;
+  let codexOpenInPendingMenu = null;
   let codexOpenInButtonRefreshInFlight = false;
   let codexOpenInControlGroup = window.__codexOpenInControlGroup || null;
 
@@ -25531,6 +26024,12 @@
     const conversationId = activeConversationIdFromDom()
       || validThreadSessionKey(currentSessionRefFromDom()?.session_id);
     if (!conversationId) return null;
+    if (
+      codexOpenInSessionContextCache?.conversationId === conversationId
+      && Date.now() - codexOpenInSessionContextCache.at <= codexOpenInContextMissingCooldownMs
+    ) {
+      return codexOpenInSessionContextCache.context;
+    }
     if (codexOpenInContextMissingAt && Date.now() - codexOpenInContextMissingAt <= codexOpenInContextMissingCooldownMs) return null;
     let conversation = null;
     try {
@@ -25548,6 +26047,35 @@
       ? conversation.hostId
       : "local";
     return { conversationId, cwd, hostId };
+  }
+
+  function isCodexOpenInContextCurrent(context) {
+    const conversationId = activeConversationIdFromDom()
+      || validThreadSessionKey(currentSessionRefFromDom()?.session_id);
+    return !!context && context.conversationId === conversationId;
+  }
+
+  async function resolveCodexOpenInContext() {
+    const context = codexOpenInContext();
+    if (context) return context;
+    const conversationId = activeConversationIdFromDom()
+      || validThreadSessionKey(currentSessionRefFromDom()?.session_id);
+    if (!conversationId) return null;
+    if (
+      codexOpenInSessionContextCache?.conversationId === conversationId
+      && Date.now() - codexOpenInSessionContextCache.at <= codexOpenInContextMissingCooldownMs
+    ) {
+      return codexOpenInSessionContextCache.context;
+    }
+    // 新版 Codex 不保证 React 树中暴露会话管理器，按当前会话 ID 从后端读取目录。
+    // 此接口只读会话元数据，与工作区检查点开关无关。
+    const sessionContext = await codexWorkspaceCheckpointSessionContext(conversationId);
+    if (!isCodexOpenInContextCurrent({ conversationId })) return null;
+    const resolved = sessionContext?.cwd
+      ? { conversationId, cwd: sessionContext.cwd, hostId: sessionContext.hostId }
+      : null;
+    codexOpenInSessionContextCache = { conversationId, context: resolved, at: Date.now() };
+    return resolved;
   }
 
   function codexOpenInTargetsCacheKey(context) {
@@ -25712,18 +26240,6 @@
   }
 
   function codexOpenInAnchor() {
-    const summaryToggle = document.querySelector(selectors.pinnedSummaryToggle);
-    if (summaryToggle) {
-      const wrapper = summaryToggle.closest("span") || summaryToggle;
-      if (wrapper?.parentElement) {
-        return {
-          parent: wrapper.parentElement,
-          before: wrapper,
-          nativeClass: summaryToggle.className || headerIconTextButtonClass,
-          anchorType: "summary",
-        };
-      }
-    }
     const surface = document.querySelector(selectors.headerContextMenuSurface);
     const group = Array.from(surface?.querySelectorAll("div") || []).find((node) => {
       const className = String(node.className || "");
@@ -25894,13 +26410,14 @@
 
   async function activateCodexOpenInPrimary(button) {
     if (button.dataset.busy === "true") return;
-    const context = codexOpenInContext();
-    if (!context) {
-      showToast("未识别到当前会话工作目录");
-      return;
-    }
     button.dataset.busy = "true";
+    let context = null;
     try {
+      context = await resolveCodexOpenInContext();
+      if (!context) {
+        showToast("未识别到当前会话工作目录");
+        return;
+      }
       let result = await loadCodexOpenInTargets(context, { force: true });
       let target = codexOpenInPrimaryTarget(result);
       if (!target) {
@@ -25911,6 +26428,7 @@
         showToast("未找到可用的打开方式");
         return;
       }
+      if (!isCodexOpenInContextCurrent(context)) return;
       renderCodexOpenInPrimaryTarget(button, target);
       dispatchCodexOpenInTarget(context, target);
     } catch (error) {
@@ -25946,6 +26464,15 @@
   }
 
   function closeCodexOpenInMenu({ restoreFocus = true } = {}) {
+    const pending = codexOpenInPendingMenu;
+    codexOpenInPendingMenu = null;
+    if (pending) {
+      document.removeEventListener("keydown", pending.keydownHandler, true);
+      document.removeEventListener("pointerdown", pending.dismissHandler, true);
+      window.removeEventListener("resize", pending.viewportHandler);
+      window.removeEventListener("scroll", pending.viewportHandler, true);
+      window.removeEventListener("blur", pending.blurHandler);
+    }
     const state = codexOpenInMenuState;
     if (!state) return;
     codexOpenInMenuState = null;
@@ -26017,6 +26544,7 @@
   }
 
   async function activateCodexOpenInMenuItem(context, target) {
+    if (!isCodexOpenInContextCurrent(context)) return;
     const primary = document.querySelector(
       `[${codexOpenInButtonAttribute}="true"] [data-codex-open-in-role="primary"]`
     );
@@ -26028,7 +26556,12 @@
 
   async function openCodexOpenInMenu({ group, button }) {
     closeCodexOpenInMenu({ restoreFocus: false });
-    const context = codexOpenInContext();
+    const pending = { group, button };
+    codexOpenInPendingMenu = pending;
+    installCodexOpenInMenuDismissHandlers(pending);
+    const context = await resolveCodexOpenInContext();
+    if (codexOpenInPendingMenu !== pending) return;
+    closeCodexOpenInMenu({ restoreFocus: false });
     if (!context) {
       showToast("未识别到当前会话工作目录");
       return;
@@ -26056,6 +26589,10 @@
     try {
       const result = await loadCodexOpenInTargets(context);
       if (codexOpenInMenuState !== state) return;
+      if (!isCodexOpenInContextCurrent(context)) {
+        closeCodexOpenInMenu({ restoreFocus: false });
+        return;
+      }
       renderCodexOpenInMenuItems(menu, context, result);
       positionCodexOpenInMenu(menu, button);
     } catch (error) {
@@ -26070,6 +26607,10 @@
   }
 
   function toggleCodexOpenInMenu({ group, button }) {
+    if (codexOpenInPendingMenu?.button === button) {
+      closeCodexOpenInMenu({ restoreFocus: false });
+      return;
+    }
     if (codexOpenInMenuState && codexOpenInMenuState.button === button) {
       const menuIsOpen = codexOpenInMenuState.element?.isConnected === true;
       closeCodexOpenInMenu({ restoreFocus: menuIsOpen });
@@ -26093,7 +26634,7 @@
         removeCodexOpenInControls();
         return;
       }
-      const context = codexOpenInContext();
+      const context = await resolveCodexOpenInContext();
       if (
         codexOpenInMenuState
         && (!context
@@ -26122,7 +26663,9 @@
           hostId: context.hostId,
         });
       }
-      upsertCodexOpenInButton({ target: codexOpenInPrimaryTarget(result) });
+      if (isCodexOpenInContextCurrent(context)) {
+        upsertCodexOpenInButton({ target: codexOpenInPrimaryTarget(result) });
+      }
     } finally {
       codexOpenInButtonRefreshInFlight = false;
     }
@@ -26132,6 +26675,7 @@
     setTestApi: setCodexOpenInTestApi,
     refresh: refreshCodexOpenInButton,
     context: codexOpenInContext,
+    resolveContext: resolveCodexOpenInContext,
     upsert: upsertCodexOpenInButton,
     remove: removeCodexOpenInControls,
     availableTargets: codexOpenInAvailableTargets,
@@ -26597,6 +27141,8 @@
   window.__codexElvesRuntimeBuild = codexElvesBuild;
   window.__codexElvesRuntimeHelperBase = helperBase;
   window.__codexElvesRuntimeManagerDiscoveryVersion = codexAppServerManagerDiscoveryVersion;
+  window.__codexElvesOpenInRuntimeVersion = codexOpenInVersion;
+  window.__codexElvesWorkspaceCheckpointRuntimeVersion = codexWorkspaceCheckpointVersion;
   window.__codexElvesTaskBoardRuntimeVersion = taskBoardRuntimeVersion;
   window.__codexElvesPromptOptimizeCleanup = cleanupPromptOptimizeFeature;
   window.__codexElvesPromptOptimizeRefreshRuntime = installPromptOptimizeFeature;
