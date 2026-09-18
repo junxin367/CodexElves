@@ -196,6 +196,7 @@ type BackendSettings = {
   relayProfilesEnabled: boolean;
   enhancementsEnabled: boolean;
   computerUseGuardEnabled: boolean;
+  computerUseApiKeyBrowserCompatEnabled: boolean;
   codexAppPluginEntryUnlock: boolean;
   codexAppPluginMarketplaceUnlock: boolean;
   codexAppTaskBoard: boolean;
@@ -978,6 +979,7 @@ const defaultSettings: BackendSettings = {
   relayProfilesEnabled: true,
   enhancementsEnabled: true,
   computerUseGuardEnabled: true,
+  computerUseApiKeyBrowserCompatEnabled: true,
   codexAppPluginEntryUnlock: true,
   codexAppPluginMarketplaceUnlock: true,
   codexAppTaskBoard: true,
@@ -1949,32 +1951,32 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.4.1",
-        latestVersion: "0.4.1",
+        currentVersion: "0.4.2",
+        latestVersion: "0.4.2",
         releaseSummary: [
-          "CodexElves 0.4.1",
+          "CodexElves 0.4.2",
           "",
           "- 优化启动与托盘唤醒稳定性",
           "- 改进 GitHub Release 更新体验",
           "- 修复若干协议代理兼容性问题",
         ].join("\n"),
-        assetName: "CodexElves-0.4.1-windows-x64-setup.exe",
-        assetUrl: "https://example.test/CodexElves-0.4.1-windows-x64-setup.exe",
+        assetName: "CodexElves-0.4.2-windows-x64-setup.exe",
+        assetUrl: "https://example.test/CodexElves-0.4.2-windows-x64-setup.exe",
         updateAvailable: false,
       }, "发现可用更新。") as T);
     case "perform_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.4.1",
-        latestVersion: "0.4.1",
+        currentVersion: "0.4.2",
+        latestVersion: "0.4.2",
         releaseSummary: "浏览器预览不会下载真实安装包。",
-        installedPath: "C:\\Temp\\CodexElves-0.4.1-windows-x64-setup.exe",
+        installedPath: "C:\\Temp\\CodexElves-0.4.2-windows-x64-setup.exe",
         launched: true,
       }, "浏览器预览已模拟启动安装包。") as T);
     case "copy_diagnostics":
       return Promise.resolve(browserPreviewResult({
         report: [
           "CodexElves 诊断报告",
-          "版本: 0.4.1",
+          "版本: 0.4.2",
           "平台: windows-x64",
           "Codex 应用: C:\\Users\\junes\\AppData\\Local\\Programs\\CodexElves\\CodexElves.exe",
           "配置目录: C:\\Users\\junes\\.codex",
@@ -1995,7 +1997,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.4.1",
+        current_version: "0.4.2",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -5738,7 +5740,21 @@ function EnhanceScreen({
               />
               <span>
                 <strong>启用 Windows Computer Use Guard</strong>
-                <small>默认关闭；开启后启动 ChatGPT/Codex 时会自动保留官方 Computer Use 插件所需的 config.toml、bundled 插件和 notify 配置。</small>
+                <small>默认开启；启动 ChatGPT/Codex 时会自动保留官方 Computer Use 插件所需的 config.toml、bundled 插件和 notify 配置。</small>
+              </span>
+            </label>
+            <label className="switch-row">
+              <input
+                checked={form.computerUseApiKeyBrowserCompatEnabled}
+                onChange={(event) => onFormChange({
+                  ...form,
+                  computerUseApiKeyBrowserCompatEnabled: event.currentTarget.checked,
+                })}
+                type="checkbox"
+              />
+              <span>
+                <strong>API Key 浏览器插件兼容</strong>
+                <small>默认开启；解决 Chrome/Edge 插件在 API Key 模式下的 unsupported Codex auth method: apikey。启动时按原始哈希备份并识别新运行时，关闭后仅在校验一致时恢复。</small>
               </span>
             </label>
           </div>
@@ -11961,6 +11977,8 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
     codexHomePath: (settings.codexHomePath || "").trim(),
     relayProfilesEnabled: settings.relayProfilesEnabled !== false,
     computerUseGuardEnabled: settings.computerUseGuardEnabled !== false,
+    computerUseApiKeyBrowserCompatEnabled:
+      settings.computerUseApiKeyBrowserCompatEnabled !== false,
     lanProxyEnabled: settings.lanProxyEnabled === true,
     wsFailureFallbackToHttp: settings.wsFailureFallbackToHttp === true,
     codexAppImageOverlayOpacity: clampNumber(settings.codexAppImageOverlayOpacity || 35, 1, 100),

@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use sha2::{Digest, Sha256};
 use toml_edit::{Array, DocumentMut, Item, Table};
 
 const BUNDLED_MARKETPLACE: &str = "openai-bundled";
@@ -19,6 +20,15 @@ const SKY_INTERNAL_COMPUTER_USE_CLIENT_EXPORT: &str =
 const SKY_INTERNAL_COMPUTER_USE_CLIENT_IMPORT: &str =
     "@oai/sky/dist/project/cua/sky_js/src/targets/windows/internal/computer_use_client_base.js";
 const SKY_PACKAGE_EXPORTS_BACKUP: &str = "package.json.bak-codexpp-runtime-exports";
+const BROWSER_SERVICE_SCRIPT: &str = "browser-service.mjs";
+const BROWSER_SERVICE_LEGACY_BACKUP: &str = "browser-service.mjs.bak-codexelves-apikey-browser";
+const BROWSER_SERVICE_BACKUP_PREFIX: &str = "browser-service.mjs.bak-codexelves-";
+const BROWSER_REQUEST_HEADER_COMPAT_METADATA: &str = "browser-service.mjs.codexelves-patch.json";
+const BROWSER_REQUEST_HEADER_COMPAT_PATCH_VERSION: u32 = 1;
+const BROWSER_REQUEST_HEADER_IDENTITY_ERROR: &str =
+    "Browser request-header policy requires caller identity.";
+const BROWSER_REQUEST_HEADER_FEATURE_FLAG: &str = "codex_browser_use_agent_request_header";
+const BROWSER_REQUEST_HEADER_COMPAT_MARKER: &str = "/*codexelves-api-key-browser-compat-v1*/";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GuardResult {
@@ -31,6 +41,7 @@ pub(crate) struct GuardArtifacts {
     pub notify_exe: Option<PathBuf>,
     pub marketplace_path: Option<PathBuf>,
     pub sky_package_json: Option<PathBuf>,
+    pub browser_service_script: Option<PathBuf>,
     pub runtime_exports_needed: bool,
 }
 
@@ -39,11 +50,15 @@ pub(crate) fn resolve_computer_use_guard_artifacts(home: &Path) -> anyhow::Resul
     {
         let notify_exe = find_computer_use_notify_exe(home);
         let runtime_exports_needed = computer_use_client_needs_sky_internal_export(home)?;
+        let browser_service_script =
+            find_browser_service_script_for_notify_exe(notify_exe.as_deref())
+                .or_else(find_latest_browser_service_script);
         Ok(GuardArtifacts {
             sky_package_json: find_sky_package_json_for_notify_exe(notify_exe.as_deref())
                 .or_else(find_latest_sky_package_json),
             notify_exe,
             marketplace_path: ensure_openai_bundled_marketplace(home)?,
+            browser_service_script,
             runtime_exports_needed,
         })
     }
@@ -54,6 +69,7 @@ pub(crate) fn resolve_computer_use_guard_artifacts(home: &Path) -> anyhow::Resul
             notify_exe: None,
             marketplace_path: None,
             sky_package_json: None,
+            browser_service_script: None,
             runtime_exports_needed: false,
         })
     }
@@ -62,14 +78,15 @@ pub(crate) fn resolve_computer_use_guard_artifacts(home: &Path) -> anyhow::Resul
 pub(crate) fn ensure_computer_use_config_with_artifacts(
     home: &Path,
     artifacts: &GuardArtifacts,
+    browser_compat_enabled: bool,
 ) -> anyhow::Result<GuardResult> {
     #[cfg(windows)]
     {
-        ensure_computer_use_config_with_artifacts_windows(home, artifacts)
+        ensure_computer_use_config_with_artifacts_windows(home, artifacts, browser_compat_enabled)
     }
     #[cfg(not(windows))]
     {
-        let _ = (home, artifacts);
+        let _ = (home, artifacts, browser_compat_enabled);
         Ok(GuardResult {
             changed: false,
             notify_exe: None,
@@ -81,6 +98,7 @@ pub(crate) fn ensure_computer_use_config_with_artifacts(
 fn ensure_computer_use_config_with_artifacts_windows(
     home: &Path,
     artifacts: &GuardArtifacts,
+    browser_compat_enabled: bool,
 ) -> anyhow::Result<GuardResult> {
     let config_path = home.join("config.toml");
     let existing = match std::fs::read(&config_path) {
@@ -108,8 +126,12 @@ fn ensure_computer_use_config_with_artifacts_windows(
         home,
         artifacts.sky_package_json.as_deref(),
     )?;
+    let browser_auth_compat = ensure_browser_request_header_compat_windows(
+        artifacts.browser_service_script.as_deref(),
+        browser_compat_enabled,
+    )?;
     Ok(GuardResult {
-        changed: changed || runtime_compat.changed,
+        changed: changed || runtime_compat.changed || browser_auth_compat.changed,
         notify_exe: artifacts.notify_exe.clone(),
     })
 }
@@ -119,6 +141,23 @@ pub(crate) struct RuntimeCompatResult {
     pub changed: bool,
     pub package_json: Option<PathBuf>,
     pub backup_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BrowserRequestHeaderCompatResult {
+    pub changed: bool,
+    pub script_path: Option<PathBuf>,
+    pub backup_path: Option<PathBuf>,
+    pub metadata_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserRequestHeaderCompatMetadata {
+    patch_version: u32,
+    original_sha256: String,
+    patched_sha256: String,
+    backup_file_name: String,
 }
 
 #[cfg(not(windows))]
@@ -200,6 +239,321 @@ fn ensure_computer_use_runtime_exports_compat_windows(
         package_json: Some(package_json.to_path_buf()),
         backup_path: Some(backup_path),
     })
+}
+
+pub(crate) fn reconcile_browser_request_header_compat(
+    home: &Path,
+    enabled: bool,
+) -> anyhow::Result<BrowserRequestHeaderCompatResult> {
+    #[cfg(windows)]
+    {
+        let notify_exe = find_computer_use_notify_exe(home);
+        let browser_service_script =
+            find_browser_service_script_for_notify_exe(notify_exe.as_deref())
+                .or_else(find_latest_browser_service_script);
+        ensure_browser_request_header_compat_windows(browser_service_script.as_deref(), enabled)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (home, enabled);
+        Ok(BrowserRequestHeaderCompatResult {
+            changed: false,
+            script_path: None,
+            backup_path: None,
+            metadata_path: None,
+        })
+    }
+}
+
+#[cfg(windows)]
+fn ensure_browser_request_header_compat_windows(
+    browser_service_script: Option<&Path>,
+    enabled: bool,
+) -> anyhow::Result<BrowserRequestHeaderCompatResult> {
+    let Some(browser_service_script) = browser_service_script else {
+        return Ok(BrowserRequestHeaderCompatResult {
+            changed: false,
+            script_path: None,
+            backup_path: None,
+            metadata_path: None,
+        });
+    };
+    let parent = browser_service_script
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("invalid browser-service.mjs path"))?;
+    let metadata_path = parent.join(BROWSER_REQUEST_HEADER_COMPAT_METADATA);
+    let existing = std::fs::read(browser_service_script)
+        .with_context(|| format!("failed to read {}", browser_service_script.display()))?;
+    let existing_hash = sha256_hex(&existing);
+    let contains_marker = existing
+        .windows(BROWSER_REQUEST_HEADER_COMPAT_MARKER.len())
+        .any(|window| window == BROWSER_REQUEST_HEADER_COMPAT_MARKER.as_bytes());
+
+    if !contains_marker {
+        if !enabled {
+            return Ok(BrowserRequestHeaderCompatResult {
+                changed: false,
+                script_path: Some(browser_service_script.to_path_buf()),
+                backup_path: None,
+                metadata_path: Some(metadata_path),
+            });
+        }
+        let existing_text = std::str::from_utf8(&existing).with_context(|| {
+            format!("failed to read UTF-8 {}", browser_service_script.display())
+        })?;
+        let Some(updated) = patch_browser_request_header_policy(existing_text) else {
+            return Ok(BrowserRequestHeaderCompatResult {
+                changed: false,
+                script_path: Some(browser_service_script.to_path_buf()),
+                backup_path: None,
+                metadata_path: Some(metadata_path),
+            });
+        };
+        let backup_path = browser_service_backup_path(parent, &existing_hash);
+        ensure_browser_service_backup(&backup_path, &existing, &existing_hash)?;
+        let metadata = BrowserRequestHeaderCompatMetadata {
+            patch_version: BROWSER_REQUEST_HEADER_COMPAT_PATCH_VERSION,
+            original_sha256: existing_hash,
+            patched_sha256: sha256_hex(updated.as_bytes()),
+            backup_file_name: backup_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| anyhow::anyhow!("invalid browser-service.mjs backup path"))?
+                .to_string(),
+        };
+        write_browser_request_header_compat_metadata(&metadata_path, &metadata)?;
+        atomic_write_runtime_file(browser_service_script, updated.as_bytes())?;
+        return Ok(BrowserRequestHeaderCompatResult {
+            changed: true,
+            script_path: Some(browser_service_script.to_path_buf()),
+            backup_path: Some(backup_path),
+            metadata_path: Some(metadata_path),
+        });
+    }
+
+    let mut metadata_changed = false;
+    let validated = match read_browser_request_header_compat_metadata(&metadata_path)? {
+        Some(metadata) => validate_browser_request_header_compat_metadata(
+            parent,
+            &metadata,
+            &existing,
+            &existing_hash,
+        )?,
+        None => None,
+    };
+    let validated = match validated {
+        Some(validated) => Some(validated),
+        None => {
+            let Some(recovered) =
+                recover_browser_request_header_compat_metadata(parent, &existing)?
+            else {
+                return Ok(BrowserRequestHeaderCompatResult {
+                    changed: false,
+                    script_path: Some(browser_service_script.to_path_buf()),
+                    backup_path: None,
+                    metadata_path: Some(metadata_path),
+                });
+            };
+            write_browser_request_header_compat_metadata(&metadata_path, &recovered.metadata)?;
+            metadata_changed = true;
+            Some(recovered)
+        }
+    };
+    let validated = validated.expect("validated browser compatibility metadata");
+    if enabled {
+        return Ok(BrowserRequestHeaderCompatResult {
+            changed: metadata_changed,
+            script_path: Some(browser_service_script.to_path_buf()),
+            backup_path: Some(validated.backup_path),
+            metadata_path: Some(metadata_path),
+        });
+    }
+
+    atomic_write_runtime_file(browser_service_script, &validated.original)?;
+    Ok(BrowserRequestHeaderCompatResult {
+        changed: true,
+        script_path: Some(browser_service_script.to_path_buf()),
+        backup_path: Some(validated.backup_path),
+        metadata_path: Some(metadata_path),
+    })
+}
+
+#[cfg(windows)]
+struct ValidatedBrowserRequestHeaderCompat {
+    metadata: BrowserRequestHeaderCompatMetadata,
+    backup_path: PathBuf,
+    original: Vec<u8>,
+}
+
+#[cfg(windows)]
+fn read_browser_request_header_compat_metadata(
+    metadata_path: &Path,
+) -> anyhow::Result<Option<BrowserRequestHeaderCompatMetadata>> {
+    match std::fs::read(metadata_path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes).ok()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to read {}", metadata_path.display()))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn validate_browser_request_header_compat_metadata(
+    parent: &Path,
+    metadata: &BrowserRequestHeaderCompatMetadata,
+    current: &[u8],
+    current_hash: &str,
+) -> anyhow::Result<Option<ValidatedBrowserRequestHeaderCompat>> {
+    if metadata.patch_version != BROWSER_REQUEST_HEADER_COMPAT_PATCH_VERSION
+        || !is_sha256_hex(&metadata.original_sha256)
+        || !is_sha256_hex(&metadata.patched_sha256)
+        || metadata.patched_sha256 != current_hash
+    {
+        return Ok(None);
+    }
+    let expected_backup_file_name = browser_service_backup_file_name(&metadata.original_sha256);
+    if metadata.backup_file_name != expected_backup_file_name {
+        return Ok(None);
+    }
+    let backup_path = parent.join(&expected_backup_file_name);
+    let original = match std::fs::read(&backup_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", backup_path.display()));
+        }
+    };
+    if sha256_hex(&original) != metadata.original_sha256 {
+        return Ok(None);
+    }
+    let Ok(original_text) = std::str::from_utf8(&original) else {
+        return Ok(None);
+    };
+    let Some(repatched) = patch_browser_request_header_policy(original_text) else {
+        return Ok(None);
+    };
+    if repatched.as_bytes() != current {
+        return Ok(None);
+    }
+    Ok(Some(ValidatedBrowserRequestHeaderCompat {
+        metadata: metadata.clone(),
+        backup_path,
+        original,
+    }))
+}
+
+#[cfg(windows)]
+fn recover_browser_request_header_compat_metadata(
+    parent: &Path,
+    current: &[u8],
+) -> anyhow::Result<Option<ValidatedBrowserRequestHeaderCompat>> {
+    let mut candidates = vec![parent.join(BROWSER_SERVICE_LEGACY_BACKUP)];
+    for entry in std::fs::read_dir(parent)
+        .with_context(|| format!("failed to read {}", parent.display()))?
+        .flatten()
+    {
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.starts_with(BROWSER_SERVICE_BACKUP_PREFIX))
+        {
+            candidates.push(path);
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+
+    let mut recovered: Option<(String, Vec<u8>)> = None;
+    for candidate in candidates {
+        let Ok(original) = std::fs::read(&candidate) else {
+            continue;
+        };
+        let Ok(original_text) = std::str::from_utf8(&original) else {
+            continue;
+        };
+        let Some(repatched) = patch_browser_request_header_policy(original_text) else {
+            continue;
+        };
+        if repatched.as_bytes() != current {
+            continue;
+        }
+        let original_hash = sha256_hex(&original);
+        if recovered
+            .as_ref()
+            .is_some_and(|(recovered_hash, _)| recovered_hash != &original_hash)
+        {
+            return Ok(None);
+        }
+        recovered = Some((original_hash, original));
+    }
+
+    let Some((original_hash, original)) = recovered else {
+        return Ok(None);
+    };
+    let backup_path = browser_service_backup_path(parent, &original_hash);
+    ensure_browser_service_backup(&backup_path, &original, &original_hash)?;
+    let metadata = BrowserRequestHeaderCompatMetadata {
+        patch_version: BROWSER_REQUEST_HEADER_COMPAT_PATCH_VERSION,
+        original_sha256: original_hash,
+        patched_sha256: sha256_hex(current),
+        backup_file_name: backup_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| anyhow::anyhow!("invalid browser-service.mjs backup path"))?
+            .to_string(),
+    };
+    Ok(Some(ValidatedBrowserRequestHeaderCompat {
+        metadata,
+        backup_path,
+        original,
+    }))
+}
+
+#[cfg(windows)]
+fn ensure_browser_service_backup(
+    backup_path: &Path,
+    original: &[u8],
+    original_hash: &str,
+) -> anyhow::Result<()> {
+    if std::fs::read(backup_path)
+        .ok()
+        .is_some_and(|existing| sha256_hex(&existing) == original_hash)
+    {
+        return Ok(());
+    }
+    atomic_write_runtime_file(backup_path, original)
+}
+
+#[cfg(windows)]
+fn write_browser_request_header_compat_metadata(
+    metadata_path: &Path,
+    metadata: &BrowserRequestHeaderCompatMetadata,
+) -> anyhow::Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(metadata)?;
+    bytes.push(b'\n');
+    atomic_write_runtime_file(metadata_path, &bytes)
+}
+
+fn browser_service_backup_file_name(original_hash: &str) -> String {
+    format!("{BROWSER_SERVICE_BACKUP_PREFIX}{original_hash}")
+}
+
+fn browser_service_backup_path(parent: &Path, original_hash: &str) -> PathBuf {
+    parent.join(browser_service_backup_file_name(original_hash))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 pub(crate) fn guard_config_text(
@@ -371,6 +725,27 @@ fn find_sky_package_json_for_notify_exe(notify_exe: Option<&Path>) -> Option<Pat
 }
 
 #[cfg(windows)]
+fn find_browser_service_script_for_notify_exe(notify_exe: Option<&Path>) -> Option<PathBuf> {
+    let notify_exe = notify_exe?;
+    for ancestor in notify_exe.ancestors() {
+        if ancestor
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("@oai"))
+        {
+            let browser_service_script = ancestor
+                .join("browser-desktop")
+                .join("scripts")
+                .join(BROWSER_SERVICE_SCRIPT);
+            if browser_service_script.is_file() {
+                return Some(browser_service_script);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
 fn find_latest_sky_package_json() -> Option<PathBuf> {
     let local_app_data = std::env::var_os("LOCALAPPDATA")?;
     let runtimes = PathBuf::from(local_app_data)
@@ -391,6 +766,39 @@ fn find_latest_sky_package_json() -> Option<PathBuf> {
                 .join("@oai")
                 .join("sky")
                 .join("package.json")
+        })
+        .filter(|path| path.is_file())
+        .collect();
+    candidates.sort_by(|left, right| {
+        modified_millis(right)
+            .cmp(&modified_millis(left))
+            .then_with(|| left.cmp(right))
+    });
+    candidates.into_iter().next()
+}
+
+#[cfg(windows)]
+fn find_latest_browser_service_script() -> Option<PathBuf> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")?;
+    let runtimes = PathBuf::from(local_app_data)
+        .join("OpenAI")
+        .join("Codex")
+        .join("runtimes")
+        .join("cua_node");
+    let Ok(entries) = std::fs::read_dir(runtimes) else {
+        return None;
+    };
+    let mut candidates: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| {
+            entry
+                .path()
+                .join("bin")
+                .join("node_modules")
+                .join("@oai")
+                .join("browser-desktop")
+                .join("scripts")
+                .join(BROWSER_SERVICE_SCRIPT)
         })
         .filter(|path| path.is_file())
         .collect();
@@ -431,6 +839,88 @@ fn add_sky_internal_computer_use_export(contents: &str) -> anyhow::Result<Option
     let mut updated = serde_json::to_string_pretty(&package)?;
     updated.push('\n');
     Ok(Some(updated))
+}
+
+fn patch_browser_request_header_policy(contents: &str) -> Option<String> {
+    if contents.contains(BROWSER_REQUEST_HEADER_COMPAT_MARKER) {
+        return None;
+    }
+    let identity_error_matches = contents
+        .match_indices(BROWSER_REQUEST_HEADER_IDENTITY_ERROR)
+        .collect::<Vec<_>>();
+    if identity_error_matches.len() != 1 {
+        return None;
+    }
+    let identity_error_offset = identity_error_matches[0].0;
+    let function_start = contents[..identity_error_offset].rfind("async function ")?;
+    let open_brace = contents[function_start..]
+        .find('{')
+        .map(|offset| function_start + offset)?;
+    let function_header = contents[function_start..open_brace].trim_end();
+    let function_name = function_header
+        .strip_prefix("async function ")?
+        .strip_suffix("()")?;
+    if !is_simple_javascript_identifier(function_name) {
+        return None;
+    }
+    let function_end = contents[open_brace + 1..]
+        .find('}')
+        .map(|offset| open_brace + 1 + offset)?;
+    if identity_error_offset > function_end {
+        return None;
+    }
+    let function_text = &contents[function_start..=function_end];
+    if function_text
+        .match_indices(BROWSER_REQUEST_HEADER_FEATURE_FLAG)
+        .count()
+        != 1
+    {
+        return None;
+    }
+    let throw_expression = format!("throw new Error(\"{BROWSER_REQUEST_HEADER_IDENTITY_ERROR}\")");
+    if function_text.match_indices(&throw_expression).count() != 1 {
+        return None;
+    }
+
+    let body = &contents[open_brace + 1..function_end];
+    if body.len() > 512 || body.contains('{') || body.match_indices(";return await ").count() != 1 {
+        return None;
+    }
+    let (guard_expression, return_expression) = body.split_once(";return await ")?;
+    let identity_name = guard_expression
+        .strip_suffix(&throw_expression)?
+        .strip_prefix("if(")?
+        .strip_suffix("==null)")?;
+    let feature_flag_suffix = format!("(\"{BROWSER_REQUEST_HEADER_FEATURE_FLAG}\")");
+    let feature_flag_function = return_expression
+        .strip_prefix(identity_name)?
+        .strip_prefix(',')?
+        .strip_suffix(&feature_flag_suffix)?;
+    if !is_simple_javascript_identifier(identity_name)
+        || !is_simple_javascript_identifier(feature_flag_function)
+    {
+        return None;
+    }
+    let patched_body = body.replacen(&throw_expression, "return!1", 1);
+    let patched_function = format!(
+        "{}{{try{{{patched_body}}}catch{{return!1}}}}{BROWSER_REQUEST_HEADER_COMPAT_MARKER}",
+        &contents[function_start..open_brace]
+    );
+    let mut updated =
+        String::with_capacity(contents.len() + patched_function.len() - function_text.len());
+    updated.push_str(&contents[..function_start]);
+    updated.push_str(&patched_function);
+    updated.push_str(&contents[function_end + 1..]);
+    Some(updated)
+}
+
+fn is_simple_javascript_identifier(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || matches!(first, b'_' | b'$'))
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
 }
 
 #[cfg(windows)]
@@ -900,6 +1390,75 @@ mod tests {
         assert!(updated.is_none());
     }
 
+    #[test]
+    fn patch_browser_request_header_policy_preserves_online_gate_with_local_fallback() {
+        let source = concat!(
+            "var before=1;",
+            "async function NO(){if(Im==null)throw new Error(\"",
+            "Browser request-header policy requires caller identity.",
+            "\");return await Im,$R(\"codex_browser_use_agent_request_header\")}",
+            "var after=2;"
+        );
+
+        let updated = patch_browser_request_header_policy(source).unwrap();
+
+        assert!(updated.contains(concat!(
+            "async function NO(){try{if(Im==null)return!1;",
+            "return await Im,$R(\"codex_browser_use_agent_request_header\")}",
+            "catch{return!1}}",
+            "/*codexelves-api-key-browser-compat-v1*/"
+        )));
+        assert!(updated.starts_with("var before=1;"));
+        assert!(updated.ends_with("var after=2;"));
+        assert!(!updated.contains(BROWSER_REQUEST_HEADER_IDENTITY_ERROR));
+    }
+
+    #[test]
+    fn patch_browser_request_header_policy_is_idempotent() {
+        let source = concat!(
+            "async function NO(){if(Im==null)throw new Error(\"",
+            "Browser request-header policy requires caller identity.",
+            "\");return await Im,$R(\"codex_browser_use_agent_request_header\")}"
+        );
+        let updated = patch_browser_request_header_policy(source).unwrap();
+
+        assert!(patch_browser_request_header_policy(&updated).is_none());
+    }
+
+    #[test]
+    fn patch_browser_request_header_policy_ignores_unknown_or_ambiguous_builds() {
+        let missing_feature_flag = concat!(
+            "async function NO(){if(Im==null)throw new Error(\"",
+            "Browser request-header policy requires caller identity.",
+            "\");return false}"
+        );
+        let duplicate_identity_error = format!(
+            "{missing_feature_flag}{missing_feature_flag}{}",
+            BROWSER_REQUEST_HEADER_FEATURE_FLAG
+        );
+        let nested_in_different_outer_function = concat!(
+            "async function Outer(){(()=>{if(Im==null)throw new Error(\"",
+            "Browser request-header policy requires caller identity.",
+            "\");return await Im,$R(\"codex_browser_use_agent_request_header\")})()}"
+        );
+
+        assert!(patch_browser_request_header_policy(missing_feature_flag).is_none());
+        assert!(patch_browser_request_header_policy(&duplicate_identity_error).is_none());
+        assert!(patch_browser_request_header_policy(nested_in_different_outer_function).is_none());
+    }
+
+    #[test]
+    fn browser_compat_metadata_accepts_only_canonical_sha256() {
+        assert!(is_sha256_hex(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        ));
+        assert!(!is_sha256_hex("../0123456789abcdef"));
+        assert!(!is_sha256_hex(
+            "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
+        ));
+        assert!(!is_sha256_hex("0123456789abcdef"));
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn runtime_exports_compat_is_noop_off_windows() {
@@ -1044,6 +1603,257 @@ mod tests {
             ensure_computer_use_runtime_exports_compat_windows(&home, Some(&package_json)).unwrap();
 
         assert!(!result.changed);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_request_header_compat_uses_versioned_backup_metadata_and_restores() {
+        let temp = tempfile::tempdir().unwrap();
+        let browser_service_script = temp.path().join(BROWSER_SERVICE_SCRIPT);
+        let source = concat!(
+            "var before=1;",
+            "async function NO(){if(Im==null)throw new Error(\"",
+            "Browser request-header policy requires caller identity.",
+            "\");return await Im,$R(\"codex_browser_use_agent_request_header\")}",
+            "var after=2;"
+        );
+        std::fs::write(&browser_service_script, source).unwrap();
+
+        let first =
+            ensure_browser_request_header_compat_windows(Some(&browser_service_script), true)
+                .unwrap();
+        let second =
+            ensure_browser_request_header_compat_windows(Some(&browser_service_script), true)
+                .unwrap();
+
+        assert!(first.changed);
+        assert_eq!(
+            first.script_path.as_deref(),
+            Some(browser_service_script.as_path())
+        );
+        let backup_path = first.backup_path.as_deref().unwrap();
+        assert_eq!(
+            backup_path.file_name().and_then(|value| value.to_str()),
+            Some(
+                format!(
+                    "{BROWSER_SERVICE_SCRIPT}.bak-codexelves-{}",
+                    sha256_hex(source.as_bytes())
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(std::fs::read_to_string(backup_path).unwrap(), source);
+        let patched = std::fs::read_to_string(&browser_service_script).unwrap();
+        assert!(patched.contains(BROWSER_REQUEST_HEADER_COMPAT_MARKER));
+        let metadata_path = first.metadata_path.as_deref().unwrap();
+        let metadata: BrowserRequestHeaderCompatMetadata =
+            serde_json::from_str(&std::fs::read_to_string(metadata_path).unwrap()).unwrap();
+        assert_eq!(
+            metadata.patch_version,
+            BROWSER_REQUEST_HEADER_COMPAT_PATCH_VERSION
+        );
+        assert_eq!(metadata.original_sha256, sha256_hex(source.as_bytes()));
+        assert_eq!(metadata.patched_sha256, sha256_hex(patched.as_bytes()));
+        assert_eq!(
+            metadata.backup_file_name,
+            backup_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap()
+        );
+        assert!(!second.changed);
+        assert_eq!(
+            second.script_path.as_deref(),
+            Some(browser_service_script.as_path())
+        );
+        assert_eq!(second.backup_path.as_deref(), Some(backup_path));
+
+        let restored =
+            ensure_browser_request_header_compat_windows(Some(&browser_service_script), false)
+                .unwrap();
+        let restored_again =
+            ensure_browser_request_header_compat_windows(Some(&browser_service_script), false)
+                .unwrap();
+
+        assert!(restored.changed);
+        assert_eq!(
+            std::fs::read_to_string(&browser_service_script).unwrap(),
+            source
+        );
+        assert!(!restored_again.changed);
+        assert!(backup_path.is_file());
+        assert!(metadata_path.is_file());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_request_header_compat_creates_new_backup_after_same_path_runtime_update() {
+        let temp = tempfile::tempdir().unwrap();
+        let browser_service_script = temp.path().join(BROWSER_SERVICE_SCRIPT);
+        let first_source = concat!(
+            "var build=1;",
+            "async function NO(){if(Im==null)throw new Error(\"",
+            "Browser request-header policy requires caller identity.",
+            "\");return await Im,$R(\"codex_browser_use_agent_request_header\")}"
+        );
+        let second_source = concat!(
+            "var build=2;",
+            "async function NP(){if(Jm==null)throw new Error(\"",
+            "Browser request-header policy requires caller identity.",
+            "\");return await Jm,$S(\"codex_browser_use_agent_request_header\")}"
+        );
+        std::fs::write(&browser_service_script, first_source).unwrap();
+
+        let first =
+            ensure_browser_request_header_compat_windows(Some(&browser_service_script), true)
+                .unwrap();
+        std::fs::write(&browser_service_script, second_source).unwrap();
+        let second =
+            ensure_browser_request_header_compat_windows(Some(&browser_service_script), true)
+                .unwrap();
+
+        assert!(first.changed);
+        assert!(second.changed);
+        assert_ne!(first.backup_path, second.backup_path);
+        assert_eq!(
+            std::fs::read_to_string(first.backup_path.as_deref().unwrap()).unwrap(),
+            first_source
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.backup_path.as_deref().unwrap()).unwrap(),
+            second_source
+        );
+
+        ensure_browser_request_header_compat_windows(Some(&browser_service_script), false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&browser_service_script).unwrap(),
+            second_source
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_request_header_compat_leaves_vendor_fixed_update_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        let browser_service_script = temp.path().join(BROWSER_SERVICE_SCRIPT);
+        let old_source = concat!(
+            "async function NO(){if(Im==null)throw new Error(\"",
+            "Browser request-header policy requires caller identity.",
+            "\");return await Im,$R(\"codex_browser_use_agent_request_header\")}"
+        );
+        let vendor_fixed_source = "async function NO(){return false}";
+        std::fs::write(&browser_service_script, old_source).unwrap();
+        ensure_browser_request_header_compat_windows(Some(&browser_service_script), true).unwrap();
+        std::fs::write(&browser_service_script, vendor_fixed_source).unwrap();
+
+        let enabled =
+            ensure_browser_request_header_compat_windows(Some(&browser_service_script), true)
+                .unwrap();
+        let disabled =
+            ensure_browser_request_header_compat_windows(Some(&browser_service_script), false)
+                .unwrap();
+
+        assert!(!enabled.changed);
+        assert!(!disabled.changed);
+        assert_eq!(
+            std::fs::read_to_string(&browser_service_script).unwrap(),
+            vendor_fixed_source
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_request_header_compat_refuses_unsafe_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let browser_service_script = temp.path().join(BROWSER_SERVICE_SCRIPT);
+        let source = concat!(
+            "async function NO(){if(Im==null)throw new Error(\"",
+            "Browser request-header policy requires caller identity.",
+            "\");return await Im,$R(\"codex_browser_use_agent_request_header\")}"
+        );
+        std::fs::write(&browser_service_script, source).unwrap();
+        let enabled =
+            ensure_browser_request_header_compat_windows(Some(&browser_service_script), true)
+                .unwrap();
+        let patched = std::fs::read_to_string(&browser_service_script).unwrap();
+
+        let modified_patch = format!("{patched}\n// user change");
+        std::fs::write(&browser_service_script, &modified_patch).unwrap();
+        let current_mismatch =
+            ensure_browser_request_header_compat_windows(Some(&browser_service_script), false)
+                .unwrap();
+        assert!(!current_mismatch.changed);
+        assert_eq!(
+            std::fs::read_to_string(&browser_service_script).unwrap(),
+            modified_patch
+        );
+
+        std::fs::write(&browser_service_script, &patched).unwrap();
+        std::fs::write(enabled.backup_path.as_deref().unwrap(), "corrupt backup").unwrap();
+        let backup_mismatch =
+            ensure_browser_request_header_compat_windows(Some(&browser_service_script), false)
+                .unwrap();
+        assert!(!backup_mismatch.changed);
+        assert_eq!(
+            std::fs::read_to_string(&browser_service_script).unwrap(),
+            patched
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_request_header_compat_migrates_legacy_backup_before_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let browser_service_script = temp.path().join(BROWSER_SERVICE_SCRIPT);
+        let legacy_backup = temp.path().join(BROWSER_SERVICE_LEGACY_BACKUP);
+        let source = concat!(
+            "async function NO(){if(Im==null)throw new Error(\"",
+            "Browser request-header policy requires caller identity.",
+            "\");return await Im,$R(\"codex_browser_use_agent_request_header\")}"
+        );
+        let patched = patch_browser_request_header_policy(source).unwrap();
+        std::fs::write(&browser_service_script, patched).unwrap();
+        std::fs::write(&legacy_backup, source).unwrap();
+
+        let result =
+            ensure_browser_request_header_compat_windows(Some(&browser_service_script), false)
+                .unwrap();
+
+        assert!(result.changed);
+        assert_eq!(
+            std::fs::read_to_string(&browser_service_script).unwrap(),
+            source
+        );
+        assert_eq!(
+            std::fs::read_to_string(result.backup_path.as_deref().unwrap()).unwrap(),
+            source
+        );
+        assert!(result.metadata_path.as_deref().unwrap().is_file());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_service_script_resolves_from_notify_executable_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let oai_root = temp.path().join("bin").join("node_modules").join("@oai");
+        let notify_exe = oai_root
+            .join("sky")
+            .join("bin")
+            .join("windows")
+            .join(COMPUTER_USE_EXE);
+        let browser_service_script = oai_root
+            .join("browser-desktop")
+            .join("scripts")
+            .join(BROWSER_SERVICE_SCRIPT);
+        std::fs::create_dir_all(notify_exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(browser_service_script.parent().unwrap()).unwrap();
+        std::fs::write(&notify_exe, "").unwrap();
+        std::fs::write(&browser_service_script, "").unwrap();
+
+        assert_eq!(
+            find_browser_service_script_for_notify_exe(Some(&notify_exe)).as_deref(),
+            Some(browser_service_script.as_path())
+        );
     }
 
     #[cfg(windows)]

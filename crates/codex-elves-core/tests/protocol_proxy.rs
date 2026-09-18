@@ -9932,6 +9932,270 @@ async fn responses_proxy_preserves_deepseek_high_for_cli_proxy_api_gateway() {
     assert_eq!(body["output_config"], json!({ "effort": "high" }));
 }
 
+fn deepseek_reasoning_replay_error() -> String {
+    json!({
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "Error from provider (Console Go): Upstream request failed: [invalid_request_error] The `reasoning_content` in the thinking mode must be passed back to the API."
+        }
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn deepseek_reasoning_replay_retries_rejected_anthropic_history_as_chat() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let server = spawn_chat_server_with_status_responses(vec![
+        ("400 Bad Request".into(), deepseek_reasoning_replay_error()),
+        (
+            "200 OK".into(),
+            json!({
+                "id": "chatcmpl-replay", "model": "deepseek-v4-flash",
+                "choices": [{
+                    "message": { "role": "assistant", "reasoning_content": "Continue safely.", "content": "Ready." },
+                    "finish_reason": "stop"
+                }],
+                "usage": { "prompt_tokens": 10, "completion_tokens": 5 }
+            })
+            .to_string(),
+        ),
+    ]);
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+    let mut request = compacted_thinking_history(true, true);
+    request["model"] = json!("deepseek-v4-flash");
+    request["stream"] = json!(false);
+
+    let response = handle_responses_proxy_request(&request.to_string())
+        .await
+        .unwrap();
+    assert_eq!(response.status, "200 OK");
+    let body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(body["output"][0]["reasoning_content"], "Continue safely.");
+    assert_eq!(body["output"][1]["content"][0]["text"], "Ready.");
+    let requests = server.finish_all();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].path, "/v1/messages");
+    assert_eq!(requests[1].path, "/v1/chat/completions");
+    let first: Value = serde_json::from_str(&requests[0].body).unwrap();
+    let retry: Value = serde_json::from_str(&requests[1].body).unwrap();
+    assert_eq!(first["thinking"]["type"], "adaptive");
+    assert_eq!(retry["model"], first["model"]);
+    assert_eq!(retry["reasoning_effort"], "max");
+    let assistants: Vec<_> = retry["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "assistant")
+        .collect();
+    assert_eq!(assistants.len(), 2);
+    assert_eq!(assistants[0]["reasoning_content"], "anchor reasoning");
+    assert_eq!(assistants[1]["reasoning_content"], "tool reasoning");
+    assert_eq!(assistants[1]["tool_calls"][0]["id"], "call-history");
+    assert!(
+        retry["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "tool" && message["tool_call_id"] == "call-history")
+    );
+    assert!(
+        retry["messages"]
+            .to_string()
+            .contains("Earlier history summary")
+    );
+    assert!(
+        retry["messages"]
+            .to_string()
+            .contains("data:image/png;base64,aGVsbG8=")
+    );
+}
+
+#[tokio::test]
+async fn deepseek_reasoning_replay_stream_preserves_effort_without_requiring_compaction() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    for effort in [None, Some("low"), Some("max")] {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+        let server = spawn_chat_server_with_status_responses(vec![
+            ("400 Bad Request".into(), deepseek_reasoning_replay_error()),
+            (
+                "200 OK".into(),
+                concat!(
+                    "data: {\"id\":\"chatcmpl-replay\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Check the result.\"}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"Ready.\"}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n"
+                ).into(),
+            ),
+        ]);
+        write_mixed_relay_settings(temp.path(), &server.base_url);
+        let mut request = compacted_thinking_history(true, true);
+        // 使用无压缩标记的完整历史，兼容恢复旧任务、供应商缓存失效等相同回放场景。
+        let payload = request["input"][0]["encrypted_content"].as_str().unwrap();
+        let payload: Value =
+            serde_json::from_str(payload.strip_prefix("codex-elves-compaction-v3:").unwrap())
+                .unwrap();
+        request["input"] = payload["retained_tail"].clone();
+        request["input"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, json!({ "role": "user", "content": "Start the task." }));
+        request["model"] = json!("deepseek-v4-flash");
+        request["stream"] = json!(true);
+        request["max_output_tokens"] = json!(1024);
+        if let Some(effort) = effort {
+            request["reasoning"] = json!({ "effort": effort });
+        } else {
+            request.as_object_mut().unwrap().remove("reasoning");
+        }
+
+        let response = handle_responses_proxy_request(&request.to_string())
+            .await
+            .unwrap();
+        assert_eq!(response.status, "200 OK");
+        let sse = String::from_utf8(response.body).unwrap();
+        assert_eq!(collect_stream_output_text(&sse), "Ready.");
+        let completed = parse_response_sse_events(&sse)
+            .into_iter()
+            .find(|event| event.event == "response.completed")
+            .unwrap();
+        assert_eq!(
+            completed.data["response"]["output"][0]["reasoning_content"],
+            "Check the result."
+        );
+        let requests = server.finish_all();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].path, "/v1/messages");
+        assert_eq!(requests[1].path, "/v1/chat/completions");
+        let first: Value = serde_json::from_str(&requests[0].body).unwrap();
+        let retry: Value = serde_json::from_str(&requests[1].body).unwrap();
+        assert_eq!(retry["thinking"]["type"], "enabled");
+        assert_eq!(retry["reasoning_effort"], first["output_config"]["effort"]);
+        assert_eq!(retry["max_tokens"], 1024);
+        assert_eq!(retry["stream"], true);
+    }
+}
+
+#[tokio::test]
+async fn deepseek_reasoning_replay_does_not_retry_unrelated_errors_or_protocols() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    for scenario in [
+        "unrelated",
+        "status-500",
+        "disabled",
+        "no-tools",
+        "claude",
+        "native-responses",
+        "missing-reasoning",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+        let error = if scenario == "unrelated" {
+            json!({ "error": { "type": "invalid_request_error", "message": "Invalid tools schema" } }).to_string()
+        } else {
+            deepseek_reasoning_replay_error()
+        };
+        let status = if scenario == "status-500" {
+            "500 Internal Server Error"
+        } else {
+            "400 Bad Request"
+        };
+        let server = spawn_chat_server_with_status_responses(vec![(status.into(), error.clone())]);
+        write_mixed_relay_settings(temp.path(), &server.base_url);
+        let mut request = compacted_thinking_history(true, true);
+        request["model"] = json!("deepseek-v4-flash");
+        request["stream"] = json!(false);
+        let mut settings = codex_elves_core::settings::SettingsStore::default()
+            .load()
+            .unwrap();
+        match scenario {
+            "disabled" => request["reasoning"] = json!({ "effort": "none" }),
+            "no-tools" => {
+                request.as_object_mut().unwrap().remove("tools");
+            }
+            "claude" => request["model"] = json!("claude-sonnet-4"),
+            "native-responses" => {
+                settings.relay_profiles[0]
+                    .model_mappings
+                    .iter_mut()
+                    .find(|mapping| mapping.request_model == "deepseek-v4-flash")
+                    .unwrap()
+                    .protocol = RelayProtocol::Responses;
+            }
+            "missing-reasoning" => {
+                request["input"] = json!([
+                    { "role": "user", "content": "Start." },
+                    { "role": "assistant", "content": "Historical answer with no reasoning." },
+                    { "role": "user", "content": "Continue." }
+                ]);
+            }
+            _ => {}
+        }
+        let upstream = open_responses_proxy_request_with_settings(&request.to_string(), settings)
+            .await
+            .unwrap();
+        assert_eq!(
+            upstream.status_code,
+            if scenario == "status-500" { 500 } else { 400 },
+            "{scenario}"
+        );
+        assert_eq!(
+            String::from_utf8(upstream.into_body_bytes().await.unwrap()).unwrap(),
+            error,
+            "{scenario}"
+        );
+        let requests = server.finish_all();
+        assert_eq!(requests.len(), 1, "{scenario}");
+        assert_eq!(
+            requests[0].path,
+            if scenario == "native-responses" {
+                "/v1/responses"
+            } else {
+                "/v1/messages"
+            },
+            "{scenario}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn deepseek_reasoning_replay_stops_after_one_rejected_chat_retry() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let server = spawn_chat_server_with_status_responses(vec![
+        ("400 Bad Request".into(), deepseek_reasoning_replay_error()),
+        ("400 Bad Request".into(), deepseek_reasoning_replay_error()),
+    ]);
+    write_mixed_relay_settings(temp.path(), &server.base_url);
+    let mut request = compacted_thinking_history(true, true);
+    request["model"] = json!("deepseek-v4-flash");
+    request["stream"] = json!(false);
+    let upstream = open_responses_proxy_request(&request.to_string(), None)
+        .await
+        .unwrap();
+    assert_eq!(upstream.status_code, 400);
+    assert_eq!(
+        upstream.response_protocol,
+        UpstreamResponseProtocol::ChatCompletions
+    );
+    assert!(
+        upstream
+            .endpoint
+            .as_deref()
+            .unwrap()
+            .ends_with("/v1/chat/completions")
+    );
+    let logged: Value = serde_json::from_str(&upstream.request_body).unwrap();
+    assert_eq!(logged["reasoning_effort"], "max");
+    assert!(logged.get("output_config").is_none());
+    let requests = server.finish_all();
+    assert_eq!(requests.len(), 2);
+}
+
 #[tokio::test]
 async fn responses_proxy_infers_responses_for_unlisted_gpt_model() {
     let _lock = settings_path_test_lock().lock().unwrap();

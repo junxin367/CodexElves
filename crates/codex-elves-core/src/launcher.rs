@@ -300,7 +300,7 @@ where
                 }),
             );
         }
-        if settings.computer_use_guard_enabled {
+        if should_reconcile_computer_use_config(&settings) {
             hooks.ensure_computer_use_config(&settings).await?;
         }
         if protocol_proxy_enabled {
@@ -326,7 +326,7 @@ where
             .await?;
         launched = Some(launch.clone());
         keep_launched_on_error = true;
-        if settings.computer_use_guard_enabled {
+        if should_start_computer_use_guard_watchdog(&settings) {
             hooks.start_computer_use_guard_watchdog(&settings).await?;
         }
 
@@ -401,6 +401,18 @@ where
 
 fn relay_protocol_proxy_enabled(settings: &BackendSettings) -> bool {
     settings.active_relay_uses_protocol_proxy()
+}
+
+fn should_reconcile_computer_use_config(settings: &BackendSettings) -> bool {
+    cfg!(windows) || settings.computer_use_guard_enabled
+}
+
+fn should_start_computer_use_guard_watchdog(settings: &BackendSettings) -> bool {
+    if cfg!(windows) {
+        settings.computer_use_guard_enabled || settings.computer_use_api_key_browser_compat_enabled
+    } else {
+        settings.computer_use_guard_enabled
+    }
 }
 
 fn should_refresh_codex_builtin_model_catalog(settings: &BackendSettings) -> bool {
@@ -626,13 +638,22 @@ impl LaunchHooks for DefaultLaunchHooks {
     }
 
     async fn ensure_computer_use_config(&self, settings: &BackendSettings) -> anyhow::Result<()> {
-        if !settings.computer_use_guard_enabled {
-            return Ok(());
-        }
         let home = crate::codex_home::codex_home_dir_for_settings(settings);
-        let artifacts = crate::computer_use_guard::resolve_computer_use_guard_artifacts(&home)?;
-        crate::computer_use_guard::ensure_computer_use_config_with_artifacts(&home, &artifacts)?;
-        *self.computer_use_guard_artifacts.lock().await = Some(artifacts);
+        if settings.computer_use_guard_enabled {
+            let artifacts = crate::computer_use_guard::resolve_computer_use_guard_artifacts(&home)?;
+            crate::computer_use_guard::ensure_computer_use_config_with_artifacts(
+                &home,
+                &artifacts,
+                settings.computer_use_api_key_browser_compat_enabled,
+            )?;
+            *self.computer_use_guard_artifacts.lock().await = Some(artifacts);
+        } else {
+            crate::computer_use_guard::reconcile_browser_request_header_compat(
+                &home,
+                settings.computer_use_api_key_browser_compat_enabled,
+            )?;
+            *self.computer_use_guard_artifacts.lock().await = None;
+        }
         Ok(())
     }
 
@@ -797,14 +818,27 @@ impl LaunchHooks for DefaultLaunchHooks {
     ) -> anyhow::Result<()> {
         #[cfg(windows)]
         {
-            if !settings.computer_use_guard_enabled {
+            if !should_start_computer_use_guard_watchdog(settings) {
                 return Ok(());
             }
             let home = crate::codex_home::codex_home_dir_for_settings(settings);
-            let artifacts = self.computer_use_guard_artifacts.lock().await.clone();
+            let guard_enabled = settings.computer_use_guard_enabled;
+            let browser_compat_enabled = settings.computer_use_api_key_browser_compat_enabled;
+            let artifacts = if guard_enabled {
+                self.computer_use_guard_artifacts.lock().await.clone()
+            } else {
+                None
+            };
             let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
             let task = tokio::spawn(async move {
-                run_post_launch_computer_use_guard(home, artifacts, &mut shutdown_rx).await;
+                run_post_launch_computer_use_guard(
+                    home,
+                    artifacts,
+                    guard_enabled,
+                    browser_compat_enabled,
+                    &mut shutdown_rx,
+                )
+                .await;
             });
             if let Some(runtime) = self
                 .computer_use_guard_watchdog
@@ -4460,25 +4494,28 @@ async fn is_macos_app_running(app_dir: &Path) -> bool {
 #[cfg_attr(not(windows), allow(dead_code))]
 fn post_launch_guard_artifacts_ready(
     artifacts: &crate::computer_use_guard::GuardArtifacts,
+    browser_compat_enabled: bool,
 ) -> bool {
     artifacts.notify_exe.is_some()
         && artifacts.marketplace_path.is_some()
         && (!artifacts.runtime_exports_needed || artifacts.sky_package_json.is_some())
+        && (!browser_compat_enabled || artifacts.browser_service_script.is_some())
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
 fn should_stop_post_launch_computer_use_guard(
     stable_unchanged_attempts: usize,
-    artifacts: &crate::computer_use_guard::GuardArtifacts,
+    targets_ready: bool,
 ) -> bool {
-    stable_unchanged_attempts >= POST_LAUNCH_COMPUTER_USE_GUARD_STABLE_ATTEMPTS
-        && post_launch_guard_artifacts_ready(artifacts)
+    stable_unchanged_attempts >= POST_LAUNCH_COMPUTER_USE_GUARD_STABLE_ATTEMPTS && targets_ready
 }
 
 #[cfg(windows)]
 async fn run_post_launch_computer_use_guard(
     home: PathBuf,
     mut artifacts: Option<crate::computer_use_guard::GuardArtifacts>,
+    guard_enabled: bool,
+    browser_compat_enabled: bool,
     shutdown_rx: &mut tokio::sync::oneshot::Receiver<()>,
 ) {
     let mut previous_delay = 0_u64;
@@ -4497,33 +4534,47 @@ async fn run_post_launch_computer_use_guard(
             }
         }
         let attempt = index + 1;
-        let resolved_artifacts = match artifacts.take() {
-            Some(artifacts) => artifacts,
-            None => match crate::computer_use_guard::resolve_computer_use_guard_artifacts(&home) {
-                Ok(resolved) => resolved,
-                Err(error) => {
-                    stable_unchanged_attempts = 0;
-                    let _ = crate::diagnostic_log::append_diagnostic_log(
-                        "computer_use_guard.post_launch_failed",
-                        serde_json::json!({
-                            "attempt": attempt,
-                            "delay_seconds": delay,
-                            "phase": "resolve_artifacts",
-                            "message": error.to_string()
-                        }),
-                    );
-                    continue;
+        let outcome = if guard_enabled {
+            let resolved_artifacts = match artifacts.take() {
+                Some(artifacts) => artifacts,
+                None => {
+                    match crate::computer_use_guard::resolve_computer_use_guard_artifacts(&home) {
+                        Ok(resolved) => resolved,
+                        Err(error) => {
+                            stable_unchanged_attempts = 0;
+                            let _ = crate::diagnostic_log::append_diagnostic_log(
+                                "computer_use_guard.post_launch_failed",
+                                serde_json::json!({
+                                    "attempt": attempt,
+                                    "delay_seconds": delay,
+                                    "phase": "resolve_artifacts",
+                                    "message": error.to_string()
+                                }),
+                            );
+                            continue;
+                        }
+                    }
                 }
-            },
+            };
+            let targets_ready =
+                post_launch_guard_artifacts_ready(&resolved_artifacts, browser_compat_enabled);
+            artifacts = targets_ready.then_some(resolved_artifacts.clone());
+            crate::computer_use_guard::ensure_computer_use_config_with_artifacts(
+                &home,
+                &resolved_artifacts,
+                browser_compat_enabled,
+            )
+            .map(|result| (result.changed, targets_ready, result.notify_exe))
+        } else {
+            crate::computer_use_guard::reconcile_browser_request_header_compat(
+                &home,
+                browser_compat_enabled,
+            )
+            .map(|result| (result.changed, result.script_path.is_some(), None))
         };
-        let artifacts_ready = post_launch_guard_artifacts_ready(&resolved_artifacts);
-        artifacts = artifacts_ready.then_some(resolved_artifacts.clone());
-        match crate::computer_use_guard::ensure_computer_use_config_with_artifacts(
-            &home,
-            &resolved_artifacts,
-        ) {
-            Ok(result) => {
-                if !result.changed && artifacts_ready {
+        match outcome {
+            Ok((changed, targets_ready, notify_exe)) => {
+                if !changed && targets_ready {
                     stable_unchanged_attempts += 1;
                 } else {
                     stable_unchanged_attempts = 0;
@@ -4533,16 +4584,15 @@ async fn run_post_launch_computer_use_guard(
                     serde_json::json!({
                         "attempt": attempt,
                         "delay_seconds": delay,
-                        "changed": result.changed,
+                        "changed": changed,
                         "stable_unchanged_attempts": stable_unchanged_attempts,
-                        "notify_exe": result
-                            .notify_exe
+                        "notify_exe": notify_exe
                             .map(|path| path.to_string_lossy().to_string())
                     }),
                 );
                 if should_stop_post_launch_computer_use_guard(
                     stable_unchanged_attempts,
-                    &resolved_artifacts,
+                    targets_ready,
                 ) {
                     let _ = crate::diagnostic_log::append_diagnostic_log(
                         "computer_use_guard.post_launch_stable_stop",
@@ -4852,17 +4902,45 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn computer_use_reconciliation_restores_once_without_starting_disabled_watchdog() {
+        let settings = BackendSettings {
+            computer_use_guard_enabled: false,
+            computer_use_api_key_browser_compat_enabled: false,
+            ..BackendSettings::default()
+        };
+
+        assert!(should_reconcile_computer_use_config(&settings));
+        assert!(!should_start_computer_use_guard_watchdog(&settings));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_compat_starts_watchdog_without_full_guard() {
+        let settings = BackendSettings {
+            computer_use_guard_enabled: false,
+            computer_use_api_key_browser_compat_enabled: true,
+            ..BackendSettings::default()
+        };
+
+        assert!(should_reconcile_computer_use_config(&settings));
+        assert!(should_start_computer_use_guard_watchdog(&settings));
+    }
+
     #[test]
     fn post_launch_guard_stops_after_stable_ready_artifacts() {
         let artifacts = crate::computer_use_guard::GuardArtifacts {
             notify_exe: Some(PathBuf::from("codex-computer-use.exe")),
             marketplace_path: Some(PathBuf::from("openai-bundled")),
             sky_package_json: None,
+            browser_service_script: Some(PathBuf::from("browser-service.mjs")),
             runtime_exports_needed: false,
         };
 
-        assert!(!should_stop_post_launch_computer_use_guard(2, &artifacts));
-        assert!(should_stop_post_launch_computer_use_guard(3, &artifacts));
+        assert!(post_launch_guard_artifacts_ready(&artifacts, true));
+        assert!(!should_stop_post_launch_computer_use_guard(2, true));
+        assert!(should_stop_post_launch_computer_use_guard(3, true));
     }
 
     #[test]
@@ -4871,32 +4949,47 @@ mod tests {
             notify_exe: None,
             marketplace_path: Some(PathBuf::from("openai-bundled")),
             sky_package_json: None,
+            browser_service_script: Some(PathBuf::from("browser-service.mjs")),
             runtime_exports_needed: false,
         };
         let missing_marketplace = crate::computer_use_guard::GuardArtifacts {
             notify_exe: Some(PathBuf::from("codex-computer-use.exe")),
             marketplace_path: None,
             sky_package_json: None,
+            browser_service_script: Some(PathBuf::from("browser-service.mjs")),
             runtime_exports_needed: false,
         };
         let missing_runtime_package = crate::computer_use_guard::GuardArtifacts {
             notify_exe: Some(PathBuf::from("codex-computer-use.exe")),
             marketplace_path: Some(PathBuf::from("openai-bundled")),
             sky_package_json: None,
+            browser_service_script: Some(PathBuf::from("browser-service.mjs")),
             runtime_exports_needed: true,
         };
+        let missing_browser_service = crate::computer_use_guard::GuardArtifacts {
+            notify_exe: Some(PathBuf::from("codex-computer-use.exe")),
+            marketplace_path: Some(PathBuf::from("openai-bundled")),
+            sky_package_json: None,
+            browser_service_script: None,
+            runtime_exports_needed: false,
+        };
 
-        assert!(!should_stop_post_launch_computer_use_guard(
-            3,
-            &missing_notify
+        assert!(!post_launch_guard_artifacts_ready(&missing_notify, true));
+        assert!(!post_launch_guard_artifacts_ready(
+            &missing_marketplace,
+            true
         ));
-        assert!(!should_stop_post_launch_computer_use_guard(
-            3,
-            &missing_marketplace
+        assert!(!post_launch_guard_artifacts_ready(
+            &missing_runtime_package,
+            true
         ));
-        assert!(!should_stop_post_launch_computer_use_guard(
-            3,
-            &missing_runtime_package
+        assert!(!post_launch_guard_artifacts_ready(
+            &missing_browser_service,
+            true
+        ));
+        assert!(post_launch_guard_artifacts_ready(
+            &missing_browser_service,
+            false
         ));
     }
 

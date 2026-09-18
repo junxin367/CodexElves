@@ -1321,6 +1321,7 @@ async fn launch_lifecycle_runs_sync_before_launch_writes_success_and_shutdowns_o
         .with_settings(BackendSettings {
             provider_sync_enabled: true,
             computer_use_guard_enabled: false,
+            computer_use_api_key_browser_compat_enabled: false,
             ..BackendSettings::default()
         })
         .with_launch_result(CodexLaunch::Process {
@@ -1409,6 +1410,7 @@ async fn launch_lifecycle_keeps_js_injection_in_relay_mode() {
     let hooks = FakeHooks::new(events.clone()).with_settings(BackendSettings {
         launch_mode: codex_elves_core::settings::LaunchMode::Relay,
         computer_use_guard_enabled: false,
+        computer_use_api_key_browser_compat_enabled: false,
         ..BackendSettings::default()
     });
 
@@ -1452,6 +1454,7 @@ async fn launch_lifecycle_skips_helper_and_injection_when_enhancements_disabled(
     let hooks = FakeHooks::new(events.clone()).with_settings(BackendSettings {
         enhancements_enabled: false,
         computer_use_guard_enabled: false,
+        computer_use_api_key_browser_compat_enabled: false,
         ..BackendSettings::default()
     });
 
@@ -1554,6 +1557,38 @@ async fn launch_lifecycle_skips_computer_use_guard_when_disabled() {
 }
 
 #[tokio::test]
+async fn launch_lifecycle_runs_browser_compat_without_full_computer_use_guard() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_dir = temp.path().join("Codex.app");
+    std::fs::create_dir_all(&app_dir).unwrap();
+    let status_store = StatusStore::new(temp.path().join("latest-status.json"));
+    let events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let hooks = FakeHooks::new(events.clone()).with_settings(BackendSettings {
+        computer_use_guard_enabled: false,
+        computer_use_api_key_browser_compat_enabled: true,
+        ..BackendSettings::default()
+    });
+
+    let handle = launch_and_inject_with_hooks(
+        LaunchOptions {
+            app_dir: Some(app_dir),
+            debug_port: 9229,
+            helper_port: 45221,
+            status_store,
+        },
+        &hooks,
+    )
+    .await
+    .unwrap();
+    handle.wait_for_codex_exit().await.unwrap();
+
+    let events = events.lock().unwrap().clone();
+    assert!(events.contains(&"browser-request-header-compat".to_string()));
+    assert!(events.contains(&"computer-use-guard-watchdog".to_string()));
+    assert!(!events.contains(&"computer-use-guard".to_string()));
+}
+
+#[tokio::test]
 async fn launch_lifecycle_does_not_apply_relay_profile_while_launching_codex() {
     let temp = tempfile::tempdir().unwrap();
     let app_dir = temp.path().join("Codex.app");
@@ -1601,6 +1636,7 @@ async fn launch_lifecycle_skips_active_relay_profile_when_supplier_config_disabl
     let hooks = FakeHooks::new(events.clone()).with_settings(BackendSettings {
         relay_profiles_enabled: false,
         computer_use_guard_enabled: false,
+        computer_use_api_key_browser_compat_enabled: false,
         ..BackendSettings::default()
     });
 
@@ -1655,6 +1691,7 @@ experimental_bearer_token = "sk-test"
         }],
         active_relay_id: "relay-a".to_string(),
         computer_use_guard_enabled: false,
+        computer_use_api_key_browser_compat_enabled: false,
         ..BackendSettings::default()
     });
 
@@ -2057,6 +2094,7 @@ impl FakeHooks {
             events,
             settings: BackendSettings {
                 computer_use_guard_enabled: false,
+                computer_use_api_key_browser_compat_enabled: false,
                 ..BackendSettings::default()
             },
             launch_result: CodexLaunch::Process {
@@ -2154,8 +2192,12 @@ impl LaunchHooks for FakeHooks {
         Ok(())
     }
 
-    async fn ensure_computer_use_config(&self, _settings: &BackendSettings) -> anyhow::Result<()> {
-        self.event("computer-use-guard");
+    async fn ensure_computer_use_config(&self, settings: &BackendSettings) -> anyhow::Result<()> {
+        if settings.computer_use_guard_enabled {
+            self.event("computer-use-guard");
+        } else if settings.computer_use_api_key_browser_compat_enabled {
+            self.event("browser-request-header-compat");
+        }
         Ok(())
     }
 

@@ -2244,8 +2244,8 @@ async fn open_responses_proxy_request_once(
             }
             None => local_request_json,
         };
-        let response_protocol = responses_proxy_target_protocol(&relay, &request_json)?;
-        let endpoint = upstream_endpoint_for_protocol(&relay, response_protocol);
+        let mut response_protocol = responses_proxy_target_protocol(&relay, &request_json)?;
+        let mut endpoint = upstream_endpoint_for_protocol(&relay, response_protocol);
         // The client can downgrade independently of our WS close frames / 426
         // fallback cache, and can keep using HTTP for later turns in the session.
         // Enforce the currently selected transport at the HTTP send boundary.
@@ -2393,7 +2393,9 @@ async fn open_responses_proxy_request_once(
         if response_protocol == UpstreamResponseProtocol::Anthropic {
             let mut anthropic_request = upstream_request_json.clone();
             apply_cached_anthropic_reasoning_compatibility(&mut anthropic_request);
-            if should_retry_anthropic_effort(status_code, &content_type, &anthropic_request) {
+            if should_retry_anthropic_effort(status_code, &content_type, &anthropic_request)
+                || (status_code == 400 && is_deepseek_thinking_tool_history(&anthropic_request))
+            {
                 let response = upstream_response
                     .take()
                     .expect("anthropic response is present before retry inspection");
@@ -2427,28 +2429,69 @@ async fn open_responses_proxy_request_once(
                                 .bridges_remote_v2(),
                         };
                         return Err(error)
-                            .context("读取 Anthropic max effort 兼容重试错误体失败")
+                            .context("读取 Anthropic 兼容重试错误体失败")
                             .context(failure_context);
                     }
                 };
                 let rejected_effort = anthropic_requested_effort(&anthropic_request)
                     .unwrap_or_default()
                     .to_string();
-                if let Some(fallback_effort) =
+                let compatibility_retry = if let Some(retry_request) =
+                    deepseek_chat_reasoning_replay_request(
+                        &request_json,
+                        &anthropic_request,
+                        &error_body,
+                    )? {
+                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                        "protocol_proxy.deepseek_reasoning_replay_retry",
+                        json!({
+                            "diagnosticId": diagnostic_id,
+                            "relayId": relay.id,
+                            "model": retry_request.get("model"),
+                            "fromProtocol": response_protocol,
+                            "toProtocol": UpstreamResponseProtocol::ChatCompletions,
+                            "reasoningEffort": retry_request.get("reasoning_effort"),
+                            "reason": "anthropic_history_rejected_reasoning_content"
+                        }),
+                    );
+                    Some((retry_request, UpstreamResponseProtocol::ChatCompletions))
+                } else if let Some(fallback_effort) =
                     anthropic_effort_fallback_from_error(&error_body, &rejected_effort)
                 {
                     remember_anthropic_reasoning_compatibility(&anthropic_request, fallback_effort);
                     let mut retry_request = anthropic_request.clone();
                     apply_cached_anthropic_reasoning_compatibility(&mut retry_request);
-                    let retry = match send_anthropic_messages_request(
-                        &client,
-                        &relay,
-                        &retry_request,
-                        upstream_is_stream,
-                        header_timeout,
-                    )
-                    .await
-                    {
+                    Some((retry_request, UpstreamResponseProtocol::Anthropic))
+                } else {
+                    None
+                };
+                if let Some((retry_request, retry_protocol)) = compatibility_retry {
+                    // 仅重试当前被明确拒绝的请求；不更改模型协议配置或全局路由。
+                    response_protocol = retry_protocol;
+                    endpoint = upstream_endpoint_for_protocol(&relay, response_protocol);
+                    let retry_result = match response_protocol {
+                        UpstreamResponseProtocol::ChatCompletions => {
+                            send_chat_completions_request(
+                                &client,
+                                &relay,
+                                &retry_request,
+                                upstream_is_stream,
+                                header_timeout,
+                            )
+                            .await
+                        }
+                        _ => {
+                            send_anthropic_messages_request(
+                                &client,
+                                &relay,
+                                &retry_request,
+                                upstream_is_stream,
+                                header_timeout,
+                            )
+                            .await
+                        }
+                    };
+                    let retry = match retry_result {
                         Ok(retry) => retry,
                         Err(error) => {
                             let _ = crate::diagnostic_log::append_diagnostic_log(
@@ -2458,6 +2501,7 @@ async fn open_responses_proxy_request_once(
                                     "relayId": relay.id,
                                     "relayName": relay.name,
                                     "endpoint": endpoint,
+                                    "responseProtocol": response_protocol,
                                     "attempt": attempt + 1,
                                     "candidateCount": relay_count,
                                     "willFailover": has_more_candidates,
@@ -2478,7 +2522,7 @@ async fn open_responses_proxy_request_once(
                                     .bridges_remote_v2(),
                             };
                             return Err(error)
-                                .context("Anthropic max effort 兼容重试请求失败")
+                                .context("上游协议兼容重试请求失败")
                                 .context(failure_context);
                         }
                     };
@@ -10948,6 +10992,85 @@ fn should_retry_anthropic_effort(status_code: u16, content_type: &str, request: 
         && anthropic_requested_effort(request)
             .and_then(reasoning_effort_index)
             .is_some_and(|index| index > 0)
+}
+
+fn is_deepseek_thinking_tool_history(request: &Value) -> bool {
+    request
+        .get("model")
+        .and_then(Value::as_str)
+        .is_some_and(|model| model.to_ascii_lowercase().contains("deepseek"))
+        && matches!(
+            request.pointer("/thinking/type").and_then(Value::as_str),
+            Some("adaptive" | "enabled")
+        )
+        && request
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some_and(|tools| !tools.is_empty())
+        && request
+            .get("messages")
+            .and_then(Value::as_array)
+            .is_some_and(|messages| {
+                messages
+                    .iter()
+                    .any(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+            })
+}
+
+/// 部分 Anthropic 兼容网关在历史回放时，即使原样带回 thinking 仍会拒绝 DeepSeek
+/// 请求。收到明确的缺失错误后，从原始 Responses 历史
+/// 重新生成 Chat 请求，把真实 reasoning_content 直接回传；不伪造思考或降低档位。
+fn deepseek_chat_reasoning_replay_request(
+    source: &Value,
+    anthropic_request: &Value,
+    error_body: &[u8],
+) -> anyhow::Result<Option<Value>> {
+    if !is_deepseek_thinking_tool_history(anthropic_request) {
+        return Ok(None);
+    }
+    let Ok(error) = serde_json::from_slice::<Value>(error_body) else {
+        return Ok(None);
+    };
+    let error = error.get("error").unwrap_or(&error);
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .replace('`', "")
+        .to_ascii_lowercase();
+    if error.get("type").and_then(Value::as_str) != Some("invalid_request_error")
+        || !message.contains("reasoning_content")
+        || !message.contains("thinking mode")
+        || !message.contains("must be passed back")
+    {
+        return Ok(None);
+    }
+
+    let mut retry = responses_to_chat_completions(source.clone())?;
+    let Some(messages) = retry.get("messages").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    if messages.iter().any(|message| {
+        message.get("role").and_then(Value::as_str) == Some("assistant")
+            && !message
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+    }) {
+        return Ok(None);
+    }
+    retry["thinking"] = json!({ "type": "enabled" });
+    // 保留 Anthropic 路径解析后的实际档位，不能因 Chat 能力映射不同而回退到上游默认值。
+    if let Some(effort) = anthropic_requested_effort(anthropic_request) {
+        retry["reasoning_effort"] = json!(effort);
+    }
+    if retry.get("max_tokens").is_none()
+        && retry.get("max_completion_tokens").is_none()
+        && let Some(max_tokens) = anthropic_request.get("max_tokens")
+    {
+        retry["max_tokens"] = max_tokens.clone();
+    }
+    Ok(Some(retry))
 }
 
 fn anthropic_effort_fallback_from_error(

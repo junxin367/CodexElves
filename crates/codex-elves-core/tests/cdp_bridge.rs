@@ -3615,6 +3615,20 @@ fn injection_script_exposes_conversation_view_width_control() {
     assert!(script.contains("data-codex-elves-conversation-view-width"));
     assert!(script.contains("conversationViewWidth()"));
     assert!(script.contains("normalizeConversationViewWidth"));
+    assert!(script.contains(
+        "const conversationViewContentSelector = \"[data-thread-user-message-navigation-content]\";"
+    ));
+    assert!(script.contains(
+        "const conversationViewComposerRootSelector = \"[data-codex-composer-root][data-composer-placement='thread']\";"
+    ));
+    assert!(script.contains(
+        "const conversationViewComposerShellSelector = \"[data-pip-obstacle='thread-footer']\";"
+    ));
+    assert!(script.contains(
+        "conversationViewFindBySelector(conversationViewContentSelector) || conversationViewFindByClasses(conversationViewContentClasses)"
+    ));
+    assert!(script.contains("composerRoot?.closest(conversationViewComposerShellSelector)"));
+    assert!(script.contains("const codexConversationViewRouteHooksVersion = \"3\";"));
     assert!(script.contains("installConversationViewRouteHooks"));
     assert!(script.contains("scheduleConversationViewRouteRefresh"));
     assert!(script.contains("scheduleCodexRouteFeatureRefresh"));

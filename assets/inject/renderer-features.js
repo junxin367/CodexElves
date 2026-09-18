@@ -36,7 +36,7 @@
   const codexDeleteVersion = "7";
   const codexActionGroupVersion = "6";
   const codexArchiveRowActionsVersion = "1";
-  const codexConversationViewRouteHooksVersion = "2";
+  const codexConversationViewRouteHooksVersion = "3";
   const codexConversationViewRouteRefreshDelaysMs = [0, 80, 220, 500, 1000, 1800, 3000];
   const codexRouteFeatureRefreshDelaysMs = [0, 360];
   const codexThreadServiceTierVersion = "1";
@@ -25068,6 +25068,9 @@
     }
   }
 
+  const conversationViewContentSelector = "[data-thread-user-message-navigation-content]";
+  const conversationViewComposerRootSelector = "[data-codex-composer-root][data-composer-placement='thread']";
+  const conversationViewComposerShellSelector = "[data-pip-obstacle='thread-footer']";
   const conversationViewContentClasses = [
     "mx-auto",
     "w-full",
@@ -25125,12 +25128,20 @@
     return matches.find(conversationViewElementIsActive) || matches.find((el) => el?.isConnected) || null;
   }
 
+  function conversationViewFindBySelector(selector) {
+    const matches = Array.from(document.querySelectorAll(selector));
+    return matches.find(conversationViewElementIsActive) || matches.find((el) => el?.isConnected) || null;
+  }
+
   function conversationViewFindContentEl() {
-    return conversationViewFindByClasses(conversationViewContentClasses);
+    return conversationViewFindBySelector(conversationViewContentSelector) || conversationViewFindByClasses(conversationViewContentClasses);
   }
 
   function conversationViewFindComposerEl() {
-    return conversationViewFindByClasses(conversationViewComposerClasses);
+    const composerRoot = conversationViewFindBySelector(conversationViewComposerRootSelector);
+    const composerShell = composerRoot?.closest(conversationViewComposerShellSelector)
+      || conversationViewFindBySelector(conversationViewComposerShellSelector);
+    return composerShell || conversationViewFindByClasses(conversationViewComposerClasses);
   }
 
   function codexServiceTierBadgeVisibleElement(element) {

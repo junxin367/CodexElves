@@ -749,6 +749,11 @@ pub struct BackendSettings {
     pub enhancements_enabled: bool,
     #[serde(rename = "computerUseGuardEnabled", default = "default_true")]
     pub computer_use_guard_enabled: bool,
+    #[serde(
+        rename = "computerUseApiKeyBrowserCompatEnabled",
+        default = "default_true"
+    )]
+    pub computer_use_api_key_browser_compat_enabled: bool,
     #[serde(rename = "codexAppPluginEntryUnlock", default = "default_true")]
     pub codex_app_plugin_entry_unlock: bool,
     #[serde(rename = "codexAppPluginMarketplaceUnlock", default = "default_true")]
@@ -882,6 +887,7 @@ impl Default for BackendSettings {
             relay_profiles_enabled: true,
             enhancements_enabled: true,
             computer_use_guard_enabled: true,
+            computer_use_api_key_browser_compat_enabled: true,
             codex_app_plugin_entry_unlock: true,
             codex_app_plugin_marketplace_unlock: true,
             codex_app_task_board: true,
@@ -1372,6 +1378,7 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
     {
         target.insert("computerUseGuardEnabled".to_string(), Value::Bool(value));
     }
+    merge_bool_setting(target, source, "computerUseApiKeyBrowserCompatEnabled");
     merge_bool_setting(target, source, "codexAppPluginEntryUnlock");
     merge_bool_setting(target, source, "codexAppPluginMarketplaceUnlock");
     merge_bool_setting(target, source, "codexAppTaskBoard");
@@ -1773,6 +1780,7 @@ mod tests {
         assert!(settings.relay_profiles_enabled);
         assert!(settings.enhancements_enabled);
         assert!(settings.computer_use_guard_enabled);
+        assert!(settings.computer_use_api_key_browser_compat_enabled);
         assert!(settings.codex_app_plugin_entry_unlock);
         assert!(settings.codex_app_plugin_marketplace_unlock);
         assert!(settings.codex_app_task_board);
@@ -1850,6 +1858,33 @@ mod tests {
         let serialized = serde_json::to_value(settings).unwrap();
 
         assert_eq!(serialized["codexAppWorkspaceCheckpoint"], json!(false));
+    }
+
+    #[test]
+    fn settings_missing_api_key_browser_compat_defaults_enabled() {
+        let settings: BackendSettings = serde_json::from_str("{}").unwrap();
+        let serialized = serde_json::to_value(settings).unwrap();
+
+        assert_eq!(
+            serialized["computerUseApiKeyBrowserCompatEnabled"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn settings_store_update_persists_api_key_browser_compat() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(temp.path().join("settings.json"));
+
+        let updated = store
+            .update(json!({
+                "computerUseApiKeyBrowserCompatEnabled": false
+            }))
+            .unwrap();
+        let loaded = store.load().unwrap();
+
+        assert!(!updated.computer_use_api_key_browser_compat_enabled);
+        assert!(!loaded.computer_use_api_key_browser_compat_enabled);
     }
 
     #[test]
