@@ -116,7 +116,7 @@ fn create_state_db_with_providers(path: &Path, rows: &[(&str, &str, i64)]) {
 }
 
 #[test]
-fn provider_sync_targets_merge_config_rollout_sqlite_and_sort_current_first() {
+fn provider_sync_targets_merge_config_and_sqlite_without_scanning_rollouts() {
     let tmp = tempdir().unwrap();
     let home = tmp.path().join(".codex");
     fs::create_dir(&home).unwrap();
@@ -162,13 +162,7 @@ name = "apigather"
         .collect::<Vec<_>>();
     assert_eq!(
         ids,
-        vec![
-            "custom",
-            "apigather",
-            "legacy-provider",
-            "openai",
-            "sqlite-provider",
-        ]
+        vec!["custom", "apigather", "openai", "sqlite-provider",]
     );
     let custom = targets
         .targets
@@ -183,14 +177,19 @@ name = "apigather"
         .find(|target| target.id == "openai")
         .unwrap();
     assert!(openai.sources.contains(&ProviderSyncTargetSource::Config));
-    assert!(openai.sources.contains(&ProviderSyncTargetSource::Rollout));
     assert!(openai.sources.contains(&ProviderSyncTargetSource::Sqlite));
-    let legacy = targets
-        .targets
-        .iter()
-        .find(|target| target.id == "legacy-provider")
-        .unwrap();
-    assert_eq!(legacy.sources, vec![ProviderSyncTargetSource::Rollout]);
+    assert!(
+        targets
+            .targets
+            .iter()
+            .all(|target| !target.sources.contains(&ProviderSyncTargetSource::Rollout))
+    );
+    assert!(
+        targets
+            .targets
+            .iter()
+            .all(|target| target.id != "legacy-provider")
+    );
 }
 
 #[test]
@@ -286,7 +285,7 @@ fn provider_sync_accepts_nested_session_meta_ids_when_filename_identifies_primar
     let primary_id = "019fd49e-ea36-7382-9272-20599822ff82";
     let nested_id = "019fd157-b1ec-71c3-b9ff-8f18daf0fc44";
     let rollout = home.join(format!(
-        "sessions/2026/rollout-2026-08-06T09-10-12-{primary_id}.jsonl"
+        "sessions/2026/rollout-2026-08-06T09-10-12-{nested_id}_{primary_id}.jsonl"
     ));
     fs::create_dir_all(rollout.parent().unwrap()).unwrap();
     fs::write(
@@ -342,7 +341,7 @@ fn provider_sync_accepts_nested_session_meta_ids_when_filename_identifies_primar
 }
 
 #[test]
-fn provider_sync_target_discovery_reads_all_session_meta_providers() {
+fn provider_sync_target_discovery_does_not_scan_session_rollouts() {
     let tmp = tempdir().unwrap();
     let home = tmp.path().join(".codex");
     fs::create_dir(&home).unwrap();
@@ -361,13 +360,13 @@ fn provider_sync_target_discovery_reads_all_session_meta_providers() {
         .map(|target| target.id.as_str())
         .collect::<Vec<_>>();
 
-    assert!(ids.contains(&"openai"));
-    assert!(ids.contains(&"ccx"));
-    assert!(ids.contains(&"CodexElves"));
+    assert!(ids.contains(&"custom"));
+    assert!(!ids.contains(&"ccx"));
+    assert!(!ids.contains(&"CodexElves"));
 }
 
 #[test]
-fn provider_sync_updates_rollout_sqlite_visibility_and_creates_backup() {
+fn provider_sync_updates_rollout_sqlite_visibility_without_persistent_backup() {
     let tmp = tempdir().unwrap();
     let home = tmp.path().join(".codex");
     fs::create_dir(&home).unwrap();
@@ -412,9 +411,13 @@ fn provider_sync_updates_rollout_sqlite_visibility_and_creates_backup() {
         row,
         ("apigather".to_string(), 1, "C:/workspace".to_string())
     );
-    let backup_dir = result.backup_dir.unwrap();
-    assert!(backup_dir.join("session-meta-backup.json").exists());
-    assert!(backup_dir.join("db/state_5.sqlite").exists());
+    assert!(result.backup_dir.is_none());
+    assert!(
+        fs::read_dir(home.join("backups_state/provider-sync"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
 }
 
 #[test]
@@ -451,12 +454,17 @@ fn provider_sync_updates_new_codex_sqlite_directory_db() {
         row,
         ("apigather".to_string(), 1, "C:/workspace".to_string())
     );
-    let backup_dir = result.backup_dir.unwrap();
-    assert!(backup_dir.join("db/sqlite/codex-dev.db").exists());
+    assert!(result.backup_dir.is_none());
+    assert!(
+        fs::read_dir(home.join("backups_state/provider-sync"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
 }
 
 #[test]
-fn provider_sync_backup_metadata_contains_reference_fields_and_managed_marker() {
+fn provider_sync_removes_successful_and_legacy_provider_sync_backups() {
     let tmp = tempdir().unwrap();
     let home = tmp.path().join(".codex");
     fs::create_dir(&home).unwrap();
@@ -468,36 +476,31 @@ fn provider_sync_backup_metadata_contains_reference_fields_and_managed_marker() 
         "C:/workspace",
     );
     create_state_db(&home.join("state_5.sqlite"));
+    let legacy_backup = home.join("backups_state/provider-sync/20260612102245");
+    fs::create_dir_all(&legacy_backup).unwrap();
+    fs::write(
+        legacy_backup.join("metadata.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "namespace": "provider-sync",
+            "codexHome": home.to_string_lossy(),
+            "targetProvider": "openai",
+            "changedSessionFiles": 0,
+            "managedBy": "Codex++ provider sync"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 
     let result = run_provider_sync(Some(&home));
 
     assert_eq!(result.status, ProviderSyncStatus::Synced);
-    let backup_dir = result.backup_dir.unwrap();
-    let metadata: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(backup_dir.join("metadata.json")).unwrap())
-            .unwrap();
-    assert_eq!(metadata["version"], 1);
-    assert_eq!(metadata["namespace"], "provider-sync");
-    assert_eq!(metadata["codexHome"], home.to_string_lossy().to_string());
-    assert_eq!(metadata["targetProvider"], "apigather");
-    assert_eq!(metadata["changedSessionFiles"], 1);
-    assert_eq!(metadata["managedBy"], "CodexElves provider sync");
-    assert!(metadata["createdAt"].as_str().unwrap().contains('T'));
+    assert!(result.backup_dir.is_none());
     assert!(
-        metadata["dbFiles"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("state_5.sqlite"))
-    );
-    let operation: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(backup_dir.join("operation.json")).unwrap())
-            .unwrap();
-    assert_eq!(operation["status"], "committed");
-    assert!(
-        fs::read_dir(backup_dir.join("rollouts"))
+        fs::read_dir(home.join("backups_state/provider-sync"))
             .unwrap()
             .next()
-            .is_some()
+            .is_none()
     );
 }
 
@@ -733,6 +736,12 @@ fn provider_sync_restores_rollout_first_line_when_later_step_fails() {
         .unwrap()
         .to_string();
     assert_eq!(restored_first_line, original_first_line);
+    assert!(
+        fs::read_dir(home.join("backups_state/provider-sync"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
 }
 
 #[test]
@@ -805,21 +814,28 @@ fn provider_sync_restores_global_state_when_later_step_fails() {
     })
     .to_string();
     fs::write(&state_path, &original_state).unwrap();
-    fs::create_dir_all(home.join("backups_state/provider-sync/blocker")).unwrap();
-    fs::write(
-        home.join("backups_state/provider-sync/blocker/metadata.json"),
-        json!({"managedBy": "CodexElves provider sync"}).to_string(),
+    let db = Connection::open(home.join("state_5.sqlite")).unwrap();
+    db.execute(
+        "CREATE TRIGGER fail_provider_sync_update BEFORE UPDATE ON threads BEGIN SELECT RAISE(ABORT, 'boom'); END",
+        [],
     )
     .unwrap();
+    drop(db);
 
-    let result = run_provider_sync_with_target(Some(&home), Some("bad/provider"));
+    let result = run_provider_sync(Some(&home));
 
-    assert_eq!(result.status, ProviderSyncStatus::Blocked);
+    assert_eq!(result.status, ProviderSyncStatus::Failed);
     assert_eq!(fs::read_to_string(&state_path).unwrap(), original_state);
+    assert!(
+        fs::read_dir(home.join("backups_state/provider-sync"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
 }
 
 #[test]
-fn provider_sync_skips_when_home_missing_or_lock_exists_and_prunes_backups() {
+fn provider_sync_skips_when_home_missing_or_lock_exists_and_cleans_legacy_backups() {
     let tmp = tempdir().unwrap();
     let missing = tmp.path().join(".missing");
     let result = run_provider_sync(Some(&missing));
@@ -840,7 +856,12 @@ fn provider_sync_skips_when_home_missing_or_lock_exists_and_prunes_backups() {
         fs::create_dir_all(&backup).unwrap();
         fs::write(
             backup.join("metadata.json"),
-            json!({"managedBy": "CodexElves provider sync"}).to_string(),
+            json!({
+                "namespace": "provider-sync",
+                "codexHome": home.to_string_lossy(),
+                "managedBy": "Codex++ provider sync"
+            })
+            .to_string(),
         )
         .unwrap();
     }
@@ -856,7 +877,7 @@ fn provider_sync_skips_when_home_missing_or_lock_exists_and_prunes_backups() {
         .unwrap()
         .filter(|entry| entry.as_ref().unwrap().path().is_dir())
         .count();
-    assert_eq!(backups, 5);
+    assert_eq!(backups, 0);
 }
 
 #[test]
@@ -946,6 +967,172 @@ fn provider_sync_rebuilds_missing_user_index() {
 }
 
 #[test]
+fn provider_sync_preserves_paginated_user_event_semantics_and_current_index_metadata() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join(".codex");
+    fs::create_dir(&home).unwrap();
+    fs::write(home.join("config.toml"), "model_provider = \"custom\"\n").unwrap();
+    let existing_rollout = home.join("sessions/2026/rollout-paginated-existing.jsonl");
+    let missing_rollout = home.join("sessions/2026/rollout-paginated-missing.jsonl");
+    for (path, id) in [
+        (&existing_rollout, "thread-existing"),
+        (&missing_rollout, "thread-missing"),
+    ] {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            format!(
+                "{}\n{}\n{}\n",
+                json!({
+                    "timestamp": "2026-09-22T00:00:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": id,
+                        "session_id": "parent-session-id",
+                        "model_provider": "old-provider",
+                        "cwd": "C:/workspace",
+                        "source": "vscode",
+                        "thread_source": "user",
+                        "history_mode": "paginated",
+                        "originator": "Codex Desktop",
+                        "cli_version": "0.155.0-alpha.9.2",
+                        "git": {
+                            "commit_hash": "deadbeef",
+                            "branch": "main",
+                            "repository_url": "https://example.com/repo.git"
+                        }
+                    }
+                }),
+                json!({
+                    "timestamp": "2026-09-22T00:00:01Z",
+                    "type": "turn_context",
+                    "payload": {
+                        "model": "gpt-5.6-sol",
+                        "effort": "high",
+                        "sandbox_policy": {"type": "read-only"},
+                        "approval_policy": "on-request"
+                    }
+                }),
+                json!({
+                    "timestamp": "2026-09-22T00:00:02Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message",
+                        "message": "分页历史会话"
+                    }
+                })
+            ),
+        )
+        .unwrap();
+    }
+    let db = Connection::open(home.join("state_5.sqlite")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            rollout_path TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            model_provider TEXT NOT NULL,
+            cwd TEXT NOT NULL,
+            title TEXT NOT NULL,
+            sandbox_policy TEXT NOT NULL,
+            approval_mode TEXT NOT NULL,
+            tokens_used INTEGER NOT NULL DEFAULT 0,
+            has_user_event INTEGER NOT NULL DEFAULT 0,
+            archived INTEGER NOT NULL DEFAULT 0,
+            git_sha TEXT,
+            git_branch TEXT,
+            git_origin_url TEXT,
+            cli_version TEXT NOT NULL DEFAULT '',
+            first_user_message TEXT NOT NULL DEFAULT '',
+            model TEXT,
+            reasoning_effort TEXT,
+            thread_source TEXT,
+            preview TEXT NOT NULL DEFAULT '',
+            recency_at INTEGER NOT NULL DEFAULT 0,
+            recency_at_ms INTEGER NOT NULL DEFAULT 0,
+            history_mode TEXT NOT NULL DEFAULT 'legacy',
+            is_pinned INTEGER NOT NULL DEFAULT 0,
+            originator TEXT
+        );
+        INSERT INTO threads (
+            id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+            sandbox_policy, approval_mode, has_user_event, archived, history_mode
+        ) VALUES (
+            'thread-existing', '', 0, 0, 'vscode', 'old-provider', 'C:/old', 'Existing',
+            '{}', 'on-request', 0, 0, 'PAGINATED'
+        );",
+    )
+    .unwrap();
+    drop(db);
+
+    let result = run_provider_sync(Some(&home));
+
+    assert_eq!(
+        result.status,
+        ProviderSyncStatus::Synced,
+        "{}",
+        result.message
+    );
+    assert_eq!(result.sqlite_rows_inserted, 1);
+    assert_eq!(result.sqlite_user_event_rows_updated, 0);
+    let db = Connection::open(home.join("state_5.sqlite")).unwrap();
+    let existing_has_user_event: i64 = db
+        .query_row(
+            "SELECT has_user_event FROM threads WHERE id = 'thread-existing'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(existing_has_user_event, 0);
+    let inserted = db
+        .query_row(
+            "SELECT id, has_user_event, history_mode, originator, model, reasoning_effort,
+                    git_sha, git_branch, git_origin_url
+             FROM threads WHERE id = 'thread-missing'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        inserted,
+        (
+            "thread-missing".to_string(),
+            0,
+            "paginated".to_string(),
+            "Codex Desktop".to_string(),
+            "gpt-5.6-sol".to_string(),
+            "high".to_string(),
+            "deadbeef".to_string(),
+            "main".to_string(),
+            "https://example.com/repo.git".to_string(),
+        )
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM threads WHERE id = 'parent-session-id'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn provider_sync_does_not_mark_subagent_as_user_event() {
     let tmp = tempdir().unwrap();
     let home = tmp.path().join(".codex");
@@ -1015,6 +1202,34 @@ fn provider_sync_recovers_dead_owner_lock() {
 
     assert_eq!(result.status, ProviderSyncStatus::Synced);
     assert!(!lock_dir.exists());
+}
+
+#[test]
+fn provider_sync_cleans_stale_atomic_replacement_artifacts() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join(".codex");
+    fs::create_dir(&home).unwrap();
+    fs::write(home.join("config.toml"), "model_provider = \"custom\"\n").unwrap();
+    let rollout = home.join("sessions/2026/rollout-stale-artifact.jsonl");
+    write_rollout(&rollout, "custom", "thread-1", "C:/workspace");
+    let file_name = rollout.file_name().unwrap().to_string_lossy();
+    let old_path = rollout
+        .parent()
+        .unwrap()
+        .join(format!(".{file_name}.provider-sync-deadbeef.old"));
+    let temp_path = rollout
+        .parent()
+        .unwrap()
+        .join(format!(".{file_name}.provider-sync-deadbeef.tmp"));
+    fs::copy(&rollout, &old_path).unwrap();
+    fs::copy(&rollout, &temp_path).unwrap();
+
+    let result = run_provider_sync(Some(&home));
+
+    assert_eq!(result.status, ProviderSyncStatus::Synced);
+    assert!(!old_path.exists());
+    assert!(!temp_path.exists());
+    assert!(rollout.exists());
 }
 
 #[test]
@@ -1177,14 +1392,53 @@ fn provider_sync_recovers_an_unfinished_operation_before_new_writes() {
 
     let first = run_provider_sync(Some(&home));
     assert_eq!(first.status, ProviderSyncStatus::Synced);
-    let first_backup = first.backup_dir.unwrap();
+    assert!(first.backup_dir.is_none());
+    let first_backup = home.join("backups_state/provider-sync/20260922000000");
+    let backup_rollout = first_backup
+        .join("rollouts")
+        .join(rollout.strip_prefix(&home).unwrap());
+    fs::create_dir_all(backup_rollout.parent().unwrap()).unwrap();
+    fs::create_dir_all(first_backup.join("db")).unwrap();
+    fs::copy(&rollout, &backup_rollout).unwrap();
+    fs::copy(
+        home.join("state_5.sqlite"),
+        first_backup.join("db/state_5.sqlite"),
+    )
+    .unwrap();
+    fs::write(
+        first_backup.join("session-meta-backup.json"),
+        serde_json::to_vec_pretty(&json!([{
+            "path": rollout.to_string_lossy(),
+            "backupPath": backup_rollout.to_string_lossy()
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        first_backup.join("metadata.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "namespace": "provider-sync",
+            "codexHome": home.to_string_lossy(),
+            "targetProvider": "custom",
+            "operationId": "interrupted-operation",
+            "changedSessionFiles": 1,
+            "managedBy": "CodexElves provider sync"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     let operation_path = first_backup.join("operation.json");
-    let mut operation: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&operation_path).unwrap()).unwrap();
-    operation["status"] = json!("files_applied");
     fs::write(
         &operation_path,
-        serde_json::to_string_pretty(&operation).unwrap(),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "operationId": "interrupted-operation",
+            "status": "files_applied",
+            "updatedAt": "2026-09-22T00:00:00Z",
+            "error": null
+        }))
+        .unwrap(),
     )
     .unwrap();
     let mut rollout_value: serde_json::Value = serde_json::from_str(
@@ -1219,9 +1473,7 @@ fn provider_sync_recovers_an_unfinished_operation_before_new_writes() {
         "{}",
         second.message
     );
-    let recovered_operation: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(operation_path).unwrap()).unwrap();
-    assert_eq!(recovered_operation["status"], "rolled_back");
+    assert!(!first_backup.exists());
     let first_line: serde_json::Value =
         serde_json::from_str(fs::read_to_string(rollout).unwrap().lines().next().unwrap()).unwrap();
     assert_eq!(first_line["payload"]["model_provider"], "custom");

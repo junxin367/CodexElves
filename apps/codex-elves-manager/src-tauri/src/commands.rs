@@ -962,11 +962,9 @@ pub fn list_local_sessions() -> CommandResult<LocalSessionsPayload> {
     });
     let mut seen_session_ids = std::collections::HashSet::new();
     sessions.retain(|session| seen_session_ids.insert(session.id.clone()));
+    let dominant_db_path = dominant_session_db_path(&sessions, &db_paths);
     let payload = LocalSessionsPayload {
-        db_path: db_paths
-            .first()
-            .map(|path| path.to_string_lossy().to_string())
-            .unwrap_or_default(),
+        db_path: dominant_db_path,
         db_paths: db_paths
             .iter()
             .map(|path| path.to_string_lossy().to_string())
@@ -1059,6 +1057,27 @@ pub fn delete_local_session(request: DeleteLocalSessionRequest) -> CommandResult
 
 fn local_session_adapter(db_path: &Path) -> codex_elves_data::SQLiteStorageAdapter {
     codex_elves_data::SQLiteStorageAdapter::new(db_path)
+}
+
+fn dominant_session_db_path(
+    sessions: &[codex_elves_data::LocalSession],
+    db_paths: &[PathBuf],
+) -> String {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for session in sessions {
+        *counts.entry(session.db_path.clone()).or_default() += 1;
+    }
+    let max_count = counts.values().copied().max().unwrap_or_default();
+    sessions
+        .iter()
+        .find(|session| counts.get(&session.db_path).copied() == Some(max_count))
+        .map(|session| session.db_path.clone())
+        .unwrap_or_else(|| {
+            db_paths
+                .first()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_default()
+        })
 }
 
 fn normalize_settings_before_save(mut settings: BackendSettings) -> BackendSettings {
@@ -5123,6 +5142,14 @@ base_url = "https://manual.example/v1"
         let legacy_db = codex_home.join("state_5.sqlite");
         create_minimal_thread_db(&current_db, "t1", "Current Copy", 100);
         create_minimal_thread_db(&legacy_db, "t1", "Legacy Copy", 200);
+        let legacy = rusqlite::Connection::open(&legacy_db).unwrap();
+        legacy
+            .execute(
+                "INSERT INTO threads VALUES ('t2', '', 'Legacy Only', 150)",
+                [],
+            )
+            .unwrap();
+        drop(legacy);
 
         unsafe {
             std::env::set_var("CODEX_HOME", &codex_home);
@@ -5131,13 +5158,14 @@ base_url = "https://manual.example/v1"
         restore_codex_home(previous_codex_home);
 
         assert_eq!(result.status, "ok");
-        assert_eq!(result.payload.sessions.len(), 1);
+        assert_eq!(result.payload.sessions.len(), 2);
         assert_eq!(result.payload.sessions[0].id, "t1");
         assert_eq!(result.payload.sessions[0].title, "Legacy Copy");
         assert_eq!(
             result.payload.sessions[0].db_path,
             legacy_db.to_string_lossy()
         );
+        assert_eq!(result.payload.db_path, legacy_db.to_string_lossy());
     }
 
     #[test]
