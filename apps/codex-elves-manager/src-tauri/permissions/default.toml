@@ -38,6 +38,7 @@ commands.allow = [
   "load_settings",
   "load_watcher_state",
   "load_workspace_checkpoint_management",
+  "open_codex_home_directory",
   "open_external_url",
   "open_workspace_checkpoint_storage",
   "perform_update",

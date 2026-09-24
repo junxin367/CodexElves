@@ -55,7 +55,7 @@ const COMMON_MODEL_CONTEXT_WINDOWS: Record<string, string> = {
 };
 
 const COMMON_MODEL_CONTEXT_PATTERNS: Array<{ pattern: RegExp; contextWindow: string }> = [
-  // Plan 套餐窗口只匹配已确认版本；未知后续版本保持为空，交由供应商配置。
+  // 已知窗口只匹配确认过的版本；未知型号由界面默认值处理。
   { pattern: /^gpt-5\.6(?:[.-]|$)/, contextWindow: "372000" },
   { pattern: /^gpt-5\.5(?:[.-]|$)/, contextWindow: "272000" },
   { pattern: /^gpt-5\.4-mini(?:[.-]|$)/, contextWindow: "272000" },
@@ -103,11 +103,8 @@ export function knownModelContextWindow(model: string): string {
   return "";
 }
 
-// 仅用于修复已经保存但缺少容量的明确模型元数据，不对所有 Plan 模型做通用兜底。
-export function requiredModelContextWindow(model: string): string {
-  const slug = model.trim().toLowerCase().split("/").filter(Boolean).pop() || "";
-  if (!/^claude-fable-5(?:[.-]|$)/.test(slug)) return "";
-  return knownModelContextWindow(model);
+export function defaultModelContextWindow(model: string): string {
+  return knownModelContextWindow(model) || "1000000";
 }
 
 function uniqueStrings(values: string[]): string[] {

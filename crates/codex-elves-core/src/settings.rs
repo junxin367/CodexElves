@@ -637,29 +637,11 @@ pub fn infer_relay_protocol_for_model(model: &str) -> RelayProtocol {
         return RelayProtocol::Responses;
     }
 
-    const CHAT_COMPLETIONS_PREFIXES: &[&str] = &[
-        "deepseek", "qwen", "qwq", "glm", "chatglm", "zhipu", "zhipuai", "kimi", "moonshot",
-        "minimax", "mimo", "gemini", "gemma", "grok", "mistral", "mixtral", "llama", "step",
-        "stepfun", "qianfan", "ernie", "hunyuan", "doubao", "longcat", "baichuan", "yi", "command",
-        "cohere", "phi", "nova", "ark",
-    ];
-    if CHAT_COMPLETIONS_PREFIXES
-        .iter()
-        .any(|prefix| model_slug_matches_family(slug, prefix))
-    {
-        return RelayProtocol::ChatCompletions;
+    if slug.is_empty() {
+        RelayProtocol::Responses
+    } else {
+        RelayProtocol::Anthropic
     }
-
-    RelayProtocol::Responses
-}
-
-fn model_slug_matches_family(slug: &str, family: &str) -> bool {
-    if slug == family {
-        return true;
-    }
-    slug.strip_prefix(family)
-        .and_then(|rest| rest.chars().next())
-        .is_some_and(|ch| matches!(ch, '-' | '_' | '.') || ch.is_ascii_digit())
 }
 
 fn insert_model_protocol_assignment(
@@ -814,6 +796,8 @@ pub struct BackendSettings {
     pub gpt_reasoning_continuation_max_rounds: u8,
     #[serde(rename = "layeredCompactionEnabled", default)]
     pub layered_compaction_enabled: bool,
+    #[serde(rename = "layeredCompactionRetainRecentRoundEnabled", default)]
+    pub layered_compaction_retain_recent_round_enabled: bool,
     #[serde(
         rename = "layeredCompactionRetainTokens",
         default = "default_layered_compaction_retain_tokens",
@@ -911,6 +895,7 @@ impl Default for BackendSettings {
             gpt_reasoning_continuation: false,
             gpt_reasoning_continuation_max_rounds: default_gpt_reasoning_continuation_max_rounds(),
             layered_compaction_enabled: false,
+            layered_compaction_retain_recent_round_enabled: false,
             layered_compaction_retain_tokens: default_layered_compaction_retain_tokens(),
             layered_compaction_prompt_override: String::new(),
             layered_compaction_model_override_enabled: false,
@@ -2055,6 +2040,24 @@ mod tests {
     }
 
     #[test]
+    fn compaction_recent_round_switch_defaults_off_for_existing_settings() {
+        let existing: BackendSettings =
+            serde_json::from_str(r#"{"layeredCompactionEnabled":true}"#).unwrap();
+        assert!(existing.layered_compaction_enabled);
+        assert!(!existing.layered_compaction_retain_recent_round_enabled);
+
+        let enabled: BackendSettings = serde_json::from_str(
+            r#"{"layeredCompactionEnabled":true,"layeredCompactionRetainRecentRoundEnabled":true}"#,
+        )
+        .unwrap();
+        assert!(enabled.layered_compaction_retain_recent_round_enabled);
+        assert_eq!(
+            serde_json::to_value(enabled).unwrap()["layeredCompactionRetainRecentRoundEnabled"],
+            true
+        );
+    }
+
+    #[test]
     fn relay_profile_official_mix_api_key_defaults_to_false() {
         let profile: RelayProfile =
             serde_json::from_str(r#"{"id":"official","name":"官方","relayMode":"official"}"#)
@@ -2222,7 +2225,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_protocol_inference_matches_model_family_and_falls_back_to_responses() {
+    fn relay_protocol_inference_defaults_other_models_to_anthropic() {
         for model in [
             "gpt-5.3-codex-spark",
             "openai/gpt-5.6-sol",
@@ -2247,17 +2250,14 @@ mod tests {
             "zai-org/glm-5.1",
             "google/gemini-3.1-pro",
             "Qwen/Qwen3-Coder",
+            "vendor/future-model",
         ] {
             assert_eq!(
                 infer_relay_protocol_for_model(model),
-                RelayProtocol::ChatCompletions,
+                RelayProtocol::Anthropic,
                 "{model}"
             );
         }
-        assert_eq!(
-            infer_relay_protocol_for_model("vendor/future-model"),
-            RelayProtocol::Responses
-        );
         assert_eq!(infer_relay_protocol_for_model(""), RelayProtocol::Responses);
     }
 
@@ -2976,6 +2976,7 @@ experimental_bearer_token = "sk-existing""#
             cli_wrapper_api_key_env: "CUSTOM_ENV".to_string(),
             codex_extra_args: vec!["--force_high_performance_gpu".to_string()],
             layered_compaction_enabled: true,
+            layered_compaction_retain_recent_round_enabled: true,
             layered_compaction_model_override_enabled: true,
             layered_compaction_models: LayeredCompactionModels {
                 gpt: "deepseek-chat".to_string(),

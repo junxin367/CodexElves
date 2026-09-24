@@ -9012,7 +9012,19 @@ async fn responses_proxy_legacy_compaction_blank_override_uses_project_default_p
             {
                 "type": "message",
                 "role": "user",
-                "content": [{ "type": "input_text", "text": "keep this context" }]
+                "content": [{ "type": "input_text", "text": "earlier request" }]
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "recent answer" }]
+            },
+            { "type": "function_call", "name": "exec_command", "call_id": "call_recent", "arguments": "{}" },
+            { "type": "function_call_output", "call_id": "call_recent", "output": "tool result" },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "recent request" }]
             },
             {
                 "type": "message",
@@ -9032,8 +9044,14 @@ async fn responses_proxy_legacy_compaction_blank_override_uses_project_default_p
     let captured = server.finish();
     let forwarded: Value = serde_json::from_str(&captured.body).unwrap();
 
+    assert_eq!(forwarded["input"].as_array().unwrap().len(), 6);
     assert_eq!(
-        forwarded["input"][0]["content"][0]["text"],
+        &forwarded["input"].as_array().unwrap()[..5],
+        &request["input"].as_array().unwrap()[..5],
+        "关闭补回时摘要模型仍应收到完整最近一轮及工具调用配对"
+    );
+    assert_eq!(
+        forwarded["input"][5]["content"][0]["text"],
         codex_elves_core::layered_compaction::DEFAULT_COMPACTION_PROMPT
     );
 }
@@ -9400,6 +9418,41 @@ async fn continue_thinking_skips_response_with_tool_call_output() {
     assert!(result.request_body.is_none());
     assert!(result.before_response_body.is_none());
     assert!(result.after_response_body.is_none());
+}
+
+#[tokio::test]
+async fn prompt_only_compaction_does_not_trigger_gpt_reasoning_continuation() {
+    let settings = BackendSettings {
+        layered_compaction_enabled: true,
+        layered_compaction_retain_recent_round_enabled: false,
+        gpt_reasoning_continuation: true,
+        ..BackendSettings::default()
+    };
+    let first_round = responses_sse_with_reasoning("resp_compaction_summary", 516);
+    let result = apply_continue_thinking_to_responses_stream(
+        &json!({
+            "model": "gpt-5.6",
+            "stream": true,
+            "reasoning": { "effort": "high" },
+            "input": [
+                { "type": "message", "role": "user", "content": "recent request" },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a summary."
+                }
+            ]
+        }),
+        settings,
+        None,
+        first_round.clone(),
+    )
+    .await;
+
+    assert!(!result.triggered);
+    assert_eq!(result.rounds, 0);
+    assert!(result.request_body.is_none());
+    assert_eq!(result.sse_text, first_round);
 }
 
 #[tokio::test]
@@ -11275,7 +11328,7 @@ async fn responses_proxy_infers_responses_for_unlisted_gpt_model() {
 }
 
 #[tokio::test]
-async fn responses_proxy_infers_chat_completions_for_unlisted_compatible_model() {
+async fn responses_proxy_infers_anthropic_for_unlisted_non_gpt_non_claude_model() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
@@ -11290,11 +11343,11 @@ async fn responses_proxy_infers_chat_completions_for_unlisted_compatible_model()
     .unwrap();
     assert_eq!(
         upstream.response_protocol,
-        UpstreamResponseProtocol::ChatCompletions
+        UpstreamResponseProtocol::Anthropic
     );
 
     let request = server.finish();
-    assert_eq!(request.path, "/v1/chat/completions");
+    assert_eq!(request.path, "/v1/messages");
     let body: Value = serde_json::from_str(&request.body).unwrap();
     assert_eq!(body["model"], "deepseek-v5");
 }
@@ -12263,4 +12316,109 @@ async fn failed_compaction_model_retries_once_with_session_model() {
     assert_eq!(first["model"], "deepseek-chat");
     assert_eq!(first["reasoning_effort"], "max");
     assert_eq!(second["model"], "claude-opus-4-8");
+}
+
+#[tokio::test]
+async fn compaction_capacity_estimate_defers_to_anthropic_upstream() {
+    let summary = |model: &str| {
+        json!({
+            "id": "msg-capacity",
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": [{"type": "text", "text": "summary"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 600, "output_tokens": 10}
+        })
+        .to_string()
+    };
+    for status in ["200 OK", "400 Bad Request", "413 Payload Too Large"] {
+        let rejected = status != "200 OK";
+        let mut responses = vec![(
+            status.to_string(),
+            if rejected {
+                r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: context length exceeded"}}"#.to_string()
+            } else {
+                summary("deepseek-v4.1-flash")
+            },
+        )];
+        if rejected {
+            responses.push(("200 OK".to_string(), summary("claude-opus-4-8")));
+        }
+        let server = spawn_chat_server_with_status_responses(responses);
+        let settings = BackendSettings {
+            layered_compaction_enabled: true,
+            layered_compaction_retain_recent_round_enabled: false,
+            layered_compaction_model_override_enabled: true,
+            layered_compaction_models: LayeredCompactionModels {
+                claude: "deepseek-v4.1-flash[small]".to_string(),
+                ..Default::default()
+            },
+            relay_profiles: vec![RelayProfile {
+                id: "compaction-capacity".to_string(),
+                base_url: server.base_url.clone(),
+                upstream_base_url: server.base_url.clone(),
+                api_key: "sk-test".to_string(),
+                model_mappings: vec![
+                    RelayModelMapping {
+                        request_model: "claude-opus-4-8".to_string(),
+                        alias: String::new(),
+                        protocol: RelayProtocol::Anthropic,
+                        context_window: "1000000".to_string(),
+                    },
+                    RelayModelMapping {
+                        request_model: "deepseek-v4.1-flash".to_string(),
+                        alias: "deepseek-v4.1-flash[small]".to_string(),
+                        protocol: RelayProtocol::Anthropic,
+                        context_window: "9000".to_string(),
+                    },
+                ],
+                ..RelayProfile::default()
+            }],
+            active_relay_id: "compaction-capacity".to_string(),
+            ..BackendSettings::default()
+        };
+        let history = "中文历史与代码 function_call(arguments);\n".repeat(600);
+        let mut request = legacy_compaction_request();
+        request["model"] = json!("claude-opus-4-8");
+        request["stream"] = json!(false);
+        request["input"][0] = json!({
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": history}]
+        });
+        let candidate = apply_compaction_model_override(&request, "deepseek-v4.1-flash");
+        assert!(
+            codex_elves_core::layered_compaction::estimate_compaction_request_tokens(&candidate)
+                > 9_000,
+            "fixture must exceed the target context estimate even before output reserve"
+        );
+
+        let response = open_responses_proxy_request_with_settings(&request.to_string(), settings)
+            .await
+            .unwrap();
+        assert_eq!(response.status_code, 200);
+        drop(response);
+
+        let requests = server.finish_all();
+        assert_eq!(requests.len(), if rejected { 2 } else { 1 });
+        for (index, captured) in requests.iter().enumerate() {
+            assert!(captured.path.ends_with("/messages"));
+            let body: Value = serde_json::from_str(&captured.body).unwrap();
+            assert_eq!(
+                body["model"],
+                if index == 0 {
+                    "deepseek-v4.1-flash"
+                } else {
+                    "claude-opus-4-8"
+                }
+            );
+            assert!(
+                body["messages"]
+                    .to_string()
+                    .contains(&serde_json::to_string(&history).unwrap()),
+                "容量判断不得裁剪历史；首次请求和回退请求均应保留完整内容"
+            );
+        }
+    }
 }

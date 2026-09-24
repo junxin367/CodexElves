@@ -142,6 +142,20 @@ pub fn prepare_remote_compaction_v2_bridge_request_with_prompt(
     request_json: &Value,
     prompt_override: Option<&str>,
 ) -> Value {
+    prepare_remote_compaction_v2_bridge_request_with_options(
+        request_json,
+        prompt_override,
+        prompt_override.is_some(),
+    )
+}
+
+/// 自定义摘要提示词与最近一轮原始记录补回分别控制。
+/// 关闭补回时仍替换 V2 trigger，但将完整历史交给摘要模型。
+pub fn prepare_remote_compaction_v2_bridge_request_with_options(
+    request_json: &Value,
+    prompt_override: Option<&str>,
+    retain_recent_round: bool,
+) -> Value {
     if !is_remote_compaction_v2_request(Some(request_json)) {
         return request_json.clone();
     }
@@ -155,7 +169,7 @@ pub fn prepare_remote_compaction_v2_bridge_request_with_prompt(
     };
     if let Some(input) = object.get_mut("input") {
         match input {
-            Value::Array(items) if prompt_override.is_some() => {
+            Value::Array(items) if prompt_override.is_some() && retain_recent_round => {
                 let split = split_local_compaction_input(
                     items,
                     LocalCompactionControlKind::RemoteV2Trigger,
@@ -1574,6 +1588,15 @@ pub fn prepare_legacy_layered_compaction_request(
     request_json: &Value,
     prompt_override: &str,
 ) -> Value {
+    prepare_legacy_layered_compaction_request_with_options(request_json, prompt_override, true)
+}
+
+/// 关闭最近一轮补回时只替换压缩提示词，不从摘要请求里摘除原始尾部。
+pub fn prepare_legacy_layered_compaction_request_with_options(
+    request_json: &Value,
+    prompt_override: &str,
+    retain_recent_round: bool,
+) -> Value {
     if !is_compaction_request(Some(request_json)) {
         return request_json.clone();
     }
@@ -1586,10 +1609,14 @@ pub fn prepare_legacy_layered_compaction_request(
                 .cloned()
                 .unwrap_or_else(|| remote_compaction_v2_bridge_prompt_item(prompt));
             replace_message_text(&mut prompt_item, prompt);
-            let split =
-                split_local_compaction_input(input, LocalCompactionControlKind::LegacyPrompt);
-            *input = split.summary_input;
-            input.push(prompt_item);
+            if retain_recent_round {
+                let split =
+                    split_local_compaction_input(input, LocalCompactionControlKind::LegacyPrompt);
+                *input = split.summary_input;
+                input.push(prompt_item);
+            } else if let Some(last) = input.last_mut() {
+                *last = prompt_item;
+            }
         }
         for key in ["tools", "tool_choice", "parallel_tool_calls"] {
             object.remove(key);
@@ -1670,6 +1697,8 @@ pub const DEFAULT_COMPACTION_OUTPUT_RESERVE_TOKENS: u64 = 8_192;
 ///
 /// - 字符加权：ASCII 连续词每 4 字符约 1 token，其他非空白字符按 1 token；
 /// - 序列化 JSON UTF-8 字节数除以 3，覆盖结构字段与中英文混合内容。
+///
+/// 该值可能显著高于上游实际用量，只用于诊断，不得作为跳过独立压缩模型的依据。
 pub fn estimate_compaction_request_tokens(request_json: &Value) -> u64 {
     let weighted = estimate_json_value_tokens(request_json);
     let serialized = serde_json::to_vec(request_json)
@@ -1686,12 +1715,6 @@ pub fn compaction_output_reserve_tokens(request_json: &Value) -> u64 {
         .max()
         .unwrap_or(0)
         .max(DEFAULT_COMPACTION_OUTPUT_RESERVE_TOKENS)
-}
-
-pub fn compaction_request_fits_context(request_json: &Value, context_window: u64) -> bool {
-    let estimated_input = estimate_compaction_request_tokens(request_json);
-    let output_reserve = compaction_output_reserve_tokens(request_json);
-    estimated_input.saturating_add(output_reserve) <= context_window
 }
 
 fn estimate_json_value_tokens(value: &Value) -> u64 {
@@ -3010,6 +3033,83 @@ mod tests {
             item_text(&request["input"][1]),
             item_text(&compaction_prompt_item())
         );
+    }
+
+    #[test]
+    fn legacy_prompt_only_keeps_recent_original_items_in_summary_request() {
+        let request = json!({
+            "input": [
+                user_message("earlier request"),
+                assistant_message("recent answer"),
+                user_message("recent request"),
+                compaction_prompt_item()
+            ]
+        });
+        let rewritten = prepare_legacy_layered_compaction_request_with_options(
+            &request,
+            "CUSTOM PROMPT",
+            false,
+        );
+        let input = rewritten["input"].as_array().unwrap();
+        assert_eq!(&input[..3], &request["input"].as_array().unwrap()[..3]);
+        assert_eq!(item_text(input.last().unwrap()), "CUSTOM PROMPT");
+    }
+
+    #[test]
+    fn bridged_remote_prompt_only_keeps_recent_original_items() {
+        let request = json!({
+            "input": [
+                user_message("earlier request"),
+                assistant_message("recent answer"),
+                user_message("recent request"),
+                { "type": "compaction_trigger" }
+            ]
+        });
+        let rewritten = prepare_remote_compaction_v2_bridge_request_with_options(
+            &request,
+            Some("CUSTOM PROMPT"),
+            false,
+        );
+        let input = rewritten["input"].as_array().unwrap();
+        assert_eq!(&input[..3], &request["input"].as_array().unwrap()[..3]);
+        assert_eq!(item_text(input.last().unwrap()), "CUSTOM PROMPT");
+    }
+
+    #[test]
+    fn prompt_only_compaction_expands_previous_structured_history_once() {
+        let retained_user = user_message("previous recent request");
+        let retained_answer = assistant_message("previous recent answer");
+        let encoded = format!(
+            "{LOCAL_COMPACTION_V3_STRUCTURED_PREFIX}{}",
+            json!({
+                "summary": "previous summary",
+                "retained_tail": [retained_user.clone(), retained_answer.clone()]
+            })
+        );
+        let request = json!({
+            "input": [
+                user_message("older request"),
+                retained_user.clone(),
+                synthetic_structured_compaction_item(&encoded),
+                compaction_prompt_item()
+            ]
+        });
+        let prepared =
+            prepare_legacy_layered_compaction_request_with_options(&request, "NEW PROMPT", false);
+        let input = prepared["input"].as_array().unwrap();
+
+        assert_eq!(
+            input.iter().filter(|item| *item == &retained_user).count(),
+            1
+        );
+        assert!(input.contains(&retained_answer));
+        assert!(prepared.to_string().contains("previous summary"));
+        assert!(
+            !prepared
+                .to_string()
+                .contains(LOCAL_COMPACTION_V3_STRUCTURED_PREFIX)
+        );
+        assert_eq!(item_text(input.last().unwrap()), "NEW PROMPT");
     }
 
     #[test]

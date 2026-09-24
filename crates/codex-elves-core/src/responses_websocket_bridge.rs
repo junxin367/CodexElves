@@ -1360,52 +1360,47 @@ impl WebSocketContinuationCoordinator {
             return Ok(());
         }
         if crate::layered_compaction::is_compaction_request(Some(payload)) {
-            let options = layered_compaction_options
-                .filter(|options| options.enabled)
-                .context("Responses WebSocket 传统压缩请求缺少已启用的上下文压缩配置快照")?;
-            state.active = Some(ActiveWebSocketContinuation {
-                mode: ActiveWebSocketMode::LegacyLayeredCompaction {
-                    retain_tokens: options.retain_tokens,
-                },
-                original_request: payload.clone(),
-                log_id,
-                max_rounds: 0,
-                round: 0,
-                completed_rounds: 0,
-                accumulated_reasoning_tokens: None,
-                buffered_messages: Vec::new(),
-                fallback_messages: Vec::new(),
-                fallback_response_body: None,
-                continue_requests: Vec::new(),
-                before_response_body: None,
-                original_compaction_model,
-                compaction_fallback,
-                compaction_fallback_attempted: false,
-                capacity_retry_attempts: 0,
-            });
-            return Ok(());
-        }
-        if original_compaction_model.is_some()
-            && crate::layered_compaction::is_compaction_request(Some(payload))
-        {
-            state.active = Some(ActiveWebSocketContinuation {
-                mode: ActiveWebSocketMode::CompactionModelOverride,
-                original_request: payload.clone(),
-                log_id,
-                max_rounds: 0,
-                round: 0,
-                completed_rounds: 0,
-                accumulated_reasoning_tokens: None,
-                buffered_messages: Vec::new(),
-                fallback_messages: Vec::new(),
-                fallback_response_body: None,
-                continue_requests: Vec::new(),
-                before_response_body: None,
-                original_compaction_model,
-                compaction_fallback,
-                compaction_fallback_attempted: false,
-                capacity_retry_attempts: 0,
-            });
+            if let Some(options) = layered_compaction_options.filter(|options| options.enabled) {
+                state.active = Some(ActiveWebSocketContinuation {
+                    mode: ActiveWebSocketMode::LegacyLayeredCompaction {
+                        retain_tokens: options.retain_tokens,
+                    },
+                    original_request: payload.clone(),
+                    log_id,
+                    max_rounds: 0,
+                    round: 0,
+                    completed_rounds: 0,
+                    accumulated_reasoning_tokens: None,
+                    buffered_messages: Vec::new(),
+                    fallback_messages: Vec::new(),
+                    fallback_response_body: None,
+                    continue_requests: Vec::new(),
+                    before_response_body: None,
+                    original_compaction_model,
+                    compaction_fallback,
+                    compaction_fallback_attempted: false,
+                    capacity_retry_attempts: 0,
+                });
+            } else if original_compaction_model.is_some() {
+                state.active = Some(ActiveWebSocketContinuation {
+                    mode: ActiveWebSocketMode::CompactionModelOverride,
+                    original_request: payload.clone(),
+                    log_id,
+                    max_rounds: 0,
+                    round: 0,
+                    completed_rounds: 0,
+                    accumulated_reasoning_tokens: None,
+                    buffered_messages: Vec::new(),
+                    fallback_messages: Vec::new(),
+                    fallback_response_body: None,
+                    continue_requests: Vec::new(),
+                    before_response_body: None,
+                    original_compaction_model,
+                    compaction_fallback,
+                    compaction_fallback_attempted: false,
+                    capacity_retry_attempts: 0,
+                });
+            }
             return Ok(());
         }
         if !settings.gpt_reasoning_continuation
@@ -3737,16 +3732,19 @@ fn prepare_websocket_compaction_forwarded_payload(
         && !crate::layered_compaction::model_supports_native_remote_compaction_v2(model)
     {
         let forwarded =
-            crate::layered_compaction::prepare_remote_compaction_v2_bridge_request_with_prompt(
+            crate::layered_compaction::prepare_remote_compaction_v2_bridge_request_with_options(
                 &normalized,
                 settings
                     .layered_compaction_enabled
                     .then_some(settings.layered_compaction_prompt_override.as_str()),
+                settings.layered_compaction_enabled
+                    && settings.layered_compaction_retain_recent_round_enabled,
             );
         return (
             forwarded,
             Some(crate::protocol_proxy::LayeredCompactionOptions {
-                enabled: settings.layered_compaction_enabled,
+                enabled: settings.layered_compaction_enabled
+                    && settings.layered_compaction_retain_recent_round_enabled,
                 retain_tokens: settings.layered_compaction_retain_tokens,
             }),
         );
@@ -3754,14 +3752,16 @@ fn prepare_websocket_compaction_forwarded_payload(
     if crate::layered_compaction::is_compaction_request(Some(&normalized))
         && settings.layered_compaction_enabled
     {
-        let forwarded = crate::layered_compaction::prepare_legacy_layered_compaction_request(
-            &normalized,
-            &settings.layered_compaction_prompt_override,
-        );
+        let forwarded =
+            crate::layered_compaction::prepare_legacy_layered_compaction_request_with_options(
+                &normalized,
+                &settings.layered_compaction_prompt_override,
+                settings.layered_compaction_retain_recent_round_enabled,
+            );
         return (
             forwarded,
             Some(crate::protocol_proxy::LayeredCompactionOptions {
-                enabled: true,
+                enabled: settings.layered_compaction_retain_recent_round_enabled,
                 retain_tokens: settings.layered_compaction_retain_tokens,
             }),
         );
@@ -4945,9 +4945,40 @@ mod tests {
     }
 
     #[test]
+    fn websocket_bridged_remote_prompt_only_preserves_recent_history() {
+        let settings = BackendSettings {
+            layered_compaction_enabled: true,
+            layered_compaction_prompt_override: "CUSTOM V2 PROMPT".to_string(),
+            ..Default::default()
+        };
+        let payload = json!({
+            "type": "response.create",
+            "model": "claude-sonnet-5",
+            "input": [
+                { "type": "message", "role": "user", "content": "earlier request" },
+                { "type": "message", "role": "assistant", "content": "recent answer" },
+                { "type": "message", "role": "user", "content": "recent request" },
+                { "type": "compaction_trigger" }
+            ]
+        });
+        let (_, forwarded, options, _, _) =
+            prepare_downstream_response_create_payload_with_settings(payload.clone(), &settings);
+        assert_eq!(
+            &forwarded["input"].as_array().unwrap()[..3],
+            &payload["input"].as_array().unwrap()[..3]
+        );
+        assert_eq!(
+            forwarded["input"][3]["content"][0]["text"],
+            "CUSTOM V2 PROMPT"
+        );
+        assert!(!options.unwrap().enabled);
+    }
+
+    #[test]
     fn websocket_legacy_compaction_uses_project_default_prompt_and_removes_tools() {
         let settings = BackendSettings {
             layered_compaction_enabled: true,
+            layered_compaction_retain_recent_round_enabled: true,
             layered_compaction_prompt_override: String::new(),
             layered_compaction_retain_tokens: 23_456,
             ..Default::default()
@@ -4994,6 +5025,137 @@ mod tests {
         let options = options.expect("legacy compaction should capture settings");
         assert!(options.enabled);
         assert_eq!(options.retain_tokens, 23_456);
+    }
+
+    #[test]
+    fn websocket_legacy_compaction_without_recent_round_keeps_history_and_changes_prompt() {
+        let settings = BackendSettings {
+            layered_compaction_enabled: true,
+            layered_compaction_prompt_override: "CUSTOM PROMPT".to_string(),
+            ..Default::default()
+        };
+        let payload = json!({
+            "type": "response.create",
+            "model": "gpt-5.6",
+            "input": [
+                { "type": "message", "role": "user", "content": "earlier request" },
+                { "type": "message", "role": "assistant", "content": "recent answer" },
+                { "type": "message", "role": "user", "content": "recent request" },
+                { "type": "message", "role": "user", "content":
+                    "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a summary." }
+            ]
+        });
+        let (_, forwarded, options, _, _) =
+            prepare_downstream_response_create_payload_with_settings(payload.clone(), &settings);
+        assert_eq!(
+            &forwarded["input"].as_array().unwrap()[..3],
+            &payload["input"].as_array().unwrap()[..3]
+        );
+        assert_eq!(forwarded["input"][3]["content"], "CUSTOM PROMPT");
+        assert!(!options.unwrap().enabled);
+    }
+
+    #[test]
+    fn websocket_legacy_prompt_only_forwards_summary_without_continuation() {
+        let settings = BackendSettings {
+            layered_compaction_enabled: true,
+            layered_compaction_prompt_override: "CUSTOM PROMPT".to_string(),
+            gpt_reasoning_continuation: true,
+            ..Default::default()
+        };
+        let payload = json!({
+            "type": "response.create",
+            "model": "gpt-5.6",
+            "input": [
+                { "type": "message", "role": "user", "content": "recent request" },
+                { "type": "message", "role": "user", "content":
+                    "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a summary." }
+            ]
+        });
+        let (request_payload, forwarded, options, _, _) =
+            prepare_downstream_response_create_payload_with_settings(payload, &settings);
+        assert_eq!(forwarded["input"][1]["content"], "CUSTOM PROMPT");
+        assert!(!options.unwrap().enabled);
+
+        let coordinator = WebSocketContinuationCoordinator::default();
+        coordinator
+            .register_request_with_settings(&request_payload, None, options, &settings)
+            .expect("关闭补回时传统压缩应允许透传");
+        assert!(coordinator.state.lock().unwrap().active.is_none());
+
+        let response = Message::Text(
+            r#"{"type":"response.completed","response":{"id":"resp-summary","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"SUMMARY"}]}]}}"#
+                .into(),
+        );
+        let action = coordinator
+            .handle_upstream_message(response.clone())
+            .unwrap();
+        assert!(
+            matches!(action, WebSocketContinuationAction::Forward(message) if message == response)
+        );
+    }
+
+    #[test]
+    fn websocket_legacy_prompt_only_with_independent_model_restores_original_model() {
+        let settings = BackendSettings {
+            layered_compaction_enabled: true,
+            layered_compaction_model_override_enabled: true,
+            ..Default::default()
+        };
+        let payload = json!({
+            "type": "response.create",
+            "model": "gpt-5.6",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a summary."
+            }]
+        });
+        let coordinator = WebSocketContinuationCoordinator::default();
+        coordinator
+            .register_request_with_settings_and_original_model(
+                &payload,
+                None,
+                Some(crate::protocol_proxy::LayeredCompactionOptions {
+                    enabled: false,
+                    retain_tokens: crate::layered_compaction::DEFAULT_RETAIN_TOKENS,
+                }),
+                &settings,
+                Some("claude-opus-4-8".to_string()),
+                None,
+            )
+            .expect("关闭补回但启用独立压缩模型时应保留模型回填");
+        assert!(matches!(
+            coordinator
+                .state
+                .lock()
+                .unwrap()
+                .active
+                .as_ref()
+                .map(|active| active.mode),
+            Some(ActiveWebSocketMode::CompactionModelOverride)
+        ));
+        let action = coordinator
+            .handle_upstream_message(Message::Text(
+                r#"{"type":"response.completed","response":{"id":"resp-summary","status":"completed","model":"gpt-5.6","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"SUMMARY"}]}]}}"#
+                    .into(),
+            ))
+            .unwrap();
+        let WebSocketContinuationAction::Flush { messages, metadata } = action else {
+            panic!("独立压缩模型完成后应回填会话原模型并透传摘要");
+        };
+        let output = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(output.contains("claude-opus-4-8"));
+        assert!(output.contains("SUMMARY"));
+        assert!(!output.contains("codex-elves-compaction-v3:"));
+        assert!(!metadata.layered_compaction_triggered);
     }
 
     #[test]
@@ -5473,6 +5635,73 @@ mod tests {
                 retain_tokens: 12_345
             }
         ));
+    }
+
+    #[test]
+    fn websocket_bridged_remote_prompt_only_returns_plain_summary() {
+        let settings = BackendSettings {
+            layered_compaction_enabled: true,
+            layered_compaction_prompt_override: "CUSTOM V2 PROMPT".to_string(),
+            ..Default::default()
+        };
+        let payload = json!({
+            "type": "response.create",
+            "model": "claude-sonnet-5",
+            "input": [
+                { "type": "message", "role": "user", "content": "recent request" },
+                { "type": "message", "role": "assistant", "content": "recent answer" },
+                { "type": "compaction_trigger" }
+            ]
+        });
+        let (request_payload, forwarded, options, _, _) =
+            prepare_downstream_response_create_payload_with_settings(payload, &settings);
+        assert_eq!(
+            forwarded["input"][2]["content"][0]["text"],
+            "CUSTOM V2 PROMPT"
+        );
+        let coordinator = WebSocketContinuationCoordinator::default();
+        coordinator
+            .register_request_with_settings(&request_payload, None, options, &settings)
+            .unwrap();
+        let action = coordinator
+            .handle_upstream_message(Message::Text(
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp-plain-summary",
+                        "status": "completed",
+                        "model": "claude-sonnet-5",
+                        "output": [{
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{ "type": "output_text", "text": "PLAIN SUMMARY" }]
+                        }]
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        let WebSocketContinuationAction::Flush { messages, metadata } = action else {
+            panic!("本地桥接 V2 应产生 compaction 响应");
+        };
+        let done = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::Text(text) => serde_json::from_str::<Value>(text.as_str()).ok(),
+                _ => None,
+            })
+            .find(|event| event["type"] == "response.output_item.done")
+            .expect("应产生一个终结的 compaction item");
+        assert_eq!(done["item"]["type"], "compaction");
+        assert!(
+            done["item"]["encrypted_content"]
+                .as_str()
+                .unwrap()
+                .starts_with("codex-elves-compaction-v2:")
+        );
+        assert!(!done.to_string().contains("recent answer"));
+        assert!(!metadata.layered_compaction_triggered);
     }
 
     #[test]

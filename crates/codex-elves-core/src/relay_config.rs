@@ -4377,11 +4377,11 @@ mod tests {
         );
         assert_eq!(
             relay_profile_test_protocols(&default_profile, "deepseek-v3").unwrap(),
-            vec![RelayProtocol::ChatCompletions]
+            vec![RelayProtocol::Anthropic, RelayProtocol::ChatCompletions]
         );
         assert_eq!(
             relay_profile_test_protocols(&default_profile, "future-model").unwrap(),
-            vec![RelayProtocol::Responses, RelayProtocol::ChatCompletions]
+            vec![RelayProtocol::Anthropic, RelayProtocol::ChatCompletions]
         );
 
         let chat_profile = RelayProfile {
@@ -4390,7 +4390,7 @@ mod tests {
         };
         assert_eq!(
             relay_profile_test_protocols(&chat_profile, "deepseek-v3").unwrap(),
-            vec![RelayProtocol::ChatCompletions]
+            vec![RelayProtocol::Anthropic, RelayProtocol::ChatCompletions]
         );
     }
 

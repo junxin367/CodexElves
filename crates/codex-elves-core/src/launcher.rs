@@ -1466,12 +1466,21 @@ fn is_native_remote_compaction_v2_response(
     })
 }
 
+fn should_run_continue_thinking_for_proxy_request(
+    original_request: Option<&serde_json::Value>,
+    forwarded_request: Option<&serde_json::Value>,
+) -> bool {
+    forwarded_request.is_some()
+        && !original_request.is_some_and(crate::layered_compaction::is_any_compaction_request)
+}
+
 // 分层压缩：若命中 Codex 上下文压缩请求且功能已启用，则在 LLM 摘要
 // 之上追加“最近原始对话 / 工具调用记录”，避免纯摘要压缩导致的断片。
 // 作用于已经转换为 Responses 协议的 SSE 文本，与上游协议无关。
 fn apply_layered_compaction_if_enabled(
     request_json: Option<&serde_json::Value>,
     sse_text: String,
+    options: crate::protocol_proxy::LayeredCompactionOptions,
 ) -> (String, LocalLayeredCompactionLog) {
     let Some(request) = request_json else {
         return (sse_text, LocalLayeredCompactionLog::default());
@@ -1479,14 +1488,13 @@ fn apply_layered_compaction_if_enabled(
     if !crate::layered_compaction::is_compaction_request(Some(request)) {
         return (sse_text, LocalLayeredCompactionLog::default());
     }
-    let settings = SettingsStore::default().load().unwrap_or_default();
     let result = crate::layered_compaction::apply_layered_compaction_to_responses_sse(
         request,
-        settings.layered_compaction_enabled,
-        settings.layered_compaction_retain_tokens,
+        options.enabled,
+        options.retain_tokens,
         sse_text.clone(),
     );
-    finish_layered_compaction_response(sse_text, result, settings.layered_compaction_retain_tokens)
+    finish_layered_compaction_response(sse_text, result, options.retain_tokens)
 }
 
 fn finish_layered_compaction_response(
@@ -2136,6 +2144,7 @@ async fn handle_protocol_proxy_connection_inner(
         .original_compaction_model
         .clone()
         .zip(upstream.compaction_model.clone());
+    let layered_compaction_options = upstream.layered_compaction_options;
 
     if upstream.is_stream {
         if upstream.response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses
@@ -2296,7 +2305,13 @@ async fn handle_protocol_proxy_connection_inner(
                     true,
                 );
                 let first_round_sse_text = String::from_utf8_lossy(&first_round_bytes).into_owned();
-                let final_sse_text = if let Some(request) = logged_request_json.as_ref() {
+                let final_sse_text = if should_run_continue_thinking_for_proxy_request(
+                    request_json.as_ref(),
+                    logged_request_json.as_ref(),
+                ) {
+                    let request = logged_request_json
+                        .as_ref()
+                        .expect("只有可解析的上游请求才会进入自动续思考");
                     let settings = SettingsStore::default().load().unwrap_or_default();
                     let result =
                         crate::protocol_proxy::apply_continue_thinking_to_responses_stream_with_request_context(
@@ -2324,6 +2339,7 @@ async fn handle_protocol_proxy_connection_inner(
                     // Codex 发来的原始请求，否则自定义/项目默认提示词会破坏固定前缀检测。
                     request_json.as_ref(),
                     final_sse_text,
+                    layered_compaction_options,
                 );
                 layered_compaction_log = compaction_log;
                 let final_bytes = restore_compaction_model_in_text(
@@ -2518,7 +2534,6 @@ async fn handle_protocol_proxy_connection_inner(
     }
 
     let response_protocol = upstream.response_protocol;
-    let layered_compaction_options = upstream.layered_compaction_options;
     let status_code = upstream.status_code;
     let upstream_status = upstream.status();
     let upstream_content_type = upstream.content_type.clone();
@@ -3560,8 +3575,11 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                 layered_compaction_log = log;
                 rewritten
             } else {
-                let (rewritten, log) =
-                    apply_layered_compaction_if_enabled(request_json.as_ref(), compaction_buffer);
+                let (rewritten, log) = apply_layered_compaction_if_enabled(
+                    request_json.as_ref(),
+                    compaction_buffer,
+                    layered_compaction_options,
+                );
                 layered_compaction_log = log;
                 rewritten
             };
@@ -5058,6 +5076,72 @@ fn activate_packaged_app_blocking(app_user_model_id: &str, arguments: &str) -> a
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compaction_continuation_gate_uses_original_request_before_prompt_replacement() {
+        use serde_json::json;
+        let original = json!({"model":"gpt-5.6","input":[
+            {"type":"message","role":"user","content":"recent request"},
+            {"type":"message","role":"user","content":
+                "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a summary."}
+        ]});
+        let forwarded = json!({"model":"gpt-5.6","input":[
+            {"type":"message","role":"user","content":"recent request"},
+            {"type":"message","role":"user","content":"CUSTOM SUMMARY PROMPT"}
+        ]});
+        assert!(crate::layered_compaction::is_compaction_request(Some(
+            &original
+        )));
+        assert!(!crate::layered_compaction::is_compaction_request(Some(
+            &forwarded
+        )));
+        assert!(!should_run_continue_thinking_for_proxy_request(
+            Some(&original),
+            Some(&forwarded)
+        ));
+        assert!(should_run_continue_thinking_for_proxy_request(
+            Some(&forwarded),
+            Some(&forwarded)
+        ));
+    }
+
+    #[test]
+    fn layered_compaction_response_uses_request_snapshot_for_recent_round() {
+        use serde_json::json;
+        let request = json!({"input":[
+            {"type":"message","role":"user","content":"Earlier question"},
+            {"type":"message","role":"assistant","content":"Recent answer"},
+            {"type":"message","role":"user","content":"Current task"},
+            {"type":"message","role":"user","content":format!("{} summarize",
+                crate::layered_compaction::COMPACTION_PROMPT_PREFIX)}
+        ]});
+        let sse = format!(
+            "event: response.completed\ndata: {}\n\n",
+            json!({
+                "type":"response.completed","response":{"id":"resp-summary","status":"completed",
+                "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"SUMMARY"}]}]}
+            })
+        );
+        let options = crate::protocol_proxy::LayeredCompactionOptions {
+            enabled: false,
+            retain_tokens: 20_000,
+        };
+        let (plain, plain_log) =
+            apply_layered_compaction_if_enabled(Some(&request), sse.clone(), options);
+        assert_eq!(plain, sse);
+        assert!(!plain_log.triggered);
+
+        let (layered, layered_log) = apply_layered_compaction_if_enabled(
+            Some(&request),
+            sse,
+            crate::protocol_proxy::LayeredCompactionOptions {
+                enabled: true,
+                retain_tokens: 20_000,
+            },
+        );
+        assert!(layered_log.triggered);
+        assert!(layered.contains("codex-elves-compaction-v3:"));
+    }
 
     #[test]
     fn layered_compaction_http_preserves_payload_limit_failure() {

@@ -69,9 +69,9 @@ import { ProviderPresetSelector } from "@/components/ProviderPresetSelector";
 import type { PresetPatch } from "@/components/ProviderPresetSelector";
 import type { RelayMode, RelayModelMapping, RelayProtocol } from "@/relay-types";
 import {
+  defaultModelContextWindow,
   knownModelContextWindow,
   modelFamilyForModel,
-  requiredModelContextWindow,
   type ModelFamily,
 } from "@/modelContextWindows";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
@@ -221,6 +221,7 @@ type BackendSettings = {
   gptReasoningContinuation: boolean;
   gptReasoningContinuationMaxRounds: number;
   layeredCompactionEnabled: boolean;
+  layeredCompactionRetainRecentRoundEnabled: boolean;
   layeredCompactionRetainTokens: number;
   layeredCompactionPromptOverride: string;
   layeredCompactionModelOverrideEnabled: boolean;
@@ -966,6 +967,7 @@ const defaultSettings: BackendSettings = {
   gptReasoningContinuation: false,
   gptReasoningContinuationMaxRounds: 3,
   layeredCompactionEnabled: false,
+  layeredCompactionRetainRecentRoundEnabled: false,
   layeredCompactionRetainTokens: 20000,
   layeredCompactionPromptOverride: "",
   layeredCompactionModelOverrideEnabled: false,
@@ -1827,32 +1829,32 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.4.3",
-        latestVersion: "0.4.3",
+        currentVersion: "0.4.4",
+        latestVersion: "0.4.4",
         releaseSummary: [
-          "CodexElves 0.4.3",
+          "CodexElves 0.4.4",
           "",
           "- 优化启动与托盘唤醒稳定性",
           "- 改进 GitHub Release 更新体验",
           "- 修复若干协议代理兼容性问题",
         ].join("\n"),
-        assetName: "CodexElves-0.4.3-windows-x64-setup.exe",
-        assetUrl: "https://example.test/CodexElves-0.4.3-windows-x64-setup.exe",
+        assetName: "CodexElves-0.4.4-windows-x64-setup.exe",
+        assetUrl: "https://example.test/CodexElves-0.4.4-windows-x64-setup.exe",
         updateAvailable: false,
       }, "发现可用更新。") as T);
     case "perform_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.4.3",
-        latestVersion: "0.4.3",
+        currentVersion: "0.4.4",
+        latestVersion: "0.4.4",
         releaseSummary: "浏览器预览不会下载真实安装包。",
-        installedPath: "C:\\Temp\\CodexElves-0.4.3-windows-x64-setup.exe",
+        installedPath: "C:\\Temp\\CodexElves-0.4.4-windows-x64-setup.exe",
         launched: true,
       }, "浏览器预览已模拟启动安装包。") as T);
     case "copy_diagnostics":
       return Promise.resolve(browserPreviewResult({
         report: [
           "CodexElves 诊断报告",
-          "版本: 0.4.3",
+          "版本: 0.4.4",
           "平台: windows-x64",
           "Codex 应用: C:\\Users\\junes\\AppData\\Local\\Programs\\CodexElves\\CodexElves.exe",
           "配置目录: C:\\Users\\junes\\.codex",
@@ -1873,7 +1875,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.4.3",
+        current_version: "0.4.4",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -6284,10 +6286,38 @@ function SessionsScreen({
             <label className="session-context-compaction-toggle" htmlFor="context-compaction-enabled">
               <strong>上下文压缩</strong>
               <small>
-                Codex 原生压缩只保留你的历史消息 + 一段摘要，会丢弃最近的助手回复和工具调用，导致“忘记上一秒在做什么”。开启后本地代理会在摘要后补回“最近一轮”的原始记录（user 请求 + 助手回复 + 工具调用/输出），并可替换压缩提示词。
+                开启后本地代理会替换压缩提示词；如需在摘要后补回最近一轮的 user 请求、助手回复及工具调用/输出，可单独开启下方开关。
               </small>
             </label>
             <div className="session-context-compaction-options">
+              <div className="session-context-compaction-option">
+                <div className="session-context-compaction-option-copy">
+                  <strong>补回最近一轮原始记录</strong>
+                  <small>关闭时仅替换压缩提示词，不在摘要后追加原始记录。</small>
+                </div>
+                <div className="session-context-compaction-option-control">
+                  <button
+                    aria-checked={form.layeredCompactionRetainRecentRoundEnabled}
+                    aria-label="补回最近一轮原始记录"
+                    className={`context-enabled-switch ${form.layeredCompactionRetainRecentRoundEnabled ? "active" : ""}`}
+                    disabled={!form.layeredCompactionEnabled}
+                    onClick={() => {
+                      const next = {
+                        ...form,
+                        layeredCompactionRetainRecentRoundEnabled: !form.layeredCompactionRetainRecentRoundEnabled,
+                      };
+                      onFormChange(next);
+                      void actions.saveSettingsValue(next, false);
+                    }}
+                    role="switch"
+                    type="button"
+                  >
+                    <span className="context-switch-track" aria-hidden="true">
+                      <span className="context-switch-thumb" />
+                    </span>
+                  </button>
+                </div>
+              </div>
               <div className="session-context-compaction-option">
                 <div className="session-context-compaction-option-copy">
                   <strong>补回裁剪目标</strong>
@@ -6299,7 +6329,7 @@ function SessionsScreen({
                   <Input
                     aria-label="上下文压缩补回裁剪目标 token"
                     className="session-context-compaction-limit"
-                    disabled={!form.layeredCompactionEnabled}
+                    disabled={!form.layeredCompactionEnabled || !form.layeredCompactionRetainRecentRoundEnabled}
                     id="context-compaction-retain-tokens"
                     inputMode="numeric"
                     maxLength={5}
@@ -7954,7 +7984,7 @@ function RelayProfileEditor({
           requestModel,
           alias: "",
           protocol: defaultProtocolForModel(requestModel),
-          contextWindow: knownModelContextWindow(requestModel),
+          contextWindow: defaultModelContextWindow(requestModel),
         }));
       if (additions.length) updateModelMappings([...profile.modelMappings, ...additions]);
     } finally {
@@ -8146,7 +8176,7 @@ function RelayProfileEditor({
                   onClick={() =>
                     updateModelMappings([
                       ...profile.modelMappings,
-                      { requestModel: "", alias: "", protocol: defaultProtocolForModel(""), contextWindow: "" },
+                      { requestModel: "", alias: "", protocol: defaultProtocolForModel(""), contextWindow: defaultModelContextWindow("") },
                     ])
                   }
                   size="sm"
@@ -8170,7 +8200,7 @@ function RelayProfileEditor({
       {showApiFields && profile.localProxyEnabled ? (
         <div className="hint-line relay-protocol-hint">
           <MessageCircle className="h-4 w-4" />
-          <span>本地代理优先使用模型列表中的显式协议；未列入时按模型名称推断，无法识别则使用 Responses API。</span>
+          <span>本地代理优先使用模型列表中的显式协议；未列入时 GPT/OpenAI 系列用 Responses API，其他模型默认用 Anthropic。</span>
         </div>
       ) : null}
       {showApiFields ? (
@@ -8470,7 +8500,7 @@ function RelayModelMappingTable({
 }) {
   const displayRows = mappings.length
     ? mappings
-    : [{ requestModel: "", alias: "", protocol: defaultProtocolForModel("") as RelayProtocol, contextWindow: "" }];
+    : [{ requestModel: "", alias: "", protocol: defaultProtocolForModel("") as RelayProtocol, contextWindow: defaultModelContextWindow("") }];
   const canSort = mappings.length > 1;
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -8483,7 +8513,7 @@ function RelayModelMappingTable({
   const updateRow = (index: number, patch: Partial<RelayModelMapping>) => {
     const next = mappings.length
       ? [...mappings]
-      : [{ requestModel: "", alias: "", protocol: defaultProtocolForModel("") as RelayProtocol, contextWindow: "" }];
+      : [{ requestModel: "", alias: "", protocol: defaultProtocolForModel("") as RelayProtocol, contextWindow: defaultModelContextWindow("") }];
     next[index] = {
       ...next[index],
       ...patch,
@@ -8491,11 +8521,11 @@ function RelayModelMappingTable({
     onChange(next);
   };
   const updateRowModel = (index: number, row: RelayModelMapping, requestModel: string) => {
-    const nextContextWindow = knownModelContextWindow(requestModel);
+    const nextContextWindow = defaultModelContextWindow(requestModel);
     const currentContextWindow = row.contextWindow.trim();
-    const previousContextWindow = knownModelContextWindow(row.requestModel);
+    const previousContextWindow = defaultModelContextWindow(row.requestModel);
     const shouldFillContextWindow =
-      !!nextContextWindow && (!currentContextWindow || (!!previousContextWindow && currentContextWindow === previousContextWindow));
+      !currentContextWindow || currentContextWindow === previousContextWindow;
     // 模型名为空时行上协议还是默认值，选定模型后按模型归属自动纠正；
     // 已手动改过协议的行不覆盖，避免覆盖用户选择。
     const shouldFillProtocol =
@@ -8627,7 +8657,7 @@ function SortableRelayModelMappingRow({
           inputMode="numeric"
           value={row.contextWindow}
           onChange={(event) => onUpdate(index, { contextWindow: event.currentTarget.value.replace(/[^\d]/g, "") })}
-          placeholder="例如 200000"
+          placeholder="默认 1000000"
         />
       </div>
       <div className="relay-model-delete-cell" role="cell">
@@ -12095,11 +12125,11 @@ function normalizeRelayModelMappings(mappings: RelayModelMapping[] | undefined):
     const requestModel = item.requestModel || "";
     const alias = item.alias || "";
     const contextWindow = (item.contextWindow || "").replace(/[^\d]/g, "")
-      || requiredModelContextWindow(requestModel);
+      || defaultModelContextWindow(requestModel);
     return {
       requestModel,
       alias,
-      protocol: normalizeRelayProtocol(item.protocol),
+      protocol: item.protocol == null ? defaultProtocolForModel(requestModel) : normalizeRelayProtocol(item.protocol),
       contextWindow,
     };
   });
@@ -12109,40 +12139,6 @@ function normalizeRelayProtocol(protocol: RelayProtocol | undefined): RelayProto
   if (protocol === "chatCompletions" || protocol === "anthropic") return protocol;
   return "responses";
 }
-
-const chatCompletionsModelPrefixes = [
-  "deepseek",
-  "qwen",
-  "qwq",
-  "glm",
-  "chatglm",
-  "zhipu",
-  "zhipuai",
-  "kimi",
-  "moonshot",
-  "minimax",
-  "mimo",
-  "gemini",
-  "gemma",
-  "grok",
-  "mistral",
-  "mixtral",
-  "llama",
-  "step",
-  "stepfun",
-  "qianfan",
-  "ernie",
-  "hunyuan",
-  "doubao",
-  "longcat",
-  "baichuan",
-  "yi",
-  "command",
-  "cohere",
-  "phi",
-  "nova",
-  "ark",
-];
 
 export function defaultProtocolForModel(model: string): RelayProtocol {
   const slug = (model.trim().toLowerCase().split("/").filter(Boolean).pop() || "").trim();
@@ -12160,16 +12156,7 @@ export function defaultProtocolForModel(model: string): RelayProtocol {
   ) {
     return "responses";
   }
-  if (chatCompletionsModelPrefixes.some((prefix) => modelSlugMatchesFamily(slug, prefix))) {
-    return "chatCompletions";
-  }
-  return "responses";
-}
-
-function modelSlugMatchesFamily(slug: string, family: string): boolean {
-  if (slug === family) return true;
-  if (!slug.startsWith(family)) return false;
-  return /^[-_.\d]/.test(slug.slice(family.length));
+  return slug ? "anthropic" : "responses";
 }
 
 function uniqueStrings(values: string[]): string[] {
@@ -12368,7 +12355,7 @@ function relayProfileContextWindowForModel(profile: RelayProfile, model: string)
   const requestModel = mapping?.requestModel.trim() || normalizedModel;
   return mapping?.contextWindow.trim()
     || (profile.model.trim() === normalizedModel ? profile.contextWindow.trim() : "")
-    || requiredModelContextWindow(requestModel);
+    || defaultModelContextWindow(requestModel);
 }
 
 function formatContextWindowCompact(value: string): string {

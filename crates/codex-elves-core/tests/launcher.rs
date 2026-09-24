@@ -806,6 +806,82 @@ data: [DONE]
 }
 
 #[tokio::test]
+async fn helper_prompt_only_compaction_does_not_continue_after_prompt_replacement() {
+    let _lock = launcher_settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let settings_path = temp.path().join("settings.json");
+    let _guard = LauncherSettingsPathGuard::set(settings_path.clone());
+    let diagnostic_log = DiagnosticLogCapture::new(temp.path().join("compaction-diagnostic.log"));
+    let model = "gpt-qa-compaction-prompt-only";
+    let upstream = spawn_launcher_upstream_with_response(
+        "text/event-stream",
+        format!(
+            "event: response.completed\ndata: {}\n\ndata: [DONE]\n\n",
+            serde_json::json!({
+                "type":"response.completed",
+                "response":{
+                    "id":"resp_compaction_summary",
+                    "status":"completed",
+                    "model":model,
+                    "output":[{"type":"message","role":"assistant",
+                        "content":[{"type":"output_text","text":"SUMMARY"}]}],
+                    "usage":{"output_tokens_details":{"reasoning_tokens":516}}
+                }
+            })
+        ),
+    );
+    write_launcher_mixed_relay_settings(temp.path(), &upstream.base_url);
+    let mut settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+    settings["layeredCompactionEnabled"] = serde_json::json!(true);
+    settings["layeredCompactionRetainRecentRoundEnabled"] = serde_json::json!(false);
+    settings["layeredCompactionPromptOverride"] = serde_json::json!("CUSTOM SUMMARY PROMPT");
+    settings["gptReasoningContinuation"] = serde_json::json!(true);
+    std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
+
+    let hooks = DefaultLaunchHooks::default();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    hooks.start_helper(port).await.unwrap();
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .json(&serde_json::json!({
+            "model":model,
+            "stream":true,
+            "reasoning":{"effort":"high"},
+            "input":[
+                {"type":"message","role":"user","content":"recent request"},
+                {"type":"message","role":"user",
+                 "content":"You are performing a CONTEXT CHECKPOINT COMPACTION. Create a summary."}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let body = response.text().await.unwrap();
+    hooks.shutdown_helper(port).await;
+    let requests = upstream.finish_all();
+
+    assert_eq!(requests.len(), 1);
+    let forwarded: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(forwarded["input"][0]["content"], "recent request");
+    assert_eq!(forwarded["input"][1]["content"], "CUSTOM SUMMARY PROMPT");
+    assert!(body.contains("SUMMARY"));
+    assert!(!body.contains("codex-elves-compaction-v3:"));
+    let continued = diagnostic_log.read().lines().any(|line| {
+        serde_json::from_str::<serde_json::Value>(line).is_ok_and(|entry| {
+            entry["event"] == "continue_thinking.round_start" && entry["detail"]["model"] == model
+        })
+    });
+    assert!(!continued, "压缩摘要不得触发自动续思考请求");
+}
+
+#[tokio::test]
 async fn helper_preserves_codex_semantic_headers_for_native_responses_upstream() {
     let _lock = launcher_settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();

@@ -1154,7 +1154,8 @@ pub(crate) struct LayeredCompactionOptions {
 impl LayeredCompactionOptions {
     fn from_settings(settings: &crate::settings::BackendSettings) -> Self {
         Self {
-            enabled: settings.layered_compaction_enabled,
+            enabled: settings.layered_compaction_enabled
+                && settings.layered_compaction_retain_recent_round_enabled,
             retain_tokens: settings.layered_compaction_retain_tokens,
         }
     }
@@ -1208,7 +1209,8 @@ pub(crate) struct ResolvedCompactionModelOverride {
 /// 传统压缩提示词处理或 V2 本地桥接转换后的实际本地请求，容量校验基于这份最终载荷。
 ///
 /// 返回 `None` 表示继续用会话原模型压缩。配置槽按原会话家族选择，但目标模型
-/// 可以跨家族；只有同时通过供应商、协议归属和本次实际请求容量校验后才会被采用。
+/// 可以跨家族；供应商、协议归属和输出预留必须有效。输入 token 粗估只用于诊断，
+/// 不能代替目标模型 tokenizer 拒绝请求；实际超限由上游拒绝后触发原模型重试。
 pub(crate) fn resolve_compaction_model_override(
     request_json: &Value,
     original_request_json: &Value,
@@ -1269,13 +1271,13 @@ pub(crate) fn resolve_compaction_model_override(
         crate::layered_compaction::estimate_compaction_request_tokens(&candidate);
     let output_reserve_tokens =
         crate::layered_compaction::compaction_output_reserve_tokens(&candidate);
-    if !crate::layered_compaction::compaction_request_fits_context(&candidate, context_window) {
+    if output_reserve_tokens >= context_window {
         log_compaction_model_override_skipped(
             relay,
             original_model,
             catalog_model,
             family.as_str(),
-            "本次压缩载荷超过目标模型可用上下文，回落原模型压缩",
+            "输出预留已占满目标模型上下文，回落原模型压缩",
             Some(json!({
                 "estimatedInputTokens": estimated_input_tokens,
                 "outputReserveTokens": output_reserve_tokens,
@@ -1283,6 +1285,24 @@ pub(crate) fn resolve_compaction_model_override(
             })),
         );
         return None;
+    }
+    if estimated_input_tokens.saturating_add(output_reserve_tokens) > context_window {
+        // JSON 字节数和字符加权不是目标模型的真实 token 数，不能据此静默跳过
+        // 用户指定的模型。仍发送本次请求，上游拒绝时由已有重试路径回退原模型。
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "protocol_proxy.compaction_model_capacity_estimate_exceeded",
+            json!({
+                "relayId": relay.id,
+                "relayName": relay.name,
+                "originalModel": original_model,
+                "compactionModel": catalog_model,
+                "family": family.as_str(),
+                "estimatedInputTokens": estimated_input_tokens,
+                "outputReserveTokens": output_reserve_tokens,
+                "contextWindow": context_window,
+                "reason": "输入容量为本地粗估，继续尝试独立压缩模型；上游拒绝后回退原模型"
+            }),
+        );
     }
     Some(ResolvedCompactionModelOverride {
         request_json: candidate,
@@ -2230,17 +2250,20 @@ async fn open_responses_proxy_request_once(
         // legacy 先应用有效提示词并移除工具，再选择独立压缩模型。
         let local_request_json = match compaction_execution_mode {
             CompactionExecutionMode::LegacyLocal if settings.layered_compaction_enabled => {
-                crate::layered_compaction::prepare_legacy_layered_compaction_request(
+                crate::layered_compaction::prepare_legacy_layered_compaction_request_with_options(
                     &source_request_json,
                     &settings.layered_compaction_prompt_override,
+                    settings.layered_compaction_retain_recent_round_enabled,
                 )
             }
             CompactionExecutionMode::BridgedRemoteV2 => {
-                crate::layered_compaction::prepare_remote_compaction_v2_bridge_request_with_prompt(
+                crate::layered_compaction::prepare_remote_compaction_v2_bridge_request_with_options(
                     &source_request_json,
                     settings
                         .layered_compaction_enabled
                         .then_some(settings.layered_compaction_prompt_override.as_str()),
+                    settings.layered_compaction_enabled
+                        && settings.layered_compaction_retain_recent_round_enabled,
                 )
             }
             _ => source_request_json.clone(),
@@ -3383,7 +3406,9 @@ pub async fn apply_continue_thinking_to_responses_stream_with_request_context(
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !settings.gpt_reasoning_continuation || !crate::continue_thinking::is_supported_model(model)
+    if !settings.gpt_reasoning_continuation
+        || !crate::continue_thinking::is_supported_model(model)
+        || crate::layered_compaction::is_any_compaction_request(original_request)
     {
         return ContinueThinkingResult::unchanged(first_round_sse_text);
     }
@@ -11804,7 +11829,7 @@ mod compaction_model_override_tests {
     }
 
     #[test]
-    fn oversized_current_payload_falls_back_to_original_model() {
+    fn estimated_oversized_payload_still_uses_selected_compaction_model() {
         let settings = settings_with_models(LayeredCompactionModels {
             gpt: "gpt-5.6".to_string(),
             ..Default::default()
@@ -11815,16 +11840,50 @@ mod compaction_model_override_tests {
         ]);
         let request = compaction_request("gpt-5.4", &"x".repeat(6_000));
 
-        assert!(
-            resolve_compaction_model_override(
+        for execution_mode in [
+            CompactionExecutionMode::LegacyLocal,
+            CompactionExecutionMode::BridgedRemoteV2,
+        ] {
+            let resolved = resolve_compaction_model_override(
                 &request,
                 &request,
-                CompactionExecutionMode::LegacyLocal,
+                execution_mode,
                 &settings,
                 &relay,
             )
-            .is_none()
-        );
+            .expect("本地粗估超限不能代替上游 tokenizer 拒绝独立压缩模型");
+            assert_eq!(resolved.compaction_model, "gpt-5.6");
+            assert!(
+                resolved.estimated_input_tokens + resolved.output_reserve_tokens
+                    > resolved.context_window
+            );
+        }
+    }
+
+    #[test]
+    fn output_reserve_exhausting_context_falls_back_to_original_model() {
+        let settings = settings_with_models(LayeredCompactionModels {
+            gpt: "gpt-5.6".to_string(),
+            ..Default::default()
+        });
+        let relay = relay_with_models(&[
+            ("gpt-5.4", RelayProtocol::Responses, "1000000"),
+            ("gpt-5.6", RelayProtocol::Responses, "9000"),
+        ]);
+        for reserve in [9_000, 10_000, u64::MAX] {
+            let mut request = compaction_request("gpt-5.4", "small");
+            request["max_output_tokens"] = json!(reserve);
+            assert!(
+                resolve_compaction_model_override(
+                    &request,
+                    &request,
+                    CompactionExecutionMode::LegacyLocal,
+                    &settings,
+                    &relay,
+                )
+                .is_none()
+            );
+        }
     }
 
     #[test]
