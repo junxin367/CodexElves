@@ -97,6 +97,7 @@ struct CodexCustomToolSpec {
 struct CodexFunctionToolSpec {
     namespace: String,
     name: String,
+    parameters: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +140,23 @@ impl CodexPatchProxyAction {
             Self::Batch => "batch",
         }
     }
+
+    fn item_id(self, call_id: &str) -> String {
+        format!("ctc_patch_{}_{call_id}", self.suffix())
+    }
+
+    fn from_item_id(item_id: Option<&str>, call_id: &str) -> Option<Self> {
+        let item_id = item_id?;
+        [
+            Self::AddFile,
+            Self::DeleteFile,
+            Self::UpdateFile,
+            Self::ReplaceFile,
+            Self::Batch,
+        ]
+        .into_iter()
+        .find(|action| item_id == action.item_id(call_id))
+    }
 }
 
 impl CodexToolContext {
@@ -151,6 +169,17 @@ impl CodexToolContext {
             .get(upstream_name)
             .map(|spec| spec.openai_name.clone())
             .unwrap_or_else(|| upstream_name.to_string())
+    }
+
+    fn custom_tool_item_id(&self, upstream_name: &str, call_id: &str) -> String {
+        // Codex 会持久化 item id；保留代理动作，避免回放时仅凭补丁语法猜测工具名。
+        // call_id 不变，工具结果仍与原始上游调用配对。
+        self.custom_tools
+            .get(upstream_name)
+            .filter(|spec| spec.kind == CodexCustomToolKind::ApplyPatch)
+            .and_then(|spec| spec.proxy_action)
+            .map(|action| action.item_id(call_id))
+            .unwrap_or_else(|| format!("ctc_{call_id}"))
     }
 
     fn openai_name_for_function_tool(&self, upstream_name: &str) -> (String, String) {
@@ -759,7 +788,19 @@ pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
             .get("tool_choice")
             .and_then(|value| responses_tool_choice_to_chat(value, &tool_context))
         {
-            result["tool_choice"] = tool_choice;
+            let target_is_declared = tool_choice
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .is_none_or(|name| {
+                    result["tools"].as_array().is_some_and(|tools| {
+                        tools.iter().any(|tool| {
+                            tool.pointer("/function/name").and_then(Value::as_str) == Some(name)
+                        })
+                    })
+                });
+            if target_is_declared {
+                result["tool_choice"] = tool_choice;
+            }
         }
         if let Some(value) = body.get("parallel_tool_calls") {
             result["parallel_tool_calls"] = value.clone();
@@ -984,6 +1025,14 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
                 result["tool_choice"] = json!({ "type": "auto" });
             } else {
                 result["tool_choice"] = tool_choice;
+            }
+        }
+        if let Some(parallel) = body.get("parallel_tool_calls").and_then(Value::as_bool) {
+            if result.get("tool_choice").is_none() {
+                result["tool_choice"] = json!({ "type": "auto" });
+            }
+            if result["tool_choice"]["type"] != "none" {
+                result["tool_choice"]["disable_parallel_tool_use"] = json!(!parallel);
             }
         }
     }
@@ -4647,14 +4696,24 @@ impl ChatSseState {
             }
             if let Some(name) = name_delta {
                 if !name.is_empty() {
-                    state.name = name;
+                    if state.name.is_empty() || name.starts_with(&state.name) {
+                        state.name = name;
+                    } else if !state.added {
+                        state.name.push_str(&name);
+                    }
                 }
             }
             if !args_delta.is_empty() {
                 state.arguments.push_str(&args_delta);
             }
 
-            if !state.added && (!state.call_id.is_empty() || !state.name.is_empty()) {
+            // 等参数开始后再发布工具项：合法流可能分开发 id、name 和 arguments，
+            // 过早发布会固定成 unknown_tool，后续 done 项与 added 项不再匹配。
+            if !state.added
+                && !state.call_id.is_empty()
+                && !state.name.is_empty()
+                && !state.arguments.is_empty()
+            {
                 should_add = true;
                 pending_arguments = state.arguments.clone();
             } else if state.added {
@@ -4911,6 +4970,9 @@ impl ChatSseState {
             }
 
             let state = self.tools.get_mut(&key).expect("tool state exists");
+            if state.arguments.trim().is_empty() {
+                state.arguments = "{}".to_string();
+            }
             let output_index = state.output_index.unwrap_or(0);
             let item = tool_call_done_item(state, &self.tool_context);
             state.done = true;
@@ -5342,12 +5404,13 @@ impl AnthropicSseState {
 
         self.inner.flush_inline_think_at_boundary_into(output);
         self.inner.finalize_reasoning_into(output);
-        for (offset, call) in calls.into_iter().enumerate() {
+        for (offset, mut call) in calls.into_iter().enumerate() {
             let call_index = first_call_index.saturating_add(offset);
             let tool_state_index = self.allocate_tool_state_index();
+            normalize_textual_invoke_arguments(&mut call, &self.inner.tool_context);
             let fake = json!({
                 "index": tool_state_index,
-                "id": format!("call_textual_invoke_{call_index}"),
+                "id": textual_invoke_call_id(&self.inner.response_id, call_index),
                 "function": {
                     "name": call.name,
                     "arguments": canonical_json_string(&Value::Object(call.arguments))
@@ -5724,7 +5787,12 @@ fn append_responses_item_to_anthropic(
                 ignored_tool_call_ids.insert(call_id.to_string());
                 return;
             }
-            let (name, arguments) = build_custom_tool_call_history(raw_name, input);
+            let (name, arguments) = build_custom_tool_call_history(
+                raw_name,
+                input,
+                item.get("id").and_then(Value::as_str),
+                call_id,
+            );
             if !name.is_empty() && !call_id.is_empty() {
                 seen_tool_call_ids.insert(call_id.to_string());
                 push_anthropic_message(
@@ -6514,7 +6582,12 @@ fn append_responses_item(
                 ignored_tool_call_ids.insert(call_id.to_string());
                 return;
             }
-            let (name, arguments) = build_custom_tool_call_history(raw_name, input);
+            let (name, arguments) = build_custom_tool_call_history(
+                raw_name,
+                input,
+                item.get("id").and_then(Value::as_str),
+                call_id,
+            );
             seen_tool_call_ids.insert(call_id.to_string());
             pending_tool_calls.push(json!({
                 "id": call_id,
@@ -7158,7 +7231,11 @@ fn tool_identity_key(tool: &Value) -> String {
         return format!("string:{name}");
     }
     let tool_type = tool.get("type").and_then(Value::as_str).unwrap_or("");
-    let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
+    let name = tool
+        .get("name")
+        .or_else(|| tool.pointer("/function/name"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
     if !tool_type.is_empty() || !name.is_empty() {
         return format!("{tool_type}:{name}");
     }
@@ -7243,7 +7320,8 @@ fn add_tools_to_codex_tool_context(context: &mut CodexToolContext, tools: &[Valu
                 context.has_custom_tools = true;
             }
             "function" => {
-                if let Some(name) = tool
+                let function = tool.get("function").unwrap_or(tool);
+                if let Some(name) = function
                     .get("name")
                     .and_then(Value::as_str)
                     .filter(|v| !v.is_empty())
@@ -7253,11 +7331,22 @@ fn add_tools_to_codex_tool_context(context: &mut CodexToolContext, tools: &[Valu
                         CodexFunctionToolSpec {
                             name: name.to_string(),
                             namespace: String::new(),
+                            parameters: function.get("parameters").cloned().unwrap_or(Value::Null),
                         },
                     );
                 }
             }
             "namespace" => add_namespace_tools_to_context(&mut *context, tool),
+            _ if is_proxy_internal_tool_type(tool_type) => {
+                context.function_tools.insert(
+                    tool_type.to_string(),
+                    CodexFunctionToolSpec {
+                        name: tool_type.to_string(),
+                        namespace: String::new(),
+                        parameters: tool.get("parameters").cloned().unwrap_or(Value::Null),
+                    },
+                );
+            }
             _ if is_builtin_proxy_tool_type(tool_type) => {
                 let name = tool
                     .get("name")
@@ -7305,6 +7394,7 @@ fn add_namespace_tools_to_context(context: &mut CodexToolContext, namespace_tool
                 CodexFunctionToolSpec {
                     namespace: namespace.to_string(),
                     name: name.to_string(),
+                    parameters: child.get("parameters").cloned().unwrap_or(Value::Null),
                 },
             );
         } else if context
@@ -7317,6 +7407,7 @@ fn add_namespace_tools_to_context(context: &mut CodexToolContext, namespace_tool
                 CodexFunctionToolSpec {
                     namespace: namespace.to_string(),
                     name: name.to_string(),
+                    parameters: child.get("parameters").cloned().unwrap_or(Value::Null),
                 },
             );
             maybe_set_web_search_fallback(context, namespace, name, &flat, child);
@@ -7499,22 +7590,24 @@ fn proxy_internal_tool_to_chat_tool(tool_type: &str, tool: &Value) -> Value {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| proxy_internal_tool_description(tool_type));
+    let parameters = tool
+        .get("parameters")
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| {
+            json!({
+                "type": "object",
+                "properties": { "query": { "type": "string", "description": "Search query" } },
+                "required": ["query"],
+                "additionalProperties": true
+            })
+        });
     json!({
         "type": "function",
         "function": {
             "name": name,
             "description": description,
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query"
-                    }
-                },
-                "required": ["query"],
-                "additionalProperties": true
-            }
+            "parameters": parameters
         }
     })
 }
@@ -7703,6 +7796,9 @@ fn namespace_tool_to_chat_tools(namespace_tool: &Value, context: &CodexToolConte
         });
         if !description.is_empty() {
             function["description"] = json!(description);
+        }
+        if let Some(strict) = child.get("strict") {
+            function["strict"] = strict.clone();
         }
         converted.push(json!({
             "type": "function",
@@ -7901,19 +7997,20 @@ fn append_any_of_variants(variants: &mut Vec<Value>, schema: Value) {
 }
 
 fn generic_custom_proxy_tool(name: &str, description: &str) -> Value {
-    let description = if description.trim().is_empty() {
-        format!("FREEFORM custom tool: {name}. Put only the tool input text here.")
-    } else {
-        format!(
-            "{}\n\nThis is a FREEFORM tool. Do not wrap the input in JSON or markdown.",
-            description.trim()
-        )
-    };
+    let mut description_text = format!(
+        "Call {name} with a JSON object containing the string field `input`. \
+         Put the raw tool payload inside `input`; do not send raw text as the argument object."
+    );
+    if !description.trim().is_empty() {
+        description_text
+            .push_str("\n\nPayload instructions (apply only to the text inside `input`):\n");
+        description_text.push_str(description.trim());
+    }
     json!({
         "type": "function",
         "function": {
             "name": name,
-            "description": description,
+            "description": description_text,
             "parameters": {
                 "type": "object",
                 "additionalProperties": false,
@@ -7972,7 +8069,11 @@ fn apply_patch_proxy_tools(name: &str, description: &str) -> Vec<Value> {
             &patch_proxy_description(
                 description,
                 "batch",
-                "Edit files by providing structured JSON patch operations.",
+                "Edit files by providing structured JSON patch operations. \
+                 Each file path must appear in only one operation per batch; the executor rejects duplicate paths. \
+                 Combine edits to an existing file into the hunks of one update_file operation. \
+                 For add_file or replace_file, supply the final full content instead of adding a later update. \
+                 If sequential changes to the same file are necessary, use separate tool calls and wait for each to complete.",
             ),
             apply_patch_batch_schema(),
         ),
@@ -7991,10 +8092,18 @@ fn function_tool(name: &str, description: &str, parameters: Value) -> Value {
 }
 
 fn patch_proxy_description(description: &str, action: &str, default_description: &str) -> String {
+    let prefix = format!(
+        "{default_description} Use JSON arguments matching this tool's schema \
+         (proxy action: {action}). The proxy generates the native patch."
+    );
     if description.trim().is_empty() {
-        default_description.to_string()
+        prefix
     } else {
-        format!("{} (proxy action: {action})", description.trim())
+        format!(
+            "{prefix}\n\nOriginal tool instructions (FREEFORM and patch-format rules apply \
+             to the generated patch, not to these JSON arguments):\n{}",
+            description.trim()
+        )
     }
 }
 
@@ -8053,7 +8162,7 @@ fn apply_patch_batch_schema() -> Value {
         "properties": {
             "operations": {
                 "type": "array",
-                "description": "Ordered list of file patch operations.",
+                "description": "File patch operations with distinct target paths.",
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
@@ -8081,6 +8190,7 @@ fn apply_patch_hunks_schema() -> Value {
             "additionalProperties": false,
             "properties": {
                 "context": { "type": "string", "description": "Optional @@ context header text." },
+                "end_of_file": { "type": "boolean", "description": "Require this hunk to match at the end of the file." },
                 "lines": {
                     "type": "array",
                     "items": {
@@ -8174,7 +8284,11 @@ fn responses_tool_choice_to_chat(tool_choice: &Value, context: &CodexToolContext
                     }));
                 }
             }
-            let name = object.get("name").and_then(Value::as_str).unwrap_or("");
+            let name = object
+                .get("name")
+                .or_else(|| object.get("function").and_then(|f| f.get("name")))
+                .and_then(Value::as_str)
+                .unwrap_or("");
             if !chat_tool_choice_target_available(context, name) {
                 return None;
             }
@@ -8443,7 +8557,7 @@ fn tool_call_added_item(
             "type": "response.output_item.added",
             "output_index": output_index,
             "item": {
-                "id": format!("ctc_{}", state.call_id),
+                "id": tool_context.custom_tool_item_id(&state.name, &state.call_id),
                 "type": "custom_tool_call",
                 "status": "in_progress",
                 "call_id": state.call_id,
@@ -8548,7 +8662,7 @@ fn push_tool_call_done_sse(
             "response.custom_tool_call_input.delta",
             json!({
                 "type": "response.custom_tool_call_input.delta",
-                "item_id": format!("ctc_{}", state.call_id),
+                "item_id": tool_context.custom_tool_item_id(&state.name, &state.call_id),
                 "call_id": state.call_id,
                 "output_index": output_index,
                 "delta": input.clone()
@@ -8560,7 +8674,7 @@ fn push_tool_call_done_sse(
             "response.custom_tool_call_input.done",
             json!({
                 "type": "response.custom_tool_call_input.done",
-                "item_id": format!("ctc_{}", state.call_id),
+                "item_id": tool_context.custom_tool_item_id(&state.name, &state.call_id),
                 "output_index": output_index,
                 "input": input
             }),
@@ -8604,7 +8718,7 @@ fn response_tool_call_item(
     }
     if tool_context.is_custom_tool_proxy(name) {
         return json!({
-            "id": format!("ctc_{call_id}"),
+            "id": tool_context.custom_tool_item_id(name, call_id),
             "type": "custom_tool_call",
             "status": "completed",
             "call_id": call_id,
@@ -8619,7 +8733,7 @@ fn response_tool_call_item(
         "status": "completed",
         "call_id": call_id,
         "name": display_name,
-        "arguments": arguments
+        "arguments": if arguments.trim().is_empty() { "{}" } else { arguments }
     });
     if !namespace.is_empty() {
         item["namespace"] = json!(namespace);
@@ -8760,6 +8874,7 @@ fn anthropic_content_to_response_output_items(
                         tool_items.extend(textual_invoke_calls_to_response_items(
                             calls,
                             tool_context,
+                            response_id,
                             &mut textual_invoke_call_index,
                         ));
                     } else if !text.is_empty() {
@@ -9149,13 +9264,15 @@ fn log_responses_request_metadata(
 fn textual_invoke_calls_to_response_items(
     calls: Vec<TextualInvokeToolCall>,
     tool_context: &CodexToolContext,
+    response_id: &str,
     next_call_index: &mut usize,
 ) -> Vec<Value> {
     calls
         .into_iter()
-        .map(|call| {
-            let call_id = format!("call_textual_invoke_{}", *next_call_index);
+        .map(|mut call| {
+            let call_id = textual_invoke_call_id(response_id, *next_call_index);
             *next_call_index = next_call_index.saturating_add(1);
+            normalize_textual_invoke_arguments(&mut call, tool_context);
             response_tool_call_item(
                 &call_id,
                 &call.name,
@@ -9170,6 +9287,114 @@ fn textual_invoke_calls_to_response_items(
 struct TextualInvokeToolCall {
     name: String,
     arguments: serde_json::Map<String, Value>,
+}
+
+fn textual_invoke_call_id(response_id: &str, index: usize) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(response_id.as_bytes()));
+    format!("call_textual_{}_{index}", &digest[..16])
+}
+
+fn normalize_textual_invoke_arguments(
+    call: &mut TextualInvokeToolCall,
+    context: &CodexToolContext,
+) {
+    let Some(spec) = context.function_tools.get(&call.name) else {
+        return;
+    };
+    for (name, value) in &mut call.arguments {
+        let Some(text) = value.as_str() else {
+            continue;
+        };
+        let mut schemas = Vec::new();
+        collect_textual_property_schemas(&spec.parameters, &spec.parameters, name, 0, &mut schemas);
+        // 字符串属性中的 "false" 或 JSON 代码仍是文本；只恢复声明为非字符串的参数。
+        if schemas
+            .iter()
+            .any(|schema| schema_accepts_json_type(schema, &spec.parameters, "string", 0))
+        {
+            continue;
+        }
+        let Ok(parsed) = serde_json::from_str::<Value>(text) else {
+            continue;
+        };
+        let kind = match &parsed {
+            Value::Null => "null",
+            Value::Bool(_) => "boolean",
+            Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
+            Value::Number(_) => "number",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+            Value::String(_) => continue,
+        };
+        if schemas
+            .iter()
+            .any(|schema| schema_accepts_json_type(schema, &spec.parameters, kind, 0))
+        {
+            *value = parsed;
+        }
+    }
+}
+
+fn collect_textual_property_schemas<'a>(
+    schema: &'a Value,
+    root: &'a Value,
+    name: &str,
+    depth: usize,
+    result: &mut Vec<&'a Value>,
+) {
+    if depth > 16 {
+        return;
+    }
+    if let Some(property) = schema.get("properties").and_then(|p| p.get(name)) {
+        result.push(property);
+    }
+    if let Some(target) = schema
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|r| r.strip_prefix('#'))
+        .and_then(|p| root.pointer(p))
+    {
+        collect_textual_property_schemas(target, root, name, depth + 1, result);
+    }
+    for key in ["allOf", "oneOf", "anyOf"] {
+        if let Some(branches) = schema.get(key).and_then(Value::as_array) {
+            for branch in branches {
+                collect_textual_property_schemas(branch, root, name, depth + 1, result);
+            }
+        }
+    }
+}
+
+fn schema_accepts_json_type(schema: &Value, root: &Value, kind: &str, depth: usize) -> bool {
+    if depth > 16 {
+        return false;
+    }
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        return reference
+            .strip_prefix('#')
+            .and_then(|pointer| root.pointer(pointer))
+            .is_some_and(|target| schema_accepts_json_type(target, root, kind, depth + 1));
+    }
+    let matches = |value: &Value| {
+        value
+            .as_str()
+            .is_some_and(|name| name == kind || (kind == "integer" && name == "number"))
+    };
+    if let Some(value) = schema.get("type") {
+        return matches(value)
+            || value
+                .as_array()
+                .is_some_and(|types| types.iter().any(matches));
+    }
+    for key in ["anyOf", "oneOf"] {
+        if let Some(branches) = schema.get(key).and_then(Value::as_array) {
+            return branches
+                .iter()
+                .any(|branch| schema_accepts_json_type(branch, root, kind, depth + 1));
+        }
+    }
+    false
 }
 
 const ANTHROPIC_TOOL_BOUNDARY_MARKERS: &[&str] = &["course", "codex", "call", "count"];
@@ -10020,15 +10245,35 @@ fn tool_search_output_text(item: &Value) -> String {
     response_output_text(item)
 }
 
-fn build_custom_tool_call_history(name: &str, input: &Value) -> (String, String) {
+fn build_custom_tool_call_history(
+    name: &str,
+    input: &Value,
+    item_id: Option<&str>,
+    call_id: &str,
+) -> (String, String) {
     let input = response_output_text(input);
     if name == "apply_patch" || input.starts_with("*** Begin Patch") {
-        let operations = parse_apply_patch_operations(&input);
-        if operations.len() == 1 {
-            let action = operations[0]
-                .get("type")
-                .and_then(Value::as_str)
-                .and_then(single_apply_patch_action)
+        let mut operations = parse_apply_patch_operations(&input);
+        let action_hint = CodexPatchProxyAction::from_item_id(item_id, call_id);
+        // 兼容旧代理的整文件替换格式。只合并同一路径的完整删除/新增对，
+        // 不把不同文件的批量操作误判为一次替换。
+        if action_hint.is_none()
+            && operations.len() == 2
+            && operations[0]["type"] == "delete_file"
+            && operations[1]["type"] == "add_file"
+            && operations[0]["path"] == operations[1]["path"]
+        {
+            operations.remove(0);
+            operations[0]["type"] = json!("replace_file");
+        }
+        if operations.len() == 1 && action_hint != Some(CodexPatchProxyAction::Batch) {
+            let action = action_hint
+                .or_else(|| {
+                    operations[0]
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .and_then(single_apply_patch_action)
+                })
                 .unwrap_or(CodexPatchProxyAction::Batch);
             return (
                 format!("{name}_{}", action.suffix()),
@@ -10117,7 +10362,9 @@ fn build_apply_patch_text(operations: &[Value]) -> String {
         let op_type = operation.get("type").and_then(Value::as_str).unwrap_or("");
         let path = operation.get("path").and_then(Value::as_str).unwrap_or("");
         match op_type {
-            "add_file" => {
+            "add_file" | "replace_file" => {
+                // Codex 的 Add File 可整体覆盖已有文件；同一补丁不能对同一路径
+                // 先 Delete 再 Add，否则执行器会拒绝 multiple operations target。
                 text.push_str(&format!("\n*** Add File: {path}"));
                 for line in operation
                     .get("content")
@@ -10158,20 +10405,10 @@ fn build_apply_patch_text(operations: &[Value]) -> String {
                                 );
                             }
                         }
+                        if hunk.get("end_of_file").and_then(Value::as_bool) == Some(true) {
+                            text.push_str("\n*** End of File");
+                        }
                     }
-                }
-            }
-            "replace_file" => {
-                text.push_str(&format!("\n*** Delete File: {path}"));
-                text.push_str(&format!("\n*** Add File: {path}"));
-                for line in operation
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .lines()
-                {
-                    text.push_str("\n+");
-                    text.push_str(line);
                 }
             }
             _ => {}
@@ -10283,6 +10520,12 @@ fn parse_apply_patch_operations(input: &str) -> Vec<Value> {
                 "context".to_string(),
                 json!(context),
             )]));
+            continue;
+        }
+        if raw_line == "*** End of File" {
+            if let Some(hunk) = current_hunk.as_mut() {
+                hunk.insert("end_of_file".to_string(), json!(true));
+            }
             continue;
         }
         if let Some(operation) = current.as_ref() {

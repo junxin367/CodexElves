@@ -35,6 +35,777 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+mod tool_conversion_audit {
+    use super::*;
+
+    fn tool_request(tools: Value) -> Value {
+        json!({ "model": "claude-opus-4-8", "input": "audit", "tools": tools })
+    }
+
+    #[test]
+    fn declaration_preserves_tool_search_parameters() {
+        let parameters = json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" },
+                "limit": { "type": "number", "minimum": 1, "maximum": 8 }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        });
+        let request = tool_request(json!([{
+            "type": "tool_search", "execution": "client", "parameters": parameters
+        }]));
+        let chat = responses_to_chat_completions(request.clone()).unwrap();
+        let anthropic = responses_to_anthropic_messages(request).unwrap();
+        assert_eq!(chat["tools"][0]["function"]["parameters"], parameters);
+        assert_eq!(anthropic["tools"][0]["input_schema"], parameters);
+    }
+
+    #[test]
+    fn namespace_tools_preserve_strict_flags() {
+        for strict in [true, false] {
+            let request = tool_request(json!([{
+                "type": "namespace", "name": "mcp__audit", "tools": [{
+                    "type": "function", "name": "inspect", "strict": strict,
+                    "parameters": { "type": "object", "properties": {} }
+                }]
+            }]));
+            let chat = responses_to_chat_completions(request.clone()).unwrap();
+            let anthropic = responses_to_anthropic_messages(request).unwrap();
+            assert_eq!(chat["tools"][0]["function"]["strict"], strict);
+            assert_eq!(anthropic["tools"][0]["strict"], strict);
+        }
+    }
+
+    #[test]
+    fn removed_web_search_cannot_remain_the_forced_chat_tool() {
+        let mut request = tool_request(json!([
+            {"type":"web_search"},
+            {"type":"function","name":"exec_command","parameters":{"type":"object"}}
+        ]));
+        request["tool_choice"] = json!({"type":"web_search"});
+        let converted = responses_to_chat_completions(request).unwrap();
+        assert!(
+            converted["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|t| t["function"]["name"] != "web_search")
+        );
+        assert!(
+            converted.get("tool_choice").is_none(),
+            "不能强制调用已从声明中移除的工具"
+        );
+    }
+
+    #[test]
+    fn anthropic_preserves_explicit_parallel_tool_control() {
+        for parallel in [true, false] {
+            let mut request = tool_request(json!([{
+                "type":"function","name":"inspect","parameters":{"type":"object"}
+            }]));
+            request["parallel_tool_calls"] = json!(parallel);
+            let converted = responses_to_anthropic_messages(request).unwrap();
+            assert_eq!(converted["tool_choice"]["type"], "auto");
+            assert_eq!(
+                converted["tool_choice"]["disable_parallel_tool_use"],
+                !parallel
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_function_declarations_and_choice_are_not_dropped() {
+        let mut request = tool_request(json!([
+            { "type": "function", "function": {
+                "name": "first", "parameters": { "type": "object", "properties": {} }
+            }},
+            { "type": "function", "function": {
+                "name": "second", "parameters": { "type": "object", "properties": {} }
+            }}
+        ]));
+        request["tool_choice"] = json!({
+            "type": "function", "function": { "name": "second" }
+        });
+        let chat = responses_to_chat_completions(request.clone()).unwrap();
+        let anthropic = responses_to_anthropic_messages(request).unwrap();
+        assert_eq!(chat["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(anthropic["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(chat["tool_choice"]["function"]["name"], "second");
+        assert_eq!(anthropic["tool_choice"]["name"], "second");
+    }
+
+    fn typed_text_request() -> Value {
+        tool_request(json!([{
+            "type": "namespace", "name": "mcp__audit", "tools": [{
+                "type": "function", "name": "inspect",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "$ref": "#/$defs/id" },
+                        "enabled": { "type": "boolean" },
+                        "items": { "type": "array", "items": { "type": "integer" } },
+                        "config": { "type": "object" },
+                        "optional": { "type": ["integer", "null"] },
+                        "code": { "type": "string" }
+                    },
+                    "$defs": { "id": { "type": "integer" } }
+                }
+            }]
+        }]))
+    }
+
+    #[test]
+    fn textual_invocations_preserve_declared_types_in_json_and_stream() {
+        let text = concat!(
+            "<invoke name=\"mcp__audit__inspect\">",
+            "<parameter name=\"session_id\">42</parameter>",
+            "<parameter name=\"enabled\">false</parameter>",
+            "<parameter name=\"items\">[1,2]</parameter>",
+            "<parameter name=\"config\">{\"key\":\"中文\"}</parameter>",
+            "<parameter name=\"optional\">null</parameter>",
+            "<parameter name=\"code\">{\"literal\":true}</parameter>",
+            "</invoke>"
+        );
+        let request = typed_text_request();
+        let direct = anthropic_message_to_response_with_request(
+            json!({
+                "id": "msg_typed", "model": "claude-opus-4-8",
+                "content": [{ "type": "text", "text": text }], "stop_reason": "end_turn"
+            }),
+            &request,
+        )
+        .unwrap();
+        let streamed = anthropic_sse_to_responses_sse_with_request(
+            &anthropic_sse_from_text_deltas(&[text.to_string()]),
+            &request,
+        );
+        let events = parse_response_sse_events(&streamed);
+        let stream_item = &events
+            .iter()
+            .find(|e| e.event == "response.output_item.done")
+            .unwrap()
+            .data["item"];
+        let expected = json!({
+            "session_id": 42, "enabled": false, "items": [1,2],
+            "config": { "key": "中文" }, "optional": null, "code": "{\"literal\":true}"
+        });
+        for item in [&direct["output"][0], stream_item] {
+            assert_eq!(item["namespace"], "mcp__audit");
+            assert_eq!(item["name"], "inspect");
+            assert_eq!(
+                serde_json::from_str::<Value>(item["arguments"].as_str().unwrap()).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn textual_invocation_ids_do_not_collide_between_responses() {
+        let request = typed_text_request();
+        let ids: Vec<_> = ["msg_first", "msg_second"]
+            .into_iter()
+            .map(|id| {
+                anthropic_message_to_response_with_request(
+                    json!({
+                        "id": id, "model": "claude-opus-4-8",
+                        "content": [{
+                            "type": "text",
+                            "text": "<invoke name=\"mcp__audit__inspect\"><parameter name=\"session_id\">42</parameter></invoke>"
+                        }],
+                        "stop_reason": "end_turn"
+                    }),
+                    &request,
+                )
+                .unwrap()["output"][0]["call_id"]
+                    .clone()
+            })
+            .collect();
+        assert_ne!(ids[0], ids[1], "连续两轮工具调用不能复用同一 call_id");
+    }
+
+    #[test]
+    fn textual_arguments_follow_properties_inside_composed_schemas() {
+        for composition in ["oneOf", "anyOf", "allOf"] {
+            let mut parameters = json!({"type":"object"});
+            parameters[composition] = json!([{
+                "type":"object","properties":{
+                    "count":{"type":"integer"},"enabled":{"type":"boolean"},
+                    "literal":{"anyOf":[{"type":"string"},{"type":"integer"}]}
+                }
+            }]);
+            let request =
+                tool_request(json!([{"type":"function","name":"inspect","parameters":parameters}]));
+            let converted = anthropic_message_to_response_with_request(json!({
+                "id":"msg_composed","model":"claude-opus-4-8","stop_reason":"end_turn",
+                "content":[{"type":"text","text":"<invoke name=\"inspect\"><parameter name=\"count\">7</parameter><parameter name=\"enabled\">false</parameter><parameter name=\"literal\">42</parameter></invoke>"}]
+            }), &request).unwrap();
+            let arguments: Value =
+                serde_json::from_str(converted["output"][0]["arguments"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(
+                arguments,
+                json!({"count":7,"enabled":false,"literal":"42"}),
+                "{composition}"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_stream_waits_for_complete_header_and_normalizes_empty_arguments() {
+        let request = tool_request(json!([
+            { "type": "namespace", "name": "mcp__audit", "tools": [{
+                "type": "function", "name": "inspect",
+                "parameters": { "type": "object", "properties": {} }
+            }] },
+            { "type": "function", "name": "no_args", "parameters": { "type": "object" } }
+        ]));
+        let chunks = [
+            json!({"index": 0, "id": "call_frag"}),
+            json!({"index": 0, "function": {"name": "mcp__audit__"}}),
+            json!({"index": 0, "function": {"name": "inspect", "arguments": "{"}}),
+            json!({"index": 0, "function": {"arguments": "}"}}),
+            json!({"index": 1, "id": "call_empty", "function": {"name": "no_args"}}),
+        ];
+        let mut upstream = String::new();
+        for call in chunks {
+            upstream.push_str(&format!(
+                "data: {}\n\n",
+                json!({
+                    "id": "chatcmpl_frag", "model": "claude-opus-4-8",
+                    "choices": [{ "delta": { "tool_calls": [call] } }]
+                })
+            ));
+        }
+        upstream.push_str("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n");
+        let stream = chat_sse_to_responses_sse_with_request(&upstream, &request);
+        let events = parse_response_sse_events(&stream);
+        let added: Vec<_> = events
+            .iter()
+            .filter(|e| e.event == "response.output_item.added")
+            .collect();
+        let done: Vec<_> = events
+            .iter()
+            .filter(|e| e.event == "response.output_item.done")
+            .collect();
+        assert_eq!(added.len(), 2);
+        assert_eq!(done.len(), 2);
+        for (a, d) in added.iter().zip(&done) {
+            assert_eq!(a.data["item"]["name"], d.data["item"]["name"]);
+            assert_eq!(a.data["item"]["id"], d.data["item"]["id"]);
+            assert_eq!(d.data["item"]["arguments"], "{}");
+        }
+        assert_eq!(done[0].data["item"]["name"], "inspect");
+        assert_eq!(done[0].data["item"]["namespace"], "mcp__audit");
+    }
+
+    #[test]
+    fn apply_patch_history_preserves_end_of_file_hunks() {
+        let patch = "*** Begin Patch\n*** Update File: old.txt\n@@\n-last\n+new\n*** End of File\n*** End Patch";
+        let request = json!({
+            "model": "gpt-5-mini",
+            "tools": [{ "type": "custom", "name": "apply_patch" }],
+            "input": [{
+                "type": "custom_tool_call", "call_id": "call_eof", "name": "apply_patch",
+                "input": patch
+            }]
+        });
+        let chat = responses_to_chat_completions(request.clone()).unwrap();
+        let function = &chat["messages"][0]["tool_calls"][0]["function"];
+        let response = chat_completion_to_response_with_request(
+            json!({
+                "id": "chatcmpl_eof", "model": "gpt-5-mini", "choices": [{
+                    "finish_reason": "tool_calls", "message": { "tool_calls": [{
+                        "id": "call_eof", "type": "function", "function": function
+                    }] }
+                }]
+            }),
+            &request,
+        )
+        .unwrap();
+        assert_eq!(response["output"][0]["input"], patch);
+    }
+
+    fn sample_arguments(schema: &Value, root: &Value, depth: usize) -> Value {
+        if depth > 12 {
+            return Value::Null;
+        }
+        if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+            if let Some(target) = reference.strip_prefix('#').and_then(|p| root.pointer(p)) {
+                return sample_arguments(target, root, depth + 1);
+            }
+        }
+        if let Some(value) = schema.get("const").or_else(|| schema.pointer("/enum/0")) {
+            return value.clone();
+        }
+        for key in ["oneOf", "anyOf"] {
+            if let Some(branch) = schema.get(key).and_then(|v| v.get(0)) {
+                return sample_arguments(branch, root, depth + 1);
+            }
+        }
+        let kind = schema
+            .get("type")
+            .and_then(|v| v.as_str().or_else(|| v.get(0)?.as_str()));
+        match kind.unwrap_or("object") {
+            "string" => json!("中文 \"quoted\" \\path\n{\"literal\":false}"),
+            "boolean" => json!(false),
+            "integer" | "number" => schema.get("minimum").cloned().unwrap_or(json!(1)),
+            "null" => Value::Null,
+            "array" => {
+                let count = schema
+                    .get("minItems")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1)
+                    .min(3);
+                json!(
+                    (0..count)
+                        .map(|_| sample_arguments(
+                            schema.get("items").unwrap_or(&json!({})),
+                            root,
+                            depth + 1
+                        ))
+                        .collect::<Vec<_>>()
+                )
+            }
+            _ => {
+                let mut object = serde_json::Map::new();
+                if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+                    for (key, value) in properties {
+                        object.insert(key.clone(), sample_arguments(value, root, depth + 1));
+                    }
+                }
+                if let Some(branches) = schema.get("allOf").and_then(Value::as_array) {
+                    for branch in branches {
+                        if let Value::Object(values) = sample_arguments(branch, root, depth + 1) {
+                            object.extend(values);
+                        }
+                    }
+                }
+                Value::Object(object)
+            }
+        }
+    }
+
+    fn mock_tool_response(
+        request: &Value,
+        name: &str,
+        arguments: &Value,
+        anthropic: bool,
+        stream: bool,
+    ) -> Value {
+        let call_id = "call_matrix";
+        if !stream {
+            return if anthropic {
+                anthropic_message_to_response_with_request(json!({
+                    "id": "msg_matrix", "model": "claude-opus-4-8",
+                    "content": [{ "type": "tool_use", "id": call_id, "name": name, "input": arguments }],
+                    "stop_reason": "tool_use"
+                }), request).unwrap()["output"][0].clone()
+            } else {
+                chat_completion_to_response_with_request(
+                    json!({
+                        "id": "chatcmpl_matrix", "model": "gpt-chat", "choices": [{
+                            "finish_reason": "tool_calls", "message": { "tool_calls": [{
+                                "id": call_id, "type": "function",
+                                "function": { "name": name, "arguments": arguments.to_string() }
+                            }] }
+                        }]
+                    }),
+                    request,
+                )
+                .unwrap()["output"][0]
+                    .clone()
+            };
+        }
+        let mut chunks = Vec::new();
+        if anthropic {
+            chunks.push(json!({"type":"message_start","message":{"id":"msg_matrix","model":"claude-opus-4-8","content":[]}}));
+            chunks.push(json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":call_id,"name":name,"input":{}}}));
+            // 同时覆盖 JSON 参数逐字符分片和中文 UTF-8 在网络字节边界处分片。
+            for ch in arguments.to_string().chars() {
+                chunks.push(json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":ch.to_string()}}));
+            }
+            chunks.push(json!({"type":"content_block_stop","index":0}));
+            chunks.push(json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}));
+            chunks.push(json!({"type":"message_stop"}));
+        } else {
+            chunks.push(json!({"id":"chatcmpl_matrix","model":"gpt-chat","choices":[{"delta":{"tool_calls":[{"index":0,"id":call_id,"function":{"name":name}}]}}]}));
+            for ch in arguments.to_string().chars() {
+                chunks.push(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":ch.to_string()}}]}}]}));
+            }
+            chunks.push(json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}));
+        }
+        let mut wire: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
+        if !anthropic {
+            wire.push_str("data: [DONE]\n\n");
+        }
+        let mut bytes = Vec::new();
+        if anthropic {
+            let mut converter = AnthropicSseToResponsesConverter::with_request(request);
+            for chunk in wire.as_bytes().chunks(1) {
+                bytes.extend(converter.push_bytes(chunk));
+            }
+            bytes.extend(converter.finish());
+        } else {
+            let mut converter = ChatSseToResponsesConverter::with_request(request);
+            for chunk in wire.as_bytes().chunks(1) {
+                bytes.extend(converter.push_bytes(chunk));
+            }
+            bytes.extend(converter.finish());
+        }
+        let events = parse_response_sse_events(std::str::from_utf8(&bytes).unwrap());
+        assert!(!events.iter().any(|e| e.event == "response.failed"));
+        let added = &events
+            .iter()
+            .find(|e| e.event == "response.output_item.added")
+            .unwrap()
+            .data["item"];
+        let done = &events
+            .iter()
+            .find(|e| e.event == "response.output_item.done")
+            .unwrap()
+            .data["item"];
+        assert_eq!(added["id"], done["id"]);
+        assert_eq!(added["name"], done["name"]);
+        assert_eq!(added["call_id"], done["call_id"]);
+        let complete = &events
+            .iter()
+            .find(|e| e.event == "response.completed")
+            .unwrap()
+            .data;
+        assert_eq!(complete["response"]["output"][0], *done);
+        done.clone()
+    }
+
+    #[test]
+    fn function_catalog_roundtrips_all_tools_across_four_wire_modes() {
+        let parameters = json!({
+            "type":"object","properties":{
+                "code":{"type":"string"},"session_id":{"type":"integer"},"enabled":{"type":"boolean"},
+                "items":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"}}}},
+                "optional":{"type":["null","string"]}
+            },"required":["code","session_id","enabled","items"],"additionalProperties":false
+        });
+        let mut requests = vec![tool_request(json!([
+            {"type":"function","name":"exec_command","parameters":parameters,"strict":false},
+            {"type":"namespace","name":"mcp__audit","tools":[
+                {"type":"function","name":"inspect","parameters":parameters,"strict":true},
+                {"type":"function","name":"no_args","parameters":{"type":"object","properties":{}}}
+            ]},
+            {"type":"function","function":{"name":"wrapped","parameters":parameters,"strict":false}}
+        ]))];
+        // 可选真实会话目录补充样本；无外部样本时仍完整执行上述确定性回归。
+        if let Ok(path) = std::env::var("CODEX_ELVES_TOOL_CATALOG_FIXTURE") {
+            let tools: Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            requests.push(tool_request(tools));
+        }
+        let mut checked = 0;
+        for request in requests {
+            let mut functions = Vec::new();
+            for tool in request["tools"].as_array().unwrap() {
+                if tool["type"] == "namespace" {
+                    for child in tool["tools"].as_array().unwrap() {
+                        if child["type"] == "function" {
+                            functions.push((tool["name"].as_str().unwrap(), child));
+                        }
+                    }
+                } else if tool["type"] == "function" {
+                    functions.push(("", tool.get("function").unwrap_or(tool)));
+                }
+            }
+            let chat = responses_to_chat_completions(request.clone()).unwrap();
+            let anth = responses_to_anthropic_messages(request.clone()).unwrap();
+            for (namespace, tool) in functions {
+                let name = tool["name"].as_str().unwrap();
+                let flat = if namespace.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{namespace}__{name}")
+                };
+                let arguments = sample_arguments(&tool["parameters"], &tool["parameters"], 0);
+                assert_eq!(
+                    chat["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|t| t["function"]["name"] == flat)
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    anth["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|t| t["name"] == flat)
+                        .count(),
+                    1
+                );
+                for anthropic in [false, true] {
+                    for stream in [false, true] {
+                        let item =
+                            mock_tool_response(&request, &flat, &arguments, anthropic, stream);
+                        assert_eq!(item["name"], name);
+                        assert_eq!(
+                            item.get("namespace").and_then(Value::as_str).unwrap_or(""),
+                            namespace
+                        );
+                        assert_eq!(
+                            serde_json::from_str::<Value>(item["arguments"].as_str().unwrap())
+                                .unwrap(),
+                            arguments
+                        );
+                        let mut followup = request.clone();
+                        followup["input"] = json!([
+                            {"role":"user","content":"audit"},
+                            item,
+                            {"type":"function_call_output","call_id":"call_matrix","output":"工具结果：成功"}
+                        ]);
+                        let replay = if anthropic {
+                            responses_to_anthropic_messages(followup)
+                        } else {
+                            responses_to_chat_completions(followup)
+                        }
+                        .unwrap();
+                        if anthropic {
+                            assert_eq!(replay["messages"][1]["content"][0]["name"], flat);
+                            assert_eq!(replay["messages"][1]["content"][0]["input"], arguments);
+                            assert_eq!(
+                                replay["messages"][2]["content"][0]["tool_use_id"],
+                                "call_matrix"
+                            );
+                        } else {
+                            assert_eq!(
+                                replay["messages"][1]["tool_calls"][0]["function"]["name"],
+                                flat
+                            );
+                            assert_eq!(
+                                serde_json::from_str::<Value>(
+                                    replay["messages"][1]["tool_calls"][0]["function"]["arguments"]
+                                        .as_str()
+                                        .unwrap()
+                                )
+                                .unwrap(),
+                                arguments
+                            );
+                            assert_eq!(replay["messages"][2]["tool_call_id"], "call_matrix");
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        eprintln!("function catalog roundtrip scenarios: {checked}");
+    }
+
+    #[test]
+    fn custom_payloads_roundtrip_without_losing_whitespace_or_json_text() {
+        let request = tool_request(json!([{"type":"custom","name":"exec"}]));
+        for payload in [
+            "",
+            "\nprint('中文')\n",
+            "{\"input\":\"literal JSON\"}",
+            "  leading and trailing  ",
+        ] {
+            for anthropic in [false, true] {
+                for stream in [false, true] {
+                    let item = mock_tool_response(
+                        &request,
+                        "exec",
+                        &json!({"input":payload}),
+                        anthropic,
+                        stream,
+                    );
+                    assert_eq!(item["type"], "custom_tool_call");
+                    assert_eq!(item["input"], payload);
+                    let mut followup = request.clone();
+                    followup["input"] = json!([
+                        {"role":"user","content":"audit"}, item,
+                        {"type":"custom_tool_call_output","call_id":"call_matrix","output":"done"}
+                    ]);
+                    let replay = if anthropic {
+                        responses_to_anthropic_messages(followup)
+                    } else {
+                        responses_to_chat_completions(followup)
+                    }
+                    .unwrap();
+                    if anthropic {
+                        assert_eq!(
+                            replay["messages"][1]["content"][0]["input"]["input"],
+                            payload
+                        );
+                    } else {
+                        let args: Value = serde_json::from_str(
+                            replay["messages"][1]["tool_calls"][0]["function"]["arguments"]
+                                .as_str()
+                                .unwrap(),
+                        )
+                        .unwrap();
+                        assert_eq!(args["input"], payload);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn all_patch_actions_preserve_action_identity_in_four_modes() {
+        let request = tool_request(json!([{"type":"custom","name":"apply_patch"}]));
+        let cases = [
+            (
+                "add_file",
+                json!({"path":"new.txt","content":"中文\nsecond"}),
+            ),
+            ("delete_file", json!({"path":"old.txt"})),
+            (
+                "replace_file",
+                json!({"path":"old.txt","content":"replaced"}),
+            ),
+            (
+                "update_file",
+                json!({"path":"old.txt","move_to":"renamed.txt","hunks":[{
+                    "lines":[{"op":"remove","text":"old"},{"op":"add","text":"new"}],
+                    "end_of_file":true
+                }]}),
+            ),
+            (
+                "batch",
+                json!({"operations":[
+                    {"type":"replace_file","path":"one.txt","content":"one"},
+                    {"type":"add_file","path":"two.txt","content":"two"}
+                ]}),
+            ),
+        ];
+        for (action, arguments) in cases {
+            for anthropic in [false, true] {
+                for stream in [false, true] {
+                    let name = format!("apply_patch_{action}");
+                    let item = mock_tool_response(&request, &name, &arguments, anthropic, stream);
+                    assert_eq!(item["type"], "custom_tool_call");
+                    assert_eq!(item["name"], "apply_patch");
+                    let patch = item["input"].as_str().unwrap();
+                    assert!(patch.starts_with("*** Begin Patch\n"));
+                    assert!(patch.ends_with("\n*** End Patch"));
+                    let mut followup = request.clone();
+                    followup["input"] = json!([
+                        {"role":"user","content":"audit"}, item,
+                        {"type":"custom_tool_call_output","call_id":"call_matrix","output":"done"}
+                    ]);
+                    let replay = if anthropic {
+                        responses_to_anthropic_messages(followup)
+                    } else {
+                        responses_to_chat_completions(followup)
+                    }
+                    .unwrap();
+                    let replay_name = if anthropic {
+                        &replay["messages"][1]["content"][0]["name"]
+                    } else {
+                        &replay["messages"][1]["tool_calls"][0]["function"]["name"]
+                    };
+                    assert_eq!(replay_name, &name);
+                    if action == "replace_file" || action == "batch" {
+                        assert!(!patch.contains("*** Delete File:"));
+                    }
+                    if action == "update_file" {
+                        assert!(patch.contains("*** Move to: renamed.txt"));
+                        assert!(patch.contains("\n*** End of File\n"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tool_search_loads_and_calls_namespaced_tools_in_four_modes() {
+        let schema = json!({
+            "type":"object","properties":{"query":{"type":"string"},"limit":{"type":"number"}},
+            "required":["query"],"additionalProperties":false
+        });
+        for anthropic in [false, true] {
+            for stream in [false, true] {
+                let request = tool_request(
+                    json!([{"type":"tool_search","execution":"client","parameters":schema}]),
+                );
+                let arguments = json!({"query":"audit lookup","limit":3});
+                let mut search =
+                    mock_tool_response(&request, "tool_search", &arguments, anthropic, stream);
+                assert_eq!(search["type"], "tool_search_call");
+                assert_eq!(search["arguments"], arguments);
+                search["call_id"] = json!("call_search");
+                let mut discovered = request.clone();
+                discovered["input"] = json!([
+                    {"role":"user","content":"audit"},
+                    search,
+                    {"type":"tool_search_output","call_id":"call_search","execution":"client","tools":[{
+                        "type":"namespace","name":"mcp__discovered","tools":[{
+                            "type":"function","name":"lookup","strict":false,"defer_loading":true,
+                            "parameters":{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}
+                        }]
+                    }]}
+                ]);
+                let declaration = if anthropic {
+                    responses_to_anthropic_messages(discovered.clone())
+                } else {
+                    responses_to_chat_completions(discovered.clone())
+                }
+                .unwrap();
+                assert!(declaration["tools"].as_array().unwrap().iter().any(|t| {
+                    if anthropic {
+                        t["name"] == "mcp__discovered__lookup"
+                    } else {
+                        t["function"]["name"] == "mcp__discovered__lookup"
+                    }
+                }));
+                let call = mock_tool_response(
+                    &discovered,
+                    "mcp__discovered__lookup",
+                    &json!({"id":7}),
+                    anthropic,
+                    stream,
+                );
+                assert_eq!(call["namespace"], "mcp__discovered");
+                assert_eq!(call["name"], "lookup");
+                assert_eq!(call["arguments"], "{\"id\":7}");
+            }
+        }
+    }
+
+    #[test]
+    fn interleaved_parallel_calls_keep_custom_and_function_arguments_separate() {
+        let request = tool_request(json!([
+            {"type":"custom","name":"exec"},
+            {"type":"namespace","name":"mcp__audit","tools":[{
+                "type":"function","name":"inspect","parameters":{"type":"object"}
+            }]}
+        ]));
+        let chunks = [
+            json!({"index":3,"id":"call_custom","function":{"name":"exec","arguments":"{\"input\":\""}}),
+            json!({"index":8,"id":"call_function","function":{"name":"mcp__audit__inspect","arguments":"{\"count\":"}}),
+            json!({"index":8,"function":{"arguments":"7}"}}),
+            json!({"index":3,"function":{"arguments":"中文\"}"}}),
+        ];
+        let mut wire: String = chunks.into_iter().map(|call| format!("data: {}\n\n", json!({
+            "id":"chatcmpl_parallel","model":"gpt-chat","choices":[{"delta":{"tool_calls":[call]}}]
+        }))).collect();
+        wire.push_str("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n");
+        let converted = chat_sse_to_responses_sse_with_request(&wire, &request);
+        let events = parse_response_sse_events(&converted);
+        let output = &events
+            .iter()
+            .find(|e| e.event == "response.completed")
+            .unwrap()
+            .data["response"]["output"];
+        assert_eq!(output[0]["call_id"], "call_custom");
+        assert_eq!(output[0]["type"], "custom_tool_call");
+        assert_eq!(output[0]["input"], "中文");
+        assert_eq!(output[1]["call_id"], "call_function");
+        assert_eq!(output[1]["namespace"], "mcp__audit");
+        assert_eq!(output[1]["arguments"], "{\"count\":7}");
+    }
+}
+
 #[derive(Debug)]
 struct ParsedSseEvent {
     event: String,
@@ -2672,7 +3443,7 @@ fn anthropic_textual_invoke_response_converts_to_tool_call() {
     assert_eq!(converted["output"][0]["name"], "exec_command");
     assert_eq!(
         converted["output"][0]["arguments"],
-        r#"{"cmd":"git diff crates/codex-elves-core/src/protocol_proxy.rs","max_output_tokens":"6000","yield_time_ms":"3000"}"#
+        r#"{"cmd":"git diff crates/codex-elves-core/src/protocol_proxy.rs","max_output_tokens":6000,"yield_time_ms":3000}"#
     );
 }
 
@@ -3086,8 +3857,14 @@ fn anthropic_textual_invoke_uses_unique_ids_across_text_blocks() {
         .filter(|item| item["type"] == "function_call")
         .collect::<Vec<_>>();
     assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0]["call_id"], "call_textual_invoke_0");
-    assert_eq!(calls[1]["call_id"], "call_textual_invoke_1");
+    assert!(
+        calls[0]["call_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("call_textual_")
+    );
+    assert!(calls[0]["call_id"].as_str().unwrap().ends_with("_0"));
+    assert!(calls[1]["call_id"].as_str().unwrap().ends_with("_1"));
     assert_ne!(calls[0]["id"], calls[1]["id"]);
 }
 
@@ -4154,7 +4931,7 @@ fn responses_request_maps_tool_choice_for_proxy_internal_tools() {
 
 #[test]
 fn responses_request_stream_includes_usage_and_apply_patch_proxy_tools() {
-    let converted = responses_to_chat_completions(json!({
+    let request = json!({
         "model": "gpt-5-mini",
         "input": "hi",
         "stream": true,
@@ -4166,8 +4943,8 @@ fn responses_request_stream_includes_usage_and_apply_patch_proxy_tools() {
             }
         ],
         "tool_choice": { "type": "custom", "name": "apply_patch" }
-    }))
-    .unwrap();
+    });
+    let converted = responses_to_chat_completions(request.clone()).unwrap();
 
     assert_eq!(converted["stream_options"]["include_usage"], true);
     let names: Vec<_> = converted["tools"]
@@ -4195,6 +4972,38 @@ fn responses_request_stream_includes_usage_and_apply_patch_proxy_tools() {
         converted["tool_choice"]["function"]["name"],
         "apply_patch_batch"
     );
+
+    let batch = &converted["tools"][4]["function"];
+    let description = batch["description"].as_str().unwrap();
+    for instruction in [
+        "Each file path must appear in only one operation per batch",
+        "the executor rejects duplicate paths",
+        "the hunks of one update_file operation",
+        "supply the final full content",
+        "use separate tool calls and wait for each to complete",
+        "Patch files",
+    ] {
+        assert!(
+            description.contains(instruction),
+            "missing batch instruction: {instruction}"
+        );
+    }
+    assert!(
+        batch["parameters"]["properties"]["operations"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("distinct target paths")
+    );
+
+    let anthropic = responses_to_anthropic_messages(request).unwrap();
+    let anthropic_batch = anthropic["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "apply_patch_batch")
+        .unwrap();
+    assert_eq!(anthropic_batch["description"], batch["description"]);
+    assert_eq!(anthropic_batch["input_schema"], batch["parameters"]);
 }
 
 #[test]
@@ -5423,7 +6232,220 @@ fn chat_completion_response_reconstructs_apply_patch_replace_file_proxy_call() {
     assert_eq!(converted["output"][0]["name"], "apply_patch");
     assert_eq!(
         converted["output"][0]["input"],
-        "*** Begin Patch\n*** Delete File: README.md\n*** Add File: README.md\n+hello\n*** End Patch"
+        "*** Begin Patch\n*** Add File: README.md\n+hello\n*** End Patch"
+    );
+
+    assert_apply_patch_replace_history(&converted["output"][0], "README.md", "hello");
+}
+
+fn assert_apply_patch_replace_history(item: &Value, path: &str, content: &str) {
+    let request = json!({
+        "model": "claude-opus-4-8",
+        "input": [
+            { "role": "user", "content": "Replace the file." },
+            item,
+            {
+                "type": "custom_tool_call_output",
+                "call_id": item["call_id"],
+                "output": "Success"
+            }
+        ],
+        "tools": [{ "type": "custom", "name": "apply_patch" }]
+    });
+    let expected = json!({ "path": path, "content": content });
+    let chat = responses_to_chat_completions(request.clone()).unwrap();
+    let call = &chat["messages"][1]["tool_calls"][0];
+    assert_eq!(call["id"], item["call_id"]);
+    assert_eq!(call["function"]["name"], "apply_patch_replace_file");
+    assert_eq!(
+        serde_json::from_str::<Value>(call["function"]["arguments"].as_str().unwrap()).unwrap(),
+        expected
+    );
+    assert_eq!(chat["messages"][2]["tool_call_id"], item["call_id"]);
+
+    let anthropic = responses_to_anthropic_messages(request).unwrap();
+    let call = &anthropic["messages"][1]["content"][0];
+    assert_eq!(call["id"], item["call_id"]);
+    assert_eq!(call["name"], "apply_patch_replace_file");
+    assert_eq!(call["input"], expected);
+    assert_eq!(
+        anthropic["messages"][2]["content"][0]["tool_use_id"],
+        item["call_id"]
+    );
+}
+
+#[test]
+fn anthropic_apply_patch_replace_file_preserves_history_and_single_file_operation() {
+    for content in ["", "替换内容", "first\n\n最后一行"] {
+        let converted = anthropic_message_to_response_with_request(
+            json!({
+                "id": "msg_replace",
+                "model": "claude-opus-4-8",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_replace",
+                    "name": "apply_patch_replace_file",
+                    "input": { "path": "目录/existing.txt", "content": content }
+                }],
+                "stop_reason": "tool_use"
+            }),
+            &json!({ "tools": [{ "type": "custom", "name": "apply_patch" }] }),
+        )
+        .unwrap();
+        let item = &converted["output"][0];
+        let patch = item["input"].as_str().unwrap();
+        assert_eq!(patch.matches("*** Add File: ").count(), 1);
+        assert!(!patch.contains("*** Delete File: "));
+        assert_apply_patch_replace_history(item, "目录/existing.txt", content);
+    }
+}
+
+#[test]
+fn legacy_apply_patch_replace_history_does_not_replay_as_batch() {
+    assert_apply_patch_replace_history(
+        &json!({
+            "id": "ctc_toolu_legacy",
+            "type": "custom_tool_call",
+            "name": "apply_patch",
+            "call_id": "toolu_legacy",
+            "input": "*** Begin Patch\n*** Delete File: existing.txt\n*** Add File: existing.txt\n+new\n*** End Patch"
+        }),
+        "existing.txt",
+        "new",
+    );
+
+    let request = json!({
+        "model": "gpt-5-mini",
+        "input": [{
+            "type": "custom_tool_call",
+            "name": "apply_patch",
+            "call_id": "call_different_paths",
+            "input": "*** Begin Patch\n*** Delete File: old.txt\n*** Add File: new.txt\n+new\n*** End Patch"
+        }],
+        "tools": [{ "type": "custom", "name": "apply_patch" }]
+    });
+    let chat = responses_to_chat_completions(request).unwrap();
+    assert_eq!(
+        chat["messages"][0]["tool_calls"][0]["function"]["name"], "apply_patch_batch",
+        "不同路径的删除和新增仍是两个操作"
+    );
+}
+
+#[test]
+fn apply_patch_replace_stream_preserves_identity_through_both_protocols() {
+    let request = json!({
+        "model": "claude-opus-4-8",
+        "tools": [{ "type": "custom", "name": "apply_patch" }]
+    });
+    let chat = chat_sse_to_responses_sse_with_request(
+        r#"data: {"id":"chatcmpl_replace","model":"claude-opus-4-8","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_replace","type":"function","function":{"name":"apply_patch_replace_file","arguments":"{\"path\":\"existing.txt\","}}]}}]}
+
+data: {"id":"chatcmpl_replace","model":"claude-opus-4-8","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"content\":\"replacement\"}"}}]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+"#,
+        &request,
+    );
+    let anthropic = anthropic_sse_to_responses_sse_with_request(
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_replace","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_replace","name":"apply_patch_replace_file","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"existing.txt\","}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"content\":\"replacement\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":9}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#,
+        &request,
+    );
+
+    for stream in [chat, anthropic] {
+        let events = parse_response_sse_events(&stream);
+        let item = &events
+            .iter()
+            .find(|event| event.event == "response.output_item.done")
+            .unwrap()
+            .data["item"];
+        let expected_patch =
+            "*** Begin Patch\n*** Add File: existing.txt\n+replacement\n*** End Patch";
+        assert_eq!(item["input"], expected_patch);
+        assert_eq!(item["call_id"], "call_replace");
+        assert_apply_patch_replace_history(item, "existing.txt", "replacement");
+        for event in &events {
+            match event.event.as_str() {
+                "response.output_item.added" => {
+                    assert_eq!(event.data["item"]["id"], item["id"]);
+                }
+                "response.custom_tool_call_input.delta" => {
+                    assert_eq!(event.data["item_id"], item["id"]);
+                    assert_eq!(event.data["delta"], expected_patch);
+                }
+                "response.custom_tool_call_input.done" => {
+                    assert_eq!(event.data["item_id"], item["id"]);
+                    assert_eq!(event.data["input"], expected_patch);
+                }
+                "response.completed" => {
+                    assert_eq!(event.data["response"]["output"][0], *item);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+#[test]
+fn apply_patch_batch_with_one_replacement_keeps_batch_identity() {
+    let converted = chat_completion_to_response_with_request(
+        json!({
+            "id": "chatcmpl_batch",
+            "model": "gpt-5-mini",
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": { "tool_calls": [{
+                    "id": "call_batch",
+                    "type": "function",
+                    "function": {
+                        "name": "apply_patch_batch",
+                        "arguments": json!({ "operations": [{
+                            "type": "replace_file",
+                            "path": "existing.txt",
+                            "content": "replacement"
+                        }] }).to_string()
+                    }
+                }] }
+            }]
+        }),
+        &json!({ "tools": [{ "type": "custom", "name": "apply_patch" }] }),
+    )
+    .unwrap();
+    let item = &converted["output"][0];
+    assert_eq!(
+        item["input"],
+        "*** Begin Patch\n*** Add File: existing.txt\n+replacement\n*** End Patch"
+    );
+    let replay = responses_to_chat_completions(json!({
+        "model": "gpt-5-mini",
+        "input": [item],
+        "tools": [{ "type": "custom", "name": "apply_patch" }]
+    }))
+    .unwrap();
+    assert_eq!(
+        replay["messages"][0]["tool_calls"][0]["function"]["name"],
+        "apply_patch_batch"
     );
 }
 
@@ -6142,7 +7164,32 @@ data: {"type":"message_stop"}
 }
 
 #[test]
-fn anthropic_stream_and_non_stream_agree_on_inline_cite_stripping() {}
+fn anthropic_stream_and_non_stream_agree_on_inline_cite_stripping() {
+    for text in [
+        "普通中文回复",
+        "前缀<cite source=\"one\">引用内容</cite>后缀",
+        "代码中的 <T> 和 <value> 保留",
+    ] {
+        let direct = anthropic_message_to_response_with_request(
+            json!({
+                "id": "msg_cite_compare", "model": "claude-opus-4-8",
+                "content": [{ "type": "text", "text": text }],
+                "stop_reason": "end_turn"
+            }),
+            &json!({}),
+        )
+        .unwrap();
+        let chunks: Vec<_> = text.chars().map(|c| c.to_string()).collect();
+        let streamed = anthropic_sse_to_responses_sse_with_request(
+            &anthropic_sse_from_text_deltas(&chunks),
+            &json!({}),
+        );
+        assert_eq!(
+            collect_stream_output_text(&streamed),
+            direct["output"][0]["content"][0]["text"].as_str().unwrap()
+        );
+    }
+}
 
 /// 引用标记剥离已收敛到共享文本出口，Chat Completions 协议必须同样生效。
 #[test]
@@ -6644,8 +7691,14 @@ data: {"type":"message_stop"}
         .filter(|item| item["type"] == "function_call")
         .collect::<Vec<_>>();
     assert_eq!(calls.len(), 3);
-    assert_eq!(calls[0]["call_id"], "call_textual_invoke_0");
-    assert_eq!(calls[1]["call_id"], "call_textual_invoke_1");
+    assert!(
+        calls[0]["call_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("call_textual_")
+    );
+    assert!(calls[0]["call_id"].as_str().unwrap().ends_with("_0"));
+    assert!(calls[1]["call_id"].as_str().unwrap().ends_with("_1"));
     assert_eq!(calls[2]["call_id"], "toolu_native_after_textual");
     assert_eq!(calls[0]["name"], "exec_command");
     assert_eq!(calls[1]["name"], "exec_command");
