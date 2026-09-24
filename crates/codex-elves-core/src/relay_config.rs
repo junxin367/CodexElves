@@ -19,6 +19,12 @@ const LEGACY_RELAY_PROVIDERS: &[&str] = &["CodexElves", "CodexPP"];
 const CHAT_UPSTREAM_BASE_URL_KEY: &str = "codex_elves_chat_base_url";
 const STREAM_IDLE_TIMEOUT_MS_KEY: &str = "stream_idle_timeout_ms";
 const MULTI_AGENT_V2_FEATURE_KEY: &str = "multi_agent_v2";
+const MULTI_AGENT_V2_TABLE: &str = "features.multi_agent_v2";
+const MULTI_AGENT_V2_ENABLED_KEY: &str = "enabled";
+const LEGACY_MULTI_AGENT_V2_MAX_THREADS_KEY: &str = "max_concurrent_threads_per_session";
+const AGENTS_TABLE: &str = "agents";
+const AGENTS_MAX_CONCURRENT_THREADS_KEY: &str = "max_concurrent_threads_per_session";
+const DEFAULT_SUBAGENT_COUNT: u64 = 6;
 pub const LOCAL_PROXY_CODEX_STREAM_IDLE_TIMEOUT_MS: u64 = 3_600_000;
 const GENERATED_MODEL_CATALOG_FILENAME: &str = "codex-elves-model-catalog.json";
 const RESERVED_MODEL_PROVIDER_IDS: &[&str] = &[
@@ -512,11 +518,7 @@ fn apply_relay_profile_owned_fields_to_config(
             profile.auto_compact_limit.trim(),
         );
     }
-    updated = if relay_profile_multi_agent_v2_enabled(profile) {
-        set_table_toml_raw_line(&updated, "features", MULTI_AGENT_V2_FEATURE_KEY, "true")
-    } else {
-        remove_table_key(&updated, "features", MULTI_AGENT_V2_FEATURE_KEY)
-    };
+    updated = apply_relay_profile_subagent_config(&updated, profile);
 
     apply_owned_model_catalog_to_config(home, &updated, profile)
 }
@@ -740,10 +742,11 @@ pub fn sync_applied_relay_profile_provider_name_to_home(
     Ok(true)
 }
 
-/// 把当前活跃供应商的 Multi Agent V2 开关同步到 live `config.toml`。
+/// 把当前活跃供应商的子代理配置同步到 live `config.toml`。
 ///
 /// 只在 live 的 `model_provider` 与该供应商一致时修改
-/// `[features].multi_agent_v2`，保留同表中的其它 feature。
+/// `[features.multi_agent_v2]` 和 `[agents].max_concurrent_threads_per_session`，
+/// 保留其它配置。
 pub fn sync_applied_relay_profile_multi_agent_v2_to_home(
     home: &Path,
     profile: &RelayProfile,
@@ -755,11 +758,7 @@ pub fn sync_applied_relay_profile_multi_agent_v2_to_home(
         return Ok(false);
     }
 
-    let updated = if relay_profile_multi_agent_v2_enabled(profile) {
-        set_table_toml_raw_line(&live_config, "features", MULTI_AGENT_V2_FEATURE_KEY, "true")
-    } else {
-        remove_table_key(&live_config, "features", MULTI_AGENT_V2_FEATURE_KEY)
-    };
+    let updated = apply_relay_profile_subagent_config(&live_config, profile);
     if updated != live_config {
         write_codex_live_atomic(home, Some(&updated), None, false)?;
     }
@@ -2914,12 +2913,65 @@ fn relay_profile_multi_agent_v2_enabled(profile: &RelayProfile) -> bool {
     parse_toml_document(&profile.config_contents)
         .ok()
         .and_then(|doc| {
-            doc.get("features")
-                .and_then(Item::as_table)
-                .and_then(|features| features.get(MULTI_AGENT_V2_FEATURE_KEY))
-                .and_then(Item::as_bool)
+            let feature = doc
+                .get("features")
+                .and_then(Item::as_table_like)
+                .and_then(|features| features.get(MULTI_AGENT_V2_FEATURE_KEY))?;
+            feature.as_bool().or_else(|| {
+                feature
+                    .as_table_like()
+                    .and_then(|config| config.get(MULTI_AGENT_V2_ENABLED_KEY))
+                    .and_then(Item::as_bool)
+            })
         })
         .unwrap_or(false)
+}
+
+fn relay_profile_subagent_count(profile: &RelayProfile) -> u64 {
+    parse_toml_document(&profile.config_contents)
+        .ok()
+        .and_then(|doc| {
+            let configured = doc
+                .get(AGENTS_TABLE)
+                .and_then(Item::as_table_like)
+                .and_then(|agents| agents.get(AGENTS_MAX_CONCURRENT_THREADS_KEY))
+                .and_then(Item::as_integer)
+                .and_then(|value| u64::try_from(value).ok())
+                .filter(|value| *value >= 1);
+            if configured.is_some() {
+                return configured;
+            }
+            doc.get("features")
+                .and_then(Item::as_table_like)
+                .and_then(|features| features.get(MULTI_AGENT_V2_FEATURE_KEY))
+                .and_then(Item::as_table_like)
+                .and_then(|config| config.get(LEGACY_MULTI_AGENT_V2_MAX_THREADS_KEY))
+                .and_then(Item::as_integer)
+                .and_then(|value| u64::try_from(value).ok())
+                .map(|value| value.saturating_sub(1).max(1))
+        })
+        .unwrap_or(DEFAULT_SUBAGENT_COUNT)
+}
+
+fn apply_relay_profile_subagent_config(contents: &str, profile: &RelayProfile) -> String {
+    let multi_agent_v2_enabled = relay_profile_multi_agent_v2_enabled(profile);
+    let subagent_count = relay_profile_subagent_count(profile);
+    let mut updated = remove_table_key(contents, "features", MULTI_AGENT_V2_FEATURE_KEY);
+    updated = remove_toml_table_section(&updated, MULTI_AGENT_V2_TABLE);
+    if multi_agent_v2_enabled {
+        updated = set_table_toml_raw_line(
+            &updated,
+            MULTI_AGENT_V2_TABLE,
+            MULTI_AGENT_V2_ENABLED_KEY,
+            "true",
+        );
+    }
+    set_table_toml_raw_line(
+        &updated,
+        AGENTS_TABLE,
+        AGENTS_MAX_CONCURRENT_THREADS_KEY,
+        &subagent_count.to_string(),
+    )
 }
 
 fn model_prefers_max_reasoning_default(model: &str) -> bool {
@@ -4650,6 +4702,10 @@ mod tests {
         assert!(disabled["models"][0].get("multi_agent_version").is_none());
 
         profile.config_contents = "[features]\nmulti_agent_v2 = true\n".to_string();
+        let legacy_enabled = generated_model_catalog_json(&profile, "", rows.clone()).unwrap();
+        assert_eq!(legacy_enabled["models"][0]["multi_agent_version"], "v2");
+
+        profile.config_contents = "[features.multi_agent_v2]\nenabled = true\n".to_string();
         let enabled = generated_model_catalog_json(&profile, "", rows).unwrap();
         assert_eq!(enabled["models"][0]["multi_agent_version"], "v2");
     }
@@ -5787,6 +5843,16 @@ fn remove_table_key(contents: &str, table: &str, key: &str) -> String {
         })
         .collect::<Vec<_>>();
     ensure_trailing_newline(next.join("\n").trim_end().to_string())
+}
+
+fn remove_toml_table_section(contents: &str, table: &str) -> String {
+    let header = format!("[{table}]");
+    let mut lines = normalized_lines(contents);
+    let Some((start, end)) = table_bounds(&lines, &header) else {
+        return ensure_trailing_newline(lines.join("\n").trim_end().to_string());
+    };
+    lines.drain(start..end);
+    ensure_trailing_newline(lines.join("\n").trim_end().to_string())
 }
 
 fn append_table_with_line(lines: &[String], header: &str, line_text: &str) -> String {

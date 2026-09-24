@@ -74,9 +74,6 @@ Windows 安装包会创建桌面和开始菜单快捷方式。macOS DMG 会安�
 ### 批量会话删除
 ![alt text](image-2.png)
 
-### 引入降智雷达
-![alt text](image-3.png)
-
 ## 痛点与解决
 
 API Key 登录模式下，Codex 原生插件入口会提示需要登录 ChatGPT，导致插件功能无法正常使用：

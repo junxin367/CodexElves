@@ -321,6 +321,20 @@ pub async fn handle_bridge_request(
         "/devtools/open" => ctx.runtime.open_devtools().await,
         "/manager/open" => ctx.runtime.open_manager().await,
         "/backend/status" => ctx.runtime.backend_status().await,
+        "/transport/sessions" => {
+            let ids = payload
+                .get("threadIds")
+                .and_then(Value::as_array)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(Value::as_str)
+                        .take(200)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            Ok(crate::session_transport::status(&ids))
+        }
         "/backend/repair" => ctx.runtime.repair_backend().await,
         "/runtime/install-renderer-features" => ctx.runtime.install_renderer_features().await,
         "/codex-model-catalog" | "/codex-config-model" => ctx.runtime.codex_model_catalog().await,
@@ -346,7 +360,11 @@ pub async fn handle_bridge_request(
             ctx.runtime.upstream_worktree_prepare(payload.clone()).await
         }
         "/upstream-worktree/create" => ctx.runtime.upstream_worktree_create(payload.clone()).await,
-        "/delete" => result_value(ctx.data.delete(session_from_payload(&payload)).await),
+        "/delete" => Ok(json!(DeleteResult {
+            status: DeleteStatus::Failed,
+            session_id: session_from_payload(&payload).session_id,
+            message: "旧删除接口已停用，请使用 Codex 原生永久删除入口".to_string(),
+        })),
         "/session/suppress" => suppress_thread_value(&payload),
         "/session/suppressed" => Ok(json!({
             "status": "ok",

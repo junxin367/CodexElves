@@ -27,6 +27,7 @@ use crate::settings::{RelayProtocol, SettingsStore};
 const FRAME_SEND_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_LIVENESS_PING_INTERVAL: Duration = Duration::from_secs(30);
 const UPSTREAM_LIVENESS_PONG_TIMEOUT: Duration = Duration::from_secs(15);
+const UPSTREAM_LIVENESS_TOLERATED_TIMEOUTS: usize = 3;
 const UPSTREAM_APPLICATION_IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const OVERSIZED_REQUEST_HTTP_FALLBACK_TTL: Duration = Duration::from_secs(30);
 const EARLY_DISCONNECT_HTTP_FALLBACK_TTL: Duration = Duration::from_secs(30);
@@ -43,8 +44,9 @@ const MODEL_CAPACITY_RETRY_DELAYS: [Duration; 5] = [
 static NEXT_WEBSOCKET_CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Default)]
-struct WebSocketTransportLiveness {
+pub(crate) struct WebSocketTransportLiveness {
     next_ping_sequence: u64,
+    consecutive_timeouts: usize,
     pending_ping: Option<PendingWebSocketPing>,
     last_ping_at: Option<Instant>,
     last_pong_at: Option<Instant>,
@@ -58,7 +60,7 @@ struct PendingWebSocketPing {
 }
 
 impl WebSocketTransportLiveness {
-    fn begin_ping(&mut self, now: Instant) -> Option<Vec<u8>> {
+    pub(crate) fn begin_ping(&mut self, now: Instant) -> Option<Vec<u8>> {
         if self.pending_ping.is_some() {
             return None;
         }
@@ -72,8 +74,9 @@ impl WebSocketTransportLiveness {
         Some(payload)
     }
 
-    fn observe_frame(&mut self, message: &Message, now: Instant) -> Option<Duration> {
+    pub(crate) fn observe_frame(&mut self, message: &Message, now: Instant) -> Option<Duration> {
         self.last_transport_activity_at = Some(now);
+        self.consecutive_timeouts = 0;
         let pending_ping = self.pending_ping.take();
         let matched_pong = pending_ping.as_ref().is_some_and(|pending| {
             matches!(message, Message::Pong(payload) if payload.as_ref() == pending.payload.as_slice())
@@ -96,6 +99,18 @@ impl WebSocketTransportLiveness {
         let pending = self.pending_ping.as_ref()?;
         let elapsed = now.duration_since(pending.sent_at);
         (elapsed >= timeout).then_some(elapsed)
+    }
+
+    pub(crate) fn take_timeout(&mut self, timeout: Duration, now: Instant) -> Option<Duration> {
+        let elapsed = self.timeout_elapsed(timeout, now)?;
+        // 每个实际发出的 Ping 只计数一次，允许下一个定时 Ping 继续探测。
+        self.pending_ping = None;
+        self.consecutive_timeouts += 1;
+        Some(elapsed)
+    }
+
+    pub(crate) fn timeout_limit_exceeded(&self) -> bool {
+        self.consecutive_timeouts > UPSTREAM_LIVENESS_TOLERATED_TIMEOUTS
     }
 }
 
@@ -165,6 +180,8 @@ pub async fn handle_responses_websocket_connection(
         return Ok(());
     }
     let connection_context = WebSocketConnectionContext::from_request(&request);
+    let request_context =
+        crate::request_headers::RequestContext::from_headers(request.headers().clone());
 
     let settings = SettingsStore::default().load().unwrap_or_default();
     let relay = settings.active_relay_profile();
@@ -192,10 +209,18 @@ pub async fn handle_responses_websocket_connection(
         reject_upgrade(&mut stream, StatusCode::UPGRADE_REQUIRED, message).await?;
         return Ok(());
     }
+    if crate::session_transport::should_use_http(&relay, &request_context) {
+        reject_upgrade(
+            &mut stream,
+            StatusCode::UPGRADE_REQUIRED,
+            "当前会话暂用 HTTP，后台每 3 分钟尝试恢复 WS",
+        )
+        .await?;
+        return Ok(());
+    }
     if should_temporarily_fallback_oversized_responses_websocket_to_http(
         &relay.id,
         &connection_context,
-        settings.ws_failure_fallback_to_http,
     ) {
         let message = "当前会话轮次的请求超过 Responses WebSocket 消息上限，临时改走 HTTP";
         log_websocket_event(
@@ -211,7 +236,6 @@ pub async fn handle_responses_websocket_connection(
     if should_temporarily_fallback_early_disconnect_responses_websocket_to_http(
         &relay.id,
         &connection_context,
-        settings.ws_failure_fallback_to_http,
     ) {
         let message = "当前会话轮次的 Responses WebSocket 在首个请求前异常断开，临时回退 HTTP";
         log_websocket_event(
@@ -227,7 +251,6 @@ pub async fn handle_responses_websocket_connection(
     if should_temporarily_fallback_upstream_failure_responses_websocket_to_http(
         &relay.id,
         &connection_context,
-        settings.ws_failure_fallback_to_http,
     ) {
         let message = "当前会话轮次的 Responses WebSocket 上游连续失败，临时回退 HTTP";
         log_websocket_event(
@@ -241,8 +264,6 @@ pub async fn handle_responses_websocket_connection(
         return Ok(());
     }
 
-    let request_context =
-        crate::request_headers::RequestContext::from_headers(request.headers().clone());
     let upstream = match open_responses_websocket_upstream_with_initial_retries(
         &relay,
         &request_context,
@@ -251,10 +272,10 @@ pub async fn handle_responses_websocket_connection(
     {
         Ok(upstream) => upstream,
         Err(error) => {
+            crate::session_transport::mark_http(&relay, &request_context, &format!("{error:#}"));
             let fallback_armed = arm_upstream_failure_responses_websocket_http_fallback(
                 &relay.id,
                 &connection_context,
-                settings.ws_failure_fallback_to_http,
             );
             log_websocket_event(
                 "helper.responses_websocket_upstream_failed",
@@ -327,21 +348,17 @@ pub async fn handle_responses_websocket_connection(
         request_path,
         connection_context.clone(),
     );
+    request_logger.set_transport_context(relay.clone(), request_context.clone());
     let result = bridge_responses_websockets(
         downstream,
         upstream,
         &relay,
         request_logger.clone(),
         request_context,
-        settings.ws_failure_fallback_to_http,
     )
     .await;
     if !request_logger.has_recorded_application_requests()
-        && arm_early_disconnect_responses_websocket_http_fallback(
-            &relay.id,
-            &connection_context,
-            settings.ws_failure_fallback_to_http,
-        )
+        && arm_early_disconnect_responses_websocket_http_fallback(&relay.id, &connection_context)
     {
         log_websocket_event(
             "helper.responses_websocket_http_fallback_armed",
@@ -353,13 +370,10 @@ pub async fn handle_responses_websocket_connection(
     }
     if result.is_err()
         && request_logger.has_recorded_application_requests()
-        && !request_logger.has_recorded_first_response_event()
+        && request_logger.interrupted_before_response()
     {
-        let fallback_armed = arm_upstream_failure_responses_websocket_http_fallback(
-            &relay.id,
-            &connection_context,
-            settings.ws_failure_fallback_to_http,
-        );
+        let fallback_armed =
+            arm_upstream_failure_responses_websocket_http_fallback(&relay.id, &connection_context);
         if fallback_armed {
             log_websocket_event(
                 "helper.responses_websocket_http_fallback_armed",
@@ -400,14 +414,12 @@ async fn bridge_responses_websockets(
     relay: &crate::settings::RelayProfile,
     request_logger: WebSocketRequestLogger,
     request_context: crate::request_headers::RequestContext,
-    allow_http_fallback: bool,
 ) -> anyhow::Result<()> {
     let continuation = WebSocketContinuationCoordinator::default();
     enum BridgeEvent {
         Downstream(Option<Result<Message, WebSocketError>>),
         Upstream(Option<Result<Message, WebSocketError>>),
-        LivenessPing,
-        ApplicationIdleCheck,
+        LivenessCheck { send_ping: bool },
     }
 
     let relay = relay.clone();
@@ -415,6 +427,7 @@ async fn bridge_responses_websockets(
     let mut downstream_closed = false;
     let mut upstream_closed = false;
     let mut reconnect_attempts = 0usize;
+    let mut queued_downstream = VecDeque::new();
     let mut liveness_ping = tokio::time::interval_at(
         tokio::time::Instant::now() + UPSTREAM_LIVENESS_PING_INTERVAL,
         UPSTREAM_LIVENESS_PING_INTERVAL,
@@ -429,14 +442,18 @@ async fn bridge_responses_websockets(
 
     let result: anyhow::Result<()> = async {
         'bridge: loop {
-            let event = tokio::select! {
-                biased;
-                message = downstream.next(), if !downstream_closed => {
-                    BridgeEvent::Downstream(message)
+            let event = if let Some(message) = queued_downstream.pop_front() {
+                BridgeEvent::Downstream(Some(Ok(message)))
+            } else {
+                tokio::select! {
+                    biased;
+                    message = downstream.next(), if !downstream_closed => {
+                        BridgeEvent::Downstream(message)
+                    }
+                    message = upstream.next() => BridgeEvent::Upstream(message),
+                    _ = liveness_ping.tick() => BridgeEvent::LivenessCheck { send_ping: true },
+                    _ = application_idle_check.tick() => BridgeEvent::LivenessCheck { send_ping: false },
                 }
-                message = upstream.next() => BridgeEvent::Upstream(message),
-                _ = liveness_ping.tick() => BridgeEvent::LivenessPing,
-                _ = application_idle_check.tick() => BridgeEvent::ApplicationIdleCheck,
             };
 
             match event {
@@ -510,6 +527,9 @@ async fn bridge_responses_websockets(
                     };
 
                     if let Some(request_payload) = request_payload.as_ref() {
+                        if !request_logger.has_pending_requests() {
+                            reconnect_attempts = 0;
+                        }
                         if let Some(response_messages) =
                             local_compaction_wait_websocket_messages(request_payload)
                         {
@@ -529,11 +549,11 @@ async fn bridge_responses_websockets(
                                 }),
                             );
                             for response_message in response_messages {
-                                if forward_websocket_message(
+                                if forward_downstream_response(
                                     &mut downstream,
                                     response_message,
-                                    "转发 Responses WebSocket 响应超时",
-                                    "转发 Responses WebSocket 响应失败",
+                                    &request_logger,
+                                    None,
                                 )
                                 .await?
                                 {
@@ -548,6 +568,9 @@ async fn bridge_responses_websockets(
                     if let (Some(request_payload), Message::Text(text)) =
                         (request_payload.as_ref(), &message)
                     {
+                        crate::session_transport::observe_native_request(
+                            &relay, &request_context, request_payload, text.len(),
+                        );
                         let log_id = request_logger.record_request(request_payload, text.as_str());
                         if text.len()
                             > crate::responses_websocket::RESPONSES_UPSTREAM_WEBSOCKET_SAFE_MAX_BYTES
@@ -556,14 +579,11 @@ async fn bridge_responses_websockets(
                                 log_id.as_deref(),
                                 text.len(),
                                 crate::responses_websocket::RESPONSES_UPSTREAM_WEBSOCKET_SAFE_MAX_BYTES,
-                                allow_http_fallback,
                             );
                             let downstream_close = Message::Close(Some(
                                 websocket_failure_close_frame(
-                                    allow_http_fallback,
                                     CloseCode::Size,
                                     "request exceeds upstream websocket limit; retry over HTTP",
-                                    "request exceeds upstream websocket limit; HTTP fallback disabled",
                                 ),
                             ));
                             let upstream_close = Message::Close(Some(CloseFrame {
@@ -631,7 +651,12 @@ async fn bridge_responses_websockets(
                         "转发 Responses WebSocket 请求超时",
                         "转发 Responses WebSocket 请求失败",
                     )
-                    .await?
+                    .await.map_err(|error| {
+                        if !is_close {
+                            request_logger.mark_http_fallback("发送 WS 请求失败");
+                        }
+                        error
+                    })?
                     {
                         upstream_closed = true;
                         downstream_closed = true;
@@ -654,13 +679,11 @@ async fn bridge_responses_websockets(
                                 request_logger.record_continue_metadata(&metadata);
                                 for message in messages {
                                     let message_is_close = matches!(message, Message::Close(_));
-                                    request_logger
-                                        .record_response_for(&message, metadata.log_id.as_deref());
-                                    if forward_websocket_message(
+                                    if forward_downstream_response(
                                         &mut downstream,
                                         message,
-                                        "转发 Responses WebSocket 响应超时",
-                                        "转发 Responses WebSocket 响应失败",
+                                        &request_logger,
+                                        metadata.log_id.as_deref(),
                                     )
                                     .await?
                                     {
@@ -677,33 +700,35 @@ async fn bridge_responses_websockets(
                                 }
                                 continue;
                             }
-                            if request_logger.has_recorded_application_requests()
-                                && !request_logger.has_recorded_first_response_event()
+                            if request_logger.upstream_replay_block_reason().is_none()
                                 && reconnect_attempts < INITIAL_UPSTREAM_RETRY_DELAYS.len()
                             {
-                                let retry_index = reconnect_attempts;
-                                reconnect_attempts += 1;
-                                match reconnect_upstream_with_replay(
+                                match recover_upstream_connection(
+                                    upstream,
+                                    &mut downstream,
+                                    &mut queued_downstream,
                                     &relay,
                                     &request_context,
                                     &request_logger,
-                                    retry_index,
+                                    &mut reconnect_attempts,
+                                    "read_error",
                                 )
                                 .await
                                 {
-                                    Ok(new_upstream) => {
+                                    Ok(Some(new_upstream)) => {
                                         upstream = new_upstream;
                                         transport_liveness = WebSocketTransportLiveness::default();
+                                        liveness_ping.reset();
                                         continue 'bridge;
                                     }
+                                    Ok(None) => {
+                                        downstream_closed = true;
+                                        return Ok(());
+                                    }
                                     Err(reconnect_error) => {
-                                        if reconnect_attempts < INITIAL_UPSTREAM_RETRY_DELAYS.len() {
-                                            continue 'bridge;
-                                        }
                                         let _ = send_downstream_terminal_failure(
                                             &mut downstream,
                                             &request_logger,
-                                            allow_http_fallback,
                                             &format!(
                                                 "{error_message}; 最后一次重连失败：{reconnect_error:#}"
                                             ),
@@ -719,7 +744,6 @@ async fn bridge_responses_websockets(
                             let _ = send_downstream_terminal_failure(
                                 &mut downstream,
                                 &request_logger,
-                                allow_http_fallback,
                                 &error_message,
                             )
                             .await;
@@ -736,13 +760,11 @@ async fn bridge_responses_websockets(
                                 request_logger.record_continue_metadata(&metadata);
                                 for message in messages {
                                     let message_is_close = matches!(message, Message::Close(_));
-                                    request_logger
-                                        .record_response_for(&message, metadata.log_id.as_deref());
-                                    if forward_websocket_message(
+                                    if forward_downstream_response(
                                         &mut downstream,
                                         message,
-                                        "转发 Responses WebSocket 响应超时",
-                                        "转发 Responses WebSocket 响应失败",
+                                        &request_logger,
+                                        metadata.log_id.as_deref(),
                                     )
                                     .await?
                                     {
@@ -762,7 +784,6 @@ async fn bridge_responses_websockets(
                             let _ = send_downstream_terminal_failure(
                                 &mut downstream,
                                 &request_logger,
-                                allow_http_fallback,
                                 "Responses WebSocket 上游未发送 Close 帧就结束连接",
                             )
                             .await;
@@ -771,18 +792,26 @@ async fn bridge_responses_websockets(
                         }
                     };
 
+                    if transport_liveness.consecutive_timeouts > 0 {
+                        request_logger.log_transport_recovered(
+                            transport_liveness.consecutive_timeouts,
+                            &message,
+                        );
+                    }
                     let _ = transport_liveness.observe_frame(&message, Instant::now());
                     request_logger.record_upstream_application_activity(&message);
                     let is_close = matches!(message, Message::Close(_));
+                    if is_close && request_logger.has_pending_requests() {
+                        request_logger.mark_http_fallback("上游在请求完成前关闭 WS");
+                    }
                     request_logger.record_first_response_event(&message);
                     match continuation.handle_upstream_message(message)? {
                         WebSocketContinuationAction::Forward(message) => {
-                            request_logger.record_response(&message);
-                            if forward_websocket_message(
+                            if forward_downstream_response(
                                 &mut downstream,
                                 message,
-                                "转发 Responses WebSocket 响应超时",
-                                "转发 Responses WebSocket 响应失败",
+                                &request_logger,
+                                None,
                             )
                             .await?
                             {
@@ -815,13 +844,11 @@ async fn bridge_responses_websockets(
                                 .any(|message| matches!(message, Message::Close(_)));
                             for message in messages {
                                 let message_is_close = matches!(message, Message::Close(_));
-                                request_logger
-                                    .record_response_for(&message, metadata.log_id.as_deref());
-                                if forward_websocket_message(
+                                if forward_downstream_response(
                                     &mut downstream,
                                     message,
-                                    "转发 Responses WebSocket 响应超时",
-                                    "转发 Responses WebSocket 响应失败",
+                                    &request_logger,
+                                    metadata.log_id.as_deref(),
                                 )
                                 .await?
                                 {
@@ -844,67 +871,93 @@ async fn bridge_responses_websockets(
                         break;
                     }
                 }
-                BridgeEvent::LivenessPing => {
+                BridgeEvent::LivenessCheck { send_ping } => {
                     let now = Instant::now();
                     if let Some(idle_for) =
-                        transport_liveness.timeout_elapsed(UPSTREAM_LIVENESS_PONG_TIMEOUT, now)
+                        transport_liveness.take_timeout(UPSTREAM_LIVENESS_PONG_TIMEOUT, now)
                     {
+                        let replay_block_reason = request_logger.upstream_replay_block_reason();
+                        let will_reconnect = transport_liveness.timeout_limit_exceeded()
+                            && replay_block_reason.is_none()
+                            && reconnect_attempts < INITIAL_UPSTREAM_RETRY_DELAYS.len();
                         request_logger.log_transport_timeout(
                             idle_for,
                             &transport_liveness,
                             now,
+                            will_reconnect,
                         );
-                        let _ = send_downstream_terminal_failure(
-                            &mut downstream,
-                            &request_logger,
-                            allow_http_fallback,
-                            &format!(
-                                "Responses WebSocket 上游连接在 Ping 后超过 {} 秒没有返回任何帧",
+                        if transport_liveness.timeout_limit_exceeded() {
+                            let mut failure_message = format!(
+                                "Responses WebSocket 上游连接连续 {} 次 Ping 后超过 {} 秒没有返回任何帧",
+                                transport_liveness.consecutive_timeouts,
                                 UPSTREAM_LIVENESS_PONG_TIMEOUT.as_secs()
-                            ),
-                        )
-                        .await;
-                        downstream_closed = true;
-                        anyhow::bail!(
-                            "Responses WebSocket 上游连接在 Ping 后超过 {} 秒没有返回任何帧",
-                            UPSTREAM_LIVENESS_PONG_TIMEOUT.as_secs()
-                        );
+                            );
+                            if will_reconnect {
+                                match recover_upstream_connection(
+                                    upstream,
+                                    &mut downstream,
+                                    &mut queued_downstream,
+                                    &relay,
+                                    &request_context,
+                                    &request_logger,
+                                    &mut reconnect_attempts,
+                                    "ping_timeout",
+                                )
+                                .await
+                                {
+                                    Ok(Some(new_upstream)) => {
+                                        upstream = new_upstream;
+                                        transport_liveness = WebSocketTransportLiveness::default();
+                                        liveness_ping.reset();
+                                        continue 'bridge;
+                                    }
+                                    Ok(None) => {
+                                        downstream_closed = true;
+                                        return Ok(());
+                                    }
+                                    Err(error) => {
+                                        failure_message.push_str(&format!("；上游恢复失败：{error:#}"));
+                                        let _ = send_downstream_terminal_failure(
+                                            &mut downstream,
+                                            &request_logger,
+                                            &failure_message,
+                                        )
+                                        .await;
+                                        downstream_closed = true;
+                                        anyhow::bail!("{failure_message}");
+                                    }
+                                }
+                            }
+                            request_logger.log_upstream_reconnect(
+                                "ping_timeout",
+                                "skipped",
+                                reconnect_attempts,
+                                Some(replay_block_reason.unwrap_or("reconnect_attempts_exhausted")),
+                            );
+                            let _ = send_downstream_terminal_failure(
+                                &mut downstream,
+                                &request_logger,
+                                &failure_message,
+                            )
+                            .await;
+                            downstream_closed = true;
+                            anyhow::bail!("{failure_message}");
+                        }
                     }
-                    if let Some(payload) = transport_liveness.begin_ping(now) {
-                        forward_websocket_message(
-                            &mut upstream,
-                            Message::Ping(payload.into()),
-                            "转发 Responses WebSocket Ping 超时",
-                            "转发 Responses WebSocket Ping 失败",
-                        )
-                        .await?;
-                    }
-                }
-                BridgeEvent::ApplicationIdleCheck => {
-                    let now = Instant::now();
-                    if let Some(idle_for) =
-                        transport_liveness.timeout_elapsed(UPSTREAM_LIVENESS_PONG_TIMEOUT, now)
-                    {
-                        request_logger.log_transport_timeout(
-                            idle_for,
-                            &transport_liveness,
-                            now,
-                        );
-                        let _ = send_downstream_terminal_failure(
-                            &mut downstream,
-                            &request_logger,
-                            allow_http_fallback,
-                            &format!(
-                                "Responses WebSocket 上游连接在 Ping 后超过 {} 秒没有返回任何帧",
-                                UPSTREAM_LIVENESS_PONG_TIMEOUT.as_secs()
-                            ),
-                        )
-                        .await;
-                        downstream_closed = true;
-                        anyhow::bail!(
-                            "Responses WebSocket 上游连接在 Ping 后超过 {} 秒没有返回任何帧",
-                            UPSTREAM_LIVENESS_PONG_TIMEOUT.as_secs()
-                        );
+                    if send_ping {
+                        if let Some(payload) = transport_liveness.begin_ping(now) {
+                            forward_websocket_message(
+                                &mut upstream,
+                                Message::Ping(payload.into()),
+                                "转发 Responses WebSocket Ping 超时",
+                                "转发 Responses WebSocket Ping 失败",
+                            )
+                            .await.map_err(|error| {
+                                request_logger.mark_http_fallback("发送 WS Ping 失败");
+                                error
+                            })?;
+                        }
+                        continue;
                     }
                     if let Some(expired) = request_logger.expired_pending_request(now) {
                         request_logger.log_idle_timeout(&expired);
@@ -916,7 +969,6 @@ async fn bridge_responses_websockets(
                         let _ = send_downstream_terminal_failure(
                             &mut downstream,
                             &request_logger,
-                            allow_http_fallback,
                             &failure_message,
                         )
                         .await;
@@ -1000,71 +1052,25 @@ async fn open_responses_websocket_upstream_with_initial_retries(
     )
 }
 
-fn websocket_failure_close_frame(
-    allow_http_fallback: bool,
-    fallback_enabled_code: CloseCode,
-    fallback_enabled_reason: &'static str,
-    fallback_disabled_reason: &'static str,
-) -> CloseFrame {
+fn websocket_failure_close_frame(code: CloseCode, reason: &'static str) -> CloseFrame {
     CloseFrame {
-        code: if allow_http_fallback {
-            fallback_enabled_code
-        } else {
-            CloseCode::Policy
-        },
-        reason: if allow_http_fallback {
-            fallback_enabled_reason
-        } else {
-            fallback_disabled_reason
-        }
-        .into(),
+        code,
+        reason: reason.into(),
     }
-}
-
-async fn send_downstream_failure_close(
-    downstream: &mut WebSocketStream<TcpStream>,
-    allow_http_fallback: bool,
-) -> anyhow::Result<()> {
-    forward_websocket_message(
-        downstream,
-        Message::Close(Some(websocket_failure_close_frame(
-            allow_http_fallback,
-            CloseCode::Restart,
-            "upstream websocket reconnect required",
-            "upstream websocket failed; HTTP fallback disabled",
-        ))),
-        "关闭本地 Responses WebSocket 超时",
-        "关闭本地 Responses WebSocket 失败",
-    )
-    .await?;
-    Ok(())
 }
 
 async fn send_downstream_terminal_failure(
     downstream: &mut WebSocketStream<TcpStream>,
     request_logger: &WebSocketRequestLogger,
-    allow_http_fallback: bool,
     error_message: &str,
 ) -> anyhow::Result<()> {
-    if allow_http_fallback {
-        return send_downstream_failure_close(downstream, true).await;
-    }
-
-    if let Some(message) = request_logger.pending_response_failure_message(error_message) {
-        forward_websocket_message(
-            downstream,
-            message,
-            "转发 Responses WebSocket 失败事件超时",
-            "转发 Responses WebSocket 失败事件失败",
-        )
-        .await?;
-    }
+    request_logger.mark_http_fallback(error_message);
     forward_websocket_message(
         downstream,
-        Message::Close(Some(CloseFrame {
-            code: CloseCode::Normal,
-            reason: "response failed; HTTP fallback disabled".into(),
-        })),
+        Message::Close(Some(websocket_failure_close_frame(
+            CloseCode::Restart,
+            "upstream websocket reconnect required",
+        ))),
         "关闭本地 Responses WebSocket 超时",
         "关闭本地 Responses WebSocket 失败",
     )
@@ -1103,6 +1109,94 @@ async fn reconnect_upstream_with_replay(
         }
     }
     Ok(upstream)
+}
+
+async fn recover_upstream_connection(
+    mut old_upstream: crate::responses_websocket::UpstreamResponsesWebsocket,
+    downstream: &mut WebSocketStream<TcpStream>,
+    queued_downstream: &mut VecDeque<Message>,
+    relay: &crate::settings::RelayProfile,
+    request_context: &crate::request_headers::RequestContext,
+    request_logger: &WebSocketRequestLogger,
+    attempts: &mut usize,
+    reason: &'static str,
+) -> anyhow::Result<Option<crate::responses_websocket::UpstreamResponsesWebsocket>> {
+    let mut recovery = Box::pin(async {
+        request_logger.log_upstream_reconnect(reason, "closing_upstream", *attempts, None);
+        if let Err(error) = close_websocket_sink(
+            &mut old_upstream,
+            "关闭失活的 Responses WebSocket 上游超时",
+            "关闭失活的 Responses WebSocket 上游失败",
+        )
+        .await
+        {
+            request_logger.log_upstream_reconnect(
+                reason,
+                "close_failed",
+                *attempts,
+                Some(&format!("{error:#}")),
+            );
+        }
+        drop(old_upstream);
+        let mut last_error = None;
+        while *attempts < INITIAL_UPSTREAM_RETRY_DELAYS.len() {
+            let retry_index = *attempts;
+            *attempts += 1;
+            request_logger.log_upstream_reconnect(reason, "attempt", *attempts, None);
+            match reconnect_upstream_with_replay(
+                relay,
+                request_context,
+                request_logger,
+                retry_index,
+            )
+            .await
+            {
+                Ok(upstream) => {
+                    request_logger.log_upstream_reconnect(reason, "succeeded", *attempts, None);
+                    return Ok(upstream);
+                }
+                Err(error) => {
+                    request_logger.log_upstream_reconnect(
+                        reason,
+                        "failed",
+                        *attempts,
+                        Some(&format!("{error:#}")),
+                    );
+                    last_error = Some(error);
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Responses WebSocket 重连次数已耗尽")))
+    });
+    let mut queued_bytes: usize = queued_downstream.iter().map(Message::len).sum();
+    loop {
+        tokio::select! {
+            biased;
+            message = downstream.next() => {
+                match message {
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                        // 丢弃恢复 future 会同时取消拨号/重放，并释放其中持有的上游连接。
+                        drop(recovery);
+                        request_logger.log_upstream_reconnect(
+                            reason, "cancelled", *attempts, Some("downstream_closed"),
+                        );
+                        return Ok(None);
+                    }
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                    Some(Ok(message)) => {
+                        queued_bytes += message.len();
+                        if queued_bytes > crate::responses_websocket::RESPONSES_TRANSPORT_MAX_BYTES
+                            || queued_downstream.len() >= 256
+                        {
+                            anyhow::bail!("Responses WebSocket 恢复期间下游排队超过 64 MiB 或 256 条消息");
+                        }
+                        queued_downstream.push_back(message);
+                    }
+                }
+            }
+            result = &mut recovery => return result.map(Some),
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -2273,11 +2367,16 @@ struct WebSocketRequestLogState {
     connection_generation: u64,
     connected_at: Instant,
     application_request_count: usize,
-    first_response_event_recorded: bool,
+    interrupted_before_response: bool,
     requests: HashMap<String, TrackedWebSocketRequest>,
     active_order: VecDeque<String>,
     unassigned_order: VecDeque<String>,
     response_ids: HashMap<String, String>,
+    transport_context: Option<(
+        crate::settings::RelayProfile,
+        crate::request_headers::RequestContext,
+        Option<u64>,
+    )>,
 }
 
 struct TrackedWebSocketRequest {
@@ -2288,6 +2387,32 @@ struct TrackedWebSocketRequest {
     response_capture: Vec<u8>,
     response_bytes: usize,
     response_truncated: bool,
+    transport_timeout_count: usize,
+    last_transport_timeout_at: Option<Instant>,
+    response_id: Option<String>,
+    response_model: crate::proxy_log::UpstreamResponseModelObserver,
+}
+
+impl TrackedWebSocketRequest {
+    fn log_after_transport_timeout(&self, stage: &str, event_type: Option<&str>) {
+        let Some(timeout_at) = self.last_transport_timeout_at else {
+            return;
+        };
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "protocol_proxy.responses_websocket_request_after_ping_timeout",
+            serde_json::json!({
+                "logId": self.record.id,
+                "model": self.record.model,
+                "stage": stage,
+                "eventType": event_type,
+                "pingTimeoutCount": self.transport_timeout_count,
+                "sinceLastPingTimeoutMs": timeout_at.elapsed().as_millis(),
+                "requestAgeMs": self.started_at.elapsed().as_millis(),
+                "statusCode": self.record.status_code,
+                "error": self.record.error,
+            }),
+        );
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2321,12 +2446,36 @@ impl WebSocketRequestLogger {
                     .fetch_add(1, Ordering::Relaxed),
                 connected_at,
                 application_request_count: 0,
-                first_response_event_recorded: false,
+                interrupted_before_response: false,
                 requests: HashMap::new(),
                 active_order: VecDeque::new(),
                 unassigned_order: VecDeque::new(),
                 response_ids: HashMap::new(),
+                transport_context: None,
             })),
+        }
+    }
+
+    fn set_transport_context(
+        &self,
+        relay: crate::settings::RelayProfile,
+        context: crate::request_headers::RequestContext,
+    ) {
+        if let Ok(mut state) = self.state.lock() {
+            state.transport_context = Some((relay, context, None));
+        }
+    }
+
+    fn mark_http_fallback(&self, reason: &str) {
+        if let Ok(state) = self.state.lock() {
+            if let Some((relay, context, Some(generation))) = state.transport_context.as_ref() {
+                crate::session_transport::mark_http_for_generation(
+                    relay,
+                    context,
+                    reason,
+                    *generation,
+                );
+            }
         }
     }
 
@@ -2339,6 +2488,9 @@ impl WebSocketRequestLogger {
         let Ok(mut state) = self.state.lock() else {
             return None;
         };
+        if let Some((relay, context, generation)) = state.transport_context.as_mut() {
+            *generation = crate::session_transport::generation(relay, context);
+        }
         state.application_request_count += 1;
         let record = crate::proxy_log::ProxyRequestRecord {
             id: id.clone(),
@@ -2349,6 +2501,7 @@ impl WebSocketRequestLogger {
             path: state.path.clone(),
             remote_addr: state.remote_addr.clone(),
             model: metadata.model,
+            upstream_response_model: None,
             reasoning_tokens: None,
             reasoning_effort: metadata.reasoning_effort,
             reasoning_source: metadata.reasoning_source,
@@ -2393,6 +2546,10 @@ impl WebSocketRequestLogger {
                 response_capture: Vec::new(),
                 response_bytes: 0,
                 response_truncated: false,
+                transport_timeout_count: 0,
+                last_transport_timeout_at: None,
+                response_id: None,
+                response_model: Default::default(),
             },
         );
         state.active_order.push_back(id.clone());
@@ -2428,10 +2585,39 @@ impl WebSocketRequestLogger {
             .is_ok_and(|state| state.application_request_count > 0)
     }
 
-    fn has_recorded_first_response_event(&self) -> bool {
+    fn interrupted_before_response(&self) -> bool {
         self.state
             .lock()
-            .is_ok_and(|state| state.first_response_event_recorded)
+            .is_ok_and(|state| state.interrupted_before_response)
+    }
+
+    fn has_pending_requests(&self) -> bool {
+        self.state
+            .lock()
+            .map_or(true, |state| !state.requests.is_empty())
+    }
+
+    fn upstream_replay_block_reason(&self) -> Option<&'static str> {
+        let Ok(state) = self.state.lock() else {
+            return Some("request_state_unavailable");
+        };
+        for tracked in state.requests.values() {
+            // 包括已交付给 Codex 的事件，以及压缩/续接正在缓冲的事件。
+            // 这些请求都不能从初始 response.create 无条件重放。
+            if tracked.record.first_token_ms.is_some() {
+                return Some("application_response_already_received");
+            }
+            let Ok(payload) = serde_json::from_str::<Value>(&tracked.record.request_body) else {
+                return Some("request_body_unavailable");
+            };
+            if payload
+                .get("previous_response_id")
+                .is_some_and(|id| !id.is_null())
+            {
+                return Some("previous_response_id_requires_context_recovery");
+            }
+        }
+        None
     }
 
     fn pending_request_messages(&self) -> Vec<Message> {
@@ -2460,6 +2646,7 @@ impl WebSocketRequestLogger {
             .collect()
     }
 
+    #[cfg(test)]
     fn pending_response_failure_message(&self, error_message: &str) -> Option<Message> {
         let state = self.state.lock().ok()?;
         let log_id = state
@@ -2467,10 +2654,12 @@ impl WebSocketRequestLogger {
             .iter()
             .find(|log_id| state.requests.contains_key(*log_id))?;
         let tracked = state.requests.get(log_id)?;
-        let response_id = format!(
-            "resp_codex_elves_failed_{}",
-            log_id.trim_start_matches("local-")
-        );
+        let response_id = tracked.response_id.clone().unwrap_or_else(|| {
+            format!(
+                "resp_codex_elves_failed_{}",
+                log_id.trim_start_matches("local-")
+            )
+        });
         let mut response = serde_json::json!({
             "id": response_id,
             "object": "response",
@@ -2517,6 +2706,16 @@ impl WebSocketRequestLogger {
         }
         state.unassigned_order.retain(|id| id != &log_id);
         if let Some(tracked) = state.requests.get_mut(&log_id) {
+            if tracked.last_transport_timeout_at.is_some_and(|timeout_at| {
+                tracked
+                    .last_upstream_event_at
+                    .is_none_or(|at| at <= timeout_at)
+            }) {
+                tracked.log_after_transport_timeout(
+                    "application_resumed",
+                    payload.get("type").and_then(Value::as_str),
+                );
+            }
             tracked.last_upstream_event_at = Some(Instant::now());
         }
     }
@@ -2568,10 +2767,24 @@ impl WebSocketRequestLogger {
         idle_for: Duration,
         liveness: &WebSocketTransportLiveness,
         now: Instant,
+        will_reconnect: bool,
     ) {
-        let Ok(state) = self.state.lock() else {
+        let Ok(mut state) = self.state.lock() else {
             return;
         };
+        let pending_requests: Vec<Value> = state
+            .requests
+            .iter_mut()
+            .map(|(log_id, tracked)| {
+                tracked.transport_timeout_count += 1;
+                tracked.last_transport_timeout_at = Some(now);
+                serde_json::json!({
+                    "logId": log_id,
+                    "model": tracked.record.model,
+                    "requestAgeMs": now.duration_since(tracked.started_at).as_millis(),
+                })
+            })
+            .collect();
         let _ = crate::diagnostic_log::append_diagnostic_log(
             "protocol_proxy.responses_websocket_transport_timeout",
             serde_json::json!({
@@ -2587,12 +2800,84 @@ impl WebSocketRequestLogger {
                 "socketAgeMs": state.connected_at.elapsed().as_millis(),
                 "transportIdleTimeoutMs": UPSTREAM_LIVENESS_PONG_TIMEOUT.as_millis(),
                 "idleForMs": idle_for.as_millis(),
+                "consecutivePingTimeouts": liveness.consecutive_timeouts,
+                "toleratedPingTimeouts": UPSTREAM_LIVENESS_TOLERATED_TIMEOUTS,
+                "willTerminate": liveness.timeout_limit_exceeded() && !will_reconnect,
+                "willReconnect": will_reconnect,
+                "pendingRequests": pending_requests,
                 "lastPingAgoMs": liveness.last_ping_at.map(|at| now.duration_since(at).as_millis()),
                 "lastPongAgoMs": liveness.last_pong_at.map(|at| now.duration_since(at).as_millis()),
                 "lastPongRttMs": liveness.last_pong_rtt.map(|rtt| rtt.as_millis()),
                 "lastTransportActivityAgoMs": liveness
                     .last_transport_activity_at
                     .map(|at| now.duration_since(at).as_millis()),
+            }),
+        );
+    }
+
+    fn log_upstream_reconnect(
+        &self,
+        reason: &str,
+        stage: &str,
+        attempt: usize,
+        error: Option<&str>,
+    ) {
+        let Ok(state) = self.state.lock() else {
+            return;
+        };
+        let pending_requests: Vec<Value> = state
+            .active_order
+            .iter()
+            .filter_map(|id| state.requests.get(id))
+            .map(|tracked| {
+                serde_json::json!({
+                    "logId": tracked.record.id,
+                    "model": tracked.record.model,
+                })
+            })
+            .collect();
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            if reason == "ping_timeout" {
+                "protocol_proxy.responses_websocket_ping_reconnect"
+            } else {
+                "protocol_proxy.responses_websocket_reconnect"
+            },
+            serde_json::json!({
+                "relayId": state.relay_id,
+                "threadId": state.connection_context.thread_id,
+                "turnId": state.connection_context.turn_id,
+                "connectionGeneration": state.connection_generation,
+                "stage": stage,
+                "reason": reason,
+                "attempt": attempt,
+                "maxAttempts": INITIAL_UPSTREAM_RETRY_DELAYS.len(),
+                "pendingRequests": pending_requests,
+                "error": error,
+            }),
+        );
+    }
+
+    fn log_transport_recovered(&self, consecutive_timeouts: usize, message: &Message) {
+        let Ok(state) = self.state.lock() else {
+            return;
+        };
+        let frame_type = match message {
+            Message::Text(_) => "text",
+            Message::Binary(_) => "binary",
+            Message::Ping(_) => "ping",
+            Message::Pong(_) => "pong",
+            Message::Close(_) => "close",
+            Message::Frame(_) => "frame",
+        };
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "protocol_proxy.responses_websocket_transport_activity_after_ping_timeout",
+            serde_json::json!({
+                "relayId": state.relay_id,
+                "threadId": state.connection_context.thread_id,
+                "turnId": state.connection_context.turn_id,
+                "connectionGeneration": state.connection_generation,
+                "previousConsecutivePingTimeouts": consecutive_timeouts,
+                "frameType": frame_type,
             }),
         );
     }
@@ -2621,6 +2906,7 @@ impl WebSocketRequestLogger {
         );
     }
 
+    #[cfg(test)]
     fn record_response(&self, message: &Message) {
         self.record_response_for(message, None);
     }
@@ -2644,7 +2930,6 @@ impl WebSocketRequestLogger {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        state.first_response_event_recorded = true;
         let Some(log_id) = resolve_websocket_log_id(&mut state, response_id.as_deref()) else {
             return;
         };
@@ -2656,6 +2941,15 @@ impl WebSocketRequestLogger {
         let Some(tracked) = state.requests.get_mut(&log_id) else {
             return;
         };
+        if let Some(response_id) = response_id {
+            tracked.response_id = Some(response_id);
+        }
+        tracked.response_model.observe_value(
+            &payload,
+            crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+            Some(event_type),
+        );
+        tracked.record.upstream_response_model = tracked.response_model.model();
         if tracked.record.first_token_ms.is_none() {
             tracked.record.first_token_ms = Some(tracked.started_at.elapsed().as_millis() as u64);
             tracked.record.status_code = Some(200);
@@ -2687,7 +2981,6 @@ impl WebSocketRequestLogger {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        state.first_response_event_recorded = true;
         let log_id = preferred_log_id
             .filter(|log_id| state.requests.contains_key(*log_id))
             .map(ToString::to_string)
@@ -2703,6 +2996,9 @@ impl WebSocketRequestLogger {
         let Some(tracked) = state.requests.get_mut(&log_id) else {
             return;
         };
+        if let Some(response_id) = response_id {
+            tracked.response_id = Some(response_id);
+        }
         let first_response_event = tracked.record.first_token_ms.is_none();
         if first_response_event {
             tracked.record.first_token_ms = Some(tracked.started_at.elapsed().as_millis() as u64);
@@ -2733,6 +3029,7 @@ impl WebSocketRequestLogger {
                 tracked.record.reasoning_tokens = final_reasoning_tokens;
             }
             tracked.record.error = websocket_response_error(&payload, event_type);
+            tracked.log_after_transport_timeout("terminal_response", Some(event_type));
             update = Some(tracked.record.clone());
         } else if first_response_event {
             update = Some(tracked.record.clone());
@@ -2785,6 +3082,12 @@ impl WebSocketRequestLogger {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
+        state.interrupted_before_response = status_code == 502
+            && !state.requests.is_empty()
+            && state
+                .requests
+                .values()
+                .all(|tracked| tracked.record.first_token_ms.is_none());
         let mut records = Vec::with_capacity(state.requests.len());
         let interrupted_request_count = state.requests.len();
         let connection_context = state.connection_context.clone();
@@ -2810,6 +3113,7 @@ impl WebSocketRequestLogger {
                 tracked.record.reasoning_tokens = captured_reasoning_tokens;
             }
             tracked.record.error = Some(error.to_string());
+            tracked.log_after_transport_timeout("interrupted", None);
             records.push(tracked.record);
         }
         state.active_order.clear();
@@ -2846,8 +3150,8 @@ impl WebSocketRequestLogger {
         log_id: Option<&str>,
         request_bytes: usize,
         safe_max_bytes: usize,
-        allow_http_fallback: bool,
     ) {
+        self.mark_http_fallback("请求超过 WS 的 16 MiB 安全上限");
         let Some(log_id) = log_id else {
             return;
         };
@@ -2876,11 +3180,8 @@ impl WebSocketRequestLogger {
             let connection_context = state.connection_context.clone();
             let record = tracked.record;
             drop(state);
-            let fallback_armed = arm_oversized_responses_websocket_http_fallback(
-                &relay_id,
-                &connection_context,
-                allow_http_fallback,
-            );
+            let fallback_armed =
+                arm_oversized_responses_websocket_http_fallback(&relay_id, &connection_context);
             (
                 record,
                 relay_id,
@@ -3026,6 +3327,26 @@ fn append_websocket_proxy_log_record(record: &crate::proxy_log::ProxyRequestReco
             }),
         );
     }
+}
+
+async fn forward_downstream_response<S>(
+    downstream: &mut S,
+    message: Message,
+    request_logger: &WebSocketRequestLogger,
+    preferred_log_id: Option<&str>,
+) -> anyhow::Result<bool>
+where
+    S: Sink<Message, Error = WebSocketError> + Unpin,
+{
+    let closed = forward_websocket_message(
+        downstream,
+        message.clone(),
+        "转发 Responses WebSocket 响应超时",
+        "转发 Responses WebSocket 响应失败",
+    )
+    .await?;
+    request_logger.record_response_for(&message, preferred_log_id);
+    Ok(closed)
 }
 
 async fn forward_websocket_message<S>(
@@ -3189,7 +3510,7 @@ async fn prepare_downstream_response_create_payload_with_snapshot(
     prepare_downstream_response_create_payload_with_settings(normalized, settings)
 }
 
-fn normalize_downstream_response_create_payload(payload: &Value) -> Value {
+pub(crate) fn normalize_downstream_response_create_payload(payload: &Value) -> Value {
     let mut normalized = crate::protocol_proxy::normalize_native_responses_request(payload);
     if normalized
         .get("previous_response_id")
@@ -3634,11 +3955,7 @@ fn responses_websocket_upstream_failure_fallbacks()
 fn arm_upstream_failure_responses_websocket_http_fallback(
     relay_id: &str,
     connection_context: &WebSocketConnectionContext,
-    allow_http_fallback: bool,
 ) -> bool {
-    if !allow_http_fallback {
-        return false;
-    }
     let Some(key) = responses_websocket_upstream_failure_fallback_key(relay_id, connection_context)
     else {
         return false;
@@ -3655,11 +3972,7 @@ fn arm_upstream_failure_responses_websocket_http_fallback(
 fn should_temporarily_fallback_upstream_failure_responses_websocket_to_http(
     relay_id: &str,
     connection_context: &WebSocketConnectionContext,
-    allow_http_fallback: bool,
 ) -> bool {
-    if !allow_http_fallback {
-        return false;
-    }
     let Some(key) = responses_websocket_upstream_failure_fallback_key(relay_id, connection_context)
     else {
         return false;
@@ -3697,11 +4010,7 @@ fn responses_websocket_early_disconnect_fallbacks()
 fn should_temporarily_fallback_early_disconnect_responses_websocket_to_http(
     relay_id: &str,
     connection_context: &WebSocketConnectionContext,
-    allow_http_fallback: bool,
 ) -> bool {
-    if !allow_http_fallback {
-        return false;
-    }
     let Some(key) = responses_websocket_early_disconnect_fallback_key(relay_id, connection_context)
     else {
         return false;
@@ -3717,11 +4026,7 @@ fn should_temporarily_fallback_early_disconnect_responses_websocket_to_http(
 fn arm_early_disconnect_responses_websocket_http_fallback(
     relay_id: &str,
     connection_context: &WebSocketConnectionContext,
-    allow_http_fallback: bool,
 ) -> bool {
-    if !allow_http_fallback {
-        return false;
-    }
     let Some(key) = responses_websocket_early_disconnect_fallback_key(relay_id, connection_context)
     else {
         return false;
@@ -3738,11 +4043,7 @@ fn arm_early_disconnect_responses_websocket_http_fallback(
 fn should_temporarily_fallback_oversized_responses_websocket_to_http(
     relay_id: &str,
     connection_context: &WebSocketConnectionContext,
-    allow_http_fallback: bool,
 ) -> bool {
-    if !allow_http_fallback {
-        return false;
-    }
     let Some(key) = responses_websocket_oversized_fallback_key(relay_id, connection_context) else {
         return false;
     };
@@ -3757,11 +4058,7 @@ fn should_temporarily_fallback_oversized_responses_websocket_to_http(
 fn arm_oversized_responses_websocket_http_fallback(
     relay_id: &str,
     connection_context: &WebSocketConnectionContext,
-    allow_http_fallback: bool,
 ) -> bool {
-    if !allow_http_fallback {
-        return false;
-    }
     let Some(key) = responses_websocket_oversized_fallback_key(relay_id, connection_context) else {
         return false;
     };
@@ -3836,6 +4133,10 @@ fn redact_websocket_identifier(value: Option<String>) -> Option<String> {
     Some(format!("sha256:{short_hash}"))
 }
 
+pub(crate) fn redact_transport_thread_id(value: &str) -> Option<String> {
+    redact_websocket_identifier(Some(value.to_string()))
+}
+
 fn bounded_websocket_context_label(value: Option<String>) -> Option<String> {
     let value = value?;
     let bounded = value
@@ -3887,6 +4188,29 @@ mod tests {
         assert!(is_responses_websocket_proxy_path("/v1/responses"));
         assert!(!is_responses_websocket_proxy_path("/v1/responses/compact"));
         assert!(!is_responses_websocket_proxy_path("/v1/chat/completions"));
+    }
+
+    #[tokio::test]
+    async fn stale_native_connection_cannot_arm_a_new_session_generation() {
+        let relay = crate::settings::RelayProfile::default();
+        let context = crate::request_headers::RequestContext::from_http_request(
+            format!(
+                "GET /v1/responses HTTP/1.1\r\nthread-id: {}\r\n\r\n",
+                uuid::Uuid::new_v4()
+            )
+            .as_bytes(),
+        );
+        let request = json!({"type":"response.create","model":"gpt-test","input":"hi"});
+        crate::session_transport::observe_native_request(&relay, &context, &request, 100);
+        let logger =
+            WebSocketRequestLogger::new(&relay, None, "/v1/responses".into(), Default::default());
+        logger.set_transport_context(relay.clone(), context.clone());
+        logger.record_request(&request, &request.to_string());
+        crate::session_transport::forget_thread(&context);
+        crate::session_transport::observe_native_request(&relay, &context, &request, 100);
+        logger.mark_http_fallback("old connection failed after a model switch");
+        assert!(!crate::session_transport::should_use_http(&relay, &context));
+        crate::session_transport::forget_thread(&context);
     }
 
     #[test]
@@ -3943,99 +4267,46 @@ mod tests {
     }
 
     #[test]
-    fn websocket_http_fallback_requires_explicit_setting() {
+    fn websocket_http_fallback_is_always_available() {
         let context = WebSocketConnectionContext {
             thread_id: Some("sha256:thread".to_string()),
             turn_id: Some("sha256:turn".to_string()),
             request_kind: Some("turn".to_string()),
             ..Default::default()
         };
-
-        assert!(!arm_oversized_responses_websocket_http_fallback(
-            "relay-test",
-            &context,
-            false,
-        ));
-        assert!(
-            !should_temporarily_fallback_oversized_responses_websocket_to_http(
-                "relay-test",
-                &context,
-                false,
-            )
-        );
         assert!(arm_oversized_responses_websocket_http_fallback(
             "relay-test",
-            &context,
-            true,
+            &context
         ));
         assert!(
             should_temporarily_fallback_oversized_responses_websocket_to_http(
                 "relay-test",
-                &context,
-                true,
-            )
-        );
-        assert!(!arm_early_disconnect_responses_websocket_http_fallback(
-            "relay-test",
-            &context,
-            false,
-        ));
-        assert!(
-            !should_temporarily_fallback_early_disconnect_responses_websocket_to_http(
-                "relay-test",
-                &context,
-                false,
+                &context
             )
         );
         assert!(arm_early_disconnect_responses_websocket_http_fallback(
             "relay-test",
-            &context,
-            true,
+            &context
         ));
         assert!(
             should_temporarily_fallback_early_disconnect_responses_websocket_to_http(
                 "relay-test",
-                &context,
-                true,
-            )
-        );
-        assert!(!arm_upstream_failure_responses_websocket_http_fallback(
-            "relay-test",
-            &context,
-            false,
-        ));
-        assert!(
-            !should_temporarily_fallback_upstream_failure_responses_websocket_to_http(
-                "relay-test",
-                &context,
-                false,
+                &context
             )
         );
         assert!(arm_upstream_failure_responses_websocket_http_fallback(
             "relay-test",
-            &context,
-            true,
+            &context
         ));
         assert!(
             should_temporarily_fallback_upstream_failure_responses_websocket_to_http(
                 "relay-test",
-                &context,
-                true,
+                &context
             )
         );
-    }
-
-    #[test]
-    fn websocket_failure_close_is_not_retryable_when_http_fallback_is_disabled() {
-        let disabled =
-            websocket_failure_close_frame(false, CloseCode::Restart, "retry", "fallback disabled");
-        assert_eq!(disabled.code, CloseCode::Policy);
-        assert_eq!(disabled.reason, "fallback disabled");
-
-        let enabled =
-            websocket_failure_close_frame(true, CloseCode::Restart, "retry", "fallback disabled");
-        assert_eq!(enabled.code, CloseCode::Restart);
-        assert_eq!(enabled.reason, "retry");
+        let close = websocket_failure_close_frame(CloseCode::Restart, "retry");
+        assert_eq!(close.code, CloseCode::Restart);
+        assert_eq!(close.reason, "retry");
     }
 
     #[test]
@@ -4133,6 +4404,196 @@ mod tests {
     }
 
     #[test]
+    fn websocket_records_raw_response_model_per_request_before_response_rewriting() {
+        let logger = WebSocketRequestLogger::new(
+            &RelayProfile::default(),
+            None,
+            "/v1/responses".into(),
+            WebSocketConnectionContext::default(),
+        );
+        let request = json!({"type":"response.create","model":"gpt-6-astra","input":[]});
+        let first_id = logger
+            .record_request(&request, &request.to_string())
+            .unwrap();
+        let second_id = logger
+            .record_request(&request, &request.to_string())
+            .unwrap();
+        let first_created = Message::Text(
+            r#"{"type":"response.created","response":{"id":"resp_first","model":"gpt-6-astra"}}"#
+                .into(),
+        );
+        logger.record_first_response_event(&first_created);
+        assert_eq!(
+            logger.state.lock().unwrap().requests[&first_id]
+                .record
+                .upstream_response_model
+                .as_deref(),
+            Some("gpt-6-astra")
+        );
+        logger.record_response(&first_created);
+        let first_completed = Message::Text(
+            r#"{"type":"response.completed","response":{"id":"resp_first","model":"gpt-6-astra"}}"#
+                .into(),
+        );
+        logger.record_first_response_event(&first_completed);
+        logger.record_response(&first_completed);
+
+        logger.record_first_response_event(&Message::Text(
+            r#"{"type":"response.created","response":{"id":"resp_second","model":"gpt-5.6-sol"}}"#
+                .into(),
+        ));
+        logger.record_first_response_event(&Message::Text(
+            r#"{"type":"response.completed","response":{"id":"resp_second","model":"gpt-5.6-luna"}}"#.into(),
+        ));
+        logger.record_response(&Message::Text(
+            r#"{"type":"response.created","response":{"id":"resp_second","model":"gpt-6-astra"}}"#
+                .into(),
+        ));
+
+        let state = logger.state.lock().unwrap();
+        assert!(!state.requests.contains_key(&first_id));
+        assert_eq!(
+            state.requests[&second_id]
+                .record
+                .upstream_response_model
+                .as_deref(),
+            Some("gpt-5.6-luna")
+        );
+    }
+
+    #[test]
+    fn websocket_ping_replay_only_allows_pending_requests_without_application_response_or_context_id()
+     {
+        let logger = WebSocketRequestLogger::new(
+            &RelayProfile::default(),
+            None,
+            "/v1/responses".to_string(),
+            WebSocketConnectionContext::default(),
+        );
+        assert!(!logger.has_pending_requests());
+        assert_eq!(logger.upstream_replay_block_reason(), None);
+
+        let request = json!({"type":"response.create","model":"gpt-5.6","input":[]});
+        logger
+            .record_request(&request, &request.to_string())
+            .unwrap();
+        assert_eq!(logger.upstream_replay_block_reason(), None);
+        logger.record_first_response_event(&Message::Text(
+            r#"{"type":"response.created","response":{"id":"resp_first"}}"#.into(),
+        ));
+        assert_eq!(
+            logger.upstream_replay_block_reason(),
+            Some("application_response_already_received")
+        );
+        logger.record_response(&Message::Text(
+            r#"{"type":"response.completed","response":{"id":"resp_first"}}"#.into(),
+        ));
+        assert!(!logger.has_pending_requests());
+        assert_eq!(logger.upstream_replay_block_reason(), None);
+
+        // 上一轮收到过响应，不影响下一轮尚未收到响应的完整请求恢复。
+        logger
+            .record_request(&request, &request.to_string())
+            .unwrap();
+        assert!(!logger.interrupted_before_response());
+        assert_eq!(logger.upstream_replay_block_reason(), None);
+        let chained = json!({
+            "type":"response.create","model":"gpt-5.6",
+            "previous_response_id":"resp_first","input":[]
+        });
+        logger
+            .record_request(&chained, &chained.to_string())
+            .unwrap();
+        assert_eq!(
+            logger.upstream_replay_block_reason(),
+            Some("previous_response_id_requires_context_recovery")
+        );
+        logger.finish_pending("upstream failed on a later request", 502);
+        assert!(logger.interrupted_before_response());
+    }
+
+    #[tokio::test]
+    async fn websocket_terminal_response_is_completed_only_after_downstream_send_succeeds() {
+        use futures_util::SinkExt;
+        let logger = WebSocketRequestLogger::new(
+            &RelayProfile::default(),
+            None,
+            "/v1/responses".into(),
+            WebSocketConnectionContext::default(),
+        );
+        let request = json!({"type":"response.create","model":"gpt-5.6","input":[]});
+        let id = logger
+            .record_request(&request, &request.to_string())
+            .unwrap();
+        let response = Message::Text(
+            r#"{"type":"response.completed","response":{"id":"resp_delivery","status":"completed"}}"#.into(),
+        );
+        logger.record_first_response_event(&response);
+        let mut failed_sink = Box::pin(futures_util::sink::unfold((), |(), _: Message| async {
+            Err::<(), _>(tokio_tungstenite::tungstenite::Error::ConnectionClosed)
+        }));
+        assert!(
+            super::forward_downstream_response(&mut failed_sink, response.clone(), &logger, None,)
+                .await
+                .is_err()
+        );
+        {
+            let state = logger.state.lock().unwrap();
+            let tracked = state
+                .requests
+                .get(&id)
+                .expect("failed delivery must remain pending");
+            assert_eq!(
+                tracked.record.state,
+                crate::proxy_log::ProxyRequestState::Pending
+            );
+            assert!(tracked.record.duration_ms.is_none());
+        }
+        let mut delivered_sink =
+            futures_util::sink::drain::<Message>().sink_map_err(|never| match never {});
+        super::forward_downstream_response(&mut delivered_sink, response, &logger, None)
+            .await
+            .unwrap();
+        assert!(!logger.has_pending_requests());
+    }
+
+    #[test]
+    fn websocket_terminal_failure_preserves_the_current_upstream_response_id() {
+        let logger = WebSocketRequestLogger::new(
+            &RelayProfile::default(),
+            None,
+            "/v1/responses".into(),
+            WebSocketConnectionContext::default(),
+        );
+        let request = json!({"type":"response.create","model":"gpt-5.6","input":[]});
+        logger
+            .record_request(&request, &request.to_string())
+            .unwrap();
+        let failure_id = || {
+            let Message::Text(text) = logger.pending_response_failure_message("timeout").unwrap()
+            else {
+                panic!("expected response.failed");
+            };
+            serde_json::from_str::<Value>(&text).unwrap()["response"]["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert!(failure_id().starts_with("resp_codex_elves_failed_"));
+        logger.record_first_response_event(&Message::Text(
+            r#"{"type":"response.created","response":{"id":"resp_original"}}"#.into(),
+        ));
+        assert_eq!(failure_id(), "resp_original");
+        logger.record_first_response_event(&Message::Text(
+            r#"{"type":"response.output_text.delta","response_id":"resp_original","delta":"hi"}"#
+                .into(),
+        ));
+        assert_eq!(failure_id(), "resp_original");
+        logger.finish_pending("interrupted after output", 502);
+        assert!(!logger.interrupted_before_response());
+    }
+
+    #[test]
     fn websocket_transport_liveness_pings_idle_connections_and_times_out_without_activity() {
         let started_at = Instant::now();
         let mut liveness = WebSocketTransportLiveness::default();
@@ -4157,6 +4618,26 @@ mod tests {
             ),
             Some(Duration::from_secs(15))
         );
+        for attempt in 1..=4 {
+            let ping_at = started_at + Duration::from_secs((attempt - 1) * 30);
+            if attempt > 1 {
+                assert!(liveness.begin_ping(ping_at).is_some());
+            }
+            let timeout_at = ping_at + Duration::from_secs(15);
+            assert!(
+                liveness
+                    .take_timeout(Duration::from_secs(15), timeout_at)
+                    .is_some()
+            );
+            assert_eq!(liveness.consecutive_timeouts, attempt as usize);
+            assert_eq!(liveness.timeout_limit_exceeded(), attempt > 3);
+            assert!(
+                liveness
+                    .take_timeout(Duration::from_secs(15), timeout_at + Duration::from_secs(5))
+                    .is_none(),
+                "the same expired ping must not be counted again"
+            );
+        }
     }
 
     #[tokio::test]
@@ -4193,6 +4674,29 @@ mod tests {
             ),
             None
         );
+        for message in [
+            Message::Pong(Vec::new().into()),
+            Message::Text(r#"{"type":"response.completed"}"#.into()),
+        ] {
+            for attempt in 0..3 {
+                let ping_at = started_at + Duration::from_secs(attempt * 30);
+                assert!(liveness.begin_ping(ping_at).is_some());
+                liveness
+                    .take_timeout(Duration::from_secs(15), ping_at + Duration::from_secs(15))
+                    .unwrap();
+            }
+            assert_eq!(liveness.consecutive_timeouts, 3);
+            liveness.observe_frame(&message, started_at + Duration::from_secs(80));
+            assert_eq!(liveness.consecutive_timeouts, 0);
+            let ping_at = started_at + Duration::from_secs(90);
+            assert!(liveness.begin_ping(ping_at).is_some());
+            liveness
+                .take_timeout(Duration::from_secs(15), ping_at + Duration::from_secs(15))
+                .unwrap();
+            assert_eq!(liveness.consecutive_timeouts, 1);
+            assert!(!liveness.timeout_limit_exceeded());
+            liveness.observe_frame(&message, started_at + Duration::from_secs(110));
+        }
     }
 
     #[test]

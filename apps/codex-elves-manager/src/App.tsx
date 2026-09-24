@@ -218,7 +218,6 @@ type BackendSettings = {
   codexAppActiveSkinId: string;
   codexGoalsEnabled: boolean;
   lanProxyEnabled: boolean;
-  wsFailureFallbackToHttp: boolean;
   gptReasoningContinuation: boolean;
   gptReasoningContinuationMaxRounds: number;
   layeredCompactionEnabled: boolean;
@@ -336,6 +335,12 @@ const CHAT_UPSTREAM_BASE_URL_KEY = "codex_elves_chat_base_url";
 const SCRIPT_MARKET_REPOSITORY_URL = "https://github.com/BigPizzaV3/CodexElvesScriptMarket";
 const REMOTE_COMPACTION_V2_PROVIDER_NAME = "OpenAI";
 const MULTI_AGENT_V2_FEATURE_KEY = "multi_agent_v2";
+const MULTI_AGENT_V2_SECTION = `features.${MULTI_AGENT_V2_FEATURE_KEY}`;
+const MULTI_AGENT_V2_ENABLED_KEY = "enabled";
+const LEGACY_MULTI_AGENT_V2_MAX_THREADS_KEY = "max_concurrent_threads_per_session";
+const AGENTS_SECTION = "agents";
+const AGENTS_MAX_CONCURRENT_THREADS_KEY = "max_concurrent_threads_per_session";
+const DEFAULT_SUBAGENT_COUNT = 6;
 const COMPACTION_MODEL_FAMILIES: Array<{ value: ModelFamily; label: string }> = [
   { value: "gpt", label: "GPT 会话" },
   { value: "claude", label: "Claude 会话" },
@@ -681,7 +686,9 @@ type LocalProxyLogEntry = {
   path: string;
   remoteAddr?: string | null;
   model?: string | null;
+  upstreamResponseModel?: string | null;
   reasoningTokens?: number | null;
+  outputTokens?: number | null;
   reasoningEffort?: string | null;
   reasoningSource?: string | null;
   continueThinkingTriggered?: boolean | null;
@@ -749,50 +756,6 @@ type UpdateResult = CommandResult<{
   assetUrl?: string | null;
   updateAvailable?: boolean;
   installedPath?: string;
-}>;
-
-type CodexRadarIqRun = {
-  date: string;
-  score: number;
-  status: string;
-  passed: number;
-  tasks: number;
-  invalid: number;
-  totalTokens: number;
-  inputTokens: number;
-  cachedInputTokens: number;
-  outputTokens: number;
-  wallSeconds: number;
-  wallTimeHuman: string;
-  model?: string | null;
-  reasoningEffort?: string | null;
-  validTasks?: number | null;
-  costUsd?: number | null;
-};
-
-type CodexRadarIqComparison = {
-  label: string;
-  model?: string | null;
-  reasoningEffort?: string | null;
-  latest?: CodexRadarIqRun | null;
-  recentDays: CodexRadarIqRun[];
-};
-
-type CodexRadarResult = CommandResult<{
-  sourceUrl: string;
-  cacheStatus: string;
-  cachedUntilMs?: number | null;
-  snapshot: {
-    schemaVersion?: string | null;
-    monitoredAt?: string | null;
-    timezone?: string | null;
-    links?: { html?: string | null; rss?: string | null } | null;
-    modelIq: {
-      latest?: CodexRadarIqRun | null;
-      recentDays: CodexRadarIqRun[];
-      comparisons: Record<string, CodexRadarIqComparison>;
-    };
-  } | null;
 }>;
 
 type ScriptMarketItem = {
@@ -879,7 +842,7 @@ type StartupResult = CommandResult<{
   showUpdate: boolean;
 }>;
 
-type Route = "overview" | "relay" | "localProxy" | "sessions" | "checkpoint" | "context" | "enhance" | "skins" | "userScripts" | "radar" | "maintenance" | "about" | "settings";
+type Route = "overview" | "relay" | "localProxy" | "sessions" | "checkpoint" | "context" | "enhance" | "skins" | "userScripts" | "maintenance" | "about" | "settings";
 type Theme = "dark" | "light";
 
 type NavItem = { id: Route; label: string; icon: LucideIcon; badge?: string };
@@ -917,7 +880,6 @@ const routeGroups: NavGroup[] = [
     id: "system",
     label: "系统管理",
     items: [
-      { id: "radar", label: "降智雷达", icon: TestTube },
       { id: "maintenance", label: "安装维护", icon: Wrench },
       { id: "settings", label: "设置", icon: Settings },
     ],
@@ -1001,7 +963,6 @@ const defaultSettings: BackendSettings = {
   codexAppActiveSkinId: "",
   codexGoalsEnabled: false,
   lanProxyEnabled: false,
-  wsFailureFallbackToHttp: false,
   gptReasoningContinuation: false,
   gptReasoningContinuationMaxRounds: 3,
   layeredCompactionEnabled: false,
@@ -1555,6 +1516,7 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
   const protocols = ["responses", "anthropic", "chat_completions", "responses"];
   return Array.from({ length: 23 }, (_, index) => {
     const protocol = protocols[index % protocols.length];
+    const model = index === 2 ? "gpt-6-astra" : models[index % models.length];
     const success = index % 7 !== 5;
     const continueThinkingTriggered = protocol === "responses" && index === 0;
     const layeredCompactionTriggered = index === 1;
@@ -1566,8 +1528,10 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
       method: "POST",
       path: protocol === "chat_completions" ? "/v1/chat/completions" : "/v1/responses",
       remoteAddr: `127.0.0.1:${54624 + index}`,
-      model: models[index % models.length],
+      model,
+      upstreamResponseModel: index === 2 ? "gpt-5.6-luna" : null,
       reasoningTokens,
+      outputTokens: success ? Math.round(browserPreviewDurationMs(index) * (40 + index % 4 * 5) / 1000) : null,
       reasoningEffort: continueThinkingTriggered ? "high" : index % 3 === 1 ? "medium" : index % 3 === 2 ? "max" : null,
       reasoningSource: typeof reasoningTokens === "number" ? "reasoning.effort" : null,
       continueThinkingTriggered,
@@ -1757,94 +1721,6 @@ function browserPreviewLocalProxyDetail(id: string): LocalProxyLogDetail | null 
   };
 }
 
-function browserPreviewCodexRadar(): Omit<CodexRadarResult, "status" | "message"> {
-  const recentDays: CodexRadarIqRun[] = [
-    codexRadarRun("2026-06-17-am", 87.5, "yellow", 7, "23分钟"),
-    codexRadarRun("2026-06-17-pm", 87.5, "yellow", 7, "39分钟"),
-    codexRadarRun("2026-06-18", 125, "green", 10, "44分钟"),
-    codexRadarRun("2026-06-19", 100, "green", 8, "47分钟"),
-    codexRadarRun("2026-06-20", 75, "red", 6, "48分钟"),
-    codexRadarRun("2026-06-21", 87.5, "yellow", 7, "37分钟"),
-    codexRadarRun("2026-06-22-am", 100, "green", 8, "45分钟"),
-    codexRadarRun("2026-06-22-pm", 50, "red", 4, "54分钟"),
-    codexRadarRun("2026-06-23", 125, "green", 10, "46分钟"),
-    codexRadarRun("2026-06-24-am", 87.5, "yellow", 7, "23分钟", {
-      model: "gpt-5.5",
-      reasoningEffort: "xhigh",
-      totalTokens: 34196051,
-      inputTokens: 33842289,
-      cachedInputTokens: 31681664,
-      outputTokens: 353762,
-      wallSeconds: 1393,
-      costUsd: 37.256817,
-    }),
-  ];
-  const latest = recentDays[recentDays.length - 1];
-  return {
-    sourceUrl: "https://codexradar.com/",
-    cacheStatus: "refresh",
-    cachedUntilMs: Date.now() + (25 * 60 * 1000),
-    snapshot: {
-      schemaVersion: "html-scrape",
-      monitoredAt: "6月24日12:52更新",
-      timezone: "Asia/Shanghai",
-      links: { html: "https://codexradar.com/", rss: "https://codexradar.com/feed.xml" },
-      modelIq: {
-        latest,
-        recentDays,
-        comparisons: {
-          gpt_55_high: {
-            label: "GPT-5.5 high",
-            model: "gpt-5.5",
-            reasoningEffort: "high",
-            latest: codexRadarRun("2026-06-24-am", 100, "green", 8, "26分钟", { costUsd: 29.005678 }),
-            recentDays: [],
-          },
-          gpt_55_medium: {
-            label: "GPT-5.5 medium",
-            model: "gpt-5.5",
-            reasoningEffort: "medium",
-            latest: codexRadarRun("2026-06-24-am", 87.5, "yellow", 7, "24分钟", { costUsd: 22.212796 }),
-            recentDays: [],
-          },
-          gpt_54_xhigh: {
-            label: "GPT-5.4 xhigh",
-            model: "gpt-5.4",
-            reasoningEffort: "xhigh",
-            latest: codexRadarRun("2026-06-24-am", 62.5, "red", 5, "40分钟", { costUsd: 25.097168 }),
-            recentDays: [],
-          },
-        },
-      },
-    },
-  };
-}
-
-function codexRadarRun(
-  date: string,
-  score: number,
-  status: string,
-  passed: number,
-  wallTimeHuman: string,
-  patch: Partial<CodexRadarIqRun> = {},
-): CodexRadarIqRun {
-  return {
-    date,
-    score,
-    status,
-    passed,
-    tasks: 12,
-    invalid: 0,
-    totalTokens: 0,
-    inputTokens: 0,
-    cachedInputTokens: 0,
-    outputTokens: 0,
-    wallSeconds: 0,
-    wallTimeHuman,
-    ...patch,
-  };
-}
-
 function browserPreviewCheckpointManagement(
   settings = browserPreviewSettings(),
   message = "浏览器预览已加载 Checkpoint 管理数据。",
@@ -1951,32 +1827,32 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
       return Promise.resolve(browserPreviewResult({ showUpdate: false }) as T);
     case "check_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.4.2",
-        latestVersion: "0.4.2",
+        currentVersion: "0.4.3",
+        latestVersion: "0.4.3",
         releaseSummary: [
-          "CodexElves 0.4.2",
+          "CodexElves 0.4.3",
           "",
           "- 优化启动与托盘唤醒稳定性",
           "- 改进 GitHub Release 更新体验",
           "- 修复若干协议代理兼容性问题",
         ].join("\n"),
-        assetName: "CodexElves-0.4.2-windows-x64-setup.exe",
-        assetUrl: "https://example.test/CodexElves-0.4.2-windows-x64-setup.exe",
+        assetName: "CodexElves-0.4.3-windows-x64-setup.exe",
+        assetUrl: "https://example.test/CodexElves-0.4.3-windows-x64-setup.exe",
         updateAvailable: false,
       }, "发现可用更新。") as T);
     case "perform_update":
       return Promise.resolve(browserPreviewResult({
-        currentVersion: "0.4.2",
-        latestVersion: "0.4.2",
+        currentVersion: "0.4.3",
+        latestVersion: "0.4.3",
         releaseSummary: "浏览器预览不会下载真实安装包。",
-        installedPath: "C:\\Temp\\CodexElves-0.4.2-windows-x64-setup.exe",
+        installedPath: "C:\\Temp\\CodexElves-0.4.3-windows-x64-setup.exe",
         launched: true,
       }, "浏览器预览已模拟启动安装包。") as T);
     case "copy_diagnostics":
       return Promise.resolve(browserPreviewResult({
         report: [
           "CodexElves 诊断报告",
-          "版本: 0.4.2",
+          "版本: 0.4.3",
           "平台: windows-x64",
           "Codex 应用: C:\\Users\\junes\\AppData\\Local\\Programs\\CodexElves\\CodexElves.exe",
           "配置目录: C:\\Users\\junes\\.codex",
@@ -1997,7 +1873,7 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           helper_port: 45221,
           codex_app: settings.codexAppPath,
         },
-        current_version: "0.4.2",
+        current_version: "0.4.3",
         update_status: "ok",
         settings_path: "浏览器预览 mock",
         logs_path: "浏览器预览 mock",
@@ -2127,6 +2003,13 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
             settings.codexAppWorkspaceCheckpointStoragePath ||
             "C:\\Users\\junes\\.codex-session-delete\\workspace-checkpoints",
         }, "浏览器预览不打开本地目录。") as T,
+      );
+    case "open_codex_home_directory":
+      return Promise.resolve(
+        browserPreviewResult(
+          { path: browserPreviewCodexHome(settings) },
+          "浏览器预览不打开本地目录。",
+        ) as T,
       );
     case "list_skins":
       return Promise.resolve(browserPreviewSkinsResult("已读取皮肤列表。") as unknown as T);
@@ -2325,8 +2208,6 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
           },
         ],
       }) as T);
-    case "fetch_codex_radar":
-      return Promise.resolve(browserPreviewResult(browserPreviewCodexRadar(), "降智雷达已刷新。") as T);
     case "backfill_relay_profile_from_live": {
       const request = args?.request as { settings?: BackendSettings } | undefined;
       return Promise.resolve(browserPreviewResult({ settings: request?.settings || settings }) as T);
@@ -2434,7 +2315,6 @@ export function App() {
   const [updateInstallActive, setUpdateInstallActive] = useState(false);
   const [scriptMarket, setScriptMarket] = useState<ScriptMarketResult | null>(null);
   const [skins, setSkins] = useState<SkinsResult | null>(null);
-  const [codexRadar, setCodexRadar] = useState<CodexRadarResult | null>(null);
   const [launchForm, setLaunchForm] = useState({
     appPath: "",
     debugPort: "9229",
@@ -2461,6 +2341,16 @@ export function App() {
     percent: 0,
     message: "尚未检查官方远端插件缓存。",
   });
+  useEffect(() => {
+    if (remotePluginMarketplaceProgress.active || remotePluginMarketplaceProgress.percent < 100) return;
+    const completedProgress = remotePluginMarketplaceProgress;
+    const timer = window.setTimeout(() => {
+      setRemotePluginMarketplaceProgress((current) =>
+        current === completedProgress ? { active: false, percent: 0, message: "" } : current,
+      );
+    }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [remotePluginMarketplaceProgress]);
   const [remotePluginMarketplacePrompt, setRemotePluginMarketplacePrompt] =
     useState<RemotePluginMarketplaceResult | null>(null);
   const [pluginMarketplacePrompt, setPluginMarketplacePrompt] = useState<PluginMarketplaceStatusResult | null>(null);
@@ -2777,11 +2667,18 @@ export function App() {
     if (result) showResultNotice("Checkpoint 储存目录", result, { silentSuccess: true });
   };
 
+  const openCodexHomeDirectory = async () => {
+    const result = await run(() =>
+      call<CommandResult<{ path?: string }>>("open_codex_home_directory"),
+    );
+    if (result) showResultNotice("Codex 配置目录", result, { silentSuccess: true });
+  };
+
   const deleteLocalSession = async (session: LocalSession) => {
     const title = session.title || session.id;
     if (
       !window.confirm(
-        `永久删除会话“${title}”？\n\n将删除本地数据库记录和 rollout 文件，此操作不可恢复。请先关闭正在使用该会话的窗口。`,
+        `永久删除会话“${title}”？\n\n将通过 Codex 原生功能删除该会话及其派生会话，此操作不可恢复。`,
       )
     ) return;
     const result = await run(() =>
@@ -2795,23 +2692,11 @@ export function App() {
     }
   };
 
-  const refreshCodexRadar = async (forceRefresh = false) => {
-    const result = await run(() =>
-      call<CodexRadarResult>(
-        "fetch_codex_radar",
-        forceRefresh ? { request: { forceRefresh: true } } : undefined,
-      ),
-    );
-    if (result) {
-      setCodexRadar(result);
-    }
-  };
-
   const deleteLocalSessionsBatch = async (sessionsToDelete: LocalSession[]) => {
     if (!sessionsToDelete.length) return;
     if (
       !window.confirm(
-        `确认永久删除这 ${sessionsToDelete.length} 个会话？\n\n将删除本地数据库记录和 rollout 文件，此操作不可恢复。请先关闭正在使用这些会话的窗口。`,
+        `确认永久删除这 ${sessionsToDelete.length} 个会话？\n\n将通过 Codex 原生功能删除所选会话及其派生会话，此操作不可恢复。`,
       )
     ) return;
     let deleted = 0;
@@ -3041,7 +2926,6 @@ export function App() {
       await refreshSettings(true);
       await refreshScriptMarket(true);
     }
-    if (next === "radar") await refreshCodexRadar();
     if (next === "about") {
       await refreshOverview(true);
       await refreshLogs(true);
@@ -3838,7 +3722,6 @@ export function App() {
       await refreshProviderSyncTargets(true);
       await refreshLocalProxyStatus(true);
       if (route === "localProxy") await refreshLocalProxyLogs(true);
-      if (route === "radar") await refreshCodexRadar();
       if (route === "checkpoint") {
         await refreshWorkspaceCheckpointManagement(true);
         await refreshLocalSessions(true);
@@ -3975,7 +3858,9 @@ export function App() {
 
   const actions = useMemo(
     () => ({
-      refreshCurrent: () => (route === "radar" ? refreshCodexRadar(true) : navigate(route)),
+      refreshCurrent: async () => {
+        await navigate(route);
+      },
       launch,
       restart,
       repairBackend,
@@ -4123,7 +4008,6 @@ export function App() {
       forceRefreshPluginCache,
       syncLiveContextEntries,
       refreshScriptMarket,
-      refreshCodexRadar: () => refreshCodexRadar(true),
       installMarketScript,
       setUserScriptsEnabled,
       setUserScriptEnabled,
@@ -4139,6 +4023,7 @@ export function App() {
       releaseWorkspaceCheckpointStorage,
       deleteWorkspaceCheckpointData,
       openWorkspaceCheckpointStorage,
+      openCodexHomeDirectory,
       openExternalUrl,
       applyRelayInjection,
       applyPureApiInjection,
@@ -4169,7 +4054,6 @@ export function App() {
       copyLocalProxyAddress: (text: string) =>
         copyText(text, "局域网代理地址已复制。"),
       copyDiagnostics: () => copyText(diagnostics?.report ?? "", "诊断报告已复制。"),
-      goLogs: () => navigate("about"),
       checkHealth: async () => {
         await refreshOverview(true);
         await refreshRelay(true);
@@ -4276,7 +4160,7 @@ export function App() {
             </Button>
           </div>
         </header>
-        <section className="screen" key={route}>
+        <section className={`screen${route === "overview" ? " overview-screen" : ""}`} key={route}>
           {route === "overview" ? (
             <OverviewScreen
               overview={overview}
@@ -4352,7 +4236,6 @@ export function App() {
           ) : null}
           {route === "userScripts" ? <UserScriptsScreen settings={settings} market={scriptMarket} actions={actions} /> : null}
           {route === "skins" ? <SkinsScreen skins={skins} activeSkinId={settingsForm.codexAppActiveSkinId} actions={actions} /> : null}
-          {route === "radar" ? <CodexRadarScreen radar={codexRadar} actions={actions} /> : null}
           {route === "maintenance" ? (
             <MaintenanceScreen
               overview={overview}
@@ -4487,7 +4370,6 @@ type Actions = {
     target: ContextSyncTarget,
   ) => Promise<LiveContextEntriesResult | null>;
   refreshScriptMarket: () => Promise<void>;
-  refreshCodexRadar: () => Promise<void>;
   installMarketScript: (id: string) => Promise<void>;
   setUserScriptsEnabled: (enabled: boolean) => Promise<void>;
   setUserScriptEnabled: (key: string, enabled: boolean) => Promise<void>;
@@ -4509,6 +4391,7 @@ type Actions = {
     request: DeleteWorkspaceCheckpointRequest,
   ) => Promise<void>;
   openWorkspaceCheckpointStorage: () => Promise<void>;
+  openCodexHomeDirectory: () => Promise<void>;
   openExternalUrl: (url: string) => Promise<void>;
   applyRelayInjection: () => Promise<boolean>;
   applyPureApiInjection: () => Promise<boolean>;
@@ -4541,7 +4424,6 @@ type Actions = {
   copyLocalProxyResponse: (text?: string) => Promise<void>;
   copyLocalProxyAddress: (text: string) => Promise<void>;
   copyDiagnostics: () => Promise<void>;
-  goLogs: () => Promise<void>;
   installWatcher: () => Promise<void>;
   uninstallWatcher: () => Promise<void>;
   enableWatcher: () => Promise<void>;
@@ -4562,7 +4444,13 @@ function OverviewScreen({
   const health = healthItems(overview);
   return (
     <>
-      <Panel>
+      <Panel className="overview-launch-panel">
+        <CardHead title="最近启动" detail={overview?.logs_path ?? "暂无状态文件"} />
+        <CardContent>
+          <LatestLaunch status={overview?.latest_launch ?? null} />
+        </CardContent>
+      </Panel>
+      <Panel className="overview-health-panel">
         <CardHead title="健康检查" detail="概览只展示关键问题，具体配置在对应页面处理" />
         <CardContent>
           <div className="health-grid">
@@ -4600,23 +4488,12 @@ function OverviewScreen({
             <Button disabled={pluginMarketplaceProgress.active} variant="secondary" onClick={() => void actions.repairPluginMarketplace()}>
               {pluginMarketplaceProgress.active ? "正在修复…" : "修复插件市场"}
             </Button>
+            <Button variant="secondary" onClick={() => void actions.openCodexHomeDirectory()}>
+              <FolderOpen className="h-4 w-4" />
+              打开 .codex 目录
+            </Button>
           </Toolbar>
           <TaskProgressBox progress={pluginMarketplaceProgress} title="插件市场修复进度" />
-        </CardContent>
-      </Panel>
-      <Panel>
-        <CardHead title="最近启动" detail={overview?.logs_path ?? "暂无状态文件"} />
-        <CardContent>
-          <LatestLaunch status={overview?.latest_launch ?? null} />
-          <Toolbar>
-            <Button onClick={() => void actions.launch()}>
-              <Rocket className="h-4 w-4" />
-              启动 CodexElves
-            </Button>
-            <Button variant="secondary" onClick={() => void actions.goLogs()}>
-              打开关于
-            </Button>
-          </Toolbar>
         </CardContent>
       </Panel>
     </>
@@ -4707,6 +4584,7 @@ function LocalProxyScreen({
     [entries, modelFilter],
   );
   const requestRatio = useMemo(() => calculateRequestRatio(modelFilteredEntries), [modelFilteredEntries]);
+  const modelSpeeds = useMemo(() => calculateProxyModelSpeeds(entries), [entries]);
   const filteredEntries = useMemo(
     () =>
       modelFilteredEntries.filter((entry) => {
@@ -4766,22 +4644,6 @@ function LocalProxyScreen({
                   type="checkbox"
                 />
                 <span>局域网代理</span>
-              </label>
-              <label
-                className="proxy-inline-toggle"
-                data-tooltip="允许已启用 WS 的模型在失败后改走 HTTP；关闭时会在本地阻止客户端的 HTTP 回退。普通 HTTP 模型和压缩请求不受影响。"
-              >
-                <input
-                  checked={form.wsFailureFallbackToHttp}
-                  onChange={(event) =>
-                    void actions.saveSettingsValue(
-                      { ...form, wsFailureFallbackToHttp: event.currentTarget.checked },
-                      false,
-                    )
-                  }
-                  type="checkbox"
-                />
-                <span>WS 失败切 HTTP</span>
               </label>
               <div className="proxy-continue-thinking-control">
                 <label
@@ -4886,6 +4748,32 @@ function LocalProxyScreen({
           </div>
         </CardContent>
       </Panel>
+      <section className="proxy-speed-section" aria-labelledby="proxy-speed-title">
+        <h3 id="proxy-speed-title">模型速率</h3>
+        <div className="proxy-speed-grid" aria-label="本地请求模型速率">
+          {modelSpeeds.map((speed, index) => (
+            <div className="proxy-speed-model" key={speed?.model ?? `empty-${index}`}>
+              {speed ? (
+                <>
+                  <strong className="proxy-speed-name" title={speed.model}>{speed.model}</strong>
+                  <div className="proxy-speed-values">
+                    <div>
+                      <span data-tooltip="最近一条有输出 token 和耗时的成功请求">最近有效请求</span>
+                      <strong>{formatProxyTokenRate(speed.latestRate)} <small>tok/s</small></strong>
+                    </div>
+                    <div>
+                      <span data-tooltip="当前日志范围内的输出 token 总数除以请求总耗时">平均速率</span>
+                      <strong>{formatProxyTokenRate(speed.averageRate)} <small>tok/s</small></strong>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <span className="proxy-speed-placeholder">{index === 0 ? "暂无请求模型" : ""}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      </section>
       <Panel>
         <CardHead
           title={`请求日志（${filteredEntries.length}）`}
@@ -4944,6 +4832,11 @@ function LocalProxyScreen({
                     <span className="proxy-log-main">
                       <strong className="proxy-log-model-title">
                         <span>{entry.model || "未知模型"}</span>
+                        {upstreamResponseModelMismatch(entry) ? (
+                          <span className="proxy-upstream-model-mismatch" title={`上游响应模型：${entry.upstreamResponseModel}`}>
+                            （上游响应模型：{entry.upstreamResponseModel}）
+                          </span>
+                        ) : null}
                         {entry.remoteCompactionTriggered ? (
                           <span
                             aria-label="Remote Compaction V2 请求"
@@ -5146,7 +5039,12 @@ function LocalProxyLogDetailDialog({
         <div className="proxy-detail-summary">
           <div className="proxy-detail-head">
             <div>
-              <strong>{entry.model || "未知模型"}</strong>
+              <strong className="proxy-detail-model-title">
+                {entry.model || "未知模型"}
+                {upstreamResponseModelMismatch(entry) ? (
+                  <span className="proxy-upstream-model-mismatch">（上游响应模型：{entry.upstreamResponseModel}）</span>
+                ) : null}
+              </strong>
               <span>{`${formatTime(entry.timestampMs)} · ${formatProtocolRoute(entry)}`}</span>
             </div>
           </div>
@@ -5412,79 +5310,82 @@ function RelayScreen({
 
   return (
     <>
-      <Panel>
+      <Panel className="relay-provider-panel">
         <CardHead
           title="供应商列表"
           detail={`${normalized.relayProfiles.length} 个供应商配置；可拖动排序，点编辑进入详情`}
           actions={(
-            <label
-              className="relay-header-switch"
-              data-tooltip="开启后允许切换供应商，并在启动 ChatGPT/Codex 时按当前供应商同步 config.toml / auth.json；需要本地代理或聚合供应商时也会随启动启用。关闭后只保存供应商列表，不写入 Codex live 配置、不启动本地代理。"
-            >
-              <input
-                checked={normalized.relayProfilesEnabled}
-                onChange={(event) => {
-                  const next = { ...normalized, relayProfilesEnabled: event.currentTarget.checked };
-                  void saveRelaySettings(next);
-                }}
-                type="checkbox"
-              />
-              <span>启用供应商功能</span>
-            </label>
+            <>
+              <div className="relay-add-row">
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    setNewProfileDraft(createRelayProfile(normalized));
+                    setDetailProfileId(null);
+                  }}
+                >
+                  <Plus className="h-4 w-4" />
+                  添加供应商
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={createNewAggregateProfile}
+                >
+                  <Plus className="h-4 w-4" />
+                  添加聚合供应商
+                </Button>
+                <div className="third-party-import">
+                  <Button
+                    onClick={openThirdPartyImport}
+                    variant="secondary"
+                  >
+                    <Download className="h-4 w-4" />
+                    从第三方导入
+                  </Button>
+                  {thirdPartyImportOpen ? (
+                    <div className="third-party-import-menu">
+                      <button
+                        disabled={!ccsProviders?.providers.length}
+                        onClick={() => {
+                          setThirdPartyImportOpen(false);
+                          void actions.importCcsProviders();
+                        }}
+                        type="button"
+                      >
+                        <strong>ccswitch</strong>
+                        <span>{ccsProviderSummary(ccsProviders)}</span>
+                      </button>
+                      <button
+                        onClick={() => void actions.refreshCcsProviders()}
+                        type="button"
+                      >
+                        <RefreshCw className="h-4 w-4" />
+                        刷新列表
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+              <label
+                className="relay-header-switch"
+                data-tooltip="开启后允许切换供应商，并在启动 ChatGPT/Codex 时按当前供应商同步 config.toml / auth.json；需要本地代理或聚合供应商时也会随启动启用。关闭后只保存供应商列表，不写入 Codex live 配置、不启动本地代理。"
+              >
+                <input
+                  aria-label="启用供应商功能"
+                  checked={normalized.relayProfilesEnabled}
+                  onChange={(event) => {
+                    const next = { ...normalized, relayProfilesEnabled: event.currentTarget.checked };
+                    void saveRelaySettings(next);
+                  }}
+                  type="checkbox"
+                />
+                <span>启用</span>
+              </label>
+            </>
           )}
         />
         <CardContent>
           <EnvConflictNotice envConflicts={envConflicts} actions={actions} />
-          <div className="relay-add-row">
-            <Button
-              variant="secondary"
-              onClick={() => {
-                setNewProfileDraft(createRelayProfile(normalized));
-                setDetailProfileId(null);
-              }}
-            >
-              <Plus className="h-4 w-4" />
-              添加供应商
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={createNewAggregateProfile}
-            >
-              <Plus className="h-4 w-4" />
-              添加聚合供应商
-            </Button>
-            <div className="third-party-import">
-              <Button
-                onClick={openThirdPartyImport}
-                variant="secondary"
-              >
-                <Download className="h-4 w-4" />
-                从第三方导入
-              </Button>
-              {thirdPartyImportOpen ? (
-                <div className="third-party-import-menu">
-                  <button
-                    disabled={!ccsProviders?.providers.length}
-                    onClick={() => {
-                      setThirdPartyImportOpen(false);
-                      void actions.importCcsProviders();
-                    }}
-                    type="button"
-                  >
-                    <strong>ccswitch</strong>
-                    <span>{ccsProviderSummary(ccsProviders)}</span>
-                  </button>
-                  <button
-                    onClick={() => void actions.refreshCcsProviders()}
-                    type="button"
-                  >
-                    <RefreshCw className="h-4 w-4" />
-                    刷新列表
-                  </button>
-                </div>
-              ) : null}
-            </div>
-          </div>
           <RelayProfileList
             form={normalized}
             onEdit={(profileId) => void editRelayProfile(profileId)}
@@ -5717,54 +5618,45 @@ function EnhanceScreen({
         </div>
         <TaskProgressBox progress={remotePluginMarketplaceProgress} title="官方远端插件缓存进度" />
       </div>
-      <Panel>
-        <CardHead title="功能增强" detail="任务看板、会话删除、导出、项目移动和用户脚本等界面能力" />
+      <Panel className="enhance-panel">
+        <CardHead
+          title="功能增强"
+          detail="任务看板、会话删除、导出、项目移动和用户脚本等界面能力"
+          actions={<ModeSelector launchMode={form.launchMode} actions={actions} />}
+        />
         <CardContent>
-          <div className="enhancement-master-grid">
-            <label className="switch-row">
-              <input
+          <section className="enhancement-basic-section" aria-labelledby="enhancement-basic-title">
+            <h4 id="enhancement-basic-title">基础控制</h4>
+            <div className="enhancement-basic-list">
+              <FeatureToggle
+                title="CodexElves 功能增强"
+                detail="关闭后会停用任务看板、删除、导出、项目移动、Fast 按钮、插件相关和菜单位置增强。"
                 checked={form.enhancementsEnabled}
-                onChange={(event) => onFormChange({ ...form, enhancementsEnabled: event.currentTarget.checked })}
-                type="checkbox"
+                onChange={(value) => onFormChange({ ...form, enhancementsEnabled: value })}
               />
-              <span>
-                <strong>启用 CodexElves 功能增强</strong>
-                <small>关闭后会停用任务看板、删除、导出、项目移动、Fast 按钮、插件相关和菜单位置增强。</small>
-              </span>
-            </label>
-            <label className="switch-row">
-              <input
+              <FeatureToggle
+                title="Computer Use Guard"
+                detail="Windows 下默认开启；启动 ChatGPT/Codex 时会自动保留官方 Computer Use 插件所需的 config.toml、bundled 插件和 notify 配置。"
                 checked={form.computerUseGuardEnabled}
-                onChange={(event) => onFormChange({ ...form, computerUseGuardEnabled: event.currentTarget.checked })}
-                type="checkbox"
+                onChange={(value) => onFormChange({ ...form, computerUseGuardEnabled: value })}
               />
-              <span>
-                <strong>启用 Windows Computer Use Guard</strong>
-                <small>默认开启；启动 ChatGPT/Codex 时会自动保留官方 Computer Use 插件所需的 config.toml、bundled 插件和 notify 配置。</small>
-              </span>
-            </label>
-            <label className="switch-row">
-              <input
+              <FeatureToggle
+                title="API Key 浏览器插件兼容"
+                detail="默认开启；解决 Chrome/Edge 插件在 API Key 模式下的 unsupported Codex auth method: apikey。启动时按原始哈希备份并识别新运行时，关闭后仅在校验一致时恢复。"
                 checked={form.computerUseApiKeyBrowserCompatEnabled}
-                onChange={(event) => onFormChange({
-                  ...form,
-                  computerUseApiKeyBrowserCompatEnabled: event.currentTarget.checked,
-                })}
-                type="checkbox"
+                onChange={(value) => onFormChange({ ...form, computerUseApiKeyBrowserCompatEnabled: value })}
               />
-              <span>
-                <strong>API Key 浏览器插件兼容</strong>
-                <small>默认开启；解决 Chrome/Edge 插件在 API Key 模式下的 unsupported Codex auth method: apikey。启动时按原始哈希备份并识别新运行时，关闭后仅在校验一致时恢复。</small>
-              </span>
-            </label>
-          </div>
-          <ModeSelector launchMode={form.launchMode} actions={actions} />
-          {form.launchMode === "relay" ? (
-            <div className="hint-line">
-              <ShieldCheck className="h-4 w-4" />
-              <span>当前为兼容增强模式，插件市场解锁和强制解锁入口不会启用；其他页面功能仍可用。</span>
             </div>
-          ) : null}
+          </section>
+          <div className="enhancement-optional-head">
+            <h4 className="enhancement-optional-title">可选功能</h4>
+            {form.launchMode === "relay" ? (
+              <div className="hint-line">
+                <ShieldCheck className="h-4 w-4" />
+                <span>当前为兼容增强模式，插件市场解锁和强制解锁入口不会启用；其他页面功能仍可用。</span>
+              </div>
+            ) : null}
+          </div>
           <div className="feature-switch-grid">
             <FeatureToggle title="插件市场解锁" detail="API Key 模式下扩展插件市场请求，尽量显示完整插件列表；官方/混合模式通常不需要。" checked={form.codexAppPluginMarketplaceUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginMarketplaceUnlock", value)} />
             <FeatureToggle title="强制解锁入口" detail="恢复 1.1.9 的入口解锁方式，强制显示并启用插件入口。" checked={form.codexAppPluginEntryUnlock} disabled={!masterEnabled || !patchMode} onChange={(value) => setEnhanceFlag("codexAppPluginEntryUnlock", value)} />
@@ -5779,19 +5671,20 @@ function EnhanceScreen({
             <FeatureToggle title="Upstream worktree" detail="从最新 upstream 分支创建 Git worktree。" checked={form.codexAppUpstreamWorktreeCreate} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppUpstreamWorktreeCreate", value)} />
             <FeatureToggle title="原生菜单栏位置" detail="把 CodexElves 菜单插入 Codex 顶部原生菜单栏。" checked={form.codexAppNativeMenuPlacement} disabled={!masterEnabled} onChange={(value) => setEnhanceFlag("codexAppNativeMenuPlacement", value)} />
           </div>
-          <div className="hint-line">
-            <Wrench className="h-4 w-4" />
-            <span>新机器没有本地插件市场时，可从 openai/plugins 初始化到当前配置目录。</span>
-            <Button disabled={pluginMarketplaceProgress.active} variant="secondary" onClick={() => void actions.repairPluginMarketplace()}>
-              {pluginMarketplaceProgress.active ? "正在修复…" : "修复插件市场"}
-            </Button>
-          </div>
           <TaskProgressBox progress={pluginMarketplaceProgress} title="插件市场修复进度" />
           <div className="hint-line">
             <Info className="h-4 w-4" />
             <span>如果使用官方模式或官方混入 API 模式，通常不需要开启插件市场解锁和强制解锁入口。</span>
           </div>
           <Toolbar>
+            <Button
+              disabled={pluginMarketplaceProgress.active}
+              onClick={() => void actions.repairPluginMarketplace()}
+              title="新机器没有本地插件市场时，可从 openai/plugins 初始化到当前配置目录。"
+              variant="secondary"
+            >
+              {pluginMarketplaceProgress.active ? "正在修复…" : "修复插件市场"}
+            </Button>
             <Button onClick={() => void actions.saveSettings()}>保存增强设置</Button>
           </Toolbar>
         </CardContent>
@@ -5865,137 +5758,6 @@ function UserScriptsScreen({ settings, market, actions }: { settings: SettingsRe
         </CardContent>
       </Panel>
     </>
-  );
-}
-
-function CodexRadarScreen({ radar, actions }: { radar: CodexRadarResult | null; actions: Actions }) {
-  const snapshot = radar?.snapshot;
-  const modelIq = snapshot?.modelIq;
-  const latest = modelIq?.latest ?? null;
-  const radarFailed = radar?.status === "failed";
-  const radarTitle = radarFailed
-    ? "降智雷达读取失败"
-    : `${latest?.model || "模型未记录"} · ${latest?.reasoningEffort || "推理档位未记录"}`;
-  const radarSummary = radarFailed
-    ? radar?.message ?? "请稍后重试。"
-    : latest
-      ? `最近样本 ${latest.date}，通过 ${latest.passed}/${latest.tasks} 项，耗时 ${latest.wallTimeHuman || "-"}`
-      : "点击刷新读取 codexradar.com 的最新模型 IQ 数据。";
-  const recentDays = modelIq?.recentDays ?? [];
-  const comparisons = Object.entries(modelIq?.comparisons ?? {})
-    .map(([key, comparison]) => ({ key, ...comparison }))
-    .filter((comparison) => comparison.latest)
-    .sort((left, right) => (right.latest?.score ?? 0) - (left.latest?.score ?? 0));
-  const sourceUrl = snapshot?.links?.html || radar?.sourceUrl || "https://codexradar.com/";
-
-  return (
-    <div className="grid gap-4">
-      <Panel className="radar-hero">
-        <CardContent className="radar-hero-content">
-          <div className="radar-score-block">
-            <span className="radar-kicker">CodexRadar Model IQ</span>
-            <strong className={`radar-score radar-${latest?.status ?? "unknown"}`}>{latest ? formatScore(latest.score) : "-"}</strong>
-          </div>
-          <div className="radar-hero-main">
-            <div>
-              <h2>{radarTitle}</h2>
-              <p className={radarFailed ? "radar-error-message" : undefined}>{radarSummary}</p>
-            </div>
-            <Toolbar>
-              <Button onClick={() => void actions.refreshCodexRadar()} variant="secondary">
-                <RefreshCw className="h-4 w-4" />
-                刷新
-              </Button>
-              <Button onClick={() => void actions.openExternalUrl(sourceUrl)} variant="outline">
-                <ExternalLink className="h-4 w-4" />
-                打开来源
-              </Button>
-            </Toolbar>
-          </div>
-        </CardContent>
-      </Panel>
-
-      <Panel>
-        <CardHead title="模型对比" detail={comparisons.length ? "来自 codexradar.com 页面数据" : "暂无对比模型"} />
-        <CardContent>
-          {comparisons.length ? (
-            <div className="radar-comparison-list">
-              {comparisons.map((comparison) => (
-                <div className="radar-comparison-row" key={comparison.key}>
-                  <div>
-                    <strong>{comparison.label}</strong>
-                    <span>{comparison.model || "model 未记录"} · {comparison.reasoningEffort || "effort 未记录"}</span>
-                  </div>
-                  <div className="radar-comparison-score">
-                    <strong className={`radar-${comparison.latest?.status ?? "unknown"}`}>{formatScore(comparison.latest?.score ?? 0)}</strong>
-                    <span>{comparison.latest?.passed ?? 0}/{comparison.latest?.tasks ?? 0}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="empty">暂无模型对比数据。</div>
-          )}
-        </CardContent>
-      </Panel>
-
-      <div className="radar-grid">
-        <Panel>
-          <CardHeader className="panel-head radar-sample-head">
-            <div>
-              <CardTitle>
-                {latest ? `最新样本 · ${latest.model || "模型未记录"} · ${latest.reasoningEffort || "推理档位未记录"}` : "最新样本"}
-              </CardTitle>
-              <CardDescription className="radar-sample-time">
-                {snapshot?.monitoredAt ? formatIsoTime(snapshot.monitoredAt) : radar?.message ?? "-"}
-              </CardDescription>
-            </div>
-          </CardHeader>
-          <CardContent>
-            {latest ? (
-              <div className="metric-list radar-sample-metrics">
-                <Metric label="通过任务" value={`${latest.passed}/${latest.tasks}`} />
-                <Metric label="有效任务" value={`${latest.validTasks ?? latest.tasks} 个`} />
-                <Metric label="耗时" value={latest.wallTimeHuman || `${latest.wallSeconds} 秒`} />
-                <Metric label="成本" value={formatUsd(latest.costUsd)} />
-              </div>
-            ) : (
-              <div className="empty">{radar?.message ?? "暂无雷达数据。"}</div>
-            )}
-          </CardContent>
-        </Panel>
-
-        <Panel>
-          <CardHead
-            title={latest ? `近日报告 · ${latest.model || "模型未记录"} · ${latest.reasoningEffort || "推理档位未记录"}` : "近日报告"}
-            detail={recentDays.length ? `${recentDays.length} 个样本，按近到远显示` : "暂无历史样本"}
-          />
-          <CardContent>
-            {recentDays.length ? <RadarTrend runs={[...recentDays].reverse()} /> : <div className="empty">暂无趋势数据。</div>}
-          </CardContent>
-        </Panel>
-      </div>
-    </div>
-  );
-}
-
-function RadarTrend({ runs }: { runs: CodexRadarIqRun[] }) {
-  const maxScore = Math.max(125, ...runs.map((run) => run.score));
-  return (
-    <div className="radar-trend" aria-label="近日报告趋势">
-      {runs.map((run) => {
-        const height = Math.max(12, Math.round((run.score / maxScore) * 100));
-        return (
-          <div className="radar-trend-item" data-tooltip={`${run.date}：${formatScore(run.score)}`} key={run.date}>
-            <div className="radar-trend-bar-track" style={{ "--bar-height": `${height}%` } as CSSProperties}>
-              <strong className="radar-trend-score">{formatScore(run.score)}</strong>
-              <div className={`radar-trend-bar radar-${run.status}`} style={{ height: `${height}%` }} />
-            </div>
-            <span>{run.date.replace("2026-", "")}</span>
-          </div>
-        );
-      })}
-    </div>
   );
 }
 
@@ -6429,8 +6191,21 @@ function SessionsScreen({
           <div className="session-management-grid">
             <section className="session-control-section session-sync-section">
               <div className="session-section-head">
-                <strong>历史会话修复</strong>
-                <small>刷新本地会话，或将旧会话归属同步到指定 provider。</small>
+                <div className="session-section-heading">
+                  <strong>历史会话修复</strong>
+                  <small>刷新本地会话，或将旧会话归属同步到指定 provider。</small>
+                </div>
+                <div className="session-sync-actions">
+                  <Button onClick={() => void actions.refreshLocalSessions()}>
+                    <RefreshCw className="h-4 w-4" />
+                    刷新会话
+                  </Button>
+                  <Button disabled={providerSyncProgress.active} onClick={() => void actions.syncProvidersNow()} variant="outline">
+                    <RefreshCw className="h-4 w-4" />
+                    {providerSyncProgress.active ? "正在修复…" : "立刻修复历史会话"}
+                  </Button>
+                  <Button onClick={() => void actions.saveSettings()}>保存会话设置</Button>
+                </div>
               </div>
               <div className="session-sync-options">
                 <Field className="provider-sync-target-field" label="同步目标">
@@ -6468,17 +6243,6 @@ function SessionsScreen({
                     </span>
                   </button>
                 </Field>
-              </div>
-              <div className="session-sync-actions">
-                <Button onClick={() => void actions.refreshLocalSessions()}>
-                  <RefreshCw className="h-4 w-4" />
-                  刷新会话
-                </Button>
-                <Button disabled={providerSyncProgress.active} onClick={() => void actions.syncProvidersNow()} variant="outline">
-                  <RefreshCw className="h-4 w-4" />
-                  {providerSyncProgress.active ? "正在修复…" : "立刻修复历史会话"}
-                </Button>
-                <Button onClick={() => void actions.saveSettings()}>保存会话设置</Button>
               </div>
               {providerSyncProgressVisible ? (
                 <div className="provider-sync-progress" data-active={providerSyncProgress.active}>
@@ -8101,6 +7865,7 @@ function RelayProfileEditor({
     responsesWebsocketToggleEnabled && profile.responsesWebsocketEnabled;
   const remoteCompactionV2Enabled = relayRemoteCompactionV2Enabled(profile);
   const multiAgentV2Enabled = relayMultiAgentV2Enabled(profile);
+  const subagentCount = relaySubagentCount(profile);
   const responsesWebsocketLabel =
     probingResponsesWebsocket
       ? "探测中"
@@ -8438,32 +8203,69 @@ function RelayProfileEditor({
         </div>
       ) : null}
       {showApiFields ? (
-        <div className="relay-remote-compaction-panel">
+        <div className="relay-subagent-panel">
           <div className="relay-remote-compaction-copy">
-            <strong>Multi Agent V2</strong>
-            <span>
-              开启后，保存供应商配置会写入
-              {" "}
-              <code>[features].{MULTI_AGENT_V2_FEATURE_KEY}</code>
-              {" "}
-              并将当前供应商生成的模型目录标记为多代理 V2。
-            </span>
+            <strong>子代理配置</strong>
+            <span>V2 模式和子代理数量是两个独立设置，可分别配置。</span>
           </div>
-          <label className="relay-remote-compaction-toggle">
-            <input
-              checked={multiAgentV2Enabled}
-              onChange={(event) =>
-                updateDraft({
-                  configContents: setRelayMultiAgentV2Enabled(
-                    profile.configContents,
-                    event.currentTarget.checked,
-                  ),
-                })
-              }
-              type="checkbox"
-            />
-            <span>启用多代理</span>
-          </label>
+          <div className="relay-subagent-options">
+            <div className="relay-subagent-option">
+              <div className="relay-subagent-option-copy">
+                <strong>V2 模式</strong>
+                <span title={`控制 [${MULTI_AGENT_V2_SECTION}].${MULTI_AGENT_V2_ENABLED_KEY}。`}>
+                  控制
+                  {" "}
+                  <code>[{MULTI_AGENT_V2_SECTION}].{MULTI_AGENT_V2_ENABLED_KEY}</code>。
+                </span>
+              </div>
+              <label className="relay-remote-compaction-toggle">
+                <input
+                  checked={multiAgentV2Enabled}
+                  onChange={(event) =>
+                    updateDraft({
+                      configContents: setRelayMultiAgentV2Enabled(
+                        profile.configContents,
+                        event.currentTarget.checked,
+                      ),
+                    })
+                  }
+                  type="checkbox"
+                />
+                <span>启动</span>
+              </label>
+            </div>
+            <div className="relay-subagent-option">
+              <div className="relay-subagent-option-copy">
+                <strong>子代理数量</strong>
+                <span
+                  title={`写入 [${AGENTS_SECTION}].${AGENTS_MAX_CONCURRENT_THREADS_KEY}，与 V2 模式无关。`}
+                >
+                  写入
+                  {" "}
+                  <code>[{AGENTS_SECTION}].{AGENTS_MAX_CONCURRENT_THREADS_KEY}</code>，
+                  与 V2 模式无关。
+                </span>
+              </div>
+              <label className="relay-subagent-count">
+                <span>数量</span>
+                <Input
+                  inputMode="numeric"
+                  min={1}
+                  onChange={(event) =>
+                    updateDraft({
+                      configContents: setRelaySubagentCount(
+                        profile.configContents,
+                        Number(event.currentTarget.value),
+                      ),
+                    })
+                  }
+                  title="允许同时运行的子代理数量，与 V2 模式开关无关"
+                  type="number"
+                  value={subagentCount}
+                />
+              </label>
+            </div>
+          </div>
         </div>
       ) : null}
       {showApiFields ? (
@@ -10400,6 +10202,7 @@ function relayActivationImpactRows(profile: RelayProfile): RelayActivationImpact
   const modelCatalogCount = relayProfileCatalogModelCount(profile);
   const contextWindow = relayProfileContextWindowForActiveModel(profile).trim();
   const multiAgentV2Enabled = relayMultiAgentV2Enabled(profile);
+  const subagentCount = relaySubagentCount(profile);
   const rows: RelayActivationImpactRow[] = [
     {
       file: "config.toml",
@@ -10477,12 +10280,19 @@ function relayActivationImpactRows(profile: RelayProfile): RelayActivationImpact
     },
     {
       file: "config.toml",
-      field: `features.${MULTI_AGENT_V2_FEATURE_KEY}`,
+      field: `${MULTI_AGENT_V2_SECTION}.${MULTI_AGENT_V2_ENABLED_KEY}`,
       value: multiAgentV2Enabled ? "true" : "不写入",
       detail: multiAgentV2Enabled
-        ? "启用 Codex Multi Agent V2。"
-        : "当前供应商不启用 Multi Agent V2。",
+        ? "启动 Codex 子代理 V2 模式。"
+        : "当前供应商不启动子代理 V2 模式。",
       tone: multiAgentV2Enabled ? "write" : "skip",
+    },
+    {
+      file: "config.toml",
+      field: `${AGENTS_SECTION}.${AGENTS_MAX_CONCURRENT_THREADS_KEY}`,
+      value: String(subagentCount),
+      detail: "允许同时运行的子代理数量，与 V2 模式开关无关。",
+      tone: "write",
     },
     {
       file: "config.toml",
@@ -10499,7 +10309,7 @@ function relayActivationImpactRows(profile: RelayProfile): RelayActivationImpact
       field: "models",
       value: `${modelCatalogCount} 个模型`,
       detail: multiAgentV2Enabled
-        ? "由模型列表生成，包含协议、上下文大小和 Multi Agent V2 能力。"
+        ? "由模型列表生成，包含协议、上下文大小和子代理 V2 能力。"
         : "由模型列表生成，包含协议和上下文大小信息。",
       tone: "file",
     });
@@ -10508,7 +10318,7 @@ function relayActivationImpactRows(profile: RelayProfile): RelayActivationImpact
         file: "codex-elves-model-catalog.json",
         field: "models[].multi_agent_version",
         value: "v2",
-        detail: "当前供应商的所有生成模型条目使用多代理 V2。",
+        detail: "当前供应商的所有生成模型条目使用子代理 V2。",
         tone: "write",
       });
     }
@@ -10561,17 +10371,87 @@ function setRelayRemoteCompactionV2Enabled(contents: string, enabled: boolean): 
 }
 
 function relayMultiAgentV2Enabled(profile: RelayProfile): boolean {
-  return tomlSectionBoolValue(
+  const enabled = tomlSectionOptionalBoolValue(
     profile.configContents,
-    "features",
-    MULTI_AGENT_V2_FEATURE_KEY,
+    MULTI_AGENT_V2_SECTION,
+    MULTI_AGENT_V2_ENABLED_KEY,
+  );
+  if (enabled !== null) return enabled;
+  return tomlSectionBoolValue(profile.configContents, "features", MULTI_AGENT_V2_FEATURE_KEY);
+}
+
+function relaySubagentCount(profile: RelayProfile): number {
+  const configured = tomlSectionIntValue(
+    profile.configContents,
+    AGENTS_SECTION,
+    AGENTS_MAX_CONCURRENT_THREADS_KEY,
+  );
+  if (configured !== null) {
+    return clampNumber(configured, 1, Number.MAX_SAFE_INTEGER);
+  }
+  const legacyMaxThreads = tomlSectionIntValue(
+    profile.configContents,
+    MULTI_AGENT_V2_SECTION,
+    LEGACY_MULTI_AGENT_V2_MAX_THREADS_KEY,
+  );
+  return clampNumber(
+    legacyMaxThreads === null ? DEFAULT_SUBAGENT_COUNT : legacyMaxThreads - 1,
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+}
+
+function migrateLegacyRelaySubagentCount(contents: string): string {
+  if (
+    tomlSectionIntValue(contents, AGENTS_SECTION, AGENTS_MAX_CONCURRENT_THREADS_KEY)
+    !== null
+  ) {
+    return contents;
+  }
+  const legacyMaxThreads = tomlSectionIntValue(
+    contents,
+    MULTI_AGENT_V2_SECTION,
+    LEGACY_MULTI_AGENT_V2_MAX_THREADS_KEY,
+  );
+  if (legacyMaxThreads === null) return contents;
+  return setTomlSectionRawKey(
+    contents,
+    AGENTS_SECTION,
+    AGENTS_MAX_CONCURRENT_THREADS_KEY,
+    String(clampNumber(legacyMaxThreads - 1, 1, Number.MAX_SAFE_INTEGER)),
   );
 }
 
 function setRelayMultiAgentV2Enabled(contents: string, enabled: boolean): string {
-  return enabled
-    ? setTomlSectionBoolKey(contents, "features", MULTI_AGENT_V2_FEATURE_KEY, true)
-    : removeTomlSectionKey(contents, "features", MULTI_AGENT_V2_FEATURE_KEY);
+  let next = migrateLegacyRelaySubagentCount(contents);
+  next = removeTomlSectionKey(next, "features", MULTI_AGENT_V2_FEATURE_KEY);
+  next = removeTomlSection(next, MULTI_AGENT_V2_SECTION);
+  if (!enabled) return next;
+  return setTomlSectionBoolKey(
+    next,
+    MULTI_AGENT_V2_SECTION,
+    MULTI_AGENT_V2_ENABLED_KEY,
+    true,
+  );
+}
+
+function setRelaySubagentCount(contents: string, subagentCount: number): string {
+  const next = removeTomlSectionKey(
+    contents,
+    MULTI_AGENT_V2_SECTION,
+    LEGACY_MULTI_AGENT_V2_MAX_THREADS_KEY,
+  );
+  const normalizedSubagentCount = clampNumber(
+    subagentCount,
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  return setTomlSectionRawKey(
+    next,
+    AGENTS_SECTION,
+    AGENTS_MAX_CONCURRENT_THREADS_KEY,
+    String(normalizedSubagentCount),
+  );
 }
 
 function relayProfileEffectiveBaseUrl(profile: RelayProfile): string {
@@ -10626,22 +10506,24 @@ function splitRelayModelList(value: string): string[] {
 
 function ModeSelector({ launchMode, actions }: { launchMode: LaunchMode; actions: Actions }) {
   return (
-    <div className="mode-grid">
+    <div className="enhance-mode-switch" role="group" aria-label="功能增强模式">
       <button
-        className={`mode-option ${launchMode === "relay" ? "active" : ""}`}
+        aria-pressed={launchMode === "relay"}
+        className={`enhance-mode-option ${launchMode === "relay" ? "active" : ""}`}
+        data-tooltip="适合官方登录或官方混入 API Key；保留会话删除、导出、项目移动和用户脚本，关闭插件入口相关增强。"
         onClick={() => void actions.setLaunchMode("relay")}
         type="button"
       >
-        <strong>兼容增强</strong>
-        <span>适合官方登录或官方混入 API Key；保留会话删除、导出、项目移动和用户脚本，关闭插件入口相关增强。</span>
+        登录兼容增强
       </button>
       <button
-        className={`mode-option ${launchMode === "patch" ? "active" : ""}`}
+        aria-pressed={launchMode === "patch"}
+        className={`enhance-mode-option ${launchMode === "patch" ? "active" : ""}`}
+        data-tooltip="适合纯 API；启用插件入口、会话删除导出、项目移动等全部页面能力。"
         onClick={() => void actions.setLaunchMode("patch")}
         type="button"
       >
-        <strong>完整增强</strong>
-        <span>适合纯 API；启用插件入口、会话删除导出、项目移动等全部页面能力。</span>
+        API完整增强
       </button>
     </div>
   );
@@ -11104,7 +10986,7 @@ function routeTitle(route: Route) {
 
 function routeSubtitle(route: Route) {
   const subtitles: Record<Route, string> = {
-    overview: "检查问题、启动与快速修复",
+    overview: "检查问题与快速修复",
     relay: "管理 API 供应商、协议、Key 与配置文件",
     localProxy: "查看本地代理状态、请求日志和完整返回内容",
     sessions: "查看、删除和修复 Codex 本地会话",
@@ -11113,7 +10995,6 @@ function routeSubtitle(route: Route) {
     enhance: "会话删除、导出、项目移动和脚本能力",
     skins: "为 Codex 界面设置背景主题与切换",
     userScripts: "内置和用户自定义脚本清单",
-    radar: "读取 codexradar.com 的模型 IQ 与近日报告",
     maintenance: "入口安装、修复、Watcher 与手动启动",
     about: "版本信息、项目链接、GitHub Release 更新、日志与诊断",
     settings: "主题、命令包装器和启动参数",
@@ -11792,6 +11673,82 @@ function calculateRequestRatio(entries: LocalProxyLogEntry[]) {
   };
 }
 
+function requestOutputRate(entry: LocalProxyLogEntry) {
+  const tokens = entry.outputTokens;
+  const duration = entry.durationMs;
+  if (
+    entry.state === "pending" ||
+    entry.error ||
+    typeof entry.statusCode !== "number" ||
+    entry.statusCode < 200 ||
+    entry.statusCode >= 300 ||
+    typeof tokens !== "number" ||
+    !Number.isFinite(tokens) ||
+    tokens <= 0 ||
+    typeof duration !== "number" ||
+    !Number.isFinite(duration) ||
+    duration <= 0
+  ) return null;
+  return { tokens, generationMs: duration };
+}
+
+function calculateProxyModelSpeeds(entries: LocalProxyLogEntry[]) {
+  const models = new Map<string, {
+    requestCount: number;
+    latestAtMs: number;
+    latestRateAtMs: number;
+    latestRate: number | null;
+    tokens: number;
+    generationMs: number;
+  }>();
+  for (const entry of entries) {
+    const model = entry.model?.trim();
+    if (!model) continue;
+    if (!models.has(model)) {
+      models.set(model, {
+        requestCount: 0,
+        latestAtMs: 0,
+        latestRateAtMs: -1,
+        latestRate: null,
+        tokens: 0,
+        generationMs: 0,
+      });
+    }
+    const summary = models.get(model)!;
+    summary.requestCount += 1;
+    summary.latestAtMs = Math.max(summary.latestAtMs, entry.timestampMs);
+    const sample = requestOutputRate(entry);
+    if (!sample) continue;
+    if (entry.timestampMs > summary.latestRateAtMs) {
+      summary.latestRateAtMs = entry.timestampMs;
+      summary.latestRate = sample.tokens * 1000 / sample.generationMs;
+    }
+    summary.tokens += sample.tokens;
+    summary.generationMs += sample.generationMs;
+  }
+  const result: Array<{ model: string; latestRate: number | null; averageRate: number | null } | null> =
+    Array.from(models)
+      .sort(([leftModel, left], [rightModel, right]) =>
+        right.requestCount - left.requestCount ||
+        right.latestAtMs - left.latestAtMs ||
+        leftModel.localeCompare(rightModel),
+      )
+      .slice(0, 4)
+      .map(([model, summary]) => ({
+        model,
+        latestRate: summary.latestRate,
+        averageRate: summary.generationMs > 0 ? summary.tokens * 1000 / summary.generationMs : null,
+      }));
+  while (result.length < 2) result.push(null);
+  return result;
+}
+
+function formatProxyTokenRate(rate?: number | null) {
+  return typeof rate === "number" && Number.isFinite(rate)
+    ? rate.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 })
+    : "-";
+}
+
 function classifyHighReasoningRequest(entry: Pick<LocalProxyLogEntry, "reasoningTokens">) {
   if (entry.reasoningTokens === 516) return "low";
   if (typeof entry.reasoningTokens === "number" && entry.reasoningTokens > 516) return "high";
@@ -11980,7 +11937,6 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
     computerUseApiKeyBrowserCompatEnabled:
       settings.computerUseApiKeyBrowserCompatEnabled !== false,
     lanProxyEnabled: settings.lanProxyEnabled === true,
-    wsFailureFallbackToHttp: settings.wsFailureFallbackToHttp === true,
     codexAppImageOverlayOpacity: clampNumber(settings.codexAppImageOverlayOpacity || 35, 1, 100),
     codexAppWorkspaceCheckpointStoragePath: (
       settings.codexAppWorkspaceCheckpointStoragePath || ""
@@ -12856,6 +12812,14 @@ function tomlStringAssignmentValue(line: string, key: string): string | null {
 }
 
 function tomlSectionBoolValue(contents: string, sectionName: string, key: string): boolean {
+  return tomlSectionOptionalBoolValue(contents, sectionName, key) === true;
+}
+
+function tomlSectionOptionalBoolValue(
+  contents: string,
+  sectionName: string,
+  key: string,
+): boolean | null {
   let currentSection = "";
   const pattern = new RegExp(`^\\s*${key}\\s*=\\s*(true|false)\\s*(?:#.*)?$`);
   for (const line of contents.split(/\r?\n/)) {
@@ -12868,7 +12832,23 @@ function tomlSectionBoolValue(contents: string, sectionName: string, key: string
     const match = pattern.exec(line);
     if (match) return match[1] === "true";
   }
-  return false;
+  return null;
+}
+
+function tomlSectionIntValue(contents: string, sectionName: string, key: string): number | null {
+  let currentSection = "";
+  const pattern = new RegExp(`^\\s*${key}\\s*=\\s*(\\d+)\\s*(?:#.*)?$`);
+  for (const line of contents.split(/\r?\n/)) {
+    const section = tomlSectionName(line);
+    if (section !== null) {
+      currentSection = section;
+      continue;
+    }
+    if (currentSection !== sectionName) continue;
+    const match = pattern.exec(line);
+    if (match) return Number(match[1]);
+  }
+  return null;
 }
 
 function setAuthOpenAiApiKey(contents: string, apiKey: string): string {
@@ -13009,6 +12989,24 @@ function removeTomlSectionKey(contents: string, sectionName: string, key: string
     return !new RegExp(`^\\s*${key}\\s*=`).test(line);
   });
   return ensureTrailingNewline(next.join("\n").trimEnd());
+}
+
+function removeTomlSection(contents: string, sectionName: string): string {
+  const lines = contents.split(/\r?\n/);
+  let sectionStart = -1;
+  let sectionEnd = lines.length;
+  for (let index = 0; index < lines.length; index += 1) {
+    const section = tomlSectionName(lines[index]);
+    if (section === null) continue;
+    if (sectionStart >= 0) {
+      sectionEnd = index;
+      break;
+    }
+    if (section === sectionName) sectionStart = index;
+  }
+  if (sectionStart < 0) return contents;
+  lines.splice(sectionStart, sectionEnd - sectionStart);
+  return ensureTrailingNewline(lines.join("\n").trimEnd());
 }
 
 function relayProfileSwitchValidation(profile: RelayProfile, settings?: BackendSettings): string | null {
@@ -13396,6 +13394,22 @@ function formatTime(value: number) {
   return new Date(value).toLocaleString("zh-CN");
 }
 
+function upstreamResponseModelMismatch(entry: LocalProxyLogEntry): boolean {
+  const requested = entry.model?.trim();
+  const observed = entry.upstreamResponseModel?.trim();
+  return Boolean(
+    requested
+    && observed
+    && normalizeAuditModel(requested) !== normalizeAuditModel(observed),
+  );
+}
+
+function normalizeAuditModel(model: string): string {
+  const normalized = model.toLowerCase();
+  const grok = /^(grok-4\.[567])(?:-latest|-build)?$/.exec(normalized);
+  return grok ? `${grok[1]}-build` : normalized;
+}
+
 function formatRequestLogListTime(value: number) {
   if (!value) return "-";
   return new Date(value).toLocaleString("zh-CN", {
@@ -13408,24 +13422,9 @@ function formatRequestLogListTime(value: number) {
   });
 }
 
-function formatIsoTime(value: string) {
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) return value;
-  return new Date(timestamp).toLocaleString("zh-CN");
-}
-
-function formatScore(value: number) {
-  return Number.isInteger(value) ? String(value) : value.toFixed(1);
-}
-
 function formatCompactNumber(value: number) {
   if (!value) return "-";
   return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(value);
-}
-
-function formatUsd(value?: number | null) {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
-  return `$${value.toFixed(2)}`;
 }
 
 function formatDuration(startedAtMs: number): string {
@@ -13453,7 +13452,6 @@ function loadInitialTheme(): Theme {
 function loadInitialRoute(): Route {
   if (typeof window === "undefined") return "overview";
   const params = new URLSearchParams(window.location.search);
-  if (window.location.hash === "#radar") return "radar";
   if (params.get("showUpdate") === "1" || window.location.hash === "#about") {
     return "about";
   }

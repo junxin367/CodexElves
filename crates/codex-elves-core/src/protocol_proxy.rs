@@ -1313,17 +1313,6 @@ impl std::fmt::Display for UpstreamFailureContext {
 
 impl std::error::Error for UpstreamFailureContext {}
 
-/// A local transport-policy rejection; no HTTP request reached the provider.
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "当前模型已启用 WS，且“WS 失败切 HTTP”已关闭；已在本地阻止 HTTP 回退。请重新连接会话以恢复 WS，或开启 HTTP 回退。"
-)]
-pub struct ResponsesHttpFallbackDisabled;
-
-impl ResponsesHttpFallbackDisabled {
-    pub const CODE: &str = "responses_websocket_required";
-}
-
 pub fn upstream_failure_context(error: &anyhow::Error) -> Option<&UpstreamFailureContext> {
     error
         .chain()
@@ -2098,7 +2087,7 @@ pub async fn open_responses_proxy_request_with_request_context_and_stream_header
     .await
 }
 
-async fn open_responses_proxy_request_with_settings_request_context_and_timeout(
+pub(crate) async fn open_responses_proxy_request_with_settings_request_context_and_timeout(
     body: &str,
     settings: crate::settings::BackendSettings,
     request_context: &RequestContext,
@@ -2246,39 +2235,18 @@ async fn open_responses_proxy_request_once(
         };
         let mut response_protocol = responses_proxy_target_protocol(&relay, &request_json)?;
         let mut endpoint = upstream_endpoint_for_protocol(&relay, response_protocol);
-        // The client can downgrade independently of our WS close frames / 426
-        // fallback cache, and can keep using HTTP for later turns in the session.
-        // Enforce the currently selected transport at the HTTP send boundary.
-        // Compaction and non-stream requests have separate HTTP-only paths;
-        // converted protocols and aggregates do not use the native WS bridge.
-        if !settings.ws_failure_fallback_to_http
-            && is_stream
+        let can_recover_ws = is_stream
             && compaction_execution_mode == CompactionExecutionMode::None
             && response_protocol == UpstreamResponseProtocol::Responses
             && settings.active_aggregate_relay_profile().is_none()
-            && crate::responses_websocket::relay_websocket_enabled_for_settings(&settings, &relay)
+            && crate::responses_websocket::relay_websocket_enabled_for_settings(&settings, &relay);
+        if is_stream
+            && compaction_execution_mode == CompactionExecutionMode::None
+            && !can_recover_ws
         {
-            let _ = crate::diagnostic_log::append_diagnostic_log(
-                "protocol_proxy.responses_http_fallback_blocked",
-                json!({
-                    "diagnosticId": diagnostic_id,
-                    "relayId": relay.id,
-                    "relayName": relay.name,
-                    "endpoint": endpoint,
-                    "code": ResponsesHttpFallbackDisabled::CODE,
-                    "upstreamRequestSent": false,
-                }),
-            );
-            return Err(anyhow::Error::new(ResponsesHttpFallbackDisabled).context(
-                UpstreamFailureContext {
-                    diagnostic_id,
-                    relay_id: Some(relay.id.clone()),
-                    relay_name: Some(relay.name.clone()),
-                    endpoint: Some(endpoint),
-                    response_protocol: Some(response_protocol),
-                    bridge_remote_compaction_v2: false,
-                },
-            ));
+            // A normal request switched to an HTTP-only model/provider. Compaction
+            // requests are auxiliary and must not reset the conversation's timer.
+            crate::session_transport::forget_thread(request_context);
         }
         let has_more_candidates = attempt + 1 < relay_count;
         let upstream_is_stream = is_stream;
@@ -2324,7 +2292,7 @@ async fn open_responses_proxy_request_once(
             &relay.user_agent,
             request_context.user_agent(),
         ))?;
-        let (upstream, upstream_request_json) = match send_responses_upstream_request(
+        let (upstream, upstream_request_json, used_ws) = match send_responses_upstream_request(
             &client,
             &relay,
             &request_json,
@@ -2333,6 +2301,7 @@ async fn open_responses_proxy_request_once(
             &diagnostic_id,
             header_timeout,
             request_context,
+            can_recover_ws,
         )
         .await
         {
@@ -2377,7 +2346,19 @@ async fn open_responses_proxy_request_once(
                     .context(failure_context);
             }
         };
-        let mut logged_request_body = serialized_proxy_request_body(&upstream_request_json);
+        if used_ws {
+            endpoint = crate::responses_websocket::responses_websocket_url(
+                crate::responses_websocket::relay_responses_base_url(&relay),
+            )
+            .unwrap_or(endpoint);
+        }
+        let mut logged_request_body = if used_ws {
+            // Match the actual compact WS frame, including pruning and the
+            // response.create envelope, so request bytes are meaningful.
+            upstream_request_json.to_string()
+        } else {
+            serialized_proxy_request_body(&upstream_request_json)
+        };
         let status_code = upstream.status().as_u16();
         let mut upstream_response = Some(upstream);
         let mut body_override = None;
@@ -2695,13 +2676,26 @@ async fn send_responses_upstream_request(
     diagnostic_id: &str,
     header_timeout: Option<Duration>,
     request_context: &RequestContext,
-) -> anyhow::Result<(reqwest::Response, Value)> {
+    can_recover_ws: bool,
+) -> anyhow::Result<(reqwest::Response, Value, bool)> {
     let upstream_request = responses_upstream_request_for_protocol(
         request_json,
         response_protocol,
         is_stream,
         diagnostic_id,
     )?;
+    if can_recover_ws {
+        if let Some((response, ws_request)) = crate::session_transport::try_ws_for_http(
+            relay,
+            request_context,
+            &upstream_request,
+            header_timeout,
+        )
+        .await
+        {
+            return Ok((response, ws_request, true));
+        }
+    }
     let response = match response_protocol {
         UpstreamResponseProtocol::Responses => {
             send_upstream_request_with_optional_header_timeout(
@@ -2738,7 +2732,7 @@ async fn send_responses_upstream_request(
             .await
         }
     }?;
-    Ok((response, upstream_request))
+    Ok((response, upstream_request, false))
 }
 
 fn responses_upstream_request_for_protocol(

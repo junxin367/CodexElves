@@ -73,9 +73,6 @@ The Windows installer creates desktop and Start Menu shortcuts. The macOS DMG in
 ### Batch Session Deletion
 ![Batch session deletion](image-2.png)
 
-### Codex Radar
-![Codex Radar](image-3.png)
-
 ## Relay Injection
 
 Relay injection is for users who are already logged in with an official ChatGPT account in Codex/ChatGPT and want model requests to go through a custom compatible API.

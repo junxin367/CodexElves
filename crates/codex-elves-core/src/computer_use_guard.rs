@@ -48,19 +48,7 @@ pub(crate) struct GuardArtifacts {
 pub(crate) fn resolve_computer_use_guard_artifacts(home: &Path) -> anyhow::Result<GuardArtifacts> {
     #[cfg(windows)]
     {
-        let notify_exe = find_computer_use_notify_exe(home);
-        let runtime_exports_needed = computer_use_client_needs_sky_internal_export(home)?;
-        let browser_service_script =
-            find_browser_service_script_for_notify_exe(notify_exe.as_deref())
-                .or_else(find_latest_browser_service_script);
-        Ok(GuardArtifacts {
-            sky_package_json: find_sky_package_json_for_notify_exe(notify_exe.as_deref())
-                .or_else(find_latest_sky_package_json),
-            notify_exe,
-            marketplace_path: ensure_openai_bundled_marketplace(home)?,
-            browser_service_script,
-            runtime_exports_needed,
-        })
+        resolve_computer_use_guard_artifacts_windows(home, ensure_openai_bundled_marketplace(home)?)
     }
     #[cfg(not(windows))]
     {
@@ -73,6 +61,53 @@ pub(crate) fn resolve_computer_use_guard_artifacts(home: &Path) -> anyhow::Resul
             runtime_exports_needed: false,
         })
     }
+}
+
+pub(crate) fn refresh_computer_use_guard_artifacts(
+    home: &Path,
+    previous: Option<&GuardArtifacts>,
+) -> anyhow::Result<GuardArtifacts> {
+    #[cfg(windows)]
+    {
+        let marketplace_path = previous
+            .and_then(|artifacts| artifacts.marketplace_path.as_deref())
+            .filter(|path| path.is_dir())
+            .map(Path::to_path_buf);
+        let marketplace_path = match marketplace_path {
+            Some(path) => Some(path),
+            None => ensure_openai_bundled_marketplace(home)?,
+        };
+        resolve_computer_use_guard_artifacts_windows(home, marketplace_path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (home, previous);
+        Ok(GuardArtifacts {
+            notify_exe: None,
+            marketplace_path: None,
+            sky_package_json: None,
+            browser_service_script: None,
+            runtime_exports_needed: false,
+        })
+    }
+}
+
+#[cfg(windows)]
+fn resolve_computer_use_guard_artifacts_windows(
+    home: &Path,
+    marketplace_path: Option<PathBuf>,
+) -> anyhow::Result<GuardArtifacts> {
+    let notify_exe = find_computer_use_notify_exe(home);
+    let runtime_exports_needed = computer_use_client_needs_sky_internal_export(home)?;
+    let browser_service_script = resolve_browser_service_script(home, notify_exe.as_deref());
+    Ok(GuardArtifacts {
+        sky_package_json: find_sky_package_json_for_notify_exe(notify_exe.as_deref())
+            .or_else(find_latest_sky_package_json),
+        notify_exe,
+        marketplace_path,
+        browser_service_script,
+        runtime_exports_needed,
+    })
 }
 
 pub(crate) fn ensure_computer_use_config_with_artifacts(
@@ -248,9 +283,7 @@ pub(crate) fn reconcile_browser_request_header_compat(
     #[cfg(windows)]
     {
         let notify_exe = find_computer_use_notify_exe(home);
-        let browser_service_script =
-            find_browser_service_script_for_notify_exe(notify_exe.as_deref())
-                .or_else(find_latest_browser_service_script);
+        let browser_service_script = resolve_browser_service_script(home, notify_exe.as_deref());
         ensure_browser_request_header_compat_windows(browser_service_script.as_deref(), enabled)
     }
     #[cfg(not(windows))]
@@ -743,6 +776,31 @@ fn find_browser_service_script_for_notify_exe(notify_exe: Option<&Path>) -> Opti
         }
     }
     None
+}
+
+#[cfg(windows)]
+fn resolve_browser_service_script(home: &Path, notify_exe: Option<&Path>) -> Option<PathBuf> {
+    configured_browser_service_script(home)
+        .or_else(|| find_browser_service_script_for_notify_exe(notify_exe))
+        .or_else(find_latest_browser_service_script)
+}
+
+#[cfg(windows)]
+fn configured_browser_service_script(home: &Path) -> Option<PathBuf> {
+    let config = std::fs::read_to_string(home.join("config.toml")).ok()?;
+    let without_bom = config.trim_start_matches('\u{feff}');
+    let doc = parse_toml_document(without_bom).ok()?;
+    let trusted_services = doc
+        .get("shell_environment_policy")?
+        .as_table_like()?
+        .get("set")?
+        .as_table_like()?
+        .get("NODE_REPL_TRUSTED_SERVICES")?
+        .as_str()?;
+    let trusted_services: serde_json::Value = serde_json::from_str(trusted_services).ok()?;
+    let browser = trusted_services.get("browser")?.as_str()?;
+    let browser = PathBuf::from(browser);
+    (browser.is_absolute() && browser.is_file()).then_some(browser)
 }
 
 #[cfg(windows)]
@@ -1341,6 +1399,178 @@ mod tests {
         assert_eq!(
             parsed["marketplaces"]["openai-bundled"]["source"].as_str(),
             Some(r"\\?\C:\Users\me\.codex\.tmp\bundled-marketplaces\openai-bundled")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_service_resolution_prefers_configured_trusted_service() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join(".codex");
+        let configured_browser = temp
+            .path()
+            .join("plugins")
+            .join("browser")
+            .join(BROWSER_SERVICE_SCRIPT);
+        let oai_root = temp.path().join("runtime").join("@oai");
+        let notify_exe = oai_root
+            .join("sky")
+            .join("bin")
+            .join("windows")
+            .join(COMPUTER_USE_EXE);
+        let runtime_browser = oai_root
+            .join("browser-desktop")
+            .join("scripts")
+            .join(BROWSER_SERVICE_SCRIPT);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(configured_browser.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(notify_exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(runtime_browser.parent().unwrap()).unwrap();
+        std::fs::write(&configured_browser, "").unwrap();
+        std::fs::write(&notify_exe, "").unwrap();
+        std::fs::write(&runtime_browser, "").unwrap();
+        let trusted_services = serde_json::json!({
+            "browser": configured_browser.to_string_lossy()
+        });
+        std::fs::write(
+            home.join("config.toml"),
+            format!(
+                "[shell_environment_policy.set]\nNODE_REPL_TRUSTED_SERVICES = '{}'\n",
+                trusted_services
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_browser_service_script(&home, Some(&notify_exe)).as_deref(),
+            Some(configured_browser.as_path())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_service_resolution_follows_configured_runtime_rotation() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join(".codex");
+        let old_browser = temp.path().join("runtime-old").join(BROWSER_SERVICE_SCRIPT);
+        let new_browser = temp.path().join("runtime-new").join(BROWSER_SERVICE_SCRIPT);
+        let marketplace_path = temp.path().join("openai-bundled");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(old_browser.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(new_browser.parent().unwrap()).unwrap();
+        std::fs::create_dir(&marketplace_path).unwrap();
+        std::fs::write(&old_browser, "").unwrap();
+        std::fs::write(&new_browser, "").unwrap();
+        let previous = GuardArtifacts {
+            notify_exe: None,
+            marketplace_path: Some(marketplace_path.clone()),
+            sky_package_json: None,
+            browser_service_script: Some(old_browser.clone()),
+            runtime_exports_needed: false,
+        };
+        std::fs::remove_file(&old_browser).unwrap();
+        let trusted_services = serde_json::json!({
+            "browser": new_browser.to_string_lossy()
+        });
+        std::fs::write(
+            home.join("config.toml"),
+            format!(
+                "[shell_environment_policy.set]\nNODE_REPL_TRUSTED_SERVICES = '{}'\n",
+                trusted_services
+            ),
+        )
+        .unwrap();
+
+        let refreshed = refresh_computer_use_guard_artifacts(&home, Some(&previous)).unwrap();
+        assert_eq!(
+            refreshed.browser_service_script.as_deref(),
+            Some(new_browser.as_path())
+        );
+        assert_eq!(
+            refreshed.marketplace_path.as_deref(),
+            Some(marketplace_path.as_path())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_service_resolution_ignores_invalid_configured_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join(".codex");
+        let oai_root = temp.path().join("runtime").join("@oai");
+        let notify_exe = oai_root
+            .join("sky")
+            .join("bin")
+            .join("windows")
+            .join(COMPUTER_USE_EXE);
+        let runtime_browser = oai_root
+            .join("browser-desktop")
+            .join("scripts")
+            .join(BROWSER_SERVICE_SCRIPT);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(notify_exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(runtime_browser.parent().unwrap()).unwrap();
+        std::fs::write(&notify_exe, "").unwrap();
+        std::fs::write(&runtime_browser, "").unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            "[shell_environment_policy.set]\nNODE_REPL_TRUSTED_SERVICES = '{\"browser\":\"relative/browser-service.mjs\"}'\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_browser_service_script(&home, Some(&notify_exe)).as_deref(),
+            Some(runtime_browser.as_path())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_request_header_compat_reconciles_configured_trusted_service() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join(".codex");
+        let browser_service_script = temp
+            .path()
+            .join("plugins")
+            .join("browser")
+            .join(BROWSER_SERVICE_SCRIPT);
+        let source = concat!(
+            "async function NO(){if(Im==null)throw new Error(\"",
+            "Browser request-header policy requires caller identity.",
+            "\");return await Im,$R(\"codex_browser_use_agent_request_header\")}"
+        );
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(browser_service_script.parent().unwrap()).unwrap();
+        std::fs::write(&browser_service_script, source).unwrap();
+        let trusted_services = serde_json::json!({
+            "browser": browser_service_script.to_string_lossy()
+        });
+        std::fs::write(
+            home.join("config.toml"),
+            format!(
+                "[shell_environment_policy.set]\nNODE_REPL_TRUSTED_SERVICES = '{}'\n",
+                trusted_services
+            ),
+        )
+        .unwrap();
+
+        let enabled = reconcile_browser_request_header_compat(&home, true).unwrap();
+        assert!(enabled.changed);
+        assert_eq!(
+            enabled.script_path.as_deref(),
+            Some(browser_service_script.as_path())
+        );
+        assert!(
+            std::fs::read_to_string(&browser_service_script)
+                .unwrap()
+                .contains(BROWSER_REQUEST_HEADER_COMPAT_MARKER)
+        );
+
+        let disabled = reconcile_browser_request_header_compat(&home, false).unwrap();
+        assert!(disabled.changed);
+        assert_eq!(
+            std::fs::read_to_string(&browser_service_script).unwrap(),
+            source
         );
     }
 

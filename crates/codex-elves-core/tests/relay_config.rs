@@ -3182,7 +3182,7 @@ base_url = "https://relay.example/v1"
 }
 
 #[test]
-fn apply_relay_profile_to_home_with_switch_rules_syncs_multi_agent_v2_feature() {
+fn apply_relay_profile_to_home_with_switch_rules_syncs_independent_subagent_config() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(
         temp.path().join("config.toml"),
@@ -3217,19 +3217,25 @@ base_url = "https://relay.example/v1"
     let disabled = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
     assert!(disabled.contains("goals = true"));
     assert!(!disabled.contains("multi_agent_v2"));
+    assert!(disabled.contains("[agents]"));
+    assert!(disabled.contains("max_concurrent_threads_per_session = 6"));
 
-    profile
-        .config_contents
-        .push_str("\n[features]\nmulti_agent_v2 = true\n");
+    profile.config_contents.push_str(
+        "\n[features.multi_agent_v2]\nenabled = true\n\n[agents]\nmax_concurrent_threads_per_session = 7\n",
+    );
     apply_relay_profile_to_home_with_switch_rules(temp.path(), &profile, "").unwrap();
 
     let enabled = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
     assert!(enabled.contains("goals = true"));
-    assert!(enabled.contains("multi_agent_v2 = true"));
+    assert!(enabled.contains("[features.multi_agent_v2]"));
+    assert!(enabled.contains("enabled = true"));
+    assert!(enabled.contains("[agents]"));
+    assert!(enabled.contains("max_concurrent_threads_per_session = 7"));
+    assert!(!enabled.contains("\nmulti_agent_v2 = true"));
 }
 
 #[test]
-fn sync_applied_relay_profile_multi_agent_v2_to_home_updates_active_live_config() {
+fn sync_applied_relay_profile_multi_agent_v2_to_home_updates_independent_subagent_config() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(
         temp.path().join("config.toml"),
@@ -3248,8 +3254,11 @@ goals = true
         relay_mode: RelayMode::PureApi,
         config_contents: r#"model_provider = "custom"
 
-[features]
-multi_agent_v2 = true
+[features.multi_agent_v2]
+enabled = true
+
+[agents]
+max_concurrent_threads_per_session = 6
 "#
         .to_string(),
         ..RelayProfile::default()
@@ -3258,13 +3267,20 @@ multi_agent_v2 = true
     assert!(sync_applied_relay_profile_multi_agent_v2_to_home(temp.path(), &profile).unwrap());
     let enabled = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
     assert!(enabled.contains("goals = true"));
-    assert!(enabled.contains("multi_agent_v2 = true"));
+    assert!(enabled.contains("[features.multi_agent_v2]"));
+    assert!(enabled.contains("enabled = true"));
+    assert!(enabled.contains("[agents]"));
+    assert!(enabled.contains("max_concurrent_threads_per_session = 6"));
 
-    profile.config_contents = "model_provider = \"custom\"\n".to_string();
+    profile.config_contents =
+        "model_provider = \"custom\"\n\n[agents]\nmax_concurrent_threads_per_session = 8\n"
+            .to_string();
     assert!(sync_applied_relay_profile_multi_agent_v2_to_home(temp.path(), &profile).unwrap());
     let disabled = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
     assert!(disabled.contains("goals = true"));
     assert!(!disabled.contains("multi_agent_v2"));
+    assert!(disabled.contains("[agents]"));
+    assert!(disabled.contains("max_concurrent_threads_per_session = 8"));
 }
 
 #[test]

@@ -22,7 +22,6 @@ commands.allow = [
   "delete_workspace_checkpoint_data",
   "disable_watcher",
   "enable_watcher",
-  "fetch_codex_radar",
   "fetch_relay_profile_models",
   "force_refresh_plugin_cache",
   "import_ccs_providers",

@@ -28,12 +28,12 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "90";
+  const codexDeleteStyleVersion = "93";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
   const codexElvesMenuTitlebarClass = "codex-elves-menu-titlebar";
-  const codexDeleteVersion = "7";
+  const codexDeleteVersion = "12";
   const codexActionGroupVersion = "6";
   const codexArchiveRowActionsVersion = "1";
   const codexConversationViewRouteHooksVersion = "3";
@@ -342,6 +342,8 @@
   if (
     window.__codexElvesRuntimeBuild === codexElvesBuild &&
     window.__codexElvesRuntimeHelperBase === helperBase &&
+    window.__codexElvesRuntimeStyleVersion === codexDeleteStyleVersion &&
+    window.__codexElvesRuntimeDeleteVersion === codexDeleteVersion &&
     window.__codexElvesRuntimeManagerDiscoveryVersion === codexAppServerManagerDiscoveryVersion &&
     window.__codexElvesOpenInRuntimeVersion === codexOpenInVersion &&
     window.__codexElvesWorkspaceCheckpointRuntimeVersion === codexWorkspaceCheckpointVersion &&
@@ -715,6 +717,28 @@
         flex: 0 0 auto;
         gap: 8px;
       }
+      .${actionGroupClass}[data-codex-action-placement="native"] .${actionButtonClass} {
+        display: inline-flex;
+        width: 20px;
+        height: 20px;
+        min-width: 20px;
+        min-height: 20px;
+        flex: 0 0 20px;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        border: 0;
+        border-radius: 4px;
+        background: transparent;
+        color: inherit;
+        cursor: default;
+      }
+      .${actionGroupClass}[data-codex-action-placement="native"] .${actionButtonClass} svg {
+        display: block;
+        width: 16px;
+        height: 16px;
+        flex: 0 0 16px;
+      }
       [data-codex-session-action-host="true"] {
         width: auto !important;
         min-width: 52px !important;
@@ -746,6 +770,10 @@
         background: #363839;
         color: #f4f4f5;
         outline: none;
+      }
+      .${actionGroupClass}[data-codex-action-placement="native"] .${buttonClass},
+      .${actionGroupClass}:not([data-codex-action-placement="native"]) .${buttonClass} {
+        cursor: pointer;
       }
       .${moreMenuClass} {
         position: fixed;
@@ -3390,17 +3418,27 @@
       .codex-task-board-create-session-option:last-child {
         border-bottom: 0;
       }
-      .codex-task-board-create-session-option:hover,
-      .codex-task-board-create-session-option:has(input:checked) {
+      .codex-task-board-create-session-option:hover {
         background: color-mix(in srgb, currentColor 5%, transparent);
         color: inherit;
       }
-      .codex-task-board-create-session-option input {
+      .codex-task-board-create-session-option:has(input:checked) {
+        background: color-mix(in srgb, #63aee0 18%, transparent);
+        box-shadow: inset 3px 0 #63aee0;
+        color: inherit;
+      }
+      .codex-task-board-create-session-option input[type="checkbox"] {
+        appearance: auto;
+        -webkit-appearance: checkbox;
         width: 15px;
         height: 15px;
         margin: 0;
         accent-color: #63aee0;
         cursor: pointer;
+      }
+      .codex-task-board-create-session-option input[type="checkbox"]:focus-visible {
+        outline: 2px solid #63aee0;
+        outline-offset: 2px;
       }
       .codex-task-board-create-session-icon {
         color: color-mix(in srgb, currentColor 48%, transparent);
@@ -9236,6 +9274,116 @@
     const conversationId = activeConversationIdFromDom();
     if (conversationId) return { session_id: conversationId, title: "" };
     return resolveTemporarySessionRef({ session_id: locationThreadId(), title: "" });
+  }
+
+  let codexTransportPollBusy = false;
+  let codexTransportStates = new Map();
+  const codexTransportRuntime = {};
+
+  function updateCodexTransportBadge(host, state, current = false) {
+    if (!host) return;
+    let badge = host.querySelector(':scope > [data-codex-transport-badge="true"]');
+    if (!state || (!current && state.mode === "ws")) {
+      badge?.remove();
+      return;
+    }
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.dataset.codexTransportBadge = "true";
+      badge.style.cssText = "display:inline-flex;align-items:center;flex-shrink:0;font-size:10px;line-height:18px;padding:0 5px;border-radius:4px;margin-inline-start:6px;white-space:nowrap;pointer-events:auto;";
+      host.appendChild(badge);
+    }
+    const waiting = state.mode !== "ws";
+    const seconds = Math.max(0, Math.ceil((Number(state.nextProbeAtMs || 0) - Date.now()) / 1000));
+    const text = state.mode === "probing"
+      ? "HTTP · 检测 WS"
+      : waiting ? `HTTP · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`
+      : "上游 WS";
+    if (badge.textContent !== text) badge.textContent = text;
+    if (badge.dataset.transportMode !== state.mode) {
+      badge.dataset.transportMode = state.mode;
+      badge.style.background = waiting ? "rgba(217,119,6,.14)" : "rgba(22,163,74,.12)";
+      badge.style.color = waiting ? "#b97712" : "var(--text-secondary, #6b7280)";
+    }
+    const title = waiting
+      ? `当前会话上游已回退 HTTP，每 3 分钟尝试恢复 WS。\n${state.reason || ""}`
+      : "当前会话上游使用 WebSocket；客户端仍可通过本地 HTTP 连接提交请求。";
+    if (badge.title !== title) {
+      badge.title = title;
+      badge.setAttribute("aria-label", title);
+    }
+  }
+
+  function renderCodexTransportBadges() {
+    if (window.__codexTransportRuntime !== codexTransportRuntime) return;
+    const current = currentSessionRef().session_id;
+    const menu = document.getElementById(codexElvesMenuId);
+    updateCodexTransportBadge(menu, codexTransportStates.get(current), true);
+    sessionRows().forEach((row) => {
+      const ref = sessionRefFromRow(row);
+      const state = codexTransportStates.get(ref.session_id);
+      let host = row.querySelector('[data-codex-transport-host="true"]');
+      // Action groups can be disabled or hidden until hover. Keep transport
+      // status beside the title, independent of delete/export/move controls.
+      row.querySelectorAll('[data-codex-transport-badge="true"]').forEach((badge) => {
+        if (!host?.contains(badge)) badge.remove();
+      });
+      if (!state || state.mode === "ws") {
+        host?.remove();
+        return;
+      }
+      const title = row.querySelector(`${selectors.threadTitle}, .truncate.select-none, .truncate.text-base`);
+      if (!title) {
+        host?.remove();
+        return;
+      }
+      if (!host) {
+        host = document.createElement("span");
+        host.dataset.codexTransportHost = "true";
+        host.style.cssText = "display:inline-flex;align-items:center;flex-shrink:0;margin-inline-end:6px;";
+      }
+      if (host.nextSibling !== title) title.before(host);
+      updateCodexTransportBadge(host, state);
+    });
+  }
+
+  async function pollCodexSessionTransports() {
+    if (codexTransportPollBusy) return;
+    const ids = new Set([currentSessionRef().session_id]);
+    sessionRows().forEach((row) => ids.add(sessionRefFromRow(row).session_id));
+    ids.delete("");
+    ids.delete(undefined);
+    if (!ids.size) {
+      codexTransportStates.clear();
+      renderCodexTransportBadges();
+      return;
+    }
+    codexTransportPollBusy = true;
+    try {
+      const result = await withBackendTimeout(postJson("/transport/sessions", { threadIds: [...ids].slice(0, 200) }));
+      if (window.__codexTransportRuntime !== codexTransportRuntime) return;
+      const states = new Map();
+      for (const state of result?.sessions || []) {
+        const previous = states.get(state.threadId);
+        if (!previous || Number(state.lastSeenOrder ?? state.lastSeenAtMs) > Number(previous.lastSeenOrder ?? previous.lastSeenAtMs)) states.set(state.threadId, state);
+      }
+      codexTransportStates = states;
+      renderCodexTransportBadges();
+    } catch {
+      codexTransportStates.clear();
+      renderCodexTransportBadges();
+    } finally {
+      codexTransportPollBusy = false;
+    }
+  }
+
+  function installCodexTransportBadges() {
+    window.__codexTransportRuntime = codexTransportRuntime;
+    clearInterval(window.__codexTransportPollTimer);
+    clearInterval(window.__codexTransportDisplayTimer);
+    window.__codexTransportPollTimer = setInterval(() => void pollCodexSessionTransports(), 5000);
+    window.__codexTransportDisplayTimer = setInterval(renderCodexTransportBadges, 1000);
+    void pollCodexSessionTransports();
   }
 
   function currentSessionRef() {
@@ -24293,12 +24441,12 @@
       const overlay = document.createElement("div");
       overlay.className = "codex-delete-confirm-overlay";
       overlay.innerHTML = `
-        <div class="codex-delete-confirm-content" role="dialog" aria-modal="true" aria-label="删除会话">
-          <div class="codex-delete-confirm-title">删除会话</div>
-          <div class="codex-delete-confirm-message">删除“${escapeHtml(title)}”？</div>
+        <div class="codex-delete-confirm-content" role="dialog" aria-modal="true" aria-label="永久删除会话">
+          <div class="codex-delete-confirm-title">永久删除会话</div>
+          <div class="codex-delete-confirm-message">永久删除“${escapeHtml(title)}”及其派生会话？此操作不可恢复。</div>
           <div class="codex-delete-confirm-actions">
             <button type="button" data-codex-delete-cancel="true">取消</button>
-            <button type="button" data-codex-delete-confirm="true">删除</button>
+            <button type="button" data-codex-delete-confirm="true">永久删除</button>
           </div>
         </div>
       `;
@@ -24331,17 +24479,99 @@
   }
 
   function isCurrentSessionRow(row, ref) {
-    if (row.getAttribute("aria-current") === "page" || row.getAttribute("aria-current") === "true") return true;
+    if (
+      row.getAttribute("aria-current") === "page" ||
+      row.getAttribute("aria-current") === "true" ||
+      row.getAttribute("data-app-action-sidebar-thread-active") === "true" ||
+      row.getAttribute("data-app-action-sidebar-thread-selected") === "true"
+    ) {
+      return true;
+    }
+    const rowSessionId = validThreadSessionKey(ref?.session_id);
+    const activeConversationId = activeConversationIdFromDom();
+    if (rowSessionId && activeConversationId && rowSessionId === activeConversationId) return true;
     const href = rowHref(row);
     if (href) {
       try {
         const url = new URL(href, window.location.href);
-        if (url.href === window.location.href || url.pathname === window.location.pathname) return true;
+        if (url.href === window.location.href) return true;
       } catch {
         if (window.location.href.includes(href)) return true;
       }
     }
     return !!ref.session_id && window.location.href.includes(ref.session_id);
+  }
+
+  function normalizedSessionDeleteNavigationLabel(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function sessionDeleteNativeNewConversationButton() {
+    const exactLabels = /^(?:新对话|新建对话|新聊天|新建聊天|New chat|New conversation|Start new chat)$/i;
+    return Array.from(document.querySelectorAll("button")).find((button) => {
+      if (
+        !visibleElement(button) ||
+        button.disabled ||
+        button.getAttribute("aria-disabled") === "true"
+      ) {
+        return false;
+      }
+      const labels = [
+        button.getAttribute("aria-label"),
+        button.getAttribute("title"),
+        button.textContent,
+      ].map(normalizedSessionDeleteNavigationLabel);
+      if (!labels.some((label) => exactLabels.test(label))) return false;
+      return button.classList.contains("sidebar-item") ||
+        !!button.closest("nav, aside, [role='navigation']");
+    }) || null;
+  }
+
+  function sessionDeleteFallbackThreadRow(deletedRow) {
+    return sessionRows(true).find((candidate) => {
+      if (candidate === deletedRow || !candidate?.isConnected || !visibleElement(candidate)) {
+        return false;
+      }
+      const candidateRef = sessionRefFromRow(candidate);
+      return !!candidateRef.session_id && !isThreadSuppressed(candidateRef.session_id);
+    }) || null;
+  }
+
+  function sessionDeleteNavigationTarget(deletedRow) {
+    const newConversationButton = sessionDeleteNativeNewConversationButton();
+    if (newConversationButton) {
+      return { element: newConversationButton, strategy: "new_conversation" };
+    }
+    const fallbackThreadRow = sessionDeleteFallbackThreadRow(deletedRow);
+    return fallbackThreadRow
+      ? { element: fallbackThreadRow, strategy: "fallback_thread" }
+      : null;
+  }
+
+  function navigateAfterDeletingCurrentSession(target) {
+    if (!target?.element || typeof target.element.click !== "function") {
+      sendCodexElvesDiagnostic("session_delete_current_navigation", {
+        status: "unavailable",
+      });
+      return false;
+    }
+    try {
+      target.element.click();
+      sendCodexElvesDiagnostic("session_delete_current_navigation", {
+        status: "ok",
+        strategy: target.strategy,
+      });
+      scheduleCodexRouteFeatureRefresh();
+      return true;
+    } catch (error) {
+      sendCodexElvesDiagnostic("session_delete_current_navigation", {
+        status: "failed",
+        strategy: target.strategy,
+        errorName: error?.name || "",
+        errorMessage: error?.message || String(error),
+      });
+      return false;
+    }
   }
 
   function releaseDeleteFocus(row, button) {
@@ -24351,16 +24581,13 @@
     }
   }
 
-  function removeDeletedRow(row, button, ref, archived = false) {
+  function removeDeletedRow(row, button, ref) {
     releaseDeleteFocus(row, button);
-    const shouldReload = isCurrentSessionRow(row, ref);
-    // 把会话加入持久抑制集（不依赖 Codex 内部 manager），
-    // 确保展开项目、折叠/展开重渲染时不复现已删除会话。
-    if (ref && ref.session_id) suppressThreadEverywhere(ref.session_id);
+    const shouldNavigate = isCurrentSessionRow(row, ref);
+    const navigationTarget = shouldNavigate ? sessionDeleteNavigationTarget(row) : null;
     row.remove();
-    if (shouldReload) {
-      window.location.reload();
-    }
+    invalidateSessionRowsCache();
+    if (shouldNavigate) navigateAfterDeletingCurrentSession(navigationTarget);
   }
 
   function updateDeleteButtonOffsets(rows = sessionRows()) {
@@ -24380,27 +24607,79 @@
     });
   }
 
+  async function deleteSessionWithCodex(ref) {
+    if (!String(ref?.session_id || "").startsWith("local:")) {
+      throw new Error("只能永久删除本机会话");
+    }
+    const threadId = validThreadSessionKey(ref?.session_id);
+    if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(threadId)) {
+      throw new Error("会话尚未创建完成，不能永久删除");
+    }
+    const manager = isCodexConversationManager(window.__codexElvesConversationStateManager)
+      ? window.__codexElvesConversationStateManager
+      : findCodexConversationManagerInReactTree()?.manager;
+    if (!manager?.requestClient?.sendRequest || manager.hostId !== "local") {
+      throw new Error("Codex 本机会话管理器不可用");
+    }
+    try {
+      await manager.requestClient.sendRequest("thread/delete", { threadId });
+    } catch (error) {
+      const missingRolloutId = String(error?.message || error)
+        .match(/no rollout found for thread id ([0-9a-f-]{36})$/i)?.[1];
+      if (missingRolloutId?.toLowerCase() !== threadId.toLowerCase()
+        || typeof manager.requestClient.sendAppServerExtensionRequest !== "function") {
+        throw error;
+      }
+      await manager.requestClient.sendAppServerExtensionRequest(
+        "thread/delete",
+        { threadId, missingRolloutRecovery: true }
+      );
+    }
+    try {
+      const projectless = manager.projectlessConversations;
+      if (typeof projectless?.removeConversation !== "function") {
+        throw new Error("Codex 最近会话管理器不可用");
+      }
+      await projectless.removeConversation(threadId);
+    } catch (error) {
+      return {
+        status: "partial",
+        session_id: threadId,
+        message: `会话已永久删除，但最近列表更新失败：${error?.message || error}`,
+      };
+    }
+    return { status: "local_deleted", session_id: threadId, message: "会话已永久删除" };
+  }
+  window.__codexElvesNativeDeleteThread = deleteSessionWithCodex;
+
+  function sessionDeleteRefFromRow(row, ref) {
+    if (!isTemporaryThreadId(ref?.session_id) || !isCurrentSessionRow(row, ref)) return ref;
+    const activeId = activeConversationIdFromDom();
+    return activeId ? { ...ref, session_id: `local:${activeId}` } : ref;
+  }
+
   function openDeleteConfirmForRow(row, button, ref, event) {
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation?.();
+    if (row.dataset.codexDeletePending === "true") return;
+    row.dataset.codexDeletePending = "true";
     releaseDeleteFocus(row, button);
     confirmDelete(ref.title).then(async (confirmed) => {
       if (!confirmed) return;
       releaseDeleteFocus(row, button);
-      // 先删数据，再由 removeDeletedRow 加入持久抑制集（不依赖 Codex 内部 manager）。
-      const result = await postJson("/delete", ref);
-      if (result.status === "server_deleted" || result.status === "local_deleted" || result.status === "partial") {
+      button.disabled = true;
+      try {
+        const result = await deleteSessionWithCodex(sessionDeleteRefFromRow(row, ref));
         removeDeletedRow(row, button, ref);
-        // partial 表示数据库记录已经删除，仅有 rollout 文件清理失败；仍需抑制残留列表行。
-        showToast(result.message || (result.status === "partial" ? "数据库已删除，但部分文件清理失败" : "删除成功"));
-      } else if (result.status === "not_found") {
-        // 会话在本地存储中已不存在，目标（会话不存在）已达成，直接移除残留的列表行
-        removeDeletedRow(row, button, ref);
-        showToast(result.message || "会话已不存在，已从列表移除");
-      } else {
-        showToast(result.message || "删除失败");
+        showToast(result.message);
+      } catch (error) {
+        showToast(`删除失败：${error?.message || error}`);
+      } finally {
+        if (row.isConnected) button.disabled = false;
       }
+    }).finally(() => {
+      delete row.dataset.codexDeletePending;
     });
   }
 
@@ -24961,7 +25240,7 @@
       deleteButton.type = "button";
       deleteButton.className = sessionActionButtonClassName(nativeActionHost, buttonClass);
       deleteButton.dataset.codexDeleteVersion = codexDeleteVersion;
-      configureSvgActionButton(deleteButton, "删除", trashIconSvg());
+      configureSvgActionButton(deleteButton, "永久删除", trashIconSvg());
       const openDeleteConfirm = (event) => openDeleteConfirmForRow(row, deleteButton, ref, event);
       installActionButtonEvents(row, deleteButton, openDeleteConfirm);
       group.appendChild(deleteButton);
@@ -26708,7 +26987,6 @@
     installCodexWorkspaceCheckpointTurnCompletionListener();
     installSuppressedThreadObserver();
     scheduleBackendHeartbeat();
-    installDeleteButtonEventDelegation();
     installConversationViewRouteHooks();
     installCodexRouteFeatureRefreshEvents();
     installCodexAppServerRestartPositionTracking();
@@ -27077,6 +27355,10 @@
   refreshUpstreamBranchDropdownAdapter();
   installUpstreamWorktreeNativeAdapter();
   runScanStep(installCodexElvesRuntimeOnce);
+  installDeleteButtonEventDelegation();
+  const initialSessionRows = sessionRows(true);
+  initialSessionRows.forEach(tryAttachButton);
+  syncActionGroupsLayout(initialSessionRows);
   refreshTaskBoardRuntime();
   scan();
   syncChatsSortVisibilityListener();
@@ -27150,7 +27432,10 @@
     installCodexAppServerRestartPositionTracking();
   };
   window.__codexElvesRuntimeBuild = codexElvesBuild;
+  installCodexTransportBadges();
   window.__codexElvesRuntimeHelperBase = helperBase;
+  window.__codexElvesRuntimeStyleVersion = codexDeleteStyleVersion;
+  window.__codexElvesRuntimeDeleteVersion = codexDeleteVersion;
   window.__codexElvesRuntimeManagerDiscoveryVersion = codexAppServerManagerDiscoveryVersion;
   window.__codexElvesOpenInRuntimeVersion = codexOpenInVersion;
   window.__codexElvesWorkspaceCheckpointRuntimeVersion = codexWorkspaceCheckpointVersion;

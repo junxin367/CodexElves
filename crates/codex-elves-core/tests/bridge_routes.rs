@@ -589,9 +589,9 @@ async fn data_routes_forward_payloads_to_data_service() {
         )
         .await,
         json!({
-            "status": "local_deleted",
+            "status": "failed",
             "session_id": "s1",
-            "message": "deleted First"
+            "message": "旧删除接口已停用，请使用 Codex 原生永久删除入口"
         })
     );
     assert_eq!(
@@ -692,7 +692,7 @@ async fn data_routes_forward_payloads_to_data_service() {
 }
 
 #[tokio::test]
-async fn bridge_context_core_with_data_uses_injected_data_service() {
+async fn bridge_context_rejects_legacy_delete_even_with_data_service() {
     let ctx = BridgeContext::core_with_data(
         Arc::new(CoreRuntimeService::new(9229, StatusStore::default())),
         Arc::new(FakeData::default()),
@@ -705,12 +705,12 @@ async fn bridge_context_core_with_data_uses_injected_data_service() {
     )
     .await;
 
-    assert_eq!(result["status"], "local_deleted");
+    assert_eq!(result["status"], "failed");
     assert!(result.get("undo_token").is_none());
     assert!(result.get("backup_path").is_none());
-    assert_ne!(
+    assert_eq!(
         result["message"],
-        "Delete service is not wired in core launcher hooks"
+        "旧删除接口已停用，请使用 Codex 原生永久删除入口"
     );
 }
 

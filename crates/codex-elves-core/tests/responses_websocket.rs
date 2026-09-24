@@ -915,21 +915,6 @@ async fn local_proxy_closes_downstream_promptly_when_upstream_ends_without_close
         .await
         .unwrap();
 
-    let failure = tokio::time::timeout(Duration::from_secs(3), client.next())
-        .await
-        .expect("upstream EOF should close the downstream websocket promptly")
-        .expect("downstream websocket should yield a close frame")
-        .expect("downstream websocket close should be readable");
-    let Message::Text(failure) = failure else {
-        panic!("expected response.failed before websocket close");
-    };
-    let failure: serde_json::Value = serde_json::from_str(failure.as_str()).unwrap();
-    assert_eq!(failure["type"], "response.failed");
-    assert_eq!(
-        failure["response"]["error"]["code"],
-        "responses_websocket_upstream_failed"
-    );
-
     let close = tokio::time::timeout(Duration::from_secs(3), client.next())
         .await
         .expect("upstream EOF should close the downstream websocket promptly")
@@ -938,8 +923,8 @@ async fn local_proxy_closes_downstream_promptly_when_upstream_ends_without_close
     let Message::Close(Some(close)) = close else {
         panic!("expected websocket failure close after upstream EOF");
     };
-    assert_eq!(close.code, CloseCode::Normal);
-    assert_eq!(close.reason, "response failed; HTTP fallback disabled");
+    assert_eq!(close.code, CloseCode::Restart);
+    assert_eq!(close.reason, "upstream websocket reconnect required");
 
     upstream.await.unwrap();
     assert!(
@@ -1307,12 +1292,7 @@ async fn local_proxy_falls_back_same_turn_when_websocket_request_exceeds_16_mib(
     let temp = tempfile::tempdir().unwrap();
     let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
     let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
-    save_supported_websocket_settings_with_http_fallback(
-        upstream_address,
-        false,
-        "gpt-large-frame",
-        true,
-    );
+    save_supported_websocket_settings(upstream_address, false, "gpt-large-frame");
 
     let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_address = local_listener.local_addr().unwrap();
@@ -1512,7 +1492,7 @@ async fn explicitly_disabled_websocket_rejects_upgrade_before_connecting_upstrea
 }
 
 #[tokio::test]
-async fn local_proxy_keeps_websocket_for_same_turn_after_disconnect_before_first_request() {
+async fn local_proxy_defaults_to_http_for_same_turn_after_disconnect_before_first_request() {
     let _settings_lock = websocket_settings_test_lock().lock().await;
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_address = upstream_listener.local_addr().unwrap();
@@ -1607,7 +1587,7 @@ async fn local_proxy_keeps_websocket_for_same_turn_after_disconnect_before_first
         .unwrap();
     let second_response = read_upgrade_request(&mut second_client).await;
     assert!(
-        second_response.starts_with(b"HTTP/1.1 101"),
+        second_response.starts_with(b"HTTP/1.1 426"),
         "{}",
         String::from_utf8_lossy(&second_response)
     );
@@ -1617,12 +1597,7 @@ async fn local_proxy_keeps_websocket_for_same_turn_after_disconnect_before_first
         .await
         .unwrap()
         .unwrap();
-    assert!(
-        second_result
-            .unwrap_err()
-            .to_string()
-            .contains("读取本地 Responses WebSocket 消息失败")
-    );
+    second_result.unwrap();
 
     let third_listener = local_listener.clone();
     let third_local_server = tokio::spawn(async move {
@@ -1657,11 +1632,11 @@ async fn local_proxy_keeps_websocket_for_same_turn_after_disconnect_before_first
     );
 
     upstream.await.unwrap();
-    assert_eq!(upstream_connection_count.load(Ordering::SeqCst), 3);
+    assert_eq!(upstream_connection_count.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
-async fn local_proxy_downgrades_same_turn_after_disconnect_when_http_fallback_enabled() {
+async fn local_proxy_downgrades_same_turn_after_disconnect_with_default_settings() {
     let _settings_lock = websocket_settings_test_lock().lock().await;
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_address = upstream_listener.local_addr().unwrap();
@@ -1688,12 +1663,7 @@ async fn local_proxy_downgrades_same_turn_after_disconnect_when_http_fallback_en
 
     let temp = tempfile::tempdir().unwrap();
     let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
-    save_supported_websocket_settings_with_http_fallback(
-        upstream_address,
-        false,
-        "gpt-side-turn-fallback",
-        true,
-    );
+    save_supported_websocket_settings(upstream_address, false, "gpt-side-turn-fallback");
 
     let local_listener = Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
     let local_address = local_listener.local_addr().unwrap();
@@ -2138,7 +2108,7 @@ fn websocket_settings_test_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 #[tokio::test]
-async fn helper_blocks_client_http_retries_after_websocket_failure() {
+async fn helper_allows_client_http_retries_and_ignores_legacy_disabled_setting() {
     use codex_elves_core::launcher::{DefaultLaunchHooks, LaunchHooks};
 
     let _settings_lock = websocket_settings_test_lock().lock().await;
@@ -2180,12 +2150,7 @@ async fn helper_blocks_client_http_retries_after_websocket_failure() {
         }
     });
 
-    save_supported_websocket_settings_with_http_fallback(
-        upstream_address,
-        false,
-        "gpt-fallback-policy",
-        true,
-    );
+    save_supported_websocket_settings(upstream_address, false, "gpt-fallback-policy");
     let hooks = DefaultLaunchHooks::default();
     let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = local_listener.local_addr().unwrap().port();
@@ -2195,8 +2160,7 @@ async fn helper_blocks_client_http_retries_after_websocket_failure() {
         .await
         .unwrap();
 
-    // Closing the switch must take effect even for a connection opened while
-    // fallback was enabled. HTTP attempts load the current policy independently.
+    // A persisted value from an older version must no longer disable fallback.
     SettingsStore::default()
         .update(serde_json::json!({"wsFailureFallbackToHttp": false}))
         .unwrap();
@@ -2227,8 +2191,10 @@ async fn helper_blocks_client_http_retries_after_websocket_failure() {
 
     let http = reqwest::Client::builder().no_proxy().build().unwrap();
     // Exercise the real helper HTTP route, not just WS close/event semantics.
-    // A later turn and missing WS metadata must not bypass the outbound policy.
-    for turn in [Some("failed-turn"), Some("next-turn"), None] {
+    for (index, turn) in [Some("failed-turn"), Some("next-turn"), None]
+        .into_iter()
+        .enumerate()
+    {
         let mut request = serde_json::json!({
             "model": "gpt-fallback-policy", "input": "hi", "stream": true
         });
@@ -2247,16 +2213,15 @@ async fn helper_blocks_client_http_retries_after_websocket_failure() {
         let body = response.text().await.unwrap();
         assert_eq!(
             http_requests.load(Ordering::SeqCst),
-            0,
-            "disabled fallback must never POST to the provider; local status={status}, body={body}"
+            index + 1,
+            "HTTP fallback must reach the provider; local status={status}, body={body}"
         );
-        assert_eq!(status.as_u16(), 409);
-        assert!(body.contains("responses_websocket_required"));
+        assert_eq!(status.as_u16(), 200);
+        assert!(body.contains("response.completed"));
     }
 
-    // Switching on permits HTTP, and switching off blocks the next attempt
-    // without restarting the helper or relying on a per-turn failure cache.
-    for (enabled, expected_status, expected_http_count) in [(true, 200, 1), (false, 409, 1)] {
+    // Both legacy values are ignored without restarting the helper.
+    for (enabled, expected_status, expected_http_count) in [(true, 200, 4), (false, 200, 5)] {
         SettingsStore::default()
             .update(serde_json::json!({"wsFailureFallbackToHttp": enabled}))
             .unwrap();
@@ -2274,6 +2239,150 @@ async fn helper_blocks_client_http_retries_after_websocket_failure() {
     }
     hooks.shutdown_helper(port).await;
     upstream.abort();
+}
+
+#[tokio::test]
+async fn helper_disconnect_cancels_a_recovered_ws_request_waiting_for_more_output() {
+    assert_helper_ws_disconnect_cancels(true).await;
+}
+
+#[tokio::test]
+async fn helper_disconnect_cancels_a_recovered_ws_request_before_its_first_event() {
+    assert_helper_ws_disconnect_cancels(false).await;
+}
+
+async fn assert_helper_ws_disconnect_cancels(send_created: bool) {
+    use codex_elves_core::launcher::{DefaultLaunchHooks, LaunchHooks};
+    let _settings_lock = websocket_settings_test_lock().lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = listener.local_addr().unwrap();
+    save_supported_websocket_settings(upstream_address, false, "gpt-disconnect");
+    let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let provider = tokio::spawn(async move {
+        // Establish known WS state through the real native helper route.
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut native = tokio_tungstenite::accept_async(stream).await.unwrap();
+        assert!(matches!(native.next().await, Some(Ok(Message::Text(_)))));
+        native.send(Message::Text(serde_json::json!({
+            "type":"response.completed","response":{"id":"resp_warm","status":"completed","output":[]}
+        }).to_string().into())).await.unwrap();
+        let _ = native.next().await;
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut recovered = tokio_tungstenite::accept_async(stream).await.unwrap();
+        assert!(matches!(recovered.next().await, Some(Ok(Message::Text(_)))));
+        if send_created {
+            recovered.send(Message::Text(serde_json::json!({
+                "type":"response.created","response":{"id":"resp_waiting","status":"in_progress","output":[]}
+            }).to_string().into())).await.unwrap();
+        }
+        recovered
+            .send(Message::Ping(b"waiting-for-output".to_vec().into()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), recovered.next())
+                .await
+                .unwrap(),
+            Some(Ok(Message::Pong(_)))
+        ));
+        started_tx.send(()).unwrap();
+        let end = tokio::time::timeout(Duration::from_secs(3), recovered.next()).await;
+        let cancelled = matches!(end, Ok(None | Some(Err(_)) | Some(Ok(Message::Close(_)))));
+        let _ = cancelled_tx.send(cancelled);
+    });
+    let hooks = DefaultLaunchHooks::default();
+    let local = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = local.local_addr().unwrap().port();
+    drop(local);
+    hooks.start_helper(port).await.unwrap();
+    let thread = uuid::Uuid::new_v4().to_string();
+    let mut upgrade = format!("ws://127.0.0.1:{port}/v1/responses")
+        .into_client_request()
+        .unwrap();
+    upgrade
+        .headers_mut()
+        .insert("thread-id", HeaderValue::from_str(&thread).unwrap());
+    let (mut client, _) = connect_async(upgrade).await.unwrap();
+    client
+        .send(Message::Text(
+            serde_json::json!({
+                "type":"response.create","model":"gpt-disconnect","input":"warm","stream":true
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(client.next().await, Some(Ok(Message::Text(_)))));
+    client.close(None).await.unwrap();
+    drop(client);
+    let mut http = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let body =
+        serde_json::json!({"model":"gpt-disconnect","input":"wait","stream":true}).to_string();
+    http.write_all(format!(
+        "POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nthread-id: {thread}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len(),
+    ).as_bytes()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), started_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    http.shutdown().await.unwrap();
+    drop(http);
+    let cancelled = cancelled_rx.await.unwrap();
+    let record = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(record) = codex_elves_core::proxy_log::read_summaries(20)
+                .unwrap()
+                .into_iter()
+                .find(|record| record.status_code == Some(499))
+            {
+                break record;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(record.state, ProxyRequestState::Completed);
+    assert!(
+        codex_elves_core::proxy_log::find_record(&record.id)
+            .unwrap()
+            .unwrap()
+            .response_bytes
+            .is_none()
+    );
+    if send_created {
+        assert_eq!(record.transport, ProxyRequestTransport::Ws);
+    }
+    let status: serde_json::Value = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{port}/transport/sessions"))
+        .json(&serde_json::json!({"threadIds":[thread]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        status["sessions"][0]["mode"], "ws",
+        "client cancellation must not trigger HTTP fallback"
+    );
+    hooks.shutdown_helper(port).await;
+    provider.await.unwrap();
+    assert!(
+        cancelled,
+        "closing the actual HTTP client must release the upstream WS promptly"
+    );
 }
 
 #[tokio::test]
@@ -2324,10 +2433,7 @@ async fn websocket_http_policy_preserves_http_models_and_compaction() {
         let mut settings = settings.clone();
         let mut request = normal.clone();
         let expected_path = match case {
-            0 => {
-                settings.ws_failure_fallback_to_http = true;
-                "/v1/responses"
-            }
+            0 => "/v1/responses",
             1 => {
                 settings.relay_profiles[0].responses_websocket_enabled = Some(false);
                 "/v1/responses"
@@ -2437,20 +2543,6 @@ fn save_supported_websocket_settings(
     reasoning_continuation: bool,
     request_model: &str,
 ) {
-    save_supported_websocket_settings_with_http_fallback(
-        upstream_address,
-        reasoning_continuation,
-        request_model,
-        false,
-    );
-}
-
-fn save_supported_websocket_settings_with_http_fallback(
-    upstream_address: std::net::SocketAddr,
-    reasoning_continuation: bool,
-    request_model: &str,
-    ws_failure_fallback_to_http: bool,
-) {
     let mut profile = RelayProfile {
         id: "relay-websocket-test".to_string(),
         name: "WebSocket Test".to_string(),
@@ -2477,7 +2569,6 @@ fn save_supported_websocket_settings_with_http_fallback(
             relay_profiles: vec![profile],
             active_relay_id: "relay-websocket-test".to_string(),
             gpt_reasoning_continuation: reasoning_continuation,
-            ws_failure_fallback_to_http,
             ..BackendSettings::default()
         })
         .unwrap();

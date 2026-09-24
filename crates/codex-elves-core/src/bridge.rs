@@ -149,6 +149,20 @@ pub async fn evaluate_script_with_await_promise(
         .await
 }
 
+pub async fn evaluate_script_value_with_timeout(
+    websocket_url: &str,
+    script: &str,
+    command_timeout: Duration,
+) -> anyhow::Result<Value> {
+    let socket = connect_cdp_websocket(websocket_url).await?;
+    let mut session = CdpSession::new(socket);
+    let mut params = runtime_evaluate_params_with_await_promise(script, true);
+    params["returnByValue"] = json!(true);
+    session
+        .send_command_with_timeout(1, "Runtime.evaluate", params, command_timeout)
+        .await
+}
+
 pub async fn add_script_to_new_documents(
     websocket_url: &str,
     script: &str,
@@ -427,6 +441,17 @@ where
         method: &str,
         params: Value,
     ) -> anyhow::Result<Value> {
+        self.send_command_with_timeout(message_id, method, params, CDP_COMMAND_TIMEOUT)
+            .await
+    }
+
+    async fn send_command_with_timeout(
+        &mut self,
+        message_id: u64,
+        method: &str,
+        params: Value,
+        command_timeout: Duration,
+    ) -> anyhow::Result<Value> {
         self.socket
             .send(Message::Text(
                 json!({
@@ -441,14 +466,14 @@ where
             .with_context(|| format!("failed to send CDP command {method} id {message_id}"))?;
 
         tokio::time::timeout(
-            CDP_COMMAND_TIMEOUT,
+            command_timeout,
             self.wait_for_id(message_id, method.to_string()),
         )
         .await
         .with_context(|| {
             format!(
                 "timed out waiting for CDP command {method} id {message_id} response after {}s",
-                CDP_COMMAND_TIMEOUT.as_secs()
+                command_timeout.as_secs()
             )
         })?
     }

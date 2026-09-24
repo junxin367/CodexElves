@@ -78,6 +78,16 @@ impl RequestContext {
             .filter(|value| !value.is_empty())
     }
 
+    pub(crate) fn thread_id(&self) -> Option<&str> {
+        self.headers
+            .get("thread-id")
+            .or_else(|| self.headers.get("x-client-request-id"))
+            .or_else(|| self.headers.get("session-id"))
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
     /// Build a fresh outbound map after the final upstream protocol is known.
     ///
     /// Converted protocols deliberately receive no Codex/OpenAI request

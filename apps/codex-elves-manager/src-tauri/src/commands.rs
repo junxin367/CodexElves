@@ -1,12 +1,14 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+#[cfg(test)]
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use codex_elves_core::install::SILENT_BINARY;
-use codex_elves_core::models::{DeleteResult, SessionRef};
+use codex_elves_core::models::{DeleteResult, DeleteStatus};
 use codex_elves_core::script_market::{self, MarketScript, ScriptMarketManifest};
 use codex_elves_core::settings::{
     BackendSettings, RelayProfile, ResponsesWebsocketCapability, SettingsStore,
@@ -136,30 +138,6 @@ pub struct PluginCacheRefreshPayload {
 pub struct PluginCacheRefreshRequest {
     pub plugin_id: String,
 }
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CodexRadarPayload {
-    pub source_url: String,
-    pub snapshot: Option<codex_elves_core::codex_radar::CodexRadarSnapshot>,
-    pub cache_status: String,
-    pub cached_until_ms: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CodexRadarRequest {
-    #[serde(default)]
-    pub force_refresh: bool,
-}
-
-#[derive(Debug, Clone)]
-struct CodexRadarCacheEntry {
-    snapshot: codex_elves_core::codex_radar::CodexRadarSnapshot,
-    expires_at: SystemTime,
-}
-
-static CODEX_RADAR_CACHE: OnceLock<Mutex<Option<CodexRadarCacheEntry>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -861,6 +839,31 @@ pub fn open_workspace_checkpoint_storage() -> CommandResult<Value> {
 }
 
 #[tauri::command]
+pub fn open_codex_home_directory() -> CommandResult<Value> {
+    let settings = match SettingsStore::default().load() {
+        Ok(settings) => settings,
+        Err(error) => return failed(&format!("读取 Codex 配置目录失败：{error}"), json!({})),
+    };
+    let home = codex_elves_core::codex_home::codex_home_dir_for_settings(&settings);
+    if let Err(error) = fs::create_dir_all(&home) {
+        return failed(
+            &format!("无法创建 Codex 配置目录：{error}"),
+            json!({ "path": home.to_string_lossy() }),
+        );
+    }
+    match open_local_directory(&home) {
+        Ok(()) => ok(
+            "已打开 Codex 配置目录。",
+            json!({ "path": home.to_string_lossy() }),
+        ),
+        Err(error) => failed(
+            &format!("打开 Codex 配置目录失败：{error}"),
+            json!({ "path": home.to_string_lossy() }),
+        ),
+    }
+}
+
+#[tauri::command]
 pub fn load_ccs_providers() -> CommandResult<CcsProvidersPayload> {
     let db_path = codex_elves_core::ccs_import::default_ccs_db_path();
     match codex_elves_core::ccs_import::list_codex_providers_from_db(&db_path) {
@@ -985,65 +988,48 @@ pub fn list_local_sessions() -> CommandResult<LocalSessionsPayload> {
 }
 
 #[tauri::command]
-pub fn delete_local_session(request: DeleteLocalSessionRequest) -> CommandResult<DeleteResult> {
-    let session_id = request.session_id.trim();
-    if session_id.is_empty() {
+pub async fn delete_local_session(
+    request: DeleteLocalSessionRequest,
+) -> CommandResult<DeleteResult> {
+    let session_id = request
+        .session_id
+        .trim()
+        .strip_prefix("local:")
+        .unwrap_or(request.session_id.trim());
+    if uuid::Uuid::parse_str(session_id).is_err() {
         return failed(
-            "会话 ID 不能为空。",
+            "只能永久删除已创建的本机 Codex 会话。",
             DeleteResult {
-                status: codex_elves_core::models::DeleteStatus::Failed,
-                session_id: String::new(),
-                message: "会话 ID 不能为空。".to_string(),
+                status: DeleteStatus::Failed,
+                session_id: session_id.to_string(),
+                message: "只能永久删除已创建的本机 Codex 会话。".to_string(),
             },
         );
-    }
-    let session = SessionRef {
-        session_id: session_id.to_string(),
-        title: request.title,
-    };
-    let mut candidate_paths = Vec::new();
-    if let Some(path) = request.db_path.as_deref() {
-        let path = PathBuf::from(path);
-        if !candidate_paths.iter().any(|candidate| candidate == &path) {
-            candidate_paths.push(path);
-        }
-    }
-    for path in
-        codex_elves_core::codex_sqlite::codex_session_db_paths_from_home(&saved_codex_home_dir())
-    {
-        if !candidate_paths.iter().any(|candidate| candidate == &path) {
-            candidate_paths.push(path);
-        }
     }
     log_manager_event(
         "manager.delete_local_session.start",
         json!({
             "session_id": session_id,
-            "title": session.title,
+            "title": request.title,
             "requested_db_path": request.db_path,
-            "candidate_paths": candidate_paths
-                .iter()
-                .map(|path| path.to_string_lossy().to_string())
-                .collect::<Vec<_>>(),
         }),
     );
-    let result = codex_elves_data::delete_local_from_paths(candidate_paths.clone(), &session);
+    let result = delete_local_session_in_codex(session_id)
+        .await
+        .unwrap_or_else(|error| DeleteResult {
+            status: DeleteStatus::Failed,
+            session_id: session_id.to_string(),
+            message: format!("Codex 原生删除失败：{error:#}"),
+        });
     log_manager_event(
         "manager.delete_local_session.finish",
         json!({
             "session_id": session_id,
             "final_status": format!("{:?}", result.status),
             "final_message": result.message,
-            "candidate_paths": candidate_paths
-                .iter()
-                .map(|path| path.to_string_lossy().to_string())
-                .collect::<Vec<_>>(),
         }),
     );
-    let status = if matches!(
-        result.status,
-        codex_elves_core::models::DeleteStatus::LocalDeleted
-    ) {
+    let status = if matches!(result.status, DeleteStatus::LocalDeleted) {
         "ok"
     } else {
         "failed"
@@ -1053,6 +1039,44 @@ pub fn delete_local_session(request: DeleteLocalSessionRequest) -> CommandResult
         message: result.message.clone(),
         payload: result,
     }
+}
+
+async fn delete_local_session_in_codex(session_id: &str) -> anyhow::Result<DeleteResult> {
+    let debug_port = user_script_reload_debug_port(StatusStore::default().load_latest()?)?;
+    let targets = codex_elves_core::cdp::list_targets(debug_port).await?;
+    let target = codex_elves_core::cdp::pick_injectable_codex_page_target(&targets)?;
+    let websocket_url = target
+        .web_socket_debugger_url
+        .as_deref()
+        .context("Codex 页面缺少调试连接")?;
+    let encoded_id = serde_json::to_string(session_id)?;
+    let encoded_ref =
+        serde_json::to_string(&json!({ "session_id": format!("local:{session_id}") }))?;
+    let expression = format!(
+        r#"(async () => {{
+          if (typeof window.__codexElvesNativeDeleteThread !== "function") {{
+            return {{ status: "failed", session_id: {encoded_id}, message: "请先启动 CodexElves 并启用会话删除增强" }};
+          }}
+          try {{
+            return await window.__codexElvesNativeDeleteThread({encoded_ref});
+          }} catch (error) {{
+            return {{ status: "failed", session_id: {encoded_id}, message: String(error?.message || error) }};
+          }}
+        }})()"#
+    );
+    let response = codex_elves_core::bridge::evaluate_script_value_with_timeout(
+        websocket_url,
+        &expression,
+        Duration::from_secs(60),
+    )
+    .await?;
+    if let Some(exception) = response.pointer("/result/exceptionDetails/text") {
+        anyhow::bail!("Codex 页面执行删除失败：{exception}");
+    }
+    let value = response
+        .pointer("/result/result/value")
+        .context("Codex 页面未返回删除结果")?;
+    serde_json::from_value(value.clone()).context("Codex 页面返回了无效删除结果")
 }
 
 fn local_session_adapter(db_path: &Path) -> codex_elves_data::SQLiteStorageAdapter {
@@ -1541,96 +1565,6 @@ fn persist_provider_sync_selection(provider: &str) {
     settings.provider_sync_saved_providers =
         normalize_provider_sync_provider_list(settings.provider_sync_saved_providers);
     let _ = store.save(&settings);
-}
-
-#[tauri::command]
-pub async fn fetch_codex_radar(
-    request: Option<CodexRadarRequest>,
-) -> CommandResult<CodexRadarPayload> {
-    let source_url = codex_elves_core::codex_radar::CODEX_RADAR_HTML_URL.to_string();
-    let force_refresh = request.map(|item| item.force_refresh).unwrap_or(false);
-    if !force_refresh
-        && let Some(cached) = codex_radar_cache_entry()
-        && cached.expires_at > SystemTime::now()
-    {
-        return ok(
-            "降智雷达已从缓存读取。",
-            codex_radar_payload(
-                source_url,
-                Some(cached.snapshot),
-                "hit",
-                Some(cached.expires_at),
-            ),
-        );
-    }
-
-    match codex_elves_core::codex_radar::fetch_current_snapshot().await {
-        Ok(snapshot) => {
-            let expires_at = codex_radar_next_expiry();
-            set_codex_radar_cache(snapshot.clone(), expires_at);
-            ok(
-                "降智雷达已刷新。",
-                codex_radar_payload(source_url, Some(snapshot), "refresh", Some(expires_at)),
-            )
-        }
-        Err(error) => failed(
-            &format!("降智雷达读取失败：{error}"),
-            codex_radar_payload(source_url, None, "failed", None),
-        ),
-    }
-}
-
-fn codex_radar_cache_entry() -> Option<CodexRadarCacheEntry> {
-    CODEX_RADAR_CACHE
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone())
-}
-
-fn set_codex_radar_cache(
-    snapshot: codex_elves_core::codex_radar::CodexRadarSnapshot,
-    expires_at: SystemTime,
-) {
-    if let Ok(mut guard) = CODEX_RADAR_CACHE.get_or_init(|| Mutex::new(None)).lock() {
-        *guard = Some(CodexRadarCacheEntry {
-            snapshot,
-            expires_at,
-        });
-    }
-}
-
-fn codex_radar_next_expiry() -> SystemTime {
-    let jitter_seconds = codex_radar_cache_jitter_seconds();
-    SystemTime::now() + Duration::from_secs((25 * 60) + jitter_seconds)
-}
-
-fn codex_radar_cache_jitter_seconds() -> u64 {
-    let seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default()
-        ^ u128::from(std::process::id());
-    (seed % 3601) as u64
-}
-
-fn codex_radar_payload(
-    source_url: String,
-    snapshot: Option<codex_elves_core::codex_radar::CodexRadarSnapshot>,
-    cache_status: &str,
-    cached_until: Option<SystemTime>,
-) -> CodexRadarPayload {
-    CodexRadarPayload {
-        source_url,
-        snapshot,
-        cache_status: cache_status.to_string(),
-        cached_until_ms: cached_until.and_then(system_time_ms),
-    }
-}
-
-fn system_time_ms(value: SystemTime) -> Option<u64> {
-    let millis = value.duration_since(UNIX_EPOCH).ok()?.as_millis();
-    u64::try_from(millis).ok()
 }
 
 #[tauri::command]
@@ -3679,9 +3613,9 @@ fn sync_applied_stream_idle_timeout_after_settings_save_in_home(
 fn sync_applied_multi_agent_v2_after_settings_save(settings: &BackendSettings) -> String {
     let home = codex_elves_core::codex_home::codex_home_dir_for_settings(settings);
     match sync_applied_multi_agent_v2_after_settings_save_in_home(&home, settings) {
-        Ok(true) => " Multi Agent V2 配置已同步。".to_string(),
+        Ok(true) => " 子代理配置已同步。".to_string(),
         Ok(false) => String::new(),
-        Err(error) => format!(" 但 Multi Agent V2 配置同步失败：{error}。"),
+        Err(error) => format!(" 但子代理配置同步失败：{error}。"),
     }
 }
 
@@ -5063,8 +4997,8 @@ base_url = "https://manual.example/v1"
         }
     }
 
-    #[test]
-    fn delete_local_session_falls_back_when_requested_db_no_longer_contains_thread() {
+    #[tokio::test]
+    async fn delete_local_session_does_not_touch_databases_for_invalid_id() {
         let _process_state = process_state_test_guard();
         let temp = tempfile::tempdir().unwrap();
         let previous_codex_home = std::env::var_os("CODEX_HOME");
@@ -5105,7 +5039,8 @@ base_url = "https://manual.example/v1"
             session_id: "t1".to_string(),
             title: "Active Thread".to_string(),
             db_path: Some(stale_db.to_string_lossy().to_string()),
-        });
+        })
+        .await;
         unsafe {
             if let Some(value) = previous_codex_home {
                 std::env::set_var("CODEX_HOME", value);
@@ -5114,10 +5049,10 @@ base_url = "https://manual.example/v1"
             }
         }
 
-        assert_eq!(result.status, "ok");
+        assert_eq!(result.status, "failed");
         assert_eq!(
             result.payload.status,
-            codex_elves_core::models::DeleteStatus::LocalDeleted
+            codex_elves_core::models::DeleteStatus::Failed
         );
         let active = rusqlite::Connection::open(&active_db).unwrap();
         assert_eq!(
@@ -5126,8 +5061,9 @@ base_url = "https://manual.example/v1"
                     row.get::<_, i64>(0)
                 })
                 .unwrap(),
-            0
+            1
         );
+        assert!(rollout_path.is_file());
     }
 
     #[test]
@@ -5168,8 +5104,8 @@ base_url = "https://manual.example/v1"
         assert_eq!(result.payload.db_path, legacy_db.to_string_lossy());
     }
 
-    #[test]
-    fn delete_local_session_removes_duplicate_threads_from_all_candidate_dbs() {
+    #[tokio::test]
+    async fn delete_local_session_does_not_remove_duplicate_rows_for_invalid_id() {
         let _process_state = process_state_test_guard();
         let temp = tempfile::tempdir().unwrap();
         let previous_codex_home = std::env::var_os("CODEX_HOME");
@@ -5188,12 +5124,13 @@ base_url = "https://manual.example/v1"
             session_id: "t1".to_string(),
             title: "Legacy Copy".to_string(),
             db_path: Some(legacy_db.to_string_lossy().to_string()),
-        });
+        })
+        .await;
         restore_codex_home(previous_codex_home);
 
-        assert_eq!(result.status, "ok");
-        assert_eq!(thread_count(&current_db, "t1"), 0);
-        assert_eq!(thread_count(&legacy_db, "t1"), 0);
+        assert_eq!(result.status, "failed");
+        assert_eq!(thread_count(&current_db, "t1"), 1);
+        assert_eq!(thread_count(&legacy_db, "t1"), 1);
     }
 
     fn create_minimal_thread_db(path: &Path, id: &str, title: &str, updated_at_ms: i64) {
@@ -5306,7 +5243,7 @@ base_url = "https://manual.example/v1"
     }
 
     #[test]
-    fn saving_active_profile_syncs_multi_agent_v2_to_live_config() {
+    fn saving_active_profile_syncs_independent_subagent_config_to_live_config() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
             temp.path().join("config.toml"),
@@ -5318,8 +5255,7 @@ base_url = "https://manual.example/v1"
             relay_profiles: vec![RelayProfile {
                 id: "supplier-a".to_string(),
                 relay_mode: codex_elves_core::settings::RelayMode::PureApi,
-                config_contents:
-                    "model_provider = \"custom\"\n\n[features]\nmulti_agent_v2 = true\n".to_string(),
+                config_contents: "model_provider = \"custom\"\n\n[features.multi_agent_v2]\nenabled = true\n\n[agents]\nmax_concurrent_threads_per_session = 5\n".to_string(),
                 ..RelayProfile::default()
             }],
             ..BackendSettings::default()
@@ -5332,7 +5268,10 @@ base_url = "https://manual.example/v1"
 
         let live = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
         assert!(live.contains("goals = true"));
-        assert!(live.contains("multi_agent_v2 = true"));
+        assert!(live.contains("[features.multi_agent_v2]"));
+        assert!(live.contains("enabled = true"));
+        assert!(live.contains("[agents]"));
+        assert!(live.contains("max_concurrent_threads_per_session = 5"));
     }
 
     #[test]

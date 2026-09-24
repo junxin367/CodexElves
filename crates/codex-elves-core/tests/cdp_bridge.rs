@@ -109,8 +109,187 @@ fn renderer_features_delete_is_permanent_without_undo_ui() {
     assert!(!script.contains("postJson(\"/undo\""));
     assert!(!script.contains("result.undo_token"));
     assert!(!script.contains("undo.textContent = \"撤销\""));
-    assert!(script.contains("result.status === \"partial\""));
+    assert!(script.contains("async function deleteSessionWithCodex(ref)"));
+    assert!(!script.contains("postJson(\"/delete\", ref)"));
     assert!(manager_source.contains("deleteStatus === \"partial\""));
+}
+
+#[test]
+fn renderer_delete_current_session_uses_native_navigation_without_page_reload() {
+    let script = assets::renderer_features_script();
+
+    assert!(script.contains(r#"const codexDeleteVersion = "12";"#));
+    assert!(script.contains("function sessionDeleteNativeNewConversationButton()"));
+    assert!(script.contains(
+        r#"/^(?:新对话|新建对话|新聊天|新建聊天|New chat|New conversation|Start new chat)$/i"#
+    ));
+    assert!(script.contains("function sessionDeleteFallbackThreadRow(deletedRow)"));
+    assert!(script.contains("function navigateAfterDeletingCurrentSession(target)"));
+    assert!(script.contains(
+        "const navigationTarget = shouldNavigate ? sessionDeleteNavigationTarget(row) : null;"
+    ));
+    assert!(
+        script
+            .contains("if (shouldNavigate) navigateAfterDeletingCurrentSession(navigationTarget);")
+    );
+    assert!(
+        script
+            .contains("row.getAttribute(\"data-app-action-sidebar-thread-selected\") === \"true\"")
+    );
+    assert!(!script.contains("url.pathname === window.location.pathname"));
+    assert!(!script.contains("window.location.reload()"));
+}
+
+#[test]
+fn renderer_delete_uses_codex_lifecycle_and_keeps_failed_rows() {
+    let script = assets::renderer_features_script();
+    let start = script
+        .find("  async function deleteSessionWithCodex(ref) {")
+        .expect("native delete helper");
+    let end = script[start..]
+        .find("\n  window.__codexElvesNativeDeleteThread = deleteSessionWithCodex;")
+        .map(|offset| start + offset)
+        .expect("native delete export");
+    let helper = &script[start..end];
+    let node_script = format!(
+        "const source = {};\n",
+        serde_json::to_string(helper).unwrap()
+    ) + r#"
+const assert = require("node:assert/strict");
+const id = "01a0bcd2-2190-70b1-bb66-94cac705d622";
+const ref = { session_id: `local:${id}` };
+function create(manager) {
+  return new Function(
+    "window",
+    "validThreadSessionKey",
+    "isCodexConversationManager",
+    "findCodexConversationManagerInReactTree",
+    `return (${source.trim()});`
+  )(
+    { __codexElvesConversationStateManager: manager },
+    (value) => value.replace(/^local:/, ""),
+    (value) => value === manager,
+    () => ({ manager })
+  );
+}
+(async () => {
+  const calls = [];
+  const normal = {
+    hostId: "local",
+    requestClient: {
+      sendRequest: async (method, params) => calls.push([method, params]),
+    },
+    projectlessConversations: {
+      hasConversationId: () => true,
+      removeConversation: async (threadId) => calls.push(["remove", threadId]),
+    },
+  };
+  assert.equal((await create(normal)(ref)).status, "local_deleted");
+  assert.deepEqual(calls, [
+    ["thread/delete", { threadId: id }],
+    ["remove", id],
+  ]);
+
+  const recovered = [];
+  const missingRollout = {
+    hostId: "local",
+    requestClient: {
+      sendRequest: async () => { throw Error(`no rollout found for thread id ${id}`); },
+      sendAppServerExtensionRequest: async (method, params) => recovered.push([method, params]),
+    },
+    projectlessConversations: { removeConversation: async () => {} },
+  };
+  assert.equal((await create(missingRollout)(ref)).status, "local_deleted");
+  assert.deepEqual(recovered, [
+    ["thread/delete", { threadId: id, missingRolloutRecovery: true }],
+  ]);
+
+  let removed = false;
+  const failed = {
+    hostId: "local",
+    requestClient: {
+      sendRequest: async () => { throw Error("permission denied"); },
+      sendAppServerExtensionRequest: async () => { throw Error("unexpected recovery"); },
+    },
+    projectlessConversations: {
+      removeConversation: async () => { removed = true; },
+    },
+  };
+  await assert.rejects(create(failed)(ref), /permission denied/);
+  assert.equal(removed, false);
+  await assert.rejects(create(normal)({ session_id: id }), /本机会话/);
+  await assert.rejects(create(normal)({ session_id: "local:client-new-thread:pending" }), /尚未创建完成/);
+
+  const partial = {
+    hostId: "local",
+    requestClient: { sendRequest: async () => ({}) },
+    projectlessConversations: {
+      removeConversation: async () => { throw Error("storage unavailable"); },
+    },
+  };
+  assert.equal((await create(partial)(ref)).status, "partial");
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"#;
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(node_script)
+        .output()
+        .expect("node should be available");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn renderer_delete_resolves_only_the_active_temporary_thread() {
+    let script = assets::renderer_features_script();
+    let start = script
+        .find("  function sessionDeleteRefFromRow(row, ref) {")
+        .expect("temporary session delete resolver");
+    let end = script[start..]
+        .find("\n  function openDeleteConfirmForRow(")
+        .map(|offset| start + offset)
+        .expect("delete confirmation handler");
+    let helper = &script[start..end];
+    assert!(script.contains("deleteSessionWithCodex(sessionDeleteRefFromRow(row, ref))"));
+    let node_script = format!(
+        "const source = {};\n",
+        serde_json::to_string(helper).unwrap()
+    ) + r#"
+const assert = require("node:assert/strict");
+const id = "01a0cc16-7bf6-7dc2-ac50-5cdfad7f7b29";
+const ref = { session_id: "local:client-new-thread:4725a80c", title: "Recent" };
+const row = {};
+function create(active, current) {
+  return new Function(
+    "isTemporaryThreadId",
+    "isCurrentSessionRow",
+    "activeConversationIdFromDom",
+    `return (${source.trim()});`
+  )(
+    (value) => String(value).includes("client-new-thread:"),
+    () => current,
+    () => active
+  );
+}
+assert.deepEqual(create(id, true)(row, ref), { ...ref, session_id: `local:${id}` });
+assert.equal(create(id, false)(row, ref), ref);
+assert.equal(create("", true)(row, ref), ref);
+const stable = { session_id: `local:${id}`, title: "Stable" };
+assert.equal(create(id, true)(row, stable), stable);
+"#;
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(node_script)
+        .output()
+        .expect("node should be available");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -1678,7 +1857,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "90";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "93";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -1842,6 +2021,33 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
     assert!(
         runtime_refresh
             .contains("closeTaskBoardCreateModal();\n    closeTaskBoardManager({ restoreFocus: false });\n    closeTaskBoardDetachDialog({ restoreFocus: false });\n    reconcileTaskBoardRuntime();")
+    );
+}
+
+#[test]
+fn renderer_task_board_selected_sessions_remain_visible_with_codex_checkbox_reset() {
+    let script = assets::renderer_features_script();
+    let selected_style = script
+        .split(".codex-task-board-create-session-option:has(input:checked) {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("selected session style should be present");
+    assert!(selected_style.contains("background: color-mix(in srgb, #63aee0 18%, transparent)"));
+    assert!(selected_style.contains("box-shadow: inset 3px 0 #63aee0"));
+
+    let checkbox_style = script
+        .split(".codex-task-board-create-session-option input[type=\"checkbox\"] {")
+        .nth(1)
+        .and_then(|section| section.split('}').next())
+        .expect("session checkbox style should be present");
+    assert!(checkbox_style.contains("appearance: auto"));
+    assert!(checkbox_style.contains("-webkit-appearance: checkbox"));
+    assert!(checkbox_style.contains("accent-color: #63aee0"));
+    assert!(script.contains("checkbox.checked = modal.selectedSessionIds.has(session.sessionId)"));
+    assert!(
+        script.contains(
+            "modal.sessionCount.textContent = `已选 ${modal.selectedSessionIds.size} 个`"
+        )
     );
 }
 
@@ -3776,7 +3982,7 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
     assert!(script.contains("codex-open-in-menu"));
     assert!(script.contains(r#"const codexOpenInVersion = "10";"#));
     assert!(script.contains("window.__codexElvesOpenInRuntimeVersion === codexOpenInVersion"));
-    assert!(script.contains(r#"const codexDeleteStyleVersion = "90";"#));
+    assert!(script.contains(r#"const codexDeleteStyleVersion = "93";"#));
     assert!(script.contains(r#"[data-codex-open-in-role="primary"]"#));
     assert!(script.contains(r#"[data-codex-open-in-role="arrow"]"#));
     assert!(script.contains("width: 30px !important;"));
@@ -4102,11 +4308,43 @@ fn injection_script_open_in_does_not_block_repeat_activation_on_native_promise()
 fn injection_script_reuses_native_session_action_button_style_with_fallback() {
     let script = assets::injection_script(45221);
 
+    assert!(script.contains("window.__codexElvesRuntimeStyleVersion === codexDeleteStyleVersion"));
+    assert!(script.contains("window.__codexElvesRuntimeStyleVersion = codexDeleteStyleVersion"));
+    assert!(script.contains("window.__codexElvesRuntimeDeleteVersion === codexDeleteVersion"));
+    assert!(script.contains("window.__codexElvesRuntimeDeleteVersion = codexDeleteVersion"));
+    assert!(script.contains(
+        "runScanStep(installCodexElvesRuntimeOnce);\n  installDeleteButtonEventDelegation();\n  const initialSessionRows = sessionRows(true);\n  initialSessionRows.forEach(tryAttachButton);\n  syncActionGroupsLayout(initialSessionRows);"
+    ));
     assert!(script.contains("actionButtonClass = \"codex-session-action-button\""));
     assert!(script.contains("nativeActionButtonClassFromHost"));
     assert!(script.contains("sessionActionButtonClassName"));
+    let native_action_style = script
+        .split(
+            ".${actionGroupClass}[data-codex-action-placement=\"native\"] .${actionButtonClass} {",
+        )
+        .nth(1)
+        .expect("native action button style should be present")
+        .split("\n      }")
+        .next()
+        .expect("native action button style should be closed");
+    for property in [
+        "display: inline-flex;",
+        "width: 20px;",
+        "height: 20px;",
+        "min-width: 20px;",
+        "min-height: 20px;",
+        "flex: 0 0 20px;",
+    ] {
+        assert!(native_action_style.contains(property), "missing {property}");
+    }
+    assert!(script.contains(
+        ".${actionGroupClass}[data-codex-action-placement=\"native\"] .${actionButtonClass} svg {\n        display: block;\n        width: 16px;\n        height: 16px;"
+    ));
     assert!(script.contains(
         ".${actionGroupClass}:not([data-codex-action-placement=\"native\"]) .${actionButtonClass}"
+    ));
+    assert!(script.contains(
+        ".${actionGroupClass}[data-codex-action-placement=\"native\"] .${buttonClass},\n      .${actionGroupClass}:not([data-codex-action-placement=\"native\"]) .${buttonClass} {\n        cursor: pointer;"
     ));
     assert!(script.contains("background: transparent;"));
     assert!(script.contains("background: #363839;"));
@@ -7565,6 +7803,7 @@ const documentSet = (type) => documentListeners.get(type) || (documentListeners.
 globalThis.document = {
   readyState: "complete", scripts: [], visibilityState: "visible", documentElement: node("html"), body: node("body"), activeElement: null,
   createElement: (tag) => node(tag), createTextNode: (text) => { const value = node("#text"); value.nodeType = 3; value.textContent = String(text); return value; },
+  getElementById(id) { return this.documentElement.querySelector(`[id="${id}"]`); },
   querySelector(selector) { return this.documentElement.querySelector(selector); },
   querySelectorAll(selector) { return this.documentElement.querySelectorAll(selector); },
   addEventListener(type, listener) { documentSet(type).add(listener); },
@@ -11932,6 +12171,53 @@ fn runtime_evaluate_params_can_await_promise_for_bridge_health_checks() {
     assert_eq!(params["expression"], "Promise.resolve(true)");
     assert_eq!(params["awaitPromise"], true);
     assert_eq!(params["allowUnsafeEvalBlockedByCSP"], true);
+}
+
+#[tokio::test]
+async fn native_delete_bridge_waits_for_value_result() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let message = socket.next().await.unwrap().unwrap().into_text().unwrap();
+        let request: serde_json::Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(request["method"], "Runtime.evaluate");
+        assert_eq!(request["params"]["awaitPromise"], true);
+        assert_eq!(request["params"]["returnByValue"], true);
+        socket
+            .send(Message::Text(
+                json!({
+                    "id": 1,
+                    "result": {
+                        "result": {
+                            "type": "object",
+                            "value": {
+                                "status": "local_deleted",
+                                "session_id": "thread-1",
+                                "message": "deleted"
+                            }
+                        }
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+    });
+    let response = bridge::evaluate_script_value_with_timeout(
+        &format!("ws://{addr}"),
+        "Promise.resolve({ status: 'local_deleted' })",
+        Duration::from_secs(2),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        response["result"]["result"]["value"]["status"],
+        "local_deleted"
+    );
+    server.await.unwrap();
 }
 
 #[test]

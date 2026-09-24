@@ -1112,6 +1112,25 @@ async fn handle_helper_connection(
                     "helper.backend_repair_ok"
                 },
             )
+        } else if path == "/transport/sessions" && matches!(method.as_str(), "POST" | "OPTIONS") {
+            let payload: serde_json::Value = serde_json::from_str(request_body).unwrap_or_default();
+            let ids = payload
+                .get("threadIds")
+                .and_then(serde_json::Value::as_array)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .take(200)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (
+                "200 OK".to_string(),
+                serde_json::to_vec(&crate::session_transport::status(&ids))?,
+                "application/json; charset=utf-8".to_string(),
+                "helper.session_transport_status",
+            )
         } else if path == "/diagnostics/log" && matches!(method.as_str(), "POST" | "OPTIONS") {
             if method == "POST" {
                 let detail = serde_json::from_str::<serde_json::Value>(request_body)
@@ -1622,11 +1641,169 @@ async fn handle_protocol_proxy_connection(
     path: &str,
     remote_addr_text: Option<String>,
 ) -> anyhow::Result<()> {
+    let log_id = next_local_proxy_log_id();
+    let mut progress = ProxyCancellationProgress::default();
+    #[derive(serde::Deserialize)]
+    struct StreamFlag {
+        #[serde(default)]
+        stream: bool,
+    }
+    // Ignore large input/image fields while selecting the cancellation path.
+    // The forwarding routine owns the single full parsed request.
+    if !serde_json::from_str::<StreamFlag>(request_body).is_ok_and(|request| request.stream) {
+        return handle_protocol_proxy_connection_inner(
+            stream,
+            request_body,
+            request_context,
+            method,
+            path,
+            remote_addr_text,
+            log_id,
+            &mut progress,
+        )
+        .await;
+    }
+    let started_at = Instant::now();
+    let timestamp_ms = crate::proxy_log::current_timestamp_ms();
+    let (mut reader, writer) = stream.split();
+    let mut writer = ProxyClientWriter {
+        inner: writer,
+        write_failed: false,
+    };
+    let result = tokio::select! {
+        biased;
+        result = handle_protocol_proxy_connection_inner(
+            &mut writer, request_body, request_context, method, path,
+            remote_addr_text.clone(), log_id.clone(), &mut progress,
+        ) => Some(result),
+        _ = wait_for_proxy_client_disconnect(&mut reader) => None,
+    };
+    match result {
+        Some(Ok(())) => return Ok(()),
+        Some(Err(error)) if !writer.write_failed => return Err(error),
+        _ => {}
+    }
+    // The entire forwarding future has been dropped, including its active
+    // WS/HTTP body and any pending reconnect or continuation request.
+    let request_body = progress.request_body.as_deref().unwrap_or(request_body);
+    let request_json = serde_json::from_str::<Value>(request_body).ok();
+    let metadata = crate::proxy_log::extract_request_metadata(request_json.as_ref());
+    append_local_proxy_record(
+        log_id,
+        timestamp_ms,
+        started_at,
+        method,
+        path,
+        remote_addr_text,
+        &metadata,
+        progress.relay_id,
+        progress.relay_name,
+        progress.endpoint,
+        progress.response_protocol,
+        499,
+        true,
+        request_body,
+        &[],
+        0,
+        false,
+        Some("客户端已断开，已取消上游请求".to_string()),
+    );
+    Ok(())
+}
+
+#[derive(Default)]
+struct ProxyCancellationProgress {
+    relay_id: Option<String>,
+    relay_name: Option<String>,
+    endpoint: Option<String>,
+    response_protocol: Option<String>,
+    request_body: Option<Arc<str>>,
+}
+
+struct ProxyClientWriter<W> {
+    inner: W,
+    write_failed: bool,
+}
+
+impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for ProxyClientWriter<W> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let result = std::pin::Pin::new(&mut self.inner).poll_write(cx, bytes);
+        if matches!(result, std::task::Poll::Ready(Err(_))) {
+            self.write_failed = true;
+        }
+        result
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let result = std::pin::Pin::new(&mut self.inner).poll_flush(cx);
+        if matches!(result, std::task::Poll::Ready(Err(_))) {
+            self.write_failed = true;
+        }
+        result
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let result = std::pin::Pin::new(&mut self.inner).poll_shutdown(cx);
+        if matches!(result, std::task::Poll::Ready(Err(_))) {
+            self.write_failed = true;
+        }
+        result
+    }
+}
+
+impl ProxyCancellationProgress {
+    fn observe_upstream(
+        &mut self,
+        upstream: &mut crate::protocol_proxy::UpstreamProxyResponse,
+        original_body: &str,
+    ) -> Arc<str> {
+        let body: Arc<str> = if upstream.request_body.trim().is_empty() {
+            Arc::from(original_body)
+        } else {
+            Arc::from(std::mem::take(&mut upstream.request_body))
+        };
+        self.relay_id = upstream.relay_id.clone();
+        self.relay_name = upstream.relay_name.clone();
+        self.endpoint = upstream.endpoint.clone();
+        self.response_protocol = Some(response_protocol_label(upstream.response_protocol));
+        self.request_body = Some(body.clone());
+        body
+    }
+}
+
+async fn wait_for_proxy_client_disconnect(reader: &mut tokio::net::tcp::ReadHalf<'_>) {
+    let mut byte = [0; 1];
+    match reader.peek(&mut byte).await {
+        Ok(0) | Err(_) => {}
+        // The helper advertises Connection: close. Do not consume unexpected
+        // pipelined input or spin on it while the current response is running.
+        Ok(_) => std::future::pending::<()>().await,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_protocol_proxy_connection_inner(
+    stream: &mut (impl tokio::io::AsyncWrite + Unpin),
+    request_body: &str,
+    request_context: &crate::request_headers::RequestContext,
+    method: &str,
+    path: &str,
+    remote_addr_text: Option<String>,
+    log_id: String,
+    progress: &mut ProxyCancellationProgress,
+) -> anyhow::Result<()> {
     let started_at = Instant::now();
     let timestamp_ms = crate::proxy_log::current_timestamp_ms();
     let request_json = serde_json::from_str::<serde_json::Value>(request_body).ok();
     let request_metadata = crate::proxy_log::extract_request_metadata(request_json.as_ref());
-    let log_id = next_local_proxy_log_id();
     append_pending_local_proxy_record(
         &log_id,
         timestamp_ms,
@@ -1650,6 +1827,7 @@ async fn handle_protocol_proxy_connection(
             request_json,
             request_metadata,
             log_id,
+            progress,
         )
         .await;
     }
@@ -1674,14 +1852,11 @@ async fn handle_protocol_proxy_connection(
         )
         .await
     };
-    let upstream = match upstream_request {
+    let mut upstream = match upstream_request {
         Ok(upstream) => upstream,
         Err(error) => {
             let failure_context = crate::protocol_proxy::upstream_failure_context(&error).cloned();
-            let fallback_blocked =
-                error.downcast_ref::<crate::protocol_proxy::ResponsesHttpFallbackDisabled>();
-            let error_message =
-                fallback_blocked.map_or_else(|| error.to_string(), ToString::to_string);
+            let error_message = error.to_string();
             let upstream_timed_out = crate::protocol_proxy::upstream_error_is_timeout(&error);
             let bridge_remote_compaction_v2 = failure_context.as_ref().map_or_else(
                 || {
@@ -1693,19 +1868,7 @@ async fn handle_protocol_proxy_connection(
                 },
                 |context| context.bridge_remote_compaction_v2,
             );
-            let (status, status_code, body) = if fallback_blocked.is_some() {
-                (
-                    "409 Conflict",
-                    409,
-                    serde_json::to_vec(&serde_json::json!({
-                        "error": {
-                            "type": "invalid_request_error",
-                            "code": crate::protocol_proxy::ResponsesHttpFallbackDisabled::CODE,
-                            "message": error_message,
-                        }
-                    }))?,
-                )
-            } else if bridge_remote_compaction_v2 {
+            let (status, status_code, body) = if bridge_remote_compaction_v2 {
                 let failure = crate::layered_compaction::remote_compaction_v2_failure_response(
                     request_json.as_ref().expect("V2 bridge request must exist"),
                     None,
@@ -1778,16 +1941,12 @@ async fn handle_protocol_proxy_connection(
         }
     };
 
-    let logged_request_body = if upstream.request_body.trim().is_empty() {
-        request_body.to_string()
-    } else {
-        upstream.request_body.clone()
-    };
+    let logged_request_body = progress.observe_upstream(&mut upstream, request_body);
     let logged_request_json = serde_json::from_str::<serde_json::Value>(&logged_request_body).ok();
     let logged_request_metadata =
         crate::proxy_log::extract_request_metadata(logged_request_json.as_ref());
-    let request_metadata = logged_request_metadata;
-    let request_body = logged_request_body.as_str();
+    let mut request_metadata = logged_request_metadata;
+    let request_body = logged_request_body.as_ref();
 
     if !upstream.is_success() {
         let relay_id = upstream.relay_id.clone();
@@ -1996,10 +2155,14 @@ async fn handle_protocol_proxy_connection(
             let mut continue_thinking_log = LocalContinueThinkingLog::default();
             let mut layered_compaction_log = LocalLayeredCompactionLog::default();
             if upstream.body_override.is_some() {
-                let body = restore_compaction_model_in_bytes(
-                    upstream.into_body_bytes().await?,
-                    compaction_model_restore.as_ref(),
+                let raw_body = upstream.into_body_bytes().await?;
+                request_metadata.upstream_response_model = observed_upstream_model(
+                    &raw_body,
+                    crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+                    true,
                 );
+                let body =
+                    restore_compaction_model_in_bytes(raw_body, compaction_model_restore.as_ref());
                 response_bytes += body.len();
                 response_truncated |=
                     crate::proxy_log::append_capture(&mut response_capture, &body);
@@ -2032,6 +2195,11 @@ async fn handle_protocol_proxy_connection(
                             response_truncated |=
                                 crate::proxy_log::append_capture(&mut response_capture, &failed);
                             stream.write_all(&failed).await?;
+                            request_metadata.upstream_response_model = observed_upstream_model(
+                                &first_round_bytes,
+                                crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+                                true,
+                            );
                             append_local_proxy_record(
                                 log_id.clone(),
                                 timestamp_ms,
@@ -2071,6 +2239,11 @@ async fn handle_protocol_proxy_connection(
                             response_truncated |=
                                 crate::proxy_log::append_capture(&mut response_capture, &failed);
                             stream.write_all(&failed).await?;
+                            request_metadata.upstream_response_model = observed_upstream_model(
+                                &first_round_bytes,
+                                crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+                                true,
+                            );
                             append_local_proxy_record(
                                 log_id.clone(),
                                 timestamp_ms,
@@ -2117,6 +2290,11 @@ async fn handle_protocol_proxy_connection(
                         );
                     }
                 }
+                request_metadata.upstream_response_model = observed_upstream_model(
+                    &first_round_bytes,
+                    crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+                    true,
+                );
                 let first_round_sse_text = String::from_utf8_lossy(&first_round_bytes).into_owned();
                 let final_sse_text = if let Some(request) = logged_request_json.as_ref() {
                     let settings = SettingsStore::default().load().unwrap_or_default();
@@ -2221,6 +2399,8 @@ async fn handle_protocol_proxy_connection(
             EitherResponsesStreamConverter::Anthropic(&mut anthropic_converter)
         };
         let mut converter = converter_kind;
+        let mut upstream_model_observer =
+            crate::proxy_log::UpstreamResponseModelObserver::default();
         let mut bytes_stream = upstream.into_response()?.bytes_stream();
         let mut stream_failed = false;
         let mut stream_error = None;
@@ -2232,6 +2412,7 @@ async fn handle_protocol_proxy_connection(
         while let Some(chunk) = bytes_stream.next().await {
             match chunk {
                 Ok(bytes) => {
+                    upstream_model_observer.observe_sse_chunk(&bytes, response_protocol);
                     let converted = restore_compaction_model_in_bytes(
                         converter.push_bytes(&bytes),
                         compaction_model_restore.as_ref(),
@@ -2281,6 +2462,8 @@ async fn handle_protocol_proxy_connection(
                 }
             }
         }
+        upstream_model_observer.finish_sse(response_protocol);
+        request_metadata.upstream_response_model = upstream_model_observer.model();
 
         if !stream_failed {
             let tail = restore_compaction_model_in_bytes(
@@ -2386,6 +2569,8 @@ async fn handle_protocol_proxy_connection(
         }
         Err(error) => return Err(error),
     };
+    request_metadata.upstream_response_model =
+        observed_upstream_model(&upstream_body, response_protocol, false);
     if response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses {
         let body = if bridge_remote_compaction_v2 {
             let request = request_json.as_ref().expect("bridge request must exist");
@@ -2574,7 +2759,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_deferred_protocol_proxy_stream_connection(
-    stream: &mut tokio::net::TcpStream,
+    stream: &mut (impl tokio::io::AsyncWrite + Unpin),
     request_body: &str,
     request_context: &crate::request_headers::RequestContext,
     method: &str,
@@ -2585,6 +2770,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     request_json: Option<serde_json::Value>,
     request_metadata: crate::proxy_log::RequestMetadata,
     log_id: String,
+    progress: &mut ProxyCancellationProgress,
 ) -> anyhow::Result<()> {
     let mut response_capture = Vec::new();
     let mut response_bytes = 0_usize;
@@ -2624,7 +2810,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
         )
         .await;
 
-    let upstream = match upstream {
+    let mut upstream = match upstream {
         Ok(upstream) => upstream,
         Err(error) => {
             let failure_context = crate::protocol_proxy::upstream_failure_context(&error).cloned();
@@ -2701,16 +2887,12 @@ async fn handle_deferred_protocol_proxy_stream_connection(
         }
     };
 
-    let logged_request_body = if upstream.request_body.trim().is_empty() {
-        request_body.to_string()
-    } else {
-        upstream.request_body.clone()
-    };
+    let logged_request_body = progress.observe_upstream(&mut upstream, request_body);
     let logged_request_json = serde_json::from_str::<serde_json::Value>(&logged_request_body).ok();
     let logged_request_metadata =
         crate::proxy_log::extract_request_metadata(logged_request_json.as_ref());
-    let request_metadata = logged_request_metadata;
-    let request_body = logged_request_body.as_str();
+    let mut request_metadata = logged_request_metadata;
+    let request_body = logged_request_body.as_ref();
 
     let diagnostic_id = upstream.diagnostic_id.clone();
     let relay_id = upstream.relay_id.clone();
@@ -2733,6 +2915,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
             response_protocol,
             bridge_remote_compaction_v2,
         );
+    let mut upstream_model_observer = crate::proxy_log::UpstreamResponseModelObserver::default();
 
     if !upstream.is_success() {
         let upstream_body = match upstream.into_body_bytes().await {
@@ -3002,6 +3185,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                 }
                 buffered
             };
+            upstream_model_observer.observe_sse_chunk(&raw_body, response_protocol);
             if first_token_ms.is_none() {
                 let elapsed_ms = started_at.elapsed().as_millis() as u64;
                 first_token_ms = Some(elapsed_ms);
@@ -3037,10 +3221,10 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                 crate::proxy_log::append_capture(&mut response_capture, &rewritten);
             stream.write_all(&rewritten).await?;
         } else if upstream.body_override.is_some() {
-            let body = restore_compaction_model_in_bytes(
-                upstream.into_body_bytes().await?,
-                compaction_model_restore.as_ref(),
-            );
+            let raw_body = upstream.into_body_bytes().await?;
+            upstream_model_observer.observe_sse_chunk(&raw_body, response_protocol);
+            let body =
+                restore_compaction_model_in_bytes(raw_body, compaction_model_restore.as_ref());
             let elapsed_ms = started_at.elapsed().as_millis() as u64;
             first_token_ms = Some(elapsed_ms);
             append_local_proxy_first_token_record(
@@ -3109,6 +3293,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                         break;
                     }
                 };
+                upstream_model_observer.observe_sse_chunk(&bytes, response_protocol);
                 if first_token_ms.is_none() {
                     let elapsed_ms = started_at.elapsed().as_millis() as u64;
                     first_token_ms = Some(elapsed_ms);
@@ -3146,6 +3331,8 @@ async fn handle_deferred_protocol_proxy_stream_connection(
             "200 OK",
             remote_addr_text.clone(),
         );
+        upstream_model_observer.finish_sse(response_protocol);
+        request_metadata.upstream_response_model = upstream_model_observer.model();
         append_local_proxy_record_with_continue_thinking(
             log_id.clone(),
             timestamp_ms,
@@ -3219,6 +3406,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
 
     if upstream_has_body_override {
         let body = upstream.into_body_bytes().await?;
+        upstream_model_observer.observe_sse_chunk(&body, response_protocol);
         let converted = converter.push_bytes(&body);
         if !converted.is_empty() {
             if first_token_ms.is_none() {
@@ -3292,6 +3480,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                 };
             match chunk {
                 Ok(bytes) => {
+                    upstream_model_observer.observe_sse_chunk(&bytes, response_protocol);
                     let converted = converter.push_bytes(&bytes);
                     if !converted.is_empty() {
                         if first_token_ms.is_none() {
@@ -3394,6 +3583,8 @@ async fn handle_deferred_protocol_proxy_stream_connection(
         "protocol_proxy.stream_conversion_terminal",
         converter.diagnostic_summary(),
     );
+    upstream_model_observer.finish_sse(response_protocol);
+    request_metadata.upstream_response_model = upstream_model_observer.model();
     log_helper_response(
         if stream_failed {
             "helper.protocol_proxy_deferred_stream_failed"
@@ -3517,7 +3708,7 @@ async fn handle_chat_completions_proxy_connection(
     let logged_request_json = serde_json::from_str::<serde_json::Value>(&logged_request_body).ok();
     let logged_request_metadata =
         crate::proxy_log::extract_request_metadata(logged_request_json.as_ref());
-    let request_metadata = logged_request_metadata;
+    let mut request_metadata = logged_request_metadata;
     let request_body = logged_request_body.as_str();
 
     let relay_id = upstream.relay_id.clone();
@@ -3536,6 +3727,8 @@ async fn handle_chat_completions_proxy_connection(
     if upstream.is_stream && is_success {
         write_http_stream_headers(stream, &status, &content_type).await?;
         let mut bytes_stream = upstream.into_response()?.bytes_stream();
+        let mut upstream_model_observer =
+            crate::proxy_log::UpstreamResponseModelObserver::default();
         let mut response_capture = Vec::new();
         let mut response_bytes = 0_usize;
         let mut response_truncated = false;
@@ -3544,6 +3737,8 @@ async fn handle_chat_completions_proxy_connection(
             let bytes = match chunk {
                 Ok(bytes) => bytes,
                 Err(error) => {
+                    upstream_model_observer.finish_sse(response_protocol);
+                    request_metadata.upstream_response_model = upstream_model_observer.model();
                     append_local_proxy_record(
                         log_id.clone(),
                         timestamp_ms,
@@ -3567,6 +3762,7 @@ async fn handle_chat_completions_proxy_connection(
                     return Err(error.into());
                 }
             };
+            upstream_model_observer.observe_sse_chunk(&bytes, response_protocol);
             if first_token_ms.is_none() {
                 let elapsed_ms = started_at.elapsed().as_millis() as u64;
                 first_token_ms = Some(elapsed_ms);
@@ -3591,6 +3787,8 @@ async fn handle_chat_completions_proxy_connection(
             response_truncated |= crate::proxy_log::append_capture(&mut response_capture, &bytes);
             stream.write_all(&bytes).await?;
         }
+        upstream_model_observer.finish_sse(response_protocol);
+        request_metadata.upstream_response_model = upstream_model_observer.model();
         log_helper_response(
             "helper.chat_completions_proxy_stream_ok",
             method,
@@ -3628,6 +3826,10 @@ async fn handle_chat_completions_proxy_connection(
     }
 
     let body = upstream.into_body_bytes().await?;
+    if is_success {
+        request_metadata.upstream_response_model =
+            observed_upstream_model(&body, response_protocol, false);
+    }
     write_http_response(stream, &status, &content_type, &body).await?;
     log_helper_response(
         if is_success {
@@ -3692,6 +3894,16 @@ fn next_local_proxy_log_id() -> String {
     format!("local-{}", uuid::Uuid::new_v4())
 }
 
+fn upstream_log_transport(endpoint: Option<&str>) -> crate::proxy_log::ProxyRequestTransport {
+    if endpoint
+        .is_some_and(|endpoint| endpoint.starts_with("ws://") || endpoint.starts_with("wss://"))
+    {
+        crate::proxy_log::ProxyRequestTransport::Ws
+    } else {
+        crate::proxy_log::ProxyRequestTransport::Http
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_pending_local_proxy_record(
     id: &str,
@@ -3716,6 +3928,7 @@ fn append_pending_local_proxy_record(
         path: path.to_string(),
         remote_addr: remote_addr_text,
         model: request_metadata.model.clone(),
+        upstream_response_model: None,
         reasoning_tokens: None,
         reasoning_effort: request_metadata.reasoning_effort.clone(),
         reasoning_source: request_metadata.reasoning_source.clone(),
@@ -3772,12 +3985,13 @@ fn append_local_proxy_first_token_record(
     let record = crate::proxy_log::ProxyRequestRecord {
         id: id.to_string(),
         state: crate::proxy_log::ProxyRequestState::Pending,
-        transport: crate::proxy_log::ProxyRequestTransport::Http,
+        transport: upstream_log_transport(endpoint.as_deref()),
         timestamp_ms,
         method: method.to_string(),
         path: path.to_string(),
         remote_addr: remote_addr_text,
         model: request_metadata.model.clone(),
+        upstream_response_model: request_metadata.upstream_response_model.clone(),
         reasoning_tokens: None,
         reasoning_effort: request_metadata.reasoning_effort.clone(),
         reasoning_source: request_metadata.reasoning_source.clone(),
@@ -3885,12 +4099,13 @@ fn append_local_proxy_record_with_continue_thinking(
     let record = crate::proxy_log::ProxyRequestRecord {
         id,
         state: crate::proxy_log::ProxyRequestState::Completed,
-        transport: crate::proxy_log::ProxyRequestTransport::Http,
+        transport: upstream_log_transport(endpoint.as_deref()),
         timestamp_ms,
         method: method.to_string(),
         path: path.to_string(),
         remote_addr: remote_addr_text,
         model: request_metadata.model.clone(),
+        upstream_response_model: request_metadata.upstream_response_model.clone(),
         reasoning_tokens: continue_thinking.reasoning_tokens.or_else(|| {
             crate::proxy_log::extract_reasoning_tokens_from_response_body(response_body)
         }),
@@ -3919,7 +4134,12 @@ fn append_local_proxy_record_with_continue_thinking(
         duration_ms: Some(started_at.elapsed().as_millis() as u64),
         stream,
         request_bytes: request_body.len(),
-        response_bytes: Some(response_bytes),
+        // Cancellation can interrupt a write after an unknown number of bytes.
+        response_bytes: if status_code == 499 && response_body.is_empty() {
+            None
+        } else {
+            Some(response_bytes)
+        },
         response_captured_bytes: Some(response_body.len()),
         response_truncated,
         request_body: request_body.to_string(),
@@ -3949,8 +4169,23 @@ fn response_protocol_label(protocol: crate::protocol_proxy::UpstreamResponseProt
         .unwrap_or_else(|| format!("{protocol:?}"))
 }
 
+fn observed_upstream_model(
+    body: &[u8],
+    protocol: crate::protocol_proxy::UpstreamResponseProtocol,
+    stream: bool,
+) -> Option<String> {
+    let mut observer = crate::proxy_log::UpstreamResponseModelObserver::default();
+    if stream {
+        observer.observe_sse_chunk(body, protocol);
+        observer.finish_sse(protocol);
+    } else {
+        observer.observe_json(body, protocol);
+    }
+    observer.model()
+}
+
 async fn write_http_response(
-    stream: &mut tokio::net::TcpStream,
+    stream: &mut (impl tokio::io::AsyncWrite + Unpin),
     status: &str,
     content_type: &str,
     body: &[u8],
@@ -3965,7 +4200,7 @@ async fn write_http_response(
 }
 
 async fn write_http_stream_headers(
-    stream: &mut tokio::net::TcpStream,
+    stream: &mut (impl tokio::io::AsyncWrite + Unpin),
     status: &str,
     content_type: &str,
 ) -> anyhow::Result<()> {
@@ -3977,7 +4212,7 @@ async fn write_http_stream_headers(
 }
 
 async fn write_http_stream_headers_once(
-    stream: &mut tokio::net::TcpStream,
+    stream: &mut (impl tokio::io::AsyncWrite + Unpin),
     headers_sent: &mut bool,
     status: &str,
     content_type: &str,
@@ -4496,10 +4731,21 @@ fn post_launch_guard_artifacts_ready(
     artifacts: &crate::computer_use_guard::GuardArtifacts,
     browser_compat_enabled: bool,
 ) -> bool {
-    artifacts.notify_exe.is_some()
-        && artifacts.marketplace_path.is_some()
-        && (!artifacts.runtime_exports_needed || artifacts.sky_package_json.is_some())
-        && (!browser_compat_enabled || artifacts.browser_service_script.is_some())
+    artifacts.notify_exe.as_deref().is_some_and(Path::is_file)
+        && artifacts
+            .marketplace_path
+            .as_deref()
+            .is_some_and(Path::is_dir)
+        && (!artifacts.runtime_exports_needed
+            || artifacts
+                .sky_package_json
+                .as_deref()
+                .is_some_and(Path::is_file))
+        && (!browser_compat_enabled
+            || artifacts
+                .browser_service_script
+                .as_deref()
+                .is_some_and(Path::is_file))
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -4535,30 +4781,29 @@ async fn run_post_launch_computer_use_guard(
         }
         let attempt = index + 1;
         let outcome = if guard_enabled {
-            let resolved_artifacts = match artifacts.take() {
-                Some(artifacts) => artifacts,
-                None => {
-                    match crate::computer_use_guard::resolve_computer_use_guard_artifacts(&home) {
-                        Ok(resolved) => resolved,
-                        Err(error) => {
-                            stable_unchanged_attempts = 0;
-                            let _ = crate::diagnostic_log::append_diagnostic_log(
-                                "computer_use_guard.post_launch_failed",
-                                serde_json::json!({
-                                    "attempt": attempt,
-                                    "delay_seconds": delay,
-                                    "phase": "resolve_artifacts",
-                                    "message": error.to_string()
-                                }),
-                            );
-                            continue;
-                        }
+            let resolved_artifacts =
+                match crate::computer_use_guard::refresh_computer_use_guard_artifacts(
+                    &home,
+                    artifacts.as_ref(),
+                ) {
+                    Ok(resolved) => resolved,
+                    Err(error) => {
+                        stable_unchanged_attempts = 0;
+                        let _ = crate::diagnostic_log::append_diagnostic_log(
+                            "computer_use_guard.post_launch_failed",
+                            serde_json::json!({
+                                "attempt": attempt,
+                                "delay_seconds": delay,
+                                "phase": "resolve_artifacts",
+                                "message": error.to_string()
+                            }),
+                        );
+                        continue;
                     }
-                }
-            };
+                };
             let targets_ready =
                 post_launch_guard_artifacts_ready(&resolved_artifacts, browser_compat_enabled);
-            artifacts = targets_ready.then_some(resolved_artifacts.clone());
+            artifacts = Some(resolved_artifacts.clone());
             crate::computer_use_guard::ensure_computer_use_config_with_artifacts(
                 &home,
                 &resolved_artifacts,
@@ -4930,11 +5175,18 @@ mod tests {
 
     #[test]
     fn post_launch_guard_stops_after_stable_ready_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        let notify_exe = temp.path().join("codex-computer-use.exe");
+        let marketplace_path = temp.path().join("openai-bundled");
+        let browser_service_script = temp.path().join("browser-service.mjs");
+        std::fs::write(&notify_exe, "").unwrap();
+        std::fs::create_dir(&marketplace_path).unwrap();
+        std::fs::write(&browser_service_script, "").unwrap();
         let artifacts = crate::computer_use_guard::GuardArtifacts {
-            notify_exe: Some(PathBuf::from("codex-computer-use.exe")),
-            marketplace_path: Some(PathBuf::from("openai-bundled")),
+            notify_exe: Some(notify_exe),
+            marketplace_path: Some(marketplace_path),
             sky_package_json: None,
-            browser_service_script: Some(PathBuf::from("browser-service.mjs")),
+            browser_service_script: Some(browser_service_script),
             runtime_exports_needed: false,
         };
 
@@ -4945,34 +5197,28 @@ mod tests {
 
     #[test]
     fn post_launch_guard_keeps_retrying_until_artifacts_are_ready() {
-        let missing_notify = crate::computer_use_guard::GuardArtifacts {
-            notify_exe: None,
-            marketplace_path: Some(PathBuf::from("openai-bundled")),
+        let temp = tempfile::tempdir().unwrap();
+        let notify_exe = temp.path().join("codex-computer-use.exe");
+        let marketplace_path = temp.path().join("openai-bundled");
+        let browser_service_script = temp.path().join("browser-service.mjs");
+        std::fs::write(&notify_exe, "").unwrap();
+        std::fs::create_dir(&marketplace_path).unwrap();
+        std::fs::write(&browser_service_script, "").unwrap();
+        let ready = crate::computer_use_guard::GuardArtifacts {
+            notify_exe: Some(notify_exe.clone()),
+            marketplace_path: Some(marketplace_path.clone()),
             sky_package_json: None,
-            browser_service_script: Some(PathBuf::from("browser-service.mjs")),
+            browser_service_script: Some(browser_service_script.clone()),
             runtime_exports_needed: false,
         };
-        let missing_marketplace = crate::computer_use_guard::GuardArtifacts {
-            notify_exe: Some(PathBuf::from("codex-computer-use.exe")),
-            marketplace_path: None,
-            sky_package_json: None,
-            browser_service_script: Some(PathBuf::from("browser-service.mjs")),
-            runtime_exports_needed: false,
-        };
-        let missing_runtime_package = crate::computer_use_guard::GuardArtifacts {
-            notify_exe: Some(PathBuf::from("codex-computer-use.exe")),
-            marketplace_path: Some(PathBuf::from("openai-bundled")),
-            sky_package_json: None,
-            browser_service_script: Some(PathBuf::from("browser-service.mjs")),
-            runtime_exports_needed: true,
-        };
-        let missing_browser_service = crate::computer_use_guard::GuardArtifacts {
-            notify_exe: Some(PathBuf::from("codex-computer-use.exe")),
-            marketplace_path: Some(PathBuf::from("openai-bundled")),
-            sky_package_json: None,
-            browser_service_script: None,
-            runtime_exports_needed: false,
-        };
+        let mut missing_notify = ready.clone();
+        missing_notify.notify_exe = None;
+        let mut missing_marketplace = ready.clone();
+        missing_marketplace.marketplace_path = None;
+        let mut missing_runtime_package = ready.clone();
+        missing_runtime_package.runtime_exports_needed = true;
+        let mut missing_browser_service = ready.clone();
+        missing_browser_service.browser_service_script = None;
 
         assert!(!post_launch_guard_artifacts_ready(&missing_notify, true));
         assert!(!post_launch_guard_artifacts_ready(
@@ -4991,6 +5237,26 @@ mod tests {
             &missing_browser_service,
             false
         ));
+
+        std::fs::remove_file(&notify_exe).unwrap();
+        assert!(!post_launch_guard_artifacts_ready(&ready, true));
+        std::fs::write(&notify_exe, "").unwrap();
+
+        std::fs::remove_dir(&marketplace_path).unwrap();
+        assert!(!post_launch_guard_artifacts_ready(&ready, true));
+        std::fs::create_dir(&marketplace_path).unwrap();
+
+        let sky_package_json = temp.path().join("sky-package.json");
+        std::fs::write(&sky_package_json, "{}").unwrap();
+        let mut runtime_ready = ready.clone();
+        runtime_ready.runtime_exports_needed = true;
+        runtime_ready.sky_package_json = Some(sky_package_json.clone());
+        assert!(post_launch_guard_artifacts_ready(&runtime_ready, true));
+        std::fs::remove_file(sky_package_json).unwrap();
+        assert!(!post_launch_guard_artifacts_ready(&runtime_ready, true));
+
+        std::fs::remove_file(browser_service_script).unwrap();
+        assert!(!post_launch_guard_artifacts_ready(&ready, true));
     }
 
     #[test]
@@ -5067,6 +5333,20 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("没有返回数据"));
+    }
+
+    #[tokio::test]
+    async fn failed_client_write_is_detected_even_when_it_wins_the_disconnect_race() {
+        let (client, server) = tokio::io::duplex(64);
+        let mut writer = ProxyClientWriter {
+            inner: server,
+            write_failed: false,
+        };
+        writer.write_all(b"first chunk").await.unwrap();
+        assert!(!writer.write_failed);
+        drop(client);
+        assert!(writer.write_all(b"next chunk").await.is_err());
+        assert!(writer.write_failed);
     }
 
     #[test]
