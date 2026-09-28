@@ -1058,6 +1058,7 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
             );
         }
     }
+    crate::anthropic_images::enforce_image_limits(&mut result, diagnostic_id)?;
     log_anthropic_request_shape(&result, &body, diagnostic_id);
 
     Ok(result)
@@ -7570,7 +7571,38 @@ fn responses_tools_to_chat_tools(tools: &[Value], context: &CodexToolContext) ->
             _ => {}
         }
     }
+    for tool in &mut converted {
+        let name = tool
+            .pointer("/function/name")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let (name, namespace) = context.openai_name_for_function_tool(name);
+        if is_v2_collaboration_message_tool(&namespace, &name) {
+            // encrypted 是 Responses 服务端的扩展，转换协议只生成明文参数。
+            if let Some(message) = tool
+                .pointer_mut("/function/parameters/properties/message")
+                .and_then(Value::as_object_mut)
+            {
+                message.remove("encrypted");
+            }
+        }
+    }
     converted
+}
+
+fn is_v2_collaboration_message_tool(namespace: &str, name: &str) -> bool {
+    namespace == "collaboration" && matches!(name, "spawn_agent" | "followup_task" | "send_message")
+}
+
+fn mark_plaintext_collaboration_call(item: &mut Value) {
+    if is_v2_collaboration_message_tool(
+        item.get("namespace").and_then(Value::as_str).unwrap_or(""),
+        item.get("name").and_then(Value::as_str).unwrap_or(""),
+    ) {
+        // Codex V2 缺少此字段时默认按密文转发 message。空数组让运行时生成
+        // input_text；参数本身保持原样，也无需猜测或解码真正的上游密文。
+        item["encrypted_function_args"] = json!([]);
+    }
 }
 
 fn responses_tools_to_anthropic_tools(tools: &[Value], context: &CodexToolContext) -> Vec<Value> {
@@ -8607,6 +8639,7 @@ fn tool_call_added_item(
     if !namespace.is_empty() {
         item["item"]["namespace"] = json!(namespace);
     }
+    mark_plaintext_collaboration_call(&mut item["item"]);
     item
 }
 
@@ -8763,6 +8796,7 @@ fn response_tool_call_item(
     if !namespace.is_empty() {
         item["namespace"] = json!(namespace);
     }
+    mark_plaintext_collaboration_call(&mut item);
     item
 }
 
@@ -11420,6 +11454,92 @@ fn is_stepfun_model(model: &str) -> bool {
 }
 
 #[cfg(test)]
+mod anthropic_image_replay_tests {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use image::ImageReader;
+    use serde_json::Value;
+    use std::io::Cursor;
+
+    fn image_dimensions(request: &Value) -> Vec<(String, (u32, u32))> {
+        fn visit(value: &Value, path: String, images: &mut Vec<(String, (u32, u32))>) {
+            if value["type"] == "image" && value["source"]["type"] == "base64" {
+                let bytes = STANDARD
+                    .decode(value["source"]["data"].as_str().unwrap())
+                    .unwrap();
+                let size = ImageReader::new(Cursor::new(bytes))
+                    .with_guessed_format()
+                    .unwrap()
+                    .into_dimensions()
+                    .unwrap();
+                images.push((path, size));
+                return;
+            }
+            match value {
+                Value::Array(items) => {
+                    for (index, item) in items.iter().enumerate() {
+                        visit(item, format!("{path}/{index}"), images);
+                    }
+                }
+                Value::Object(fields) => {
+                    for (name, item) in fields {
+                        visit(item, format!("{path}/{name}"), images);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut images = Vec::new();
+        visit(&request["messages"], "/messages".to_string(), &mut images);
+        images
+    }
+
+    #[test]
+    #[ignore = "设置 CODEX_ELVES_IMAGE_REQUEST_FIXTURE 为本地失败请求详情，仅在内存中重放"]
+    fn replay_saved_many_image_request() {
+        let path = std::env::var("CODEX_ELVES_IMAGE_REQUEST_FIXTURE").unwrap();
+        let detail: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let original: Value =
+            serde_json::from_str(detail["requestBody"].as_str().unwrap()).unwrap();
+        let before = image_dimensions(&original);
+        assert!(before.len() > 20);
+        let oversized = before
+            .iter()
+            .filter(|(_, (w, h))| *w > 2000 || *h > 2000)
+            .count();
+        assert!(oversized > 0, "样本必须包含实际触发限制的图片");
+        let mut resized = original.clone();
+        let started = std::time::Instant::now();
+        crate::anthropic_images::enforce_image_limits(&mut resized, Some("image-fixture-replay"))
+            .unwrap();
+        let after = image_dimensions(&resized);
+        assert_eq!(before.len(), after.len(), "不能丢弃历史图片");
+        assert!(after.iter().all(|(_, (w, h))| *w <= 2000 && *h <= 2000));
+        let mut changed = 0;
+        for ((path, old_size), (_, new_size)) in before.iter().zip(&after) {
+            if old_size == new_size {
+                assert_eq!(resized.pointer(path), original.pointer(path));
+            } else {
+                changed += 1;
+                eprintln!("resized {path}: {old_size:?} -> {new_size:?}");
+                *resized.pointer_mut(path).unwrap() = original.pointer(path).unwrap().clone();
+            }
+        }
+        assert_eq!(changed, oversized);
+        assert_eq!(
+            resized, original,
+            "图片以外的消息、工具配对及参数必须保持不变"
+        );
+        eprintln!(
+            "images={}, resized={}, elapsed={:?}",
+            before.len(),
+            changed,
+            started.elapsed()
+        );
+    }
+}
+
+#[cfg(test)]
 mod remote_compaction_v2_tests {
     use super::{
         UpstreamResponseProtocol, normalize_native_responses_request,
@@ -11427,6 +11547,50 @@ mod remote_compaction_v2_tests {
         should_bridge_remote_compaction_v2_after_failure,
     };
     use serde_json::{Value, json};
+
+    #[test]
+    fn v2_collaboration_native_http_and_websocket_preserve_message_encryption() {
+        let request = json!({
+            "model": "gpt-test",
+            "tools": [{
+                "type": "namespace", "name": "collaboration", "tools": [{
+                    "type": "function", "name": "spawn_agent",
+                    "parameters": {"type":"object","properties":{
+                        "message":{"type":"string","encrypted":true}
+                    }}
+                }]
+            }],
+            "input": [
+                {"type":"function_call","namespace":"collaboration","name":"spawn_agent",
+                 "call_id":"plain","arguments":"{\"message\":\"你好\"}","encrypted_function_args":[]},
+                {"type":"function_call","namespace":"collaboration","name":"send_message",
+                 "call_id":"encrypted","arguments":"{\"message\":\"opaque-token\"}",
+                 "encrypted_function_args":["message"]},
+                {"type":"agent_message","author":"/root","recipient":"/root/worker",
+                 "content":[{"type":"input_text","text":"Message Type: NEW_TASK\nPayload:\n你好"}]},
+                {"type":"agent_message","author":"/root","recipient":"/root/worker",
+                 "content":[{"type":"input_text","text":"Message Type: MESSAGE\nPayload:\n"},
+                            {"type":"encrypted_content","encrypted_content":"opaque-token"}]},
+                {"type":"reasoning","encrypted_content":"opaque-reasoning","summary":[]}
+            ]
+        });
+        let http = responses_upstream_request_for_protocol(
+            &request,
+            UpstreamResponseProtocol::Responses,
+            false,
+            "v2-test",
+        )
+        .unwrap();
+        assert_eq!(http, request);
+        let mut websocket = request;
+        websocket["type"] = json!("response.create");
+        assert_eq!(
+            crate::responses_websocket_bridge::normalize_downstream_response_create_payload(
+                &websocket
+            ),
+            websocket
+        );
+    }
 
     #[test]
     fn native_responses_replays_synthetic_compaction_as_assistant_history() {

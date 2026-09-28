@@ -1,3 +1,4 @@
+mod anthropic_images;
 pub mod app_paths;
 pub mod assets;
 pub mod bridge;

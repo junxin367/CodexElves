@@ -35,6 +35,241 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+mod anthropic_image_limits {
+    use super::*;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use image::{DynamicImage, GenericImageView, ImageFormat};
+    use std::io::Cursor;
+
+    fn image_url(width: u32, height: u32, format: ImageFormat) -> String {
+        let image = if format == ImageFormat::Jpeg {
+            DynamicImage::new_rgb8(width, height)
+        } else {
+            DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+                width,
+                height,
+                image::Rgba([20, 40, 60, 128]),
+            ))
+        };
+        let mut bytes = Cursor::new(Vec::new());
+        image.write_to(&mut bytes, format).unwrap();
+        format!(
+            "data:{};base64,{}",
+            format.to_mime_type(),
+            STANDARD.encode(bytes.into_inner())
+        )
+    }
+
+    fn request_with_images(count: usize, last_url: &str) -> Value {
+        let small = image_url(2, 2, ImageFormat::Png);
+        let mut historical: Vec<_> = (0..count - 1)
+            .map(|_| json!({"type":"input_image","image_url":small}))
+            .collect();
+        if historical.is_empty() {
+            historical.push(json!({"type":"input_text","text":"查看图片"}));
+        }
+        json!({
+            "model":"claude-test",
+            "input":[
+                {"type":"message","role":"user","content":historical},
+                {"type":"function_call","name":"view_image","call_id":"call_image","arguments":"{}"},
+                {"type":"function_call_output","call_id":"call_image","output":[
+                    {"type":"input_text","text":"图片已读取"},
+                    {"type":"input_image","image_url":last_url}
+                ]}
+            ]
+        })
+    }
+
+    fn last_source(request: &Value) -> &Value {
+        let messages = request["messages"].as_array().unwrap();
+        &messages.last().unwrap()["content"][0]["content"][1]["source"]
+    }
+
+    fn decoded_source(source: &Value) -> DynamicImage {
+        let bytes = STANDARD.decode(source["data"].as_str().unwrap()).unwrap();
+        image::load_from_memory(&bytes).unwrap()
+    }
+
+    #[test]
+    fn threshold_counts_history_and_tool_images_across_messages() {
+        let url = image_url(1099, 2048, ImageFormat::Jpeg);
+        for count in [20, 21, 33] {
+            let source = request_with_images(count, &url);
+            let converted = responses_to_anthropic_messages(source).unwrap();
+            let result = last_source(&converted);
+            if count == 20 {
+                assert_eq!(result["data"], url.split_once(";base64,").unwrap().1);
+                assert_eq!(decoded_source(result).dimensions(), (1099, 2048));
+            } else {
+                assert_eq!(decoded_source(result).dimensions(), (1073, 2000));
+            }
+            assert_eq!(
+                converted["messages"][2]["content"][0]["tool_use_id"],
+                "call_image"
+            );
+            assert_eq!(
+                converted["messages"][2]["content"][0]["content"][0]["text"],
+                "图片已读取"
+            );
+        }
+    }
+
+    #[test]
+    fn resizes_supported_formats_and_preserves_png_alpha() {
+        for format in [ImageFormat::Png, ImageFormat::Gif, ImageFormat::WebP] {
+            let url = image_url(2048, 32, format);
+            let converted = responses_to_anthropic_messages(request_with_images(21, &url)).unwrap();
+            let source = last_source(&converted);
+            assert_eq!(source["media_type"], "image/png");
+            let image = decoded_source(source);
+            assert_eq!(image.dimensions(), (2000, 31));
+            if format != ImageFormat::Gif {
+                assert_eq!(image.to_rgba8().get_pixel(1000, 15).0, [20, 40, 60, 128]);
+            }
+        }
+    }
+
+    #[test]
+    fn compliant_images_keep_original_bytes_and_native_chat_is_unchanged() {
+        let at_limit = image_url(2000, 16, ImageFormat::Jpeg);
+        let request = request_with_images(21, &at_limit);
+        let converted = responses_to_anthropic_messages(request).unwrap();
+        assert_eq!(
+            last_source(&converted)["data"],
+            at_limit.split_once(";base64,").unwrap().1
+        );
+
+        let oversized = image_url(2048, 32, ImageFormat::Png);
+        let request = request_with_images(21, &oversized);
+        let chat = responses_to_chat_completions(request).unwrap();
+        let content = chat["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_array()
+            .unwrap();
+        assert!(
+            content
+                .iter()
+                .any(|part| part["image_url"]["url"] == oversized)
+        );
+    }
+
+    #[test]
+    fn small_requests_only_resize_beyond_single_image_limit() {
+        for width in [8000, 8001] {
+            let url = image_url(width, 8, ImageFormat::Png);
+            let converted = responses_to_anthropic_messages(request_with_images(1, &url)).unwrap();
+            let source = last_source(&converted);
+            assert_eq!(decoded_source(source).dimensions(), (8000, 8));
+            if width == 8000 {
+                assert_eq!(source["data"], url.split_once(";base64,").unwrap().1);
+            }
+        }
+    }
+
+    #[test]
+    fn jpeg_orientation_is_applied_before_reencoding() {
+        use image::ImageEncoder as _;
+        let mut bytes = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new(&mut bytes);
+        // 小端 TIFF：Orientation=6（顺时针旋转 90 度）。
+        encoder
+            .set_exif_metadata(vec![
+                b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0,
+                0, 0, 0,
+            ])
+            .unwrap();
+        encoder
+            .encode_image(&image::RgbImage::new(2048, 32))
+            .unwrap();
+        let url = format!("data:image/jpeg;base64,{}", STANDARD.encode(bytes));
+        let converted = responses_to_anthropic_messages(request_with_images(21, &url)).unwrap();
+        assert_eq!(
+            decoded_source(last_source(&converted)).dimensions(),
+            (31, 2000)
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_http_receives_resized_images_in_stream_and_json_modes() {
+        let url = image_url(2048, 32, ImageFormat::Jpeg);
+        for stream in [false, true] {
+            let server = spawn_chat_server();
+            let settings = BackendSettings {
+                relay_profiles: vec![RelayProfile {
+                    id: "image-limit-test".to_string(),
+                    name: "Image Limit Test".to_string(),
+                    base_url: server.base_url.clone(),
+                    upstream_base_url: server.base_url.clone(),
+                    api_key: "sk-test".to_string(),
+                    model_mappings: vec![RelayModelMapping {
+                        request_model: "claude-test".to_string(),
+                        alias: String::new(),
+                        protocol: RelayProtocol::Anthropic,
+                        context_window: "1000000".to_string(),
+                    }],
+                    ..Default::default()
+                }],
+                active_relay_id: "image-limit-test".to_string(),
+                ..Default::default()
+            };
+            let mut request = request_with_images(21, &url);
+            request["stream"] = json!(stream);
+            let response =
+                open_responses_proxy_request_with_settings(&request.to_string(), settings)
+                    .await
+                    .unwrap();
+            assert_eq!(response.status_code, 200);
+            assert_eq!(
+                response.response_protocol,
+                UpstreamResponseProtocol::Anthropic
+            );
+            drop(response);
+            let captured = server.finish();
+            assert_eq!(captured.path, "/v1/messages");
+            let sent: Value = serde_json::from_str(&captured.body).unwrap();
+            assert_eq!(decoded_source(last_source(&sent)).dimensions(), (2000, 31));
+            assert_eq!(sent["stream"], stream);
+        }
+    }
+
+    #[test]
+    fn url_images_count_without_download_and_tool_arguments_stay_untouched() {
+        let oversized = image_url(2048, 32, ImageFormat::Png);
+        let mut request = request_with_images(21, &oversized);
+        for image in request["input"][0]["content"].as_array_mut().unwrap() {
+            image["image_url"] = json!("https://example.invalid/test.png");
+        }
+        let business_input = json!({
+            "type":"image","source":{"type":"base64","media_type":"image/png",
+            "data":oversized.split_once(";base64,").unwrap().1}
+        });
+        request["input"][1]["arguments"] = json!(business_input.to_string());
+        let converted = responses_to_anthropic_messages(request).unwrap();
+        assert_eq!(
+            decoded_source(last_source(&converted)).dimensions(),
+            (2000, 31)
+        );
+        assert_eq!(
+            converted["messages"][0]["content"][0]["source"],
+            json!({"type":"url","url":"https://example.invalid/test.png"})
+        );
+        assert_eq!(
+            converted["messages"][1]["content"][0]["input"],
+            business_input
+        );
+
+        // 工具业务参数中的 image 对象不能使真实的 20 张图片误触发多图限制。
+        let mut request = request_with_images(20, &oversized);
+        request["input"][1]["arguments"] = json!(business_input.to_string());
+        let converted = responses_to_anthropic_messages(request).unwrap();
+        assert_eq!(
+            decoded_source(last_source(&converted)).dimensions(),
+            (2048, 32)
+        );
+    }
+}
+
 mod tool_conversion_audit {
     use super::*;
 
@@ -469,6 +704,10 @@ mod tool_conversion_audit {
         assert_eq!(added["id"], done["id"]);
         assert_eq!(added["name"], done["name"]);
         assert_eq!(added["call_id"], done["call_id"]);
+        assert_eq!(
+            added.get("encrypted_function_args"),
+            done.get("encrypted_function_args")
+        );
         let complete = &events
             .iter()
             .find(|e| e.event == "response.completed")
@@ -476,6 +715,186 @@ mod tool_conversion_audit {
             .data;
         assert_eq!(complete["response"]["output"][0], *done);
         done.clone()
+    }
+
+    fn v2_collaboration_request(namespace: &str, name: &str) -> Value {
+        tool_request(json!([{
+            "type": "namespace", "name": namespace, "tools": [{
+                "type": "function", "name": name,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string", "description": "Initial plain-text task",
+                            "encrypted": true
+                        },
+                        "task_name": {"type": "string"},
+                        "target": {"type": "string"}
+                    },
+                    "required": ["message"], "additionalProperties": false
+                }
+            }]
+        }]))
+    }
+
+    #[test]
+    fn v2_collaboration_plaintext_survives_all_tools_and_wire_modes() {
+        for name in ["spawn_agent", "followup_task", "send_message"] {
+            let request = v2_collaboration_request("collaboration", name);
+            for message in [
+                "你好",
+                "任务\n保留 \"引号\"、路径 C:\\temp\\a",
+                "gAAAAA_plain_text",
+                "",
+            ] {
+                let arguments = json!({
+                    "message": message, "task_name": "worker", "target": "/root/worker"
+                });
+                for anthropic in [false, true] {
+                    for stream in [false, true] {
+                        let item = mock_tool_response(
+                            &request,
+                            &format!("collaboration__{name}"),
+                            &arguments,
+                            anthropic,
+                            stream,
+                        );
+                        assert_eq!(item["namespace"], "collaboration");
+                        assert_eq!(item["name"], name);
+                        assert_eq!(item["encrypted_function_args"], json!([]));
+                        assert_eq!(
+                            serde_json::from_str::<Value>(item["arguments"].as_str().unwrap())
+                                .unwrap(),
+                            arguments
+                        );
+                        // 父代理回放时参数与工具结果仍保持配对，不让明文标记污染参数。
+                        let mut replay = request.clone();
+                        replay["input"] = json!([
+                            {"role":"user","content":"开始"},
+                            item,
+                            {"type":"function_call_output","call_id":"call_matrix","output":"ok"}
+                        ]);
+                        let chat = responses_to_chat_completions(replay.clone()).unwrap();
+                        assert_eq!(
+                            serde_json::from_str::<Value>(
+                                chat["messages"][1]["tool_calls"][0]["function"]["arguments"]
+                                    .as_str()
+                                    .unwrap()
+                            )
+                            .unwrap(),
+                            arguments
+                        );
+                        let anth = responses_to_anthropic_messages(replay).unwrap();
+                        assert_eq!(anth["messages"][1]["content"][0]["input"], arguments);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v2_collaboration_encryption_schema_is_removed_only_for_translated_messages() {
+        for (namespace, name, plaintext) in [
+            ("collaboration", "spawn_agent", true),
+            ("collaboration", "followup_task", true),
+            ("collaboration", "send_message", true),
+            ("collaboration", "list_agents", false),
+            ("mcp__mail", "send_message", false),
+            ("functions", "spawn_agent", false),
+        ] {
+            let request = v2_collaboration_request(namespace, name);
+            let mut expected = request["tools"][0]["tools"][0]["parameters"].clone();
+            if plaintext {
+                expected["properties"]["message"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("encrypted");
+            }
+            let chat = responses_to_chat_completions(request.clone()).unwrap();
+            let anth = responses_to_anthropic_messages(request.clone()).unwrap();
+            assert_eq!(chat["tools"][0]["function"]["parameters"], expected);
+            assert_eq!(anth["tools"][0]["input_schema"], expected);
+            assert_eq!(
+                request["tools"][0]["tools"][0]["parameters"]["properties"]["message"]["encrypted"],
+                true
+            );
+            for anthropic in [false, true] {
+                let item = mock_tool_response(
+                    &request,
+                    &format!("{namespace}__{name}"),
+                    &json!({"message":"你好"}),
+                    anthropic,
+                    true,
+                );
+                assert_eq!(item.get("encrypted_function_args").is_some(), plaintext);
+            }
+        }
+        // V1 和没有已声明 namespace 的同名函数不能被误认成 V2。
+        let request = tool_request(json!([{
+            "type":"function","name":"spawn_agent","parameters":{"type":"object"}
+        }]));
+        for name in ["spawn_agent", "collaboration__spawn_agent"] {
+            let item = mock_tool_response(&request, name, &json!({"message":"你好"}), true, false);
+            assert!(item.get("encrypted_function_args").is_none());
+        }
+    }
+
+    #[test]
+    fn v2_collaboration_textual_tool_fallback_marks_plaintext() {
+        for name in ["spawn_agent", "followup_task", "send_message"] {
+            let request = v2_collaboration_request("collaboration", name);
+            let text = format!(
+                "<invoke name=\"collaboration__{name}\"><parameter name=\"message\">你好</parameter></invoke>"
+            );
+            let direct = anthropic_message_to_response_with_request(
+                json!({
+                    "id":"msg_v2","model":"claude-test","stop_reason":"end_turn",
+                    "content":[{"type":"text","text":text}]
+                }),
+                &request,
+            )
+            .unwrap();
+            let stream = anthropic_sse_to_responses_sse_with_request(
+                &anthropic_sse_from_text_deltas(&[text]),
+                &request,
+            );
+            let events = parse_response_sse_events(&stream);
+            let done = &events
+                .iter()
+                .find(|e| e.event == "response.output_item.done")
+                .unwrap()
+                .data["item"];
+            for item in [&direct["output"][0], done] {
+                assert_eq!(item["encrypted_function_args"], json!([]));
+                assert_eq!(
+                    serde_json::from_str::<Value>(item["arguments"].as_str().unwrap()).unwrap(),
+                    json!({"message":"你好"})
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn v2_collaboration_plaintext_agent_message_reaches_translated_children() {
+        for kind in ["NEW_TASK", "MESSAGE"] {
+            let text = format!(
+                "Message Type: {kind}\nTask name: /root/worker\nSender: /root\nPayload:\n你好\n继续工作"
+            );
+            // 与 Codex 收到 encrypted_function_args: [] 后生成的 agent_message 一致。
+            let request = json!({
+                "model":"claude-test",
+                "input":[{
+                    "type":"agent_message", "author":"/root", "recipient":"/root/worker",
+                    "content":[{"type":"input_text","text":text}]
+                }]
+            });
+            let chat = responses_to_chat_completions(request.clone()).unwrap();
+            let anth = responses_to_anthropic_messages(request).unwrap();
+            assert_eq!(chat["messages"][0]["role"], "user");
+            assert_eq!(chat["messages"][0]["content"], text);
+            assert_eq!(anth["messages"][0]["role"], "user");
+            assert_eq!(anth["messages"][0]["content"][0]["text"], text);
+        }
     }
 
     #[test]
