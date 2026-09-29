@@ -41,15 +41,37 @@ pub fn effective_compaction_prompt(prompt_override: &str) -> &str {
     }
 }
 
-/// Remote Compaction V2 在不支持原生远程压缩的模型/协议上的兼容摘要提示词。
+/// 压缩指令固定前缀：限定本轮只写交接摘要。写死在代码中，不随用户提示词变化。
 ///
-/// 仅 `gpt-* + Responses` 保留原生 `compaction_trigger`；其他场景由代理把触发器转换为
-/// 普通摘要请求，再将结果封装为 synthetic `compaction`。
-const REMOTE_COMPACTION_V2_BRIDGE_PROMPT: &str = "\
-You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that \
-will resume the task. Include current progress and key decisions, important context and constraints, \
-remaining work, and critical data needed to continue. Be concise and return only the summary text. \
-Do not call tools.";
+/// 不得以 [`COMPACTION_PROMPT_PREFIX`] 开头，否则准备后的请求会被再次识别为 Codex 压缩请求。
+pub const COMPACTION_INSTRUCTION_PREFIX: &str = "\
+[Handoff checkpoint]\n\
+This turn has one job: write a handoff summary of the conversation above for the agent that \
+will resume the work.\n\
+- Do not continue the task. Do not answer open questions, run the next step, or start new work.\n\
+- Do not call tools. Do not write tool calls or commands in any text form.\n\
+- If the history ends with tool results that were not handled yet, record them in the summary. \
+Do not act on them.";
+
+/// 压缩指令固定后缀：输出格式约束，优先于用户提示词中的任何输出格式要求。
+pub const COMPACTION_INSTRUCTION_SUFFIX: &str = "\
+[Output format - overrides every output-format instruction above]\n\
+- You may first organize your notes inside <analysis></analysis>.\n\
+- Then write the complete handoff summary inside <summary></summary>.\n\
+- Only the text inside <summary></summary> is kept. Everything outside it is discarded.";
+
+/// D 校验首次失败后，同模型重试使用的系统提示。
+pub const COMPACTION_RETRY_SYSTEM_PROMPT: &str = "\
+You are a handoff summary writer. You do not execute tasks and you have no tools.\n\
+Follow the handoff checkpoint instruction in the supplied conversation. Write the complete \
+handoff summary inside <summary></summary>.\n\
+Never write tool calls or commands to run.";
+
+const COMPACTION_TOOL_FIELDS: [&str; 3] = ["tools", "tool_choice", "parallel_tool_calls"];
+const SUMMARY_OPEN_TAG: &str = "<summary>";
+const SUMMARY_CLOSE_TAG: &str = "</summary>";
+const ANALYSIS_OPEN_TAG: &str = "<analysis>";
+const ANALYSIS_CLOSE_TAG: &str = "</analysis>";
 
 /// 代理生成的 Remote Compaction V2 命名空间载荷前缀。
 ///
@@ -124,20 +146,299 @@ struct LocalCompactionSplit {
     retained_tail: Vec<Value>,
 }
 
-/// 为不支持 Remote Compaction V2 的上游生成等价摘要请求。
-///
-/// - 未启用分层压缩时仅替换 `compaction_trigger`；
-/// - 启用分层压缩时先摘除 assistant 指代锚点开始的原始尾部，再追加摘要提示词；
-/// - 移除工具定义与工具选择，保证摘要轮只产生文本；
-/// - 非 V2 请求原样返回。
-pub fn prepare_remote_compaction_v2_bridge_request(request_json: &Value) -> Value {
-    prepare_remote_compaction_v2_bridge_request_with_prompt(request_json, None)
+/// 代理接管的压缩请求类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionKind {
+    /// Codex 本地压缩：`input` 末项是 CONTEXT CHECKPOINT COMPACTION 指令。
+    Legacy,
+    /// Codex Remote Compaction V2：`input` 含 `compaction_trigger`。
+    RemoteV2,
 }
 
-/// 使用可选的分层压缩自定义提示词生成 V2 降级摘要请求。
+impl CompactionKind {
+    pub fn of_request(request_json: &Value) -> Option<Self> {
+        if is_compaction_request(Some(request_json)) {
+            Some(Self::Legacy)
+        } else if is_remote_compaction_v2_request(Some(request_json)) {
+            Some(Self::RemoteV2)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::RemoteV2 => "remote_v2",
+        }
+    }
+
+    fn control_kind(self) -> LocalCompactionControlKind {
+        match self {
+            Self::Legacy => LocalCompactionControlKind::LegacyPrompt,
+            Self::RemoteV2 => LocalCompactionControlKind::RemoteV2Trigger,
+        }
+    }
+}
+
+/// 代理压缩的上游请求构造方式，按会话模型家族选择。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionRoute {
+    /// A：Claude 家族。system、tools、thinking 等全部参数与原请求逐字段一致，
+    /// 只把压缩触发项替换为压缩指令，以命中上游提示词缓存。
+    CacheReuse,
+    /// B：其他模型。沿用 Codex 本地压缩方式：主模型、主系统提示，移除工具字段。
+    CodexLocal,
+}
+
+impl CompactionRoute {
+    pub fn for_model(model: &str) -> Self {
+        match crate::model_capabilities::model_family(model) {
+            crate::model_capabilities::ModelFamily::Claude => Self::CacheReuse,
+            _ => Self::CodexLocal,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CacheReuse => "cache_reuse",
+            Self::CodexLocal => "codex_local",
+        }
+    }
+}
+
+/// 一次压缩最多两次尝试：首次按路由构造，D 校验失败后同模型重试一次。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionAttempt {
+    First,
+    Retry,
+}
+
+impl CompactionAttempt {
+    pub const ALL: [Self; 2] = [Self::First, Self::Retry];
+
+    pub fn number(self) -> u8 {
+        match self {
+            Self::First => 1,
+            Self::Retry => 2,
+        }
+    }
+}
+
+/// 压缩请求构造与封装所需的设置快照。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionOptions {
+    /// 用户提示词；空字符串表示使用项目默认提示词。
+    pub user_prompt: String,
+    /// 是否补回最近一轮原始记录（v3 结构化载荷）。
+    pub retain_recent_round: bool,
+    pub retain_tokens: u32,
+}
+
+impl Default for CompactionOptions {
+    fn default() -> Self {
+        Self {
+            user_prompt: String::new(),
+            retain_recent_round: false,
+            retain_tokens: DEFAULT_RETAIN_TOKENS,
+        }
+    }
+}
+
+impl CompactionOptions {
+    /// 仅供总开关开启后的压缩执行器使用；调用方必须在关闭时绕过整个压缩增强链路。
+    pub fn from_settings(settings: &crate::settings::BackendSettings) -> Self {
+        let enabled = settings.layered_compaction_enabled;
+        Self {
+            user_prompt: settings.layered_compaction_prompt_override.clone(),
+            retain_recent_round: enabled && settings.layered_compaction_retain_recent_round_enabled,
+            retain_tokens: settings.layered_compaction_retain_tokens,
+        }
+    }
+}
+
+/// C：固定前缀 + 用户提示词（为空时用项目默认提示词）+ 固定后缀。
+pub fn compaction_instruction(user_prompt: &str) -> String {
+    format!(
+        "{COMPACTION_INSTRUCTION_PREFIX}\n\n{}\n\n{COMPACTION_INSTRUCTION_SUFFIX}",
+        effective_compaction_prompt(user_prompt)
+    )
+}
+
+/// 按路由和尝试序号构造发往上游的压缩请求（Responses 格式，协议转换由调用方完成）。
+pub fn prepare_compaction_attempt_request(
+    request_json: &Value,
+    kind: CompactionKind,
+    route: CompactionRoute,
+    options: &CompactionOptions,
+    attempt: CompactionAttempt,
+) -> Value {
+    let first = match route {
+        CompactionRoute::CacheReuse => prepare_cache_reuse_request(request_json, kind, options),
+        CompactionRoute::CodexLocal => prepare_codex_local_request(request_json, kind, options),
+    };
+    match attempt {
+        CompactionAttempt::First => first,
+        CompactionAttempt::Retry => compaction_retry_request(&first),
+    }
+}
+
+/// A：只替换压缩触发项。历史中的合成压缩项保持原样，由协议转换按主请求相同规则展开，
+/// 保证转换后的 system / tools / messages 前缀与主请求逐字节一致。
+fn prepare_cache_reuse_request(
+    request_json: &Value,
+    kind: CompactionKind,
+    options: &CompactionOptions,
+) -> Value {
+    let instruction = compaction_instruction_item(&compaction_instruction(&options.user_prompt));
+    let mut request = request_json.clone();
+    let Some(input) = request
+        .as_object_mut()
+        .and_then(|object| object.get_mut("input"))
+    else {
+        return request;
+    };
+    match input {
+        Value::Array(items) => {
+            let control = kind.control_kind();
+            if !options.retain_recent_round {
+                let controls = items
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, item)| {
+                        is_local_compaction_control_item(items, *index, item, control)
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                for index in controls {
+                    items[index] = instruction.clone();
+                }
+                return request;
+            }
+            let mut conversation = items
+                .iter()
+                .enumerate()
+                .filter(|(index, item)| {
+                    !is_local_compaction_control_item(items, *index, item, control)
+                })
+                .map(|(_, item)| item.clone())
+                .collect::<Vec<_>>();
+            if options.retain_recent_round {
+                let cut = cache_reuse_retained_tail_len(request_json, &conversation, control);
+                conversation.truncate(conversation.len() - cut);
+            }
+            conversation.push(instruction);
+            *items = conversation;
+        }
+        Value::Object(_) if is_remote_compaction_v2_trigger(input) => *input = instruction,
+        _ => {}
+    }
+    request
+}
+
+/// A 路径补回最近一轮时只截末尾：返回原始 input 末尾与封装时保留尾部完全一致的条数。
 ///
-/// `prompt_override` 为空时使用传统压缩提示词；只有分层压缩开启时调用方才应传入
-/// 用户配置的自定义提示词。
+/// 保留尾部按封装侧的展开视图计算；若尾部延伸进上一次合成压缩的载荷内部，只截与原始
+/// input 末尾逐项相同的部分，其余仍留给摘要模型，宁可重复也不丢上下文。
+fn cache_reuse_retained_tail_len(
+    request_json: &Value,
+    conversation: &[Value],
+    control: LocalCompactionControlKind,
+) -> usize {
+    let expanded = expand_synthetic_local_compaction_request(request_json);
+    let Some(expanded_input) = expanded.get("input").and_then(Value::as_array) else {
+        return 0;
+    };
+    let tail = split_local_compaction_input(expanded_input, control).retained_tail;
+    conversation
+        .iter()
+        .rev()
+        .zip(tail.iter().rev())
+        .take_while(|(raw, retained)| raw == retained)
+        .count()
+}
+
+/// B：展开合成压缩历史、按需摘除最近一轮，替换触发项为压缩指令并移除工具字段。
+fn prepare_codex_local_request(
+    request_json: &Value,
+    kind: CompactionKind,
+    options: &CompactionOptions,
+) -> Value {
+    let instruction = compaction_instruction_item(&compaction_instruction(&options.user_prompt));
+    let mut request = expand_synthetic_local_compaction_request(request_json);
+    let Some(object) = request.as_object_mut() else {
+        return request_json.clone();
+    };
+    if let Some(input) = object.get_mut("input") {
+        match input {
+            Value::Array(items) => {
+                let control = kind.control_kind();
+                *items = if options.retain_recent_round {
+                    split_local_compaction_input(items, control).summary_input
+                } else {
+                    items
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, item)| {
+                            !is_local_compaction_control_item(items, *index, item, control)
+                        })
+                        .map(|(_, item)| item.clone())
+                        .collect()
+                };
+                items.push(instruction);
+            }
+            Value::Object(_) if is_remote_compaction_v2_trigger(input) => *input = instruction,
+            _ => {}
+        }
+    }
+    for key in COMPACTION_TOOL_FIELDS {
+        object.remove(key);
+    }
+    request
+}
+
+/// D 的重试请求：历史与压缩指令不变，system 换成交接摘要撰写者说明并移除工具字段。
+pub fn compaction_retry_request(first_attempt_request: &Value) -> Value {
+    let mut request = first_attempt_request.clone();
+    let Some(object) = request.as_object_mut() else {
+        return request;
+    };
+    object.insert(
+        "instructions".to_string(),
+        json!(COMPACTION_RETRY_SYSTEM_PROMPT),
+    );
+    if object.contains_key("system") {
+        object.insert("system".to_string(), json!(COMPACTION_RETRY_SYSTEM_PROMPT));
+    }
+    if let Some(Value::Array(items)) = object.get_mut("input") {
+        items.retain(|item| {
+            !matches!(
+                item.get("role").and_then(Value::as_str),
+                Some("system" | "developer")
+            )
+        });
+    }
+    for key in COMPACTION_TOOL_FIELDS {
+        object.remove(key);
+    }
+    request
+}
+
+/// 协议转换层的兜底：未经代理压缩执行器准备的 V2 请求按模型路由、默认提示词转换，
+/// 保证 `compaction_trigger` 不会原样发给不支持它的上游。非 V2 请求原样返回。
+pub fn prepare_remote_compaction_v2_bridge_request(request_json: &Value) -> Value {
+    if !is_remote_compaction_v2_request(Some(request_json)) {
+        return request_json.clone();
+    }
+    prepare_compaction_attempt_request(
+        request_json,
+        CompactionKind::RemoteV2,
+        CompactionRoute::for_model(request_json["model"].as_str().unwrap_or_default()),
+        &CompactionOptions::default(),
+        CompactionAttempt::First,
+    )
+}
+
 pub fn prepare_remote_compaction_v2_bridge_request_with_prompt(
     request_json: &Value,
     prompt_override: Option<&str>,
@@ -149,8 +450,6 @@ pub fn prepare_remote_compaction_v2_bridge_request_with_prompt(
     )
 }
 
-/// 自定义摘要提示词与最近一轮原始记录补回分别控制。
-/// 关闭补回时仍替换 V2 trigger，但将完整历史交给摘要模型。
 pub fn prepare_remote_compaction_v2_bridge_request_with_options(
     request_json: &Value,
     prompt_override: Option<&str>,
@@ -159,44 +458,37 @@ pub fn prepare_remote_compaction_v2_bridge_request_with_options(
     if !is_remote_compaction_v2_request(Some(request_json)) {
         return request_json.clone();
     }
-
-    let prompt = prompt_override
-        .map(effective_compaction_prompt)
-        .unwrap_or(REMOTE_COMPACTION_V2_BRIDGE_PROMPT);
-    let mut request = expand_synthetic_local_compaction_request(request_json);
-    let Some(object) = request.as_object_mut() else {
-        return request_json.clone();
-    };
-    if let Some(input) = object.get_mut("input") {
-        match input {
-            Value::Array(items) if prompt_override.is_some() && retain_recent_round => {
-                let split = split_local_compaction_input(
-                    items,
-                    LocalCompactionControlKind::RemoteV2Trigger,
-                );
-                *items = split.summary_input;
-                items.push(remote_compaction_v2_bridge_prompt_item(prompt));
-            }
-            Value::Array(items) => {
-                for item in items {
-                    if is_remote_compaction_v2_trigger(item) {
-                        *item = remote_compaction_v2_bridge_prompt_item(prompt);
-                    }
-                }
-            }
-            Value::Object(_) if is_remote_compaction_v2_trigger(input) => {
-                *input = remote_compaction_v2_bridge_prompt_item(prompt);
-            }
-            _ => {}
-        }
-    }
-    for key in ["tools", "tool_choice", "parallel_tool_calls"] {
-        object.remove(key);
-    }
-    request
+    prepare_compaction_attempt_request(
+        request_json,
+        CompactionKind::RemoteV2,
+        CompactionRoute::for_model(request_json["model"].as_str().unwrap_or_default()),
+        &CompactionOptions {
+            user_prompt: prompt_override.unwrap_or_default().to_string(),
+            retain_recent_round,
+            ..Default::default()
+        },
+        CompactionAttempt::First,
+    )
 }
 
-fn remote_compaction_v2_bridge_prompt_item(prompt: &str) -> Value {
+pub fn rewrite_remote_compaction_v2_response(
+    request_json: &Value,
+    response_object: &Value,
+) -> Option<Value> {
+    rewrite_remote_compaction_v2_response_with_layered_compaction(
+        request_json,
+        response_object,
+        false,
+        DEFAULT_RETAIN_TOKENS,
+    )
+    .map(|result| result.response)
+}
+
+fn extract_compaction_summary_text(response_object: &Value) -> Option<String> {
+    validate_compaction_response(response_object).ok()
+}
+
+fn compaction_instruction_item(prompt: &str) -> Value {
     json!({
         "type": "message",
         "role": "user",
@@ -584,22 +876,6 @@ fn synthetic_remote_compaction_summary(encrypted_content: &str) -> Option<String
         return None;
     }
     String::from_utf8(decoded).ok()
-}
-
-/// 把非 Responses 上游生成的普通 Responses 响应改写为 Remote Compaction V2 响应。
-///
-/// 成功时 `output` 中只保留一个 `compaction` item，满足 Codex V2 collector 的约束。
-pub fn rewrite_remote_compaction_v2_response(
-    request_json: &Value,
-    response_object: &Value,
-) -> Option<Value> {
-    rewrite_remote_compaction_v2_response_with_layered_compaction(
-        request_json,
-        response_object,
-        false,
-        DEFAULT_RETAIN_TOKENS,
-    )
-    .map(|result| result.response)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1485,31 +1761,375 @@ pub fn local_compaction_wait_for_user_sse(request_json: &Value) -> String {
     build_responses_sse_for_empty_completed(&local_compaction_wait_for_user_response(request_json))
 }
 
-fn extract_compaction_summary_text(response_object: &Value) -> Option<String> {
-    if let Some(text) = extract_message_text(response_object) {
-        if !text.trim().is_empty() {
-            return Some(text);
+/// D 校验失败原因。只看响应结构与 `<summary>` 标签，不按任何模型特有文本判定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionValidationFailure {
+    /// 上游没有返回可解析的终止响应（流中断、格式错误、多个终止事件等）。
+    NoTerminalResponse,
+    /// 终止状态不是 completed。
+    NotCompleted,
+    /// output 含工具调用项。
+    ToolCallOutput,
+    /// assistant 文本中没有完整的 `<summary></summary>`。
+    SummaryTagMissing,
+    /// `<summary>` 内去空白后为空。
+    SummaryEmpty,
+}
+
+impl CompactionValidationFailure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoTerminalResponse => "no_terminal_response",
+            Self::NotCompleted => "not_completed",
+            Self::ToolCallOutput => "tool_call_output",
+            Self::SummaryTagMissing => "summary_tag_missing",
+            Self::SummaryEmpty => "summary_empty",
         }
     }
 
-    let output = response_object.get("output")?.as_array()?;
-    for item in output {
-        if item.get("type").and_then(Value::as_str) != Some("reasoning") {
-            continue;
+    fn message(self) -> &'static str {
+        match self {
+            Self::NoTerminalResponse => "the upstream returned no valid terminal response",
+            Self::NotCompleted => "the upstream response did not complete",
+            Self::ToolCallOutput => "the upstream response contains tool call output items",
+            Self::SummaryTagMissing => "the upstream response has no <summary></summary> block",
+            Self::SummaryEmpty => "the <summary> block is empty",
         }
-        let mut text = String::new();
-        if let Some(parts) = item.get("summary").and_then(Value::as_array) {
-            for part in parts {
-                if let Some(part_text) = part.get("text").and_then(Value::as_str) {
-                    text.push_str(part_text);
+    }
+}
+
+/// Responses output 中被视为工具调用的 item 类型。
+fn is_tool_call_output_item(item: &Value) -> bool {
+    let Some(kind) = item.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    kind.ends_with("_call")
+        || kind.ends_with("_call_output")
+        || matches!(
+            kind,
+            "tool_use"
+                | "server_tool_use"
+                | "tool_call"
+                | "tool_result"
+                | "tool_search_output"
+                | "mcp_list_tools"
+        )
+}
+
+fn contains_tool_call_output(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            is_tool_call_output_item(value) || object.values().any(contains_tool_call_output)
+        }
+        Value::Array(items) => items.iter().any(contains_tool_call_output),
+        _ => false,
+    }
+}
+
+/// D：校验压缩响应并只取 `<summary>` 内文本。
+///
+/// 通过条件：completed；无工具调用输出项；assistant 文本中存在 `<summary></summary>` 且去空白后非空。
+pub fn validate_compaction_response(
+    response_object: &Value,
+) -> Result<String, CompactionValidationFailure> {
+    if response_object.get("status").and_then(Value::as_str) != Some("completed") {
+        return Err(CompactionValidationFailure::NotCompleted);
+    }
+    let output = response_object
+        .get("output")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if output.iter().any(contains_tool_call_output) {
+        return Err(CompactionValidationFailure::ToolCallOutput);
+    }
+    let text = output
+        .iter()
+        .filter(|item| {
+            item.get("type").and_then(Value::as_str) == Some("message")
+                && item.get("role").and_then(Value::as_str) == Some("assistant")
+        })
+        .map(item_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let summary =
+        extract_summary_block(&text).ok_or(CompactionValidationFailure::SummaryTagMissing)?;
+    let summary = summary.trim();
+    if summary.is_empty() {
+        return Err(CompactionValidationFailure::SummaryEmpty);
+    }
+    Ok(summary.to_string())
+}
+
+/// 取 `<analysis>` 块之外第一个完整 `<summary>` 块，闭合标签后的文本不进入载荷。
+fn extract_summary_block(text: &str) -> Option<&str> {
+    let mut cursor = 0;
+    loop {
+        let rest = &text[cursor..];
+        let summary_at = rest.find(SUMMARY_OPEN_TAG)?;
+        match rest.find(ANALYSIS_OPEN_TAG) {
+            Some(analysis_at) if analysis_at < summary_at => {
+                let after_analysis = cursor + analysis_at + ANALYSIS_OPEN_TAG.len();
+                let close = text[after_analysis..].find(ANALYSIS_CLOSE_TAG)?;
+                cursor = after_analysis + close + ANALYSIS_CLOSE_TAG.len();
+            }
+            _ => {
+                let start = cursor + summary_at + SUMMARY_OPEN_TAG.len();
+                let end = start + text[start..].find(SUMMARY_CLOSE_TAG)?;
+                return Some(&text[start..end]);
+            }
+        }
+    }
+}
+
+/// 从完整 Responses SSE 中取唯一的终止响应并做 D 校验。
+pub fn validate_compaction_sse(
+    sse_text: &str,
+) -> (Option<Value>, Result<String, CompactionValidationFailure>) {
+    let normalized = sse_text.replace("\r\n", "\n").replace('\r', "\n");
+    match extract_single_remote_compaction_v2_terminal_response(&normalized) {
+        Ok(response) => {
+            let tool_event = normalized.split("\n\n").any(|block| {
+                let data = block
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("data:"))
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                serde_json::from_str::<Value>(&data)
+                    .ok()
+                    .is_some_and(|event| {
+                        event.get("item").is_some_and(contains_tool_call_output)
+                            || event["type"].as_str().is_some_and(|kind| {
+                                kind.starts_with("response.function_call_arguments.")
+                                    || kind.starts_with("response.custom_tool_call_input.")
+                            })
+                    })
+            });
+            let verdict = if tool_event {
+                Err(CompactionValidationFailure::ToolCallOutput)
+            } else {
+                validate_compaction_response(&response)
+            };
+            (Some(response), verdict)
+        }
+        Err(_) => (None, Err(CompactionValidationFailure::NoTerminalResponse)),
+    }
+}
+
+/// HTTP 与 WebSocket 使用相同的尝试日志；缺失 usage 保持 null，不伪造为零。
+pub(crate) fn log_compaction_attempt(
+    transport: &str,
+    kind: CompactionKind,
+    route: CompactionRoute,
+    attempt: CompactionAttempt,
+    model: &str,
+    response: Option<&Value>,
+    verdict: &Result<String, CompactionValidationFailure>,
+    error_detail: Option<&str>,
+) {
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "protocol_proxy.compaction_attempt",
+        json!({
+            "transport": transport,
+            "kind": kind.as_str(),
+            "route": route.as_str(),
+            "attempt": attempt.number(),
+            "model": model,
+            "inputTokens": response.and_then(|r| r.pointer("/usage/input_tokens")),
+            "cachedTokens": response.and_then(|r| r.pointer("/usage/input_tokens_details/cached_tokens")),
+            "outputTokens": response.and_then(|r| r.pointer("/usage/output_tokens")),
+            "validation": if verdict.is_ok() { "passed" } else { "failed" },
+            "failureReason": verdict.as_ref().err().map(|failure| failure.as_str()),
+            "error": error_detail,
+        }),
+    );
+}
+
+/// 压缩执行结果写回 Codex 时使用的载荷形态。
+#[derive(Debug, Clone)]
+pub struct CompactionPayloadResult {
+    /// 成功时为 completed 响应，失败时为 `status: failed` 且 output 为空的响应。
+    pub response: Value,
+    pub layered: LayeredCompactionStats,
+}
+
+/// 校验通过后按现有载荷格式封装：
+///
+/// - V2：唯一 `compaction` item，补回关闭时为 v2 明文，开启时为 v3 结构化载荷；
+/// - legacy：唯一 assistant message，补回关闭时为摘要明文，开启时为 v3 结构化载荷。
+pub fn build_compaction_success_response(
+    original_request: &Value,
+    kind: CompactionKind,
+    response_object: &Value,
+    options: &CompactionOptions,
+) -> CompactionPayloadResult {
+    // 格式校验属于代码责任；封装入口本身也不接受未经校验的上游响应。
+    let summary = match validate_compaction_response(response_object) {
+        Ok(summary) => summary,
+        Err(failure) => {
+            return CompactionPayloadResult {
+                response: compaction_validation_failure_response(
+                    original_request,
+                    kind,
+                    Some(response_object),
+                    failure,
+                ),
+                layered: LayeredCompactionStats::default(),
+            };
+        }
+    };
+    let summary = summary.as_str();
+    let summary_with_path = directories::BaseDirs::new()
+        .and_then(|dirs| {
+            verified_rollout_path(
+                original_request,
+                &dirs.home_dir().join(".codex").join("sessions"),
+            )
+        })
+        .map(|path| format!("{summary}\n\n完整会话记录：{}", path.display()));
+    let summary = summary_with_path.as_deref().unwrap_or(summary);
+    let structured = if options.retain_recent_round {
+        match build_structured_local_compaction(original_request, summary, options.retain_tokens) {
+            Ok(build) => build,
+            Err(error) => {
+                return CompactionPayloadResult {
+                    response: remote_compaction_v2_failure_response(
+                        original_request,
+                        Some(response_object),
+                        error.code(),
+                        &error.message(),
+                    ),
+                    layered: LayeredCompactionStats::default(),
+                };
+            }
+        }
+    } else {
+        None
+    };
+    let (output_item, layered) = match (kind, structured) {
+        (CompactionKind::RemoteV2, Some(build)) => (
+            synthetic_structured_compaction_item(&build.encoded),
+            build.stats,
+        ),
+        (CompactionKind::RemoteV2, None) => (
+            synthetic_remote_compaction_item(summary),
+            LayeredCompactionStats::default(),
+        ),
+        (CompactionKind::Legacy, Some(build)) => (
+            compaction_summary_message_item(response_object, &build.encoded),
+            build.stats,
+        ),
+        (CompactionKind::Legacy, None) => (
+            compaction_summary_message_item(response_object, summary),
+            LayeredCompactionStats::default(),
+        ),
+    };
+    let mut response = response_object.clone();
+    if let Some(object) = response.as_object_mut() {
+        object.insert("status".to_string(), json!("completed"));
+        object.insert("output".to_string(), json!([output_item]));
+        object.remove("error");
+        object.remove("incomplete_details");
+    }
+    CompactionPayloadResult { response, layered }
+}
+
+/// E：只接受 UUID cache key、真实存在且首行 session_meta.id 匹配的唯一 rollout。
+/// 不按时间猜路径，不使用 archived_sessions，也不读取会话正文。
+fn verified_rollout_path(
+    request: &Value,
+    sessions: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    use std::io::{BufRead, BufReader, Read};
+    let key = request.get("prompt_cache_key")?.as_str()?;
+    uuid::Uuid::parse_str(key).ok()?;
+    let root = sessions.canonicalize().ok()?;
+    let suffix = format!("-{key}.jsonl");
+    let mut directories = vec![(sessions.to_path_buf(), 0)];
+    let mut matches = Vec::new();
+    while let Some((directory, depth)) = directories.pop() {
+        for entry in std::fs::read_dir(directory).ok()?.flatten() {
+            let kind = entry.file_type().ok()?;
+            if kind.is_dir() && depth < 3 {
+                directories.push((entry.path(), depth + 1));
+            } else if kind.is_file() {
+                let name = entry.file_name();
+                let name = name.to_str()?;
+                if name.starts_with("rollout-") && name.ends_with(&suffix) {
+                    let path = entry.path();
+                    if !path.canonicalize().ok()?.starts_with(&root) {
+                        continue;
+                    }
+                    let mut line = String::new();
+                    BufReader::new(std::fs::File::open(&path).ok()?.take(256 * 1024))
+                        .read_line(&mut line)
+                        .ok()?;
+                    let meta: Value = serde_json::from_str(&line).ok()?;
+                    if meta["type"] == "session_meta"
+                        && meta.pointer("/payload/id")?.as_str()? == key
+                    {
+                        matches.push(path);
+                    }
                 }
             }
         }
-        if !text.trim().is_empty() {
-            return Some(text);
+    }
+    (matches.len() == 1).then(|| matches.remove(0))
+}
+
+/// D 两次尝试均失败时返回给 Codex 的失败响应（output 为空，不含任何摘要或工具调用）。
+pub fn compaction_validation_failure_response(
+    original_request: &Value,
+    kind: CompactionKind,
+    response_object: Option<&Value>,
+    failure: CompactionValidationFailure,
+) -> Value {
+    let (code_prefix, label) = match kind {
+        CompactionKind::Legacy => ("layered_compaction", "Context compaction"),
+        CompactionKind::RemoteV2 => ("remote_compaction", "Remote Compaction V2 bridge"),
+    };
+    remote_compaction_v2_failure_response(
+        original_request,
+        response_object,
+        &format!("{code_prefix}_{}", failure.as_str()),
+        &format!(
+            "{label} failed after {} attempts: {}.",
+            CompactionAttempt::ALL.len(),
+            failure.message()
+        ),
+    )
+}
+
+/// 把压缩结果（成功或失败）转成完整 Responses SSE。
+pub fn compaction_payload_sse(kind: CompactionKind, response: &Value) -> String {
+    if response.get("status").and_then(Value::as_str) != Some("completed") {
+        return build_responses_sse_for_remote_compaction_failure(response);
+    }
+    match kind {
+        CompactionKind::RemoteV2 => build_responses_sse_for_compaction(response),
+        CompactionKind::Legacy => {
+            let text = extract_message_text(response).unwrap_or_default();
+            build_responses_sse_for_message(response, &text)
         }
     }
-    None
+}
+
+fn compaction_summary_message_item(response_object: &Value, text: &str) -> Value {
+    let response_id = response_object
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("resp_compaction");
+    let item_id = existing_message_item_id(response_object)
+        .and_then(|id| crate::protocol_proxy::normalize_responses_message_item_id(&id))
+        .unwrap_or_else(|| crate::protocol_proxy::response_message_item_id(response_id));
+    json!({
+        "id": item_id,
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{ "type": "output_text", "text": text, "annotations": [] }]
+    })
 }
 
 /// 分层压缩结果。
@@ -1600,121 +2220,22 @@ pub fn prepare_legacy_layered_compaction_request_with_options(
     if !is_compaction_request(Some(request_json)) {
         return request_json.clone();
     }
-    let prompt = effective_compaction_prompt(prompt_override);
-    let mut request = expand_synthetic_local_compaction_request(request_json);
-    if let Some(object) = request.as_object_mut() {
-        if let Some(input) = object.get_mut("input").and_then(Value::as_array_mut) {
-            let mut prompt_item = input
-                .last()
-                .cloned()
-                .unwrap_or_else(|| remote_compaction_v2_bridge_prompt_item(prompt));
-            replace_message_text(&mut prompt_item, prompt);
-            if retain_recent_round {
-                let split =
-                    split_local_compaction_input(input, LocalCompactionControlKind::LegacyPrompt);
-                *input = split.summary_input;
-                input.push(prompt_item);
-            } else if let Some(last) = input.last_mut() {
-                *last = prompt_item;
-            }
-        }
-        for key in ["tools", "tool_choice", "parallel_tool_calls"] {
-            object.remove(key);
-        }
-    }
-    request
+    prepare_compaction_attempt_request(
+        request_json,
+        CompactionKind::Legacy,
+        CompactionRoute::for_model(request_json["model"].as_str().unwrap_or_default()),
+        &CompactionOptions {
+            user_prompt: prompt_override.to_string(),
+            retain_recent_round,
+            ..Default::default()
+        },
+        CompactionAttempt::First,
+    )
 }
 
 /// 判断请求是否属于任一种上下文压缩（传统压缩或 Remote Compaction V2）。
 pub fn is_any_compaction_request(request_json: &Value) -> bool {
     is_compaction_request(Some(request_json)) || is_remote_compaction_v2_request(Some(request_json))
-}
-
-/// 把传统本地压缩请求改写为使用独立的压缩模型。
-///
-/// 压缩轮只需要一段纯文本摘要，因此除了替换 `model` 还要做两件事：
-///
-/// - 剔除历史里的 `reasoning` item。它们携带原模型的 `encrypted_content`，跨模型
-///   （尤其跨供应商）传回上游必被拒；摘要也用不到这些推理痕迹。
-/// - 清理主模型的推理档位，再按独立压缩模型设置摘要专用默认值：
-///   DeepSeek/GLM 使用 `max`，其他模型使用 `xhigh`。
-///
-/// Remote Compaction V2、非压缩请求、模型名为空、或目标模型与当前模型相同时原样返回。
-pub fn apply_compaction_model_override(request_json: &Value, model: &str) -> Value {
-    let model = model.trim();
-    if model.is_empty() || !is_compaction_request(Some(request_json)) {
-        return request_json.clone();
-    }
-    apply_confirmed_compaction_model_override(request_json, model)
-}
-
-/// 为已经在改写前确认身份的压缩请求替换模型。
-///
-/// 自定义压缩提示词会移除 Codex 固定前缀，因此代理必须先冻结请求身份，再调用此入口。
-pub(crate) fn apply_confirmed_compaction_model_override(
-    request_json: &Value,
-    model: &str,
-) -> Value {
-    let model = model.trim();
-    if model.is_empty() {
-        return request_json.clone();
-    }
-    if request_json.get("model").and_then(Value::as_str) == Some(model) {
-        return request_json.clone();
-    }
-    let mut request = request_json.clone();
-    let Some(object) = request.as_object_mut() else {
-        return request_json.clone();
-    };
-    object.insert("model".to_string(), json!(model));
-    for key in ["reasoning", "model_reasoning_effort", "reasoning_effort"] {
-        object.remove(key);
-    }
-    object.insert(
-        "reasoning".to_string(),
-        json!({ "effort": default_compaction_reasoning_effort(model) }),
-    );
-    if let Some(Value::Array(items)) = object.get_mut("input") {
-        items.retain(|item| item.get("type").and_then(Value::as_str) != Some("reasoning"));
-    }
-    request
-}
-
-fn default_compaction_reasoning_effort(model: &str) -> &'static str {
-    let model = model.trim().to_ascii_lowercase();
-    if model.contains("deepseek") || model.contains("glm") {
-        "max"
-    } else {
-        "xhigh"
-    }
-}
-
-pub const DEFAULT_COMPACTION_OUTPUT_RESERVE_TOKENS: u64 = 8_192;
-
-/// 估算独立压缩模型实际收到的请求 token 数。
-///
-/// 上游 tokenizer 不可用时采用偏保守估算，并取以下两种结果中的较大值：
-///
-/// - 字符加权：ASCII 连续词每 4 字符约 1 token，其他非空白字符按 1 token；
-/// - 序列化 JSON UTF-8 字节数除以 3，覆盖结构字段与中英文混合内容。
-///
-/// 该值可能显著高于上游实际用量，只用于诊断，不得作为跳过独立压缩模型的依据。
-pub fn estimate_compaction_request_tokens(request_json: &Value) -> u64 {
-    let weighted = estimate_json_value_tokens(request_json);
-    let serialized = serde_json::to_vec(request_json)
-        .map(|bytes| (bytes.len() as u64).div_ceil(3))
-        .unwrap_or(0);
-    weighted.max(serialized)
-}
-
-/// 为压缩摘要输出预留上下文空间。
-pub fn compaction_output_reserve_tokens(request_json: &Value) -> u64 {
-    ["max_output_tokens", "max_tokens", "max_completion_tokens"]
-        .into_iter()
-        .filter_map(|key| request_json.get(key).and_then(Value::as_u64))
-        .max()
-        .unwrap_or(0)
-        .max(DEFAULT_COMPACTION_OUTPUT_RESERVE_TOKENS)
 }
 
 fn estimate_json_value_tokens(value: &Value) -> u64 {
@@ -1762,44 +2283,9 @@ fn estimate_text_tokens(text: &str) -> u64 {
     tokens
 }
 
-/// 把压缩响应 SSE 里的 `model` 回填为会话原本的模型。
-///
-/// 上游返回的是压缩模型名，直接透传会让 Codex 侧的记账和展示错乱。
-pub fn restore_response_model_in_sse(
-    sse_text: &str,
-    original_model: &str,
-    compaction_model: &str,
-) -> String {
-    let original_model = original_model.trim();
-    let compaction_model = compaction_model.trim();
-    if original_model.is_empty()
-        || compaction_model.is_empty()
-        || original_model == compaction_model
-    {
-        return sse_text.to_string();
-    }
-    let from = format!("\"model\":{}", json!(compaction_model));
-    let to = format!("\"model\":{}", json!(original_model));
-    sse_text.replace(&from, &to)
-}
-
-/// 响应对象版本的压缩模型回填。
-pub fn restore_response_model(response: &mut Value, original_model: &str) {
-    let original_model = original_model.trim();
-    if original_model.is_empty() {
-        return;
-    }
-    if let Some(object) = response.as_object_mut()
-        && object.contains_key("model")
-    {
-        object.insert("model".to_string(), json!(original_model));
-    }
-}
-
 /// 判断 completed Responses 对象是否包含传统压缩可用的 assistant 摘要文本。
 pub fn has_completed_compaction_summary(response_object: &Value) -> bool {
-    response_object.get("status").and_then(Value::as_str) == Some("completed")
-        && extract_message_text(response_object).is_some_and(|summary| !summary.trim().is_empty())
+    validate_compaction_response(response_object).is_ok()
 }
 
 /// 将 message item 的文本内容整体替换为 `text`，兼容字符串 content 与
@@ -1851,9 +2337,7 @@ pub fn apply_layered_compaction_to_responses_sse(
     if response_object.get("status").and_then(Value::as_str) != Some("completed") {
         return LayeredCompactionResult::unchanged(sse_text);
     }
-    let Some(summary) =
-        extract_message_text(&response_object).filter(|summary| !summary.trim().is_empty())
-    else {
+    let Some(summary) = extract_compaction_summary_text(&response_object) else {
         return LayeredCompactionResult::unchanged(compaction_failure_sse(
             request_json,
             Some(&response_object),
@@ -2283,6 +2767,191 @@ fn push_event(output: &mut String, event: &str, mut data: Value, sequence: &mut 
 mod tests {
     use super::*;
 
+    fn tagged_response(text: &str) -> Value {
+        json!({"status":"completed","output":[{
+            "type":"message","role":"assistant","content":[{"type":"output_text","text":text}]
+        }]})
+    }
+
+    #[test]
+    fn compaction_contract_rollout_requires_existing_file_and_matching_session_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let key = "01a0ea47-0de4-72e2-be5b-dfd63296920c";
+        let request = json!({"prompt_cache_key":key});
+        assert!(verified_rollout_path(&request, root.path()).is_none());
+        let day = root.path().join("2026/09/29");
+        std::fs::create_dir_all(&day).unwrap();
+        let file = day.join(format!("rollout-2026-09-29T07-08-40-{key}.jsonl"));
+        std::fs::write(
+            &file,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"different\"}}\n",
+        )
+        .unwrap();
+        assert!(verified_rollout_path(&request, root.path()).is_none());
+        std::fs::write(
+            &file,
+            format!("{}\n", json!({"type":"session_meta","payload":{"id":key}})),
+        )
+        .unwrap();
+        assert_eq!(verified_rollout_path(&request, root.path()), Some(file));
+        assert!(
+            verified_rollout_path(&json!({"prompt_cache_key":"../invalid"}), root.path()).is_none()
+        );
+    }
+
+    #[test]
+    fn compaction_contract_routes_and_preserves_cache_prefix() {
+        assert!(model_supports_native_remote_compaction_v2("gpt-5.4"));
+        assert_eq!(
+            CompactionRoute::for_model("claude-opus-5-5"),
+            CompactionRoute::CacheReuse
+        );
+        assert_eq!(
+            CompactionRoute::for_model("deepseek-v4.1-flash"),
+            CompactionRoute::CodexLocal
+        );
+        let request = json!({
+            "model":"claude-opus-5-5","instructions":"main system","system":"main",
+            "tools":[{"type":"function","name":"read","parameters":{"type":"object"}}],
+            "tool_choice":"auto","parallel_tool_calls":true,
+            "thinking":{"type":"adaptive"},"output_config":{"effort":"max"},
+            "reasoning":{"effort":"max"},"prompt_cache_key":"unchanged",
+            "input":[user_message("earlier"),{"type":"reasoning","summary":[{"text":"reasoning"}]},
+                assistant_message("done"),user_message("next"),{"type":"compaction_trigger"}]
+        });
+        let prepared = prepare_compaction_attempt_request(
+            &request,
+            CompactionKind::RemoteV2,
+            CompactionRoute::CacheReuse,
+            &CompactionOptions::default(),
+            CompactionAttempt::First,
+        );
+        for (key, value) in request.as_object().unwrap() {
+            if key != "input" {
+                assert_eq!(&prepared[key], value, "{key}");
+            }
+        }
+        assert_eq!(
+            &prepared["input"].as_array().unwrap()[..4],
+            &request["input"].as_array().unwrap()[..4]
+        );
+        let with_tail = prepare_compaction_attempt_request(
+            &request,
+            CompactionKind::RemoteV2,
+            CompactionRoute::CacheReuse,
+            &CompactionOptions {
+                retain_recent_round: true,
+                ..Default::default()
+            },
+            CompactionAttempt::First,
+        );
+        let kept = with_tail["input"].as_array().unwrap().len() - 1;
+        assert_eq!(
+            &with_tail["input"].as_array().unwrap()[..kept],
+            &request["input"].as_array().unwrap()[..kept]
+        );
+        let local = prepare_compaction_attempt_request(
+            &request,
+            CompactionKind::RemoteV2,
+            CompactionRoute::CodexLocal,
+            &CompactionOptions::default(),
+            CompactionAttempt::First,
+        );
+        for field in COMPACTION_TOOL_FIELDS {
+            assert!(local.get(field).is_none());
+        }
+        assert_eq!(local["model"], request["model"]);
+        assert_eq!(local["instructions"], request["instructions"]);
+        let retry = compaction_retry_request(&prepared);
+        assert_eq!(retry["input"], prepared["input"]);
+        assert_eq!(retry["model"], prepared["model"]);
+        assert_eq!(retry["instructions"], COMPACTION_RETRY_SYSTEM_PROMPT);
+        for field in COMPACTION_TOOL_FIELDS {
+            assert!(retry.get(field).is_none());
+        }
+    }
+
+    #[test]
+    fn compaction_contract_instruction_order_and_strict_validation() {
+        assert_eq!(
+            compaction_instruction("custom"),
+            format!("{COMPACTION_INSTRUCTION_PREFIX}\n\ncustom\n\n{COMPACTION_INSTRUCTION_SUFFIX}")
+        );
+        assert_eq!(
+            compaction_instruction(""),
+            format!(
+                "{COMPACTION_INSTRUCTION_PREFIX}\n\n{DEFAULT_COMPACTION_PROMPT}\n\n{COMPACTION_INSTRUCTION_SUFFIX}"
+            )
+        );
+        // 已确认事故形态：completed 的任务继续执行文本，不能被当作摘要。
+        for text in [
+            "我先把相关文件找出来。",
+            "<analysis>notes</analysis>",
+            "   ",
+        ] {
+            assert_eq!(
+                validate_compaction_response(&tagged_response(text)),
+                Err(CompactionValidationFailure::SummaryTagMissing)
+            );
+        }
+        assert_eq!(
+            validate_compaction_response(&tagged_response("<summary> \n </summary>")),
+            Err(CompactionValidationFailure::SummaryEmpty)
+        );
+        assert_eq!(
+            validate_compaction_response(&tagged_response(
+                "<analysis>example <summary>discard</summary></analysis><summary> kept </summary>outside"
+            )),
+            Ok("kept".to_string())
+        );
+        let tool_sse = format!(
+            "data: {}\n\ndata: {}\n\n",
+            json!({"type":"response.output_item.added","item":{"type":"function_call"}}),
+            json!({"type":"response.completed","response":tagged_response("<summary>done</summary>")})
+        );
+        assert_eq!(
+            validate_compaction_sse(&tool_sse).1,
+            Err(CompactionValidationFailure::ToolCallOutput)
+        );
+        let mut response = tagged_response("<summary>done</summary>");
+        for kind in [
+            "function_call",
+            "custom_tool_call",
+            "mcp_call",
+            "web_search_call",
+            "tool_use",
+        ] {
+            response["output"].as_array_mut().unwrap().truncate(1);
+            response["output"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"type":kind}));
+            assert_eq!(
+                validate_compaction_response(&response),
+                Err(CompactionValidationFailure::ToolCallOutput)
+            );
+        }
+        response["output"].as_array_mut().unwrap().truncate(1);
+        response["status"] = json!("incomplete");
+        assert_eq!(
+            validate_compaction_response(&response),
+            Err(CompactionValidationFailure::NotCompleted)
+        );
+        for kind in [CompactionKind::Legacy, CompactionKind::RemoteV2] {
+            let failed = compaction_validation_failure_response(
+                &json!({}),
+                kind,
+                Some(&response),
+                CompactionValidationFailure::SummaryTagMissing,
+            );
+            assert_eq!(failed["status"], "failed");
+            assert_eq!(failed["output"], json!([]));
+            let sse = compaction_payload_sse(kind, &failed);
+            assert!(sse.contains("event: response.failed"));
+            assert!(!sse.contains("event: response.completed"));
+        }
+    }
+
     fn compaction_prompt_item() -> Value {
         json!({
             "type": "message",
@@ -2509,7 +3178,7 @@ mod tests {
                 "type": "message",
                 "status": "completed",
                 "role": "assistant",
-                "content": [{ "type": "output_text", "text": summary, "annotations": [] }]
+                "content": [{ "type": "output_text", "text": format!("<summary>{summary}</summary>"), "annotations": [] }]
             }],
             "usage": { "input_tokens": 10, "output_tokens": 5, "total_tokens": 15 }
         });
@@ -2548,15 +3217,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_compaction_v2_keeps_original_model() {
-        let request = remote_compaction_v2_request();
-        assert_eq!(
-            apply_compaction_model_override(&request, "gpt-5.6"),
-            request
-        );
-    }
-
-    #[test]
     fn effective_prompt_uses_project_default_for_blank_override() {
         assert_eq!(effective_compaction_prompt(""), DEFAULT_COMPACTION_PROMPT);
         assert_eq!(
@@ -2570,27 +3230,38 @@ mod tests {
     }
 
     #[test]
-    fn project_default_prompt_is_scope_aware_evidence_handoff() {
-        assert!(DEFAULT_COMPACTION_PROMPT.starts_with("You are a conversation compaction writer."));
+    fn project_default_prompt_preserves_continuation_execution_point() {
+        assert!(DEFAULT_COMPACTION_PROMPT.starts_with(
+            "You are writing a continuation checkpoint for an agent task that is still in progress."
+        ));
         assert!(!DEFAULT_COMPACTION_PROMPT.starts_with('#'));
-        assert!(DEFAULT_COMPACTION_PROMPT.contains("## Evidence Scope and Supersession"));
-        assert!(DEFAULT_COMPACTION_PROMPT.contains("## Mandatory Internal Evidence Ledger"));
-        assert!(DEFAULT_COMPACTION_PROMPT.contains("Example: `git log -3`"));
-        assert!(DEFAULT_COMPACTION_PROMPT.contains("## Mandatory Internal Verification"));
+        assert!(DEFAULT_COMPACTION_PROMPT.contains("the exact point where work stopped"));
+        assert!(DEFAULT_COMPACTION_PROMPT.contains("## Execution point"));
+        assert!(DEFAULT_COMPACTION_PROMPT.contains("## Do not redo"));
+        assert!(DEFAULT_COMPACTION_PROMPT.contains("BLOCKING"));
+        assert!(DEFAULT_COMPACTION_PROMPT.contains("DEFAULTED"));
+        assert!(DEFAULT_COMPACTION_PROMPT.contains("DEFERRED"));
+        assert!(DEFAULT_COMPACTION_PROMPT.contains("## Silent final check (do not output)"));
     }
 
     #[test]
-    fn remote_compaction_v2_bridge_replaces_trigger_and_removes_tools() {
+    fn remote_compaction_v2_bridge_replaces_trigger_and_preserves_claude_tools() {
         let rewritten =
             prepare_remote_compaction_v2_bridge_request(&remote_compaction_v2_request());
-        assert!(rewritten.get("tools").is_none());
-        assert!(rewritten.get("tool_choice").is_none());
-        assert!(rewritten.get("parallel_tool_calls").is_none());
+        assert_eq!(rewritten["tools"], remote_compaction_v2_request()["tools"]);
+        assert_eq!(
+            rewritten["tool_choice"],
+            remote_compaction_v2_request()["tool_choice"]
+        );
+        assert_eq!(
+            rewritten["parallel_tool_calls"],
+            remote_compaction_v2_request()["parallel_tool_calls"]
+        );
         let input = rewritten.get("input").and_then(Value::as_array).unwrap();
         assert_eq!(input.len(), 2);
         assert_eq!(input[1]["type"], "message");
         assert_eq!(input[1]["role"], "user");
-        assert!(item_text(&input[1]).starts_with(COMPACTION_PROMPT_PREFIX));
+        assert!(item_text(&input[1]).starts_with(COMPACTION_INSTRUCTION_PREFIX));
     }
 
     #[test]
@@ -2602,7 +3273,7 @@ mod tests {
         let input = rewritten.get("input").and_then(Value::as_array).unwrap();
         assert_eq!(
             item_text(input.last().unwrap()),
-            "CUSTOM LAYERED COMPACTION PROMPT"
+            compaction_instruction("CUSTOM LAYERED COMPACTION PROMPT")
         );
     }
 
@@ -2613,7 +3284,7 @@ mod tests {
             Some(""),
         );
         let input = rewritten.get("input").and_then(Value::as_array).unwrap();
-        assert_eq!(item_text(input.last().unwrap()), DEFAULT_COMPACTION_PROMPT);
+        assert_eq!(item_text(input.last().unwrap()), compaction_instruction(""));
     }
 
     #[test]
@@ -2629,7 +3300,7 @@ mod tests {
                     "id": "msg_bridge",
                     "type": "message",
                     "role": "assistant",
-                    "content": [{ "type": "output_text", "text": "SUMMARY", "annotations": [] }]
+                    "content": [{ "type": "output_text", "text": "<summary>SUMMARY</summary>", "annotations": [] }]
                 },
                 {
                     "type": "function_call",
@@ -2643,12 +3314,8 @@ mod tests {
         let rewritten =
             rewrite_remote_compaction_v2_response(&remote_compaction_v2_request(), &source)
                 .expect("V2 response should be rewritten");
-        let output = rewritten.get("output").and_then(Value::as_array).unwrap();
-        assert_eq!(output.len(), 1);
-        assert_eq!(output[0]["type"], "compaction");
-        let restored = synthetic_remote_compaction_history_text(&output[0])
-            .expect("synthetic compaction should be decodable");
-        assert!(restored.contains("SUMMARY"));
+        assert_eq!(rewritten["status"], "failed");
+        assert_eq!(rewritten["output"], json!([]));
     }
 
     #[test]
@@ -2707,7 +3374,7 @@ mod tests {
                 "id": "msg_bridge",
                 "type": "message",
                 "role": "assistant",
-                "content": [{ "type": "output_text", "text": "SUMMARY", "annotations": [] }]
+                "content": [{ "type": "output_text", "text": "<summary>SUMMARY</summary>", "annotations": [] }]
             }]
         });
         let rewritten = rewrite_remote_compaction_v2_response_with_layered_compaction(
@@ -2980,7 +3647,7 @@ mod tests {
             "output": [{
                 "type": "message",
                 "role": "assistant",
-                "content": [{ "type": "output_text", "text": "SUMMARY" }]
+                "content": [{ "type": "output_text", "text": "<summary>SUMMARY</summary>" }]
             }]
         });
         let rewritten = rewrite_remote_compaction_v2_response_with_layered_compaction(
@@ -3025,7 +3692,7 @@ mod tests {
         let rewritten = prepare_legacy_layered_compaction_request(&request, "");
         let input = rewritten.get("input").and_then(Value::as_array).unwrap();
 
-        assert_eq!(item_text(input.last().unwrap()), DEFAULT_COMPACTION_PROMPT);
+        assert_eq!(item_text(input.last().unwrap()), compaction_instruction(""));
         assert!(rewritten.get("tools").is_none());
         assert!(rewritten.get("tool_choice").is_none());
         assert!(rewritten.get("parallel_tool_calls").is_none());
@@ -3052,7 +3719,10 @@ mod tests {
         );
         let input = rewritten["input"].as_array().unwrap();
         assert_eq!(&input[..3], &request["input"].as_array().unwrap()[..3]);
-        assert_eq!(item_text(input.last().unwrap()), "CUSTOM PROMPT");
+        assert_eq!(
+            item_text(input.last().unwrap()),
+            compaction_instruction("CUSTOM PROMPT")
+        );
     }
 
     #[test]
@@ -3072,7 +3742,10 @@ mod tests {
         );
         let input = rewritten["input"].as_array().unwrap();
         assert_eq!(&input[..3], &request["input"].as_array().unwrap()[..3]);
-        assert_eq!(item_text(input.last().unwrap()), "CUSTOM PROMPT");
+        assert_eq!(
+            item_text(input.last().unwrap()),
+            compaction_instruction("CUSTOM PROMPT")
+        );
     }
 
     #[test]
@@ -3109,7 +3782,10 @@ mod tests {
                 .to_string()
                 .contains(LOCAL_COMPACTION_V3_STRUCTURED_PREFIX)
         );
-        assert_eq!(item_text(input.last().unwrap()), "NEW PROMPT");
+        assert_eq!(
+            item_text(input.last().unwrap()),
+            compaction_instruction("NEW PROMPT")
+        );
     }
 
     #[test]
@@ -3203,7 +3879,7 @@ mod tests {
 
         assert_eq!(input.len(), 2);
         assert_eq!(item_text(&input[0]), "更早历史");
-        assert_eq!(item_text(&input[1]), DEFAULT_COMPACTION_PROMPT);
+        assert_eq!(item_text(&input[1]), compaction_instruction(""));
         assert!(!prepared.to_string().contains("推荐方案：执行方案 1"));
         assert!(!prepared.to_string().contains("按推荐处理"));
         assert!(!prepared.to_string().contains("call_1"));
@@ -3957,7 +4633,7 @@ mod tests {
             "output": [{
                 "type": "message",
                 "role": "assistant",
-                "content": [{ "type": "output_text", "text": "SUMMARY" }]
+                "content": [{ "type": "output_text", "text": "<summary>SUMMARY</summary>" }]
             }]
         });
 
@@ -4071,7 +4747,7 @@ mod tests {
             "output": [{
                 "type": "message",
                 "role": "assistant",
-                "content": [{ "type": "output_text", "text": "SUMMARY" }]
+                "content": [{ "type": "output_text", "text": "<summary>SUMMARY</summary>" }]
             }]
         });
 

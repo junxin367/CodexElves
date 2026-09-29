@@ -705,6 +705,7 @@ mod tests {
             protocol: crate::settings::RelayProtocol::Responses,
             local_proxy_enabled: Some(true),
             model_mappings: vec![crate::settings::RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-test".into(),
                 protocol: crate::settings::RelayProtocol::Responses,
                 alias: String::new(),

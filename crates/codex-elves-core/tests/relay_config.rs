@@ -1501,18 +1501,21 @@ experimental_bearer_token = "sk-new"
         model_insert_mode: Default::default(),
         model_mappings: vec![
             RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "deepseek-coder".to_string(),
                 alias: String::new(),
                 protocol: RelayProtocol::ChatCompletions,
                 context_window: "128000".to_string(),
             },
             RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "qwen3-coder".to_string(),
                 alias: String::new(),
                 protocol: RelayProtocol::Responses,
                 context_window: "200000".to_string(),
             },
             RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "glm-5.2".to_string(),
                 alias: String::new(),
                 protocol: RelayProtocol::ChatCompletions,
@@ -1619,12 +1622,14 @@ experimental_bearer_token = "sk-new"
         auth_contents: r#"{"OPENAI_API_KEY":"sk-new"}"#.to_string(),
         model_mappings: vec![
             RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-5.6-sol".to_string(),
                 alias: "gpt-primary".to_string(),
                 protocol: RelayProtocol::Responses,
                 context_window: "500000".to_string(),
             },
             RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-5.6-sol".to_string(),
                 alias: "gpt-secondary".to_string(),
                 protocol: RelayProtocol::Responses,
@@ -1670,12 +1675,14 @@ experimental_bearer_token = "sk-new"
         auth_contents: r#"{"OPENAI_API_KEY":"sk-new"}"#.to_string(),
         model_mappings: vec![
             RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "model-a".to_string(),
                 alias: "model-b".to_string(),
                 protocol: RelayProtocol::ChatCompletions,
                 context_window: "400000".to_string(),
             },
             RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "model-b".to_string(),
                 alias: String::new(),
                 protocol: RelayProtocol::Responses,
@@ -1839,18 +1846,21 @@ base_url = "http://127.0.0.1:45221/v1"
         config_contents: "model_provider = \"custom\"\n".to_string(),
         model_mappings: vec![
             RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-test".to_string(),
                 alias: String::new(),
                 protocol: RelayProtocol::Responses,
                 context_window: String::new(),
             },
             RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-explicit".to_string(),
                 alias: String::new(),
                 protocol: RelayProtocol::Responses,
                 context_window: String::new(),
             },
             RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "claude-test".to_string(),
                 alias: String::new(),
                 protocol: RelayProtocol::Anthropic,
@@ -1949,6 +1959,7 @@ experimental_bearer_token = "sk-new"
         auth_contents: r#"{"OPENAI_API_KEY":"sk-new"}"#.to_string(),
         model_insert_mode: Default::default(),
         model_mappings: vec![RelayModelMapping {
+            system_prompt_override: String::new(),
             request_model: "deepseek-coder".to_string(),
             alias: String::new(),
             protocol: RelayProtocol::Responses,
@@ -3657,6 +3668,7 @@ base_url = "https://old.example/v1"
         api_key: "sk-new".to_string(),
         relay_mode: RelayMode::PureApi,
         model_mappings: vec![RelayModelMapping {
+            system_prompt_override: String::new(),
             request_model: "qwen3-coder".to_string(),
             alias: String::new(),
             protocol: RelayProtocol::Responses,

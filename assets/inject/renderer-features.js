@@ -106,7 +106,7 @@
   const codexPromptOptimizeCompactCollisionMaxWidth = 140;
   const codexPromptOptimizeCompactCollisionMaxHeight = 84;
   const codexPromptOptimizeMaxRecentContextChars = 100000;
-  const codexWorkspaceCheckpointVersion = "5";
+  const codexWorkspaceCheckpointVersion = "6";
   const codexWorkspaceCheckpointButtonAttribute = "data-codex-workspace-checkpoint-button";
   const codexWorkspaceCheckpointButtonGap = 6;
   const codexWorkspaceCheckpointDialogClass = "codex-workspace-checkpoint-dialog";
@@ -116,6 +116,7 @@
   const codexWorkspaceCheckpointCompletionHintTtlMs = 10 * 1000;
   const codexWorkspaceCheckpointPatchRetryBaseMs = 1000;
   const codexWorkspaceCheckpointPatchRetryMaxMs = 30000;
+  const codexWorkspaceCheckpointBridgeTimeoutMs = 2000;
   const taskBoardRuntimeVersion = "63";
   const taskBoardNativeOperationLeaseTtlMs = 2 * 60 * 1000;
   const taskBoardNativeCreateBusyMessage = "另一个窗口正在创建原生会话，请稍后重试";
@@ -6124,6 +6125,42 @@
     );
   }
 
+  async function postCodexWorkspaceCheckpointJson(path, payload) {
+    const unavailable = (message) => Object.assign(
+      new Error(message || "Checkpoint 桥接暂不可用"),
+      { code: "checkpoint_bridge_unavailable" }
+    );
+    if (typeof window.__codexSessionDeleteBridge !== "function") {
+      throw unavailable("Checkpoint 桥接暂不可用");
+    }
+    let timer;
+    try {
+      const result = await Promise.race([
+        postJson(path, payload),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(unavailable("Checkpoint 请求超时")),
+            codexWorkspaceCheckpointBridgeTimeoutMs
+          );
+        }),
+      ]);
+      if (
+        result?.bridgeMissing ||
+        result?.code === "bridge_unavailable" ||
+        result?.code === "bridge_timeout" ||
+        result?.message === "CodexElves Bridge 已重启，请重试" ||
+        result?.message === "桥接不可用，请重启启动器"
+      ) {
+        throw unavailable(result?.message);
+      }
+      return result;
+    } catch (error) {
+      throw unavailable(error?.message || String(error));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   function codexWorkspaceCheckpointSessionContext(threadId) {
     const key = codexWorkspaceCheckpointSessionKey(threadId);
     if (!key) return Promise.resolve(null);
@@ -6133,7 +6170,7 @@
     const promises = window.__codexWorkspaceCheckpointSessionContextPromises;
     const existing = promises.get(key);
     if (existing) return existing;
-    const promise = postJson("/workspace-checkpoint/session-context", {
+    const promise = postCodexWorkspaceCheckpointJson("/workspace-checkpoint/session-context", {
       session_id: threadId,
     })
       .then((result) => {
@@ -6152,7 +6189,7 @@
             }
           : null;
       })
-      .catch(() => null)
+      .catch((bridgeError) => ({ bridgeError }))
       .finally(() => {
         if (promises.get(key) === promise) promises.delete(key);
       });
@@ -6251,6 +6288,9 @@
     }
     let resolved = context;
     const sessionContext = await codexWorkspaceCheckpointSessionContext(context.threadId);
+    if (sessionContext?.bridgeError) {
+      resolved = { ...context, bridgeError: sessionContext.bridgeError };
+    }
     if (sessionContext?.cwd) {
       rememberCodexWorkspaceCheckpointWorkspace(
         context.threadId,
@@ -6354,9 +6394,10 @@
     const context = await codexWorkspaceCheckpointContextAsync(client, params);
     if (context.stale) throw new Error("会话已切换，请重试");
     if (!context.local) return { skipped: true, reason: "remote_host", context };
+    if (context.bridgeError) throw context.bridgeError;
     if (!context.cwd) throw new Error("未识别到当前会话工作目录");
     if (!context.threadId) throw new Error("未识别到当前 thread");
-    const result = await postJson("/workspace-checkpoint/create", {
+    const result = await postCodexWorkspaceCheckpointJson("/workspace-checkpoint/create", {
       cwd: context.cwd,
       threadId: context.threadId,
       requestId: codexWorkspaceCheckpointRequestId(params),
@@ -6370,7 +6411,7 @@
 
   async function bindCodexWorkspaceCheckpoint(created, turnResult) {
     if (created?.skipped || !created?.checkpoint?.id) return;
-    const result = await postJson("/workspace-checkpoint/bind-turn", {
+    const result = await postCodexWorkspaceCheckpointJson("/workspace-checkpoint/bind-turn", {
       cwd: created.context.cwd,
       checkpointId: created.checkpoint.id,
       threadId: created.context.threadId,
@@ -6784,28 +6825,37 @@
         try {
           created = await createCodexWorkspaceCheckpoint(client, params);
         } catch (error) {
-          showToast(`${error?.message || "创建工作区 Checkpoint 失败"}；本轮发送已取消`);
-          sendCodexElvesDiagnostic("workspace_checkpoint_create_failed", {
-            errorName: error?.name || "",
-            errorMessage: error?.message || String(error),
-          });
-          throw error;
+          if (error?.code === "checkpoint_bridge_unavailable") {
+            created = { skipped: true, reason: "bridge_unavailable" };
+            showToast("Checkpoint 暂不可用，本轮未保存快照，继续发送");
+            sendCodexElvesDiagnostic("workspace_checkpoint_create_skipped", {
+              reason: created.reason,
+              errorMessage: error.message,
+            });
+          } else {
+            showToast(`${error?.message || "创建工作区 Checkpoint 失败"}；本轮发送已取消`);
+            sendCodexElvesDiagnostic("workspace_checkpoint_create_failed", {
+              errorName: error?.name || "",
+              errorMessage: error?.message || String(error),
+            });
+            throw error;
+          }
         }
         const result = await original.call(client, method, params, options);
+        if (created?.skipped) return result;
         installCodexWorkspaceCheckpointTurnCompletionListener();
-        try {
-          await trackCodexWorkspaceCheckpointBinding(
-            created,
-            result,
-            bindCodexWorkspaceCheckpoint(created, result)
-          );
-        } catch (error) {
+        // 原生发送已成功；绑定在后台完成，轮次完成处理仍通过 bindings 等待它。
+        void trackCodexWorkspaceCheckpointBinding(
+          created,
+          result,
+          bindCodexWorkspaceCheckpoint(created, result)
+        ).catch((error) => {
           sendCodexElvesDiagnostic("workspace_checkpoint_bind_failed", {
             checkpointId: created?.checkpoint?.id || "",
             errorName: error?.name || "",
             errorMessage: error?.message || String(error),
           });
-        }
+        });
         return result;
       }
       return await original.call(client, method, params, options);

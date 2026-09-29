@@ -118,12 +118,14 @@ fn native_responses_websocket_supports_mixed_profiles_with_responses_models() {
     profile.protocol = RelayProtocol::ChatCompletions;
     profile.model_mappings = vec![
         RelayModelMapping {
+            system_prompt_override: String::new(),
             request_model: "gpt-responses".to_string(),
             alias: String::new(),
             protocol: RelayProtocol::Responses,
             context_window: String::new(),
         },
         RelayModelMapping {
+            system_prompt_override: String::new(),
             request_model: "claude-sonnet".to_string(),
             alias: String::new(),
             protocol: RelayProtocol::Anthropic,
@@ -133,6 +135,7 @@ fn native_responses_websocket_supports_mixed_profiles_with_responses_models() {
     assert!(relay_supports_native_responses_websocket(&profile));
 
     profile.model_mappings = vec![RelayModelMapping {
+        system_prompt_override: String::new(),
         request_model: "chat-model".to_string(),
         alias: String::new(),
         protocol: RelayProtocol::ChatCompletions,
@@ -145,12 +148,14 @@ fn native_responses_websocket_supports_mixed_profiles_with_responses_models() {
     profile.system_prompt_override.clear();
     profile.model_mappings = vec![
         RelayModelMapping {
+            system_prompt_override: String::new(),
             request_model: "gpt-responses".to_string(),
             alias: String::new(),
             protocol: RelayProtocol::Responses,
             context_window: String::new(),
         },
         RelayModelMapping {
+            system_prompt_override: String::new(),
             request_model: "claude-sonnet".to_string(),
             alias: String::new(),
             protocol: RelayProtocol::Anthropic,
@@ -163,6 +168,11 @@ fn native_responses_websocket_supports_mixed_profiles_with_responses_models() {
     profile.relay_mode = RelayMode::Official;
     assert!(!relay_supports_native_responses_websocket(&profile));
     profile.official_mix_api_key = true;
+    assert!(relay_supports_native_responses_websocket(&profile));
+
+    profile.model_mappings[0].system_prompt_override = "model prompt".to_string();
+    assert!(!relay_supports_native_responses_websocket(&profile));
+    profile.model_mappings[0].system_prompt_override = " \n ".to_string();
     assert!(relay_supports_native_responses_websocket(&profile));
 
     profile.responses_websocket.endpoint = "wss://other.example.test/v1/responses".to_string();
@@ -433,6 +443,7 @@ async fn local_proxy_bridges_responses_websocket_messages_and_authentication() {
         api_key: "sk-bridge-secret".to_string(),
         auth_contents: r#"{"OPENAI_API_KEY":"sk-bridge-secret"}"#.to_string(),
         model_mappings: vec![RelayModelMapping {
+            system_prompt_override: String::new(),
             request_model: "gpt-bridge".to_string(),
             alias: String::new(),
             protocol: RelayProtocol::Responses,
@@ -583,6 +594,7 @@ async fn local_proxy_rewrites_websocket_alias_slug_and_prompt_identity_to_reques
         api_key: "sk-websocket-alias".to_string(),
         auth_contents: r#"{"OPENAI_API_KEY":"sk-websocket-alias"}"#.to_string(),
         model_mappings: vec![RelayModelMapping {
+            system_prompt_override: String::new(),
             request_model: "gpt-5.6-sol".to_string(),
             alias: "gpt-5.6-sol [500K]".to_string(),
             protocol: RelayProtocol::Responses,
@@ -696,12 +708,14 @@ async fn local_proxy_accepts_legacy_hidden_alias_slug_without_forwarding_it() {
         auth_contents: r#"{"OPENAI_API_KEY":"sk-websocket-legacy-hidden-alias"}"#.to_string(),
         model_mappings: vec![
             RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-5.6-sol".to_string(),
                 alias: String::new(),
                 protocol: RelayProtocol::Responses,
                 context_window: "372000".to_string(),
             },
             RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-5.6-sol".to_string(),
                 alias: "gpt-5.6-sol [500K]".to_string(),
                 protocol: RelayProtocol::Responses,
@@ -2413,12 +2427,14 @@ async fn websocket_http_policy_preserves_http_models_and_compaction() {
     let mut settings = SettingsStore::default().load().unwrap();
     settings.relay_profiles[0].model_mappings.extend([
         RelayModelMapping {
+            system_prompt_override: String::new(),
             request_model: "claude-http".to_string(),
             protocol: RelayProtocol::Anthropic,
             alias: String::new(),
             context_window: String::new(),
         },
         RelayModelMapping {
+            system_prompt_override: String::new(),
             request_model: "chat-http".to_string(),
             protocol: RelayProtocol::ChatCompletions,
             alias: String::new(),
@@ -2554,6 +2570,7 @@ fn save_supported_websocket_settings(
         api_key: "sk-websocket-test".to_string(),
         auth_contents: r#"{"OPENAI_API_KEY":"sk-websocket-test"}"#.to_string(),
         model_mappings: vec![RelayModelMapping {
+            system_prompt_override: String::new(),
             request_model: request_model.to_string(),
             alias: String::new(),
             protocol: RelayProtocol::Responses,

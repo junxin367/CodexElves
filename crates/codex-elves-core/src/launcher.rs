@@ -1565,27 +1565,6 @@ fn apply_remote_compaction_v2_bridge(
     (result.sse_text, log)
 }
 
-fn restore_compaction_model_in_text(text: String, restore: Option<&(String, String)>) -> String {
-    let Some((original_model, compaction_model)) = restore else {
-        return text;
-    };
-    crate::layered_compaction::restore_response_model_in_sse(
-        &text,
-        original_model,
-        compaction_model,
-    )
-}
-
-fn restore_compaction_model_in_bytes(body: Vec<u8>, restore: Option<&(String, String)>) -> Vec<u8> {
-    let Some(_) = restore else {
-        return body;
-    };
-    match String::from_utf8(body) {
-        Ok(text) => restore_compaction_model_in_text(text, restore).into_bytes(),
-        Err(error) => error.into_bytes(),
-    }
-}
-
 fn deferred_stream_target_protocol(
     request: &serde_json::Value,
 ) -> anyhow::Result<crate::protocol_proxy::UpstreamResponseProtocol> {
@@ -1870,7 +1849,12 @@ async fn handle_protocol_proxy_connection_inner(
                 || {
                     request_json.as_ref().is_some_and(|request| {
                         crate::protocol_proxy::should_bridge_remote_compaction_v2_after_failure(
-                            request, None,
+                            request,
+                            None,
+                            SettingsStore::default()
+                                .load()
+                                .unwrap_or_default()
+                                .layered_compaction_enabled,
                         )
                     })
                 },
@@ -2140,10 +2124,6 @@ async fn handle_protocol_proxy_connection_inner(
     let relay_id = upstream.relay_id.clone();
     let relay_name = upstream.relay_name.clone();
     let endpoint = upstream.endpoint.clone();
-    let compaction_model_restore = upstream
-        .original_compaction_model
-        .clone()
-        .zip(upstream.compaction_model.clone());
     let layered_compaction_options = upstream.layered_compaction_options;
 
     if upstream.is_stream {
@@ -2170,8 +2150,7 @@ async fn handle_protocol_proxy_connection_inner(
                     crate::protocol_proxy::UpstreamResponseProtocol::Responses,
                     true,
                 );
-                let body =
-                    restore_compaction_model_in_bytes(raw_body, compaction_model_restore.as_ref());
+                let body = raw_body;
                 response_bytes += body.len();
                 response_truncated |=
                     crate::proxy_log::append_capture(&mut response_capture, &body);
@@ -2342,11 +2321,7 @@ async fn handle_protocol_proxy_connection_inner(
                     layered_compaction_options,
                 );
                 layered_compaction_log = compaction_log;
-                let final_bytes = restore_compaction_model_in_text(
-                    final_sse_text,
-                    compaction_model_restore.as_ref(),
-                )
-                .into_bytes();
+                let final_bytes = final_sse_text.into_bytes();
                 response_bytes += final_bytes.len();
                 response_truncated |=
                     crate::proxy_log::append_capture(&mut response_capture, &final_bytes);
@@ -2429,10 +2404,7 @@ async fn handle_protocol_proxy_connection_inner(
             match chunk {
                 Ok(bytes) => {
                     upstream_model_observer.observe_sse_chunk(&bytes, response_protocol);
-                    let converted = restore_compaction_model_in_bytes(
-                        converter.push_bytes(&bytes),
-                        compaction_model_restore.as_ref(),
-                    );
+                    let converted = converter.push_bytes(&bytes);
                     if !converted.is_empty() {
                         if first_token_ms.is_none() {
                             let elapsed_ms = started_at.elapsed().as_millis() as u64;
@@ -2462,10 +2434,8 @@ async fn handle_protocol_proxy_connection_inner(
                 }
                 Err(error) => {
                     let error_message = format!("Stream error: {error}");
-                    let failed = restore_compaction_model_in_bytes(
-                        converter.fail(error_message.clone(), Some("stream_error".to_string())),
-                        compaction_model_restore.as_ref(),
-                    );
+                    let failed =
+                        converter.fail(error_message.clone(), Some("stream_error".to_string()));
                     if !failed.is_empty() {
                         response_bytes += failed.len();
                         response_truncated |=
@@ -2482,10 +2452,7 @@ async fn handle_protocol_proxy_connection_inner(
         request_metadata.upstream_response_model = upstream_model_observer.model();
 
         if !stream_failed {
-            let tail = restore_compaction_model_in_bytes(
-                converter.finish(),
-                compaction_model_restore.as_ref(),
-            );
+            let tail = converter.finish();
             if !tail.is_empty() {
                 response_bytes += tail.len();
                 response_truncated |=
@@ -2609,7 +2576,7 @@ async fn handle_protocol_proxy_connection_inner(
         } else {
             upstream_body
         };
-        let body = restore_compaction_model_in_bytes(body, compaction_model_restore.as_ref());
+
         let content_type = if bridge_remote_compaction_v2 || upstream_content_type.is_empty() {
             "application/json; charset=utf-8".to_string()
         } else {
@@ -2719,10 +2686,7 @@ async fn handle_protocol_proxy_connection_inner(
         }
         Err(error) => return Err(error),
     };
-    let body = restore_compaction_model_in_bytes(
-        serde_json::to_vec(&response_json)?,
-        compaction_model_restore.as_ref(),
-    );
+    let body = serde_json::to_vec(&response_json)?;
     write_http_response(stream, "200 OK", "application/json; charset=utf-8", &body).await?;
     log_helper_response(
         "helper.protocol_proxy_ok",
@@ -2913,10 +2877,6 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     let relay_id = upstream.relay_id.clone();
     let relay_name = upstream.relay_name.clone();
     let endpoint = upstream.endpoint.clone();
-    let compaction_model_restore = upstream
-        .original_compaction_model
-        .clone()
-        .zip(upstream.compaction_model.clone());
     let response_protocol = upstream.response_protocol;
     let layered_compaction_options = upstream.layered_compaction_options;
     let response_protocol_label = response_protocol_label(response_protocol);
@@ -3228,9 +3188,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                 layered_compaction_options,
             );
             layered_compaction_log = log;
-            let rewritten =
-                restore_compaction_model_in_text(rewritten, compaction_model_restore.as_ref())
-                    .into_bytes();
+            let rewritten = rewritten.into_bytes();
             response_bytes += rewritten.len();
             response_truncated |=
                 crate::proxy_log::append_capture(&mut response_capture, &rewritten);
@@ -3238,8 +3196,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
         } else if upstream.body_override.is_some() {
             let raw_body = upstream.into_body_bytes().await?;
             upstream_model_observer.observe_sse_chunk(&raw_body, response_protocol);
-            let body =
-                restore_compaction_model_in_bytes(raw_body, compaction_model_restore.as_ref());
+            let body = raw_body;
             let elapsed_ms = started_at.elapsed().as_millis() as u64;
             first_token_ms = Some(elapsed_ms);
             append_local_proxy_first_token_record(
@@ -3412,10 +3369,9 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     // - legacy 分层压缩需要把摘要和原始 tail 合并；
     // - Remote Compaction V2 需要把普通 message/tool 输出封装成唯一 compaction item。
     // 缓冲期间不伪造 Responses 事件；Codex 的等待上限由 Provider 配置单独控制。
-    let is_legacy_compaction =
-        crate::layered_compaction::is_compaction_request(request_json.as_ref());
-    let is_remote_compaction_v2 =
-        crate::layered_compaction::is_remote_compaction_v2_request(request_json.as_ref());
+    let is_legacy_compaction = layered_compaction_options.enabled
+        && crate::layered_compaction::is_compaction_request(request_json.as_ref());
+    let is_remote_compaction_v2 = bridge_remote_compaction_v2;
     let is_compaction = is_legacy_compaction || is_remote_compaction_v2;
     let mut compaction_buffer = String::new();
 
@@ -3583,15 +3539,12 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                 layered_compaction_log = log;
                 rewritten
             };
-            let rewritten =
-                restore_compaction_model_in_text(rewritten, compaction_model_restore.as_ref())
-                    .into_bytes();
+            let rewritten = rewritten.into_bytes();
             response_bytes += rewritten.len();
             response_truncated |=
                 crate::proxy_log::append_capture(&mut response_capture, &rewritten);
             stream.write_all(&rewritten).await?;
         } else if !tail.is_empty() {
-            let tail = restore_compaction_model_in_bytes(tail, compaction_model_restore.as_ref());
             response_bytes += tail.len();
             response_truncated |= crate::proxy_log::append_capture(&mut response_capture, &tail);
             stream.write_all(&tail).await?;
@@ -5119,7 +5072,7 @@ mod tests {
             "event: response.completed\ndata: {}\n\n",
             json!({
                 "type":"response.completed","response":{"id":"resp-summary","status":"completed",
-                "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"SUMMARY"}]}]}
+                "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"<summary>SUMMARY</summary>"}]}]}
             })
         );
         let options = crate::protocol_proxy::LayeredCompactionOptions {
@@ -5160,7 +5113,7 @@ mod tests {
             "event: response.completed\ndata: {}\n\n",
             json!({
                 "type":"response.completed","response":{"id":"resp-summary","status":"completed",
-                "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"SUMMARY"}]}]}
+                "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"<summary>SUMMARY</summary>"}]}]}
             })
         );
         let result = crate::layered_compaction::apply_layered_compaction_to_responses_sse(

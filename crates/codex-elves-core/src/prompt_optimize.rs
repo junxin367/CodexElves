@@ -83,8 +83,10 @@ impl PromptOptimizeService {
             .unwrap_or_default();
         for relay in &mut settings.relay_profiles {
             relay.system_prompt_override.clear();
+            for mapping in &mut relay.model_mappings {
+                mapping.system_prompt_override.clear();
+            }
         }
-        settings.layered_compaction_model_override_enabled = false;
 
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         {

@@ -42,6 +42,7 @@ import {
   KeyRound,
   LayoutDashboard,
   MessageCircle,
+  MessageSquareText,
   FileCode2,
   Moon,
   Network,
@@ -68,11 +69,11 @@ import {
 import { ProviderPresetSelector } from "@/components/ProviderPresetSelector";
 import type { PresetPatch } from "@/components/ProviderPresetSelector";
 import type { RelayMode, RelayModelMapping, RelayProtocol } from "@/relay-types";
+import { readProxyTokenUsage } from "@/proxy-token-usage";
+import { JsonViewer } from "@/components/JsonViewer";
 import {
   defaultModelContextWindow,
   knownModelContextWindow,
-  modelFamilyForModel,
-  type ModelFamily,
 } from "@/modelContextWindows";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
@@ -224,10 +225,6 @@ type BackendSettings = {
   layeredCompactionRetainRecentRoundEnabled: boolean;
   layeredCompactionRetainTokens: number;
   layeredCompactionPromptOverride: string;
-  layeredCompactionModelOverrideEnabled: boolean;
-  layeredCompactionModels: Record<ModelFamily, string>;
-  /** 旧版单模型字段，仅用于读取迁移。 */
-  layeredCompactionModel: string;
   launchMode: LaunchMode;
   relayBaseUrl: string;
   relayApiKey: string;
@@ -342,12 +339,6 @@ const LEGACY_MULTI_AGENT_V2_MAX_THREADS_KEY = "max_concurrent_threads_per_sessio
 const AGENTS_SECTION = "agents";
 const AGENTS_MAX_CONCURRENT_THREADS_KEY = "max_concurrent_threads_per_session";
 const DEFAULT_SUBAGENT_COUNT = 6;
-const COMPACTION_MODEL_FAMILIES: Array<{ value: ModelFamily; label: string }> = [
-  { value: "gpt", label: "GPT 会话" },
-  { value: "claude", label: "Claude 会话" },
-  { value: "other", label: "其他会话" },
-];
-
 const emptyContextSelection = (): RelayContextSelection => ({
   mcpServers: [],
   skills: [],
@@ -970,13 +961,6 @@ const defaultSettings: BackendSettings = {
   layeredCompactionRetainRecentRoundEnabled: false,
   layeredCompactionRetainTokens: 20000,
   layeredCompactionPromptOverride: "",
-  layeredCompactionModelOverrideEnabled: false,
-  layeredCompactionModels: {
-    gpt: "",
-    claude: "",
-    other: "",
-  },
-  layeredCompactionModel: "",
   launchMode: "patch",
   relayBaseUrl: "",
   relayApiKey: "",
@@ -1587,6 +1571,14 @@ function browserPreviewFirstTokenMs(index: number) {
 function browserPreviewLocalProxyDetail(id: string): LocalProxyLogDetail | null {
   const entry = browserPreviewLocalProxyEntries().find((item) => item.id === id);
   if (!entry) return null;
+  const previewUsage = entry.error ? undefined : {
+    input_tokens: 132727,
+    output_tokens: entry.outputTokens ?? 1249,
+    input_tokens_details: { cached_tokens: 131980, cache_write_tokens: 745 },
+    output_tokens_details: {
+      reasoning_tokens: Math.min(entry.reasoningTokens ?? 0, entry.outputTokens ?? 1249),
+    },
+  };
   return {
     ...entry,
     reasoningSource: entry.reasoningEffort ? "reasoning.effort" : null,
@@ -1619,6 +1611,7 @@ function browserPreviewLocalProxyDetail(id: string): LocalProxyLogDetail | null 
           {
             id: entry.id,
             status: "completed",
+            usage: previewUsage,
             output: [{
               type: "compaction",
               encrypted_content: "codex-elves-compaction-v2:浏览器预览压缩摘要",
@@ -1632,6 +1625,7 @@ function browserPreviewLocalProxyDetail(id: string): LocalProxyLogDetail | null 
             {
               id: entry.id,
               status: "completed",
+              usage: previewUsage,
               output: [{
                 type: "message",
                 role: "assistant",
@@ -1645,8 +1639,11 @@ function browserPreviewLocalProxyDetail(id: string): LocalProxyLogDetail | null 
             2,
           )
       : entry.stream
-        ? 'event: response.output_text.delta\ndata: {"delta":"浏览器预览响应"}\n\n'
-        : JSON.stringify({ id: entry.id, status: "completed", output_text: "浏览器预览响应" }, null, 2),
+        ? `event: response.completed\ndata: ${JSON.stringify({
+            type: "response.completed",
+            response: { id: entry.id, status: "completed", output_text: "浏览器预览响应", usage: previewUsage },
+          })}\n\n`
+        : JSON.stringify({ id: entry.id, status: "completed", output_text: "浏览器预览响应", usage: previewUsage }, null, 2),
     continueThinkingRequestBody: entry.continueThinkingTriggered
       ? JSON.stringify(
           {
@@ -5005,6 +5002,18 @@ function LocalProxyLogDetailDialog({
           : entry.responseBody;
   const formattedRequestViewBody = formatProxyBody(requestViewBody);
   const formattedResponseViewBody = formatProxyResponseBody(responseViewBody);
+  const tokenUsage = useMemo(
+    () => readProxyTokenUsage(formattedResponseViewBody),
+    [formattedResponseViewBody],
+  );
+  const tokenMetrics = [
+    { label: "输入", value: tokenUsage.input, hint: "包含缓存命中和缓存写入的输入总量" },
+    { label: "输出", value: tokenUsage.output, hint: "响应报告的输出总量，推理 Token 不重复相加" },
+    { label: "总计", value: tokenUsage.total, hint: "优先使用响应总量；未提供时由输入与输出相加" },
+    { label: "缓存命中", value: tokenUsage.cached, hint: "从缓存读取的输入 Token，已包含在输入总量中" },
+    { label: "缓存写入", value: tokenUsage.cacheWrite, hint: "写入缓存的输入 Token，已包含在输入总量中" },
+    { label: "推理", value: tokenUsage.reasoning, hint: "仅展示响应 usage 报告的推理用量，不以文本长度估算" },
+  ];
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -5091,6 +5100,32 @@ function LocalProxyLogDetailDialog({
             </div>
           ) : null}
         </div>
+        <section className="proxy-detail-usage" aria-label="Token 用量">
+          <strong title="当前返回的 Token 用量；缓存计入输入，推理计入输出">Token</strong>
+          {responseView !== "full" ? (
+            <span className="proxy-detail-usage-scope">
+              {responseView === "before" ? "续接前" : responseView === "after" ? "续接后" : "压缩前"}
+            </span>
+          ) : null}
+          <dl className="proxy-detail-usage-list">
+            {tokenMetrics.map(({ label, value, hint }) => (
+              <div className="proxy-detail-usage-item" key={label} title={hint}>
+                <dt>{label}</dt>
+                <dd data-missing={value === null || undefined}>
+                  {value === null ? "未提供" : value.toLocaleString("zh-CN")}
+                </dd>
+                {label === "缓存命中" && tokenUsage.cacheHitRate !== null ? (
+                  <small title="缓存命中率：缓存读取 Token ÷ 输入 Token">
+                    （{(tokenUsage.cacheHitRate * 100).toFixed(2)}%）
+                  </small>
+                ) : null}
+              </div>
+            ))}
+          </dl>
+          {entry.responseTruncated ? (
+            <p className="proxy-detail-usage-note">返回内容已截断，用量可能不完整。</p>
+          ) : null}
+        </section>
         <div className="proxy-log-detail">
           <div className="proxy-detail-grid">
             <div className="proxy-detail-pane">
@@ -5134,7 +5169,7 @@ function LocalProxyLogDetailDialog({
                   复制
                 </Button>
               </div>
-              <Textarea className="log-view proxy-detail-code" readOnly value={formattedRequestViewBody} />
+              <JsonViewer text={formattedRequestViewBody} label="请求 JSON 查看器" />
             </div>
             <div className="proxy-detail-pane">
               <div className="proxy-detail-pane-head">
@@ -5205,7 +5240,7 @@ function LocalProxyLogDetailDialog({
                   复制
                 </Button>
               </div>
-              <Textarea className="log-view proxy-detail-code" readOnly value={formattedResponseViewBody} />
+              <JsonViewer text={formattedResponseViewBody} label="返回 JSON 查看器" />
             </div>
           </div>
         </div>
@@ -6071,48 +6106,11 @@ function SessionsScreen({
     () => String(form.layeredCompactionRetainTokens),
   );
   const [compactionPromptOpen, setCompactionPromptOpen] = useState(false);
+  const retainRecentRoundEnabled = form.layeredCompactionRetainRecentRoundEnabled;
 
   useEffect(() => {
     setLayeredCompactionRetainTokensInput(String(form.layeredCompactionRetainTokens));
   }, [form.layeredCompactionRetainTokens]);
-
-  // 三个配置槽按源会话家族区分，但目标模型可以是当前供应商的任意模型。
-  const compactionModelOptions = useMemo<Record<ModelFamily, SelectMenuOption<string>[]>>(() => {
-    const profile = activeRelayProfile(form);
-    const options: SelectMenuOption<string>[] = [
-      { value: "", label: "跟随会话模型" },
-      ...relayProfileCatalogModels(profile).map((model) => {
-        const contextWindow = relayProfileContextWindowForModel(profile, model);
-        return {
-          value: model,
-          label: contextWindow
-            ? `${model} · ${formatContextWindowCompact(contextWindow)}`
-            : `${model} · 容量未知`,
-        };
-      }),
-    ];
-    return {
-      gpt: [...options],
-      claude: [...options],
-      other: [...options],
-    };
-  }, [form]);
-  const compactionModelWarnings = useMemo(() => {
-    if (!form.layeredCompactionModelOverrideEnabled) return [];
-    const profile = activeRelayProfile(form);
-    const knownModels = new Set(relayProfileCatalogModels(profile));
-    return COMPACTION_MODEL_FAMILIES.flatMap(({ value: family, label }) => {
-      const model = form.layeredCompactionModels[family].trim();
-      if (!model) return [];
-      if (!knownModels.has(model)) {
-        return [`${label}：当前供应商未配置「${model}」`];
-      }
-      if (!relayProfileContextWindowForModel(profile, model)) {
-        return [`${label}：「${model}」未配置上下文容量`];
-      }
-      return [];
-    });
-  }, [form]);
 
   // 项目（cwd）筛选选项：去重后的项目路径列表，附带会话数量
   const projectOptions = useMemo(() => {
@@ -6273,38 +6271,35 @@ function SessionsScreen({
             checked={form.layeredCompactionEnabled}
             id="context-compaction-enabled"
             onChange={(event) => {
-              const next = {
-                ...form,
-                layeredCompactionEnabled: event.currentTarget.checked,
-              };
+              const next = { ...form, layeredCompactionEnabled: event.currentTarget.checked };
               onFormChange(next);
               void actions.saveSettingsValue(next, false);
             }}
             type="checkbox"
           />
           <div className="session-runtime-setting-copy session-context-compaction-copy">
-            <label className="session-context-compaction-toggle" htmlFor="context-compaction-enabled">
+            <label className="session-context-compaction-heading" htmlFor="context-compaction-enabled">
               <strong>上下文压缩</strong>
               <small>
-                开启后本地代理会替换压缩提示词；如需在摘要后补回最近一轮的 user 请求、助手回复及工具调用/输出，可单独开启下方开关。
+                开启后由本地代理使用会话模型生成并校验摘要；关闭时沿用 harness 默认压缩流程。原生 Remote Compaction V2 保持原有行为。
               </small>
             </label>
             <div className="session-context-compaction-options">
               <div className="session-context-compaction-option">
                 <div className="session-context-compaction-option-copy">
                   <strong>补回最近一轮原始记录</strong>
-                  <small>关闭时仅替换压缩提示词，不在摘要后追加原始记录。</small>
+                  <small>关闭时仅保留摘要；开启时额外保留最近一轮的用户请求、助手回复及工具调用与输出。</small>
                 </div>
                 <div className="session-context-compaction-option-control">
                   <button
-                    aria-checked={form.layeredCompactionRetainRecentRoundEnabled}
+                    aria-checked={retainRecentRoundEnabled}
                     aria-label="补回最近一轮原始记录"
-                    className={`context-enabled-switch ${form.layeredCompactionRetainRecentRoundEnabled ? "active" : ""}`}
+                    className={`context-enabled-switch ${retainRecentRoundEnabled ? "active" : ""}`}
                     disabled={!form.layeredCompactionEnabled}
                     onClick={() => {
                       const next = {
                         ...form,
-                        layeredCompactionRetainRecentRoundEnabled: !form.layeredCompactionRetainRecentRoundEnabled,
+                        layeredCompactionRetainRecentRoundEnabled: !retainRecentRoundEnabled,
                       };
                       onFormChange(next);
                       void actions.saveSettingsValue(next, false);
@@ -6318,41 +6313,46 @@ function SessionsScreen({
                   </button>
                 </div>
               </div>
-              <div className="session-context-compaction-option">
-                <div className="session-context-compaction-option-copy">
-                  <strong>补回裁剪目标</strong>
-                  <small>
-                    超过目标时优先裁剪工具结果和动态工具描述；调用参数、用户与助手原文不会仅因该值超限而失败。范围 20,000–64,000。
-                  </small>
+              {form.layeredCompactionEnabled && retainRecentRoundEnabled ? (
+                <div className="session-context-compaction-option">
+                  <div className="session-context-compaction-option-copy">
+                    <strong>补回裁剪目标</strong>
+                    <small>
+                      控制补回记录的长度，不影响压缩触发时机。优先裁剪工具结果和动态工具描述，保留调用参数及用户、助手原文；实际长度可能超过目标。范围 20,000–64,000。
+                    </small>
+                  </div>
+                  <div className="session-context-compaction-option-control session-context-compaction-limit-control">
+                    <Input
+                      aria-label="上下文压缩补回裁剪目标 token"
+                      className="session-context-compaction-limit"
+                      id="context-compaction-retain-tokens"
+                      inputMode="numeric"
+                      maxLength={5}
+                      onBlur={saveLayeredCompactionRetainTokens}
+                      onChange={(event) =>
+                        setLayeredCompactionRetainTokensInput(event.currentTarget.value.replace(/[^0-9]/g, "").slice(0, 5))
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") event.currentTarget.blur();
+                      }}
+                      pattern="[0-9]*"
+                      value={layeredCompactionRetainTokensInput}
+                    />
+                    <span className="session-context-compaction-unit">token</span>
+                  </div>
                 </div>
-                <div className="session-context-compaction-option-control session-context-compaction-limit-control">
-                  <Input
-                    aria-label="上下文压缩补回裁剪目标 token"
-                    className="session-context-compaction-limit"
-                    disabled={!form.layeredCompactionEnabled || !form.layeredCompactionRetainRecentRoundEnabled}
-                    id="context-compaction-retain-tokens"
-                    inputMode="numeric"
-                    maxLength={5}
-                    onBlur={saveLayeredCompactionRetainTokens}
-                    onChange={(event) =>
-                      setLayeredCompactionRetainTokensInput(event.currentTarget.value.replace(/[^0-9]/g, "").slice(0, 5))
-                    }
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") event.currentTarget.blur();
-                    }}
-                    pattern="[0-9]*"
-                    value={layeredCompactionRetainTokensInput}
-                  />
-                  <span className="session-context-compaction-unit">token</span>
-                </div>
-              </div>
+              ) : null}
               <div className="session-context-compaction-option">
                 <div className="session-context-compaction-option-copy">
                   <strong>压缩提示词</strong>
                   <small>
                     {form.layeredCompactionPromptOverride.trim()
-                      ? "当前使用自定义摘要提示词。"
-                      : "当前使用 CodexElves 默认摘要提示词。"}
+                      ? form.layeredCompactionEnabled
+                        ? "当前使用自定义摘要提示词。"
+                        : "已保存自定义摘要提示词，开启后生效。"
+                      : form.layeredCompactionEnabled
+                        ? "当前使用 CodexElves 默认摘要提示词。"
+                        : "开启后使用 CodexElves 默认摘要提示词。"}
                   </small>
                 </div>
                 <div className="session-context-compaction-option-control">
@@ -6368,69 +6368,6 @@ function SessionsScreen({
                     设置
                   </Button>
                 </div>
-              </div>
-              <div className="session-context-compaction-option">
-                <div className="session-context-compaction-option-copy">
-                  <strong>独立压缩模型</strong>
-                  <small data-warning={compactionModelWarnings.length > 0 || undefined}>
-                    {compactionModelWarnings.length
-                      ? `${compactionModelWarnings.join("；")}。触发压缩时会回落使用会话原模型。`
-                      : "仅本地压缩生效，可按原会话类型跨模型家族选择；远程压缩始终使用会话原模型。"}
-                  </small>
-                </div>
-                <div className="session-context-compaction-option-control">
-                  <button
-                    aria-checked={form.layeredCompactionModelOverrideEnabled}
-                    aria-label="启用独立压缩模型"
-                    className={`context-enabled-switch ${form.layeredCompactionModelOverrideEnabled ? "active" : ""}`}
-                    disabled={!form.layeredCompactionEnabled}
-                    onClick={() => {
-                      const next = {
-                        ...form,
-                        layeredCompactionModelOverrideEnabled: !form.layeredCompactionModelOverrideEnabled,
-                      };
-                      onFormChange(next);
-                      void actions.saveSettingsValue(next, false);
-                    }}
-                    role="switch"
-                    type="button"
-                  >
-                    <span className="context-switch-track" aria-hidden="true">
-                      <span className="context-switch-thumb" />
-                    </span>
-                  </button>
-                </div>
-                {form.layeredCompactionEnabled && form.layeredCompactionModelOverrideEnabled ? (
-                  <div className="session-context-compaction-family-grid">
-                    {COMPACTION_MODEL_FAMILIES.map(({ value: family, label }) => (
-                      <label className="session-context-compaction-family-field" key={family}>
-                        <span>{label}</span>
-                        <SelectMenu
-                          ariaLabel={`${label}使用的上下文压缩模型`}
-                          className="session-context-compaction-model-select"
-                          menuClassName="session-context-compaction-model-menu"
-                          menuMaxWidth={260}
-                          menuMinWidth={260}
-                          onChange={(next) => {
-                            const value = {
-                              ...form,
-                              layeredCompactionModels: {
-                                ...form.layeredCompactionModels,
-                                [family]: next,
-                              },
-                              layeredCompactionModel: "",
-                            };
-                            onFormChange(value);
-                            void actions.saveSettingsValue(value, false);
-                          }}
-                          options={compactionModelOptions[family]}
-                          placeholder="跟随会话模型"
-                          value={form.layeredCompactionModels[family]}
-                        />
-                      </label>
-                    ))}
-                  </div>
-                ) : null}
               </div>
             </div>
           </div>
@@ -8032,7 +7969,7 @@ function RelayProfileEditor({
               title="设置当前供应商的系统提示词"
               variant="secondary"
             >
-              <MessageCircle className="h-4 w-4" />
+              <MessageSquareText className="h-4 w-4" />
               替换系统提示词
             </Button>
           ) : null}
@@ -8367,10 +8304,12 @@ function RelayProfileEditor({
 
 function SystemPromptOverrideModal({
   value,
+  modelName,
   onClose,
   onSave,
 }: {
   value: string;
+  modelName?: string;
   onClose: () => void;
   onSave: (value: string) => void;
 }) {
@@ -8388,8 +8327,10 @@ function SystemPromptOverrideModal({
       <div className="modal-card system-prompt-modal" onClick={(event) => event.stopPropagation()}>
         <div className="modal-head">
           <div>
-            <h2 id="system-prompt-title">替换系统提示词</h2>
-            <p>直连会写入模型目录；本地代理请求会先替换这里的系统提示词，再执行模型协议分流。</p>
+            <h2 id="system-prompt-title">{modelName ? `${modelName} · 系统提示词` : "替换系统提示词"}</h2>
+            <p>{modelName
+              ? "仅对当前模型生效，优先于供应商和默认系统提示词；留空则继承供应商配置。保存后请保存供应商配置。"
+              : "直连会写入模型目录；本地代理请求会先替换这里的系统提示词，再执行模型协议分流。单模型配置优先于此处。"}</p>
           </div>
           <Button onClick={onClose} size="icon" title="关闭" variant="ghost">
             <X className="h-4 w-4" />
@@ -8399,7 +8340,8 @@ function SystemPromptOverrideModal({
           autoFocus
           className="system-prompt-textarea"
           onChange={(event) => setDraft(event.currentTarget.value)}
-          placeholder="输入新的系统提示词；留空表示不替换。"
+          aria-label={modelName ? "模型系统提示词" : "供应商系统提示词"}
+          placeholder={modelName ? "输入当前模型的系统提示词；留空则继承供应商配置。" : "输入新的系统提示词；留空表示不替换。"}
           value={draft}
         />
         <Toolbar>
@@ -8449,10 +8391,10 @@ function LayeredCompactionPromptModal({
       <div className="modal-card system-prompt-modal" onClick={(event) => event.stopPropagation()}>
         <div className="modal-head">
           <div>
-            <h2 id="layered-compaction-prompt-title">替换压缩提示词</h2>
+            <h2 id="layered-compaction-prompt-title">压缩提示词</h2>
             <p>
-              Codex 触发上下文压缩时用于生成 LLM 摘要的指令。默认显示 CodexElves
-              内置提示词，可直接修改后保存；保存内容与默认提示词完全一致时等同于不替换。
+              设置摘要应保留的内容与重点，输出格式与校验规则由程序固定。
+              默认显示 CodexElves 内置提示词，可直接修改后保存；恢复默认内容后保存，将使用内置提示词。
             </p>
           </div>
           <Button onClick={onClose} size="icon" title="关闭" variant="ghost">
@@ -8555,7 +8497,7 @@ function RelayModelMappingTable({
           <span role="columnheader">别名</span>
           <span role="columnheader">协议</span>
           <span role="columnheader">上下文大小</span>
-          <span role="columnheader" aria-label="删除" />
+          <span role="columnheader" aria-label="模型操作" />
         </div>
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
           <SortableContext
@@ -8601,6 +8543,8 @@ function SortableRelayModelMappingRow({
   onUpdateModel: (index: number, row: RelayModelMapping, requestModel: string) => void;
   onRemove: (index: number) => void;
 }) {
+  const [systemPromptOpen, setSystemPromptOpen] = useState(false);
+  const hasSystemPrompt = !!row.systemPromptOverride?.trim();
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: relayModelMappingRowId(index),
     disabled: !canSort,
@@ -8671,7 +8615,28 @@ function SortableRelayModelMappingRow({
         >
           <Trash2 className="h-4 w-4" />
         </button>
+        <button
+          aria-label={`设置${row.alias.trim() || row.requestModel.trim() || "模型"}的系统提示词`}
+          className={`relay-model-prompt-button${hasSystemPrompt ? " is-configured" : ""}`}
+          data-tooltip={hasSystemPrompt ? "编辑系统提示词（已配置）" : "设置系统提示词"}
+          disabled={!row.requestModel.trim()}
+          onClick={() => setSystemPromptOpen(true)}
+          type="button"
+        >
+          <MessageSquareText className="h-4 w-4" />
+        </button>
       </div>
+      {systemPromptOpen ? (
+        <SystemPromptOverrideModal
+          modelName={row.alias.trim() || row.requestModel.trim()}
+          value={row.systemPromptOverride || ""}
+          onClose={() => setSystemPromptOpen(false)}
+          onSave={(value) => {
+            onUpdate(index, { systemPromptOverride: value });
+            setSystemPromptOpen(false);
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -11957,7 +11922,6 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
   const activeRelayId = profiles.some((profile) => profile.id === settings.activeRelayId)
     ? settings.activeRelayId
     : profiles[0]?.id || "default";
-  const layeredCompactionModels = normalizeLayeredCompactionModels(settings);
   return syncLegacyRelayFields({
     ...defaultSettings,
     ...settings,
@@ -11982,29 +11946,11 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
       20000,
       64000,
     ),
-    layeredCompactionModels,
-    layeredCompactionModel: "",
     relayCommonConfigContents,
     relayContextConfigContents,
     relayProfiles: profiles,
     activeRelayId,
   });
-}
-
-function normalizeLayeredCompactionModels(settings: BackendSettings): Record<ModelFamily, string> {
-  const normalized: Record<ModelFamily, string> = {
-    gpt: settings.layeredCompactionModels?.gpt?.trim() || "",
-    claude: settings.layeredCompactionModels?.claude?.trim() || "",
-    other: settings.layeredCompactionModels?.other?.trim() || "",
-  };
-  if (normalized.gpt || normalized.claude || normalized.other) return normalized;
-  const legacy = settings.layeredCompactionModel?.trim() || "";
-  if (legacy) {
-    normalized.gpt = legacy;
-    normalized.claude = legacy;
-    normalized.other = legacy;
-  }
-  return normalized;
 }
 
 function clampNumber(value: number, min: number, max: number): number {
@@ -12131,6 +12077,7 @@ function normalizeRelayModelMappings(mappings: RelayModelMapping[] | undefined):
       alias,
       protocol: item.protocol == null ? defaultProtocolForModel(requestModel) : normalizeRelayProtocol(item.protocol),
       contextWindow,
+      systemPromptOverride: item.systemPromptOverride || "",
     };
   });
 }
@@ -12224,6 +12171,7 @@ function relayModelMappingParameterKey(mapping: RelayModelMapping): string {
     mapping.requestModel.trim(),
     normalizeRelayProtocol(mapping.protocol),
     normalizedRelayMappingContextWindow(mapping.contextWindow),
+    (mapping.systemPromptOverride || "").trim(),
   ]);
 }
 
@@ -12513,6 +12461,7 @@ function relayCanProbeNativeResponsesWebsocket(profile: RelayProfile): boolean {
     && (profile.relayMode !== "official" || profile.officialMixApiKey)
     && hasResponsesModel
     && !profile.systemPromptOverride.trim()
+    && !mappings.some((mapping) => mapping.systemPromptOverride?.trim())
   );
 }
 

@@ -118,6 +118,7 @@ fn settings_for(
             local_proxy_enabled: Some(true),
             relay_mode: RelayMode::MixedApi,
             model_mappings: vec![RelayModelMapping {
+                system_prompt_override: "MODEL OVERRIDE MUST NOT WIN".to_string(),
                 request_model: model.to_string(),
                 alias: String::new(),
                 protocol,

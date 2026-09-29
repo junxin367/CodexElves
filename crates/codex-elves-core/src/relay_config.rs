@@ -2562,10 +2562,11 @@ fn rewrite_generated_catalog_prompt_value_for_model(value: Value, model: &str) -
 fn generated_catalog_prompt_fields(
     profile: &RelayProfile,
     model: &str,
+    catalog_model: &str,
     codex_catalog: Option<&Value>,
     packaged_model: Option<&Value>,
 ) -> (String, Value) {
-    let override_prompt = profile.system_prompt_override.trim();
+    let override_prompt = profile.system_prompt_for_model(catalog_model);
     if !override_prompt.is_empty() {
         let base_instructions = override_prompt.to_string();
         return (
@@ -2689,6 +2690,7 @@ fn generated_model_catalog_json_with_codex_catalog(
         let (model_base_instructions, model_messages) = generated_catalog_prompt_fields(
             profile,
             &model,
+            &catalog_slug,
             codex_catalog,
             packaged_model.as_ref(),
         );
@@ -4050,12 +4052,14 @@ mod tests {
         let mut profile = RelayProfile {
             model_mappings: vec![
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "claude-fable-5".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Anthropic,
                     context_window: String::new(),
                 },
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.6".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Responses,
@@ -4078,6 +4082,7 @@ mod tests {
             model: "gpt-5.6-sol".to_string(),
             config_contents: "model_provider = \"custom\"\n".to_string(),
             model_mappings: vec![crate::settings::RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-5.6-sol".to_string(),
                 alias: "gpt-5.6-sol [500K]".to_string(),
                 protocol: RelayProtocol::Responses,
@@ -4089,6 +4094,7 @@ mod tests {
             model: "gpt-5.6-sol".to_string(),
             config_contents: "model_provider = \"custom\"\n".to_string(),
             model_mappings: vec![crate::settings::RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-5.6-sol".to_string(),
                 alias: String::new(),
                 protocol: RelayProtocol::Responses,
@@ -4110,12 +4116,14 @@ mod tests {
             local_proxy_enabled: Some(false),
             model_mappings: vec![
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.6-sol".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "372000".to_string(),
                 },
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.6-sol".to_string(),
                     alias: "gpt-5.6-sol[1M]".to_string(),
                     protocol: RelayProtocol::Responses,
@@ -4136,12 +4144,14 @@ mod tests {
             local_proxy_enabled: Some(false),
             model_mappings: vec![
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.6-sol".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "372000".to_string(),
                 },
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.6-sol".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Responses,
@@ -4354,6 +4364,7 @@ mod tests {
     fn relay_profile_test_protocols_infer_only_when_model_is_unassigned() {
         let explicit = RelayProfile {
             model_mappings: vec![crate::settings::RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-5.4".to_string(),
                 alias: String::new(),
                 protocol: RelayProtocol::Anthropic,
@@ -4409,6 +4420,7 @@ mod tests {
             base_url: format!("http://{address}/v1"),
             api_key: "sk-test".to_string(),
             model_mappings: vec![crate::settings::RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-5.6-sol".to_string(),
                 alias: "gpt-5.6-sol [500K]".to_string(),
                 protocol: RelayProtocol::Responses,
@@ -4607,18 +4619,21 @@ mod tests {
             protocol: crate::settings::RelayProtocol::Responses,
             model_mappings: vec![
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.5".to_string(),
                     alias: String::new(),
                     context_window: "400000".to_string(),
                     protocol: RelayProtocol::Responses,
                 },
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.2".to_string(),
                     alias: String::new(),
                     context_window: "400000".to_string(),
                     protocol: RelayProtocol::Responses,
                 },
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "openai/gpt-5.6-terra".to_string(),
                     alias: String::new(),
                     context_window: "1000000".to_string(),
@@ -4689,6 +4704,7 @@ mod tests {
             relay_mode: crate::settings::RelayMode::PureApi,
             protocol: crate::settings::RelayProtocol::Responses,
             model_mappings: vec![crate::settings::RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-5.6-sol".to_string(),
                 alias: String::new(),
                 context_window: "372000".to_string(),
@@ -4807,12 +4823,14 @@ mod tests {
             base_url: "https://relay.example.test/v1".to_string(),
             model_mappings: vec![
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.6-sol".to_string(),
                     alias: String::new(),
                     context_window: "372000".to_string(),
                     protocol: RelayProtocol::Responses,
                 },
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "claude-sonnet-5".to_string(),
                     alias: String::new(),
                     context_window: "1000000".to_string(),
@@ -4851,24 +4869,28 @@ mod tests {
             protocol: crate::settings::RelayProtocol::Responses,
             model_mappings: vec![
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.4".to_string(),
                     alias: String::new(),
                     context_window: String::new(),
                     protocol: RelayProtocol::Responses,
                 },
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "openai/gpt-5.6-custom".to_string(),
                     alias: String::new(),
                     context_window: String::new(),
                     protocol: RelayProtocol::Responses,
                 },
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "openai/gpt-5.6-sol-2026-07-09".to_string(),
                     alias: String::new(),
                     context_window: String::new(),
                     protocol: RelayProtocol::Responses,
                 },
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.6-luna".to_string(),
                     alias: String::new(),
                     context_window: String::new(),
@@ -4957,12 +4979,14 @@ mod tests {
         let profile = RelayProfile {
             model_mappings: vec![
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "shared-model".to_string(),
                     alias: String::new(),
                     context_window: "200000".to_string(),
                     protocol: RelayProtocol::Responses,
                 },
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "shared-model".to_string(),
                     alias: String::new(),
                     context_window: "200000".to_string(),
@@ -5015,10 +5039,58 @@ mod tests {
     }
 
     #[test]
+    fn generated_model_catalog_uses_model_system_prompt_by_alias_before_supplier_prompt() {
+        let mut profile: RelayProfile = serde_json::from_value(json!({
+            "id": "model-prompts",
+            "name": "模型提示词",
+            "systemPromptOverride": "supplier prompt",
+            "modelMappings": [
+                {"requestModel": "gpt-5.6-sol", "alias": "review", "systemPromptOverride": "review prompt"},
+                {"requestModel": "gpt-5.6-sol", "alias": "write", "systemPromptOverride": "write prompt"},
+                {"requestModel": "gpt-5.6-sol", "alias": "inherit"}
+            ]
+        })).unwrap();
+        let codex_catalog = json!({"models": [{
+            "slug": "gpt-5.6-sol",
+            "base_instructions": "default prompt"
+        }]});
+        for supplier_prompt in ["supplier prompt", ""] {
+            profile.system_prompt_override = supplier_prompt.to_string();
+            let catalog = generated_model_catalog_json_with_codex_catalog(
+                &profile,
+                "",
+                relay_profile_catalog_rows(&profile).unwrap(),
+                Some(&codex_catalog),
+            )
+            .unwrap();
+            assert_eq!(catalog["models"].as_array().unwrap().len(), 3);
+            for (index, expected) in [
+                "review prompt",
+                "write prompt",
+                if supplier_prompt.is_empty() {
+                    "default prompt"
+                } else {
+                    supplier_prompt
+                },
+            ]
+            .iter()
+            .enumerate()
+            {
+                assert_eq!(catalog["models"][index]["base_instructions"], *expected);
+                assert_eq!(
+                    catalog["models"][index]["model_messages"]["instructions_template"],
+                    *expected
+                );
+            }
+        }
+    }
+
+    #[test]
     fn generated_model_catalog_prefers_codex_prompt_over_packaged_prompt() {
         let profile = RelayProfile {
             protocol: RelayProtocol::Responses,
             model_mappings: vec![crate::settings::RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-5.6-sol".to_string(),
                 alias: String::new(),
                 context_window: String::new(),
@@ -5061,6 +5133,7 @@ mod tests {
         let profile = RelayProfile {
             protocol: RelayProtocol::Responses,
             model_mappings: vec![crate::settings::RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-5.6-sol".to_string(),
                 alias: String::new(),
                 context_window: String::new(),
@@ -5103,6 +5176,7 @@ mod tests {
         let profile = RelayProfile {
             protocol: RelayProtocol::Responses,
             model_mappings: vec![crate::settings::RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "qwen3-coder".to_string(),
                 alias: String::new(),
                 context_window: String::new(),
@@ -5161,6 +5235,7 @@ mod tests {
             model_mappings: requested_models
                 .iter()
                 .map(|model| crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: (*model).to_string(),
                     alias: String::new(),
                     context_window: String::new(),
@@ -5199,6 +5274,7 @@ mod tests {
         let profile = RelayProfile {
             protocol: RelayProtocol::Responses,
             model_mappings: vec![crate::settings::RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "qwen3-coder".to_string(),
                 alias: String::new(),
                 context_window: String::new(),
@@ -5275,12 +5351,14 @@ base_url = "http://127.0.0.1:45221/v1"
             protocol: crate::settings::RelayProtocol::Responses,
             model_mappings: vec![
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "deepseek-coder".to_string(),
                     alias: String::new(),
                     context_window: "128000".to_string(),
                     protocol: RelayProtocol::Responses,
                 },
                 crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "qwen3-coder".to_string(),
                     alias: String::new(),
                     context_window: "200000".to_string(),
@@ -5310,18 +5388,21 @@ base_url = "http://127.0.0.1:45221/v1"
 
         profile.model_mappings = vec![
             crate::settings::RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "claude-opus-4.6".to_string(),
                 alias: String::new(),
                 context_window: "1000000".to_string(),
                 protocol: RelayProtocol::Anthropic,
             },
             crate::settings::RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "qwen3-coder".to_string(),
                 alias: String::new(),
                 context_window: "200000".to_string(),
                 protocol: RelayProtocol::ChatCompletions,
             },
             crate::settings::RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "deepseek-coder".to_string(),
                 alias: String::new(),
                 context_window: "128000".to_string(),

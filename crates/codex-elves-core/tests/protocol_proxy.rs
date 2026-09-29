@@ -1,6 +1,5 @@
 use codex_elves_core::layered_compaction::{
-    DEFAULT_RETAIN_TOKENS, MIN_RETAIN_TOKENS, apply_compaction_model_override,
-    is_any_compaction_request, restore_response_model_in_sse,
+    DEFAULT_RETAIN_TOKENS, MIN_RETAIN_TOKENS,
     rewrite_remote_compaction_v2_response_with_layered_compaction,
 };
 use codex_elves_core::protocol_proxy::{
@@ -24,7 +23,7 @@ use codex_elves_core::protocol_proxy::{
 use codex_elves_core::request_headers::RequestContext;
 use codex_elves_core::settings::{
     AggregateRelayMember, AggregateRelayProfile, AggregateRelayStrategy, BackendSettings,
-    LayeredCompactionModels, RelayMode, RelayModelMapping, RelayProfile, RelayProtocol,
+    RelayMode, RelayModelMapping, RelayProfile, RelayProtocol,
 };
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -203,6 +202,7 @@ mod anthropic_image_limits {
                     upstream_base_url: server.base_url.clone(),
                     api_key: "sk-test".to_string(),
                     model_mappings: vec![RelayModelMapping {
+                        system_prompt_override: String::new(),
                         request_model: "claude-test".to_string(),
                         alias: String::new(),
                         protocol: RelayProtocol::Anthropic,
@@ -1413,11 +1413,11 @@ fn remote_compaction_v2_request() -> Value {
 }
 
 #[test]
-fn remote_compaction_v2_trigger_becomes_tool_free_summary_request() {
+fn remote_compaction_v2_claude_trigger_preserves_tools_and_replaces_instruction() {
     let chat = responses_to_chat_completions(remote_compaction_v2_request()).unwrap();
-    assert!(chat.get("tools").is_none());
-    assert!(chat.get("tool_choice").is_none());
-    assert!(chat.get("parallel_tool_calls").is_none());
+    assert!(chat.get("tools").is_some());
+    assert!(chat.get("tool_choice").is_some());
+    assert_eq!(chat["parallel_tool_calls"], true);
     let chat_messages = chat.get("messages").and_then(Value::as_array).unwrap();
     assert!(
         chat_messages
@@ -1425,14 +1425,16 @@ fn remote_compaction_v2_trigger_becomes_tool_free_summary_request() {
             .and_then(|message| message.get("content"))
             .and_then(Value::as_str)
             .is_some_and(|text| {
-                text.starts_with(codex_elves_core::layered_compaction::COMPACTION_PROMPT_PREFIX)
+                text.starts_with(
+                    codex_elves_core::layered_compaction::COMPACTION_INSTRUCTION_PREFIX,
+                )
             })
     );
     assert!(!chat.to_string().contains("compaction_trigger"));
 
     let anthropic = responses_to_anthropic_messages(remote_compaction_v2_request()).unwrap();
-    assert!(anthropic.get("tools").is_none());
-    assert!(anthropic.get("tool_choice").is_none());
+    assert!(anthropic.get("tools").is_some());
+    assert!(anthropic.get("tool_choice").is_some());
     let anthropic_messages = anthropic.get("messages").and_then(Value::as_array).unwrap();
     assert!(
         anthropic_messages
@@ -1445,7 +1447,7 @@ fn remote_compaction_v2_trigger_becomes_tool_free_summary_request() {
                         .and_then(Value::as_str)
                         .is_some_and(|text| {
                             text.starts_with(
-                                codex_elves_core::layered_compaction::COMPACTION_PROMPT_PREFIX,
+                                codex_elves_core::layered_compaction::COMPACTION_INSTRUCTION_PREFIX,
                             )
                         })
                 })
@@ -1466,15 +1468,8 @@ fn remote_compaction_v2_response_is_single_compaction_and_restores_history() {
                 "finish_reason": "stop",
                 "message": {
                     "role": "assistant",
-                    "content": "SUMMARY FROM BRIDGE",
-                    "tool_calls": [{
-                        "id": "call_unexpected",
-                        "type": "function",
-                        "function": {
-                            "name": "exec_command",
-                            "arguments": "{}"
-                        }
-                    }]
+                    "content": "<summary>SUMMARY FROM BRIDGE</summary>"
+
                 }
             }],
             "usage": {
@@ -1577,7 +1572,7 @@ fn structured_compaction_restores_real_roles_and_tool_pairing_across_protocols()
         "output": [{
             "type": "message",
             "role": "assistant",
-            "content": [{ "type": "output_text", "text": "较早历史摘要" }]
+            "content": [{ "type": "output_text", "text": "<summary>较早历史摘要</summary>" }]
         }]
     });
     let compacted = rewrite_remote_compaction_v2_response_with_layered_compaction(
@@ -1793,7 +1788,7 @@ fn anthropic_repeated_compaction_preserves_the_anchor_reasoning_before_its_answe
         "id": "resp-summary", "status": "completed",
         "output": [{
             "type": "message", "role": "assistant",
-            "content": [{ "type": "output_text", "text": "Updated history summary" }]
+            "content": [{ "type": "output_text", "text": "<summary>Updated history summary</summary>" }]
         }]
     });
     for _ in 0..2 {
@@ -1963,7 +1958,7 @@ fn structured_compaction_trims_legacy_tool_result_without_breaking_protocol_pair
         "output": [{
             "type": "message",
             "role": "assistant",
-            "content": [{ "type": "output_text", "text": "较早历史摘要" }]
+            "content": [{ "type": "output_text", "text": "<summary>较早历史摘要</summary>" }]
         }]
     });
     let compacted = rewrite_remote_compaction_v2_response_with_layered_compaction(
@@ -2095,7 +2090,7 @@ fn structured_compaction_trims_tool_search_descriptions_without_losing_dynamic_t
         "output": [{
             "type": "message",
             "role": "assistant",
-            "content": [{ "type": "output_text", "text": "较早历史摘要" }]
+            "content": [{ "type": "output_text", "text": "<summary>较早历史摘要</summary>" }]
         }]
     });
     let compacted = rewrite_remote_compaction_v2_response_with_layered_compaction(
@@ -2164,7 +2159,7 @@ async fn claude_synthetic_assistant_tail_completes_locally_without_upstream_pref
         "output": [{
             "type": "message",
             "role": "assistant",
-            "content": [{ "type": "output_text", "text": "SUMMARY" }]
+            "content": [{ "type": "output_text", "text": "<summary>SUMMARY</summary>" }]
         }]
     });
     let compacted = rewrite_remote_compaction_v2_response_with_layered_compaction(
@@ -2275,7 +2270,7 @@ fn remote_compaction_v2_incomplete_chat_response_fails_closed() {
 }
 
 #[test]
-fn remote_compaction_v2_chat_sse_with_message_and_tool_becomes_one_compaction() {
+fn remote_compaction_v2_chat_sse_with_message_and_tool_fails_closed() {
     let converted = chat_sse_to_responses_sse_with_request(
         r#"data: {"id":"chatcmpl-compact","created":123,"model":"claude-sonnet-5","choices":[{"index":0,"delta":{"role":"assistant","content":"CHAT STREAM SUMMARY"}}]}
 
@@ -2290,26 +2285,16 @@ data: [DONE]
     );
 
     let events = parse_response_sse_events(&converted);
-    let done = events
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event == "response.completed")
+    );
+    let failed = events
         .iter()
-        .filter(|event| event.event == "response.output_item.done")
-        .collect::<Vec<_>>();
-    assert_eq!(done.len(), 1);
-    assert_eq!(done[0].data["item"]["type"], "compaction");
-    let completed = events
-        .iter()
-        .find(|event| event.event == "response.completed")
+        .find(|event| event.event == "response.failed")
         .unwrap();
-    assert_eq!(
-        completed.data["response"]["output"]
-            .as_array()
-            .map(Vec::len),
-        Some(1)
-    );
-    assert_eq!(
-        completed.data["response"]["output"][0]["type"],
-        "compaction"
-    );
+    assert_eq!(failed.data["response"]["output"], json!([]));
 }
 
 #[test]
@@ -7333,7 +7318,7 @@ data: {"type":"message_stop"}
 }
 
 #[test]
-fn remote_compaction_v2_anthropic_sse_with_message_and_tool_becomes_one_compaction() {
+fn remote_compaction_v2_anthropic_sse_with_message_and_tool_fails_closed() {
     let converted = anthropic_sse_to_responses_sse_with_request(
         r#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_compact","type":"message","role":"assistant","model":"claude-sonnet-5","content":[],"usage":{"input_tokens":100}}}
@@ -7367,21 +7352,16 @@ data: {"type":"message_stop"}
     );
 
     let events = parse_response_sse_events(&converted);
-    let done = events
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event == "response.completed")
+    );
+    let failed = events
         .iter()
-        .filter(|event| event.event == "response.output_item.done")
-        .collect::<Vec<_>>();
-    assert_eq!(done.len(), 1);
-    assert_eq!(done[0].data["item"]["type"], "compaction");
-    let completed = events
-        .iter()
-        .find(|event| event.event == "response.completed")
+        .find(|event| event.event == "response.failed")
         .unwrap();
-    let output = completed.data["response"]["output"].as_array().unwrap();
-    assert_eq!(output.len(), 1);
-    assert_eq!(output[0]["type"], "compaction");
-    assert!(!converted.contains("\"type\":\"function_call\""));
-    assert!(!converted.contains("\"type\":\"message\",\"status\":\"completed\""));
+    assert_eq!(failed.data["response"]["output"], json!([]));
 }
 
 #[test]
@@ -9360,7 +9340,7 @@ async fn aggregate_remote_compaction_uses_successful_candidates_actual_protocol(
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": "FAILOVER SUMMARY"
+                    "content": "<summary>FAILOVER SUMMARY</summary>"
                 },
                 "finish_reason": "stop"
             }]
@@ -9375,6 +9355,7 @@ async fn aggregate_remote_compaction_uses_successful_candidates_actual_protocol(
     settings.relay_profiles[1].protocol = RelayProtocol::ChatCompletions;
     settings.relay_profiles[1].model_mappings[0].protocol = RelayProtocol::ChatCompletions;
     let mut request = remote_compaction_v2_request();
+    settings.layered_compaction_enabled = true;
     request["model"] = json!("gpt-5-mini");
     request["stream"] = json!(false);
 
@@ -9385,15 +9366,13 @@ async fn aggregate_remote_compaction_uses_successful_candidates_actual_protocol(
 
     assert_eq!(
         result.response_protocol,
-        UpstreamResponseProtocol::ChatCompletions
+        UpstreamResponseProtocol::Responses
     );
     assert_eq!(upstream_request.path, "/v1/chat/completions");
     assert!(!upstream_request.body.contains("compaction_trigger"));
     assert!(!upstream_request.body.contains("\"tools\""));
     assert!(
-        upstream_request
-            .body
-            .contains("CONTEXT CHECKPOINT COMPACTION"),
+        upstream_request.body.contains("[Handoff checkpoint]"),
         "actual failover request: {}",
         upstream_request.body
     );
@@ -9412,6 +9391,7 @@ async fn responses_proxy_legacy_compaction_blank_override_uses_project_default_p
             api_key: "sk-legacy".to_string(),
             protocol: RelayProtocol::Responses,
             model_mappings: vec![RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-5-mini".to_string(),
                 alias: String::new(),
                 protocol: RelayProtocol::Responses,
@@ -9471,7 +9451,7 @@ async fn responses_proxy_legacy_compaction_blank_override_uses_project_default_p
     );
     assert_eq!(
         forwarded["input"][5]["content"][0]["text"],
-        codex_elves_core::layered_compaction::DEFAULT_COMPACTION_PROMPT
+        codex_elves_core::layered_compaction::compaction_instruction("")
     );
 }
 
@@ -9488,7 +9468,7 @@ async fn aggregate_remote_compaction_fails_over_after_2xx_invalid_body() {
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": "SUMMARY AFTER INVALID BODY"
+                    "content": "<summary>SUMMARY AFTER INVALID BODY</summary>"
                 },
                 "finish_reason": "stop"
             }]
@@ -9506,6 +9486,7 @@ async fn aggregate_remote_compaction_fails_over_after_2xx_invalid_body() {
         relay.model_mappings[0].protocol = RelayProtocol::ChatCompletions;
     }
     let mut request = remote_compaction_v2_request();
+    settings.layered_compaction_enabled = true;
     request["model"] = json!("gpt-5-mini");
     request["stream"] = json!(false);
 
@@ -9516,7 +9497,7 @@ async fn aggregate_remote_compaction_fails_over_after_2xx_invalid_body() {
     assert_eq!(result.status_code, 200);
     assert_eq!(
         result.response_protocol,
-        UpstreamResponseProtocol::ChatCompletions
+        UpstreamResponseProtocol::Responses
     );
     assert_eq!(first_server.finish().path, "/v1/chat/completions");
     assert_eq!(second_server.finish().path, "/v1/chat/completions");
@@ -9535,7 +9516,7 @@ async fn aggregate_remote_compaction_fails_over_after_2xx_truncated_body() {
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": "SUMMARY AFTER TRUNCATED BODY"
+                    "content": "<summary>SUMMARY AFTER TRUNCATED BODY</summary>"
                 },
                 "finish_reason": "stop"
             }]
@@ -9553,6 +9534,7 @@ async fn aggregate_remote_compaction_fails_over_after_2xx_truncated_body() {
         relay.model_mappings[0].protocol = RelayProtocol::ChatCompletions;
     }
     let mut request = remote_compaction_v2_request();
+    settings.layered_compaction_enabled = true;
     request["model"] = json!("gpt-5-mini");
     request["stream"] = json!(false);
 
@@ -9563,7 +9545,7 @@ async fn aggregate_remote_compaction_fails_over_after_2xx_truncated_body() {
     assert_eq!(result.status_code, 200);
     assert_eq!(
         result.response_protocol,
-        UpstreamResponseProtocol::ChatCompletions
+        UpstreamResponseProtocol::Responses
     );
     assert_eq!(first_server.finish().path, "/v1/chat/completions");
     assert_eq!(second_server.finish().path, "/v1/chat/completions");
@@ -9578,7 +9560,7 @@ async fn aggregate_remote_compaction_stream_fails_over_after_unfinished_2xx_body
 "#,
     );
     let second_server = spawn_chat_server_with_response(
-        r#"data: {"id":"chatcmpl_stream_fallback","created":0,"model":"gpt-5-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"STREAM SUMMARY AFTER FAILOVER"}}]}
+        r#"data: {"id":"chatcmpl_stream_fallback","created":0,"model":"gpt-5-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"<summary>STREAM SUMMARY AFTER FAILOVER</summary>"}}]}
 
 data: {"id":"chatcmpl_stream_fallback","created":0,"model":"gpt-5-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}
 
@@ -9597,6 +9579,7 @@ data: [DONE]
         relay.model_mappings[0].protocol = RelayProtocol::ChatCompletions;
     }
     let mut request = remote_compaction_v2_request();
+    settings.layered_compaction_enabled = true;
     request["model"] = json!("gpt-5-mini");
     request["stream"] = json!(true);
 
@@ -9608,7 +9591,7 @@ data: [DONE]
     assert!(result.is_stream);
     assert_eq!(
         result.response_protocol,
-        UpstreamResponseProtocol::ChatCompletions
+        UpstreamResponseProtocol::Responses
     );
     assert_eq!(first_server.finish().path, "/v1/chat/completions");
     assert_eq!(second_server.finish().path, "/v1/chat/completions");
@@ -9628,7 +9611,7 @@ async fn aggregate_anthropic_retry_body_failure_fails_over_to_next_candidate() {
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": "SUMMARY AFTER FAILOVER"
+                    "content": "<summary>SUMMARY AFTER FAILOVER</summary>"
                 },
                 "finish_reason": "stop"
             }]
@@ -9647,6 +9630,7 @@ async fn aggregate_anthropic_retry_body_failure_fails_over_to_next_candidate() {
     settings.relay_profiles[1].model_mappings[0].request_model = "claude-sonnet-5".to_string();
     settings.relay_profiles[1].model_mappings[0].protocol = RelayProtocol::ChatCompletions;
     let mut request = remote_compaction_v2_request();
+    settings.layered_compaction_enabled = true;
     request["model"] = json!("claude-sonnet-5");
     request["stream"] = json!(false);
     request["reasoning"] = json!({ "effort": "max" });
@@ -9658,7 +9642,7 @@ async fn aggregate_anthropic_retry_body_failure_fails_over_to_next_candidate() {
     assert_eq!(result.status_code, 200);
     assert_eq!(
         result.response_protocol,
-        UpstreamResponseProtocol::ChatCompletions
+        UpstreamResponseProtocol::Responses
     );
     assert_eq!(first_server.finish().path, "/v1/messages");
     assert_eq!(second_server.finish().path, "/v1/chat/completions");
@@ -9735,6 +9719,7 @@ async fn continue_thinking_reports_accumulated_reasoning_tokens() {
             protocol: RelayProtocol::Responses,
             relay_mode: RelayMode::MixedApi,
             model_mappings: vec![RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-responses".to_string(),
                 alias: String::new(),
                 protocol: RelayProtocol::Responses,
@@ -9788,6 +9773,7 @@ async fn continue_thinking_skips_response_with_tool_call_output() {
             protocol: RelayProtocol::Responses,
             relay_mode: RelayMode::MixedApi,
             model_mappings: vec![RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-responses".to_string(),
                 alias: String::new(),
                 protocol: RelayProtocol::Responses,
@@ -9890,6 +9876,7 @@ async fn continue_thinking_respects_configured_max_rounds() {
             protocol: RelayProtocol::Responses,
             relay_mode: RelayMode::MixedApi,
             model_mappings: vec![RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-responses".to_string(),
                 alias: String::new(),
                 protocol: RelayProtocol::Responses,
@@ -9945,6 +9932,7 @@ fn aggregate_proxy_settings(
                 base_url: first_base_url,
                 api_key: "sk-first".to_string(),
                 model_mappings: vec![RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5-mini".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Responses,
@@ -9958,6 +9946,7 @@ fn aggregate_proxy_settings(
                 base_url: second_base_url,
                 api_key: "sk-second".to_string(),
                 model_mappings: vec![RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5-mini".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Responses,
@@ -10089,12 +10078,14 @@ async fn responses_proxy_rewrites_alias_slug_and_prompt_identity_to_request_mode
             relay_mode: RelayMode::PureApi,
             model_mappings: vec![
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.6-sol".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "372000".to_string(),
                 },
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.6-sol".to_string(),
                     alias: "gpt-5.6-sol [500K]".to_string(),
                     protocol: RelayProtocol::Responses,
@@ -10141,12 +10132,14 @@ async fn responses_proxy_accepts_legacy_alias_slug_without_forwarding_it() {
             relay_mode: RelayMode::PureApi,
             model_mappings: vec![
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.6-sol".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "372000".to_string(),
                 },
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.6-sol".to_string(),
                     alias: "gpt-5.6-sol [500K]".to_string(),
                     protocol: RelayProtocol::Responses,
@@ -10188,12 +10181,14 @@ async fn responses_proxy_legacy_ambiguous_alias_prefers_legacy_request_model() {
             relay_mode: RelayMode::PureApi,
             model_mappings: vec![
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "model-a".to_string(),
                     alias: "model-b".to_string(),
                     protocol: RelayProtocol::ChatCompletions,
                     context_window: "400000".to_string(),
                 },
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "model-b".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Responses,
@@ -10260,12 +10255,14 @@ async fn responses_proxy_rejects_conflicting_duplicate_model_mappings() {
             relay_mode: RelayMode::PureApi,
             model_mappings: vec![
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "shared-model".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "200000".to_string(),
                 },
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "shared-model".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::ChatCompletions,
@@ -10343,6 +10340,7 @@ async fn remote_compaction_v2_chat_malformed_json_response_fails_closed() {
     let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
     let server = spawn_chat_server_with_response("not-json");
     write_mixed_relay_settings(temp.path(), &server.base_url);
+    enable_compaction_for_test(temp.path());
     let mut request = remote_compaction_v2_request();
     request["model"] = json!("gpt-chat");
     request["stream"] = json!(false);
@@ -10357,7 +10355,7 @@ async fn remote_compaction_v2_chat_malformed_json_response_fails_closed() {
     assert_eq!(body["output"], json!([]));
     assert_eq!(
         body["error"]["code"],
-        "remote_compaction_response_parse_failed"
+        "remote_compaction_no_terminal_response"
     );
     assert_eq!(server.finish().path, "/v1/chat/completions");
 }
@@ -10369,6 +10367,7 @@ async fn remote_compaction_v2_anthropic_malformed_json_response_fails_closed() {
     let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
     let server = spawn_chat_server_with_response("not-json");
     write_mixed_relay_settings(temp.path(), &server.base_url);
+    enable_compaction_for_test(temp.path());
     let mut request = remote_compaction_v2_request();
     request["model"] = json!("claude-sonnet-4");
     request["stream"] = json!(false);
@@ -10383,7 +10382,7 @@ async fn remote_compaction_v2_anthropic_malformed_json_response_fails_closed() {
     assert_eq!(body["output"], json!([]));
     assert_eq!(
         body["error"]["code"],
-        "remote_compaction_response_parse_failed"
+        "remote_compaction_no_terminal_response"
     );
     assert_eq!(server.finish().path, "/v1/messages");
 }
@@ -10395,6 +10394,7 @@ async fn remote_compaction_v2_chat_truncated_body_fails_closed() {
     let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
     let server = spawn_truncated_response_server();
     write_mixed_relay_settings(temp.path(), &server.base_url);
+    enable_compaction_for_test(temp.path());
     let mut request = remote_compaction_v2_request();
     request["model"] = json!("gpt-chat");
     request["stream"] = json!(false);
@@ -10409,7 +10409,7 @@ async fn remote_compaction_v2_chat_truncated_body_fails_closed() {
     assert_eq!(body["output"], json!([]));
     assert_eq!(
         body["error"]["code"],
-        "remote_compaction_response_read_failed"
+        "remote_compaction_no_terminal_response"
     );
     assert_eq!(server.finish().path, "/v1/chat/completions");
 }
@@ -10421,6 +10421,7 @@ async fn remote_compaction_v2_anthropic_truncated_body_fails_closed() {
     let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
     let server = spawn_truncated_response_server();
     write_mixed_relay_settings(temp.path(), &server.base_url);
+    enable_compaction_for_test(temp.path());
     let mut request = remote_compaction_v2_request();
     request["model"] = json!("claude-sonnet-4");
     request["stream"] = json!(false);
@@ -10435,7 +10436,7 @@ async fn remote_compaction_v2_anthropic_truncated_body_fails_closed() {
     assert_eq!(body["output"], json!([]));
     assert_eq!(
         body["error"]["code"],
-        "remote_compaction_response_read_failed"
+        "remote_compaction_no_terminal_response"
     );
     assert_eq!(server.finish().path, "/v1/messages");
 }
@@ -10446,6 +10447,7 @@ async fn remote_compaction_v2_upstream_connection_failure_fails_closed() {
     let temp = tempfile::tempdir().unwrap();
     let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
     write_mixed_relay_settings(temp.path(), "not-a-valid-url");
+    enable_compaction_for_test(temp.path());
     let mut request = remote_compaction_v2_request();
     request["model"] = json!("claude-sonnet-4");
     request["stream"] = json!(false);
@@ -10460,7 +10462,7 @@ async fn remote_compaction_v2_upstream_connection_failure_fails_closed() {
     assert_eq!(body["output"], json!([]));
     assert_eq!(
         body["error"]["code"],
-        "remote_compaction_upstream_request_failed"
+        "remote_compaction_no_terminal_response"
     );
 }
 
@@ -10474,6 +10476,7 @@ async fn remote_compaction_v2_non_success_status_fails_closed() {
         r#"{"error":{"message":"upstream exploded"}}"#,
     );
     write_mixed_relay_settings(temp.path(), &server.base_url);
+    enable_compaction_for_test(temp.path());
     let mut request = remote_compaction_v2_request();
     request["model"] = json!("gpt-chat");
     request["stream"] = json!(false);
@@ -10488,7 +10491,7 @@ async fn remote_compaction_v2_non_success_status_fails_closed() {
     assert_eq!(body["output"], json!([]));
     assert_eq!(
         body["error"]["code"],
-        "remote_compaction_upstream_http_error"
+        "remote_compaction_no_terminal_response"
     );
     assert_eq!(server.finish().path, "/v1/chat/completions");
 }
@@ -10501,6 +10504,7 @@ async fn remote_compaction_v2_final_anthropic_retry_body_failure_fails_closed() 
     let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
     let server = spawn_truncated_response_server_with_status("400 Bad Request");
     write_anthropic_sonnet5_relay_settings(temp.path(), &server.base_url);
+    enable_compaction_for_test(temp.path());
     let mut request = remote_compaction_v2_request();
     request["model"] = json!("claude-sonnet-5");
     request["stream"] = json!(false);
@@ -10516,9 +10520,151 @@ async fn remote_compaction_v2_final_anthropic_retry_body_failure_fails_closed() 
     assert_eq!(body["output"], json!([]));
     assert_eq!(
         body["error"]["code"],
-        "remote_compaction_upstream_request_failed"
+        "remote_compaction_no_terminal_response"
     );
     assert_eq!(server.finish().path, "/v1/messages");
+}
+
+#[tokio::test]
+async fn responses_proxy_model_system_prompt_wins_for_all_protocols_and_aliases() {
+    for (model, protocol, path) in [
+        ("gpt-responses", RelayProtocol::Responses, "/v1/responses"),
+        (
+            "gpt-chat",
+            RelayProtocol::ChatCompletions,
+            "/v1/chat/completions",
+        ),
+        ("claude-sonnet", RelayProtocol::Anthropic, "/v1/messages"),
+    ] {
+        for (alias, prompt) in [
+            ("custom", "custom prompt: GPT-5.6 Sol"),
+            ("inherit", "supplier prompt"),
+        ] {
+            let server = spawn_chat_server();
+            let settings = BackendSettings {
+                relay_profiles: vec![RelayProfile {
+                    id: "prompts".to_string(),
+                    name: "Prompts".to_string(),
+                    base_url: server.base_url.clone(),
+                    upstream_base_url: server.base_url.clone(),
+                    api_key: "sk-test".to_string(),
+                    relay_mode: RelayMode::MixedApi,
+                    system_prompt_override: "supplier prompt".to_string(),
+                    model_mappings: vec![
+                        RelayModelMapping {
+                            request_model: model.to_string(),
+                            alias: "custom".to_string(),
+                            protocol,
+                            context_window: "200000".to_string(),
+                            system_prompt_override: "custom prompt: GPT-5.6 Sol".to_string(),
+                        },
+                        RelayModelMapping {
+                            request_model: model.to_string(),
+                            alias: "inherit".to_string(),
+                            protocol,
+                            context_window: "200000".to_string(),
+                            system_prompt_override: " \n ".to_string(),
+                        },
+                    ],
+                    ..RelayProfile::default()
+                }],
+                active_relay_id: "prompts".to_string(),
+                ..BackendSettings::default()
+            };
+            let upstream = open_responses_proxy_request_with_settings(
+                &json!({
+                    "model": alias,
+                    "instructions": "old system",
+                    "input": [
+                        {"type": "message", "role": "developer", "content": "old developer"},
+                        {"type": "message", "role": "user", "content": "hello"}
+                    ],
+                    "stream": false
+                })
+                .to_string(),
+                settings,
+            )
+            .await
+            .unwrap();
+            assert_eq!(upstream.status_code, 200);
+            let request = server.finish();
+            assert_eq!(request.path, path);
+            let body: Value = serde_json::from_str(&request.body).unwrap();
+            assert_eq!(body["model"], model);
+            match protocol {
+                RelayProtocol::Responses => {
+                    assert_eq!(body["instructions"], prompt);
+                    assert_eq!(body["input"].as_array().unwrap().len(), 1);
+                    assert_eq!(body["input"][0]["role"], "user");
+                }
+                RelayProtocol::ChatCompletions => {
+                    assert_eq!(
+                        body["messages"][0],
+                        json!({"role": "system", "content": prompt})
+                    );
+                }
+                RelayProtocol::Anthropic => {
+                    assert!(body["system"].to_string().contains(prompt));
+                }
+            }
+            assert!(!request.body.contains("old system"));
+            assert!(!request.body.contains("old developer"));
+            if alias == "custom" {
+                assert!(!request.body.contains("supplier prompt"));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn chat_proxy_model_system_prompt_is_selected_before_alias_is_rewritten() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("settings.json");
+    let _guard = SettingsPathGuard::set(path.clone());
+    let server = spawn_chat_server();
+    std::fs::write(path, json!({
+        "activeRelayId": "prompts",
+        "relayProfiles": [{
+            "id": "prompts",
+            "name": "Prompts",
+            "baseUrl": server.base_url,
+            "upstreamBaseUrl": server.base_url,
+            "apiKey": "sk-test",
+            "relayMode": "mixedApi",
+            "systemPromptOverride": "supplier prompt",
+            "modelMappings": [
+                {"requestModel": "gpt-chat", "alias": "first", "protocol": "chatCompletions", "systemPromptOverride": "first prompt"},
+                {"requestModel": "gpt-chat", "alias": "second", "protocol": "chatCompletions", "systemPromptOverride": "second prompt"}
+            ]
+        }]
+    }).to_string()).unwrap();
+    let upstream = open_chat_completions_proxy_request(
+        &json!({
+            "model": "second",
+            "messages": [
+                {"role": "system", "content": "old system"},
+                {"role": "developer", "content": "old developer"},
+                {"role": "user", "content": "hello"}
+            ],
+            "stream": false
+        })
+        .to_string(),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(upstream.status_code, 200);
+    let request = server.finish();
+    let body: Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["model"], "gpt-chat");
+    assert_eq!(
+        body["messages"],
+        json!([
+            {"role": "system", "content": "second prompt"},
+            {"role": "user", "content": "hello"}
+        ])
+    );
 }
 
 #[tokio::test]
@@ -10613,6 +10759,7 @@ async fn responses_proxy_accepts_anthropic_history_after_switching_to_responses_
             protocol: RelayProtocol::Responses,
             relay_mode: RelayMode::MixedApi,
             model_mappings: vec![RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-responses".to_string(),
                 alias: String::new(),
                 protocol: RelayProtocol::Responses,
@@ -11917,6 +12064,13 @@ fn pal_namespace_tool() -> Value {
     })
 }
 
+fn enable_compaction_for_test(settings_dir: &Path) {
+    let path = settings_dir.join("settings.json");
+    let mut settings: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    settings["layeredCompactionEnabled"] = json!(true);
+    std::fs::write(path, serde_json::to_vec(&settings).unwrap()).unwrap();
+}
+
 fn write_mixed_relay_settings(settings_dir: &Path, base_url: &str) {
     write_named_mixed_relay_settings_with_system_prompt(settings_dir, base_url, "Mixed", "");
 }
@@ -12353,136 +12507,28 @@ fn legacy_compaction_request() -> serde_json::Value {
     })
 }
 
-#[test]
-fn compaction_model_override_replaces_model_resets_effort_and_strips_reasoning_history() {
-    let overridden = apply_compaction_model_override(&legacy_compaction_request(), "glm-4.6");
-    assert_eq!(overridden["model"], "glm-4.6");
-    assert_eq!(overridden["reasoning"], json!({ "effort": "max" }));
-    assert!(overridden.get("model_reasoning_effort").is_none());
-    assert!(overridden.get("reasoning_effort").is_none());
-    let input = overridden["input"].as_array().unwrap();
-    assert!(
-        input
-            .iter()
-            .all(|item| item.get("type").and_then(|v| v.as_str()) != Some("reasoning"))
-    );
-    assert_eq!(input.len(), 2);
-}
-
-#[test]
-fn independent_compaction_models_receive_family_default_reasoning_effort() {
-    for model in [
-        "deepseek-v4-flash",
-        "DeepSeek-V4-Pro",
-        "glm-5.2",
-        "z-ai/GLM-4.6",
-    ] {
-        let overridden = apply_compaction_model_override(&legacy_compaction_request(), model);
-        assert_eq!(
-            overridden["reasoning"],
-            json!({ "effort": "max" }),
-            "{model} 应默认使用 max"
-        );
-    }
-
-    for model in ["gpt-5.6", "claude-sonnet-5", "gemini-3-pro"] {
-        let overridden = apply_compaction_model_override(&legacy_compaction_request(), model);
-        assert_eq!(
-            overridden["reasoning"],
-            json!({ "effort": "xhigh" }),
-            "{model} 应默认使用 xhigh"
-        );
-    }
-}
-
-#[test]
-fn deepseek_anthropic_compaction_override_uses_adaptive_without_model_suffix() {
-    let overridden =
-        apply_compaction_model_override(&legacy_compaction_request(), "deepseek-v4-flash");
-    let converted = responses_to_anthropic_messages(overridden).unwrap();
-
-    assert_eq!(converted["model"], "deepseek-v4-flash");
-    assert_eq!(converted["thinking"], json!({ "type": "adaptive" }));
-    assert_eq!(converted["output_config"], json!({ "effort": "max" }));
-}
-
-#[test]
-fn compaction_model_override_skips_non_compaction_requests() {
-    let plain = json!({
-        "model": "claude-opus-4-5",
-        "input": [{ "type": "message", "role": "user", "content": "hello" }]
-    });
-    assert!(!is_any_compaction_request(&plain));
-    assert_eq!(apply_compaction_model_override(&plain, "glm-4.6"), plain);
-}
-
-#[test]
-fn compaction_model_override_skips_remote_compaction_requests() {
-    let remote = json!({
-        "model": "claude-opus-4-5",
-        "input": [
-            { "type": "message", "role": "user", "content": "keep this context" },
-            { "type": "compaction_trigger" }
-        ]
-    });
-    assert!(is_any_compaction_request(&remote));
-    assert_eq!(apply_compaction_model_override(&remote, "glm-4.6"), remote);
-}
-
-#[test]
-fn compaction_model_override_is_noop_for_empty_or_same_model() {
-    let request = legacy_compaction_request();
-    assert_eq!(apply_compaction_model_override(&request, "   "), request);
-    assert_eq!(
-        apply_compaction_model_override(&request, "claude-opus-4-5"),
-        request
-    );
-}
-
-#[test]
-fn compaction_response_model_is_restored_to_session_model() {
-    let sse = concat!(
-        "event: response.completed\n",
-        "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"glm-4.6\",\"status\":\"completed\"}}\n\n"
-    );
-    let restored = restore_response_model_in_sse(sse, "claude-opus-4-5", "glm-4.6");
-    assert!(restored.contains("\"model\":\"claude-opus-4-5\""));
-    assert!(!restored.contains("glm-4.6"));
-}
-
 #[tokio::test]
-async fn native_remote_compaction_keeps_session_model_when_override_is_enabled() {
+async fn native_remote_compaction_keeps_session_model() {
     let server = spawn_chat_server_with_status_responses(vec![(
         "200 OK".to_string(),
         r#"{"id":"resp-remote","status":"completed","model":"gpt-5.4","output":[]}"#.to_string(),
     )]);
     let settings = BackendSettings {
         layered_compaction_enabled: true,
-        layered_compaction_model_override_enabled: true,
-        layered_compaction_models: LayeredCompactionModels {
-            gpt: "gpt-5.6".to_string(),
-            ..Default::default()
-        },
+
         relay_profiles: vec![RelayProfile {
             id: "remote-compaction-original-model".to_string(),
             name: "Remote Compaction Original Model".to_string(),
             base_url: server.base_url.clone(),
             upstream_base_url: server.base_url.clone(),
             api_key: "sk-test".to_string(),
-            model_mappings: vec![
-                RelayModelMapping {
-                    request_model: "gpt-5.4".to_string(),
-                    alias: String::new(),
-                    protocol: RelayProtocol::Responses,
-                    context_window: "1000000".to_string(),
-                },
-                RelayModelMapping {
-                    request_model: "gpt-5.6".to_string(),
-                    alias: String::new(),
-                    protocol: RelayProtocol::Responses,
-                    context_window: "372000".to_string(),
-                },
-            ],
+            model_mappings: vec![RelayModelMapping {
+                system_prompt_override: String::new(),
+                request_model: "gpt-5.4".to_string(),
+                alias: String::new(),
+                protocol: RelayProtocol::Responses,
+                context_window: "1000000".to_string(),
+            }],
             ..RelayProfile::default()
         }],
         active_relay_id: "remote-compaction-original-model".to_string(),
@@ -12516,41 +12562,328 @@ async fn native_remote_compaction_keeps_session_model_when_override_is_enabled()
 }
 
 #[tokio::test]
-async fn bridged_claude_remote_compaction_uses_override_without_becoming_native_v2() {
+async fn disabled_compaction_preserves_harness_legacy_requests_and_untagged_summary() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("settings.json");
+    let _guard = SettingsPathGuard::set(path.clone());
+    for (model, protocol) in [
+        ("gpt-test", RelayProtocol::Responses),
+        ("deepseek-test", RelayProtocol::ChatCompletions),
+        ("claude-test", RelayProtocol::Anthropic),
+    ] {
+        let reply = match protocol {
+            RelayProtocol::Responses => json!({
+                "id":"resp_harness","status":"completed","model":model,
+                "output":[{"type":"message","role":"assistant","content":[
+                    {"type":"output_text","text":"HARNESS SUMMARY"}
+                ]}]
+            }),
+            RelayProtocol::ChatCompletions => json!({
+                "id":"chatcmpl_harness","model":model,"choices":[{
+                    "message":{"role":"assistant","content":"HARNESS SUMMARY"},"finish_reason":"stop"
+                }]
+            }),
+            RelayProtocol::Anthropic => json!({
+                "id":"msg_harness","type":"message","role":"assistant","model":model,
+                "content":[{"type":"text","text":"HARNESS SUMMARY"}],"stop_reason":"end_turn",
+                "usage":{"input_tokens":10,"output_tokens":5}
+            }),
+        };
+        let server = spawn_chat_server_with_response(reply.to_string());
+        let settings = BackendSettings {
+            layered_compaction_enabled: false,
+            layered_compaction_retain_recent_round_enabled: true,
+            layered_compaction_prompt_override: "MUST NOT APPLY".to_string(),
+
+            relay_profiles: vec![RelayProfile {
+                id: "harness".to_string(),
+                base_url: server.base_url.clone(),
+                upstream_base_url: server.base_url.clone(),
+                relay_mode: RelayMode::MixedApi,
+                api_key: "sk-test".to_string(),
+                local_proxy_enabled: Some(true),
+                model_mappings: vec![RelayModelMapping {
+                    request_model: model.to_string(),
+                    alias: String::new(),
+                    protocol,
+                    context_window: "200000".to_string(),
+                    system_prompt_override: String::new(),
+                }],
+                ..Default::default()
+            }],
+            active_relay_id: "harness".to_string(),
+            ..Default::default()
+        };
+        let mut saved_settings = serde_json::to_value(&settings).unwrap();
+        // API key 不参与 BackendSettings 的普通序列化，测试配置显式写入占位值。
+        saved_settings["relayProfiles"][0]["apiKey"] = json!("sk-test");
+        std::fs::write(&path, serde_json::to_vec(&saved_settings).unwrap()).unwrap();
+        let instruction = format!(
+            "{}. Keep the harness format.",
+            codex_elves_core::layered_compaction::COMPACTION_PROMPT_PREFIX
+        );
+        let request = json!({
+            "model":model,"stream":false,"instructions":"HARNESS SYSTEM",
+            "tools":[{"type":"function","name":"read","parameters":{"type":"object"}}],
+            "tool_choice":"auto",
+            "input":[
+                {"type":"message","role":"user","content":"original history"},
+                {"type":"message","role":"user","content":instruction}
+            ]
+        });
+        let result = handle_responses_proxy_request(&request.to_string())
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_slice(&result.body).unwrap();
+        assert_eq!(response["status"], "completed");
+        assert_eq!(
+            response["output"][0]["content"][0]["text"],
+            "HARNESS SUMMARY"
+        );
+        assert!(!String::from_utf8_lossy(&result.body).contains("codex-elves-compaction-"));
+        let captured = server.finish();
+        let wire: Value = serde_json::from_str(&captured.body).unwrap();
+        let expected = match protocol {
+            RelayProtocol::Responses => request.clone(),
+            RelayProtocol::ChatCompletions => responses_to_chat_completions(request).unwrap(),
+            RelayProtocol::Anthropic => responses_to_anthropic_messages(request).unwrap(),
+        };
+        for field in [
+            "model",
+            "instructions",
+            "system",
+            "input",
+            "messages",
+            "tools",
+            "tool_choice",
+        ] {
+            assert_eq!(wire.get(field), expected.get(field), "{model}: {field}");
+        }
+        assert!(!captured.body.contains("MUST NOT APPLY"));
+        assert!(!captured.body.contains("[Handoff checkpoint]"));
+    }
+}
+
+#[tokio::test]
+async fn disabled_compaction_passes_responses_v2_through_and_does_not_emulate_other_protocols() {
+    for stream in [false, true] {
+        let request = json!({
+            "model":"claude-test","stream":stream,
+            "instructions":"HARNESS SYSTEM",
+            "input":[{"role":"user","content":"original history"},{"type":"compaction_trigger"}]
+        });
+        let response = json!({
+            "id":"resp_native","status":"completed","output":[
+                {"type":"compaction","encrypted_content":"upstream-opaque-payload"}
+            ]
+        });
+        let body = if stream {
+            format!(
+                "event: response.completed\ndata: {}\n\n",
+                json!({"type":"response.completed","response":response})
+            )
+        } else {
+            response.to_string()
+        };
+        let server = spawn_chat_server_with_response(body.clone());
+        let settings = BackendSettings {
+            layered_compaction_enabled: false,
+            layered_compaction_retain_recent_round_enabled: true,
+            layered_compaction_prompt_override: "MUST NOT APPLY".to_string(),
+            relay_profiles: vec![RelayProfile {
+                id: "harness".to_string(),
+                base_url: server.base_url.clone(),
+                api_key: "sk-test".to_string(),
+                model_mappings: vec![RelayModelMapping {
+                    request_model: "claude-test".to_string(),
+                    alias: String::new(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "200000".to_string(),
+                    system_prompt_override: String::new(),
+                }],
+                ..Default::default()
+            }],
+            active_relay_id: "harness".to_string(),
+            ..Default::default()
+        };
+        let result =
+            open_responses_proxy_request_with_settings(&request.to_string(), settings.clone())
+                .await
+                .unwrap();
+        assert_eq!(
+            result.response_protocol,
+            UpstreamResponseProtocol::Responses
+        );
+        assert_eq!(result.status_code, 200);
+        assert_eq!(result.into_body_bytes().await.unwrap(), body.as_bytes());
+        let captured: Value = serde_json::from_str(&server.finish().body).unwrap();
+        assert_eq!(captured["input"], request["input"]);
+        assert_eq!(captured["instructions"], request["instructions"]);
+        for protocol in [RelayProtocol::ChatCompletions, RelayProtocol::Anthropic] {
+            let mut settings = settings.clone();
+            settings.relay_profiles[0].model_mappings[0].protocol = protocol;
+            // 服务器已经关闭；不支持的协议应直接返回错误，不能偷偷发起摘要请求。
+            let result = open_responses_proxy_request_with_settings(&request.to_string(), settings)
+                .await
+                .unwrap();
+            assert_eq!(result.status_code, 400);
+            let response: Value =
+                serde_json::from_slice(&result.into_body_bytes().await.unwrap()).unwrap();
+            assert_eq!(response["error"]["code"], "unsupported_compaction");
+            assert!(response.get("output").is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn compaction_contract_http_retries_same_model_and_only_returns_validated_summary() {
+    use codex_elves_core::layered_compaction::{
+        COMPACTION_RETRY_SYSTEM_PROMPT, compaction_instruction,
+    };
+    for retain in [false, true] {
+        for succeeds_on_retry in [false, true] {
+            let reply = |text: &str| {
+                json!({
+                    "id":"msg-handoff","type":"message","role":"assistant",
+                    "model":"claude-opus-5-5","stop_reason":"end_turn",
+                    "content":[{"type":"text","text":text}],
+                    "usage":{"input_tokens":100,"cache_read_input_tokens":900,"output_tokens":20}
+                })
+                .to_string()
+            };
+            let server = spawn_chat_server_with_status_responses(vec![
+                ("200 OK".to_string(), reply("我先把相关文件找出来。")),
+                (
+                    "200 OK".to_string(),
+                    reply(if succeeds_on_retry {
+                        "<analysis>notes</analysis><summary>已完成检查，下一步只需复核。</summary>"
+                    } else {
+                        "<analysis>only notes</analysis>"
+                    }),
+                ),
+            ]);
+            let settings = BackendSettings {
+                layered_compaction_enabled: true,
+                layered_compaction_retain_recent_round_enabled: retain,
+                layered_compaction_prompt_override: "CUSTOM HANDOFF".to_string(),
+
+                relay_profiles: vec![RelayProfile {
+                    id: "handoff".to_string(),
+                    name: "handoff".to_string(),
+                    base_url: server.base_url.clone(),
+                    api_key: "sk-test".to_string(),
+                    model_mappings: vec![RelayModelMapping {
+                        system_prompt_override: String::new(),
+                        request_model: "claude-opus-5-5".to_string(),
+                        alias: String::new(),
+                        protocol: RelayProtocol::Anthropic,
+                        context_window: "1000000".to_string(),
+                    }],
+                    ..Default::default()
+                }],
+                active_relay_id: "handoff".to_string(),
+                ..Default::default()
+            };
+            let request = json!({
+                "model":"claude-opus-5-5","stream":false,
+                "instructions":"MAIN SYSTEM","reasoning":{"effort":"max"},
+                "tools":[{"type":"function","name":"read","parameters":{"type":"object"}}],
+                "tool_choice":"auto","parallel_tool_calls":true,
+                "input":[
+                    {"type":"message","role":"user","content":"earlier work"},
+                    {"type":"reasoning","summary":[{"type":"summary_text","text":"prior reasoning"}]},
+                    {"type":"message","role":"assistant","content":"checks completed"},
+                    {"type":"message","role":"user","content":"continue"},
+                    {"type":"compaction_trigger"}
+                ]
+            });
+            let response =
+                open_responses_proxy_request_with_settings(&request.to_string(), settings)
+                    .await
+                    .unwrap();
+            let body: Value =
+                serde_json::from_slice(&response.into_body_bytes().await.unwrap()).unwrap();
+            assert_eq!(
+                body["status"],
+                if succeeds_on_retry {
+                    "completed"
+                } else {
+                    "failed"
+                }
+            );
+            if succeeds_on_retry {
+                let payload = body["output"][0]["encrypted_content"].as_str().unwrap();
+                assert!(payload.starts_with(if retain {
+                    "codex-elves-compaction-v3:"
+                } else {
+                    "codex-elves-compaction-v2:"
+                }));
+                assert!(payload.contains("已完成检查"));
+                assert!(!payload.contains("<summary>"));
+                assert!(!payload.contains("notes"));
+            } else {
+                assert_eq!(body["output"], json!([]));
+            }
+            let requests = server.finish_all();
+            assert_eq!(requests.len(), 2);
+            let first: Value = serde_json::from_str(&requests[0].body).unwrap();
+            let retry: Value = serde_json::from_str(&requests[1].body).unwrap();
+            let mut main = request.clone();
+            main["input"].as_array_mut().unwrap().pop();
+            let main = responses_to_anthropic_messages(main).unwrap();
+            for field in [
+                "system",
+                "tools",
+                "tool_choice",
+                "parallel_tool_calls",
+                "thinking",
+                "output_config",
+                "model",
+            ] {
+                assert_eq!(
+                    first.get(field),
+                    main.get(field),
+                    "{field}; retain={retain}"
+                );
+            }
+            assert_eq!(retry["model"], first["model"]);
+            assert_eq!(retry["messages"], first["messages"]);
+            assert_eq!(retry["system"], COMPACTION_RETRY_SYSTEM_PROMPT);
+            assert!(retry.get("tools").is_none());
+            assert!(retry.get("tool_choice").is_none());
+            assert!(first["messages"].to_string().contains(
+                &serde_json::to_string(&compaction_instruction("CUSTOM HANDOFF")).unwrap()
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn bridged_claude_remote_compaction_keeps_session_model_and_tools() {
     let server = spawn_chat_server_with_status_responses(vec![(
         "200 OK".to_string(),
-        r#"{"id":"resp-bridge","status":"completed","model":"gpt-5.6","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"BRIDGED SUMMARY"}]}]}"#.to_string(),
+        r#"{"id":"msg-bridge","type":"message","role":"assistant","model":"claude-opus-4-8","stop_reason":"end_turn","content":[{"type":"text","text":"<summary>BRIDGED SUMMARY</summary>"}]}"#.to_string(),
     )]);
     let settings = BackendSettings {
         layered_compaction_enabled: true,
-        layered_compaction_model_override_enabled: true,
-        layered_compaction_models: LayeredCompactionModels {
-            claude: "gpt-5.6".to_string(),
-            ..Default::default()
-        },
+
         relay_profiles: vec![RelayProfile {
-            id: "bridged-compaction-override".to_string(),
-            name: "Bridged Compaction Override".to_string(),
+            id: "bridged-compaction-main-model".to_string(),
+            name: "Bridged Compaction Main Model".to_string(),
             base_url: server.base_url.clone(),
             upstream_base_url: server.base_url.clone(),
             api_key: "sk-test".to_string(),
-            model_mappings: vec![
-                RelayModelMapping {
-                    request_model: "claude-opus-4-8".to_string(),
-                    alias: String::new(),
-                    protocol: RelayProtocol::Anthropic,
-                    context_window: "1000000".to_string(),
-                },
-                RelayModelMapping {
-                    request_model: "gpt-5.6".to_string(),
-                    alias: String::new(),
-                    protocol: RelayProtocol::Responses,
-                    context_window: "372000".to_string(),
-                },
-            ],
+            model_mappings: vec![RelayModelMapping {
+                system_prompt_override: String::new(),
+                request_model: "claude-opus-4-8".to_string(),
+                alias: String::new(),
+                protocol: RelayProtocol::Anthropic,
+                context_window: "1000000".to_string(),
+            }],
             ..RelayProfile::default()
         }],
-        active_relay_id: "bridged-compaction-override".to_string(),
+        active_relay_id: "bridged-compaction-main-model".to_string(),
         ..BackendSettings::default()
     };
     let request = json!({
@@ -12576,51 +12909,38 @@ async fn bridged_claude_remote_compaction_uses_override_without_becoming_native_
 
     let requests = server.finish_all();
     assert_eq!(requests.len(), 1);
-    assert!(requests[0].path.ends_with("/responses"));
+    assert!(requests[0].path.ends_with("/messages"));
     let upstream: Value = serde_json::from_str(&requests[0].body).unwrap();
-    assert_eq!(upstream["model"], "gpt-5.6");
-    assert_eq!(upstream["reasoning"], json!({ "effort": "xhigh" }));
-    assert_eq!(upstream["input"][0]["type"], "message");
-    assert!(upstream.get("tools").is_none());
-    assert!(upstream.get("tool_choice").is_none());
+    assert_eq!(upstream["model"], "claude-opus-4-8");
+    assert!(upstream.get("tools").is_some());
+    assert_eq!(upstream["tool_choice"]["type"], "auto");
 }
 
 #[tokio::test]
-async fn bridged_claude_remote_compaction_uses_configured_claude_model() {
+async fn bridged_claude_remote_compaction_preserves_reasoning_effort() {
     let server = spawn_chat_server_with_status_responses(vec![(
         "200 OK".to_string(),
-        r#"{"id":"msg-bridge","type":"message","role":"assistant","model":"claude-sonnet-5","stop_reason":"end_turn","content":[{"type":"text","text":"BRIDGED CLAUDE SUMMARY"}],"usage":{"input_tokens":10,"output_tokens":5}}"#.to_string(),
+        r#"{"id":"msg-bridge","type":"message","role":"assistant","model":"claude-opus-4-8","stop_reason":"end_turn","content":[{"type":"text","text":"<summary>BRIDGED CLAUDE SUMMARY</summary>"}],"usage":{"input_tokens":10,"output_tokens":5}}"#.to_string(),
     )]);
     let settings = BackendSettings {
         layered_compaction_enabled: true,
-        layered_compaction_model_override_enabled: true,
-        layered_compaction_models: LayeredCompactionModels {
-            claude: "claude-sonnet-5".to_string(),
-            ..Default::default()
-        },
+
         relay_profiles: vec![RelayProfile {
-            id: "bridged-claude-compaction-override".to_string(),
-            name: "Bridged Claude Compaction Override".to_string(),
+            id: "bridged-claude-compaction-main-model".to_string(),
+            name: "Bridged Claude Compaction Main Model".to_string(),
             base_url: server.base_url.clone(),
             upstream_base_url: server.base_url.clone(),
             api_key: "sk-test".to_string(),
-            model_mappings: vec![
-                RelayModelMapping {
-                    request_model: "claude-opus-4-8".to_string(),
-                    alias: String::new(),
-                    protocol: RelayProtocol::Anthropic,
-                    context_window: "1000000".to_string(),
-                },
-                RelayModelMapping {
-                    request_model: "claude-sonnet-5".to_string(),
-                    alias: String::new(),
-                    protocol: RelayProtocol::Anthropic,
-                    context_window: "1000000".to_string(),
-                },
-            ],
+            model_mappings: vec![RelayModelMapping {
+                system_prompt_override: String::new(),
+                request_model: "claude-opus-4-8".to_string(),
+                alias: String::new(),
+                protocol: RelayProtocol::Anthropic,
+                context_window: "1000000".to_string(),
+            }],
             ..RelayProfile::default()
         }],
-        active_relay_id: "bridged-claude-compaction-override".to_string(),
+        active_relay_id: "bridged-claude-compaction-main-model".to_string(),
         ..BackendSettings::default()
     };
     let request = json!({
@@ -12646,8 +12966,8 @@ async fn bridged_claude_remote_compaction_uses_configured_claude_model() {
     assert_eq!(requests.len(), 1);
     assert!(requests[0].path.ends_with("/messages"));
     let upstream: Value = serde_json::from_str(&requests[0].body).unwrap();
-    assert_eq!(upstream["model"], "claude-sonnet-5");
-    assert_eq!(upstream["output_config"], json!({ "effort": "xhigh" }));
+    assert_eq!(upstream["model"], "claude-opus-4-8");
+    assert_eq!(upstream["output_config"], json!({ "effort": "high" }));
     assert!(!requests[0].body.contains("compaction_trigger"));
     assert!(
         upstream["messages"]
@@ -12657,7 +12977,7 @@ async fn bridged_claude_remote_compaction_uses_configured_claude_model() {
 }
 
 #[tokio::test]
-async fn failed_compaction_model_retries_once_with_session_model() {
+async fn failed_compaction_retries_once_with_same_session_model() {
     let server = spawn_chat_server_with_status_responses(vec![
         (
             "404 Not Found".to_string(),
@@ -12665,37 +12985,26 @@ async fn failed_compaction_model_retries_once_with_session_model() {
         ),
         (
             "200 OK".to_string(),
-            r#"{"id":"resp-original","status":"completed","model":"gpt-5.4","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"summary"}]}]}"#
+            r#"{"id":"resp-original","status":"completed","model":"gpt-5.4","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"<summary>summary</summary>"}]}]}"#
                 .to_string(),
         ),
     ]);
     let settings = BackendSettings {
         layered_compaction_enabled: true,
-        layered_compaction_model_override_enabled: true,
-        layered_compaction_models: LayeredCompactionModels {
-            claude: "deepseek-chat".to_string(),
-            ..Default::default()
-        },
+
         relay_profiles: vec![RelayProfile {
             id: "compaction-retry".to_string(),
             name: "Compaction Retry".to_string(),
             base_url: server.base_url.clone(),
             upstream_base_url: server.base_url.clone(),
             api_key: "sk-test".to_string(),
-            model_mappings: vec![
-                RelayModelMapping {
-                    request_model: "claude-opus-4-8".to_string(),
-                    alias: String::new(),
-                    protocol: RelayProtocol::Anthropic,
-                    context_window: "1000000".to_string(),
-                },
-                RelayModelMapping {
-                    request_model: "deepseek-chat".to_string(),
-                    alias: String::new(),
-                    protocol: RelayProtocol::ChatCompletions,
-                    context_window: "128000".to_string(),
-                },
-            ],
+            model_mappings: vec![RelayModelMapping {
+                system_prompt_override: String::new(),
+                request_model: "claude-opus-4-8".to_string(),
+                alias: String::new(),
+                protocol: RelayProtocol::Anthropic,
+                context_window: "1000000".to_string(),
+            }],
             ..RelayProfile::default()
         }],
         active_relay_id: "compaction-retry".to_string(),
@@ -12730,22 +13039,22 @@ async fn failed_compaction_model_retries_once_with_session_model() {
     assert_eq!(requests.len(), 2);
     let first: Value = serde_json::from_str(&requests[0].body).unwrap();
     let second: Value = serde_json::from_str(&requests[1].body).unwrap();
-    assert!(requests[0].path.ends_with("/chat/completions"));
+    assert!(requests[0].path.ends_with("/messages"));
     assert!(requests[1].path.ends_with("/messages"));
-    assert_eq!(first["model"], "deepseek-chat");
-    assert_eq!(first["reasoning_effort"], "max");
+    assert_eq!(first["model"], "claude-opus-4-8");
+    assert_eq!(first["output_config"]["effort"], "high");
     assert_eq!(second["model"], "claude-opus-4-8");
 }
 
 #[tokio::test]
-async fn compaction_capacity_estimate_defers_to_anthropic_upstream() {
+async fn compaction_preserves_large_history_across_upstream_rejection_retry() {
     let summary = |model: &str| {
         json!({
             "id": "msg-capacity",
             "type": "message",
             "role": "assistant",
             "model": model,
-            "content": [{"type": "text", "text": "summary"}],
+            "content": [{"type": "text", "text": "<summary>summary</summary>"}],
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 600, "output_tokens": 10}
         })
@@ -12758,7 +13067,7 @@ async fn compaction_capacity_estimate_defers_to_anthropic_upstream() {
             if rejected {
                 r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: context length exceeded"}}"#.to_string()
             } else {
-                summary("deepseek-v4.1-flash")
+                summary("claude-opus-4-8")
             },
         )];
         if rejected {
@@ -12768,30 +13077,19 @@ async fn compaction_capacity_estimate_defers_to_anthropic_upstream() {
         let settings = BackendSettings {
             layered_compaction_enabled: true,
             layered_compaction_retain_recent_round_enabled: false,
-            layered_compaction_model_override_enabled: true,
-            layered_compaction_models: LayeredCompactionModels {
-                claude: "deepseek-v4.1-flash[small]".to_string(),
-                ..Default::default()
-            },
+
             relay_profiles: vec![RelayProfile {
                 id: "compaction-capacity".to_string(),
                 base_url: server.base_url.clone(),
                 upstream_base_url: server.base_url.clone(),
                 api_key: "sk-test".to_string(),
-                model_mappings: vec![
-                    RelayModelMapping {
-                        request_model: "claude-opus-4-8".to_string(),
-                        alias: String::new(),
-                        protocol: RelayProtocol::Anthropic,
-                        context_window: "1000000".to_string(),
-                    },
-                    RelayModelMapping {
-                        request_model: "deepseek-v4.1-flash".to_string(),
-                        alias: "deepseek-v4.1-flash[small]".to_string(),
-                        protocol: RelayProtocol::Anthropic,
-                        context_window: "9000".to_string(),
-                    },
-                ],
+                model_mappings: vec![RelayModelMapping {
+                    system_prompt_override: String::new(),
+                    request_model: "claude-opus-4-8".to_string(),
+                    alias: String::new(),
+                    protocol: RelayProtocol::Anthropic,
+                    context_window: "1000000".to_string(),
+                }],
                 ..RelayProfile::default()
             }],
             active_relay_id: "compaction-capacity".to_string(),
@@ -12806,13 +13104,6 @@ async fn compaction_capacity_estimate_defers_to_anthropic_upstream() {
             "role": "user",
             "content": [{"type": "input_text", "text": history}]
         });
-        let candidate = apply_compaction_model_override(&request, "deepseek-v4.1-flash");
-        assert!(
-            codex_elves_core::layered_compaction::estimate_compaction_request_tokens(&candidate)
-                > 9_000,
-            "fixture must exceed the target context estimate even before output reserve"
-        );
-
         let response = open_responses_proxy_request_with_settings(&request.to_string(), settings)
             .await
             .unwrap();
@@ -12821,22 +13112,15 @@ async fn compaction_capacity_estimate_defers_to_anthropic_upstream() {
 
         let requests = server.finish_all();
         assert_eq!(requests.len(), if rejected { 2 } else { 1 });
-        for (index, captured) in requests.iter().enumerate() {
+        for captured in &requests {
             assert!(captured.path.ends_with("/messages"));
             let body: Value = serde_json::from_str(&captured.body).unwrap();
-            assert_eq!(
-                body["model"],
-                if index == 0 {
-                    "deepseek-v4.1-flash"
-                } else {
-                    "claude-opus-4-8"
-                }
-            );
+            assert_eq!(body["model"], "claude-opus-4-8");
             assert!(
                 body["messages"]
                     .to_string()
                     .contains(&serde_json::to_string(&history).unwrap()),
-                "容量判断不得裁剪历史；首次请求和回退请求均应保留完整内容"
+                "首次请求和同模型重试均应保留完整历史"
             );
         }
     }

@@ -824,7 +824,7 @@ async fn helper_prompt_only_compaction_does_not_continue_after_prompt_replacemen
                     "status":"completed",
                     "model":model,
                     "output":[{"type":"message","role":"assistant",
-                        "content":[{"type":"output_text","text":"SUMMARY"}]}],
+                        "content":[{"type":"output_text","text":"<summary>SUMMARY</summary>"}]}],
                     "usage":{"output_tokens_details":{"reasoning_tokens":516}}
                 }
             })
@@ -870,7 +870,10 @@ async fn helper_prompt_only_compaction_does_not_continue_after_prompt_replacemen
     assert_eq!(requests.len(), 1);
     let forwarded: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
     assert_eq!(forwarded["input"][0]["content"], "recent request");
-    assert_eq!(forwarded["input"][1]["content"], "CUSTOM SUMMARY PROMPT");
+    assert_eq!(
+        forwarded["input"][1]["content"][0]["text"],
+        codex_elves_core::layered_compaction::compaction_instruction("CUSTOM SUMMARY PROMPT")
+    );
     assert!(body.contains("SUMMARY"));
     assert!(!body.contains("codex-elves-compaction-v3:"));
     let continued = diagnostic_log.read().lines().any(|line| {
@@ -1250,7 +1253,7 @@ async fn chat_remote_compaction_stream_establishes_local_sse_before_upstream_hea
     let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
     let upstream = spawn_launcher_upstream_with_delayed_response(
         "text/event-stream",
-        r#"data: {"id":"chatcmpl_compact","object":"chat.completion.chunk","created":0,"model":"gpt-chat","choices":[{"index":0,"delta":{"content":"summary"},"finish_reason":null}]}
+        r#"data: {"id":"chatcmpl_compact","object":"chat.completion.chunk","created":0,"model":"gpt-chat","choices":[{"index":0,"delta":{"content":"<summary>summary</summary>"},"finish_reason":null}]}
 
 data: {"id":"chatcmpl_compact","object":"chat.completion.chunk","created":0,"model":"gpt-chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
 
@@ -1261,6 +1264,11 @@ data: [DONE]
         std::time::Duration::from_secs(2),
     );
     write_launcher_mixed_relay_settings(temp.path(), &upstream.base_url);
+    let settings_path = temp.path().join("settings.json");
+    let mut settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+    settings["layeredCompactionEnabled"] = serde_json::json!(true);
+    std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
 
     let hooks = DefaultLaunchHooks::default();
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();

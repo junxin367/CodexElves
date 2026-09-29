@@ -47,27 +47,8 @@ pub struct RelayModelMapping {
     pub protocol: RelayProtocol,
     #[serde(default)]
     pub context_window: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct LayeredCompactionModels {
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub gpt: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub claude: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub other: String,
-}
-
-impl LayeredCompactionModels {
-    pub fn model_for_family(&self, family: crate::model_capabilities::ModelFamily) -> &str {
-        match family {
-            crate::model_capabilities::ModelFamily::Gpt => &self.gpt,
-            crate::model_capabilities::ModelFamily::Claude => &self.claude,
-            crate::model_capabilities::ModelFamily::Other => &self.other,
-        }
-    }
+    pub system_prompt_override: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -237,6 +218,21 @@ impl Default for RelayProfile {
 }
 
 impl RelayProfile {
+    pub(crate) fn system_prompt_for_model(&self, model: &str) -> &str {
+        self.model_mapping_for_catalog_model(model)
+            .map(|mapping| mapping.system_prompt_override.trim())
+            .filter(|prompt| !prompt.is_empty())
+            .unwrap_or_else(|| self.system_prompt_override.trim())
+    }
+
+    pub(crate) fn has_system_prompt_override(&self) -> bool {
+        !self.system_prompt_override.trim().is_empty()
+            || self.model_mappings.iter().any(|mapping| {
+                !mapping.request_model.trim().is_empty()
+                    && !mapping.system_prompt_override.trim().is_empty()
+            })
+    }
+
     pub fn local_proxy_enabled(&self) -> bool {
         self.local_proxy_enabled.unwrap_or(false)
     }
@@ -425,6 +421,7 @@ impl RelayProfile {
                 request_model.to_string(),
                 mapping.protocol,
                 context_window,
+                mapping.system_prompt_override.trim().to_string(),
             )) {
                 anyhow::bail!(
                     "模型「{request_model}」的模型配置重复：协议为 {}，上下文大小为「{}」；别名不能用于区分完全相同的参数",
@@ -453,6 +450,7 @@ fn relay_model_mapping_parameters_match(
         && left.protocol == right.protocol
         && normalized_model_context_window(&left.context_window)
             == normalized_model_context_window(&right.context_window)
+        && left.system_prompt_override.trim() == right.system_prompt_override.trim()
 }
 
 fn validate_catalog_model_identifiers_only(mappings: &[RelayModelMapping]) -> anyhow::Result<()> {
@@ -555,6 +553,7 @@ pub(crate) fn relay_model_mappings_for_catalog(
                     request_model.to_string(),
                     mapping.protocol,
                     normalized_model_context_window(&mapping.context_window),
+                    mapping.system_prompt_override.trim().to_string(),
                 ))
         })
         .cloned()
@@ -810,17 +809,6 @@ pub struct BackendSettings {
         skip_serializing_if = "String::is_empty"
     )]
     pub layered_compaction_prompt_override: String,
-    #[serde(rename = "layeredCompactionModelOverrideEnabled", default)]
-    pub layered_compaction_model_override_enabled: bool,
-    #[serde(rename = "layeredCompactionModels", default)]
-    pub layered_compaction_models: LayeredCompactionModels,
-    /// 旧版单一压缩模型配置，仅用于读取迁移。
-    #[serde(
-        rename = "layeredCompactionModel",
-        default,
-        skip_serializing_if = "String::is_empty"
-    )]
-    pub layered_compaction_model: String,
     #[serde(rename = "launchMode", default)]
     pub launch_mode: LaunchMode,
     #[serde(rename = "relayBaseUrl", default = "default_relay_base_url")]
@@ -898,9 +886,6 @@ impl Default for BackendSettings {
             layered_compaction_retain_recent_round_enabled: false,
             layered_compaction_retain_tokens: default_layered_compaction_retain_tokens(),
             layered_compaction_prompt_override: String::new(),
-            layered_compaction_model_override_enabled: false,
-            layered_compaction_models: LayeredCompactionModels::default(),
-            layered_compaction_model: String::new(),
             launch_mode: LaunchMode::Patch,
             relay_base_url: default_relay_base_url(),
             relay_api_key: String::new(),
@@ -916,26 +901,6 @@ impl Default for BackendSettings {
             cli_wrapper_api_key: String::new(),
             cli_wrapper_api_key_env: default_api_key_env(),
         }
-    }
-}
-
-impl BackendSettings {
-    pub fn compaction_model_for_family(
-        &self,
-        family: crate::model_capabilities::ModelFamily,
-    ) -> &str {
-        let configured = self
-            .layered_compaction_models
-            .model_for_family(family)
-            .trim();
-        if !configured.is_empty() {
-            return configured;
-        }
-        let legacy = self.layered_compaction_model.trim();
-        if !legacy.is_empty() {
-            return legacy;
-        }
-        ""
     }
 }
 
@@ -1979,27 +1944,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_single_compaction_model_applies_to_all_source_families() {
-        let settings = BackendSettings {
-            layered_compaction_model: "deepseek-chat".to_string(),
-            ..BackendSettings::default()
-        };
-
-        assert_eq!(
-            settings.compaction_model_for_family(crate::model_capabilities::ModelFamily::Gpt),
-            "deepseek-chat"
-        );
-        assert_eq!(
-            settings.compaction_model_for_family(crate::model_capabilities::ModelFamily::Claude),
-            "deepseek-chat"
-        );
-        assert_eq!(
-            settings.compaction_model_for_family(crate::model_capabilities::ModelFamily::Other),
-            "deepseek-chat"
-        );
-    }
-
-    #[test]
     fn settings_deserialize_keeps_plugin_unlock_switches_independent() {
         let settings: BackendSettings = serde_json::from_str(
             r#"{
@@ -2161,12 +2105,14 @@ mod tests {
         let profile = RelayProfile {
             model_mappings: vec![
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "claude-fable-5".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Anthropic,
                     context_window: String::new(),
                 },
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.6".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Responses,
@@ -2189,12 +2135,14 @@ mod tests {
             protocol: RelayProtocol::Responses,
             model_mappings: vec![
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-chat".to_string(),
                     alias: "对话模型".to_string(),
                     protocol: RelayProtocol::ChatCompletions,
                     context_window: "200000".to_string(),
                 },
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "claude-sonnet-4".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Anthropic,
@@ -2266,12 +2214,14 @@ mod tests {
         let profile = RelayProfile {
             model_mappings: vec![
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.6-sol".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "372000".to_string(),
                 },
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.6-sol".to_string(),
                     alias: "gpt-5.6-sol [500K]".to_string(),
                     protocol: RelayProtocol::Responses,
@@ -2314,12 +2264,14 @@ mod tests {
     fn relay_profile_keeps_plain_request_models_when_each_unaliased_model_is_unique() {
         let mappings = vec![
             RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-5.6-terra".to_string(),
                 alias: String::new(),
                 protocol: RelayProtocol::Responses,
                 context_window: "372000".to_string(),
             },
             RelayModelMapping {
+                system_prompt_override: String::new(),
                 request_model: "gpt-5.6-luna".to_string(),
                 alias: String::new(),
                 protocol: RelayProtocol::Responses,
@@ -2338,12 +2290,14 @@ mod tests {
         let profile = RelayProfile {
             model_mappings: vec![
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.6-sol".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "372000".to_string(),
                 },
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-5.6-sol".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Responses,
@@ -2372,12 +2326,14 @@ mod tests {
         let profile = RelayProfile {
             model_mappings: vec![
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "model-a".to_string(),
                     alias: "model-b".to_string(),
                     protocol: RelayProtocol::ChatCompletions,
                     context_window: "400000".to_string(),
                 },
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "model-b".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Responses,
@@ -2411,12 +2367,14 @@ mod tests {
         let profile = RelayProfile {
             model_mappings: vec![
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-conflict".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::Responses,
                     context_window: "200000".to_string(),
                 },
                 RelayModelMapping {
+                    system_prompt_override: String::new(),
                     request_model: "gpt-conflict".to_string(),
                     alias: String::new(),
                     protocol: RelayProtocol::ChatCompletions,
@@ -2442,12 +2400,14 @@ mod tests {
                 name: "重复模型参数".to_string(),
                 model_mappings: vec![
                     RelayModelMapping {
+                        system_prompt_override: String::new(),
                         request_model: "gpt-5.6-sol".to_string(),
                         alias: "gpt-5.6-sol [500K]".to_string(),
                         protocol: RelayProtocol::Responses,
                         context_window: "500000".to_string(),
                     },
                     RelayModelMapping {
+                        system_prompt_override: String::new(),
                         request_model: "gpt-5.6-sol".to_string(),
                         alias: "编程模型".to_string(),
                         protocol: RelayProtocol::Responses,
@@ -2464,6 +2424,55 @@ mod tests {
 
         assert!(message.contains("模型配置重复"), "{message}");
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn model_system_prompt_round_trips_and_takes_priority_per_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(temp.path().join("settings.json"));
+        let profile: RelayProfile = serde_json::from_value(serde_json::json!({
+            "id": "model-prompts",
+            "name": "模型提示词",
+            "systemPromptOverride": "supplier prompt",
+            "modelMappings": [
+                {"requestModel": "gpt-5.6-sol", "alias": "review", "systemPromptOverride": "review prompt"},
+                {"requestModel": "gpt-5.6-sol", "alias": "write", "systemPromptOverride": "write prompt"},
+                {"requestModel": "gpt-5.6-sol", "alias": "inherit"},
+                {"requestModel": "claude-sonnet", "systemPromptOverride": " \n "}
+            ]
+        })).unwrap();
+        store
+            .save(&BackendSettings {
+                relay_profiles: vec![profile],
+                ..BackendSettings::default()
+            })
+            .unwrap();
+        let loaded = store.load().unwrap();
+        let profile = &loaded.relay_profiles[0];
+        assert_eq!(profile.model_mappings.len(), 4);
+        assert_eq!(
+            relay_model_mappings_for_catalog(&profile.model_mappings).len(),
+            4
+        );
+        assert_eq!(profile.system_prompt_for_model("review"), "review prompt");
+        assert_eq!(profile.system_prompt_for_model("write"), "write prompt");
+        assert_eq!(
+            profile.system_prompt_for_model("inherit"),
+            "supplier prompt"
+        );
+        assert_eq!(
+            profile.system_prompt_for_model("claude-sonnet"),
+            "supplier prompt"
+        );
+        assert_eq!(
+            profile.system_prompt_for_model("unknown"),
+            "supplier prompt"
+        );
+        let mut cleared = profile.clone();
+        cleared.model_mappings[0].system_prompt_override.clear();
+        assert_eq!(cleared.system_prompt_for_model("review"), "supplier prompt");
+        cleared.system_prompt_override.clear();
+        assert_eq!(cleared.system_prompt_for_model("review"), "");
     }
 
     #[test]
@@ -2514,12 +2523,14 @@ mod tests {
                 name: "重复目录标识".to_string(),
                 model_mappings: vec![
                     RelayModelMapping {
+                        system_prompt_override: String::new(),
                         request_model: "gpt-5.6-sol".to_string(),
                         alias: "主力模型".to_string(),
                         protocol: RelayProtocol::Responses,
                         context_window: "500000".to_string(),
                     },
                     RelayModelMapping {
+                        system_prompt_override: String::new(),
                         request_model: "gpt-5.6-luna".to_string(),
                         alias: "主力模型".to_string(),
                         protocol: RelayProtocol::Responses,
@@ -2549,12 +2560,14 @@ mod tests {
                 name: "目录标识歧义".to_string(),
                 model_mappings: vec![
                     RelayModelMapping {
+                        system_prompt_override: String::new(),
                         request_model: "model-a".to_string(),
                         alias: "model-b".to_string(),
                         protocol: RelayProtocol::Responses,
                         context_window: "400000".to_string(),
                     },
                     RelayModelMapping {
+                        system_prompt_override: String::new(),
                         request_model: "model-b".to_string(),
                         alias: String::new(),
                         protocol: RelayProtocol::Responses,
@@ -2965,6 +2978,46 @@ experimental_bearer_token = "sk-existing""#
     }
 
     #[test]
+    fn settings_store_discards_retired_compaction_model_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "layeredCompactionEnabled": true,
+                "layeredCompactionRetainRecentRoundEnabled": true,
+                "layeredCompactionRetainTokens": 24000,
+                "layeredCompactionPromptOverride": "Preserve the current task",
+                "layeredCompactionModelOverrideEnabled": true,
+                "layeredCompactionModels": {"gpt": "old-gpt", "claude": "old-claude", "other": "old-other"},
+                "layeredCompactionModel": "old-global"
+            }"#,
+        )
+        .unwrap();
+        let store = SettingsStore::new(path.clone());
+        let settings = store.load().unwrap();
+        assert!(settings.layered_compaction_enabled);
+        assert!(settings.layered_compaction_retain_recent_round_enabled);
+        assert_eq!(settings.layered_compaction_retain_tokens, 24_000);
+        assert_eq!(
+            settings.layered_compaction_prompt_override,
+            "Preserve the current task"
+        );
+
+        store.save(&settings).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        for retired_key in [
+            "layeredCompactionModelOverrideEnabled",
+            "layeredCompactionModels",
+            "layeredCompactionModel",
+        ] {
+            assert!(saved.get(retired_key).is_none(), "{retired_key}");
+        }
+        assert_eq!(store.load().unwrap(), settings);
+    }
+
+    #[test]
     fn settings_store_save_load_roundtrip_uses_custom_path() {
         let dir = temp_dir();
         let store = SettingsStore::new(dir.join("nested").join("settings.json"));
@@ -2977,12 +3030,6 @@ experimental_bearer_token = "sk-existing""#
             codex_extra_args: vec!["--force_high_performance_gpu".to_string()],
             layered_compaction_enabled: true,
             layered_compaction_retain_recent_round_enabled: true,
-            layered_compaction_model_override_enabled: true,
-            layered_compaction_models: LayeredCompactionModels {
-                gpt: "deepseek-chat".to_string(),
-                claude: "gpt-5.6".to_string(),
-                other: "claude-sonnet-4-6".to_string(),
-            },
             ..BackendSettings::default()
         };
 
@@ -3002,12 +3049,14 @@ experimental_bearer_token = "sk-existing""#
                 name: "冲突供应商".to_string(),
                 model_mappings: vec![
                     RelayModelMapping {
+                        system_prompt_override: String::new(),
                         request_model: "shared-model".to_string(),
                         alias: String::new(),
                         protocol: RelayProtocol::Responses,
                         context_window: String::new(),
                     },
                     RelayModelMapping {
+                        system_prompt_override: String::new(),
                         request_model: "shared-model".to_string(),
                         alias: String::new(),
                         protocol: RelayProtocol::Anthropic,

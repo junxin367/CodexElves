@@ -472,7 +472,7 @@ fn renderer_workspace_checkpoint_wraps_turns_and_native_message_edits() {
     ));
     assert!(script.contains("data-codex-workspace-checkpoint-button"));
     assert!(script.contains("button.setAttribute?.(\"aria-label\", \"打开 Checkpoint\")"));
-    assert!(script.contains(r#"const codexWorkspaceCheckpointVersion = "5";"#));
+    assert!(script.contains(r#"const codexWorkspaceCheckpointVersion = "6";"#));
     assert!(script.contains(
         "window.__codexElvesWorkspaceCheckpointRuntimeVersion === codexWorkspaceCheckpointVersion"
     ));
@@ -568,7 +568,7 @@ fn renderer_modal_shell_preserves_each_dialog_visual_contract() {
 }
 
 #[test]
-fn renderer_workspace_checkpoint_request_contract_is_fail_closed_and_restore_first() {
+fn renderer_workspace_checkpoint_request_contract_degrades_bridge_failures_and_restores_first() {
     let result = run_workspace_checkpoint_contract_harness();
 
     assert_eq!(
@@ -590,6 +590,19 @@ fn renderer_workspace_checkpoint_request_contract_is_fail_closed_and_restore_fir
     );
     assert_eq!(result["revertBeforeTurnId"], "turn-1");
     assert_eq!(result["createFailureBlockedOriginal"], true);
+    for case in result["bridgeFailureCases"].as_array().unwrap() {
+        assert_eq!(case["nativeCalls"], 1, "{case}");
+        assert_eq!(case["preservedRequest"], true, "{case}");
+        assert_eq!(case["preservedResult"], true, "{case}");
+        assert_eq!(case["lateResponseIgnored"], true, "{case}");
+        assert_eq!(case["skipDiagnosed"], true, "{case}");
+    }
+    assert_eq!(result["bridgeFailureCases"].as_array().unwrap().len(), 7);
+    assert_eq!(result["nativeFailurePreserved"], true);
+    assert_eq!(result["bindTimeoutDidNotBlockSend"], true);
+    assert_eq!(result["bindTimeoutDiagnosed"], true);
+    assert_eq!(result["restoreBridgeFailureBlockedOriginal"], true);
+    assert_eq!(result["nativeRevertWithoutRestoreContinued"], true);
     assert_eq!(result["remoteSkippedCheckpoint"], true);
     assert_eq!(result["disabledSkippedCheckpoint"], true);
     assert_eq!(result["activeManagerFallbackInstalled"], true);
@@ -1049,6 +1062,138 @@ api.setBackendSettingsForTest({{
   }}
 
   bridgeMode = "ok";
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const healthyCheckpointBridge = window.__codexSessionDeleteBridge;
+  const realSetTimeout = globalThis.setTimeout;
+  const bridgeFailureCases = [];
+  for (const kind of [
+    "missing", "restarted", "unavailable", "throw", "rejected",
+    "create-timeout", "context-timeout",
+  ]) {{
+    let nativeCalls = 0;
+    let preservedRequest = false;
+    let expireRequest = null;
+    let releaseLateResponse = null;
+    const calls = [];
+    const diagnosticStart = window.__codexElvesServiceTierTestDiagnostics.length;
+    const params = {{
+      threadId: "thread-12345678",
+      ...(kind === "context-timeout" ? {{}} : {{ cwd: "C:\\repo" }}),
+      input: [{{ type: "text", text: "bridge fallback" }}],
+    }};
+    const options = {{ timeout: 12345 }};
+    const expected = {{ turn: {{ id: `fallback-${{kind}}` }} }};
+    globalThis.setTimeout = (callback, delay, ...args) => {{
+      if (delay === 2000) {{
+        expireRequest = callback;
+        return undefined;
+      }}
+      return realSetTimeout(callback, delay, ...args);
+    }};
+    window.__codexSessionDeleteBridge = (path, payload) => {{
+      if (!path.startsWith("/workspace-checkpoint/")) {{
+        return healthyCheckpointBridge(path, payload);
+      }}
+      calls.push(path);
+      if (kind === "restarted") {{
+        return Promise.resolve({{ status: "failed", message: "CodexElves Bridge 已重启，请重试" }});
+      }}
+      if (kind === "unavailable") {{
+        return Promise.resolve({{ status: "failed", code: "bridge_unavailable" }});
+      }}
+      if (kind === "throw") throw new Error("binding unavailable");
+      if (kind === "rejected") return Promise.reject(new Error("bridge disconnected"));
+      return new Promise((resolve) => {{ releaseLateResponse = resolve; }});
+    }};
+    if (kind === "missing") delete window.__codexSessionDeleteBridge;
+    const send = api.sendRequest(function(method, actualParams, actualOptions) {{
+      nativeCalls += 1;
+      preservedRequest = this === client &&
+        method === "turn/start" && actualParams === params && actualOptions === options;
+      return Promise.resolve(expected);
+    }}, client, "turn/start", params, options);
+    // 只推进请求超时，不实际等待两秒；晚到的响应在原生发送后再释放。
+    if (kind.endsWith("-timeout")) {{
+      for (let step = 0; step < 30 && !expireRequest; step += 1) await Promise.resolve();
+      if (!expireRequest) throw new Error(`checkpoint timeout was not scheduled: ${{kind}}`);
+      expireRequest();
+    }}
+    const actual = await send;
+    releaseLateResponse?.({{
+      status: "ok", session_id: params.threadId, cwd: "C:\\repo", host_id: "local",
+      checkpoint: {{ id: "late-checkpoint" }},
+    }});
+    await new Promise((resolve) => realSetTimeout(resolve, 0));
+    const expectedCalls = kind === "missing" ? [] : [
+      kind === "context-timeout" ? "/workspace-checkpoint/session-context" : "/workspace-checkpoint/create",
+    ];
+    bridgeFailureCases.push({{
+      kind, nativeCalls, preservedRequest,
+      preservedResult: actual === expected,
+      lateResponseIgnored: JSON.stringify(calls) === JSON.stringify(expectedCalls),
+      skipDiagnosed: window.__codexElvesServiceTierTestDiagnostics
+        .slice(diagnosticStart).some((item) => item.event === "workspace_checkpoint_create_skipped"),
+    }});
+    globalThis.setTimeout = realSetTimeout;
+    window.__codexSessionDeleteBridge = healthyCheckpointBridge;
+  }}
+
+  delete window.__codexSessionDeleteBridge;
+  const nativeError = new Error("native turn failed");
+  let nativeFailurePreserved = false;
+  try {{
+    await api.sendRequest(async () => {{ throw nativeError; }}, client, "turn/start", turnParams);
+  }} catch (error) {{
+    nativeFailurePreserved = error === nativeError;
+  }}
+  let nativeRevertWithoutRestoreContinued = false;
+  await api.sendRequest(async () => {{
+    nativeRevertWithoutRestoreContinued = true;
+  }}, client, "thread/revert", {{ threadId: "thread-12345678" }});
+  window.__codexSessionDeleteBridge = healthyCheckpointBridge;
+
+  let expireBind = null;
+  let bindTimeoutDidNotBlockSend = false;
+  const bindDiagnosticStart = window.__codexElvesServiceTierTestDiagnostics.length;
+  globalThis.setTimeout = (callback, delay, ...args) => {{
+    if (delay === 2000) {{
+      expireBind = callback;
+      return undefined;
+    }}
+    return realSetTimeout(callback, delay, ...args);
+  }};
+  window.__codexSessionDeleteBridge = (path, payload) =>
+    path === "/workspace-checkpoint/bind-turn"
+      ? new Promise(() => {{}})
+      : healthyCheckpointBridge(path, payload);
+  const bindTurn = {{ turn: {{ id: "bind-timeout-turn" }} }};
+  const bindSend = api.sendRequest(async () => bindTurn, client, "turn/start", turnParams);
+  bindTimeoutDidNotBlockSend = await Promise.race([
+    bindSend.then((result) => result === bindTurn),
+    new Promise((resolve) => realSetTimeout(() => resolve(false), 100)),
+  ]);
+  expireBind?.();
+  await bindSend;
+  await new Promise((resolve) => realSetTimeout(resolve, 0));
+  const bindTimeoutDiagnosed = window.__codexElvesServiceTierTestDiagnostics
+    .slice(bindDiagnosticStart).some((item) => item.event === "workspace_checkpoint_bind_failed");
+  globalThis.setTimeout = realSetTimeout;
+  window.__codexSessionDeleteBridge = (path, payload) =>
+    path === "/workspace-checkpoint/restore-for-revert"
+      ? Promise.resolve({{ status: "failed", message: "CodexElves Bridge 已重启，请重试" }})
+      : healthyCheckpointBridge(path, payload);
+  api.setRestoreIntent({{ cwd: "C:\\repo", threadId: "thread-12345678" }});
+  let restoreNativeCalls = 0;
+  let restoreBridgeFailureBlockedOriginal = false;
+  try {{
+    await api.sendRequest(async () => {{ restoreNativeCalls += 1; }}, client, "thread/revert", {{
+      threadId: "thread-12345678", beforeTurnId: "turn-1",
+    }});
+  }} catch {{
+    restoreBridgeFailureBlockedOriginal = restoreNativeCalls === 0;
+  }}
+  window.__codexSessionDeleteBridge = healthyCheckpointBridge;
+
   activeOrder = [];
   await api.sendRequest(async function(method) {{
     activeOrder.push(`original:${{method}}`);
@@ -1626,6 +1771,12 @@ api.setBackendSettingsForTest({{
     revertOrder,
     revertBeforeTurnId,
     createFailureBlockedOriginal,
+    bridgeFailureCases,
+    nativeFailurePreserved,
+    bindTimeoutDidNotBlockSend,
+    bindTimeoutDiagnosed,
+    restoreBridgeFailureBlockedOriginal,
+    nativeRevertWithoutRestoreContinued,
     remoteSkippedCheckpoint,
     disabledSkippedCheckpoint,
     activeManagerFallbackInstalled,

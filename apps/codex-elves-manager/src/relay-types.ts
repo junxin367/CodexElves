@@ -7,4 +7,5 @@ export type RelayModelMapping = {
   alias: string;
   protocol: RelayProtocol;
   contextWindow: string;
+  systemPromptOverride?: string;
 };
