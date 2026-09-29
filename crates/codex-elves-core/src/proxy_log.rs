@@ -33,6 +33,8 @@ static PROXY_LOG_COMPLETED_ENQUEUE_FENCE: OnceLock<(Mutex<CompletedEnqueueFence>
     OnceLock::new();
 static LEGACY_OUTPUT_TOKEN_CACHE: OnceLock<Mutex<HashMap<PathBuf, HashMap<String, Option<u64>>>>> =
     OnceLock::new();
+static LEGACY_COMPACTION_CACHE: OnceLock<Mutex<HashMap<PathBuf, HashMap<String, bool>>>> =
+    OnceLock::new();
 
 #[derive(Default)]
 struct CompletedEnqueueFence {
@@ -79,6 +81,8 @@ pub struct ProxyRequestRecord {
     pub continue_thinking_after_response_body: Option<String>,
     #[serde(default)]
     pub remote_compaction_triggered: bool,
+    #[serde(default)]
+    pub compaction_requested: bool,
     #[serde(default)]
     pub layered_compaction_triggered: bool,
     #[serde(default)]
@@ -140,6 +144,9 @@ pub struct ProxyRequestSummary {
     pub continue_thinking_rounds: u32,
     #[serde(default)]
     pub remote_compaction_triggered: bool,
+    // None identifies indexes written before request-level compaction tracking.
+    #[serde(default)]
+    pub compaction_requested: Option<bool>,
     #[serde(default)]
     pub layered_compaction_triggered: bool,
     #[serde(default)]
@@ -194,6 +201,7 @@ fn default_proxy_request_transport() -> ProxyRequestTransport {
 
 #[derive(Debug, Clone)]
 pub struct RequestMetadata {
+    pub compaction_requested: bool,
     pub model: Option<String>,
     pub upstream_response_model: Option<String>,
     pub reasoning_effort: Option<String>,
@@ -224,6 +232,12 @@ impl From<&ProxyRequestRecord> for ProxyRequestSummary {
             continue_thinking_triggered: record.continue_thinking_triggered,
             continue_thinking_rounds: record.continue_thinking_rounds,
             remote_compaction_triggered: record.remote_compaction_triggered,
+            compaction_requested: Some(
+                record.compaction_requested
+                    || record.remote_compaction_triggered
+                    || record.layered_compaction_triggered
+                    || request_body_uses_compaction(&record.request_body),
+            ),
             layered_compaction_triggered: record.layered_compaction_triggered,
             layered_compaction_retain_tokens: record.layered_compaction_retain_tokens,
             layered_compaction_retained_items: record.layered_compaction_retained_items,
@@ -258,6 +272,51 @@ pub fn request_body_uses_remote_compaction_v2(request_body: &str) -> bool {
         .ok()
         .as_ref()
         .is_some_and(|request| request_uses_remote_compaction_v2(Some(request)))
+}
+
+fn request_uses_compaction(request: &Value) -> bool {
+    if crate::layered_compaction::is_any_compaction_request(request) {
+        return true;
+    }
+    // Logs can contain the upstream Anthropic/Chat request, after prompt replacement.
+    let Some(last) = request
+        .get("input")
+        .or_else(|| request.get("messages"))
+        .and_then(Value::as_array)
+        .and_then(|items| items.last())
+    else {
+        return false;
+    };
+    if last.get("role").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+    let content = &last["content"];
+    let text = content.as_str().map(str::to_owned).unwrap_or_else(|| {
+        content
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+    let text = text.trim_start();
+    text.starts_with(crate::layered_compaction::COMPACTION_PROMPT_PREFIX)
+        || (text.starts_with(crate::layered_compaction::COMPACTION_INSTRUCTION_PREFIX)
+            && text.contains(crate::layered_compaction::COMPACTION_INSTRUCTION_SUFFIX))
+}
+
+fn request_body_uses_compaction(body: &str) -> bool {
+    if !body.contains("compaction_trigger")
+        && !body.contains(crate::layered_compaction::COMPACTION_PROMPT_PREFIX)
+        && !body.contains("[Handoff checkpoint]")
+    {
+        return false;
+    }
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .as_ref()
+        .is_some_and(request_uses_compaction)
 }
 
 fn infer_reasoning_tokens_for_summary(record: &ProxyRequestRecord) -> Option<u64> {
@@ -334,6 +393,7 @@ pub fn extract_request_metadata(request_json: Option<&Value>) -> RequestMetadata
     };
 
     RequestMetadata {
+        compaction_requested: request_json.is_some_and(request_uses_compaction),
         model,
         upstream_response_model: None,
         reasoning_effort,
@@ -950,7 +1010,51 @@ fn read_summaries_at_path(path: &Path, limit: usize) -> std::io::Result<Vec<Prox
     let mut summaries = result?;
     unlock_result?;
     backfill_legacy_output_tokens(path, &mut summaries);
+    backfill_legacy_compaction(path, &mut summaries);
     Ok(summaries)
+}
+
+fn backfill_legacy_compaction(path: &Path, summaries: &mut [ProxyRequestSummary]) {
+    if !summaries
+        .iter()
+        .any(|summary| summary.compaction_requested.is_none())
+    {
+        return;
+    }
+    let cache = LEGACY_COMPACTION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().unwrap();
+    if cache.len() > 4 && !cache.contains_key(path) {
+        cache.clear();
+    }
+    let path_cache = cache.entry(path.to_path_buf()).or_default();
+    let completed_ids: HashSet<_> = summaries
+        .iter()
+        .filter(|summary| summary.state == ProxyRequestState::Completed)
+        .map(|summary| summary.id.as_str())
+        .collect();
+    path_cache.retain(|id, _| completed_ids.contains(id.as_str()));
+    for summary in summaries
+        .iter_mut()
+        .filter(|summary| summary.compaction_requested.is_none())
+    {
+        let requested =
+            if summary.remote_compaction_triggered || summary.layered_compaction_triggered {
+                true
+            } else if let Some(requested) = path_cache.get(&summary.id) {
+                *requested
+            } else {
+                let Ok(Some(record)) = read_detail_record_at_path(path, &summary.id) else {
+                    continue;
+                };
+                let requested = record.compaction_requested
+                    || request_body_uses_compaction(&record.request_body);
+                if summary.state == ProxyRequestState::Completed {
+                    path_cache.insert(summary.id.clone(), requested);
+                }
+                requested
+            };
+        summary.compaction_requested = Some(requested);
+    }
 }
 
 fn backfill_legacy_output_tokens(path: &Path, summaries: &mut [ProxyRequestSummary]) {
@@ -1008,7 +1112,13 @@ fn find_record_at_path(path: &Path, id: &str) -> std::io::Result<Option<ProxyReq
     ensure_result?;
     unlock_result?;
 
-    read_detail_record_at_path(path, id)
+    let mut record = read_detail_record_at_path(path, id)?;
+    if let Some(record) = record.as_mut() {
+        record.compaction_requested |= record.remote_compaction_triggered
+            || record.layered_compaction_triggered
+            || request_body_uses_compaction(&record.request_body);
+    }
+    Ok(record)
 }
 
 fn read_detail_record_at_path(
@@ -2094,6 +2204,100 @@ data: [DONE]
     }
 
     #[test]
+    fn compaction_request_marker_is_independent_of_enhancement_and_success() {
+        let prompt = crate::layered_compaction::COMPACTION_PROMPT_PREFIX;
+        for state in [ProxyRequestState::Pending, ProxyRequestState::Completed] {
+            let mut record = sample_proxy_record("ordinary-compaction");
+            record.state = state;
+            record.status_code = Some(500);
+            record.request_body = serde_json::json!({
+                "input": [{"role":"user","content":[{"type":"input_text","text":prompt}]}]
+            })
+            .to_string();
+            let summary = super::ProxyRequestSummary::from(&record);
+            assert_eq!(summary.compaction_requested, Some(true));
+            assert!(!summary.layered_compaction_triggered);
+            assert!(!summary.remote_compaction_triggered);
+        }
+    }
+
+    #[test]
+    fn compaction_marker_detects_converted_requests_without_matching_old_history() {
+        let prompt = crate::layered_compaction::compaction_instruction("custom checkpoint");
+        for field in ["input", "messages"] {
+            for content in [
+                serde_json::json!(prompt),
+                serde_json::json!([{"type":"text","text":prompt}]),
+            ] {
+                let mut request = serde_json::json!({
+                    field: [{"role":"user","content":content}]
+                });
+                assert!(super::request_uses_compaction(&request));
+                request[field]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({"role":"user","content":"continue the actual work"}));
+                assert!(!super::request_uses_compaction(&request));
+            }
+        }
+        assert!(!super::request_body_uses_compaction(r#"{"messages":["#));
+        assert!(!super::request_uses_compaction(&serde_json::json!({
+            "messages":[{"role":"assistant","content":prompt}]
+        })));
+        assert!(super::request_uses_compaction(&serde_json::json!({
+            "input":[{"type":"compaction_trigger"}]
+        })));
+    }
+
+    #[test]
+    fn compaction_marker_survives_body_truncation_and_backfills_old_indexes() {
+        let path = temp_proxy_log_path("compaction-marker-backfill");
+        let mut record = sample_proxy_record("legacy-compaction");
+        record.request_body = serde_json::json!({
+            "messages":[{"role":"user","content":crate::layered_compaction::compaction_instruction("checkpoint")}]
+        }).to_string();
+        append_record_at_path(&path, &record).unwrap();
+        let mut legacy = serde_json::to_value(super::ProxyRequestSummary::from(&record)).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("compactionRequested");
+        std::fs::write(
+            &path,
+            format!("{}\n{}\n", super::PROXY_INDEX_HEADER, legacy),
+        )
+        .unwrap();
+        let summaries = super::read_summaries_at_path(&path, 10).unwrap();
+        assert_eq!(summaries[0].compaction_requested, Some(true));
+        assert!(
+            find_record_at_path(&path, &record.id)
+                .unwrap()
+                .unwrap()
+                .compaction_requested
+        );
+        // Reading repairs presentation without rewriting the user's historical log.
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("compactionRequested")
+        );
+
+        record.compaction_requested = true;
+        record.request_body = r#"{"input":["#.to_string();
+        assert_eq!(
+            super::ProxyRequestSummary::from(&record).compaction_requested,
+            Some(true)
+        );
+        record.compaction_requested = false;
+        assert_eq!(
+            super::ProxyRequestSummary::from(&record).compaction_requested,
+            Some(false)
+        );
+        clear_records_at_path(&path).unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn detects_remote_compaction_v2_from_request_body() {
         let request = serde_json::json!({
             "model": "gpt-5.4",
@@ -2134,6 +2338,7 @@ data: [DONE]
             continue_thinking_after_response_body: None,
             remote_compaction_triggered: false,
             layered_compaction_triggered: false,
+            compaction_requested: false,
             layered_compaction_retain_tokens: None,
             layered_compaction_retained_items: None,
             layered_compaction_retained_chars: None,
@@ -2523,6 +2728,7 @@ data: [DONE]
             continue_thinking_after_response_body: None,
             remote_compaction_triggered: false,
             layered_compaction_triggered: false,
+            compaction_requested: false,
             layered_compaction_retain_tokens: None,
             layered_compaction_retained_items: None,
             layered_compaction_retained_chars: None,

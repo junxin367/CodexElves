@@ -2059,6 +2059,7 @@ impl WebSocketRequestLogger {
                 payload,
             )),
             layered_compaction_triggered: false,
+            compaction_requested: metadata.compaction_requested,
             layered_compaction_retain_tokens: None,
             layered_compaction_retained_items: None,
             layered_compaction_retained_chars: None,

@@ -472,7 +472,7 @@ fn renderer_workspace_checkpoint_wraps_turns_and_native_message_edits() {
     ));
     assert!(script.contains("data-codex-workspace-checkpoint-button"));
     assert!(script.contains("button.setAttribute?.(\"aria-label\", \"打开 Checkpoint\")"));
-    assert!(script.contains(r#"const codexWorkspaceCheckpointVersion = "6";"#));
+    assert!(script.contains(r#"const codexWorkspaceCheckpointVersion = "7";"#));
     assert!(script.contains(
         "window.__codexElvesWorkspaceCheckpointRuntimeVersion === codexWorkspaceCheckpointVersion"
     ));
@@ -590,14 +590,19 @@ fn renderer_workspace_checkpoint_request_contract_degrades_bridge_failures_and_r
     );
     assert_eq!(result["revertBeforeTurnId"], "turn-1");
     assert_eq!(result["createFailureBlockedOriginal"], true);
+    assert_eq!(result["slowHealthyCheckpointWaited"], true);
+    assert_eq!(result["slowHealthyCheckpointBound"], true);
+    assert_eq!(result["slowHealthyCheckpointSkipped"], false);
+    assert_eq!(result["slowHealthyBridgeProbes"], 3);
     for case in result["bridgeFailureCases"].as_array().unwrap() {
         assert_eq!(case["nativeCalls"], 1, "{case}");
         assert_eq!(case["preservedRequest"], true, "{case}");
         assert_eq!(case["preservedResult"], true, "{case}");
         assert_eq!(case["lateResponseIgnored"], true, "{case}");
         assert_eq!(case["skipDiagnosed"], true, "{case}");
+        assert_eq!(case["correctReason"], true, "{case}");
     }
-    assert_eq!(result["bridgeFailureCases"].as_array().unwrap().len(), 7);
+    assert_eq!(result["bridgeFailureCases"].as_array().unwrap().len(), 8);
     assert_eq!(result["nativeFailurePreserved"], true);
     assert_eq!(result["bindTimeoutDidNotBlockSend"], true);
     assert_eq!(result["bindTimeoutDiagnosed"], true);
@@ -1065,14 +1070,57 @@ api.setBackendSettingsForTest({{
   await new Promise((resolve) => setTimeout(resolve, 0));
   const healthyCheckpointBridge = window.__codexSessionDeleteBridge;
   const realSetTimeout = globalThis.setTimeout;
+  let checkSlowRequest = null;
+  let finishSlowSnapshot = null;
+  let slowNativeCalls = 0;
+  let slowHealthyBridgeProbes = 0;
+  const slowDiagnosticStart = window.__codexElvesServiceTierTestDiagnostics.length;
+  globalThis.setTimeout = (callback, delay, ...args) => {{
+    if (delay === 2000) {{
+      checkSlowRequest = callback;
+      return undefined;
+    }}
+    return realSetTimeout(callback, delay, ...args);
+  }};
+  window.__codexSessionDeleteBridge = (path, payload) => {{
+    if (path === "/backend/status") slowHealthyBridgeProbes += 1;
+    return path === "/workspace-checkpoint/create"
+      ? new Promise((resolve) => {{ finishSlowSnapshot = resolve; }})
+      : healthyCheckpointBridge(path, payload);
+  }};
+  const slowSend = api.sendRequest(async () => {{
+    slowNativeCalls += 1;
+    return {{ turn: {{ id: "slow-healthy-turn" }} }};
+  }}, client, "turn/start", turnParams);
+  for (let step = 0; step < 30 && !checkSlowRequest; step += 1) await Promise.resolve();
+  if (!checkSlowRequest || !finishSlowSnapshot) throw new Error("slow checkpoint did not start");
+  for (let tick = 0; tick < 3; tick += 1) {{
+    checkSlowRequest();
+    await new Promise((resolve) => realSetTimeout(resolve, 0));
+  }}
+  const slowHealthyCheckpointWaited = slowNativeCalls === 0;
+  finishSlowSnapshot({{ status: "ok", checkpoint: {{ id: "slow-healthy-checkpoint" }} }});
+  await slowSend;
+  await new Promise((resolve) => realSetTimeout(resolve, 0));
+  // 请求完成后，即使旧定时回调已排队，也不能继续发起桥接检查。
+  checkSlowRequest();
+  await new Promise((resolve) => realSetTimeout(resolve, 0));
+  const slowHealthyCheckpointBound = slowNativeCalls === 1 &&
+    lastBindPayload?.checkpointId === "slow-healthy-checkpoint" &&
+    lastBindPayload?.turnId === "slow-healthy-turn";
+  const slowHealthyCheckpointSkipped = window.__codexElvesServiceTierTestDiagnostics
+    .slice(slowDiagnosticStart).some((item) => item.event === "workspace_checkpoint_create_skipped");
+  globalThis.setTimeout = realSetTimeout;
+  window.__codexSessionDeleteBridge = healthyCheckpointBridge;
   const bridgeFailureCases = [];
   for (const kind of [
     "missing", "restarted", "unavailable", "throw", "rejected",
-    "create-timeout", "context-timeout",
+    "create-timeout", "context-timeout", "request-timeout",
   ]) {{
     let nativeCalls = 0;
     let preservedRequest = false;
     let expireRequest = null;
+    let expireOperation = null;
     let releaseLateResponse = null;
     const calls = [];
     const diagnosticStart = window.__codexElvesServiceTierTestDiagnostics.length;
@@ -1088,9 +1136,17 @@ api.setBackendSettingsForTest({{
         expireRequest = callback;
         return undefined;
       }}
+      if (delay === 60000) {{
+        expireOperation = callback;
+        return undefined;
+      }}
       return realSetTimeout(callback, delay, ...args);
     }};
     window.__codexSessionDeleteBridge = (path, payload) => {{
+      if (path === "/backend/status" &&
+          (kind === "create-timeout" || kind === "context-timeout")) {{
+        return new Promise(() => {{}});
+      }}
       if (!path.startsWith("/workspace-checkpoint/")) {{
         return healthyCheckpointBridge(path, payload);
       }}
@@ -1112,11 +1168,18 @@ api.setBackendSettingsForTest({{
         method === "turn/start" && actualParams === params && actualOptions === options;
       return Promise.resolve(expected);
     }}, client, "turn/start", params, options);
-    // 只推进请求超时，不实际等待两秒；晚到的响应在原生发送后再释放。
+    // 分别推进连通性探测和处理总时限；晚到的快照不得绑定到已发送轮次。
     if (kind.endsWith("-timeout")) {{
       for (let step = 0; step < 30 && !expireRequest; step += 1) await Promise.resolve();
       if (!expireRequest) throw new Error(`checkpoint timeout was not scheduled: ${{kind}}`);
       expireRequest();
+      await new Promise((resolve) => realSetTimeout(resolve, 0));
+      if (kind === "request-timeout") {{
+        if (!expireOperation) throw new Error("checkpoint operation deadline was not scheduled");
+        expireOperation();
+      }} else {{
+        expireRequest();
+      }}
     }}
     const actual = await send;
     releaseLateResponse?.({{
@@ -1133,6 +1196,10 @@ api.setBackendSettingsForTest({{
       lateResponseIgnored: JSON.stringify(calls) === JSON.stringify(expectedCalls),
       skipDiagnosed: window.__codexElvesServiceTierTestDiagnostics
         .slice(diagnosticStart).some((item) => item.event === "workspace_checkpoint_create_skipped"),
+      correctReason: window.__codexElvesServiceTierTestDiagnostics
+        .slice(diagnosticStart).some((item) =>
+          item.event === "workspace_checkpoint_create_skipped" &&
+          item.detail.reason === (kind === "request-timeout" ? "request_timeout" : "bridge_unavailable")),
     }});
     globalThis.setTimeout = realSetTimeout;
     window.__codexSessionDeleteBridge = healthyCheckpointBridge;
@@ -1156,10 +1223,11 @@ api.setBackendSettingsForTest({{
   let bindTimeoutDidNotBlockSend = false;
   const bindDiagnosticStart = window.__codexElvesServiceTierTestDiagnostics.length;
   globalThis.setTimeout = (callback, delay, ...args) => {{
-    if (delay === 2000) {{
+    if (delay === 60000) {{
       expireBind = callback;
       return undefined;
     }}
+    if (delay === 2000) return undefined;
     return realSetTimeout(callback, delay, ...args);
   }};
   window.__codexSessionDeleteBridge = (path, payload) =>
@@ -1771,6 +1839,10 @@ api.setBackendSettingsForTest({{
     revertOrder,
     revertBeforeTurnId,
     createFailureBlockedOriginal,
+    slowHealthyCheckpointWaited,
+    slowHealthyCheckpointBound,
+    slowHealthyCheckpointSkipped,
+    slowHealthyBridgeProbes,
     bridgeFailureCases,
     nativeFailurePreserved,
     bindTimeoutDidNotBlockSend,

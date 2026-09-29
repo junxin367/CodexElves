@@ -2417,6 +2417,7 @@ fn launcher_proxy_request_record(id: &str, timestamp_ms: u64) -> ProxyRequestRec
         continue_thinking_after_response_body: None,
         remote_compaction_triggered: false,
         layered_compaction_triggered: false,
+        compaction_requested: false,
         layered_compaction_retain_tokens: None,
         layered_compaction_retained_items: None,
         layered_compaction_retained_chars: None,

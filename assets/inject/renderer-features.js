@@ -106,7 +106,7 @@
   const codexPromptOptimizeCompactCollisionMaxWidth = 140;
   const codexPromptOptimizeCompactCollisionMaxHeight = 84;
   const codexPromptOptimizeMaxRecentContextChars = 100000;
-  const codexWorkspaceCheckpointVersion = "6";
+  const codexWorkspaceCheckpointVersion = "7";
   const codexWorkspaceCheckpointButtonAttribute = "data-codex-workspace-checkpoint-button";
   const codexWorkspaceCheckpointButtonGap = 6;
   const codexWorkspaceCheckpointDialogClass = "codex-workspace-checkpoint-dialog";
@@ -117,6 +117,7 @@
   const codexWorkspaceCheckpointPatchRetryBaseMs = 1000;
   const codexWorkspaceCheckpointPatchRetryMaxMs = 30000;
   const codexWorkspaceCheckpointBridgeTimeoutMs = 2000;
+  const codexWorkspaceCheckpointRequestTimeoutMs = 60000;
   const taskBoardRuntimeVersion = "63";
   const taskBoardNativeOperationLeaseTtlMs = 2 * 60 * 1000;
   const taskBoardNativeCreateBusyMessage = "另一个窗口正在创建原生会话，请稍后重试";
@@ -6130,18 +6131,52 @@
       new Error(message || "Checkpoint 桥接暂不可用"),
       { code: "checkpoint_bridge_unavailable" }
     );
-    if (typeof window.__codexSessionDeleteBridge !== "function") {
+    const bridge = window.__codexSessionDeleteBridge;
+    if (typeof bridge !== "function") {
       throw unavailable("Checkpoint 桥接暂不可用");
     }
-    let timer;
+    let settled = false;
+    let requestTimer;
+    let probeTimer;
+    let probeTimeout;
     try {
       const result = await Promise.race([
         postJson(path, payload),
         new Promise((_, reject) => {
-          timer = setTimeout(
-            () => reject(unavailable("Checkpoint 请求超时")),
-            codexWorkspaceCheckpointBridgeTimeoutMs
+          requestTimer = setTimeout(
+            () => reject(Object.assign(new Error("Checkpoint 处理超时"), {
+              code: "checkpoint_request_timeout",
+            })),
+            codexWorkspaceCheckpointRequestTimeoutMs
           );
+          // 快照可能需要数秒；用独立请求检测桥接，不能把快照耗时当作断线。
+          const probe = async () => {
+            if (settled) return;
+            try {
+              if (window.__codexSessionDeleteBridge !== bridge) {
+                throw unavailable("Checkpoint 桥接已切换");
+              }
+              const health = await Promise.race([
+                bridge("/backend/status", {}),
+                new Promise((_, rejectProbe) => {
+                  probeTimeout = setTimeout(
+                    () => rejectProbe(unavailable("Checkpoint 桥接检查超时")),
+                    codexWorkspaceCheckpointBridgeTimeoutMs
+                  );
+                }),
+              ]);
+              if (settled) return;
+              if (health?.status !== "ok") {
+                throw unavailable(health?.message);
+              }
+              probeTimer = setTimeout(probe, codexWorkspaceCheckpointBridgeTimeoutMs);
+            } catch (error) {
+              if (!settled) reject(unavailable(error?.message || String(error)));
+            } finally {
+              clearTimeout(probeTimeout);
+            }
+          };
+          probeTimer = setTimeout(probe, codexWorkspaceCheckpointBridgeTimeoutMs);
         }),
       ]);
       if (
@@ -6155,9 +6190,13 @@
       }
       return result;
     } catch (error) {
+      if (error?.code === "checkpoint_request_timeout") throw error;
       throw unavailable(error?.message || String(error));
     } finally {
-      clearTimeout(timer);
+      settled = true;
+      clearTimeout(requestTimer);
+      clearTimeout(probeTimer);
+      clearTimeout(probeTimeout);
     }
   }
 
@@ -6825,11 +6864,18 @@
         try {
           created = await createCodexWorkspaceCheckpoint(client, params);
         } catch (error) {
-          if (error?.code === "checkpoint_bridge_unavailable") {
-            created = { skipped: true, reason: "bridge_unavailable" };
-            showToast("Checkpoint 暂不可用，本轮未保存快照，继续发送");
+          if (
+            error?.code === "checkpoint_bridge_unavailable" ||
+            error?.code === "checkpoint_request_timeout"
+          ) {
+            const timedOut = error.code === "checkpoint_request_timeout";
+            created = { skipped: true, reason: timedOut ? "request_timeout" : "bridge_unavailable" };
+            showToast(timedOut
+              ? "Checkpoint 处理超时，本轮跳过快照，继续发送"
+              : "Checkpoint 暂不可用，本轮未保存快照，继续发送");
             sendCodexElvesDiagnostic("workspace_checkpoint_create_skipped", {
               reason: created.reason,
+              errorCode: error.code,
               errorMessage: error.message,
             });
           } else {

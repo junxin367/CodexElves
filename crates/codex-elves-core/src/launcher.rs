@@ -1938,6 +1938,8 @@ async fn handle_protocol_proxy_connection_inner(
     let logged_request_metadata =
         crate::proxy_log::extract_request_metadata(logged_request_json.as_ref());
     let mut request_metadata = logged_request_metadata;
+    request_metadata.compaction_requested |=
+        crate::proxy_log::extract_request_metadata(request_json.as_ref()).compaction_requested;
     let request_body = logged_request_body.as_ref();
 
     if !upstream.is_success() {
@@ -2871,6 +2873,8 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     let logged_request_metadata =
         crate::proxy_log::extract_request_metadata(logged_request_json.as_ref());
     let mut request_metadata = logged_request_metadata;
+    request_metadata.compaction_requested |=
+        crate::proxy_log::extract_request_metadata(request_json.as_ref()).compaction_requested;
     let request_body = logged_request_body.as_ref();
 
     let diagnostic_id = upstream.diagnostic_id.clone();
@@ -3680,6 +3684,8 @@ async fn handle_chat_completions_proxy_connection(
     let logged_request_metadata =
         crate::proxy_log::extract_request_metadata(logged_request_json.as_ref());
     let mut request_metadata = logged_request_metadata;
+    request_metadata.compaction_requested |=
+        crate::proxy_log::extract_request_metadata(request_json.as_ref()).compaction_requested;
     let request_body = logged_request_body.as_str();
 
     let relay_id = upstream.relay_id.clone();
@@ -3912,6 +3918,7 @@ fn append_pending_local_proxy_record(
             request_json,
         ),
         layered_compaction_triggered: false,
+        compaction_requested: request_metadata.compaction_requested,
         layered_compaction_retain_tokens: None,
         layered_compaction_retained_items: None,
         layered_compaction_retained_chars: None,
@@ -3975,6 +3982,7 @@ fn append_local_proxy_first_token_record(
             request_body,
         ),
         layered_compaction_triggered: false,
+        compaction_requested: request_metadata.compaction_requested,
         layered_compaction_retain_tokens: None,
         layered_compaction_retained_items: None,
         layered_compaction_retained_chars: None,
@@ -4091,6 +4099,7 @@ fn append_local_proxy_record_with_continue_thinking(
             request_body,
         ),
         layered_compaction_triggered: layered_compaction.triggered,
+        compaction_requested: request_metadata.compaction_requested,
         layered_compaction_retain_tokens: layered_compaction.retain_tokens,
         layered_compaction_retained_items: layered_compaction.retained_items,
         layered_compaction_retained_chars: layered_compaction.retained_chars,

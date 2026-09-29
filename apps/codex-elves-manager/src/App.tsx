@@ -686,6 +686,7 @@ type LocalProxyLogEntry = {
   continueThinkingTriggered?: boolean | null;
   continueThinkingRounds?: number | null;
   remoteCompactionTriggered?: boolean | null;
+  compactionRequested?: boolean | null;
   layeredCompactionTriggered?: boolean | null;
   layeredCompactionRetainTokens?: number | null;
   layeredCompactionRetainedItems?: number | null;
@@ -1523,6 +1524,7 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
       continueThinkingTriggered,
       continueThinkingRounds: continueThinkingTriggered ? 2 : 0,
       remoteCompactionTriggered,
+      compactionRequested: layeredCompactionTriggered || remoteCompactionTriggered || index === 2,
       layeredCompactionTriggered,
       layeredCompactionRetainTokens: layeredCompactionTriggered ? 20000 : null,
       layeredCompactionRetainedItems: layeredCompactionTriggered ? 6 : null,
@@ -4844,7 +4846,7 @@ function LocalProxyScreen({
                           >
                             <Cloud aria-hidden="true" className="proxy-remote-compaction-icon" />
                           </span>
-                        ) : entry.layeredCompactionTriggered ? (
+                        ) : entry.compactionRequested || entry.layeredCompactionTriggered ? (
                           <span
                             aria-label={formatLayeredCompactionTitle(entry)}
                             className="proxy-context-compaction-badge"
@@ -5082,7 +5084,7 @@ function LocalProxyLogDetailDialog({
                 <span>裁剪目标 {entry.layeredCompactionRetainTokens.toLocaleString()} token</span>
               ) : null}
             </div>
-          ) : entry.layeredCompactionTriggered ? (
+          ) : entry.compactionRequested || entry.layeredCompactionTriggered ? (
             <div className="proxy-detail-meta proxy-layered-compaction-meta">
               <span>
                 <Shrink className="h-4 w-4" />
