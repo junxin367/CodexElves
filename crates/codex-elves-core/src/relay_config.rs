@@ -2456,7 +2456,7 @@ fn is_gpt_fast_service_tier_model(slug: &str) -> bool {
         return false;
     }
     // 取版本号之后的第一段作为产品线名；没有则为主线。
-    // 兼容 gpt-5.7-sol（点分隔）与 gpt-6-terra（无 minor）两种形式。
+    // 兼容 gpt-5.7-sol（点分隔）与 gpt-6-astra（无 minor）两种形式。
     let Some(rest) = slug.split_once("gpt").map(|(_, rest)| rest) else {
         return false;
     };
@@ -2466,7 +2466,7 @@ fn is_gpt_fast_service_tier_model(slug: &str) -> bool {
         .find(|part| !part.is_empty() && part.parse::<u32>().is_err());
     match line {
         None => true,
-        Some(line) => matches!(line, "sol" | "terra" | "luna"),
+        Some(line) => matches!(line, "sol" | "terra" | "luna" | "astra"),
     }
 }
 
@@ -4538,7 +4538,7 @@ mod tests {
     }
 
     #[test]
-    fn fast_service_tier_capability_matches_packaged_and_gpt56_models() {
+    fn fast_service_tier_capability_matches_packaged_and_future_gpt_models() {
         let (tiers, speed) = fast_service_tier_capability("gpt-5.5").expect("gpt-5.5 应支持 fast");
         assert!(
             tiers.as_array().is_some_and(|items| items
@@ -4582,6 +4582,8 @@ mod tests {
             "gpt-5.7",
             "gpt-5.7-sol",
             "gpt-6-terra",
+            "gpt-6-astra",
+            "openai/gpt-6-astra",
             "openai/gpt-5.9-luna-2027-01-01",
         ] {
             assert!(

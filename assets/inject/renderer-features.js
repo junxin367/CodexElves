@@ -4659,6 +4659,13 @@
     "gpt-5.6-terra-",
     "gpt-5.6-luna-",
   ];
+  const codexServiceTierInheritedFastMinimumVersion = [5, 6];
+  const codexServiceTierInheritedFastModelLines = new Set([
+    "sol",
+    "terra",
+    "luna",
+    "astra",
+  ]);
   const codexThreadServiceTierModes = new Set(["inherit", "standard", "fast"]);
   const codexServiceTierControlModes = new Set(["inherit", "global-standard", "global-fast", "custom"]);
 
@@ -4935,8 +4942,24 @@
   function codexServiceTierBuiltInFastSupported(modelName) {
     const normalized = normalizeCodexServiceTierModelName(modelName);
     const model = normalized.split("/").filter(Boolean).pop() || normalized;
-    return codexServiceTierSupportedFastModels.has(model)
-      || codexServiceTierSupportedFastModelPrefixes.some((prefix) => model.startsWith(prefix));
+    if (
+      codexServiceTierSupportedFastModels.has(model)
+      || codexServiceTierSupportedFastModelPrefixes.some((prefix) => model.startsWith(prefix))
+    ) {
+      return true;
+    }
+    const match = model.match(
+      /^gpt[-._]?(\d+)(?:[-._](\d+))?(?:[-._]([a-z]+))?(?=$|[-._]|\[)/
+    );
+    if (!match) return false;
+    const major = Number(match[1]);
+    const minor = Number(match[2] || 0);
+    const [minimumMajor, minimumMinor] = codexServiceTierInheritedFastMinimumVersion;
+    if (major < minimumMajor || (major === minimumMajor && minor < minimumMinor)) {
+      return false;
+    }
+    const line = match[3] || "";
+    return !line || codexServiceTierInheritedFastModelLines.has(line);
   }
 
   function codexServiceTierModelFromValue(value, visited = new WeakSet(), depth = 0) {

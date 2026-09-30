@@ -4823,6 +4823,9 @@ fn injection_script_exposes_fast_service_tier_control() {
     assert!(script.contains("\"gpt-5.6-sol\""));
     assert!(script.contains("\"gpt-5.6-terra\""));
     assert!(script.contains("\"gpt-5.6-luna\""));
+    assert!(script.contains("codexServiceTierInheritedFastMinimumVersion"));
+    assert!(script.contains("codexServiceTierInheritedFastModelLines"));
+    assert!(script.contains("\"astra\""));
     assert!(script.contains("codexServiceTierBuiltInFastSupported"));
     assert!(script.contains("codexServiceTierFastSupportedForModel"));
     assert!(script.contains("codexServiceTierModelForRequest"));
@@ -5027,6 +5030,34 @@ fn injection_script_applies_fast_service_tier_contract() {
         );
     }
     assert_eq!(cases["gpt56EmptyCatalogFast"]["service_tier"], "priority");
+    for model in [
+        "gpt-6",
+        "gpt-6-astra",
+        "openai/gpt-6-astra",
+        "gpt-6-astra[600K]",
+        "gpt-7-sol",
+    ] {
+        assert_eq!(
+            cases["futureGptFast"][model]["service_tier"], "priority",
+            "{model} 应按版本继承 Fast"
+        );
+        assert_eq!(
+            cases["futureGptFast"][model]["serviceTier"], "priority",
+            "{model} 应同步 serviceTier"
+        );
+    }
+    for model in [
+        "gpt-5.4-mini",
+        "gpt-5.7-custom",
+        "gpt-6-custom",
+        "gpt-6custom",
+    ] {
+        assert_eq!(
+            cases["unsupportedGptVariants"][model]["service_tier"],
+            serde_json::Value::Null,
+            "{model} 不应被版本判定误放行"
+        );
+    }
     assert_eq!(cases["displayNameMatches"]["gpt56Sol"], true);
     assert_eq!(cases["displayNameMatches"]["gpt56Terra"], true);
     assert_eq!(cases["displayNameMatches"]["gpt55"], true);
@@ -7051,6 +7082,40 @@ const gpt56EmptyCatalogFast = api.applyServiceTierOverride("turn/start", {{
   service_tier: null,
 }}, "");
 
+const futureGptFast = {{}};
+for (const model of [
+  "gpt-6",
+  "gpt-6-astra",
+  "openai/gpt-6-astra",
+  "gpt-6-astra[600K]",
+  "gpt-7-sol",
+]) {{
+  api.setModelCatalog({{
+    status: "ok",
+    model,
+    default_model: model,
+    models: [model],
+    model_entries: [{{ slug: model, service_tiers: [] }}],
+  }});
+  api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
+  futureGptFast[model] = api.applyServiceTierOverride("turn/start", {{
+    threadId: "thread-12345678",
+    model,
+    service_tier: null,
+  }}, "");
+}}
+
+const unsupportedGptVariants = {{}};
+for (const model of ["gpt-5.4-mini", "gpt-5.7-custom", "gpt-6-custom", "gpt-6custom"]) {{
+  api.setModelCatalog({{ status: "ok", model, default_model: model, models: [model] }});
+  api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
+  unsupportedGptVariants[model] = api.applyServiceTierOverride("turn/start", {{
+    threadId: "thread-12345678",
+    model,
+    service_tier: null,
+  }}, "");
+}}
+
 // catalog 驱动：内置白名单之外的模型，但 catalog 标记 supports_fast=true 也应支持
 api.setModelCatalog({{
   status: "ok",
@@ -7452,6 +7517,8 @@ async function runAppServerRestartDispatchCase() {{
     startConversation,
     gpt56Fast,
     gpt56EmptyCatalogFast,
+    futureGptFast,
+    unsupportedGptVariants,
     displayNameMatches,
     unicodeAliasMatches,
     aliasCatalogResolution,
