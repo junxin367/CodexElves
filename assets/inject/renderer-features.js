@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "93";
+  const codexDeleteStyleVersion = "94";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -106,7 +106,7 @@
   const codexPromptOptimizeCompactCollisionMaxWidth = 140;
   const codexPromptOptimizeCompactCollisionMaxHeight = 84;
   const codexPromptOptimizeMaxRecentContextChars = 100000;
-  const codexWorkspaceCheckpointVersion = "7";
+  const codexWorkspaceCheckpointVersion = "8";
   const codexWorkspaceCheckpointButtonAttribute = "data-codex-workspace-checkpoint-button";
   const codexWorkspaceCheckpointButtonGap = 6;
   const codexWorkspaceCheckpointDialogClass = "codex-workspace-checkpoint-dialog";
@@ -1713,7 +1713,8 @@
         background: rgba(245,158,11,.08);
         color: #fcd34d;
       }
-      .codex-workspace-checkpoint-dialog .checkpoint-stage[data-kind="legacy"] {
+      .codex-workspace-checkpoint-dialog .checkpoint-stage[data-kind="legacy"],
+      .codex-workspace-checkpoint-dialog .checkpoint-stage[data-kind="unsynced"] {
         border-color: rgba(161,161,170,.2);
         background: rgba(161,161,170,.08);
         color: #c4c4cc;
@@ -1918,6 +1919,8 @@
         background: #4a4a51;
       }
       .codex-workspace-checkpoint-dialog .checkpoint-restore-button {
+        flex: 0 0 auto;
+        white-space: nowrap;
         border-color: rgba(96,165,250,.25);
         background: rgba(59,130,246,.11);
         color: #bfdbfe;
@@ -1925,6 +1928,21 @@
       .codex-workspace-checkpoint-dialog .checkpoint-restore-button:not(:disabled):hover {
         border-color: rgba(96,165,250,.4);
         background: rgba(59,130,246,.18);
+      }
+      @media (max-width: 640px) {
+        .codex-workspace-checkpoint-dialog .checkpoint-item-main {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+        }
+        .codex-workspace-checkpoint-dialog .checkpoint-item-copy {
+          grid-column: 1 / -1;
+        }
+        .codex-workspace-checkpoint-dialog .codex-workspace-checkpoint-footer {
+          flex-wrap: wrap;
+        }
+        .codex-workspace-checkpoint-dialog .checkpoint-footer-note {
+          flex-basis: 100%;
+        }
       }
       .codex-workspace-checkpoint-dialog .checkpoint-undo-button {
         border-color: rgba(245,158,11,.28);
@@ -7214,9 +7232,46 @@
     return codexElvesSettings().workspaceCheckpoint === true;
   }
 
-  function codexWorkspaceCheckpointStage(checkpoint) {
+  function codexWorkspaceCheckpointTurnState(checkpoint) {
+    // Native history can recover the status, but only a persisted completion
+    // provides reliable file statistics for that turn.
+    const recordedStatus = codexWorkspaceCheckpointCompletionStatus(checkpoint?.turnStatus);
+    if (recordedStatus) return { status: recordedStatus, recorded: true };
+    const turnId = String(checkpoint?.turnId || "").trim();
+    if (!turnId || !checkpoint?.threadId) return { status: "", recorded: false };
+    let turns = [];
+    try {
+      turns = codexAppServerConversationTurns(
+        codexWorkspaceCheckpointConversation(
+          checkpoint.threadId,
+          window.__codexWorkspaceCheckpointCompletionManager
+        )
+      );
+    } catch {
+    }
+    const matchingTurns = turns.filter((turn) =>
+      String(turn?.turnId || turn?.id || "").trim() === turnId
+    );
+    const terminalStatus = matchingTurns
+      .map((turn) => codexWorkspaceCheckpointCompletionStatus(turn?.status))
+      .find(Boolean);
+    if (terminalStatus) return { status: terminalStatus, recorded: false };
+    const running = matchingTurns.some((turn) =>
+      ["inprogress", "in_progress", "running", "active"]
+        .includes(String(turn?.status || "").toLowerCase())
+    );
+    return { status: running ? "running" : "", recorded: false };
+  }
+
+  function codexWorkspaceCheckpointRestoreLabel(checkpoint) {
+    return checkpoint?.kind === "restoreSafety"
+      ? "恢复此安全快照"
+      : "恢复到本轮开始前";
+  }
+
+  function codexWorkspaceCheckpointStage(checkpoint, turnState = codexWorkspaceCheckpointTurnState(checkpoint)) {
     if (checkpoint?.kind === "restoreSafety") {
-      return { kind: "safety", label: "恢复前保护" };
+      return { kind: "safety", label: "安全快照" };
     }
     if (checkpoint?.initialization === true) {
       return { kind: "initialization", label: "初始化" };
@@ -7225,22 +7280,24 @@
       return { kind: "incomplete", label: "发送未完成" };
     }
     if (checkpoint?.changeScope === "turn") {
-      switch (checkpoint?.turnStatus) {
+      switch (turnState.status) {
         case "completed":
           return { kind: "turn", label: "本轮完成" };
         case "failed":
           return { kind: "failed", label: "本轮失败" };
         case "interrupted":
           return { kind: "interrupted", label: "本轮已中断" };
-        default:
+        case "running":
           return { kind: "turn", label: "本轮执行中" };
+        default:
+          return { kind: "unsynced", label: "状态未同步" };
       }
     }
     return { kind: "legacy", label: "旧版·发送前差异" };
   }
 
   function codexWorkspaceCheckpointItemTitle(checkpoint) {
-    if (checkpoint?.kind === "restoreSafety") return "恢复操作前自动保存";
+    if (checkpoint?.kind === "restoreSafety") return "恢复前自动保存的工作区";
     const preview = String(checkpoint?.promptPreview || "").replace(/\s+/g, " ").trim();
     if (preview) return preview;
     if (checkpoint?.accepted === false) return "未完成的发送请求";
@@ -7329,7 +7386,8 @@
   }
 
   function codexWorkspaceCheckpointItemHtml(checkpoint) {
-    const stage = codexWorkspaceCheckpointStage(checkpoint);
+    const turnState = codexWorkspaceCheckpointTurnState(checkpoint);
+    const stage = codexWorkspaceCheckpointStage(checkpoint, turnState);
     const title = codexWorkspaceCheckpointItemTitle(checkpoint);
     const files = codexWorkspaceCheckpointChangedFiles(checkpoint);
     const recordedCount = codexWorkspaceCheckpointLineCount(checkpoint?.changedFileCount) || 0;
@@ -7344,14 +7402,18 @@
       ? files.reduce((total, file) => total + file.deletions, 0)
       : null;
     const turnScoped = checkpoint?.accepted !== false && checkpoint?.changeScope === "turn";
-    const turnTerminal = turnScoped &&
-      ["completed", "failed", "interrupted"].includes(String(checkpoint?.turnStatus || ""));
+    const turnTerminal = turnScoped && turnState.recorded;
+    const pendingLabel = turnState.status === "running"
+      ? "正在记录本轮文件变化…"
+      : turnState.status
+        ? "本轮已结束，但完成时的文件统计未同步，无法确认是否有文件改动。"
+        : "尚未获取到本轮完成状态，文件变化统计暂不可用。";
     const initialization = checkpoint?.initialization === true;
     const initialFileCount = codexWorkspaceCheckpointLineCount(checkpoint?.initialFileCount);
     const initializationTurnLabel = checkpoint?.accepted === false
       ? "发送未完成"
       : !turnTerminal
-        ? "正在记录第一轮文件变化…"
+        ? pendingLabel
         : checkpoint?.turnStatus === "failed"
           ? `本轮失败${changedFileCount > 0 ? `，${changedFileCount} 个文件发生变化` : "，无文件变化"}`
           : checkpoint?.turnStatus === "interrupted"
@@ -7369,7 +7431,7 @@
         </div>
       `
       : turnScoped && !turnTerminal
-        ? '<div class="checkpoint-no-change">正在记录本轮文件变化…</div>'
+        ? `<div class="checkpoint-no-change">${escapeHtml(pendingLabel)}</div>`
         : changedFileCount === 0
           ? `<div class="checkpoint-no-change">${turnTerminal ? "本轮无文件变化" : "无文件变化"}</div>`
         : `
@@ -7392,8 +7454,9 @@
             </div>
           </div>
           <span class="checkpoint-time">${escapeHtml(codexWorkspaceCheckpointTimeLabel(checkpoint?.createdAtMs))}</span>
-          <button type="button" class="codex-elves-action-button checkpoint-restore-button" data-codex-workspace-checkpoint-restore="${escapeHtml(checkpointId)}"${checkpointId ? "" : " disabled"}>恢复到此处</button>
+          <button type="button" class="codex-elves-action-button checkpoint-restore-button" data-codex-workspace-checkpoint-restore="${escapeHtml(checkpointId)}" data-codex-workspace-checkpoint-kind="${escapeHtml(checkpoint?.kind || "")}"${checkpointId ? "" : " disabled"}>${codexWorkspaceCheckpointRestoreLabel(checkpoint)}</button>
         </div>
+        ${checkpoint?.kind === "restoreSafety" ? '<div class="checkpoint-no-change">系统在恢复文件前自动保存，可用此快照找回恢复操作前的文件状态。</div>' : ""}
         ${changeDetails}
       </div>
     `;
@@ -7462,11 +7525,16 @@
     const requestId = Number(dialog.__codexWorkspaceCheckpointListRequestId || 0) + 1;
     dialog.__codexWorkspaceCheckpointListRequestId = requestId;
     list.innerHTML = '<div class="codex-workspace-checkpoint-empty">正在读取 Checkpoint…</div>';
-    const result = await postJson("/workspace-checkpoint/list", {
-      cwd: context.cwd,
-      threadId: context.threadId,
-      limit: 100,
-    });
+    let result;
+    try {
+      result = await postJson("/workspace-checkpoint/list", {
+        cwd: context.cwd,
+        threadId: context.threadId,
+        limit: 100,
+      });
+    } catch (error) {
+      result = { status: "failed", message: error?.message || "读取 Checkpoint 失败，请重试。" };
+    }
     if (dialog.__codexWorkspaceCheckpointListRequestId !== requestId) return;
     if (
       !codexWorkspaceCheckpointFeatureEnabled() ||
@@ -7488,6 +7556,10 @@
     const checkpoints = Array.isArray(result.checkpoints) ? result.checkpoints : [];
     const checkpointHtml = codexWorkspaceCheckpointListHtml(checkpoints);
     if (!checkpointHtml) {
+      if (checkpoints.length) {
+        list.innerHTML = '<div class="codex-workspace-checkpoint-empty">已完成轮次均无文件变化，已隐藏；发送前的快照仍保留。</div>';
+        return;
+      }
       const ready = window.__codexWorkspaceCheckpointRequestClientPatchInstalled ===
         codexWorkspaceCheckpointVersion;
       list.innerHTML = `<div class="codex-workspace-checkpoint-empty">${
@@ -7508,13 +7580,17 @@
     }
     const checkpointId = String(button.getAttribute("data-codex-workspace-checkpoint-restore") || "").trim();
     if (!checkpointId) return;
+    const safety = button.getAttribute("data-codex-workspace-checkpoint-kind") === "restoreSafety";
+    const restoreLabel = codexWorkspaceCheckpointRestoreLabel({ kind: safety ? "restoreSafety" : "turnStart" });
     if (codexWorkspaceCheckpointConversationBusy(context.threadId)) {
       showToast("AI 正在运行，结束后才能恢复 Checkpoint");
       return;
     }
     const confirmed = await confirmCodexElvesAction({
-      title: "恢复 Checkpoint？",
-      message: "恢复会覆盖当前工作区中由 Checkpoint 管理的文件。恢复前会自动创建一个安全快照。",
+      title: `${restoreLabel}？`,
+      message: safety
+        ? "将工作区文件恢复为此安全快照保存的状态。当前文件会先另存为安全快照；Git 提交和聊天记录不变。"
+        : "将工作区文件恢复到本轮开始前，此后文件改动也会被回退。恢复前会自动保存安全快照；Git 提交和聊天记录不变。",
       confirmLabel: "继续恢复",
       tone: "warning",
       mount: dialog.closest(".codex-workspace-checkpoint-overlay"),
@@ -7549,7 +7625,7 @@
     } catch (error) {
       showToast(error?.message || "恢复 Checkpoint 失败");
       button.disabled = false;
-      button.textContent = "恢复到此处";
+      button.textContent = restoreLabel;
     }
   }
 
@@ -7647,7 +7723,7 @@
         </div>
         <div class="codex-workspace-checkpoint-list" data-codex-workspace-checkpoint-list="true"></div>
         <div class="codex-workspace-checkpoint-footer">
-          <span class="checkpoint-footer-note">恢复前会自动保存当前文件状态</span>
+          <span class="checkpoint-footer-note">恢复前自动生成“安全快照”，可用于找回恢复前状态</span>
           <div class="checkpoint-footer-actions">
             <button type="button" class="codex-elves-action-button checkpoint-undo-button" data-codex-workspace-checkpoint-undo-latest="true">撤销上一轮</button>
             <button type="button" class="codex-elves-action-button" data-codex-workspace-checkpoint-refresh="true">刷新</button>

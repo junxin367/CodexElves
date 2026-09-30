@@ -422,10 +422,11 @@ fn renderer_workspace_checkpoint_wraps_turns_and_native_message_edits() {
     assert!(script.contains("本轮失败"));
     assert!(script.contains("本轮已中断"));
     assert!(script.contains("旧版·发送前差异"));
-    assert!(script.contains("恢复前保护"));
+    assert!(script.contains("安全快照"));
     assert!(script.contains("发送未完成"));
-    assert!(script.contains("恢复到此处"));
-    assert!(script.contains("恢复前会自动保存当前文件状态"));
+    assert!(script.contains("恢复到本轮开始前"));
+    assert!(script.contains("恢复此安全快照"));
+    assert!(script.contains("恢复前会自动保存安全快照"));
     assert!(
         script.contains(
             ".codex-workspace-checkpoint-dialog button:not(:disabled) { cursor: pointer; }"
@@ -472,7 +473,7 @@ fn renderer_workspace_checkpoint_wraps_turns_and_native_message_edits() {
     ));
     assert!(script.contains("data-codex-workspace-checkpoint-button"));
     assert!(script.contains("button.setAttribute?.(\"aria-label\", \"打开 Checkpoint\")"));
-    assert!(script.contains(r#"const codexWorkspaceCheckpointVersion = "7";"#));
+    assert!(script.contains(r#"const codexWorkspaceCheckpointVersion = "8";"#));
     assert!(script.contains(
         "window.__codexElvesWorkspaceCheckpointRuntimeVersion === codexWorkspaceCheckpointVersion"
     ));
@@ -670,6 +671,14 @@ fn renderer_workspace_checkpoint_request_contract_degrades_bridge_failures_and_r
     assert_eq!(result["checkpointDialogHasTotalStat"], true);
     assert_eq!(result["checkpointDialogOmitsCompletedNoChange"], true);
     assert_eq!(result["checkpointDialogHasPendingChangeCapture"], true);
+    assert_eq!(result["checkpointDialogUsesNativeCompletedState"], true);
+    assert_eq!(result["checkpointDialogUsesNativeInterruptedState"], true);
+    assert_eq!(result["checkpointDialogUnknownStateIsNotRunning"], true);
+    assert_eq!(
+        result["checkpointDialogDoesNotBorrowOtherThreadState"],
+        true
+    );
+    assert_eq!(result["checkpointDialogDistinguishesSafetyRestore"], true);
     assert_eq!(result["checkpointDialogHasLegacyFallback"], true);
     assert_eq!(result["checkpointDialogHasDefaultCollapse"], true);
     assert_eq!(result["checkpointDialogHasToggle"], true);
@@ -693,6 +702,11 @@ fn renderer_workspace_checkpoint_custom_confirmation_gates_restore_and_undo() {
     assert_eq!(result["checkpointCustomConfirmationAvailable"], true);
     assert_eq!(result["checkpointRestoreCancelBlocked"], true);
     assert_eq!(result["checkpointRestoreConfirmRan"], true);
+    assert_eq!(result["checkpointRestoreConfirmationExplainsTarget"], true);
+    assert_eq!(result["checkpointSafetyConfirmationExplainsTarget"], true);
+    assert_eq!(result["checkpointFailedRestoreResetsLabels"], true);
+    assert_eq!(result["checkpointEmptyTurnsExplained"], true);
+    assert_eq!(result["checkpointListFailureExplained"], true);
     assert_eq!(result["checkpointUndoCancelBlocked"], true);
     assert_eq!(result["checkpointUndoConfirmRan"], true);
     assert_eq!(result["checkpointConfirmationUsesWarningSurface"], true);
@@ -988,6 +1002,19 @@ window.__codexSessionDeleteBridge = async (path, payload) => {{
   if (path === "/workspace-checkpoint/restore-for-revert") {{
     lastRevertPayload = payload;
     return {{ status: "ok", changedPaths: ["a.txt"], partial: false }};
+  }}
+  if (path === "/workspace-checkpoint/restore" && bridgeMode === "restore-failed") {{
+    return {{ status: "failed", message: "mock restore failure" }};
+  }}
+  if (path === "/workspace-checkpoint/list") {{
+    if (bridgeMode === "list-failed") throw new Error("mock list failure");
+    return {{
+      status: "ok",
+      checkpoints: bridgeMode === "list-empty-turns" ? [{{
+        id: "empty-turn", accepted: true, changeScope: "turn",
+        turnStatus: "completed", changedFileCount: 0, changedFiles: [],
+      }}] : [],
+    }};
   }}
   return {{ status: "ok" }};
 }};
@@ -1376,6 +1403,14 @@ api.setBackendSettingsForTest({{
               : "C:\\repo",
         hostId: "local",
         turns: [],
+        turnHistory: threadId === "thread-dialog" ? {{
+          kind: "canonical",
+          history: {{ entitiesByKey: new Map([
+            ["running", {{ turnId: "running-turn", status: "inProgress" }}],
+            ["completed", {{ turnId: "ended-turn", status: "completed" }}],
+            ["interrupted", {{ turnId: "interrupted-turn", status: "interrupted" }}],
+          ]) }},
+        }} : undefined,
       }};
     }},
     addNotificationCallback(method, callback) {{
@@ -1499,6 +1534,8 @@ api.setBackendSettingsForTest({{
     }},
     {{
       id: "normal-1",
+      threadId: "thread-dialog",
+      turnId: "running-turn",
       accepted: true,
       changeScope: "turn",
       turnStatus: null,
@@ -1562,6 +1599,14 @@ api.setBackendSettingsForTest({{
       changedFileCount: 2,
     }},
   ]);
+  const missingCompletionHtml = (turnId, threadId = "thread-dialog") => api.listHtml([{{
+    id: "missing-completion", threadId, turnId, accepted: true,
+    changeScope: "turn", turnStatus: null, changedFileCount: 0, changedFiles: [],
+  }}]);
+  const nativeCompletedHtml = missingCompletionHtml("ended-turn");
+  const nativeInterruptedHtml = missingCompletionHtml("interrupted-turn");
+  const unknownTurnHtml = missingCompletionHtml("unknown-turn");
+  const otherThreadHtml = missingCompletionHtml("running-turn", "thread-other");
   const checkpointDialogRestoreButtonCount =
     (checkpointDialogHtml.match(/data-codex-workspace-checkpoint-restore=/g) || []).length;
   const checkpointDialogFileRowCount =
@@ -1655,6 +1700,11 @@ api.setBackendSettingsForTest({{
     typeof api.undoLatest === "function";
   let checkpointRestoreCancelBlocked = false;
   let checkpointRestoreConfirmRan = false;
+  let checkpointRestoreConfirmationExplainsTarget = false;
+  let checkpointSafetyConfirmationExplainsTarget = false;
+  let checkpointFailedRestoreResetsLabels = true;
+  let checkpointEmptyTurnsExplained = false;
+  let checkpointListFailureExplained = false;
   let checkpointUndoCancelBlocked = false;
   let checkpointUndoConfirmRan = false;
   let checkpointConfirmationUsesWarningSurface = false;
@@ -1710,6 +1760,9 @@ api.setBackendSettingsForTest({{
       checkpointDialog,
       checkpointContext
     );
+    checkpointRestoreConfirmationExplainsTarget =
+      lastCheckpointConfirmationOverlay?.innerHTML?.includes("恢复到本轮开始前？") &&
+      lastCheckpointConfirmationOverlay?.innerHTML?.includes("此后文件改动也会被回退");
     checkpointConfirmationUsesWarningSurface =
       lastCheckpointConfirmationOverlay?.parentElement ===
         checkpointConfirmationMount &&
@@ -1767,6 +1820,42 @@ api.setBackendSettingsForTest({{
     checkpointRestoreConfirmRan =
       checkpointBridgeCallCount("/workspace-checkpoint/restore") ===
       restoreBeforeConfirm + 1;
+
+    bridgeMode = "restore-failed";
+    for (const kind of ["turnStart", "restoreSafety"]) {{
+      const failedButton = checkpointRestoreButton();
+      failedButton.setAttribute("data-codex-workspace-checkpoint-kind", kind);
+      const failedPromise = api.restoreFromDialog(
+        failedButton, checkpointDialog, checkpointContext
+      );
+      if (kind === "restoreSafety") {{
+        checkpointSafetyConfirmationExplainsTarget =
+          lastCheckpointConfirmationOverlay?.innerHTML?.includes("恢复此安全快照？") &&
+          lastCheckpointConfirmationOverlay?.innerHTML?.includes("此安全快照保存的状态");
+      }}
+      clickCheckpointConfirmation("[data-codex-confirm-accept]");
+      await failedPromise;
+      checkpointFailedRestoreResetsLabels &&=
+        failedButton.disabled === false &&
+        failedButton.textContent === (kind === "restoreSafety" ? "恢复此安全快照" : "恢复到本轮开始前");
+    }}
+    for (const mode of ["list-empty-turns", "list-failed"]) {{
+      bridgeMode = mode;
+      const loadPromise = api.restoreFromDialog(
+        checkpointRestoreButton(), checkpointDialog, checkpointContext
+      );
+      clickCheckpointConfirmation("[data-codex-confirm-accept]");
+      await loadPromise;
+      if (mode === "list-empty-turns") {{
+        checkpointEmptyTurnsExplained =
+          checkpointListNode.innerHTML.includes("已完成轮次均无文件变化，已隐藏");
+      }} else {{
+        checkpointListFailureExplained =
+          checkpointListNode.innerHTML.includes("mock list failure") &&
+          !checkpointListNode.innerHTML.includes("正在读取");
+      }}
+    }}
+    bridgeMode = "ok";
 
     const repeatedFirstButton = checkpointRestoreButton();
     document.activeElement = repeatedFirstButton;
@@ -1881,7 +1970,7 @@ api.setBackendSettingsForTest({{
       checkpointDialogHtml.includes("本轮失败") &&
       checkpointDialogHtml.includes("本轮已中断") &&
       checkpointDialogHtml.includes("旧版·发送前差异") &&
-      checkpointDialogHtml.includes("恢复前保护") &&
+      checkpointDialogHtml.includes("安全快照") &&
       checkpointDialogHtml.includes("发送未完成"),
     checkpointDialogRestoreButtonCount,
     checkpointDialogFileRowCount,
@@ -1905,6 +1994,25 @@ api.setBackendSettingsForTest({{
       !checkpointDialogHtml.includes("本轮无文件变化"),
     checkpointDialogHasPendingChangeCapture:
       checkpointDialogHtml.includes("正在记录本轮文件变化…"),
+    checkpointDialogUsesNativeCompletedState:
+      nativeCompletedHtml.includes("本轮完成") &&
+      nativeCompletedHtml.includes("文件统计未同步") &&
+      !nativeCompletedHtml.includes("本轮执行中") &&
+      !nativeCompletedHtml.includes("本轮无文件变化"),
+    checkpointDialogUsesNativeInterruptedState:
+      nativeInterruptedHtml.includes("本轮已中断") &&
+      nativeInterruptedHtml.includes("文件统计未同步"),
+    checkpointDialogUnknownStateIsNotRunning:
+      unknownTurnHtml.includes("状态未同步") &&
+      !unknownTurnHtml.includes("本轮执行中"),
+    checkpointDialogDoesNotBorrowOtherThreadState:
+      otherThreadHtml.includes("状态未同步") &&
+      !otherThreadHtml.includes("本轮执行中"),
+    checkpointDialogDistinguishesSafetyRestore:
+      checkpointDialogHtml.includes("恢复到本轮开始前") &&
+      checkpointDialogHtml.includes("恢复此安全快照") &&
+      checkpointDialogHtml.includes("恢复前自动保存的工作区") &&
+      checkpointDialogHtml.includes("系统在恢复文件前自动保存"),
     checkpointDialogHasLegacyFallback: checkpointDialogHtml.includes("文件明细不可用"),
     checkpointDialogHasDefaultCollapse: checkpointDialogHtml.includes('data-expanded="false"'),
     checkpointDialogHasToggle: checkpointDialogHtml.includes("展开其余 1 个文件"),
@@ -1918,6 +2026,11 @@ api.setBackendSettingsForTest({{
     checkpointCustomConfirmationAvailable,
     checkpointRestoreCancelBlocked,
     checkpointRestoreConfirmRan,
+    checkpointRestoreConfirmationExplainsTarget,
+    checkpointSafetyConfirmationExplainsTarget,
+    checkpointFailedRestoreResetsLabels,
+    checkpointEmptyTurnsExplained,
+    checkpointListFailureExplained,
     checkpointUndoCancelBlocked,
     checkpointUndoConfirmRan,
     checkpointConfirmationUsesWarningSurface,
@@ -2080,7 +2193,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "93";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "94";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -4205,7 +4318,7 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
     assert!(script.contains("codex-open-in-menu"));
     assert!(script.contains(r#"const codexOpenInVersion = "11";"#));
     assert!(script.contains("window.__codexElvesOpenInRuntimeVersion === codexOpenInVersion"));
-    assert!(script.contains(r#"const codexDeleteStyleVersion = "93";"#));
+    assert!(script.contains(r#"const codexDeleteStyleVersion = "94";"#));
     assert!(script.contains(r#"[data-codex-open-in-role="primary"]"#));
     assert!(script.contains(r#"[data-codex-open-in-role="arrow"]"#));
     assert!(script.contains("width: 30px !important;"));
