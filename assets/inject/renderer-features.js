@@ -4630,9 +4630,22 @@
   const codexServiceTierFallbackFastValue = "priority";
   const codexServiceTierModulePromises = new Map();
   let codexAppModuleLoaderForTest = null;
+  const codexServiceTierSharedModulePart = "app-shared-";
   const codexServiceTierModernModulePart = "app-initial-";
-  const codexServiceTierSettingModuleParts = ["setting-storage-", codexServiceTierModernModulePart];
-  const codexServiceTierRequestClientModuleParts = ["thread-context-inputs-", codexServiceTierModernModulePart];
+  const codexServiceTierDispatcherBackedModuleParts = new Set([
+    codexServiceTierSharedModulePart,
+    codexServiceTierModernModulePart,
+  ]);
+  const codexServiceTierSettingModuleParts = [
+    "setting-storage-",
+    codexServiceTierSharedModulePart,
+    codexServiceTierModernModulePart,
+  ];
+  const codexServiceTierRequestClientModuleParts = [
+    "thread-context-inputs-",
+    codexServiceTierSharedModulePart,
+    codexServiceTierModernModulePart,
+  ];
   const codexServiceTierSupportedFastModels = new Set([
     "gpt-5.4",
     "gpt-5.5",
@@ -4658,16 +4671,26 @@
     return urls.find((url) => url.includes("/assets/") && url.includes(namePart) && url.split("?")[0].endsWith(".js")) || "";
   }
 
+  function codexAppAssetReferenceFromScriptText(text, namePart) {
+    const escaped = namePart.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = String(text || "").match(
+      new RegExp(`["'](\\./(?:assets/)?${escaped}[^"']+\\.js)["']`)
+    );
+    return match?.[1] || "";
+  }
+
   async function codexAppAssetUrlFromScriptText(namePart) {
     const scripts = Array.from(document.scripts || []).map((script) => script.src).filter(Boolean);
     for (const src of scripts) {
       if (!src.includes("/assets/") || !src.split("?")[0].endsWith(".js")) continue;
       try {
         const text = await fetch(src).then((response) => response.ok ? response.text() : "");
-        const escaped = namePart.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const match = text.match(new RegExp(`["'](\\./assets/${escaped}[^"']+\\.js)["']`));
-        if (!match) continue;
-        return new URL(match[1], src).href;
+        const reference = codexAppAssetReferenceFromScriptText(text, namePart);
+        if (!reference) continue;
+        const normalizedReference = reference.startsWith("./assets/")
+          ? reference.slice(1)
+          : reference;
+        return new URL(normalizedReference, src).href;
       } catch {
       }
     }
@@ -4693,8 +4716,13 @@
   }
 
   // Codex App 升级后会重排 chunk：dispatcher 的归属模块与导出形态都可能变化。
-  // 历史版本导出 getInstance 类；新版 app-initial 直接导出带 handlers/dispatchMessage 的对象。
-  const codexServiceTierDispatcherModuleParts = ["vscode-api-", "setting-storage-", codexServiceTierModernModulePart];
+  // 历史版本导出 getInstance 类；新版 app-shared/app-initial 直接导出 dispatcher 对象。
+  const codexServiceTierDispatcherModuleParts = [
+    "vscode-api-",
+    "setting-storage-",
+    codexServiceTierSharedModulePart,
+    codexServiceTierModernModulePart,
+  ];
   let codexServiceTierDispatcher = null;
   let codexServiceTierNativeThreadSyncKey = "";
 
@@ -4788,6 +4816,7 @@
       }
       const dispatcher = codexServiceTierDispatcherFromModule(module);
       if (dispatcher) return dispatcher;
+      lastError = new Error(`Codex dispatcher unavailable: ${namePart}`);
     }
     if (lastError) throw lastError;
     return null;
@@ -4822,9 +4851,15 @@
     }
   }
 
-  function codexServiceTierSettingReaderFromModule(module) {
+  function codexServiceTierSettingReaderFromModule(module, allowLegacyNamedExports = false) {
     if (!module || typeof module !== "object") return null;
-    if (typeof module.n === "function" && typeof module.s === "function") return module.n;
+    if (
+      allowLegacyNamedExports &&
+      typeof module.n === "function" &&
+      typeof module.s === "function"
+    ) {
+      return module.n;
+    }
     for (const value of Object.values(module)) {
       if (typeof value !== "function") continue;
       let source = "";
@@ -4834,9 +4869,11 @@
         continue;
       }
       if (
-        source.includes("get-setting") &&
-        source.includes("key") &&
-        source.includes(".value")
+        value.constructor?.name === "AsyncFunction" &&
+        value.length <= 1 &&
+        /["'`]get-setting["'`]/.test(source) &&
+        source.includes(".value") &&
+        source.includes(".default")
       ) {
         return value;
       }
@@ -4849,7 +4886,10 @@
     for (const namePart of codexServiceTierSettingModuleParts) {
       try {
         const module = await loadCodexAppModule(namePart);
-        const reader = codexServiceTierSettingReaderFromModule(module);
+        const reader = codexServiceTierSettingReaderFromModule(
+          module,
+          namePart === "setting-storage-"
+        );
         if (reader) return reader;
         lastError = new Error(`Codex 设置读取接口不可用: ${namePart}`);
       } catch (error) {
@@ -5811,7 +5851,7 @@
           try {
             const module = await loadCodexAppModule(namePart);
             requestClientClass = codexServiceTierRequestClientClassFromModule(module);
-            modernModuleLoaded ||= namePart === codexServiceTierModernModulePart;
+            modernModuleLoaded ||= codexServiceTierDispatcherBackedModuleParts.has(namePart);
             if (requestClientClass) break;
             lastError = new Error(`Codex AppServerRequestClient unavailable: ${namePart}`);
           } catch (error) {
@@ -11509,6 +11549,8 @@
       applyServiceTierOverride: (method, params, threadIdHint = "") => applyCodexServiceTierRequestOverride(method, params, threadIdHint),
       requestOverride: (message) => codexServiceTierRequestOverride(message),
       patchRequestClientPrototype: (klass) => patchCodexServiceTierRequestClientPrototype(klass),
+      assetReferenceFromScriptText: (text, namePart) =>
+        codexAppAssetReferenceFromScriptText(text, namePart),
       readServiceTierSetting: () => getCodexServiceTierSetting(),
       installDispatcherPatch: () => installCodexServiceTierDispatcherPatch(),
       installRequestClientPatch: () => installCodexServiceTierRequestClientPatch(),

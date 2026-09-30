@@ -4796,6 +4796,7 @@ fn injection_script_exposes_fast_service_tier_control() {
     assert!(script.contains("default-service-tier"));
     assert!(script.contains("setting-storage-"));
     assert!(script.contains("vscode-api-"));
+    assert!(script.contains("app-shared-"));
     assert!(script.contains("app-initial-"));
     assert!(script.contains("thread-context-inputs-"));
     assert!(script.contains("findCodexServiceTierDispatcher"));
@@ -5117,6 +5118,28 @@ fn injection_script_applies_fast_service_tier_contract() {
     assert_eq!(
         cases["modernServiceTierModule"]["requestClientRetryPending"],
         false
+    );
+    assert_eq!(cases["sharedServiceTierModule"]["setting"], "priority");
+    assert_eq!(cases["sharedServiceTierModule"]["invalidHookCalls"], 0);
+    assert_eq!(
+        cases["sharedServiceTierModule"]["turnMessage"]["payload"]["params"]["serviceTier"],
+        "priority"
+    );
+    assert_eq!(
+        cases["sharedServiceTierModule"]["dispatcherInstalled"],
+        true
+    );
+    assert_eq!(
+        cases["sharedServiceTierModule"]["requestClientInstalled"],
+        true
+    );
+    assert_eq!(
+        cases["serviceTierAssetReferences"]["direct"],
+        "./app-shared-1234.js"
+    );
+    assert_eq!(
+        cases["serviceTierAssetReferences"]["nested"],
+        "./assets/app-shared-5678.js"
     );
 }
 
@@ -6774,6 +6797,16 @@ require(scriptPath);
 const api = window.__codexElvesServiceTierTest;
 const appServerRestartApi = window.__codexElvesAppServerRestartTest;
 const appServerRestartError = "failed to start turn: internal error; agent loop died unexpectedly";
+const serviceTierAssetReferences = {{
+  direct: api.assetReferenceFromScriptText(
+    'const chunks = ["./app-shared-1234.js"];',
+    "app-shared-",
+  ),
+  nested: api.assetReferenceFromScriptText(
+    'const chunks = ["./assets/app-shared-5678.js"];',
+    "app-shared-",
+  ),
+}};
 const transientFailedTurn = {{
   turnId: null,
   status: "failed",
@@ -7307,6 +7340,76 @@ async function runModernServiceTierModuleCase() {{
   }};
 }}
 
+async function runSharedServiceTierModuleCase() {{
+  api.resetServiceTierInstallState();
+  api.setModelCatalog({{ status: "ok", model: "gpt-5.4", default_model: "gpt-5.4", models: ["gpt-5.4"] }});
+  api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
+  let invalidHookCalls = 0;
+  const dispatched = [];
+  const dispatcher = {{
+    handlers: new Map(),
+    dispatchMessage(type, payload) {{
+      dispatched.push({{ type, payload }});
+    }},
+    handleMessage() {{}},
+  }};
+  function invalidReactSettingHook(setting) {{
+    const request = {{ method: "get-settings", params: {{ key: setting.key }} }};
+    const result = {{ value: setting.default }};
+    invalidHookCalls += 1;
+    throw new Error(`invalid hook call: ${{request.method}} ${{result.value}}`);
+  }}
+  async function sharedSettingReader(setting) {{
+    const request = {{ method: "get-setting", params: {{ key: setting.key }} }};
+    const result = {{
+      value: request.params.key === "default-service-tier" ? "priority" : setting.default,
+    }};
+    return result.value ?? setting.default;
+  }}
+  function legacyCollisionReader() {{
+    invalidHookCalls += 1;
+    throw new Error("app-shared short export collision");
+  }}
+  function legacyCollisionWriter() {{}}
+  api.setModuleLoader(async (namePart) => {{
+    if (namePart === "app-shared-") {{
+      return {{
+        n: legacyCollisionReader,
+        s: legacyCollisionWriter,
+        invalidReactSettingHook,
+        sharedSettingReader,
+        dispatcher,
+      }};
+    }}
+    if (namePart === "app-initial-") {{
+      return {{ invalidReactSettingHook }};
+    }}
+    throw new Error(`legacy module unavailable: ${{namePart}}`);
+  }});
+  const setting = await api.readServiceTierSetting();
+  await Promise.all([
+    api.installDispatcherPatch(),
+    api.installRequestClientPatch(),
+  ]);
+  dispatcher.dispatchMessage("start-turn-for-host", {{
+    conversationId: "thread-12345678",
+    params: {{
+      model: "gpt-5.4",
+      serviceTier: null,
+    }},
+  }});
+  const state = api.serviceTierInstallState();
+  const turnMessage = dispatched.find((message) => message.type === "start-turn-for-host");
+  api.setModuleLoader(null);
+  return {{
+    setting,
+    invalidHookCalls,
+    dispatched,
+    turnMessage,
+    ...state,
+  }};
+}}
+
 async function runAppServerRestartDispatchCase() {{
   const conversation = restartConversation(
     "restart-safe",
@@ -7337,6 +7440,7 @@ async function runAppServerRestartDispatchCase() {{
 (async () => {{
   const serviceTierRetry = await runServiceTierRetryCase();
   const modernServiceTierModule = await runModernServiceTierModuleCase();
+  const sharedServiceTierModule = await runSharedServiceTierModuleCase();
   const appServerRestartDispatch = await runAppServerRestartDispatchCase();
   const pluginMarketplaceRequestClientCase = await runPluginMarketplaceRequestClientCase();
   process.stdout.write(JSON.stringify({{
@@ -7364,6 +7468,8 @@ async function runAppServerRestartDispatchCase() {{
     appServerRestartDispatch,
     serviceTierRetry,
     modernServiceTierModule,
+    sharedServiceTierModule,
+    serviceTierAssetReferences,
   }}));
 }})().catch((error) => {{
   console.error(error);
