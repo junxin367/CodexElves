@@ -4203,7 +4203,7 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
     assert!(script.contains("快速打开工作区"));
     assert!(script.contains("data-codex-open-in-button"));
     assert!(script.contains("codex-open-in-menu"));
-    assert!(script.contains(r#"const codexOpenInVersion = "10";"#));
+    assert!(script.contains(r#"const codexOpenInVersion = "11";"#));
     assert!(script.contains("window.__codexElvesOpenInRuntimeVersion === codexOpenInVersion"));
     assert!(script.contains(r#"const codexDeleteStyleVersion = "93";"#));
     assert!(script.contains(r#"[data-codex-open-in-role="primary"]"#));
@@ -4491,6 +4491,7 @@ fn injection_script_open_in_reuses_native_service_without_local_detection() {
         .next()
         .expect("open in service loader should be closed");
     assert!(loader_block.contains("app-initial-"));
+    assert!(loader_block.contains("app-shared-"));
     assert!(loader_block.contains("value?.openIn"));
     assert!(loader_block.contains("[object RpcPromise]"));
     assert!(loader_block.contains("[object RpcStub]"));

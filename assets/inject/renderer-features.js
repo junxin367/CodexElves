@@ -84,7 +84,7 @@
   const codexFailureHistoryMaxEntries = 64;
   const codexManagerReactDiscoveryCooldownMs = 15000;
   const codexOpenInButtonAttribute = "data-codex-open-in-button";
-  const codexOpenInVersion = "10";
+  const codexOpenInVersion = "11";
   const codexOpenInGroupClass = "codex-open-in-group";
   const codexOpenInMenuClass = "codex-open-in-menu";
   const codexOpenInTargetsCacheLimit = 12;
@@ -26344,15 +26344,24 @@
     codexOpenInTestApi = api || null;
   }
 
-  async function codexOpenInAppInitialUrlFromScripts() {
+  async function codexOpenInAppModuleUrlFromScripts(namePart) {
     const scripts = Array.from(document.scripts || [])
       .map((script) => script.src)
       .filter((src) => src.split("?")[0].endsWith(".js"));
-    for (const src of scripts.slice(0, 8)) {
+    const escaped = namePart.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp("[\"'`]([^\"'`]*" + escaped + "[^\"'`/]*\\.js)[\"'`]");
+    const visited = new Set();
+    while (scripts.length && visited.size < 8) {
+      const src = scripts.shift();
+      if (visited.has(src)) continue;
+      visited.add(src);
       try {
         const text = await fetch(src).then((response) => (response.ok ? response.text() : ""));
-        const match = text.match(/["']([^"']*app-initial-[^"]*\.js)["']/);
+        const match = text.match(pattern);
         if (match) return new URL(match[1], src).href;
+        // 新版可能仅在 app-initial 的依赖中引用 app-shared。
+        const initial = text.match(/["'`]([^"'`]*app-initial-[^"'`/]*\.js)["'`]/);
+        if (initial) scripts.push(new URL(initial[1], src).href);
       } catch {
       }
     }
@@ -26363,26 +26372,34 @@
     if (codexOpenInTestApi?.service) return codexOpenInTestApi.service;
     if (codexOpenInServicePromise) return await codexOpenInServicePromise;
     codexOpenInServicePromise = (async () => {
-      const url = codexAppAssetUrl("app-initial-") || await codexOpenInAppInitialUrlFromScripts();
-      if (!url) throw new Error("未找到 ChatGPT/Codex 桌面应用 app-initial 模块");
-      const module = await import(url);
       let fallbackService = null;
-      for (const value of Object.values(module || {})) {
-        let service = null;
+      // 26.928 起原生服务迁移到 app-shared，旧版仍从 app-initial 导出。
+      for (const namePart of ["app-shared-", "app-initial-"]) {
+        const url = codexAppAssetUrl(namePart) || await codexOpenInAppModuleUrlFromScripts(namePart);
+        if (!url) continue;
+        let module;
         try {
-          service = value?.openIn ?? null;
+          module = await import(url);
         } catch {
           continue;
         }
-        if (!isCodexOpenInService(service)) continue;
-        let serviceTag = "";
-        try {
-          serviceTag = String(service);
-        } catch {
+        for (const value of Object.values(module || {})) {
+          let service = null;
+          try {
+            service = value?.openIn ?? null;
+          } catch {
+            continue;
+          }
+          if (!isCodexOpenInService(service)) continue;
+          let serviceTag = "";
+          try {
+            serviceTag = String(service);
+          } catch {
+          }
+          if (serviceTag === "[object RpcPromise]") continue;
+          if (serviceTag === "[object RpcStub]") return service;
+          fallbackService ||= service;
         }
-        if (serviceTag === "[object RpcPromise]") continue;
-        if (serviceTag === "[object RpcStub]") return service;
-        fallbackService ||= service;
       }
       if (fallbackService) return fallbackService;
       throw new Error("未找到 ChatGPT/Codex Open in 服务");

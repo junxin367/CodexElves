@@ -2312,6 +2312,7 @@ export function App() {
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
   const [watcher, setWatcher] = useState<WatcherResult | null>(null);
   const [update, setUpdate] = useState<UpdateResult | null>(null);
+  const checkedUpdateRef = useRef<UpdateResult | null>(null);
   const [updatePrompt, setUpdatePrompt] = useState<UpdateResult | null>(null);
   const [updateInstallActive, setUpdateInstallActive] = useState(false);
   const [scriptMarket, setScriptMarket] = useState<ScriptMarketResult | null>(null);
@@ -2949,6 +2950,15 @@ export function App() {
   };
 
   const restart = async () => {
+    const checkedUpdate = checkedUpdateRef.current;
+    if (checkedUpdate?.updateAvailable) {
+      showNotice(
+        "需要更新后才可使用",
+        `当前 CodexElves 版本 ${checkedUpdate.currentVersion} 落后于已检测到的远程版本 ${checkedUpdate.latestVersion}。请前往“关于”完成更新，并重新打开管理器后再重启 Codex。`,
+        "failed",
+      );
+      return;
+    }
     const result = await launchCommand("restart_codex_elves");
     if (result) {
       showNotice("重启 Codex", result.message, result.status);
@@ -3146,6 +3156,10 @@ export function App() {
   const checkUpdate = async (silent = false) => {
     const result = await run(() => call<UpdateResult>("check_update"));
     if (result) {
+      // 检查失败或启动安装包不能清除已检测到的版本信息。
+      if ((result.status === "ok" || result.status === "not_checked") && result.latestVersion) {
+        checkedUpdateRef.current = result;
+      }
       setUpdate(result);
       if (result.updateAvailable) {
         setUpdatePrompt(result);
