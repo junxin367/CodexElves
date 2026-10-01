@@ -494,13 +494,20 @@ async fn bridge_responses_websockets(
                         request_payload,
                         layered_compaction_options,
                         request_settings,
+                        compaction_plan,
                     ) = if let Some((payload, settings, payload_rewritten)) = payload {
                         let (
                             request_payload,
                             forwarded_payload,
                             layered_compaction_options,
-                        ) = prepare_downstream_response_create_payload_with_snapshot(&payload, &settings)
-                            .await;
+                            compaction_plan,
+                        ) = prepare_downstream_response_create_payload_with_snapshot(
+                            &payload,
+                            &settings,
+                            &relay,
+                            &request_context,
+                        )
+                        .await;
                         let message = if !payload_rewritten && forwarded_payload == payload {
                             message
                         } else {
@@ -515,12 +522,38 @@ async fn bridge_responses_websockets(
                             Some(request_payload),
                             layered_compaction_options,
                             Some(settings),
+                            compaction_plan,
                         )
                     } else {
-                        (message, None, None, None)
+                        (message, None, None, None, None)
                     };
 
                     if let Some(request_payload) = request_payload.as_ref() {
+                        if crate::layered_compaction::is_any_compaction_request(request_payload)
+                            && request_logger.has_pending_requests()
+                        {
+                            let close = Message::Close(Some(CloseFrame {
+                                code: CloseCode::Policy,
+                                reason: "compaction cannot overlap an active response".into(),
+                            }));
+                            let _ = forward_websocket_message(
+                                &mut downstream,
+                                close.clone(),
+                                "关闭本地 Responses WebSocket 超时",
+                                "关闭本地 Responses WebSocket 失败",
+                            )
+                            .await;
+                            let _ = forward_websocket_message(
+                                &mut upstream,
+                                close,
+                                "关闭 Responses WebSocket 上游超时",
+                                "关闭 Responses WebSocket 上游失败",
+                            )
+                            .await;
+                            downstream_closed = true;
+                            upstream_closed = true;
+                            break;
+                        }
                         if !request_logger.has_pending_requests() {
                             reconnect_attempts = 0;
                         }
@@ -602,15 +635,24 @@ async fn bridge_responses_websockets(
                             upstream_closed = true;
                             break;
                         }
+                        request_logger.record_independent_compaction(
+                            log_id.as_deref(),
+                            compaction_plan
+                                .as_ref()
+                                .and_then(|plan| plan.independent_compaction_model.as_deref()),
+                            compaction_plan
+                                .as_ref()
+                                .and_then(|plan| plan.independent_compaction_usage),
+                        );
                         if let Err(error) = continuation
-                            .register_request_with_settings(
+                            .register_request_with_settings_and_plan(
                                 request_payload,
                                 log_id,
                                 layered_compaction_options,
                                 request_settings
                                     .as_ref()
                                     .expect("response.create should include a settings snapshot"),
-
+                                compaction_plan,
                             )
                         {
                             let close = Message::Close(Some(CloseFrame {
@@ -1247,9 +1289,27 @@ struct ActiveWebSocketContinuation {
     fallback_response_body: Option<String>,
     continue_requests: Vec<Value>,
     before_response_body: Option<String>,
-    /// 同一会话模型的精简提示词重试请求快照。
-    compaction_retry: Option<Value>,
+    compaction_plan: Option<WebSocketCompactionPlan>,
     capacity_retry_attempts: u8,
+}
+
+#[derive(Clone)]
+struct WebSocketCompactionFallback {
+    request: Value,
+    route: crate::layered_compaction::CompactionRoute,
+    model: String,
+}
+
+#[derive(Clone)]
+struct WebSocketCompactionPlan {
+    route: crate::layered_compaction::CompactionRoute,
+    model: String,
+    original_model: String,
+    independent_compaction_model: Option<String>,
+    independent_compaction_usage: Option<crate::settings::LayeredCompactionModelUsage>,
+    retry_request: Option<Value>,
+    original_fallback: Option<WebSocketCompactionFallback>,
+    independent: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1301,12 +1361,30 @@ impl WebSocketContinuationCoordinator {
             })
         })
     }
+    #[cfg(test)]
     fn register_request_with_settings(
         &self,
         payload: &Value,
         log_id: Option<String>,
         layered_compaction_options: Option<crate::protocol_proxy::LayeredCompactionOptions>,
         settings: &crate::settings::BackendSettings,
+    ) -> anyhow::Result<()> {
+        self.register_request_with_settings_and_plan(
+            payload,
+            log_id,
+            layered_compaction_options,
+            settings,
+            None,
+        )
+    }
+
+    fn register_request_with_settings_and_plan(
+        &self,
+        payload: &Value,
+        log_id: Option<String>,
+        layered_compaction_options: Option<crate::protocol_proxy::LayeredCompactionOptions>,
+        settings: &crate::settings::BackendSettings,
+        prepared_compaction_plan: Option<WebSocketCompactionPlan>,
     ) -> anyhow::Result<()> {
         let model = payload
             .get("model")
@@ -1331,13 +1409,28 @@ impl WebSocketContinuationCoordinator {
                 crate::layered_compaction::CompactionOptions::from_settings(settings);
             compaction_options.retain_recent_round = options.enabled;
             compaction_options.retain_tokens = options.retain_tokens;
-            let retry = crate::layered_compaction::prepare_compaction_attempt_request(
-                payload,
-                kind,
-                crate::layered_compaction::CompactionRoute::for_model(model),
-                &compaction_options,
-                crate::layered_compaction::CompactionAttempt::Retry,
-            );
+            let compaction_plan = prepared_compaction_plan.unwrap_or_else(|| {
+                let route = crate::layered_compaction::CompactionRoute::for_model(model);
+                let first = crate::layered_compaction::prepare_compaction_attempt_request(
+                    payload,
+                    kind,
+                    route,
+                    &compaction_options,
+                    crate::layered_compaction::CompactionAttempt::First,
+                );
+                WebSocketCompactionPlan {
+                    route,
+                    model: model.to_string(),
+                    original_model: model.to_string(),
+                    independent_compaction_model: None,
+                    independent_compaction_usage: None,
+                    retry_request: Some(crate::layered_compaction::compaction_retry_request(
+                        &first,
+                    )),
+                    original_fallback: None,
+                    independent: false,
+                }
+            });
             state.active = Some(ActiveWebSocketContinuation {
                 mode: ActiveWebSocketMode::ValidatedCompaction {
                     kind,
@@ -1355,7 +1448,7 @@ impl WebSocketContinuationCoordinator {
                 fallback_response_body: None,
                 continue_requests: Vec::new(),
                 before_response_body: None,
-                compaction_retry: Some(retry),
+                compaction_plan: Some(compaction_plan),
                 capacity_retry_attempts: 0,
             });
             return Ok(());
@@ -1383,7 +1476,7 @@ impl WebSocketContinuationCoordinator {
             fallback_response_body: None,
             continue_requests: Vec::new(),
             before_response_body: None,
-            compaction_retry: None,
+            compaction_plan: None,
             capacity_retry_attempts: 0,
         });
         Ok(())
@@ -1611,22 +1704,31 @@ impl WebSocketContinuationCoordinator {
         let (code_prefix, label) = match mode {
             Some(ActiveWebSocketMode::ValidatedCompaction { kind, .. }) => {
                 let active = state.active.as_ref().expect("active compaction");
+                let original_model = active.original_request["model"]
+                    .as_str()
+                    .unwrap_or_default();
+                let route = active
+                    .compaction_plan
+                    .as_ref()
+                    .map(|plan| plan.route)
+                    .unwrap_or_else(|| {
+                        crate::layered_compaction::CompactionRoute::for_model(original_model)
+                    });
+                let model = active
+                    .compaction_plan
+                    .as_ref()
+                    .map(|plan| plan.model.as_str())
+                    .unwrap_or(original_model);
                 crate::layered_compaction::log_compaction_attempt(
                     "ws",
                     kind,
-                    crate::layered_compaction::CompactionRoute::for_model(
-                        active.original_request["model"]
-                            .as_str()
-                            .unwrap_or_default(),
-                    ),
+                    route,
                     if active.round == 0 {
                         crate::layered_compaction::CompactionAttempt::First
                     } else {
                         crate::layered_compaction::CompactionAttempt::Retry
                     },
-                    active.original_request["model"]
-                        .as_str()
-                        .unwrap_or_default(),
+                    model,
                     None,
                     &Err(
                         crate::layered_compaction::CompactionValidationFailure::NoTerminalResponse,
@@ -1677,6 +1779,23 @@ fn handle_validated_compaction_websocket_message(
     let malformed = payload.is_none();
     let closed = matches!(message, Message::Close(_));
     let active = state.active.as_mut().expect("active compaction");
+    if active.compaction_plan.is_none() {
+        let model = active.original_request["model"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let route = CompactionRoute::for_model(&model);
+        active.compaction_plan = Some(WebSocketCompactionPlan {
+            route,
+            model: model.clone(),
+            original_model: model,
+            independent_compaction_model: None,
+            independent_compaction_usage: None,
+            retry_request: Some(compaction_retry_request(&active.original_request)),
+            original_fallback: None,
+            independent: false,
+        });
+    }
     active.buffered_messages.push(message);
     if !terminal && !malformed {
         return Ok(WebSocketContinuationAction::Buffered);
@@ -1687,28 +1806,57 @@ fn handle_validated_compaction_websocket_message(
     } else {
         validate_compaction_sse(&source_sse)
     };
-    let model = active.original_request["model"]
-        .as_str()
+    let plan = active
+        .compaction_plan
+        .as_ref()
+        .expect("validated compaction must include a plan");
+    let event_type = payload
+        .as_ref()
+        .and_then(|payload| payload.get("type"))
+        .and_then(Value::as_str)
         .unwrap_or_default();
+    let transport_failure =
+        malformed || closed || matches!(event_type, "response.failed" | "error");
     log_compaction_attempt(
         "ws",
         kind,
-        CompactionRoute::for_model(model),
+        plan.route,
         if active.round == 0 {
             CompactionAttempt::First
         } else {
             CompactionAttempt::Retry
         },
-        model,
+        &plan.model,
         response.as_ref(),
         &verdict,
-        None,
+        transport_failure
+            .then_some(event_type)
+            .filter(|value| !value.is_empty()),
     );
     if verdict.is_err() && active.round == 0 {
-        let retry = active
-            .compaction_retry
-            .take()
-            .expect("compaction retry snapshot");
+        let plan = active
+            .compaction_plan
+            .as_mut()
+            .expect("validated compaction must include a plan");
+        let retry = if crate::protocol_proxy::compaction_second_attempt(
+            plan.independent,
+            transport_failure,
+        ) == crate::protocol_proxy::CompactionSecondAttempt::OriginalModelFallback
+        {
+            let fallback = plan
+                .original_fallback
+                .take()
+                .expect("independent compaction must retain an original-model fallback");
+            plan.route = fallback.route;
+            plan.model = fallback.model;
+            plan.independent = false;
+            plan.retry_request = None;
+            fallback.request
+        } else {
+            plan.retry_request
+                .take()
+                .expect("compaction retry snapshot")
+        };
         let request = Message::Text(serde_json::to_string(&retry)?.into());
         active.round = 1;
         active.buffered_messages.clear();
@@ -1726,10 +1874,16 @@ fn handle_validated_compaction_websocket_message(
     let active = state.active.take().expect("active compaction");
     let (result, stats) = match verdict {
         Ok(_) => {
+            let mut response = response.expect("validated response");
+            if let Some(plan) = active.compaction_plan.as_ref()
+                && plan.model != plan.original_model
+            {
+                restore_response_model(&mut response, &plan.original_model);
+            }
             let result = build_compaction_success_response(
                 &active.original_request,
                 kind,
-                response.as_ref().expect("validated response"),
+                &response,
                 &CompactionOptions {
                     retain_recent_round: layered_enabled,
                     retain_tokens,
@@ -1936,6 +2090,7 @@ struct TrackedWebSocketRequest {
     last_transport_timeout_at: Option<Instant>,
     response_id: Option<String>,
     response_model: crate::proxy_log::UpstreamResponseModelObserver,
+    cache_observer: Option<crate::compaction_cache::CacheResponseObserver>,
 }
 
 impl TrackedWebSocketRequest {
@@ -2047,6 +2202,8 @@ impl WebSocketRequestLogger {
             remote_addr: state.remote_addr.clone(),
             model: metadata.model,
             upstream_response_model: None,
+            independent_compaction_model: None,
+            independent_compaction_usage: None,
             reasoning_tokens: None,
             reasoning_effort: metadata.reasoning_effort,
             reasoning_source: metadata.reasoning_source,
@@ -2081,6 +2238,24 @@ impl WebSocketRequestLogger {
             response_body: String::new(),
             error: None,
         };
+        let cache_observer = state
+            .transport_context
+            .as_ref()
+            .and_then(|(relay, context, _)| {
+                let endpoint = state.endpoint.as_deref()?;
+                let wire_request =
+                    serde_json::from_str::<Value>(request_body).unwrap_or_else(|_| payload.clone());
+                crate::compaction_cache::CacheResponseObserver::new(
+                    relay,
+                    crate::compaction_cache::CacheProtocol::Responses,
+                    endpoint,
+                    payload,
+                    &wire_request,
+                    context,
+                    true,
+                    started_at,
+                )
+            });
         let application_started_at = state.active_order.is_empty().then_some(started_at);
         state.requests.insert(
             id.clone(),
@@ -2096,6 +2271,7 @@ impl WebSocketRequestLogger {
                 last_transport_timeout_at: None,
                 response_id: None,
                 response_model: Default::default(),
+                cache_observer,
             },
         );
         state.active_order.push_back(id.clone());
@@ -2123,6 +2299,32 @@ impl WebSocketRequestLogger {
             );
         }
         Some(id)
+    }
+
+    fn record_independent_compaction(
+        &self,
+        log_id: Option<&str>,
+        model: Option<&str>,
+        usage: Option<crate::settings::LayeredCompactionModelUsage>,
+    ) {
+        let (Some(log_id), Some(model), Some(usage)) = (
+            log_id,
+            model.map(str::trim).filter(|model| !model.is_empty()),
+            usage,
+        ) else {
+            return;
+        };
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        let Some(tracked) = state.requests.get_mut(log_id) else {
+            return;
+        };
+        tracked.record.independent_compaction_model = Some(model.to_string());
+        tracked.record.independent_compaction_usage = Some(usage);
+        let record = tracked.record.clone();
+        drop(state);
+        append_websocket_proxy_log_record(&record);
     }
 
     fn has_recorded_application_requests(&self) -> bool {
@@ -2524,6 +2726,7 @@ impl WebSocketRequestLogger {
         let terminal = is_terminal_websocket_response_event(event_type);
         let failed = matches!(event_type, "response.failed" | "error");
         let mut update = None;
+        let mut completed_cache_observer = None;
         let Ok(mut state) = self.state.lock() else {
             return;
         };
@@ -2557,6 +2760,9 @@ impl WebSocketRequestLogger {
             crate::proxy_log::append_capture(&mut tracked.response_capture, text.as_bytes());
         tracked.response_truncated |=
             crate::proxy_log::append_capture(&mut tracked.response_capture, b"\n");
+        if let Some(observer) = tracked.cache_observer.as_mut() {
+            observer.observe_json_event(&payload);
+        }
 
         if terminal {
             tracked.record.state = crate::proxy_log::ProxyRequestState::Completed;
@@ -2577,6 +2783,10 @@ impl WebSocketRequestLogger {
             tracked.record.error = websocket_response_error(&payload, event_type);
             tracked.log_after_transport_timeout("terminal_response", Some(event_type));
             update = Some(tracked.record.clone());
+            let observer = tracked.cache_observer.take();
+            if !failed {
+                completed_cache_observer = observer;
+            }
         } else if first_response_event {
             update = Some(tracked.record.clone());
         }
@@ -2589,6 +2799,9 @@ impl WebSocketRequestLogger {
             activate_next_queued_websocket_request(&mut state, Instant::now());
         }
         drop(state);
+        if let Some(observer) = completed_cache_observer {
+            observer.finish();
+        }
         if let Some(record) = update {
             append_websocket_proxy_log_record(&record);
         }
@@ -3044,10 +3257,13 @@ fn local_compaction_wait_websocket_messages(payload: &Value) -> Option<Vec<Messa
 async fn prepare_downstream_response_create_payload_with_snapshot(
     payload: &Value,
     settings: &crate::settings::BackendSettings,
+    relay: &crate::settings::RelayProfile,
+    request_context: &crate::request_headers::RequestContext,
 ) -> (
     Value,
     Value,
     Option<crate::protocol_proxy::LayeredCompactionOptions>,
+    Option<WebSocketCompactionPlan>,
 ) {
     let normalized = normalize_downstream_response_create_payload(payload);
     let normalized = if crate::layered_compaction::is_any_compaction_request(&normalized) {
@@ -3055,7 +3271,9 @@ async fn prepare_downstream_response_create_payload_with_snapshot(
     } else {
         restore_oversized_resumed_compaction_checkpoint(normalized, settings).await
     };
-    prepare_downstream_response_create_payload_with_settings(normalized, settings)
+    let (forwarded, options, plan) =
+        prepare_websocket_compaction_execution(&normalized, settings, relay, request_context);
+    (normalized, forwarded, options, plan)
 }
 
 pub(crate) fn normalize_downstream_response_create_payload(payload: &Value) -> Value {
@@ -3195,6 +3413,7 @@ async fn restore_oversized_resumed_compaction_checkpoint(
     restore.payload
 }
 
+#[cfg(test)]
 fn prepare_downstream_response_create_payload_with_settings(
     normalized: Value,
     settings: &crate::settings::BackendSettings,
@@ -3208,6 +3427,176 @@ fn prepare_downstream_response_create_payload_with_settings(
     (normalized, forwarded, options)
 }
 
+fn prepare_websocket_compaction_execution(
+    normalized: &Value,
+    settings: &crate::settings::BackendSettings,
+    relay: &crate::settings::RelayProfile,
+    request_context: &crate::request_headers::RequestContext,
+) -> (
+    Value,
+    Option<crate::protocol_proxy::LayeredCompactionOptions>,
+    Option<WebSocketCompactionPlan>,
+) {
+    use crate::layered_compaction::*;
+
+    if !settings.layered_compaction_enabled {
+        return (normalized.clone(), None, None);
+    }
+    let mode = crate::protocol_proxy::compaction_execution_mode(
+        normalized,
+        crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+    );
+    if matches!(
+        mode,
+        crate::protocol_proxy::CompactionExecutionMode::None
+            | crate::protocol_proxy::CompactionExecutionMode::NativeRemoteV2
+    ) {
+        return (normalized.clone(), None, None);
+    }
+    let kind = CompactionKind::of_request(normalized).expect("compaction request");
+    let options = CompactionOptions::from_settings(settings);
+    let original_model = normalized
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let endpoint = crate::responses_websocket::responses_websocket_url(
+        crate::responses_websocket::relay_responses_base_url(relay),
+    )
+    .unwrap_or_default();
+    let cache_probe = prepare_compaction_attempt_request(
+        normalized,
+        kind,
+        CompactionRoute::CacheReuse,
+        &options,
+        CompactionAttempt::First,
+    );
+    let cache_decision = crate::compaction_cache::lease_decision(
+        relay,
+        crate::compaction_cache::CacheProtocol::Responses,
+        &endpoint,
+        normalized,
+        &cache_probe,
+        request_context,
+    );
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "protocol_proxy.compaction_cache_lease_decision",
+        serde_json::json!({
+            "transport": "ws",
+            "relayId": relay.id,
+            "relayName": relay.name,
+            "endpoint": endpoint,
+            "protocol": crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+            "originalModel": original_model,
+            "state": cache_decision.state.as_str(),
+            "ttl": cache_decision.ttl,
+            "remainingMs": cache_decision.remaining_ms,
+            "identitySha256": cache_decision.identity_sha256,
+        }),
+    );
+
+    let original_route = if cache_decision.is_valid() {
+        CompactionRoute::CacheReuse
+    } else {
+        CompactionRoute::for_model(&original_model)
+    };
+    let original_first = prepare_compaction_attempt_request(
+        normalized,
+        kind,
+        original_route,
+        &options,
+        CompactionAttempt::First,
+    );
+    let mut forwarded = original_first.clone();
+    let mut route = original_route;
+    let mut model = original_model.clone();
+    let mut independent = false;
+    let mut independent_compaction_model = None;
+    let mut independent_compaction_usage = None;
+    let mut original_fallback = None;
+
+    if settings.should_use_independent_compaction_model(cache_decision.is_valid()) {
+        let local_first = prepare_compaction_attempt_request(
+            normalized,
+            kind,
+            CompactionRoute::CodexLocal,
+            &options,
+            CompactionAttempt::First,
+        );
+        if let Some(resolved) = crate::protocol_proxy::resolve_compaction_model_override(
+            &local_first,
+            normalized,
+            mode,
+            settings,
+            relay,
+        ) {
+            if resolved.protocol == RelayProtocol::Responses {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "protocol_proxy.compaction_model_override_applied",
+                    serde_json::json!({
+                        "transport": "ws",
+                        "relayId": relay.id,
+                        "relayName": relay.name,
+                        "originalModel": resolved.original_model,
+                        "compactionModel": resolved.compaction_model,
+                        "family": crate::model_capabilities::model_family(&resolved.original_model).as_str(),
+                        "contextWindow": resolved.context_window,
+                        "estimatedInputTokens": resolved.estimated_input_tokens,
+                        "outputReserveTokens": resolved.output_reserve_tokens,
+                        "cacheLeaseState": cache_decision.state.as_str(),
+                        "modelUsage": settings.layered_compaction_model_usage,
+                    }),
+                );
+                forwarded = resolved.request_json;
+                route = CompactionRoute::CodexLocal;
+                independent_compaction_model = Some(resolved.compaction_model.clone());
+                independent_compaction_usage = Some(settings.layered_compaction_model_usage);
+                model = resolved.compaction_model;
+                independent = true;
+                original_fallback = Some(WebSocketCompactionFallback {
+                    request: original_first,
+                    route: original_route,
+                    model: original_model.clone(),
+                });
+            } else {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "protocol_proxy.compaction_model_override_skipped",
+                    serde_json::json!({
+                        "transport": "ws",
+                        "relayId": relay.id,
+                        "relayName": relay.name,
+                        "originalModel": resolved.original_model,
+                        "compactionModel": resolved.compaction_model,
+                        "modelUsage": settings.layered_compaction_model_usage,
+                        "reason": "独立压缩模型不是 Responses 协议，现有 Responses WebSocket 连接无法安全承载，回落原模型",
+                    }),
+                );
+            }
+        }
+    }
+
+    let retry_request = compaction_retry_request(&forwarded);
+    (
+        forwarded,
+        Some(crate::protocol_proxy::LayeredCompactionOptions {
+            enabled: options.retain_recent_round,
+            retain_tokens: options.retain_tokens,
+        }),
+        Some(WebSocketCompactionPlan {
+            route,
+            model,
+            original_model,
+            independent_compaction_model,
+            independent_compaction_usage,
+            retry_request: Some(retry_request),
+            original_fallback,
+            independent,
+        }),
+    )
+}
+
+#[cfg(test)]
 fn prepare_websocket_compaction_forwarded_payload(
     normalized: &Value,
     settings: &crate::settings::BackendSettings,
@@ -3644,7 +4033,8 @@ mod tests {
         arm_upstream_failure_responses_websocket_http_fallback, is_responses_websocket_proxy_path,
         is_responses_websocket_upgrade, local_compaction_wait_websocket_messages,
         prepare_downstream_response_create_payload,
-        prepare_downstream_response_create_payload_with_settings, queue_upstream_liveness_ping,
+        prepare_downstream_response_create_payload_with_settings,
+        prepare_websocket_compaction_execution, queue_upstream_liveness_ping,
         resolve_websocket_log_id,
         should_temporarily_fallback_early_disconnect_responses_websocket_to_http,
         should_temporarily_fallback_oversized_responses_websocket_to_http,
@@ -3652,11 +4042,425 @@ mod tests {
         websocket_application_event_payload, websocket_failure_close_frame,
         websocket_idle_timeout_elapsed,
     };
-    use crate::settings::{BackendSettings, RelayProfile};
+    use crate::settings::{
+        BackendSettings, LayeredCompactionModelUsage, LayeredCompactionModels, RelayModelMapping,
+        RelayProfile, RelayProtocol,
+    };
     use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use tokio_tungstenite::tungstenite::Message;
+
+    fn compaction_relay(id: &str, models: &[(&str, RelayProtocol, &str)]) -> RelayProfile {
+        RelayProfile {
+            id: id.to_string(),
+            name: id.to_string(),
+            upstream_base_url: format!("https://{id}.example.test"),
+            api_key: format!("key-{id}"),
+            local_proxy_enabled: Some(true),
+            model_mappings: models
+                .iter()
+                .map(|(model, protocol, context_window)| RelayModelMapping {
+                    request_model: (*model).to_string(),
+                    alias: String::new(),
+                    protocol: *protocol,
+                    context_window: (*context_window).to_string(),
+                    system_prompt_override: String::new(),
+                })
+                .collect(),
+            ..RelayProfile::default()
+        }
+    }
+
+    fn independent_compaction_settings(model: &str) -> BackendSettings {
+        independent_compaction_settings_with_usage(model, LayeredCompactionModelUsage::CacheMiss)
+    }
+
+    fn independent_compaction_settings_with_usage(
+        model: &str,
+        usage: LayeredCompactionModelUsage,
+    ) -> BackendSettings {
+        BackendSettings {
+            layered_compaction_enabled: true,
+            layered_compaction_model_override_enabled: true,
+            layered_compaction_model_usage: usage,
+            layered_compaction_models: LayeredCompactionModels {
+                gpt: model.to_string(),
+                ..Default::default()
+            },
+            ..BackendSettings::default()
+        }
+    }
+
+    fn legacy_compaction_payload(model: &str, cache_key: &str) -> Value {
+        json!({
+            "type": "response.create",
+            "model": model,
+            "prompt_cache_key": cache_key,
+            "instructions": "stable system prompt",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "history" }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "You are performing a CONTEXT CHECKPOINT COMPACTION. Summarize."
+                    }]
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn websocket_unknown_cache_lease_uses_the_independent_responses_model() {
+        let relay = compaction_relay(
+            "ws-unknown-lease",
+            &[
+                ("gpt-original", RelayProtocol::Responses, "372000"),
+                ("gpt-cheap", RelayProtocol::Responses, "128000"),
+            ],
+        );
+        let settings = independent_compaction_settings("gpt-cheap");
+        let payload = legacy_compaction_payload("gpt-original", "ws-unknown-lease-key");
+        let (forwarded, options, plan) = prepare_websocket_compaction_execution(
+            &payload,
+            &settings,
+            &relay,
+            &crate::request_headers::RequestContext::default(),
+        );
+        let plan = plan.expect("local compaction should include a plan");
+
+        assert!(options.is_some());
+        assert_eq!(forwarded["model"], "gpt-cheap");
+        assert_eq!(plan.model, "gpt-cheap");
+        assert_eq!(
+            plan.independent_compaction_model.as_deref(),
+            Some("gpt-cheap")
+        );
+        assert_eq!(
+            plan.independent_compaction_usage,
+            Some(LayeredCompactionModelUsage::CacheMiss)
+        );
+        assert_eq!(
+            plan.route,
+            crate::layered_compaction::CompactionRoute::CodexLocal
+        );
+        assert!(plan.independent);
+        assert_eq!(
+            plan.original_fallback
+                .as_ref()
+                .expect("independent plan needs original fallback")
+                .model,
+            "gpt-original"
+        );
+    }
+
+    #[test]
+    fn websocket_valid_cache_lease_keeps_the_original_model_and_cache_route() {
+        let relay = compaction_relay(
+            "ws-valid-lease",
+            &[
+                ("gpt-original", RelayProtocol::Responses, "372000"),
+                ("gpt-cheap", RelayProtocol::Responses, "128000"),
+            ],
+        );
+        let settings = independent_compaction_settings("gpt-cheap");
+        let context = crate::request_headers::RequestContext::default();
+        let endpoint = crate::responses_websocket::responses_websocket_url(
+            crate::responses_websocket::relay_responses_base_url(&relay),
+        )
+        .unwrap();
+        let ordinary = json!({
+            "type": "response.create",
+            "model": "gpt-original",
+            "prompt_cache_key": "ws-valid-lease-key",
+            "instructions": "stable system prompt",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "history" }]
+            }]
+        });
+        let mut observer = crate::compaction_cache::CacheResponseObserver::new(
+            &relay,
+            crate::compaction_cache::CacheProtocol::Responses,
+            &endpoint,
+            &ordinary,
+            &ordinary,
+            &context,
+            true,
+            Instant::now(),
+        )
+        .unwrap();
+        observer.observe_json_event(&json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "usage": {
+                    "cache_creation_input_tokens": 100,
+                    "cache_ttl": "5m"
+                }
+            }
+        }));
+        observer.finish();
+
+        let payload = legacy_compaction_payload("gpt-original", "ws-valid-lease-key");
+        let (forwarded, _, plan) =
+            prepare_websocket_compaction_execution(&payload, &settings, &relay, &context);
+        let plan = plan.unwrap();
+        assert_eq!(forwarded["model"], "gpt-original");
+        assert_eq!(
+            plan.route,
+            crate::layered_compaction::CompactionRoute::CacheReuse
+        );
+        assert!(!plan.independent);
+        assert!(plan.independent_compaction_model.is_none());
+        assert!(plan.independent_compaction_usage.is_none());
+        assert!(plan.original_fallback.is_none());
+    }
+
+    #[test]
+    fn websocket_default_usage_uses_the_independent_model_with_a_valid_cache_lease() {
+        let relay = compaction_relay(
+            "ws-default-valid-lease",
+            &[
+                ("gpt-original", RelayProtocol::Responses, "372000"),
+                ("gpt-cheap", RelayProtocol::Responses, "128000"),
+            ],
+        );
+        let settings = independent_compaction_settings_with_usage(
+            "gpt-cheap",
+            LayeredCompactionModelUsage::Default,
+        );
+        let context = crate::request_headers::RequestContext::default();
+        let endpoint = crate::responses_websocket::responses_websocket_url(
+            crate::responses_websocket::relay_responses_base_url(&relay),
+        )
+        .unwrap();
+        let ordinary = json!({
+            "type": "response.create",
+            "model": "gpt-original",
+            "prompt_cache_key": "ws-default-valid-lease-key",
+            "instructions": "stable system prompt",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "history" }]
+            }]
+        });
+        let mut observer = crate::compaction_cache::CacheResponseObserver::new(
+            &relay,
+            crate::compaction_cache::CacheProtocol::Responses,
+            &endpoint,
+            &ordinary,
+            &ordinary,
+            &context,
+            true,
+            Instant::now(),
+        )
+        .unwrap();
+        observer.observe_json_event(&json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "usage": {
+                    "cache_creation_input_tokens": 100,
+                    "cache_ttl": "5m"
+                }
+            }
+        }));
+        observer.finish();
+
+        let payload = legacy_compaction_payload("gpt-original", "ws-default-valid-lease-key");
+        let (forwarded, _, plan) =
+            prepare_websocket_compaction_execution(&payload, &settings, &relay, &context);
+        let plan = plan.unwrap();
+
+        assert_eq!(forwarded["model"], "gpt-cheap");
+        assert_eq!(plan.model, "gpt-cheap");
+        assert_eq!(
+            plan.independent_compaction_model.as_deref(),
+            Some("gpt-cheap")
+        );
+        assert_eq!(
+            plan.independent_compaction_usage,
+            Some(LayeredCompactionModelUsage::Default)
+        );
+        assert!(plan.independent);
+        assert_eq!(
+            plan.original_fallback
+                .as_ref()
+                .expect("independent plan needs original fallback")
+                .route,
+            crate::layered_compaction::CompactionRoute::CacheReuse
+        );
+    }
+
+    #[test]
+    fn websocket_skips_an_independent_model_owned_by_another_protocol() {
+        let relay = compaction_relay(
+            "ws-cross-protocol",
+            &[
+                ("gpt-original", RelayProtocol::Responses, "372000"),
+                ("deepseek-chat", RelayProtocol::ChatCompletions, "128000"),
+            ],
+        );
+        let settings = independent_compaction_settings("deepseek-chat");
+        let payload = legacy_compaction_payload("gpt-original", "ws-cross-protocol-key");
+        let (forwarded, _, plan) = prepare_websocket_compaction_execution(
+            &payload,
+            &settings,
+            &relay,
+            &crate::request_headers::RequestContext::default(),
+        );
+        let plan = plan.unwrap();
+
+        assert_eq!(forwarded["model"], "gpt-original");
+        assert_eq!(plan.model, "gpt-original");
+        assert!(!plan.independent);
+        assert!(plan.independent_compaction_model.is_none());
+        assert!(plan.independent_compaction_usage.is_none());
+    }
+
+    #[test]
+    fn websocket_independent_response_restores_the_original_model_structurally() {
+        let relay = compaction_relay(
+            "ws-model-restore",
+            &[
+                ("gpt-original", RelayProtocol::Responses, "372000"),
+                ("gpt-cheap", RelayProtocol::Responses, "128000"),
+            ],
+        );
+        let settings = independent_compaction_settings("gpt-cheap");
+        let payload = legacy_compaction_payload("gpt-original", "ws-model-restore-key");
+        let (_, options, plan) = prepare_websocket_compaction_execution(
+            &payload,
+            &settings,
+            &relay,
+            &crate::request_headers::RequestContext::default(),
+        );
+        let coordinator = WebSocketContinuationCoordinator::default();
+        coordinator
+            .register_request_with_settings_and_plan(&payload, None, options, &settings, plan)
+            .unwrap();
+        let action = coordinator
+            .handle_upstream_message(Message::Text(
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp-independent",
+                        "status": "completed",
+                        "model": "gpt-cheap",
+                        "output": [{
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{ "type": "output_text", "text": "<summary>kept</summary>" }]
+                        }]
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        let WebSocketContinuationAction::Flush { messages, .. } = action else {
+            panic!("valid compaction should flush");
+        };
+        let sse = super::websocket_messages_to_responses_sse(&messages);
+        let terminal = crate::continue_thinking::extract_terminal_response_object(&sse).unwrap();
+        assert_eq!(terminal["model"], "gpt-original");
+        assert!(sse.contains("kept"));
+    }
+
+    #[test]
+    fn websocket_independent_transport_failure_uses_original_model_once() {
+        let relay = compaction_relay(
+            "ws-transport-fallback",
+            &[
+                ("gpt-original", RelayProtocol::Responses, "372000"),
+                ("gpt-cheap", RelayProtocol::Responses, "128000"),
+            ],
+        );
+        let settings = independent_compaction_settings("gpt-cheap");
+        let payload = legacy_compaction_payload("gpt-original", "ws-transport-fallback-key");
+        let (_, options, plan) = prepare_websocket_compaction_execution(
+            &payload,
+            &settings,
+            &relay,
+            &crate::request_headers::RequestContext::default(),
+        );
+        let coordinator = WebSocketContinuationCoordinator::default();
+        coordinator
+            .register_request_with_settings_and_plan(&payload, None, options, &settings, plan)
+            .unwrap();
+
+        let action = coordinator
+            .handle_upstream_message(Message::Close(None))
+            .unwrap();
+        let WebSocketContinuationAction::Continue {
+            request: Message::Text(request),
+            metadata,
+        } = action
+        else {
+            panic!("transport failure should use the only original-model fallback");
+        };
+        let request: Value = serde_json::from_str(&request).unwrap();
+        assert_eq!(request["model"], "gpt-original");
+        assert!(metadata.reconnect_upstream);
+
+        let action = coordinator
+            .handle_upstream_message(Message::Text(
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp-original-fallback",
+                        "status": "completed",
+                        "model": "gpt-original",
+                        "output": [{
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{ "type": "output_text", "text": "<summary>fallback</summary>" }]
+                        }]
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        assert!(matches!(action, WebSocketContinuationAction::Flush { .. }));
+        assert!(coordinator.state.lock().unwrap().active.is_none());
+    }
+
+    #[test]
+    fn websocket_native_remote_v2_ignores_the_independent_model_setting() {
+        let relay = compaction_relay(
+            "ws-native-v2",
+            &[
+                ("gpt-original", RelayProtocol::Responses, "372000"),
+                ("gpt-cheap", RelayProtocol::Responses, "128000"),
+            ],
+        );
+        let settings = independent_compaction_settings("gpt-cheap");
+        let payload = json!({
+            "type": "response.create",
+            "model": "gpt-original",
+            "prompt_cache_key": "ws-native-v2-key",
+            "input": [{ "type": "compaction_trigger" }]
+        });
+        let (forwarded, options, plan) = prepare_websocket_compaction_execution(
+            &payload,
+            &settings,
+            &relay,
+            &crate::request_headers::RequestContext::default(),
+        );
+        assert_eq!(forwarded, payload);
+        assert!(options.is_none());
+        assert!(plan.is_none());
+    }
 
     #[test]
     fn compaction_contract_websocket_validates_both_attempts_with_retention_on_and_off() {
@@ -4961,7 +5765,7 @@ mod tests {
                     fallback_response_body: None,
                     continue_requests: Vec::new(),
                     before_response_body: None,
-                    compaction_retry: None,
+                    compaction_plan: None,
                     capacity_retry_attempts: 0,
                 }),
                 ..Default::default()
@@ -5088,7 +5892,7 @@ mod tests {
                     fallback_response_body: None,
                     continue_requests: Vec::new(),
                     before_response_body: None,
-                    compaction_retry: None,
+                    compaction_plan: None,
                     capacity_retry_attempts: 0,
                 }),
                 ..Default::default()
@@ -5255,7 +6059,7 @@ mod tests {
                     fallback_response_body: None,
                     continue_requests: Vec::new(),
                     before_response_body: None,
-                    compaction_retry: None,
+                    compaction_plan: None,
                     capacity_retry_attempts: 0,
                 }),
                 ..Default::default()
@@ -5349,7 +6153,7 @@ mod tests {
                     fallback_response_body: None,
                     continue_requests: Vec::new(),
                     before_response_body: None,
-                    compaction_retry: None,
+                    compaction_plan: None,
                     capacity_retry_attempts: 0,
                 }),
                 ..Default::default()

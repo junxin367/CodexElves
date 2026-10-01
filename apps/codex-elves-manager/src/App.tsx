@@ -74,6 +74,7 @@ import { JsonViewer } from "@/components/JsonViewer";
 import {
   defaultModelContextWindow,
   knownModelContextWindow,
+  type ModelFamily,
 } from "@/modelContextWindows";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
@@ -185,6 +186,8 @@ type RemoteContextOptionsResult = CommandResult<{
   options: RemoteContextOption[];
 }>;
 
+type LayeredCompactionModelUsage = "cacheMiss" | "default";
+
 type BackendSettings = {
   codexAppPath: string;
   codexHomePath: string;
@@ -225,6 +228,11 @@ type BackendSettings = {
   layeredCompactionRetainRecentRoundEnabled: boolean;
   layeredCompactionRetainTokens: number;
   layeredCompactionPromptOverride: string;
+  layeredCompactionModelOverrideEnabled: boolean;
+  layeredCompactionModelUsage: LayeredCompactionModelUsage;
+  layeredCompactionModels: Record<ModelFamily, string>;
+  /** 旧版单模型字段，仅用于读取迁移。 */
+  layeredCompactionModel: string;
   launchMode: LaunchMode;
   relayBaseUrl: string;
   relayApiKey: string;
@@ -339,6 +347,11 @@ const LEGACY_MULTI_AGENT_V2_MAX_THREADS_KEY = "max_concurrent_threads_per_sessio
 const AGENTS_SECTION = "agents";
 const AGENTS_MAX_CONCURRENT_THREADS_KEY = "max_concurrent_threads_per_session";
 const DEFAULT_SUBAGENT_COUNT = 6;
+const COMPACTION_MODEL_FAMILIES: Array<{ value: ModelFamily; label: string }> = [
+  { value: "gpt", label: "GPT 会话" },
+  { value: "claude", label: "Claude 会话" },
+  { value: "other", label: "其他会话" },
+];
 const emptyContextSelection = (): RelayContextSelection => ({
   mcpServers: [],
   skills: [],
@@ -679,6 +692,10 @@ type LocalProxyLogEntry = {
   remoteAddr?: string | null;
   model?: string | null;
   upstreamResponseModel?: string | null;
+  independentCompactionModel?: string | null;
+  independentCompactionUsage?: LayeredCompactionModelUsage | null;
+  /** 旧版缓存失效压缩日志字段，仅用于兼容读取。 */
+  cacheMissCompactionModel?: string | null;
   reasoningTokens?: number | null;
   outputTokens?: number | null;
   reasoningEffort?: string | null;
@@ -962,6 +979,14 @@ const defaultSettings: BackendSettings = {
   layeredCompactionRetainRecentRoundEnabled: false,
   layeredCompactionRetainTokens: 20000,
   layeredCompactionPromptOverride: "",
+  layeredCompactionModelOverrideEnabled: false,
+  layeredCompactionModelUsage: "cacheMiss",
+  layeredCompactionModels: {
+    gpt: "",
+    claude: "",
+    other: "",
+  },
+  layeredCompactionModel: "",
   launchMode: "patch",
   relayBaseUrl: "",
   relayApiKey: "",
@@ -1517,6 +1542,11 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
       remoteAddr: `127.0.0.1:${54624 + index}`,
       model,
       upstreamResponseModel: index === 2 ? "gpt-5.6-luna" : null,
+      independentCompactionModel:
+        index === 1 ? "deepseek-v4.1-flash" : index === 3 ? "gpt-5.4-mini" : null,
+      independentCompactionUsage:
+        index === 1 ? "cacheMiss" : index === 3 ? "default" : null,
+      cacheMissCompactionModel: null,
       reasoningTokens,
       outputTokens: success ? Math.round(browserPreviewDurationMs(index) * (40 + index % 4 * 5) / 1000) : null,
       reasoningEffort: continueThinkingTriggered ? "high" : index % 3 === 1 ? "medium" : index % 3 === 2 ? "max" : null,
@@ -1524,7 +1554,8 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
       continueThinkingTriggered,
       continueThinkingRounds: continueThinkingTriggered ? 2 : 0,
       remoteCompactionTriggered,
-      compactionRequested: layeredCompactionTriggered || remoteCompactionTriggered || index === 2,
+      compactionRequested:
+        layeredCompactionTriggered || remoteCompactionTriggered || index === 2 || index === 3,
       layeredCompactionTriggered,
       layeredCompactionRetainTokens: layeredCompactionTriggered ? 20000 : null,
       layeredCompactionRetainedItems: layeredCompactionTriggered ? 6 : null,
@@ -4852,6 +4883,11 @@ function LocalProxyScreen({
                             （上游响应模型：{entry.upstreamResponseModel}）
                           </span>
                         ) : null}
+                        {formatIndependentCompactionDescription(entry) ? (
+                          <span className="proxy-compaction-model-description">
+                            {formatIndependentCompactionDescription(entry)}
+                          </span>
+                        ) : null}
                         {entry.remoteCompactionTriggered ? (
                           <span
                             aria-label="Remote Compaction V2 请求"
@@ -5070,6 +5106,11 @@ function LocalProxyLogDetailDialog({
                 {entry.model || "未知模型"}
                 {upstreamResponseModelMismatch(entry) ? (
                   <span className="proxy-upstream-model-mismatch">（上游响应模型：{entry.upstreamResponseModel}）</span>
+                ) : null}
+                {formatIndependentCompactionDescription(entry) ? (
+                  <span className="proxy-compaction-model-description">
+                    {formatIndependentCompactionDescription(entry)}
+                  </span>
                 ) : null}
               </strong>
               <span>{`${formatTime(entry.timestampMs)} · ${formatProtocolRoute(entry)}`}</span>
@@ -6128,6 +6169,51 @@ function SessionsScreen({
     setLayeredCompactionRetainTokensInput(String(form.layeredCompactionRetainTokens));
   }, [form.layeredCompactionRetainTokens]);
 
+  // 三个配置槽按源会话家族区分，但目标模型可以是当前供应商的任意模型。
+  const compactionModelOptions = useMemo<Record<ModelFamily, SelectMenuOption<string>[]>>(() => {
+    const profile = activeRelayProfile(form);
+    const options: SelectMenuOption<string>[] = [
+      { value: "", label: "使用会话原模型（不覆盖）" },
+      ...relayProfileCatalogModels(profile).map((model) => {
+        const contextWindow = relayProfileContextWindowForModel(profile, model);
+        return {
+          value: model,
+          label: contextWindow
+            ? `${model} · ${formatContextWindowCompact(contextWindow)}`
+            : `${model} · 容量未知`,
+        };
+      }),
+    ];
+    return {
+      gpt: [...options],
+      claude: [...options],
+      other: [...options],
+    };
+  }, [form]);
+  const compactionModelWarnings = useMemo(() => {
+    if (!form.layeredCompactionModelOverrideEnabled) return [];
+    const profile = activeRelayProfile(form);
+    const knownModels = new Set(relayProfileCatalogModels(profile));
+    if (COMPACTION_MODEL_FAMILIES.every(({ value: family }) => !form.layeredCompactionModels[family].trim())) {
+      return ["尚未选择独立模型，实际仍使用会话原模型"];
+    }
+    return COMPACTION_MODEL_FAMILIES.flatMap(({ value: family, label }) => {
+      const model = form.layeredCompactionModels[family].trim();
+      if (!model) return [];
+      if (!knownModels.has(model)) {
+        return [`${label}：当前供应商未配置「${model}」，将回落使用会话原模型`];
+      }
+      if (!relayProfileContextWindowForModel(profile, model)) {
+        return [`${label}：「${model}」未配置上下文容量，将回落使用会话原模型`];
+      }
+      return [];
+    });
+  }, [form]);
+  const compactionModelUsageDescription =
+    form.layeredCompactionModelUsage === "default"
+      ? "仅本地压缩生效：每次本地压缩默认使用这里选择的模型；未设置或配置无效的会话家族会使用会话原模型。原生 Remote Compaction V2 始终使用会话原模型。"
+      : "仅本地压缩生效：缓存租约有效时使用会话原模型复用缓存；缓存租约过期或未知时使用这里选择的模型。未设置或配置无效的会话家族会使用会话原模型。原生 Remote Compaction V2 始终使用会话原模型。";
+
   // 项目（cwd）筛选选项：去重后的项目路径列表，附带会话数量
   const projectOptions = useMemo(() => {
     const counts = new Map<string, number>();
@@ -6384,6 +6470,108 @@ function SessionsScreen({
                     设置
                   </Button>
                 </div>
+              </div>
+              <div className="session-context-compaction-option">
+                <div className="session-context-compaction-option-copy">
+                  <strong>独立压缩模型</strong>
+                  <small data-warning={compactionModelWarnings.length > 0 || undefined}>
+                    {compactionModelWarnings.length
+                      ? `${compactionModelWarnings.join("；")}。${compactionModelUsageDescription}`
+                      : compactionModelUsageDescription}
+                  </small>
+                </div>
+                <div className="session-context-compaction-option-control">
+                  <button
+                    aria-checked={form.layeredCompactionModelOverrideEnabled}
+                    aria-label="启用独立压缩模型"
+                    className={`context-enabled-switch ${form.layeredCompactionModelOverrideEnabled ? "active" : ""}`}
+                    disabled={!form.layeredCompactionEnabled}
+                    onClick={() => {
+                      const next = {
+                        ...form,
+                        layeredCompactionModelOverrideEnabled: !form.layeredCompactionModelOverrideEnabled,
+                      };
+                      onFormChange(next);
+                      void actions.saveSettingsValue(next, false);
+                    }}
+                    role="switch"
+                    type="button"
+                  >
+                    <span className="context-switch-track" aria-hidden="true">
+                      <span className="context-switch-thumb" />
+                    </span>
+                  </button>
+                </div>
+                {form.layeredCompactionEnabled && form.layeredCompactionModelOverrideEnabled ? (
+                  <>
+                    <div className="session-context-compaction-mode-row">
+                      <div className="session-context-compaction-mode-copy">
+                        <strong>生效方式</strong>
+                        <small>
+                          {form.layeredCompactionModelUsage === "default"
+                            ? "每次本地压缩都优先使用独立模型。"
+                            : "仅在缓存租约过期或未知时使用独立模型。"}
+                        </small>
+                      </div>
+                      <div
+                        aria-label="独立压缩模型生效方式"
+                        className="session-context-compaction-mode-switch"
+                        role="group"
+                      >
+                        {([
+                          ["cacheMiss", "缓存失效时使用"],
+                          ["default", "默认使用"],
+                        ] as const).map(([usage, label]) => (
+                          <button
+                            aria-pressed={form.layeredCompactionModelUsage === usage}
+                            className={form.layeredCompactionModelUsage === usage ? "active" : ""}
+                            key={usage}
+                            onClick={() => {
+                              const next = {
+                                ...form,
+                                layeredCompactionModelUsage: usage,
+                              };
+                              onFormChange(next);
+                              void actions.saveSettingsValue(next, false);
+                            }}
+                            type="button"
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="session-context-compaction-family-grid">
+                      {COMPACTION_MODEL_FAMILIES.map(({ value: family, label }) => (
+                        <label className="session-context-compaction-family-field" key={family}>
+                          <span>{label}</span>
+                          <SelectMenu
+                            ariaLabel={`${label}使用的上下文压缩模型`}
+                            className="session-context-compaction-model-select"
+                            menuClassName="session-context-compaction-model-menu"
+                            menuMaxWidth={260}
+                            menuMinWidth={260}
+                            onChange={(next) => {
+                              const value = {
+                                ...form,
+                                layeredCompactionModels: {
+                                  ...form.layeredCompactionModels,
+                                  [family]: next,
+                                },
+                                layeredCompactionModel: "",
+                              };
+                              onFormChange(value);
+                              void actions.saveSettingsValue(value, false);
+                            }}
+                            options={compactionModelOptions[family]}
+                            placeholder="使用会话原模型（不覆盖）"
+                            value={form.layeredCompactionModels[family]}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  </>
+                ) : null}
               </div>
             </div>
           </div>
@@ -11803,6 +11991,23 @@ function formatLayeredCompactionTitle(
   return parts.join(" · ");
 }
 
+function formatIndependentCompactionDescription(
+  entry: Pick<
+    LocalProxyLogEntry,
+    "model" | "independentCompactionModel" | "independentCompactionUsage" | "cacheMissCompactionModel"
+  >,
+) {
+  const legacyCompactionModel = entry.cacheMissCompactionModel?.trim();
+  const compactionModel = entry.independentCompactionModel?.trim() || legacyCompactionModel;
+  const usage = entry.independentCompactionUsage || (legacyCompactionModel ? "cacheMiss" : null);
+  if (!compactionModel || !usage) return "";
+  const description = usage === "default" ? "默认压缩" : "缓存失效压缩";
+  if (compactionModel.toLowerCase() === entry.model?.trim().toLowerCase()) {
+    return `（${description}）`;
+  }
+  return `（${description}：${compactionModel}）`;
+}
+
 function reasoningTokenTone(value?: number | null) {
   if (value === 516) return "low";
   if (typeof value === "number" && value > 516) return "high";
@@ -11938,6 +12143,7 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
   const activeRelayId = profiles.some((profile) => profile.id === settings.activeRelayId)
     ? settings.activeRelayId
     : profiles[0]?.id || "default";
+  const layeredCompactionModels = normalizeLayeredCompactionModels(settings);
   return syncLegacyRelayFields({
     ...defaultSettings,
     ...settings,
@@ -11962,11 +12168,31 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
       20000,
       64000,
     ),
+    layeredCompactionModelUsage:
+      settings.layeredCompactionModelUsage === "default" ? "default" : "cacheMiss",
+    layeredCompactionModels,
+    layeredCompactionModel: "",
     relayCommonConfigContents,
     relayContextConfigContents,
     relayProfiles: profiles,
     activeRelayId,
   });
+}
+
+function normalizeLayeredCompactionModels(settings: BackendSettings): Record<ModelFamily, string> {
+  const normalized: Record<ModelFamily, string> = {
+    gpt: settings.layeredCompactionModels?.gpt?.trim() || "",
+    claude: settings.layeredCompactionModels?.claude?.trim() || "",
+    other: settings.layeredCompactionModels?.other?.trim() || "",
+  };
+  if (normalized.gpt || normalized.claude || normalized.other) return normalized;
+  const legacy = settings.layeredCompactionModel?.trim() || "";
+  if (legacy) {
+    normalized.gpt = legacy;
+    normalized.claude = legacy;
+    normalized.other = legacy;
+  }
+  return normalized;
 }
 
 function clampNumber(value: number, min: number, max: number): number {

@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::settings::LayeredCompactionModelUsage;
+
 pub const MAX_CAPTURED_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_CAPTURED_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const CAPTURE_HEAD_BYTES: usize = 64 * 1024;
@@ -65,6 +67,10 @@ pub struct ProxyRequestRecord {
     pub model: Option<String>,
     #[serde(default)]
     pub upstream_response_model: Option<String>,
+    #[serde(default, alias = "cacheMissCompactionModel")]
+    pub independent_compaction_model: Option<String>,
+    #[serde(default)]
+    pub independent_compaction_usage: Option<LayeredCompactionModelUsage>,
     #[serde(default)]
     pub reasoning_tokens: Option<u64>,
     pub reasoning_effort: Option<String>,
@@ -132,6 +138,10 @@ pub struct ProxyRequestSummary {
     pub model: Option<String>,
     #[serde(default)]
     pub upstream_response_model: Option<String>,
+    #[serde(default, alias = "cacheMissCompactionModel")]
+    pub independent_compaction_model: Option<String>,
+    #[serde(default)]
+    pub independent_compaction_usage: Option<LayeredCompactionModelUsage>,
     #[serde(default)]
     pub reasoning_tokens: Option<u64>,
     #[serde(default)]
@@ -204,6 +214,8 @@ pub struct RequestMetadata {
     pub compaction_requested: bool,
     pub model: Option<String>,
     pub upstream_response_model: Option<String>,
+    pub independent_compaction_model: Option<String>,
+    pub independent_compaction_usage: Option<LayeredCompactionModelUsage>,
     pub reasoning_effort: Option<String>,
     pub reasoning_source: Option<String>,
     pub service_tier: Option<String>,
@@ -221,6 +233,8 @@ impl From<&ProxyRequestRecord> for ProxyRequestSummary {
             remote_addr: record.remote_addr.clone(),
             model: record.model.clone(),
             upstream_response_model: record.upstream_response_model.clone(),
+            independent_compaction_model: record.independent_compaction_model.clone(),
+            independent_compaction_usage: record.independent_compaction_usage,
             reasoning_tokens: record
                 .reasoning_tokens
                 .or_else(|| infer_reasoning_tokens_for_summary(record)),
@@ -396,6 +410,8 @@ pub fn extract_request_metadata(request_json: Option<&Value>) -> RequestMetadata
         compaction_requested: request_json.is_some_and(request_uses_compaction),
         model,
         upstream_response_model: None,
+        independent_compaction_model: None,
+        independent_compaction_usage: None,
         reasoning_effort,
         reasoning_source,
         service_tier,
@@ -2328,6 +2344,10 @@ data: [DONE]
             remote_addr: Some("127.0.0.1:1".to_string()),
             model: Some("gpt-5.4".to_string()),
             upstream_response_model: Some("gpt-5.6-luna".to_string()),
+            independent_compaction_model: Some("deepseek-v4.1-flash".to_string()),
+            independent_compaction_usage: Some(
+                crate::settings::LayeredCompactionModelUsage::Default,
+            ),
             reasoning_tokens: Some(516),
             reasoning_effort: Some("medium".to_string()),
             reasoning_source: Some("reasoning.effort".to_string()),
@@ -2371,10 +2391,36 @@ data: [DONE]
             found.upstream_response_model.as_deref(),
             Some("gpt-5.6-luna")
         );
+        assert_eq!(
+            found.independent_compaction_model.as_deref(),
+            Some("deepseek-v4.1-flash")
+        );
+        assert_eq!(
+            found.independent_compaction_usage,
+            Some(crate::settings::LayeredCompactionModelUsage::Default)
+        );
         assert_eq!(found.transport, super::ProxyRequestTransport::Http);
         assert_eq!(found.reasoning_tokens, Some(516));
         assert_eq!(found.request_body, "{}");
         assert_eq!(found.response_body, "{}");
+
+        let mut legacy_json = serde_json::to_value(&record).expect("serialize proxy log record");
+        let legacy_object = legacy_json
+            .as_object_mut()
+            .expect("proxy log record should serialize as an object");
+        let legacy_model = legacy_object
+            .remove("independentCompactionModel")
+            .expect("new independent model field");
+        legacy_object.remove("independentCompactionUsage");
+        legacy_object.insert("cacheMissCompactionModel".to_string(), legacy_model);
+        let legacy_record: ProxyRequestRecord =
+            serde_json::from_value(legacy_json).expect("deserialize legacy proxy log record");
+        assert_eq!(
+            legacy_record.independent_compaction_model.as_deref(),
+            Some("deepseek-v4.1-flash")
+        );
+        assert_eq!(legacy_record.independent_compaction_usage, None);
+
         let index_text = std::fs::read_to_string(&path).expect("read proxy log index");
         assert!(index_text.starts_with(super::PROXY_INDEX_HEADER));
         assert!(!index_text.contains("requestBody"));
@@ -2391,6 +2437,14 @@ data: [DONE]
         assert_eq!(
             summaries[0].upstream_response_model.as_deref(),
             Some("gpt-5.6-luna")
+        );
+        assert_eq!(
+            summaries[0].independent_compaction_model.as_deref(),
+            Some("deepseek-v4.1-flash")
+        );
+        assert_eq!(
+            summaries[0].independent_compaction_usage,
+            Some(crate::settings::LayeredCompactionModelUsage::Default)
         );
         assert_eq!(
             summaries.first().map(|entry| entry.id.as_str()),
@@ -2718,6 +2772,8 @@ data: [DONE]
             remote_addr: Some("127.0.0.1:1".to_string()),
             model: Some("glm-5.2".to_string()),
             upstream_response_model: None,
+            independent_compaction_model: None,
+            independent_compaction_usage: None,
             reasoning_tokens: None,
             reasoning_effort: None,
             reasoning_source: None,

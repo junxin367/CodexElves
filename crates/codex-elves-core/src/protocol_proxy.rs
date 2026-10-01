@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use serde_json::{Map, Value, json};
@@ -1195,10 +1195,173 @@ pub(crate) enum CompactionExecutionMode {
     NativeRemoteV2,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompactionSecondAttempt {
+    SameModelRetry,
+    OriginalModelFallback,
+}
+
+pub(crate) fn compaction_second_attempt(
+    independent_model: bool,
+    transport_failure: bool,
+) -> CompactionSecondAttempt {
+    if independent_model && transport_failure {
+        CompactionSecondAttempt::OriginalModelFallback
+    } else {
+        CompactionSecondAttempt::SameModelRetry
+    }
+}
+
 impl CompactionExecutionMode {
+    fn allows_model_override(self) -> bool {
+        matches!(self, Self::LegacyLocal | Self::BridgedRemoteV2)
+    }
+
     pub(crate) fn bridges_remote_v2(self) -> bool {
         matches!(self, Self::BridgedRemoteV2)
     }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedCompactionModelOverride {
+    pub request_json: Value,
+    pub original_model: String,
+    pub compaction_model: String,
+    pub protocol: crate::settings::RelayProtocol,
+    pub context_window: u64,
+    pub estimated_input_tokens: u64,
+    pub output_reserve_tokens: u64,
+}
+
+/// 解析本次本地压缩应使用的独立模型。原生 Remote Compaction V2 永远不会进入这里。
+pub(crate) fn resolve_compaction_model_override(
+    request_json: &Value,
+    original_request_json: &Value,
+    execution_mode: CompactionExecutionMode,
+    settings: &crate::settings::BackendSettings,
+    relay: &crate::settings::RelayProfile,
+) -> Option<ResolvedCompactionModelOverride> {
+    if !settings.layered_compaction_enabled
+        || !settings.layered_compaction_model_override_enabled
+        || !execution_mode.allows_model_override()
+    {
+        return None;
+    }
+    let original_model = original_request_json
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if original_model.is_empty() {
+        return None;
+    }
+    let family = crate::model_capabilities::model_family(original_model);
+    let catalog_model = settings.compaction_model_for_family(family).trim();
+    if catalog_model.is_empty() || catalog_model == original_model {
+        return None;
+    }
+    let protocol = match relay.resolve_protocol_for_model(catalog_model) {
+        Ok(protocol) => protocol,
+        Err(_) => {
+            log_compaction_model_override_skipped(
+                relay,
+                original_model,
+                catalog_model,
+                family.as_str(),
+                "当前供应商没有该模型的协议归属，回落原模型压缩",
+                None,
+            );
+            return None;
+        }
+    };
+    let Some(context_window) = relay.context_window_for_model(catalog_model) else {
+        log_compaction_model_override_skipped(
+            relay,
+            original_model,
+            catalog_model,
+            family.as_str(),
+            "目标模型上下文容量未知，回落原模型压缩",
+            None,
+        );
+        return None;
+    };
+    let request_model = relay.request_model_for_catalog_model(catalog_model);
+    let candidate = crate::layered_compaction::apply_confirmed_compaction_model_override(
+        request_json,
+        &request_model,
+    );
+    let estimated_input_tokens =
+        crate::layered_compaction::estimate_compaction_request_tokens(&candidate);
+    let output_reserve_tokens =
+        crate::layered_compaction::compaction_output_reserve_tokens(&candidate);
+    if output_reserve_tokens >= context_window {
+        log_compaction_model_override_skipped(
+            relay,
+            original_model,
+            catalog_model,
+            family.as_str(),
+            "输出预留已占满目标模型上下文，回落原模型压缩",
+            Some(json!({
+                "estimatedInputTokens": estimated_input_tokens,
+                "outputReserveTokens": output_reserve_tokens,
+                "contextWindow": context_window
+            })),
+        );
+        return None;
+    }
+    if estimated_input_tokens.saturating_add(output_reserve_tokens) > context_window {
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "protocol_proxy.compaction_model_capacity_estimate_exceeded",
+            json!({
+                "relayId": relay.id,
+                "relayName": relay.name,
+                "originalModel": original_model,
+                "compactionModel": catalog_model,
+                "family": family.as_str(),
+                "estimatedInputTokens": estimated_input_tokens,
+                "outputReserveTokens": output_reserve_tokens,
+                "contextWindow": context_window,
+                "reason": "输入容量为本地粗估，继续尝试独立压缩模型；上游拒绝后回退原模型"
+            }),
+        );
+    }
+    Some(ResolvedCompactionModelOverride {
+        request_json: candidate,
+        original_model: original_model.to_string(),
+        compaction_model: request_model,
+        protocol,
+        context_window,
+        estimated_input_tokens,
+        output_reserve_tokens,
+    })
+}
+
+fn log_compaction_model_override_skipped(
+    relay: &crate::settings::RelayProfile,
+    original_model: &str,
+    compaction_model: &str,
+    family: &str,
+    reason: &str,
+    capacity: Option<Value>,
+) {
+    let mut detail = json!({
+        "relayId": relay.id,
+        "relayName": relay.name,
+        "originalModel": original_model,
+        "compactionModel": compaction_model,
+        "family": family,
+        "reason": reason
+    });
+    if let Some(capacity) = capacity
+        && let Some(object) = detail.as_object_mut()
+        && let Some(capacity) = capacity.as_object()
+    {
+        object.extend(capacity.clone());
+    }
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "protocol_proxy.compaction_model_override_skipped",
+        detail,
+    );
 }
 
 pub struct UpstreamProxyResponse {
@@ -1214,8 +1377,13 @@ pub struct UpstreamProxyResponse {
     pub response: Option<reqwest::Response>,
     pub body_override: Option<Vec<u8>>,
     pub(crate) layered_compaction_options: LayeredCompactionOptions,
+    /// 本次本地压缩选中的独立模型；用于请求日志展示。
+    pub(crate) independent_compaction_model: Option<String>,
+    /// 独立模型为何生效；旧日志缺失时按缓存失效模式解释。
+    pub(crate) independent_compaction_usage: Option<crate::settings::LayeredCompactionModelUsage>,
     /// 本次请求是否已按会话原模型/原协议冻结为 Remote Compaction V2 本地兼容桥。
     pub(crate) bridge_remote_compaction_v2: bool,
+    pub(crate) cache_observer: Option<crate::compaction_cache::CacheResponseObserver>,
 }
 
 #[derive(Debug, Clone)]
@@ -1248,6 +1416,18 @@ pub enum UpstreamResponseProtocol {
     Responses,
     ChatCompletions,
     Anthropic,
+}
+
+fn cache_protocol_for_response_protocol(
+    protocol: UpstreamResponseProtocol,
+) -> crate::compaction_cache::CacheProtocol {
+    match protocol {
+        UpstreamResponseProtocol::Responses => crate::compaction_cache::CacheProtocol::Responses,
+        UpstreamResponseProtocol::ChatCompletions => {
+            crate::compaction_cache::CacheProtocol::ChatCompletions
+        }
+        UpstreamResponseProtocol::Anthropic => crate::compaction_cache::CacheProtocol::Anthropic,
+    }
 }
 
 /// 仅 `gpt-* + Responses` 直接使用原生 Remote Compaction V2。
@@ -1387,26 +1567,48 @@ impl UpstreamProxyResponse {
     }
 
     pub async fn into_body_bytes(mut self) -> anyhow::Result<Vec<u8>> {
-        if let Some(body) = self.body_override.take() {
-            return Ok(body);
-        }
-        let Some(response) = self.response.take() else {
-            anyhow::bail!("上游响应体已被本地代理消费");
+        let body = if let Some(body) = self.body_override.take() {
+            body
+        } else {
+            let Some(response) = self.response.take() else {
+                anyhow::bail!("上游响应体已被本地代理消费");
+            };
+            response.bytes().await?.to_vec()
         };
-        Ok(response.bytes().await?.to_vec())
+        if self.is_success()
+            && let Some(mut observer) = self.cache_observer.take()
+        {
+            observer.observe_bytes(&body);
+            observer.finish();
+        }
+        Ok(body)
     }
 
     pub async fn into_body_bytes_with_idle_timeout(
         mut self,
         idle_timeout: Duration,
     ) -> anyhow::Result<Vec<u8>> {
-        if let Some(body) = self.body_override.take() {
-            return Ok(body);
-        }
-        let Some(response) = self.response.take() else {
-            anyhow::bail!("上游响应体已被本地代理消费");
+        let body = if let Some(body) = self.body_override.take() {
+            body
+        } else {
+            let Some(response) = self.response.take() else {
+                anyhow::bail!("上游响应体已被本地代理消费");
+            };
+            read_upstream_response_body_with_idle_timeout(response, idle_timeout).await?
         };
-        read_upstream_response_body_with_idle_timeout(response, idle_timeout).await
+        if self.is_success()
+            && let Some(mut observer) = self.cache_observer.take()
+        {
+            observer.observe_bytes(&body);
+            observer.finish();
+        }
+        Ok(body)
+    }
+
+    pub(crate) fn take_cache_observer(
+        &mut self,
+    ) -> Option<crate::compaction_cache::CacheResponseObserver> {
+        self.cache_observer.take()
     }
 
     pub fn into_response(mut self) -> anyhow::Result<reqwest::Response> {
@@ -2058,6 +2260,17 @@ async fn execute_validated_compaction(
     header_timeout: Option<Duration>,
 ) -> anyhow::Result<UpstreamProxyResponse> {
     use crate::layered_compaction::*;
+
+    #[derive(Clone)]
+    struct AttemptPlan {
+        request: Value,
+        route: CompactionRoute,
+        protocol: UpstreamResponseProtocol,
+        model: String,
+        cache_reference: bool,
+        restore_model: Option<String>,
+    }
+
     let options = CompactionOptions::from_settings(&settings);
     let relay = crate::relay_rotation::select_relay_for_request(
         &settings,
@@ -2067,45 +2280,144 @@ async fn execute_validated_compaction(
     )?;
     let source = apply_system_prompt_override_to_responses_request(original, &relay);
     let source = rewrite_catalog_model_to_request_model(&source, &relay);
-    let fallback_relays = crate::relay_rotation::fallback_relays_after(&settings, &relay.id)?;
-    let model = source["model"].as_str().unwrap_or_default();
-    let route = CompactionRoute::for_model(model);
-    let conversion_context = prepare_compaction_attempt_request(
+    let source_model = source["model"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let original_protocol = responses_proxy_target_protocol(&relay, &source)?;
+    let execution_mode = compaction_execution_mode(&source, original_protocol);
+    let is_stream = original["stream"].as_bool().unwrap_or(false);
+
+    // 只有与普通请求完全相同的缓存身份仍处于可信租约内，才走原模型缓存复用。
+    let cache_probe_request = prepare_compaction_attempt_request(
         &source,
         kind,
-        route,
+        CompactionRoute::CacheReuse,
         &options,
         CompactionAttempt::First,
     );
-    let is_stream = original["stream"].as_bool().unwrap_or(false);
+    let cache_probe_diagnostic_id = next_protocol_proxy_diagnostic_id();
+    let cache_probe_wire = responses_upstream_request_for_protocol(
+        &cache_probe_request,
+        original_protocol,
+        is_stream,
+        &cache_probe_diagnostic_id,
+    )?;
+    let original_endpoint = upstream_endpoint_for_protocol(&relay, original_protocol);
+    let cache_decision = crate::compaction_cache::lease_decision(
+        &relay,
+        cache_protocol_for_response_protocol(original_protocol),
+        &original_endpoint,
+        &source,
+        &cache_probe_wire,
+        request_context,
+    );
+    let _ = crate::diagnostic_log::append_diagnostic_log(
+        "protocol_proxy.compaction_cache_lease_decision",
+        json!({
+            "transport": "http",
+            "relayId": relay.id,
+            "relayName": relay.name,
+            "endpoint": original_endpoint,
+            "protocol": original_protocol,
+            "originalModel": source_model,
+            "state": cache_decision.state.as_str(),
+            "ttl": cache_decision.ttl,
+            "remainingMs": cache_decision.remaining_ms,
+            "identitySha256": cache_decision.identity_sha256,
+        }),
+    );
+
+    let original_route = if cache_decision.is_valid() {
+        CompactionRoute::CacheReuse
+    } else {
+        CompactionRoute::for_model(&source_model)
+    };
+    let original_first_request = prepare_compaction_attempt_request(
+        &source,
+        kind,
+        original_route,
+        &options,
+        CompactionAttempt::First,
+    );
+    let original_plan = AttemptPlan {
+        request: original_first_request,
+        route: original_route,
+        protocol: original_protocol,
+        model: source_model.clone(),
+        cache_reference: original_route == CompactionRoute::CacheReuse,
+        restore_model: None,
+    };
+
+    let mut independent_selected = false;
+    let mut independent_compaction_model = None;
+    let mut independent_compaction_usage = None;
+    let mut plan = original_plan.clone();
+    if settings.should_use_independent_compaction_model(cache_decision.is_valid()) {
+        let local_request = prepare_compaction_attempt_request(
+            &source,
+            kind,
+            CompactionRoute::CodexLocal,
+            &options,
+            CompactionAttempt::First,
+        );
+        if let Some(resolved) = resolve_compaction_model_override(
+            &local_request,
+            original,
+            execution_mode,
+            &settings,
+            &relay,
+        ) {
+            independent_selected = true;
+            independent_compaction_model = Some(resolved.compaction_model.clone());
+            independent_compaction_usage = Some(settings.layered_compaction_model_usage);
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "protocol_proxy.compaction_model_override_applied",
+                json!({
+                    "transport": "http",
+                    "relayId": relay.id,
+                    "relayName": relay.name,
+                    "originalModel": resolved.original_model,
+                    "compactionModel": resolved.compaction_model,
+                    "family": crate::model_capabilities::model_family(&resolved.original_model).as_str(),
+                    "contextWindow": resolved.context_window,
+                    "estimatedInputTokens": resolved.estimated_input_tokens,
+                    "outputReserveTokens": resolved.output_reserve_tokens,
+                    "cacheLeaseState": cache_decision.state.as_str(),
+                    "modelUsage": settings.layered_compaction_model_usage.as_str(),
+                }),
+            );
+            plan = AttemptPlan {
+                request: resolved.request_json,
+                route: CompactionRoute::CodexLocal,
+                protocol: response_protocol_for_relay_protocol(resolved.protocol),
+                model: resolved.compaction_model,
+                cache_reference: false,
+                restore_model: Some(resolved.original_model),
+            };
+        }
+    }
+
     let mut last_upstream = None;
     let mut final_response = None;
     for attempt in CompactionAttempt::ALL {
-        // 最多一次重试；聚合供应商可以换候选，但模型和已冻结的历史不变。
-        let attempt_relay = if attempt == CompactionAttempt::Retry {
-            fallback_relays.first().unwrap_or(&relay)
-        } else {
-            &relay
-        };
-        let protocol = responses_proxy_target_protocol(attempt_relay, &source)?;
         let client = crate::http_client::proxied_client(&effective_user_agent(
-            &attempt_relay.user_agent,
+            &relay.user_agent,
             request_context.user_agent(),
         ))?;
-        let prepared = prepare_compaction_attempt_request(&source, kind, route, &options, attempt);
         let diagnostic_id = next_protocol_proxy_diagnostic_id();
         let sent = send_responses_upstream_request(
             &client,
-            attempt_relay,
-            &prepared,
-            protocol,
+            &relay,
+            &plan.request,
+            plan.protocol,
             is_stream,
             &diagnostic_id,
             header_timeout,
             request_context,
             false,
-            (route == CompactionRoute::CacheReuse && attempt == CompactionAttempt::First)
-                .then_some(&source),
+            plan.cache_reference.then_some(&source),
         )
         .await;
         let upstream = sent.map(|(raw, wire, _)| UpstreamProxyResponse {
@@ -2122,20 +2434,24 @@ async fn execute_validated_compaction(
                     .get(reqwest::header::CONTENT_TYPE)
                     .and_then(|v| v.to_str().ok())
                     .is_some_and(|v| v.contains("text/event-stream")),
-            response_protocol: protocol,
+            response_protocol: plan.protocol,
             diagnostic_id,
-            relay_id: Some(attempt_relay.id.clone()),
-            relay_name: Some(attempt_relay.name.clone()),
-            endpoint: Some(upstream_endpoint_for_protocol(attempt_relay, protocol)),
+            relay_id: Some(relay.id.clone()),
+            relay_name: Some(relay.name.clone()),
+            endpoint: Some(upstream_endpoint_for_protocol(&relay, plan.protocol)),
             request_body: serialized_proxy_request_body(&wire),
             response: Some(raw),
             body_override: None,
             layered_compaction_options: LayeredCompactionOptions::default(),
+            independent_compaction_model: None,
+            independent_compaction_usage: None,
             bridge_remote_compaction_v2: false,
+            cache_observer: None,
         });
         let mut response = None;
         let mut decoded_verdict = None;
         let mut error_detail = None;
+        let mut transport_failure = false;
         match upstream {
             Ok(mut upstream) => {
                 let bytes = if let Some(bytes) = upstream.body_override.take() {
@@ -2143,7 +2459,7 @@ async fn execute_validated_compaction(
                 } else if let Some(raw) = upstream.response.take() {
                     read_upstream_response_body_with_idle_timeout(
                         raw,
-                        stream_idle_timeout_for_request(Some(&source)),
+                        stream_idle_timeout_for_request(Some(&plan.request)),
                     )
                     .await
                 } else {
@@ -2151,8 +2467,7 @@ async fn execute_validated_compaction(
                 };
                 match bytes {
                     Ok(bytes) if upstream.is_success() => {
-                        let decoded =
-                            decode_compaction_response(&upstream, &bytes, &conversion_context);
+                        let decoded = decode_compaction_response(&upstream, &bytes, &plan.request);
                         match decoded {
                             Ok((value, verdict)) => {
                                 response = Some(value);
@@ -2161,12 +2476,21 @@ async fn execute_validated_compaction(
                             Err(error) => error_detail = Some(error.to_string()),
                         }
                     }
-                    Ok(_) => error_detail = Some(format!("upstream_http_{}", upstream.status_code)),
-                    Err(error) => error_detail = Some(error.to_string()),
+                    Ok(_) => {
+                        transport_failure = true;
+                        error_detail = Some(format!("upstream_http_{}", upstream.status_code));
+                    }
+                    Err(error) => {
+                        transport_failure = true;
+                        error_detail = Some(error.to_string());
+                    }
                 }
                 last_upstream = Some(upstream);
             }
-            Err(error) => error_detail = Some(error.to_string()),
+            Err(error) => {
+                transport_failure = true;
+                error_detail = Some(error.to_string());
+            }
         }
         let verdict = decoded_verdict
             .or_else(|| response.as_ref().map(validate_compaction_response))
@@ -2182,15 +2506,20 @@ async fn execute_validated_compaction(
         log_compaction_attempt(
             "http",
             kind,
-            route,
+            plan.route,
             attempt,
-            model,
+            &plan.model,
             response.as_ref(),
             &verdict,
             error_detail.as_deref(),
         );
         match verdict {
             Ok(_) => {
+                if let Some(original_model) = plan.restore_model.as_deref()
+                    && let Some(response) = response.as_mut()
+                {
+                    restore_response_model(response, original_model);
+                }
                 final_response = Some(
                     build_compaction_success_response(
                         original,
@@ -2210,7 +2539,18 @@ async fn execute_validated_compaction(
                     failure,
                 ));
             }
-            Err(_) => {}
+            Err(_) => {
+                if compaction_second_attempt(independent_selected, transport_failure)
+                    == CompactionSecondAttempt::OriginalModelFallback
+                {
+                    // 独立模型网络/HTTP 失败时，第二次也是最后一次机会：回落原模型。
+                    plan = original_plan.clone();
+                } else {
+                    // 结构或摘要校验失败时保持同一模型，只切换 D 重试提示。
+                    plan.request = compaction_retry_request(&plan.request);
+                    plan.cache_reference = false;
+                }
+            }
         }
     }
     let response = final_response.expect("two compaction attempts always terminate");
@@ -2227,7 +2567,10 @@ async fn execute_validated_compaction(
         response: None,
         body_override: None,
         layered_compaction_options: LayeredCompactionOptions::default(),
+        independent_compaction_model: None,
+        independent_compaction_usage: None,
         bridge_remote_compaction_v2: false,
+        cache_observer: None,
     });
     upstream.status_code = 200;
     upstream.is_stream = is_stream;
@@ -2245,6 +2588,8 @@ async fn execute_validated_compaction(
     });
     // 这里已经校验并封装；launcher/HTTP handler 不得再次解析成摘要。
     upstream.layered_compaction_options = LayeredCompactionOptions::default();
+    upstream.independent_compaction_model = independent_compaction_model;
+    upstream.independent_compaction_usage = independent_compaction_usage;
     upstream.bridge_remote_compaction_v2 = false;
     Ok(upstream)
 }
@@ -2369,7 +2714,10 @@ async fn open_responses_proxy_request_once(
                         }
                     }))?),
                     layered_compaction_options: LayeredCompactionOptions::default(),
+                    independent_compaction_model: None,
+                    independent_compaction_usage: None,
                     bridge_remote_compaction_v2: false,
+                    cache_observer: None,
                 });
             }
             // Responses 上游的能力由上游决定；不按模型名替换 harness 的 V2 请求。
@@ -2458,6 +2806,7 @@ async fn open_responses_proxy_request_once(
             &relay.user_agent,
             request_context.user_agent(),
         ))?;
+        let mut cache_started_at = Instant::now();
         let (upstream, upstream_request_json, used_ws) = match send_responses_upstream_request(
             &client,
             &relay,
@@ -2513,6 +2862,7 @@ async fn open_responses_proxy_request_once(
                     .context(failure_context);
             }
         };
+        let mut cache_wire_request = upstream_request_json.clone();
         if used_ws {
             endpoint = crate::responses_websocket::responses_websocket_url(
                 crate::responses_websocket::relay_responses_base_url(&relay),
@@ -2617,6 +2967,7 @@ async fn open_responses_proxy_request_once(
                     // 仅重试当前被明确拒绝的请求；不更改模型协议配置或全局路由。
                     response_protocol = retry_protocol;
                     endpoint = upstream_endpoint_for_protocol(&relay, response_protocol);
+                    cache_started_at = Instant::now();
                     let retry_result = match response_protocol {
                         UpstreamResponseProtocol::ChatCompletions => {
                             send_chat_completions_request(
@@ -2682,6 +3033,7 @@ async fn open_responses_proxy_request_once(
                         .unwrap_or("")
                         .to_string();
                     logged_request_body = serialized_proxy_request_body(&retry_request);
+                    cache_wire_request = retry_request;
                     upstream_response = Some(retry);
                 } else {
                     body_override = Some(error_body);
@@ -2796,9 +3148,26 @@ async fn open_responses_proxy_request_once(
             },
         );
         if (200..300).contains(&status_code) || !has_more_candidates {
+            let response_is_stream =
+                upstream_is_stream || content_type.contains("text/event-stream");
+            let cache_observer = (200..300)
+                .contains(&status_code)
+                .then(|| {
+                    crate::compaction_cache::CacheResponseObserver::new(
+                        &relay,
+                        cache_protocol_for_response_protocol(response_protocol),
+                        &endpoint,
+                        &request_json,
+                        &cache_wire_request,
+                        request_context,
+                        response_is_stream,
+                        cache_started_at,
+                    )
+                })
+                .flatten();
             return Ok(UpstreamProxyResponse {
                 status_code,
-                is_stream: upstream_is_stream || content_type.contains("text/event-stream"),
+                is_stream: response_is_stream,
                 content_type,
                 response_protocol,
                 diagnostic_id,
@@ -2809,7 +3178,10 @@ async fn open_responses_proxy_request_once(
                 response: upstream_response,
                 body_override,
                 layered_compaction_options,
+                independent_compaction_model: None,
+                independent_compaction_usage: None,
                 bridge_remote_compaction_v2: compaction_execution_mode.bridges_remote_v2(),
+                cache_observer,
             });
         }
         let _ = crate::diagnostic_log::append_diagnostic_log(
@@ -3112,7 +3484,10 @@ pub async fn open_models_proxy_request(
         response: Some(upstream),
         body_override: None,
         layered_compaction_options: LayeredCompactionOptions::from_settings(&settings),
+        independent_compaction_model: None,
+        independent_compaction_usage: None,
         bridge_remote_compaction_v2: false,
+        cache_observer: None,
     })
 }
 
@@ -3172,7 +3547,10 @@ pub async fn open_chat_completions_proxy_request(
         response: Some(upstream),
         body_override: None,
         layered_compaction_options: LayeredCompactionOptions::from_settings(&settings),
+        independent_compaction_model: None,
+        independent_compaction_usage: None,
         bridge_remote_compaction_v2: false,
+        cache_observer: None,
     })
 }
 
@@ -11934,6 +12312,612 @@ mod remote_compaction_v2_tests {
                 .as_str()
                 .is_some_and(|text| text
                     .starts_with(crate::layered_compaction::COMPACTION_INSTRUCTION_PREFIX))
+        );
+    }
+}
+
+#[cfg(test)]
+mod compaction_model_override_tests {
+    use super::{
+        CompactionExecutionMode, CompactionSecondAttempt, compaction_second_attempt,
+        execute_validated_compaction, resolve_compaction_model_override, responses_url,
+    };
+    use crate::settings::{
+        BackendSettings, LayeredCompactionModelUsage, LayeredCompactionModels, RelayModelMapping,
+        RelayProfile, RelayProtocol,
+    };
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    fn compaction_request(model: &str, history: &str) -> Value {
+        json!({
+            "model": model,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": history }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "You are performing a CONTEXT CHECKPOINT COMPACTION. Summarize."
+                    }]
+                }
+            ]
+        })
+    }
+
+    fn relay_with_models(models: &[(&str, RelayProtocol, &str)]) -> RelayProfile {
+        RelayProfile {
+            id: "relay-test".to_string(),
+            name: "Relay Test".to_string(),
+            model_mappings: models
+                .iter()
+                .map(|(model, protocol, context_window)| RelayModelMapping {
+                    request_model: (*model).to_string(),
+                    alias: String::new(),
+                    protocol: *protocol,
+                    context_window: (*context_window).to_string(),
+                    system_prompt_override: String::new(),
+                })
+                .collect(),
+            ..RelayProfile::default()
+        }
+    }
+
+    fn settings_with_models(models: LayeredCompactionModels) -> BackendSettings {
+        BackendSettings {
+            layered_compaction_enabled: true,
+            layered_compaction_model_override_enabled: true,
+            layered_compaction_models: models,
+            ..BackendSettings::default()
+        }
+    }
+
+    async fn spawn_responses_server(
+        responses: Vec<(u16, Value)>,
+    ) -> (String, oneshot::Receiver<Vec<Value>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (requests_tx, requests_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, response) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut received = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                let (header_end, content_length) = loop {
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    assert!(read > 0, "request ended before headers");
+                    received.extend_from_slice(&chunk[..read]);
+                    if let Some(header_end) =
+                        received.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        let head = String::from_utf8_lossy(&received[..header_end]);
+                        let content_length = head
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        break (header_end + 4, content_length);
+                    }
+                };
+                while received.len() < header_end + content_length {
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    assert!(read > 0, "request ended before body");
+                    received.extend_from_slice(&chunk[..read]);
+                }
+                requests.push(
+                    serde_json::from_slice::<Value>(
+                        &received[header_end..header_end + content_length],
+                    )
+                    .unwrap(),
+                );
+
+                let body = serde_json::to_vec(&response).unwrap();
+                let reason = if status == 200 {
+                    "OK"
+                } else {
+                    "Internal Server Error"
+                };
+                let headers = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(headers.as_bytes()).await.unwrap();
+                socket.write_all(&body).await.unwrap();
+                socket.shutdown().await.unwrap();
+            }
+            let _ = requests_tx.send(requests);
+        });
+        (format!("http://{address}"), requests_rx)
+    }
+
+    fn http_settings(base_url: String, independent_model: Option<&str>) -> BackendSettings {
+        let relay = RelayProfile {
+            id: "http-compaction-test".to_string(),
+            name: "HTTP Compaction Test".to_string(),
+            base_url: base_url.clone(),
+            upstream_base_url: base_url,
+            api_key: "test-key".to_string(),
+            local_proxy_enabled: Some(true),
+            model_mappings: vec![
+                RelayModelMapping {
+                    request_model: "gpt-original".to_string(),
+                    alias: String::new(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "372000".to_string(),
+                    system_prompt_override: String::new(),
+                },
+                RelayModelMapping {
+                    request_model: "gpt-cheap".to_string(),
+                    alias: String::new(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "128000".to_string(),
+                    system_prompt_override: String::new(),
+                },
+            ],
+            ..RelayProfile::default()
+        };
+        BackendSettings {
+            layered_compaction_enabled: true,
+            layered_compaction_model_override_enabled: independent_model.is_some(),
+            layered_compaction_models: LayeredCompactionModels {
+                gpt: independent_model.unwrap_or_default().to_string(),
+                ..Default::default()
+            },
+            active_relay_id: relay.id.clone(),
+            relay_profiles: vec![relay],
+            ..BackendSettings::default()
+        }
+    }
+
+    fn http_compaction_request(cache_key: &str) -> Value {
+        json!({
+            "model": "gpt-original",
+            "prompt_cache_key": cache_key,
+            "instructions": "stable system prompt",
+            "stream": false,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "history" }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "You are performing a CONTEXT CHECKPOINT COMPACTION. Summarize."
+                    }]
+                }
+            ]
+        })
+    }
+
+    fn summary_response(model: &str, text: &str) -> Value {
+        json!({
+            "id": format!("resp-{model}"),
+            "object": "response",
+            "status": "completed",
+            "model": model,
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": text }]
+            }],
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "total_tokens": 110
+            }
+        })
+    }
+
+    #[test]
+    fn source_family_can_select_a_cross_family_compaction_model() {
+        let settings = settings_with_models(LayeredCompactionModels {
+            gpt: "deepseek-chat".to_string(),
+            ..Default::default()
+        });
+        let relay = relay_with_models(&[
+            ("gpt-5.6", RelayProtocol::Responses, "372000"),
+            ("deepseek-chat", RelayProtocol::ChatCompletions, "128000"),
+        ]);
+        let request = compaction_request("gpt-5.6", "small");
+        let resolved = resolve_compaction_model_override(
+            &request,
+            &request,
+            CompactionExecutionMode::LegacyLocal,
+            &settings,
+            &relay,
+        )
+        .expect("configured independent model should resolve");
+
+        assert_eq!(resolved.compaction_model, "deepseek-chat");
+        assert_eq!(resolved.protocol, RelayProtocol::ChatCompletions);
+        assert_eq!(resolved.request_json["model"], "deepseek-chat");
+        assert_eq!(
+            resolved.request_json["reasoning"],
+            json!({ "effort": "max" })
+        );
+    }
+
+    #[tokio::test]
+    async fn http_valid_cache_lease_uses_original_model_once() {
+        let (base_url, requests_rx) = spawn_responses_server(vec![(
+            200,
+            summary_response("gpt-original", "<summary>cached</summary>"),
+        )])
+        .await;
+        let settings = http_settings(base_url, Some("gpt-cheap"));
+        let relay = settings.active_relay_profile();
+        let context = crate::request_headers::RequestContext::default();
+        let endpoint = responses_url(&relay.base_url);
+        let ordinary = json!({
+            "model": "gpt-original",
+            "prompt_cache_key": "http-valid-cache-key",
+            "instructions": "stable system prompt",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "history" }]
+            }]
+        });
+        let mut observer = crate::compaction_cache::CacheResponseObserver::new(
+            &relay,
+            crate::compaction_cache::CacheProtocol::Responses,
+            &endpoint,
+            &ordinary,
+            &ordinary,
+            &context,
+            false,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        observer.observe_bytes(
+            serde_json::to_string(&json!({
+                "status": "completed",
+                "usage": {
+                    "cache_creation_input_tokens": 100,
+                    "cache_ttl": "5m"
+                }
+            }))
+            .unwrap()
+            .as_bytes(),
+        );
+        observer.finish();
+
+        let request = http_compaction_request("http-valid-cache-key");
+        let upstream = execute_validated_compaction(
+            &request.to_string(),
+            &request,
+            crate::layered_compaction::CompactionKind::Legacy,
+            settings,
+            &context,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(upstream.independent_compaction_model.is_none());
+        assert!(upstream.independent_compaction_usage.is_none());
+        let response: Value =
+            serde_json::from_slice(&upstream.into_body_bytes().await.unwrap()).unwrap();
+        let requests = requests_rx.await.unwrap();
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["model"], "gpt-original");
+        assert_eq!(response["model"], "gpt-original");
+    }
+
+    #[tokio::test]
+    async fn http_default_usage_uses_independent_model_with_valid_cache_lease() {
+        let (base_url, requests_rx) = spawn_responses_server(vec![(
+            200,
+            summary_response("gpt-cheap", "<summary>default independent</summary>"),
+        )])
+        .await;
+        let mut settings = http_settings(base_url, Some("gpt-cheap"));
+        settings.layered_compaction_model_usage = LayeredCompactionModelUsage::Default;
+        let relay = settings.active_relay_profile();
+        let context = crate::request_headers::RequestContext::default();
+        let endpoint = responses_url(&relay.base_url);
+        let ordinary = json!({
+            "model": "gpt-original",
+            "prompt_cache_key": "http-default-valid-cache-key",
+            "instructions": "stable system prompt",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "history" }]
+            }]
+        });
+        let mut observer = crate::compaction_cache::CacheResponseObserver::new(
+            &relay,
+            crate::compaction_cache::CacheProtocol::Responses,
+            &endpoint,
+            &ordinary,
+            &ordinary,
+            &context,
+            false,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        observer.observe_bytes(
+            serde_json::to_string(&json!({
+                "status": "completed",
+                "usage": {
+                    "cache_creation_input_tokens": 100,
+                    "cache_ttl": "5m"
+                }
+            }))
+            .unwrap()
+            .as_bytes(),
+        );
+        observer.finish();
+
+        let request = http_compaction_request("http-default-valid-cache-key");
+        let upstream = execute_validated_compaction(
+            &request.to_string(),
+            &request,
+            crate::layered_compaction::CompactionKind::Legacy,
+            settings,
+            &context,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            upstream.independent_compaction_model.as_deref(),
+            Some("gpt-cheap")
+        );
+        assert_eq!(
+            upstream.independent_compaction_usage,
+            Some(LayeredCompactionModelUsage::Default)
+        );
+        let response: Value =
+            serde_json::from_slice(&upstream.into_body_bytes().await.unwrap()).unwrap();
+        let requests = requests_rx.await.unwrap();
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["model"], "gpt-cheap");
+        assert_eq!(response["model"], "gpt-original");
+    }
+
+    #[tokio::test]
+    async fn http_invalid_independent_summary_retries_the_independent_model() {
+        let (base_url, requests_rx) = spawn_responses_server(vec![
+            (
+                200,
+                summary_response("gpt-cheap", "<analysis>missing summary</analysis>"),
+            ),
+            (
+                200,
+                summary_response("gpt-cheap", "<summary>independent retry</summary>"),
+            ),
+        ])
+        .await;
+        let settings = http_settings(base_url, Some("gpt-cheap"));
+        let request = http_compaction_request("http-independent-retry-key");
+        let upstream = execute_validated_compaction(
+            &request.to_string(),
+            &request,
+            crate::layered_compaction::CompactionKind::Legacy,
+            settings,
+            &crate::request_headers::RequestContext::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            upstream.independent_compaction_model.as_deref(),
+            Some("gpt-cheap")
+        );
+        assert_eq!(
+            upstream.independent_compaction_usage,
+            Some(LayeredCompactionModelUsage::CacheMiss)
+        );
+        let response: Value =
+            serde_json::from_slice(&upstream.into_body_bytes().await.unwrap()).unwrap();
+        let requests = requests_rx.await.unwrap();
+
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request["model"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["gpt-cheap", "gpt-cheap"]
+        );
+        assert_eq!(response["model"], "gpt-original");
+    }
+
+    #[tokio::test]
+    async fn http_independent_transport_failure_falls_back_to_original_model_once() {
+        let (base_url, requests_rx) = spawn_responses_server(vec![
+            (
+                500,
+                json!({"error":{"message":"temporary upstream failure"}}),
+            ),
+            (
+                200,
+                summary_response("gpt-original", "<summary>original fallback</summary>"),
+            ),
+        ])
+        .await;
+        let settings = http_settings(base_url, Some("gpt-cheap"));
+        let request = http_compaction_request("http-independent-fallback-key");
+        let upstream = execute_validated_compaction(
+            &request.to_string(),
+            &request,
+            crate::layered_compaction::CompactionKind::Legacy,
+            settings,
+            &crate::request_headers::RequestContext::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            upstream.independent_compaction_model.as_deref(),
+            Some("gpt-cheap")
+        );
+        assert_eq!(
+            upstream.independent_compaction_usage,
+            Some(LayeredCompactionModelUsage::CacheMiss)
+        );
+        let response: Value =
+            serde_json::from_slice(&upstream.into_body_bytes().await.unwrap()).unwrap();
+        let requests = requests_rx.await.unwrap();
+
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request["model"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["gpt-cheap", "gpt-original"]
+        );
+        assert_eq!(response["model"], "gpt-original");
+    }
+
+    #[tokio::test]
+    async fn http_original_path_retries_the_original_model_only() {
+        let (base_url, requests_rx) = spawn_responses_server(vec![
+            (
+                200,
+                summary_response("gpt-original", "<analysis>invalid</analysis>"),
+            ),
+            (
+                200,
+                summary_response("gpt-original", "<summary>original retry</summary>"),
+            ),
+        ])
+        .await;
+        let settings = http_settings(base_url, None);
+        let request = http_compaction_request("http-original-retry-key");
+        let upstream = execute_validated_compaction(
+            &request.to_string(),
+            &request,
+            crate::layered_compaction::CompactionKind::Legacy,
+            settings,
+            &crate::request_headers::RequestContext::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        let response: Value =
+            serde_json::from_slice(&upstream.into_body_bytes().await.unwrap()).unwrap();
+        let requests = requests_rx.await.unwrap();
+
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request["model"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["gpt-original", "gpt-original"]
+        );
+        assert_eq!(response["status"], "completed");
+    }
+
+    #[test]
+    fn native_remote_compaction_never_uses_the_independent_model() {
+        let settings = settings_with_models(LayeredCompactionModels {
+            gpt: "gpt-5.6-sol".to_string(),
+            ..Default::default()
+        });
+        let relay = relay_with_models(&[
+            ("gpt-5.6", RelayProtocol::Responses, "372000"),
+            ("gpt-5.6-sol", RelayProtocol::Responses, "500000"),
+        ]);
+        let request = json!({
+            "model": "gpt-5.6",
+            "input": [{ "type": "compaction_trigger" }]
+        });
+
+        assert!(
+            resolve_compaction_model_override(
+                &request,
+                &request,
+                CompactionExecutionMode::NativeRemoteV2,
+                &settings,
+                &relay,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn output_reserve_that_consumes_the_context_falls_back_to_original() {
+        let settings = settings_with_models(LayeredCompactionModels {
+            gpt: "gpt-small".to_string(),
+            ..Default::default()
+        });
+        let relay = relay_with_models(&[
+            ("gpt-5.6", RelayProtocol::Responses, "372000"),
+            ("gpt-small", RelayProtocol::Responses, "8192"),
+        ]);
+        let mut request = compaction_request("gpt-5.6", "small");
+        request["max_output_tokens"] = json!(8192);
+
+        assert!(
+            resolve_compaction_model_override(
+                &request,
+                &request,
+                CompactionExecutionMode::LegacyLocal,
+                &settings,
+                &relay,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn two_attempt_policy_matches_the_cost_first_contract() {
+        assert_eq!(
+            compaction_second_attempt(false, false),
+            CompactionSecondAttempt::SameModelRetry
+        );
+        assert_eq!(
+            compaction_second_attempt(false, true),
+            CompactionSecondAttempt::SameModelRetry
+        );
+        assert_eq!(
+            compaction_second_attempt(true, false),
+            CompactionSecondAttempt::SameModelRetry
+        );
+        assert_eq!(
+            compaction_second_attempt(true, true),
+            CompactionSecondAttempt::OriginalModelFallback
+        );
+    }
+
+    #[test]
+    fn structural_response_model_restore_keeps_the_summary_unchanged() {
+        let mut response = json!({
+            "id": "resp-target",
+            "model": "deepseek-chat",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "<summary>kept</summary>" }]
+            }]
+        });
+        crate::layered_compaction::restore_response_model(&mut response, "gpt-5.6");
+        assert_eq!(response["model"], "gpt-5.6");
+        assert_eq!(
+            response["output"][0]["content"][0]["text"],
+            "<summary>kept</summary>"
         );
     }
 }

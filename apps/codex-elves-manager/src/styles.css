@@ -4099,6 +4099,10 @@ body {
   line-height: 1.45;
 }
 
+.session-context-compaction-option-copy small[data-warning="true"] {
+  color: hsl(var(--destructive));
+}
+
 .session-context-compaction-option-control {
   display: flex;
   min-width: 92px;
@@ -4121,6 +4125,124 @@ body {
   opacity: 0.5;
 }
 
+.session-context-compaction-mode-row {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 20px;
+  width: 100%;
+  padding: 2px 0 4px;
+}
+
+.session-context-compaction-mode-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.session-context-compaction-mode-copy strong {
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.session-context-compaction-mode-copy small {
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.session-context-compaction-mode-switch {
+  display: inline-flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.session-context-compaction-mode-switch button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  background: hsl(var(--secondary) / 0.35);
+  color: hsl(var(--foreground));
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.session-context-compaction-mode-switch button:hover:not(.active) {
+  border-color: hsl(var(--primary) / 0.42);
+  background: hsl(var(--secondary) / 0.6);
+}
+
+.session-context-compaction-mode-switch button.active {
+  border-color: hsl(var(--primary));
+  background: hsl(var(--primary) / 0.14);
+}
+
+.session-context-compaction-mode-switch button:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 2px;
+}
+
+.session-context-compaction-model-select {
+  width: 210px;
+  min-width: 0;
+}
+
+.session-context-compaction-model-select .app-select-trigger {
+  min-height: 32px;
+  gap: 8px;
+}
+
+.session-context-compaction-model-menu .app-select-option {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-context-compaction-family-grid {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px 16px;
+  width: 100%;
+  padding: 2px 0 4px;
+}
+
+.session-context-compaction-family-field {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.session-context-compaction-family-field > span {
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.session-context-compaction-family-field .session-context-compaction-model-select {
+  width: 100%;
+}
+
+@media (min-width: 761px) and (max-width: 1100px) {
+  .session-context-compaction-family-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .session-context-compaction-family-field:last-child {
+    grid-column: 1 / -1;
+  }
+}
+
 @media (max-width: 760px) {
   .session-sync-options {
     grid-template-columns: minmax(0, 1fr);
@@ -4136,6 +4258,18 @@ body {
     justify-content: flex-start;
   }
 
+  .session-context-compaction-mode-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .session-context-compaction-mode-switch {
+    justify-content: flex-start;
+  }
+
+  .session-context-compaction-family-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .field .field-help {
@@ -4864,6 +4998,15 @@ body {
   white-space: normal;
 }
 
+.proxy-compaction-model-description {
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .proxy-remote-compaction-badge,
 .proxy-context-compaction-badge {
   align-items: center;
@@ -5170,6 +5313,11 @@ body {
 .proxy-detail-head .proxy-upstream-model-mismatch {
   overflow: visible;
   color: hsl(var(--destructive));
+  white-space: normal;
+}
+
+.proxy-detail-head .proxy-compaction-model-description {
+  overflow: visible;
   white-space: normal;
 }
 

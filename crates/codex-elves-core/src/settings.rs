@@ -51,6 +51,44 @@ pub struct RelayModelMapping {
     pub system_prompt_override: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LayeredCompactionModels {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub gpt: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub claude: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub other: String,
+}
+
+impl LayeredCompactionModels {
+    pub fn model_for_family(&self, family: crate::model_capabilities::ModelFamily) -> &str {
+        match family {
+            crate::model_capabilities::ModelFamily::Gpt => &self.gpt,
+            crate::model_capabilities::ModelFamily::Claude => &self.claude,
+            crate::model_capabilities::ModelFamily::Other => &self.other,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum LayeredCompactionModelUsage {
+    #[default]
+    CacheMiss,
+    Default,
+}
+
+impl LayeredCompactionModelUsage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CacheMiss => "cacheMiss",
+            Self::Default => "default",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ResponsesWebsocketCapabilityState {
@@ -809,6 +847,19 @@ pub struct BackendSettings {
         skip_serializing_if = "String::is_empty"
     )]
     pub layered_compaction_prompt_override: String,
+    #[serde(rename = "layeredCompactionModelOverrideEnabled", default)]
+    pub layered_compaction_model_override_enabled: bool,
+    #[serde(rename = "layeredCompactionModelUsage", default)]
+    pub layered_compaction_model_usage: LayeredCompactionModelUsage,
+    #[serde(rename = "layeredCompactionModels", default)]
+    pub layered_compaction_models: LayeredCompactionModels,
+    /// 旧版单一压缩模型配置，仅用于读取迁移。
+    #[serde(
+        rename = "layeredCompactionModel",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub layered_compaction_model: String,
     #[serde(rename = "launchMode", default)]
     pub launch_mode: LaunchMode,
     #[serde(rename = "relayBaseUrl", default = "default_relay_base_url")]
@@ -886,6 +937,10 @@ impl Default for BackendSettings {
             layered_compaction_retain_recent_round_enabled: false,
             layered_compaction_retain_tokens: default_layered_compaction_retain_tokens(),
             layered_compaction_prompt_override: String::new(),
+            layered_compaction_model_override_enabled: false,
+            layered_compaction_model_usage: LayeredCompactionModelUsage::CacheMiss,
+            layered_compaction_models: LayeredCompactionModels::default(),
+            layered_compaction_model: String::new(),
             launch_mode: LaunchMode::Patch,
             relay_base_url: default_relay_base_url(),
             relay_api_key: String::new(),
@@ -905,6 +960,33 @@ impl Default for BackendSettings {
 }
 
 impl BackendSettings {
+    pub fn should_use_independent_compaction_model(&self, cache_lease_valid: bool) -> bool {
+        self.layered_compaction_enabled
+            && self.layered_compaction_model_override_enabled
+            && match self.layered_compaction_model_usage {
+                LayeredCompactionModelUsage::CacheMiss => !cache_lease_valid,
+                LayeredCompactionModelUsage::Default => true,
+            }
+    }
+
+    pub fn compaction_model_for_family(
+        &self,
+        family: crate::model_capabilities::ModelFamily,
+    ) -> &str {
+        let configured = self
+            .layered_compaction_models
+            .model_for_family(family)
+            .trim();
+        if !configured.is_empty() {
+            return configured;
+        }
+        let legacy = self.layered_compaction_model.trim();
+        if !legacy.is_empty() {
+            return legacy;
+        }
+        ""
+    }
+
     pub fn active_relay_profile(&self) -> RelayProfile {
         if self.active_relay_id == default_active_relay_id()
             && self.relay_profiles.len() == 1
@@ -1400,6 +1482,53 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
             Value::Number(serde_json::Number::from(
                 clamp_gpt_reasoning_continuation_max_rounds(value),
             )),
+        );
+    }
+    merge_bool_setting(target, source, "layeredCompactionEnabled");
+    merge_bool_setting(target, source, "layeredCompactionRetainRecentRoundEnabled");
+    if let Some(value) = source
+        .get("layeredCompactionRetainTokens")
+        .and_then(Value::as_u64)
+    {
+        target.insert(
+            "layeredCompactionRetainTokens".to_string(),
+            Value::Number(serde_json::Number::from(
+                clamp_layered_compaction_retain_tokens(value),
+            )),
+        );
+    }
+    if let Some(value) = source
+        .get("layeredCompactionPromptOverride")
+        .and_then(Value::as_str)
+    {
+        target.insert(
+            "layeredCompactionPromptOverride".to_string(),
+            Value::String(value.to_string()),
+        );
+    }
+    merge_bool_setting(target, source, "layeredCompactionModelOverrideEnabled");
+    if let Some(value @ ("cacheMiss" | "default")) = source
+        .get("layeredCompactionModelUsage")
+        .and_then(Value::as_str)
+    {
+        target.insert(
+            "layeredCompactionModelUsage".to_string(),
+            Value::String(value.to_string()),
+        );
+    }
+    if let Some(value) = source
+        .get("layeredCompactionModels")
+        .and_then(Value::as_object)
+    {
+        target.insert(
+            "layeredCompactionModels".to_string(),
+            Value::Object(value.clone()),
+        );
+    }
+    if let Some(value) = source.get("layeredCompactionModel").and_then(Value::as_str) {
+        target.insert(
+            "layeredCompactionModel".to_string(),
+            Value::String(value.to_string()),
         );
     }
     if let Some(value) = source.get("launchMode").and_then(Value::as_str) {
@@ -1989,6 +2118,10 @@ mod tests {
             serde_json::from_str(r#"{"layeredCompactionEnabled":true}"#).unwrap();
         assert!(existing.layered_compaction_enabled);
         assert!(!existing.layered_compaction_retain_recent_round_enabled);
+        assert_eq!(
+            existing.layered_compaction_model_usage,
+            LayeredCompactionModelUsage::CacheMiss
+        );
 
         let enabled: BackendSettings = serde_json::from_str(
             r#"{"layeredCompactionEnabled":true,"layeredCompactionRetainRecentRoundEnabled":true}"#,
@@ -1999,6 +2132,53 @@ mod tests {
             serde_json::to_value(enabled).unwrap()["layeredCompactionRetainRecentRoundEnabled"],
             true
         );
+    }
+
+    #[test]
+    fn compaction_model_usage_default_roundtrips() {
+        let settings: BackendSettings = serde_json::from_str(
+            r#"{
+                "layeredCompactionEnabled": true,
+                "layeredCompactionModelOverrideEnabled": true,
+                "layeredCompactionModelUsage": "default"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            settings.layered_compaction_model_usage,
+            LayeredCompactionModelUsage::Default
+        );
+        assert!(settings.should_use_independent_compaction_model(true));
+        assert!(settings.should_use_independent_compaction_model(false));
+        assert_eq!(
+            serde_json::to_value(settings).unwrap()["layeredCompactionModelUsage"],
+            "default"
+        );
+    }
+
+    #[test]
+    fn compaction_model_usage_respects_cache_and_feature_switches() {
+        let cache_miss = BackendSettings {
+            layered_compaction_enabled: true,
+            layered_compaction_model_override_enabled: true,
+            layered_compaction_model_usage: LayeredCompactionModelUsage::CacheMiss,
+            ..BackendSettings::default()
+        };
+        assert!(!cache_miss.should_use_independent_compaction_model(true));
+        assert!(cache_miss.should_use_independent_compaction_model(false));
+
+        let disabled = BackendSettings {
+            layered_compaction_enabled: false,
+            ..cache_miss.clone()
+        };
+        assert!(!disabled.should_use_independent_compaction_model(false));
+
+        let override_disabled = BackendSettings {
+            layered_compaction_model_override_enabled: false,
+            ..cache_miss
+        };
+        assert!(!override_disabled.should_use_independent_compaction_model(false));
     }
 
     #[test]
@@ -2978,7 +3158,7 @@ experimental_bearer_token = "sk-existing""#
     }
 
     #[test]
-    fn settings_store_discards_retired_compaction_model_settings() {
+    fn settings_store_preserves_and_migrates_compaction_model_settings() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(
@@ -3003,18 +3183,82 @@ experimental_bearer_token = "sk-existing""#
             settings.layered_compaction_prompt_override,
             "Preserve the current task"
         );
+        assert!(settings.layered_compaction_model_override_enabled);
+        assert_eq!(settings.layered_compaction_models.gpt, "old-gpt");
+        assert_eq!(settings.layered_compaction_models.claude, "old-claude");
+        assert_eq!(settings.layered_compaction_models.other, "old-other");
+        assert_eq!(
+            settings.compaction_model_for_family(crate::model_capabilities::ModelFamily::Gpt),
+            "old-gpt"
+        );
 
         store.save(&settings).unwrap();
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        for retired_key in [
-            "layeredCompactionModelOverrideEnabled",
-            "layeredCompactionModels",
-            "layeredCompactionModel",
-        ] {
-            assert!(saved.get(retired_key).is_none(), "{retired_key}");
-        }
+        assert_eq!(saved["layeredCompactionModelOverrideEnabled"], true);
+        assert_eq!(saved["layeredCompactionModels"]["gpt"], "old-gpt");
+        assert_eq!(saved["layeredCompactionModels"]["claude"], "old-claude");
+        assert_eq!(saved["layeredCompactionModels"]["other"], "old-other");
+        assert_eq!(saved["layeredCompactionModel"], "old-global");
         assert_eq!(store.load().unwrap(), settings);
+
+        let legacy: BackendSettings = serde_json::from_str(
+            r#"{"layeredCompactionModelOverrideEnabled":true,"layeredCompactionModel":"legacy"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy.compaction_model_for_family(crate::model_capabilities::ModelFamily::Claude),
+            "legacy"
+        );
+    }
+
+    #[test]
+    fn settings_store_update_persists_layered_compaction_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path().join("settings.json"));
+
+        let updated = store
+            .update(json!({
+                "layeredCompactionEnabled": true,
+                "layeredCompactionRetainRecentRoundEnabled": true,
+                "layeredCompactionRetainTokens": 24000,
+                "layeredCompactionPromptOverride": "Preserve the active task",
+                "layeredCompactionModelOverrideEnabled": true,
+                "layeredCompactionModelUsage": "default",
+                "layeredCompactionModels": {
+                    "gpt": "gpt-compact",
+                    "claude": "claude-compact",
+                    "other": "other-compact"
+                },
+                "layeredCompactionModel": "legacy-compact"
+            }))
+            .unwrap();
+
+        assert!(updated.layered_compaction_enabled);
+        assert!(updated.layered_compaction_retain_recent_round_enabled);
+        assert_eq!(updated.layered_compaction_retain_tokens, 24_000);
+        assert_eq!(
+            updated.layered_compaction_prompt_override,
+            "Preserve the active task"
+        );
+        assert!(updated.layered_compaction_model_override_enabled);
+        assert_eq!(
+            updated.layered_compaction_model_usage,
+            LayeredCompactionModelUsage::Default
+        );
+        assert_eq!(updated.layered_compaction_models.gpt, "gpt-compact");
+        assert_eq!(updated.layered_compaction_models.claude, "claude-compact");
+        assert_eq!(updated.layered_compaction_models.other, "other-compact");
+        assert_eq!(updated.layered_compaction_model, "legacy-compact");
+        assert_eq!(store.load().unwrap(), updated);
+
+        let unchanged = store
+            .update(json!({"layeredCompactionModelUsage": "always"}))
+            .unwrap();
+        assert_eq!(
+            unchanged.layered_compaction_model_usage,
+            LayeredCompactionModelUsage::Default
+        );
     }
 
     #[test]
@@ -3030,6 +3274,12 @@ experimental_bearer_token = "sk-existing""#
             codex_extra_args: vec!["--force_high_performance_gpu".to_string()],
             layered_compaction_enabled: true,
             layered_compaction_retain_recent_round_enabled: true,
+            layered_compaction_model_override_enabled: true,
+            layered_compaction_models: LayeredCompactionModels {
+                gpt: "deepseek-chat".to_string(),
+                claude: "gpt-5.6".to_string(),
+                other: "claude-sonnet-4-6".to_string(),
+            },
             ..BackendSettings::default()
         };
 

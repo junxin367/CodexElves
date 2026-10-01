@@ -88,6 +88,30 @@ impl RequestContext {
             .filter(|value| !value.is_empty())
     }
 
+    pub(crate) fn cache_window_identity(&self) -> Option<String> {
+        self.headers
+            .get("x-codex-window-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .or_else(|| {
+                let metadata = self
+                    .headers
+                    .get("x-codex-turn-metadata")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())?;
+                ["window_id", "turn_id"].into_iter().find_map(|field| {
+                    metadata
+                        .get(field)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToString::to_string)
+                })
+            })
+    }
+
     /// Build a fresh outbound map after the final upstream protocol is known.
     ///
     /// Converted protocols deliberately receive no Codex/OpenAI request

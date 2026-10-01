@@ -2407,6 +2407,8 @@ fn launcher_proxy_request_record(id: &str, timestamp_ms: u64) -> ProxyRequestRec
         remote_addr: Some("127.0.0.1:1".to_string()),
         model: Some("gpt-5.4".to_string()),
         upstream_response_model: None,
+        independent_compaction_model: None,
+        independent_compaction_usage: None,
         reasoning_tokens: None,
         reasoning_effort: None,
         reasoning_source: None,

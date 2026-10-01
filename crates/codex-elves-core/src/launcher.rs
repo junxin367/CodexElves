@@ -1674,7 +1674,9 @@ async fn handle_protocol_proxy_connection(
     // WS/HTTP body and any pending reconnect or continuation request.
     let request_body = progress.request_body.as_deref().unwrap_or(request_body);
     let request_json = serde_json::from_str::<Value>(request_body).ok();
-    let metadata = crate::proxy_log::extract_request_metadata(request_json.as_ref());
+    let mut metadata = crate::proxy_log::extract_request_metadata(request_json.as_ref());
+    metadata.independent_compaction_model = progress.independent_compaction_model;
+    metadata.independent_compaction_usage = progress.independent_compaction_usage;
     append_local_proxy_record(
         log_id,
         timestamp_ms,
@@ -1705,6 +1707,8 @@ struct ProxyCancellationProgress {
     endpoint: Option<String>,
     response_protocol: Option<String>,
     request_body: Option<Arc<str>>,
+    independent_compaction_model: Option<String>,
+    independent_compaction_usage: Option<crate::settings::LayeredCompactionModelUsage>,
 }
 
 struct ProxyClientWriter<W> {
@@ -1761,6 +1765,8 @@ impl ProxyCancellationProgress {
         self.relay_name = upstream.relay_name.clone();
         self.endpoint = upstream.endpoint.clone();
         self.response_protocol = Some(response_protocol_label(upstream.response_protocol));
+        self.independent_compaction_model = upstream.independent_compaction_model.clone();
+        self.independent_compaction_usage = upstream.independent_compaction_usage;
         self.request_body = Some(body.clone());
         body
     }
@@ -1938,6 +1944,8 @@ async fn handle_protocol_proxy_connection_inner(
     let logged_request_metadata =
         crate::proxy_log::extract_request_metadata(logged_request_json.as_ref());
     let mut request_metadata = logged_request_metadata;
+    request_metadata.independent_compaction_model = upstream.independent_compaction_model.clone();
+    request_metadata.independent_compaction_usage = upstream.independent_compaction_usage;
     request_metadata.compaction_requested |=
         crate::proxy_log::extract_request_metadata(request_json.as_ref()).compaction_requested;
     let request_body = logged_request_body.as_ref();
@@ -2158,6 +2166,7 @@ async fn handle_protocol_proxy_connection_inner(
                     crate::proxy_log::append_capture(&mut response_capture, &body);
                 stream.write_all(&body).await?;
             } else {
+                let mut cache_observer = upstream.take_cache_observer();
                 let mut bytes_stream = upstream.into_response()?.bytes_stream();
                 let mut first_round_bytes = Vec::new();
                 let upstream_idle_timeout = crate::protocol_proxy::stream_idle_timeout_for_request(
@@ -2258,6 +2267,9 @@ async fn handle_protocol_proxy_connection_inner(
                             return Ok(());
                         }
                     };
+                    if let Some(observer) = cache_observer.as_mut() {
+                        observer.observe_bytes(&bytes);
+                    }
                     first_round_bytes.extend_from_slice(&bytes);
                     if continue_thinking_log.first_token_ms.is_none() {
                         let first_token_ms = started_at.elapsed().as_millis() as u64;
@@ -2279,6 +2291,9 @@ async fn handle_protocol_proxy_connection_inner(
                             first_token_ms,
                         );
                     }
+                }
+                if let Some(observer) = cache_observer.take() {
+                    observer.finish();
                 }
                 request_metadata.upstream_response_model = observed_upstream_model(
                     &first_round_bytes,
@@ -2394,6 +2409,7 @@ async fn handle_protocol_proxy_connection_inner(
         let mut converter = converter_kind;
         let mut upstream_model_observer =
             crate::proxy_log::UpstreamResponseModelObserver::default();
+        let mut cache_observer = upstream.take_cache_observer();
         let mut bytes_stream = upstream.into_response()?.bytes_stream();
         let mut stream_failed = false;
         let mut stream_error = None;
@@ -2405,6 +2421,9 @@ async fn handle_protocol_proxy_connection_inner(
         while let Some(chunk) = bytes_stream.next().await {
             match chunk {
                 Ok(bytes) => {
+                    if let Some(observer) = cache_observer.as_mut() {
+                        observer.observe_bytes(&bytes);
+                    }
                     upstream_model_observer.observe_sse_chunk(&bytes, response_protocol);
                     let converted = converter.push_bytes(&bytes);
                     if !converted.is_empty() {
@@ -2449,6 +2468,9 @@ async fn handle_protocol_proxy_connection_inner(
                     break;
                 }
             }
+        }
+        if !stream_failed && let Some(observer) = cache_observer.take() {
+            observer.finish();
         }
         upstream_model_observer.finish_sse(response_protocol);
         request_metadata.upstream_response_model = upstream_model_observer.model();
@@ -2873,6 +2895,8 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     let logged_request_metadata =
         crate::proxy_log::extract_request_metadata(logged_request_json.as_ref());
     let mut request_metadata = logged_request_metadata;
+    request_metadata.independent_compaction_model = upstream.independent_compaction_model.clone();
+    request_metadata.independent_compaction_usage = upstream.independent_compaction_usage;
     request_metadata.compaction_requested |=
         crate::proxy_log::extract_request_metadata(request_json.as_ref()).compaction_requested;
     let request_body = logged_request_body.as_ref();
@@ -3223,6 +3247,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
             response_truncated |= crate::proxy_log::append_capture(&mut response_capture, &body);
             stream.write_all(&body).await?;
         } else {
+            let mut cache_observer = upstream.take_cache_observer();
             let mut bytes_stream = upstream.into_response()?.bytes_stream();
             loop {
                 let chunk = match next_stream_chunk_with_idle_timeout(
@@ -3269,6 +3294,9 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                         break;
                     }
                 };
+                if let Some(observer) = cache_observer.as_mut() {
+                    observer.observe_bytes(&bytes);
+                }
                 upstream_model_observer.observe_sse_chunk(&bytes, response_protocol);
                 if first_token_ms.is_none() {
                     let elapsed_ms = started_at.elapsed().as_millis() as u64;
@@ -3294,6 +3322,11 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                 response_truncated |=
                     crate::proxy_log::append_capture(&mut response_capture, &bytes);
                 stream.write_all(&bytes).await?;
+            }
+            if remote_compaction_stream_error.is_none()
+                && let Some(observer) = cache_observer.take()
+            {
+                observer.finish();
             }
         }
         log_helper_response(
@@ -3378,6 +3411,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     let is_remote_compaction_v2 = bridge_remote_compaction_v2;
     let is_compaction = is_legacy_compaction || is_remote_compaction_v2;
     let mut compaction_buffer = String::new();
+    let mut cache_observer = None;
 
     if upstream_has_body_override {
         let body = upstream.into_body_bytes().await?;
@@ -3414,6 +3448,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
             }
         }
     } else {
+        cache_observer = upstream.take_cache_observer();
         let mut bytes_stream = upstream.into_response()?.bytes_stream();
         loop {
             let chunk =
@@ -3455,6 +3490,9 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                 };
             match chunk {
                 Ok(bytes) => {
+                    if let Some(observer) = cache_observer.as_mut() {
+                        observer.observe_bytes(&bytes);
+                    }
                     upstream_model_observer.observe_sse_chunk(&bytes, response_protocol);
                     let converted = converter.push_bytes(&bytes);
                     if !converted.is_empty() {
@@ -3522,6 +3560,9 @@ async fn handle_deferred_protocol_proxy_stream_connection(
         }
     }
 
+    if !stream_failed && let Some(observer) = cache_observer.take() {
+        observer.finish();
+    }
     if !stream_failed {
         let tail = converter.finish();
         if is_compaction {
@@ -3906,6 +3947,8 @@ fn append_pending_local_proxy_record(
         remote_addr: remote_addr_text,
         model: request_metadata.model.clone(),
         upstream_response_model: None,
+        independent_compaction_model: request_metadata.independent_compaction_model.clone(),
+        independent_compaction_usage: request_metadata.independent_compaction_usage,
         reasoning_tokens: None,
         reasoning_effort: request_metadata.reasoning_effort.clone(),
         reasoning_source: request_metadata.reasoning_source.clone(),
@@ -3970,6 +4013,8 @@ fn append_local_proxy_first_token_record(
         remote_addr: remote_addr_text,
         model: request_metadata.model.clone(),
         upstream_response_model: request_metadata.upstream_response_model.clone(),
+        independent_compaction_model: request_metadata.independent_compaction_model.clone(),
+        independent_compaction_usage: request_metadata.independent_compaction_usage,
         reasoning_tokens: None,
         reasoning_effort: request_metadata.reasoning_effort.clone(),
         reasoning_source: request_metadata.reasoning_source.clone(),
@@ -4085,6 +4130,8 @@ fn append_local_proxy_record_with_continue_thinking(
         remote_addr: remote_addr_text,
         model: request_metadata.model.clone(),
         upstream_response_model: request_metadata.upstream_response_model.clone(),
+        independent_compaction_model: request_metadata.independent_compaction_model.clone(),
+        independent_compaction_usage: request_metadata.independent_compaction_usage,
         reasoning_tokens: continue_thinking.reasoning_tokens.or_else(|| {
             crate::proxy_log::extract_reasoning_tokens_from_response_body(response_body)
         }),

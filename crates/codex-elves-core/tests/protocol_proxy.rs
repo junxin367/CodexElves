@@ -9321,39 +9321,38 @@ async fn aggregate_failover_reapplies_header_policy_after_switching_to_chat_comp
 }
 
 #[tokio::test]
-async fn aggregate_remote_compaction_uses_successful_candidates_actual_protocol() {
+async fn aggregate_remote_compaction_retries_selected_candidate_with_actual_protocol() {
     let _lock = settings_path_test_lock().lock().unwrap();
-    let first = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .unwrap();
-    let first_addr = first.local_addr().unwrap();
-    let first_server = tokio::spawn(respond_once(
-        first,
-        "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 11\r\ncontent-type: application/json\r\n\r\n{\"error\":1}",
-    ));
-    let second_server = spawn_chat_server_with_response(
-        json!({
-            "id": "chatcmpl_compaction",
-            "created": 0,
-            "model": "gpt-5-mini",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "<summary>FAILOVER SUMMARY</summary>"
-                },
-                "finish_reason": "stop"
-            }]
-        })
-        .to_string(),
-    );
+    let first_server = spawn_chat_server_with_status_responses(vec![
+        (
+            "500 Internal Server Error".to_string(),
+            r#"{"error":1}"#.to_string(),
+        ),
+        (
+            "200 OK".to_string(),
+            json!({
+                "id": "chatcmpl_compaction",
+                "created": 0,
+                "model": "gpt-5-mini",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "<summary>RETRY SUMMARY</summary>"
+                    },
+                    "finish_reason": "stop"
+                }]
+            })
+            .to_string(),
+        ),
+    ]);
     let mut settings = aggregate_proxy_settings(
-        "compaction-failover",
-        format!("http://{first_addr}/v1"),
-        second_server.base_url.clone(),
+        "compaction-same-candidate-retry",
+        first_server.base_url.clone(),
+        "http://127.0.0.1:9/v1".to_string(),
     );
-    settings.relay_profiles[1].protocol = RelayProtocol::ChatCompletions;
-    settings.relay_profiles[1].model_mappings[0].protocol = RelayProtocol::ChatCompletions;
+    settings.relay_profiles[0].protocol = RelayProtocol::ChatCompletions;
+    settings.relay_profiles[0].model_mappings[0].protocol = RelayProtocol::ChatCompletions;
     let mut request = remote_compaction_v2_request();
     settings.layered_compaction_enabled = true;
     request["model"] = json!("gpt-5-mini");
@@ -9362,21 +9361,25 @@ async fn aggregate_remote_compaction_uses_successful_candidates_actual_protocol(
     let result = open_responses_proxy_request_with_settings(&request.to_string(), settings)
         .await
         .unwrap();
-    let upstream_request = second_server.finish();
 
     assert_eq!(
         result.response_protocol,
         UpstreamResponseProtocol::Responses
     );
-    assert_eq!(upstream_request.path, "/v1/chat/completions");
-    assert!(!upstream_request.body.contains("compaction_trigger"));
-    assert!(!upstream_request.body.contains("\"tools\""));
+    let upstream_requests = first_server.finish_all();
+    assert_eq!(upstream_requests.len(), 2);
     assert!(
-        upstream_request.body.contains("[Handoff checkpoint]"),
-        "actual failover request: {}",
-        upstream_request.body
+        upstream_requests
+            .iter()
+            .all(|request| request.path == "/v1/chat/completions")
     );
-    first_server.await.unwrap();
+    assert!(!upstream_requests[1].body.contains("compaction_trigger"));
+    assert!(!upstream_requests[1].body.contains("\"tools\""));
+    assert!(
+        upstream_requests[1].body.contains("[Handoff checkpoint]"),
+        "actual retry request: {}",
+        upstream_requests[1].body
+    );
 }
 
 #[tokio::test]
@@ -9456,10 +9459,10 @@ async fn responses_proxy_legacy_compaction_blank_override_uses_project_default_p
 }
 
 #[tokio::test]
-async fn aggregate_remote_compaction_fails_over_after_2xx_invalid_body() {
+async fn aggregate_remote_compaction_retries_same_candidate_after_2xx_invalid_body() {
     let _lock = settings_path_test_lock().lock().unwrap();
-    let first_server = spawn_chat_server_with_response("not-json");
-    let second_server = spawn_chat_server_with_response(
+    let first_server = spawn_chat_server_with_responses(vec![
+        "not-json".to_string(),
         json!({
             "id": "chatcmpl_after_invalid_body",
             "created": 0,
@@ -9474,11 +9477,11 @@ async fn aggregate_remote_compaction_fails_over_after_2xx_invalid_body() {
             }]
         })
         .to_string(),
-    );
+    ]);
     let mut settings = aggregate_proxy_settings(
-        "compaction-invalid-body-failover",
+        "compaction-invalid-body-same-candidate",
         first_server.base_url.clone(),
-        second_server.base_url.clone(),
+        "http://127.0.0.1:9/v1".to_string(),
     );
     settings.aggregate_relay_profiles[0].strategy = AggregateRelayStrategy::Failover;
     for relay in &mut settings.relay_profiles[..2] {
@@ -9499,34 +9502,23 @@ async fn aggregate_remote_compaction_fails_over_after_2xx_invalid_body() {
         result.response_protocol,
         UpstreamResponseProtocol::Responses
     );
-    assert_eq!(first_server.finish().path, "/v1/chat/completions");
-    assert_eq!(second_server.finish().path, "/v1/chat/completions");
+    let upstream_requests = first_server.finish_all();
+    assert_eq!(upstream_requests.len(), 2);
+    assert!(
+        upstream_requests
+            .iter()
+            .all(|request| request.path == "/v1/chat/completions")
+    );
 }
 
 #[tokio::test]
-async fn aggregate_remote_compaction_fails_over_after_2xx_truncated_body() {
+async fn aggregate_remote_compaction_does_not_switch_candidate_after_2xx_truncated_body() {
     let _lock = settings_path_test_lock().lock().unwrap();
     let first_server = spawn_truncated_response_server();
-    let second_server = spawn_chat_server_with_response(
-        json!({
-            "id": "chatcmpl_after_truncated_body",
-            "created": 0,
-            "model": "gpt-5-mini",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "<summary>SUMMARY AFTER TRUNCATED BODY</summary>"
-                },
-                "finish_reason": "stop"
-            }]
-        })
-        .to_string(),
-    );
     let mut settings = aggregate_proxy_settings(
-        "compaction-truncated-body-failover",
+        "compaction-truncated-body-same-candidate",
         first_server.base_url.clone(),
-        second_server.base_url.clone(),
+        "http://127.0.0.1:9/v1".to_string(),
     );
     settings.aggregate_relay_profiles[0].strategy = AggregateRelayStrategy::Failover;
     for relay in &mut settings.relay_profiles[..2] {
@@ -9547,31 +9539,32 @@ async fn aggregate_remote_compaction_fails_over_after_2xx_truncated_body() {
         result.response_protocol,
         UpstreamResponseProtocol::Responses
     );
+    let response: Value = serde_json::from_slice(&result.into_body_bytes().await.unwrap()).unwrap();
+    assert_eq!(response["status"], "failed");
     assert_eq!(first_server.finish().path, "/v1/chat/completions");
-    assert_eq!(second_server.finish().path, "/v1/chat/completions");
 }
 
 #[tokio::test]
-async fn aggregate_remote_compaction_stream_fails_over_after_unfinished_2xx_body() {
+async fn aggregate_remote_compaction_stream_retries_same_candidate_after_unfinished_2xx_body() {
     let _lock = settings_path_test_lock().lock().unwrap();
-    let first_server = spawn_chat_server_with_response(
+    let first_server = spawn_chat_server_with_responses(vec![
         r#"data: {"id":"chatcmpl_unfinished","created":0,"model":"gpt-5-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"PARTIAL"}}]}
 
-"#,
-    );
-    let second_server = spawn_chat_server_with_response(
-        r#"data: {"id":"chatcmpl_stream_fallback","created":0,"model":"gpt-5-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"<summary>STREAM SUMMARY AFTER FAILOVER</summary>"}}]}
+"#
+        .to_string(),
+        r#"data: {"id":"chatcmpl_stream_retry","created":0,"model":"gpt-5-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"<summary>STREAM SUMMARY AFTER RETRY</summary>"}}]}
 
-data: {"id":"chatcmpl_stream_fallback","created":0,"model":"gpt-5-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}
+data: {"id":"chatcmpl_stream_retry","created":0,"model":"gpt-5-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}
 
 data: [DONE]
 
-"#,
-    );
+"#
+        .to_string(),
+    ]);
     let mut settings = aggregate_proxy_settings(
-        "compaction-stream-body-failover",
+        "compaction-stream-body-same-candidate",
         first_server.base_url.clone(),
-        second_server.base_url.clone(),
+        "http://127.0.0.1:9/v1".to_string(),
     );
     settings.aggregate_relay_profiles[0].strategy = AggregateRelayStrategy::Failover;
     for relay in &mut settings.relay_profiles[..2] {
@@ -9593,35 +9586,24 @@ data: [DONE]
         result.response_protocol,
         UpstreamResponseProtocol::Responses
     );
-    assert_eq!(first_server.finish().path, "/v1/chat/completions");
-    assert_eq!(second_server.finish().path, "/v1/chat/completions");
+    let upstream_requests = first_server.finish_all();
+    assert_eq!(upstream_requests.len(), 2);
+    assert!(
+        upstream_requests
+            .iter()
+            .all(|request| request.path == "/v1/chat/completions")
+    );
 }
 
 #[tokio::test]
-async fn aggregate_anthropic_retry_body_failure_fails_over_to_next_candidate() {
+async fn aggregate_anthropic_retry_body_failure_does_not_switch_candidate() {
     let _lock = settings_path_test_lock().lock().unwrap();
     clear_anthropic_reasoning_compatibility_cache_for_tests();
     let first_server = spawn_truncated_response_server_with_status("400 Bad Request");
-    let second_server = spawn_chat_server_with_response(
-        json!({
-            "id": "chatcmpl_after_anthropic",
-            "created": 0,
-            "model": "claude-sonnet-5",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "<summary>SUMMARY AFTER FAILOVER</summary>"
-                },
-                "finish_reason": "stop"
-            }]
-        })
-        .to_string(),
-    );
     let mut settings = aggregate_proxy_settings(
         "anthropic-retry-read-failure",
         first_server.base_url.clone(),
-        second_server.base_url.clone(),
+        "http://127.0.0.1:9/v1".to_string(),
     );
     settings.relay_profiles[0].protocol = RelayProtocol::Anthropic;
     settings.relay_profiles[0].model_mappings[0].request_model = "claude-sonnet-5".to_string();
@@ -9644,8 +9626,9 @@ async fn aggregate_anthropic_retry_body_failure_fails_over_to_next_candidate() {
         result.response_protocol,
         UpstreamResponseProtocol::Responses
     );
+    let response: Value = serde_json::from_slice(&result.into_body_bytes().await.unwrap()).unwrap();
+    assert_eq!(response["status"], "failed");
     assert_eq!(first_server.finish().path, "/v1/messages");
-    assert_eq!(second_server.finish().path, "/v1/chat/completions");
     codex_elves_core::relay_rotation::record_relay_request_event(
         &BackendSettings::default(),
         codex_elves_core::relay_rotation::RotationEvent::Success,

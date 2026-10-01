@@ -283,6 +283,48 @@ pub fn prepare_compaction_attempt_request(
     }
 }
 
+/// 为已经确认属于本地压缩链路的请求替换模型。
+///
+/// 模型切换时必须丢弃原模型的推理配置和历史 reasoning item，避免把不兼容参数
+/// 带到独立压缩模型。
+pub(crate) fn apply_confirmed_compaction_model_override(
+    request_json: &Value,
+    model: &str,
+) -> Value {
+    let model = model.trim();
+    if model.is_empty() {
+        return request_json.clone();
+    }
+    if request_json.get("model").and_then(Value::as_str) == Some(model) {
+        return request_json.clone();
+    }
+    let mut request = request_json.clone();
+    let Some(object) = request.as_object_mut() else {
+        return request_json.clone();
+    };
+    object.insert("model".to_string(), json!(model));
+    for key in ["reasoning", "model_reasoning_effort", "reasoning_effort"] {
+        object.remove(key);
+    }
+    object.insert(
+        "reasoning".to_string(),
+        json!({ "effort": default_compaction_reasoning_effort(model) }),
+    );
+    if let Some(Value::Array(items)) = object.get_mut("input") {
+        items.retain(|item| item.get("type").and_then(Value::as_str) != Some("reasoning"));
+    }
+    request
+}
+
+fn default_compaction_reasoning_effort(model: &str) -> &'static str {
+    let model = model.trim().to_ascii_lowercase();
+    if model.contains("deepseek") || model.contains("glm") {
+        "max"
+    } else {
+        "xhigh"
+    }
+}
+
 /// A：只替换压缩触发项。历史中的合成压缩项保持原样，由协议转换按主请求相同规则展开，
 /// 保证转换后的 system / tools / messages 前缀与主请求逐字节一致。
 fn prepare_cache_reuse_request(
@@ -2236,6 +2278,40 @@ pub fn prepare_legacy_layered_compaction_request_with_options(
 /// 判断请求是否属于任一种上下文压缩（传统压缩或 Remote Compaction V2）。
 pub fn is_any_compaction_request(request_json: &Value) -> bool {
     is_compaction_request(Some(request_json)) || is_remote_compaction_v2_request(Some(request_json))
+}
+
+pub const DEFAULT_COMPACTION_OUTPUT_RESERVE_TOKENS: u64 = 8_192;
+
+/// 独立压缩模型的保守输入 token 估算，仅用于诊断。
+pub fn estimate_compaction_request_tokens(request_json: &Value) -> u64 {
+    let weighted = estimate_json_value_tokens(request_json);
+    let serialized = serde_json::to_vec(request_json)
+        .map(|bytes| (bytes.len() as u64).div_ceil(3))
+        .unwrap_or(0);
+    weighted.max(serialized)
+}
+
+/// 为压缩摘要输出预留上下文空间。
+pub fn compaction_output_reserve_tokens(request_json: &Value) -> u64 {
+    ["max_output_tokens", "max_tokens", "max_completion_tokens"]
+        .into_iter()
+        .filter_map(|key| request_json.get(key).and_then(Value::as_u64))
+        .max()
+        .unwrap_or(0)
+        .max(DEFAULT_COMPACTION_OUTPUT_RESERVE_TOKENS)
+}
+
+/// 独立模型生成的压缩响应必须对下游恢复为会话原模型。
+pub fn restore_response_model(response: &mut Value, original_model: &str) {
+    let original_model = original_model.trim();
+    if original_model.is_empty() {
+        return;
+    }
+    if let Some(object) = response.as_object_mut()
+        && object.contains_key("model")
+    {
+        object.insert("model".to_string(), json!(original_model));
+    }
 }
 
 fn estimate_json_value_tokens(value: &Value) -> u64 {

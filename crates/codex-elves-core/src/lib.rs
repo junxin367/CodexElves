@@ -7,6 +7,7 @@ pub mod cdp;
 pub mod cli_wrapper;
 pub mod codex_home;
 pub mod codex_sqlite;
+mod compaction_cache;
 mod computer_use_guard;
 pub mod continue_thinking;
 pub mod diagnostic_log;
