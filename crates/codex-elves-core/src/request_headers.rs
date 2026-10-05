@@ -16,6 +16,14 @@ pub enum UpstreamHeaderRoute {
     ConvertedProtocol,
 }
 
+/// Responses HTTP operations have different upstream endpoints and response schemas.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ResponsesRequestOperation {
+    #[default]
+    Create,
+    Compact,
+}
+
 /// Validated inbound request headers.
 ///
 /// This type intentionally does not implement `Debug` or serialization so
@@ -24,11 +32,15 @@ pub enum UpstreamHeaderRoute {
 #[derive(Clone, Default)]
 pub struct RequestContext {
     headers: HeaderMap,
+    responses_operation: ResponsesRequestOperation,
 }
 
 impl RequestContext {
     pub fn from_headers(headers: HeaderMap) -> Self {
-        Self { headers }
+        Self {
+            headers,
+            ..Self::default()
+        }
     }
 
     pub fn from_user_agent(user_agent: Option<&str>) -> Self {
@@ -38,7 +50,7 @@ impl RequestContext {
         {
             headers.insert(USER_AGENT, value);
         }
-        Self { headers }
+        Self::from_headers(headers)
     }
 
     /// Parse the request head without accepting malformed values for forwarding.
@@ -67,7 +79,28 @@ impl RequestContext {
             };
             headers.append(name, value);
         }
-        Self { headers }
+        Self::from_headers(headers)
+    }
+
+    /// Set the operation from the validated local HTTP route, never from a forwarded header.
+    pub fn with_responses_path(mut self, path: &str) -> Self {
+        let path = path.split_once('?').map_or(path, |(path, _)| path);
+        self.responses_operation = if matches!(
+            path,
+            "/responses/compact"
+                | "/v1/responses/compact"
+                | "/v1/v1/responses/compact"
+                | "/codex/v1/responses/compact"
+        ) {
+            ResponsesRequestOperation::Compact
+        } else {
+            ResponsesRequestOperation::Create
+        };
+        self
+    }
+
+    pub fn responses_operation(&self) -> ResponsesRequestOperation {
+        self.responses_operation
     }
 
     pub fn user_agent(&self) -> Option<&str> {

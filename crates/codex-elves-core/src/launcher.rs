@@ -1041,7 +1041,8 @@ async fn handle_helper_connection(
         )
         .await;
     }
-    let request_context = crate::request_headers::RequestContext::from_http_request(&request_bytes);
+    let request_context = crate::request_headers::RequestContext::from_http_request(&request_bytes)
+        .with_responses_path(&path);
     let request = String::from_utf8_lossy(&request_bytes);
     let request_body = http_request_body(&request);
     let request_user_agent = request_context.user_agent();
@@ -1380,7 +1381,9 @@ async fn handle_models_proxy_connection(
     } else {
         upstream.content_type.clone()
     };
-    let body = upstream.into_body_bytes().await?;
+    let body = upstream
+        .into_body_bytes_with_idle_timeout(crate::protocol_proxy::upstream_models_header_timeout())
+        .await?;
     write_http_response(stream, &status, &content_type, &body).await?;
     log_helper_response(
         if is_success {
@@ -1802,6 +1805,8 @@ async fn handle_protocol_proxy_connection_inner(
     let started_at = Instant::now();
     let timestamp_ms = crate::proxy_log::current_timestamp_ms();
     let request_json = serde_json::from_str::<serde_json::Value>(request_body).ok();
+    let upstream_idle_timeout =
+        crate::protocol_proxy::stream_idle_timeout_for_request(request_json.as_ref());
     let original_request_metadata =
         crate::proxy_log::extract_request_metadata(request_json.as_ref());
     append_pending_local_proxy_record(
@@ -1814,7 +1819,10 @@ async fn handle_protocol_proxy_connection_inner(
         request_body,
         request_json.as_ref(),
     );
-    if should_defer_protocol_stream(request_json.as_ref())? {
+    if request_context.responses_operation()
+        == crate::request_headers::ResponsesRequestOperation::Create
+        && should_defer_protocol_stream(request_json.as_ref())?
+    {
         return handle_deferred_protocol_proxy_stream_connection(
             stream,
             request_body,
@@ -1967,7 +1975,10 @@ async fn handle_protocol_proxy_connection_inner(
         let response_protocol_label = response_protocol_label(response_protocol);
         let status_code = upstream.status_code;
         let bridge_remote_compaction_v2 = upstream.bridge_remote_compaction_v2;
-        let upstream_body = match upstream.into_body_bytes().await {
+        let upstream_body = match upstream
+            .into_body_bytes_with_idle_timeout(upstream_idle_timeout)
+            .await
+        {
             Ok(body) => body,
             Err(error) if bridge_remote_compaction_v2 => {
                 let message = format!(
@@ -2437,7 +2448,15 @@ async fn handle_protocol_proxy_connection_inner(
         let mut response_truncated = false;
         let mut first_token_ms = None;
 
-        while let Some(chunk) = bytes_stream.next().await {
+        loop {
+            let chunk =
+                match next_stream_chunk_with_idle_timeout(&mut bytes_stream, upstream_idle_timeout)
+                    .await
+                {
+                    Ok(Some(chunk)) => chunk.map_err(anyhow::Error::from),
+                    Ok(None) => break,
+                    Err(error) => Err(error),
+                };
             match chunk {
                 Ok(bytes) => {
                     if let Some(observer) = cache_observer.as_mut() {
@@ -2548,7 +2567,10 @@ async fn handle_protocol_proxy_connection_inner(
     let upstream_status = upstream.status();
     let upstream_content_type = upstream.content_type.clone();
     let bridge_remote_compaction_v2 = upstream.bridge_remote_compaction_v2;
-    let upstream_body = match upstream.into_body_bytes().await {
+    let upstream_body = match upstream
+        .into_body_bytes_with_idle_timeout(upstream_idle_timeout)
+        .await
+    {
         Ok(body) => body,
         Err(error) if bridge_remote_compaction_v2 => {
             let message = format!(
@@ -2773,8 +2795,8 @@ where
 {
     tokio::time::timeout(upstream_idle_timeout, bytes_stream.next())
         .await
-        .map_err(|_| {
-            anyhow::anyhow!(
+        .with_context(|| {
+            format!(
                 "上游流超过 {} 毫秒没有返回数据",
                 upstream_idle_timeout.as_millis()
             )
@@ -2942,7 +2964,10 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     let mut upstream_model_observer = crate::proxy_log::UpstreamResponseModelObserver::default();
 
     if !upstream.is_success() {
-        let upstream_body = match upstream.into_body_bytes().await {
+        let upstream_body = match upstream
+            .into_body_bytes_with_idle_timeout(stream_header_timeout)
+            .await
+        {
             Ok(body) => body,
             Err(error) if bridge_remote_compaction_v2 => {
                 let message = format!(
@@ -3120,7 +3145,10 @@ async fn handle_deferred_protocol_proxy_stream_connection(
         let mut remote_compaction_stream_error = None;
         if bridge_remote_compaction_v2 {
             let raw_body = if upstream.body_override.is_some() {
-                upstream.into_body_bytes().await?.to_vec()
+                upstream
+                    .into_body_bytes_with_idle_timeout(stream_header_timeout)
+                    .await?
+                    .to_vec()
             } else {
                 let mut bytes_stream = upstream.into_response()?.bytes_stream();
                 let mut buffered = Vec::new();
@@ -3243,7 +3271,9 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                 crate::proxy_log::append_capture(&mut response_capture, &rewritten);
             stream.write_all(&rewritten).await?;
         } else if upstream.body_override.is_some() {
-            let raw_body = upstream.into_body_bytes().await?;
+            let raw_body = upstream
+                .into_body_bytes_with_idle_timeout(stream_header_timeout)
+                .await?;
             upstream_model_observer.observe_sse_chunk(&raw_body, response_protocol);
             let body = raw_body;
             let elapsed_ms = started_at.elapsed().as_millis() as u64;
@@ -3435,7 +3465,9 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     let mut cache_observer = None;
 
     if upstream_has_body_override {
-        let body = upstream.into_body_bytes().await?;
+        let body = upstream
+            .into_body_bytes_with_idle_timeout(stream_header_timeout)
+            .await?;
         upstream_model_observer.observe_sse_chunk(&body, response_protocol);
         let converted = converter.push_bytes(&body);
         if !converted.is_empty() {
@@ -3673,6 +3705,8 @@ async fn handle_chat_completions_proxy_connection(
     let started_at = Instant::now();
     let timestamp_ms = crate::proxy_log::current_timestamp_ms();
     let request_json = serde_json::from_str::<serde_json::Value>(request_body).ok();
+    let upstream_idle_timeout =
+        crate::protocol_proxy::stream_idle_timeout_for_request(request_json.as_ref());
     let original_request_metadata =
         crate::proxy_log::extract_request_metadata(request_json.as_ref());
     let log_id = next_local_proxy_log_id();
@@ -3686,11 +3720,16 @@ async fn handle_chat_completions_proxy_connection(
         request_body,
         request_json.as_ref(),
     );
-    let upstream = match crate::protocol_proxy::open_chat_completions_proxy_request(
-        request_body,
-        request_user_agent,
+    let upstream = match tokio::time::timeout(
+        upstream_idle_timeout,
+        crate::protocol_proxy::open_chat_completions_proxy_request(
+            request_body,
+            request_user_agent,
+        ),
     )
     .await
+    .context("Chat Completions 上游响应头等待超时")
+    .and_then(|result| result)
     {
         Ok(upstream) => upstream,
         Err(error) => {
@@ -3773,7 +3812,15 @@ async fn handle_chat_completions_proxy_connection(
         let mut response_bytes = 0_usize;
         let mut response_truncated = false;
         let mut first_token_ms = None;
-        while let Some(chunk) = bytes_stream.next().await {
+        loop {
+            let chunk =
+                match next_stream_chunk_with_idle_timeout(&mut bytes_stream, upstream_idle_timeout)
+                    .await
+                {
+                    Ok(Some(chunk)) => chunk.map_err(anyhow::Error::from),
+                    Ok(None) => break,
+                    Err(error) => Err(error),
+                };
             let bytes = match chunk {
                 Ok(bytes) => bytes,
                 Err(error) => {
@@ -3868,7 +3915,9 @@ async fn handle_chat_completions_proxy_connection(
         return Ok(());
     }
 
-    let body = upstream.into_body_bytes().await?;
+    let body = upstream
+        .into_body_bytes_with_idle_timeout(upstream_idle_timeout)
+        .await?;
     if is_success {
         record_observed_upstream_model(
             &mut request_metadata,

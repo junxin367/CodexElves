@@ -34,6 +34,1289 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+mod protocol_stream_integrity_review {
+    use super::*;
+
+    fn request(compat: bool) -> Value {
+        json!({
+            "model":"claude-test","input":"test",
+            "codex_elves_compat":{"textual_tool_calls":compat,"inline_citations":compat},
+            "tools":[{"type":"function","name":"write_file","parameters":{
+                "type":"object","properties":{"content":{"type":"string"}}
+            }}]
+        })
+    }
+
+    fn wire(blocks: &[Value], stop: &str) -> String {
+        let mut events = vec![
+            json!({"type":"message_start","message":{"id":"msg_integrity","model":"claude-test"}}),
+        ];
+        for (index, block) in blocks.iter().enumerate() {
+            events.push(json!({"type":"content_block_start","index":index,"content_block":block}));
+            events.push(json!({"type":"content_block_stop","index":index}));
+        }
+        events.push(json!({"type":"message_delta","delta":{"stop_reason":stop}}));
+        events.push(json!({"type":"message_stop"}));
+        events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect()
+    }
+
+    fn responses(blocks: Vec<Value>, request: &Value) -> Vec<Value> {
+        let direct = anthropic_message_to_response_with_request(
+            json!({"id":"msg_integrity","model":"claude-test","content":blocks,"stop_reason":"end_turn"}),
+            request,
+        ).unwrap();
+        let sse = anthropic_sse_to_responses_sse_with_request(&wire(&blocks, "end_turn"), request);
+        let events = parse_response_sse_events(&sse);
+        vec![direct, events.last().unwrap().data["response"].clone()]
+    }
+
+    fn text(response: &Value) -> String {
+        response["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["content"].as_array())
+            .flatten()
+            .filter_map(|part| part["text"].as_str())
+            .collect()
+    }
+
+    #[test]
+    fn truncated_tool_does_not_block_later_item_completion() {
+        for finish in ["length", "content_filter"] {
+            let chunks = [
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"cut","function":{"name":"f","arguments":"{}"}}]}}]}),
+                json!({"choices":[{"delta":{"content":"kept answer"}}]}),
+                json!({"choices":[{"delta":{},"finish_reason":finish}]}),
+            ];
+            let sse = format!(
+                "{}data: [DONE]\n\n",
+                chunks
+                    .iter()
+                    .map(|v| format!("data: {v}\n\n"))
+                    .collect::<String>()
+            );
+            let output = chat_sse_to_responses_sse(&sse);
+            let events = parse_response_sse_events(&output);
+            let done: Vec<_> = events
+                .iter()
+                .filter(|e| e.event == "response.output_item.done")
+                .collect();
+            assert_eq!(done.len(), 1, "{output}");
+            assert_eq!(done[0].data["item"]["type"], "message");
+            assert_eq!(done[0].data["item"]["content"][0]["text"], "kept answer");
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| e.event == "response.function_call_arguments.done")
+            );
+        }
+    }
+
+    #[test]
+    fn text_tools_require_explicit_compatibility_and_ignore_code_examples() {
+        let xml =
+            "<invoke name=\"write_file\"><parameter name=\"content\">demo</parameter></invoke>";
+        for response in responses(vec![json!({"type":"text","text":xml})], &request(false)) {
+            assert_eq!(text(&response), xml);
+            assert!(
+                response["output"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|i| i["type"] == "message")
+            );
+        }
+        for example in [format!("```xml\n{xml}\n```"), format!("`{xml}`")] {
+            for response in responses(vec![json!({"type":"text","text":example})], &request(true)) {
+                assert_eq!(text(&response), example);
+                assert!(
+                    response["output"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|i| i["type"] == "message")
+                );
+            }
+        }
+        let mut disabled = request(true);
+        disabled["tool_choice"] = json!("none");
+        for response in responses(vec![json!({"type":"text","text":xml})], &disabled) {
+            assert_eq!(text(&response), xml);
+        }
+        for response in responses(vec![json!({"type":"text","text":xml})], &request(true)) {
+            assert_eq!(response["output"][0]["type"], "function_call");
+        }
+    }
+
+    #[test]
+    fn text_tool_string_parameters_preserve_whitespace() {
+        for content in ["    print(\"x\")\n", " \r\n ", "\n\ntext\t"] {
+            let xml = format!(
+                "<invoke name=\"write_file\"><parameter name=\"content\">{content}</parameter></invoke>"
+            );
+            for response in responses(vec![json!({"type":"text","text":xml})], &request(true)) {
+                let args: Value =
+                    serde_json::from_str(response["output"][0]["arguments"].as_str().unwrap())
+                        .unwrap();
+                assert_eq!(args["content"], content);
+            }
+        }
+    }
+
+    #[test]
+    fn html_cite_code_is_preserved_and_wrapper_cleanup_is_opt_in() {
+        for raw in [
+            "<cite>Book</cite>",
+            "```html\n<cite>Book</cite>\n```",
+            "`<cite>Book</cite>`",
+        ] {
+            for response in responses(vec![json!({"type":"text","text":raw})], &request(false)) {
+                assert_eq!(text(&response), raw);
+            }
+            let chat = chat_completion_to_response_with_request(
+                json!({"choices":[{"message":{"content":raw},"finish_reason":"stop"}]}),
+                &request(false),
+            )
+            .unwrap();
+            assert_eq!(text(&chat), raw);
+            if raw.starts_with('`') {
+                for response in responses(vec![json!({"type":"text","text":raw})], &request(true)) {
+                    assert_eq!(text(&response), raw);
+                }
+            }
+        }
+        for response in responses(
+            vec![json!({"type":"text","text":"a<cite>Book</cite>b"})],
+            &request(true),
+        ) {
+            assert_eq!(text(&response), "aBookb");
+        }
+    }
+
+    #[test]
+    fn citations_preserve_sources_and_raw_roundtrip() {
+        let citation = json!({"type":"web_search_result_location","url":"https://example.com/source",
+            "title":"Source","encrypted_index":"opaque-location","cited_text":"Evidence"});
+        for response in responses(
+            vec![json!({"type":"text","text":"中🙂 Evidence","citations":[citation]})],
+            &request(false),
+        ) {
+            let part = &response["output"][0]["content"][0];
+            let annotation = &part["annotations"][0];
+            assert_eq!(annotation["type"], "url_citation");
+            assert_eq!(annotation["url"], citation["url"]);
+            assert_eq!(annotation["title"], citation["title"]);
+            assert_eq!(annotation["start_index"], 3);
+            assert_eq!(annotation["end_index"], 11);
+            let replay = responses_to_anthropic_messages(json!({
+                "model":"claude-test","input":[{"role":"user","content":"test"},response["output"][0].clone()]
+            })).unwrap();
+            assert_eq!(
+                replay["messages"][1]["content"][0]["citations"][0],
+                citation
+            );
+        }
+        let sse = format!(
+            "data: {{\"type\":\"message_start\",\"message\":{{\"id\":\"c\"}}}}\n\n\
+             data: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n\
+             data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"Evidence\"}}}}\n\n\
+             data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"citations_delta\",\"citation\":{citation}}}}}\n\n\
+             data: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n\
+             data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}}}}\n\n\
+             data: {{\"type\":\"message_stop\"}}\n\n"
+        );
+        let converted = anthropic_sse_to_responses_sse_with_request(&sse, &request(false));
+        let events = parse_response_sse_events(&converted);
+        assert_eq!(
+            events.last().unwrap().data["response"]["output"][0]["content"][0]["annotations"][0]["url"],
+            citation["url"]
+        );
+    }
+
+    #[test]
+    fn server_tools_are_opaque_history_not_client_calls() {
+        let blocks = vec![
+            json!({"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"q"}}),
+            json!({"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","url":"https://example.com","encrypted_content":"opaque"}]}),
+            json!({"type":"text","text":"answer"}),
+        ];
+        for response in responses(blocks.clone(), &request(false)) {
+            let items = response["output"].as_array().unwrap();
+            assert!(items.iter().all(|item| !matches!(
+                item["type"].as_str(),
+                Some("function_call" | "custom_tool_call" | "web_search_call")
+            )));
+            assert_eq!(text(&response), "answer");
+            assert_eq!(items[0]["type"], "reasoning");
+            assert!(
+                items[0]["encrypted_content"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("codex-elves-anthropic-content-v1:")
+            );
+            let mut history = vec![json!({"role":"user","content":"test"})];
+            history.extend(items.iter().cloned());
+            let replay =
+                responses_to_anthropic_messages(json!({"model":"claude-test","input":history}))
+                    .unwrap();
+            assert_eq!(replay["messages"][1]["content"][0], blocks[0]);
+            assert_eq!(replay["messages"][1]["content"][1], blocks[1]);
+        }
+    }
+
+    #[test]
+    fn compatibility_code_and_citations_survive_every_fragment_boundary() {
+        let examples = [
+            "```xml\n<invoke name=\"write_file\"><parameter name=\"content\">demo</parameter></invoke>\n```",
+            "`<invoke name=\"write_file\"><parameter name=\"content\">demo</parameter></invoke>`",
+            "~~~html\n<cite>HTML</cite>\n~~~",
+            "``<cite>inline ` code</cite>``",
+        ];
+        for example in examples {
+            let deltas: Vec<_> = example.chars().map(|ch| ch.to_string()).collect();
+            let upstream = anthropic_sse_from_text_deltas(&deltas);
+            for width in [1, 7, 4096] {
+                let mut converter = AnthropicSseToResponsesConverter::with_request(&request(true));
+                let mut output = Vec::new();
+                for bytes in upstream.as_bytes().chunks(width) {
+                    output.extend(converter.push_bytes(bytes));
+                }
+                output.extend(converter.finish());
+                let rendered = String::from_utf8(output).unwrap();
+                assert_eq!(collect_stream_output_text(&rendered), example);
+                assert!(!parse_response_sse_events(&rendered).iter().any(|event| {
+                    event.event == "response.output_item.done"
+                        && event.data["item"]["type"] == "function_call"
+                }));
+            }
+        }
+        let first = json!({"type":"web_search_result_location","url":"https://example.com/1","title":"1","cited_text":"甲"});
+        let second = json!({"type":"web_search_result_location","url":"https://example.com/2","title":"2","cited_text":"乙","encrypted_index":"second"});
+        let streamed = anthropic_sse_to_responses_sse_with_request(
+            &wire(
+                &[
+                    json!({"type":"text","text":"甲","citations":[first]}),
+                    json!({"type":"text","text":"🙂乙","citations":[second]}),
+                ],
+                "end_turn",
+            ),
+            &request(false),
+        );
+        let events = parse_response_sse_events(&streamed);
+        let annotations =
+            &events.last().unwrap().data["response"]["output"][0]["content"][0]["annotations"];
+        assert_eq!(annotations[0]["start_index"], 0);
+        assert_eq!(annotations[0]["end_index"], 1);
+        assert_eq!(annotations[1]["start_index"], 2);
+        assert_eq!(annotations[1]["end_index"], 3);
+    }
+
+    #[test]
+    fn server_fetch_and_client_tools_replay_without_changing_execution_owner() {
+        let blocks = vec![
+            json!({"type":"server_tool_use","id":"srvtoolu_fetch","name":"web_fetch","input":{"url":"https://example.com"}}),
+            json!({"type":"web_fetch_tool_result","tool_use_id":"srvtoolu_fetch","content":{"type":"web_fetch_result","url":"https://example.com","retrieved_at":"2026-10-05T00:00:00Z","content":{"type":"document","source":{"type":"text","media_type":"text/plain","data":"source"}}}}),
+            json!({"type":"tool_use","id":"client_write","name":"write_file","input":{"content":"client"}}),
+        ];
+        for response in responses(blocks.clone(), &request(false)) {
+            let items = response["output"].as_array().unwrap();
+            let calls: Vec<_> = items
+                .iter()
+                .filter(|item| item["type"] == "function_call")
+                .collect();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0]["call_id"], "client_write");
+            let mut history = vec![json!({"role":"user","content":"test"})];
+            history.extend(items.iter().cloned());
+            history.push(
+                json!({"type":"function_call_output","call_id":"client_write","output":"done"}),
+            );
+            let replay = responses_to_anthropic_messages(json!({
+                "model":"claude-test","input":history,"tools":request(false)["tools"]
+            }))
+            .unwrap();
+            assert_eq!(replay["messages"][1]["content"][0], blocks[0]);
+            assert_eq!(replay["messages"][1]["content"][1], blocks[1]);
+            assert_eq!(replay["messages"][1]["content"][2], blocks[2]);
+            assert_eq!(
+                replay["messages"][2]["content"][0]["tool_use_id"],
+                "client_write"
+            );
+        }
+        // 服务端挂起等待客户端结果时，没有对应 server result 也必须保留调用。
+        let pending = vec![blocks[0].clone(), blocks[2].clone()];
+        for response in responses(pending, &request(false)) {
+            assert!(
+                response["output"][0]["encrypted_content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("srvtoolu_fetch")
+            );
+        }
+    }
+
+    #[test]
+    fn server_partial_json_and_truncation_never_create_client_calls_or_invalid_history() {
+        for arguments in [r#"{"query":"complete"}"#, r#"{"query":"cut"#] {
+            let events = vec![
+                json!({"type":"message_start","message":{"id":"msg_server_delta","model":"claude-test"}}),
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_search","name":"web_search","input":{}}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":arguments}}),
+                json!({"type":"content_block_stop","index":0}),
+                json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":"partial answer"}}),
+                json!({"type":"content_block_stop","index":1}),
+                json!({"type":"message_delta","delta":{"stop_reason":"max_tokens"}}),
+                json!({"type":"message_stop"}),
+            ];
+            let upstream: String = events
+                .iter()
+                .map(|event| format!("data: {event}\n\n"))
+                .collect();
+            let mut converter = AnthropicSseToResponsesConverter::with_request(&request(false));
+            let mut output = Vec::new();
+            for byte in upstream.as_bytes().chunks(1) {
+                output.extend(converter.push_bytes(byte));
+            }
+            output.extend(converter.finish());
+            let converted = String::from_utf8(output).unwrap();
+            let output_events = parse_response_sse_events(&converted);
+            let response = &output_events.last().unwrap().data["response"];
+            assert_eq!(response["status"], "incomplete");
+            assert_eq!(text(response), "partial answer");
+            assert!(
+                !output_events
+                    .iter()
+                    .any(|event| event.event == "response.function_call_arguments.done")
+            );
+            let done: Vec<_> = output_events
+                .iter()
+                .filter(|event| event.event == "response.output_item.done")
+                .collect();
+            assert!(
+                done.iter()
+                    .any(|event| event.data["item"]["type"] == "message")
+            );
+            let reasoning: Vec<_> = response["output"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["type"] == "reasoning")
+                .collect();
+            if arguments.ends_with('}') {
+                assert_eq!(reasoning.len(), 1);
+                let payload = reasoning[0]["encrypted_content"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("codex-elves-anthropic-content-v1:")
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(payload).unwrap()["input"]["query"],
+                    "complete"
+                );
+            } else {
+                assert!(reasoning.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn namespace_identity_not_flattened_spelling_controls_tool_permissions() {
+        for kind in ["function", "custom"] {
+            let declared = json!({"type":kind,"name":"b__c","parameters":{"type":"object"}});
+            for allowed in [false, true] {
+                let wrong = json!({"type":kind,"namespace":"a__b","name":"c"});
+                let choice = if allowed {
+                    json!({"type":"allowed_tools","mode":"required","tools":[wrong]})
+                } else {
+                    wrong
+                };
+                let request = json!({"model":"claude-test","input":"test","tools":[
+                    {"type":"namespace","name":"a","tools":[declared]}
+                ],"tool_choice":choice});
+                assert!(
+                    responses_to_chat_completions(request.clone()).is_err(),
+                    "{request}"
+                );
+                assert!(responses_to_anthropic_messages(request).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_internal_function_choice_requires_exact_declared_identity() {
+        for choice in [
+            json!({"type":"function","name":"tool_search"}),
+            json!({"type":"function","namespace":"","name":"tool_search"}),
+            json!({"type":"function","function":{"namespace":"","name":"tool_search"}}),
+        ] {
+            let request = json!({"model":"claude-test","input":"test",
+                "tools":[{"type":"custom","name":"tool_search"},{"type":"tool_search"}],
+                "tool_choice":choice});
+            let chat = responses_to_chat_completions(request.clone()).unwrap();
+            let anthropic = responses_to_anthropic_messages(request).unwrap();
+            assert_eq!(chat["tool_choice"]["function"]["name"], "tool_search");
+            assert_eq!(anthropic["tool_choice"]["name"], "tool_search");
+        }
+        for (tools, choice) in [
+            (
+                json!([{"type":"custom","name":"tool_search"}]),
+                json!({"type":"function","name":"tool_search"}),
+            ),
+            (
+                json!([{"type":"custom","name":"tool_search"},{"type":"tool_search"}]),
+                json!({"type":"function","name":"tool_search_2"}),
+            ),
+            (
+                json!([{"type":"tool_search"}]),
+                json!({"type":"function","namespace":"other","name":"tool_search"}),
+            ),
+        ] {
+            for allowed in [false, true] {
+                let restriction = if allowed {
+                    json!({"type":"allowed_tools","mode":"required","tools":[choice]})
+                } else {
+                    choice.clone()
+                };
+                let request = json!({"model":"claude-test","input":"test","tools":tools,"tool_choice":restriction});
+                assert!(
+                    responses_to_chat_completions(request.clone()).is_err(),
+                    "{request}"
+                );
+                assert!(responses_to_anthropic_messages(request).is_err());
+            }
+        }
+        let request = json!({"model":"claude-test","input":"test",
+            "tools":[{"type":"function","name":"tool_search","parameters":{"type":"object"}},{"type":"tool_search"}],
+            "tool_choice":{"type":"function","name":"tool_search"}});
+        assert_eq!(
+            responses_to_chat_completions(request.clone()).unwrap()["tool_choice"]["function"]["name"],
+            "tool_search_2"
+        );
+        assert_eq!(
+            responses_to_anthropic_messages(request).unwrap()["tool_choice"]["name"],
+            "tool_search_2"
+        );
+    }
+
+    #[test]
+    fn internal_tool_names_do_not_capture_same_named_custom_or_function_tools() {
+        for ordinary_kind in ["custom", "function"] {
+            for internal_first in [false, true] {
+                let ordinary = json!({"type":ordinary_kind,"name":"tool_search","parameters":{"type":"object"}});
+                let internal = json!({"type":"tool_search"});
+                let tools = if internal_first {
+                    vec![internal, ordinary]
+                } else {
+                    vec![ordinary, internal]
+                };
+                let request = json!({
+                    "model":"claude-test","tools":tools,"tool_choice":{"type":"tool_search"},
+                    "input":[{"role":"user","content":"test"},
+                        {"type":"tool_search_call","call_id":"search","arguments":{"query":"q"}},
+                        {"type":"tool_search_output","call_id":"search","tools":[]}]
+                });
+                let chat = responses_to_chat_completions(request.clone()).unwrap();
+                let anthropic = responses_to_anthropic_messages(request.clone()).unwrap();
+                let names: Vec<_> = chat["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|tool| tool["function"]["name"].as_str().unwrap())
+                    .collect();
+                assert!(names.contains(&"tool_search") && names.contains(&"tool_search_2"));
+                assert_eq!(chat["tool_choice"]["function"]["name"], "tool_search");
+                assert_eq!(
+                    chat["messages"][1]["tool_calls"][0]["function"]["name"],
+                    "tool_search"
+                );
+                assert_eq!(anthropic["tool_choice"]["name"], "tool_search");
+                assert_eq!(
+                    anthropic["messages"][1]["content"][0]["name"],
+                    "tool_search"
+                );
+                for (alias, expected) in [
+                    ("tool_search", "tool_search_call"),
+                    (
+                        "tool_search_2",
+                        if ordinary_kind == "custom" {
+                            "custom_tool_call"
+                        } else {
+                            "function_call"
+                        },
+                    ),
+                ] {
+                    let function = json!({"name":alias,"arguments":"{\"query\":\"q\"}"});
+                    let response = chat_completion_to_response_with_request(json!({
+                        "choices":[{"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"c","function":function}]}}]
+                    }), &request).unwrap();
+                    assert_eq!(response["output"][0]["type"], expected);
+                    let upstream = format!(
+                        "data: {}\n\ndata: [DONE]\n\n",
+                        json!({
+                            "choices":[{"finish_reason":"tool_calls","delta":{"tool_calls":[{"index":0,"id":"c","function":function}]}}]
+                        })
+                    );
+                    let converted = chat_sse_to_responses_sse_with_request(&upstream, &request);
+                    assert_eq!(
+                        parse_response_sse_events(&converted).last().unwrap().data["response"]["output"]
+                            [0]["type"],
+                        expected
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_function_history_and_textual_patch_arguments_use_actual_aliases() {
+        let tools = json!([
+            {"type":"custom","name":"apply_patch"},
+            {"type":"function","name":"apply_patch_add_file","parameters":{"type":"object"}}
+        ]);
+        let request = json!({"model":"claude-test","tools":tools,"input":[
+            {"role":"user","content":"test"},
+            {"type":"tool_call","tool_use":{"id":"c","name":"apply_patch_add_file","input":{}}},
+            {"type":"tool_result","call_id":"c","content":{"content":"done"}}
+        ]});
+        let chat = responses_to_chat_completions(request.clone()).unwrap();
+        assert_eq!(
+            chat["messages"][1]["tool_calls"][0]["function"]["name"],
+            "apply_patch_add_file_2"
+        );
+        let anthropic = responses_to_anthropic_messages(request).unwrap();
+        assert_eq!(
+            anthropic["messages"][1]["content"][0]["name"],
+            "apply_patch_add_file_2"
+        );
+        for namespace in ["", "files"] {
+            let patch = if namespace.is_empty() {
+                json!({"type":"custom","name":"apply_patch"})
+            } else {
+                json!({"type":"namespace","name":namespace,"tools":[{"type":"custom","name":"apply_patch"}]})
+            };
+            let preferred = if namespace.is_empty() {
+                "apply_patch_update_file"
+            } else {
+                "files__apply_patch_update_file"
+            };
+            let request = json!({"model":"claude-test","input":"test",
+                "codex_elves_compat":{"textual_tool_calls":true},
+                "tools":[{"type":"function","name":preferred,"parameters":{"type":"object"}},patch]
+            });
+            let xml = format!(
+                "<invoke name=\"{preferred}_2\"><parameter name=\"path\">a</parameter><parameter name=\"hunks\">[{{\"lines\":[{{\"op\":\"add\",\"text\":\"new\"}}]}}]</parameter></invoke>"
+            );
+            for response in responses(vec![json!({"type":"text","text":xml})], &request) {
+                assert_eq!(response["output"][0]["type"], "custom_tool_call");
+                assert_eq!(response["output"][0]["name"], "apply_patch");
+                assert!(
+                    response["output"][0]["input"]
+                        .as_str()
+                        .unwrap()
+                        .contains("+new")
+                );
+                if !namespace.is_empty() {
+                    assert_eq!(response["output"][0]["namespace"], namespace);
+                }
+            }
+        }
+    }
+}
+
+// 旧供应商兼容用例显式启用，普通请求默认保持原始正文。
+fn legacy_text_compat_request(request: &Value) -> Value {
+    let mut request = request.clone();
+    request["codex_elves_compat"] = json!({"textual_tool_calls":true,"inline_citations":true});
+    request
+}
+
+fn anthropic_message_to_response_with_compat(
+    body: Value,
+    request: &Value,
+) -> anyhow::Result<Value> {
+    anthropic_message_to_response_with_request(body, &legacy_text_compat_request(request))
+}
+
+fn anthropic_sse_to_responses_sse_with_compat(input: &str, request: &Value) -> String {
+    anthropic_sse_to_responses_sse_with_request(input, &legacy_text_compat_request(request))
+}
+
+mod protocol_history_integrity_review {
+    use super::*;
+
+    fn function(name: &str) -> Value {
+        json!({"type":"function","name":name,"parameters":{"type":"object","properties":{}}})
+    }
+
+    fn chat_call(request: &Value, name: &str, arguments: Value) -> Value {
+        chat_completion_to_response_with_request(
+            json!({"id":"history","choices":[{"message":{"tool_calls":[{
+                "id":"call_history","type":"function","function":{
+                    "name":name,"arguments":arguments.to_string()
+                }
+            }]},"finish_reason":"tool_calls"}]}),
+            request,
+        )
+        .unwrap()["output"][0]
+            .clone()
+    }
+
+    #[test]
+    fn additional_tools_restore_declarations_and_namespace_identity() {
+        let request = json!({
+            "model":"claude-test",
+            "input":[
+                {"type":"additional_tools","role":"system","tools":[
+                    {"type":"namespace","name":"collaboration","tools":[function("spawn_agent")]},
+                    {"type":"namespace","name":"files","tools":[{"type":"custom","name":"raw"}]}
+                ]},
+                {"role":"user","content":"使用工具"}
+            ]
+        });
+        for anthropic in [false, true] {
+            let upstream = if anthropic {
+                responses_to_anthropic_messages(request.clone()).unwrap()
+            } else {
+                responses_to_chat_completions(request.clone()).unwrap()
+            };
+            assert_eq!(upstream["tools"].as_array().unwrap().len(), 2);
+            assert!(
+                !upstream["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|m| m["content"].is_null()),
+                "工具声明不能变成空消息"
+            );
+        }
+        let call = chat_call(&request, "collaboration__spawn_agent", json!({}));
+        assert_eq!(call["namespace"], "collaboration");
+        assert_eq!(call["encrypted_function_args"], json!([]));
+        let custom = chat_call(&request, "files__raw", json!({"input":"原文"}));
+        assert_eq!(custom["type"], "custom_tool_call");
+        assert_eq!(custom["namespace"], "files");
+    }
+
+    #[test]
+    fn restored_tool_declarations_use_the_same_catalog_for_responses_and_streams() {
+        let request = json!({
+            "model":"claude-test",
+            "tools":[function("files__raw")],
+            "input":[{"type":"compaction","encrypted_content":format!(
+                "codex-elves-compaction-v3:{}", json!({
+                    "summary":"历史",
+                    "retained_tail":[
+                        {"type":"additional_tools","tools":[
+                            {"type":"namespace","name":"files","tools":[{"type":"custom","name":"raw"}]}
+                        ]},
+                        {"role":"user","content":"继续"}
+                    ]
+                })
+            )}]
+        });
+        let mut selected = request.clone();
+        selected["tool_choice"] = json!({"type":"custom","namespace":"files","name":"raw"});
+        let upstream = responses_to_chat_completions(selected.clone()).unwrap();
+        let alias = upstream["tool_choice"]["function"]["name"]
+            .as_str()
+            .unwrap();
+        let call = chat_call(&selected, alias, json!({"input":"原文"}));
+        assert_eq!(call["type"], "custom_tool_call");
+        assert_eq!(call["name"], "raw");
+        assert_eq!(call["namespace"], "files");
+        let stream = format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            json!({"id":"restored","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":alias,"arguments":"{\"input\":\"原文\"}"}}]}}]}),
+            json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]})
+        );
+        let converted = chat_sse_to_responses_sse_with_request(&stream, &selected);
+        let events = parse_response_sse_events(&converted);
+        let done = events
+            .iter()
+            .find(|event| event.event == "response.output_item.done")
+            .unwrap();
+        assert_eq!(done.data["item"]["namespace"], "files");
+        assert_eq!(done.data["item"]["name"], "raw");
+    }
+
+    #[test]
+    fn colliding_and_long_tool_names_keep_all_four_mapping_directions() {
+        let long_namespace = "n".repeat(50);
+        let long_name = "f".repeat(50);
+        let tools = json!([
+            {"type":"namespace","name":"a","tools":[function("b__c")]},
+            {"type":"namespace","name":"a__b","tools":[function("c")]},
+            function("a__b__c"),
+            {"type":"namespace","name":long_namespace,"tools":[function(&long_name)]}
+        ]);
+        let identities = [
+            ("a", "b__c"),
+            ("a__b", "c"),
+            ("", "a__b__c"),
+            (long_namespace.as_str(), long_name.as_str()),
+        ];
+        let mut aliases = std::collections::BTreeSet::new();
+        for (namespace, name) in identities {
+            let request = json!({
+                "model":"claude-test","tools":tools,
+                "tool_choice":{"type":"function","namespace":namespace,"name":name},
+                "input":[{"role":"user","content":"继续"},
+                    {"type":"function_call","namespace":namespace,"name":name,
+                     "call_id":"history","arguments":"{}"},
+                    {"type":"function_call_output","call_id":"history","output":"完成"}]
+            });
+            let chat = responses_to_chat_completions(request.clone()).unwrap();
+            let upstream_name = chat["tool_choice"]["function"]["name"].as_str().unwrap();
+            assert!(upstream_name.len() <= 64);
+            assert!(
+                upstream_name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            );
+            assert!(aliases.insert(upstream_name.to_string()), "{chat}");
+            assert_eq!(chat["tools"].as_array().unwrap().len(), 4);
+            assert_eq!(
+                chat["messages"][1]["tool_calls"][0]["function"]["name"],
+                upstream_name
+            );
+            let call = chat_call(&request, upstream_name, json!({}));
+            assert_eq!(call["name"], name);
+            assert_eq!(call["namespace"].as_str().unwrap_or(""), namespace);
+            let anthropic = responses_to_anthropic_messages(request).unwrap();
+            assert_eq!(anthropic["tool_choice"]["name"], upstream_name);
+            assert_eq!(
+                anthropic["messages"][1]["content"][0]["name"],
+                upstream_name
+            );
+        }
+    }
+
+    #[test]
+    fn custom_proxy_aliases_do_not_shadow_real_functions() {
+        let request = json!({
+            "model":"claude-test",
+            "tools":[{"type":"custom","name":"apply_patch"},function("apply_patch_add_file"),
+                {"type":"namespace","name":"a","tools":[{"type":"custom","name":"b__c"}]},
+                {"type":"namespace","name":"a__b","tools":[{"type":"custom","name":"c"}]}],
+            "tool_choice":{"type":"function","name":"apply_patch_add_file"},
+            "input":"继续"
+        });
+        let chat = responses_to_chat_completions(request.clone()).unwrap();
+        let names: Vec<_> = chat["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names.len(), 8);
+        assert_eq!(
+            names
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            8
+        );
+        let name = chat["tool_choice"]["function"]["name"].as_str().unwrap();
+        assert_eq!(
+            chat_call(&request, name, json!({}))["type"],
+            "function_call"
+        );
+        for (namespace, custom_name) in [("a", "b__c"), ("a__b", "c")] {
+            let mut selected = request.clone();
+            selected["tool_choice"] =
+                json!({"type":"custom","namespace":namespace,"name":custom_name});
+            let selected_chat = responses_to_chat_completions(selected.clone()).unwrap();
+            let alias = selected_chat["tool_choice"]["function"]["name"]
+                .as_str()
+                .unwrap();
+            let call = chat_call(&selected, alias, json!({"input":"原文"}));
+            assert_eq!(call["namespace"], namespace);
+            assert_eq!(call["name"], custom_name);
+        }
+    }
+
+    #[test]
+    fn patch_history_preserves_first_hunk_without_marker() {
+        let request = json!({
+            "model":"claude-test","tools":[{"type":"custom","name":"apply_patch"}],
+            "input":[{"role":"user","content":"继续"},
+                {"type":"custom_tool_call","call_id":"p","name":"apply_patch",
+                 "input":"*** Begin Patch\n*** Update File: a\n-old\n+new\n*** End Patch"},
+                {"type":"custom_tool_call_output","call_id":"p","output":"完成"}]
+        });
+        let chat = responses_to_chat_completions(request.clone()).unwrap();
+        let arguments: Value = serde_json::from_str(
+            chat["messages"][1]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            arguments["hunks"][0]["lines"],
+            json!([
+                {"op":"remove","text":"old"},{"op":"add","text":"new"}
+            ])
+        );
+        let anthropic = responses_to_anthropic_messages(request).unwrap();
+        assert_eq!(anthropic["messages"][1]["content"][0]["input"], arguments);
+    }
+
+    #[test]
+    fn patch_structure_rejects_embedded_line_breaks_without_extra_operations() {
+        let request = json!({"tools":[{"type":"custom","name":"apply_patch"}]});
+        for (name, arguments) in [
+            (
+                "apply_patch_delete_file",
+                json!({"path":"safe.txt\n*** Delete File: victim.txt"}),
+            ),
+            (
+                "apply_patch_update_file",
+                json!({"path":"a","move_to":"b\r\n*** Delete File: victim.txt","hunks":[]}),
+            ),
+            (
+                "apply_patch_update_file",
+                json!({"path":"a","hunks":[{"context":"x\n*** Delete File: victim.txt","lines":[]}]}),
+            ),
+            (
+                "apply_patch_update_file",
+                json!({"path":"a","hunks":[{"lines":[{"op":"add","text":"x\n*** Delete File: victim.txt"}]}]}),
+            ),
+            (
+                "apply_patch_delete_file",
+                json!({"path":"safe.txt","raw_patch":"*** Begin Patch\n*** Delete File: victim.txt\n*** End Patch"}),
+            ),
+            (
+                "apply_patch_add_file",
+                json!({"path":"safe.txt","content":"hello","input":"*** Begin Patch\n*** Delete File: victim.txt\n*** End Patch"}),
+            ),
+        ] {
+            let call = chat_call(&request, name, arguments.clone());
+            let input = call["input"].as_str().unwrap();
+            assert!(
+                !input.starts_with("*** Begin Patch"),
+                "非法参数不能生成可执行补丁: {input}"
+            );
+            assert!(
+                !input
+                    .lines()
+                    .any(|line| line.starts_with("*** Delete File: victim.txt"))
+            );
+            assert!(!input.is_empty(), "非法参数不能静默成为空操作");
+            let stream = format!(
+                "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                json!({"id":"patch","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_patch","function":{"name":name,"arguments":arguments.to_string()}}]}}]}),
+                json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]})
+            );
+            let converted = chat_sse_to_responses_sse_with_request(&stream, &request);
+            let events = parse_response_sse_events(&converted);
+            let done = events
+                .iter()
+                .find(|event| event.event == "response.custom_tool_call_input.done")
+                .unwrap();
+            assert_eq!(done.data["input"], input);
+        }
+    }
+
+    #[test]
+    fn raw_custom_patch_shaped_input_is_not_reinterpreted() {
+        let patch = "*** Begin Patch\n*** Add File: note\n+hello\n*** End Patch";
+        let request = json!({
+            "model":"claude-test",
+            "tools":[{"type":"namespace","name":"archive","tools":[{"type":"custom","name":"raw"}]}],
+            "input":[{"role":"user","content":"继续"},
+                {"type":"custom_tool_call","namespace":"archive","name":"raw","call_id":"c","input":patch},
+                {"type":"custom_tool_call_output","call_id":"c","output":"保存"}]
+        });
+        let chat = responses_to_chat_completions(request.clone()).unwrap();
+        let call = &chat["messages"][1]["tool_calls"][0]["function"];
+        assert_eq!(call["name"], "archive__raw");
+        assert_eq!(
+            serde_json::from_str::<Value>(call["arguments"].as_str().unwrap()).unwrap(),
+            json!({"input":patch})
+        );
+        let anthropic = responses_to_anthropic_messages(request).unwrap();
+        assert_eq!(
+            anthropic["messages"][1]["content"][0]["name"],
+            "archive__raw"
+        );
+        assert_eq!(
+            anthropic["messages"][1]["content"][0]["input"],
+            json!({"input":patch})
+        );
+    }
+
+    #[test]
+    fn claude_does_not_receive_foreign_ciphertext_as_a_thinking_signature() {
+        let request = json!({
+            "model":"claude-test","input":[{"role":"user","content":"继续"},
+                {"type":"reasoning","id":"rs_native","summary":[{"type":"summary_text","text":"历史摘要"}],
+                 "encrypted_content":"opaque-openai-reasoning"},
+                {"type":"reasoning","reasoning_content":"Chat 推理但没有签名"},
+                {"role":"assistant","content":"历史回答"},{"role":"user","content":"继续"}]
+        });
+        let converted = responses_to_anthropic_messages(request).unwrap();
+        let text = converted["messages"].to_string();
+        assert!(!text.contains("opaque-openai-reasoning"));
+        assert!(!text.contains("\"type\":\"thinking\""));
+        assert!(text.contains("历史摘要"));
+        assert!(text.contains("Chat 推理但没有签名"));
+    }
+
+    #[test]
+    fn new_anthropic_signatures_are_enveloped_and_legacy_bridge_still_replays() {
+        let request = json!({"model":"claude-test","input":"继续"});
+        let block = json!({"type":"thinking","thinking":"原始推理","signature":"real-signature"});
+        let response = anthropic_message_to_response_with_request(
+            json!({"id":"msg_origin","content":[block.clone(),{"type":"text","text":"回答"}],"stop_reason":"end_turn"}),
+            &request,
+        ).unwrap();
+        assert!(
+            response["output"][0]["encrypted_content"]
+                .as_str()
+                .unwrap()
+                .starts_with("codex-elves-anthropic-thinking-v1:")
+        );
+        for reasoning in [
+            response["output"][0].clone(),
+            json!({"type":"reasoning","reasoning_content":"原始推理","encrypted_content":"real-signature"}),
+        ] {
+            let replay = responses_to_anthropic_messages(json!({
+                "model":"claude-test","input":[{"role":"user","content":"继续"},reasoning,{"role":"assistant","content":"回答"}]
+            })).unwrap();
+            assert_eq!(replay["messages"][1]["content"][0], block);
+        }
+    }
+}
+
+mod protocol_request_contract_review {
+    use super::*;
+
+    fn function(name: &str) -> Value {
+        json!({"type":"function","name":name,"parameters":{"type":"object","properties":{}}})
+    }
+
+    #[test]
+    fn pdf_inputs_and_tool_results_remain_native_documents() {
+        let documents = json!([
+            {"type":"input_file","filename":"中文.pdf","file_data":"data:application/pdf;base64,JVBERi0xLjcK"},
+            {"type":"input_file","file_url":"https://example.test/report.pdf"}
+        ]);
+        let converted = responses_to_anthropic_messages(json!({
+            "model":"claude-test",
+            "input":[
+                {"role":"user","content":documents},
+                {"type":"function_call","name":"read","call_id":"c","arguments":"{}"},
+                {"type":"function_call_output","call_id":"c","output":documents}
+            ]
+        }))
+        .unwrap();
+        let expected = json!([
+            {"type":"document","title":"中文.pdf","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjcK"}},
+            {"type":"document","source":{"type":"url","url":"https://example.test/report.pdf"}}
+        ]);
+        assert_eq!(converted["messages"][0]["content"], expected);
+        assert_eq!(converted["messages"][2]["content"][0]["content"], expected);
+    }
+
+    #[test]
+    fn unsupported_anthropic_file_sources_return_errors_instead_of_text() {
+        for part in [
+            json!({"type":"input_file","file_id":"file_pdf"}),
+            json!({"type":"input_file","filename":"audio.wav","file_data":"data:audio/wav;base64,YQ=="}),
+            json!({"type":"input_file","filename":"missing.pdf"}),
+        ] {
+            let result = responses_to_anthropic_messages(json!({
+                "model":"claude-test","input":[{"role":"user","content":[part]}]
+            }));
+            assert!(result.is_err(), "无法解析的文件不可变成文本: {result:?}");
+            assert!(result.unwrap_err().to_string().contains("input_file"));
+        }
+    }
+
+    #[test]
+    fn file_id_images_are_rejected_in_messages_and_tool_outputs() {
+        for input in [
+            json!([{"role":"user","content":[{"type":"input_image","file_id":"file_img"}]}]),
+            json!([
+                {"role":"user","content":"查看"},
+                {"type":"function_call","name":"read","call_id":"c","arguments":"{}"},
+                {"type":"function_call_output","call_id":"c","output":[{"type":"input_image","file_id":"file_img"}]}
+            ]),
+        ] {
+            let request = json!({"model":"test","input":input});
+            for result in [
+                responses_to_chat_completions(request.clone()),
+                responses_to_anthropic_messages(request),
+            ] {
+                assert!(result.is_err(), "图片内容不可静默丢失: {result:?}");
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("input_image.file_id")
+                );
+            }
+        }
+        let request = json!({"model":"test","input":[{"role":"user","content":[{
+            "type":"input_image","file_id":"file_img","image_url":"https://example.test/image.png"
+        }]}]});
+        assert!(responses_to_chat_completions(request.clone()).is_ok());
+        assert!(responses_to_anthropic_messages(request).is_ok());
+    }
+
+    #[test]
+    fn unresolved_server_history_references_fail_before_conversion() {
+        for request in [
+            json!({"model":"test","previous_response_id":"resp_old","input":"继续"}),
+            json!({"model":"test","input":[{"type":"item_reference","id":"msg_old"},{"role":"user","content":"继续"}]}),
+            json!({"model":"test","conversation":{"id":"conv_old"},"input":"继续"}),
+        ] {
+            assert!(responses_to_chat_completions(request.clone()).is_err());
+            assert!(responses_to_anthropic_messages(request).is_err());
+        }
+        // conversation 字符串是现有聚合路由的绑定标识，不能删除这个兼容路径。
+        let request = json!({
+            "model":"test","conversation":"local-binding","previous_response_id":null,
+            "input":[{"role":"user","content":"完整历史"}]
+        });
+        assert!(responses_to_chat_completions(request.clone()).is_ok());
+        assert!(responses_to_anthropic_messages(request).is_ok());
+    }
+
+    #[test]
+    fn restored_compaction_history_is_validated_after_expansion() {
+        for tail in [
+            json!([{"type":"item_reference","id":"msg_old"}]),
+            json!([{"role":"user","content":[{"type":"input_image","file_id":"file_img"}]}]),
+        ] {
+            let request = json!({"model":"test","input":[{
+                "type":"compaction",
+                "encrypted_content":format!("codex-elves-compaction-v3:{}", json!({
+                    "summary":"历史摘要","retained_tail":tail
+                }))
+            }]});
+            assert!(responses_to_chat_completions(request.clone()).is_err());
+            assert!(responses_to_anthropic_messages(request).is_err());
+        }
+    }
+
+    #[test]
+    fn allowed_tools_preserve_the_permitted_subset_and_required_mode() {
+        let request = json!({
+            "model":"test","input":"读取",
+            "tools":[function("read"),function("write"),{
+                "type":"namespace","name":"files","tools":[function("list")]
+            }],
+            "tool_choice":{"type":"allowed_tools","mode":"required","tools":[
+                {"type":"function","name":"read"},
+                {"type":"function","namespace":"files","name":"list"}
+            ]}
+        });
+        let chat = responses_to_chat_completions(request.clone()).unwrap();
+        assert_eq!(chat["tools"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            chat["tool_choice"],
+            json!({
+                "type":"allowed_tools","allowed_tools":{"mode":"required","tools":[
+                    {"type":"function","function":{"name":"read"}},
+                    {"type":"function","function":{"name":"files__list"}}
+                ]}
+            })
+        );
+        let anthropic = responses_to_anthropic_messages(request).unwrap();
+        assert_eq!(anthropic["tool_choice"]["type"], "any");
+        let names: Vec<_> = anthropic["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["read", "files__list"]);
+    }
+
+    #[test]
+    fn invalid_allowed_tool_sets_cannot_fall_back_to_unrestricted_tools() {
+        for choice in [
+            json!({"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"missing"}]}),
+            json!({"type":"allowed_tools","mode":"required","tools":[]}),
+            json!({"type":"allowed_tools","mode":"invalid","tools":[{"type":"function","name":"read"}]}),
+            json!({"type":"allowed_tools","mode":"auto","tools":[{"type":"file_search"}]}),
+        ] {
+            let request = json!({"model":"test","input":"读取","tools":[function("read")],"tool_choice":choice});
+            assert!(responses_to_chat_completions(request.clone()).is_err());
+            assert!(responses_to_anthropic_messages(request).is_err());
+        }
+    }
+
+    fn custom_namespace_request() -> Value {
+        json!({
+            "model":"test","input":"执行",
+            "tools":[{"type":"namespace","name":"editor","description":"编辑工具","tools":[
+                {"type":"custom","name":"write","description":"原样写入文本"},
+                {"type":"custom","name":"apply_patch"}
+            ]}],
+            "tool_choice":{"type":"custom","namespace":"editor","name":"write"}
+        })
+    }
+
+    #[test]
+    fn namespace_custom_tools_round_trip_names_inputs_choices_and_history() {
+        let request = custom_namespace_request();
+        let chat = responses_to_chat_completions(request.clone()).unwrap();
+        assert_eq!(chat["tools"][0]["function"]["name"], "editor__write");
+        assert_eq!(chat["tool_choice"]["function"]["name"], "editor__write");
+        assert!(
+            chat["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["function"]["name"] == "editor__apply_patch_batch")
+        );
+        let anthropic = responses_to_anthropic_messages(request.clone()).unwrap();
+        assert_eq!(anthropic["tools"][0]["name"], "editor__write");
+        assert_eq!(anthropic["tool_choice"]["name"], "editor__write");
+        let input = "中文\n\"引号\"和路径 C:\\work";
+        let chat_response = chat_completion_to_response_with_request(json!({
+            "id":"chatcmpl_custom","choices":[{"finish_reason":"tool_calls","message":{"tool_calls":[{
+                "id":"c","type":"function","function":{"name":"editor__write","arguments":json!({"input":input}).to_string()}
+            }]}}]
+        }), &request).unwrap();
+        let anthropic_response = anthropic_message_to_response_with_request(json!({
+            "id":"msg_custom","type":"message","role":"assistant","stop_reason":"tool_use",
+            "content":[{"type":"tool_use","id":"c","name":"editor__write","input":{"input":input}}]
+        }), &request).unwrap();
+        for response in [chat_response, anthropic_response] {
+            let call = &response["output"][0];
+            assert_eq!(call["type"], "custom_tool_call");
+            assert_eq!(call["name"], "write");
+            assert_eq!(call["namespace"], "editor");
+            assert_eq!(call["input"], input);
+            let mut replay = request.clone();
+            replay["input"] = json!([
+                {"role":"user","content":"执行"},call,
+                {"type":"custom_tool_call_output","call_id":"c","output":"ok"}
+            ]);
+            let chat_replay = responses_to_chat_completions(replay.clone()).unwrap();
+            assert_eq!(
+                chat_replay["messages"][1]["tool_calls"][0]["function"]["name"],
+                "editor__write"
+            );
+            let arguments: Value = serde_json::from_str(
+                chat_replay["messages"][1]["tool_calls"][0]["function"]["arguments"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(arguments["input"], input);
+            let anthropic_replay = responses_to_anthropic_messages(replay).unwrap();
+            assert_eq!(
+                anthropic_replay["messages"][1]["content"][0]["name"],
+                "editor__write"
+            );
+            assert_eq!(
+                anthropic_replay["messages"][1]["content"][0]["input"]["input"],
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn allowed_namespace_custom_patch_tools_include_all_proxy_actions() {
+        let mut request = custom_namespace_request();
+        request["tool_choice"] = json!({"type":"allowed_tools","mode":"auto","tools":[{
+            "type":"custom","namespace":"editor","name":"apply_patch"
+        }]});
+        let chat = responses_to_chat_completions(request.clone()).unwrap();
+        let allowed = chat["tool_choice"]["allowed_tools"]["tools"]
+            .as_array()
+            .unwrap();
+        assert_eq!(allowed.len(), 5);
+        assert!(allowed.iter().all(|tool| {
+            tool["function"]["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("editor__apply_patch_")
+        }));
+        let anthropic = responses_to_anthropic_messages(request).unwrap();
+        assert_eq!(anthropic["tools"].as_array().unwrap().len(), 5);
+        assert_eq!(anthropic["tool_choice"]["type"], "auto");
+    }
+
+    #[test]
+    fn namespace_custom_stream_events_and_patch_history_keep_the_namespace() {
+        let request = custom_namespace_request();
+        let chat_wire = [
+            json!({"id":"chatcmpl_custom","choices":[{"index":0,"delta":{"tool_calls":[{
+                "index":0,"id":"c","type":"function","function":{"name":"editor__write","arguments":"{\"input\":\"你好\"}"}
+            }]}}]}),
+            json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}),
+        ].iter().map(|event| format!("data: {event}\n\n")).collect::<String>() + "data: [DONE]\n\n";
+        let anthropic_wire = [
+            json!({"type":"message_start","message":{"id":"msg_custom","type":"message","role":"assistant","content":[]}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"c","name":"editor__write","input":{}}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"input\":\"你好\"}"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}}),
+            json!({"type":"message_stop"}),
+        ].iter().map(|event| format!("data: {event}\n\n")).collect::<String>();
+        for output in [
+            chat_sse_to_responses_sse_with_request(&chat_wire, &request),
+            anthropic_sse_to_responses_sse_with_request(&anthropic_wire, &request),
+        ] {
+            let events: Vec<Value> = output
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter_map(|data| serde_json::from_str(data).ok())
+                .collect();
+            for event_type in ["response.output_item.added", "response.output_item.done"] {
+                let event = events
+                    .iter()
+                    .find(|event| event["type"] == event_type)
+                    .unwrap();
+                assert_eq!(event["item"]["type"], "custom_tool_call");
+                assert_eq!(event["item"]["namespace"], "editor");
+                assert_eq!(event["item"]["name"], "write");
+            }
+            let completed = events
+                .iter()
+                .find(|event| event["type"] == "response.completed")
+                .unwrap();
+            assert_eq!(completed["response"]["output"][0]["input"], "你好");
+        }
+        let mut replay = request;
+        replay["input"] = json!([
+            {"role":"user","content":"修改文件"},
+            {"type":"custom_tool_call","namespace":"editor","name":"apply_patch","call_id":"p",
+                "input":"*** Begin Patch\n*** Add File: a.txt\n+你好\n*** End Patch"},
+            {"type":"custom_tool_call_output","call_id":"p","output":"ok"}
+        ]);
+        replay["tool_choice"] = json!({"type":"custom","namespace":"editor","name":"apply_patch"});
+        let chat = responses_to_chat_completions(replay.clone()).unwrap();
+        assert_eq!(
+            chat["tool_choice"]["function"]["name"],
+            "editor__apply_patch_batch"
+        );
+        assert_eq!(
+            chat["messages"][1]["tool_calls"][0]["function"]["name"],
+            "editor__apply_patch_add_file"
+        );
+        let anthropic = responses_to_anthropic_messages(replay).unwrap();
+        assert_eq!(
+            anthropic["tool_choice"]["name"],
+            "editor__apply_patch_batch"
+        );
+        assert_eq!(
+            anthropic["messages"][1]["content"][0]["name"],
+            "editor__apply_patch_add_file"
+        );
+    }
+}
+
 mod anthropic_image_limits {
     use super::*;
     use base64::Engine as _;
@@ -404,7 +1687,7 @@ mod tool_conversion_audit {
             "</invoke>"
         );
         let request = typed_text_request();
-        let direct = anthropic_message_to_response_with_request(
+        let direct = anthropic_message_to_response_with_compat(
             json!({
                 "id": "msg_typed", "model": "claude-opus-4-8",
                 "content": [{ "type": "text", "text": text }], "stop_reason": "end_turn"
@@ -412,7 +1695,7 @@ mod tool_conversion_audit {
             &request,
         )
         .unwrap();
-        let streamed = anthropic_sse_to_responses_sse_with_request(
+        let streamed = anthropic_sse_to_responses_sse_with_compat(
             &anthropic_sse_from_text_deltas(&[text.to_string()]),
             &request,
         );
@@ -442,7 +1725,7 @@ mod tool_conversion_audit {
         let ids: Vec<_> = ["msg_first", "msg_second"]
             .into_iter()
             .map(|id| {
-                anthropic_message_to_response_with_request(
+                anthropic_message_to_response_with_compat(
                     json!({
                         "id": id, "model": "claude-opus-4-8",
                         "content": [{
@@ -472,7 +1755,7 @@ mod tool_conversion_audit {
             }]);
             let request =
                 tool_request(json!([{"type":"function","name":"inspect","parameters":parameters}]));
-            let converted = anthropic_message_to_response_with_request(json!({
+            let converted = anthropic_message_to_response_with_compat(json!({
                 "id":"msg_composed","model":"claude-opus-4-8","stop_reason":"end_turn",
                 "content":[{"type":"text","text":"<invoke name=\"inspect\"><parameter name=\"count\">7</parameter><parameter name=\"enabled\">false</parameter><parameter name=\"literal\">42</parameter></invoke>"}]
             }), &request).unwrap();
@@ -846,7 +2129,7 @@ mod tool_conversion_audit {
             let text = format!(
                 "<invoke name=\"collaboration__{name}\"><parameter name=\"message\">你好</parameter></invoke>"
             );
-            let direct = anthropic_message_to_response_with_request(
+            let direct = anthropic_message_to_response_with_compat(
                 json!({
                     "id":"msg_v2","model":"claude-test","stop_reason":"end_turn",
                     "content":[{"type":"text","text":text}]
@@ -854,7 +2137,7 @@ mod tool_conversion_audit {
                 &request,
             )
             .unwrap();
-            let stream = anthropic_sse_to_responses_sse_with_request(
+            let stream = anthropic_sse_to_responses_sse_with_compat(
                 &anthropic_sse_from_text_deltas(&[text]),
                 &request,
             );
@@ -1231,6 +2514,1386 @@ struct ParsedSseEvent {
     data: Value,
 }
 
+mod protocol_translation_fidelity_review {
+    use super::*;
+
+    #[test]
+    fn chat_image_detail_survives_user_and_tool_history_translation() {
+        for detail in ["low", "high", "auto", "original"] {
+            for nested in [false, true] {
+                let url = "https://example.test/image.png";
+                let image = json!({
+                    "type":"input_image","detail":detail,
+                    "image_url":if nested { json!({"url":url,"detail":"low"}) } else { json!(url) }
+                });
+                let converted = responses_to_chat_completions(json!({
+                    "model":"chat-test","input":[
+                        {"role":"user","content":[image.clone()]},
+                        {"type":"function_call","call_id":"call_image","name":"view","arguments":"{}"},
+                        {"type":"function_call_output","call_id":"call_image","output":[image]}
+                    ]
+                })).unwrap();
+                let messages = converted["messages"].as_array().unwrap();
+                for message_index in [0, 3] {
+                    assert_eq!(
+                        messages[message_index]["content"][0]["image_url"],
+                        json!({
+                            "url":url,"detail":detail
+                        })
+                    );
+                }
+                assert_eq!(messages[2]["role"], "tool");
+                assert_eq!(messages[2]["tool_call_id"], "call_image");
+            }
+        }
+        let converted = responses_to_chat_completions(json!({
+            "model":"chat-test","input":[{"role":"user","content":[
+                {"type":"input_image","image_url":{"url":"https://example.test/a.png","detail":"high"}},
+                {"type":"input_image","image_url":"https://example.test/b.png"}
+            ]}]
+        })).unwrap();
+        assert_eq!(
+            converted["messages"][0]["content"][0]["image_url"]["detail"],
+            "high"
+        );
+        assert!(
+            converted["messages"][0]["content"][1]["image_url"]
+                .get("detail")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn upstream_function_arguments_match_between_json_and_sse_without_rewriting() {
+        for arguments in [
+            "{\"path\":",
+            "\"quoted 中文\"",
+            "[1,2]",
+            "true",
+            "null",
+            "raw text",
+            " \n{\"path\":\"中文\"} \t",
+            "",
+        ] {
+            let expected = if arguments.is_empty() {
+                "{}"
+            } else {
+                arguments
+            };
+            for legacy in [false, true] {
+                let function = json!({"name":"inspect","arguments":arguments});
+                let message = if legacy {
+                    json!({"function_call":function})
+                } else {
+                    json!({"tool_calls":[{"id":"call_0","type":"function","function":function}]})
+                };
+                let response = chat_completion_to_response(json!({
+                    "id":"chatcmpl_fidelity","choices":[{"message":message,"finish_reason":"tool_calls"}]
+                })).unwrap();
+                let mut wire = String::new();
+                for fragment in
+                    std::iter::once(String::new()).chain(arguments.chars().map(|ch| ch.to_string()))
+                {
+                    let function = if fragment.is_empty() {
+                        json!({"name":"inspect","arguments":""})
+                    } else {
+                        json!({"arguments":fragment})
+                    };
+                    let delta = if legacy {
+                        json!({"function_call":function})
+                    } else {
+                        json!({"tool_calls":[{"index":0,"id":"call_0","function":function}]})
+                    };
+                    wire.push_str(&format!(
+                        "data: {}\n\n",
+                        json!({
+                            "id":"chatcmpl_fidelity","choices":[{"delta":delta}]
+                        })
+                    ));
+                }
+                wire.push_str("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n");
+                let events = parse_response_sse_events(&chat_sse_to_responses_sse(&wire));
+                let streamed = &events
+                    .iter()
+                    .find(|event| event.event == "response.completed")
+                    .unwrap()
+                    .data["response"];
+                assert_eq!(
+                    response["output"][0]["arguments"], expected,
+                    "legacy={legacy}"
+                );
+                assert_eq!(response["output"], streamed["output"]);
+                let done = events
+                    .iter()
+                    .find(|event| event.event == "response.function_call_arguments.done")
+                    .unwrap();
+                assert_eq!(done.data["arguments"], expected);
+            }
+        }
+    }
+
+    fn tool_result_request(output: Value, custom: bool, orphan: bool) -> Value {
+        let mut input = vec![json!({"role":"user","content":"inspect"})];
+        if !orphan {
+            input.push(if custom {
+                json!({"type":"custom_tool_call","call_id":"call_text","name":"exec","input":"pwd"})
+            } else {
+                json!({"type":"function_call","call_id":"call_text","name":"inspect","arguments":"{}"})
+            });
+        }
+        input.push(json!({
+            "type":if custom { "custom_tool_call_output" } else { "function_call_output" },
+            "call_id":"call_text","output":output
+        }));
+        json!({"model":"test","input":input})
+    }
+
+    #[test]
+    fn typed_tool_result_text_is_replayed_as_text_in_both_protocols() {
+        for custom in [false, true] {
+            for orphan in [false, true] {
+                let request = tool_result_request(
+                    json!([
+                        {"type":"input_text","text":"first 中文\nline"},
+                        {"type":"input_text","text":"{\"literal\":true}"}
+                    ]),
+                    custom,
+                    orphan,
+                );
+                let expected = "first 中文\nline\n{\"literal\":true}";
+                let chat = responses_to_chat_completions(request.clone()).unwrap();
+                let anthropic = responses_to_anthropic_messages(request).unwrap();
+                let chat_messages = chat["messages"].as_array().unwrap();
+                let anthropic_messages = anthropic["messages"].as_array().unwrap();
+                if orphan {
+                    assert_eq!(
+                        chat_messages.last().unwrap()["content"],
+                        format!("Function call output (call_text): {expected}")
+                    );
+                    assert!(
+                        anthropic_messages.last().unwrap()["content"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|block| {
+                                block["text"]
+                                    == format!("Function call output (call_text): {expected}")
+                            })
+                    );
+                } else {
+                    assert_eq!(chat_messages.len(), 3);
+                    assert_eq!(chat_messages[2]["content"], expected);
+                    assert_eq!(anthropic_messages[2]["content"][0]["content"], expected);
+                    assert_eq!(
+                        anthropic_messages[2]["content"][0]["tool_use_id"],
+                        "call_text"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn arbitrary_json_tool_results_are_not_mistaken_for_text_blocks() {
+        for output in [
+            json!({"text":"data","count":2}),
+            json!([{"text":"data"},{"count":2}]),
+            json!([{"type":"input_text","text":"known"},{"type":"vendor","payload":7}]),
+            json!([{"type":"input_text","text":42}]),
+        ] {
+            let request = tool_result_request(output.clone(), false, false);
+            let chat = responses_to_chat_completions(request.clone()).unwrap();
+            let anthropic = responses_to_anthropic_messages(request).unwrap();
+            for text in [
+                &chat["messages"][2]["content"],
+                &anthropic["messages"][2]["content"][0]["content"],
+            ] {
+                assert_eq!(
+                    serde_json::from_str::<Value>(text.as_str().unwrap()).unwrap(),
+                    output
+                );
+            }
+        }
+    }
+}
+
+mod protocol_five_round_review {
+    use super::*;
+
+    fn convert_stream(bytes: &[u8], chunk_size: usize, anthropic: bool) -> Vec<ParsedSseEvent> {
+        let mut output = Vec::new();
+        if anthropic {
+            let mut converter = AnthropicSseToResponsesConverter::default();
+            for chunk in bytes.chunks(chunk_size) {
+                output.extend(converter.push_bytes(chunk));
+            }
+            output.extend(converter.finish());
+        } else {
+            let mut converter = ChatSseToResponsesConverter::default();
+            for chunk in bytes.chunks(chunk_size) {
+                output.extend(converter.push_bytes(chunk));
+            }
+            output.extend(converter.finish());
+        }
+        parse_response_sse_events(std::str::from_utf8(&output).unwrap())
+    }
+
+    fn text_stream(anthropic: bool, text: &str) -> String {
+        if anthropic {
+            [
+                (
+                    "message_start",
+                    json!({"message":{"id":"msg_framing","model":"test","usage":{}}}),
+                ),
+                (
+                    "content_block_start",
+                    json!({"index":0,"content_block":{"type":"text","text":""}}),
+                ),
+                (
+                    "content_block_delta",
+                    json!({"index":0,"delta":{"type":"text_delta","text":text}}),
+                ),
+                ("content_block_stop", json!({"index":0})),
+                ("message_delta", json!({"delta":{"stop_reason":"end_turn"}})),
+                ("message_stop", json!({})),
+            ]
+            .into_iter()
+            .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
+            .collect()
+        } else {
+            format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                json!({"id":"chatcmpl_framing","model":"test","choices":[{
+                    "index":0,"delta":{"content":text},"finish_reason":"stop"
+                }]})
+            )
+        }
+    }
+
+    fn completed_response(events: &[ParsedSseEvent]) -> &Value {
+        assert!(
+            !events.iter().any(|event| event.event == "response.failed"),
+            "{events:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event == "response.completed")
+                .count(),
+            1
+        );
+        &events
+            .iter()
+            .find(|event| event.event == "response.completed")
+            .unwrap()
+            .data["response"]
+    }
+
+    #[test]
+    fn round_1_sse_line_endings_are_independent_of_byte_boundaries() {
+        for anthropic in [false, true] {
+            let source = text_stream(anthropic, "中文🙂");
+            for endings in [
+                vec!["\n"],
+                vec!["\r\n"],
+                vec!["\r"],
+                vec!["\r\n", "\n", "\r"],
+            ] {
+                let mut wire = String::new();
+                for (index, line) in source.split_inclusive('\n').enumerate() {
+                    wire.push_str(line.strip_suffix('\n').unwrap());
+                    wire.push_str(endings[index % endings.len()]);
+                }
+                for chunk_size in [1, 2, 7, 4096] {
+                    let events = convert_stream(wire.as_bytes(), chunk_size, anthropic);
+                    let response = completed_response(&events);
+                    assert_eq!(response["output"][0]["content"][0]["text"], "中文🙂");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn round_1_sse_strips_only_the_leading_bom() {
+        for anthropic in [false, true] {
+            let source = format!("\u{feff}{}", text_stream(anthropic, "keep \u{feff} inside"));
+            for chunk_size in [1, 2, 7, 4096] {
+                let events = convert_stream(source.as_bytes(), chunk_size, anthropic);
+                let response = completed_response(&events);
+                assert_eq!(
+                    response["output"][0]["content"][0]["text"],
+                    "keep \u{feff} inside"
+                );
+                assert!(response["id"].as_str().unwrap().contains("framing"));
+            }
+        }
+    }
+
+    #[test]
+    fn round_2_invalid_utf8_does_not_corrupt_following_split_unicode() {
+        for anthropic in [false, true] {
+            let mut wire = text_stream(anthropic, "broken X中文🙂 end").into_bytes();
+            let invalid = wire.iter().position(|byte| *byte == b'X').unwrap();
+            wire[invalid] = 0xff;
+            // 同一分片先遇到非法字节，末尾再落在正常中文字符中间。
+            for chunk_size in [1, 2, 3, 7, invalid + 2, invalid + 3, wire.len()] {
+                let events = convert_stream(&wire, chunk_size, anthropic);
+                let response = completed_response(&events);
+                assert_eq!(
+                    response["output"][0]["content"][0]["text"], "broken \u{fffd}中文🙂 end",
+                    "anthropic={anthropic}, chunk_size={chunk_size}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn round_3_nonstream_selects_choice_zero_by_index() {
+        let selected = json!({"index":0,"message":{"role":"assistant","content":"chosen"},"finish_reason":"stop"});
+        let other = json!({"index":1,"message":{"role":"assistant","content":"other"},"finish_reason":"length"});
+        for choices in [
+            json!([other, selected]),
+            json!([selected, other]),
+            json!([{"message":{"role":"assistant","content":"chosen"},"finish_reason":"stop"}]),
+        ] {
+            let response = chat_completion_to_response(json!({
+                "id":"chatcmpl_choices","model":"test","choices":choices
+            }))
+            .unwrap();
+            assert_eq!(response["status"], "completed");
+            assert_eq!(response["output"][0]["content"][0]["text"], "chosen");
+        }
+        assert!(chat_completion_to_response(json!({"choices":[other]})).is_err());
+    }
+
+    #[test]
+    fn round_3_stream_does_not_mix_candidate_text_tools_or_finish_reasons() {
+        let chunks = [
+            json!({"choices":[{"index":1,"delta":{"content":"other"}}]}),
+            json!({"choices":[
+                {"index":1,"delta":{"reasoning_content":"wrong plan"}},
+                {"index":0,"delta":{"reasoning_content":"chosen plan"}}
+            ]}),
+            json!({"choices":[{"index":0,"delta":{"content":"chosen 中文"}}]}),
+            json!({"choices":[{"index":0,"delta":{"tool_calls":[{
+                "index":0,"id":"call_chosen","function":{"name":"lookup","arguments":"{\"id\":"}
+            }]}}]}),
+            json!({"choices":[{"index":1,"delta":{"tool_calls":[{
+                "index":0,"id":"call_other","function":{"name":"other","arguments":"bad"}
+            }]}}]}),
+            json!({"choices":[{"index":0,"delta":{"tool_calls":[{
+                "index":0,"function":{"arguments":"7}"}
+            }]},"finish_reason":"tool_calls"}]}),
+            json!({"choices":[{"index":1,"delta":{},"finish_reason":"length"}]}),
+            json!({"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":5}}),
+        ];
+        let mut wire: String = chunks
+            .into_iter()
+            .map(|chunk| format!("data: {chunk}\n\n"))
+            .collect();
+        wire.push_str("data: [DONE]\n\n");
+        for chunk_size in [1, 13, 4096] {
+            let events = convert_stream(wire.as_bytes(), chunk_size, false);
+            let response = completed_response(&events);
+            assert_eq!(response["output"].as_array().unwrap().len(), 3);
+            assert_eq!(response["output"][0]["reasoning_content"], "chosen plan");
+            assert_eq!(response["output"][1]["content"][0]["text"], "chosen 中文");
+            assert_eq!(response["output"][2]["call_id"], "call_chosen");
+            assert_eq!(response["output"][2]["name"], "lookup");
+            assert_eq!(response["output"][2]["arguments"], "{\"id\":7}");
+            assert_eq!(response["usage"]["total_tokens"], 16);
+        }
+    }
+
+    #[test]
+    fn round_4_usage_details_always_have_a_numeric_reasoning_count() {
+        for (details, expected) in [
+            (json!(null), 0),
+            (json!({}), 0),
+            (json!({"audio_tokens":2}), 0),
+            (json!({"reasoning_tokens":null,"audio_tokens":2}), 0),
+            (json!({"reasoning_tokens":4,"audio_tokens":2}), 4),
+        ] {
+            for anthropic in [false, true] {
+                let usage = if anthropic {
+                    json!({"input_tokens":11,"output_tokens":5,"output_tokens_details":details})
+                } else {
+                    json!({"prompt_tokens":11,"completion_tokens":5,"completion_tokens_details":details})
+                };
+                let response = if anthropic {
+                    anthropic_message_to_response_with_request(
+                        json!({
+                            "id":"msg_usage","model":"test","content":[{"type":"text","text":"ok"}],
+                            "stop_reason":"end_turn","usage":usage
+                        }),
+                        &json!({}),
+                    )
+                    .unwrap()
+                } else {
+                    chat_completion_to_response(json!({
+                        "id":"chatcmpl_usage","model":"test","choices":[{
+                            "index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"
+                        }],"usage":usage
+                    })).unwrap()
+                };
+                let wire = if anthropic {
+                    format!(
+                        "event: message_start\ndata: {}\n\nevent: message_stop\ndata: {{}}\n\n",
+                        json!({"message":{"id":"msg_usage","model":"test","usage":usage}})
+                    )
+                } else {
+                    format!(
+                        "data: {}\n\ndata: [DONE]\n\n",
+                        json!({"choices":[],"usage":usage})
+                    )
+                };
+                let events = convert_stream(wire.as_bytes(), 7, anthropic);
+                for usage in [&response["usage"], &completed_response(&events)["usage"]] {
+                    assert_eq!(usage["total_tokens"], 16);
+                    assert_eq!(usage["output_tokens_details"]["reasoning_tokens"], expected);
+                    if let Some(audio) = details.get("audio_tokens") {
+                        assert_eq!(&usage["output_tokens_details"]["audio_tokens"], audio);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn round_4_null_detail_aliases_do_not_hide_thinking_usage() {
+        for extra in [
+            json!({"completion_tokens_details":null,"output_tokens_details":{"thinking_tokens":3}}),
+            json!({"completion_tokens_details":{"reasoning_tokens":null},"thinking_tokens":3}),
+            json!({"output_tokens_details":{"thinking_tokens":null},"thinking_tokens":3}),
+        ] {
+            let mut usage = json!({"prompt_tokens":11,"completion_tokens":5});
+            usage
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let response = chat_completion_to_response(json!({
+                "choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":usage
+            }))
+            .unwrap();
+            assert_eq!(
+                response["usage"]["output_tokens_details"]["reasoning_tokens"],
+                3
+            );
+        }
+    }
+
+    #[test]
+    fn round_5_model_discovery_accepts_all_configured_protocol_endpoints() {
+        for endpoint in [
+            "chat/completions",
+            "responses",
+            "messages",
+            "models",
+            "RESPONSES",
+            "MESSAGES",
+        ] {
+            for (base, suffix, expected) in [
+                (
+                    "https://example.test/v1",
+                    "",
+                    "https://example.test/v1/models",
+                ),
+                (
+                    "https://example.test/gateway/v2",
+                    "/",
+                    "https://example.test/gateway/v2/models",
+                ),
+                ("https://example.test", "#", "https://example.test/models"),
+            ] {
+                assert_eq!(models_url(&format!("{base}/{endpoint}{suffix}")), expected);
+            }
+        }
+        assert_eq!(
+            models_url("https://example.test/custom-messages"),
+            "https://example.test/custom-messages/models"
+        );
+    }
+
+    #[test]
+    fn round_5_version_deduplication_respects_path_segment_boundaries() {
+        let builders: [(&str, fn(&str) -> String); 4] = [
+            ("chat/completions", chat_completions_url),
+            ("responses", codex_elves_core::protocol_proxy::responses_url),
+            ("messages", anthropic_messages_url),
+            ("models", models_url),
+        ];
+        for (endpoint, build) in builders {
+            for version in ["v10", "v11", "v1beta", "v1-custom"] {
+                let base = format!("https://example.test/gateway/v1/{version}");
+                assert_eq!(build(&base), format!("{base}/{endpoint}"));
+            }
+            assert_eq!(
+                build("https://example.test/v1/v1/v1"),
+                format!("https://example.test/v1/{endpoint}")
+            );
+        }
+    }
+}
+
+mod protocol_request_review {
+    use super::*;
+
+    #[test]
+    fn merged_tool_history_keeps_reasoning_before_parallel_results() {
+        let variants = [
+            (
+                json!({"type":"function_call","call_id":"call_first","name":"lookup","arguments":"{}"}),
+                json!({"type":"function_call_output","call_id":"call_first","output":"first result"}),
+            ),
+            (
+                json!({"type":"custom_tool_call","call_id":"call_first","name":"exec","input":"pwd"}),
+                json!({"type":"custom_tool_call_output","call_id":"call_first","output":"first result"}),
+            ),
+            (
+                json!({"type":"tool_search_call","call_id":"call_first","execution":"client","arguments":{"query":"lookup"}}),
+                json!({"type":"tool_search_output","call_id":"call_first","execution":"client","tools":[]}),
+            ),
+            (
+                json!({"type":"tool_call","tool_use":{"id":"call_first","name":"lookup","input":{}}}),
+                json!({"type":"tool_result","content":{"tool_use_id":"call_first","content":"first result"}}),
+            ),
+        ];
+        for (call, output) in variants {
+            for continued in [false, true] {
+                let mut input = vec![
+                    json!({"role":"user","content":"inspect"}),
+                    json!({"type":"reasoning","summary":[{"type":"summary_text","text":"initial plan"}]}),
+                    json!({"role":"assistant","content":"checking"}),
+                    json!({"type":"reasoning","summary":[{"type":"summary_text","text":"tool plan 中文"}]}),
+                    call.clone(),
+                    json!({"type":"reasoning","summary":[{"type":"summary_text","text":"parallel plan"}]}),
+                    json!({"type":"function_call","call_id":"call_second","name":"lookup","arguments":"{\"id\":2}"}),
+                    json!({"type":"function_call_output","call_id":"call_second","output":"second result"}),
+                    output.clone(),
+                ];
+                if continued {
+                    input.push(json!({"role":"assistant","content":"finished"}));
+                }
+                let converted = responses_to_chat_completions(json!({
+                    "model":"deepseek-reasoner","input":input
+                }))
+                .unwrap();
+                let messages = converted["messages"].as_array().unwrap();
+                assert_eq!(
+                    messages[1]["reasoning_content"], "initial plan\ntool plan 中文\nparallel plan",
+                    "call={call}, continued={continued}, messages={messages:?}"
+                );
+                assert_eq!(messages.len(), if continued { 5 } else { 4 });
+                assert_eq!(messages[1]["content"], "checking");
+                assert_eq!(messages[1]["tool_calls"].as_array().unwrap().len(), 2);
+                assert_eq!(messages[1]["tool_calls"][0]["id"], "call_first");
+                assert_eq!(messages[1]["tool_calls"][1]["id"], "call_second");
+                assert_eq!(messages[2]["role"], "tool");
+                assert_eq!(messages[2]["tool_call_id"], "call_second");
+                assert_eq!(messages[2]["content"], "second result");
+                assert_eq!(messages[3]["role"], "tool");
+                assert_eq!(messages[3]["tool_call_id"], "call_first");
+                if continued {
+                    assert_eq!(messages[4]["content"], "finished");
+                    assert!(messages[4].get("reasoning_content").is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_stream_options_return_errors_without_panicking() {
+        for options in [json!(true), json!(42), json!("invalid"), json!([])] {
+            let result = std::panic::catch_unwind(|| {
+                responses_to_chat_completions(json!({
+                    "model":"chat-test","input":"hello","stream":true,
+                    "stream_options":options
+                }))
+            });
+            assert!(result.is_ok(), "stream_options={options} caused a panic");
+            let error = result.unwrap().expect_err("invalid options must fail");
+            assert!(error.to_string().contains("stream_options"));
+        }
+    }
+
+    #[test]
+    fn stream_options_preserve_extensions_and_enable_usage() {
+        for options in [
+            None,
+            Some(Value::Null),
+            Some(json!({})),
+            Some(json!({"include_usage":false,"vendor_extension":{"enabled":true}})),
+        ] {
+            let mut request = json!({"model":"chat-test","input":"hello","stream":true});
+            if let Some(options) = &options {
+                request["stream_options"] = options.clone();
+            }
+            let converted = responses_to_chat_completions(request).unwrap();
+            let mut expected = options.filter(Value::is_object).unwrap_or(json!({}));
+            expected["include_usage"] = json!(true);
+            assert_eq!(converted["stream_options"], expected);
+        }
+    }
+}
+
+mod protocol_order_review {
+    use super::*;
+
+    fn blocks() -> Vec<Value> {
+        vec![
+            json!({"type":"text","text":"before 中文"}),
+            json!({"type":"thinking","thinking":"plan","signature":"sig_plan"}),
+            json!({"type":"text","text":"between"}),
+            json!({"type":"tool_use","id":"call_order","name":"lookup","input":{}}),
+            json!({"type":"text","text":"after"}),
+            json!({"type":"redacted_thinking","data":"opaque_order"}),
+            json!({"type":"text","text":"end"}),
+        ]
+    }
+
+    fn assert_order(response: &Value) {
+        let output = response["output"].as_array().unwrap();
+        assert_eq!(
+            output
+                .iter()
+                .map(|item| item["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "message",
+                "reasoning",
+                "message",
+                "function_call",
+                "message",
+                "reasoning",
+                "message"
+            ]
+        );
+        for (index, text) in [(0, "before 中文"), (2, "between"), (4, "after"), (6, "end")] {
+            assert_eq!(output[index]["content"][0]["text"], text);
+        }
+        assert_eq!(output[3]["arguments"], "{}");
+        let mut input = vec![json!({"role":"user","content":"start"})];
+        input.extend(output.iter().cloned());
+        input.push(json!({"type":"function_call_output","call_id":"call_order","output":"done"}));
+        let replay = responses_to_anthropic_messages(json!({"input":input})).unwrap();
+        assert_eq!(replay["messages"][1]["content"], json!(blocks()));
+    }
+
+    fn stream_wire(stop_reason: &str) -> String {
+        let mut chunks =
+            vec![json!({"type":"message_start","message":{"id":"msg_order","content":[]}})];
+        for (index, block) in blocks().iter().enumerate() {
+            chunks.push(json!({"type":"content_block_start","index":index,"content_block":block}));
+            chunks.push(json!({"type":"content_block_stop","index":index}));
+        }
+        chunks.push(json!({"type":"message_delta","delta":{"stop_reason":stop_reason}}));
+        chunks.push(json!({"type":"message_stop"}));
+        chunks
+            .iter()
+            .map(|chunk| format!("data: {chunk}\n\n"))
+            .collect()
+    }
+
+    #[test]
+    fn nonstream_preserves_interleaved_block_order_in_history() {
+        let response = anthropic_message_to_response_with_request(
+            json!({"id":"msg_order","content":blocks(),"stop_reason":"tool_use"}),
+            &json!({}),
+        )
+        .unwrap();
+        assert_order(&response);
+    }
+
+    #[test]
+    fn stream_preserves_interleaved_block_order_and_output_indices() {
+        let wire = stream_wire("tool_use");
+        for width in [1, 23, 4096] {
+            let mut converter = AnthropicSseToResponsesConverter::default();
+            let mut converted = Vec::new();
+            for bytes in wire.as_bytes().chunks(width) {
+                converted.extend(converter.push_bytes(bytes));
+            }
+            converted.extend(converter.finish());
+            let events = parse_response_sse_events(&String::from_utf8(converted).unwrap());
+            let response = &events.last().unwrap().data["response"];
+            assert_order(response);
+            for event in events.iter().filter(|event| {
+                matches!(
+                    event.event.as_str(),
+                    "response.output_item.added" | "response.output_item.done"
+                )
+            }) {
+                let index = event.data["output_index"].as_u64().unwrap() as usize;
+                assert_eq!(event.data["item"]["id"], response["output"][index]["id"]);
+                if event.event == "response.output_item.done" {
+                    assert_eq!(event.data["item"], response["output"][index]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn done_event_arrival_order_matches_history_without_using_indices() {
+        let stream =
+            anthropic_sse_to_responses_sse_with_request(&stream_wire("tool_use"), &json!({}));
+        let events = parse_response_sse_events(&stream);
+        // Codex ResponseEvent::OutputItemDone 仅保留 item，不保留 output_index。
+        let history: Vec<_> = events
+            .iter()
+            .filter(|event| event.event == "response.output_item.done")
+            .map(|event| event.data["item"].clone())
+            .collect();
+        assert_eq!(
+            json!(history),
+            events.last().unwrap().data["response"]["output"]
+        );
+        assert_order(&json!({"output":history}));
+    }
+
+    #[test]
+    fn truncated_interleaving_still_terminates_without_completing_tool() {
+        let stream =
+            anthropic_sse_to_responses_sse_with_request(&stream_wire("max_tokens"), &json!({}));
+        let events = parse_response_sse_events(&stream);
+        assert_eq!(events.last().unwrap().event, "response.incomplete");
+        assert!(!events.iter().any(
+            |event| event.event == "response.function_call_arguments.done"
+                || (event.event == "response.output_item.done"
+                    && event.data["item"]["type"] == "function_call")
+        ));
+        let output = events.last().unwrap().data["response"]["output"]
+            .as_array()
+            .unwrap();
+        let text: String = output
+            .iter()
+            .filter_map(|item| item["content"][0]["text"].as_str())
+            .collect();
+        assert_eq!(text, "before 中文betweenafterend");
+    }
+
+    #[test]
+    fn chat_stream_does_not_merge_text_across_reasoning_or_empty_argument_tools() {
+        let deltas = [
+            json!({"content":"before"}),
+            json!({"reasoning_content":"plan"}),
+            json!({"content":"between"}),
+            json!({"tool_calls":[{"index":0,"id":"call_order","function":{"name":"lookup","arguments":""}}]}),
+            json!({"content":"after"}),
+        ];
+        let mut wire: String = deltas
+            .iter()
+            .map(|delta| format!("data: {}\n\n", json!({"choices":[{"delta":delta}]})))
+            .collect();
+        wire.push_str("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n");
+        let stream = chat_sse_to_responses_sse(&wire);
+        let events = parse_response_sse_events(&stream);
+        let output = events.last().unwrap().data["response"]["output"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            output
+                .iter()
+                .map(|item| item["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "message",
+                "reasoning",
+                "message",
+                "function_call",
+                "message"
+            ]
+        );
+        assert_eq!(output[0]["content"][0]["text"], "before");
+        assert_eq!(output[2]["content"][0]["text"], "between");
+        assert_eq!(output[4]["content"][0]["text"], "after");
+        assert_eq!(output[3]["arguments"], "{}");
+    }
+}
+
+mod protocol_continuation_review {
+    use super::*;
+
+    fn thinking_blocks() -> Vec<Value> {
+        vec![
+            json!({"type":"thinking","thinking":"first 中文","signature":"sig_first"}),
+            json!({"type":"thinking","thinking":"<cite>second</cite>","signature":"sig_second"}),
+            json!({"type":"redacted_thinking","data":"opaque_redacted_data"}),
+            json!({"type":"thinking","thinking":"","signature":"sig_empty"}),
+        ]
+    }
+
+    fn assert_thinking_replay(response: &Value, expected: &[Value]) {
+        let mut input = vec![json!({"role":"user","content":"look up the answer"})];
+        input.extend(response["output"].as_array().unwrap().iter().cloned());
+        input.push(json!({"type":"function_call_output","call_id":"call_lookup","output":"done"}));
+        let replay = responses_to_anthropic_messages(json!({
+            "model":"claude-sonnet-4-6","input":input
+        }))
+        .unwrap();
+        let blocks = replay["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(&blocks[..expected.len().min(blocks.len())], expected);
+        assert_eq!(blocks[expected.len()]["type"], "tool_use");
+        let ids: Vec<_> = response["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["id"].as_str())
+            .collect();
+        assert_eq!(
+            ids.len(),
+            ids.iter().collect::<std::collections::BTreeSet<_>>().len()
+        );
+    }
+
+    #[test]
+    fn nonstream_signed_and_redacted_thinking_roundtrips_exactly() {
+        let blocks = thinking_blocks();
+        let mut content = blocks.clone();
+        content.push(
+            json!({"type":"tool_use","id":"call_lookup","name":"lookup","input":{"q":"test"}}),
+        );
+        let response = anthropic_message_to_response_with_request(
+            json!({
+                "id":"msg_thinking","content":content,"stop_reason":"tool_use"
+            }),
+            &json!({}),
+        )
+        .unwrap();
+        assert_thinking_replay(&response, &blocks);
+    }
+
+    #[test]
+    fn fragmented_stream_preserves_each_thinking_block_and_signature() {
+        let blocks = thinking_blocks();
+        let mut chunks =
+            vec![json!({"type":"message_start","message":{"id":"msg_thinking","content":[]}})];
+        for (index, block) in blocks.iter().enumerate() {
+            if block["type"] == "thinking" {
+                chunks.push(json!({"type":"content_block_start","index":index,"content_block":{"type":"thinking","thinking":""}}));
+                chunks.push(json!({"type":"content_block_delta","index":index,"delta":{"type":"thinking_delta","thinking":block["thinking"]}}));
+                let signature = block["signature"].as_str().unwrap();
+                for part in [&signature[..4], &signature[4..]] {
+                    chunks.push(json!({"type":"content_block_delta","index":index,"delta":{"type":"signature_delta","signature":part}}));
+                }
+            } else {
+                chunks.push(
+                    json!({"type":"content_block_start","index":index,"content_block":block}),
+                );
+            }
+            chunks.push(json!({"type":"content_block_stop","index":index}));
+        }
+        chunks.extend([
+            json!({"type":"content_block_start","index":4,"content_block":{"type":"tool_use","id":"call_lookup","name":"lookup","input":{}}}),
+            json!({"type":"content_block_delta","index":4,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"test\"}"}}),
+            json!({"type":"content_block_stop","index":4}),
+            json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}}),
+            json!({"type":"message_stop"}),
+        ]);
+        let wire: String = chunks
+            .iter()
+            .map(|chunk| format!("data: {chunk}\n\n"))
+            .collect();
+        for width in [1, 7, 512] {
+            let mut converter = AnthropicSseToResponsesConverter::default();
+            let mut output = Vec::new();
+            for bytes in wire.as_bytes().chunks(width) {
+                output.extend(converter.push_bytes(bytes));
+            }
+            output.extend(converter.finish());
+            let events = parse_response_sse_events(&String::from_utf8(output).unwrap());
+            let response = &events.last().unwrap().data["response"];
+            assert_eq!(response["status"], "completed");
+            assert_thinking_replay(response, &blocks);
+            let done: Vec<_> = events
+                .iter()
+                .filter(|event| event.event == "response.output_item.done")
+                .map(|event| event.data["item"].clone())
+                .collect();
+            assert_eq!(done, *response["output"].as_array().unwrap());
+        }
+    }
+
+    #[test]
+    fn truncated_tools_are_not_published_as_executable_calls() {
+        for (name, tool) in [
+            (
+                "lookup",
+                json!({"type":"function","name":"lookup","parameters":{"type":"object"}}),
+            ),
+            ("exec", json!({"type":"custom","name":"exec"})),
+        ] {
+            let request = json!({"tools":[tool]});
+            let function = json!({"name":name,"arguments":"{\"input\":\"partial"});
+            let json_response = chat_completion_to_response_with_request(json!({
+                "choices":[{"message":{"content":"partial","tool_calls":[{"id":"call_cut","function":function}]},"finish_reason":"length"}]
+            }), &request).unwrap();
+            let wire = format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                json!({
+                    "choices":[{"delta":{"content":"partial","tool_calls":[{"index":0,"id":"call_cut","function":function}]},"finish_reason":"length"}]
+                })
+            );
+            let stream = chat_sse_to_responses_sse_with_request(&wire, &request);
+            let events = parse_response_sse_events(&stream);
+            assert!(!events.iter().any(|event| matches!(
+                event.event.as_str(),
+                "response.function_call_arguments.done" | "response.custom_tool_call_input.done"
+            )));
+            for response in [&json_response, &events.last().unwrap().data["response"]] {
+                assert_eq!(response["status"], "incomplete");
+                for item in response["output"].as_array().unwrap() {
+                    assert_ne!(item["type"], "function_call");
+                    assert_ne!(item["type"], "custom_tool_call");
+                    if item["type"] == "message" {
+                        assert_eq!(item["status"], "incomplete");
+                    }
+                }
+            }
+            let response = anthropic_message_to_response_with_request(json!({
+                "content":[{"type":"text","text":"partial"},{"type":"tool_use","id":"call_cut","name":name,"input":{}}],
+                "stop_reason":"max_tokens"
+            }), &request).unwrap();
+            let wire = [
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_cut","name":name,"input":{}}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"input\":\"partial"}}),
+                json!({"type":"content_block_stop","index":0}),
+                json!({"type":"message_delta","delta":{"stop_reason":"max_tokens"}}),
+                json!({"type":"message_stop"}),
+            ].iter().map(|chunk| format!("data: {chunk}\n\n")).collect::<String>();
+            let stream = anthropic_sse_to_responses_sse_with_request(&wire, &request);
+            let events = parse_response_sse_events(&stream);
+            assert!(!events.iter().any(|event| matches!(
+                event.event.as_str(),
+                "response.function_call_arguments.done" | "response.custom_tool_call_input.done"
+            )));
+            for response in [&response, &events.last().unwrap().data["response"]] {
+                assert_eq!(response["status"], "incomplete");
+                assert!(
+                    response["output"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|item| matches!(item["type"].as_str(), Some("message" | "reasoning")))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn message_stop_with_unclosed_tool_block_fails_without_publishing_call() {
+        let wire = [
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_cut","name":"lookup","input":{}}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"q\":\"partial"}}),
+            json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}}),
+            json!({"type":"message_stop"}),
+        ].iter().map(|chunk| format!("data: {chunk}\n\n")).collect::<String>();
+        let stream = anthropic_sse_to_responses_sse_with_request(&wire, &json!({}));
+        let events = parse_response_sse_events(&stream);
+        assert_eq!(events.last().unwrap().event, "response.failed");
+        assert!(!stream.contains("event: response.function_call_arguments.done"));
+        assert!(!stream.contains("event: response.completed"));
+    }
+
+    #[test]
+    fn legacy_function_call_stream_matches_nonstream() {
+        let json_response = chat_completion_to_response(json!({
+            "choices":[{"message":{"function_call":{"name":"lookup","arguments":"{\"q\":\"test\"}"}},"finish_reason":"function_call"}]
+        })).unwrap();
+        let stream = chat_sse_to_responses_sse(
+            "data: {\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\"}}}]}\n\ndata: {\"choices\":[{\"delta\":{\"function_call\":{\"arguments\":\"\\\"test\\\"}\"}},\"finish_reason\":\"function_call\"}]}\n\ndata: [DONE]\n\n",
+        );
+        let events = parse_response_sse_events(&stream);
+        assert_eq!(
+            events.last().unwrap().data["response"]["output"],
+            json_response["output"]
+        );
+    }
+
+    #[test]
+    fn alternating_text_and_refusal_items_have_unique_ids() {
+        let mut wire = String::new();
+        for delta in [
+            json!({"content":"before"}),
+            json!({"refusal":"refused"}),
+            json!({"content":"after"}),
+        ] {
+            wire.push_str(&format!(
+                "data: {}\n\n",
+                json!({"choices":[{"delta":delta}]})
+            ));
+        }
+        wire.push_str("data: [DONE]\n\n");
+        let events = parse_response_sse_events(&chat_sse_to_responses_sse(&wire));
+        let output = events.last().unwrap().data["response"]["output"]
+            .as_array()
+            .unwrap();
+        assert_eq!(output.len(), 3);
+        let ids: std::collections::BTreeSet<_> = output
+            .iter()
+            .map(|item| item["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(output[0]["content"][0]["text"], "before");
+        assert_eq!(output[1]["content"][0]["refusal"], "refused");
+        assert_eq!(output[2]["content"][0]["text"], "after");
+    }
+}
+
+#[test]
+fn protocol_review_content_filter_is_incomplete_in_json_and_stream() {
+    let converted = chat_completion_to_response(json!({
+        "choices": [{"message": {"content": "partial"}, "finish_reason": "content_filter"}]
+    }))
+    .unwrap();
+    assert_eq!(converted["status"], "incomplete");
+    assert_eq!(converted["incomplete_details"]["reason"], "content_filter");
+
+    let stream = chat_sse_to_responses_sse(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"content_filter\"}]}\n\ndata: [DONE]\n\n",
+    );
+    let events = parse_response_sse_events(&stream);
+    let terminal = events.last().unwrap();
+    assert_eq!(terminal.event, "response.incomplete");
+    assert_eq!(
+        terminal.data["response"]["incomplete_details"]["reason"],
+        "content_filter"
+    );
+    assert!(!stream.contains("event: response.completed"));
+}
+
+#[test]
+fn protocol_review_anthropic_truncation_is_consistent_in_json_and_stream() {
+    for (stop_reason, reason) in [
+        ("max_tokens", "max_output_tokens"),
+        ("model_context_window_exceeded", "max_output_tokens"),
+        ("refusal", "content_filter"),
+    ] {
+        let converted = anthropic_message_to_response_with_request(
+            json!({"content": [{"type": "text", "text": "partial"}], "stop_reason": stop_reason}),
+            &json!({}),
+        )
+        .unwrap();
+        let stream = anthropic_sse_to_responses_sse_with_request(
+            &format!(
+                "event: message_delta\ndata: {}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n",
+                json!({"type": "message_delta", "delta": {"stop_reason": stop_reason}})
+            ),
+            &json!({}),
+        );
+        let events = parse_response_sse_events(&stream);
+        assert_eq!(
+            events.last().unwrap().event,
+            "response.incomplete",
+            "{stop_reason}"
+        );
+        for response in [&converted, &events.last().unwrap().data["response"]] {
+            assert_eq!(response["status"], "incomplete", "{stop_reason}");
+            assert_eq!(
+                response["incomplete_details"]["reason"], reason,
+                "{stop_reason}"
+            );
+        }
+    }
+}
+
+#[test]
+fn protocol_review_anthropic_pause_is_not_reported_as_completed() {
+    let error = anthropic_message_to_response_with_request(
+        json!({"content": [{"type": "text", "text": "Searching…"}], "stop_reason": "pause_turn"}),
+        &json!({}),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("pause_turn"));
+    let stream = anthropic_sse_to_responses_sse_with_request(
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"pause_turn\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        &json!({}),
+    );
+    let events = parse_response_sse_events(&stream);
+    assert_eq!(events.last().unwrap().event, "response.failed");
+    assert_eq!(
+        events.last().unwrap().data["response"]["error"]["type"],
+        "unsupported_upstream_continuation"
+    );
+    assert!(!stream.contains("response.completed"));
+    let stream = anthropic_sse_to_responses_sse_with_request(
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"pause_turn\"}}\n\ndata: [DONE]\n\n",
+        &json!({}),
+    );
+    assert!(stream.contains("response.failed"));
+    assert!(!stream.contains("response.completed"));
+}
+
+#[test]
+fn protocol_review_chat_preserves_responses_text_format() {
+    let schema = json!({
+        "name": "answer", "description": "structured answer", "strict": true,
+        "schema": {"type": "object", "properties": {"answer": {"type": "string"}},
+                   "required": ["answer"], "additionalProperties": false}
+    });
+    let mut format = schema.clone();
+    format["type"] = json!("json_schema");
+    let converted = responses_to_chat_completions(json!({
+        "model": "chat-model", "input": "Return JSON",
+        "text": {"format": format},
+        "response_format": {"type": "text"}
+    }))
+    .unwrap();
+    assert_eq!(
+        converted["response_format"],
+        json!({"type": "json_schema", "json_schema": schema})
+    );
+    for kind in ["json_object", "text"] {
+        let converted = responses_to_chat_completions(json!({
+            "input": "Return JSON", "text": {"format": {"type": kind}}
+        }))
+        .unwrap();
+        assert_eq!(converted["response_format"], json!({"type": kind}));
+    }
+    let converted = responses_to_chat_completions(json!({
+        "input": "Return JSON", "response_format": {"type": "json_object"}
+    }))
+    .unwrap();
+    assert_eq!(converted["response_format"], json!({"type": "json_object"}));
+}
+
+#[test]
+fn protocol_review_anthropic_preserves_schema_and_reasoning_effort() {
+    let schema = json!({
+        "type": "object", "properties": {"answer": {"type": "string"}},
+        "required": ["answer"], "additionalProperties": false
+    });
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-sonnet-4-6", "input": "Return JSON",
+        "reasoning": {"effort": "high"},
+        "text": {"format": {"type": "json_schema", "name": "answer", "strict": true, "schema": schema}}
+    })).unwrap();
+    assert_eq!(
+        converted["output_config"]["format"],
+        json!({"type": "json_schema", "schema": schema})
+    );
+    assert_eq!(converted["output_config"]["effort"], "high");
+    assert!(
+        responses_to_anthropic_messages(json!({
+            "input": "hi", "text": {"format": {"type": "text"}}
+        }))
+        .unwrap()
+        .pointer("/output_config/format")
+        .is_none()
+    );
+    for format in [
+        json!({"type": "json_object"}),
+        json!({"type": "json_schema"}),
+    ] {
+        assert!(
+            responses_to_anthropic_messages(json!({
+                "input": "hi", "text": {"format": format}
+            }))
+            .is_err(),
+            "{format}"
+        );
+    }
+}
+
+#[test]
+fn protocol_review_chat_usage_includes_cached_input_in_json_and_stream() {
+    for (usage, expected_input, cached, written) in [
+        (
+            json!({"prompt_tokens": 100, "completion_tokens": 5, "prompt_tokens_details": {"cached_tokens": 80}}),
+            100,
+            80,
+            0,
+        ),
+        (
+            json!({"input_tokens": 100, "output_tokens": 5, "input_tokens_details": {"cached_tokens": 80}}),
+            100,
+            80,
+            0,
+        ),
+        (
+            json!({"promptTokenCount": 100, "candidatesTokenCount": 5, "cachedContentTokenCount": 80}),
+            100,
+            80,
+            0,
+        ),
+        (
+            json!({"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 80, "cache_creation_input_tokens": 10}),
+            100,
+            80,
+            10,
+        ),
+        (
+            json!({"input_tokens": 10, "output_tokens": 5, "cache_creation": {"ephemeral_5m_input_tokens": 40, "ephemeral_1h_input_tokens": 50}}),
+            100,
+            0,
+            90,
+        ),
+    ] {
+        let converted = chat_completion_to_response(json!({
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": usage
+        }))
+        .unwrap();
+        let stream = chat_sse_to_responses_sse(&format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            json!({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}),
+            json!({"choices": [], "usage": usage})
+        ));
+        let events = parse_response_sse_events(&stream);
+        for actual in [
+            &converted["usage"],
+            &events.last().unwrap().data["response"]["usage"],
+        ] {
+            assert_eq!(actual["input_tokens"], expected_input, "{usage}");
+            assert_eq!(
+                actual["input_tokens_details"]["cached_tokens"], cached,
+                "{usage}"
+            );
+            assert_eq!(
+                actual["input_tokens_details"]["cache_write_tokens"], written,
+                "{usage}"
+            );
+            assert_eq!(actual["total_tokens"], expected_input + 5, "{usage}");
+        }
+    }
+}
+
+#[test]
+fn protocol_review_anthropic_nonstream_rejects_errors_and_invalid_envelopes() {
+    for body in [
+        json!({"type": "error", "error": {"type": "overloaded_error", "message": "busy"}}),
+        json!({"error": {"message": "busy"}, "content": []}),
+        json!({}),
+        json!({"content": "not an array"}),
+        json!({"type": "error", "content": []}),
+    ] {
+        assert!(
+            anthropic_message_to_response_with_request(body.clone(), &json!({})).is_err(),
+            "{body}"
+        );
+    }
+    assert!(
+        anthropic_message_to_response_with_request(
+            json!({"type": "message", "content": [], "stop_reason": "end_turn", "error": null}),
+            &json!({})
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn protocol_review_stream_terminal_is_not_reopened_by_trailing_chunks() {
+    let chat = b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    let anthropic = b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+    let tail = b"data: {\"error\":{\"message\":\"late error\"}}\n\ndata: {broken}\n\n";
+    for split in [false, true] {
+        let mut converter = ChatSseToResponsesConverter::default();
+        let mut input = chat.to_vec();
+        if !split {
+            input.extend(tail);
+        }
+        let mut output = converter.push_bytes(&input);
+        if split {
+            output.extend(converter.push_bytes(tail));
+        }
+        output.extend(converter.fail("late read error".into(), None));
+        output.extend(converter.finish());
+        let events = parse_response_sse_events(&String::from_utf8(output).unwrap());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.event.as_str(),
+                    "response.completed" | "response.failed"
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            converter.diagnostic_summary()["terminalStatus"],
+            "response_completed"
+        );
+
+        let mut converter = AnthropicSseToResponsesConverter::default();
+        let mut input = anthropic.to_vec();
+        if !split {
+            input.extend(tail);
+        }
+        let mut output = converter.push_bytes(&input);
+        if split {
+            output.extend(converter.push_bytes(tail));
+        }
+        output.extend(converter.fail("late read error".into(), None));
+        output.extend(converter.finish());
+        let events = parse_response_sse_events(&String::from_utf8(output).unwrap());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.event.as_str(),
+                    "response.completed" | "response.failed"
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            converter.diagnostic_summary()["terminalStatus"],
+            "response_completed"
+        );
+    }
+    let mut chat_converter = ChatSseToResponsesConverter::default();
+    let failed = chat_converter.fail("first failure".into(), None);
+    assert!(
+        String::from_utf8(failed)
+            .unwrap()
+            .contains("response.failed")
+    );
+    assert!(chat_converter.push_bytes(chat).is_empty());
+    assert!(
+        chat_converter
+            .fail("second failure".into(), None)
+            .is_empty()
+    );
+    assert!(chat_converter.finish().is_empty());
+    assert_eq!(
+        chat_converter.diagnostic_summary()["failureMessage"],
+        "first failure"
+    );
+
+    let mut anthropic_converter = AnthropicSseToResponsesConverter::default();
+    let failed = anthropic_converter.fail("first failure".into(), None);
+    assert!(
+        String::from_utf8(failed)
+            .unwrap()
+            .contains("response.failed")
+    );
+    assert!(anthropic_converter.push_bytes(anthropic).is_empty());
+    assert!(
+        anthropic_converter
+            .fail("second failure".into(), None)
+            .is_empty()
+    );
+    assert!(anthropic_converter.finish().is_empty());
+    assert_eq!(
+        anthropic_converter.diagnostic_summary()["failureMessage"],
+        "first failure"
+    );
+}
+
+#[test]
+fn protocol_review_null_error_is_not_a_stream_failure() {
+    let stream = chat_sse_to_responses_sse(
+        "data: {\"error\":null,\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+    );
+    assert!(!stream.contains("response.failed"));
+    assert_eq!(collect_stream_output_text(&stream), "ok");
+    let stream = anthropic_sse_to_responses_sse_with_request(
+        "event: message_start\ndata: {\"error\":null,\"type\":\"message_start\",\"message\":{\"id\":\"msg_ok\",\"content\":[]}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        &json!({}),
+    );
+    assert!(!stream.contains("response.failed"));
+    assert!(stream.contains("response.completed"));
+}
+
 fn parse_response_sse_events(input: &str) -> Vec<ParsedSseEvent> {
     input
         .split("\n\n")
@@ -1338,7 +4001,7 @@ fn stream_text_with_cuts(text: &str, cuts: &[usize]) -> String {
         prev = cut;
     }
     deltas.push(text[prev..].to_string());
-    let converted = anthropic_sse_to_responses_sse_with_request(
+    let converted = anthropic_sse_to_responses_sse_with_compat(
         &anthropic_sse_from_text_deltas(&deltas),
         &json!({ "model": "claude-opus-4-8" }),
     );
@@ -2451,6 +5114,7 @@ fn anthropic_request_preserves_strict_tool_definition() {
 fn anthropic_request_removes_count_marker_before_tool_use_history() {
     let converted = responses_to_anthropic_messages(json!({
         "model": "claude-opus-5",
+        "codex_elves_compat":{"textual_tool_calls":true},
         "input": [
             {
                 "type": "message",
@@ -3401,7 +6065,7 @@ fn anthropic_missing_usage_includes_required_responses_details() {
 
 #[test]
 fn anthropic_message_response_drops_count_before_native_tool_use() {
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_count_native",
             "type": "message",
@@ -3444,7 +6108,7 @@ fn anthropic_message_response_drops_count_before_native_tool_use() {
 
 #[test]
 fn anthropic_message_response_drops_standalone_count_before_native_tool_use() {
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_count_only_native",
             "type": "message",
@@ -3541,7 +6205,7 @@ fn anthropic_message_response_keeps_normal_sentence_ending_in_count_before_tool_
 
 #[test]
 fn anthropic_message_response_strips_inline_cite_wrappers() {
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_cite",
             "type": "message",
@@ -3571,7 +6235,7 @@ fn anthropic_message_response_strips_inline_cite_wrappers() {
 fn anthropic_message_response_strips_inline_cite_wrappers_with_attributes() {
     // 带属性的开标签（`<cite index="4-1">`）必须和无属性写法一样被完整剥离，
     // 否则会出现「闭标签被删、开标签残留在正文」的不对称结果。
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_cite_attr",
             "type": "message",
@@ -3600,7 +6264,7 @@ fn anthropic_message_response_strips_inline_cite_wrappers_with_attributes() {
 #[test]
 fn anthropic_message_response_keeps_non_cite_angle_brackets() {
     // 引用标记剥离必须按标签名精确匹配，不能误吞正文里的小于号或同前缀标签。
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_cite_guard",
             "type": "message",
@@ -3682,10 +6346,9 @@ fn anthropic_request_downgrades_tool_choice_forcing_web_search_to_auto() {
 }
 
 #[test]
-fn anthropic_server_tool_use_web_search_maps_to_web_search_call() {
+fn anthropic_server_tool_use_web_search_keeps_server_history_without_client_calls() {
     // Claude 原生 server-side web_search 响应（server_tool_use + web_search_tool_result）：
-    // server_tool_use 转为 Codex web_search_call 进度项；web_search_tool_result 不透传给客户端；
-    // 最终 text 正常输出。
+    // 调用及结果使用不可执行历史封装，最终 text 正常输出。
     let converted = anthropic_message_to_response_with_request(
         json!({
             "id": "msg_ws_server",
@@ -3719,12 +6382,20 @@ fn anthropic_server_tool_use_web_search_maps_to_web_search_call() {
 
     let output = converted["output"].as_array().unwrap();
     let serialized = converted["output"].to_string();
-    // 含 web_search_call 进度项。
-    assert!(output.iter().any(|item| item["type"] == "web_search_call"));
+    assert!(output.iter().all(|item| !matches!(
+        item["type"].as_str(),
+        Some("function_call" | "web_search_call")
+    )));
+    assert_eq!(
+        output
+            .iter()
+            .filter(|item| item["type"] == "reasoning")
+            .count(),
+        2
+    );
     // 含最终 text。
     assert!(serialized.contains("Claude Shannon was born in 1916."));
-    // web_search_tool_result 不透传。
-    assert!(!serialized.contains("web_search_tool_result"));
+    assert!(serialized.contains("codex-elves-anthropic-content-v1:"));
 }
 
 #[test]
@@ -3804,7 +6475,7 @@ fn anthropic_message_response_maps_web_search_to_search_mcp_when_available() {
 
 #[test]
 fn anthropic_textual_invoke_response_converts_to_tool_call() {
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_textual_tool",
             "type": "message",
@@ -3853,7 +6524,7 @@ fn anthropic_textual_invoke_response_converts_to_tool_call() {
 
 #[test]
 fn anthropic_call_prefixed_textual_invoke_response_converts_to_tool_call() {
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_textual_call_tool",
             "type": "message",
@@ -3900,7 +6571,7 @@ fn anthropic_call_prefixed_textual_invoke_response_converts_to_tool_call() {
 
 #[test]
 fn anthropic_count_prefixed_textual_invoke_response_converts_to_tool_call() {
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_textual_count_tool",
             "type": "message",
@@ -3948,7 +6619,7 @@ fn anthropic_count_prefixed_textual_invoke_response_converts_to_tool_call() {
 #[test]
 fn anthropic_textual_invoke_exec_command_allows_invoke_text_inside_parameter() {
     let command = r#"cd E:\code\junes\github\CodexElves; rg -n "invoke|textual_invoke|call_prefixed|<invoke|antml_tool_call|parse_textual|extract_tool" crates/codex-elves-core/src/protocol_proxy.rs | Select-Object -First 40"#;
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_textual_exec_with_invoke_text",
             "type": "message",
@@ -3993,7 +6664,7 @@ fn anthropic_textual_invoke_exec_command_allows_invoke_text_inside_parameter() {
 #[test]
 fn anthropic_textual_invoke_exec_command_keeps_json_like_parameter_as_string() {
     let command = r#"{"query":"codex"}"#;
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_textual_exec_json_like_string",
             "type": "message",
@@ -4038,7 +6709,7 @@ fn anthropic_textual_invoke_exec_command_keeps_json_like_parameter_as_string() {
 #[test]
 fn anthropic_textual_invoke_with_only_descriptive_invoke_stays_message_text() {
     let text = "这里仅说明 call<invoke name=...> 会泄漏成文本，没有真实工具调用。";
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_descriptive_invoke_only",
             "type": "message",
@@ -4076,7 +6747,7 @@ fn anthropic_textual_invoke_with_only_descriptive_invoke_stays_message_text() {
 #[test]
 fn anthropic_textual_invoke_ignores_descriptive_invoke_text_before_real_call() {
     let command = r#"cd E:\code\junes\github\CodexElves; rg -n "invoke|textual_invoke|call_prefixed|<invoke|antml_tool_call|parse_textual|extract_tool" crates/codex-elves-core/src/protocol_proxy.rs | Select-Object -First 40"#;
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_descriptive_invoke_then_real_call",
             "type": "message",
@@ -4128,7 +6799,7 @@ fn anthropic_textual_invoke_ignores_descriptive_invoke_text_before_real_call() {
 
 #[test]
 fn anthropic_textual_invoke_skips_multiple_bad_invoke_fragments_before_real_call() {
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_multiple_bad_invoke_then_real",
             "type": "message",
@@ -4175,7 +6846,7 @@ fn anthropic_textual_invoke_skips_multiple_bad_invoke_fragments_before_real_call
 
 #[test]
 fn anthropic_textual_invoke_converts_multiple_real_calls_in_order() {
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_multiple_real_calls",
             "type": "message",
@@ -4220,7 +6891,7 @@ fn anthropic_textual_invoke_converts_multiple_real_calls_in_order() {
 
 #[test]
 fn anthropic_textual_invoke_uses_unique_ids_across_text_blocks() {
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_textual_calls_across_blocks",
             "type": "message",
@@ -4274,7 +6945,7 @@ fn anthropic_textual_invoke_uses_unique_ids_across_text_blocks() {
 
 #[test]
 fn anthropic_textual_invoke_unescapes_parameter_text_with_nested_invoke_literal() {
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_xml_escaped_nested_invoke_literal",
             "type": "message",
@@ -4313,7 +6984,7 @@ fn anthropic_textual_invoke_unescapes_parameter_text_with_nested_invoke_literal(
 
 #[test]
 fn anthropic_textual_invoke_apply_patch_batch_preserves_structured_operations() {
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_patch_batch_proxy",
             "type": "message",
@@ -4349,7 +7020,7 @@ fn anthropic_textual_invoke_apply_patch_batch_preserves_structured_operations() 
 
 #[test]
 fn anthropic_textual_invoke_apply_patch_proxy_preserves_update_hunks() {
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_textual_patch_tool",
             "type": "message",
@@ -4387,7 +7058,7 @@ fn anthropic_textual_invoke_apply_patch_proxy_preserves_update_hunks() {
 #[test]
 fn anthropic_leading_text_then_textual_invoke_splits_message_and_tool_call() {
     // 回归：同一个 text 块里先是正文，末尾才是 call/<invoke> 工具调用。
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_lead_then_invoke",
             "type": "message",
@@ -4490,12 +7161,17 @@ fn responses_request_matches_ccs_reasoning_and_tool_choice_edges() {
     let reasoning = responses_to_chat_completions(json!({
         "model": "gpt-5.4",
         "reasoning": { "effort": "high" },
-        "tool_choice": { "type": "function", "name": "lookup" },
         "input": "hi"
     }))
     .unwrap();
     assert_eq!(reasoning["reasoning_effort"], "high");
     assert!(reasoning.get("tool_choice").is_none());
+    let undeclared_choice = json!({
+        "model":"gpt-5.4","reasoning":{"effort":"high"},
+        "tool_choice":{"type":"function","name":"lookup"},"input":"hi"
+    });
+    assert!(responses_to_chat_completions(undeclared_choice.clone()).is_err());
+    assert!(responses_to_anthropic_messages(undeclared_choice).is_err());
 
     let minimal = responses_to_chat_completions(json!({
         "model": "gpt-5.4",
@@ -6502,8 +9178,15 @@ fn chat_completion_response_accepts_responses_style_usage_fields() {
 
     assert_eq!(converted["usage"]["input_tokens"], 7);
     assert_eq!(converted["usage"]["output_tokens"], 3);
-    assert_eq!(converted["usage"]["total_tokens"], 15);
-    assert!(converted["usage"].get("input_tokens_details").is_none());
+    assert_eq!(converted["usage"]["total_tokens"], 10);
+    assert_eq!(
+        converted["usage"]["input_tokens_details"]["cached_tokens"],
+        2
+    );
+    assert_eq!(
+        converted["usage"]["input_tokens_details"]["cache_write_tokens"],
+        4
+    );
     assert_eq!(converted["usage"]["cache_read_input_tokens"], 1);
     assert_eq!(converted["usage"]["cache_creation_input_tokens"], 4);
 }
@@ -6891,7 +9574,7 @@ fn chat_completion_response_remaps_string_apply_patch_proxy_tools() {
 }
 
 #[test]
-fn chat_completion_response_maps_gemini_and_claude_cache_usage_like_ccx() {
+fn chat_completion_response_maps_gemini_and_claude_cache_usage_to_responses_totals() {
     let gemini = chat_completion_to_response(json!({
         "id": "chatcmpl_gemini_usage",
         "created": 123,
@@ -6904,7 +9587,7 @@ fn chat_completion_response_maps_gemini_and_claude_cache_usage_like_ccx() {
         }
     }))
     .unwrap();
-    assert_eq!(gemini["usage"]["input_tokens"], 15);
+    assert_eq!(gemini["usage"]["input_tokens"], 20);
     assert_eq!(gemini["usage"]["output_tokens"], 7);
     assert_eq!(gemini["usage"]["total_tokens"], 27);
     assert_eq!(gemini["usage"]["input_tokens_details"]["cached_tokens"], 5);
@@ -6923,13 +9606,17 @@ fn chat_completion_response_maps_gemini_and_claude_cache_usage_like_ccx() {
         }
     }))
     .unwrap();
-    assert_eq!(claude["usage"]["input_tokens"], 10);
+    assert_eq!(claude["usage"]["input_tokens"], 22);
     assert_eq!(claude["usage"]["total_tokens"], 25);
     assert_eq!(claude["usage"]["cache_read_input_tokens"], 2);
     assert_eq!(claude["usage"]["cache_creation_5m_input_tokens"], 4);
     assert_eq!(claude["usage"]["cache_creation_1h_input_tokens"], 6);
     assert_eq!(claude["usage"]["cache_ttl"], "mixed");
-    assert!(claude["usage"].get("input_tokens_details").is_none());
+    assert_eq!(claude["usage"]["input_tokens_details"]["cached_tokens"], 2);
+    assert_eq!(
+        claude["usage"]["input_tokens_details"]["cache_write_tokens"],
+        10
+    );
 }
 
 #[test]
@@ -7310,9 +9997,19 @@ data: {"type":"message_stop"}
         completed.data["response"]["usage"]["output_tokens_details"]["reasoning_tokens"],
         4
     );
+    let replay = responses_to_anthropic_messages(json!({
+        "model":"claude-test","input":[
+            {"role":"user","content":"继续"},
+            completed.data["response"]["output"][0].clone(),
+            {"role":"assistant","content":"历史回答"}
+        ]
+    }))
+    .unwrap();
     assert_eq!(
-        completed.data["response"]["output"][0]["encrypted_content"],
-        "sig_stream"
+        replay["messages"][1]["content"][0],
+        json!({
+            "type":"thinking","thinking":"Need context.","signature":"sig_stream"
+        })
     );
     assert!(converted.contains("data: [DONE]"));
 }
@@ -7366,7 +10063,7 @@ data: {"type":"message_stop"}
 
 #[test]
 fn anthropic_sse_strips_fragmented_inline_cite_wrappers() {
-    let converted = anthropic_sse_to_responses_sse_with_request(
+    let converted = anthropic_sse_to_responses_sse_with_compat(
         r#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_cite_stream","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
 
@@ -7412,7 +10109,7 @@ data: {"type":"message_stop"}
 fn anthropic_sse_strips_fragmented_inline_cite_wrappers_with_attributes() {
     // 带属性的开标签长度不固定，且会被上游切分到多个 delta；
     // 缓冲必须等到 `>` 才判定，否则开标签会原样泄露到正文。
-    let converted = anthropic_sse_to_responses_sse_with_request(
+    let converted = anthropic_sse_to_responses_sse_with_compat(
         r#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_cite_attr_stream","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
 
@@ -7494,14 +10191,14 @@ fn anthropic_sse_keeps_unclosed_cite_tag_text() {
 #[test]
 fn anthropic_sse_strips_inline_cite_without_breaking_textual_invoke() {
     // 引用剥离和文本式工具调用解析共用同一个文本缓冲，必须确认两者不互相破坏。
-    let converted = anthropic_sse_to_responses_sse_with_request(
+    let converted = anthropic_sse_to_responses_sse_with_compat(
         &anthropic_sse_from_text_deltas(&[
             "结论：<cite ind".to_string(),
             "ex=\"4-1\">看这里</ci".to_string(),
             "te>\n\n<invoke name=\"shell\">".to_string(),
             "<parameter name=\"cmd\">ls</parameter></invoke>".to_string(),
         ]),
-        &json!({ "model": "claude-opus-4-8" }),
+        &json!({ "model": "claude-opus-4-8", "tools":[{"type":"function","name":"shell","parameters":{"type":"object"}}] }),
     );
 
     assert_eq!(collect_stream_output_text(&converted), "结论：看这里");
@@ -7520,7 +10217,7 @@ fn anthropic_sse_strips_inline_cite_without_breaking_textual_invoke() {
 #[test]
 fn anthropic_sse_strips_inline_cite_across_multiple_text_blocks() {
     // 引用残留按 block index 分开缓存；多个 text 块各自截断时不能串位。
-    let converted = anthropic_sse_to_responses_sse_with_request(
+    let converted = anthropic_sse_to_responses_sse_with_compat(
         r#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_multi","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
 
@@ -7569,7 +10266,7 @@ fn anthropic_stream_and_non_stream_agree_on_inline_cite_stripping() {
         "前缀<cite source=\"one\">引用内容</cite>后缀",
         "代码中的 <T> 和 <value> 保留",
     ] {
-        let direct = anthropic_message_to_response_with_request(
+        let direct = anthropic_message_to_response_with_compat(
             json!({
                 "id": "msg_cite_compare", "model": "claude-opus-4-8",
                 "content": [{ "type": "text", "text": text }],
@@ -7579,7 +10276,7 @@ fn anthropic_stream_and_non_stream_agree_on_inline_cite_stripping() {
         )
         .unwrap();
         let chunks: Vec<_> = text.chars().map(|c| c.to_string()).collect();
-        let streamed = anthropic_sse_to_responses_sse_with_request(
+        let streamed = anthropic_sse_to_responses_sse_with_compat(
             &anthropic_sse_from_text_deltas(&chunks),
             &json!({}),
         );
@@ -7608,7 +10305,7 @@ fn chat_completion_response_strips_inline_cite_wrappers() {
                 "finish_reason": "stop"
             }]
         }),
-        &json!({ "model": "claude-opus-4-8" }),
+        &legacy_text_compat_request(&json!({ "model": "claude-opus-4-8" })),
     )
     .unwrap();
 
@@ -7637,7 +10334,7 @@ fn chat_sse_strips_fragmented_inline_cite_wrappers() {
             "data: {\"id\":\"c\",\"model\":\"claude-opus-4-8\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"te>。\"},\"finish_reason\":\"stop\"}]}\n\n",
             "data: [DONE]\n\n"
         ),
-        &json!({ "model": "claude-opus-4-8" }),
+        &legacy_text_compat_request(&json!({ "model": "claude-opus-4-8" })),
     );
 
     assert_eq!(collect_stream_output_text(&converted), "文档：结论。");
@@ -7648,7 +10345,7 @@ fn chat_sse_strips_fragmented_inline_cite_wrappers() {
 #[test]
 fn anthropic_response_strips_inline_cite_wrappers_in_thinking() {
     // 推理内容也会带引用标记；展开推理详情时不能看到裸露的 `<cite ...>`。
-    let converted = anthropic_message_to_response_with_request(
+    let converted = anthropic_message_to_response_with_compat(
         json!({
             "id": "msg_think_cite",
             "type": "message",
@@ -7673,7 +10370,7 @@ fn anthropic_response_strips_inline_cite_wrappers_in_thinking() {
 #[test]
 fn anthropic_sse_strips_inline_cite_wrappers_in_thinking_stream() {
     // 流式推理同样会被分片，引用过滤器必须在推理通道上独立生效。
-    let converted = anthropic_sse_to_responses_sse_with_request(
+    let converted = anthropic_sse_to_responses_sse_with_compat(
         r#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_think_stream","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
 
@@ -7718,7 +10415,7 @@ data: {"type":"message_stop"}
         "<citation>保留</citation>",
         "未闭合 <cite ind",
     ] {
-        let non_stream = anthropic_message_to_response_with_request(
+        let non_stream = anthropic_message_to_response_with_compat(
             json!({
                 "id": "msg_agree",
                 "type": "message",
@@ -7858,7 +10555,7 @@ data: {"type":"message_stop"}
 
 #[test]
 fn anthropic_sse_textual_invoke_converts_to_tool_call_events() {
-    let converted = anthropic_sse_to_responses_sse_with_request(
+    let converted = anthropic_sse_to_responses_sse_with_compat(
         r#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_textual_stream","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
 
@@ -7920,7 +10617,7 @@ data: {"type":"message_stop"}
 
 #[test]
 fn anthropic_sse_call_prefixed_textual_invoke_converts_to_tool_call_events() {
-    let converted = anthropic_sse_to_responses_sse_with_request(
+    let converted = anthropic_sse_to_responses_sse_with_compat(
         r#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_textual_stream_call","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
 
@@ -7974,7 +10671,7 @@ data: {"type":"message_stop"}
 
 #[test]
 fn anthropic_sse_count_prefixed_textual_invoke_converts_to_tool_call_events() {
-    let converted = anthropic_sse_to_responses_sse_with_request(
+    let converted = anthropic_sse_to_responses_sse_with_compat(
         r#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_textual_stream_count","type":"message","role":"assistant","model":"claude-opus-5","content":[],"usage":{"input_tokens":7}}}
 
@@ -8035,7 +10732,7 @@ data: {"type":"message_stop"}
 
 #[test]
 fn anthropic_sse_keeps_textual_and_native_tool_state_indices_distinct() {
-    let converted = anthropic_sse_to_responses_sse_with_request(
+    let converted = anthropic_sse_to_responses_sse_with_compat(
         r#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_mixed_tool_indices","type":"message","role":"assistant","model":"claude-opus-5","content":[],"usage":{"input_tokens":7}}}
 
@@ -8108,7 +10805,7 @@ data: {"type":"message_stop"}
 
 #[test]
 fn anthropic_sse_ignores_descriptive_invoke_text_before_real_exec_call() {
-    let converted = anthropic_sse_to_responses_sse_with_request(
+    let converted = anthropic_sse_to_responses_sse_with_compat(
         r#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_stream_descriptive_invoke","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
 
@@ -8178,7 +10875,7 @@ data: {"type":"message_stop"}
 
 #[test]
 fn anthropic_sse_textual_invoke_split_tag_across_chunks_converts_exec_call() {
-    let converted = anthropic_sse_to_responses_sse_with_request(
+    let converted = anthropic_sse_to_responses_sse_with_compat(
         r#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_split_invoke_tag","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
 
@@ -8236,7 +10933,7 @@ data: {"type":"message_stop"}
 
 #[test]
 fn anthropic_sse_textual_invoke_split_after_marker_whitespace_converts_exec_call() {
-    let converted = anthropic_sse_to_responses_sse_with_request(
+    let converted = anthropic_sse_to_responses_sse_with_compat(
         r#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_split_marker_whitespace","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
 
@@ -8291,7 +10988,7 @@ data: {"type":"message_stop"}
 
 #[test]
 fn anthropic_sse_drops_standalone_call_marker_before_native_tool_use() {
-    let converted = anthropic_sse_to_responses_sse_with_request(
+    let converted = anthropic_sse_to_responses_sse_with_compat(
         r#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_native_tool_with_call_marker","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
 
@@ -8356,7 +11053,7 @@ data: {"type":"message_stop"}
 
 #[test]
 fn anthropic_sse_drops_fragmented_count_marker_before_native_tool_use() {
-    let converted = anthropic_sse_to_responses_sse_with_request(
+    let converted = anthropic_sse_to_responses_sse_with_compat(
         r#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_native_tool_with_count_marker","type":"message","role":"assistant","model":"claude-opus-5","content":[],"usage":{"input_tokens":7}}}
 
@@ -8660,7 +11357,7 @@ data: {"type":"message_stop"}
 
 #[test]
 fn anthropic_sse_textual_invoke_apply_patch_proxy_preserves_update_hunks() {
-    let converted = anthropic_sse_to_responses_sse_with_request(
+    let converted = anthropic_sse_to_responses_sse_with_compat(
         r#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_stream_patch_proxy","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
 
@@ -8722,7 +11419,7 @@ data: {"type":"message_stop"}
 fn anthropic_sse_leading_text_then_textual_invoke_splits_message_and_tool_call() {
     // 回归：模型先输出一段正文，再在同一文本块末尾追加 call/<invoke> 工具调用，
     // 且跨多个 delta 分块。以前流式会因「开头不像工具调用」而整块透传，导致工具变文本。
-    let converted = anthropic_sse_to_responses_sse_with_request(
+    let converted = anthropic_sse_to_responses_sse_with_compat(
         r#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_lead_then_invoke","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"usage":{"input_tokens":7}}}
 
@@ -8890,7 +11587,8 @@ data: {"type":"message_stop"}
 
 #[test]
 fn anthropic_sse_diagnostics_distinguish_done_from_message_stop_and_pending_blocks() {
-    let mut converter = AnthropicSseToResponsesConverter::default();
+    let mut converter =
+        AnthropicSseToResponsesConverter::with_request(&legacy_text_compat_request(&json!({})));
     let output = converter.push_bytes(
         br#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_done_only","type":"message","role":"assistant","model":"claude-opus-5","content":[],"usage":{"input_tokens":7}}}
@@ -9317,6 +12015,195 @@ async fn aggregate_failover_reapplies_header_policy_after_switching_to_chat_comp
     assert!(
         second.x_codex_beta_features.is_empty(),
         "Codex Responses semantics must not leak after failover changes the target protocol"
+    );
+}
+
+#[tokio::test]
+async fn aggregate_compaction_uses_bound_conversation_protocol_instead_of_probe() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let server = spawn_chat_server_with_response(
+        json!({
+            "id": "resp_bound_native",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5-mini",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "<summary>native response</summary>"}]
+            }]
+        })
+        .to_string(),
+    );
+    let mut settings = aggregate_proxy_settings(
+        "compaction-bound-native",
+        server.base_url.clone(),
+        "http://127.0.0.1:9/v1".to_string(),
+    );
+    settings.layered_compaction_enabled = true;
+    settings.aggregate_relay_profiles[0].strategy = AggregateRelayStrategy::ConversationRoundRobin;
+    settings.relay_profiles[1].model_mappings[0].protocol = RelayProtocol::ChatCompletions;
+    let selected = codex_elves_core::relay_rotation::select_relay_for_request(
+        &settings,
+        codex_elves_core::relay_rotation::RotationContext::for_conversation("bound-native"),
+    )
+    .unwrap();
+    assert_eq!(selected.id, settings.relay_profiles[0].id);
+    assert_eq!(
+        codex_elves_core::relay_rotation::select_relay_for_probe(&settings)
+            .unwrap()
+            .id,
+        settings.relay_profiles[1].id,
+    );
+    let mut request = remote_compaction_v2_request();
+    request["model"] = json!("gpt-5-mini");
+    request["conversation"] = json!("bound-native");
+    request["stream"] = json!(false);
+
+    let upstream = open_responses_proxy_request_with_settings(&request.to_string(), settings)
+        .await
+        .unwrap();
+    assert_eq!(upstream.relay_id.as_deref(), Some(selected.id.as_str()));
+    let captured = server.finish();
+    let forwarded: Value = serde_json::from_str(&captured.body).unwrap();
+    assert_eq!(captured.path, "/v1/responses");
+    assert_eq!(
+        forwarded["input"], request["input"],
+        "native V2 input must remain intact"
+    );
+    assert_eq!(forwarded["tools"], request["tools"]);
+}
+
+#[tokio::test]
+async fn aggregate_compaction_keeps_conversation_rotation_after_local_bridge() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let server = spawn_chat_server_with_response(
+        json!({
+            "id": "chatcmpl_bound_bridge",
+            "model": "gpt-5-mini",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "<summary>bridge response</summary>"},
+                "finish_reason": "stop"
+            }]
+        })
+        .to_string(),
+    );
+    let mut settings = aggregate_proxy_settings(
+        "compaction-bound-bridge",
+        server.base_url.clone(),
+        "http://127.0.0.1:9/v1".to_string(),
+    );
+    settings.layered_compaction_enabled = true;
+    settings.aggregate_relay_profiles[0].strategy = AggregateRelayStrategy::ConversationRoundRobin;
+    settings.relay_profiles[0].model_mappings[0].protocol = RelayProtocol::ChatCompletions;
+    let selected = codex_elves_core::relay_rotation::select_relay_for_request(
+        &settings,
+        codex_elves_core::relay_rotation::RotationContext::for_conversation("bound-bridge"),
+    )
+    .unwrap();
+    assert_eq!(selected.id, settings.relay_profiles[0].id);
+    let mut request = remote_compaction_v2_request();
+    request["model"] = json!("gpt-5-mini");
+    request["conversation"] = json!("bound-bridge");
+    request["stream"] = json!(false);
+
+    let upstream =
+        open_responses_proxy_request_with_settings(&request.to_string(), settings.clone())
+            .await
+            .unwrap();
+    let response: Value =
+        serde_json::from_slice(&upstream.into_body_bytes().await.unwrap()).unwrap();
+    assert_eq!(response["status"], "completed");
+    let captured = server.finish();
+    assert_eq!(captured.path, "/v1/chat/completions");
+    assert!(!captured.body.contains("compaction_trigger"));
+    let next = codex_elves_core::relay_rotation::select_relay_for_request(
+        &settings,
+        codex_elves_core::relay_rotation::RotationContext::for_conversation("next-conversation"),
+    )
+    .unwrap();
+    assert_eq!(
+        next.id, settings.relay_profiles[1].id,
+        "local bridge must not reset aggregate rotation"
+    );
+    let bound = codex_elves_core::relay_rotation::select_relay_for_request(
+        &settings,
+        codex_elves_core::relay_rotation::RotationContext::for_conversation("bound-bridge"),
+    )
+    .unwrap();
+    assert_eq!(bound.id, selected.id);
+}
+
+#[tokio::test]
+async fn aggregate_compaction_failover_uses_the_final_retry_outcome() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let mut mismatches = Vec::new();
+    for retry_succeeds in [false, true] {
+        let failure = json!({"error": {"message": "temporary provider failure"}}).to_string();
+        let retry = if retry_succeeds {
+            (
+                "200 OK".to_string(),
+                json!({
+                    "id": "chatcmpl_retry",
+                    "model": "gpt-5-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "<summary>recovered</summary>"},
+                        "finish_reason": "stop"
+                    }]
+                })
+                .to_string(),
+            )
+        } else {
+            ("500 Internal Server Error".to_string(), failure.clone())
+        };
+        let server = spawn_chat_server_with_status_responses(vec![
+            ("500 Internal Server Error".to_string(), failure),
+            retry,
+        ]);
+        let mut settings = aggregate_proxy_settings(
+            &format!("compaction-final-outcome-{retry_succeeds}"),
+            server.base_url.clone(),
+            "http://127.0.0.1:9/v1".to_string(),
+        );
+        settings.layered_compaction_enabled = true;
+        settings.aggregate_relay_profiles[0].strategy = AggregateRelayStrategy::Failover;
+        settings.relay_profiles[0].model_mappings[0].protocol = RelayProtocol::ChatCompletions;
+        let mut request = remote_compaction_v2_request();
+        request["model"] = json!("gpt-5-mini");
+        request["stream"] = json!(false);
+        let upstream =
+            open_responses_proxy_request_with_settings(&request.to_string(), settings.clone())
+                .await
+                .unwrap();
+        let body: Value =
+            serde_json::from_slice(&upstream.into_body_bytes().await.unwrap()).unwrap();
+        assert_eq!(
+            body["status"],
+            if retry_succeeds {
+                "completed"
+            } else {
+                "failed"
+            }
+        );
+        assert_eq!(server.finish_all().len(), 2);
+        let next = codex_elves_core::relay_rotation::select_relay_for_request(
+            &settings,
+            codex_elves_core::relay_rotation::RotationContext::default(),
+        )
+        .unwrap();
+        let expected = &settings.relay_profiles[usize::from(!retry_succeeds)].id;
+        if &next.id != expected {
+            mismatches.push(format!(
+                "retry_succeeds={retry_succeeds}: expected {expected}, got {}",
+                next.id
+            ));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "failover must follow the final request outcome: {mismatches:?}"
     );
 }
 

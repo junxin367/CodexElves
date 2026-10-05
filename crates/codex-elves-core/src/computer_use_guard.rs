@@ -195,29 +195,6 @@ struct BrowserRequestHeaderCompatMetadata {
     backup_file_name: String,
 }
 
-#[cfg(not(windows))]
-pub(crate) fn ensure_computer_use_runtime_exports_compat(
-    home: &Path,
-) -> anyhow::Result<RuntimeCompatResult> {
-    let _ = home;
-    Ok(RuntimeCompatResult {
-        changed: false,
-        package_json: None,
-        backup_path: None,
-    })
-}
-
-#[cfg(windows)]
-#[allow(dead_code)]
-pub(crate) fn ensure_computer_use_runtime_exports_compat(
-    home: &Path,
-) -> anyhow::Result<RuntimeCompatResult> {
-    ensure_computer_use_runtime_exports_compat_windows(
-        home,
-        find_latest_sky_package_json().as_deref(),
-    )
-}
-
 #[cfg(windows)]
 fn ensure_computer_use_runtime_exports_compat_windows(
     home: &Path,
@@ -1687,17 +1664,6 @@ mod tests {
             "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
         ));
         assert!(!is_sha256_hex("0123456789abcdef"));
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn runtime_exports_compat_is_noop_off_windows() {
-        let temp = tempfile::tempdir().unwrap();
-        let result = ensure_computer_use_runtime_exports_compat(temp.path()).unwrap();
-
-        assert!(!result.changed);
-        assert!(result.package_json.is_none());
-        assert!(result.backup_path.is_none());
     }
 
     #[cfg(windows)]

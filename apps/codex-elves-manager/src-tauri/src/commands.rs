@@ -2367,7 +2367,8 @@ pub fn copy_diagnostics() -> CommandResult<DiagnosticsPayload> {
 }
 
 #[tauri::command]
-pub fn reset_settings() -> CommandResult<SettingsPayload> {
+pub async fn reset_settings() -> CommandResult<SettingsPayload> {
+    let _guard = settings_write_mutex().lock().await;
     let settings = BackendSettings::default();
     match SettingsStore::default().save(&settings) {
         Ok(()) => settings_payload("设置已重置为默认值。", "设置重置后重新读取失败"),
@@ -2391,6 +2392,7 @@ pub fn reset_settings() -> CommandResult<SettingsPayload> {
 
 #[tauri::command]
 pub async fn reset_image_overlay_settings() -> CommandResult<SettingsPayload> {
+    let _guard = settings_write_mutex().lock().await;
     let store = SettingsStore::default();
     let mut settings = store.load().unwrap_or_default();
     let defaults = BackendSettings::default();
@@ -2470,6 +2472,7 @@ pub async fn save_skin(skin: codex_elves_core::skin::Skin) -> CommandResult<Skin
 
 #[tauri::command]
 pub async fn delete_skin(id: String) -> CommandResult<SkinsPayload> {
+    let _guard = settings_write_mutex().lock().await;
     codex_elves_core::skin::delete_skin(&id);
     // 若删除的是当前激活皮肤，清空激活态并推送（背景回退/消失）。
     let store = SettingsStore::default();
@@ -2487,6 +2490,7 @@ pub async fn delete_skin(id: String) -> CommandResult<SkinsPayload> {
 
 #[tauri::command]
 pub async fn activate_skin(id: String) -> CommandResult<SettingsPayload> {
+    let _guard = settings_write_mutex().lock().await;
     let store = SettingsStore::default();
     let mut settings = store.load().unwrap_or_default();
     let trimmed = id.trim();
@@ -5310,6 +5314,49 @@ base_url = "https://manual.example/v1"
                 .relay_common_config_contents
                 .contains("[mcp_servers")
         );
+    }
+
+    #[tokio::test]
+    async fn reset_settings_waits_for_settings_writer() {
+        assert_waits_for_settings_writer(reset_settings()).await;
+    }
+
+    #[tokio::test]
+    async fn reset_overlay_waits_for_settings_writer() {
+        assert_waits_for_settings_writer(reset_image_overlay_settings()).await;
+    }
+
+    #[tokio::test]
+    async fn activate_skin_waits_for_settings_writer() {
+        assert_waits_for_settings_writer(activate_skin(String::new())).await;
+    }
+
+    #[tokio::test]
+    async fn delete_skin_waits_for_settings_writer() {
+        assert_waits_for_settings_writer(delete_skin("test-skin".to_string())).await;
+    }
+
+    async fn assert_waits_for_settings_writer<T>(operation: impl std::future::Future<Output = T>) {
+        let _process_state = process_state_test_guard();
+        let store = SettingsStore::default();
+        let settings = BackendSettings {
+            codex_app_image_overlay_enabled: true,
+            codex_app_active_skin_id: "test-skin".to_string(),
+            ..BackendSettings::default()
+        };
+        store.save(&settings).unwrap();
+        let path = codex_elves_core::paths::default_settings_path();
+        let before = std::fs::read(&path).unwrap();
+        let writer = settings_write_mutex().lock().await;
+        let mut operation = std::pin::pin!(operation);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            operation.as_mut().poll(&mut context).is_pending(),
+            "settings mutation bypassed the writer lock"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        drop(writer);
+        operation.await;
     }
 
     #[tokio::test]

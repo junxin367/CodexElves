@@ -2833,6 +2833,712 @@ fn read_launcher_upstream_request(stream: &mut std::net::TcpStream) -> String {
     }
 }
 
+async fn audit_transport_mock(
+    responses: Vec<(&'static str, &'static str, String)>,
+) -> (
+    String,
+    tokio::task::JoinHandle<Vec<LauncherUpstreamRequest>>,
+) {
+    audit_transport_mock_with_followup_check(responses, false).await
+}
+
+async fn audit_transport_mock_with_followup_check(
+    responses: Vec<(&'static str, &'static str, String)>,
+    check_no_followup: bool,
+) -> (
+    String,
+    tokio::task::JoinHandle<Vec<LauncherUpstreamRequest>>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for (status, content_type, body) in responses {
+            let (mut stream, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+                    .await
+                    .expect("测试上游未收到请求")
+                    .unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let count = stream.read(&mut buffer).await.unwrap();
+                assert_ne!(count, 0, "请求体读取完成前连接关闭");
+                bytes.extend_from_slice(&buffer[..count]);
+                let text = String::from_utf8_lossy(&bytes);
+                let Some((head, body)) = text.split_once("\r\n\r\n") else {
+                    continue;
+                };
+                let content_length = head
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+                    .unwrap_or(0);
+                if body.len() >= content_length {
+                    requests.push(launcher_upstream_request_from_raw(&text));
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        }
+        if check_no_followup {
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept(),)
+                    .await
+                    .is_err(),
+                "完成拒绝答复后仍发出了额外请求"
+            );
+        }
+        requests
+    });
+    (base_url, task)
+}
+
+fn audit_transport_settings(
+    base_url: &str,
+    relay_id: &str,
+    protocol: &str,
+    model: &str,
+) -> BackendSettings {
+    serde_json::from_value(audit_transport_settings_json(
+        base_url, relay_id, protocol, model,
+    ))
+    .unwrap()
+}
+
+fn audit_transport_settings_json(
+    base_url: &str,
+    relay_id: &str,
+    protocol: &str,
+    model: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "relayProfiles": [{
+            "id": relay_id,
+            "name": relay_id,
+            "baseUrl": base_url,
+            "upstreamBaseUrl": base_url,
+            "apiKey": "sk-test",
+            "localProxyEnabled": true,
+            "relayMode": "mixedApi",
+            "modelMappings": [{
+                "requestModel": model,
+                "protocol": protocol,
+                "contextWindow": "200000"
+            }]
+        }],
+        "activeRelayId": relay_id
+    })
+}
+
+fn audit_transport_completed_sse(id: &str, reasoning_tokens: u64) -> String {
+    format!(
+        "event: response.completed\ndata: {}\n\n",
+        serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "id": id,
+                "object": "response",
+                "status": "completed",
+                "model": "gpt-responses",
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "首轮完整答案"}]
+                }],
+                "usage": {"output_tokens_details": {"reasoning_tokens": reasoning_tokens}}
+            }
+        })
+    )
+}
+
+#[tokio::test]
+async fn audit_transport_compact_preserves_the_native_operation() {
+    let _lock = launcher_settings_path_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
+    let (base_url, upstream) = audit_transport_mock(vec![(
+        "200 OK",
+        "application/json",
+        serde_json::json!({
+            "id": "cmp_native",
+            "object": "response.compaction",
+            "output": [{"type": "compaction", "encrypted_content": "opaque"}]
+        })
+        .to_string(),
+    )])
+    .await;
+    write_launcher_mixed_relay_settings(temp.path(), &base_url);
+    let hooks = DefaultLaunchHooks::default();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    hooks.start_helper(port).await.unwrap();
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{port}/v1/responses/compact"))
+        .json(&serde_json::json!({
+            "model": "gpt-responses",
+            "input": [{"role": "user", "content": "压缩已有历史"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = response.json().await.unwrap();
+    hooks.shutdown_helper(port).await;
+    let requests = upstream.await.unwrap();
+    assert_eq!(requests[0].path, "/v1/responses/compact");
+    assert_eq!(body["object"], "response.compaction");
+}
+
+#[tokio::test]
+async fn audit_transport_compact_rejects_converted_protocol_before_sending() {
+    use codex_elves_core::protocol_proxy::open_responses_proxy_request_with_settings_and_request_context;
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let settings =
+        audit_transport_settings(&base_url, "compact-chat", "chatCompletions", "gpt-chat");
+    let context = RequestContext::default().with_responses_path("/v1/responses/compact");
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        open_responses_proxy_request_with_settings_and_request_context(
+            r#"{"model":"gpt-chat","input":"压缩历史"}"#,
+            settings,
+            &context,
+        ),
+    )
+    .await;
+    let sent = tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+        .await
+        .is_ok();
+    assert!(!sent, "compact 请求不得转换成 Chat 并发往上游");
+    let response = result.expect("本地拒绝不得等待上游").unwrap();
+    assert_eq!(response.status_code, 400);
+}
+
+#[tokio::test]
+async fn audit_transport_chat_selects_an_aggregate_member() {
+    use codex_elves_core::protocol_proxy::open_chat_completions_proxy_request;
+    let _lock = launcher_settings_path_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
+    let (base_url, upstream) = audit_transport_mock(vec![(
+        "200 OK",
+        "application/json",
+        r#"{"id":"chatcmpl_member","choices":[]}"#.to_string(),
+    )])
+    .await;
+    let mut settings =
+        audit_transport_settings_json(&base_url, "chat-member", "chatCompletions", "gpt-chat");
+    settings["relayProfiles"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "chat-aggregate",
+            "name": "chat aggregate",
+            "relayMode": "aggregate",
+            "localProxyEnabled": false
+        }));
+    settings["activeRelayId"] = serde_json::json!("chat-aggregate");
+    settings["activeAggregateRelayId"] = serde_json::json!("chat-aggregate");
+    settings["aggregateRelayProfiles"] = serde_json::json!([{
+        "id": "chat-aggregate",
+        "name": "chat aggregate",
+        "strategy": "requestRoundRobin",
+        "members": [{"relayId": "chat-member", "weight": 1}]
+    }]);
+    std::fs::write(temp.path().join("settings.json"), settings.to_string()).unwrap();
+    let result = open_chat_completions_proxy_request(
+        r#"{"model":"gpt-chat","messages":[{"role":"user","content":"hello"}]}"#,
+        None,
+    )
+    .await;
+    if result.is_err() {
+        upstream.abort();
+    }
+    let response = result.expect("聚合本身不开代理也应转发到真实成员");
+    assert_eq!(response.relay_id.as_deref(), Some("chat-member"));
+    response.into_body_bytes().await.unwrap();
+    assert_eq!(upstream.await.unwrap()[0].path, "/v1/chat/completions");
+}
+
+#[tokio::test]
+async fn audit_transport_compact_skips_converted_aggregate_members() {
+    use codex_elves_core::protocol_proxy::open_responses_proxy_request_with_settings_and_request_context;
+    let _lock = launcher_settings_path_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let chat = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let chat_url = format!("http://{}/v1", chat.local_addr().unwrap());
+    let (base_url, upstream) = audit_transport_mock(vec![(
+        "200 OK",
+        "application/json",
+        r#"{"id":"cmp_aggregate","object":"response.compaction","output":[]}"#.to_string(),
+    )])
+    .await;
+    let mut settings = audit_transport_settings_json(
+        &chat_url,
+        "compact-chat",
+        "chatCompletions",
+        "gpt-responses",
+    );
+    let native =
+        audit_transport_settings_json(&base_url, "compact-native", "responses", "gpt-responses");
+    settings["relayProfiles"]
+        .as_array_mut()
+        .unwrap()
+        .push(native["relayProfiles"][0].clone());
+    settings["relayProfiles"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id":"compact-aggregate","name":"compact aggregate","relayMode":"aggregate"
+        }));
+    settings["activeRelayId"] = serde_json::json!("compact-aggregate");
+    settings["activeAggregateRelayId"] = serde_json::json!("compact-aggregate");
+    settings["aggregateRelayProfiles"] = serde_json::json!([{
+        "id":"compact-aggregate","name":"compact aggregate","strategy":"requestRoundRobin",
+        "members":[{"relayId":"compact-chat","weight":1},{"relayId":"compact-native","weight":1}]
+    }]);
+    let settings = serde_json::from_value(settings).unwrap();
+    let context = RequestContext::default().with_responses_path("/v1/responses/compact");
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        open_responses_proxy_request_with_settings_and_request_context(
+            r#"{"model":"gpt-responses","input":"压缩上下文"}"#,
+            settings,
+            &context,
+        ),
+    )
+    .await;
+    if result.is_err() {
+        upstream.abort();
+    }
+    let response = result.expect("应跳过不支持compact的成员").unwrap();
+    assert_eq!(response.relay_id.as_deref(), Some("compact-native"));
+    response.into_body_bytes().await.unwrap();
+    assert_eq!(upstream.await.unwrap()[0].path, "/v1/responses/compact");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), chat.accept())
+            .await
+            .is_err(),
+        "compact 请求不应发送给 Chat 成员"
+    );
+}
+
+#[tokio::test]
+async fn audit_transport_anthropic_error_body_obeys_the_request_timeout() {
+    use codex_elves_core::protocol_proxy::open_responses_proxy_request_with_stream_header_timeout;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _lock = launcher_settings_path_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let settings =
+        audit_transport_settings_json(&base_url, "body-timeout", "anthropic", "deepseek-v4-flash");
+    std::fs::write(
+        temp.path().join("settings.json"),
+        serde_json::to_vec(&settings).unwrap(),
+    )
+    .unwrap();
+    let upstream = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buffer = [0_u8; 8192];
+        stream.read(&mut buffer).await.unwrap();
+        stream
+            .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 999\r\n\r\n{")
+            .await
+            .unwrap();
+        std::future::pending::<()>().await;
+    });
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(600),
+        open_responses_proxy_request_with_stream_header_timeout(
+            r#"{"model":"deepseek-v4-flash","input":"hello","stream":true,"reasoning":{"effort":"max"}}"#,
+            None,
+            std::time::Duration::from_millis(100),
+        ),
+    )
+    .await;
+    upstream.abort();
+    assert!(result.is_ok(), "400 响应体无限等待，已绕过请求超时");
+    let error = result.unwrap().err().expect("不完整的错误体必须失败");
+    assert!(codex_elves_core::protocol_proxy::upstream_error_is_timeout(
+        &error
+    ));
+}
+
+#[tokio::test]
+async fn audit_transport_anthropic_effort_cache_isolated_by_provider() {
+    use codex_elves_core::protocol_proxy::{
+        clear_anthropic_reasoning_compatibility_cache_for_tests,
+        open_responses_proxy_request_with_settings,
+    };
+    let _lock = launcher_settings_path_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let failure =
+        r#"{"error":{"message":"max is not supported; valid levels are low, medium, high"}}"#;
+    let request = r#"{"model":"deepseek-v4-flash","input":"hello","reasoning":{"effort":"max"}}"#;
+    let mut failures = Vec::new();
+    for same_endpoint in [false, true] {
+        clear_anthropic_reasoning_compatibility_cache_for_tests();
+        let mut first_responses = vec![
+            ("400 Bad Request", "application/json", failure.to_string()),
+            ("200 OK", "application/json", "{}".to_string()),
+        ];
+        if same_endpoint {
+            first_responses.push(("200 OK", "application/json", "{}".to_string()));
+        }
+        let (first_url, first) = audit_transport_mock(first_responses).await;
+        let (second_url, second) = if same_endpoint {
+            (first_url.clone(), None)
+        } else {
+            let (url, task) =
+                audit_transport_mock(vec![("200 OK", "application/json", "{}".to_string())]).await;
+            (url, Some(task))
+        };
+        let first_settings =
+            audit_transport_settings(&first_url, "provider-a", "anthropic", "deepseek-v4-flash");
+        open_responses_proxy_request_with_settings(request, first_settings)
+            .await
+            .unwrap()
+            .into_body_bytes()
+            .await
+            .unwrap();
+        let second_id = if same_endpoint {
+            "provider-b"
+        } else {
+            "provider-a"
+        };
+        let second_settings =
+            audit_transport_settings(&second_url, second_id, "anthropic", "deepseek-v4-flash");
+        open_responses_proxy_request_with_settings(request, second_settings)
+            .await
+            .unwrap()
+            .into_body_bytes()
+            .await
+            .unwrap();
+        let first_requests = first.await.unwrap();
+        let first_retry: serde_json::Value = serde_json::from_str(&first_requests[1].body).unwrap();
+        assert_eq!(first_retry["output_config"]["effort"], "high");
+        let second_requests = match second {
+            Some(task) => task.await.unwrap(),
+            None => first_requests,
+        };
+        let received: serde_json::Value =
+            serde_json::from_str(&second_requests.last().unwrap().body).unwrap();
+        if received["output_config"]["effort"] != "max" {
+            failures.push(if same_endpoint {
+                "相同端点不同供应商"
+            } else {
+                "相同供应商切换端点"
+            });
+        }
+    }
+    clear_anthropic_reasoning_compatibility_cache_for_tests();
+    assert_eq!(failures, Vec::<&str>::new(), "兼容缓存未按供应商和端点隔离");
+}
+
+#[tokio::test]
+async fn audit_transport_non_streaming_header_wait_obeys_request_budget() {
+    use codex_elves_core::protocol_proxy::open_responses_proxy_request_with_stream_header_timeout;
+    let _lock = launcher_settings_path_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    write_launcher_mixed_relay_settings(temp.path(), &base_url);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(600),
+        open_responses_proxy_request_with_stream_header_timeout(
+            r#"{"model":"gpt-responses","input":"hello","stream":false}"#,
+            None,
+            std::time::Duration::from_millis(100),
+        ),
+    )
+    .await;
+    assert!(result.is_ok(), "非流式请求忽略了头等待预算");
+    let error = result.unwrap().err().expect("上游没有响应头时必须超时");
+    assert!(codex_elves_core::protocol_proxy::upstream_error_is_timeout(
+        &error
+    ));
+}
+
+#[tokio::test]
+async fn audit_transport_capacity_retry_preserves_converted_success() {
+    use codex_elves_core::protocol_proxy::apply_continue_thinking_to_responses_stream;
+    use codex_elves_core::relay_rotation::{RotationContext, select_relay_for_request};
+    let _lock = launcher_settings_path_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut failures = Vec::new();
+    for (case, protocol, content_type, body, expected_path) in [
+        (
+            "chat-sse",
+            "chatCompletions",
+            "text/event-stream",
+            concat!(
+                "data: {\"id\":\"chatcmpl_capacity_recovered\",\"model\":\"gpt-responses\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"容量恢复回答\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"id\":\"chatcmpl_capacity_recovered\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n"
+            ),
+            "/v1/chat/completions",
+        ),
+        (
+            "chat-json",
+            "chatCompletions",
+            "application/json",
+            r#"{"id":"chatcmpl_recovered","model":"gpt-responses","choices":[{"index":0,"message":{"role":"assistant","content":"容量恢复回答"},"finish_reason":"stop"}]}"#,
+            "/v1/chat/completions",
+        ),
+        (
+            "anthropic-json",
+            "anthropic",
+            "application/json",
+            r#"{"id":"msg_recovered","type":"message","model":"gpt-responses","role":"assistant","content":[{"type":"text","text":"容量恢复回答"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}"#,
+            "/v1/messages",
+        ),
+        (
+            "anthropic-sse",
+            "anthropic",
+            "text/event-stream",
+            concat!(
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_recovered\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"gpt-responses\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+                "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"容量恢复回答\"}}\n\n",
+                "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":2}}\n\n",
+                "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+            ),
+            "/v1/messages",
+        ),
+    ] {
+        let (base_url, upstream) =
+            audit_transport_mock(vec![("200 OK", content_type, body.to_string())]).await;
+        let mut settings = audit_transport_settings_json(
+            "http://127.0.0.1:9/v1",
+            "capacity-a",
+            "responses",
+            "gpt-responses",
+        );
+        let second =
+            audit_transport_settings_json(&base_url, "capacity-b", protocol, "gpt-responses");
+        settings["relayProfiles"]
+            .as_array_mut()
+            .unwrap()
+            .push(second["relayProfiles"][0].clone());
+        settings["relayProfiles"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "capacity-aggregate", "name": "capacity aggregate", "relayMode": "aggregate"
+            }));
+        settings["activeRelayId"] = serde_json::json!("capacity-aggregate");
+        settings["activeAggregateRelayId"] = serde_json::json!("capacity-aggregate");
+        settings["aggregateRelayProfiles"] = serde_json::json!([{
+            "id": "capacity-aggregate",
+            "name": "capacity aggregate",
+            "strategy": "requestRoundRobin",
+            "members": [{"relayId": "capacity-a", "weight": 1}, {"relayId": "capacity-b", "weight": 1}]
+        }]);
+        let settings: BackendSettings = serde_json::from_value(settings).unwrap();
+        assert_eq!(
+            select_relay_for_request(&settings, RotationContext::default())
+                .unwrap()
+                .id,
+            "capacity-a"
+        );
+        let first = "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_busy\",\"status\":\"failed\",\"error\":{\"code\":\"server_is_overloaded\",\"message\":\"Our servers are currently overloaded.\"}}}\n\n";
+        let result = apply_continue_thinking_to_responses_stream(
+            &serde_json::json!({"model":"gpt-responses","input":"hello","stream":true}),
+            settings,
+            None,
+            first.to_string(),
+        )
+        .await;
+        let requests = upstream.await.unwrap();
+        assert_eq!(requests[0].path, expected_path);
+        if !result.sse_text.contains("容量恢复回答")
+            || !result.sse_text.contains("response.completed")
+            || result.sse_text.contains("server_is_overloaded")
+        {
+            failures.push(case);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "成功的跨协议/不同响应格式重试结果被丢弃: {failures:?}"
+    );
+}
+
+#[tokio::test]
+async fn audit_transport_failed_continuation_keeps_completed_answer() {
+    use codex_elves_core::protocol_proxy::apply_continue_thinking_to_responses_stream;
+    let _lock = launcher_settings_path_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut failures = Vec::new();
+    for (name, next) in [
+        (
+            "failed",
+            "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_failed\",\"status\":\"failed\",\"error\":{\"message\":\"upstream failed\"},\"output\":[]}}\n\n",
+        ),
+        (
+            "unterminated",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"unfinished\"}\n\n",
+        ),
+    ] {
+        let (base_url, upstream) =
+            audit_transport_mock(vec![("200 OK", "text/event-stream", next.to_string())]).await;
+        let mut settings = audit_transport_settings(&base_url, name, "responses", "gpt-responses");
+        settings.gpt_reasoning_continuation = true;
+        settings.gpt_reasoning_continuation_max_rounds = 1;
+        let first = audit_transport_completed_sse("resp_first_complete", 516);
+        let result = apply_continue_thinking_to_responses_stream(
+            &serde_json::json!({"model":"gpt-responses","input":"hello","stream":true}),
+            settings,
+            None,
+            first.clone(),
+        )
+        .await;
+        assert_eq!(upstream.await.unwrap().len(), 1);
+        if result.sse_text != first || result.rounds != 0 {
+            failures.push(name);
+        }
+    }
+    assert!(failures.is_empty(), "失败续写覆盖了首轮答案: {failures:?}");
+}
+
+#[tokio::test]
+async fn audit_transport_ineligible_response_never_starts_http_continuation() {
+    use codex_elves_core::protocol_proxy::apply_continue_thinking_to_responses_stream;
+    let _lock = launcher_settings_path_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut failures = Vec::new();
+    for response in [
+        serde_json::json!({
+            "id": "resp_failed_initial",
+            "status": "failed",
+            "error": {"message":"generation failed"},
+            "output": [],
+            "usage": {"output_tokens_details":{"reasoning_tokens":516}}
+        }),
+        serde_json::json!({
+            "id": "resp_refusal_initial",
+            "status": "completed",
+            "output": [{"type":"message","content":[{"type":"refusal","refusal":"I cannot help"}]}],
+            "usage": {"output_tokens_details":{"reasoning_tokens":516}}
+        }),
+    ] {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let mut settings =
+            audit_transport_settings(&base_url, "ineligible", "responses", "gpt-responses");
+        settings.gpt_reasoning_continuation = true;
+        let event = if response["status"] == "failed" {
+            "response.failed"
+        } else {
+            "response.completed"
+        };
+        let first = format!(
+            "event: {event}\ndata: {}\n\n",
+            serde_json::json!({"type":event,"response":response})
+        );
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            apply_continue_thinking_to_responses_stream(
+                &serde_json::json!({"model":"gpt-responses","input":"hello","stream":true}),
+                settings,
+                None,
+                first.clone(),
+            ),
+        )
+        .await;
+        if !result.is_ok_and(|result| !result.triggered && result.sse_text == first) {
+            failures.push(response["id"].as_str().unwrap().to_string());
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "失败或拒绝响应仍然触发了HTTP续写: {failures:?}"
+    );
+}
+
+#[tokio::test]
+async fn audit_transport_completed_refusal_is_accepted_without_another_continuation() {
+    use codex_elves_core::protocol_proxy::apply_continue_thinking_to_responses_stream;
+    let _lock = launcher_settings_path_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let refusal = format!(
+        "event: response.completed\ndata: {}\n\n",
+        serde_json::json!({
+            "type":"response.completed",
+            "response": {
+                "id":"resp_final_refusal",
+                "status":"completed",
+                "output":[{"type":"message","content":[{"type":"refusal","refusal":"合法拒绝答复"}]}],
+                "usage":{"output_tokens_details":{"reasoning_tokens":516}}
+            }
+        })
+    );
+    let (base_url, upstream) = audit_transport_mock_with_followup_check(
+        vec![("200 OK", "text/event-stream", refusal.clone())],
+        true,
+    )
+    .await;
+    let mut settings =
+        audit_transport_settings(&base_url, "refusal-final", "responses", "gpt-responses");
+    settings.gpt_reasoning_continuation = true;
+    settings.gpt_reasoning_continuation_max_rounds = 3;
+    let result = apply_continue_thinking_to_responses_stream(
+        &serde_json::json!({"model":"gpt-responses","input":"hello","stream":true}),
+        settings,
+        None,
+        audit_transport_completed_sse("resp_first_complete", 516),
+    )
+    .await;
+    assert_eq!(upstream.await.unwrap().len(), 1);
+    assert_eq!(
+        result.sse_text, refusal,
+        "合法完成的拒绝答复应该成为最终结果"
+    );
+    assert_eq!(result.rounds, 1);
+}
+
 fn write_launcher_mixed_relay_settings(settings_dir: &Path, base_url: &str) {
     let settings = serde_json::json!({
         "relayProfiles": [{

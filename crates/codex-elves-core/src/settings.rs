@@ -1310,9 +1310,10 @@ impl SettingsStore {
 
         let mut raw = self.load_raw_object()?;
         raw.remove("wsFailureFallbackToHttp");
-        merge_known_setting_fields(&mut raw, &payload);
+        merge_known_setting_fields(&mut raw, &payload)?;
         let settings = normalize_settings_config_sections(
-            serde_json::from_value(Value::Object(raw.clone())).unwrap_or_default(),
+            serde_json::from_value(Value::Object(raw.clone()))
+                .context("更新后的设置格式无效，未写入配置文件")?,
         );
         validate_relay_model_mapping_save_constraints(&settings)?;
         raw.insert(
@@ -1340,9 +1341,14 @@ impl SettingsStore {
             }
         };
 
-        match serde_json::from_str::<Value>(&contents) {
-            Ok(Value::Object(map)) => Ok(map),
-            Ok(_) | Err(_) => Ok(settings_to_object(&BackendSettings::default())),
+        match serde_json::from_str::<Value>(&contents)
+            .with_context(|| format!("设置文件 {} 解析失败，未写入配置文件", self.path.display()))?
+        {
+            Value::Object(map) => Ok(map),
+            _ => anyhow::bail!(
+                "设置文件 {} 必须是 JSON 对象，未写入配置文件",
+                self.path.display()
+            ),
         }
     }
 }
@@ -1366,7 +1372,10 @@ fn validate_relay_model_mapping_save_constraints(settings: &BackendSettings) -> 
     Ok(())
 }
 
-fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<String, Value>) {
+fn merge_known_setting_fields(
+    target: &mut Map<String, Value>,
+    source: &Map<String, Value>,
+) -> anyhow::Result<()> {
     if let Some(value) = source.get("codexAppPath").and_then(Value::as_str) {
         target.insert("codexAppPath".to_string(), Value::String(value.to_string()));
     }
@@ -1544,16 +1553,13 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
     }
     if let Some(value) = source.get("relayProfiles").and_then(Value::as_array) {
         let mut profiles = serde_json::from_value::<Vec<RelayProfile>>(Value::Array(value.clone()))
-            .unwrap_or_default();
+            .context("供应商列表格式无效，未写入配置文件")?;
         preserve_official_mix_bearer_tokens(&mut profiles, target);
         for profile in &mut profiles {
             let _ = crate::relay_config::normalize_relay_profile_for_storage(profile);
             crate::responses_websocket::normalize_responses_websocket_capability(profile);
         }
-        target.insert(
-            "relayProfiles".to_string(),
-            serde_json::to_value(profiles).unwrap_or_else(|_| Value::Array(Vec::new())),
-        );
+        target.insert("relayProfiles".to_string(), serde_json::to_value(profiles)?);
     }
     if let Some(value) = source
         .get("relayCommonConfigContents")
@@ -1629,6 +1635,7 @@ fn merge_known_setting_fields(target: &mut Map<String, Value>, source: &Map<Stri
             }),
         );
     }
+    Ok(())
 }
 
 fn merge_bool_setting(target: &mut Map<String, Value>, source: &Map<String, Value>, key: &str) {
@@ -3783,6 +3790,90 @@ experimental_bearer_token = "sk-existing""#
             ])
         );
         assert_eq!(saved["customField"], json!({"nested": true}));
+    }
+
+    #[test]
+    fn settings_store_update_rejects_invalid_relay_profiles_without_writing() {
+        for profiles in [
+            json!([{"id": "invalid", "name": "Invalid", "protocol": "unsupported"}]),
+            json!([{"id": "invalid", "name": "Invalid", "modelMappings": [{"requestModel": 42}]}]),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            let store = SettingsStore::new(path.clone());
+            store.save(&BackendSettings::default()).unwrap();
+            let original = fs::read(&path).unwrap();
+
+            let result = store.update(json!({
+                "providerSyncEnabled": true,
+                "relayProfiles": profiles,
+            }));
+
+            assert!(
+                result.is_err(),
+                "invalid profile data must not clear the existing list"
+            );
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn settings_store_update_rejects_invalid_nested_fields_without_writing() {
+        for payload in [
+            json!({"layeredCompactionModels": {"gpt": ["invalid"]}}),
+            json!({"aggregateRelayProfiles": [{"id": "invalid", "name": "Invalid", "members": "invalid"}]}),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            let store = SettingsStore::new(path.clone());
+            store
+                .save(&BackendSettings {
+                    relay_common_config_contents: "model = \"keep-model\"\n".to_string(),
+                    ..BackendSettings::default()
+                })
+                .unwrap();
+            let original = fs::read(&path).unwrap();
+
+            assert!(
+                store.update(payload).is_err(),
+                "invalid data must not be persisted as a successful update"
+            );
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn settings_store_update_preserves_damaged_source_files() {
+        for contents in [
+            r#"{"relayProfiles":[{"id":"keep-me","name":"unfinished"#,
+            "[]",
+            "null",
+            r#"{"relayProfiles":"invalid","customField":"keep-me"}"#,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            fs::write(&path, contents).unwrap();
+            let store = SettingsStore::new(path.clone());
+
+            assert!(store.update(json!({"providerSyncEnabled": true})).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+        }
+    }
+
+    #[test]
+    fn settings_store_update_allows_explicitly_empty_profile_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::new(path);
+        store.save(&BackendSettings::default()).unwrap();
+
+        let updated = store
+            .update(json!({"relayProfiles": [], "aggregateRelayProfiles": []}))
+            .unwrap();
+
+        assert!(updated.relay_profiles.is_empty());
+        assert!(updated.aggregate_relay_profiles.is_empty());
+        assert_eq!(store.load().unwrap(), updated);
     }
 
     #[test]

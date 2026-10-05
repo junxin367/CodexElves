@@ -170,6 +170,58 @@ fn weighted_rotation_repeats_members_by_configured_weight() {
 }
 
 #[test]
+fn weighted_rotation_handles_maximum_weights_without_expanding_a_schedule() {
+    let mut settings = settings(AggregateRelayStrategy::WeightedRoundRobin);
+    for member in &mut settings.aggregate_relay_profiles[0].members {
+        member.weight = u32::MAX;
+    }
+    let mut selector = RelayRotationSelector::from_settings(&settings).unwrap();
+    for _ in 0..8 {
+        assert_eq!(selector.peek(&settings).unwrap().id, "relay-a");
+        assert_eq!(
+            selector
+                .select(&settings, RotationContext::default())
+                .unwrap()
+                .id,
+            "relay-a"
+        );
+    }
+}
+
+#[test]
+fn weighted_rotation_zero_weights_and_peeks_preserve_cycle_order() {
+    for weights in [[0, 0, 1], [2, 3, 1], [1, 1, 1]] {
+        let mut settings = settings(AggregateRelayStrategy::WeightedRoundRobin);
+        for (member, weight) in settings.aggregate_relay_profiles[0]
+            .members
+            .iter_mut()
+            .zip(weights)
+        {
+            member.weight = weight;
+        }
+        let expected = settings.aggregate_relay_profiles[0]
+            .members
+            .iter()
+            .flat_map(|member| {
+                std::iter::repeat_n(member.relay_id.clone(), member.weight.max(1) as usize)
+            })
+            .collect::<Vec<_>>();
+        let mut selector = RelayRotationSelector::from_settings(&settings).unwrap();
+        for relay_id in expected.iter().cycle().take(expected.len() * 3) {
+            assert_eq!(&selector.peek(&settings).unwrap().id, relay_id);
+            assert_eq!(&selector.peek(&settings).unwrap().id, relay_id);
+            assert_eq!(
+                &selector
+                    .select(&settings, RotationContext::default())
+                    .unwrap()
+                    .id,
+                relay_id
+            );
+        }
+    }
+}
+
+#[test]
 fn aggregate_members_must_reference_existing_relay_profiles() {
     let mut settings = settings(AggregateRelayStrategy::RequestRoundRobin);
     settings.aggregate_relay_profiles[0]
@@ -307,6 +359,58 @@ fn record_relay_request_failure_advances_global_failover_selector() {
 
     assert_eq!(first.id, "relay-a");
     assert_eq!(second.id, "relay-b");
+}
+
+#[test]
+fn late_failure_from_previous_aggregate_does_not_advance_current_failover() {
+    let _guard = global_selector_test_lock();
+    for change_id in [false, true] {
+        let previous = settings(AggregateRelayStrategy::Failover);
+        let mut regular = previous.clone();
+        regular.active_relay_id = "relay-a".to_string();
+        select_relay_for_request(&regular, RotationContext::default()).unwrap();
+        select_relay_for_request(&previous, RotationContext::default()).unwrap();
+
+        let mut current = previous.clone();
+        current.aggregate_relay_profiles[0].members.swap(0, 1);
+        if change_id {
+            current.aggregate_relay_profiles[0].id = "agg-next".to_string();
+            current.relay_profiles[3].id = "agg-next".to_string();
+            current.active_relay_id = "agg-next".to_string();
+            current.active_aggregate_relay_id = "agg-next".to_string();
+        }
+        assert_eq!(
+            select_relay_for_request(&current, RotationContext::default())
+                .unwrap()
+                .id,
+            "relay-b"
+        );
+        record_relay_request_failure(&previous);
+        assert_eq!(
+            select_relay_for_probe(&current).unwrap().id,
+            "relay-b",
+            "old failure changed a newer aggregate (change_id={change_id})"
+        );
+        record_relay_request_failure(&current);
+        assert_eq!(select_relay_for_probe(&current).unwrap().id, "relay-a");
+    }
+}
+
+#[test]
+fn late_regular_request_failure_does_not_reset_current_aggregate_rotation() {
+    let _guard = global_selector_test_lock();
+    let current = settings(AggregateRelayStrategy::RequestRoundRobin);
+    let mut regular = current.clone();
+    regular.active_relay_id = "relay-a".to_string();
+    select_relay_for_request(&regular, RotationContext::default()).unwrap();
+    assert_eq!(
+        select_relay_for_request(&current, RotationContext::default())
+            .unwrap()
+            .id,
+        "relay-a"
+    );
+    record_relay_request_failure(&regular);
+    assert_eq!(select_relay_for_probe(&current).unwrap().id, "relay-b");
 }
 
 #[test]

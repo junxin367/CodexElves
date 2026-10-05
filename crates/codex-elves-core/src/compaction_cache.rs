@@ -215,6 +215,7 @@ impl CacheLeaseStore {
         };
         if now >= lease.expires_at {
             self.leases.remove(key);
+            self.order.retain(|(candidate, _)| candidate != key);
             return CacheLeaseDecision {
                 state: CacheLeaseState::Expired,
                 ttl: Some(lease.ttl.label()),
@@ -287,6 +288,8 @@ impl CacheLeaseStore {
     }
 
     fn insert(&mut self, key: CacheLeaseKey, lease: CacheLease) {
+        // 同一缓存键刷新租约时替换旧索引，队列大小随有效租约数量保持有界。
+        self.order.retain(|(candidate, _)| candidate != &key);
         self.order.push_back((key.clone(), lease.observation));
         self.leases.insert(key, lease);
         while self.leases.len() > MAX_CACHE_LEASES {
@@ -349,6 +352,7 @@ pub(crate) struct CacheResponseObserver {
     terminal_failure: bool,
     evidence: UsageEvidence,
     pending: Vec<u8>,
+    sse_scan_from: usize,
 }
 
 impl CacheResponseObserver {
@@ -383,28 +387,33 @@ impl CacheResponseObserver {
             terminal_failure: false,
             evidence: UsageEvidence::default(),
             pending: Vec::new(),
+            sse_scan_from: 0,
         })
     }
 
     pub(crate) fn observe_bytes(&mut self, bytes: &[u8]) {
+        if self.terminal_failure {
+            return;
+        }
+        if self.pending.len().saturating_add(bytes.len()) > MAX_PENDING_RESPONSE_BYTES {
+            // 只放弃缓存租约推断，不影响调用方继续转发响应；也不能把截断内容当成完整证据。
+            self.terminal_failure = true;
+            self.pending = Vec::new();
+            self.sse_scan_from = 0;
+            return;
+        }
         if self.is_stream {
             self.pending.extend_from_slice(bytes);
             self.consume_sse_blocks(false);
-        } else if self.pending.len() < MAX_PENDING_RESPONSE_BYTES {
-            let remaining = MAX_PENDING_RESPONSE_BYTES - self.pending.len();
-            self.pending
-                .extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+        } else {
+            self.pending.extend_from_slice(bytes);
         }
     }
 
     pub(crate) fn observe_json_event(&mut self, payload: &Value) {
         observe_usage_candidates(&mut self.evidence, payload);
         let event_type = payload.get("type").and_then(Value::as_str);
-        self.terminal_failure |= matches!(event_type, Some("response.failed" | "error"))
-            || payload
-                .pointer("/response/status")
-                .and_then(Value::as_str)
-                .is_some_and(|status| status == "failed");
+        self.terminal_failure |= response_has_upstream_error(payload);
         self.terminal_success |= matches!(
             event_type,
             Some("response.completed" | "response.incomplete" | "message_stop")
@@ -451,28 +460,58 @@ impl CacheResponseObserver {
     }
 
     fn consume_sse_blocks(&mut self, finish: bool) {
-        loop {
-            let Some((end, separator_len)) = sse_block_end(&self.pending) else {
-                break;
-            };
-            let block = self.pending.drain(..end).collect::<Vec<_>>();
-            self.pending.drain(..separator_len);
-            self.observe_sse_block(&block);
+        // 批量借用完整事件，最后只搬移一次未完成的尾部，避免逐事件复制和搬移。
+        let mut pending = std::mem::take(&mut self.pending);
+        let mut consumed = 0;
+        let mut scan_from = self.sse_scan_from;
+        while let Some((end, separator_len)) = sse_block_end(&pending[scan_from..]) {
+            let end = scan_from + end;
+            self.observe_sse_block(&pending[consumed..end]);
+            consumed = end + separator_len;
+            scan_from = consumed;
         }
-        if finish && !self.pending.is_empty() {
-            let block = std::mem::take(&mut self.pending);
-            self.observe_sse_block(&block);
+        if finish {
+            if consumed < pending.len() {
+                self.observe_sse_block(&pending[consumed..]);
+            }
+            pending.clear();
+        } else if consumed > 0 {
+            pending.drain(..consumed);
         }
+        // 最长分隔符为 CRLF CRLF；只重扫末尾三个字节以覆盖跨网络分片的分隔符。
+        self.sse_scan_from = pending.len().saturating_sub(3);
+        self.pending = pending;
     }
 
     fn observe_sse_block(&mut self, block: &[u8]) {
         let text = String::from_utf8_lossy(block);
-        let data = text
+        if text.lines().any(|line| {
+            line.strip_prefix("event:")
+                .is_some_and(|event| matches!(event.trim(), "error" | "response.failed"))
+        }) {
+            self.terminal_failure = true;
+            return;
+        }
+        let mut data_lines = text
             .lines()
             .filter_map(|line| line.trim_end_matches('\r').strip_prefix("data:"))
-            .map(str::trim_start)
-            .collect::<Vec<_>>()
-            .join("\n");
+            .map(str::trim_start);
+        let Some(first) = data_lines.next() else {
+            return;
+        };
+        let data = if let Some(second) = data_lines.next() {
+            let mut data = String::with_capacity(first.len() + second.len() + 1);
+            data.push_str(first);
+            data.push('\n');
+            data.push_str(second);
+            for line in data_lines {
+                data.push('\n');
+                data.push_str(line);
+            }
+            std::borrow::Cow::Owned(data)
+        } else {
+            std::borrow::Cow::Borrowed(first)
+        };
         if data.is_empty() {
             return;
         }
@@ -666,30 +705,44 @@ fn observe_usage_candidates(evidence: &mut UsageEvidence, payload: &Value) {
 }
 
 fn non_stream_response_succeeded(payload: &Value) -> bool {
-    if payload.get("error").is_some_and(|error| !error.is_null()) {
-        return false;
-    }
-    ![
-        payload.get("status"),
-        payload.pointer("/response/status"),
-        payload.pointer("/message/status"),
-    ]
-    .into_iter()
-    .flatten()
-    .filter_map(Value::as_str)
-    .any(|status| status == "failed")
+    !response_has_upstream_error(payload)
+}
+
+fn response_has_upstream_error(payload: &Value) -> bool {
+    matches!(
+        payload.get("type").and_then(Value::as_str),
+        Some("error" | "response.failed")
+    ) || ["/error", "/response/error", "/message/error"]
+        .into_iter()
+        .any(|pointer| {
+            payload
+                .pointer(pointer)
+                .is_some_and(|error| !error.is_null())
+        })
+        || [
+            payload.get("status"),
+            payload.pointer("/response/status"),
+            payload.pointer("/message/status"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|status| status == "failed")
 }
 
 fn sse_block_end(bytes: &[u8]) -> Option<(usize, usize)> {
-    let lf = bytes.windows(2).position(|window| window == b"\n\n");
-    let crlf = bytes.windows(4).position(|window| window == b"\r\n\r\n");
-    match (lf, crlf) {
-        (Some(left), Some(right)) if left <= right => Some((left, 2)),
-        (Some(_), Some(right)) => Some((right, 4)),
-        (Some(left), None) => Some((left, 2)),
-        (None, Some(right)) => Some((right, 4)),
-        (None, None) => None,
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        if index >= 1 && bytes[index - 1] == b'\n' {
+            return Some((index - 1, 2));
+        }
+        if index >= 3 && &bytes[index - 3..=index] == b"\r\n\r\n" {
+            return Some((index - 3, 4));
+        }
     }
+    None
 }
 
 fn cache_key_sha256(key: &CacheLeaseKey) -> String {
@@ -892,6 +945,31 @@ mod tests {
     fn lease_store_is_bounded_and_evicts_old_observations() {
         let started_at = Instant::now();
         let mut store = CacheLeaseStore::default();
+        let repeated_key = key("repeated");
+        for observation in 0..100_000 {
+            store.observe(
+                repeated_key.clone(),
+                CacheProtocol::Anthropic,
+                None,
+                UsageEvidence {
+                    cache_creation_5m_tokens: u64::from(observation == 0),
+                    cached_tokens: u64::from(observation > 0),
+                    ..Default::default()
+                },
+                started_at,
+                observation,
+            );
+        }
+        assert_eq!(store.leases.len(), 1);
+        assert_eq!(store.order.len(), 1);
+        assert_eq!(
+            store
+                .decision(&repeated_key, started_at + FIVE_MINUTES)
+                .state,
+            CacheLeaseState::Expired
+        );
+        assert!(store.order.is_empty());
+
         for observation in 0..(MAX_CACHE_LEASES as u64 + 32) {
             store.observe(
                 key(&format!("bounded-{observation}")),
@@ -906,6 +984,7 @@ mod tests {
             );
         }
         assert_eq!(store.leases.len(), MAX_CACHE_LEASES);
+        assert_eq!(store.order.len(), MAX_CACHE_LEASES);
         assert_eq!(
             store.decision(&key("bounded-0"), started_at).state,
             CacheLeaseState::Missing
@@ -1144,6 +1223,317 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn error_envelopes_do_not_establish_cache_leases() {
+        let errors = [
+            json!({"error": {"message": "overloaded"}}),
+            json!({"type": "error"}),
+            json!({"type": "response.failed"}),
+            json!({"status": "failed"}),
+            json!({"response": {"error": {"message": "overloaded"}}}),
+            json!({"response": {"status": "failed"}}),
+            json!({"message": {"error": {"message": "overloaded"}}}),
+            json!({"message": {"status": "failed"}}),
+        ];
+        for (index, error) in errors.into_iter().enumerate() {
+            for is_stream in [false, true] {
+                let relay = RelayProfile::default();
+                let context = RequestContext::default();
+                let source = json!({
+                    "model": "gpt-test",
+                    "prompt_cache_key": format!("error-envelope-{index}-{is_stream}")
+                });
+                let endpoint = "https://example.test/v1/responses";
+                let mut observer = CacheResponseObserver::new(
+                    &relay,
+                    CacheProtocol::Responses,
+                    endpoint,
+                    &source,
+                    &source,
+                    &context,
+                    is_stream,
+                    Instant::now(),
+                )
+                .unwrap();
+                let mut payload = error.clone();
+                payload["usage"] = json!({"cache_creation_input_tokens": 10, "cache_ttl": "5m"});
+                let body = if is_stream {
+                    format!("data: {payload}\n\ndata: [DONE]\n\n")
+                } else {
+                    payload.to_string()
+                };
+                observer.observe_bytes(body.as_bytes());
+                observer.finish();
+                assert_eq!(
+                    lease_decision(
+                        &relay,
+                        CacheProtocol::Responses,
+                        endpoint,
+                        &source,
+                        &source,
+                        &context,
+                    )
+                    .state,
+                    CacheLeaseState::Missing,
+                    "error envelope {index}, stream={is_stream}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sse_error_event_without_json_type_invalidates_cache_evidence() {
+        for event in ["error", "response.failed"] {
+            let relay = RelayProfile::default();
+            let context = RequestContext::default();
+            let source = json!({
+                "model": "gpt-test",
+                "prompt_cache_key": format!("error-event-{event}")
+            });
+            let endpoint = "https://example.test/v1/responses";
+            let mut observer = CacheResponseObserver::new(
+                &relay,
+                CacheProtocol::Responses,
+                endpoint,
+                &source,
+                &source,
+                &context,
+                true,
+                Instant::now(),
+            )
+            .unwrap();
+            let body = format!(
+                "data: {{\"usage\":{{\"cache_creation_input_tokens\":10,\"cache_ttl\":\"5m\"}}}}\r\n\r\nevent: {event}\r\ndata: overloaded\r\n\r\ndata: [DONE]\r\n\r\n"
+            );
+            for chunk in body.as_bytes().chunks(7) {
+                observer.observe_bytes(chunk);
+            }
+            observer.finish();
+            assert_eq!(
+                lease_decision(
+                    &relay,
+                    CacheProtocol::Responses,
+                    endpoint,
+                    &source,
+                    &source,
+                    &context,
+                )
+                .state,
+                CacheLeaseState::Missing,
+            );
+        }
+    }
+
+    #[test]
+    fn sse_delimiter_finds_the_first_lf_or_crlf_boundary() {
+        for length in 0..=8 {
+            for mut encoded in 0..3_usize.pow(length) {
+                let bytes = (0..length)
+                    .map(|_| {
+                        let byte = [b'x', b'\r', b'\n'][encoded % 3];
+                        encoded /= 3;
+                        byte
+                    })
+                    .collect::<Vec<_>>();
+                let expected = (0..bytes.len()).find_map(|index| {
+                    let suffix = &bytes[index..];
+                    if suffix.starts_with(b"\n\n") {
+                        Some((index, 2))
+                    } else if suffix.starts_with(b"\r\n\r\n") {
+                        Some((index, 4))
+                    } else {
+                        None
+                    }
+                });
+                assert_eq!(sse_block_end(&bytes), expected, "{bytes:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn observer_preserves_mixed_multiline_events_at_every_byte_boundary() {
+        let relay = RelayProfile::default();
+        let context = RequestContext::default();
+        let source = json!({"model": "gpt-test", "prompt_cache_key": "mixed-multiline-boundaries"});
+        let body = concat!(
+            ": heartbeat\r\n\r\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"你好🙂\"}\n\n",
+            "data: {\"type\":\"response.completed\",\r\n",
+            "data: \"response\":{\"status\":\"completed\",\"usage\":{\"cache_creation_input_tokens\":53,\"cache_ttl\":\"5m\"}}}\r\n\r\n",
+            "data: [DONE]"
+        ).as_bytes();
+        for split in 0..=body.len() {
+            let mut observer = CacheResponseObserver::new(
+                &relay,
+                CacheProtocol::Responses,
+                "https://example.test/v1/responses",
+                &source,
+                &source,
+                &context,
+                true,
+                Instant::now(),
+            )
+            .unwrap();
+            observer.observe_bytes(&body[..split]);
+            observer.observe_bytes(&body[split..]);
+            observer.consume_sse_blocks(true);
+            assert!(observer.terminal_success, "split={split}");
+            assert!(!observer.terminal_failure, "split={split}");
+            assert_eq!(observer.evidence.cache_creation_tokens, 53, "split={split}");
+            assert!(observer.pending.is_empty());
+        }
+    }
+
+    #[test]
+    fn observer_keeps_large_fragmented_event_until_its_delimiter_arrives() {
+        let relay = RelayProfile::default();
+        let context = RequestContext::default();
+        let source = json!({"model": "gpt-test", "prompt_cache_key": "large-fragmented-frame"});
+        let mut observer = CacheResponseObserver::new(
+            &relay,
+            CacheProtocol::Responses,
+            "https://example.test/v1/responses",
+            &source,
+            &source,
+            &context,
+            true,
+            Instant::now(),
+        )
+        .unwrap();
+        let body = format!(
+            "data: {}\r\n\r\n",
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "output_text": "你".repeat(32_768),
+                    "usage": {"cache_creation_input_tokens": 71, "cache_ttl": "5m"}
+                }
+            })
+        );
+        for chunk in body.as_bytes().chunks(17) {
+            observer.observe_bytes(chunk);
+        }
+        assert!(observer.terminal_success);
+        assert!(!observer.terminal_failure);
+        assert_eq!(observer.evidence.cache_creation_tokens, 71);
+        assert!(observer.pending.is_empty());
+    }
+
+    #[test]
+    fn oversized_response_cannot_grow_observer_or_establish_a_lease() {
+        for is_stream in [true, false] {
+            let relay = RelayProfile::default();
+            let context = RequestContext::default();
+            let source = json!({
+                "model": "gpt-test",
+                "prompt_cache_key": format!("oversized-response-{is_stream}"),
+            });
+            let endpoint = "https://example.test/v1/responses";
+            let mut observer = CacheResponseObserver::new(
+                &relay,
+                CacheProtocol::Responses,
+                endpoint,
+                &source,
+                &source,
+                &context,
+                is_stream,
+                Instant::now(),
+            )
+            .unwrap();
+            observer.observe_bytes(b"data: {\"incomplete\":");
+            observer.observe_bytes(&vec![b'x'; MAX_PENDING_RESPONSE_BYTES + 1]);
+            assert!(
+                observer.pending.len() <= MAX_PENDING_RESPONSE_BYTES,
+                "observer exceeded its memory bound: {} bytes",
+                observer.pending.len()
+            );
+            assert!(
+                observer.pending.is_empty(),
+                "oversized input must be discarded"
+            );
+            observer.observe_bytes(b"data: [DONE]\n\n");
+            assert!(
+                observer.pending.is_empty(),
+                "disabled observer must not buffer more bytes"
+            );
+            observer.observe_json_event(&json!({
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "usage": {"cache_creation_input_tokens": 10, "cache_ttl": "5m"}
+                }
+            }));
+            observer.finish();
+            assert_eq!(
+                lease_decision(
+                    &relay,
+                    CacheProtocol::Responses,
+                    endpoint,
+                    &source,
+                    &source,
+                    &context
+                )
+                .state,
+                CacheLeaseState::Missing,
+            );
+        }
+    }
+
+    #[test]
+    fn complete_response_split_across_chunks_still_establishes_a_lease() {
+        for is_stream in [false, true] {
+            let relay = RelayProfile::default();
+            let context = RequestContext::default();
+            let source = json!({
+                "model": "gpt-test",
+                "prompt_cache_key": format!("chunked-complete-response-{is_stream}"),
+            });
+            let endpoint = "https://example.test/v1/responses";
+            let mut observer = CacheResponseObserver::new(
+                &relay,
+                CacheProtocol::Responses,
+                endpoint,
+                &source,
+                &source,
+                &context,
+                is_stream,
+                Instant::now(),
+            )
+            .unwrap();
+            let response = json!({
+                "status": "completed",
+                "error": null,
+                "output_text": "The words error and response.failed are ordinary output.",
+                "usage": {"cache_creation_input_tokens": 10, "cache_ttl": "5m"}
+            });
+            let body = if is_stream {
+                format!(
+                    "data: {}\n\n",
+                    json!({"type": "response.completed", "response": response})
+                )
+            } else {
+                response.to_string()
+            };
+            for chunk in body.as_bytes().chunks(7) {
+                observer.observe_bytes(chunk);
+            }
+            observer.finish();
+            assert_eq!(
+                lease_decision(
+                    &relay,
+                    CacheProtocol::Responses,
+                    endpoint,
+                    &source,
+                    &source,
+                    &context
+                )
+                .state,
+                CacheLeaseState::Valid,
+            );
+        }
     }
 
     #[test]

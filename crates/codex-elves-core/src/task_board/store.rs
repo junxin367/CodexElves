@@ -16,8 +16,6 @@ use thiserror::Error;
 
 const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
-// T-002/T-003 consume this counter through the mutation seam below.
-#[cfg_attr(not(test), allow(dead_code))]
 static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
 pub trait TaskBoardStore: Send + Sync {
@@ -255,7 +253,6 @@ impl FileTaskBoardStore {
         Ok(result)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     fn atomic_replace_document(
         &self,
         document: &TaskBoardDocument,
@@ -409,7 +406,6 @@ struct TaskBoardFileLock {
 }
 
 #[derive(Clone, Copy)]
-#[cfg_attr(not(test), allow(dead_code))]
 enum TaskBoardLockMode {
     Shared,
     Exclusive,
@@ -474,7 +470,6 @@ fn sync_parent_directory(parent: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-#[cfg_attr(not(test), allow(dead_code))]
 fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
     Ok(())
 }

@@ -101,11 +101,12 @@ pub fn build_continue_request(
 ) -> Value {
     let mut request = original_request.clone();
 
-    let mut input = original_request
-        .get("input")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let mut input = match original_request.get("input") {
+        Some(Value::Array(items)) => items.clone(),
+        Some(Value::String(text)) => vec![json!({"role":"user","content":text})],
+        Some(Value::Null) | None => Vec::new(),
+        Some(item) => vec![item.clone()],
+    };
     input.extend(previous_output_items.iter().filter_map(|item| {
         if item.get("type").and_then(Value::as_str) == Some("reasoning")
             && item
@@ -180,6 +181,9 @@ fn is_tool_call_output_item_type(kind: &str) -> bool {
             | "computer_call"
             | "computer_use_call"
             | "local_shell_call"
+            | "shell_call"
+            | "apply_patch_call"
+            | "mcp_approval_request"
             | "code_interpreter_call"
             | "image_generation_call"
             | "mcp_call"
@@ -223,8 +227,41 @@ pub fn response_contains_tool_call(response_object: &Value) -> bool {
 /// HTTP/SSE 与 WebSocket 路径共用同一判定：reasoning token 命中低网格，
 /// 且当前响应不是等待客户端处理的工具调用。
 pub fn should_continue_response(response_object: &Value) -> bool {
-    should_continue_thinking(extract_reasoning_tokens(response_object))
+    response_allows_continuation(response_object)
+        && should_continue_thinking(extract_reasoning_tokens(response_object))
         && !response_contains_tool_call(response_object)
+}
+
+/// 失败、取消、过滤或拒绝响应不应被低 token 启发式改成额外的模型请求。
+pub fn response_allows_continuation(response: &Value) -> bool {
+    if response.get("error").is_some_and(|error| !error.is_null())
+        || !matches!(
+            response.get("status").and_then(Value::as_str),
+            None | Some("completed" | "incomplete")
+        )
+        || response
+            .pointer("/incomplete_details/reason")
+            .and_then(Value::as_str)
+            .is_some_and(|reason| reason != "max_output_tokens")
+    {
+        return false;
+    }
+    !response
+        .get("output")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("type").and_then(Value::as_str) == Some("refusal")
+                    || item
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .is_some_and(|parts| {
+                            parts.iter().any(|part| {
+                                part.get("type").and_then(Value::as_str) == Some("refusal")
+                            })
+                        })
+            })
+        })
 }
 
 fn remove_websocket_transport_fields(request: &mut Value) {
@@ -346,6 +383,56 @@ pub fn extract_terminal_response_object(sse_text: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn major_audit_string_input_survives_http_and_websocket_continuation() {
+        let original = json!({"model":"gpt-test","input":"用户问题 中文"});
+        let continued = build_continue_request(&original, &[], 1);
+        assert_eq!(continued["input"][0]["role"], "user");
+        assert_eq!(continued["input"][0]["content"], "用户问题 中文");
+        let websocket =
+            build_websocket_continue_request(&original, &json!({"output":[]}), 1).unwrap();
+        assert_eq!(websocket.request["input"][0], continued["input"][0]);
+    }
+
+    #[test]
+    fn major_audit_pending_native_actions_must_not_be_discarded_for_continuation() {
+        for kind in ["shell_call", "apply_patch_call", "mcp_approval_request"] {
+            let response = json!({
+                "status":"completed",
+                "usage":{"output_tokens_details":{"reasoning_tokens":516}},
+                "output":[{"type":kind,"id":"action_1"}]
+            });
+            assert!(!should_continue_response(&response), "{kind}");
+            assert_eq!(response_tool_call_types(&response), vec![kind.to_string()]);
+        }
+    }
+
+    #[test]
+    fn major_audit_failed_or_refused_responses_must_not_trigger_continuation() {
+        for fields in [
+            json!({"status":"failed","error":{"message":"failed"}}),
+            json!({"status":"cancelled"}),
+            json!({"status":"in_progress"}),
+            json!({"status":"queued"}),
+            json!({"status":"incomplete","incomplete_details":{"reason":"content_filter"}}),
+            json!({"status":"completed","output":[{"type":"message","content":[{"type":"refusal","refusal":"cannot comply"}]}]}),
+        ] {
+            let mut response = json!({
+                "usage":{"output_tokens_details":{"reasoning_tokens":516}},
+                "output":[]
+            });
+            response
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            assert!(!should_continue_response(&response), "{response}");
+        }
+        assert!(should_continue_response(&json!({
+            "status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},
+            "usage":{"output_tokens_details":{"reasoning_tokens":516}},"output":[]
+        })));
+    }
 
     #[test]
     fn grid_multiple_matches_observed_samples() {

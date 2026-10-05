@@ -12,7 +12,7 @@ use anyhow::Context;
 use serde_json::{Map, Value, json};
 
 use crate::relay_rotation::{RotationContext, RotationEvent};
-use crate::request_headers::{RequestContext, UpstreamHeaderRoute};
+use crate::request_headers::{RequestContext, ResponsesRequestOperation, UpstreamHeaderRoute};
 use crate::settings::SettingsStore;
 
 pub const DEFAULT_PROTOCOL_PROXY_PORT: u16 = 45221;
@@ -48,6 +48,9 @@ const EXTRA_CHAT_PASSTHROUGH_FIELDS: &[&str] = &[
 ];
 const ERROR_BODY_PREVIEW_LIMIT: usize = 1024;
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+const ANTHROPIC_THINKING_REPLAY_PREFIX: &str = "codex-elves-anthropic-thinking-v1:";
+const ANTHROPIC_CONTENT_REPLAY_PREFIX: &str = "codex-elves-anthropic-content-v1:";
+const ANTHROPIC_PAUSE_TURN_ERROR: &str = "Anthropic pause_turn requires upstream continuation, which this protocol bridge does not support";
 const ANTHROPIC_DEFAULT_REASONING_EFFORT: &str = "high";
 const ANTHROPIC_BELOW_HIGH_MAX_OUTPUT_TOKENS: u64 = 32_000;
 const ANTHROPIC_HIGH_MAX_OUTPUT_TOKENS: u64 = 64_000;
@@ -84,11 +87,16 @@ struct CodexToolContext {
     web_search_fallback: Option<CodexWebSearchFallbackTool>,
     has_custom_tools: bool,
     has_namespace_tools: bool,
+    textual_tool_calls: bool,
+    inline_citations: bool,
+    text_tool_choice: Option<Value>,
+    reserved_internal_names: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
 struct CodexCustomToolSpec {
     openai_name: String,
+    namespace: String,
     kind: CodexCustomToolKind,
     proxy_action: Option<CodexPatchProxyAction>,
 }
@@ -98,6 +106,7 @@ struct CodexFunctionToolSpec {
     namespace: String,
     name: String,
     parameters: Value,
+    internal_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +169,116 @@ impl CodexPatchProxyAction {
 }
 
 impl CodexToolContext {
+    fn function_alias(&self, namespace: &str, name: &str) -> Option<&str> {
+        self.function_tools
+            .iter()
+            .find(|(_, spec)| {
+                spec.namespace == namespace && spec.name == name && spec.internal_type.is_none()
+            })
+            .map(|(alias, _)| alias.as_str())
+    }
+
+    fn custom_alias(
+        &self,
+        namespace: &str,
+        name: &str,
+        action: Option<CodexPatchProxyAction>,
+    ) -> Option<&str> {
+        self.custom_tools
+            .iter()
+            .find(|(_, spec)| {
+                spec.namespace == namespace
+                    && spec.openai_name == name
+                    && spec.proxy_action == action
+            })
+            .map(|(alias, _)| alias.as_str())
+    }
+
+    fn internal_alias(&self, kind: &str) -> Option<&str> {
+        self.function_tools
+            .iter()
+            .find(|(_, spec)| spec.internal_type.as_deref() == Some(kind))
+            .map(|(alias, _)| alias.as_str())
+    }
+
+    fn function_choice_alias(&self, namespace: &str, name: &str) -> Option<&str> {
+        self.function_alias(namespace, name).or_else(|| {
+            // 兼容旧客户端把已声明内置工具写成 function choice 的形式。
+            // 只匹配内置工具原身份，不能凭上游别名、custom 名称或其他 namespace 授权。
+            if namespace.is_empty() {
+                self.internal_alias(name)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn is_internal_alias(&self, alias: &str, accepts: fn(&str) -> bool) -> bool {
+        if let Some(spec) = self.function_tools.get(alias) {
+            return spec.internal_type.as_deref().is_some_and(accepts);
+        }
+        !self.custom_tools.contains_key(alias) && accepts(alias)
+    }
+
+    fn upstream_function_name(&self, namespace: &str, name: &str) -> String {
+        self.function_alias(namespace, name)
+            .map(str::to_string)
+            .unwrap_or_else(|| flatten_namespace_tool_name(namespace, name))
+    }
+
+    fn upstream_custom_name(
+        &self,
+        namespace: &str,
+        name: &str,
+        action: Option<CodexPatchProxyAction>,
+    ) -> String {
+        self.custom_alias(namespace, name, action)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                let base = flatten_namespace_tool_name(namespace, name);
+                action.map_or_else(
+                    || base.clone(),
+                    |action| format!("{base}_{}", action.suffix()),
+                )
+            })
+    }
+
+    /// 一个请求内所有工具共享上游名称空间，包括补丁代理生成的动作工具。
+    /// 反向映射保留原始身份，不能通过分隔符猜测 namespace/name。
+    fn allocate_upstream_name(&self, preferred: &str) -> String {
+        let sanitized: String = preferred
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let base = if sanitized.is_empty() {
+            "tool"
+        } else {
+            &sanitized
+        };
+        let mut sequence = 1;
+        loop {
+            let suffix = if sequence == 1 {
+                String::new()
+            } else {
+                format!("_{sequence}")
+            };
+            let candidate = format!("{}{}", &base[..base.len().min(64 - suffix.len())], suffix);
+            if !self.function_tools.contains_key(&candidate)
+                && !self.custom_tools.contains_key(&candidate)
+                && !self.reserved_internal_names.contains(&candidate)
+            {
+                return candidate;
+            }
+            sequence += 1;
+        }
+    }
+
     fn is_custom_tool_proxy(&self, upstream_name: &str) -> bool {
         self.custom_tools.contains_key(upstream_name)
     }
@@ -169,6 +288,13 @@ impl CodexToolContext {
             .get(upstream_name)
             .map(|spec| spec.openai_name.clone())
             .unwrap_or_else(|| upstream_name.to_string())
+    }
+
+    fn custom_tool_namespace(&self, upstream_name: &str) -> &str {
+        self.custom_tools
+            .get(upstream_name)
+            .map(|spec| spec.namespace.as_str())
+            .unwrap_or("")
     }
 
     fn custom_tool_item_id(&self, upstream_name: &str, call_id: &str) -> String {
@@ -703,7 +829,91 @@ fn prompt_model_name(model: &str) -> String {
     }
 }
 
+/// 仅在协议桥接入口校验。原生 Responses 可以由上游解析服务端历史和文件引用。
+fn validate_translated_history_references(body: &Value) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        body.get("previous_response_id").is_none_or(Value::is_null),
+        "previous_response_id cannot be resolved by this protocol bridge; send the full input history"
+    );
+    Ok(())
+}
+
+fn validate_translated_request(body: &Value, anthropic: bool) -> anyhow::Result<()> {
+    validate_translated_history_references(body)?;
+    // 本项目已有 conversation 字符串作为聚合轮换绑定 ID 的兼容用法。
+    // 对象形态则明确是 Responses 服务端 conversation 引用，不能当作完整历史使用。
+    anyhow::ensure!(
+        !body.get("conversation").is_some_and(Value::is_object),
+        "conversation references cannot be resolved by this protocol bridge; send the full input history"
+    );
+    let Some(input) = body.get("input") else {
+        return Ok(());
+    };
+    match input {
+        Value::Array(items) => {
+            for item in items {
+                validate_translated_input_item(item, anthropic)?;
+            }
+        }
+        Value::Object(_) => validate_translated_input_item(input, anthropic)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_translated_input_item(item: &Value, anthropic: bool) -> anyhow::Result<()> {
+    let content = match item.get("type").and_then(Value::as_str) {
+        Some("item_reference") => {
+            anyhow::bail!(
+                "item_reference cannot be resolved by this protocol bridge; send the full input item"
+            )
+        }
+        Some("function_call_output" | "custom_tool_call_output") => item.get("output"),
+        Some("tool_result") => item
+            .pointer("/content/content")
+            .or_else(|| item.get("content")),
+        Some("message") | None => item.get("content"),
+        _ => None,
+    };
+    let Some(parts) = content.and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for part in parts {
+        match part.get("type").and_then(Value::as_str) {
+            Some("input_image") => {
+                let url = part
+                    .get("image_url")
+                    .and_then(|value| {
+                        value
+                            .as_str()
+                            .or_else(|| value.get("url").and_then(Value::as_str))
+                    })
+                    .filter(|url| !url.is_empty());
+                anyhow::ensure!(
+                    url.is_some() || part.get("file_id").is_none_or(Value::is_null),
+                    "input_image.file_id cannot be resolved by this protocol bridge; provide image_url or a data URL"
+                );
+                if anthropic {
+                    anyhow::ensure!(
+                        anthropic_image_source(part).is_some(),
+                        "unsupported input_image source for Anthropic; provide an HTTP URL or a base64 data URL"
+                    );
+                }
+            }
+            Some("input_file") if anthropic => {
+                anyhow::ensure!(
+                    anthropic_document_block(part).is_some(),
+                    "unsupported input_file source for Anthropic; provide a PDF URL or base64 PDF data instead of an unresolved file_id"
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
+    validate_translated_history_references(&body)?;
     let recover_compacted_thinking =
         crate::layered_compaction::contains_synthetic_local_compaction(&body)
             && body
@@ -717,6 +927,10 @@ pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
         crate::layered_compaction::expand_synthetic_local_compaction_request(&body)
     };
     let body = crate::layered_compaction::prepare_remote_compaction_v2_bridge_request(&body);
+    validate_translated_request(&body, false)?;
+    let conversion_tools = tools_for_proxy_conversion(&body);
+    let tool_context = build_codex_tool_context_from_tools(&conversion_tools);
+    validate_explicit_tool_choice(&body, &tool_context)?;
     let mut result = json!({});
 
     if let Some(model) = body.get("model") {
@@ -732,7 +946,7 @@ pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
     }
 
     if let Some(input) = body.get("input") {
-        append_responses_input(input, &mut messages);
+        append_responses_input(input, &mut messages, &tool_context);
     }
     normalize_chat_messages(&mut messages);
     let messages = collapse_system_messages_to_head(messages);
@@ -759,18 +973,17 @@ pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
         }
     }
     if body.get("stream").and_then(Value::as_bool).unwrap_or(false) {
-        let mut stream_options = body
-            .get("stream_options")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+        let mut stream_options = match body.get("stream_options") {
+            None | Some(Value::Null) => json!({}),
+            Some(options) if options.is_object() => options.clone(),
+            Some(_) => anyhow::bail!("stream_options must be an object or null"),
+        };
         stream_options["include_usage"] = json!(true);
         result["stream_options"] = stream_options;
     }
 
     apply_chat_reasoning_options(&mut result, &body, model);
 
-    let conversion_tools = tools_for_proxy_conversion(&body);
-    let tool_context = build_codex_tool_context_from_tools(&conversion_tools);
     let mut has_chat_tools = false;
     if !conversion_tools.is_empty() {
         // Chat 路径 web_search 兜底:CPA 等第三方 Chat Completions 上游不支持
@@ -785,7 +998,7 @@ pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
                     tool.get("function")
                         .and_then(|f| f.get("name"))
                         .and_then(Value::as_str)
-                        .map(|name| !is_codex_web_search_name(name))
+                        .map(|name| !tool_context.is_internal_alias(name, is_codex_web_search_name))
                         .unwrap_or(true)
                 })
                 .collect::<Vec<_>>()
@@ -821,6 +1034,7 @@ pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
             result["parallel_tool_calls"] = value.clone();
         }
     }
+    apply_allowed_tool_choice(&mut result, &body, &tool_context, false)?;
 
     for key in EXTRA_CHAT_PASSTHROUGH_FIELDS {
         if *key == "stream_options" && result.get("stream_options").is_some() {
@@ -829,6 +1043,25 @@ pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
         if let Some(value) = body.get(*key) {
             result[*key] = value.clone();
         }
+    }
+    // Responses 的格式定义位于 text.format，JSON Schema 字段在 Chat 中多一层。
+    // 原生 Responses 参数优先于兼容调用方额外提供的 response_format。
+    if let Some(format) = body
+        .pointer("/text/format")
+        .filter(|value| !value.is_null())
+    {
+        result["response_format"] = match format.get("type").and_then(Value::as_str) {
+            Some("json_schema") => {
+                let mut schema = format.clone();
+                schema
+                    .as_object_mut()
+                    .expect("format has a type field")
+                    .remove("type");
+                json!({ "type": "json_schema", "json_schema": schema })
+            }
+            Some("json_object") | Some("text") => format.clone(),
+            _ => anyhow::bail!("unsupported Responses text.format for Chat Completions"),
+        };
     }
     if recover_compacted_thinking && has_chat_tools {
         recover_chat_compacted_reasoning_history(&mut result);
@@ -899,47 +1132,69 @@ pub(crate) fn chat_completion_to_response_with_request_and_options(
     )
 }
 
+fn primary_chat_choice(choices: &[Value]) -> Option<&Value> {
+    choices
+        .iter()
+        .find(|choice| choice.get("index").and_then(Value::as_u64) == Some(0))
+        // 保留未提供 index 的旧式单候选上游兼容，但不能将其他候选当成第零项。
+        .or_else(|| {
+            choices
+                .first()
+                .filter(|choice| choice.get("index").is_none_or(Value::is_null))
+        })
+}
+
 fn chat_completion_to_response_with_context(
     body: Value,
     tool_context: &CodexToolContext,
     original_request: Option<&Value>,
 ) -> anyhow::Result<Value> {
+    reject_upstream_response_error(&body)?;
     let choices = body
         .get("choices")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("chat response missing choices"))?;
-    let choice = choices
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("chat response choices is empty"))?;
+    let choice = primary_chat_choice(choices)
+        .ok_or_else(|| anyhow::anyhow!("chat response missing choice with index 0"))?;
     let message = choice
         .get("message")
         .ok_or_else(|| anyhow::anyhow!("chat response choice missing message"))?;
 
     let response_id = response_id_from_chat_id(body.get("id").and_then(Value::as_str));
     let mut output = Vec::new();
-    if let Some(reasoning) = chat_reasoning_to_response_output_item(message, &response_id) {
+    if let Some(reasoning) =
+        chat_reasoning_to_response_output_item(message, &response_id, tool_context)
+    {
         output.push(reasoning);
     }
-    if let Some(message) = chat_message_to_response_output_item(message, &response_id) {
+    if let Some(message) = chat_message_to_response_output_item(message, &response_id, tool_context)
+    {
         output.push(message);
     }
-    output.extend(chat_tool_calls_to_response_output_items(
-        message,
-        tool_context,
-    ));
+    let status = response_status(choice.get("finish_reason").and_then(Value::as_str));
+    if status == "completed" {
+        output.extend(chat_tool_calls_to_response_output_items(
+            message,
+            tool_context,
+        ));
+    } else {
+        mark_messages_incomplete(&mut output);
+    }
 
     let mut response = json!({
         "id": response_id,
         "object": "response",
         "created_at": body.get("created").and_then(Value::as_u64).unwrap_or(0),
-        "status": response_status(choice.get("finish_reason").and_then(Value::as_str)),
+        "status": status,
         "model": body.get("model").and_then(Value::as_str).unwrap_or(""),
         "output": output,
         "usage": chat_usage_to_responses_usage(body.get("usage"))
     });
 
-    if choice.get("finish_reason").and_then(Value::as_str) == Some("length") {
-        response["incomplete_details"] = json!({ "reason": "max_output_tokens" });
+    if let Some(reason) =
+        response_incomplete_reason(choice.get("finish_reason").and_then(Value::as_str))
+    {
+        response["incomplete_details"] = json!({ "reason": reason });
     }
     copy_response_request_fields(&mut response, original_request);
 
@@ -954,11 +1209,16 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
     body: Value,
     diagnostic_id: Option<&str>,
 ) -> anyhow::Result<Value> {
+    validate_translated_history_references(&body)?;
     let has_local_compaction =
         crate::layered_compaction::contains_synthetic_local_compaction(&body);
     let body =
         crate::layered_compaction::expand_synthetic_local_compaction_request_as_context(&body);
     let body = crate::layered_compaction::prepare_remote_compaction_v2_bridge_request(&body);
+    validate_translated_request(&body, true)?;
+    let conversion_tools = tools_for_proxy_conversion(&body);
+    let tool_context = build_codex_tool_context_from_tools(&conversion_tools);
+    validate_explicit_tool_choice(&body, &tool_context)?;
     let mut result = json!({});
 
     if let Some(model) = body.get("model") {
@@ -978,14 +1238,26 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
 
     let mut messages = Vec::new();
     if let Some(input) = body.get("input") {
-        append_responses_input_to_anthropic(input, &mut messages, &mut system_chunks);
+        append_responses_input_to_anthropic(
+            input,
+            &mut messages,
+            &mut system_chunks,
+            &tool_context,
+            model,
+        );
     }
     if messages.is_empty() {
         messages.push(json!({ "role": "user", "content": [{ "type": "text", "text": "" }] }));
     }
     dedupe_anthropic_codex_context_text(&mut messages);
     dedupe_anthropic_system_chunks(&mut system_chunks);
-    normalize_anthropic_tool_boundary_markers(&mut messages);
+    if body
+        .pointer("/codex_elves_compat/textual_tool_calls")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        normalize_anthropic_tool_boundary_markers(&mut messages);
+    }
     if !system_chunks.is_empty() {
         result["system"] = json!(system_chunks.join("\n\n"));
     }
@@ -1013,8 +1285,6 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
         }
     }
 
-    let conversion_tools = tools_for_proxy_conversion(&body);
-    let tool_context = build_codex_tool_context_from_tools(&conversion_tools);
     let mut has_tools = false;
     if !conversion_tools.is_empty() {
         let converted = responses_tools_to_anthropic_tools(&conversion_tools, &tool_context);
@@ -1035,7 +1305,9 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
                 && tool_choice
                     .get("name")
                     .and_then(Value::as_str)
-                    .is_some_and(is_codex_web_search_name);
+                    .is_some_and(|name| {
+                        tool_context.is_internal_alias(name, is_codex_web_search_name)
+                    });
             if forces_server_tool {
                 result["tool_choice"] = json!({ "type": "auto" });
             } else {
@@ -1051,8 +1323,28 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
             }
         }
     }
+    apply_allowed_tool_choice(&mut result, &body, &tool_context, true)?;
 
     apply_anthropic_reasoning_options(&mut result, &body, model);
+    if let Some(format) = body
+        .pointer("/text/format")
+        .filter(|value| !value.is_null())
+    {
+        match format.get("type").and_then(Value::as_str) {
+            Some("json_schema") => {
+                let schema = format
+                    .get("schema")
+                    .filter(|value| value.is_object())
+                    .context("Responses text.format.json_schema missing schema object")?;
+                result["output_config"]["format"] = json!({
+                    "type": "json_schema",
+                    "schema": schema
+                });
+            }
+            Some("text") => {}
+            _ => anyhow::bail!("unsupported Responses text.format for Anthropic Messages"),
+        }
+    }
     // DeepSeek 携带工具时要求所有历史 assistant 回答都有原始 reasoning。
     // 旧压缩已丢失的数据不能伪造；仅将缺失的历史改为有来源标记的上下文，
     // 保留完整 thinking/tool 配对，并保持用户请求的思考深度。
@@ -1128,14 +1420,24 @@ fn anthropic_message_to_response_with_context(
     original_request: Option<&Value>,
     diagnostic_id: Option<&str>,
 ) -> anyhow::Result<Value> {
+    reject_upstream_response_error(&body)?;
+    let content = body
+        .get("content")
+        .filter(|value| value.is_array())
+        .context("anthropic response missing content array")?;
     let response_id = response_id_from_chat_id(body.get("id").and_then(Value::as_str));
     let stop_reason = body.get("stop_reason").and_then(Value::as_str);
-    let status = anthropic_response_status(stop_reason);
-    let output = anthropic_content_to_response_output_items(
-        body.get("content").unwrap_or(&Value::Null),
-        &response_id,
-        tool_context,
+    anyhow::ensure!(
+        stop_reason != Some("pause_turn"),
+        ANTHROPIC_PAUSE_TURN_ERROR
     );
+    let status = anthropic_response_status(stop_reason);
+    let mut output =
+        anthropic_content_to_response_output_items(content, &response_id, tool_context);
+    if status == "incomplete" {
+        output.retain(|item| matches!(item["type"].as_str(), Some("message" | "reasoning")));
+        mark_messages_incomplete(&mut output);
+    }
     log_anthropic_response_shape(&body, &output, false, diagnostic_id);
     let mut response = json!({
         "id": response_id,
@@ -1147,8 +1449,10 @@ fn anthropic_message_to_response_with_context(
         "usage": anthropic_usage_to_responses_usage(body.get("usage"))
     });
 
-    if status == "incomplete" {
-        response["incomplete_details"] = json!({ "reason": "max_output_tokens" });
+    if let Some(reason) =
+        response_incomplete_reason(anthropic_stop_reason_to_chat_finish_reason(stop_reason))
+    {
+        response["incomplete_details"] = json!({ "reason": reason });
     }
     copy_response_request_fields(&mut response, original_request);
 
@@ -1309,9 +1613,14 @@ fn resolve_compaction_model_override_with_candidate(
     if original_model.is_empty() {
         return None;
     }
-    let family = crate::model_capabilities::model_family(original_model);
+    let original_request_model = relay.request_model_for_catalog_model(original_model);
+    let family = crate::model_capabilities::model_family(&original_request_model);
     let catalog_model = settings.compaction_model_for_family(family).trim();
     if catalog_model.is_empty() || catalog_model == original_model {
+        return None;
+    }
+    let request_model = relay.request_model_for_catalog_model(catalog_model);
+    if request_model == original_request_model {
         return None;
     }
     let protocol = match relay.resolve_protocol_for_model(catalog_model) {
@@ -1339,7 +1648,6 @@ fn resolve_compaction_model_override_with_candidate(
         );
         return None;
     };
-    let request_model = relay.request_model_for_catalog_model(catalog_model);
     let candidate = build_candidate(&request_model);
     let estimated_input_tokens =
         crate::layered_compaction::estimate_compaction_request_tokens(&candidate);
@@ -1761,6 +2069,7 @@ async fn read_upstream_response_body_with_idle_timeout(
 pub struct ChatSseToResponsesConverter {
     buffer: String,
     utf8_remainder: Vec<u8>,
+    framing: SseTextFraming,
     state: ChatSseState,
     diagnostic_id: Option<String>,
     failed: bool,
@@ -1775,6 +2084,7 @@ impl Default for ChatSseToResponsesConverter {
         Self {
             buffer: String::new(),
             utf8_remainder: Vec::new(),
+            framing: SseTextFraming::default(),
             state: ChatSseState::default(),
             diagnostic_id: None,
             failed: false,
@@ -1803,7 +2113,11 @@ impl ChatSseToResponsesConverter {
     }
 
     pub fn push_bytes(&mut self, bytes: &[u8]) -> Vec<u8> {
-        append_utf8_safe(&mut self.buffer, &mut self.utf8_remainder, bytes);
+        if self.failed {
+            return Vec::new();
+        }
+        self.framing
+            .append_bytes(&mut self.buffer, &mut self.utf8_remainder, bytes);
         let mut output = String::new();
         while let Some(block) = take_sse_block(&mut self.buffer) {
             if block.trim().is_empty() {
@@ -1887,6 +2201,9 @@ impl ChatSseToResponsesConverter {
             self.state.finalize_into(output);
             return;
         }
+        if self.state.completed {
+            return;
+        }
 
         let Ok(chunk) = serde_json::from_str::<Value>(&data) else {
             self.record_failure_into(
@@ -1897,7 +2214,7 @@ impl ChatSseToResponsesConverter {
             );
             return;
         };
-        if event_name.as_deref() == Some("error") || chunk.get("error").is_some() {
+        if event_name.as_deref() == Some("error") || upstream_response_has_error(&chunk) {
             let (message, error_type) = extract_chat_sse_error(&chunk);
             self.log_upstream_error_event(
                 "chat_completions",
@@ -1919,6 +2236,9 @@ impl ChatSseToResponsesConverter {
         message: String,
         error_type: Option<String>,
     ) {
+        if self.state.completed {
+            return;
+        }
         self.failure_source = Some(source);
         self.failure_message = Some(message.clone());
         self.failure_type = error_type.clone();
@@ -1957,6 +2277,7 @@ impl ChatSseToResponsesConverter {
 pub struct AnthropicSseToResponsesConverter {
     buffer: String,
     utf8_remainder: Vec<u8>,
+    framing: SseTextFraming,
     state: AnthropicSseState,
     failed: bool,
     saw_message_stop: bool,
@@ -1971,6 +2292,7 @@ impl Default for AnthropicSseToResponsesConverter {
         Self {
             buffer: String::new(),
             utf8_remainder: Vec::new(),
+            framing: SseTextFraming::default(),
             state: AnthropicSseState::default(),
             failed: false,
             saw_message_stop: false,
@@ -2001,7 +2323,11 @@ impl AnthropicSseToResponsesConverter {
     }
 
     pub fn push_bytes(&mut self, bytes: &[u8]) -> Vec<u8> {
-        append_utf8_safe(&mut self.buffer, &mut self.utf8_remainder, bytes);
+        if self.failed {
+            return Vec::new();
+        }
+        self.framing
+            .append_bytes(&mut self.buffer, &mut self.utf8_remainder, bytes);
         let mut output = String::new();
         while let Some(block) = take_sse_block(&mut self.buffer) {
             if block.trim().is_empty() {
@@ -2090,6 +2416,9 @@ impl AnthropicSseToResponsesConverter {
             if self.state.inner.completed {
                 return;
             }
+            if self.reject_paused_turn(output) {
+                return;
+            }
             if self.state.has_open_content_blocks() {
                 self.record_failure_into(
                     output,
@@ -2101,6 +2430,9 @@ impl AnthropicSseToResponsesConverter {
             }
             self.state.flush_pending_text_marker_into(output);
             self.state.inner.finalize_into(output);
+            return;
+        }
+        if self.state.inner.completed {
             return;
         }
 
@@ -2117,7 +2449,7 @@ impl AnthropicSseToResponsesConverter {
             .as_deref()
             .or_else(|| chunk.get("type").and_then(Value::as_str))
             .unwrap_or("");
-        if event == "error" || chunk.get("error").is_some() {
+        if event == "error" || upstream_response_has_error(&chunk) {
             let (message, error_type) = extract_chat_sse_error(&chunk);
             log_stream_upstream_error_event(
                 "anthropic",
@@ -2133,9 +2465,35 @@ impl AnthropicSseToResponsesConverter {
         }
         if event == "message_stop" {
             self.saw_message_stop = true;
+            if self.reject_paused_turn(output) {
+                return;
+            }
+            if self.state.has_open_model_content_blocks() {
+                self.record_failure_into(
+                    output,
+                    "incomplete_message_stop",
+                    "upstream sent message_stop before closing Anthropic content blocks"
+                        .to_string(),
+                    Some("stream_error".to_string()),
+                );
+                return;
+            }
         }
         self.state
             .handle_anthropic_event_into(event, &chunk, output);
+    }
+
+    fn reject_paused_turn(&mut self, output: &mut String) -> bool {
+        if self.state.inner.finish_reason.as_deref() != Some("pause_turn") {
+            return false;
+        }
+        self.record_failure_into(
+            output,
+            "unsupported_upstream_continuation",
+            ANTHROPIC_PAUSE_TURN_ERROR.to_string(),
+            Some("unsupported_upstream_continuation".to_string()),
+        );
+        true
     }
 
     fn record_failure_into(
@@ -2145,6 +2503,9 @@ impl AnthropicSseToResponsesConverter {
         message: String,
         error_type: Option<String>,
     ) {
+        if self.state.inner.completed {
+            return;
+        }
         self.failure_source = Some(source);
         self.failure_message = Some(message.clone());
         self.failure_type = error_type.clone();
@@ -2275,25 +2636,7 @@ pub(crate) async fn open_responses_proxy_request_with_settings_request_context_a
     request_context: &RequestContext,
     stream_header_timeout_override: Option<Duration>,
 ) -> anyhow::Result<UpstreamProxyResponse> {
-    let original: Value = serde_json::from_str(body)?;
-    if settings.layered_compaction_enabled
-        && let Some(kind) = crate::layered_compaction::CompactionKind::of_request(&original)
-    {
-        let relay = crate::relay_rotation::select_relay_for_probe(&settings)?;
-        let source = rewrite_catalog_model_to_request_model(&original, &relay);
-        let protocol = responses_proxy_target_protocol(&relay, &source)?;
-        if compaction_execution_mode(&source, protocol) != CompactionExecutionMode::NativeRemoteV2 {
-            return execute_validated_compaction(
-                body,
-                &original,
-                kind,
-                settings,
-                request_context,
-                stream_header_timeout_override,
-            )
-            .await;
-        }
-    }
+    // 压缩类型必须由实际选中的供应商决定；探测候选可能不同于已绑定会话的供应商。
     open_responses_proxy_request_once(
         body,
         settings,
@@ -2308,6 +2651,7 @@ async fn execute_validated_compaction(
     body: &str,
     original: &Value,
     kind: crate::layered_compaction::CompactionKind,
+    relay: crate::settings::RelayProfile,
     settings: crate::settings::BackendSettings,
     request_context: &RequestContext,
     header_timeout: Option<Duration>,
@@ -2325,12 +2669,6 @@ async fn execute_validated_compaction(
     }
 
     let options = CompactionOptions::from_settings(&settings);
-    let relay = crate::relay_rotation::select_relay_for_request(
-        &settings,
-        RotationContext {
-            conversation_id: conversation_id_from_responses_request(original),
-        },
-    )?;
     let source = apply_system_prompt_override_to_responses_request(original, &relay);
     let source = rewrite_catalog_model_to_request_model(&source, &relay);
     let source_model = source["model"]
@@ -2341,6 +2679,8 @@ async fn execute_validated_compaction(
     let original_protocol = responses_proxy_target_protocol(&relay, &source)?;
     let execution_mode = compaction_execution_mode(&source, original_protocol);
     let is_stream = original["stream"].as_bool().unwrap_or(false);
+    let header_timeout =
+        Some(header_timeout.unwrap_or_else(|| stream_idle_timeout_for_request(Some(original))));
 
     // 只有与普通请求完全相同的缓存身份仍处于可信租约内，才走原模型缓存复用。
     let cache_probe_request = prepare_compaction_attempt_request(
@@ -2351,12 +2691,15 @@ async fn execute_validated_compaction(
         CompactionAttempt::First,
     );
     let cache_probe_diagnostic_id = next_protocol_proxy_diagnostic_id();
-    let cache_probe_wire = responses_upstream_request_for_protocol(
+    let mut cache_probe_wire = responses_upstream_request_for_protocol(
         &cache_probe_request,
         original_protocol,
         is_stream,
         &cache_probe_diagnostic_id,
     )?;
+    if original_protocol == UpstreamResponseProtocol::Anthropic {
+        apply_cached_anthropic_reasoning_compatibility(&relay, &mut cache_probe_wire);
+    }
     let original_endpoint = upstream_endpoint_for_protocol(&relay, original_protocol);
     let cache_decision = crate::compaction_cache::lease_decision(
         &relay,
@@ -2430,7 +2773,7 @@ async fn execute_validated_compaction(
                     "relayName": relay.name,
                     "originalModel": resolved.original_model,
                     "compactionModel": resolved.compaction_model,
-                    "family": crate::model_capabilities::model_family(&resolved.original_model).as_str(),
+                    "family": crate::model_capabilities::model_family(&source_model).as_str(),
                     "contextWindow": resolved.context_window,
                     "estimatedInputTokens": resolved.estimated_input_tokens,
                     "outputReserveTokens": resolved.output_reserve_tokens,
@@ -2502,7 +2845,7 @@ async fn execute_validated_compaction(
         let mut response = None;
         let mut decoded_verdict = None;
         let mut error_detail = None;
-        let mut transport_failure = false;
+        let transport_failure;
         match upstream {
             Ok(mut upstream) => {
                 let bytes = if let Some(bytes) = upstream.body_override.take() {
@@ -2518,11 +2861,22 @@ async fn execute_validated_compaction(
                 };
                 match bytes {
                     Ok(bytes) if upstream.is_success() => {
+                        // HTTP 200 的 JSON/SSE 也可能明确报错；此时应回退原模型，
+                        // 不能把供应商故障当成摘要格式问题继续请求同一独立模型。
+                        transport_failure =
+                            compaction_body_has_upstream_error(&bytes, upstream.is_stream);
+                        if transport_failure {
+                            error_detail = Some("upstream_error_response".to_string());
+                        }
                         let decoded = decode_compaction_response(&upstream, &bytes, &plan.request);
                         match decoded {
                             Ok((value, verdict)) => {
                                 response = Some(value);
-                                decoded_verdict = Some(verdict);
+                                decoded_verdict = Some(if transport_failure {
+                                    Err(CompactionValidationFailure::NotCompleted)
+                                } else {
+                                    verdict
+                                });
                             }
                             Err(error) => error_detail = Some(error.to_string()),
                         }
@@ -2546,14 +2900,6 @@ async fn execute_validated_compaction(
         let verdict = decoded_verdict
             .or_else(|| response.as_ref().map(validate_compaction_response))
             .unwrap_or(Err(CompactionValidationFailure::NoTerminalResponse));
-        crate::relay_rotation::record_relay_request_event(
-            &settings,
-            if verdict.is_ok() {
-                RotationEvent::Success
-            } else {
-                RotationEvent::Failure
-            },
-        );
         log_compaction_attempt(
             "http",
             kind,
@@ -2614,6 +2960,15 @@ async fn execute_validated_compaction(
         }
     }
     let response = final_response.expect("two compaction attempts always terminate");
+    // 两次尝试属于同一个供应商请求，只按最终结果推进一次故障切换。
+    crate::relay_rotation::record_relay_request_event(
+        &settings,
+        if response.get("status").and_then(Value::as_str) == Some("completed") {
+            RotationEvent::Success
+        } else {
+            RotationEvent::Failure
+        },
+    );
     let mut upstream = last_upstream.unwrap_or_else(|| UpstreamProxyResponse {
         status_code: 200,
         content_type: String::new(),
@@ -2654,6 +3009,42 @@ async fn execute_validated_compaction(
     upstream.independent_compaction_usage = independent_compaction_usage;
     upstream.bridge_remote_compaction_v2 = false;
     Ok(upstream)
+}
+
+fn compaction_body_has_upstream_error(bytes: &[u8], is_stream: bool) -> bool {
+    fn is_error(value: &Value) -> bool {
+        matches!(
+            value.get("type").and_then(Value::as_str),
+            Some("error" | "response.failed")
+        ) || value.get("status").and_then(Value::as_str) == Some("failed")
+            || value.get("error").is_some_and(|error| !error.is_null())
+    }
+
+    if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
+        return is_error(&value);
+    }
+    if !is_stream {
+        return false;
+    }
+    let normalized = String::from_utf8_lossy(bytes)
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    normalized.split("\n\n").any(|block| {
+        let error_event = block.lines().any(|line| {
+            line.strip_prefix("event:")
+                .is_some_and(|event| matches!(event.trim(), "error" | "response.failed"))
+        });
+        let data = block
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join("\n");
+        error_event
+            || serde_json::from_str::<Value>(&data)
+                .ok()
+                .is_some_and(|value| is_error(&value))
+    })
 }
 
 fn decode_compaction_response(
@@ -2711,6 +3102,62 @@ fn decode_compaction_response(
     }
 }
 
+fn unavailable_native_compaction_response(
+    body: &str,
+    diagnostic_id: String,
+    message: &str,
+) -> UpstreamProxyResponse {
+    UpstreamProxyResponse {
+        status_code: 400,
+        content_type: "application/json; charset=utf-8".to_string(),
+        is_stream: false,
+        response_protocol: UpstreamResponseProtocol::Responses,
+        diagnostic_id,
+        relay_id: None,
+        relay_name: None,
+        endpoint: None,
+        request_body: body.to_string(),
+        response: None,
+        body_override: Some(
+            json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "unsupported_compaction",
+                    "message": message
+                }
+            })
+            .to_string()
+            .into_bytes(),
+        ),
+        upstream_response_model: None,
+        layered_compaction_options: LayeredCompactionOptions::default(),
+        independent_compaction_model: None,
+        independent_compaction_usage: None,
+        bridge_remote_compaction_v2: false,
+        cache_observer: None,
+    }
+}
+
+fn responses_endpoint_for_operation(
+    relay: &crate::settings::RelayProfile,
+    request_context: &RequestContext,
+) -> String {
+    if request_context.responses_operation() == ResponsesRequestOperation::Compact {
+        let base = relay
+            .base_url
+            .trim()
+            .trim_end_matches('#')
+            .trim_end_matches('/');
+        if base.ends_with("/responses/compact") {
+            base.to_string()
+        } else {
+            format!("{}/compact", responses_url(&relay.base_url))
+        }
+    } else {
+        responses_url(&relay.base_url)
+    }
+}
+
 async fn open_responses_proxy_request_once(
     body: &str,
     settings: crate::settings::BackendSettings,
@@ -2723,6 +3170,15 @@ async fn open_responses_proxy_request_once(
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let native_compact =
+        request_context.responses_operation() == ResponsesRequestOperation::Compact;
+    if native_compact && is_stream {
+        return Ok(unavailable_native_compaction_response(
+            body,
+            diagnostic_id,
+            "The responses/compact operation does not support streaming.",
+        ));
+    }
     log_responses_request_metadata(
         &original_request_json,
         body.len(),
@@ -2732,11 +3188,29 @@ async fn open_responses_proxy_request_once(
     let context = RotationContext {
         conversation_id: conversation_id_from_responses_request(&original_request_json),
     };
-    let relay = crate::relay_rotation::select_relay_for_request(&settings, context)?;
+    let relay = if native_compact {
+        crate::relay_rotation::select_relay_for_probe(&settings)?
+    } else {
+        crate::relay_rotation::select_relay_for_request(&settings, context)?
+    };
     let mut relays = vec![relay.clone()];
     relays.extend(crate::relay_rotation::fallback_relays_after(
         &settings, &relay.id,
     )?);
+    if native_compact {
+        relays.retain(|relay| {
+            let request = rewrite_catalog_model_to_request_model(&original_request_json, relay);
+            responses_proxy_target_protocol(relay, &request)
+                .is_ok_and(|protocol| protocol == UpstreamResponseProtocol::Responses)
+        });
+        if relays.is_empty() {
+            return Ok(unavailable_native_compaction_response(
+                body,
+                diagnostic_id,
+                "No selected upstream supports the native Responses compaction operation.",
+            ));
+        }
+    }
     let relay_count = relays.len();
     'relay_attempts: for (attempt, relay) in relays.into_iter().enumerate() {
         validate_upstream(&relay)?;
@@ -2747,10 +3221,13 @@ async fn open_responses_proxy_request_once(
         // 按会话模型和协议确定本地压缩或原生 V2 路径。
         let source_response_protocol =
             responses_proxy_target_protocol(&relay, &source_request_json)?;
-        let compaction_execution_mode = if !settings.layered_compaction_enabled
+        let compaction_execution_mode = if native_compact {
+            CompactionExecutionMode::None
+        } else if !settings.layered_compaction_enabled
             && crate::layered_compaction::is_remote_compaction_v2_request(Some(
                 &source_request_json,
-            )) {
+            ))
+        {
             if source_response_protocol != UpstreamResponseProtocol::Responses {
                 // 关闭增强后不再把不支持的 V2 操作伪装成摘要成功；交由 harness 处理错误。
                 return Ok(UpstreamProxyResponse {
@@ -2795,15 +3272,14 @@ async fn open_responses_proxy_request_once(
                 CompactionExecutionMode::LegacyLocal | CompactionExecutionMode::BridgedRemoteV2
             )
         {
-            let mut selected_settings = settings.clone();
-            selected_settings.active_relay_id = relay.id.clone();
-            selected_settings.active_aggregate_relay_id.clear();
+            // 复用已选中的供应商，同时保留聚合状态，避免清空会话绑定和轮询进度。
             return execute_validated_compaction(
                 body,
                 &original_request_json,
                 crate::layered_compaction::CompactionKind::of_request(&original_request_json)
                     .expect("compaction request"),
-                selected_settings,
+                relay,
+                settings,
                 request_context,
                 stream_header_timeout_override,
             )
@@ -2811,8 +3287,13 @@ async fn open_responses_proxy_request_once(
         }
         let request_json = source_request_json;
         let mut response_protocol = responses_proxy_target_protocol(&relay, &request_json)?;
-        let mut endpoint = upstream_endpoint_for_protocol(&relay, response_protocol);
+        let mut endpoint = if native_compact {
+            responses_endpoint_for_operation(&relay, request_context)
+        } else {
+            upstream_endpoint_for_protocol(&relay, response_protocol)
+        };
         let can_recover_ws = is_stream
+            && !native_compact
             && compaction_execution_mode == CompactionExecutionMode::None
             && response_protocol == UpstreamResponseProtocol::Responses
             && settings.active_aggregate_relay_profile().is_none()
@@ -2827,11 +3308,10 @@ async fn open_responses_proxy_request_once(
         }
         let has_more_candidates = attempt + 1 < relay_count;
         let upstream_is_stream = is_stream;
-        let header_timeout = if upstream_is_stream {
+        let header_timeout = Some(
             stream_header_timeout_override
-        } else {
-            None
-        };
+                .unwrap_or_else(|| stream_idle_timeout_for_request(Some(&request_json))),
+        );
         let translated_server_side_tools =
             if response_protocol == UpstreamResponseProtocol::Responses {
                 Vec::new()
@@ -2953,15 +3433,20 @@ async fn open_responses_proxy_request_once(
             .to_string();
         if response_protocol == UpstreamResponseProtocol::Anthropic {
             let mut anthropic_request = upstream_request_json.clone();
-            apply_cached_anthropic_reasoning_compatibility(&mut anthropic_request);
+            apply_cached_anthropic_reasoning_compatibility(&relay, &mut anthropic_request);
             if should_retry_anthropic_effort(status_code, &content_type, &anthropic_request)
                 || (status_code == 400 && is_deepseek_thinking_tool_history(&anthropic_request))
             {
                 let response = upstream_response
                     .take()
                     .expect("anthropic response is present before retry inspection");
-                let error_body = match response.bytes().await {
-                    Ok(body) => body.to_vec(),
+                let error_body = match read_upstream_response_body_with_idle_timeout(
+                    response,
+                    header_timeout.expect("request timeout is always configured"),
+                )
+                .await
+                {
+                    Ok(body) => body,
                     Err(error) => {
                         let _ = crate::diagnostic_log::append_diagnostic_log(
                             "protocol_proxy.anthropic_retry_error_body_failed",
@@ -3019,9 +3504,13 @@ async fn open_responses_proxy_request_once(
                 } else if let Some(fallback_effort) =
                     anthropic_effort_fallback_from_error(&error_body, &rejected_effort)
                 {
-                    remember_anthropic_reasoning_compatibility(&anthropic_request, fallback_effort);
+                    remember_anthropic_reasoning_compatibility(
+                        &relay,
+                        &anthropic_request,
+                        fallback_effort,
+                    );
                     let mut retry_request = anthropic_request.clone();
-                    apply_cached_anthropic_reasoning_compatibility(&mut retry_request);
+                    apply_cached_anthropic_reasoning_compatibility(&relay, &mut retry_request);
                     Some((retry_request, UpstreamResponseProtocol::Anthropic))
                 } else {
                     None
@@ -3318,6 +3807,9 @@ async fn send_responses_upstream_request(
             }
         }
     }
+    if response_protocol == UpstreamResponseProtocol::Anthropic {
+        apply_cached_anthropic_reasoning_compatibility(relay, &mut upstream_request);
+    }
     if can_recover_ws {
         if let Some((response, ws_request)) = crate::session_transport::try_ws_for_http(
             relay,
@@ -3335,7 +3827,7 @@ async fn send_responses_upstream_request(
             send_upstream_request_with_optional_header_timeout(
                 upstream_request_builder(
                     client.clone(),
-                    &responses_url(&relay.base_url),
+                    &responses_endpoint_for_operation(relay, request_context),
                     relay.api_key.trim(),
                     is_stream,
                     &upstream_request,
@@ -3381,11 +3873,10 @@ fn responses_upstream_request_for_protocol(
             responses_to_chat_completions(responses_request_with_stream(request_json, is_stream))
         }
         UpstreamResponseProtocol::Anthropic => {
-            let mut request = responses_to_anthropic_messages_with_diagnostic_id(
+            let request = responses_to_anthropic_messages_with_diagnostic_id(
                 responses_request_with_stream(request_json, is_stream),
                 Some(diagnostic_id),
             )?;
-            apply_cached_anthropic_reasoning_compatibility(&mut request);
             Ok(request)
         }
     }
@@ -3562,62 +4053,92 @@ pub async fn open_chat_completions_proxy_request(
 ) -> anyhow::Result<UpstreamProxyResponse> {
     let diagnostic_id = next_protocol_proxy_diagnostic_id();
     let settings = SettingsStore::default().load().unwrap_or_default();
-    let relay = settings.active_relay_profile();
-    if !relay.local_proxy_enabled() {
+    let aggregate_enabled = settings.active_aggregate_relay_profile().is_some();
+    if !aggregate_enabled && !settings.active_relay_profile().local_proxy_enabled() {
         anyhow::bail!("当前中转未启用本地代理");
     }
-    if relay.base_url.trim().is_empty() {
-        anyhow::bail!("Chat Completions 上游 Base URL 不能为空");
-    }
-    if relay.api_key.trim().is_empty() {
-        anyhow::bail!("Chat Completions 上游 Key 不能为空");
-    }
-
-    let request_json: Value = serde_json::from_str(body)?;
-    let request_json = apply_system_prompt_override_to_chat_request(&request_json, &relay);
-    let request_json = rewrite_catalog_model_to_request_model(&request_json, &relay);
-    let request_body = serialized_proxy_request_body(&request_json);
-    let is_stream = request_json
+    let original: Value = serde_json::from_str(body)?;
+    let relay = crate::relay_rotation::select_relay_for_request(
+        &settings,
+        RotationContext {
+            conversation_id: conversation_id_from_responses_request(&original),
+        },
+    )?;
+    let mut relays = vec![relay.clone()];
+    relays.extend(crate::relay_rotation::fallback_relays_after(
+        &settings, &relay.id,
+    )?);
+    let relay_count = relays.len();
+    let is_stream = original
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let upstream = crate::http_client::proxied_client(&effective_user_agent(
-        &relay.user_agent,
-        original_user_agent,
-    ))?
-    .post(chat_completions_url(&relay.base_url))
-    .bearer_auth(relay.api_key.trim())
-    .header(reqwest::header::CONTENT_TYPE, "application/json")
-    .json(&request_json)
-    .send()
-    .await?;
-    let status_code = upstream.status().as_u16();
-    let content_type = upstream
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-
-    Ok(UpstreamProxyResponse {
-        status_code,
-        is_stream: is_stream || content_type.contains("text/event-stream"),
-        content_type,
-        response_protocol: UpstreamResponseProtocol::ChatCompletions,
-        diagnostic_id,
-        relay_id: Some(relay.id),
-        relay_name: Some(relay.name),
-        endpoint: Some(chat_completions_url(&relay.base_url)),
-        request_body,
-        response: Some(upstream),
-        body_override: None,
-        upstream_response_model: None,
-        layered_compaction_options: LayeredCompactionOptions::from_settings(&settings),
-        independent_compaction_model: None,
-        independent_compaction_usage: None,
-        bridge_remote_compaction_v2: false,
-        cache_observer: None,
-    })
+    for (attempt, relay) in relays.into_iter().enumerate() {
+        validate_upstream(&relay)?;
+        let request_json = apply_system_prompt_override_to_chat_request(&original, &relay);
+        let request_json = rewrite_catalog_model_to_request_model(&request_json, &relay);
+        let client = crate::http_client::proxied_client(&effective_user_agent(
+            &relay.user_agent,
+            original_user_agent,
+        ))?;
+        let upstream = send_chat_completions_request(
+            &client,
+            &relay,
+            &request_json,
+            is_stream,
+            Some(stream_idle_timeout_for_request(Some(&request_json))),
+        )
+        .await;
+        let upstream = match upstream {
+            Ok(response) => response,
+            Err(error) => {
+                crate::relay_rotation::record_relay_request_failure(&settings);
+                if attempt + 1 < relay_count {
+                    continue;
+                }
+                return Err(error);
+            }
+        };
+        let status_code = upstream.status().as_u16();
+        crate::relay_rotation::record_relay_request_event(
+            &settings,
+            if upstream.status().is_success() {
+                RotationEvent::Success
+            } else {
+                RotationEvent::Failure
+            },
+        );
+        if !upstream.status().is_success() && attempt + 1 < relay_count {
+            continue;
+        }
+        let content_type = upstream
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        return Ok(UpstreamProxyResponse {
+            status_code,
+            is_stream: content_type.contains("text/event-stream")
+                || (is_stream && !content_type.to_ascii_lowercase().contains("json")),
+            content_type,
+            response_protocol: UpstreamResponseProtocol::ChatCompletions,
+            diagnostic_id,
+            relay_id: Some(relay.id.clone()),
+            relay_name: Some(relay.name.clone()),
+            endpoint: Some(chat_completions_url(&relay.base_url)),
+            request_body: serialized_proxy_request_body(&request_json),
+            response: Some(upstream),
+            body_override: None,
+            upstream_response_model: None,
+            layered_compaction_options: LayeredCompactionOptions::from_settings(&settings),
+            independent_compaction_model: None,
+            independent_compaction_usage: None,
+            bridge_remote_compaction_v2: false,
+            cache_observer: None,
+        });
+    }
+    anyhow::bail!("未找到可用的 Chat Completions 聚合供应商成员")
 }
 
 fn upstream_request_builder(
@@ -3825,6 +4346,181 @@ fn upstream_response_has_retryable_model_capacity_error(status_code: u16, body: 
             && retryable_model_capacity_message(&String::from_utf8_lossy(body)))
 }
 
+fn buffered_upstream_response_as_responses_sse(
+    body: &[u8],
+    protocol: UpstreamResponseProtocol,
+    original_request: &Value,
+) -> anyhow::Result<String> {
+    // A provider may ignore stream=true. Detect actual JSON before selecting the SSE converter.
+    if let Ok(value) = serde_json::from_slice::<Value>(body) {
+        let response = match protocol {
+            UpstreamResponseProtocol::Responses => value,
+            UpstreamResponseProtocol::ChatCompletions => {
+                chat_completion_to_response_with_request(value, original_request)?
+            }
+            UpstreamResponseProtocol::Anthropic => {
+                anthropic_message_to_response_with_request(value, original_request)?
+            }
+        };
+        let status = response
+            .get("status")
+            .and_then(Value::as_str)
+            .context("上游 JSON 响应缺少终态")?;
+        let event = match status {
+            "completed" => "response.completed",
+            "incomplete" => "response.incomplete",
+            "failed" => "response.failed",
+            _ => anyhow::bail!("上游 JSON 响应尚未终止"),
+        };
+        let mut output = String::new();
+        let mut sequence = 0;
+        let mut created = response.clone();
+        created["status"] = json!("in_progress");
+        created["output"] = json!([]);
+        push_sse(
+            &mut output,
+            "response.created",
+            json!({"type":"response.created","response":created}),
+            &mut sequence,
+        );
+        if let Some(items) = response.get("output").and_then(Value::as_array) {
+            for (index, item) in items.iter().enumerate() {
+                let item_id = item.get("id").cloned().unwrap_or(Value::Null);
+                let mut added = item.clone();
+                if added.get("status").is_some() {
+                    added["status"] = json!("in_progress");
+                }
+                if added.get("content").is_some() {
+                    added["content"] = json!([]);
+                }
+                for field in ["arguments", "input"] {
+                    if added.get(field).is_some_and(Value::is_string) {
+                        added[field] = json!("");
+                    }
+                }
+                push_sse(
+                    &mut output,
+                    "response.output_item.added",
+                    json!({"type":"response.output_item.added","output_index":index,"item":added}),
+                    &mut sequence,
+                );
+                if let Some(parts) = item.get("content").and_then(Value::as_array) {
+                    for (content_index, part) in parts.iter().enumerate() {
+                        let mut added_part = part.clone();
+                        for field in ["text", "refusal"] {
+                            if added_part.get(field).is_some_and(Value::is_string) {
+                                added_part[field] = json!("");
+                            }
+                        }
+                        push_sse(
+                            &mut output,
+                            "response.content_part.added",
+                            json!({
+                                "type":"response.content_part.added","item_id":item_id,
+                                "output_index":index,"content_index":content_index,"part":added_part
+                            }),
+                            &mut sequence,
+                        );
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            push_sse(
+                                &mut output,
+                                "response.output_text.delta",
+                                json!({
+                                    "type":"response.output_text.delta", "item_id":item_id,
+                                    "output_index":index,"content_index":content_index,"delta":text
+                                }),
+                                &mut sequence,
+                            );
+                            push_sse(
+                                &mut output,
+                                "response.output_text.done",
+                                json!({
+                                    "type":"response.output_text.done", "item_id":item_id,
+                                    "output_index":index,"content_index":content_index,"text":text
+                                }),
+                                &mut sequence,
+                            );
+                        }
+                        if let Some(refusal) = part.get("refusal").and_then(Value::as_str) {
+                            push_sse(
+                                &mut output,
+                                "response.refusal.delta",
+                                json!({
+                                    "type":"response.refusal.delta","item_id":item_id,
+                                    "output_index":index,"content_index":content_index,"delta":refusal
+                                }),
+                                &mut sequence,
+                            );
+                            push_sse(
+                                &mut output,
+                                "response.refusal.done",
+                                json!({
+                                    "type":"response.refusal.done","item_id":item_id,
+                                    "output_index":index,"content_index":content_index,"refusal":refusal
+                                }),
+                                &mut sequence,
+                            );
+                        }
+                        push_sse(
+                            &mut output,
+                            "response.content_part.done",
+                            json!({
+                                "type":"response.content_part.done","item_id":item_id,
+                                "output_index":index,"content_index":content_index,"part":part
+                            }),
+                            &mut sequence,
+                        );
+                    }
+                }
+                for (kind, field) in [
+                    ("function_call_arguments", "arguments"),
+                    ("custom_tool_call_input", "input"),
+                ] {
+                    if let Some(value) = item.get(field).and_then(Value::as_str) {
+                        let delta_event = format!("response.{kind}.delta");
+                        push_sse(
+                            &mut output,
+                            &delta_event,
+                            json!({
+                                "type":delta_event,"item_id":item_id,"output_index":index,"delta":value
+                            }),
+                            &mut sequence,
+                        );
+                        let done_event = format!("response.{kind}.done");
+                        let mut done =
+                            json!({"type":done_event,"item_id":item_id,"output_index":index});
+                        done[field] = json!(value);
+                        push_sse(&mut output, &done_event, done, &mut sequence);
+                    }
+                }
+                push_sse(
+                    &mut output,
+                    "response.output_item.done",
+                    json!({"type":"response.output_item.done","output_index":index,"item":item}),
+                    &mut sequence,
+                );
+            }
+        }
+        push_sse(
+            &mut output,
+            event,
+            json!({"type":event,"response":response}),
+            &mut sequence,
+        );
+        return Ok(output);
+    }
+    let text = std::str::from_utf8(body).context("上游 SSE 不是有效 UTF-8")?;
+    Ok(match protocol {
+        UpstreamResponseProtocol::Responses => text.to_string(),
+        UpstreamResponseProtocol::ChatCompletions => {
+            chat_sse_to_responses_sse_with_request(text, original_request)
+        }
+        UpstreamResponseProtocol::Anthropic => {
+            anthropic_sse_to_responses_sse_with_request(text, original_request)
+        }
+    })
+}
+
 async fn retry_model_capacity_responses_stream(
     original_request: &Value,
     settings: &crate::settings::BackendSettings,
@@ -3875,9 +4571,7 @@ async fn retry_model_capacity_responses_stream(
         let status_code = upstream.status_code;
         let is_success = upstream.is_success();
         let is_stream = upstream.is_stream;
-        if upstream.response_protocol != UpstreamResponseProtocol::Responses {
-            break;
-        }
+        let response_protocol = upstream.response_protocol;
 
         let body = match upstream
             .into_body_bytes_with_idle_timeout(stream_idle_timeout)
@@ -3911,19 +4605,37 @@ async fn retry_model_capacity_responses_stream(
                         "bodyMatched": true
                     }),
                 );
-                if is_success && is_stream {
-                    current_sse_text = String::from_utf8_lossy(&body).into_owned();
+                if is_success
+                    && let Ok(converted) = buffered_upstream_response_as_responses_sse(
+                        &body,
+                        response_protocol,
+                        original_request,
+                    )
+                {
+                    current_sse_text = converted;
                 }
                 continue;
             }
             break;
         }
-        if !is_success || !is_stream {
+        if !is_success {
             break;
         }
 
-        current_sse_text = String::from_utf8_lossy(&body).into_owned();
-        return current_sse_text;
+        match buffered_upstream_response_as_responses_sse(
+            &body,
+            response_protocol,
+            original_request,
+        ) {
+            Ok(converted) => return converted,
+            Err(error) => {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "protocol_proxy.model_capacity_retry_conversion_failed",
+                    json!({"model":model,"error":error.to_string()}),
+                );
+                break;
+            }
+        }
     }
 
     current_sse_text
@@ -4003,7 +4715,9 @@ pub async fn apply_continue_thinking_to_responses_stream_with_request_context(
         };
         let reasoning_tokens = crate::continue_thinking::extract_reasoning_tokens(&response_object);
         add_reasoning_tokens(&mut accumulated_reasoning_tokens, reasoning_tokens);
-        if !crate::continue_thinking::should_continue_thinking(reasoning_tokens) {
+        if !crate::continue_thinking::response_allows_continuation(&response_object)
+            || !crate::continue_thinking::should_continue_thinking(reasoning_tokens)
+        {
             return ContinueThinkingResult::from_state(
                 current_sse_text,
                 triggered,
@@ -4117,6 +4831,7 @@ pub async fn apply_continue_thinking_to_responses_stream_with_request_context(
                 before_response_body,
             );
         }
+        let response_protocol = upstream.response_protocol;
         let bytes = match upstream
             .into_body_bytes_with_idle_timeout(stream_idle_timeout)
             .await
@@ -4137,7 +4852,36 @@ pub async fn apply_continue_thinking_to_responses_stream_with_request_context(
                 );
             }
         };
-        let round_sse_text = String::from_utf8_lossy(&bytes).into_owned();
+        let round_sse_text = buffered_upstream_response_as_responses_sse(
+            &bytes,
+            response_protocol,
+            &continue_request,
+        )
+        .ok();
+        let valid_terminal = round_sse_text
+            .as_deref()
+            .and_then(crate::continue_thinking::extract_terminal_response_object)
+            .is_some_and(|response| {
+                matches!(
+                    response.get("status").and_then(Value::as_str),
+                    Some("completed" | "incomplete")
+                ) && response.get("error").is_none_or(Value::is_null)
+            });
+        if !valid_terminal {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "continue_thinking.round_invalid_terminal",
+                json!({"round":round,"preservedPreviousResponse":true}),
+            );
+            return ContinueThinkingResult::from_state(
+                current_sse_text,
+                triggered,
+                completed_rounds,
+                accumulated_reasoning_tokens,
+                continue_request_body(&continue_requests),
+                before_response_body,
+            );
+        }
+        let round_sse_text = round_sse_text.expect("validated terminal response");
         let _ = crate::diagnostic_log::append_diagnostic_log(
             "continue_thinking.round_completed",
             json!({ "round": round, "bytes": round_sse_text.len() }),
@@ -4460,8 +5204,8 @@ pub fn chat_completions_url(base_url: &str) -> String {
     } else {
         format!("{base}/v1/chat/completions")
     };
-    while url.contains("/v1/v1") {
-        url = url.replace("/v1/v1", "/v1");
+    while url.contains("/v1/v1/") {
+        url = url.replace("/v1/v1/", "/v1/");
     }
     url
 }
@@ -4480,8 +5224,8 @@ pub fn responses_url(base_url: &str) -> String {
     } else {
         format!("{base}/v1/responses")
     };
-    while url.contains("/v1/v1") {
-        url = url.replace("/v1/v1", "/v1");
+    while url.contains("/v1/v1/") {
+        url = url.replace("/v1/v1/", "/v1/");
     }
     url
 }
@@ -4500,8 +5244,8 @@ pub fn anthropic_messages_url(base_url: &str) -> String {
     } else {
         format!("{base}/v1/messages")
     };
-    while url.contains("/v1/v1") {
-        url = url.replace("/v1/v1", "/v1");
+    while url.contains("/v1/v1/") {
+        url = url.replace("/v1/v1/", "/v1/");
     }
     url
 }
@@ -4513,8 +5257,11 @@ pub fn models_url(base_url: &str) -> String {
         .trim_end_matches('#')
         .trim_end_matches('/')
         .to_string();
-    if base.to_ascii_lowercase().ends_with("/chat/completions") {
-        base.truncate(base.len() - "/chat/completions".len());
+    for endpoint in ["/chat/completions", "/responses", "/messages"] {
+        if base.to_ascii_lowercase().ends_with(endpoint) {
+            base.truncate(base.len() - endpoint.len());
+            break;
+        }
     }
     if base.to_ascii_lowercase().ends_with("/models") {
         return base;
@@ -4527,8 +5274,8 @@ pub fn models_url(base_url: &str) -> String {
     } else {
         format!("{base}/v1/models")
     };
-    while url.contains("/v1/v1") {
-        url = url.replace("/v1/v1", "/v1");
+    while url.contains("/v1/v1/") {
+        url = url.replace("/v1/v1/", "/v1/");
     }
     url
 }
@@ -4647,12 +5394,42 @@ pub(crate) fn normalize_responses_message_item_id(id: &str) -> Option<String> {
 pub(crate) fn normalize_native_responses_request(request_json: &Value) -> Value {
     let mut request =
         crate::layered_compaction::expand_synthetic_local_compaction_request(request_json);
+    if let Some(object) = request.as_object_mut() {
+        object.remove("codex_elves_compat");
+    }
     clamp_native_gpt_reasoning_effort(&mut request);
     let Some(input) = request.get_mut("input").and_then(Value::as_array_mut) else {
         return request;
     };
+    // 本地服务端工具历史只在 Anthropic 回放，不能作为原生 Responses 密文发送。
+    input.retain_mut(|item| {
+        let Some(encrypted) = item.get("encrypted_content").and_then(Value::as_str) else {
+            return true;
+        };
+        if encrypted.starts_with(ANTHROPIC_CONTENT_REPLAY_PREFIX) {
+            return false;
+        }
+        if let Some(payload) = encrypted.strip_prefix(ANTHROPIC_THINKING_REPLAY_PREFIX) {
+            let block = serde_json::from_str::<Value>(payload).unwrap_or(Value::Null);
+            let Some(text) = block["thinking"].as_str().filter(|text| !text.is_empty()) else {
+                return false;
+            };
+            *item = json!({
+                "type":"message","role":"assistant",
+                "content":[{"type":"output_text","text":format!("[Historical reasoning from another protocol]\n{text}")}]
+            });
+        }
+        true
+    });
 
     for item in input {
+        if let Some(parts) = item.get_mut("content").and_then(Value::as_array_mut) {
+            for part in parts {
+                if let Some(object) = part.as_object_mut() {
+                    object.remove("anthropic_citations");
+                }
+            }
+        }
         if let Some(text) =
             crate::layered_compaction::synthetic_remote_compaction_history_text(item)
         {
@@ -4776,6 +5553,21 @@ struct TextItemState {
     content_kind: OutputContentKind,
     added: bool,
     done: bool,
+    annotations: Vec<Value>,
+    anthropic_citations: Vec<Value>,
+}
+
+impl TextItemState {
+    fn done_part(&self) -> Value {
+        let mut part = self.content_kind.done_part(&self.text);
+        if matches!(self.content_kind, OutputContentKind::OutputText) {
+            part["annotations"] = json!(self.annotations);
+            if !self.anthropic_citations.is_empty() {
+                part["anthropic_citations"] = json!(self.anthropic_citations);
+            }
+        }
+        part
+    }
 }
 
 #[derive(Debug, Default)]
@@ -4784,6 +5576,7 @@ struct ReasoningItemState {
     item_id: String,
     text: String,
     encrypted_content: Option<String>,
+    anthropic_thinking_block: Option<Value>,
     added: bool,
     done: bool,
 }
@@ -4847,12 +5640,17 @@ struct ChatSseState {
     next_sequence_number: u64,
     text: TextItemState,
     reasoning: ReasoningItemState,
+    message_item_count: u32,
+    reasoning_item_count: u32,
     inline_think: InlineThinkState,
     /// 正文与推理各自维护引用过滤状态，两路流不能串位。
     content_cite_filter: InlineCiteFilter,
     reasoning_cite_filter: InlineCiteFilter,
     tools: BTreeMap<usize, ToolCallState>,
     output_items: Vec<(u32, Value)>,
+    pending_output_item_done: BTreeMap<u32, Value>,
+    skipped_output_indices: BTreeSet<u32>,
+    next_done_output_index: u32,
     latest_usage: Option<Value>,
     finish_reason: Option<String>,
     tool_context: CodexToolContext,
@@ -4871,11 +5669,16 @@ impl Default for ChatSseState {
             next_sequence_number: 0,
             text: TextItemState::default(),
             reasoning: ReasoningItemState::default(),
+            message_item_count: 0,
+            reasoning_item_count: 0,
             inline_think: InlineThinkState::default(),
             content_cite_filter: InlineCiteFilter::default(),
             reasoning_cite_filter: InlineCiteFilter::default(),
             tools: BTreeMap::new(),
             output_items: Vec::new(),
+            pending_output_item_done: BTreeMap::new(),
+            skipped_output_indices: BTreeSet::new(),
+            next_done_output_index: 0,
             latest_usage: None,
             finish_reason: None,
             tool_context: CodexToolContext::default(),
@@ -4914,13 +5717,20 @@ impl ChatSseState {
         let Some(choice) = chunk
             .get("choices")
             .and_then(Value::as_array)
-            .and_then(|choices| choices.first())
+            .and_then(|choices| primary_chat_choice(choices))
         else {
             return;
         };
 
+        // 同一分片中的工具或思考可能结束当前正文项，必须先知道是否已截断。
+        if let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            self.finish_reason = Some(finish_reason.to_string());
+        }
+
         if let Some(delta) = choice.get("delta") {
             if let Some(reasoning) = chat_delta_reasoning_text(delta) {
+                self.flush_inline_think_at_boundary_into(output);
+                self.finalize_text_into(output);
                 self.push_reasoning_delta_into(&reasoning, output);
             }
 
@@ -4942,16 +5752,29 @@ impl ChatSseState {
                 for tool_call in tool_calls {
                     self.push_tool_call_delta_into(tool_call, output);
                 }
+            } else if let Some(function_call) =
+                delta.get("function_call").filter(|value| value.is_object())
+            {
+                self.flush_inline_think_at_boundary_into(output);
+                self.finalize_reasoning_into(output);
+                self.push_tool_call_delta_into(
+                    &json!({
+                        "index": 0,
+                        "id": "call_0",
+                        "function": function_call
+                    }),
+                    output,
+                );
             }
-        }
-
-        if let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) {
-            self.finish_reason = Some(finish_reason.to_string());
         }
     }
 
     /// 正文入口：先统一剥离行内引用标记，再交给 think / 工具解析等后续环节。
     fn push_content_delta_into(&mut self, delta: &str, output: &mut String) {
+        if !self.tool_context.inline_citations {
+            self.push_filtered_content_delta_into(delta, output);
+            return;
+        }
         let delta = self.content_cite_filter.push(delta);
         if delta.is_empty() {
             return;
@@ -5078,17 +5901,25 @@ impl ChatSseState {
 
     /// 推理内容入口：与正文同样需要剥离引用标记，否则会泄露到推理详情里。
     fn push_reasoning_delta_into(&mut self, delta: &str, output: &mut String) {
-        let delta = self.reasoning_cite_filter.push(delta);
+        if self.reasoning.done {
+            self.reasoning = ReasoningItemState::default();
+            self.reasoning_cite_filter = InlineCiteFilter::default();
+        }
+        let delta = if self.tool_context.inline_citations {
+            self.reasoning_cite_filter.push(delta)
+        } else {
+            delta.to_string()
+        };
         if delta.is_empty() {
             return;
         }
         self.push_filtered_reasoning_delta_into(&delta, output);
     }
 
-    fn push_filtered_reasoning_delta_into(&mut self, delta: &str, output: &mut String) {
+    fn ensure_reasoning_started_into(&mut self, output: &mut String) {
         if !self.reasoning.added {
             let output_index = self.next_output_index();
-            let item_id = format!("rs_{}", self.response_id);
+            let item_id = self.next_reasoning_item_id();
             self.reasoning.output_index = Some(output_index);
             self.reasoning.item_id = item_id.clone();
             self.reasoning.added = true;
@@ -5122,7 +5953,21 @@ impl ChatSseState {
                 &mut self.next_sequence_number,
             );
         }
+    }
 
+    fn next_reasoning_item_id(&mut self) -> String {
+        let base = format!("rs_{}", self.response_id);
+        let id = if self.reasoning_item_count == 0 {
+            base
+        } else {
+            format!("{base}_{}", self.reasoning_item_count)
+        };
+        self.reasoning_item_count += 1;
+        id
+    }
+
+    fn push_filtered_reasoning_delta_into(&mut self, delta: &str, output: &mut String) {
+        self.ensure_reasoning_started_into(output);
         self.reasoning.text.push_str(delta);
         let output_index = self.reasoning.output_index.unwrap_or(0);
         push_sse(
@@ -5148,6 +5993,13 @@ impl ChatSseState {
             .encrypted_content
             .get_or_insert_with(String::new);
         existing.push_str(encrypted_content);
+        if let Some(block) = self.reasoning.anthropic_thinking_block.as_mut() {
+            if let Some(Value::String(signature)) = block.get_mut("signature") {
+                signature.push_str(encrypted_content);
+            } else {
+                block["signature"] = json!(encrypted_content);
+            }
+        }
     }
 
     fn push_message_delta_into(
@@ -5158,11 +6010,19 @@ impl ChatSseState {
     ) {
         if self.text.added && !self.text.done && self.text.content_kind != content_kind {
             self.finalize_text_into(output);
+        }
+        if self.text.done {
             self.text = TextItemState::default();
         }
         if !self.text.added {
             let output_index = self.next_output_index();
-            let item_id = response_message_item_id(&self.response_id);
+            let base = response_message_item_id(&self.response_id);
+            let item_id = if self.message_item_count == 0 {
+                base
+            } else {
+                format!("{base}_{}", self.message_item_count)
+            };
+            self.message_item_count += 1;
             self.text.output_index = Some(output_index);
             self.text.item_id = item_id.clone();
             self.text.content_kind = content_kind;
@@ -5221,6 +6081,18 @@ impl ChatSseState {
 
     fn push_tool_call_delta_into(&mut self, tool_call: &Value, output: &mut String) {
         let chat_index = tool_call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+        if !self.tools.contains_key(&chat_index) {
+            self.finalize_text_into(output);
+            // 发布可以等待 name/arguments 完整，但输出位置必须在首次出现时保留。
+            let output_index = self.next_output_index();
+            self.tools.insert(
+                chat_index,
+                ToolCallState {
+                    output_index: Some(output_index),
+                    ..ToolCallState::default()
+                },
+            );
+        }
         let id_delta = tool_call
             .get("id")
             .and_then(Value::as_str)
@@ -5275,8 +6147,8 @@ impl ChatSseState {
         }
 
         if should_add {
-            let assigned = self.next_output_index();
             let state = self.tools.get_mut(&chat_index).expect("tool state exists");
+            let assigned = state.output_index.expect("tool output index is reserved");
             state.added = true;
             if state.call_id.is_empty() {
                 state.call_id = format!("call_{chat_index}");
@@ -5340,12 +6212,23 @@ impl ChatSseState {
         self.flush_inline_think_at_boundary_into(output);
         self.finalize_reasoning_into(output);
         self.finalize_text_into(output);
-        self.finalize_tools_into(output);
+        // 上游截断后参数可能只有半段，不能通过 done 事件发布为可执行调用。
+        if response_status(self.finish_reason.as_deref()) == "completed" {
+            self.finalize_tools_into(output);
+        } else {
+            self.skipped_output_indices.extend(
+                self.tools
+                    .values()
+                    .filter(|tool| !tool.done)
+                    .filter_map(|tool| tool.output_index),
+            );
+            self.flush_output_item_done_into(output);
+        }
 
         let status = response_status(self.finish_reason.as_deref());
         let mut response = self.base_response(status, self.completed_output_items());
-        if status == "incomplete" {
-            response["incomplete_details"] = json!({ "reason": "max_output_tokens" });
+        if let Some(reason) = response_incomplete_reason(self.finish_reason.as_deref()) {
+            response["incomplete_details"] = json!({ "reason": reason });
         }
         copy_response_request_fields(&mut response, self.original_request.as_ref());
         let terminal_event = if status == "incomplete" {
@@ -5390,6 +6273,13 @@ impl ChatSseState {
         {
             item["encrypted_content"] = json!(encrypted_content);
         }
+        if let Some(block) = self.reasoning.anthropic_thinking_block.take() {
+            item = anthropic_thinking_response_item(
+                &block,
+                &self.reasoning.item_id,
+                self.tool_context.inline_citations,
+            );
+        }
         self.output_items.push((output_index, item.clone()));
         self.reasoning.done = true;
         push_sse(
@@ -5416,16 +6306,7 @@ impl ChatSseState {
             }),
             &mut self.next_sequence_number,
         );
-        push_sse(
-            output,
-            "response.output_item.done",
-            json!({
-                "type": "response.output_item.done",
-                "output_index": output_index,
-                "item": item
-            }),
-            &mut self.next_sequence_number,
-        );
+        self.queue_output_item_done_into(output_index, item, output);
     }
 
     fn finalize_text_into(&mut self, output: &mut String) {
@@ -5436,9 +6317,9 @@ impl ChatSseState {
         let item = json!({
             "id": self.text.item_id,
             "type": "message",
-            "status": "completed",
+            "status": response_status(self.finish_reason.as_deref()),
             "role": "assistant",
-            "content": [self.text.content_kind.done_part(&self.text.text)]
+            "content": [self.text.done_part()]
         });
         self.output_items.push((output_index, item.clone()));
         self.text.done = true;
@@ -5473,20 +6354,11 @@ impl ChatSseState {
                 "item_id": self.text.item_id,
                 "output_index": output_index,
                 "content_index": 0,
-                "part": self.text.content_kind.done_part(&self.text.text)
+                "part": self.text.done_part()
             }),
             &mut self.next_sequence_number,
         );
-        push_sse(
-            output,
-            "response.output_item.done",
-            json!({
-                "type": "response.output_item.done",
-                "output_index": output_index,
-                "item": item
-            }),
-            &mut self.next_sequence_number,
-        );
+        self.queue_output_item_done_into(output_index, item, output);
     }
 
     fn finalize_tools_into(&mut self, output: &mut String) {
@@ -5501,8 +6373,8 @@ impl ChatSseState {
                 .map(|state| !state.added && !state.done)
                 .unwrap_or(false)
             {
-                let assigned = self.next_output_index();
                 let state = self.tools.get_mut(&key).expect("tool state exists");
+                let assigned = state.output_index.expect("tool output index is reserved");
                 state.added = true;
                 if state.call_id.is_empty() {
                     state.call_id = format!("call_{key}");
@@ -5536,16 +6408,43 @@ impl ChatSseState {
                 &self.tool_context,
                 &mut self.next_sequence_number,
             );
+            self.queue_output_item_done_into(output_index, item, output);
+        }
+    }
+
+    fn queue_output_item_done_into(&mut self, output_index: u32, item: Value, output: &mut String) {
+        self.pending_output_item_done.insert(output_index, item);
+        self.flush_output_item_done_into(output);
+    }
+
+    fn flush_output_item_done_into(&mut self, output: &mut String) {
+        // Codex 的 OutputItemDone 事件不保留 output_index，历史顺序取决于到达顺序。
+        // 较早的工具须等待上游终止状态；只暂存其后的完成项，正文 delta 仍实时转发。
+        loop {
+            if self
+                .skipped_output_indices
+                .remove(&self.next_done_output_index)
+            {
+                self.next_done_output_index += 1;
+                continue;
+            }
+            let Some(item) = self
+                .pending_output_item_done
+                .remove(&self.next_done_output_index)
+            else {
+                break;
+            };
             push_sse(
                 output,
                 "response.output_item.done",
                 json!({
                     "type": "response.output_item.done",
-                    "output_index": output_index,
+                    "output_index": self.next_done_output_index,
                     "item": item
                 }),
                 &mut self.next_sequence_number,
             );
+            self.next_done_output_index += 1;
         }
     }
 
@@ -5598,7 +6497,23 @@ enum AnthropicBlockKind {
     Text,
     Thinking,
     Tool,
+    Server,
     Other,
+}
+
+#[derive(Debug, Default)]
+struct AnthropicTextBlockState {
+    start: usize,
+    prefix: String,
+    citations: Vec<Value>,
+}
+
+#[derive(Debug)]
+struct AnthropicServerBlockState {
+    output_index: u32,
+    item_id: String,
+    block: Value,
+    arguments: String,
 }
 
 #[derive(Debug, Default)]
@@ -5607,6 +6522,8 @@ struct AnthropicSseState {
     diagnostic_id: Option<String>,
     blocks: BTreeMap<usize, AnthropicBlockKind>,
     text_buffers: BTreeMap<usize, String>,
+    text_blocks: BTreeMap<usize, AnthropicTextBlockState>,
+    server_blocks: BTreeMap<usize, AnthropicServerBlockState>,
     native_tool_state_indices: BTreeMap<usize, usize>,
     next_tool_state_index: usize,
     usage: Value,
@@ -5634,6 +6551,8 @@ impl AnthropicSseState {
             diagnostic_id: diagnostic_id.map(ToString::to_string),
             blocks: BTreeMap::new(),
             text_buffers: BTreeMap::new(),
+            text_blocks: BTreeMap::new(),
+            server_blocks: BTreeMap::new(),
             native_tool_state_indices: BTreeMap::new(),
             next_tool_state_index: 0,
             usage: json!({}),
@@ -5682,16 +6601,70 @@ impl AnthropicSseState {
         let index = chunk.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
         let block = chunk.get("content_block").unwrap_or(&Value::Null);
         let block_type = block.get("type").and_then(Value::as_str).unwrap_or("");
-        if block_type == "tool_use" || block_type == "server_tool_use" {
+        if self.inner.tool_context.textual_tool_calls
+            && (block_type == "tool_use" || block_type == "server_tool_use")
+        {
             self.pending_text_marker.take();
         } else {
             // Anthropic 每个 text 块都会先发 content_block_start；这里先冲刷旧 marker，避免顺序落到新正文之后。
             self.flush_pending_text_marker_into(output);
         }
+        if is_anthropic_server_content(block) {
+            self.inner.flush_inline_think_at_boundary_into(output);
+            self.inner.finalize_text_into(output);
+            self.inner.finalize_reasoning_into(output);
+            let output_index = self.inner.next_output_index();
+            let item_id = format!("rs_{}_server_{index}", self.inner.response_id);
+            self.blocks.insert(index, AnthropicBlockKind::Server);
+            if block_type == "server_tool_use" {
+                self.native_tool_use_block_count += 1;
+                if let Some(name) = block["name"].as_str() {
+                    self.native_tool_names.insert(name.to_string());
+                }
+            } else {
+                self.other_block_count += 1;
+                self.server_tool_result_block_count += 1;
+            }
+            push_sse(
+                output,
+                "response.output_item.added",
+                json!({
+                    "type":"response.output_item.added","output_index":output_index,
+                    "item":{"id":item_id,"type":"reasoning","summary":[]}
+                }),
+                &mut self.inner.next_sequence_number,
+            );
+            self.server_blocks.insert(
+                index,
+                AnthropicServerBlockState {
+                    output_index,
+                    item_id,
+                    block: block.clone(),
+                    arguments: String::new(),
+                },
+            );
+            return;
+        }
         match block_type {
             "text" => {
                 self.text_block_count += 1;
                 self.blocks.insert(index, AnthropicBlockKind::Text);
+                self.text_blocks.insert(
+                    index,
+                    AnthropicTextBlockState {
+                        start: if self.inner.text.done {
+                            0
+                        } else {
+                            self.inner.text.text.len()
+                        },
+                        citations: block
+                            .get("citations")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default(),
+                        ..Default::default()
+                    },
+                );
                 if let Some(text) = block.get("text").and_then(Value::as_str) {
                     if !text.is_empty() {
                         self.handle_text_delta_into(index, text, output);
@@ -5701,53 +6674,46 @@ impl AnthropicSseState {
             "thinking" => {
                 self.thinking_block_count += 1;
                 self.blocks.insert(index, AnthropicBlockKind::Thinking);
+                self.inner.flush_inline_think_at_boundary_into(output);
+                self.inner.finalize_text_into(output);
+                self.inner.finalize_reasoning_into(output);
+                self.inner.reasoning = ReasoningItemState::default();
+                self.inner.reasoning_cite_filter = InlineCiteFilter::default();
+                self.inner.reasoning.anthropic_thinking_block = Some(block.clone());
+                self.inner.ensure_reasoning_started_into(output);
                 if let Some(thinking) = block.get("thinking").and_then(Value::as_str) {
                     if !thinking.is_empty() {
                         self.inner.push_reasoning_delta_into(thinking, output);
                     }
                 }
             }
-            "tool_use" => {
-                self.native_tool_use_block_count += 1;
-                self.blocks.insert(index, AnthropicBlockKind::Tool);
-                let tool_state_index = self.native_tool_state_index(index);
+            "redacted_thinking" => {
+                self.thinking_block_count += 1;
+                self.blocks.insert(index, AnthropicBlockKind::Other);
                 self.inner.flush_inline_think_at_boundary_into(output);
+                self.inner.finalize_text_into(output);
                 self.inner.finalize_reasoning_into(output);
-                if let Some(name) = block
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .filter(|name| !name.is_empty())
-                {
-                    self.native_tool_names.insert(name.to_string());
-                }
-                let fake = json!({
-                    "index": tool_state_index,
-                    "id": block.get("id").and_then(Value::as_str).unwrap_or(""),
-                    "function": {
-                        "name": block.get("name").and_then(Value::as_str).unwrap_or(""),
-                        "arguments": ""
-                    }
-                });
-                self.inner.push_tool_call_delta_into(&fake, output);
-                if let Some(input) = block.get("input").filter(|value| {
-                    value
-                        .as_object()
-                        .map(|object| !object.is_empty())
-                        .unwrap_or(false)
-                }) {
-                    let fake = json!({
-                        "index": tool_state_index,
-                        "function": {
-                            "arguments": canonical_json_string(input)
-                        }
-                    });
-                    self.inner.push_tool_call_delta_into(&fake, output);
-                }
+                let output_index = self.inner.next_output_index();
+                let item_id = self.inner.next_reasoning_item_id();
+                let item = anthropic_thinking_response_item(
+                    block,
+                    &item_id,
+                    self.inner.tool_context.inline_citations,
+                );
+                push_sse(
+                    output,
+                    "response.output_item.added",
+                    json!({
+                        "type": "response.output_item.added", "output_index": output_index,
+                        "item": {"id": item_id, "type": "reasoning", "summary": []}
+                    }),
+                    &mut self.inner.next_sequence_number,
+                );
+                self.inner.output_items.push((output_index, item.clone()));
+                self.inner
+                    .queue_output_item_done_into(output_index, item, output);
             }
-            "server_tool_use" => {
-                // Anthropic 原生 server-side 工具（如 web_search）。复用 tool_use 路径生成
-                // Codex web_search_call 进度项；因为是服务端执行，Claude 同一轮自己出答案，
-                // 不会触发客户端工具循环。
+            "tool_use" => {
                 self.native_tool_use_block_count += 1;
                 self.blocks.insert(index, AnthropicBlockKind::Tool);
                 let tool_state_index = self.native_tool_state_index(index);
@@ -5819,6 +6785,13 @@ impl AnthropicSseState {
             }
             "thinking_delta" => {
                 if let Some(thinking) = delta.get("thinking").and_then(Value::as_str) {
+                    if let Some(block) = self.inner.reasoning.anthropic_thinking_block.as_mut() {
+                        if let Some(Value::String(raw)) = block.get_mut("thinking") {
+                            raw.push_str(thinking);
+                        } else {
+                            block["thinking"] = json!(thinking);
+                        }
+                    }
                     if !thinking.is_empty() {
                         self.inner.push_reasoning_delta_into(thinking, output);
                     }
@@ -5830,6 +6803,12 @@ impl AnthropicSseState {
                 }
             }
             "input_json_delta" => {
+                if let Some(server) = self.server_blocks.get_mut(&index) {
+                    if let Some(partial) = delta["partial_json"].as_str() {
+                        server.arguments.push_str(partial);
+                    }
+                    return;
+                }
                 self.inner.flush_inline_think_at_boundary_into(output);
                 self.inner.finalize_reasoning_into(output);
                 let tool_state_index = self.native_tool_state_index(index);
@@ -5847,6 +6826,13 @@ impl AnthropicSseState {
                     self.inner.push_tool_call_delta_into(&fake, output);
                 }
             }
+            "citations_delta" => {
+                if let Some(citation) = delta.get("citation")
+                    && let Some(block) = self.text_blocks.get_mut(&index)
+                {
+                    block.citations.push(citation.clone());
+                }
+            }
             _ => {}
         }
     }
@@ -5858,8 +6844,58 @@ impl AnthropicSseState {
             if let Some(text) = self.text_buffers.remove(&index) {
                 self.flush_buffered_text_block_into(index, &text, output);
             }
+            self.inner.flush_inline_think_at_boundary_into(output);
+            if let Some(block) = self.text_blocks.remove(&index)
+                && !self.inner.text.done
+            {
+                let annotations = anthropic_citation_annotations(
+                    &self.inner.text.text,
+                    &block.citations,
+                    block.start,
+                );
+                for annotation in &annotations {
+                    let annotation_index = self.inner.text.annotations.len();
+                    push_sse(
+                        output,
+                        "response.output_text.annotation.added",
+                        json!({
+                            "type":"response.output_text.annotation.added",
+                            "item_id":self.inner.text.item_id,
+                            "output_index":self.inner.text.output_index,
+                            "content_index":0,"annotation_index":annotation_index,"annotation":annotation
+                        }),
+                        &mut self.inner.next_sequence_number,
+                    );
+                    self.inner.text.annotations.push(annotation.clone());
+                }
+                self.inner.text.anthropic_citations.extend(block.citations);
+            }
+        } else if matches!(kind, Some(AnthropicBlockKind::Thinking)) {
+            self.inner.finalize_reasoning_into(output);
         } else if matches!(kind, Some(AnthropicBlockKind::Tool)) {
             self.native_tool_state_indices.remove(&index);
+        } else if matches!(kind, Some(AnthropicBlockKind::Server))
+            && let Some(mut server) = self.server_blocks.remove(&index)
+        {
+            if !server.arguments.is_empty() {
+                match serde_json::from_str::<Value>(&server.arguments) {
+                    Ok(input) if input.is_object() => server.block["input"] = input,
+                    _ => {
+                        // 服务端参数也可能被截断，不能把不完整块写回下一轮历史。
+                        self.inner
+                            .skipped_output_indices
+                            .insert(server.output_index);
+                        self.inner.flush_output_item_done_into(output);
+                        return;
+                    }
+                }
+            }
+            let item = anthropic_server_content_response_item(&server.block, &server.item_id);
+            self.inner
+                .output_items
+                .push((server.output_index, item.clone()));
+            self.inner
+                .queue_output_item_done_into(server.output_index, item, output);
         }
     }
 
@@ -5875,6 +6911,19 @@ impl AnthropicSseState {
             || !self.native_tool_state_indices.is_empty()
     }
 
+    fn has_open_model_content_blocks(&self) -> bool {
+        self.blocks.values().any(|kind| {
+            matches!(
+                kind,
+                AnthropicBlockKind::Text
+                    | AnthropicBlockKind::Thinking
+                    | AnthropicBlockKind::Tool
+                    | AnthropicBlockKind::Server
+            )
+        }) || !self.text_buffers.is_empty()
+            || !self.native_tool_state_indices.is_empty()
+    }
+
     fn native_tool_state_index(&mut self, block_index: usize) -> usize {
         if let Some(index) = self.native_tool_state_indices.get(&block_index) {
             return *index;
@@ -5885,6 +6934,10 @@ impl AnthropicSseState {
     }
 
     fn handle_text_delta_into(&mut self, index: usize, text: &str, output: &mut String) {
+        if !self.inner.tool_context.textual_tool_calls {
+            self.inner.push_content_delta_into(text, output);
+            return;
+        }
         // 引用标记剥离统一在 `ChatSseState` 的文本出口完成，这里只管工具调用切分。
         let buffer = self.text_buffers.entry(index).or_default();
         buffer.push_str(text);
@@ -5903,12 +6956,20 @@ impl AnthropicSseState {
         if buffer.is_empty() {
             self.text_buffers.remove(&index);
         }
+        if let Some(block) = self.text_blocks.get_mut(&index) {
+            block.prefix.push_str(&passthrough);
+        }
         self.inner.push_content_delta_into(&passthrough, output);
     }
 
     fn flush_buffered_text_block_into(&mut self, index: usize, text: &str, output: &mut String) {
         let marker_kinds = text_tool_marker_kinds(text);
-        let split = split_text_into_message_and_tool_calls(text);
+        let prefix = self
+            .text_blocks
+            .get(&index)
+            .map(|block| block.prefix.as_str())
+            .unwrap_or("");
+        let split = split_text_into_message_and_tool_calls(text, prefix, &self.inner.tool_context);
         if !marker_kinds.is_empty() {
             log_anthropic_text_tool_marker_detected(
                 true,
@@ -6009,22 +7070,51 @@ impl AnthropicSseState {
     }
 }
 
-fn take_sse_block(buffer: &mut String) -> Option<String> {
-    let lf = buffer.find("\n\n").map(|index| (index, 2));
-    let crlf = buffer.find("\r\n\r\n").map(|index| (index, 4));
-    let (index, delimiter_len) = match (lf, crlf) {
-        (Some(left), Some(right)) => {
-            if left.0 <= right.0 {
-                left
-            } else {
-                right
+#[derive(Default)]
+struct SseTextFraming {
+    started: bool,
+    skip_lf: bool,
+}
+
+impl SseTextFraming {
+    fn append_bytes(&mut self, buffer: &mut String, remainder: &mut Vec<u8>, bytes: &[u8]) {
+        let start = buffer.len();
+        append_utf8_safe(buffer, remainder, bytes);
+        if buffer.len() == start {
+            return;
+        }
+        if !self.started {
+            self.started = true;
+            if buffer[start..].starts_with('\u{feff}') {
+                buffer.replace_range(start..start + '\u{feff}'.len_utf8(), "");
             }
         }
-        (Some(value), None) | (None, Some(value)) => value,
-        (None, None) => return None,
-    };
+        // 常见 LF 分片沿用直接追加路径；只对新增文本归一化，不重扫未完成事件。
+        if !self.skip_lf && !buffer[start..].contains('\r') {
+            return;
+        }
+        let appended = buffer.split_off(start);
+        for ch in appended.chars() {
+            if self.skip_lf {
+                self.skip_lf = false;
+                if ch == '\n' {
+                    continue;
+                }
+            }
+            if ch == '\r' {
+                buffer.push('\n');
+                self.skip_lf = true;
+            } else {
+                buffer.push(ch);
+            }
+        }
+    }
+}
+
+fn take_sse_block(buffer: &mut String) -> Option<String> {
+    let index = buffer.find("\n\n")?;
     let block = buffer[..index].to_string();
-    buffer.drain(..index + delimiter_len);
+    buffer.drain(..index + 2);
     Some(block)
 }
 
@@ -6032,24 +7122,34 @@ fn append_utf8_safe(buffer: &mut String, remainder: &mut Vec<u8>, bytes: &[u8]) 
     if bytes.is_empty() {
         return;
     }
-    let mut combined = Vec::new();
-    if !remainder.is_empty() {
-        combined.extend_from_slice(remainder);
-        remainder.clear();
-    }
-    combined.extend_from_slice(bytes);
+    let combined = if remainder.is_empty() {
+        std::borrow::Cow::Borrowed(bytes)
+    } else {
+        let mut combined = std::mem::take(remainder);
+        combined.extend_from_slice(bytes);
+        std::borrow::Cow::Owned(combined)
+    };
 
-    match std::str::from_utf8(&combined) {
-        Ok(text) => buffer.push_str(text),
-        Err(error) => {
-            let valid = error.valid_up_to();
-            if valid > 0 {
-                buffer.push_str(std::str::from_utf8(&combined[..valid]).unwrap_or_default());
+    let mut pending = combined.as_ref();
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(text) => {
+                buffer.push_str(text);
+                break;
             }
-            if error.error_len().is_none() {
-                remainder.extend_from_slice(&combined[valid..]);
-            } else {
-                buffer.push_str(&String::from_utf8_lossy(&combined[valid..]));
+            Err(error) => {
+                let valid = error.valid_up_to();
+                if valid > 0 {
+                    buffer.push_str(std::str::from_utf8(&pending[..valid]).unwrap_or_default());
+                }
+                if let Some(invalid_len) = error.error_len() {
+                    buffer.push('\u{fffd}');
+                    pending = &pending[valid + invalid_len..];
+                } else {
+                    // 非法字节之后仍可能有跨分片的合法字符，须保留其未完成字节。
+                    remainder.extend_from_slice(&pending[valid..]);
+                    break;
+                }
             }
         }
     }
@@ -6082,6 +7182,22 @@ fn leading_think_prefix_decision(buffer: &str) -> ThinkPrefixDecision {
         return ThinkPrefixDecision::NeedMore;
     }
     ThinkPrefixDecision::Text
+}
+
+fn upstream_response_has_error(body: &Value) -> bool {
+    body.get("type").and_then(Value::as_str) == Some("error")
+        || body.get("error").is_some_and(|error| !error.is_null())
+}
+
+fn reject_upstream_response_error(body: &Value) -> anyhow::Result<()> {
+    if upstream_response_has_error(body) {
+        let (message, error_type) = extract_chat_sse_error(body);
+        anyhow::bail!(
+            "upstream response error ({}): {message}",
+            error_type.as_deref().unwrap_or("upstream_error")
+        );
+    }
+    Ok(())
 }
 
 fn extract_chat_sse_error(value: &Value) -> (String, Option<String>) {
@@ -6180,7 +7296,11 @@ fn truncate_error_preview(input: &str) -> String {
     input.chars().take(ERROR_BODY_PREVIEW_LIMIT).collect()
 }
 
-fn append_responses_input(input: &Value, messages: &mut Vec<Value>) {
+fn append_responses_input(
+    input: &Value,
+    messages: &mut Vec<Value>,
+    tool_context: &CodexToolContext,
+) {
     match input {
         Value::String(text) => messages.push(json!({ "role": "user", "content": text })),
         Value::Array(items) => {
@@ -6192,6 +7312,7 @@ fn append_responses_input(input: &Value, messages: &mut Vec<Value>) {
             for item in items {
                 append_responses_item(
                     item,
+                    tool_context,
                     messages,
                     &mut pending_tool_calls,
                     &mut pending_reasoning,
@@ -6212,6 +7333,7 @@ fn append_responses_input(input: &Value, messages: &mut Vec<Value>) {
             let mut ignored_tool_call_ids = BTreeSet::new();
             append_responses_item(
                 input,
+                tool_context,
                 messages,
                 &mut pending_tool_calls,
                 &mut pending_reasoning,
@@ -6231,6 +7353,8 @@ fn append_responses_input_to_anthropic(
     input: &Value,
     messages: &mut Vec<Value>,
     system_chunks: &mut Vec<String>,
+    tool_context: &CodexToolContext,
+    model: &str,
 ) {
     match input {
         Value::String(text) => push_anthropic_message(
@@ -6244,6 +7368,8 @@ fn append_responses_input_to_anthropic(
             for item in items {
                 append_responses_item_to_anthropic(
                     item,
+                    tool_context,
+                    model,
                     messages,
                     system_chunks,
                     &mut seen_tool_call_ids,
@@ -6256,6 +7382,8 @@ fn append_responses_input_to_anthropic(
             let mut ignored_tool_call_ids = BTreeSet::new();
             append_responses_item_to_anthropic(
                 input,
+                tool_context,
+                model,
                 messages,
                 system_chunks,
                 &mut seen_tool_call_ids,
@@ -6268,6 +7396,8 @@ fn append_responses_input_to_anthropic(
 
 fn append_responses_item_to_anthropic(
     item: &Value,
+    tool_context: &CodexToolContext,
+    model: &str,
     messages: &mut Vec<Value>,
     system_chunks: &mut Vec<String>,
     seen_tool_call_ids: &mut BTreeSet<String>,
@@ -6275,7 +7405,7 @@ fn append_responses_item_to_anthropic(
 ) {
     match item.get("type").and_then(Value::as_str) {
         Some("function_call") => {
-            let name = responses_history_function_name(item);
+            let name = responses_history_function_name(item, tool_context);
             let call_id = item
                 .get("call_id")
                 .or_else(|| item.get("id"))
@@ -6340,7 +7470,9 @@ fn append_responses_item_to_anthropic(
                 return;
             }
             let (name, arguments) = build_custom_tool_call_history(
+                tool_context,
                 raw_name,
+                item.get("namespace").and_then(Value::as_str).unwrap_or(""),
                 input,
                 item.get("id").and_then(Value::as_str),
                 call_id,
@@ -6398,7 +7530,7 @@ fn append_responses_item_to_anthropic(
                     vec![json!({
                         "type": "tool_use",
                         "id": call_id,
-                        "name": "tool_search",
+                        "name": tool_context.internal_alias("tool_search").unwrap_or("tool_search"),
                         "input": tool_search_arguments_from_value(item.get("arguments"))
                     })],
                 );
@@ -6432,8 +7564,8 @@ fn append_responses_item_to_anthropic(
                 .or_else(|| item.get("id"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            let name = tool_use.get("name").and_then(Value::as_str).unwrap_or("");
-            if !call_id.is_empty() && is_filtered_server_side_tool_type(name) {
+            let name = responses_history_function_name(tool_use, tool_context);
+            if !call_id.is_empty() && is_filtered_server_side_tool_type(&name) {
                 ignored_tool_call_ids.insert(call_id.to_string());
                 return;
             }
@@ -6480,10 +7612,20 @@ fn append_responses_item_to_anthropic(
             }
         }
         Some("reasoning") => {
-            if let Some(block) = responses_reasoning_to_anthropic_thinking_block(item) {
+            if item["encrypted_content"]
+                .as_str()
+                .is_some_and(|value| value.starts_with(ANTHROPIC_CONTENT_REPLAY_PREFIX))
+            {
+                if let Some(block) = anthropic_server_content_from_response(item) {
+                    push_anthropic_message(messages, "assistant", vec![block]);
+                }
+                return;
+            }
+            if let Some(block) = responses_reasoning_to_anthropic_thinking_block(item, model) {
                 push_anthropic_message(messages, "assistant", vec![block]);
             }
         }
+        Some("additional_tools") => {}
         Some("compaction") => {
             if let Some(text) =
                 crate::layered_compaction::synthetic_remote_compaction_history_text(item)
@@ -6922,15 +8064,40 @@ fn push_anthropic_orphan_tool_output_message(
 /// 否则 base64 会被序列化成正文文本发给上游，把一张图片放大成几十万 token。
 fn anthropic_tool_result_content(output: &Value) -> Value {
     match output {
-        Value::Array(parts) if parts.iter().any(is_responses_image_part) => {
+        Value::Array(parts)
+            if parts.iter().any(|part| {
+                is_responses_image_part(part)
+                    || part.get("type").and_then(Value::as_str) == Some("input_file")
+            }) =>
+        {
             let blocks = responses_content_to_anthropic_content(output);
             if blocks.is_empty() {
                 return Value::String(response_output_text(output));
             }
             Value::Array(blocks)
         }
-        other => Value::String(response_output_text(other)),
+        other => Value::String(tool_output_text(other)),
     }
+}
+
+fn tool_output_text(output: &Value) -> String {
+    if let Some(parts) = output.as_array() {
+        let texts: Option<Vec<&str>> = parts
+            .iter()
+            .map(|part| match part.get("type").and_then(Value::as_str) {
+                Some("input_text" | "output_text" | "text") => {
+                    part.get("text").and_then(Value::as_str)
+                }
+                Some("refusal") => part.get("refusal").and_then(Value::as_str),
+                _ => None,
+            })
+            .collect();
+        if let Some(texts) = texts {
+            return texts.join("\n");
+        }
+    }
+    // 任意 JSON 结果仍按数据处理，不能只因含 text 字段就丢弃其他字段。
+    response_output_text(output)
 }
 
 fn is_responses_image_part(part: &Value) -> bool {
@@ -6946,7 +8113,13 @@ fn responses_content_to_anthropic_content(content: &Value) -> Vec<Value> {
                 match part.get("type").and_then(Value::as_str).unwrap_or("") {
                     "input_text" | "output_text" | "text" => {
                         if let Some(text) = part.get("text").and_then(Value::as_str) {
-                            converted.push(json!({ "type": "text", "text": text }));
+                            let mut block = json!({ "type": "text", "text": text });
+                            if let Some(citations) =
+                                part.get("anthropic_citations").and_then(Value::as_array)
+                            {
+                                block["citations"] = json!(citations);
+                            }
+                            converted.push(block);
                         }
                     }
                     "refusal" => {
@@ -6957,6 +8130,11 @@ fn responses_content_to_anthropic_content(content: &Value) -> Vec<Value> {
                     "input_image" => {
                         if let Some(source) = anthropic_image_source(part) {
                             converted.push(json!({ "type": "image", "source": source }));
+                        }
+                    }
+                    "input_file" => {
+                        if let Some(document) = anthropic_document_block(part) {
+                            converted.push(document);
                         }
                     }
                     _ => converted.push(json!({
@@ -7012,6 +8190,40 @@ fn anthropic_image_source(part: &Value) -> Option<Value> {
     None
 }
 
+fn anthropic_document_block(part: &Value) -> Option<Value> {
+    let source = if let Some(data) = part.get("file_data").and_then(Value::as_str) {
+        if let Some(source) = data_url_to_anthropic_source(data) {
+            (source["media_type"] == "application/pdf").then_some(source)?
+        } else if !data.is_empty()
+            && !data.starts_with("data:")
+            && part
+                .get("filename")
+                .and_then(Value::as_str)
+                .is_some_and(|name| name.to_ascii_lowercase().ends_with(".pdf"))
+        {
+            json!({"type":"base64","media_type":"application/pdf","data":data})
+        } else {
+            return None;
+        }
+    } else if let Some(url) = part.get("file_url").and_then(Value::as_str) {
+        if !url.starts_with("https://") && !url.starts_with("http://") {
+            return None;
+        }
+        json!({"type":"url","url":url})
+    } else {
+        return None;
+    };
+    let mut document = json!({"type":"document","source":source});
+    if let Some(filename) = part
+        .get("filename")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        document["title"] = json!(filename);
+    }
+    Some(document)
+}
+
 fn data_url_to_anthropic_source(url: &str) -> Option<Value> {
     let rest = url.strip_prefix("data:")?;
     let (media_type, data) = rest.split_once(";base64,")?;
@@ -7050,6 +8262,7 @@ fn anthropic_tool_input_from_argument_string(arguments: &str) -> Value {
 
 fn append_responses_item(
     item: &Value,
+    tool_context: &CodexToolContext,
     messages: &mut Vec<Value>,
     pending_tool_calls: &mut Vec<Value>,
     pending_reasoning: &mut Vec<String>,
@@ -7064,7 +8277,7 @@ fn append_responses_item(
     }
     match item_type {
         Some("function_call") => {
-            let name = responses_history_function_name(item);
+            let name = responses_history_function_name(item, tool_context);
             if name.is_empty() {
                 return;
             }
@@ -7135,7 +8348,9 @@ fn append_responses_item(
                 return;
             }
             let (name, arguments) = build_custom_tool_call_history(
+                tool_context,
                 raw_name,
+                item.get("namespace").and_then(Value::as_str).unwrap_or(""),
                 input,
                 item.get("id").and_then(Value::as_str),
                 call_id,
@@ -7190,7 +8405,7 @@ fn append_responses_item(
                 "id": call_id,
                 "type": "function",
                 "function": {
-                    "name": "tool_search",
+                    "name": tool_context.internal_alias("tool_search").unwrap_or("tool_search"),
                     "arguments": canonical_json_string(&tool_search_arguments_from_value(item.get("arguments")))
                 }
             }));
@@ -7224,8 +8439,8 @@ fn append_responses_item(
                 if call_id.is_empty() {
                     return;
                 }
-                let name = tool_use.get("name").and_then(Value::as_str).unwrap_or("");
-                if is_filtered_server_side_tool_type(name) {
+                let name = responses_history_function_name(tool_use, tool_context);
+                if is_filtered_server_side_tool_type(&name) {
                     ignored_tool_call_ids.insert(call_id.to_string());
                     return;
                 }
@@ -7269,6 +8484,7 @@ fn append_responses_item(
             }));
             pending_tool_images.extend(images);
         }
+        Some("additional_tools") => {}
         Some("reasoning") => {
             if let Some(text) = responses_reasoning_text(item) {
                 if !text.is_empty() {
@@ -7335,7 +8551,7 @@ fn split_chat_tool_output(output: &Value) -> (String, Vec<Value>) {
         .as_array()
         .is_some_and(|parts| parts.iter().any(is_responses_image_part));
     if !has_image {
-        return (response_output_text(output), Vec::new());
+        return (tool_output_text(output), Vec::new());
     }
     let converted = responses_content_to_chat_content("tool", output);
     let Some(parts) = converted.as_array() else {
@@ -7460,6 +8676,10 @@ fn flush_tool_calls(
 
     if let Some(last) = messages.last_mut() {
         if last.get("role").and_then(Value::as_str) == Some("assistant") {
+            if !pending_reasoning.is_empty() {
+                let reasoning = std::mem::take(pending_reasoning).join("\n");
+                append_reasoning_to_assistant_message(last, &reasoning);
+            }
             merge_tool_calls_into_message(last, std::mem::take(pending_tool_calls));
             return;
         }
@@ -7543,14 +8763,43 @@ fn responses_reasoning_text(item: &Value) -> Option<String> {
     extract_reasoning_summary_text(item).or_else(|| extract_reasoning_field_text(item))
 }
 
-fn responses_reasoning_to_anthropic_thinking_block(item: &Value) -> Option<Value> {
-    let text = responses_reasoning_text(item)?;
-    if text.is_empty() {
+fn responses_reasoning_to_anthropic_thinking_block(item: &Value, model: &str) -> Option<Value> {
+    let encrypted_content = responses_reasoning_encrypted_content(item);
+    if let Some(payload) = encrypted_content
+        .as_deref()
+        .and_then(|value| value.strip_prefix(ANTHROPIC_THINKING_REPLAY_PREFIX))
+    {
+        let block: Value = serde_json::from_str(payload).ok()?;
+        return match block["type"].as_str() {
+            Some("thinking") if block["thinking"].is_string() && block["signature"].is_string() => {
+                Some(block)
+            }
+            Some("redacted_thinking") if block["data"].is_string() => Some(block),
+            _ => None,
+        };
+    }
+    let text = responses_reasoning_text(item).unwrap_or_default();
+    if model.to_ascii_lowercase().contains("claude") {
+        // 老版本桥接器会同时写入 reasoning_content 和原始 signature。
+        // 这只是向后兼容的来源标记，不是对任意客户端内容的身份认证；
+        // 新回包统一使用版本封装，不能把原生 Responses 密文猜成 Claude 签名。
+        let legacy_bridge_signature = item.get("reasoning_content").is_some_and(Value::is_string)
+            && encrypted_content.is_some();
+        if !legacy_bridge_signature {
+            return (!text.is_empty()).then(|| {
+                json!({
+                    "type":"text",
+                    "text":format!("[Historical reasoning from another protocol]\n{text}")
+                })
+            });
+        }
+    }
+    if text.is_empty() && encrypted_content.is_none() {
         return None;
     }
 
     let mut block = json!({ "type": "thinking", "thinking": text });
-    if let Some(encrypted_content) = responses_reasoning_encrypted_content(item) {
+    if let Some(encrypted_content) = encrypted_content {
         block["signature"] = json!(encrypted_content);
     }
     Some(block)
@@ -7601,11 +8850,12 @@ fn responses_content_to_chat_content(_role: &str, content: &Value) -> Value {
             }
             "input_image" => {
                 if let Some(image_url) = part.get("image_url").filter(|value| !value.is_null()) {
-                    let image_url = if image_url.is_object() {
+                    let mut image_url = if image_url.is_object() {
                         image_url.clone()
                     } else {
                         json!({ "url": image_url.as_str().unwrap_or_default() })
                     };
+                    copy_string_field(part, &mut image_url, "detail");
                     chat_parts.push(json!({ "type": "image_url", "image_url": image_url }));
                     has_non_text_part = true;
                 } else if let Some(file_id) = part.get("file_id").and_then(Value::as_str) {
@@ -7676,15 +8926,13 @@ fn copy_string_field(source: &Value, target: &mut Value, field: &str) {
     }
 }
 
-fn responses_history_function_name(item: &Value) -> String {
+fn responses_history_function_name(item: &Value, context: &CodexToolContext) -> String {
     let name = item.get("name").and_then(Value::as_str).unwrap_or("");
     let namespace = item.get("namespace").and_then(Value::as_str).unwrap_or("");
     if name.is_empty() {
         String::new()
-    } else if namespace.is_empty() {
-        name.to_string()
     } else {
-        flatten_namespace_tool_name(namespace, name)
+        context.upstream_function_name(namespace, name)
     }
 }
 
@@ -7702,7 +8950,10 @@ fn append_tool_search_output_tools(input: Option<&Value>, tools: &mut Vec<Value>
         return;
     };
     for item in items {
-        if item.get("type").and_then(Value::as_str) != Some("tool_search_output") {
+        if !matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("tool_search_output" | "additional_tools")
+        ) {
             continue;
         }
         if let Some(found_tools) = item.get("tools").and_then(Value::as_array) {
@@ -7795,12 +9046,43 @@ fn tool_identity_key(tool: &Value) -> String {
 }
 
 fn build_codex_tool_context_for_request(request: &Value) -> CodexToolContext {
-    let tools = tools_for_proxy_conversion(request);
-    build_codex_tool_context_from_tools(&tools)
+    // 响应映射必须使用请求实际发送前恢复出的工具目录。
+    // 摘要的角色不影响工具声明，两个翻译协议可共用 context 形式的只读恢复。
+    let expanded =
+        crate::layered_compaction::expand_synthetic_local_compaction_request_as_context(request);
+    let prepared =
+        crate::layered_compaction::prepare_remote_compaction_v2_bridge_request(&expanded);
+    let tools = tools_for_proxy_conversion(&prepared);
+    let mut context = build_codex_tool_context_from_tools(&tools);
+    context.textual_tool_calls = request
+        .pointer("/codex_elves_compat/textual_tool_calls")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    context.inline_citations = request
+        .pointer("/codex_elves_compat/inline_citations")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    context.text_tool_choice = request.get("tool_choice").cloned();
+    context
 }
 
 fn build_codex_tool_context_from_tools(tools: &[Value]) -> CodexToolContext {
     let mut context = CodexToolContext::default();
+    context.reserved_internal_names = tools
+        .iter()
+        .filter_map(|tool| tool["type"].as_str())
+        .filter(|kind| is_proxy_internal_tool_type(kind))
+        .map(str::to_string)
+        .collect();
+    if context
+        .reserved_internal_names
+        .iter()
+        .any(|name| is_codex_web_search_name(name))
+    {
+        context
+            .reserved_internal_names
+            .insert("web_search".to_string());
+    }
     add_tools_to_codex_tool_context(&mut context, tools);
     context
 }
@@ -7808,11 +9090,13 @@ fn build_codex_tool_context_from_tools(tools: &[Value]) -> CodexToolContext {
 fn add_tools_to_codex_tool_context(context: &mut CodexToolContext, tools: &[Value]) {
     for tool in tools {
         if let Some(name) = tool.as_str().filter(|name| !name.is_empty()) {
+            let alias = context.allocate_upstream_name(name);
             if let Some(action) = proxy_action_from_upstream_name(name) {
                 context.custom_tools.insert(
-                    name.to_string(),
+                    alias,
                     CodexCustomToolSpec {
                         openai_name: "apply_patch".to_string(),
+                        namespace: String::new(),
                         kind: CodexCustomToolKind::ApplyPatch,
                         proxy_action: Some(action),
                     },
@@ -7821,9 +9105,10 @@ fn add_tools_to_codex_tool_context(context: &mut CodexToolContext, tools: &[Valu
                 continue;
             }
             context.custom_tools.insert(
-                name.to_string(),
+                alias,
                 CodexCustomToolSpec {
                     openai_name: name.to_string(),
+                    namespace: String::new(),
                     kind: CodexCustomToolKind::Raw,
                     proxy_action: None,
                 },
@@ -7834,42 +9119,7 @@ fn add_tools_to_codex_tool_context(context: &mut CodexToolContext, tools: &[Valu
         let tool_type = tool.get("type").and_then(Value::as_str).unwrap_or("");
         match tool_type {
             "custom" => {
-                let Some(name) = tool
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .filter(|v| !v.is_empty())
-                else {
-                    continue;
-                };
-                let kind = detect_codex_custom_tool_kind(tool, name);
-                context.custom_tools.insert(
-                    name.to_string(),
-                    CodexCustomToolSpec {
-                        openai_name: name.to_string(),
-                        kind,
-                        proxy_action: None,
-                    },
-                );
-                if kind == CodexCustomToolKind::ApplyPatch {
-                    for action in [
-                        CodexPatchProxyAction::AddFile,
-                        CodexPatchProxyAction::DeleteFile,
-                        CodexPatchProxyAction::UpdateFile,
-                        CodexPatchProxyAction::ReplaceFile,
-                        CodexPatchProxyAction::Batch,
-                    ] {
-                        let proxy_name = format!("{name}_{}", action.suffix());
-                        context.custom_tools.insert(
-                            proxy_name,
-                            CodexCustomToolSpec {
-                                openai_name: name.to_string(),
-                                kind: CodexCustomToolKind::ApplyPatch,
-                                proxy_action: Some(action),
-                            },
-                        );
-                    }
-                }
-                context.has_custom_tools = true;
+                add_custom_tool_to_context(context, tool, "");
             }
             "function" => {
                 let function = tool.get("function").unwrap_or(tool);
@@ -7878,24 +9128,28 @@ fn add_tools_to_codex_tool_context(context: &mut CodexToolContext, tools: &[Valu
                     .and_then(Value::as_str)
                     .filter(|v| !v.is_empty())
                 {
+                    let alias = context.allocate_upstream_name(name);
                     context.function_tools.insert(
-                        name.to_string(),
+                        alias,
                         CodexFunctionToolSpec {
                             name: name.to_string(),
                             namespace: String::new(),
                             parameters: function.get("parameters").cloned().unwrap_or(Value::Null),
+                            internal_type: None,
                         },
                     );
                 }
             }
             "namespace" => add_namespace_tools_to_context(&mut *context, tool),
             _ if is_proxy_internal_tool_type(tool_type) => {
+                let alias = tool_type.to_string();
                 context.function_tools.insert(
-                    tool_type.to_string(),
+                    alias,
                     CodexFunctionToolSpec {
                         name: tool_type.to_string(),
                         namespace: String::new(),
                         parameters: tool.get("parameters").cloned().unwrap_or(Value::Null),
+                        internal_type: Some(tool_type.to_string()),
                     },
                 );
             }
@@ -7905,10 +9159,12 @@ fn add_tools_to_codex_tool_context(context: &mut CodexToolContext, tools: &[Valu
                     .and_then(Value::as_str)
                     .filter(|v| !v.is_empty())
                     .unwrap_or(tool_type);
+                let alias = context.allocate_upstream_name(name);
                 context.custom_tools.insert(
-                    name.to_string(),
+                    alias,
                     CodexCustomToolSpec {
                         openai_name: name.to_string(),
+                        namespace: String::new(),
                         kind: CodexCustomToolKind::BuiltIn,
                         proxy_action: None,
                     },
@@ -7920,6 +9176,48 @@ fn add_tools_to_codex_tool_context(context: &mut CodexToolContext, tools: &[Valu
     }
 }
 
+fn add_custom_tool_to_context(context: &mut CodexToolContext, tool: &Value, namespace: &str) {
+    let Some(name) = tool
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+    else {
+        return;
+    };
+    let preferred = flatten_namespace_tool_name(namespace, name);
+    let upstream_name = context.allocate_upstream_name(&preferred);
+    let kind = detect_codex_custom_tool_kind(tool, name);
+    let spec = CodexCustomToolSpec {
+        openai_name: name.to_string(),
+        namespace: namespace.to_string(),
+        kind,
+        proxy_action: None,
+    };
+    context
+        .custom_tools
+        .insert(upstream_name.clone(), spec.clone());
+    if kind == CodexCustomToolKind::ApplyPatch {
+        for action in [
+            CodexPatchProxyAction::AddFile,
+            CodexPatchProxyAction::DeleteFile,
+            CodexPatchProxyAction::UpdateFile,
+            CodexPatchProxyAction::ReplaceFile,
+            CodexPatchProxyAction::Batch,
+        ] {
+            let alias = context.allocate_upstream_name(&format!("{preferred}_{}", action.suffix()));
+            context.custom_tools.insert(
+                alias,
+                CodexCustomToolSpec {
+                    proxy_action: Some(action),
+                    ..spec.clone()
+                },
+            );
+        }
+    }
+    context.has_custom_tools = true;
+    context.has_namespace_tools |= !namespace.is_empty();
+}
+
 fn add_namespace_tools_to_context(context: &mut CodexToolContext, namespace_tool: &Value) {
     let namespace = namespace_tool
         .get("name")
@@ -7929,6 +9227,10 @@ fn add_namespace_tools_to_context(context: &mut CodexToolContext, namespace_tool
         return;
     };
     for child in children {
+        if child.get("type").and_then(Value::as_str) == Some("custom") {
+            add_custom_tool_to_context(context, child, namespace);
+            continue;
+        }
         if child.get("type").and_then(Value::as_str) != Some("function") {
             continue;
         }
@@ -7939,32 +9241,18 @@ fn add_namespace_tools_to_context(context: &mut CodexToolContext, namespace_tool
         else {
             continue;
         };
-        let flat = flatten_namespace_tool_name(namespace, name);
-        if namespace.is_empty() {
-            context.function_tools.insert(
-                flat,
-                CodexFunctionToolSpec {
-                    namespace: namespace.to_string(),
-                    name: name.to_string(),
-                    parameters: child.get("parameters").cloned().unwrap_or(Value::Null),
-                },
-            );
-        } else if context
-            .function_tools
-            .get(&flat)
-            .is_none_or(|spec| !spec.namespace.is_empty())
-        {
-            context.function_tools.insert(
-                flat.clone(),
-                CodexFunctionToolSpec {
-                    namespace: namespace.to_string(),
-                    name: name.to_string(),
-                    parameters: child.get("parameters").cloned().unwrap_or(Value::Null),
-                },
-            );
-            maybe_set_web_search_fallback(context, namespace, name, &flat, child);
-            context.has_namespace_tools = true;
-        }
+        let alias = context.allocate_upstream_name(&flatten_namespace_tool_name(namespace, name));
+        context.function_tools.insert(
+            alias.clone(),
+            CodexFunctionToolSpec {
+                namespace: namespace.to_string(),
+                name: name.to_string(),
+                parameters: child.get("parameters").cloned().unwrap_or(Value::Null),
+                internal_type: None,
+            },
+        );
+        maybe_set_web_search_fallback(context, namespace, name, &alias, child);
+        context.has_namespace_tools |= !namespace.is_empty();
     }
 }
 
@@ -8052,12 +9340,24 @@ fn responses_tools_to_chat_tools(tools: &[Value], context: &CodexToolContext) ->
     let mut converted = Vec::new();
     for tool in tools {
         if let Some(name) = tool.as_str().filter(|name| !name.is_empty()) {
-            converted.push(generic_custom_proxy_tool(name, ""));
+            let action = proxy_action_from_upstream_name(name);
+            let alias = context.upstream_custom_name(
+                "",
+                if action.is_some() {
+                    "apply_patch"
+                } else {
+                    name
+                },
+                action,
+            );
+            converted.push(generic_custom_proxy_tool(&alias, ""));
             continue;
         }
         match tool.get("type").and_then(Value::as_str).unwrap_or("") {
             "function" => {
-                if let Some(tool) = responses_function_tool_to_chat_tool(tool) {
+                if let Some(mut tool) = responses_function_tool_to_chat_tool(tool) {
+                    let name = tool["function"]["name"].as_str().unwrap_or("");
+                    tool["function"]["name"] = json!(context.upstream_function_name("", name));
                     converted.push(tool);
                 }
             }
@@ -8072,11 +9372,13 @@ fn responses_tools_to_chat_tools(tools: &[Value], context: &CodexToolContext) ->
                     .get("description")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                if detect_codex_custom_tool_kind(tool, name) == CodexCustomToolKind::ApplyPatch {
-                    converted.extend(apply_patch_proxy_tools(name, description));
-                } else {
-                    converted.push(generic_custom_proxy_tool(name, description));
-                }
+                converted.extend(custom_tool_to_chat_tools(
+                    tool,
+                    "",
+                    name,
+                    description,
+                    context,
+                ));
             }
             tool_type if is_builtin_proxy_tool_type(tool_type) => {
                 let name = tool
@@ -8088,10 +9390,16 @@ fn responses_tools_to_chat_tools(tools: &[Value], context: &CodexToolContext) ->
                     .get("description")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                converted.push(generic_custom_proxy_tool(name, description));
+                converted.push(generic_custom_proxy_tool(
+                    &context.upstream_custom_name("", name, None),
+                    description,
+                ));
             }
             tool_type if is_proxy_internal_tool_type(tool_type) => {
-                converted.push(proxy_internal_tool_to_chat_tool(tool_type, tool));
+                let mut converted_tool = proxy_internal_tool_to_chat_tool(tool_type, tool);
+                converted_tool["function"]["name"] =
+                    json!(context.internal_alias(tool_type).unwrap_or(tool_type));
+                converted.push(converted_tool);
             }
             "namespace" => converted.extend(namespace_tool_to_chat_tools(tool, context)),
             _ => {}
@@ -8150,7 +9458,7 @@ fn responses_tools_to_anthropic_tools(tools: &[Value], context: &CodexToolContex
         converted.retain(|tool| {
             tool.get("name")
                 .and_then(Value::as_str)
-                .map(|name| !is_codex_web_search_name(name))
+                .map(|name| !context.is_internal_alias(name, is_codex_web_search_name))
                 .unwrap_or(true)
         });
         converted.push(json!({
@@ -8347,7 +9655,8 @@ fn namespace_tool_to_chat_tools(namespace_tool: &Value, context: &CodexToolConte
     };
     let mut converted = Vec::new();
     for child in children {
-        if child.get("type").and_then(Value::as_str) != Some("function") {
+        let child_type = child.get("type").and_then(Value::as_str);
+        if !matches!(child_type, Some("function" | "custom")) {
             continue;
         }
         let Some(name) = child
@@ -8357,15 +9666,24 @@ fn namespace_tool_to_chat_tools(namespace_tool: &Value, context: &CodexToolConte
         else {
             continue;
         };
-        let flat = flatten_namespace_tool_name(namespace, name);
-        if namespace != ""
-            && context
-                .function_tools
-                .get(&flat)
-                .is_some_and(|spec| spec.namespace.is_empty())
-        {
+        if child_type == Some("custom") {
+            let description = combine_namespace_description(
+                namespace_description,
+                child
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            );
+            converted.extend(custom_tool_to_chat_tools(
+                child,
+                namespace,
+                name,
+                &description,
+                context,
+            ));
             continue;
         }
+        let flat = context.upstream_function_name(namespace, name);
         let description = combine_namespace_description(
             namespace_description,
             child
@@ -8389,6 +9707,26 @@ fn namespace_tool_to_chat_tools(namespace_tool: &Value, context: &CodexToolConte
         }));
     }
     converted
+}
+
+fn custom_tool_to_chat_tools(
+    tool: &Value,
+    namespace: &str,
+    name: &str,
+    description: &str,
+    context: &CodexToolContext,
+) -> Vec<Value> {
+    let base = context.upstream_custom_name(namespace, name, None);
+    if detect_codex_custom_tool_kind(tool, name) != CodexCustomToolKind::ApplyPatch {
+        return vec![generic_custom_proxy_tool(&base, description)];
+    }
+    let mut tools = apply_patch_proxy_tools(&base, description);
+    for tool in &mut tools {
+        let action =
+            proxy_action_from_upstream_name(tool["function"]["name"].as_str().unwrap_or(""));
+        tool["function"]["name"] = json!(context.upstream_custom_name(namespace, name, action));
+    }
+    tools
 }
 
 fn normalize_chat_tool_parameters(parameters: &Value) -> Value {
@@ -8836,15 +10174,140 @@ fn flatten_namespace_tool_name(namespace: &str, name: &str) -> String {
     }
 }
 
+/// Responses 与 Chat 的 allowed_tools 外形不同；Anthropic 只能缩小实际工具声明集合。
+/// 任一允许项无法映射时返回错误，不能悄悄移除限制而暴露其他工具。
+fn validate_explicit_tool_choice(
+    request: &Value,
+    context: &CodexToolContext,
+) -> anyhow::Result<()> {
+    if let Some(choice) = request.get("tool_choice")
+        && matches!(choice["type"].as_str(), Some("function" | "custom"))
+    {
+        anyhow::ensure!(
+            responses_tool_choice_to_chat(choice, context).is_some(),
+            "tool_choice refers to an undeclared tool identity"
+        );
+    }
+    Ok(())
+}
+
+fn apply_allowed_tool_choice(
+    result: &mut Value,
+    request: &Value,
+    context: &CodexToolContext,
+    anthropic: bool,
+) -> anyhow::Result<()> {
+    let Some(choice) = request
+        .get("tool_choice")
+        .filter(|choice| choice.get("type").and_then(Value::as_str) == Some("allowed_tools"))
+    else {
+        return Ok(());
+    };
+    let allowed = choice.get("allowed_tools").unwrap_or(choice);
+    let mode = allowed
+        .get("mode")
+        .and_then(Value::as_str)
+        .filter(|mode| matches!(*mode, "auto" | "required"))
+        .context("tool_choice.allowed_tools.mode must be auto or required")?;
+    let references = allowed
+        .get("tools")
+        .and_then(Value::as_array)
+        .filter(|tools| !tools.is_empty())
+        .context("tool_choice.allowed_tools.tools must be a non-empty array")?;
+    let tools = result
+        .get("tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let tool_name = |tool: &Value| {
+        if anthropic {
+            tool.get("name")
+        } else {
+            tool.pointer("/function/name")
+        }
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    };
+    let declared: BTreeSet<String> = tools.iter().filter_map(tool_name).collect();
+    let mut names = Vec::new();
+    for reference in references {
+        let mut targets = Vec::new();
+        if reference.get("type").and_then(Value::as_str) == Some("custom") {
+            let name = reference.get("name").and_then(Value::as_str).unwrap_or("");
+            let namespace = reference
+                .get("namespace")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let flat = context.custom_alias(namespace, name, None);
+            if let Some((flat, spec)) =
+                flat.and_then(|flat| context.custom_tools.get(flat).map(|spec| (flat, spec)))
+            {
+                if spec.kind == CodexCustomToolKind::ApplyPatch {
+                    targets.extend(context.custom_tools.iter().filter_map(
+                        |(upstream_name, candidate)| {
+                            (candidate.openai_name == spec.openai_name
+                                && candidate.namespace == spec.namespace
+                                && candidate.proxy_action.is_some())
+                            .then(|| upstream_name.clone())
+                        },
+                    ));
+                } else {
+                    targets.push(flat.to_string());
+                }
+            }
+        } else if let Some(choice) = responses_tool_choice_to_chat(reference, context) {
+            if let Some(name) = choice.pointer("/function/name").and_then(Value::as_str) {
+                let name = if anthropic
+                    && context.is_internal_alias(name, is_codex_web_search_name)
+                    && declared.contains("web_search")
+                {
+                    "web_search"
+                } else {
+                    name
+                };
+                targets.push(name.to_string());
+            }
+        }
+        anyhow::ensure!(
+            !targets.is_empty() && targets.iter().all(|name| declared.contains(name)),
+            "tool_choice.allowed_tools contains an undeclared or unsupported tool: {}",
+            canonical_json_string(reference)
+        );
+        for name in targets {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    if anthropic {
+        result["tools"] = json!(
+            tools
+                .into_iter()
+                .filter(|tool| { tool_name(tool).is_some_and(|name| names.contains(&name)) })
+                .collect::<Vec<_>>()
+        );
+        result["tool_choice"] = json!({"type": if mode == "required" { "any" } else { "auto" }});
+        if let Some(parallel) = request.get("parallel_tool_calls").and_then(Value::as_bool) {
+            result["tool_choice"]["disable_parallel_tool_use"] = json!(!parallel);
+        }
+    } else {
+        let choices: Vec<_> = names
+            .into_iter()
+            .map(|name| json!({"type":"function","function":{"name":name}}))
+            .collect();
+        result["tool_choice"] = json!({
+            "type":"allowed_tools","allowed_tools":{"mode":mode,"tools":choices}
+        });
+    }
+    Ok(())
+}
+
 fn responses_tool_choice_to_chat(tool_choice: &Value, context: &CodexToolContext) -> Option<Value> {
     match tool_choice {
         Value::Object(object) if object.get("type").and_then(Value::as_str) == Some("function") => {
             if let Some(namespace) = object.get("namespace").and_then(Value::as_str) {
                 let name = object.get("name").and_then(Value::as_str).unwrap_or("");
-                let flat_name = flatten_namespace_tool_name(namespace, name);
-                if !chat_tool_choice_target_available(context, &flat_name) {
-                    return None;
-                }
+                let flat_name = context.function_choice_alias(namespace, name)?;
                 return Some(json!({
                     "type": "function",
                     "function": {
@@ -8855,10 +10318,7 @@ fn responses_tool_choice_to_chat(tool_choice: &Value, context: &CodexToolContext
             if let Some(function) = object.get("function").and_then(Value::as_object) {
                 if let Some(namespace) = function.get("namespace").and_then(Value::as_str) {
                     let name = function.get("name").and_then(Value::as_str).unwrap_or("");
-                    let flat_name = flatten_namespace_tool_name(namespace, name);
-                    if !chat_tool_choice_target_available(context, &flat_name) {
-                        return None;
-                    }
+                    let flat_name = context.function_choice_alias(namespace, name)?;
                     return Some(json!({
                         "type": "function",
                         "function": {
@@ -8872,9 +10332,7 @@ fn responses_tool_choice_to_chat(tool_choice: &Value, context: &CodexToolContext
                 .or_else(|| object.get("function").and_then(|f| f.get("name")))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if !chat_tool_choice_target_available(context, name) {
-                return None;
-            }
+            let name = context.function_choice_alias("", name)?;
             Some(json!({
                 "type": "function",
                 "function": {
@@ -8884,11 +10342,16 @@ fn responses_tool_choice_to_chat(tool_choice: &Value, context: &CodexToolContext
         }
         Value::Object(object) if object.get("type").and_then(Value::as_str) == Some("custom") => {
             let name = object.get("name").and_then(Value::as_str)?;
-            let spec = context.custom_tools.get(name)?;
+            let namespace = object
+                .get("namespace")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let flat_name = context.custom_alias(namespace, name, None)?;
+            let spec = context.custom_tools.get(flat_name)?;
             let upstream_name = if spec.kind == CodexCustomToolKind::ApplyPatch {
-                format!("{}_batch", spec.openai_name)
+                context.custom_alias(namespace, name, Some(CodexPatchProxyAction::Batch))?
             } else {
-                spec.openai_name.clone()
+                flat_name
             };
             Some(json!({
                 "type": "function",
@@ -8902,6 +10365,7 @@ fn responses_tool_choice_to_chat(tool_choice: &Value, context: &CodexToolContext
                 .is_some_and(is_proxy_internal_tool_type) =>
         {
             let name = object.get("type").and_then(Value::as_str).unwrap_or("");
+            let name = context.internal_alias(name)?;
             Some(json!({
                 "type": "function",
                 "function": { "name": name }
@@ -8909,13 +10373,6 @@ fn responses_tool_choice_to_chat(tool_choice: &Value, context: &CodexToolContext
         }
         other => Some(other.clone()),
     }
-}
-
-fn chat_tool_choice_target_available(context: &CodexToolContext, name: &str) -> bool {
-    !name.is_empty()
-        && (is_proxy_internal_tool_type(name)
-            || context.function_tools.contains_key(name)
-            || context.custom_tools.contains_key(name))
 }
 
 fn responses_tool_choice_to_anthropic(
@@ -8946,8 +10403,13 @@ fn responses_tool_choice_to_anthropic(
     }
 }
 
-fn chat_reasoning_to_response_output_item(message: &Value, response_id: &str) -> Option<Value> {
-    let reasoning = strip_inline_cite_tags(&chat_reasoning_text(message)?);
+fn chat_reasoning_to_response_output_item(
+    message: &Value,
+    response_id: &str,
+    context: &CodexToolContext,
+) -> Option<Value> {
+    let reasoning =
+        clean_inline_citations(&chat_reasoning_text(message)?, context.inline_citations);
     if reasoning.is_empty() {
         return None;
     }
@@ -8975,13 +10437,17 @@ fn chat_reasoning_text(message: &Value) -> Option<String> {
     None
 }
 
-fn chat_message_to_response_output_item(message: &Value, response_id: &str) -> Option<Value> {
+fn chat_message_to_response_output_item(
+    message: &Value,
+    response_id: &str,
+    context: &CodexToolContext,
+) -> Option<Value> {
     let mut content = Vec::new();
     if let Some(text) = message.get("content").and_then(Value::as_str) {
         let text = split_leading_think_block(text)
             .map(|(_reasoning, answer)| answer)
             .unwrap_or_else(|| text.to_string());
-        let text = strip_inline_cite_tags(&text);
+        let text = clean_inline_citations(&text, context.inline_citations);
         if !text.is_empty() {
             content.push(json!({ "type": "output_text", "text": text, "annotations": [] }));
         }
@@ -8990,7 +10456,7 @@ fn chat_message_to_response_output_item(message: &Value, response_id: &str) -> O
             match part.get("type").and_then(Value::as_str).unwrap_or("") {
                 "text" | "output_text" => {
                     if let Some(text) = part.get("text").and_then(Value::as_str) {
-                        let text = strip_inline_cite_tags(text);
+                        let text = clean_inline_citations(text, context.inline_citations);
                         if !text.is_empty() {
                             content.push(
                                 json!({ "type": "output_text", "text": text, "annotations": [] }),
@@ -9063,7 +10529,7 @@ fn chat_tool_call_to_response_item(
         .unwrap_or_else(|| format!("call_{index}"));
     let function = tool_call.get("function").unwrap_or(&Value::Null);
     let name = function.get("name").and_then(Value::as_str).unwrap_or("");
-    let arguments = responses_arguments_to_chat(function.get("arguments").unwrap_or(&json!({})));
+    let arguments = chat_response_tool_arguments(function.get("arguments"));
     response_tool_call_item(&call_id, name, &arguments, tool_context)
 }
 
@@ -9080,9 +10546,16 @@ fn chat_legacy_function_call_to_response_item(
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let arguments =
-        responses_arguments_to_chat(function_call.get("arguments").unwrap_or(&json!({})));
+    let arguments = chat_response_tool_arguments(function_call.get("arguments"));
     response_tool_call_item(call_id, name, &arguments, tool_context)
+}
+
+fn chat_response_tool_arguments(arguments: Option<&Value>) -> String {
+    match arguments {
+        // 上游输出必须与 SSE 原始参数一致；历史回放的兼容修复不能改写待执行参数。
+        Some(Value::String(text)) => text.clone(),
+        other => responses_arguments_to_chat(other.unwrap_or(&Value::Null)),
+    }
 }
 
 fn tool_call_added_item(
@@ -9090,7 +10563,7 @@ fn tool_call_added_item(
     output_index: u32,
     tool_context: &CodexToolContext,
 ) -> Value {
-    if is_codex_web_search_name(&state.name) {
+    if tool_context.is_internal_alias(&state.name, is_codex_web_search_name) {
         if let Some(fallback) = tool_context.web_search_fallback_tool() {
             let mut item = json!({
                 "type": "response.output_item.added",
@@ -9121,7 +10594,7 @@ fn tool_call_added_item(
             }
         });
     }
-    if is_codex_tool_search_name(&state.name) {
+    if tool_context.is_internal_alias(&state.name, is_codex_tool_search_name) {
         return json!({
             "type": "response.output_item.added",
             "output_index": output_index,
@@ -9136,7 +10609,7 @@ fn tool_call_added_item(
         });
     }
     if tool_context.is_custom_tool_proxy(&state.name) {
-        return json!({
+        let mut event = json!({
             "type": "response.output_item.added",
             "output_index": output_index,
             "item": {
@@ -9148,6 +10621,11 @@ fn tool_call_added_item(
                 "input": ""
             }
         });
+        let namespace = tool_context.custom_tool_namespace(&state.name);
+        if !namespace.is_empty() {
+            event["item"]["namespace"] = json!(namespace);
+        }
+        return event;
     }
     let (display_name, namespace) = tool_context.openai_name_for_function_tool(&state.name);
     let mut item = json!({
@@ -9177,14 +10655,14 @@ fn push_tool_call_delta_sse(
     tool_context: &CodexToolContext,
     next_sequence_number: &mut u64,
 ) {
-    if is_codex_tool_search_name(&state.name)
-        || (is_codex_web_search_name(&state.name)
+    if tool_context.is_internal_alias(&state.name, is_codex_tool_search_name)
+        || (tool_context.is_internal_alias(&state.name, is_codex_web_search_name)
             && tool_context.web_search_fallback_tool().is_none())
     {
         let _ = (output, output_index, delta, next_sequence_number);
         return;
     }
-    if is_codex_web_search_name(&state.name) {
+    if tool_context.is_internal_alias(&state.name, is_codex_web_search_name) {
         let _ = (output, output_index, delta, next_sequence_number);
         return;
     }
@@ -9212,11 +10690,11 @@ fn push_tool_call_done_sse(
     tool_context: &CodexToolContext,
     next_sequence_number: &mut u64,
 ) {
-    if is_codex_tool_search_name(&state.name) {
+    if tool_context.is_internal_alias(&state.name, is_codex_tool_search_name) {
         let _ = (output, output_index, tool_context, next_sequence_number);
         return;
     }
-    if is_codex_web_search_name(&state.name) {
+    if tool_context.is_internal_alias(&state.name, is_codex_web_search_name) {
         if let Some(fallback) = tool_context.web_search_fallback_tool() {
             push_sse(
                 output,
@@ -9291,17 +10769,17 @@ fn response_tool_call_item(
     arguments: &str,
     tool_context: &CodexToolContext,
 ) -> Value {
-    if is_codex_web_search_name(name) {
+    if tool_context.is_internal_alias(name, is_codex_web_search_name) {
         if let Some(fallback) = tool_context.web_search_fallback_tool() {
             return web_search_fallback_function_call_item(call_id, arguments, fallback);
         }
         return web_search_call_item(call_id, arguments);
     }
-    if is_codex_tool_search_name(name) {
+    if tool_context.is_internal_alias(name, is_codex_tool_search_name) {
         return tool_search_call_item(call_id, arguments);
     }
     if tool_context.is_custom_tool_proxy(name) {
-        return json!({
+        let mut item = json!({
             "id": tool_context.custom_tool_item_id(name, call_id),
             "type": "custom_tool_call",
             "status": "completed",
@@ -9309,6 +10787,11 @@ fn response_tool_call_item(
             "name": tool_context.original_custom_tool_name(name),
             "input": reconstruct_custom_tool_call_input_with_context(tool_context, name, arguments)
         });
+        let namespace = tool_context.custom_tool_namespace(name);
+        if !namespace.is_empty() {
+            item["namespace"] = json!(namespace);
+        }
+        return item;
     }
     let (display_name, namespace) = tool_context.openai_name_for_function_tool(name);
     let mut item = json!({
@@ -9412,6 +10895,125 @@ fn web_search_fallback_arguments(arguments: &str, fallback: &CodexWebSearchFallb
     canonical_json_string(&Value::Object(object))
 }
 
+fn anthropic_thinking_response_item(block: &Value, item_id: &str, inline_citations: bool) -> Value {
+    let raw = block["thinking"].as_str().unwrap_or("");
+    let text = clean_inline_citations(raw, inline_citations);
+    let mut item = json!({
+        "id": item_id, "type": "reasoning", "reasoning_content": text,
+        "summary": if block["type"] == "redacted_thinking" { json!([]) } else {
+            json!([{ "type": "summary_text", "text": text }])
+        }
+    });
+    if block["type"] == "redacted_thinking" || block["signature"].is_string() {
+        // 展示文本可以过滤引用标签，签名对应的原始块必须按原样回放。
+        // 这是本地版本化封装，不对上游签名或 redacted data 做解密。
+        item["encrypted_content"] = json!(format!(
+            "{ANTHROPIC_THINKING_REPLAY_PREFIX}{}",
+            canonical_json_string(block)
+        ));
+    }
+    item
+}
+
+fn is_anthropic_server_content(block: &Value) -> bool {
+    let kind = block["type"].as_str().unwrap_or("");
+    if kind == "server_tool_use" {
+        return block["id"].is_string() && block["name"].is_string() && block["input"].is_object();
+    }
+    kind.ends_with("_tool_result")
+        && block["tool_use_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("srvtoolu_"))
+        && block.get("content").is_some()
+}
+
+fn anthropic_server_content_response_item(block: &Value, item_id: &str) -> Value {
+    json!({
+        "id":item_id,"type":"reasoning","summary":[],
+        "encrypted_content":format!("{ANTHROPIC_CONTENT_REPLAY_PREFIX}{}", canonical_json_string(block))
+    })
+}
+
+fn anthropic_server_content_from_response(item: &Value) -> Option<Value> {
+    let payload = item["encrypted_content"]
+        .as_str()?
+        .strip_prefix(ANTHROPIC_CONTENT_REPLAY_PREFIX)?;
+    let block: Value = serde_json::from_str(payload).ok()?;
+    is_anthropic_server_content(&block).then_some(block)
+}
+
+fn anthropic_citation_annotations(text: &str, citations: &[Value], start: usize) -> Vec<Value> {
+    if start >= text.len() || !text.is_char_boundary(start) {
+        return Vec::new();
+    }
+    let suffix = &text[start..];
+    citations
+        .iter()
+        .filter_map(|citation| {
+            let url = citation.get("url")?.as_str()?.trim();
+            if url.is_empty() {
+                return None;
+            }
+            let quote = citation["cited_text"]
+                .as_str()
+                .filter(|text| !text.is_empty());
+            let (begin, end) = quote
+                .and_then(|quote| {
+                    suffix
+                        .find(quote)
+                        .map(|pos| (start + pos, start + pos + quote.len()))
+                })
+                .unwrap_or((start, text.len()));
+            Some(json!({
+                "type":"url_citation","url":url,
+                "title":citation["title"].as_str().unwrap_or(url),
+                "start_index":text[..begin].chars().count(),
+                "end_index":text[..end].chars().count()
+            }))
+        })
+        .collect()
+}
+
+fn anthropic_text_response_part(text: &str, block: &Value) -> Value {
+    let citations = block
+        .get("citations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut part = json!({
+        "type":"output_text","text":text,
+        "annotations":anthropic_citation_annotations(text, &citations, 0)
+    });
+    // Responses annotations 没有 encrypted_index 等原始字段。这是本转换器可识别的
+    // 回放扩展；客户端若不保留扩展，不能据此承诺跨客户端持久化。
+    if !citations.is_empty() {
+        part["anthropic_citations"] = json!(citations);
+    }
+    part
+}
+
+fn flush_anthropic_response_message(
+    output: &mut Vec<Value>,
+    content: &mut Vec<Value>,
+    response_id: &str,
+    message_count: &mut u32,
+) {
+    if content.is_empty() {
+        return;
+    }
+    let base = response_message_item_id(response_id);
+    let item_id = if *message_count == 0 {
+        base
+    } else {
+        format!("{base}_{message_count}")
+    };
+    *message_count += 1;
+    output.push(json!({
+        "id": item_id, "type": "message", "status": "completed",
+        "role": "assistant", "content": std::mem::take(content)
+    }));
+}
+
 fn anthropic_content_to_response_output_items(
     content: &Value,
     response_id: &str,
@@ -9421,55 +11023,75 @@ fn anthropic_content_to_response_output_items(
         return Vec::new();
     };
 
-    let mut reasoning_chunks = Vec::new();
+    let mut output = Vec::new();
+    let mut reasoning_count = 0;
+    let mut message_count = 0;
     let mut message_content = Vec::new();
-    let mut tool_items = Vec::new();
     let mut textual_invoke_call_index = 0;
 
     for (index, block) in blocks.iter().enumerate() {
         match block.get("type").and_then(Value::as_str).unwrap_or("") {
-            "thinking" => {
-                if let Some(text) = block.get("thinking").and_then(Value::as_str) {
-                    // 推理内容也会带引用标记，不剥离会泄露到推理详情里。
-                    let text = strip_inline_cite_tags(text);
-                    if !text.is_empty() {
-                        reasoning_chunks.push(text);
-                    }
-                }
+            "thinking" | "redacted_thinking" => {
+                flush_anthropic_response_message(
+                    &mut output,
+                    &mut message_content,
+                    response_id,
+                    &mut message_count,
+                );
+                let item_id = if reasoning_count == 0 {
+                    format!("rs_{response_id}")
+                } else {
+                    format!("rs_{response_id}_{reasoning_count}")
+                };
+                reasoning_count += 1;
+                output.push(anthropic_thinking_response_item(
+                    block,
+                    &item_id,
+                    tool_context.inline_citations,
+                ));
             }
             "text" => {
                 if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    let text = strip_inline_cite_tags(text);
-                    let text = if blocks
-                        .get(index + 1)
-                        .is_some_and(is_anthropic_native_tool_block)
+                    let text = clean_inline_citations(text, tool_context.inline_citations);
+                    let text = if tool_context.textual_tool_calls
+                        && blocks
+                            .get(index + 1)
+                            .is_some_and(is_anthropic_native_tool_block)
                     {
                         strip_trailing_anthropic_tool_boundary_marker(&text).unwrap_or(text)
                     } else {
                         text
                     };
-                    if let Some((leading, calls)) = split_text_into_message_and_tool_calls(&text) {
+                    if let Some((leading, calls)) =
+                        split_text_into_message_and_tool_calls(&text, "", tool_context)
+                    {
                         if !leading.is_empty() {
-                            message_content.push(json!({
-                                "type": "output_text",
-                                "text": leading,
-                                "annotations": []
-                            }));
+                            message_content.push(anthropic_text_response_part(&leading, block));
                         }
-                        tool_items.extend(textual_invoke_calls_to_response_items(
+                        flush_anthropic_response_message(
+                            &mut output,
+                            &mut message_content,
+                            response_id,
+                            &mut message_count,
+                        );
+                        output.extend(textual_invoke_calls_to_response_items(
                             calls,
                             tool_context,
                             response_id,
                             &mut textual_invoke_call_index,
                         ));
                     } else if !text.is_empty() {
-                        message_content.push(
-                            json!({ "type": "output_text", "text": text, "annotations": [] }),
-                        );
+                        message_content.push(anthropic_text_response_part(&text, block));
                     }
                 }
             }
-            "tool_use" | "server_tool_use" => {
+            "tool_use" => {
+                flush_anthropic_response_message(
+                    &mut output,
+                    &mut message_content,
+                    response_id,
+                    &mut message_count,
+                );
                 let call_id = block
                     .get("id")
                     .and_then(Value::as_str)
@@ -9481,39 +11103,35 @@ fn anthropic_content_to_response_output_items(
                     .get("input")
                     .map(canonical_json_string)
                     .unwrap_or_else(|| "{}".to_string());
-                tool_items.push(response_tool_call_item(
+                output.push(response_tool_call_item(
                     &call_id,
                     name,
                     &arguments,
                     tool_context,
                 ));
             }
-            // 服务端搜索结果由 Claude 自己消化并写进最终 text，不透传给客户端。
-            "web_search_tool_result" => {}
+            _ if is_anthropic_server_content(block) => {
+                flush_anthropic_response_message(
+                    &mut output,
+                    &mut message_content,
+                    response_id,
+                    &mut message_count,
+                );
+                output.push(anthropic_server_content_response_item(
+                    block,
+                    &format!("rs_{response_id}_server_{index}"),
+                ));
+            }
             _ => {}
         }
     }
 
-    let mut output = Vec::new();
-    if !reasoning_chunks.is_empty() {
-        let reasoning = reasoning_chunks.join("\n\n");
-        output.push(json!({
-            "id": format!("rs_{response_id}"),
-            "type": "reasoning",
-            "reasoning_content": reasoning,
-            "summary": [{ "type": "summary_text", "text": reasoning }]
-        }));
-    }
-    if !message_content.is_empty() {
-        output.push(json!({
-            "id": response_message_item_id(response_id),
-            "type": "message",
-            "status": "completed",
-            "role": "assistant",
-            "content": message_content
-        }));
-    }
-    output.extend(tool_items);
+    flush_anthropic_response_message(
+        &mut output,
+        &mut message_content,
+        response_id,
+        &mut message_count,
+    );
     output
 }
 
@@ -9884,6 +11502,19 @@ fn normalize_textual_invoke_arguments(
     call: &mut TextualInvokeToolCall,
     context: &CodexToolContext,
 ) {
+    if let Some(spec) = context.custom_tools.get(&call.name) {
+        let parameter = match spec.proxy_action {
+            Some(CodexPatchProxyAction::UpdateFile) => Some("hunks"),
+            Some(CodexPatchProxyAction::Batch) => Some("operations"),
+            _ => None,
+        };
+        if let Some(parameter) = parameter
+            && let Some(Value::String(raw)) = call.arguments.get(parameter)
+            && let Ok(value) = serde_json::from_str::<Value>(raw)
+        {
+            call.arguments.insert(parameter.to_string(), value);
+        }
+    }
     let Some(spec) = context.function_tools.get(&call.name) else {
         return;
     };
@@ -10023,18 +11654,49 @@ fn is_anthropic_tool_marker_line_boundary(prefix: &str) -> bool {
 /// 若起点之后无法解析为完整工具调用，则视为普通文本，返回 `None`。
 fn split_text_into_message_and_tool_calls(
     text: &str,
+    prefix: &str,
+    context: &CodexToolContext,
 ) -> Option<(String, Vec<TextualInvokeToolCall>)> {
+    if !context.textual_tool_calls {
+        return None;
+    }
     let mut search_from = 0;
     while let Some(relative_pos) = text[search_from..].find("<invoke") {
         let invoke_pos = search_from + relative_pos;
         let start = textual_invoke_region_start_before(text, invoke_pos);
-        if let Some(calls) = parse_textual_invoke_tool_calls(&text[start..]) {
+        let mut markdown = MarkdownCodeState::default();
+        markdown.feed(prefix);
+        markdown.feed(&text[..invoke_pos]);
+        if !markdown.in_code()
+            && let Some(calls) = parse_textual_invoke_tool_calls(&text[start..])
+            && calls
+                .iter()
+                .all(|call| textual_tool_call_allowed(&call.name, context))
+        {
             let leading = text[..start].trim_end();
             return Some((leading.to_string(), calls));
         }
         search_from = invoke_pos + "<invoke".len();
     }
     None
+}
+
+fn textual_tool_call_allowed(name: &str, context: &CodexToolContext) -> bool {
+    if !context.function_tools.contains_key(name) && !context.custom_tools.contains_key(name) {
+        return false;
+    }
+    let Some(choice) = context.text_tool_choice.as_ref() else {
+        return true;
+    };
+    if choice == "none" || choice.get("type").and_then(Value::as_str) == Some("none") {
+        return false;
+    }
+    if let Some(mapped) = responses_tool_choice_to_chat(choice, context)
+        && let Some(target) = mapped.pointer("/function/name").and_then(Value::as_str)
+    {
+        return target == name;
+    }
+    true
 }
 
 fn textual_invoke_region_start_before(text: &str, invoke_pos: usize) -> usize {
@@ -10147,21 +11809,77 @@ const INLINE_CITE_TAG_MAX_LEN: usize = 256;
 /// 开标签可以带任意属性（如 `<cite index="4-1">`），因此必须按标签名解析，
 /// 不能用固定字面量匹配，否则会出现「开标签残留、闭标签被删」的不对称结果。
 fn strip_inline_cite_tags(text: &str) -> String {
-    let mut normalized = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(relative) = rest.find('<') {
-        let (before, tail) = rest.split_at(relative);
-        normalized.push_str(before);
-        match inline_cite_tag_len(tail) {
-            Some(tag_len) => rest = &tail[tag_len..],
-            None => {
-                normalized.push('<');
-                rest = &tail[1..];
+    let mut filter = InlineCiteFilter::default();
+    let mut result = filter.push(text);
+    result.push_str(&filter.flush());
+    result
+}
+
+fn clean_inline_citations(text: &str, enabled: bool) -> String {
+    if enabled {
+        strip_inline_cite_tags(text)
+    } else {
+        text.to_string()
+    }
+}
+
+/// Markdown 代码区跟踪与文本工具检测共用，避免把代码里的标签解释成协议。
+#[derive(Debug)]
+struct MarkdownCodeState {
+    delimiter: Option<(char, usize, bool)>,
+    line_prefix: bool,
+}
+
+impl Default for MarkdownCodeState {
+    fn default() -> Self {
+        Self {
+            delimiter: None,
+            line_prefix: true,
+        }
+    }
+}
+
+impl MarkdownCodeState {
+    fn in_code(&self) -> bool {
+        self.delimiter.is_some()
+    }
+
+    fn mark(&mut self, ch: char, count: usize) {
+        if let Some((delimiter, width, fence)) = self.delimiter {
+            if delimiter == ch
+                && ((!fence && width == count) || (fence && self.line_prefix && count >= width))
+            {
+                self.delimiter = None;
+            }
+        } else if ch == '`' || (ch == '~' && self.line_prefix && count >= 3) {
+            self.delimiter = Some((ch, count, self.line_prefix && count >= 3));
+        }
+        self.line_prefix = false;
+    }
+
+    fn character(&mut self, ch: char) {
+        if ch == '\n' || ch == '\r' {
+            self.line_prefix = true;
+        } else if ch != ' ' && ch != '\t' {
+            self.line_prefix = false;
+        }
+    }
+
+    fn feed(&mut self, text: &str) {
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '`' || ch == '~' {
+                let mut count = 1;
+                while chars.peek() == Some(&ch) {
+                    chars.next();
+                    count += 1;
+                }
+                self.mark(ch, count);
+            } else {
+                self.character(ch);
             }
         }
     }
-    normalized.push_str(rest);
-    normalized
 }
 
 /// `text` 以 `<` 开头时，返回开头处完整 `<cite ...>` / `</cite ...>` 标签的字节长度。
@@ -10221,27 +11939,57 @@ fn inline_cite_tag_pending_suffix_len(text: &str) -> usize {
 #[derive(Debug, Default)]
 struct InlineCiteFilter {
     pending: String,
+    markdown: MarkdownCodeState,
 }
 
 impl InlineCiteFilter {
     /// 写入一段上游文本，返回可以安全透传的已去标文本。
     fn push(&mut self, text: &str) -> String {
-        if text.is_empty() {
-            return String::new();
-        }
         let mut combined = std::mem::take(&mut self.pending);
         combined.push_str(text);
-        let pending_len = inline_cite_tag_pending_suffix_len(&combined);
-        if pending_len > 0 {
-            self.pending = combined.split_off(combined.len() - pending_len);
-        }
-        strip_inline_cite_tags(&combined)
+        self.process(&combined, false)
     }
 
     /// 边界处兵底吐出残留（上游截断导致标签永远等不到 `>`），避免静默丢文本。
     fn flush(&mut self) -> String {
         let pending = std::mem::take(&mut self.pending);
-        strip_inline_cite_tags(&pending)
+        self.process(&pending, true)
+    }
+
+    fn process(&mut self, text: &str, final_chunk: bool) -> String {
+        let mut output = String::with_capacity(text.len());
+        let mut index = 0;
+        while index < text.len() {
+            let ch = text[index..].chars().next().expect("character boundary");
+            if ch == '`' || ch == '~' {
+                let count = text[index..].chars().take_while(|next| *next == ch).count();
+                let end = index + count;
+                if end == text.len() && !final_chunk {
+                    self.pending.push_str(&text[index..]);
+                    break;
+                }
+                self.markdown.mark(ch, count);
+                output.push_str(&text[index..end]);
+                index = end;
+                continue;
+            }
+            if ch == '<' && !self.markdown.in_code() {
+                if let Some(length) = inline_cite_tag_len(&text[index..]) {
+                    index += length;
+                    continue;
+                }
+                if !final_chunk
+                    && inline_cite_tag_pending_suffix_len(&text[index..]) == text.len() - index
+                {
+                    self.pending.push_str(&text[index..]);
+                    break;
+                }
+            }
+            self.markdown.character(ch);
+            output.push(ch);
+            index += ch.len_utf8();
+        }
+        output
     }
 }
 
@@ -10343,7 +12091,7 @@ fn parse_textual_invoke_parameters(
         let after_open = &rest[open_end + 1..];
         let close_start = after_open.find("</parameter>")?;
         let parameter_name = name.trim();
-        let value = xml_unescape_text(after_open[..close_start].trim());
+        let value = xml_unescape_text(&after_open[..close_start]);
         let value = if textual_invoke_parameter_is_json(tool_name, parameter_name) {
             serde_json::from_str::<Value>(&value).unwrap_or(Value::String(value))
         } else {
@@ -10523,23 +12271,46 @@ fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
     let Some(usage) = usage.filter(|value| value.is_object() && !value.is_null()) else {
         return default_responses_usage();
     };
-    let mut input_tokens = usage
+    // Chat/Responses/Gemini 的输入总数已含缓存；原生 Anthropic usage 的输入
+    // 才需要加上读写缓存。始终输出统一的 Responses 口径，避免客户端重复加减。
+    let has_claude_cache_fields = [
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "cache_creation",
+        "cache_creation_5m_input_tokens",
+        "cache_creation_1h_input_tokens",
+    ]
+    .iter()
+    .any(|key| usage.get(*key).is_some_and(|value| !value.is_null()));
+    if has_claude_cache_fields
+        && usage.get("prompt_tokens").and_then(Value::as_u64).is_none()
+        && usage
+            .get("promptTokenCount")
+            .and_then(Value::as_u64)
+            .is_none()
+        && !usage
+            .get("input_tokens_details")
+            .is_some_and(Value::is_object)
+    {
+        return anthropic_usage_to_responses_usage(Some(usage));
+    }
+    let input_tokens = usage
         .get("prompt_tokens")
         .or_else(|| usage.get("input_tokens"))
         .or_else(|| usage.get("promptTokenCount"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let mut input_tokens_include_cache = usage.get("prompt_tokens").is_some();
     let output_tokens = usage
         .get("completion_tokens")
         .or_else(|| usage.get("output_tokens"))
         .or_else(|| usage.get("candidatesTokenCount"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let mut cached_tokens = usage
+    let cached_tokens = usage
         .pointer("/prompt_tokens_details/cached_tokens")
         .or_else(|| usage.pointer("/input_tokens_details/cached_tokens"))
         .or_else(|| usage.get("cachedContentTokenCount"))
+        .or_else(|| usage.get("cache_read_input_tokens"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let cache_creation = usage
@@ -10556,77 +12327,24 @@ fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
         .or_else(|| usage.get("cache_creation_1h_input_tokens"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let has_claude_cache_fields = usage.get("cache_read_input_tokens").is_some()
-        || usage.get("cache_creation_input_tokens").is_some()
-        || usage.get("cache_creation_5m_input_tokens").is_some()
-        || usage.get("cache_creation_1h_input_tokens").is_some();
-    let has_cache_details = cached_tokens > 0
-        || usage
-            .pointer("/prompt_tokens_details/cached_tokens")
-            .is_some()
-        || usage
-            .pointer("/input_tokens_details/cached_tokens")
-            .is_some();
-
-    if let Some(value) = usage.get("input_tokens").and_then(Value::as_u64) {
-        input_tokens = value;
-        input_tokens_include_cache = false;
-    }
-    if let Some(cache_read) = usage.get("cache_read_input_tokens").and_then(Value::as_u64) {
-        cached_tokens = cache_read;
-    }
-    if let Some(prompt_tokens) = usage.get("promptTokenCount").and_then(Value::as_u64) {
-        cached_tokens = usage
-            .get("cachedContentTokenCount")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        input_tokens = prompt_tokens.saturating_sub(cached_tokens);
-        input_tokens_include_cache = false;
-    }
-
-    let usage_input_tokens = if input_tokens_include_cache {
-        input_tokens.saturating_sub(
-            cached_tokens.saturating_add(effective_cache_creation_tokens(
-                cache_creation,
-                cache_creation_5m,
-                cache_creation_1h,
-            )),
-        )
-    } else {
-        input_tokens
-    };
-    let should_recalculate_total = usage.get("total_tokens").is_none()
-        || cached_tokens > 0
-        || effective_cache_creation_tokens(cache_creation, cache_creation_5m, cache_creation_1h)
-            > 0
-        || usage.get("promptTokenCount").is_some();
-    let total_tokens = if should_recalculate_total {
-        usage_input_tokens
-            .saturating_add(output_tokens)
-            .saturating_add(cached_tokens)
-            .saturating_add(effective_cache_creation_tokens(
-                cache_creation,
-                cache_creation_5m,
-                cache_creation_1h,
-            ))
-    } else {
-        usage
-            .get("total_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or_else(|| usage_input_tokens.saturating_add(output_tokens))
-    };
+    let cache_write_tokens = usage
+        .pointer("/prompt_tokens_details/cache_write_tokens")
+        .or_else(|| usage.pointer("/input_tokens_details/cache_write_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| {
+            effective_cache_creation_tokens(cache_creation, cache_creation_5m, cache_creation_1h)
+        });
     let mut result = json!({
-        "input_tokens": usage_input_tokens,
+        "input_tokens": input_tokens,
+        "input_tokens_details": {
+            "cached_tokens": cached_tokens,
+            "cache_write_tokens": cache_write_tokens
+        },
         "output_tokens": output_tokens,
-        "total_tokens": total_tokens
+        "output_tokens_details": responses_output_tokens_details_from_usage(usage),
+        "total_tokens": input_tokens.saturating_add(output_tokens)
     });
 
-    if !has_claude_cache_fields && has_cache_details && cached_tokens > 0 {
-        result["input_tokens_details"] = json!({ "cached_tokens": cached_tokens });
-    }
-    if let Some(details) = responses_output_tokens_details_from_usage(usage) {
-        result["output_tokens_details"] = details.clone();
-    }
     if let Some(cache_read) = usage.get("cache_read_input_tokens") {
         result["cache_read_input_tokens"] = cache_read.clone();
     }
@@ -10638,6 +12356,9 @@ fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
     }
     if let Some(cache_creation) = usage.get("cache_creation_1h_input_tokens") {
         result["cache_creation_1h_input_tokens"] = cache_creation.clone();
+    }
+    if let Some(cache_creation) = usage.get("cache_creation") {
+        result["cache_creation"] = cache_creation.clone();
     }
     let cache_ttl = match (cache_creation_5m > 0, cache_creation_1h > 0) {
         (true, true) => Some("mixed"),
@@ -10695,8 +12416,7 @@ fn anthropic_usage_to_responses_usage(usage: Option<&Value>) -> Value {
             "cache_write_tokens": cache_write_tokens
         },
         "output_tokens": output_tokens,
-        "output_tokens_details": responses_output_tokens_details_from_usage(usage)
-            .unwrap_or_else(|| json!({ "reasoning_tokens": 0 })),
+        "output_tokens_details": responses_output_tokens_details_from_usage(usage),
         "total_tokens": input_tokens.saturating_add(output_tokens)
     });
 
@@ -10726,29 +12446,35 @@ fn anthropic_usage_to_responses_usage(usage: Option<&Value>) -> Value {
     result
 }
 
-fn responses_output_tokens_details_from_usage(usage: &Value) -> Option<Value> {
+fn responses_output_tokens_details_from_usage(usage: &Value) -> Value {
     let mut details = usage
         .get("completion_tokens_details")
-        .or_else(|| usage.get("output_tokens_details"))
-        .cloned();
-    let thinking_tokens = usage
-        .pointer("/output_tokens_details/thinking_tokens")
-        .or_else(|| usage.get("thinking_tokens"))
-        .cloned();
-
-    match (&mut details, thinking_tokens) {
-        (Some(Value::Object(map)), Some(tokens)) => {
-            map.entry("reasoning_tokens".to_string()).or_insert(tokens);
-        }
-        (None, Some(tokens)) => {
-            let mut map = serde_json::Map::new();
-            map.insert("thinking_tokens".to_string(), tokens.clone());
-            map.insert("reasoning_tokens".to_string(), tokens);
-            details = Some(Value::Object(map));
-        }
-        _ => {}
+        .filter(|value| value.is_object())
+        .or_else(|| {
+            usage
+                .get("output_tokens_details")
+                .filter(|value| value.is_object())
+        })
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let thinking_tokens = details
+        .get("thinking_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            usage
+                .pointer("/output_tokens_details/thinking_tokens")
+                .and_then(Value::as_u64)
+        })
+        .or_else(|| usage.get("thinking_tokens").and_then(Value::as_u64));
+    let reasoning_tokens = details
+        .get("reasoning_tokens")
+        .and_then(Value::as_u64)
+        .or(thinking_tokens)
+        .unwrap_or(0);
+    details["reasoning_tokens"] = json!(reasoning_tokens);
+    if let Some(tokens) = thinking_tokens {
+        details["thinking_tokens"] = json!(tokens);
     }
-
     details
 }
 
@@ -10764,26 +12490,40 @@ fn effective_cache_creation_tokens(
     }
 }
 
+fn mark_messages_incomplete(output: &mut [Value]) {
+    for item in output {
+        if item["type"] == "message" {
+            item["status"] = json!("incomplete");
+        }
+    }
+}
+
 fn response_status(finish_reason: Option<&str>) -> &'static str {
+    if response_incomplete_reason(finish_reason).is_some() {
+        "incomplete"
+    } else {
+        "completed"
+    }
+}
+
+fn response_incomplete_reason(finish_reason: Option<&str>) -> Option<&'static str> {
     match finish_reason {
-        Some("length") => "incomplete",
-        _ => "completed",
+        Some("length") => Some("max_output_tokens"),
+        Some("content_filter") => Some("content_filter"),
+        _ => None,
     }
 }
 
 fn anthropic_response_status(stop_reason: Option<&str>) -> &'static str {
-    match stop_reason {
-        Some("max_tokens") => "incomplete",
-        _ => "completed",
-    }
+    response_status(anthropic_stop_reason_to_chat_finish_reason(stop_reason))
 }
 
 fn anthropic_stop_reason_to_chat_finish_reason(stop_reason: Option<&str>) -> Option<&str> {
     match stop_reason {
-        Some("max_tokens") => Some("length"),
-        // pause_turn 是 server-side 工具耗时较长时的中间停止；Claude 已产出部分/完整文本，
-        // 映射为正常结束，避免非法 finish_reason 泄露给 Codex。
-        Some("end_turn") | Some("stop_sequence") | Some("pause_turn") => Some("stop"),
+        Some("max_tokens") | Some("model_context_window_exceeded") => Some("length"),
+        Some("refusal") => Some("content_filter"),
+        // pause_turn 保留到转换器终止阶段，显式报告尚不支持的服务端续传。
+        Some("end_turn") | Some("stop_sequence") => Some("stop"),
         Some("tool_use") => Some("tool_calls"),
         Some(value) => Some(value),
         None => None,
@@ -10831,13 +12571,22 @@ fn tool_search_output_text(item: &Value) -> String {
 }
 
 fn build_custom_tool_call_history(
+    tool_context: &CodexToolContext,
     name: &str,
+    namespace: &str,
     input: &Value,
     item_id: Option<&str>,
     call_id: &str,
 ) -> (String, String) {
+    let upstream_name = tool_context.upstream_custom_name(namespace, name, None);
     let input = response_output_text(input);
-    if name == "apply_patch" || input.starts_with("*** Begin Patch") {
+    let is_patch = tool_context
+        .custom_tools
+        .get(&upstream_name)
+        .map(|spec| spec.kind == CodexCustomToolKind::ApplyPatch)
+        // 兼容没有工具声明的旧 apply_patch 历史，普通 custom 不按输入正文猜类型。
+        .unwrap_or(name == "apply_patch");
+    if is_patch {
         let mut operations = parse_apply_patch_operations(&input);
         let action_hint = CodexPatchProxyAction::from_item_id(item_id, call_id);
         // 兼容旧代理的整文件替换格式。只合并同一路径的完整删除/新增对，
@@ -10861,16 +12610,16 @@ fn build_custom_tool_call_history(
                 })
                 .unwrap_or(CodexPatchProxyAction::Batch);
             return (
-                format!("{name}_{}", action.suffix()),
+                tool_context.upstream_custom_name(namespace, name, Some(action)),
                 build_apply_patch_operation_arguments(&operations[0], action),
             );
         }
         return (
-            format!("{name}_batch"),
+            tool_context.upstream_custom_name(namespace, name, Some(CodexPatchProxyAction::Batch)),
             json!({ "operations": operations, "raw_patch": input }).to_string(),
         );
     }
-    (name.to_string(), json!({ "input": input }).to_string())
+    (upstream_name, json!({ "input": input }).to_string())
 }
 
 fn reconstruct_custom_tool_call_input_with_context(
@@ -10898,16 +12647,41 @@ fn reconstruct_custom_tool_call_input(arguments: &str) -> String {
 
 fn reconstruct_apply_patch_input(action: Option<CodexPatchProxyAction>, arguments: &str) -> String {
     let Ok(value) = serde_json::from_str::<Value>(arguments) else {
-        return arguments.to_string();
+        return if action.is_some() {
+            invalid_structured_patch(
+                "structured tool arguments must be valid JSON",
+                &json!(arguments),
+            )
+        } else {
+            arguments.to_string()
+        };
     };
-    if let Some(raw_patch) = value
+    if !value.is_object() {
+        return invalid_structured_patch("structured tool arguments must be an object", &value);
+    }
+    let raw_patch = value
         .get("raw_patch")
         .or_else(|| value.get("patch"))
         .or_else(|| value.get("input"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.is_null());
+    if let Some(raw_patch) = raw_patch {
+        if action.is_some_and(|action| action != CodexPatchProxyAction::Batch) {
+            return invalid_structured_patch(
+                "raw patch fields are not allowed for single-operation tools",
+                &value,
+            );
+        }
+        if let Some(raw_patch) = raw_patch.as_str().filter(|raw| !raw.is_empty()) {
+            return raw_patch.to_string();
+        }
+        return invalid_structured_patch("raw patch must be a non-empty string", &value);
+    }
+    if matches!(
+        action,
+        Some(CodexPatchProxyAction::AddFile | CodexPatchProxyAction::ReplaceFile)
+    ) && !value.get("content").is_some_and(Value::is_string)
     {
-        return raw_patch.to_string();
+        return invalid_structured_patch("file content must be a string", &value);
     }
 
     let operations = match action.unwrap_or(CodexPatchProxyAction::Batch) {
@@ -10938,7 +12712,71 @@ fn reconstruct_apply_patch_input(action: Option<CodexPatchProxyAction>, argument
             .unwrap_or_default(),
     };
 
+    if !valid_structured_patch_operations(&operations) {
+        return invalid_structured_patch(
+            "invalid structured patch fields; paths and hunk fields must be single-line",
+            &value,
+        );
+    }
     build_apply_patch_text(&operations)
+}
+
+/// 返回明确无效的单行 JSON，交给 apply_patch 的参数验证报错。
+/// 不使用空补丁，也不回显可被当作补丁指令执行的原始换行。
+fn invalid_structured_patch(reason: &str, value: &Value) -> String {
+    json!({"error":format!("CodexElves rejected structured patch: {reason}"),"arguments":value})
+        .to_string()
+}
+
+fn valid_structured_patch_operations(operations: &[Value]) -> bool {
+    let single_line = |value: Option<&Value>, required: bool| match value {
+        Some(Value::String(text)) => {
+            (!required || !text.is_empty()) && !text.contains(['\r', '\n'])
+        }
+        None | Some(Value::Null) => !required,
+        _ => false,
+    };
+    !operations.is_empty()
+        && operations.iter().all(|operation| {
+            if !single_line(operation.get("path"), true)
+                || !single_line(operation.get("move_to"), false)
+            {
+                return false;
+            }
+            match operation.get("type").and_then(Value::as_str) {
+                Some("add_file" | "replace_file") => {
+                    operation.get("content").is_some_and(Value::is_string)
+                }
+                Some("delete_file") => true,
+                Some("update_file") => operation
+                    .get("hunks")
+                    .and_then(Value::as_array)
+                    .is_some_and(|hunks| {
+                        hunks.iter().all(|hunk| {
+                            single_line(hunk.get("context"), false)
+                                && hunk.get("lines").and_then(Value::as_array).is_some_and(
+                                    |lines| {
+                                        !lines.is_empty()
+                                            && lines.iter().all(|line| {
+                                                single_line(line.get("text"), false)
+                                                    && matches!(
+                                                        line.get("op").and_then(Value::as_str),
+                                                        Some(
+                                                            "add" | "remove" | "delete" | "context"
+                                                        )
+                                                    )
+                                            })
+                                    },
+                                )
+                        }) && (!hunks.is_empty()
+                            || operation
+                                .get("move_to")
+                                .and_then(Value::as_str)
+                                .is_some_and(|path| !path.is_empty()))
+                    }),
+                _ => false,
+            }
+        })
 }
 
 fn build_apply_patch_text(operations: &[Value]) -> String {
@@ -11121,6 +12959,9 @@ fn parse_apply_patch_operations(input: &str) -> Vec<Value> {
                     }
                 }
                 "update_file" => {
+                    if current_hunk.is_none() {
+                        current_hunk = Some(serde_json::Map::new());
+                    }
                     let (op, text) = match raw_line.chars().next() {
                         Some('+') => ("add", &raw_line[1..]),
                         Some('-') => ("remove", &raw_line[1..]),
@@ -11740,21 +13581,38 @@ fn reasoning_effort_index(effort: &str) -> Option<usize> {
         .position(|candidate| *candidate == effort)
 }
 
-fn anthropic_reasoning_compatibility_cache() -> &'static Mutex<BTreeMap<String, String>> {
-    static CACHE: OnceLock<Mutex<BTreeMap<String, String>>> = OnceLock::new();
+type AnthropicCompatibilityKey = (String, String, String);
+
+fn anthropic_reasoning_compatibility_cache()
+-> &'static Mutex<BTreeMap<AnthropicCompatibilityKey, String>> {
+    static CACHE: OnceLock<Mutex<BTreeMap<AnthropicCompatibilityKey, String>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-fn anthropic_model_cache_key(model: &str) -> String {
-    model.trim().to_ascii_lowercase()
+fn anthropic_model_cache_key(
+    relay: &crate::settings::RelayProfile,
+    model: &str,
+) -> AnthropicCompatibilityKey {
+    let endpoint = anthropic_messages_url(&relay.base_url);
+    let endpoint = reqwest::Url::parse(&endpoint)
+        .map(|url| url.to_string())
+        .unwrap_or(endpoint);
+    (
+        relay.id.clone(),
+        endpoint,
+        model.trim().to_ascii_lowercase(),
+    )
 }
 
-fn apply_cached_anthropic_reasoning_compatibility(request: &mut Value) {
+fn apply_cached_anthropic_reasoning_compatibility(
+    relay: &crate::settings::RelayProfile,
+    request: &mut Value,
+) {
     let Some(model) = request.get("model").and_then(Value::as_str) else {
         return;
     };
-    let key = anthropic_model_cache_key(model);
-    if key.is_empty() {
+    let key = anthropic_model_cache_key(relay, model);
+    if key.2.is_empty() {
         return;
     }
     let fallback = anthropic_reasoning_compatibility_cache()
@@ -11780,12 +13638,16 @@ fn apply_cached_anthropic_reasoning_compatibility(request: &mut Value) {
     }
 }
 
-fn remember_anthropic_reasoning_compatibility(request: &Value, fallback_effort: &str) {
+fn remember_anthropic_reasoning_compatibility(
+    relay: &crate::settings::RelayProfile,
+    request: &Value,
+    fallback_effort: &str,
+) {
     let Some(model) = request.get("model").and_then(Value::as_str) else {
         return;
     };
-    let key = anthropic_model_cache_key(model);
-    if key.is_empty() {
+    let key = anthropic_model_cache_key(relay, model);
+    if key.2.is_empty() {
         return;
     }
     if let Ok(mut cache) = anthropic_reasoning_compatibility_cache().lock() {
@@ -12073,6 +13935,70 @@ mod remote_compaction_v2_tests {
         should_bridge_remote_compaction_v2_after_failure,
     };
     use serde_json::{Value, json};
+
+    #[test]
+    fn native_http_and_websocket_remove_local_compatibility_and_replay_envelopes_only() {
+        let thinking = format!(
+            "{}{}",
+            super::ANTHROPIC_THINKING_REPLAY_PREFIX,
+            json!({"type":"thinking","thinking":"visible historical reasoning","signature":"anthropic-only"})
+        );
+        let server = format!(
+            "{}{}",
+            super::ANTHROPIC_CONTENT_REPLAY_PREFIX,
+            json!({"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"q"}})
+        );
+        let native = json!({"type":"reasoning","encrypted_content":"genuine-native-ciphertext","summary":[]});
+        let request = json!({
+            "model":"gpt-test","codex_elves_compat":{"textual_tool_calls":true,"inline_citations":true},
+            "input":[
+                {"role":"user","content":"test"},
+                {"type":"reasoning","encrypted_content":thinking,"summary":[]},
+                {"type":"reasoning","encrypted_content":server,"summary":[]},
+                {"type":"message","role":"assistant","content":[{
+                    "type":"output_text","text":"answer","annotations":[],
+                    "anthropic_citations":[{"encrypted_index":"local"}]
+                }]},
+                native
+            ]
+        });
+        let http = responses_upstream_request_for_protocol(
+            &request,
+            UpstreamResponseProtocol::Responses,
+            false,
+            "native-local-compat-test",
+        )
+        .unwrap();
+        let websocket = normalize_native_responses_request(&request);
+        assert_eq!(http, websocket);
+        assert!(http.get("codex_elves_compat").is_none());
+        assert_eq!(http["input"].as_array().unwrap().len(), 4);
+        assert!(
+            http["input"][1]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("visible historical reasoning")
+        );
+        assert!(
+            http["input"][2]["content"][0]
+                .get("anthropic_citations")
+                .is_none()
+        );
+        assert_eq!(http["input"][3], native);
+        assert!(!http.to_string().contains("anthropic-only"));
+        assert!(
+            !http
+                .to_string()
+                .contains(super::ANTHROPIC_CONTENT_REPLAY_PREFIX)
+        );
+        assert!(
+            normalize_native_responses_request(&json!({
+                "model":"gpt-test","input":"text","codex_elves_compat":{}
+            }))
+            .get("codex_elves_compat")
+            .is_none()
+        );
+    }
 
     #[test]
     fn v2_collaboration_native_http_and_websocket_preserve_message_encryption() {
@@ -12449,12 +14375,24 @@ mod compaction_model_override_tests {
     async fn spawn_responses_server(
         responses: Vec<(u16, Value)>,
     ) -> (String, oneshot::Receiver<Vec<Value>>) {
+        spawn_raw_compaction_server(
+            responses
+                .into_iter()
+                .map(|(status, body)| (status, "application/json", body.to_string()))
+                .collect(),
+        )
+        .await
+    }
+
+    async fn spawn_raw_compaction_server(
+        responses: Vec<(u16, &'static str, String)>,
+    ) -> (String, oneshot::Receiver<Vec<Value>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (requests_tx, requests_rx) = oneshot::channel();
         tokio::spawn(async move {
             let mut requests = Vec::new();
-            for (status, response) in responses {
+            for (status, content_type, body) in responses {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut received = Vec::new();
                 let mut chunk = [0_u8; 4096];
@@ -12490,18 +14428,17 @@ mod compaction_model_override_tests {
                     .unwrap(),
                 );
 
-                let body = serde_json::to_vec(&response).unwrap();
                 let reason = if status == 200 {
                     "OK"
                 } else {
                     "Internal Server Error"
                 };
                 let headers = format!(
-                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 socket.write_all(headers.as_bytes()).await.unwrap();
-                socket.write_all(&body).await.unwrap();
+                socket.write_all(body.as_bytes()).await.unwrap();
                 socket.shutdown().await.unwrap();
             }
             let _ = requests_tx.send(requests);
@@ -12620,6 +14557,65 @@ mod compaction_model_override_tests {
         );
     }
 
+    #[tokio::test]
+    async fn http_compaction_uses_request_model_family_when_catalog_model_is_an_alias() {
+        for (model, alias, family) in [
+            ("gpt-original", "主模型", "gpt"),
+            ("claude-original", "gpt-display-alias", "claude"),
+            ("qwen3-coder", "claude-display-alias", "other"),
+        ] {
+            let (base_url, requests_rx) = spawn_responses_server(vec![(
+                200,
+                summary_response("gpt-cheap", "<summary>alias family</summary>"),
+            )])
+            .await;
+            let mut settings = http_settings(base_url, None);
+            settings.layered_compaction_model_override_enabled = true;
+            settings.layered_compaction_model_usage = LayeredCompactionModelUsage::Default;
+            match family {
+                "gpt" => settings.layered_compaction_models.gpt = "gpt-cheap".to_string(),
+                "claude" => settings.layered_compaction_models.claude = "gpt-cheap".to_string(),
+                _ => settings.layered_compaction_models.other = "gpt-cheap".to_string(),
+            }
+            settings.relay_profiles[0].model_mappings[0].request_model = model.to_string();
+            settings.relay_profiles[0].model_mappings[0].alias = alias.to_string();
+            let mut request = http_compaction_request(&format!("http-alias-family-{family}"));
+            request["model"] = json!(alias);
+            let upstream =
+                super::open_responses_proxy_request_with_settings(&request.to_string(), settings)
+                    .await
+                    .unwrap();
+            let response: Value =
+                serde_json::from_slice(&upstream.into_body_bytes().await.unwrap()).unwrap();
+            let requests = requests_rx.await.unwrap();
+
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0]["model"], "gpt-cheap", "{model} as {alias}");
+            assert_eq!(response["model"], alias);
+        }
+    }
+
+    #[test]
+    fn compaction_override_skips_aliases_of_the_original_request_model() {
+        let settings = settings_with_models(LayeredCompactionModels {
+            gpt: "gpt-5.6".to_string(),
+            ..Default::default()
+        });
+        let mut relay = relay_with_models(&[("gpt-5.6", RelayProtocol::Responses, "372000")]);
+        relay.model_mappings[0].alias = "gpt-primary".to_string();
+        let request = compaction_request("gpt-primary", "small");
+        assert!(
+            resolve_compaction_model_override(
+                &request,
+                &request,
+                CompactionExecutionMode::LegacyLocal,
+                &settings,
+                &relay,
+            )
+            .is_none()
+        );
+    }
+
     #[test]
     fn cross_family_non_gpt_compaction_model_preserves_tools() {
         let settings = settings_with_models(LayeredCompactionModels {
@@ -12708,6 +14704,7 @@ mod compaction_model_override_tests {
             &request.to_string(),
             &request,
             crate::layered_compaction::CompactionKind::Legacy,
+            settings.active_relay_profile(),
             settings,
             &context,
             None,
@@ -12781,6 +14778,7 @@ mod compaction_model_override_tests {
             &request.to_string(),
             &request,
             crate::layered_compaction::CompactionKind::Legacy,
+            settings.active_relay_profile(),
             settings,
             &context,
             None,
@@ -12834,6 +14832,7 @@ mod compaction_model_override_tests {
             &request.to_string(),
             &request,
             crate::layered_compaction::CompactionKind::Legacy,
+            settings.active_relay_profile(),
             settings,
             &crate::request_headers::RequestContext::default(),
             None,
@@ -12879,6 +14878,7 @@ mod compaction_model_override_tests {
             &request.to_string(),
             &request,
             crate::layered_compaction::CompactionKind::Legacy,
+            settings.active_relay_profile(),
             settings,
             &crate::request_headers::RequestContext::default(),
             None,
@@ -12912,6 +14912,167 @@ mod compaction_model_override_tests {
     }
 
     #[tokio::test]
+    async fn http_independent_error_in_success_status_falls_back_to_original_model() {
+        let mut failures = Vec::new();
+        for protocol in [
+            RelayProtocol::Responses,
+            RelayProtocol::ChatCompletions,
+            RelayProtocol::Anthropic,
+        ] {
+            for stream in [false, true] {
+                let failed_response = if protocol == RelayProtocol::Responses {
+                    json!({
+                        "id": "resp_failed",
+                        "object": "response",
+                        "model": "gpt-cheap",
+                        "status": "failed",
+                        "output": [],
+                        "error": {"code": "server_error", "message": "independent model unavailable"}
+                    })
+                } else {
+                    json!({
+                        "type": "error",
+                        "error": {"type": "api_error", "message": "independent model unavailable"}
+                    })
+                };
+                let completed = summary_response("gpt-original", "<summary>fallback</summary>");
+                let (content_type, first, second) = if stream {
+                    let event = if protocol == RelayProtocol::Responses {
+                        json!({"type": "response.failed", "response": failed_response})
+                    } else {
+                        failed_response
+                    };
+                    (
+                        "text/event-stream",
+                        format!("data: {event}\n\n"),
+                        format!(
+                            "data: {}\n\n",
+                            json!({"type": "response.completed", "response": completed})
+                        ),
+                    )
+                } else {
+                    (
+                        "application/json",
+                        failed_response.to_string(),
+                        completed.to_string(),
+                    )
+                };
+                let (base_url, requests_rx) = spawn_raw_compaction_server(vec![
+                    (200, content_type, first),
+                    (200, content_type, second),
+                ])
+                .await;
+                let mut settings = http_settings(base_url, Some("gpt-cheap"));
+                settings.relay_profiles[0].model_mappings[1].protocol = protocol;
+                let mut request = http_compaction_request("http-body-error-fallback");
+                request["stream"] = json!(stream);
+                let upstream = super::open_responses_proxy_request_with_settings(
+                    &request.to_string(),
+                    settings,
+                )
+                .await
+                .unwrap();
+                let body = upstream.into_body_bytes().await.unwrap();
+                let requests = requests_rx.await.unwrap();
+                let models = requests
+                    .iter()
+                    .map(|request| request["model"].as_str().unwrap())
+                    .collect::<Vec<_>>();
+                if models != ["gpt-cheap", "gpt-original"] {
+                    failures.push(format!("{protocol:?}, stream={stream}: {models:?}"));
+                } else {
+                    assert!(String::from_utf8_lossy(&body).contains("fallback"));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "upstream errors must fall back: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn utf8_append_preserves_all_valid_split_boundaries() {
+        let input = "ASCII / 你好 / 🙂 / é / \r\n";
+        for width in 1..=input.len() {
+            let mut output = String::new();
+            let mut remainder = Vec::new();
+            for chunk in input.as_bytes().chunks(width) {
+                super::append_utf8_safe(&mut output, &mut remainder, chunk);
+                assert!(remainder.len() <= 3);
+            }
+            assert_eq!(output, input, "chunk width={width}");
+            assert!(remainder.is_empty());
+        }
+    }
+
+    #[test]
+    fn utf8_append_preserves_incomplete_bytes_and_lossy_error_behavior() {
+        let mut output = String::new();
+        let mut remainder = Vec::new();
+        super::append_utf8_safe(&mut output, &mut remainder, b"a\xe4");
+        assert_eq!(output, "a");
+        assert_eq!(remainder, b"\xe4");
+        super::append_utf8_safe(&mut output, &mut remainder, b"");
+        assert_eq!(remainder, b"\xe4");
+        super::append_utf8_safe(&mut output, &mut remainder, b"\xbd\xa0b");
+        assert_eq!(output, "a你b");
+        assert!(remainder.is_empty());
+        super::append_utf8_safe(&mut output, &mut remainder, b"\xffc");
+        assert_eq!(output, "a你b\u{fffd}c");
+        assert!(remainder.is_empty());
+        super::append_utf8_safe(&mut output, &mut remainder, b"\xf0\x9f");
+        super::append_utf8_safe(&mut output, &mut remainder, b"x");
+        assert_eq!(output, "a你b\u{fffd}c\u{fffd}x");
+        assert!(remainder.is_empty());
+    }
+
+    #[test]
+    fn compaction_upstream_errors_are_detected_without_matching_summary_text() {
+        for value in [
+            json!({"status": "failed", "error": {"message": "unavailable"}}),
+            json!({"type": "error", "error": {"type": "overloaded_error"}}),
+            json!({"error": {"message": "quota exceeded"}}),
+        ] {
+            assert!(super::compaction_body_has_upstream_error(
+                value.to_string().as_bytes(),
+                false
+            ));
+            assert!(super::compaction_body_has_upstream_error(
+                value.to_string().as_bytes(),
+                true
+            ));
+        }
+        for body in [
+            "event: error\r\ndata: {\"message\":\"unavailable\"}\r\n\r\n",
+            "data: {\"type\":\"response.failed\",\ndata: \"response\":{\"status\":\"failed\"}}\n\n",
+        ] {
+            assert!(super::compaction_body_has_upstream_error(
+                body.as_bytes(),
+                true
+            ));
+        }
+        let mut completed = summary_response(
+            "gpt-cheap",
+            "<summary>Investigate the error and response.failed event.</summary>",
+        );
+        completed["error"] = Value::Null;
+        assert!(!super::compaction_body_has_upstream_error(
+            completed.to_string().as_bytes(),
+            false
+        ));
+        let event = json!({"type": "response.completed", "response": completed});
+        assert!(!super::compaction_body_has_upstream_error(
+            format!("data: {event}\n\n").as_bytes(),
+            true
+        ));
+        assert!(!super::compaction_body_has_upstream_error(
+            br#"{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}"#,
+            false,
+        ));
+    }
+
+    #[tokio::test]
     async fn http_independent_transport_failure_falls_back_to_original_model_once() {
         let (base_url, requests_rx) = spawn_responses_server(vec![
             (
@@ -12930,6 +15091,7 @@ mod compaction_model_override_tests {
             &request.to_string(),
             &request,
             crate::layered_compaction::CompactionKind::Legacy,
+            settings.active_relay_profile(),
             settings,
             &crate::request_headers::RequestContext::default(),
             None,
@@ -12981,6 +15143,7 @@ mod compaction_model_override_tests {
             &request.to_string(),
             &request,
             crate::layered_compaction::CompactionKind::Legacy,
+            settings.active_relay_profile(),
             settings,
             &crate::request_headers::RequestContext::default(),
             None,

@@ -402,10 +402,6 @@ type SkinsResult = CommandResult<{
   activeSkinId: string;
 }>;
 
-type SkinExportResult = CommandResult<{
-  json: string;
-}>;
-
 type RelayResult = CommandResult<{
   authenticated: boolean;
   authSource: string;
@@ -527,6 +523,13 @@ type SaveWorkspaceCheckpointSettingsRequest = {
   storagePath: string;
   retentionRounds: number;
 };
+
+type WorkspaceCheckpointFormPatch = Partial<Pick<
+  BackendSettings,
+  | "codexAppWorkspaceCheckpoint"
+  | "codexAppWorkspaceCheckpointStoragePath"
+  | "codexAppWorkspaceCheckpointRetentionRounds"
+>>;
 
 type ContextEntriesResult = CommandResult<{
   settings: BackendSettings;
@@ -848,10 +851,6 @@ function syncMarketInstalledState(current: ScriptMarketResult | null, userScript
     },
   };
 }
-
-type StartupResult = CommandResult<{
-  showUpdate: boolean;
-}>;
 
 type Route = "overview" | "relay" | "localProxy" | "sessions" | "checkpoint" | "context" | "enhance" | "skins" | "userScripts" | "maintenance" | "about" | "settings";
 type Theme = "dark" | "light";
@@ -2316,7 +2315,6 @@ export function App() {
   const [notice, setNotice] = useState<{ title: string; message: string; status?: Status } | null>(null);
   const [overview, setOverview] = useState<OverviewResult | null>(null);
   const [settings, setSettings] = useState<SettingsResult | null>(null);
-  const [relay, setRelay] = useState<RelayResult | null>(null);
   const [relayFiles, setRelayFiles] = useState<RelayFilesResult | null>(null);
   const [envConflicts, setEnvConflicts] = useState<EnvConflictsResult | null>(null);
   const [ccsProviders, setCcsProviders] = useState<CcsProvidersResult | null>(null);
@@ -2338,6 +2336,7 @@ export function App() {
   const [localProxyStatus, setLocalProxyStatus] = useState<LocalProxyStatusResult | null>(null);
   const [localProxyLogs, setLocalProxyLogs] = useState<LocalProxyLogsResult | null>(null);
   const [localProxyDetail, setLocalProxyDetail] = useState<LocalProxyLogDetailResult | null>(null);
+  const localProxyLogDetailRequestRef = useRef(0);
   const [selectedLocalProxyLogId, setSelectedLocalProxyLogId] = useState<string | null>(null);
   const [loadingLocalProxyLogDetailId, setLoadingLocalProxyLogDetailId] = useState<string | null>(
     null,
@@ -2358,6 +2357,8 @@ export function App() {
   });
   const prevLaunchStatusRef = useRef<string | null>(null);
   const [settingsForm, setSettingsForm] = useState<BackendSettings>({ ...defaultSettings });
+  const settingsSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingSettingsOperationsRef = useRef(new Set<{ settings: BackendSettings }>());
   const [providerSyncProgress, setProviderSyncProgress] = useState<ProviderSyncProgress>({
     active: false,
     percent: 0,
@@ -2412,6 +2413,12 @@ export function App() {
     }
   };
 
+  const enqueueSettingsOperation = <T,>(task: () => Promise<T>): Promise<T> => {
+    const pending = settingsSaveQueueRef.current.then(task, task);
+    settingsSaveQueueRef.current = pending.then(() => {}, () => {});
+    return pending;
+  };
+
   const refreshOverview = async (silent = false) => {
     const result = await run(() => call<OverviewResult>("load_overview"));
     if (result) {
@@ -2428,19 +2435,23 @@ export function App() {
   };
 
   const refreshSettings = async (silent = false) => {
-    const result = await run(() => call<SettingsResult>("load_settings"));
-    if (result) {
-      setSettings(result);
-      const normalized = normalizeSettings(result.settings);
-      setSettingsForm(normalized);
-      setLaunchForm((current) => ({
-        ...current,
-        appPath: current.appPath || result.settings.codexAppPath || "",
-      }));
-      if (!silent) showResultNotice("设置已加载", result, { silentSuccess: true });
-      return normalized;
-    }
-    return null;
+    const requestedForm = settingsForm;
+    // 先完成已提交的保存；读取期间出现的新编辑也不能被旧快照覆盖。
+    return enqueueSettingsOperation(async () => {
+      const result = await run(() => call<SettingsResult>("load_settings"));
+      if (result) {
+        setSettings(result);
+        const normalized = normalizeSettings(result.settings);
+        setSettingsForm((current) => current === requestedForm ? normalized : current);
+        setLaunchForm((current) => ({
+          ...current,
+          appPath: current.appPath || result.settings.codexAppPath || "",
+        }));
+        if (!silent) showResultNotice("设置已加载", result, { silentSuccess: true });
+        return normalized;
+      }
+      return null;
+    });
   };
 
   const refreshScriptMarket = async (silent = false) => {
@@ -2507,7 +2518,6 @@ export function App() {
   const refreshRelay = async (silent = false) => {
     const result = await run(() => call<RelayResult>("relay_status"));
     if (result) {
-      setRelay(result);
       if (!silent) showResultNotice("登录状态", result, { silentSuccess: true });
     }
   };
@@ -2577,10 +2587,22 @@ export function App() {
     result: WorkspaceCheckpointManagementResult,
     silent = false,
     announceSuccess = false,
+    submitted?: WorkspaceCheckpointFormPatch,
   ) => {
     setWorkspaceCheckpointManagement(result);
     const normalized = normalizeSettings(result.settings);
-    setSettingsForm(normalized);
+    // 刷新/清理/删除只更新管理结果；保存也只能回填本次提交且之后未改动的字段。
+    if (submitted) {
+      setSettingsForm((current) => {
+        let next = current;
+        for (const key of Object.keys(submitted) as (keyof WorkspaceCheckpointFormPatch)[]) {
+          if (current[key] === submitted[key]) {
+            next = { ...next, [key]: normalized[key] };
+          }
+        }
+        return next;
+      });
+    }
     setSettings((current) => (current ? { ...current, settings: normalized } : current));
     if (!silent || !isSuccessStatus(result.status)) {
       showResultNotice("Checkpoint 管理", result, { silentSuccess: !announceSuccess });
@@ -2589,10 +2611,12 @@ export function App() {
   };
 
   const refreshWorkspaceCheckpointManagement = async (silent = false) => {
-    const result = await run(() =>
-      call<WorkspaceCheckpointManagementResult>("load_workspace_checkpoint_management"),
-    );
-    return result ? applyWorkspaceCheckpointManagement(result, silent) : null;
+    return enqueueSettingsOperation(async () => {
+      const result = await run(() =>
+        call<WorkspaceCheckpointManagementResult>("load_workspace_checkpoint_management"),
+      );
+      return result ? applyWorkspaceCheckpointManagement(result, silent) : null;
+    });
   };
 
   const chooseWorkspaceCheckpointStoragePath = async () => {
@@ -2619,20 +2643,25 @@ export function App() {
   ) => {
     if (workspaceCheckpointBusy) return;
     setWorkspaceCheckpointBusy("save");
+    const submitted = {
+      codexAppWorkspaceCheckpointStoragePath:
+        request?.storagePath ?? settingsForm.codexAppWorkspaceCheckpointStoragePath,
+      codexAppWorkspaceCheckpointRetentionRounds:
+        request?.retentionRounds ?? settingsForm.codexAppWorkspaceCheckpointRetentionRounds,
+    };
+    setSettingsForm((current) => ({ ...current, ...submitted }));
     try {
-      const result = await run(() =>
-        call<WorkspaceCheckpointManagementResult>("save_workspace_checkpoint_settings", {
-          request: {
-            storagePath:
-              request?.storagePath ??
-              settingsForm.codexAppWorkspaceCheckpointStoragePath,
-            retentionRounds:
-              request?.retentionRounds ??
-              settingsForm.codexAppWorkspaceCheckpointRetentionRounds,
-          },
-        }),
-      );
-      if (result) applyWorkspaceCheckpointManagement(result);
+      await enqueueSettingsOperation(async () => {
+        const result = await run(() =>
+          call<WorkspaceCheckpointManagementResult>("save_workspace_checkpoint_settings", {
+            request: {
+              storagePath: submitted.codexAppWorkspaceCheckpointStoragePath,
+              retentionRounds: submitted.codexAppWorkspaceCheckpointRetentionRounds,
+            },
+          }),
+        );
+        if (result) applyWorkspaceCheckpointManagement(result, false, false, submitted);
+      });
     } finally {
       setWorkspaceCheckpointBusy(null);
     }
@@ -2641,26 +2670,27 @@ export function App() {
   const setWorkspaceCheckpointEnabled = async (enabled: boolean) => {
     if (workspaceCheckpointBusy) return;
     setWorkspaceCheckpointBusy("toggle");
+    const previousEnabled = settingsForm.codexAppWorkspaceCheckpoint;
+    const submitted = { codexAppWorkspaceCheckpoint: enabled };
+    setSettingsForm((current) => ({ ...current, ...submitted }));
     try {
-      const result = await run(() =>
-        call<WorkspaceCheckpointManagementResult>(
-          "set_workspace_checkpoint_enabled",
-          { enabled },
-        ),
-      );
-      if (result) {
-        setWorkspaceCheckpointManagement(result);
-        const normalized = normalizeSettings(result.settings);
-        setSettingsForm((current) => ({
-          ...current,
-          codexAppWorkspaceCheckpoint:
-            normalized.codexAppWorkspaceCheckpoint,
-        }));
-        setSettings((current) =>
-          current ? { ...current, settings: normalized } : current,
+      await enqueueSettingsOperation(async () => {
+        const result = await run(() =>
+          call<WorkspaceCheckpointManagementResult>(
+            "set_workspace_checkpoint_enabled",
+            { enabled },
+          ),
         );
-        showResultNotice("Checkpoint 开关", result);
-      }
+        if (result) {
+          applyWorkspaceCheckpointManagement(result, false, true, submitted);
+        } else {
+          setSettingsForm((current) =>
+            current.codexAppWorkspaceCheckpoint === enabled
+              ? { ...current, codexAppWorkspaceCheckpoint: previousEnabled }
+              : current,
+          );
+        }
+      });
     } finally {
       setWorkspaceCheckpointBusy(null);
     }
@@ -2670,10 +2700,12 @@ export function App() {
     if (workspaceCheckpointBusy) return;
     setWorkspaceCheckpointBusy("cleanup");
     try {
-      const result = await run(() =>
-        call<WorkspaceCheckpointManagementResult>("cleanup_workspace_checkpoint_storage"),
-      );
-      if (result) applyWorkspaceCheckpointManagement(result, false, true);
+      await enqueueSettingsOperation(async () => {
+        const result = await run(() =>
+          call<WorkspaceCheckpointManagementResult>("cleanup_workspace_checkpoint_storage"),
+        );
+        if (result) applyWorkspaceCheckpointManagement(result, false, true);
+      });
     } finally {
       setWorkspaceCheckpointBusy(null);
     }
@@ -2685,12 +2717,14 @@ export function App() {
     if (workspaceCheckpointBusy) return;
     setWorkspaceCheckpointBusy("delete");
     try {
-      const result = await run(() =>
-        call<WorkspaceCheckpointManagementResult>("delete_workspace_checkpoint_data", {
-          request,
-        }),
-      );
-      if (result) applyWorkspaceCheckpointManagement(result, false, true);
+      await enqueueSettingsOperation(async () => {
+        const result = await run(() =>
+          call<WorkspaceCheckpointManagementResult>("delete_workspace_checkpoint_data", {
+            request,
+          }),
+        );
+        if (result) applyWorkspaceCheckpointManagement(result, false, true);
+      });
     } finally {
       setWorkspaceCheckpointBusy(null);
     }
@@ -2772,7 +2806,7 @@ export function App() {
   const refreshLiveContextEntries = async (silent = false) => {
     const result = await run(() => call<LiveContextEntriesResult>("read_live_context_entries"));
     if (result) {
-      setLiveContextEntries(result.entries);
+      if (isSuccessStatus(result.status)) setLiveContextEntries(result.entries);
       if (!silent || !isSuccessStatus(result.status)) showResultNotice("工具与插件", result, { silentSuccess: true });
     }
     return result;
@@ -2781,7 +2815,7 @@ export function App() {
   const refreshPluginCacheInfos = async (silent = false) => {
     const result = await run(() => call<PluginCacheInfosResult>("read_plugin_cache_infos"));
     if (result) {
-      setPluginCacheInfos(result.plugins);
+      if (isSuccessStatus(result.status)) setPluginCacheInfos(result.plugins);
       if (!silent || !isSuccessStatus(result.status)) showResultNotice("插件缓存", result, { silentSuccess: true });
     }
     return result;
@@ -2830,7 +2864,7 @@ export function App() {
   const syncLiveContextEntries = async (next: BackendSettings, silent: boolean, target: ContextSyncTarget) => {
     const result = await run(() => call<LiveContextEntriesResult>("sync_live_context_entries", { request: { settings: next, target } }));
     if (result) {
-      setLiveContextEntries(result.entries);
+      if (isSuccessStatus(result.status)) setLiveContextEntries(result.entries);
       if (!silent || !isSuccessStatus(result.status)) showResultNotice("工具与插件", result, { silentSuccess: true });
     }
     return result;
@@ -2865,6 +2899,7 @@ export function App() {
   };
 
   const loadLocalProxyLogDetail = async (id: string) => {
+    const requestId = ++localProxyLogDetailRequestRef.current;
     setSelectedLocalProxyLogId(id);
     setLocalProxyDetail(null);
     setLoadingLocalProxyLogDetailId(id);
@@ -2872,16 +2907,19 @@ export function App() {
       const result = await run(() =>
         call<LocalProxyLogDetailResult>("read_local_proxy_log_detail", { request: { id } }),
       );
-      if (result) {
+      if (result && requestId === localProxyLogDetailRequestRef.current) {
         setLocalProxyDetail(result);
         if (!result.entry) showResultNotice("本地代理日志", result);
       }
     } finally {
-      setLoadingLocalProxyLogDetailId((current) => (current === id ? null : current));
+      if (requestId === localProxyLogDetailRequestRef.current) {
+        setLoadingLocalProxyLogDetailId(null);
+      }
     }
   };
 
   const closeLocalProxyLogDetail = () => {
+    localProxyLogDetailRequestRef.current += 1;
     setLocalProxyDetail(null);
     setSelectedLocalProxyLogId(null);
     setLoadingLocalProxyLogDetailId(null);
@@ -2891,11 +2929,11 @@ export function App() {
     if (!window.confirm("清空本地代理请求日志？完整请求和返回内容都会被删除。")) return;
     const result = await run(() => call<LocalProxyLogsResult>("clear_local_proxy_logs"));
     if (result) {
-      setLocalProxyLogs(result);
-      setLocalProxyDetail(null);
-      setSelectedLocalProxyLogId(null);
-      setLoadingLocalProxyLogDetailId(null);
-      await refreshLocalProxyStatus(true);
+      if (isSuccessStatus(result.status)) {
+        setLocalProxyLogs(result);
+        closeLocalProxyLogDetail();
+        await refreshLocalProxyStatus(true);
+      }
       showResultNotice("本地代理日志", result);
     }
   };
@@ -3240,40 +3278,60 @@ export function App() {
   };
 
   const saveSettings = async () => {
-    const next = normalizeSettings(settingsForm);
-    const result = await run(() => call<SettingsResult>("save_settings", { settings: next }));
-    if (result) {
-      setSettings(result);
-      setSettingsForm(normalizeSettings(result.settings));
+    await saveSettingsValue(settingsForm, false);
+  };
+
+  const persistSettings = async (
+    next: BackendSettings,
+    command: "save_settings" | "reset_settings" | "reset_image_overlay_settings" | "activate_skin" = "save_settings",
+    args?: Record<string, unknown>,
+  ) => {
+    const pending = { settings: normalizeSettings(next) };
+    pendingSettingsOperationsRef.current.add(pending);
+    setSettingsForm(pending.settings);
+    const persist = async () => {
+      const submitted = pending.settings;
+      try {
+        const result = await run(() =>
+          call<SettingsResult>(command, command === "save_settings" ? { settings: submitted } : args),
+        );
+        if (result && isSuccessStatus(result.status)) {
+          const saved = normalizeSettings(result.settings);
+          setSettings(result);
+          // 重置、皮肤切换及服务端归一化也要合入排队快照，避免后续保存写回旧值。
+          for (const queued of pendingSettingsOperationsRef.current) {
+            if (queued !== pending) {
+              queued.settings = normalizeSettings(rebaseSettingsAfterSave(queued.settings, submitted, saved));
+            }
+          }
+          setSettingsForm((current) => rebaseSettingsAfterSave(current, submitted, saved));
+        }
+        return result;
+      } finally {
+        pendingSettingsOperationsRef.current.delete(pending);
+      }
+    };
+    // 自动保存、手动保存、路径/模式切换和重置共享顺序，避免旧请求覆盖后续操作。
+    return enqueueSettingsOperation(persist);
+  };
+
+  const saveSettingsValue = async (next: BackendSettings, silent = true) => {
+    const result = await persistSettings(next);
+    if (result && (!silent || !isSuccessStatus(result.status))) {
       showNotice("设置保存", result.message, result.status);
     }
   };
 
-  const saveSettingsValue = async (next: BackendSettings, silent = true) => {
-    const normalized = normalizeSettings(next);
-    setSettingsForm(normalized);
-    const result = await run(() => call<SettingsResult>("save_settings", { settings: normalized }));
-    if (result) {
-      setSettings(result);
-      setSettingsForm(normalizeSettings(result.settings));
-      if (!silent || !isSuccessStatus(result.status)) showNotice("设置保存", result.message, result.status);
-    }
-  };
-
   const resetSettings = async () => {
-    const result = await run(() => call<SettingsResult>("reset_settings"));
+    const result = await persistSettings(settingsForm, "reset_settings");
     if (result) {
-      setSettings(result);
-      setSettingsForm(normalizeSettings(result.settings));
       showNotice("设置重置", result.message, result.status);
     }
   };
 
   const resetImageOverlaySettings = async () => {
-    const result = await run(() => call<SettingsResult>("reset_image_overlay_settings"));
+    const result = await persistSettings(settingsForm, "reset_image_overlay_settings");
     if (result) {
-      setSettings(result);
-      setSettingsForm(normalizeSettings(result.settings));
       showNotice("图片覆盖层", result.message, result.status);
     }
   };
@@ -3307,10 +3365,8 @@ export function App() {
   };
 
   const activateSkin = async (id: string) => {
-    const result = await run(() => call<SettingsResult>("activate_skin", { id }));
+    const result = await persistSettings(settingsForm, "activate_skin", { id });
     if (result) {
-      setSettings(result);
-      setSettingsForm(normalizeSettings(result.settings));
       showNotice("皮肤管理", result.message, result.status);
       void refreshSkins(true);
     }
@@ -3474,10 +3530,8 @@ export function App() {
   };
 
   const applyRelayInjection = async (silent = false) => {
-    const settingsResult = await run(() => call<SettingsResult>("save_settings", { settings: settingsForm }));
+    const settingsResult = await persistSettings(settingsForm);
     if (settingsResult) {
-      setSettings(settingsResult);
-      setSettingsForm(normalizeSettings(settingsResult.settings));
       if (!isSuccessStatus(settingsResult.status)) {
         showNotice("设置保存", settingsResult.message, settingsResult.status);
         return false;
@@ -3487,7 +3541,6 @@ export function App() {
     }
     const result = await run(() => call<RelayResult>("apply_relay_injection"));
     if (result) {
-      setRelay(result);
       await refreshRelayFiles(true);
       if (!silent || !isSuccessStatus(result.status)) showNotice("官方混入 API Key", result.message, result.status);
     }
@@ -3496,21 +3549,16 @@ export function App() {
 
   const saveLaunchMode = async (launchMode: LaunchMode, silent = false, baseSettings: BackendSettings = settingsForm) => {
     const next = { ...baseSettings, launchMode };
-    setSettingsForm(next);
-    const result = await run(() => call<SettingsResult>("save_settings", { settings: next }));
+    const result = await persistSettings(next);
     if (result) {
-      setSettings(result);
-      setSettingsForm(normalizeSettings(result.settings));
       if (!silent) showNotice("功能增强模式", result.message, result.status);
     }
     return result;
   };
 
   const applyPureApiInjection = async (silent = false) => {
-    const settingsResult = await run(() => call<SettingsResult>("save_settings", { settings: settingsForm }));
+    const settingsResult = await persistSettings(settingsForm);
     if (settingsResult) {
-      setSettings(settingsResult);
-      setSettingsForm(normalizeSettings(settingsResult.settings));
       if (!isSuccessStatus(settingsResult.status)) {
         showNotice("设置保存", settingsResult.message, settingsResult.status);
         return false;
@@ -3520,7 +3568,6 @@ export function App() {
     }
     const result = await run(() => call<RelayResult>("apply_pure_api_injection"));
     if (result) {
-      setRelay(result);
       await refreshRelayFiles(true);
       if (!silent || !isSuccessStatus(result.status)) showNotice("纯 API 模式", result.message, result.status);
     }
@@ -3530,7 +3577,6 @@ export function App() {
   const clearRelayInjection = async (silent = false) => {
     const result = await run(() => call<RelayResult>("clear_relay_injection"));
     if (result) {
-      setRelay(result);
       await refreshRelayFiles(true);
       if (!silent || !isSuccessStatus(result.status)) showNotice("官方登录模式", result.message, result.status);
     }
@@ -3555,15 +3601,17 @@ export function App() {
       }),
     );
     if (!result) return null;
-    let normalized = normalizeSettings(result.settings);
-    const saveResult = await run(() => call<SettingsResult>("save_settings", { settings: normalized }));
-    if (saveResult) {
-      setSettings(saveResult);
-      normalized = normalizeSettings(saveResult.settings);
+    if (!isSuccessStatus(result.status)) {
+      showResultNotice("工具与插件", result);
+      return null;
     }
-    setSettingsForm(normalized);
-    if (!isSuccessStatus(result.status)) showResultNotice("工具与插件", result);
-    return normalized;
+    const saveResult = await persistSettings(normalizeSettings(result.settings));
+    if (!saveResult) return null;
+    if (!isSuccessStatus(saveResult.status)) {
+      showResultNotice("工具与插件", saveResult);
+      return null;
+    }
+    return normalizeSettings(saveResult.settings);
   };
 
   const deleteContextEntry = async (next: BackendSettings, kind: ContextKind, id: string) => {
@@ -3573,15 +3621,17 @@ export function App() {
       }),
     );
     if (!result) return null;
-    let normalized = normalizeSettings(result.settings);
-    const saveResult = await run(() => call<SettingsResult>("save_settings", { settings: normalized }));
-    if (saveResult) {
-      setSettings(saveResult);
-      normalized = normalizeSettings(saveResult.settings);
+    if (!isSuccessStatus(result.status)) {
+      showResultNotice("工具与插件", result);
+      return null;
     }
-    setSettingsForm(normalized);
-    if (!isSuccessStatus(result.status)) showResultNotice("工具与插件", result);
-    return normalized;
+    const saveResult = await persistSettings(normalizeSettings(result.settings));
+    if (!saveResult) return null;
+    if (!isSuccessStatus(saveResult.status)) {
+      showResultNotice("工具与插件", saveResult);
+      return null;
+    }
+    return normalizeSettings(saveResult.settings);
   };
 
   const testRelayProfile = async (profile: RelayProfile, model?: string) => {
@@ -3681,11 +3731,6 @@ export function App() {
         layered_compaction_default_prompt: settings?.layered_compaction_default_prompt ?? "",
       });
       setSettingsForm(selectedSettings);
-      setRelay({
-        status: result.status,
-        message: result.message,
-        ...result.relay,
-      });
       await refreshRelayFiles(true);
       if (!isSuccessStatus(result.status)) {
         logDiagnostic("switchRelayProfile.apply_failed", {
@@ -3843,11 +3888,9 @@ export function App() {
 
   const saveCodexAppPath = async (appPath: string) => {
     const next = { ...settingsForm, codexAppPath: appPath };
-    const result = await run(() => call<SettingsResult>("save_settings", { settings: next }));
+    const result = await persistSettings(next);
     if (result) {
-      setSettings(result);
       const normalized = normalizeSettings(result.settings);
-      setSettingsForm(normalized);
       setLaunchForm((current) => ({ ...current, appPath: normalized.codexAppPath }));
       await refreshOverview(true);
     }
@@ -3856,10 +3899,8 @@ export function App() {
 
   const saveCodexHomePath = async (codexHomePath: string) => {
     const next = { ...settingsForm, codexHomePath };
-    const result = await run(() => call<SettingsResult>("save_settings", { settings: next }));
+    const result = await persistSettings(next);
     if (result) {
-      setSettings(result);
-      setSettingsForm(normalizeSettings(result.settings));
       await Promise.all([
         refreshRelay(true),
         refreshRelayFiles(true),
@@ -3965,14 +4006,9 @@ export function App() {
         }
       },
       clearCodexAppPath: async () => {
-        const next = { ...settingsForm, codexAppPath: "" };
-        const result = await run(() => call<SettingsResult>("save_settings", { settings: next }));
+        const result = await saveCodexAppPath("");
         if (result) {
-          setSettings(result);
-          setSettingsForm(normalizeSettings(result.settings));
-          setLaunchForm((current) => ({ ...current, appPath: "" }));
           showNotice("ChatGPT/Codex 应用路径", "已清除保存路径，后续启动会回到自动探测。", result.status);
-          await refreshOverview(true);
         }
       },
       chooseCodexHomePath: async () => {
@@ -4045,7 +4081,6 @@ export function App() {
       setLaunchMode: async (launchMode: LaunchMode) => {
         await saveLaunchMode(launchMode);
       },
-      refreshRelay,
       refreshRelayFiles,
       refreshEnvConflicts,
       removeEnvConflicts,
@@ -4268,7 +4303,6 @@ export function App() {
               liveEntries={liveContextEntries}
               pluginCacheInfos={pluginCacheInfos}
               remoteContextOptions={remoteContextOptions}
-              relayFiles={relayFiles}
               onFormChange={setSettingsForm}
               actions={actions}
             />
@@ -4403,7 +4437,6 @@ type Actions = {
   refreshProviderSyncTargets: (silent?: boolean) => Promise<ProviderSyncTargetsResult | null>;
   setProviderSyncTarget: (provider: string) => void;
   setLaunchMode: (launchMode: LaunchMode) => Promise<void>;
-  refreshRelay: () => Promise<void>;
   refreshRelayFiles: () => Promise<RelayFilesResult | null>;
   refreshEnvConflicts: (silent?: boolean) => Promise<EnvConflictsResult | null>;
   removeEnvConflicts: (names: string[]) => Promise<void>;
@@ -7689,11 +7722,10 @@ function RelayProfileList({
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
       <SortableContext items={form.relayProfiles.map((profile) => profile.id)} strategy={verticalListSortingStrategy}>
         <div className="relay-profile-list">
-          {form.relayProfiles.map((profile, index) => (
+          {form.relayProfiles.map((profile) => (
             <SortableRelayProfileCard
               actions={actions}
               form={form}
-              index={index}
               key={profile.id}
               onEdit={onEdit}
               onFormChange={onFormChange}
@@ -7711,7 +7743,6 @@ function RelayProfileList({
 function SortableRelayProfileCard({
   form,
   profile,
-  index,
   onFormChange,
   onEdit,
   onTest,
@@ -7720,7 +7751,6 @@ function SortableRelayProfileCard({
 }: {
   form: BackendSettings;
   profile: RelayProfile;
-  index: number;
   onFormChange: (value: BackendSettings) => void;
   onEdit: (id: string) => void;
   onTest: (id: string) => void;
@@ -7963,7 +7993,6 @@ function ContextScreen({
   liveEntries,
   pluginCacheInfos,
   remoteContextOptions,
-  relayFiles,
   onFormChange,
   actions,
 }: {
@@ -7971,7 +8000,6 @@ function ContextScreen({
   liveEntries: CodexContextEntries | null;
   pluginCacheInfos: PluginCacheInfo[];
   remoteContextOptions: RemoteContextOption[];
-  relayFiles: RelayFilesResult | null;
   onFormChange: (value: BackendSettings) => void;
   actions: Actions;
 }) {
@@ -7983,7 +8011,6 @@ function ContextScreen({
           liveEntries={liveEntries}
           pluginCacheInfos={pluginCacheInfos}
           remoteContextOptions={remoteContextOptions}
-          relayFiles={relayFiles}
           onFormChange={onFormChange}
           actions={actions}
         />
@@ -9876,7 +9903,6 @@ function RelayContextManager({
   liveEntries,
   pluginCacheInfos,
   remoteContextOptions,
-  relayFiles,
   onFormChange,
   actions,
 }: {
@@ -9884,7 +9910,6 @@ function RelayContextManager({
   liveEntries: CodexContextEntries | null;
   pluginCacheInfos: PluginCacheInfo[];
   remoteContextOptions: RemoteContextOption[];
-  relayFiles: RelayFilesResult | null;
   onFormChange: (value: BackendSettings) => void;
   actions: Actions;
 }) {
@@ -9902,8 +9927,8 @@ function RelayContextManager({
     const syncResult = await actions.syncLiveContextEntries(next, true, { kind, id });
     if (syncResult && isSuccessStatus(syncResult.status)) {
       void actions.refreshRelayFiles();
+      setEditor(null);
     }
-    setEditor(null);
   };
 
   const toggleContextEntryEnabled = async (entry: CodexContextEntry) => {
@@ -10731,18 +10756,6 @@ function ModeSelector({ launchMode, actions }: { launchMode: LaunchMode; actions
   );
 }
 
-function FeatureItem({ title, detail, enabled }: { title: string; detail: string; enabled: boolean }) {
-  return (
-    <div className="feature-item">
-      <div>
-        <strong>{title}</strong>
-        <span>{detail}</span>
-      </div>
-      <Badge status={enabled ? "ok" : "disabled"} />
-    </div>
-  );
-}
-
 function FeatureToggle({
   title,
   detail,
@@ -10786,19 +10799,6 @@ function formatBytes(bytes: number) {
 
 function formatOptionalBytes(bytes?: number | null) {
   return typeof bytes === "number" ? formatBytes(bytes) : "-";
-}
-
-function GuideList({ items }: { items: string[] }) {
-  return (
-    <div className="guide-list">
-      {items.map((item, index) => (
-        <div className="guide-step" key={item}>
-          <span>{index + 1}</span>
-          <p>{item}</p>
-        </div>
-      ))}
-    </div>
-  );
 }
 
 function UpdatePromptDialog({
@@ -11263,18 +11263,6 @@ function contextEntriesFromConfig(configContents: string): CodexContextEntries {
   };
 }
 
-function mergeContextEntries(primary: CodexContextEntries, secondary: CodexContextEntries): CodexContextEntries {
-  return {
-    mcpServers: mergeContextEntryList(primary.mcpServers, secondary.mcpServers),
-    skills: mergeContextEntryList(primary.skills, secondary.skills),
-    plugins: mergeContextEntryList(primary.plugins, secondary.plugins),
-  };
-}
-
-function mergeContextEntryList(primary: CodexContextEntry[], secondary: CodexContextEntry[]): CodexContextEntry[] {
-  return dedupeContextEntryList([...primary, ...secondary]);
-}
-
 function dedupeContextEntryList(entries: CodexContextEntry[]): CodexContextEntry[] {
   const byId = new Map<string, CodexContextEntry>();
   for (const entry of entries) {
@@ -11416,13 +11404,6 @@ function ensureTrailingNewline(value: string) {
   return value.trim() ? `${value}\n` : "";
 }
 
-function unquoteTomlKey(key: string) {
-  if (key.length >= 2 && ((key.startsWith('"') && key.endsWith('"')) || (key.startsWith("'") && key.endsWith("'")))) {
-    return key.slice(1, -1);
-  }
-  return key;
-}
-
 function contextEntriesByKind(entries: CodexContextEntries, kind: ContextKind): CodexContextEntry[] {
   if (kind === "mcp") return dedupeContextEntryList(entries.mcpServers);
   if (kind === "skill") return dedupeContextEntryList(entries.skills);
@@ -11504,23 +11485,6 @@ function upsertPluginCacheInfo(items: PluginCacheInfo[], next: PluginCacheInfo) 
 
 function findContextEntry(entries: CodexContextEntries, kind: ContextKind, id: string): CodexContextEntry | undefined {
   return contextEntriesByKind(entries, kind).find((entry) => entry.id === id);
-}
-
-function filterContextEntriesBySelection(entries: CodexContextEntries, selection: RelayContextSelection): CodexContextEntries {
-  const selected = {
-    mcp: new Set(selection.mcpServers.map((id) => id.trim()).filter(Boolean)),
-    skill: new Set(selection.skills.map((id) => id.trim()).filter(Boolean)),
-    plugin: new Set(selection.plugins.map((id) => id.trim()).filter(Boolean)),
-  };
-  return {
-    mcpServers: entries.mcpServers.filter((entry) => selected.mcp.has(entry.id)),
-    skills: entries.skills.filter((entry) => selected.skill.has(entry.id)),
-    plugins: entries.plugins.filter((entry) => selected.plugin.has(entry.id)),
-  };
-}
-
-function relayCombinedCommonConfig(settings: BackendSettings): string {
-  return joinTomlSectionsRootFirst([settings.relayCommonConfigContents || "", settings.relayContextConfigContents || ""]);
 }
 
 function splitContextConfigText(configContents: string): { common: string; context: string } {
@@ -12097,6 +12061,21 @@ function healthItems(overview: OverviewResult | null) {
   ];
 }
 
+function rebaseSettingsAfterSave(
+  current: BackendSettings,
+  submitted: BackendSettings,
+  saved: BackendSettings,
+): BackendSettings {
+  const next = { ...current };
+  for (const key of Object.keys(saved) as (keyof BackendSettings)[]) {
+    // 只回填提交后未改动的字段；数组作为整体，保留用户后续的模型或供应商编辑。
+    if (JSON.stringify(current[key]) === JSON.stringify(submitted[key])) {
+      Object.assign(next, { [key]: saved[key] });
+    }
+  }
+  return next;
+}
+
 function normalizeSettings(settings: BackendSettings): BackendSettings {
   const backendAggregates = new Map(
     (settings.aggregateRelayProfiles ?? []).map((aggregate) => [aggregate.id, aggregate] as const),
@@ -12637,29 +12616,6 @@ function relayProfileModeHelp(profile: RelayProfile): string {
     return "此供应商会同时写入 config.toml 和 auth.json；API Key 也会注入到 provider bearer token。";
   }
   return "此供应商会保留官方登录模式，并把请求混入当前 API Key；功能增强仍使用兼容模式。";
-}
-
-function relayProfileReadinessText(profile: RelayProfile, relay: RelayResult | null): string {
-  if (isAggregateRelayProfile(profile)) {
-    const aggregate = normalizeAggregateConfig(profile.aggregate, []);
-    return `聚合供应商已配置为${aggregateStrategyLabel(aggregate.strategy)}，包含 ${aggregate.members.length} 个成员；真实对话会走本地代理轮转。`;
-  }
-  if (profile.relayMode === "official") {
-    if (profile.officialMixApiKey) {
-      const hasApiFields = profile.baseUrl.trim() && profile.apiKey.trim();
-      if (!relay?.authenticated && !hasApiFields) return "当前未登录官方账号，也未配置混入 API 的 Base URL / Key。";
-      if (!relay?.authenticated) return "当前未登录官方账号；官方登录混入 API Key 需要先登录官方账号。";
-      if (!hasApiFields) return "当前还没有填写混入 API 的 Base URL / Key。";
-      return `官方登录已就绪：${relay.accountLabel || "已登录"}，会混入当前 API Key。`;
-    }
-    return relay?.authenticated
-      ? `官方账号已登录：${relay.accountLabel || relay.authSource || "已检测"}。`
-      : "当前未登录官方账号；切到官方登录模式后仍需要先在 Codex/ChatGPT 登录。";
-  }
-  const hasApiFields = relayProfileHasBaseUrl(profile) && relayProfileHasApiKey(profile);
-  if (!hasApiFields) return "当前供应商还没有填写 Base URL / API Key。";
-  if (relay && !relay.configured) return "纯 API 配置未完整写入：请检查此供应商是否有 OPENAI_API_KEY，且 config.toml 是否包含 model_provider / provider / base_url。";
-  return "纯 API 就绪：会同时写入 config.toml 和 auth.json。";
 }
 
 function relayProfileSwitchCommand(profile: RelayProfile): "clear_relay_injection" | "apply_relay_injection" | "apply_pure_api_injection" {
@@ -13634,23 +13590,6 @@ function formatRequestLogListTime(value: number) {
     second: "2-digit",
     hour12: false,
   });
-}
-
-function formatCompactNumber(value: number) {
-  if (!value) return "-";
-  return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(value);
-}
-
-function formatDuration(startedAtMs: number): string {
-  if (!startedAtMs) return "-";
-  const elapsed = Date.now() - startedAtMs;
-  if (elapsed < 0) return formatTime(startedAtMs);
-  const mins = Math.floor(elapsed / 60000);
-  if (mins < 1) return "刚刚启动";
-  if (mins < 60) return `已运行 ${mins} 分钟`;
-  const hours = Math.floor(mins / 60);
-  const remainMins = mins % 60;
-  return `已运行 ${hours} 小时 ${remainMins} 分钟`;
 }
 
 function stringifyError(error: unknown) {

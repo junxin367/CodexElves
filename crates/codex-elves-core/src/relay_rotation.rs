@@ -78,7 +78,8 @@ pub struct RelayRotationSelector {
     aggregate: AggregateRelayProfile,
     failover_index: usize,
     request_index: usize,
-    weighted_index: usize,
+    weighted_member_index: usize,
+    weighted_requests_served: u32,
     conversation_assignments: HashMap<String, String>,
 }
 
@@ -92,7 +93,8 @@ impl RelayRotationSelector {
             aggregate,
             failover_index: 0,
             request_index: 0,
-            weighted_index: 0,
+            weighted_member_index: 0,
+            weighted_requests_served: 0,
             conversation_assignments: HashMap::new(),
         })
     }
@@ -124,8 +126,7 @@ impl RelayRotationSelector {
             AggregateRelayStrategy::ConversationRoundRobin
             | AggregateRelayStrategy::RequestRoundRobin => self.member_id_at(self.request_index),
             AggregateRelayStrategy::WeightedRoundRobin => {
-                let schedule = self.weighted_schedule();
-                schedule[self.weighted_index % schedule.len()].clone()
+                self.member_id_at(self.weighted_member_index)
             }
         };
         relay_profile_by_id(settings, &relay_id).ok_or_else(|| SelectionError::UnknownMemberRelay {
@@ -164,20 +165,15 @@ impl RelayRotationSelector {
     }
 
     fn select_next_weighted(&mut self) -> String {
-        let schedule = self.weighted_schedule();
-        let relay_id = schedule[self.weighted_index % schedule.len()].clone();
-        self.weighted_index = (self.weighted_index + 1) % schedule.len();
+        let member = &self.aggregate.members[self.weighted_member_index];
+        let relay_id = member.relay_id.clone();
+        self.weighted_requests_served += 1;
+        if self.weighted_requests_served >= member.weight.max(1) {
+            self.weighted_requests_served = 0;
+            self.weighted_member_index =
+                (self.weighted_member_index + 1) % self.aggregate.members.len();
+        }
         relay_id
-    }
-
-    fn weighted_schedule(&self) -> Vec<String> {
-        self.aggregate
-            .members
-            .iter()
-            .flat_map(|member| {
-                std::iter::repeat_n(member.relay_id.clone(), member.weight.max(1) as usize)
-            })
-            .collect()
     }
 
     fn member_id_at(&self, index: usize) -> String {
@@ -260,13 +256,15 @@ pub fn fallback_relays_after(
 }
 
 pub fn record_relay_request_event(settings: &BackendSettings, event: RotationEvent) {
-    if settings.active_aggregate_relay_profile().is_none() {
-        clear_global_selector();
+    let Some(active_aggregate) = settings.active_aggregate_relay_profile() else {
         return;
-    }
+    };
     let lock = GLOBAL_SELECTOR.get_or_init(|| Mutex::new(None));
     let mut guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(selector) = guard.as_mut() {
+    if let Some(selector) = guard
+        .as_mut()
+        .filter(|selector| selector.aggregate == active_aggregate)
+    {
         selector.record_event(event);
     }
 }
@@ -332,4 +330,40 @@ fn relay_profile_by_id(settings: &BackendSettings, relay_id: &str) -> Option<Rel
         .iter()
         .find(|profile| profile.id == relay_id)
         .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::AggregateRelayMember;
+
+    #[test]
+    fn maximum_weight_boundary_advances_without_overflow() {
+        let mut selector = RelayRotationSelector {
+            aggregate: AggregateRelayProfile {
+                id: "weighted-boundary".to_string(),
+                name: String::new(),
+                strategy: AggregateRelayStrategy::WeightedRoundRobin,
+                members: vec![
+                    AggregateRelayMember {
+                        relay_id: "a".to_string(),
+                        weight: u32::MAX,
+                    },
+                    AggregateRelayMember {
+                        relay_id: "b".to_string(),
+                        weight: 1,
+                    },
+                ],
+            },
+            failover_index: 0,
+            request_index: 0,
+            weighted_member_index: 0,
+            weighted_requests_served: u32::MAX - 1,
+            conversation_assignments: HashMap::new(),
+        };
+        assert_eq!(selector.select_next_weighted(), "a");
+        assert_eq!(selector.select_next_weighted(), "b");
+        assert_eq!(selector.select_next_weighted(), "a");
+        assert_eq!(selector.weighted_requests_served, 1);
+    }
 }

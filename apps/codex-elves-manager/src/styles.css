@@ -693,7 +693,6 @@ body {
 }
 
 .hero-layout p,
-.feature-item span,
 .relay-select span,
 .health-item span {
   color: hsl(var(--muted-foreground));
@@ -3102,9 +3101,7 @@ body {
   overflow-wrap: anywhere;
 }
 
-.health-grid,
-.feature-list,
-.guide-list {
+.health-grid {
   display: grid;
   gap: 8px;
 }
@@ -3298,8 +3295,7 @@ body {
   white-space: nowrap;
 }
 
-.health-item,
-.feature-item {
+.health-item {
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr) auto;
   gap: 10px;
@@ -3319,14 +3315,9 @@ body {
   padding: 7px 10px;
 }
 
-.health-item:hover,
-.feature-item:hover {
+.health-item:hover {
   border-color: hsl(var(--primary) / 0.32);
   background: hsl(var(--accent) / 0.55);
-}
-
-.feature-item {
-  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .feature-toggle {
@@ -4490,48 +4481,6 @@ body {
   margin-top: 14px;
 }
 
-.guide-list {
-  margin-bottom: 12px;
-}
-
-.guide-step {
-  display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
-  gap: 10px;
-  align-items: start;
-  border: 1px solid hsl(var(--border));
-  border-radius: 8px;
-  background: hsl(var(--background));
-  padding: 10px 12px;
-  transition:
-    border-color var(--motion-normal) var(--motion-ease),
-    background-color var(--motion-normal) var(--motion-ease),
-    transform var(--motion-normal) var(--motion-ease);
-}
-
-.guide-step:hover {
-  border-color: hsl(var(--primary) / 0.32);
-  background: hsl(var(--accent) / 0.45);
-}
-
-.guide-step > span {
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 999px;
-  background: hsl(var(--accent));
-  color: hsl(var(--foreground));
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.guide-step p {
-  margin: 1px 0 0;
-  color: hsl(var(--muted-foreground));
-  line-height: 1.5;
-}
-
 .health-item.ok svg {
   color: hsl(164 74% 62%);
 }
@@ -4540,8 +4489,7 @@ body {
   color: hsl(var(--brand-accent));
 }
 
-.health-item strong,
-.feature-item strong {
+.health-item strong {
   display: block;
   margin-bottom: 2px;
 }

@@ -1,8 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    InstallOptions, MANAGER_BINARY, MANAGER_NAME, SILENT_BINARY, SILENT_NAME,
-    install_root_or_default, option_or_current_exe,
+    InstallOptions, MANAGER_BINARY, SILENT_BINARY, install_root_or_default, option_or_current_exe,
 };
 
 const UNINSTALL_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexElves";
@@ -145,9 +144,4 @@ fn default_icon_path() -> PathBuf {
         .and_then(|path| path.parent().map(Path::to_path_buf))
         .map(|path| path.join("codex-elves.ico"))
         .unwrap_or_else(|| PathBuf::from("codex-elves.ico"))
-}
-
-#[allow(dead_code)]
-fn _entrypoint_names() -> (&'static str, &'static str) {
-    (SILENT_NAME, MANAGER_NAME)
 }
