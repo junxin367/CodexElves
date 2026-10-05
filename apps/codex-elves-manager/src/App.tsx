@@ -691,6 +691,7 @@ type LocalProxyLogEntry = {
   path: string;
   remoteAddr?: string | null;
   model?: string | null;
+  upstreamRequestModel?: string | null;
   upstreamResponseModel?: string | null;
   independentCompactionModel?: string | null;
   independentCompactionUsage?: LayeredCompactionModelUsage | null;
@@ -1541,6 +1542,8 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
       path: protocol === "chat_completions" ? "/v1/chat/completions" : "/v1/responses",
       remoteAddr: `127.0.0.1:${54624 + index}`,
       model,
+      upstreamRequestModel:
+        index === 1 ? "deepseek-v4.1-flash" : index === 3 ? "gpt-5.4-mini" : model,
       upstreamResponseModel: index === 2 ? "gpt-5.6-luna" : null,
       independentCompactionModel:
         index === 1 ? "deepseek-v4.1-flash" : index === 3 ? "gpt-5.4-mini" : null,
@@ -1617,7 +1620,7 @@ function browserPreviewLocalProxyDetail(id: string): LocalProxyLogDetail | null 
     reasoningSource: entry.reasoningEffort ? "reasoning.effort" : null,
     requestBody: JSON.stringify(
       {
-        model: entry.model,
+        model: entry.upstreamRequestModel || entry.model,
         reasoning: { effort: entry.reasoningEffort },
         service_tier: entry.serviceTier,
         stream: entry.stream,
@@ -4617,14 +4620,14 @@ function LocalProxyScreen({
   const [logFilter, setLogFilter] = useState<"high" | "continuation" | "">("");
   const modelOptions = useMemo(
     () =>
-      Array.from(new Set(entries.map((entry) => entry.model?.trim()).filter((model): model is string => Boolean(model))))
+      Array.from(new Set(entries.map(proxyLogDisplayModel).filter((model): model is string => Boolean(model))))
         .sort((left, right) => left.localeCompare(right)),
     [entries],
   );
   const modelFilteredEntries = useMemo(
     () =>
       entries.filter((entry) => {
-        if (modelFilter && entry.model !== modelFilter) return false;
+        if (modelFilter && proxyLogDisplayModel(entry) !== modelFilter) return false;
         return true;
       }),
     [entries, modelFilter],
@@ -4877,7 +4880,7 @@ function LocalProxyScreen({
                   <div className={`proxy-log-row ${selectedId === entry.id ? "active" : ""}`} key={entry.id}>
                     <span className="proxy-log-main">
                       <strong className="proxy-log-model-title">
-                        <span>{entry.model || "未知模型"}</span>
+                        <span>{proxyLogDisplayModel(entry) || "未知模型"}</span>
                         {upstreamResponseModelMismatch(entry) ? (
                           <span className="proxy-upstream-model-mismatch" title={`上游响应模型：${entry.upstreamResponseModel}`}>
                             （上游响应模型：{entry.upstreamResponseModel}）
@@ -5103,7 +5106,7 @@ function LocalProxyLogDetailDialog({
           <div className="proxy-detail-head">
             <div>
               <strong className="proxy-detail-model-title">
-                {entry.model || "未知模型"}
+                {proxyLogDisplayModel(entry) || "未知模型"}
                 {upstreamResponseModelMismatch(entry) ? (
                   <span className="proxy-upstream-model-mismatch">（上游响应模型：{entry.upstreamResponseModel}）</span>
                 ) : null}
@@ -11852,7 +11855,7 @@ function calculateRequestRatio(entries: LocalProxyLogEntry[]) {
     if (classifyHighReasoningRequest(entry) === "high") {
       high += 1;
     }
-    if (isGptModel(entry.model)) {
+    if (isGptModel(proxyLogDisplayModel(entry))) {
       continuationTotal += 1;
       if (isContinueThinkingEntry(entry)) {
         continuation += 1;
@@ -11901,7 +11904,7 @@ function calculateProxyModelSpeeds(entries: LocalProxyLogEntry[]) {
     generationMs: number;
   }>();
   for (const entry of entries) {
-    const model = entry.model?.trim();
+    const model = entry.upstreamRequestModel?.trim() || entry.model?.trim();
     if (!model) continue;
     if (!models.has(model)) {
       models.set(model, {
@@ -11954,8 +11957,8 @@ function classifyHighReasoningRequest(entry: Pick<LocalProxyLogEntry, "reasoning
   return null;
 }
 
-function isContinueThinkingEntry(entry: Pick<LocalProxyLogEntry, "model" | "continueThinkingTriggered">) {
-  return isGptModel(entry.model) && entry.continueThinkingTriggered === true;
+function isContinueThinkingEntry(entry: LocalProxyLogEntry) {
+  return isGptModel(proxyLogDisplayModel(entry)) && entry.continueThinkingTriggered === true;
 }
 
 function isGptModel(model?: string | null) {
@@ -11994,15 +11997,20 @@ function formatLayeredCompactionTitle(
 function formatIndependentCompactionDescription(
   entry: Pick<
     LocalProxyLogEntry,
-    "model" | "independentCompactionModel" | "independentCompactionUsage" | "cacheMissCompactionModel"
+    | "transport"
+    | "model"
+    | "upstreamResponseModel"
+    | "independentCompactionModel"
+    | "independentCompactionUsage"
+    | "cacheMissCompactionModel"
   >,
 ) {
   const legacyCompactionModel = entry.cacheMissCompactionModel?.trim();
-  const compactionModel = entry.independentCompactionModel?.trim() || legacyCompactionModel;
+  const compactionModel = independentCompactionTarget(entry);
   const usage = entry.independentCompactionUsage || (legacyCompactionModel ? "cacheMiss" : null);
   if (!compactionModel || !usage) return "";
   const description = usage === "default" ? "默认压缩" : "缓存失效压缩";
-  if (compactionModel.toLowerCase() === entry.model?.trim().toLowerCase()) {
+  if (compactionModel.toLowerCase() === proxyLogDisplayModel(entry)?.toLowerCase()) {
     return `（${description}）`;
   }
   return `（${description}：${compactionModel}）`;
@@ -13573,13 +13581,41 @@ function formatTime(value: number) {
 }
 
 function upstreamResponseModelMismatch(entry: LocalProxyLogEntry): boolean {
-  const requested = entry.model?.trim();
+  const requested = proxyLogDisplayModel(entry);
   const observed = entry.upstreamResponseModel?.trim();
+  const independent = independentCompactionTarget(entry);
   return Boolean(
     requested
     && observed
+    && (!independent || normalizeAuditModel(independent) !== normalizeAuditModel(observed))
     && normalizeAuditModel(requested) !== normalizeAuditModel(observed),
   );
+}
+
+function independentCompactionTarget(
+  entry: Pick<LocalProxyLogEntry, "independentCompactionModel" | "cacheMissCompactionModel">,
+): string | null {
+  return entry.independentCompactionModel?.trim()
+    || entry.cacheMissCompactionModel?.trim()
+    || null;
+}
+
+function proxyLogDisplayModel(
+  entry: Pick<
+    LocalProxyLogEntry,
+    "transport" | "model" | "upstreamResponseModel" | "independentCompactionModel" | "cacheMissCompactionModel"
+  >,
+): string | null {
+  const model = entry.model?.trim();
+  const observed = entry.upstreamResponseModel?.trim();
+  const independent = independentCompactionTarget(entry);
+  const legacyHttpIndependentLog = entry.transport !== "ws"
+    && model
+    && observed
+    && independent
+    && normalizeAuditModel(model) === normalizeAuditModel(independent)
+    && normalizeAuditModel(model) !== normalizeAuditModel(observed);
+  return legacyHttpIndependentLog ? observed : model || null;
 }
 
 function normalizeAuditModel(model: string): string {

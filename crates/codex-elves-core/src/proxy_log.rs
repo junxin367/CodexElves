@@ -66,6 +66,8 @@ pub struct ProxyRequestRecord {
     pub remote_addr: Option<String>,
     pub model: Option<String>,
     #[serde(default)]
+    pub upstream_request_model: Option<String>,
+    #[serde(default)]
     pub upstream_response_model: Option<String>,
     #[serde(default, alias = "cacheMissCompactionModel")]
     pub independent_compaction_model: Option<String>,
@@ -136,6 +138,8 @@ pub struct ProxyRequestSummary {
     pub path: String,
     pub remote_addr: Option<String>,
     pub model: Option<String>,
+    #[serde(default)]
+    pub upstream_request_model: Option<String>,
     #[serde(default)]
     pub upstream_response_model: Option<String>,
     #[serde(default, alias = "cacheMissCompactionModel")]
@@ -213,6 +217,7 @@ fn default_proxy_request_transport() -> ProxyRequestTransport {
 pub struct RequestMetadata {
     pub compaction_requested: bool,
     pub model: Option<String>,
+    pub upstream_request_model: Option<String>,
     pub upstream_response_model: Option<String>,
     pub independent_compaction_model: Option<String>,
     pub independent_compaction_usage: Option<LayeredCompactionModelUsage>,
@@ -232,6 +237,7 @@ impl From<&ProxyRequestRecord> for ProxyRequestSummary {
             path: record.path.clone(),
             remote_addr: record.remote_addr.clone(),
             model: record.model.clone(),
+            upstream_request_model: record.upstream_request_model.clone(),
             upstream_response_model: record.upstream_response_model.clone(),
             independent_compaction_model: record.independent_compaction_model.clone(),
             independent_compaction_usage: record.independent_compaction_usage,
@@ -409,6 +415,7 @@ pub fn extract_request_metadata(request_json: Option<&Value>) -> RequestMetadata
     RequestMetadata {
         compaction_requested: request_json.is_some_and(request_uses_compaction),
         model,
+        upstream_request_model: None,
         upstream_response_model: None,
         independent_compaction_model: None,
         independent_compaction_usage: None,
@@ -2343,6 +2350,7 @@ data: [DONE]
             path: "/v1/responses".to_string(),
             remote_addr: Some("127.0.0.1:1".to_string()),
             model: Some("gpt-5.4".to_string()),
+            upstream_request_model: Some("deepseek-v4.1-flash".to_string()),
             upstream_response_model: Some("gpt-5.6-luna".to_string()),
             independent_compaction_model: Some("deepseek-v4.1-flash".to_string()),
             independent_compaction_usage: Some(
@@ -2388,6 +2396,10 @@ data: [DONE]
 
         assert_eq!(found.model.as_deref(), Some("gpt-5.4"));
         assert_eq!(
+            found.upstream_request_model.as_deref(),
+            Some("deepseek-v4.1-flash")
+        );
+        assert_eq!(
             found.upstream_response_model.as_deref(),
             Some("gpt-5.6-luna")
         );
@@ -2411,6 +2423,7 @@ data: [DONE]
         let legacy_model = legacy_object
             .remove("independentCompactionModel")
             .expect("new independent model field");
+        legacy_object.remove("upstreamRequestModel");
         legacy_object.remove("independentCompactionUsage");
         legacy_object.insert("cacheMissCompactionModel".to_string(), legacy_model);
         let legacy_record: ProxyRequestRecord =
@@ -2419,6 +2432,7 @@ data: [DONE]
             legacy_record.independent_compaction_model.as_deref(),
             Some("deepseek-v4.1-flash")
         );
+        assert_eq!(legacy_record.upstream_request_model, None);
         assert_eq!(legacy_record.independent_compaction_usage, None);
 
         let index_text = std::fs::read_to_string(&path).expect("read proxy log index");
@@ -2434,6 +2448,10 @@ data: [DONE]
         }
         let summaries = read_summaries_at_path(&path, 20).expect("read proxy log summaries");
         assert_eq!(summaries.len(), 13);
+        assert_eq!(
+            summaries[0].upstream_request_model.as_deref(),
+            Some("deepseek-v4.1-flash")
+        );
         assert_eq!(
             summaries[0].upstream_response_model.as_deref(),
             Some("gpt-5.6-luna")
@@ -2771,6 +2789,7 @@ data: [DONE]
             path: "/v1/responses".to_string(),
             remote_addr: Some("127.0.0.1:1".to_string()),
             model: Some("glm-5.2".to_string()),
+            upstream_request_model: None,
             upstream_response_model: None,
             independent_compaction_model: None,
             independent_compaction_usage: None,

@@ -1672,9 +1672,15 @@ async fn handle_protocol_proxy_connection(
     }
     // The entire forwarding future has been dropped, including its active
     // WS/HTTP body and any pending reconnect or continuation request.
-    let request_body = progress.request_body.as_deref().unwrap_or(request_body);
-    let request_json = serde_json::from_str::<Value>(request_body).ok();
-    let mut metadata = crate::proxy_log::extract_request_metadata(request_json.as_ref());
+    let original_request_json = serde_json::from_str::<Value>(request_body).ok();
+    let original_request_metadata =
+        crate::proxy_log::extract_request_metadata(original_request_json.as_ref());
+    let logged_request_body = progress.request_body.as_deref().unwrap_or(request_body);
+    let logged_request_json = serde_json::from_str::<Value>(logged_request_body).ok();
+    let mut metadata = request_metadata_for_upstream(
+        crate::proxy_log::extract_request_metadata(logged_request_json.as_ref()),
+        &original_request_metadata,
+    );
     metadata.independent_compaction_model = progress.independent_compaction_model;
     metadata.independent_compaction_usage = progress.independent_compaction_usage;
     append_local_proxy_record(
@@ -1691,7 +1697,7 @@ async fn handle_protocol_proxy_connection(
         progress.response_protocol,
         499,
         true,
-        request_body,
+        logged_request_body,
         &[],
         0,
         false,
@@ -1796,14 +1802,15 @@ async fn handle_protocol_proxy_connection_inner(
     let started_at = Instant::now();
     let timestamp_ms = crate::proxy_log::current_timestamp_ms();
     let request_json = serde_json::from_str::<serde_json::Value>(request_body).ok();
-    let request_metadata = crate::proxy_log::extract_request_metadata(request_json.as_ref());
+    let original_request_metadata =
+        crate::proxy_log::extract_request_metadata(request_json.as_ref());
     append_pending_local_proxy_record(
         &log_id,
         timestamp_ms,
         method,
         path,
         remote_addr_text.clone(),
-        &request_metadata,
+        &original_request_metadata,
         request_body,
         request_json.as_ref(),
     );
@@ -1818,7 +1825,7 @@ async fn handle_protocol_proxy_connection_inner(
             started_at,
             timestamp_ms,
             request_json,
-            request_metadata,
+            original_request_metadata,
             log_id,
             progress,
         )
@@ -1915,7 +1922,7 @@ async fn handle_protocol_proxy_connection_inner(
                 method,
                 path,
                 remote_addr_text,
-                &request_metadata,
+                &original_request_metadata,
                 failure_context
                     .as_ref()
                     .and_then(|context| context.relay_id.clone()),
@@ -1943,11 +1950,11 @@ async fn handle_protocol_proxy_connection_inner(
     let logged_request_json = serde_json::from_str::<serde_json::Value>(&logged_request_body).ok();
     let logged_request_metadata =
         crate::proxy_log::extract_request_metadata(logged_request_json.as_ref());
-    let mut request_metadata = logged_request_metadata;
+    let mut request_metadata =
+        request_metadata_for_upstream(logged_request_metadata, &original_request_metadata);
     request_metadata.independent_compaction_model = upstream.independent_compaction_model.clone();
     request_metadata.independent_compaction_usage = upstream.independent_compaction_usage;
-    request_metadata.compaction_requested |=
-        crate::proxy_log::extract_request_metadata(request_json.as_ref()).compaction_requested;
+    request_metadata.upstream_response_model = upstream.upstream_response_model.clone();
     let request_body = logged_request_body.as_ref();
 
     if !upstream.is_success() {
@@ -2155,10 +2162,13 @@ async fn handle_protocol_proxy_connection_inner(
             let mut layered_compaction_log = LocalLayeredCompactionLog::default();
             if upstream.body_override.is_some() {
                 let raw_body = upstream.into_body_bytes().await?;
-                request_metadata.upstream_response_model = observed_upstream_model(
-                    &raw_body,
-                    crate::protocol_proxy::UpstreamResponseProtocol::Responses,
-                    true,
+                record_observed_upstream_model(
+                    &mut request_metadata,
+                    observed_upstream_model(
+                        &raw_body,
+                        crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+                        true,
+                    ),
                 );
                 let body = raw_body;
                 response_bytes += body.len();
@@ -2194,10 +2204,13 @@ async fn handle_protocol_proxy_connection_inner(
                             response_truncated |=
                                 crate::proxy_log::append_capture(&mut response_capture, &failed);
                             stream.write_all(&failed).await?;
-                            request_metadata.upstream_response_model = observed_upstream_model(
-                                &first_round_bytes,
-                                crate::protocol_proxy::UpstreamResponseProtocol::Responses,
-                                true,
+                            record_observed_upstream_model(
+                                &mut request_metadata,
+                                observed_upstream_model(
+                                    &first_round_bytes,
+                                    crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+                                    true,
+                                ),
                             );
                             append_local_proxy_record(
                                 log_id.clone(),
@@ -2238,10 +2251,13 @@ async fn handle_protocol_proxy_connection_inner(
                             response_truncated |=
                                 crate::proxy_log::append_capture(&mut response_capture, &failed);
                             stream.write_all(&failed).await?;
-                            request_metadata.upstream_response_model = observed_upstream_model(
-                                &first_round_bytes,
-                                crate::protocol_proxy::UpstreamResponseProtocol::Responses,
-                                true,
+                            record_observed_upstream_model(
+                                &mut request_metadata,
+                                observed_upstream_model(
+                                    &first_round_bytes,
+                                    crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+                                    true,
+                                ),
                             );
                             append_local_proxy_record(
                                 log_id.clone(),
@@ -2295,10 +2311,13 @@ async fn handle_protocol_proxy_connection_inner(
                 if let Some(observer) = cache_observer.take() {
                     observer.finish();
                 }
-                request_metadata.upstream_response_model = observed_upstream_model(
-                    &first_round_bytes,
-                    crate::protocol_proxy::UpstreamResponseProtocol::Responses,
-                    true,
+                record_observed_upstream_model(
+                    &mut request_metadata,
+                    observed_upstream_model(
+                        &first_round_bytes,
+                        crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+                        true,
+                    ),
                 );
                 let first_round_sse_text = String::from_utf8_lossy(&first_round_bytes).into_owned();
                 let final_sse_text = if should_run_continue_thinking_for_proxy_request(
@@ -2473,7 +2492,7 @@ async fn handle_protocol_proxy_connection_inner(
             observer.finish();
         }
         upstream_model_observer.finish_sse(response_protocol);
-        request_metadata.upstream_response_model = upstream_model_observer.model();
+        record_observed_upstream_model(&mut request_metadata, upstream_model_observer.model());
 
         if !stream_failed {
             let tail = converter.finish();
@@ -2575,8 +2594,10 @@ async fn handle_protocol_proxy_connection_inner(
         }
         Err(error) => return Err(error),
     };
-    request_metadata.upstream_response_model =
-        observed_upstream_model(&upstream_body, response_protocol, false);
+    record_observed_upstream_model(
+        &mut request_metadata,
+        observed_upstream_model(&upstream_body, response_protocol, false),
+    );
     if response_protocol == crate::protocol_proxy::UpstreamResponseProtocol::Responses {
         let body = if bridge_remote_compaction_v2 {
             let request = request_json.as_ref().expect("bridge request must exist");
@@ -2771,7 +2792,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     started_at: Instant,
     timestamp_ms: u64,
     request_json: Option<serde_json::Value>,
-    request_metadata: crate::proxy_log::RequestMetadata,
+    original_request_metadata: crate::proxy_log::RequestMetadata,
     log_id: String,
     progress: &mut ProxyCancellationProgress,
 ) -> anyhow::Result<()> {
@@ -2864,7 +2885,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                 method,
                 path,
                 remote_addr_text,
-                &request_metadata,
+                &original_request_metadata,
                 failure_context
                     .as_ref()
                     .and_then(|context| context.relay_id.clone()),
@@ -2894,11 +2915,11 @@ async fn handle_deferred_protocol_proxy_stream_connection(
     let logged_request_json = serde_json::from_str::<serde_json::Value>(&logged_request_body).ok();
     let logged_request_metadata =
         crate::proxy_log::extract_request_metadata(logged_request_json.as_ref());
-    let mut request_metadata = logged_request_metadata;
+    let mut request_metadata =
+        request_metadata_for_upstream(logged_request_metadata, &original_request_metadata);
     request_metadata.independent_compaction_model = upstream.independent_compaction_model.clone();
     request_metadata.independent_compaction_usage = upstream.independent_compaction_usage;
-    request_metadata.compaction_requested |=
-        crate::proxy_log::extract_request_metadata(request_json.as_ref()).compaction_requested;
+    request_metadata.upstream_response_model = upstream.upstream_response_model.clone();
     let request_body = logged_request_body.as_ref();
 
     let diagnostic_id = upstream.diagnostic_id.clone();
@@ -3341,7 +3362,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
             remote_addr_text.clone(),
         );
         upstream_model_observer.finish_sse(response_protocol);
-        request_metadata.upstream_response_model = upstream_model_observer.model();
+        record_observed_upstream_model(&mut request_metadata, upstream_model_observer.model());
         append_local_proxy_record_with_continue_thinking(
             log_id.clone(),
             timestamp_ms,
@@ -3600,7 +3621,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
         converter.diagnostic_summary(),
     );
     upstream_model_observer.finish_sse(response_protocol);
-    request_metadata.upstream_response_model = upstream_model_observer.model();
+    record_observed_upstream_model(&mut request_metadata, upstream_model_observer.model());
     log_helper_response(
         if stream_failed {
             "helper.protocol_proxy_deferred_stream_failed"
@@ -3652,7 +3673,8 @@ async fn handle_chat_completions_proxy_connection(
     let started_at = Instant::now();
     let timestamp_ms = crate::proxy_log::current_timestamp_ms();
     let request_json = serde_json::from_str::<serde_json::Value>(request_body).ok();
-    let request_metadata = crate::proxy_log::extract_request_metadata(request_json.as_ref());
+    let original_request_metadata =
+        crate::proxy_log::extract_request_metadata(request_json.as_ref());
     let log_id = next_local_proxy_log_id();
     append_pending_local_proxy_record(
         &log_id,
@@ -3660,7 +3682,7 @@ async fn handle_chat_completions_proxy_connection(
         method,
         path,
         remote_addr_text.clone(),
-        &request_metadata,
+        &original_request_metadata,
         request_body,
         request_json.as_ref(),
     );
@@ -3698,7 +3720,7 @@ async fn handle_chat_completions_proxy_connection(
                 method,
                 path,
                 remote_addr_text,
-                &request_metadata,
+                &original_request_metadata,
                 None,
                 None,
                 None,
@@ -3724,9 +3746,9 @@ async fn handle_chat_completions_proxy_connection(
     let logged_request_json = serde_json::from_str::<serde_json::Value>(&logged_request_body).ok();
     let logged_request_metadata =
         crate::proxy_log::extract_request_metadata(logged_request_json.as_ref());
-    let mut request_metadata = logged_request_metadata;
-    request_metadata.compaction_requested |=
-        crate::proxy_log::extract_request_metadata(request_json.as_ref()).compaction_requested;
+    let mut request_metadata =
+        request_metadata_for_upstream(logged_request_metadata, &original_request_metadata);
+    request_metadata.upstream_response_model = upstream.upstream_response_model.clone();
     let request_body = logged_request_body.as_str();
 
     let relay_id = upstream.relay_id.clone();
@@ -3756,7 +3778,10 @@ async fn handle_chat_completions_proxy_connection(
                 Ok(bytes) => bytes,
                 Err(error) => {
                     upstream_model_observer.finish_sse(response_protocol);
-                    request_metadata.upstream_response_model = upstream_model_observer.model();
+                    record_observed_upstream_model(
+                        &mut request_metadata,
+                        upstream_model_observer.model(),
+                    );
                     append_local_proxy_record(
                         log_id.clone(),
                         timestamp_ms,
@@ -3806,7 +3831,7 @@ async fn handle_chat_completions_proxy_connection(
             stream.write_all(&bytes).await?;
         }
         upstream_model_observer.finish_sse(response_protocol);
-        request_metadata.upstream_response_model = upstream_model_observer.model();
+        record_observed_upstream_model(&mut request_metadata, upstream_model_observer.model());
         log_helper_response(
             "helper.chat_completions_proxy_stream_ok",
             method,
@@ -3845,8 +3870,10 @@ async fn handle_chat_completions_proxy_connection(
 
     let body = upstream.into_body_bytes().await?;
     if is_success {
-        request_metadata.upstream_response_model =
-            observed_upstream_model(&body, response_protocol, false);
+        record_observed_upstream_model(
+            &mut request_metadata,
+            observed_upstream_model(&body, response_protocol, false),
+        );
     }
     write_http_response(stream, &status, &content_type, &body).await?;
     log_helper_response(
@@ -3946,6 +3973,7 @@ fn append_pending_local_proxy_record(
         path: path.to_string(),
         remote_addr: remote_addr_text,
         model: request_metadata.model.clone(),
+        upstream_request_model: request_metadata.upstream_request_model.clone(),
         upstream_response_model: None,
         independent_compaction_model: request_metadata.independent_compaction_model.clone(),
         independent_compaction_usage: request_metadata.independent_compaction_usage,
@@ -4012,6 +4040,7 @@ fn append_local_proxy_first_token_record(
         path: path.to_string(),
         remote_addr: remote_addr_text,
         model: request_metadata.model.clone(),
+        upstream_request_model: request_metadata.upstream_request_model.clone(),
         upstream_response_model: request_metadata.upstream_response_model.clone(),
         independent_compaction_model: request_metadata.independent_compaction_model.clone(),
         independent_compaction_usage: request_metadata.independent_compaction_usage,
@@ -4129,6 +4158,7 @@ fn append_local_proxy_record_with_continue_thinking(
         path: path.to_string(),
         remote_addr: remote_addr_text,
         model: request_metadata.model.clone(),
+        upstream_request_model: request_metadata.upstream_request_model.clone(),
         upstream_response_model: request_metadata.upstream_response_model.clone(),
         independent_compaction_model: request_metadata.independent_compaction_model.clone(),
         independent_compaction_usage: request_metadata.independent_compaction_usage,
@@ -4194,6 +4224,26 @@ fn response_protocol_label(protocol: crate::protocol_proxy::UpstreamResponseProt
         .ok()
         .and_then(|value| value.as_str().map(ToString::to_string))
         .unwrap_or_else(|| format!("{protocol:?}"))
+}
+
+fn request_metadata_for_upstream(
+    mut upstream: crate::proxy_log::RequestMetadata,
+    original: &crate::proxy_log::RequestMetadata,
+) -> crate::proxy_log::RequestMetadata {
+    let upstream_model = upstream.model.clone();
+    upstream.model = original.model.clone().or_else(|| upstream_model.clone());
+    upstream.upstream_request_model = upstream_model;
+    upstream.compaction_requested |= original.compaction_requested;
+    upstream
+}
+
+fn record_observed_upstream_model(
+    request_metadata: &mut crate::proxy_log::RequestMetadata,
+    observed: Option<String>,
+) {
+    if request_metadata.upstream_response_model.is_none() {
+        request_metadata.upstream_response_model = observed;
+    }
 }
 
 fn observed_upstream_model(

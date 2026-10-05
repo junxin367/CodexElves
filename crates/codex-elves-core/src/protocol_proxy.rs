@@ -1234,12 +1234,66 @@ pub(crate) struct ResolvedCompactionModelOverride {
 }
 
 /// 解析本次本地压缩应使用的独立模型。原生 Remote Compaction V2 永远不会进入这里。
+#[cfg(test)]
 pub(crate) fn resolve_compaction_model_override(
     request_json: &Value,
     original_request_json: &Value,
     execution_mode: CompactionExecutionMode,
     settings: &crate::settings::BackendSettings,
     relay: &crate::settings::RelayProfile,
+) -> Option<ResolvedCompactionModelOverride> {
+    resolve_compaction_model_override_with_candidate(
+        original_request_json,
+        execution_mode,
+        settings,
+        relay,
+        |request_model| {
+            crate::layered_compaction::apply_confirmed_compaction_model_override(
+                request_json,
+                request_model,
+            )
+        },
+    )
+}
+
+/// 独立压缩模型必须按目标模型家族重新构造请求：GPT 移除工具，非 GPT 保留工具。
+pub(crate) fn resolve_compaction_model_override_for_attempt(
+    request_json: &Value,
+    original_request_json: &Value,
+    kind: crate::layered_compaction::CompactionKind,
+    options: &crate::layered_compaction::CompactionOptions,
+    execution_mode: CompactionExecutionMode,
+    settings: &crate::settings::BackendSettings,
+    relay: &crate::settings::RelayProfile,
+) -> Option<ResolvedCompactionModelOverride> {
+    resolve_compaction_model_override_with_candidate(
+        original_request_json,
+        execution_mode,
+        settings,
+        relay,
+        |request_model| {
+            let route = crate::layered_compaction::CompactionRoute::for_model(request_model);
+            let prepared = crate::layered_compaction::prepare_compaction_attempt_request(
+                request_json,
+                kind,
+                route,
+                options,
+                crate::layered_compaction::CompactionAttempt::First,
+            );
+            crate::layered_compaction::apply_confirmed_compaction_model_override(
+                &prepared,
+                request_model,
+            )
+        },
+    )
+}
+
+fn resolve_compaction_model_override_with_candidate(
+    original_request_json: &Value,
+    execution_mode: CompactionExecutionMode,
+    settings: &crate::settings::BackendSettings,
+    relay: &crate::settings::RelayProfile,
+    build_candidate: impl FnOnce(&str) -> Value,
 ) -> Option<ResolvedCompactionModelOverride> {
     if !settings.layered_compaction_enabled
         || !settings.layered_compaction_model_override_enabled
@@ -1286,10 +1340,7 @@ pub(crate) fn resolve_compaction_model_override(
         return None;
     };
     let request_model = relay.request_model_for_catalog_model(catalog_model);
-    let candidate = crate::layered_compaction::apply_confirmed_compaction_model_override(
-        request_json,
-        &request_model,
-    );
+    let candidate = build_candidate(&request_model);
     let estimated_input_tokens =
         crate::layered_compaction::estimate_compaction_request_tokens(&candidate);
     let output_reserve_tokens =
@@ -1376,6 +1427,8 @@ pub struct UpstreamProxyResponse {
     pub request_body: String,
     pub response: Option<reqwest::Response>,
     pub body_override: Option<Vec<u8>>,
+    /// 已在本地响应改写前观测到的真实上游响应模型。
+    pub(crate) upstream_response_model: Option<String>,
     pub(crate) layered_compaction_options: LayeredCompactionOptions,
     /// 本次本地压缩选中的独立模型；用于请求日志展示。
     pub(crate) independent_compaction_model: Option<String>,
@@ -2353,22 +2406,19 @@ async fn execute_validated_compaction(
     let mut independent_selected = false;
     let mut independent_compaction_model = None;
     let mut independent_compaction_usage = None;
+    let mut upstream_response_model = None;
     let mut plan = original_plan.clone();
     if settings.should_use_independent_compaction_model(cache_decision.is_valid()) {
-        let local_request = prepare_compaction_attempt_request(
+        if let Some(resolved) = resolve_compaction_model_override_for_attempt(
             &source,
-            kind,
-            CompactionRoute::CodexLocal,
-            &options,
-            CompactionAttempt::First,
-        );
-        if let Some(resolved) = resolve_compaction_model_override(
-            &local_request,
             original,
+            kind,
+            &options,
             execution_mode,
             &settings,
             &relay,
         ) {
+            let independent_route = CompactionRoute::for_model(&resolved.compaction_model);
             independent_selected = true;
             independent_compaction_model = Some(resolved.compaction_model.clone());
             independent_compaction_usage = Some(settings.layered_compaction_model_usage);
@@ -2390,7 +2440,7 @@ async fn execute_validated_compaction(
             );
             plan = AttemptPlan {
                 request: resolved.request_json,
-                route: CompactionRoute::CodexLocal,
+                route: independent_route,
                 protocol: response_protocol_for_relay_protocol(resolved.protocol),
                 model: resolved.compaction_model,
                 cache_reference: false,
@@ -2442,6 +2492,7 @@ async fn execute_validated_compaction(
             request_body: serialized_proxy_request_body(&wire),
             response: Some(raw),
             body_override: None,
+            upstream_response_model: None,
             layered_compaction_options: LayeredCompactionOptions::default(),
             independent_compaction_model: None,
             independent_compaction_usage: None,
@@ -2513,8 +2564,16 @@ async fn execute_validated_compaction(
             &verdict,
             error_detail.as_deref(),
         );
+        let attempt_upstream_response_model = response
+            .as_ref()
+            .and_then(|response| response.get("model"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(ToString::to_string);
         match verdict {
             Ok(_) => {
+                upstream_response_model = attempt_upstream_response_model;
                 if let Some(original_model) = plan.restore_model.as_deref()
                     && let Some(response) = response.as_mut()
                 {
@@ -2532,6 +2591,7 @@ async fn execute_validated_compaction(
                 break;
             }
             Err(failure) if attempt == CompactionAttempt::Retry => {
+                upstream_response_model = attempt_upstream_response_model;
                 final_response = Some(compaction_validation_failure_response(
                     original,
                     kind,
@@ -2566,6 +2626,7 @@ async fn execute_validated_compaction(
         request_body: body.to_string(),
         response: None,
         body_override: None,
+        upstream_response_model: None,
         layered_compaction_options: LayeredCompactionOptions::default(),
         independent_compaction_model: None,
         independent_compaction_usage: None,
@@ -2586,6 +2647,7 @@ async fn execute_validated_compaction(
     } else {
         serde_json::to_vec(&response)?
     });
+    upstream.upstream_response_model = upstream_response_model;
     // 这里已经校验并封装；launcher/HTTP handler 不得再次解析成摘要。
     upstream.layered_compaction_options = LayeredCompactionOptions::default();
     upstream.independent_compaction_model = independent_compaction_model;
@@ -2713,6 +2775,7 @@ async fn open_responses_proxy_request_once(
                             "message": "Remote Compaction V2 is not supported by this upstream protocol."
                         }
                     }))?),
+                    upstream_response_model: None,
                     layered_compaction_options: LayeredCompactionOptions::default(),
                     independent_compaction_model: None,
                     independent_compaction_usage: None,
@@ -3177,6 +3240,7 @@ async fn open_responses_proxy_request_once(
                 request_body: logged_request_body,
                 response: upstream_response,
                 body_override,
+                upstream_response_model: None,
                 layered_compaction_options,
                 independent_compaction_model: None,
                 independent_compaction_usage: None,
@@ -3483,6 +3547,7 @@ pub async fn open_models_proxy_request(
         request_body: String::new(),
         response: Some(upstream),
         body_override: None,
+        upstream_response_model: None,
         layered_compaction_options: LayeredCompactionOptions::from_settings(&settings),
         independent_compaction_model: None,
         independent_compaction_usage: None,
@@ -3546,6 +3611,7 @@ pub async fn open_chat_completions_proxy_request(
         request_body,
         response: Some(upstream),
         body_override: None,
+        upstream_response_model: None,
         layered_compaction_options: LayeredCompactionOptions::from_settings(&settings),
         independent_compaction_model: None,
         independent_compaction_usage: None,
@@ -12320,7 +12386,8 @@ mod remote_compaction_v2_tests {
 mod compaction_model_override_tests {
     use super::{
         CompactionExecutionMode, CompactionSecondAttempt, compaction_second_attempt,
-        execute_validated_compaction, resolve_compaction_model_override, responses_url,
+        execute_validated_compaction, resolve_compaction_model_override,
+        resolve_compaction_model_override_for_attempt, responses_url,
     };
     use crate::settings::{
         BackendSettings, LayeredCompactionModelUsage, LayeredCompactionModels, RelayModelMapping,
@@ -12553,6 +12620,43 @@ mod compaction_model_override_tests {
         );
     }
 
+    #[test]
+    fn cross_family_non_gpt_compaction_model_preserves_tools() {
+        let settings = settings_with_models(LayeredCompactionModels {
+            gpt: "deepseek-chat".to_string(),
+            ..Default::default()
+        });
+        let relay = relay_with_models(&[
+            ("gpt-5.6", RelayProtocol::Responses, "372000"),
+            ("deepseek-chat", RelayProtocol::ChatCompletions, "128000"),
+        ]);
+        let mut request = compaction_request("gpt-5.6", "small");
+        request["instructions"] = json!("stable system prompt");
+        request["tools"] =
+            json!([{ "type": "function", "name": "exec_command", "parameters": {} }]);
+        request["tool_choice"] = json!("auto");
+        request["parallel_tool_calls"] = json!(true);
+        let resolved = resolve_compaction_model_override_for_attempt(
+            &request,
+            &request,
+            crate::layered_compaction::CompactionKind::Legacy,
+            &crate::layered_compaction::CompactionOptions::default(),
+            CompactionExecutionMode::LegacyLocal,
+            &settings,
+            &relay,
+        )
+        .expect("configured independent model should resolve");
+
+        assert_eq!(resolved.compaction_model, "deepseek-chat");
+        for field in ["tools", "tool_choice", "parallel_tool_calls"] {
+            assert_eq!(resolved.request_json[field], request[field], "{field}");
+        }
+        assert_eq!(
+            resolved.request_json["instructions"],
+            request["instructions"]
+        );
+    }
+
     #[tokio::test]
     async fn http_valid_cache_lease_uses_original_model_once() {
         let (base_url, requests_rx) = spawn_responses_server(vec![(
@@ -12612,6 +12716,10 @@ mod compaction_model_override_tests {
         .unwrap();
         assert!(upstream.independent_compaction_model.is_none());
         assert!(upstream.independent_compaction_usage.is_none());
+        assert_eq!(
+            upstream.upstream_response_model.as_deref(),
+            Some("gpt-original")
+        );
         let response: Value =
             serde_json::from_slice(&upstream.into_body_bytes().await.unwrap()).unwrap();
         let requests = requests_rx.await.unwrap();
@@ -12687,12 +12795,68 @@ mod compaction_model_override_tests {
             upstream.independent_compaction_usage,
             Some(LayeredCompactionModelUsage::Default)
         );
+        assert_eq!(
+            upstream.upstream_response_model.as_deref(),
+            Some("gpt-cheap")
+        );
         let response: Value =
             serde_json::from_slice(&upstream.into_body_bytes().await.unwrap()).unwrap();
         let requests = requests_rx.await.unwrap();
 
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0]["model"], "gpt-cheap");
+        assert_eq!(response["model"], "gpt-original");
+    }
+
+    #[tokio::test]
+    async fn http_non_gpt_independent_model_preserves_tools_without_cache_reference() {
+        let (base_url, requests_rx) = spawn_responses_server(vec![(
+            200,
+            summary_response("deepseek-chat", "<summary>non-gpt independent</summary>"),
+        )])
+        .await;
+        let mut settings = http_settings(base_url, Some("deepseek-chat"));
+        settings.relay_profiles[0]
+            .model_mappings
+            .push(RelayModelMapping {
+                request_model: "deepseek-chat".to_string(),
+                alias: String::new(),
+                protocol: RelayProtocol::Responses,
+                context_window: "128000".to_string(),
+                system_prompt_override: String::new(),
+            });
+        let mut request = http_compaction_request("http-non-gpt-independent-key");
+        request["tools"] =
+            json!([{ "type": "function", "name": "exec_command", "parameters": {} }]);
+        request["tool_choice"] = json!("auto");
+        request["parallel_tool_calls"] = json!(true);
+        let upstream = execute_validated_compaction(
+            &request.to_string(),
+            &request,
+            crate::layered_compaction::CompactionKind::Legacy,
+            settings,
+            &crate::request_headers::RequestContext::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            upstream.independent_compaction_model.as_deref(),
+            Some("deepseek-chat")
+        );
+        assert_eq!(
+            upstream.upstream_response_model.as_deref(),
+            Some("deepseek-chat")
+        );
+        let response: Value =
+            serde_json::from_slice(&upstream.into_body_bytes().await.unwrap()).unwrap();
+        let requests = requests_rx.await.unwrap();
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["model"], "deepseek-chat");
+        for field in ["tools", "tool_choice", "parallel_tool_calls"] {
+            assert_eq!(requests[0][field], request[field], "{field}");
+        }
         assert_eq!(response["model"], "gpt-original");
     }
 
@@ -12728,6 +12892,10 @@ mod compaction_model_override_tests {
         assert_eq!(
             upstream.independent_compaction_usage,
             Some(LayeredCompactionModelUsage::CacheMiss)
+        );
+        assert_eq!(
+            upstream.upstream_response_model.as_deref(),
+            Some("gpt-cheap")
         );
         let response: Value =
             serde_json::from_slice(&upstream.into_body_bytes().await.unwrap()).unwrap();
@@ -12775,6 +12943,10 @@ mod compaction_model_override_tests {
         assert_eq!(
             upstream.independent_compaction_usage,
             Some(LayeredCompactionModelUsage::CacheMiss)
+        );
+        assert_eq!(
+            upstream.upstream_response_model.as_deref(),
+            Some("gpt-original")
         );
         let response: Value =
             serde_json::from_slice(&upstream.into_body_bytes().await.unwrap()).unwrap();

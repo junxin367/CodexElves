@@ -181,21 +181,22 @@ impl CompactionKind {
     }
 }
 
-/// 代理压缩的上游请求构造方式，按会话模型家族选择。
+/// 代理压缩的上游请求构造方式，按实际执行压缩的模型家族选择。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactionRoute {
-    /// A：Claude 家族。system、tools、thinking 等全部参数与原请求逐字段一致，
-    /// 只把压缩触发项替换为压缩指令，以命中上游提示词缓存。
+    /// A：所有非 GPT 模型。system、tools、thinking 等全部参数与原请求逐字段一致，
+    /// 只把压缩触发项替换为压缩指令；同模型执行时可继续复用上游提示词缓存。
     CacheReuse,
-    /// B：其他模型。沿用 Codex 本地压缩方式：主模型、主系统提示，移除工具字段。
+    /// B：GPT 家族。沿用 Codex 本地压缩方式：主模型、主系统提示，移除工具字段。
     CodexLocal,
 }
 
 impl CompactionRoute {
     pub fn for_model(model: &str) -> Self {
         match crate::model_capabilities::model_family(model) {
-            crate::model_capabilities::ModelFamily::Claude => Self::CacheReuse,
-            _ => Self::CodexLocal,
+            crate::model_capabilities::ModelFamily::Gpt => Self::CodexLocal,
+            crate::model_capabilities::ModelFamily::Claude
+            | crate::model_capabilities::ModelFamily::Other => Self::CacheReuse,
         }
     }
 
@@ -2245,7 +2246,7 @@ pub fn apply_custom_compaction_prompt(request_json: &Value, custom_prompt: &str)
 /// 为传统上下文压缩准备只生成摘要文本的上游请求。
 ///
 /// 请求身份仍由调用方保存的原始请求判断；转发副本会先摘除 assistant 指代锚点开始的
-/// 原始尾部，再使用有效项目提示词，并移除工具字段，避免摘要阶段产生工具调用。
+/// 原始尾部，再使用有效项目提示词。GPT 路由移除工具字段，非 GPT 路由保留工具定义。
 pub fn prepare_legacy_layered_compaction_request(
     request_json: &Value,
     prompt_override: &str,
@@ -2884,6 +2885,18 @@ mod tests {
         );
         assert_eq!(
             CompactionRoute::for_model("deepseek-v4.1-flash"),
+            CompactionRoute::CacheReuse
+        );
+        assert_eq!(
+            CompactionRoute::for_model("qwen3-coder-plus"),
+            CompactionRoute::CacheReuse
+        );
+        assert_eq!(
+            CompactionRoute::for_model("gpt-5.6"),
+            CompactionRoute::CodexLocal
+        );
+        assert_eq!(
+            CompactionRoute::for_model("o4-mini"),
             CompactionRoute::CodexLocal
         );
         let request = json!({
@@ -2926,10 +2939,22 @@ mod tests {
             &with_tail["input"].as_array().unwrap()[..kept],
             &request["input"].as_array().unwrap()[..kept]
         );
+        let mut non_gpt = request.clone();
+        non_gpt["model"] = json!("deepseek-v4.1-flash");
+        let non_gpt_prepared = prepare_compaction_attempt_request(
+            &non_gpt,
+            CompactionKind::RemoteV2,
+            CompactionRoute::for_model(non_gpt["model"].as_str().unwrap()),
+            &CompactionOptions::default(),
+            CompactionAttempt::First,
+        );
+        for field in COMPACTION_TOOL_FIELDS {
+            assert_eq!(non_gpt_prepared[field], non_gpt[field], "{field}");
+        }
         let local = prepare_compaction_attempt_request(
             &request,
             CompactionKind::RemoteV2,
-            CompactionRoute::CodexLocal,
+            CompactionRoute::for_model("gpt-5.6"),
             &CompactionOptions::default(),
             CompactionAttempt::First,
         );
@@ -3760,6 +3785,7 @@ mod tests {
     #[test]
     fn legacy_layered_request_uses_effective_prompt_and_removes_tools() {
         let request = json!({
+            "model": "gpt-5.6",
             "input": [user_message("hi"), compaction_prompt_item()],
             "tools": [{ "type": "function", "name": "exec_command" }],
             "tool_choice": "auto",
@@ -3836,6 +3862,7 @@ mod tests {
             })
         );
         let request = json!({
+            "model": "gpt-5.6",
             "input": [
                 user_message("older request"),
                 retained_user.clone(),
@@ -3940,6 +3967,7 @@ mod tests {
     #[test]
     fn legacy_summary_request_excludes_anchor_and_raw_tail() {
         let request = json!({
+            "model": "gpt-5.6",
             "input": [
                 user_message("更早历史"),
                 assistant_message("推荐方案：执行方案 1"),
@@ -4904,6 +4932,10 @@ mod tests {
         assert!(!local_compaction_requires_real_user(
             &assistant_request,
             "gpt-5.6"
+        ));
+        assert!(!local_compaction_requires_real_user(
+            &assistant_request,
+            "deepseek-v4.1-flash"
         ));
         let legacy_v1_request = json!({
             "model": "claude-sonnet-5",

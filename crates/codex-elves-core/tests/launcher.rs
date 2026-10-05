@@ -885,6 +885,130 @@ async fn helper_prompt_only_compaction_does_not_continue_after_prompt_replacemen
 }
 
 #[tokio::test]
+async fn helper_logs_independent_http_compaction_model_roles() {
+    let _lock = launcher_settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let settings_path = temp.path().join("settings.json");
+    let proxy_log_path = temp.path().join("proxy-requests.jsonl");
+    let _settings_guard = LauncherSettingsPathGuard::set(settings_path.clone());
+    let _proxy_log_guard = LauncherProxyLogPathGuard::set(proxy_log_path);
+    let original_model = "claude-opus-5-5";
+    let compaction_model = "deepseek-v4.1-flash";
+    let upstream = spawn_launcher_upstream_with_response(
+        "text/event-stream",
+        format!(
+            "event: response.completed\ndata: {}\n\ndata: [DONE]\n\n",
+            serde_json::json!({
+                "type":"response.completed",
+                "response":{
+                    "id":"resp_independent_compaction",
+                    "object":"response",
+                    "status":"completed",
+                    "model":compaction_model,
+                    "output":[{
+                        "type":"message",
+                        "role":"assistant",
+                        "content":[{"type":"output_text","text":"<summary>SUMMARY</summary>"}]
+                    }],
+                    "usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}
+                }
+            })
+        ),
+    );
+    write_launcher_mixed_relay_settings(temp.path(), &upstream.base_url);
+    let mut settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+    settings["relayProfiles"][0]["modelMappings"] = serde_json::json!([
+        {
+            "requestModel": original_model,
+            "protocol": "responses",
+            "contextWindow": "200000"
+        },
+        {
+            "requestModel": compaction_model,
+            "protocol": "responses",
+            "contextWindow": "200000"
+        }
+    ]);
+    settings["layeredCompactionEnabled"] = serde_json::json!(true);
+    settings["layeredCompactionModelOverrideEnabled"] = serde_json::json!(true);
+    settings["layeredCompactionModelUsage"] = serde_json::json!("default");
+    settings["layeredCompactionModels"] = serde_json::json!({ "claude": compaction_model });
+    std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
+
+    let hooks = DefaultLaunchHooks::default();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    hooks.start_helper(port).await.unwrap();
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .json(&serde_json::json!({
+            "model": original_model,
+            "stream": true,
+            "input": [
+                {"type":"message","role":"user","content":"recent request"},
+                {
+                    "type":"message",
+                    "role":"user",
+                    "content":"You are performing a CONTEXT CHECKPOINT COMPACTION. Create a summary."
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let downstream = response.text().await.unwrap();
+    hooks.shutdown_helper(port).await;
+    let requests = upstream.finish_all();
+
+    assert_eq!(requests.len(), 1);
+    let forwarded: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(forwarded["model"], compaction_model);
+    assert_eq!(forwarded["stream"], true);
+    assert!(downstream.contains(&format!(r#""model":"{original_model}""#)));
+
+    let summaries = codex_elves_core::proxy_log::read_summaries(10).unwrap();
+    assert_eq!(summaries.len(), 1);
+    let summary = &summaries[0];
+    assert_eq!(summary.model.as_deref(), Some(original_model));
+    assert_eq!(
+        summary.upstream_request_model.as_deref(),
+        Some(compaction_model)
+    );
+    assert_eq!(
+        summary.upstream_response_model.as_deref(),
+        Some(compaction_model)
+    );
+    assert_eq!(
+        summary.independent_compaction_model.as_deref(),
+        Some(compaction_model)
+    );
+    assert_eq!(
+        summary.independent_compaction_usage,
+        Some(codex_elves_core::settings::LayeredCompactionModelUsage::Default)
+    );
+
+    let detail = codex_elves_core::proxy_log::find_record(&summary.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&detail.request_body).unwrap()["model"],
+        compaction_model
+    );
+    assert_eq!(
+        detail
+            .response_body
+            .contains(&format!(r#""model":"{original_model}""#)),
+        true
+    );
+}
+
+#[tokio::test]
 async fn helper_preserves_codex_semantic_headers_for_native_responses_upstream() {
     let _lock = launcher_settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
@@ -2406,6 +2530,7 @@ fn launcher_proxy_request_record(id: &str, timestamp_ms: u64) -> ProxyRequestRec
         path: "/v1/responses".to_string(),
         remote_addr: Some("127.0.0.1:1".to_string()),
         model: Some("gpt-5.4".to_string()),
+        upstream_request_model: None,
         upstream_response_model: None,
         independent_compaction_model: None,
         independent_compaction_usage: None,

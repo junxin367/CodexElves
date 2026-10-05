@@ -2200,7 +2200,8 @@ impl WebSocketRequestLogger {
             method: "WS".to_string(),
             path: state.path.clone(),
             remote_addr: state.remote_addr.clone(),
-            model: metadata.model,
+            model: metadata.model.clone(),
+            upstream_request_model: metadata.model,
             upstream_response_model: None,
             independent_compaction_model: None,
             independent_compaction_usage: None,
@@ -2322,6 +2323,7 @@ impl WebSocketRequestLogger {
         };
         tracked.record.independent_compaction_model = Some(model.to_string());
         tracked.record.independent_compaction_usage = Some(usage);
+        tracked.record.upstream_request_model = Some(model.to_string());
         let record = tracked.record.clone();
         drop(state);
         append_websocket_proxy_log_record(&record);
@@ -2824,6 +2826,21 @@ impl WebSocketRequestLogger {
         tracked.record.continue_thinking_before_response_body =
             metadata.before_response_body.clone();
         tracked.record.continue_thinking_after_response_body = metadata.after_response_body.clone();
+        if let Some(upstream_model) = metadata
+            .request_body
+            .as_deref()
+            .and_then(|body| serde_json::from_str::<Value>(body).ok())
+            .and_then(|request| {
+                request
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                    .map(ToString::to_string)
+            })
+        {
+            tracked.record.upstream_request_model = Some(upstream_model);
+        }
         tracked.record.layered_compaction_triggered = metadata.layered_compaction_triggered;
         tracked.record.layered_compaction_retain_tokens = metadata.layered_compaction_retain_tokens;
         tracked.record.layered_compaction_retained_items =
@@ -3517,21 +3534,11 @@ fn prepare_websocket_compaction_execution(
     let mut original_fallback = None;
 
     if settings.should_use_independent_compaction_model(cache_decision.is_valid()) {
-        let local_first = prepare_compaction_attempt_request(
-            normalized,
-            kind,
-            CompactionRoute::CodexLocal,
-            &options,
-            CompactionAttempt::First,
-        );
-        if let Some(resolved) = crate::protocol_proxy::resolve_compaction_model_override(
-            &local_first,
-            normalized,
-            mode,
-            settings,
-            relay,
+        if let Some(resolved) = crate::protocol_proxy::resolve_compaction_model_override_for_attempt(
+            normalized, normalized, kind, &options, mode, settings, relay,
         ) {
             if resolved.protocol == RelayProtocol::Responses {
+                let independent_route = CompactionRoute::for_model(&resolved.compaction_model);
                 let _ = crate::diagnostic_log::append_diagnostic_log(
                     "protocol_proxy.compaction_model_override_applied",
                     serde_json::json!({
@@ -3549,7 +3556,7 @@ fn prepare_websocket_compaction_execution(
                     }),
                 );
                 forwarded = resolved.request_json;
-                route = CompactionRoute::CodexLocal;
+                route = independent_route;
                 independent_compaction_model = Some(resolved.compaction_model.clone());
                 independent_compaction_usage = Some(settings.layered_compaction_model_usage);
                 model = resolved.compaction_model;
@@ -4027,7 +4034,8 @@ mod tests {
     use super::{
         ActiveWebSocketContinuation, ActiveWebSocketMode, WebSocketConnectionContext,
         WebSocketContinuationAction, WebSocketContinuationCoordinator, WebSocketContinuationState,
-        WebSocketRequestLogger, WebSocketTransportLiveness, activate_next_queued_websocket_request,
+        WebSocketContinueMetadata, WebSocketRequestLogger, WebSocketTransportLiveness,
+        activate_next_queued_websocket_request,
         arm_early_disconnect_responses_websocket_http_fallback,
         arm_oversized_responses_websocket_http_fallback,
         arm_upstream_failure_responses_websocket_http_fallback, is_responses_websocket_proxy_path,
@@ -4158,6 +4166,86 @@ mod tests {
                 .model,
             "gpt-original"
         );
+    }
+
+    #[test]
+    fn websocket_unknown_cache_lease_preserves_tools_for_non_gpt_model() {
+        let relay = compaction_relay(
+            "ws-non-gpt-original",
+            &[("deepseek-chat", RelayProtocol::Responses, "128000")],
+        );
+        let settings = BackendSettings {
+            layered_compaction_enabled: true,
+            ..Default::default()
+        };
+        let mut payload = legacy_compaction_payload("deepseek-chat", "ws-non-gpt-original-key");
+        payload["tools"] =
+            json!([{ "type": "function", "name": "exec_command", "parameters": {} }]);
+        payload["tool_choice"] = json!("auto");
+        payload["parallel_tool_calls"] = json!(true);
+        let (forwarded, options, plan) = prepare_websocket_compaction_execution(
+            &payload,
+            &settings,
+            &relay,
+            &crate::request_headers::RequestContext::default(),
+        );
+        let plan = plan.expect("local compaction should include a plan");
+
+        assert!(options.is_some());
+        assert_eq!(
+            plan.route,
+            crate::layered_compaction::CompactionRoute::CacheReuse
+        );
+        assert!(!plan.independent);
+        for field in ["tools", "tool_choice", "parallel_tool_calls"] {
+            assert_eq!(forwarded[field], payload[field], "{field}");
+        }
+    }
+
+    #[test]
+    fn websocket_non_gpt_independent_model_preserves_tools_and_gpt_fallback_removes_them() {
+        let relay = compaction_relay(
+            "ws-non-gpt-independent",
+            &[
+                ("gpt-original", RelayProtocol::Responses, "372000"),
+                ("deepseek-chat", RelayProtocol::Responses, "128000"),
+            ],
+        );
+        let settings = independent_compaction_settings("deepseek-chat");
+        let mut payload = legacy_compaction_payload("gpt-original", "ws-non-gpt-independent-key");
+        payload["tools"] =
+            json!([{ "type": "function", "name": "exec_command", "parameters": {} }]);
+        payload["tool_choice"] = json!("auto");
+        payload["parallel_tool_calls"] = json!(true);
+        let (forwarded, options, plan) = prepare_websocket_compaction_execution(
+            &payload,
+            &settings,
+            &relay,
+            &crate::request_headers::RequestContext::default(),
+        );
+        let plan = plan.expect("local compaction should include a plan");
+
+        assert!(options.is_some());
+        assert_eq!(forwarded["model"], "deepseek-chat");
+        assert_eq!(
+            plan.route,
+            crate::layered_compaction::CompactionRoute::CacheReuse
+        );
+        assert!(plan.independent);
+        for field in ["tools", "tool_choice", "parallel_tool_calls"] {
+            assert_eq!(forwarded[field], payload[field], "{field}");
+        }
+        let fallback = plan
+            .original_fallback
+            .as_ref()
+            .expect("independent plan needs original fallback");
+        assert_eq!(
+            fallback.route,
+            crate::layered_compaction::CompactionRoute::CodexLocal
+        );
+        for field in ["tools", "tool_choice", "parallel_tool_calls"] {
+            assert!(fallback.request.get(field).is_none(), "{field}");
+        }
     }
 
     #[test]
@@ -4959,6 +5047,62 @@ mod tests {
                 .upstream_response_model
                 .as_deref(),
             Some("gpt-5.6-luna")
+        );
+    }
+
+    #[test]
+    fn websocket_independent_compaction_log_keeps_model_roles_distinct() {
+        let logger = WebSocketRequestLogger::new(
+            &RelayProfile::default(),
+            None,
+            "/v1/responses".into(),
+            WebSocketConnectionContext::default(),
+        );
+        let request = json!({"type":"response.create","model":"claude-opus-5-5","input":[]});
+        let id = logger
+            .record_request(&request, &request.to_string())
+            .unwrap();
+        logger.record_independent_compaction(
+            Some(&id),
+            Some("deepseek-v4.1-flash"),
+            Some(crate::settings::LayeredCompactionModelUsage::CacheMiss),
+        );
+        logger.record_first_response_event(&Message::Text(
+            r#"{"type":"response.created","response":{"id":"resp_compaction","model":"deepseek-v4.1-flash"}}"#
+                .into(),
+        ));
+
+        {
+            let state = logger.state.lock().unwrap();
+            let record = &state.requests[&id].record;
+            assert_eq!(record.model.as_deref(), Some("claude-opus-5-5"));
+            assert_eq!(
+                record.upstream_request_model.as_deref(),
+                Some("deepseek-v4.1-flash")
+            );
+            assert_eq!(
+                record.upstream_response_model.as_deref(),
+                Some("deepseek-v4.1-flash")
+            );
+            assert_eq!(
+                record.independent_compaction_model.as_deref(),
+                Some("deepseek-v4.1-flash")
+            );
+        }
+
+        logger.record_continue_metadata(&WebSocketContinueMetadata {
+            log_id: Some(id.clone()),
+            request_body: Some(
+                json!({"type":"response.create","model":"claude-opus-5-5","input":[]}).to_string(),
+            ),
+            ..Default::default()
+        });
+        assert_eq!(
+            logger.state.lock().unwrap().requests[&id]
+                .record
+                .upstream_request_model
+                .as_deref(),
+            Some("claude-opus-5-5")
         );
     }
 
