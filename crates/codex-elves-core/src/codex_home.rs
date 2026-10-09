@@ -1,5 +1,31 @@
 use std::path::PathBuf;
 
+pub fn projectless_workspace_root(codex_home: &std::path::Path) -> anyhow::Result<PathBuf> {
+    let config_path = codex_home.join("config.toml");
+    let config = match std::fs::read_to_string(&config_path) {
+        Ok(contents) => contents.parse::<toml::Value>()?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            toml::Value::Table(Default::default())
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(value) = config
+        .get("desktop")
+        .and_then(|desktop| desktop.get("projectlessWorkspaceRoot"))
+    {
+        let path = value
+            .as_str()
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .ok_or_else(|| anyhow::anyhow!("desktop.projectlessWorkspaceRoot 必须是绝对目录"))?;
+        return Ok(path);
+    }
+    // 与 Codex 的默认规则一致，不使用可能重定向到 OneDrive 的系统文档目录。
+    directories::BaseDirs::new()
+        .map(|dirs| dirs.home_dir().join("Documents").join("Codex"))
+        .ok_or_else(|| anyhow::anyhow!("无法读取用户主目录"))
+}
+
 pub fn default_codex_home_dir() -> PathBuf {
     saved_codex_home_dir()
         .or_else(codex_home_env_dir)

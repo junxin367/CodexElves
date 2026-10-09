@@ -9,6 +9,8 @@
 //!   当前尾部”，只把更早历史发给摘要模型。
 //! - v3 载荷保存摘要和原始尾部；下一轮恢复时删除 Codex 自己保留的重复 user /
 //!   developer / system，再按原顺序插回完整尾部。
+//! - 非 GPT 上游重放只保留必要指令、工具声明、摘要和原始尾部，避免 Codex 客户端
+//!   保留的旧 user / 图片绕过压缩再次进入模型；再次压缩也使用相同的历史展开规则。
 //! - 尾部仍是 assistant 且目标 Claude 不支持 prefill 时，代理返回空 output 的 completed
 //!   响应，结束自动续接并等待真实 user。
 //!
@@ -98,6 +100,8 @@ Use this to build on the work that has already been done and avoid duplicating w
 Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:";
 
 const MAX_REMOTE_COMPACTION_V2_SYNTHETIC_BYTES: usize = 2 * 1024 * 1024;
+/// assistant 摘要前可复用的历史 user 必须足够小；找不到时直接用 user 历史摘要。
+const MAX_COMPACTION_USER_ANCHOR_BYTES: usize = 4096;
 const RETAINED_TOOL_DETAIL_PREVIEW_CHARS: usize = 4_000;
 
 const REMOTE_COMPACTION_V2_HISTORY_HEADER: &str = "\
@@ -368,7 +372,29 @@ fn prepare_cache_reuse_request(
                 .collect::<Vec<_>>();
             if options.retain_recent_round {
                 let cut = cache_reuse_retained_tail_len(request_json, &conversation, control);
-                conversation.truncate(conversation.len() - cut);
+                let retained = conversation.split_off(conversation.len() - cut);
+                // 尾部对话不参与摘要，但其 system 和工具目录仍属于请求前缀。
+                // 必须在协议转换/强制 tool_choice 校验之前保留，不能只在发送后覆盖 tools。
+                conversation.extend(retained.iter().filter_map(|item| {
+                    match item
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("message")
+                    {
+                        "additional_tools" | "tool_search_output" => {
+                            canonical_compaction_context_item(item)
+                        }
+                        "message"
+                            if matches!(
+                                item.get("role").and_then(Value::as_str),
+                                Some("system" | "developer")
+                            ) =>
+                        {
+                            Some(item.clone())
+                        }
+                        _ => None,
+                    }
+                }));
             }
             conversation.push(instruction);
             *items = conversation;
@@ -388,7 +414,7 @@ fn cache_reuse_retained_tail_len(
     conversation: &[Value],
     control: LocalCompactionControlKind,
 ) -> usize {
-    let expanded = expand_synthetic_local_compaction_request(request_json);
+    let expanded = expand_synthetic_local_compaction_request_for_upstream(request_json);
     let Some(expanded_input) = expanded.get("input").and_then(Value::as_array) else {
         return 0;
     };
@@ -408,7 +434,8 @@ fn prepare_codex_local_request(
     options: &CompactionOptions,
 ) -> Value {
     let instruction = compaction_instruction_item(&compaction_instruction(&options.user_prompt));
-    let mut request = expand_synthetic_local_compaction_request(request_json);
+    // 裁剪规则由会话来源决定：非 GPT 会话改用 GPT 摘要时也不能复活已摘要的旧媒体。
+    let mut request = expand_synthetic_local_compaction_request_for_upstream(request_json);
     let Some(object) = request.as_object_mut() else {
         return request_json.clone();
     };
@@ -434,9 +461,7 @@ fn prepare_codex_local_request(
             _ => {}
         }
     }
-    for key in COMPACTION_TOOL_FIELDS {
-        object.remove(key);
-    }
+    remove_compaction_tool_declarations(&mut request);
     request
 }
 
@@ -461,10 +486,62 @@ pub fn compaction_retry_request(first_attempt_request: &Value) -> Value {
             )
         });
     }
+    remove_compaction_tool_declarations(&mut request);
+    request
+}
+
+fn remove_compaction_tool_declarations(request: &mut Value) {
+    let Some(object) = request.as_object_mut() else {
+        return;
+    };
     for key in COMPACTION_TOOL_FIELDS {
         object.remove(key);
     }
-    request
+    if let Some(items) = object.get_mut("input").and_then(Value::as_array_mut) {
+        strip_compaction_history_tool_declarations(items);
+    }
+}
+
+/// 保留工具调用/结果配对，只移除可再次启用工具的目录；旧 v3 载荷也遵循同一规则。
+/// 不提前展开压缩项，以免丢失后续协议转换用于恢复 thinking 历史的标识。
+fn strip_compaction_history_tool_declarations(items: &mut Vec<Value>) -> bool {
+    let mut changed = false;
+    items.retain_mut(|item| {
+        match item.get("type").and_then(Value::as_str) {
+            Some("additional_tools") => {
+                changed = true;
+                return false;
+            }
+            Some("tool_search_output")
+                if item.get("tools").is_some_and(|tools| {
+                    tools.as_array().is_none_or(|tools| !tools.is_empty())
+                }) =>
+            {
+                item["tools"] = json!([]);
+                changed = true;
+            }
+            _ => {}
+        }
+        if let Some(mut payload) = synthetic_local_compaction_payload(item)
+            && strip_compaction_history_tool_declarations(&mut payload.retained_tail)
+        {
+            let encoded = format!(
+                "{LOCAL_COMPACTION_V3_STRUCTURED_PREFIX}{}",
+                serde_json::to_string(&payload).expect("JSON compaction payload is serializable")
+            );
+            if item.get("type").and_then(Value::as_str) == Some("compaction") {
+                item["encrypted_content"] = json!(encoded);
+            } else {
+                replace_message_text(
+                    item,
+                    &format!("{LEGACY_COMPACTION_SUMMARY_PREFIX}\n\n{encoded}"),
+                );
+            }
+            changed = true;
+        }
+        true
+    });
+    changed
 }
 
 /// 协议转换层的兜底：未经代理压缩执行器准备的 V2 请求按模型路由、默认提示词转换，
@@ -630,20 +707,56 @@ pub fn synthetic_remote_compaction_history_text(item: &Value) -> Option<String> 
 ///
 /// 真实 OpenAI `encrypted_content` 没有本项目前缀，不会被误解码。
 pub fn expand_synthetic_local_compaction_request(request_json: &Value) -> Value {
-    expand_synthetic_local_compaction_request_with_summary_role(request_json, "assistant")
+    expand_synthetic_local_compaction_request_with_summary_role(
+        request_json,
+        "assistant",
+        SyntheticCompactionExpansionMode::PreserveCodexRetainedPrefix,
+    )
 }
 
-/// thinking 历史不能把没有原始思考的合成摘要当成模型回答。
-/// 摘要以带来源说明的历史上下文传入，原始 retained_tail 的角色和内容保持不变。
-pub(crate) fn expand_synthetic_local_compaction_request_as_context(request_json: &Value) -> Value {
-    expand_synthetic_local_compaction_request_with_summary_role(request_json, "user")
+/// 上游请求恢复本地压缩历史时，非 GPT 模型只保留必要指令、工具声明、摘要、
+/// v3 retained tail 与压缩后的新输入。
+///
+/// Codex 客户端会把压缩前的 user/developer/system 项与 compaction item 一起重新发送。
+/// 对不支持原生 Remote Compaction V2 的模型，若直接展开这些项，会让已被摘要覆盖的旧
+/// user（尤其图片）再次进入上游上下文。普通请求和再次压缩必须同样处理已被摘要覆盖的
+/// 旧历史，才能保持原模型 prompt cache 前缀；未被摘要覆盖的当前会话不会在此裁剪。
+pub(crate) fn expand_synthetic_local_compaction_request_for_upstream(
+    request_json: &Value,
+) -> Value {
+    expand_synthetic_local_compaction_request_with_summary_role(
+        request_json,
+        "assistant",
+        SyntheticCompactionExpansionMode::PruneNonGptHistory,
+    )
+}
+
+/// 与 [`expand_synthetic_local_compaction_request_for_upstream`] 相同，但把摘要作为
+/// user 历史上下文，供禁止 assistant prefill 或需要恢复 thinking 上下文的协议使用。
+pub(crate) fn expand_synthetic_local_compaction_request_as_context_for_upstream(
+    request_json: &Value,
+) -> Value {
+    expand_synthetic_local_compaction_request_with_summary_role(
+        request_json,
+        "user",
+        SyntheticCompactionExpansionMode::PruneNonGptHistory,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyntheticCompactionExpansionMode {
+    PreserveCodexRetainedPrefix,
+    PruneNonGptHistory,
 }
 
 fn expand_synthetic_local_compaction_request_with_summary_role(
     request_json: &Value,
     summary_role: &str,
+    mode: SyntheticCompactionExpansionMode,
 ) -> Value {
     let mut request = request_json.clone();
+    let prune_codex_retained_prefix = mode == SyntheticCompactionExpansionMode::PruneNonGptHistory
+        && should_prune_codex_retained_prefix_for_upstream(request_json);
     let Some(input) = request
         .as_object_mut()
         .and_then(|object| object.get_mut("input"))
@@ -651,8 +764,17 @@ fn expand_synthetic_local_compaction_request_with_summary_role(
     else {
         return request;
     };
-    *input = expand_synthetic_local_compaction_items(input, summary_role);
+    *input =
+        expand_synthetic_local_compaction_items(input, summary_role, prune_codex_retained_prefix);
     request
+}
+
+fn should_prune_codex_retained_prefix_for_upstream(request_json: &Value) -> bool {
+    let model = request_json
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    crate::model_capabilities::model_family(model) != crate::model_capabilities::ModelFamily::Gpt
 }
 
 /// 判断请求历史是否含 CodexElves 生成的本地合成压缩载荷。
@@ -671,6 +793,7 @@ pub fn contains_synthetic_local_compaction(request_json: &Value) -> bool {
 /// assistant 侧，则本次自动续接必须结束并等待真实 user/tool result。
 pub fn local_compaction_requires_real_user(request_json: &Value, model: &str) -> bool {
     if !model.trim().to_ascii_lowercase().contains("claude")
+        || is_any_compaction_request(request_json)
         || !contains_synthetic_local_compaction(request_json)
     {
         return false;
@@ -683,7 +806,15 @@ pub fn local_compaction_requires_real_user(request_json: &Value, model: &str) ->
         == Some(EffectiveHistorySide::Assistant)
 }
 
-fn expand_synthetic_local_compaction_items(input: &[Value], summary_role: &str) -> Vec<Value> {
+fn expand_synthetic_local_compaction_items(
+    input: &[Value],
+    summary_role: &str,
+    prune_codex_retained_prefix: bool,
+) -> Vec<Value> {
+    if prune_codex_retained_prefix {
+        return expand_synthetic_local_compaction_items_for_upstream(input, summary_role);
+    }
+
     let mut expanded = Vec::with_capacity(input.len());
     for item in input {
         let Some(payload) = synthetic_local_compaction_payload(item) else {
@@ -697,6 +828,204 @@ fn expand_synthetic_local_compaction_items(input: &[Value], summary_role: &str) 
         expanded.extend(payload.retained_tail);
     }
     expanded
+}
+
+fn expand_synthetic_local_compaction_items_for_upstream(
+    input: &[Value],
+    summary_role: &str,
+) -> Vec<Value> {
+    let Some((compaction_index, payload)) =
+        input.iter().enumerate().rev().find_map(|(index, item)| {
+            synthetic_local_compaction_payload(item).map(|payload| (index, payload))
+        })
+    else {
+        return input.to_vec();
+    };
+
+    // 较早 v3 载荷内也可能有仍有效的指令或动态工具声明。
+    let prefix =
+        expand_synthetic_local_compaction_items(&input[..compaction_index], summary_role, false);
+    let user_anchor_index = if summary_role == "user" {
+        None
+    } else {
+        prefix.iter().rposition(|item| {
+            is_bounded_text_user_anchor(item)
+                && canonical_compaction_context_item(item).is_none()
+                && !payload
+                    .retained_tail
+                    .iter()
+                    .filter(|retained| is_codex_retained_message(retained))
+                    .any(|retained| retained_message_matches(item, retained))
+        })
+    };
+    let effective_summary_role = if summary_role == "user" || user_anchor_index.is_some() {
+        summary_role
+    } else {
+        // 不为满足协议首条 user 而把唯一的历史图片重新带回上游。
+        "user"
+    };
+
+    let mut expanded = Vec::with_capacity(
+        prefix.len().min(8) + payload.retained_tail.len() + input.len() - compaction_index,
+    );
+    expanded.extend(prefix.iter().enumerate().filter_map(|(index, item)| {
+        if Some(index) == user_anchor_index {
+            Some(item.clone())
+        } else {
+            canonical_compaction_context_item(item)
+        }
+    }));
+    remove_codex_retained_duplicates_with_user_anchor(
+        &mut expanded,
+        &payload.retained_tail,
+        effective_summary_role != "user",
+    );
+    if let Some(summary) =
+        historical_compaction_summary_item(&payload.summary, effective_summary_role)
+    {
+        expanded.push(summary);
+    }
+    expanded.extend(payload.retained_tail);
+    expanded.extend(input[compaction_index + 1..].iter().cloned());
+    expanded
+}
+
+fn canonical_compaction_context_item(item: &Value) -> Option<Value> {
+    match item
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("message")
+    {
+        "additional_tools" => return Some(item.clone()),
+        "tool_search_output" => {
+            // 保留目录，不重放已经被摘要覆盖的工具执行结果或孤立 call_id。
+            let tools = item.get("tools")?.as_array()?;
+            return (!tools.is_empty()).then(|| {
+                json!({
+                    "type": "additional_tools",
+                    "tools": tools
+                })
+            });
+        }
+        "message" => {}
+        _ => return None,
+    }
+    match item.get("role").and_then(Value::as_str) {
+        Some("developer" | "system" | "latest_reminder") => Some(item.clone()),
+        Some("user") => canonical_user_context_item(item),
+        _ => None,
+    }
+}
+
+/// 与协议层去重使用同一组旧版 Codex 上下文标识，兼容不带 passthrough metadata 的历史。
+pub(crate) fn is_codex_context_text(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with("# AGENTS.md instructions for ")
+        || trimmed.starts_with("<environment_context>")
+        || trimmed.starts_with("<INSTRUCTIONS>")
+}
+
+fn canonical_user_context_item(item: &Value) -> Option<Value> {
+    let content = item.get("content")?;
+    let kinds = item.pointer("/internal_chat_message_metadata_passthrough/content_item_kinds");
+    let all_canonical = match kinds {
+        Some(Value::String(kind)) => is_canonical_context_kind(kind),
+        Some(Value::Array(kinds)) => {
+            !kinds.is_empty()
+                && kinds
+                    .iter()
+                    .all(|kind| kind.as_str().is_some_and(is_canonical_context_kind))
+        }
+        _ => false,
+    };
+    if let Some(text) = content.as_str() {
+        return (all_canonical || is_codex_context_text(text)).then(|| item.clone());
+    }
+    let parts = content.as_array()?;
+    let aligned_kinds = kinds
+        .and_then(Value::as_array)
+        .filter(|kinds| kinds.len() == parts.len());
+    let kept_indices = parts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, part)| {
+            let text = compaction_text_part(part)?;
+            let canonical = all_canonical
+                || aligned_kinds.is_some_and(|kinds| {
+                    kinds[index].as_str().is_some_and(is_canonical_context_kind)
+                })
+                || is_codex_context_text(text);
+            canonical.then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if kept_indices.is_empty() {
+        return None;
+    }
+    let mut projected = item.clone();
+    projected["content"] = json!(
+        kept_indices
+            .iter()
+            .map(|&index| &parts[index])
+            .collect::<Vec<_>>()
+    );
+    if let Some(kinds) = aligned_kinds {
+        projected["internal_chat_message_metadata_passthrough"]["content_item_kinds"] = json!(
+            kept_indices
+                .iter()
+                .map(|&index| &kinds[index])
+                .collect::<Vec<_>>()
+        );
+    }
+    Some(projected)
+}
+
+fn compaction_text_part(part: &Value) -> Option<&str> {
+    if let Some(text) = part.as_str() {
+        return Some(text);
+    }
+    matches!(
+        part.get("type").and_then(Value::as_str),
+        Some("input_text" | "output_text" | "text")
+    )
+    .then(|| part.get("text").and_then(Value::as_str))
+    .flatten()
+}
+
+fn is_bounded_text_user_anchor(item: &Value) -> bool {
+    if !is_real_user_message(item) {
+        return false;
+    }
+    let Some(content) = item.get("content") else {
+        return false;
+    };
+    let text_only = content.is_string()
+        || content.as_array().is_some_and(|parts| {
+            !parts.is_empty()
+                && parts.iter().all(|part| {
+                    compaction_text_part(part).is_some()
+                        && part.as_object().is_none_or(|object| {
+                            object
+                                .keys()
+                                .all(|key| matches!(key.as_str(), "type" | "text"))
+                        })
+                })
+        });
+    if !text_only || content.to_string().len() > MAX_COMPACTION_USER_ANCHOR_BYTES {
+        return false;
+    }
+    let text = item_text(item);
+    let text = text.trim();
+    !text.is_empty()
+        && !text.starts_with(COMPACTION_INSTRUCTION_PREFIX)
+        && !text.starts_with(LEGACY_COMPACTION_SUMMARY_PREFIX)
+        && !text.starts_with(REMOTE_COMPACTION_V2_HISTORY_HEADER)
+}
+
+fn is_canonical_context_kind(kind: &str) -> bool {
+    let kind = kind.trim().to_ascii_lowercase();
+    kind.ends_with("instructions")
+        || kind.ends_with("environment_context")
+        || kind == "multi_agent.usage_hint"
 }
 
 fn synthetic_local_compaction_payload(item: &Value) -> Option<StructuredLocalCompactionPayload> {
@@ -777,6 +1106,14 @@ fn is_historical_compaction_summary_item(item: &Value) -> bool {
 }
 
 fn remove_codex_retained_duplicates(output: &mut Vec<Value>, retained_tail: &[Value]) {
+    remove_codex_retained_duplicates_with_user_anchor(output, retained_tail, true);
+}
+
+fn remove_codex_retained_duplicates_with_user_anchor(
+    output: &mut Vec<Value>,
+    retained_tail: &[Value],
+    preserve_sole_user_anchor: bool,
+) {
     for retained in retained_tail
         .iter()
         .filter(|item| is_codex_retained_message(item))
@@ -787,9 +1124,10 @@ fn remove_codex_retained_duplicates(output: &mut Vec<Value>, retained_tail: &[Va
         else {
             continue;
         };
-        // Anthropic 需要首条有效消息为 user。若这是压缩前唯一可用的 user，则保留这一份
+        // assistant 摘要前需要一个真实 user 锚点。若这是唯一可用的 user，则保留这一份
         // 原生副本；v3 尾部仍会追加原始 user，避免伪造传输消息。
-        if is_real_user_message(retained)
+        if preserve_sole_user_anchor
+            && is_real_user_message(retained)
             && !output
                 .iter()
                 .enumerate()
@@ -827,6 +1165,9 @@ fn is_real_user_message(item: &Value) -> bool {
         && !item_text(item)
             .trim_start()
             .starts_with(COMPACTION_PROMPT_PREFIX)
+        && !item_text(item)
+            .trim_start()
+            .starts_with(REMOTE_COMPACTION_V2_HISTORY_HEADER)
 }
 
 fn retained_message_matches(candidate: &Value, retained: &Value) -> bool {
@@ -1411,7 +1752,7 @@ fn build_structured_local_compaction(
     summary: &str,
     retain_tokens: u32,
 ) -> Result<Option<StructuredCompactionBuild>, StructuredCompactionError> {
-    let expanded = expand_synthetic_local_compaction_request(request_json);
+    let expanded = expand_synthetic_local_compaction_request_for_upstream(request_json);
     let input = expanded
         .get("input")
         .and_then(Value::as_array)
@@ -4120,6 +4461,307 @@ mod tests {
     }
 
     #[test]
+    fn upstream_context_expansion_prunes_old_non_gpt_users_and_images() {
+        let mut old_image = user_message("旧截图");
+        old_image["content"].as_array_mut().unwrap().push(json!({
+            "type": "input_image",
+            "image_url": "data:image/png;base64,OLD_IMAGE_BYTES"
+        }));
+        let canonical_context = json!({
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "canonical developer context" }],
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": [
+                    "generic.developer_instructions",
+                    "environments.environment_context"
+                ]
+            }
+        });
+        let request = json!({
+            "model": "claude-sonnet-5",
+            "input": [
+                user_message("旧问题 1"),
+                old_image,
+                canonical_context.clone(),
+                synthetic_remote_compaction_item("压缩后的完整交接摘要"),
+                user_message("压缩后的新问题")
+            ]
+        });
+
+        let expanded = expand_synthetic_local_compaction_request_as_context_for_upstream(&request);
+        let input = expanded["input"].as_array().unwrap();
+        let serialized = expanded.to_string();
+
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0], canonical_context);
+        assert_eq!(input[1]["role"], "user");
+        assert!(item_text(&input[1]).contains("压缩后的完整交接摘要"));
+        assert_eq!(item_text(&input[2]), "压缩后的新问题");
+        assert!(!serialized.contains("旧问题 1"));
+        assert!(!serialized.contains("OLD_IMAGE_BYTES"));
+        assert!(!serialized.contains("旧截图"));
+    }
+
+    #[test]
+    fn upstream_assistant_expansion_keeps_only_a_text_user_anchor() {
+        let mut old_image = user_message("旧截图");
+        old_image["content"].as_array_mut().unwrap().push(json!({
+            "type": "input_image",
+            "image_url": "data:image/png;base64,OLD_IMAGE_BYTES"
+        }));
+        let request = json!({
+            "model": "deepseek-v4.1-flash",
+            "input": [
+                old_image,
+                user_message("最后一个纯文本 user 锚点"),
+                synthetic_remote_compaction_item("较早历史摘要"),
+                user_message("新问题")
+            ]
+        });
+
+        let expanded = expand_synthetic_local_compaction_request_for_upstream(&request);
+        let input = expanded["input"].as_array().unwrap();
+
+        assert_eq!(input.len(), 3);
+        assert_eq!(item_text(&input[0]), "最后一个纯文本 user 锚点");
+        assert_eq!(input[1]["role"], "assistant");
+        assert!(item_text(&input[1]).contains("较早历史摘要"));
+        assert_eq!(item_text(&input[2]), "新问题");
+        assert!(!expanded.to_string().contains("OLD_IMAGE_BYTES"));
+    }
+
+    #[test]
+    fn upstream_compaction_expansion_uses_the_same_history_as_normal_requests() {
+        let mut old_image = user_message("压缩前截图");
+        old_image["content"].as_array_mut().unwrap().push(json!({
+            "type": "input_image",
+            "image_url": "data:image/png;base64,CACHE_PREFIX_IMAGE"
+        }));
+        let request = json!({
+            "model": "claude-sonnet-5",
+            "input": [
+                old_image,
+                synthetic_remote_compaction_item("上一轮压缩摘要"),
+                user_message("本轮需要压缩的内容"),
+                compaction_prompt_item()
+            ]
+        });
+        assert!(is_any_compaction_request(&request));
+        let prepared = prepare_compaction_attempt_request(
+            &request,
+            CompactionKind::Legacy,
+            CompactionRoute::CacheReuse,
+            &CompactionOptions {
+                user_prompt: String::new(),
+                retain_recent_round: false,
+                retain_tokens: DEFAULT_RETAIN_TOKENS,
+            },
+            CompactionAttempt::First,
+        );
+        assert!(!is_any_compaction_request(&prepared));
+        let expanded = expand_synthetic_local_compaction_request_for_upstream(&prepared);
+        let serialized = expanded.to_string();
+
+        assert!(!serialized.contains("CACHE_PREFIX_IMAGE"));
+        assert!(!serialized.contains("压缩前截图"));
+        assert!(serialized.contains("本轮需要压缩的内容"));
+        assert!(
+            item_text(expanded["input"].as_array().unwrap().last().unwrap())
+                .starts_with(COMPACTION_INSTRUCTION_PREFIX)
+        );
+        let mut normal = request.clone();
+        normal["input"].as_array_mut().unwrap().pop();
+        let normal = expand_synthetic_local_compaction_request_for_upstream(&normal);
+        let expanded_input = expanded["input"].as_array().unwrap();
+        assert_eq!(
+            &expanded_input[..expanded_input.len() - 1],
+            normal["input"].as_array().unwrap()
+        );
+        let raw = expand_synthetic_local_compaction_request_for_upstream(&request);
+        assert!(!raw.to_string().contains("CACHE_PREFIX_IMAGE"));
+    }
+
+    #[test]
+    fn upstream_expansion_projects_legacy_and_tagged_context_per_text_block() {
+        for kinds in [
+            Value::Null,
+            json!(["agents_md.instructions", "user.image", "user.text"]),
+            json!("agents_md.instructions"),
+            json!(["agents_md.instructions", "user.image"]),
+        ] {
+            let rule = "# AGENTS.md instructions for E:\\project\nPROJECT_RULE";
+            let context = json!({
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": rule},
+                    {"type": "input_image", "image_url": "data:image/png;base64,OLD_IMAGE"},
+                    {"type": "input_text", "text": "OLD_QUESTION"}
+                ],
+                "internal_chat_message_metadata_passthrough": {"content_item_kinds": kinds}
+            });
+            let request = json!({
+                "model": "claude-test",
+                "input": [
+                    context,
+                    user_message("<environment_context><cwd>E:\\project</cwd></environment_context>"),
+                    user_message("<INSTRUCTIONS>GLOBAL_RULE</INSTRUCTIONS>"),
+                    synthetic_remote_compaction_item("summary"),
+                    user_message("new question")
+                ]
+            });
+            let expanded =
+                expand_synthetic_local_compaction_request_as_context_for_upstream(&request);
+            let serialized = expanded.to_string();
+            assert!(serialized.contains("PROJECT_RULE"), "{kinds}");
+            assert!(serialized.contains("GLOBAL_RULE"), "{kinds}");
+            assert!(serialized.contains("environment_context"), "{kinds}");
+            assert!(!serialized.contains("OLD_IMAGE"), "{kinds}");
+            if !kinds.is_string() {
+                assert!(!serialized.contains("OLD_QUESTION"), "{kinds}");
+            }
+        }
+    }
+
+    #[test]
+    fn upstream_assistant_anchor_rejects_files_unknown_parts_and_unbounded_text() {
+        for content in [
+            json!([{"type": "input_file", "file_url": "https://example.invalid/old.pdf"}]),
+            json!([{"type": "future_multimodal", "text": "NOT_TEXT_ONLY"}]),
+            json!([{"type": "input_text", "text": "x".repeat(MAX_COMPACTION_USER_ANCHOR_BYTES)}]),
+            json!([{"type": "input_text", "text": "caption", "file_data": "FILE_BYTES"}]),
+            json!([{"type": "input_text", "text": format!("{LEGACY_COMPACTION_SUMMARY_PREFIX}\nold summary")}]),
+        ] {
+            let request = json!({
+                "model": "glm-test",
+                "input": [
+                    {"type": "message", "role": "user", "content": content},
+                    synthetic_remote_compaction_item("fresh handoff"),
+                    user_message("new question")
+                ]
+            });
+            let expanded = expand_synthetic_local_compaction_request_for_upstream(&request);
+            let input = expanded["input"].as_array().unwrap();
+            assert_eq!(input.len(), 2);
+            assert_eq!(input[0]["role"], "user");
+            assert!(item_text(&input[0]).contains("fresh handoff"));
+        }
+    }
+
+    #[test]
+    fn upstream_expansion_preserves_declarations_inside_older_structured_compaction() {
+        let declaration = json!({
+            "type": "additional_tools",
+            "tools": [{"type": "function", "name": "read_file", "parameters": {}}]
+        });
+        let encoded = format!(
+            "{LOCAL_COMPACTION_V3_STRUCTURED_PREFIX}{}",
+            json!({"summary": "older summary", "retained_tail": [
+                declaration.clone(),
+                user_message("# AGENTS.md instructions for E:\\project\nPROJECT_RULE"),
+                user_message("OLD_QUESTION")
+            ]})
+        );
+        let request = json!({
+            "model": "claude-test",
+            "input": [
+                synthetic_structured_compaction_item(&encoded),
+                synthetic_remote_compaction_item("new summary"),
+                user_message("current task")
+            ]
+        });
+        let expanded = expand_synthetic_local_compaction_request_as_context_for_upstream(&request);
+        assert_eq!(expanded["input"][0], declaration);
+        assert!(expanded.to_string().contains("PROJECT_RULE"));
+        assert!(!expanded.to_string().contains("OLD_QUESTION"));
+        assert!(!expanded.to_string().contains("older summary"));
+    }
+
+    #[test]
+    fn repeated_compaction_does_not_retain_files_from_before_the_previous_checkpoint() {
+        let request = json!({
+            "model": "claude-test",
+            "input": [
+                {"type": "message", "role": "user", "content": [
+                    {"type": "input_file", "file_url": "https://example.invalid/old.pdf"}
+                ]},
+                synthetic_remote_compaction_item("previous summary"),
+                compaction_prompt_item()
+            ]
+        });
+        assert!(matches!(
+            build_structured_local_compaction(&request, "new summary", DEFAULT_RETAIN_TOKENS),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn upstream_expansion_does_not_prune_gpt_native_history() {
+        let mut old_image = user_message("GPT 历史截图");
+        old_image["content"].as_array_mut().unwrap().push(json!({
+            "type": "input_image",
+            "image_url": "data:image/png;base64,GPT_IMAGE"
+        }));
+        let request = json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                old_image,
+                synthetic_remote_compaction_item("原生模型摘要"),
+                user_message("新问题")
+            ]
+        });
+
+        let expanded = expand_synthetic_local_compaction_request_for_upstream(&request);
+
+        assert!(expanded.to_string().contains("GPT_IMAGE"));
+        assert!(expanded.to_string().contains("GPT 历史截图"));
+    }
+
+    #[test]
+    fn upstream_v3_expansion_restores_retained_tail_once_after_pruning() {
+        let retained = json!({
+            "type": "message",
+            "id": "retained-user",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "保留的当前任务" }],
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["multi_agent.mode_instructions"]
+            }
+        });
+        let payload = StructuredLocalCompactionPayload {
+            summary: "较早历史摘要".to_string(),
+            retained_tail: vec![retained.clone()],
+        };
+        let item = synthetic_structured_compaction_item(&format!(
+            "{LOCAL_COMPACTION_V3_STRUCTURED_PREFIX}{}",
+            serde_json::to_string(&payload).unwrap()
+        ));
+        let request = json!({
+            "model": "claude-opus-5",
+            "input": [
+                user_message("应被删除的旧历史"),
+                retained,
+                item,
+                user_message("压缩后的新输入")
+            ]
+        });
+
+        let expanded = expand_synthetic_local_compaction_request_as_context_for_upstream(&request);
+        let input = expanded["input"].as_array().unwrap();
+
+        assert!(!expanded.to_string().contains("应被删除的旧历史"));
+        assert_eq!(
+            input
+                .iter()
+                .filter(|item| { item.get("id").and_then(Value::as_str) == Some("retained-user") })
+                .count(),
+            1
+        );
+        assert_eq!(item_text(input.last().unwrap()), "压缩后的新输入");
+    }
+
+    #[test]
     fn oversized_text_tool_output_is_trimmed_without_breaking_pair() {
         let huge_output = format!("BEGIN\n{}\nEND", "界".repeat(30_000));
         let call = function_call_item("call_1", "shell_command");
@@ -4995,6 +5637,65 @@ mod tests {
             &tool_request,
             "claude-sonnet-5"
         ));
+    }
+
+    #[test]
+    fn compaction_retry_strips_wrapped_tool_catalog_without_losing_replay_marker_or_pairs() {
+        let call = function_call_item("retained-call", "read");
+        let output = function_call_output_item("retained-call", "file contents");
+        let encoded = format!(
+            "{LOCAL_COMPACTION_V3_STRUCTURED_PREFIX}{}",
+            json!({
+                "summary": "previous summary",
+                "retained_tail": [
+                    {"type": "additional_tools", "tools": [
+                        {"type": "function", "name": "read", "parameters": {}}
+                    ]},
+                    {"type": "tool_search_output", "call_id": "search", "tools": [
+                        {"type": "function", "name": "write", "parameters": {}}
+                    ]},
+                    call.clone(), output.clone()
+                ]
+            })
+        );
+        for wrapper in [false, true] {
+            let marker = if wrapper {
+                user_message(&format!("{LEGACY_COMPACTION_SUMMARY_PREFIX}\n\n{encoded}"))
+            } else {
+                synthetic_structured_compaction_item(&encoded)
+            };
+            let source = json!({"model": "deepseek-chat", "input": [
+                marker.clone(), user_message("current task")
+            ]});
+            let retry = compaction_retry_request(&source);
+            assert!(contains_synthetic_local_compaction(&retry));
+            assert_eq!(source["input"][0], marker);
+            let payload = synthetic_local_compaction_payload(&retry["input"][0]).unwrap();
+            assert_eq!(payload.summary, "previous summary");
+            assert_eq!(payload.retained_tail[0]["type"], "tool_search_output");
+            assert_eq!(payload.retained_tail[0]["call_id"], "search");
+            assert_eq!(payload.retained_tail[0]["tools"], json!([]));
+            assert_eq!(&payload.retained_tail[1..], &[call.clone(), output.clone()]);
+        }
+    }
+
+    #[test]
+    fn explicit_compaction_is_not_mistaken_for_assistant_tail_continuation() {
+        for control in [
+            compaction_prompt_item(),
+            json!({"type": "compaction_trigger"}),
+        ] {
+            let request = json!({"model": "claude-test", "input": [
+                synthetic_remote_compaction_item("previous summary"),
+                assistant_message("completed work"),
+                control
+            ]});
+            assert!(is_any_compaction_request(&request));
+            assert!(!local_compaction_requires_real_user(
+                &request,
+                "claude-test"
+            ));
+        }
     }
 
     #[test]

@@ -14895,6 +14895,421 @@ fn chat_request_keeps_web_search_when_mcp_fallback_available() {
     assert!(names.contains(&"mcp__tavily__tavily_search"));
 }
 
+#[test]
+fn chat_post_compaction_request_drops_old_images_before_translation() {
+    let converted = responses_to_chat_completions(json!({
+        "model": "glm-5.2",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "old image caption" },
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,OLD_CHAT_IMAGE"
+                    }
+                ]
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "text-only protocol anchor" }]
+            },
+            {
+                "type": "compaction",
+                "encrypted_content": "codex-elves-compaction-v2:CHAT HANDOFF SUMMARY"
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "current request" }]
+            }
+        ]
+    }))
+    .unwrap();
+    let wire = converted.to_string();
+
+    assert!(!wire.contains("OLD_CHAT_IMAGE"));
+    assert!(!wire.contains("old image caption"));
+    assert!(wire.contains("text-only protocol anchor"));
+    assert!(wire.contains("CHAT HANDOFF SUMMARY"));
+    assert!(wire.contains("current request"));
+}
+
+#[test]
+fn anthropic_post_compaction_request_keeps_canonical_context_but_drops_old_images() {
+    let converted = responses_to_anthropic_messages(json!({
+        "model": "claude-sonnet-5",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "old anthropic image caption" },
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,OLD_ANTHROPIC_IMAGE"
+                    }
+                ]
+            },
+            {
+                "type": "message",
+                "role": "developer",
+                "content": [{
+                    "type": "input_text",
+                    "text": "canonical developer instruction"
+                }]
+            },
+            {
+                "type": "compaction",
+                "encrypted_content": "codex-elves-compaction-v2:ANTHROPIC HANDOFF SUMMARY"
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "current anthropic request" }]
+            }
+        ]
+    }))
+    .unwrap();
+    let wire = converted.to_string();
+
+    assert!(!wire.contains("OLD_ANTHROPIC_IMAGE"));
+    assert!(!wire.contains("old anthropic image caption"));
+    assert!(wire.contains("canonical developer instruction"));
+    assert!(wire.contains("ANTHROPIC HANDOFF SUMMARY"));
+    assert!(wire.contains("current anthropic request"));
+}
+
+mod post_compaction_boundaries {
+    use super::*;
+    use codex_elves_core::layered_compaction::{
+        COMPACTION_PROMPT_PREFIX, CompactionAttempt, CompactionKind, CompactionOptions,
+        CompactionRoute, prepare_compaction_attempt_request,
+    };
+
+    fn user(text: &str) -> Value {
+        json!({"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": text}
+        ]})
+    }
+
+    fn marker() -> Value {
+        json!({
+            "type": "compaction",
+            "encrypted_content": "codex-elves-compaction-v2:VERIFIED HANDOFF"
+        })
+    }
+
+    fn request(input: Vec<Value>) -> Value {
+        json!({
+            "model": "claude-test",
+            "instructions": "stable system",
+            "input": input,
+            "tools": [{"type": "function", "name": "shell", "parameters": {"type": "object"}}]
+        })
+    }
+
+    fn declaration(kind: &str, namespace: &str, name: &str) -> Value {
+        json!({
+            "type": kind,
+            "tools": [{
+                "type": "namespace", "name": namespace,
+                "tools": [{"type": "function", "name": name, "parameters": {"type": "object"}}]
+            }]
+        })
+    }
+
+    fn convert(source: &Value, anthropic: bool) -> Value {
+        if anthropic {
+            responses_to_anthropic_messages(source.clone()).unwrap()
+        } else {
+            responses_to_chat_completions(source.clone()).unwrap()
+        }
+    }
+
+    #[test]
+    fn dynamic_declarations_survive_compaction_and_forced_choice() {
+        for kind in ["additional_tools", "tool_search_output"] {
+            let mut source = request(vec![
+                declaration(kind, "files", "read"),
+                user("old task"),
+                marker(),
+                user("read the file"),
+            ]);
+            source["tool_choice"] =
+                json!({"type": "function", "namespace": "files", "name": "read"});
+            for anthropic in [false, true] {
+                let wire = convert(&source, anthropic);
+                assert_eq!(wire["tools"].as_array().unwrap().len(), 2);
+                let name = if anthropic {
+                    &wire["tool_choice"]["name"]
+                } else {
+                    &wire["tool_choice"]["function"]["name"]
+                };
+                assert_eq!(name, "files__read", "{kind}, anthropic={anthropic}");
+            }
+        }
+    }
+
+    #[test]
+    fn compaction_retained_round_keeps_dynamic_tool_choice_and_system_prefix() {
+        for kind in ["additional_tools", "tool_search_output"] {
+            let mut source = request(vec![
+                marker(),
+                user("earlier task"),
+                json!({"type": "message", "role": "assistant", "content": [
+                    {"type": "output_text", "text": "previous answer"}
+                ]}),
+                user("current task"),
+                declaration(kind, "files", "read"),
+                json!({"type": "message", "role": "developer", "content": [
+                    {"type": "input_text", "text": "TAIL_SYSTEM_RULE"}
+                ]}),
+            ]);
+            source["tool_choice"] =
+                json!({"type": "function", "namespace": "files", "name": "read"});
+            for anthropic in [false, true] {
+                let ordinary = convert(&source, anthropic);
+                let mut compact = source.clone();
+                compact["input"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(user(COMPACTION_PROMPT_PREFIX));
+                let prepared = prepare_compaction_attempt_request(
+                    &compact,
+                    CompactionKind::Legacy,
+                    CompactionRoute::CacheReuse,
+                    &CompactionOptions {
+                        retain_recent_round: true,
+                        ..Default::default()
+                    },
+                    CompactionAttempt::First,
+                );
+                let wire = convert(&prepared, anthropic);
+                assert_eq!(wire["tools"], ordinary["tools"]);
+                assert_eq!(wire["tool_choice"], ordinary["tool_choice"]);
+                assert_eq!(wire["system"], ordinary["system"]);
+                assert!(wire.to_string().contains("TAIL_SYSTEM_RULE"));
+                assert!(!wire.to_string().contains("current task"));
+                assert!(!wire.to_string().contains("previous answer"));
+            }
+        }
+    }
+
+    #[test]
+    fn compaction_retry_and_codex_local_do_not_restore_dynamic_tools() {
+        for structured in [false, true] {
+            let tools = vec![
+                declaration("additional_tools", "files", "read"),
+                declaration("tool_search_output", "files", "write"),
+            ];
+            let mut input = if structured {
+                vec![json!({
+                    "type": "compaction",
+                    "encrypted_content": format!("codex-elves-compaction-v3:{}", json!({
+                        "summary": "previous summary", "retained_tail": tools
+                    }))
+                })]
+            } else {
+                tools
+            };
+            input.extend([user("current task"), user(COMPACTION_PROMPT_PREFIX)]);
+            let source = request(input);
+            for (route, attempt) in [
+                (CompactionRoute::CacheReuse, CompactionAttempt::Retry),
+                (CompactionRoute::CodexLocal, CompactionAttempt::First),
+            ] {
+                let prepared = prepare_compaction_attempt_request(
+                    &source,
+                    CompactionKind::Legacy,
+                    route,
+                    &CompactionOptions::default(),
+                    attempt,
+                );
+                for anthropic in [false, true] {
+                    let wire = convert(&prepared, anthropic);
+                    assert!(
+                        wire.get("tools").is_none(),
+                        "unexpected tools: {}",
+                        wire["tools"]
+                    );
+                    assert!(wire.to_string().contains("current task"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn colliding_dynamic_names_round_trip_through_json_and_sse() {
+        for kind in ["additional_tools", "tool_search_output"] {
+            let mut source = request(vec![
+                declaration(kind, "archive", "files__read"),
+                user("old task"),
+                marker(),
+                declaration("additional_tools", "archive__files", "read"),
+                user("use the current tool"),
+            ]);
+            source["tool_choice"] = json!({
+                "type": "function", "namespace": "archive__files", "name": "read"
+            });
+            for anthropic in [false, true] {
+                let wire = convert(&source, anthropic);
+                assert_eq!(wire["tools"].as_array().unwrap().len(), 3);
+                let name = if anthropic {
+                    &wire["tool_choice"]["name"]
+                } else {
+                    &wire["tool_choice"]["function"]["name"]
+                };
+                let (direct, stream) = if anthropic {
+                    let block =
+                        json!({"type": "tool_use", "id": "call_new", "name": name, "input": {}});
+                    let response = json!({
+                        "id": "msg_collision", "model": "claude-test", "role": "assistant",
+                        "content": [block.clone()], "stop_reason": "tool_use"
+                    });
+                    let events = [
+                        json!({"type": "message_start", "message": {
+                            "id": "msg_collision", "model": "claude-test", "role": "assistant", "content": []
+                        }}),
+                        json!({"type": "content_block_start", "index": 0, "content_block": block}),
+                        json!({"type": "content_block_stop", "index": 0}),
+                        json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}}),
+                        json!({"type": "message_stop"}),
+                    ];
+                    let sse = events
+                        .iter()
+                        .map(|event| format!("data: {event}\n\n"))
+                        .collect::<String>();
+                    (
+                        anthropic_message_to_response_with_request(response, &source).unwrap(),
+                        anthropic_sse_to_responses_sse_with_request(&sse, &source),
+                    )
+                } else {
+                    let call = json!({
+                        "id": "call_new", "type": "function",
+                        "function": {"name": name, "arguments": "{}"}
+                    });
+                    let response = json!({
+                        "id": "chat_collision", "model": "claude-test",
+                        "choices": [{"message": {"role": "assistant", "tool_calls": [call.clone()]},
+                            "finish_reason": "tool_calls"}]
+                    });
+                    let mut delta_call = call;
+                    delta_call["index"] = json!(0);
+                    let event = json!({
+                        "id": "chat_collision", "model": "claude-test",
+                        "choices": [{"delta": {"tool_calls": [delta_call]}, "finish_reason": "tool_calls"}]
+                    });
+                    let sse = format!("data: {event}\n\ndata: [DONE]\n\n");
+                    (
+                        chat_completion_to_response_with_request(response, &source).unwrap(),
+                        chat_sse_to_responses_sse_with_request(&sse, &source),
+                    )
+                };
+                let events = parse_response_sse_events(&stream);
+                let streamed = &events.last().unwrap().data["response"];
+                for response in [&direct, streamed] {
+                    let call = response["output"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|item| item["type"] == "function_call")
+                        .unwrap();
+                    assert_eq!(call["namespace"], "archive__files", "{response}");
+                    assert_eq!(call["name"], "read", "{response}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compaction_keeps_normal_wire_history_prefix_for_legacy_and_v2_triggers() {
+        for anthropic in [false, true] {
+            for kind in [CompactionKind::Legacy, CompactionKind::RemoteV2] {
+                for non_trailing in [false, true] {
+                    if non_trailing && kind == CompactionKind::Legacy {
+                        continue;
+                    }
+                    let source = request(vec![
+                        user("already summarized"),
+                        json!({"type": "message", "role": "user", "content": [
+                            {"type": "input_file", "file_url": "https://example.invalid/OLD.pdf"}
+                        ]}),
+                        declaration("additional_tools", "files", "read"),
+                        marker(),
+                        user("current task"),
+                        json!({"type": "message", "role": "assistant", "content": [
+                            {"type": "output_text", "text": "current answer"}
+                        ]}),
+                    ]);
+                    let ordinary = convert(&source, anthropic);
+                    let mut compact = source;
+                    compact["input"].as_array_mut().unwrap().push(match kind {
+                        CompactionKind::Legacy => user(COMPACTION_PROMPT_PREFIX),
+                        CompactionKind::RemoteV2 => json!({"type": "compaction_trigger"}),
+                    });
+                    if non_trailing {
+                        compact["input"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(user("post trigger reminder"));
+                    }
+                    let prepared = prepare_compaction_attempt_request(
+                        &compact,
+                        kind,
+                        CompactionRoute::CacheReuse,
+                        &CompactionOptions::default(),
+                        CompactionAttempt::First,
+                    );
+                    let wire = convert(&prepared, anthropic);
+                    assert_eq!(wire["tools"], ordinary["tools"]);
+                    assert_eq!(wire["system"], ordinary["system"]);
+                    let messages = ordinary["messages"].as_array().unwrap();
+                    assert_eq!(
+                        &wire["messages"].as_array().unwrap()[..messages.len()],
+                        messages
+                    );
+                    assert!(!wire.to_string().contains("OLD.pdf"));
+                    assert!(wire.to_string().contains("Handoff checkpoint"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_context_and_mixed_context_media_are_projected_before_both_protocols() {
+        let source = request(vec![
+            json!({
+                "type": "message", "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "# AGENTS.md instructions for E:\\project\nPROJECT_RULE"},
+                    {"type": "input_image", "image_url": "https://example.invalid/OLD.png"}
+                ],
+                "internal_chat_message_metadata_passthrough": {
+                    "content_item_kinds": ["agents_md.instructions", "user.image"]
+                }
+            }),
+            user("<environment_context><cwd>E:\\project</cwd></environment_context>"),
+            user("<INSTRUCTIONS>GLOBAL_RULE</INSTRUCTIONS>"),
+            json!({"type": "message", "role": "user", "content": [
+                {"type": "input_file", "file_url": "https://example.invalid/OLD.pdf"}
+            ]}),
+            marker(),
+            user("new task"),
+        ]);
+        for anthropic in [false, true] {
+            let wire = convert(&source, anthropic).to_string();
+            assert!(wire.contains("PROJECT_RULE"));
+            assert!(wire.contains("environment_context"));
+            assert!(wire.contains("GLOBAL_RULE"));
+            assert!(!wire.contains("OLD.png"));
+            assert!(!wire.contains("OLD.pdf"));
+        }
+    }
+}
+
 fn tavily_namespace_tool() -> Value {
     json!({
         "type": "namespace",

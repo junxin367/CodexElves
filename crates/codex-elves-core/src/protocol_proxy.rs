@@ -922,9 +922,11 @@ pub fn responses_to_chat_completions(body: Value) -> anyhow::Result<Value> {
                 .is_some_and(|model| model.to_ascii_lowercase().contains("deepseek"))
             && reasoning_requested(&body).unwrap_or(true);
     let body = if recover_compacted_thinking {
-        crate::layered_compaction::expand_synthetic_local_compaction_request_as_context(&body)
+        crate::layered_compaction::expand_synthetic_local_compaction_request_as_context_for_upstream(
+            &body,
+        )
     } else {
-        crate::layered_compaction::expand_synthetic_local_compaction_request(&body)
+        crate::layered_compaction::expand_synthetic_local_compaction_request_for_upstream(&body)
     };
     let body = crate::layered_compaction::prepare_remote_compaction_v2_bridge_request(&body);
     validate_translated_request(&body, false)?;
@@ -1212,8 +1214,8 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
     validate_translated_history_references(&body)?;
     let has_local_compaction =
         crate::layered_compaction::contains_synthetic_local_compaction(&body);
-    let body =
-        crate::layered_compaction::expand_synthetic_local_compaction_request_as_context(&body);
+    let body = crate::layered_compaction::
+        expand_synthetic_local_compaction_request_as_context_for_upstream(&body);
     let body = crate::layered_compaction::prepare_remote_compaction_v2_bridge_request(&body);
     validate_translated_request(&body, true)?;
     let conversion_tools = tools_for_proxy_conversion(&body);
@@ -5393,7 +5395,9 @@ pub(crate) fn normalize_responses_message_item_id(id: &str) -> Option<String> {
 
 pub(crate) fn normalize_native_responses_request(request_json: &Value) -> Value {
     let mut request =
-        crate::layered_compaction::expand_synthetic_local_compaction_request(request_json);
+        crate::layered_compaction::expand_synthetic_local_compaction_request_for_upstream(
+            request_json,
+        );
     if let Some(object) = request.as_object_mut() {
         object.remove("codex_elves_compat");
     }
@@ -7757,7 +7761,7 @@ fn dedupe_anthropic_codex_context_text(messages: &mut Vec<Value>) {
             let Some(text) = block.get("text").and_then(Value::as_str) else {
                 return true;
             };
-            if !is_codex_context_text(text) {
+            if !crate::layered_compaction::is_codex_context_text(text) {
                 return true;
             }
             seen.insert(normalized_anthropic_context_text_key(text))
@@ -7812,13 +7816,6 @@ fn normalize_anthropic_tool_boundary_markers(messages: &mut [Value]) {
             index += 1;
         }
     }
-}
-
-fn is_codex_context_text(text: &str) -> bool {
-    let trimmed = text.trim_start();
-    trimmed.starts_with("# AGENTS.md instructions for ")
-        || trimmed.starts_with("<environment_context>")
-        || trimmed.starts_with("<INSTRUCTIONS>")
 }
 
 fn normalized_anthropic_context_text_key(text: &str) -> String {
@@ -9049,7 +9046,7 @@ fn build_codex_tool_context_for_request(request: &Value) -> CodexToolContext {
     // 响应映射必须使用请求实际发送前恢复出的工具目录。
     // 摘要的角色不影响工具声明，两个翻译协议可共用 context 形式的只读恢复。
     let expanded =
-        crate::layered_compaction::expand_synthetic_local_compaction_request_as_context(request);
+        crate::layered_compaction::expand_synthetic_local_compaction_request_as_context_for_upstream(request);
     let prepared =
         crate::layered_compaction::prepare_remote_compaction_v2_bridge_request(&expanded);
     let tools = tools_for_proxy_conversion(&prepared);
@@ -14091,6 +14088,57 @@ mod remote_compaction_v2_tests {
     }
 
     #[test]
+    fn native_non_gpt_responses_prunes_old_media_after_synthetic_compaction() {
+        let request = json!({
+            "model": "claude-sonnet-5",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        { "type": "input_text", "text": "old native image" },
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,OLD_NATIVE_IMAGE"
+                        }
+                    ]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "native text anchor" }]
+                },
+                {
+                    "type": "compaction",
+                    "encrypted_content": "codex-elves-compaction-v2:NATIVE HANDOFF SUMMARY"
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "native current request" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_native_responses_request(&request);
+        let wire = normalized.to_string();
+        let input = normalized["input"].as_array().unwrap();
+
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"][0]["text"], "native text anchor");
+        assert_eq!(input[1]["role"], "assistant");
+        assert!(
+            input[1]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("NATIVE HANDOFF SUMMARY"))
+        );
+        assert_eq!(input[2]["content"][0]["text"], "native current request");
+        assert!(!wire.contains("OLD_NATIVE_IMAGE"));
+        assert!(!wire.contains("old native image"));
+    }
+
+    #[test]
     fn native_responses_expands_structured_compaction_and_removes_duplicate_user() {
         let source_request = json!({
             "model": "claude-sonnet-5",
@@ -14651,6 +14699,39 @@ mod compaction_model_override_tests {
             resolved.request_json["instructions"],
             request["instructions"]
         );
+    }
+
+    #[test]
+    fn cross_family_gpt_compaction_does_not_resurrect_summarized_non_gpt_history() {
+        let settings = settings_with_models(LayeredCompactionModels {
+            claude: "gpt-cheap".to_string(),
+            ..Default::default()
+        });
+        let relay = relay_with_models(&[
+            ("claude-test", RelayProtocol::Anthropic, "200000"),
+            ("gpt-cheap", RelayProtocol::Responses, "128000"),
+        ]);
+        let mut source = compaction_request("claude-test", "current task");
+        source["input"].as_array_mut().unwrap().splice(0..0, [
+            json!({"type": "message", "role": "user", "content": [
+                {"type": "input_image", "image_url": "data:image/png;base64,OLD_IMAGE"}
+            ]}),
+            json!({"type": "compaction", "encrypted_content": "codex-elves-compaction-v2:HANDOFF"}),
+        ]);
+        let resolved = resolve_compaction_model_override_for_attempt(
+            &source,
+            &source,
+            crate::layered_compaction::CompactionKind::Legacy,
+            &crate::layered_compaction::CompactionOptions::default(),
+            CompactionExecutionMode::LegacyLocal,
+            &settings,
+            &relay,
+        )
+        .unwrap();
+        assert_eq!(resolved.compaction_model, "gpt-cheap");
+        assert!(!resolved.request_json.to_string().contains("OLD_IMAGE"));
+        assert!(resolved.request_json.to_string().contains("HANDOFF"));
+        assert!(resolved.request_json.to_string().contains("current task"));
     }
 
     #[tokio::test]

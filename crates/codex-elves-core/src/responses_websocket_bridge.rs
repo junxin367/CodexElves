@@ -3290,7 +3290,18 @@ async fn prepare_downstream_response_create_payload_with_snapshot(
     };
     let (forwarded, options, plan) =
         prepare_websocket_compaction_execution(&normalized, settings, relay, request_context);
-    (normalized, forwarded, options, plan)
+    // 等待用户的判定依赖原始压缩标识；规范化后的 wire 历史已不再包含该标识。
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let snapshot = if crate::layered_compaction::local_compaction_requires_real_user(payload, model)
+    {
+        payload.clone()
+    } else {
+        normalized
+    };
+    (snapshot, forwarded, options, plan)
 }
 
 pub(crate) fn normalize_downstream_response_create_payload(payload: &Value) -> Value {
@@ -3489,6 +3500,7 @@ fn prepare_websocket_compaction_execution(
         &options,
         CompactionAttempt::First,
     );
+    let cache_probe = crate::protocol_proxy::normalize_native_responses_request(&cache_probe);
     let cache_decision = crate::compaction_cache::lease_decision(
         relay,
         crate::compaction_cache::CacheProtocol::Responses,
@@ -3525,6 +3537,7 @@ fn prepare_websocket_compaction_execution(
         &options,
         CompactionAttempt::First,
     );
+    let original_first = crate::protocol_proxy::normalize_native_responses_request(&original_first);
     let mut forwarded = original_first.clone();
     let mut route = original_route;
     let mut model = original_model.clone();
@@ -3555,7 +3568,9 @@ fn prepare_websocket_compaction_execution(
                         "modelUsage": settings.layered_compaction_model_usage,
                     }),
                 );
-                forwarded = resolved.request_json;
+                forwarded = crate::protocol_proxy::normalize_native_responses_request(
+                    &resolved.request_json,
+                );
                 route = independent_route;
                 independent_compaction_model = Some(resolved.compaction_model.clone());
                 independent_compaction_usage = Some(settings.layered_compaction_model_usage);
@@ -4199,6 +4214,66 @@ mod tests {
         assert!(!plan.independent);
         for field in ["tools", "tool_choice", "parallel_tool_calls"] {
             assert_eq!(forwarded[field], payload[field], "{field}");
+        }
+    }
+
+    #[test]
+    fn websocket_repeated_compaction_normalizes_first_retry_and_fallback_history() {
+        let relay = compaction_relay(
+            "ws-repeated-compaction",
+            &[
+                ("deepseek-chat", RelayProtocol::Responses, "128000"),
+                ("glm-test", RelayProtocol::Responses, "128000"),
+            ],
+        );
+        let mut settings = BackendSettings {
+            layered_compaction_enabled: true,
+            ..Default::default()
+        };
+        let mut payload = legacy_compaction_payload("deepseek-chat", "ws-repeated-compaction-key");
+        let instruction = payload["input"].as_array_mut().unwrap().pop().unwrap();
+        payload["input"][0]["content"] = json!([
+            {"type": "input_file", "file_url": "https://example.invalid/OLD.pdf"}
+        ]);
+        payload["input"].as_array_mut().unwrap().extend([
+            json!({"type": "compaction", "encrypted_content": "codex-elves-compaction-v2:HANDOFF"}),
+            json!({"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "current task"}
+            ]}),
+        ]);
+        let ordinary = super::normalize_downstream_response_create_payload(&payload);
+        payload["input"].as_array_mut().unwrap().push(instruction);
+        for independent in [false, true] {
+            settings.layered_compaction_model_override_enabled = independent;
+            settings.layered_compaction_models.other = "glm-test".to_string();
+            let (forwarded, _, plan) = prepare_websocket_compaction_execution(
+                &payload,
+                &settings,
+                &relay,
+                &crate::request_headers::RequestContext::default(),
+            );
+            let plan = plan.unwrap();
+            assert_eq!(plan.independent, independent);
+            let input = ordinary["input"].as_array().unwrap();
+            assert_eq!(
+                &forwarded["input"].as_array().unwrap()[..input.len()],
+                input
+            );
+            for request in [
+                Some(&forwarded),
+                plan.retry_request.as_ref(),
+                plan.original_fallback
+                    .as_ref()
+                    .map(|fallback| &fallback.request),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let serialized = request.to_string();
+                assert!(serialized.contains("HANDOFF"));
+                assert!(!serialized.contains("OLD.pdf"));
+                assert!(!serialized.contains("codex-elves-compaction-v2:"));
+            }
         }
     }
 
@@ -5551,6 +5626,63 @@ mod tests {
                 Some("response.output_item.added" | "response.output_item.done")
             )
         }));
+    }
+
+    #[tokio::test]
+    async fn websocket_compaction_wait_survives_the_request_preparation_boundary() {
+        let relay = compaction_relay(
+            "ws-compaction-wait",
+            &[("claude-test", RelayProtocol::Responses, "128000")],
+        );
+        let settings = BackendSettings::default();
+        let mut payload = json!({
+            "type": "response.create", "model": "claude-test",
+            "input": [{
+                "type": "compaction",
+                "encrypted_content": "codex-elves-compaction-v2:HANDOFF"
+            }]
+        });
+        let (snapshot, _, _, _) = super::prepare_downstream_response_create_payload_with_snapshot(
+            &payload,
+            &settings,
+            &relay,
+            &crate::request_headers::RequestContext::default(),
+        )
+        .await;
+        assert!(local_compaction_wait_websocket_messages(&snapshot).is_some());
+        let mut compact = payload.clone();
+        compact["input"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type": "compaction_trigger"}));
+        let (snapshot, forwarded, _, plan) =
+            super::prepare_downstream_response_create_payload_with_snapshot(
+                &compact,
+                &BackendSettings {
+                    layered_compaction_enabled: true,
+                    ..Default::default()
+                },
+                &relay,
+                &crate::request_headers::RequestContext::default(),
+            )
+            .await;
+        assert!(local_compaction_wait_websocket_messages(&snapshot).is_none());
+        assert!(plan.is_some());
+        assert!(forwarded.to_string().contains("Handoff checkpoint"));
+        payload["input"].as_array_mut().unwrap().push(json!({
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "continue"}]
+        }));
+        let (snapshot, forwarded, _, _) =
+            super::prepare_downstream_response_create_payload_with_snapshot(
+                &payload,
+                &settings,
+                &relay,
+                &crate::request_headers::RequestContext::default(),
+            )
+            .await;
+        assert!(local_compaction_wait_websocket_messages(&snapshot).is_none());
+        assert!(!forwarded.to_string().contains("codex-elves-compaction-v2:"));
     }
 
     #[test]

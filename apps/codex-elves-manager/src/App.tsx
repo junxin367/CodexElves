@@ -436,6 +436,7 @@ type LocalSession = {
 type LocalSessionsResult = CommandResult<{
   dbPath: string;
   dbPaths: string[];
+  projectlessWorkspaceRoot: string;
   sessions: LocalSession[];
 }>;
 
@@ -2772,29 +2773,34 @@ export function App() {
     let deleted = 0;
     let partial = 0;
     let failed = 0;
-    for (const session of sessionsToDelete) {
-      const result = await run(() =>
-        call<DeleteLocalSessionResult>("delete_local_session", {
-          request: { sessionId: session.id, title: session.title, dbPath: session.dbPath },
-        }),
-      );
-      // not_found 也视为已达成目标（会话本来就不存在）
-      // 注：CommandResult 与 DeleteResult 的 status 字段经 serde flatten 后重名，
-      // 前端拿到的 result.status 实际是删除业务状态。partial 表示数据库已删除、
-      // rollout 文件清理不完整；not_found 表示会话本来就不存在。
-      const deleteStatus = result?.status as string | undefined;
-      if (deleteStatus === "local_deleted" || deleteStatus === "server_deleted" || deleteStatus === "not_found") {
-        deleted += 1;
-      } else if (deleteStatus === "partial") {
-        deleted += 1;
-        partial += 1;
-      } else {
-        failed += 1;
+    let nextIndex = 0;
+    // 限制原生删除的并发量，避免大量会话同时抢占 Codex 和 SQLite。
+    const workerCount = Math.min(4, sessionsToDelete.length);
+    const deleteNext = async () => {
+      while (nextIndex < sessionsToDelete.length) {
+        const session = sessionsToDelete[nextIndex++];
+        const result = await run(() =>
+          call<DeleteLocalSessionResult>("delete_local_session", {
+            request: { sessionId: session.id, title: session.title, dbPath: session.dbPath },
+          }),
+        );
+        // serde flatten 后 status 为删除业务状态；partial 表示原生删除成功、
+        // 最近列表更新失败，not_found 表示会话本来就不存在。
+        const deleteStatus = result?.status as string | undefined;
+        if (deleteStatus === "local_deleted" || deleteStatus === "server_deleted" || deleteStatus === "not_found") {
+          deleted += 1;
+        } else if (deleteStatus === "partial") {
+          deleted += 1;
+          partial += 1;
+        } else {
+          failed += 1;
+        }
       }
-    }
+    };
+    await Promise.all(Array.from({ length: workerCount }, () => deleteNext()));
     await refreshLocalSessions(true);
     const summary = [`已删除 ${deleted} 个`];
-    if (partial) summary.push(`其中 ${partial} 个文件清理不完整`);
+    if (partial) summary.push(`其中 ${partial} 个最近列表更新不完整`);
     if (failed) summary.push(`失败 ${failed} 个`);
     showNotice(
       "批量删除会话",
@@ -6186,6 +6192,7 @@ function SessionsScreen({
   actions: Actions;
 }) {
   const items = sessions?.sessions ?? [];
+  const projectlessWorkspaceRoot = sessions?.projectlessWorkspaceRoot ?? "";
   const defaultCompactionPrompt = settings?.layered_compaction_default_prompt ?? "";
   const activeCount = items.filter((item) => !item.archived).length;
   const archivedCount = items.length - activeCount;
@@ -6254,13 +6261,13 @@ function SessionsScreen({
   const projectOptions = useMemo(() => {
     const counts = new Map<string, number>();
     for (const item of items) {
-      const projectKey = sessionProjectKey(item.cwd);
+      const projectKey = sessionProjectKey(item.cwd, projectlessWorkspaceRoot);
       if (projectKey) counts.set(projectKey, (counts.get(projectKey) ?? 0) + 1);
     }
     return Array.from(counts.entries())
       .map(([value, count]) => ({ value, count }))
       .sort((a, b) => sessionProjectLabel(a.value).localeCompare(sessionProjectLabel(b.value)));
-  }, [items]);
+  }, [items, projectlessWorkspaceRoot]);
 
   // 结束时间含当天：转换为当天 23:59:59.999
   const endCutoffMs = endMs === null ? null : endMs + 24 * 60 * 60 * 1000 - 1;
@@ -6268,13 +6275,13 @@ function SessionsScreen({
 
   const filteredItems = useMemo(() => {
     return items.filter((item) => {
-      if (projectFilter && sessionProjectKey(item.cwd) !== projectFilter) return false;
+      if (projectFilter && sessionProjectKey(item.cwd, projectlessWorkspaceRoot) !== projectFilter) return false;
       const updated = item.updatedAtMs ?? 0;
       if (startMs !== null && !(updated >= startMs)) return false;
       if (endCutoffMs !== null && !(updated > 0 && updated <= endCutoffMs)) return false;
       return true;
     });
-  }, [items, projectFilter, startMs, endCutoffMs]);
+  }, [items, projectFilter, startMs, endCutoffMs, projectlessWorkspaceRoot]);
 
   const localSessionPageSize = 100;
   const localSessionTotalPages = Math.max(1, Math.ceil(filteredItems.length / localSessionPageSize));
@@ -6624,6 +6631,7 @@ function SessionsScreen({
                   <SessionProjectSelect
                     value={projectFilter}
                     options={projectOptions}
+                    projectlessWorkspaceRoot={projectlessWorkspaceRoot}
                     onChange={(next) => {
                       setProjectFilter(next);
                       setLocalSessionPage(1);
@@ -6665,7 +6673,7 @@ function SessionsScreen({
                         <div className="session-main">
                           <strong>{session.title || "未命名会话"}</strong>
                           <span>{session.id}</span>
-                          <small data-tooltip={session.cwd || undefined}>{sessionProjectLabel(session.cwd) || "未记录项目路径"}</small>
+                          <small data-tooltip={session.cwd || undefined}>{sessionProjectLabel(sessionProjectKey(session.cwd, projectlessWorkspaceRoot)) || "未记录项目路径"}</small>
                         </div>
                         <div className="session-meta">
                           <Badge status={session.archived ? "archived" : "ok"} />
@@ -9246,16 +9254,16 @@ function ModelChoiceInput({
  }
 
 const CONVERSATION_PROJECT_KEY = "__codex_conversation_project__";
-const CONVERSATION_PROJECT_LABEL = "对话项目";
+const CONVERSATION_PROJECT_LABEL = "无项目任务";
 
-function sessionProjectKey(path: string): string {
+function sessionProjectKey(path: string, projectlessWorkspaceRoot: string): string {
   const trimmed = path.trim();
   if (!trimmed) return "";
-  return isCodexConversationProjectPath(trimmed) ? CONVERSATION_PROJECT_KEY : trimmed;
+  return isCodexConversationProjectPath(trimmed, projectlessWorkspaceRoot) ? CONVERSATION_PROJECT_KEY : trimmed;
 }
 
 function sessionProjectLabel(pathOrKey: string): string {
-  if (pathOrKey === CONVERSATION_PROJECT_KEY || isCodexConversationProjectPath(pathOrKey)) {
+  if (pathOrKey === CONVERSATION_PROJECT_KEY) {
     return CONVERSATION_PROJECT_LABEL;
   }
   return projectLabel(pathOrKey);
@@ -9265,8 +9273,27 @@ function checkpointWorkspaceLabel(path: string): string {
   return projectLabel(path || "未知工作区");
 }
 
-function isCodexConversationProjectPath(path: string): boolean {
-  return /(?:^|[\\/])Codex[\\/]\d{4}-\d{2}-\d{2}[\\/][^\\/]+[\\/]?$/i.test(path.trim());
+function isCodexConversationProjectPath(path: string, workspaceRoot: string): boolean {
+  const normalize = (value: string) => {
+    const slashed = value.trim().replace(/\\/g, "/")
+      .replace(/^\/\/\?\/UNC\//i, "//").replace(/^\/\/\?\//, "");
+    const prefix = slashed.startsWith("//") ? "//" : slashed.startsWith("/") ? "/" : "";
+    const parts: string[] = [];
+    for (const part of slashed.split("/")) {
+      if (!part || part === ".") continue;
+      if (part === "..") parts.pop();
+      else parts.push(part);
+    }
+    return prefix + parts.join("/");
+  };
+  let root = normalize(workspaceRoot);
+  let cwd = normalize(path);
+  if (!root || !cwd) return false;
+  if (/^(?:[a-z]:|\/\/)/i.test(root)) {
+    root = root.toLowerCase();
+    cwd = cwd.toLowerCase();
+  }
+  return cwd === root || cwd.startsWith(root.endsWith("/") ? root : `${root}/`);
 }
 
 function projectLabel(path: string): string {
@@ -9278,10 +9305,12 @@ function projectLabel(path: string): string {
 function SessionProjectSelect({
   value,
   options,
+  projectlessWorkspaceRoot,
   onChange,
 }: {
   value: string;
   options: Array<{ value: string; count: number }>;
+  projectlessWorkspaceRoot: string;
   onChange: (value: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -9297,9 +9326,10 @@ function SessionProjectSelect({
     if (!kw) return options;
     return options.filter((item) => {
       const label = sessionProjectLabel(item.value).toLowerCase();
-      return label.includes(kw) || item.value.toLowerCase().includes(kw);
+      const path = item.value === CONVERSATION_PROJECT_KEY ? projectlessWorkspaceRoot : item.value;
+      return label.includes(kw) || path.toLowerCase().includes(kw);
     });
-  }, [options, keyword]);
+  }, [options, keyword, projectlessWorkspaceRoot]);
 
   const updatePosition = () => {
     const root = rootRef.current;
@@ -9388,7 +9418,7 @@ function SessionProjectSelect({
             >
               <span className="session-project-option-name">
                 <strong>{sessionProjectLabel(item.value)}</strong>
-                <small>{item.value === CONVERSATION_PROJECT_KEY ? "Codex/yyyy-MM-dd/*" : item.value}</small>
+                <small>{item.value === CONVERSATION_PROJECT_KEY ? projectlessWorkspaceRoot : item.value}</small>
               </span>
               <span className="session-project-option-count">{item.count}</span>
             </button>

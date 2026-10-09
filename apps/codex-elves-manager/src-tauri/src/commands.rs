@@ -151,6 +151,7 @@ pub struct CcsProvidersPayload {
 pub struct LocalSessionsPayload {
     pub db_path: String,
     pub db_paths: Vec<String>,
+    pub projectless_workspace_root: String,
     pub sessions: Vec<codex_elves_data::LocalSession>,
 }
 
@@ -947,6 +948,14 @@ pub fn list_local_sessions() -> CommandResult<LocalSessionsPayload> {
     let db_paths = codex_elves_core::codex_sqlite::codex_session_db_paths_from_home(&home);
     let mut sessions = Vec::new();
     let mut errors = Vec::new();
+    let projectless_workspace_root =
+        match codex_elves_core::codex_home::projectless_workspace_root(&home) {
+            Ok(path) => path.to_string_lossy().to_string(),
+            Err(error) => {
+                errors.push(format!("读取无项目任务文件夹失败：{error}"));
+                String::new()
+            }
+        };
     for db_path in &db_paths {
         let adapter = local_session_adapter(db_path);
         match adapter.list_local_sessions() {
@@ -968,6 +977,7 @@ pub fn list_local_sessions() -> CommandResult<LocalSessionsPayload> {
     let dominant_db_path = dominant_session_db_path(&sessions, &db_paths);
     let payload = LocalSessionsPayload {
         db_path: dominant_db_path,
+        projectless_workspace_root,
         db_paths: db_paths
             .iter()
             .map(|path| path.to_string_lossy().to_string())
