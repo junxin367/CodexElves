@@ -1735,7 +1735,7 @@ fn normalize_relay_profile_writes_supports_websockets_true_for_supported_respons
 }
 
 #[test]
-fn normalize_relay_profile_writes_supports_websockets_false_when_system_prompt_is_overridden() {
+fn normalize_relay_profile_keeps_websockets_enabled_when_system_prompt_is_overridden() {
     let mut profile = RelayProfile {
         relay_mode: RelayMode::PureApi,
         base_url: "https://relay.example".to_string(),
@@ -1762,12 +1762,12 @@ supports_websockets = true
     assert!(
         profile
             .config_contents
-            .contains("supports_websockets = false")
+            .contains("supports_websockets = true")
     );
     assert!(
         !profile
             .config_contents
-            .contains("supports_websockets = true")
+            .contains("supports_websockets = false")
     );
 }
 

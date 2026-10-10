@@ -263,14 +263,6 @@ impl RelayProfile {
             .unwrap_or_else(|| self.system_prompt_override.trim())
     }
 
-    pub(crate) fn has_system_prompt_override(&self) -> bool {
-        !self.system_prompt_override.trim().is_empty()
-            || self.model_mappings.iter().any(|mapping| {
-                !mapping.request_model.trim().is_empty()
-                    && !mapping.system_prompt_override.trim().is_empty()
-            })
-    }
-
     pub fn local_proxy_enabled(&self) -> bool {
         self.local_proxy_enabled.unwrap_or(false)
     }

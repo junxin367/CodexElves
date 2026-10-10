@@ -115,6 +115,10 @@ fn native_responses_websocket_supports_mixed_profiles_with_responses_models() {
 
     assert!(relay_supports_native_responses_websocket(&profile));
 
+    profile.system_prompt_override = "supplier prompt".to_string();
+    assert!(relay_supports_native_responses_websocket(&profile));
+    profile.system_prompt_override.clear();
+
     profile.protocol = RelayProtocol::ChatCompletions;
     profile.model_mappings = vec![
         RelayModelMapping {
@@ -171,7 +175,9 @@ fn native_responses_websocket_supports_mixed_profiles_with_responses_models() {
     assert!(relay_supports_native_responses_websocket(&profile));
 
     profile.model_mappings[0].system_prompt_override = "model prompt".to_string();
-    assert!(!relay_supports_native_responses_websocket(&profile));
+    assert!(relay_supports_native_responses_websocket(&profile));
+    profile.model_mappings[1].system_prompt_override = "anthropic prompt".to_string();
+    assert!(relay_supports_native_responses_websocket(&profile));
     profile.model_mappings[0].system_prompt_override = " \n ".to_string();
     assert!(relay_supports_native_responses_websocket(&profile));
 
@@ -649,6 +655,156 @@ async fn local_proxy_rewrites_websocket_alias_slug_and_prompt_identity_to_reques
     let _ = client.close(None).await;
 
     local_server.await.unwrap();
+    upstream.await.unwrap();
+}
+
+#[tokio::test]
+async fn local_proxy_applies_system_prompt_overrides_to_each_websocket_request() {
+    let _settings_lock = websocket_settings_test_lock().lock().await;
+    let cases = [
+        (
+            "custom",
+            "supplier prompt",
+            "custom prompt: GPT-5.6 Sol",
+            "custom prompt: GPT-5.6 Sol",
+        ),
+        (
+            "inherit",
+            "supplier prompt",
+            "custom prompt: GPT-5.6 Sol",
+            "supplier prompt",
+        ),
+        (
+            "custom",
+            "updated supplier",
+            "updated model prompt",
+            "updated model prompt",
+        ),
+        ("custom", "updated supplier", " \n ", "updated supplier"),
+        ("inherit", " \n ", "", "original instructions"),
+        ("custom", "restored supplier", "", "restored supplier"),
+    ];
+    let input = serde_json::json!([
+        {"role": "system", "content": "old system"},
+        {"role": "developer", "content": "old developer"},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "previous answer"},
+        {"type": "function_call_output", "call_id": "call_previous", "output": "tool result"}
+    ]);
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    let upstream_input = input.clone();
+    let upstream = tokio::spawn(async move {
+        let (stream, _) = upstream_listener.accept().await.unwrap();
+        let mut socket = accept_hdr_async(stream, |_request: &Request, response: Response| {
+            Ok(response)
+        })
+        .await
+        .unwrap();
+        for (index, (_, _, _, expected_prompt)) in cases.iter().enumerate() {
+            let message = socket.next().await.unwrap().unwrap();
+            let Message::Text(text) = message else {
+                panic!("expected response.create text message");
+            };
+            let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+            assert_eq!(payload["type"], "response.create");
+            assert_eq!(payload["model"], "gpt-prompt");
+            assert_eq!(payload["instructions"], *expected_prompt);
+            assert_eq!(payload["store"], false);
+            assert_eq!(payload["reasoning"]["effort"], "high");
+            let expected_input = if *expected_prompt == "original instructions" {
+                upstream_input.clone()
+            } else {
+                serde_json::json!(&upstream_input.as_array().unwrap()[2..])
+            };
+            assert_eq!(payload["input"], expected_input);
+            if index > 0 {
+                assert_eq!(
+                    payload["previous_response_id"],
+                    format!("resp_prompt_{}", index - 1)
+                );
+            }
+            socket
+                .send(Message::Text(
+                    serde_json::json!({
+                        "type": "response.completed",
+                        "response": {"id": format!("resp_prompt_{index}"), "status": "completed"}
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        }
+        let _ = socket.close(None).await;
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
+    save_supported_websocket_settings(upstream_address, false, "gpt-prompt");
+    let mut settings = SettingsStore::default().load().unwrap();
+    let mut mapping = settings.relay_profiles[0].model_mappings[0].clone();
+    mapping.alias = "custom".to_string();
+    mapping.context_window = "500000".to_string();
+    mapping.system_prompt_override = cases[0].2.to_string();
+    let mut inherited = mapping.clone();
+    inherited.alias = "inherit".to_string();
+    inherited.context_window = "1000000".to_string();
+    inherited.system_prompt_override = " \n ".to_string();
+    settings.relay_profiles[0].model_mappings = vec![mapping, inherited];
+    settings.relay_profiles[0].system_prompt_override = cases[0].1.to_string();
+    SettingsStore::default().save(&settings).unwrap();
+
+    let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_address = local_listener.local_addr().unwrap();
+    let local_server = tokio::spawn(async move {
+        let (mut stream, remote_addr) = local_listener.accept().await.unwrap();
+        let request_bytes = read_upgrade_request(&mut stream).await;
+        handle_responses_websocket_connection(stream, request_bytes, Some(remote_addr))
+            .await
+            .unwrap();
+    });
+    let (mut client, _) = connect_async(format!("ws://{local_address}/v1/responses"))
+        .await
+        .unwrap();
+    for (index, (model, supplier_prompt, model_prompt, _)) in cases.iter().enumerate() {
+        settings.relay_profiles[0].system_prompt_override = supplier_prompt.to_string();
+        settings.relay_profiles[0].model_mappings[0].system_prompt_override =
+            model_prompt.to_string();
+        SettingsStore::default().save(&settings).unwrap();
+        let mut request = serde_json::json!({
+            "type": "response.create",
+            "model": model,
+            "instructions": "original instructions",
+            "input": input,
+            "store": false,
+            "reasoning": {"effort": "high"}
+        });
+        if index > 0 {
+            request["previous_response_id"] =
+                serde_json::json!(format!("resp_prompt_{}", index - 1));
+        }
+        client
+            .send(Message::Text(request.to_string().into()))
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let Message::Text(text) = response else {
+            panic!("expected response.completed text message");
+        };
+        let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+        assert_eq!(payload["response"]["id"], format!("resp_prompt_{index}"));
+    }
+    let _ = client.close(None).await;
+    tokio::time::timeout(Duration::from_secs(5), local_server)
+        .await
+        .unwrap()
+        .unwrap();
     upstream.await.unwrap();
 }
 
@@ -1856,6 +2012,7 @@ async fn reasoning_continuation_reuses_the_same_websocket_and_only_returns_the_f
         assert_eq!(first_request["model"], "gpt-websocket-test");
         assert_eq!(first_request["previous_response_id"], "resp_parent");
         assert_eq!(first_request["store"], false);
+        assert_eq!(first_request["instructions"], "custom continuation prompt");
 
         socket
             .send(Message::Text(
@@ -1908,6 +2065,10 @@ async fn reasoning_continuation_reuses_the_same_websocket_and_only_returns_the_f
         assert_eq!(continue_request["type"], "response.create");
         assert_eq!(continue_request["model"], "gpt-websocket-test");
         assert_eq!(continue_request["previous_response_id"], "resp_short");
+        assert_eq!(
+            continue_request["instructions"],
+            "custom continuation prompt"
+        );
         assert!(continue_request.get("stream").is_none());
         assert!(continue_request.get("stream_options").is_none());
         assert!(continue_request.get("background").is_none());
@@ -1955,6 +2116,9 @@ async fn reasoning_continuation_reuses_the_same_websocket_and_only_returns_the_f
     let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
     let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
     save_supported_websocket_settings(upstream_address, true, "gpt-websocket-test");
+    let mut settings = SettingsStore::default().load().unwrap();
+    settings.relay_profiles[0].system_prompt_override = "custom continuation prompt".to_string();
+    SettingsStore::default().save(&settings).unwrap();
 
     let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_address = local_listener.local_addr().unwrap();

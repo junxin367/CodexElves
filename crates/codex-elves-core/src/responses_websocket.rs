@@ -222,7 +222,6 @@ pub fn relay_can_probe_native_responses_websocket(profile: &RelayProfile) -> boo
     profile.relay_mode != RelayMode::Aggregate
         && (profile.relay_mode != RelayMode::Official || profile.official_mix_api_key)
         && relay_has_native_responses_model(profile)
-        && !profile.has_system_prompt_override()
 }
 
 fn relay_has_native_responses_model(profile: &RelayProfile) -> bool {

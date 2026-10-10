@@ -1474,6 +1474,7 @@ mod anthropic_image_limits {
 
     #[tokio::test]
     async fn upstream_http_receives_resized_images_in_stream_and_json_modes() {
+        let _lock = settings_path_test_lock().lock().unwrap();
         let url = image_url(2048, 32, ImageFormat::Jpeg);
         for stream in [false, true] {
             let server = spawn_chat_server();
@@ -4811,6 +4812,7 @@ fn structured_compaction_trims_tool_search_descriptions_without_losing_dynamic_t
 
 #[tokio::test]
 async fn claude_synthetic_assistant_tail_completes_locally_without_upstream_prefill() {
+    let _lock = settings_path_test_lock().lock().unwrap();
     let compaction_request = json!({
         "model": "claude-sonnet-5",
         "input": [{ "type": "compaction_trigger" }]
@@ -12271,6 +12273,7 @@ async fn aggregate_remote_compaction_retries_selected_candidate_with_actual_prot
 
 #[tokio::test]
 async fn responses_proxy_legacy_compaction_blank_override_uses_project_default_prompt() {
+    let _lock = settings_path_test_lock().lock().unwrap();
     let server = spawn_chat_server();
     let relay_id = "legacy-compaction-default".to_string();
     let settings = BackendSettings {
@@ -12937,6 +12940,7 @@ async fn responses_proxy_directs_responses_models_to_responses_upstream() {
 
 #[tokio::test]
 async fn responses_proxy_rewrites_alias_slug_and_prompt_identity_to_request_model() {
+    let _lock = settings_path_test_lock().lock().unwrap();
     let server = spawn_chat_server();
     let settings = BackendSettings {
         relay_profiles: vec![RelayProfile {
@@ -12991,6 +12995,7 @@ async fn responses_proxy_rewrites_alias_slug_and_prompt_identity_to_request_mode
 
 #[tokio::test]
 async fn responses_proxy_accepts_legacy_alias_slug_without_forwarding_it() {
+    let _lock = settings_path_test_lock().lock().unwrap();
     let server = spawn_chat_server();
     let settings = BackendSettings {
         relay_profiles: vec![RelayProfile {
@@ -13040,6 +13045,7 @@ async fn responses_proxy_accepts_legacy_alias_slug_without_forwarding_it() {
 
 #[tokio::test]
 async fn responses_proxy_legacy_ambiguous_alias_prefers_legacy_request_model() {
+    let _lock = settings_path_test_lock().lock().unwrap();
     let server = spawn_chat_server();
     let settings = BackendSettings {
         relay_profiles: vec![RelayProfile {
@@ -13116,6 +13122,7 @@ async fn responses_proxy_clamps_unsupported_gpt_reasoning_to_model_max() {
 
 #[tokio::test]
 async fn responses_proxy_rejects_conflicting_duplicate_model_mappings() {
+    let _lock = settings_path_test_lock().lock().unwrap();
     let settings = BackendSettings {
         relay_profiles: vec![RelayProfile {
             id: "conflict".to_string(),
@@ -13397,6 +13404,7 @@ async fn remote_compaction_v2_final_anthropic_retry_body_failure_fails_closed() 
 
 #[tokio::test]
 async fn responses_proxy_model_system_prompt_wins_for_all_protocols_and_aliases() {
+    let _lock = settings_path_test_lock().lock().unwrap();
     for (model, protocol, path) in [
         ("gpt-responses", RelayProtocol::Responses, "/v1/responses"),
         (
@@ -13618,6 +13626,7 @@ async fn responses_proxy_replaces_system_prompt_for_responses_upstream() {
 
 #[tokio::test]
 async fn responses_proxy_accepts_anthropic_history_after_switching_to_responses_model() {
+    let _lock = settings_path_test_lock().lock().unwrap();
     let server = spawn_chat_server();
     let settings = BackendSettings {
         relay_profiles: vec![RelayProfile {
@@ -15519,6 +15528,7 @@ struct SettingsPathGuard {
 }
 
 fn settings_path_test_lock() -> &'static Mutex<()> {
+    // 普通代理请求也会重置进程级轮转状态，显式传入 settings 的测试同样需要此锁。
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -15794,6 +15804,7 @@ fn legacy_compaction_request() -> serde_json::Value {
 
 #[tokio::test]
 async fn native_remote_compaction_keeps_session_model() {
+    let _lock = settings_path_test_lock().lock().unwrap();
     let server = spawn_chat_server_with_status_responses(vec![(
         "200 OK".to_string(),
         r#"{"id":"resp-remote","status":"completed","model":"gpt-5.4","output":[]}"#.to_string(),
@@ -15952,6 +15963,7 @@ async fn disabled_compaction_preserves_harness_legacy_requests_and_untagged_summ
 
 #[tokio::test]
 async fn disabled_compaction_passes_responses_v2_through_and_does_not_emulate_other_protocols() {
+    let _lock = settings_path_test_lock().lock().unwrap();
     for stream in [false, true] {
         let request = json!({
             "model":"claude-test","stream":stream,
@@ -16023,6 +16035,7 @@ async fn disabled_compaction_passes_responses_v2_through_and_does_not_emulate_ot
 
 #[tokio::test]
 async fn compaction_contract_http_retries_same_model_and_only_returns_validated_summary() {
+    let _lock = settings_path_test_lock().lock().unwrap();
     use codex_elves_core::layered_compaction::{
         COMPACTION_RETRY_SYSTEM_PROMPT, compaction_instruction,
     };
@@ -16146,6 +16159,7 @@ async fn compaction_contract_http_retries_same_model_and_only_returns_validated_
 
 #[tokio::test]
 async fn bridged_claude_remote_compaction_keeps_session_model_and_tools() {
+    let _lock = settings_path_test_lock().lock().unwrap();
     let server = spawn_chat_server_with_status_responses(vec![(
         "200 OK".to_string(),
         r#"{"id":"msg-bridge","type":"message","role":"assistant","model":"claude-opus-4-8","stop_reason":"end_turn","content":[{"type":"text","text":"<summary>BRIDGED SUMMARY</summary>"}]}"#.to_string(),
@@ -16203,6 +16217,7 @@ async fn bridged_claude_remote_compaction_keeps_session_model_and_tools() {
 
 #[tokio::test]
 async fn bridged_claude_remote_compaction_preserves_reasoning_effort() {
+    let _lock = settings_path_test_lock().lock().unwrap();
     let server = spawn_chat_server_with_status_responses(vec![(
         "200 OK".to_string(),
         r#"{"id":"msg-bridge","type":"message","role":"assistant","model":"claude-opus-4-8","stop_reason":"end_turn","content":[{"type":"text","text":"<summary>BRIDGED CLAUDE SUMMARY</summary>"}],"usage":{"input_tokens":10,"output_tokens":5}}"#.to_string(),
@@ -16263,6 +16278,7 @@ async fn bridged_claude_remote_compaction_preserves_reasoning_effort() {
 
 #[tokio::test]
 async fn failed_compaction_retries_once_with_same_session_model() {
+    let _lock = settings_path_test_lock().lock().unwrap();
     let server = spawn_chat_server_with_status_responses(vec![
         (
             "404 Not Found".to_string(),
@@ -16333,6 +16349,7 @@ async fn failed_compaction_retries_once_with_same_session_model() {
 
 #[tokio::test]
 async fn compaction_preserves_large_history_across_upstream_rejection_retry() {
+    let _lock = settings_path_test_lock().lock().unwrap();
     let summary = |model: &str| {
         json!({
             "id": "msg-capacity",

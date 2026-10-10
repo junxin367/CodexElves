@@ -5,7 +5,11 @@ type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string
 const PAGE_SIZE = 100;
 const STRING_PREVIEW_LENGTH = 160;
 
-export function JsonViewer({ text, label }: { text: string; label: string }) {
+export function JsonViewer({ text, label, onCopy }: {
+  text: string;
+  label: string;
+  onCopy: (text: string) => Promise<void>;
+}) {
   const parsed = useMemo(() => {
     try {
       return { valid: true as const, value: JSON.parse(text) as JsonValue };
@@ -35,7 +39,7 @@ export function JsonViewer({ text, label }: { text: string; label: string }) {
       </div>
       <div className="json-viewer-content" tabIndex={0} aria-label={`${label}内容`}>
         {parsed.valid ? (
-          <JsonNode key={display.revision} value={parsed.value} path="$" initiallyOpen={display.open} />
+          <JsonNode key={display.revision} value={parsed.value} path="$" initiallyOpen={display.open} onCopy={onCopy} />
         ) : (
           <pre className="json-viewer-raw">{text || "暂无内容"}</pre>
         )}
@@ -45,12 +49,13 @@ export function JsonViewer({ text, label }: { text: string; label: string }) {
 }
 
 function JsonNode({
-  value, name, path, initiallyOpen = false,
+  value, name, path, initiallyOpen = false, onCopy,
 }: {
   value: JsonValue;
   name?: string;
   path: string;
   initiallyOpen?: boolean;
+  onCopy: (text: string) => Promise<void>;
 }) {
   const [open, setOpen] = useState(initiallyOpen && value !== null && typeof value === "object");
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
@@ -80,18 +85,48 @@ function JsonNode({
             {open ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}
           </button>
         ) : <span className="json-viewer-toggle-spacer" />}
-        <div className="json-viewer-value">
+        <div
+          className="json-viewer-value"
+          title="右键复制完整值"
+          onContextMenu={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void onCopy(typeof value === "string" ? value : JSON.stringify(value, null, 2));
+          }}
+        >
           {keyLabel}
           {container ? (
             <>
-              <span>{start}{!open && count > 0 ? " … " : ""}{!open || count === 0 ? end : ""}</span>
+              {expandable ? (
+                <button
+                  className="json-viewer-value-toggle"
+                  type="button"
+                  aria-label={`${actionLabel} 的内容`}
+                  aria-expanded={open}
+                  onClick={() => setOpen(!open)}
+                >
+                  {start}{!open ? ` … ${end}` : ""}
+                </button>
+              ) : <span>{start}{end}</span>}
               <span className="json-viewer-count">{count.toLocaleString("zh-CN")} {array ? "项" : "个字段"}</span>
             </>
           ) : (
             <>
-              <span className={`json-viewer-${value === null ? "null" : typeof value}`}>
-                {JSON.stringify(longString && !open ? value.slice(0, STRING_PREVIEW_LENGTH) : value)}
-              </span>
+              {longString && !open ? (
+                <button
+                  className="json-viewer-string json-viewer-value-toggle"
+                  type="button"
+                  aria-label={`展开 ${path} 的全文`}
+                  aria-expanded={false}
+                  onClick={() => setOpen(true)}
+                >
+                  {JSON.stringify(value.slice(0, STRING_PREVIEW_LENGTH))}
+                </button>
+              ) : (
+                <span className={`json-viewer-${value === null ? "null" : typeof value}`}>
+                  {JSON.stringify(value)}
+                </span>
+              )}
               {longString ? (
                 <button className="json-viewer-string-toggle" type="button" aria-expanded={open} onClick={() => setOpen(!open)}>
                   {open ? "收起长文本" : `… 展开全文（${value.length.toLocaleString("zh-CN")} 字符）`}
@@ -112,6 +147,7 @@ function JsonNode({
                   name={key}
                   path={array ? `${path}[${index}]` : `${path}[${JSON.stringify(key)}]`}
                   value={array ? value[index] : (value as Record<string, JsonValue>)[key]}
+                  onCopy={onCopy}
                 />
               );
             })}

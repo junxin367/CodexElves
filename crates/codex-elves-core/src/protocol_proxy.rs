@@ -359,7 +359,7 @@ pub fn local_models_proxy_response() -> anyhow::Result<Option<ProxyHttpResponse>
     }))
 }
 
-fn apply_system_prompt_override_to_responses_request(
+pub(crate) fn apply_system_prompt_override_to_responses_request(
     request: &Value,
     relay: &crate::settings::RelayProfile,
 ) -> Value {

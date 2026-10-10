@@ -3204,15 +3204,19 @@ fn validate_downstream_message(
     if model.is_empty() {
         anyhow::bail!("Responses WebSocket 请求缺少 model");
     }
-    if settings
-        .active_relay_profile()
-        .resolve_protocol_for_model(&model)?
-        != RelayProtocol::Responses
-    {
+    let current_relay = settings.active_relay_profile();
+    if current_relay.resolve_protocol_for_model(&model)? != RelayProtocol::Responses {
         anyhow::bail!("当前模型不是原生 Responses 协议");
     }
     let rewritten_payload =
-        crate::protocol_proxy::rewrite_catalog_model_to_request_model(&payload, relay);
+        crate::protocol_proxy::apply_system_prompt_override_to_responses_request(
+            &payload,
+            &current_relay,
+        );
+    let rewritten_payload = crate::protocol_proxy::rewrite_catalog_model_to_request_model(
+        &rewritten_payload,
+        &current_relay,
+    );
     let payload_rewritten = rewritten_payload != payload;
     let _ = crate::diagnostic_log::append_diagnostic_log(
         "protocol_proxy.responses_websocket_request",

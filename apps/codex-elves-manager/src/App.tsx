@@ -5268,7 +5268,7 @@ function LocalProxyLogDetailDialog({
                   复制
                 </Button>
               </div>
-              <JsonViewer text={formattedRequestViewBody} label="请求 JSON 查看器" />
+              <JsonViewer text={formattedRequestViewBody} label="请求 JSON 查看器" onCopy={onCopyRequest} />
             </div>
             <div className="proxy-detail-pane">
               <div className="proxy-detail-pane-head">
@@ -5339,7 +5339,7 @@ function LocalProxyLogDetailDialog({
                   复制
                 </Button>
               </div>
-              <JsonViewer text={formattedResponseViewBody} label="返回 JSON 查看器" />
+              <JsonViewer text={formattedResponseViewBody} label="返回 JSON 查看器" onCopy={onCopyResponse} />
             </div>
           </div>
         </div>
@@ -8089,7 +8089,7 @@ function RelayProfileEditor({
     probingResponsesWebsocket
       ? "正在连接供应商的 Responses WebSocket 端点并执行真实握手。"
       : !responsesWebsocketApplicable
-      ? "当前供应商没有配置原生 Responses 模型，或系统提示词替换会改变原始请求。"
+      ? "当前供应商没有配置原生 Responses 模型，或处于未混用 API Key 的官方登录模式。"
       : profile.responsesWebsocket.message
     || (responsesWebsocketState === "unsupported"
       ? "上次探测确认当前端点不支持 Responses WebSocket。"
@@ -11898,7 +11898,7 @@ function calculateProxyModelSpeeds(entries: LocalProxyLogEntry[]) {
     generationMs: number;
   }>();
   for (const entry of entries) {
-    const model = entry.upstreamRequestModel?.trim() || entry.model?.trim();
+    const model = entry.upstreamRequestModel?.trim();
     if (!model) continue;
     if (!models.has(model)) {
       models.set(model, {
@@ -12696,8 +12696,6 @@ function relayCanProbeNativeResponsesWebsocket(profile: RelayProfile): boolean {
     !isAggregateRelayProfile(profile)
     && (profile.relayMode !== "official" || profile.officialMixApiKey)
     && hasResponsesModel
-    && !profile.systemPromptOverride.trim()
-    && !mappings.some((mapping) => mapping.systemPromptOverride?.trim())
   );
 }
 
@@ -13567,7 +13565,7 @@ function formatTime(value: number) {
 }
 
 function upstreamResponseModelMismatch(entry: LocalProxyLogEntry): boolean {
-  const requested = proxyLogDisplayModel(entry);
+  const requested = entry.upstreamRequestModel?.trim();
   const observed = entry.upstreamResponseModel?.trim();
   const independent = independentCompactionTarget(entry);
   return Boolean(
