@@ -1,0 +1,22 @@
+{
+  "scoring_frozen_before_results": true,
+  "protocol_version": 4,
+  "arms": [
+    "default",
+    "draft",
+    "draft_keep_runtime"
+  ],
+  "repeats": 2,
+  "tasks": [
+    "routing",
+    "async_cache",
+    "stream_decoder",
+    "explore",
+    "review_injection",
+    "blocked_validation"
+  ],
+  "sha256": {
+    "cases.py": "8a87f66c77307d4759174bd8b209eab3284731f7659b67ccc31358f8d1c0fdc9",
+    "run_eval.py": "8f941da93f656c8458a100937f904681db091fff5b9612febc62ae1a3585885a"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "date": "2026-10-10",
+  "protocol_version": 4,
+  "model": "gpt-6-astra",
+  "effort": "high",
+  "cli_version": "codex-cli 0.162.0-alpha.2",
+  "default_sha256": "35bd51b5f577cb7b24cd5f4629e49e37cb724ab57754ce6f8f202001635bab8a",
+  "draft_sha256": "dac0f54de5b2ee89d73d7818ef317b61497ce7b77f82eac92df96cd7034a34f8",
+  "default_chars": 21420,
+  "draft_chars": 9850,
+  "draft_mode": "Replicate CodexElves override: replace instructions; recursively remove system/developer input.",
+  "source_catalog_sha256": "bf4ca95d385d4481fe70a0455588399afc3a1619ebd7c1f53be7d6197e3f8edf",
+  "default_matches_model_template": true,
+  "common_controls": "Remove skill catalog, multi-agent role/mode text and collaboration tool identically in both arms; no AGENTS, plugins, MCP or memories.",
+  "provider": "Existing local CodexElves relay; no production config modifications",
+  "common_controls_clarification": "No automatic AGENTS injection; models can still explicitly read parent files. Such reads are recorded and counted in results.json.",
+  "capture_boundary": "Temporary relay egress, before the unchanged production CodexElves relay and third-party upstream."
+}

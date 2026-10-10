@@ -1,0 +1,47 @@
+[
+  {
+    "case": "routing",
+    "original_broken_code": {
+      "checks_passed": 3,
+      "checks_total": 10,
+      "failed_checks": [
+        "alias-before-request",
+        "invalid-request-skipped",
+        "blank-override-fallback",
+        "default-verbatim",
+        "protocol-fallback",
+        "unknown-trimmed",
+        "empty-rejected"
+      ]
+    },
+    "detected_failure": true
+  },
+  {
+    "case": "async_cache",
+    "original_broken_code": {
+      "checks_passed": 7,
+      "checks_total": 14,
+      "failed_checks": [
+        "boundary-expired",
+        "zero-not-stored",
+        "single-flight",
+        "shared-error",
+        "old-cannot-overwrite",
+        "old-failure-preserves-new-flight",
+        "creator-loader-ttl"
+      ]
+    },
+    "detected_failure": true
+  },
+  {
+    "case": "stream_decoder",
+    "original_broken_code": {
+      "checks_passed": 0,
+      "checks_total": 1,
+      "failed_checks": [
+        "Traceback (most recent call last):\n  File \"<string>\", line 21, in <module>\n  File \"<string>\", line 13, in decode\n  File \"E:\\code\\junes\\github\\CodexPlusPlus\\temp\\prompt-ab-2026-10-10\\grader-original-fixtures\\stream_decoder\\decoder.py\", line 5, in feed\n    self.buffer += chunk.decode(\"utf-8\")\n                   ^^^^^^^^^^^^^^^^^^^^^\nUnicodeDecodeError: 'utf-8' codec can't decode byte 0xef in position 0: unexpected end of data\n"
+      ]
+    },
+    "detected_failure": true
+  }
+]
