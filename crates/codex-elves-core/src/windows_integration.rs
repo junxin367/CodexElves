@@ -57,6 +57,13 @@ pub struct WindowsProcessInfo {
 }
 
 #[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowsTcpListener {
+    pub port: u16,
+    pub process_id: u32,
+}
+
+#[cfg(windows)]
 pub struct ComApartment;
 
 #[cfg(windows)]
@@ -312,6 +319,113 @@ pub fn enumerate_processes() -> Vec<WindowsProcessInfo> {
 }
 
 #[cfg(windows)]
+pub fn loopback_tcp_listeners() -> anyhow::Result<Vec<WindowsTcpListener>> {
+    use std::mem::{offset_of, size_of, size_of_val};
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use windows::Win32::NetworkManagement::IpHelper::{
+        MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID,
+        MIB_TCPTABLE_OWNER_PID,
+    };
+    use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+
+    let mut listeners = Vec::new();
+    let buffer = tcp_listener_table(AF_INET.0 as u32)?;
+    let count = buffer[0] as usize;
+    let offset = offset_of!(MIB_TCPTABLE_OWNER_PID, table);
+    anyhow::ensure!(
+        offset + count * size_of::<MIB_TCPROW_OWNER_PID>() <= size_of_val(buffer.as_slice()),
+        "truncated IPv4 TCP listener table"
+    );
+    let rows = unsafe {
+        std::slice::from_raw_parts(
+            buffer
+                .as_ptr()
+                .cast::<u8>()
+                .add(offset)
+                .cast::<MIB_TCPROW_OWNER_PID>(),
+            count,
+        )
+    };
+    for row in rows {
+        let address = Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes());
+        if address == Ipv4Addr::LOCALHOST || address.is_unspecified() {
+            listeners.push(WindowsTcpListener {
+                port: u16::from_be(row.dwLocalPort as u16),
+                process_id: row.dwOwningPid,
+            });
+        }
+    }
+
+    let buffer = tcp_listener_table(AF_INET6.0 as u32)?;
+    let count = buffer[0] as usize;
+    let offset = offset_of!(MIB_TCP6TABLE_OWNER_PID, table);
+    anyhow::ensure!(
+        offset + count * size_of::<MIB_TCP6ROW_OWNER_PID>() <= size_of_val(buffer.as_slice()),
+        "truncated IPv6 TCP listener table"
+    );
+    let rows = unsafe {
+        std::slice::from_raw_parts(
+            buffer
+                .as_ptr()
+                .cast::<u8>()
+                .add(offset)
+                .cast::<MIB_TCP6ROW_OWNER_PID>(),
+            count,
+        )
+    };
+    for row in rows {
+        let address = Ipv6Addr::from(row.ucLocalAddr);
+        if address.is_loopback() || address.is_unspecified() {
+            listeners.push(WindowsTcpListener {
+                port: u16::from_be(row.dwLocalPort as u16),
+                process_id: row.dwOwningPid,
+            });
+        }
+    }
+    listeners.sort_unstable_by_key(|listener| (listener.port, listener.process_id));
+    listeners.dedup();
+    Ok(listeners)
+}
+
+#[cfg(windows)]
+fn tcp_listener_table(address_family: u32) -> anyhow::Result<Vec<u32>> {
+    use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS};
+    use windows::Win32::NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, TCP_TABLE_OWNER_PID_LISTENER,
+    };
+
+    let mut size = 0;
+    let mut buffer = Vec::<u32>::new();
+    for _ in 0..4 {
+        let table = if buffer.is_empty() {
+            None
+        } else {
+            Some(buffer.as_mut_ptr().cast())
+        };
+        let result = unsafe {
+            GetExtendedTcpTable(
+                table,
+                &mut size,
+                false,
+                address_family,
+                TCP_TABLE_OWNER_PID_LISTENER,
+                0,
+            )
+        };
+        if result == ERROR_SUCCESS.0 {
+            anyhow::ensure!(!buffer.is_empty(), "empty TCP listener table buffer");
+            return Ok(buffer);
+        }
+        if result != ERROR_INSUFFICIENT_BUFFER.0 {
+            return Err(std::io::Error::from_raw_os_error(result as i32))
+                .context("failed to read TCP listener owners");
+        }
+        buffer.resize((size as usize).div_ceil(std::mem::size_of::<u32>()), 0);
+    }
+    anyhow::bail!("TCP listener table kept growing while reading owners")
+}
+
+#[cfg(windows)]
 pub fn terminate_process(process_id: u32) -> bool {
     let Ok(handle) = (unsafe {
         OpenProcess(
@@ -450,5 +564,89 @@ struct RegistryKeyGuard(HKEY);
 impl Drop for RegistryKeyGuard {
     fn drop(&mut self) {
         let _ = unsafe { RegCloseKey(self.0) };
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn activating_existing_process_restores_its_minimized_window() {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, GetForegroundWindow, WS_EX_TOOLWINDOW,
+            WS_OVERLAPPEDWINDOW,
+        };
+        use windows::core::w;
+
+        struct TestWindow(HWND, HWND);
+        impl Drop for TestWindow {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = DestroyWindow(self.0);
+                    if !self.1.is_invalid() {
+                        let _ = SetForegroundWindow(self.1);
+                    }
+                }
+            }
+        }
+
+        let previous = unsafe { GetForegroundWindow() };
+        let window = TestWindow(
+            unsafe {
+                CreateWindowExW(
+                    WS_EX_TOOLWINDOW,
+                    w!("STATIC"),
+                    w!("CodexElves window activation test"),
+                    WS_OVERLAPPEDWINDOW,
+                    -32000,
+                    -32000,
+                    10,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .unwrap(),
+            previous,
+        );
+        unsafe {
+            let _ = ShowWindow(window.0, SW_SHOWMINNOACTIVE);
+        }
+        assert!(unsafe { IsIconic(window.0) }.as_bool());
+        let activated = activate_process_window(std::process::id());
+        assert!(!unsafe { IsIconic(window.0) }.as_bool());
+        if activated {
+            assert_eq!(unsafe { GetForegroundWindow() }, window.0);
+        }
+    }
+
+    #[test]
+    fn tcp_listener_owners_include_ipv4_loopback_and_wildcard_listeners() {
+        let loopback = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let wildcard = TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let listeners = loopback_tcp_listeners().unwrap();
+        for listener in [loopback, wildcard] {
+            assert!(listeners.contains(&WindowsTcpListener {
+                port: listener.local_addr().unwrap().port(),
+                process_id: std::process::id(),
+            }));
+        }
+    }
+
+    #[test]
+    fn tcp_listener_owners_include_ipv6_loopback_listeners() {
+        let listener = TcpListener::bind(("::1", 0)).unwrap();
+        assert!(
+            loopback_tcp_listeners()
+                .unwrap()
+                .contains(&WindowsTcpListener {
+                    port: listener.local_addr().unwrap().port(),
+                    process_id: std::process::id(),
+                })
+        );
     }
 }

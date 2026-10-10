@@ -33,6 +33,9 @@ const POST_LAUNCH_COMPUTER_USE_GUARD_STABLE_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexLaunch {
+    Existing {
+        process_id: u32,
+    },
     Process {
         command: Vec<String>,
         wait_strategy: ProcessWaitStrategy,
@@ -43,6 +46,12 @@ pub enum CodexLaunch {
         arguments: String,
         process_id: Option<u32>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExistingCodex {
+    pub process_id: u32,
+    pub debug_port: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +80,7 @@ impl CodexLaunch {
     pub fn process_id(&self) -> Option<u32> {
         match self {
             Self::PackagedActivation { process_id, .. } => *process_id,
+            Self::Existing { process_id } => Some(*process_id),
             Self::Process { .. } => None,
         }
     }
@@ -122,6 +132,15 @@ impl std::fmt::Debug for LaunchHandle {
 impl LaunchHandle {
     pub async fn wait_for_codex_exit(&self) -> anyhow::Result<()> {
         let result = self.hooks.wait_for_codex_exit(&self.launch).await;
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "launcher.codex_wait_finished",
+            serde_json::json!({
+                "process_id": self.launch.process_id(),
+                "helper_port": self.helper_port,
+                "helper_started": self.helper_started,
+                "error": result.as_ref().err().map(|error| format!("{error:#}"))
+            }),
+        );
         if self.helper_started {
             self.hooks.shutdown_helper(self.helper_port).await;
         }
@@ -137,6 +156,10 @@ pub trait LaunchHooks: Send + Sync {
         settings: &BackendSettings,
     ) -> anyhow::Result<PathBuf>;
     fn select_debug_port(&self, requested: u16) -> u16;
+    async fn find_existing_codex(&self, _app_dir: &Path, _requested: u16) -> Option<ExistingCodex> {
+        None
+    }
+    async fn activate_existing_codex(&self, _process_id: u32) {}
     fn select_helper_port(&self, requested: u16) -> u16;
     async fn load_settings(&self) -> anyhow::Result<BackendSettings>;
     async fn run_provider_sync(&self) -> anyhow::Result<()>;
@@ -272,10 +295,16 @@ where
     H: IntoLaunchHooks,
 {
     let hooks = hooks.into_launch_hooks();
-    let debug_port = hooks.select_debug_port(options.debug_port);
+    let mut debug_port = hooks.select_debug_port(options.debug_port);
     let mut helper_port = hooks.select_helper_port(options.helper_port);
     let settings = hooks.load_settings().await?;
     let app_dir = hooks.resolve_app_dir(options.app_dir.as_deref(), &settings)?;
+    let existing_codex = hooks
+        .find_existing_codex(&app_dir, options.debug_port)
+        .await;
+    if let Some(existing) = existing_codex {
+        debug_port = existing.debug_port;
+    }
     let status_store = options.status_store.clone();
     let protocol_proxy_enabled = relay_protocol_proxy_enabled(&settings);
     let lan_proxy_listening = settings.lan_proxy_enabled && protocol_proxy_enabled;
@@ -321,9 +350,24 @@ where
             helper_started = true;
         }
 
-        let launch = hooks
-            .launch_codex(&app_dir, debug_port, &settings.codex_extra_args)
-            .await?;
+        let launch = if let Some(existing) = existing_codex {
+            hooks.activate_existing_codex(existing.process_id).await;
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "launcher.attached_existing_codex",
+                serde_json::json!({
+                    "process_id": existing.process_id,
+                    "debug_port": debug_port,
+                    "helper_port": helper_port
+                }),
+            );
+            CodexLaunch::Existing {
+                process_id: existing.process_id,
+            }
+        } else {
+            hooks
+                .launch_codex(&app_dir, debug_port, &settings.codex_extra_args)
+                .await?
+        };
         launched = Some(launch.clone());
         keep_launched_on_error = true;
         if should_start_computer_use_guard_watchdog(&settings) {
@@ -385,7 +429,7 @@ where
                 hooks.shutdown_helper(helper_port).await;
             }
             if let Some(launch) = &launched {
-                if !keep_launched_on_error {
+                if !keep_launched_on_error && !matches!(launch, CodexLaunch::Existing { .. }) {
                     hooks.terminate_codex(launch).await;
                 }
             }
@@ -534,6 +578,54 @@ impl LaunchHooks for DefaultLaunchHooks {
 
     fn select_debug_port(&self, requested: u16) -> u16 {
         crate::ports::select_packaged_codex_debug_port(requested)
+    }
+
+    async fn find_existing_codex(&self, app_dir: &Path, requested: u16) -> Option<ExistingCodex> {
+        #[cfg(windows)]
+        {
+            let processes = crate::windows_integration::enumerate_processes();
+            let process_ids = matching_codex_process_ids(app_dir, &processes);
+            if process_ids.is_empty() {
+                return None;
+            }
+            let previous_port = StatusStore::default()
+                .load_latest()
+                .ok()
+                .flatten()
+                .and_then(|status| status.debug_port);
+            let listeners = match crate::windows_integration::loopback_tcp_listeners() {
+                Ok(listeners) => listeners,
+                Err(error) => {
+                    let _ = crate::diagnostic_log::append_diagnostic_log(
+                        "launcher.existing_codex_probe_failed",
+                        serde_json::json!({ "message": format!("{error:#}") }),
+                    );
+                    return None;
+                }
+            };
+            find_existing_codex_from(requested, previous_port, &process_ids, &listeners).await
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (app_dir, requested);
+            None
+        }
+    }
+
+    async fn activate_existing_codex(&self, process_id: u32) {
+        #[cfg(windows)]
+        {
+            let activated = crate::windows_activate_process_window(process_id);
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "launcher.existing_codex_window_activated",
+                serde_json::json!({
+                    "process_id": process_id,
+                    "activated": activated
+                }),
+            );
+        }
+        #[cfg(not(windows))]
+        let _ = process_id;
     }
 
     fn select_helper_port(&self, requested: u16) -> u16 {
@@ -725,7 +817,7 @@ impl LaunchHooks for DefaultLaunchHooks {
                         arguments,
                         process_id: Some(process_id),
                     },
-                    CodexLaunch::Process { .. } => unreachable!(),
+                    CodexLaunch::Existing { .. } | CodexLaunch::Process { .. } => unreachable!(),
                 });
             }
         }
@@ -884,34 +976,36 @@ impl LaunchHooks for DefaultLaunchHooks {
     async fn write_status(&self, _status: &str) {}
 
     async fn wait_for_codex_exit(&self, launch: &CodexLaunch) -> anyhow::Result<()> {
-        match launch {
-            CodexLaunch::Process { .. } => {
-                if let Some(mut child) = self.child.lock().await.take() {
-                    let _ = child.wait().await;
+        let wait_for_launch = async {
+            match launch {
+                CodexLaunch::Existing { .. } => {}
+                CodexLaunch::Process { .. } => {
+                    if let Some(mut child) = self.child.lock().await.take() {
+                        let _ = child.wait().await;
+                    }
+                }
+                CodexLaunch::PackagedActivation { process_id, .. } => {
+                    if let Some(process_id) = process_id {
+                        wait_for_windows_process_id(*process_id).await?;
+                    }
                 }
             }
-            CodexLaunch::PackagedActivation { process_id, .. } => {
-                if let Some(process_id) = process_id {
-                    wait_for_windows_process_id(*process_id).await?;
-                }
-            }
-        }
+            Ok(())
+        };
         #[cfg(windows)]
         {
-            let mut empty_streak = 0u32;
-            loop {
-                if crate::watcher::find_codex_processes().is_empty() {
-                    empty_streak = empty_streak.saturating_add(1);
-                    if empty_streak >= 3 {
-                        break;
-                    }
-                } else {
-                    empty_streak = 0;
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
+            wait_for_windows_codex_exit_with(
+                launch.process_id(),
+                wait_for_launch,
+                crate::watcher::find_codex_processes,
+                Duration::from_secs(2),
+            )
+            .await
         }
-        Ok(())
+        #[cfg(not(windows))]
+        {
+            wait_for_launch.await
+        }
     }
 
     async fn shutdown_helper(&self, _helper_port: u16) {
@@ -935,6 +1029,7 @@ impl LaunchHooks for DefaultLaunchHooks {
 
     async fn terminate_codex(&self, launch: &CodexLaunch) {
         match launch {
+            CodexLaunch::Existing { .. } => {}
             CodexLaunch::Process {
                 wait_strategy: ProcessWaitStrategy::ExternalWaitCommand,
                 command,
@@ -966,6 +1061,105 @@ impl LaunchHooks for DefaultLaunchHooks {
             } => {}
         }
     }
+}
+
+#[cfg(windows)]
+fn matching_codex_process_ids(
+    app_dir: &Path,
+    processes: &[crate::windows_integration::WindowsProcessInfo],
+) -> Vec<u32> {
+    let app_dir = std::fs::canonicalize(app_dir).unwrap_or_else(|_| app_dir.to_path_buf());
+    let app_dir = app_dir.to_string_lossy().replace('/', "\\");
+    processes
+        .iter()
+        .filter(|process| {
+            (process.exe_file.eq_ignore_ascii_case("Codex.exe")
+                || process.exe_file.eq_ignore_ascii_case("ChatGPT.exe"))
+                && process
+                    .executable_path
+                    .as_deref()
+                    .and_then(Path::parent)
+                    .is_some_and(|parent| {
+                        let parent =
+                            std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+                        parent
+                            .to_string_lossy()
+                            .replace('/', "\\")
+                            .trim_end_matches('\\')
+                            .eq_ignore_ascii_case(app_dir.trim_end_matches('\\'))
+                    })
+        })
+        .map(|process| process.process_id)
+        .collect()
+}
+
+#[cfg(windows)]
+async fn find_existing_codex_from(
+    requested: u16,
+    previous_port: Option<u16>,
+    process_ids: &[u32],
+    listeners: &[crate::windows_integration::WindowsTcpListener],
+) -> Option<ExistingCodex> {
+    let mut checked_ports = Vec::new();
+    for port in std::iter::once(requested).chain(previous_port).chain(
+        listeners
+            .iter()
+            .filter(|listener| process_ids.contains(&listener.process_id))
+            .map(|listener| listener.port),
+    ) {
+        if port == 0 || checked_ports.contains(&port) {
+            continue;
+        }
+        checked_ports.push(port);
+        let Some(owner) = listeners.iter().find(|listener| listener.port == port) else {
+            continue;
+        };
+        if !process_ids.contains(&owner.process_id)
+            || listeners
+                .iter()
+                .any(|listener| listener.port == port && listener.process_id != owner.process_id)
+        {
+            continue;
+        }
+        if crate::cdp::list_targets(port).await.is_ok() {
+            return Some(ExistingCodex {
+                process_id: owner.process_id,
+                debug_port: port,
+            });
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+async fn wait_for_windows_codex_exit_with(
+    process_id: Option<u32>,
+    wait_for_launch: impl Future<Output = anyhow::Result<()>>,
+    mut find_codex_processes: impl FnMut() -> Vec<u32>,
+    poll_interval: Duration,
+) -> anyhow::Result<()> {
+    if let Err(error) = wait_for_launch.await {
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "launcher.codex_process_wait_failed_nonfatal",
+            serde_json::json!({
+                "process_id": process_id,
+                "message": format!("{error:#}")
+            }),
+        );
+    }
+    let mut empty_streak = 0u32;
+    loop {
+        if find_codex_processes().is_empty() {
+            empty_streak += 1;
+            if empty_streak >= 3 {
+                break;
+            }
+        } else {
+            empty_streak = 0;
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+    Ok(())
 }
 
 async fn handle_helper_connection(
@@ -5184,6 +5378,291 @@ fn activate_packaged_app_blocking(app_user_model_id: &str, arguments: &str) -> a
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn existing_codex_app_must_match_selected_app_directory() {
+        let processes = vec![crate::windows_integration::WindowsProcessInfo {
+            process_id: 42,
+            parent_process_id: 1,
+            exe_file: "ChatGPT.exe".into(),
+            executable_path: Some(PathBuf::from(r"C:\Codex\app\ChatGPT.exe")),
+        }];
+        assert_eq!(
+            matching_codex_process_ids(Path::new(r"c:\codex\app"), &processes),
+            vec![42]
+        );
+        assert_eq!(
+            matching_codex_process_ids(Path::new("C:/Codex/app/"), &processes),
+            vec![42]
+        );
+        assert!(matching_codex_process_ids(Path::new(r"C:\OtherCodex\app"), &processes).is_empty());
+        assert!(matching_codex_process_ids(Path::new(r"C:\Codex\app"), &[]).is_empty());
+    }
+
+    #[cfg(windows)]
+    async fn serve_cdp_targets(targets: Value) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = serde_json::to_vec(&targets).unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_http_request(&mut stream).await.unwrap();
+            write_http_response(&mut stream, "200 OK", "application/json", &body)
+                .await
+                .unwrap();
+        });
+        (port, task)
+    }
+
+    #[cfg(windows)]
+    fn cdp_targets(url: &str) -> Value {
+        serde_json::json!([{
+            "id": "test",
+            "type": "page",
+            "url": url,
+            "webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/test"
+        }])
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn existing_codex_debug_port_reuses_requested_codex_target() {
+        use crate::windows_integration::WindowsTcpListener;
+        let (port, server) = serve_cdp_targets(cdp_targets("app://-/index.html")).await;
+        assert_eq!(
+            find_existing_codex_from(
+                port,
+                Some(port),
+                &[42],
+                &[WindowsTcpListener {
+                    port,
+                    process_id: 42
+                }]
+            )
+            .await,
+            Some(ExistingCodex {
+                process_id: 42,
+                debug_port: port
+            })
+        );
+        server.await.unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn existing_codex_debug_port_finds_previous_port_without_reusing_another_codex() {
+        use crate::windows_integration::WindowsTcpListener;
+        let (requested, other_app) = serve_cdp_targets(cdp_targets("app://-/index.html")).await;
+        let (previous, codex) = serve_cdp_targets(cdp_targets("app://-/index.html")).await;
+        let listeners = [
+            WindowsTcpListener {
+                port: requested,
+                process_id: 84,
+            },
+            WindowsTcpListener {
+                port: previous,
+                process_id: 42,
+            },
+        ];
+        assert_eq!(
+            find_existing_codex_from(requested, Some(previous), &[42], &listeners).await,
+            Some(ExistingCodex {
+                process_id: 42,
+                debug_port: previous
+            })
+        );
+        assert!(!other_app.is_finished());
+        other_app.abort();
+        assert!(other_app.await.unwrap_err().is_cancelled());
+        codex.await.unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn existing_codex_debug_port_rejects_non_cdp_listener() {
+        use crate::windows_integration::WindowsTcpListener;
+        let (port, server) = serve_cdp_targets(serde_json::json!({"status": "ok"})).await;
+        assert_eq!(
+            find_existing_codex_from(
+                port,
+                None,
+                &[42],
+                &[WindowsTcpListener {
+                    port,
+                    process_id: 42
+                }]
+            )
+            .await,
+            None
+        );
+        server.await.unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn existing_codex_keeps_owned_port_while_main_page_is_not_ready() {
+        use crate::windows_integration::WindowsTcpListener;
+        for targets in [serde_json::json!([]), cdp_targets("about:blank")] {
+            let (port, server) = serve_cdp_targets(targets).await;
+            assert_eq!(
+                find_existing_codex_from(
+                    port,
+                    None,
+                    &[42],
+                    &[WindowsTcpListener {
+                        port,
+                        process_id: 42
+                    }]
+                )
+                .await,
+                Some(ExistingCodex {
+                    process_id: 42,
+                    debug_port: port
+                })
+            );
+            server.await.unwrap();
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn existing_codex_discovers_owned_port_when_saved_port_is_stale() {
+        use crate::windows_integration::WindowsTcpListener;
+        let (port, server) = serve_cdp_targets(serde_json::json!([])).await;
+        assert_eq!(
+            find_existing_codex_from(
+                0,
+                Some(0),
+                &[42],
+                &[WindowsTcpListener {
+                    port,
+                    process_id: 42
+                }]
+            )
+            .await,
+            Some(ExistingCodex {
+                process_id: 42,
+                debug_port: port
+            })
+        );
+        server.await.unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn existing_codex_rejects_port_with_different_ipv4_and_ipv6_owners() {
+        use crate::windows_integration::WindowsTcpListener;
+        let (port, server) = serve_cdp_targets(cdp_targets("app://-/index.html")).await;
+        let listeners = [
+            WindowsTcpListener {
+                port,
+                process_id: 42,
+            },
+            WindowsTcpListener {
+                port,
+                process_id: 84,
+            },
+        ];
+        assert_eq!(
+            find_existing_codex_from(port, None, &[42, 84], &listeners).await,
+            None
+        );
+        assert!(!server.is_finished());
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_codex_wait_survives_unavailable_activation_process() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let process_id = u32::MAX;
+        let wait_result = wait_for_windows_process_id(process_id).await;
+        assert!(wait_result.is_err());
+
+        let running = AtomicBool::new(true);
+        let checks = AtomicUsize::new(0);
+        let wait = wait_for_windows_codex_exit_with(
+            Some(process_id),
+            std::future::ready(wait_result),
+            || {
+                checks.fetch_add(1, Ordering::SeqCst);
+                if running.load(Ordering::SeqCst) {
+                    vec![42]
+                } else {
+                    Vec::new()
+                }
+            },
+            Duration::from_millis(1),
+        );
+        tokio::pin!(wait);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut wait)
+                .await
+                .is_err()
+        );
+        assert!(checks.load(Ordering::SeqCst) > 0);
+        running.store(false, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(1), wait)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_codex_wait_requires_consecutive_empty_snapshots_after_activation_exit() {
+        let snapshots = [vec![42], vec![], vec![], vec![42], vec![], vec![], vec![]];
+        let mut checks = 0;
+        wait_for_windows_codex_exit_with(
+            Some(42),
+            std::future::ready(Ok(())),
+            || {
+                let result = snapshots[checks].clone();
+                checks += 1;
+                result
+            },
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(checks, snapshots.len());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_codex_wait_does_not_poll_before_activation_process_exits() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (exit, exited) = tokio::sync::oneshot::channel::<()>();
+        let checks = AtomicUsize::new(0);
+        let wait = wait_for_windows_codex_exit_with(
+            Some(42),
+            async { exited.await.map_err(Into::into) },
+            || {
+                checks.fetch_add(1, Ordering::SeqCst);
+                Vec::new()
+            },
+            Duration::from_millis(1),
+        );
+        tokio::pin!(wait);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut wait)
+                .await
+                .is_err()
+        );
+        assert_eq!(checks.load(Ordering::SeqCst), 0);
+        exit.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), wait)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(checks.load(Ordering::SeqCst), 3);
+    }
 
     #[test]
     fn compaction_continuation_gate_uses_original_request_before_prompt_replacement() {

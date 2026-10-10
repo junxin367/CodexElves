@@ -13,7 +13,7 @@ use codex_elves_core::app_paths::{
     resolve_codex_app_dir_with_saved, user_data_candidates_from,
 };
 use codex_elves_core::launcher::{
-    CodexLaunch, DefaultLaunchHooks, LaunchHooks, LaunchOptions, MacosCleanupPolicy,
+    CodexLaunch, DefaultLaunchHooks, ExistingCodex, LaunchHooks, LaunchOptions, MacosCleanupPolicy,
     build_codex_arguments, build_codex_command, build_macos_cleanup_command,
     build_macos_open_command, build_packaged_activation, launch_and_inject_with_hooks,
 };
@@ -414,9 +414,7 @@ fn launcher_windows_process_wait_uses_platform_cfg_guards() {
     assert!(source.contains(
         "#[cfg(windows)]\nfn wait_for_windows_process_id_blocking(process_id: u32) -> anyhow::Result<()>"
     ));
-    assert!(
-        source.contains("#[cfg(windows)]\n        {\n            let mut empty_streak = 0u32;")
-    );
+    assert!(source.contains("#[cfg(windows)]\nasync fn wait_for_windows_codex_exit_with("));
 }
 
 #[test]
@@ -1519,6 +1517,132 @@ data: {"type":"message_stop"}
 }
 
 #[tokio::test]
+async fn launch_lifecycle_reuses_existing_codex_without_reactivating_or_changing_debug_port() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_dir = temp.path().join("Codex.app");
+    let status_store = StatusStore::new(temp.path().join("latest-status.json"));
+    let events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let mut hooks = FakeHooks::new(events.clone());
+    hooks.existing_codex = Some(ExistingCodex {
+        process_id: 42,
+        debug_port: 43001,
+    });
+
+    let handle = launch_and_inject_with_hooks(
+        LaunchOptions {
+            app_dir: Some(app_dir),
+            debug_port: 9229,
+            helper_port: 45221,
+            status_store,
+        },
+        &hooks,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(handle.launch, CodexLaunch::Existing { process_id: 42 });
+    assert_eq!(handle.debug_port, 43001);
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            "select-debug:9229",
+            "select-helper:45221",
+            "load-settings",
+            "start-helper:45221",
+            "activate-existing:42",
+            "inject:43001:45221",
+            "bridge-watchdog:43001:45221",
+            "status:running",
+        ]
+    );
+    assert_eq!(
+        handle
+            .status_store
+            .load_latest()
+            .unwrap()
+            .unwrap()
+            .debug_port,
+        Some(43001)
+    );
+    handle.wait_for_codex_exit().await.unwrap();
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .contains(&"shutdown-helper:45221".to_string())
+    );
+}
+
+#[tokio::test]
+async fn launch_lifecycle_keeps_existing_codex_proxy_when_injection_is_degraded() {
+    let temp = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let mut hooks = FakeHooks::new(events.clone()).with_inject_error("page is not ready");
+    hooks.existing_codex = Some(ExistingCodex {
+        process_id: 42,
+        debug_port: 9229,
+    });
+    let handle = launch_and_inject_with_hooks(
+        LaunchOptions {
+            app_dir: Some(temp.path().join("Codex.app")),
+            status_store: StatusStore::new(temp.path().join("latest-status.json")),
+            ..LaunchOptions::default()
+        },
+        &hooks,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(handle.launch, CodexLaunch::Existing { process_id: 42 });
+    assert_eq!(
+        handle.status_store.load_latest().unwrap().unwrap().status,
+        "running_degraded"
+    );
+    let before_exit = events.lock().unwrap().clone();
+    assert!(before_exit.contains(&"start-helper:45221".to_string()));
+    assert!(before_exit.contains(&"activate-existing:42".to_string()));
+    assert!(!before_exit.iter().any(|event| {
+        event.starts_with("launch:")
+            || event.starts_with("shutdown-")
+            || event.starts_with("terminate-")
+    }));
+    handle.wait_for_codex_exit().await.unwrap();
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .contains(&"shutdown-helper:45221".to_string())
+    );
+}
+
+#[tokio::test]
+async fn launch_lifecycle_does_not_terminate_existing_codex_when_status_save_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let blocked_parent = temp.path().join("not-a-directory");
+    std::fs::write(&blocked_parent, b"blocked").unwrap();
+    let events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let mut hooks = FakeHooks::new(events.clone());
+    hooks.existing_codex = Some(ExistingCodex {
+        process_id: 42,
+        debug_port: 9229,
+    });
+    let result = launch_and_inject_with_hooks(
+        LaunchOptions {
+            app_dir: Some(temp.path().join("Codex.app")),
+            status_store: StatusStore::new(blocked_parent.join("latest-status.json")),
+            ..LaunchOptions::default()
+        },
+        &hooks,
+    )
+    .await;
+
+    assert!(result.is_err());
+    let events = events.lock().unwrap();
+    assert!(events.contains(&"shutdown-helper:45221".to_string()));
+    assert!(!events.iter().any(|event| event.starts_with("terminate-")));
+}
+
+#[tokio::test]
 async fn launch_lifecycle_runs_sync_before_launch_writes_success_and_shutdowns_on_exit() {
     let temp = tempfile::tempdir().unwrap();
     let app_dir = temp.path().join("Codex.app");
@@ -2294,6 +2418,7 @@ struct FakeHooks {
     inject_error: Option<String>,
     provider_sync_unsupported: bool,
     plugin_marketplace_error: Option<String>,
+    existing_codex: Option<ExistingCodex>,
 }
 
 impl FakeHooks {
@@ -2314,6 +2439,7 @@ impl FakeHooks {
             inject_error: None,
             provider_sync_unsupported: false,
             plugin_marketplace_error: None,
+            existing_codex: None,
         }
     }
 
@@ -2367,6 +2493,14 @@ impl LaunchHooks for FakeHooks {
     fn select_debug_port(&self, requested: u16) -> u16 {
         self.event(format!("select-debug:{requested}"));
         requested
+    }
+
+    async fn find_existing_codex(&self, _app_dir: &Path, _requested: u16) -> Option<ExistingCodex> {
+        self.existing_codex
+    }
+
+    async fn activate_existing_codex(&self, process_id: u32) {
+        self.event(format!("activate-existing:{process_id}"));
     }
 
     fn select_helper_port(&self, requested: u16) -> u16 {

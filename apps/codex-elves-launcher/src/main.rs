@@ -434,6 +434,18 @@ impl LaunchHooks for LauncherHooks {
         self.core.select_debug_port(requested)
     }
 
+    async fn find_existing_codex(
+        &self,
+        app_dir: &Path,
+        requested: u16,
+    ) -> Option<codex_elves_core::launcher::ExistingCodex> {
+        self.core.find_existing_codex(app_dir, requested).await
+    }
+
+    async fn activate_existing_codex(&self, process_id: u32) {
+        self.core.activate_existing_codex(process_id).await;
+    }
+
     fn select_helper_port(&self, requested: u16) -> u16 {
         self.core.select_helper_port(requested)
     }
