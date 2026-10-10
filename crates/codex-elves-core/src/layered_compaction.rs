@@ -62,14 +62,12 @@ pub const COMPACTION_INSTRUCTION_SUFFIX: &str = "\
 - Then write the complete handoff summary inside <summary></summary>.\n\
 - Only the text inside <summary></summary> is kept. Everything outside it is discarded.";
 
-/// D 校验首次失败后，同模型重试使用的系统提示。
-pub const COMPACTION_RETRY_SYSTEM_PROMPT: &str = "\
-You are a handoff summary writer. You do not execute tasks and you have no tools.\n\
-Follow the handoff checkpoint instruction in the supplied conversation. Write the complete \
-handoff summary inside <summary></summary>.\n\
-Never write tool calls or commands to run.";
+pub const COMPACTION_RETRY_INSTRUCTION: &str = "\
+The previous attempt did not produce a valid handoff summary.\n\
+Follow the handoff checkpoint instruction above. Do not continue the task or call tools.\n\
+Write the complete handoff summary inside <summary></summary>. \
+Do not return only analysis or write commands to run.";
 
-const COMPACTION_TOOL_FIELDS: [&str; 3] = ["tools", "tool_choice", "parallel_tool_calls"];
 const SUMMARY_OPEN_TAG: &str = "<summary>";
 const SUMMARY_CLOSE_TAG: &str = "</summary>";
 const ANALYSIS_OPEN_TAG: &str = "<analysis>";
@@ -185,29 +183,17 @@ impl CompactionKind {
     }
 }
 
-/// 代理压缩的上游请求构造方式，按实际执行压缩的模型家族选择。
+/// 原生 Remote Compaction V2 不进入本地压缩路由。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactionRoute {
-    /// A：所有非 GPT 模型。system、tools、thinking 等全部参数与原请求逐字段一致，
-    /// 只把压缩触发项替换为压缩指令；同模型执行时可继续复用上游提示词缓存。
+    /// 所有本地压缩保留 system、tools、thinking 等字段，不依赖缓存租约是否已知。
     CacheReuse,
-    /// B：GPT 家族。沿用 Codex 本地压缩方式：主模型、主系统提示，移除工具字段。
-    CodexLocal,
 }
 
 impl CompactionRoute {
-    pub fn for_model(model: &str) -> Self {
-        match crate::model_capabilities::model_family(model) {
-            crate::model_capabilities::ModelFamily::Gpt => Self::CodexLocal,
-            crate::model_capabilities::ModelFamily::Claude
-            | crate::model_capabilities::ModelFamily::Other => Self::CacheReuse,
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             Self::CacheReuse => "cache_reuse",
-            Self::CodexLocal => "codex_local",
         }
     }
 }
@@ -280,7 +266,6 @@ pub fn prepare_compaction_attempt_request(
 ) -> Value {
     let first = match route {
         CompactionRoute::CacheReuse => prepare_cache_reuse_request(request_json, kind, options),
-        CompactionRoute::CodexLocal => prepare_codex_local_request(request_json, kind, options),
     };
     match attempt {
         CompactionAttempt::First => first,
@@ -360,6 +345,7 @@ fn prepare_cache_reuse_request(
                 for index in controls {
                     items[index] = instruction.clone();
                 }
+                normalize_local_compaction_request_constraints(&mut request);
                 return request;
             }
             let mut conversation = items
@@ -402,6 +388,7 @@ fn prepare_cache_reuse_request(
         Value::Object(_) if is_remote_compaction_v2_trigger(input) => *input = instruction,
         _ => {}
     }
+    normalize_local_compaction_request_constraints(&mut request);
     request
 }
 
@@ -427,124 +414,76 @@ fn cache_reuse_retained_tail_len(
         .count()
 }
 
-/// B：展开合成压缩历史、按需摘除最近一轮，替换触发项为压缩指令并移除工具字段。
-fn prepare_codex_local_request(
-    request_json: &Value,
-    kind: CompactionKind,
-    options: &CompactionOptions,
-) -> Value {
-    let instruction = compaction_instruction_item(&compaction_instruction(&options.user_prompt));
-    // 裁剪规则由会话来源决定：非 GPT 会话改用 GPT 摘要时也不能复活已摘要的旧媒体。
-    let mut request = expand_synthetic_local_compaction_request_for_upstream(request_json);
-    let Some(object) = request.as_object_mut() else {
-        return request_json.clone();
-    };
-    if let Some(input) = object.get_mut("input") {
-        match input {
-            Value::Array(items) => {
-                let control = kind.control_kind();
-                *items = if options.retain_recent_round {
-                    split_local_compaction_input(items, control).summary_input
-                } else {
-                    items
-                        .iter()
-                        .enumerate()
-                        .filter(|(index, item)| {
-                            !is_local_compaction_control_item(items, *index, item, control)
-                        })
-                        .map(|(_, item)| item.clone())
-                        .collect()
-                };
-                items.push(instruction);
-            }
-            Value::Object(_) if is_remote_compaction_v2_trigger(input) => *input = instruction,
-            _ => {}
-        }
-    }
-    remove_compaction_tool_declarations(&mut request);
-    request
-}
-
-/// D 的重试请求：历史与压缩指令不变，system 换成交接摘要撰写者说明并移除工具字段。
+/// 重试提示只能追加到输入末尾，不能改写缓存前缀或删除工具目录。
 pub fn compaction_retry_request(first_attempt_request: &Value) -> Value {
     let mut request = first_attempt_request.clone();
-    let Some(object) = request.as_object_mut() else {
-        return request;
-    };
-    object.insert(
-        "instructions".to_string(),
-        json!(COMPACTION_RETRY_SYSTEM_PROMPT),
-    );
-    if object.contains_key("system") {
-        object.insert("system".to_string(), json!(COMPACTION_RETRY_SYSTEM_PROMPT));
+    let instruction = compaction_instruction_item(COMPACTION_RETRY_INSTRUCTION);
+    match request.get_mut("input") {
+        Some(Value::Array(items)) => items.push(instruction),
+        Some(input @ Value::Object(_)) => *input = json!([input.clone(), instruction]),
+        _ => {}
     }
-    if let Some(Value::Array(items)) = object.get_mut("input") {
-        items.retain(|item| {
-            !matches!(
-                item.get("role").and_then(Value::as_str),
-                Some("system" | "developer")
-            )
-        });
-    }
-    remove_compaction_tool_declarations(&mut request);
     request
 }
 
-fn remove_compaction_tool_declarations(request: &mut Value) {
+fn normalize_local_compaction_request_constraints(request: &mut Value) {
     let Some(object) = request.as_object_mut() else {
         return;
     };
-    for key in COMPACTION_TOOL_FIELDS {
-        object.remove(key);
+    if object
+        .get("tool_choice")
+        .is_some_and(tool_choice_forces_a_call)
+    {
+        object.insert("tool_choice".to_string(), json!("none"));
     }
-    if let Some(items) = object.get_mut("input").and_then(Value::as_array_mut) {
-        strip_compaction_history_tool_declarations(items);
+    if let Some(text) = object.get_mut("text").and_then(Value::as_object_mut)
+        && text.get("format").is_some_and(|format| {
+            !format.is_null() && format.get("type").and_then(Value::as_str) != Some("text")
+        })
+    {
+        text.insert("format".to_string(), json!({"type":"text"}));
+    }
+    if object.get("response_format").is_some_and(|format| {
+        !format.is_null() && format.get("type").and_then(Value::as_str) != Some("text")
+    }) {
+        object.insert("response_format".to_string(), json!({"type":"text"}));
+    }
+    if let Some(output_config) = object
+        .get_mut("output_config")
+        .and_then(Value::as_object_mut)
+        && output_config
+            .get("format")
+            .is_some_and(|format| !format.is_null())
+    {
+        output_config.remove("format");
     }
 }
 
-/// 保留工具调用/结果配对，只移除可再次启用工具的目录；旧 v3 载荷也遵循同一规则。
-/// 不提前展开压缩项，以免丢失后续协议转换用于恢复 thinking 历史的标识。
-fn strip_compaction_history_tool_declarations(items: &mut Vec<Value>) -> bool {
-    let mut changed = false;
-    items.retain_mut(|item| {
-        match item.get("type").and_then(Value::as_str) {
-            Some("additional_tools") => {
-                changed = true;
-                return false;
-            }
-            Some("tool_search_output")
-                if item.get("tools").is_some_and(|tools| {
-                    tools.as_array().is_none_or(|tools| !tools.is_empty())
-                }) =>
-            {
-                item["tools"] = json!([]);
-                changed = true;
-            }
-            _ => {}
+fn tool_choice_forces_a_call(choice: &Value) -> bool {
+    if choice.as_str() == Some("required") {
+        return true;
+    }
+    let Some(object) = choice.as_object() else {
+        return false;
+    };
+    match object.get("type").and_then(Value::as_str) {
+        Some("auto" | "none") | None => false,
+        Some("allowed_tools") => {
+            object
+                .get("mode")
+                .or_else(|| {
+                    object
+                        .get("allowed_tools")
+                        .and_then(|allowed| allowed.get("mode"))
+                })
+                .and_then(Value::as_str)
+                == Some("required")
         }
-        if let Some(mut payload) = synthetic_local_compaction_payload(item)
-            && strip_compaction_history_tool_declarations(&mut payload.retained_tail)
-        {
-            let encoded = format!(
-                "{LOCAL_COMPACTION_V3_STRUCTURED_PREFIX}{}",
-                serde_json::to_string(&payload).expect("JSON compaction payload is serializable")
-            );
-            if item.get("type").and_then(Value::as_str) == Some("compaction") {
-                item["encrypted_content"] = json!(encoded);
-            } else {
-                replace_message_text(
-                    item,
-                    &format!("{LEGACY_COMPACTION_SUMMARY_PREFIX}\n\n{encoded}"),
-                );
-            }
-            changed = true;
-        }
-        true
-    });
-    changed
+        Some(_) => true,
+    }
 }
 
-/// 协议转换层的兜底：未经代理压缩执行器准备的 V2 请求按模型路由、默认提示词转换，
+/// 协议转换层的兜底：未经代理压缩执行器准备的 V2 请求保留缓存前缀并使用默认提示词，
 /// 保证 `compaction_trigger` 不会原样发给不支持它的上游。非 V2 请求原样返回。
 pub fn prepare_remote_compaction_v2_bridge_request(request_json: &Value) -> Value {
     if !is_remote_compaction_v2_request(Some(request_json)) {
@@ -553,7 +492,7 @@ pub fn prepare_remote_compaction_v2_bridge_request(request_json: &Value) -> Valu
     prepare_compaction_attempt_request(
         request_json,
         CompactionKind::RemoteV2,
-        CompactionRoute::for_model(request_json["model"].as_str().unwrap_or_default()),
+        CompactionRoute::CacheReuse,
         &CompactionOptions::default(),
         CompactionAttempt::First,
     )
@@ -581,7 +520,7 @@ pub fn prepare_remote_compaction_v2_bridge_request_with_options(
     prepare_compaction_attempt_request(
         request_json,
         CompactionKind::RemoteV2,
-        CompactionRoute::for_model(request_json["model"].as_str().unwrap_or_default()),
+        CompactionRoute::CacheReuse,
         &CompactionOptions {
             user_prompt: prompt_override.unwrap_or_default().to_string(),
             retain_recent_round,
@@ -2364,14 +2303,16 @@ pub fn build_compaction_success_response(
         }
     };
     let summary = summary.as_str();
-    let summary_with_path = directories::BaseDirs::new()
-        .and_then(|dirs| {
-            verified_rollout_path(
-                original_request,
-                &dirs.home_dir().join(".codex").join("sessions"),
-            )
-        })
-        .map(|path| format!("{summary}\n\n完整会话记录：{}", path.display()));
+    let summary_with_path = verified_rollout_reference(
+        original_request,
+        &crate::codex_home::default_codex_home_dir(),
+    )
+    .map(|path| {
+        format!(
+            "{summary}\n\n完整会话记录（相对 CODEX_HOME）：{}",
+            path.display()
+        )
+    });
     let summary = summary_with_path.as_deref().unwrap_or(summary);
     let structured = if options.retain_recent_round {
         match build_structured_local_compaction(original_request, summary, options.retain_tokens) {
@@ -2421,16 +2362,18 @@ pub fn build_compaction_success_response(
 
 /// E：只接受 UUID cache key、真实存在且首行 session_meta.id 匹配的唯一 rollout。
 /// 不按时间猜路径，不使用 archived_sessions，也不读取会话正文。
-fn verified_rollout_path(
+/// 返回值始终相对 CODEX_HOME，不能把本机绝对路径写进后续上游上下文。
+fn verified_rollout_reference(
     request: &Value,
-    sessions: &std::path::Path,
+    codex_home: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
     use std::io::{BufRead, BufReader, Read};
     let key = request.get("prompt_cache_key")?.as_str()?;
     uuid::Uuid::parse_str(key).ok()?;
+    let sessions = codex_home.join("sessions");
     let root = sessions.canonicalize().ok()?;
     let suffix = format!("-{key}.jsonl");
-    let mut directories = vec![(sessions.to_path_buf(), 0)];
+    let mut directories = vec![(sessions, 0)];
     let mut matches = Vec::new();
     while let Some((directory, depth)) = directories.pop() {
         for entry in std::fs::read_dir(directory).ok()?.flatten() {
@@ -2441,8 +2384,8 @@ fn verified_rollout_path(
                 let name = entry.file_name();
                 let name = name.to_str()?;
                 if name.starts_with("rollout-") && name.ends_with(&suffix) {
-                    let path = entry.path();
-                    if !path.canonicalize().ok()?.starts_with(&root) {
+                    let path = entry.path().canonicalize().ok()?;
+                    if !path.starts_with(&root) {
                         continue;
                     }
                     let mut line = String::new();
@@ -2453,7 +2396,10 @@ fn verified_rollout_path(
                     if meta["type"] == "session_meta"
                         && meta.pointer("/payload/id")?.as_str()? == key
                     {
-                        matches.push(path);
+                        matches.push(
+                            std::path::PathBuf::from("sessions")
+                                .join(path.strip_prefix(&root).ok()?),
+                        );
                     }
                 }
             }
@@ -2587,7 +2533,7 @@ pub fn apply_custom_compaction_prompt(request_json: &Value, custom_prompt: &str)
 /// 为传统上下文压缩准备只生成摘要文本的上游请求。
 ///
 /// 请求身份仍由调用方保存的原始请求判断；转发副本会先摘除 assistant 指代锚点开始的
-/// 原始尾部，再使用有效项目提示词。GPT 路由移除工具字段，非 GPT 路由保留工具定义。
+/// 原始尾部，再使用有效项目提示词；所有模型保留工具定义。
 pub fn prepare_legacy_layered_compaction_request(
     request_json: &Value,
     prompt_override: &str,
@@ -2607,7 +2553,7 @@ pub fn prepare_legacy_layered_compaction_request_with_options(
     prepare_compaction_attempt_request(
         request_json,
         CompactionKind::Legacy,
-        CompactionRoute::for_model(request_json["model"].as_str().unwrap_or_default()),
+        CompactionRoute::CacheReuse,
         &CompactionOptions {
             user_prompt: prompt_override.to_string(),
             retain_recent_round,
@@ -3192,12 +3138,12 @@ mod tests {
     }
 
     #[test]
-    fn compaction_contract_rollout_requires_existing_file_and_matching_session_metadata() {
+    fn compaction_contract_rollout_reference_is_relative_and_matches_session_metadata() {
         let root = tempfile::tempdir().unwrap();
         let key = "01a0ea47-0de4-72e2-be5b-dfd63296920c";
         let request = json!({"prompt_cache_key":key});
-        assert!(verified_rollout_path(&request, root.path()).is_none());
-        let day = root.path().join("2026/09/29");
+        assert!(verified_rollout_reference(&request, root.path()).is_none());
+        let day = root.path().join("sessions/2026/09/29");
         std::fs::create_dir_all(&day).unwrap();
         let file = day.join(format!("rollout-2026-09-29T07-08-40-{key}.jsonl"));
         std::fs::write(
@@ -3205,111 +3151,140 @@ mod tests {
             "{\"type\":\"session_meta\",\"payload\":{\"id\":\"different\"}}\n",
         )
         .unwrap();
-        assert!(verified_rollout_path(&request, root.path()).is_none());
+        assert!(verified_rollout_reference(&request, root.path()).is_none());
         std::fs::write(
             &file,
             format!("{}\n", json!({"type":"session_meta","payload":{"id":key}})),
         )
         .unwrap();
-        assert_eq!(verified_rollout_path(&request, root.path()), Some(file));
+        let reference = verified_rollout_reference(&request, root.path()).unwrap();
+        assert_eq!(
+            reference,
+            std::path::PathBuf::from("sessions/2026/09/29").join(file.file_name().unwrap())
+        );
+        assert!(!reference.is_absolute());
         assert!(
-            verified_rollout_path(&json!({"prompt_cache_key":"../invalid"}), root.path()).is_none()
+            verified_rollout_reference(&json!({"prompt_cache_key":"../invalid"}), root.path())
+                .is_none()
         );
     }
 
     #[test]
     fn compaction_contract_routes_and_preserves_cache_prefix() {
         assert!(model_supports_native_remote_compaction_v2("gpt-5.4"));
-        assert_eq!(
-            CompactionRoute::for_model("claude-opus-5-5"),
-            CompactionRoute::CacheReuse
-        );
-        assert_eq!(
-            CompactionRoute::for_model("deepseek-v4.1-flash"),
-            CompactionRoute::CacheReuse
-        );
-        assert_eq!(
-            CompactionRoute::for_model("qwen3-coder-plus"),
-            CompactionRoute::CacheReuse
-        );
-        assert_eq!(
-            CompactionRoute::for_model("gpt-5.6"),
-            CompactionRoute::CodexLocal
-        );
-        assert_eq!(
-            CompactionRoute::for_model("o4-mini"),
-            CompactionRoute::CodexLocal
-        );
         let request = json!({
             "model":"claude-opus-5-5","instructions":"main system","system":"main",
             "tools":[{"type":"function","name":"read","parameters":{"type":"object"}}],
             "tool_choice":"auto","parallel_tool_calls":true,
             "thinking":{"type":"adaptive"},"output_config":{"effort":"max"},
             "reasoning":{"effort":"max"},"prompt_cache_key":"unchanged",
-            "input":[user_message("earlier"),{"type":"reasoning","summary":[{"text":"reasoning"}]},
-                assistant_message("done"),user_message("next"),{"type":"compaction_trigger"}]
+            "input":[
+                {"type":"message","role":"developer","content":"stable developer rules"},
+                {"type":"additional_tools","tools":[{"type":"function","name":"write","parameters":{}}]},
+                user_message("earlier"),{"type":"reasoning","summary":[{"text":"reasoning"}]},
+                assistant_message("done"),user_message("next")
+            ]
         });
-        let prepared = prepare_compaction_attempt_request(
-            &request,
-            CompactionKind::RemoteV2,
-            CompactionRoute::CacheReuse,
-            &CompactionOptions::default(),
-            CompactionAttempt::First,
-        );
-        for (key, value) in request.as_object().unwrap() {
-            if key != "input" {
-                assert_eq!(&prepared[key], value, "{key}");
+        for model in [
+            "gpt-6-astra",
+            "o4-mini",
+            "claude-opus-5-5",
+            "deepseek-v4.1-flash",
+        ] {
+            for kind in [CompactionKind::Legacy, CompactionKind::RemoteV2] {
+                let mut source = request.clone();
+                source["model"] = json!(model);
+                source["input"].as_array_mut().unwrap().push(match kind {
+                    CompactionKind::Legacy => compaction_prompt_item(),
+                    CompactionKind::RemoteV2 => json!({"type":"compaction_trigger"}),
+                });
+                for retain in [false, true] {
+                    let prepared = prepare_compaction_attempt_request(
+                        &source,
+                        kind,
+                        CompactionRoute::CacheReuse,
+                        &CompactionOptions {
+                            retain_recent_round: retain,
+                            ..Default::default()
+                        },
+                        CompactionAttempt::First,
+                    );
+                    let retry = compaction_retry_request(&prepared);
+                    for sent in [&prepared, &retry] {
+                        for (key, value) in source.as_object().unwrap() {
+                            if key != "input" {
+                                assert_eq!(&sent[key], value, "{model}: {key}");
+                            }
+                        }
+                    }
+                    let first_input = prepared["input"].as_array().unwrap();
+                    let kept = first_input.len() - 1;
+                    assert_eq!(
+                        &first_input[..kept],
+                        &source["input"].as_array().unwrap()[..kept]
+                    );
+                    let retry_input = retry["input"].as_array().unwrap();
+                    assert_eq!(&retry_input[..first_input.len()], first_input);
+                    assert_eq!(retry_input.len(), first_input.len() + 1);
+                    assert_eq!(
+                        item_text(retry_input.last().unwrap()),
+                        COMPACTION_RETRY_INSTRUCTION
+                    );
+                }
             }
         }
-        assert_eq!(
-            &prepared["input"].as_array().unwrap()[..4],
-            &request["input"].as_array().unwrap()[..4]
-        );
-        let with_tail = prepare_compaction_attempt_request(
-            &request,
-            CompactionKind::RemoteV2,
-            CompactionRoute::CacheReuse,
-            &CompactionOptions {
-                retain_recent_round: true,
-                ..Default::default()
-            },
-            CompactionAttempt::First,
-        );
-        let kept = with_tail["input"].as_array().unwrap().len() - 1;
-        assert_eq!(
-            &with_tail["input"].as_array().unwrap()[..kept],
-            &request["input"].as_array().unwrap()[..kept]
-        );
-        let mut non_gpt = request.clone();
-        non_gpt["model"] = json!("deepseek-v4.1-flash");
-        let non_gpt_prepared = prepare_compaction_attempt_request(
-            &non_gpt,
-            CompactionKind::RemoteV2,
-            CompactionRoute::for_model(non_gpt["model"].as_str().unwrap()),
-            &CompactionOptions::default(),
-            CompactionAttempt::First,
-        );
-        for field in COMPACTION_TOOL_FIELDS {
-            assert_eq!(non_gpt_prepared[field], non_gpt[field], "{field}");
-        }
-        let local = prepare_compaction_attempt_request(
-            &request,
-            CompactionKind::RemoteV2,
-            CompactionRoute::for_model("gpt-5.6"),
-            &CompactionOptions::default(),
-            CompactionAttempt::First,
-        );
-        for field in COMPACTION_TOOL_FIELDS {
-            assert!(local.get(field).is_none());
-        }
-        assert_eq!(local["model"], request["model"]);
-        assert_eq!(local["instructions"], request["instructions"]);
+        let source = json!({"model":"claude-test","input":{"type":"compaction_trigger"}});
+        let prepared = prepare_remote_compaction_v2_bridge_request(&source);
         let retry = compaction_retry_request(&prepared);
-        assert_eq!(retry["input"], prepared["input"]);
-        assert_eq!(retry["model"], prepared["model"]);
-        assert_eq!(retry["instructions"], COMPACTION_RETRY_SYSTEM_PROMPT);
-        for field in COMPACTION_TOOL_FIELDS {
-            assert!(retry.get(field).is_none());
+        assert_eq!(retry["input"][0], prepared["input"]);
+        assert_eq!(item_text(&retry["input"][1]), COMPACTION_RETRY_INSTRUCTION);
+    }
+
+    #[test]
+    fn local_compaction_disables_forced_tools_and_structured_output() {
+        for tool_choice in [
+            json!("required"),
+            json!({"type":"required"}),
+            json!({"type":"function","name":"read"}),
+            json!({"type":"custom","name":"apply_patch"}),
+            json!({"type":"allowed_tools","mode":"required","tools":[
+                {"type":"function","name":"read"}
+            ]}),
+        ] {
+            let request = json!({
+                "model":"gpt-test",
+                "instructions":"stable",
+                "tools":[{"type":"function","name":"read","parameters":{"type":"object"}}],
+                "tool_choice":tool_choice,
+                "text":{"verbosity":"high","format":{
+                    "type":"json_schema","name":"answer",
+                    "schema":{"type":"object"}
+                }},
+                "response_format":{"type":"json_object"},
+                "output_config":{"effort":"high","format":{"type":"json_schema","schema":{}}},
+                "input":[user_message("history"),compaction_prompt_item()]
+            });
+            let prepared = prepare_compaction_attempt_request(
+                &request,
+                CompactionKind::Legacy,
+                CompactionRoute::CacheReuse,
+                &CompactionOptions::default(),
+                CompactionAttempt::First,
+            );
+            assert_eq!(prepared["tools"], request["tools"]);
+            assert_eq!(prepared["instructions"], request["instructions"]);
+            assert_eq!(prepared["tool_choice"], "none");
+            assert_eq!(prepared["text"]["verbosity"], "high");
+            assert_eq!(prepared["text"]["format"], json!({"type":"text"}));
+            assert_eq!(prepared["response_format"], json!({"type":"text"}));
+            assert!(prepared["output_config"].get("format").is_none());
+            assert_eq!(prepared["output_config"]["effort"], "high");
+
+            let retry = compaction_retry_request(&prepared);
+            assert_eq!(retry["tool_choice"], "none");
+            assert_eq!(retry["text"]["format"], json!({"type":"text"}));
+            assert_eq!(retry["response_format"], json!({"type":"text"}));
+            assert!(retry["output_config"].get("format").is_none());
         }
     }
 
@@ -4124,7 +4099,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_layered_request_uses_effective_prompt_and_removes_tools() {
+    fn legacy_layered_request_uses_effective_prompt_and_preserves_tools() {
         let request = json!({
             "model": "gpt-5.6",
             "input": [user_message("hi"), compaction_prompt_item()],
@@ -4136,9 +4111,9 @@ mod tests {
         let input = rewritten.get("input").and_then(Value::as_array).unwrap();
 
         assert_eq!(item_text(input.last().unwrap()), compaction_instruction(""));
-        assert!(rewritten.get("tools").is_none());
-        assert!(rewritten.get("tool_choice").is_none());
-        assert!(rewritten.get("parallel_tool_calls").is_none());
+        for field in ["tools", "tool_choice", "parallel_tool_calls"] {
+            assert_eq!(rewritten[field], request[field], "{field}");
+        }
         assert_eq!(
             item_text(&request["input"][1]),
             item_text(&compaction_prompt_item())
@@ -4213,6 +4188,11 @@ mod tests {
         });
         let prepared =
             prepare_legacy_layered_compaction_request_with_options(&request, "NEW PROMPT", false);
+        assert_eq!(
+            &prepared["input"].as_array().unwrap()[..3],
+            &request["input"].as_array().unwrap()[..3]
+        );
+        let prepared = crate::protocol_proxy::normalize_native_responses_request(&prepared);
         let input = prepared["input"].as_array().unwrap();
 
         assert_eq!(
@@ -4328,7 +4308,7 @@ mod tests {
         assert!(!prepared.to_string().contains("推荐方案：执行方案 1"));
         assert!(!prepared.to_string().contains("按推荐处理"));
         assert!(!prepared.to_string().contains("call_1"));
-        assert!(prepared.get("tools").is_none());
+        assert_eq!(prepared["tools"], request["tools"]);
     }
 
     #[test]
@@ -5640,7 +5620,7 @@ mod tests {
     }
 
     #[test]
-    fn compaction_retry_strips_wrapped_tool_catalog_without_losing_replay_marker_or_pairs() {
+    fn compaction_retry_preserves_wrapped_tool_catalog_and_replay_pairs() {
         let call = function_call_item("retained-call", "read");
         let output = function_call_output_item("retained-call", "file contents");
         let encoded = format!(
@@ -5670,12 +5650,20 @@ mod tests {
             let retry = compaction_retry_request(&source);
             assert!(contains_synthetic_local_compaction(&retry));
             assert_eq!(source["input"][0], marker);
+            assert_eq!(
+                &retry["input"].as_array().unwrap()[..2],
+                source["input"].as_array().unwrap()
+            );
             let payload = synthetic_local_compaction_payload(&retry["input"][0]).unwrap();
             assert_eq!(payload.summary, "previous summary");
-            assert_eq!(payload.retained_tail[0]["type"], "tool_search_output");
-            assert_eq!(payload.retained_tail[0]["call_id"], "search");
-            assert_eq!(payload.retained_tail[0]["tools"], json!([]));
-            assert_eq!(&payload.retained_tail[1..], &[call.clone(), output.clone()]);
+            assert_eq!(payload.retained_tail[0]["type"], "additional_tools");
+            assert_eq!(payload.retained_tail[1]["type"], "tool_search_output");
+            assert_eq!(payload.retained_tail[1]["call_id"], "search");
+            assert_eq!(
+                payload.retained_tail[1]["tools"].as_array().unwrap().len(),
+                1
+            );
+            assert_eq!(&payload.retained_tail[2..], &[call.clone(), output.clone()]);
         }
     }
 

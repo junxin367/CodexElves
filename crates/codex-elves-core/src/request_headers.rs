@@ -121,6 +121,29 @@ impl RequestContext {
             .filter(|value| !value.is_empty())
     }
 
+    pub(crate) fn log_thread_id(&self) -> Option<&str> {
+        self.headers
+            .get("thread-id")
+            .or_else(|| self.headers.get("session-id"))
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    pub(crate) fn turn_id(&self) -> Option<String> {
+        let metadata = self
+            .headers
+            .get("x-codex-turn-metadata")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())?;
+        metadata
+            .get("turn_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    }
+
     pub(crate) fn cache_window_identity(&self) -> Option<String> {
         self.headers
             .get("x-codex-window-id")

@@ -30,6 +30,7 @@ const UPSTREAM_LIVENESS_PONG_TIMEOUT: Duration = Duration::from_secs(15);
 const UPSTREAM_LIVENESS_TOLERATED_TIMEOUTS: usize = 3;
 const UPSTREAM_APPLICATION_IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const OVERSIZED_REQUEST_HTTP_FALLBACK_TTL: Duration = Duration::from_secs(30);
+const COMPACTION_HTTP_FALLBACK_TTL: Duration = Duration::from_secs(30);
 const EARLY_DISCONNECT_HTTP_FALLBACK_TTL: Duration = Duration::from_secs(30);
 const UPSTREAM_FAILURE_HTTP_FALLBACK_TTL: Duration = Duration::from_secs(30);
 const INITIAL_UPSTREAM_RETRY_DELAYS: [Duration; 2] =
@@ -223,6 +224,21 @@ pub async fn handle_responses_websocket_connection(
         &connection_context,
     ) {
         let message = "当前会话轮次的请求超过 Responses WebSocket 消息上限，临时改走 HTTP";
+        log_websocket_event(
+            "helper.responses_websocket_http_fallback",
+            &relay,
+            remote_addr.as_deref(),
+            &connection_context,
+            Some(message),
+        );
+        reject_upgrade(&mut stream, StatusCode::UPGRADE_REQUIRED, message).await?;
+        return Ok(());
+    }
+    if should_temporarily_fallback_compaction_responses_websocket_to_http(
+        &relay.id,
+        &connection_context,
+    ) {
+        let message = "当前会话轮次的独立压缩模型使用其他协议，临时改走 HTTP";
         log_websocket_event(
             "helper.responses_websocket_http_fallback",
             &relay,
@@ -599,6 +615,49 @@ async fn bridge_responses_websockets(
                             &relay, &request_context, request_payload, text.len(),
                         );
                         let log_id = request_logger.record_request(request_payload, text.as_str());
+                        if compaction_plan
+                            .as_ref()
+                            .is_some_and(|plan| plan.http_fallback_required)
+                        {
+                            request_logger.record_independent_compaction(
+                                log_id.as_deref(),
+                                compaction_plan.as_ref().and_then(|plan| {
+                                    plan.independent_compaction_model.as_deref()
+                                }),
+                                compaction_plan
+                                    .as_ref()
+                                    .and_then(|plan| plan.independent_compaction_usage),
+                            );
+                            request_logger
+                                .finish_cross_protocol_compaction_request(log_id.as_deref());
+                            let downstream_close = Message::Close(Some(
+                                websocket_failure_close_frame(
+                                    CloseCode::Size,
+                                    "cross-protocol compaction requires HTTP",
+                                ),
+                            ));
+                            let upstream_close = Message::Close(Some(CloseFrame {
+                                code: CloseCode::Normal,
+                                reason: "cross-protocol compaction routed to HTTP".into(),
+                            }));
+                            let _ = forward_websocket_message(
+                                &mut downstream,
+                                downstream_close,
+                                "关闭本地 Responses WebSocket 超时",
+                                "关闭本地 Responses WebSocket 失败",
+                            )
+                            .await;
+                            let _ = forward_websocket_message(
+                                &mut upstream,
+                                upstream_close,
+                                "关闭 Responses WebSocket 上游超时",
+                                "关闭 Responses WebSocket 上游失败",
+                            )
+                            .await;
+                            downstream_closed = true;
+                            upstream_closed = true;
+                            break;
+                        }
                         if text.len()
                             > crate::responses_websocket::RESPONSES_UPSTREAM_WEBSOCKET_SAFE_MAX_BYTES
                         {
@@ -1277,6 +1336,7 @@ struct WebSocketContinuationState {
 }
 
 struct ActiveWebSocketContinuation {
+    audit: crate::proxy_log::ProxyRequestAudit,
     mode: ActiveWebSocketMode,
     original_request: Value,
     log_id: Option<String>,
@@ -1310,6 +1370,7 @@ struct WebSocketCompactionPlan {
     retry_request: Option<Value>,
     original_fallback: Option<WebSocketCompactionFallback>,
     independent: bool,
+    http_fallback_required: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1324,6 +1385,8 @@ enum ActiveWebSocketMode {
 
 #[derive(Clone, Default)]
 struct WebSocketContinueMetadata {
+    upstream_attempts: Vec<crate::proxy_log::ProxyRequestAttempt>,
+    upstream_attempt_pending: bool,
     log_id: Option<String>,
     triggered: bool,
     rounds: u32,
@@ -1410,7 +1473,7 @@ impl WebSocketContinuationCoordinator {
             compaction_options.retain_recent_round = options.enabled;
             compaction_options.retain_tokens = options.retain_tokens;
             let compaction_plan = prepared_compaction_plan.unwrap_or_else(|| {
-                let route = crate::layered_compaction::CompactionRoute::for_model(model);
+                let route = crate::layered_compaction::CompactionRoute::CacheReuse;
                 let first = crate::layered_compaction::prepare_compaction_attempt_request(
                     payload,
                     kind,
@@ -1429,9 +1492,11 @@ impl WebSocketContinuationCoordinator {
                     )),
                     original_fallback: None,
                     independent: false,
+                    http_fallback_required: false,
                 }
             });
             state.active = Some(ActiveWebSocketContinuation {
+                audit: Default::default(),
                 mode: ActiveWebSocketMode::ValidatedCompaction {
                     kind,
                     layered_enabled: options.enabled,
@@ -1464,6 +1529,7 @@ impl WebSocketContinuationCoordinator {
         }
 
         state.active = Some(ActiveWebSocketContinuation {
+            audit: Default::default(),
             mode: ActiveWebSocketMode::ContinueThinking,
             original_request: payload.clone(),
             log_id,
@@ -1550,6 +1616,30 @@ impl WebSocketContinuationCoordinator {
         if !is_terminal_websocket_response_event(event_type) {
             return Ok(WebSocketContinuationAction::Buffered);
         }
+        let mut observer = crate::proxy_log::UpstreamResponseModelObserver::default();
+        if let Some(payload) = &payload {
+            observer.observe_value(
+                payload,
+                crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+                Some(event_type),
+            );
+        }
+        active.audit.record_attempt(
+            active
+                .original_request
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            None,
+            None,
+        );
+        active
+            .audit
+            .upstream_attempts
+            .last_mut()
+            .expect("WS attempt")
+            .transport = Some(crate::proxy_log::ProxyRequestTransport::Ws);
+        active.audit.observe_response(&observer);
 
         let response_object = payload
             .as_ref()
@@ -1586,6 +1676,9 @@ impl WebSocketContinuationCoordinator {
             return Ok(WebSocketContinuationAction::Continue {
                 request: Message::Text(request_text.into()),
                 metadata: WebSocketContinueMetadata {
+                    log_id: active.log_id.clone(),
+                    upstream_attempts: active.audit.upstream_attempts.clone(),
+                    upstream_attempt_pending: true,
                     retry_delay: Some(MODEL_CAPACITY_RETRY_DELAYS[retry_index]),
                     ..Default::default()
                 },
@@ -1654,7 +1747,8 @@ impl WebSocketContinuationCoordinator {
                 .context("序列化 Responses WebSocket 续接请求失败")?;
             active.fallback_messages = std::mem::take(&mut active.buffered_messages);
             active.fallback_response_body = serde_json::to_string_pretty(response_object).ok();
-            let metadata = websocket_continue_metadata(active, None);
+            let mut metadata = websocket_continue_metadata(active, None);
+            metadata.upstream_attempt_pending = true;
             let _ = crate::diagnostic_log::append_diagnostic_log(
                 "continue_thinking.round_start",
                 serde_json::json!({
@@ -1711,9 +1805,7 @@ impl WebSocketContinuationCoordinator {
                     .compaction_plan
                     .as_ref()
                     .map(|plan| plan.route)
-                    .unwrap_or_else(|| {
-                        crate::layered_compaction::CompactionRoute::for_model(original_model)
-                    });
+                    .unwrap_or(crate::layered_compaction::CompactionRoute::CacheReuse);
                 let model = active
                     .compaction_plan
                     .as_ref()
@@ -1739,9 +1831,28 @@ impl WebSocketContinuationCoordinator {
             }
             _ => return Ok(None),
         };
-        let active = state.active.take().expect("active compaction must exist");
+        let mut active = state.active.take().expect("active compaction must exist");
         let code = format!("{code_prefix}_{failure_suffix}");
         let message = format!("{label} {detail}");
+        let model = active
+            .compaction_plan
+            .as_ref()
+            .map(|plan| plan.model.as_str())
+            .unwrap_or_else(|| {
+                active.original_request["model"]
+                    .as_str()
+                    .unwrap_or_default()
+            });
+        active
+            .audit
+            .record_attempt(model, None, Some(detail.to_string()));
+        let attempt = active
+            .audit
+            .upstream_attempts
+            .last_mut()
+            .expect("WS compaction attempt");
+        attempt.transport = Some(crate::proxy_log::ProxyRequestTransport::Ws);
+        attempt.error_code = Some(code.clone());
         let failure_sse = crate::layered_compaction::compaction_failure_sse(
             &active.original_request,
             None,
@@ -1754,6 +1865,7 @@ impl WebSocketContinuationCoordinator {
             messages,
             metadata: WebSocketContinueMetadata {
                 log_id: active.log_id,
+                upstream_attempts: active.audit.upstream_attempts,
                 ..Default::default()
             },
         }))
@@ -1784,7 +1896,7 @@ fn handle_validated_compaction_websocket_message(
             .as_str()
             .unwrap_or_default()
             .to_string();
-        let route = CompactionRoute::for_model(&model);
+        let route = CompactionRoute::CacheReuse;
         active.compaction_plan = Some(WebSocketCompactionPlan {
             route,
             model: model.clone(),
@@ -1794,6 +1906,7 @@ fn handle_validated_compaction_websocket_message(
             retry_request: Some(compaction_retry_request(&active.original_request)),
             original_fallback: None,
             independent: false,
+            http_fallback_required: false,
         });
     }
     active.buffered_messages.push(message);
@@ -1833,6 +1946,45 @@ fn handle_validated_compaction_websocket_message(
             .then_some(event_type)
             .filter(|value| !value.is_empty()),
     );
+    let mut observer = crate::proxy_log::UpstreamResponseModelObserver::default();
+    for message in &active.buffered_messages {
+        if let Message::Text(text) = message {
+            observer.observe_json(
+                text.as_bytes(),
+                crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+            );
+        }
+    }
+    active.audit.record_attempt(&plan.model, None, None);
+    active.audit.observe_response(&observer);
+    let attempt = active
+        .audit
+        .upstream_attempts
+        .last_mut()
+        .expect("WS compaction attempt");
+    attempt.transport = Some(crate::proxy_log::ProxyRequestTransport::Ws);
+    attempt.outcome = Some(if verdict.is_ok() {
+        crate::proxy_log::ProxyRequestOutcome::Succeeded
+    } else {
+        crate::proxy_log::ProxyRequestOutcome::Failed
+    });
+    if let Err(failure) = verdict {
+        let failed = compaction_validation_failure_response(
+            &active.original_request,
+            kind,
+            response.as_ref(),
+            failure,
+        );
+        attempt.error_code = observer.error_code.or_else(|| {
+            failed
+                .pointer("/error/code")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        });
+        attempt.error = observer
+            .error
+            .or_else(|| Some(failure.as_str().to_string()));
+    }
     if verdict.is_err() && active.round == 0 {
         let plan = active
             .compaction_plan
@@ -1862,6 +2014,8 @@ fn handle_validated_compaction_websocket_message(
         active.buffered_messages.clear();
         let metadata = WebSocketContinueMetadata {
             log_id: active.log_id.clone(),
+            upstream_attempts: active.audit.upstream_attempts.clone(),
+            upstream_attempt_pending: true,
             request_body: Some(serde_json::to_string(&retry)?),
             reconnect_upstream: malformed,
             ..Default::default()
@@ -1915,6 +2069,7 @@ fn handle_validated_compaction_websocket_message(
         messages,
         metadata: WebSocketContinueMetadata {
             log_id: active.log_id,
+            upstream_attempts: active.audit.upstream_attempts,
             layered_compaction_triggered: stats.triggered,
             layered_compaction_retain_tokens: stats.triggered.then_some(retain_tokens),
             layered_compaction_retained_items: stats.triggered.then_some(stats.retained_items),
@@ -2031,6 +2186,7 @@ fn websocket_continue_metadata(
 ) -> WebSocketContinueMetadata {
     WebSocketContinueMetadata {
         log_id: active.log_id.clone(),
+        upstream_attempts: active.audit.upstream_attempts.clone(),
         triggered: active.round > 0,
         rounds: active.completed_rounds,
         reasoning_tokens: active.accumulated_reasoning_tokens,
@@ -2180,7 +2336,6 @@ impl WebSocketRequestLogger {
     }
 
     fn record_request(&self, payload: &Value, request_body: &str) -> Option<String> {
-        let metadata = crate::proxy_log::extract_request_metadata(Some(payload));
         let idle_timeout = crate::protocol_proxy::stream_idle_timeout_for_request(Some(payload));
         let id = format!("local-{}", uuid::Uuid::new_v4());
         let timestamp_ms = crate::proxy_log::current_timestamp_ms();
@@ -2188,11 +2343,32 @@ impl WebSocketRequestLogger {
         let Ok(mut state) = self.state.lock() else {
             return None;
         };
+        let mut metadata = if let Some((_, context, _)) = &state.transport_context {
+            crate::proxy_log::extract_request_metadata_with_context(Some(payload), context)
+        } else {
+            crate::proxy_log::extract_request_metadata(Some(payload))
+        };
+        // WS 连接可以跨轮次复用，握手的轮次标识不能代替后续帧的轮次标识。
+        if state.application_request_count > 0 {
+            metadata.audit.turn_id = crate::proxy_log::extract_request_metadata(Some(payload))
+                .audit
+                .turn_id;
+        }
+        metadata
+            .audit
+            .record_attempt(metadata.model.as_deref().unwrap_or_default(), None, None);
+        metadata
+            .audit
+            .upstream_attempts
+            .last_mut()
+            .expect("WS attempt")
+            .transport = Some(crate::proxy_log::ProxyRequestTransport::Ws);
         if let Some((relay, context, generation)) = state.transport_context.as_mut() {
             *generation = crate::session_transport::generation(relay, context);
         }
         state.application_request_count += 1;
         let record = crate::proxy_log::ProxyRequestRecord {
+            audit: metadata.audit.clone(),
             id: id.clone(),
             state: crate::proxy_log::ProxyRequestState::Pending,
             transport: crate::proxy_log::ProxyRequestTransport::Ws,
@@ -2324,6 +2500,9 @@ impl WebSocketRequestLogger {
         tracked.record.independent_compaction_model = Some(model.to_string());
         tracked.record.independent_compaction_usage = Some(usage);
         tracked.record.upstream_request_model = Some(model.to_string());
+        if let Some(attempt) = tracked.record.audit.upstream_attempts.last_mut() {
+            attempt.model = model.to_string();
+        }
         let record = tracked.record.clone();
         drop(state);
         append_websocket_proxy_log_record(&record);
@@ -2767,6 +2946,15 @@ impl WebSocketRequestLogger {
         }
 
         if terminal {
+            let mut observer = crate::proxy_log::UpstreamResponseModelObserver::default();
+            observer.observe_value(
+                &payload,
+                crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+                Some(event_type),
+            );
+            tracked.record.audit.outcome = observer.outcome;
+            tracked.record.audit.error_code = observer.error_code.clone();
+            tracked.record.audit.observe_response(&observer);
             tracked.record.state = crate::proxy_log::ProxyRequestState::Completed;
             tracked.record.status_code = Some(if failed { 500 } else { 200 });
             tracked.record.duration_ms = Some(tracked.started_at.elapsed().as_millis() as u64);
@@ -2826,6 +3014,9 @@ impl WebSocketRequestLogger {
         tracked.record.continue_thinking_before_response_body =
             metadata.before_response_body.clone();
         tracked.record.continue_thinking_after_response_body = metadata.after_response_body.clone();
+        if !metadata.upstream_attempts.is_empty() {
+            tracked.record.audit.upstream_attempts = metadata.upstream_attempts.clone();
+        }
         if let Some(upstream_model) = metadata
             .request_body
             .as_deref()
@@ -2840,6 +3031,24 @@ impl WebSocketRequestLogger {
             })
         {
             tracked.record.upstream_request_model = Some(upstream_model);
+        }
+        if metadata.upstream_attempt_pending {
+            tracked.record.audit.record_attempt(
+                tracked
+                    .record
+                    .upstream_request_model
+                    .as_deref()
+                    .unwrap_or_default(),
+                None,
+                None,
+            );
+            tracked
+                .record
+                .audit
+                .upstream_attempts
+                .last_mut()
+                .expect("WS attempt")
+                .transport = Some(crate::proxy_log::ProxyRequestTransport::Ws);
         }
         tracked.record.layered_compaction_triggered = metadata.layered_compaction_triggered;
         tracked.record.layered_compaction_retain_tokens = metadata.layered_compaction_retain_tokens;
@@ -2938,6 +3147,7 @@ impl WebSocketRequestLogger {
             let Some(mut tracked) = state.requests.remove(log_id) else {
                 return;
             };
+            tracked.record.audit.upstream_attempts.clear();
             tracked.record.state = crate::proxy_log::ProxyRequestState::Completed;
             tracked.record.status_code = Some(413);
             tracked.record.duration_ms = Some(tracked.started_at.elapsed().as_millis() as u64);
@@ -2983,6 +3193,67 @@ impl WebSocketRequestLogger {
                 "windowId": connection_context.window_id,
                 "requestBytes": request_bytes,
                 "safeMaxBytes": safe_max_bytes,
+                "httpFallbackArmed": fallback_armed,
+            }),
+        );
+    }
+
+    fn finish_cross_protocol_compaction_request(&self, log_id: Option<&str>) {
+        self.mark_http_fallback("独立压缩模型需要通过 HTTP 使用其他协议");
+        let Some(log_id) = log_id else {
+            return;
+        };
+        let (mut record, relay_id, relay_name, endpoint, connection_context, fallback_armed) = {
+            let Ok(mut state) = self.state.lock() else {
+                return;
+            };
+            let Some(mut tracked) = state.requests.remove(log_id) else {
+                return;
+            };
+            tracked.record.audit.upstream_attempts.clear();
+            tracked.record.state = crate::proxy_log::ProxyRequestState::Completed;
+            tracked.record.status_code = Some(426);
+            tracked.record.duration_ms = Some(tracked.started_at.elapsed().as_millis() as u64);
+            tracked.record.response_bytes = Some(0);
+            tracked.record.response_captured_bytes = Some(0);
+            tracked.record.error =
+                Some("独立压缩模型不是 Responses 协议，当前轮次改走 HTTP".to_string());
+            state.active_order.retain(|id| id != log_id);
+            state.unassigned_order.retain(|id| id != log_id);
+            state.response_ids.retain(|_, id| id != log_id);
+            activate_next_queued_websocket_request(&mut state, Instant::now());
+            let relay_id = state.relay_id.clone();
+            let relay_name = state.relay_name.clone();
+            let endpoint = state.endpoint.clone();
+            let connection_context = state.connection_context.clone();
+            let record = tracked.record;
+            drop(state);
+            let fallback_armed =
+                arm_compaction_responses_websocket_http_fallback(&relay_id, &connection_context);
+            (
+                record,
+                relay_id,
+                relay_name,
+                endpoint,
+                connection_context,
+                fallback_armed,
+            )
+        };
+        record.response_body.clear();
+        append_websocket_proxy_log_record(&record);
+        let _ = crate::diagnostic_log::append_diagnostic_log(
+            "protocol_proxy.responses_websocket_compaction_http_fallback",
+            serde_json::json!({
+                "logId": log_id,
+                "relayId": relay_id,
+                "relayName": relay_name,
+                "endpoint": endpoint,
+                "sessionId": connection_context.session_id,
+                "threadId": connection_context.thread_id,
+                "turnId": connection_context.turn_id,
+                "requestKind": connection_context.request_kind,
+                "windowId": connection_context.window_id,
+                "independentCompactionModel": record.independent_compaction_model,
                 "httpFallbackArmed": fallback_armed,
             }),
         );
@@ -3092,6 +3363,10 @@ fn websocket_response_error(payload: &Value, event_type: &str) -> Option<String>
 }
 
 fn append_websocket_proxy_log_record(record: &crate::proxy_log::ProxyRequestRecord) {
+    #[cfg(test)]
+    if crate::paths::proxy_log_path_for_tests().is_none() {
+        return;
+    }
     if let Err(error) = crate::proxy_log::enqueue_record_nonblocking(record) {
         let _ = crate::diagnostic_log::append_diagnostic_log(
             "helper.local_proxy_log_failed",
@@ -3529,11 +3804,7 @@ fn prepare_websocket_compaction_execution(
         }),
     );
 
-    let original_route = if cache_decision.is_valid() {
-        CompactionRoute::CacheReuse
-    } else {
-        CompactionRoute::for_model(&original_model)
-    };
+    let original_route = CompactionRoute::CacheReuse;
     let original_first = prepare_compaction_attempt_request(
         normalized,
         kind,
@@ -3549,13 +3820,14 @@ fn prepare_websocket_compaction_execution(
     let mut independent_compaction_model = None;
     let mut independent_compaction_usage = None;
     let mut original_fallback = None;
+    let mut http_fallback_required = false;
 
     if settings.should_use_independent_compaction_model(cache_decision.is_valid()) {
         if let Some(resolved) = crate::protocol_proxy::resolve_compaction_model_override_for_attempt(
             normalized, normalized, kind, &options, mode, settings, relay,
         ) {
             if resolved.protocol == RelayProtocol::Responses {
-                let independent_route = CompactionRoute::for_model(&resolved.compaction_model);
+                let independent_route = CompactionRoute::CacheReuse;
                 let _ = crate::diagnostic_log::append_diagnostic_log(
                     "protocol_proxy.compaction_model_override_applied",
                     serde_json::json!({
@@ -3587,7 +3859,7 @@ fn prepare_websocket_compaction_execution(
                 });
             } else {
                 let _ = crate::diagnostic_log::append_diagnostic_log(
-                    "protocol_proxy.compaction_model_override_skipped",
+                    "protocol_proxy.compaction_model_override_http_fallback",
                     serde_json::json!({
                         "transport": "ws",
                         "relayId": relay.id,
@@ -3595,9 +3867,12 @@ fn prepare_websocket_compaction_execution(
                         "originalModel": resolved.original_model,
                         "compactionModel": resolved.compaction_model,
                         "modelUsage": settings.layered_compaction_model_usage,
-                        "reason": "独立压缩模型不是 Responses 协议，现有 Responses WebSocket 连接无法安全承载，回落原模型",
+                        "reason": "独立压缩模型不是 Responses 协议，当前压缩请求切换到 HTTP 执行",
                     }),
                 );
+                independent_compaction_model = Some(resolved.compaction_model);
+                independent_compaction_usage = Some(settings.layered_compaction_model_usage);
+                http_fallback_required = true;
             }
         }
     }
@@ -3618,6 +3893,7 @@ fn prepare_websocket_compaction_execution(
             retry_request: Some(retry_request),
             original_fallback,
             independent,
+            http_fallback_required,
         }),
     )
 }
@@ -3649,7 +3925,7 @@ fn prepare_websocket_compaction_forwarded_payload(
     let forwarded = prepare_compaction_attempt_request(
         normalized,
         CompactionKind::of_request(normalized).expect("compaction request"),
-        CompactionRoute::for_model(normalized["model"].as_str().unwrap_or_default()),
+        CompactionRoute::CacheReuse,
         &options,
         CompactionAttempt::First,
     );
@@ -3803,6 +4079,13 @@ fn responses_websocket_oversized_fallback_key(
 }
 
 fn responses_websocket_oversized_fallbacks()
+-> &'static Mutex<HashMap<ResponsesWebSocketOversizedFallbackKey, Instant>> {
+    static FALLBACKS: OnceLock<Mutex<HashMap<ResponsesWebSocketOversizedFallbackKey, Instant>>> =
+        OnceLock::new();
+    FALLBACKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn responses_websocket_compaction_fallbacks()
 -> &'static Mutex<HashMap<ResponsesWebSocketOversizedFallbackKey, Instant>> {
     static FALLBACKS: OnceLock<Mutex<HashMap<ResponsesWebSocketOversizedFallbackKey, Instant>>> =
         OnceLock::new();
@@ -3964,6 +4247,37 @@ fn arm_oversized_responses_websocket_http_fallback(
     true
 }
 
+fn should_temporarily_fallback_compaction_responses_websocket_to_http(
+    relay_id: &str,
+    connection_context: &WebSocketConnectionContext,
+) -> bool {
+    let Some(key) = responses_websocket_oversized_fallback_key(relay_id, connection_context) else {
+        return false;
+    };
+    let now = Instant::now();
+    let Ok(mut fallbacks) = responses_websocket_compaction_fallbacks().lock() else {
+        return false;
+    };
+    fallbacks.retain(|_, expires_at| *expires_at > now);
+    fallbacks.contains_key(&key)
+}
+
+fn arm_compaction_responses_websocket_http_fallback(
+    relay_id: &str,
+    connection_context: &WebSocketConnectionContext,
+) -> bool {
+    let Some(key) = responses_websocket_oversized_fallback_key(relay_id, connection_context) else {
+        return false;
+    };
+    let Ok(mut fallbacks) = responses_websocket_compaction_fallbacks().lock() else {
+        return false;
+    };
+    let now = Instant::now();
+    fallbacks.retain(|_, expires_at| *expires_at > now);
+    fallbacks.insert(key, now + COMPACTION_HTTP_FALLBACK_TTL);
+    true
+}
+
 #[derive(Clone, Debug, Default)]
 struct WebSocketConnectionContext {
     session_id: Option<String>,
@@ -4054,7 +4368,7 @@ mod tests {
         ActiveWebSocketContinuation, ActiveWebSocketMode, WebSocketConnectionContext,
         WebSocketContinuationAction, WebSocketContinuationCoordinator, WebSocketContinuationState,
         WebSocketContinueMetadata, WebSocketRequestLogger, WebSocketTransportLiveness,
-        activate_next_queued_websocket_request,
+        activate_next_queued_websocket_request, arm_compaction_responses_websocket_http_fallback,
         arm_early_disconnect_responses_websocket_http_fallback,
         arm_oversized_responses_websocket_http_fallback,
         arm_upstream_failure_responses_websocket_http_fallback, is_responses_websocket_proxy_path,
@@ -4063,6 +4377,7 @@ mod tests {
         prepare_downstream_response_create_payload_with_settings,
         prepare_websocket_compaction_execution, queue_upstream_liveness_ping,
         resolve_websocket_log_id,
+        should_temporarily_fallback_compaction_responses_websocket_to_http,
         should_temporarily_fallback_early_disconnect_responses_websocket_to_http,
         should_temporarily_fallback_oversized_responses_websocket_to_http,
         should_temporarily_fallback_upstream_failure_responses_websocket_to_http,
@@ -4175,7 +4490,7 @@ mod tests {
         );
         assert_eq!(
             plan.route,
-            crate::layered_compaction::CompactionRoute::CodexLocal
+            crate::layered_compaction::CompactionRoute::CacheReuse
         );
         assert!(plan.independent);
         assert_eq!(
@@ -4188,36 +4503,43 @@ mod tests {
     }
 
     #[test]
-    fn websocket_unknown_cache_lease_preserves_tools_for_non_gpt_model() {
-        let relay = compaction_relay(
-            "ws-non-gpt-original",
-            &[("deepseek-chat", RelayProtocol::Responses, "128000")],
-        );
-        let settings = BackendSettings {
-            layered_compaction_enabled: true,
-            ..Default::default()
-        };
-        let mut payload = legacy_compaction_payload("deepseek-chat", "ws-non-gpt-original-key");
-        payload["tools"] =
-            json!([{ "type": "function", "name": "exec_command", "parameters": {} }]);
-        payload["tool_choice"] = json!("auto");
-        payload["parallel_tool_calls"] = json!(true);
-        let (forwarded, options, plan) = prepare_websocket_compaction_execution(
-            &payload,
-            &settings,
-            &relay,
-            &crate::request_headers::RequestContext::default(),
-        );
-        let plan = plan.expect("local compaction should include a plan");
+    fn websocket_unknown_cache_lease_preserves_tools_for_all_models() {
+        for model in ["gpt-6-astra", "claude-opus-5-5", "deepseek-chat"] {
+            let relay = compaction_relay(
+                "ws-non-gpt-original",
+                &[(model, RelayProtocol::Responses, "1000000")],
+            );
+            let settings = BackendSettings {
+                layered_compaction_enabled: true,
+                ..Default::default()
+            };
+            let mut payload = legacy_compaction_payload(model, "ws-non-gpt-original-key");
+            payload["tools"] =
+                json!([{ "type": "function", "name": "exec_command", "parameters": {} }]);
+            payload["tool_choice"] = json!("auto");
+            payload["parallel_tool_calls"] = json!(true);
+            let (forwarded, options, plan) = prepare_websocket_compaction_execution(
+                &payload,
+                &settings,
+                &relay,
+                &crate::request_headers::RequestContext::default(),
+            );
+            let plan = plan.expect("local compaction should include a plan");
 
-        assert!(options.is_some());
-        assert_eq!(
-            plan.route,
-            crate::layered_compaction::CompactionRoute::CacheReuse
-        );
-        assert!(!plan.independent);
-        for field in ["tools", "tool_choice", "parallel_tool_calls"] {
-            assert_eq!(forwarded[field], payload[field], "{field}");
+            assert!(options.is_some());
+            assert_eq!(
+                plan.route,
+                crate::layered_compaction::CompactionRoute::CacheReuse
+            );
+            assert!(!plan.independent);
+            for field in ["tools", "tool_choice", "parallel_tool_calls"] {
+                assert_eq!(forwarded[field], payload[field], "{field}");
+                assert_eq!(
+                    plan.retry_request.as_ref().unwrap()[field],
+                    payload[field],
+                    "{field}"
+                );
+            }
         }
     }
 
@@ -4282,7 +4604,7 @@ mod tests {
     }
 
     #[test]
-    fn websocket_non_gpt_independent_model_preserves_tools_and_gpt_fallback_removes_them() {
+    fn websocket_non_gpt_independent_model_and_gpt_fallback_preserve_tools() {
         let relay = compaction_relay(
             "ws-non-gpt-independent",
             &[
@@ -4320,10 +4642,10 @@ mod tests {
             .expect("independent plan needs original fallback");
         assert_eq!(
             fallback.route,
-            crate::layered_compaction::CompactionRoute::CodexLocal
+            crate::layered_compaction::CompactionRoute::CacheReuse
         );
         for field in ["tools", "tool_choice", "parallel_tool_calls"] {
-            assert!(fallback.request.get(field).is_none(), "{field}");
+            assert_eq!(fallback.request[field], payload[field], "{field}");
         }
     }
 
@@ -4469,7 +4791,7 @@ mod tests {
     }
 
     #[test]
-    fn websocket_skips_an_independent_model_owned_by_another_protocol() {
+    fn websocket_routes_cross_protocol_independent_compaction_to_http() {
         let relay = compaction_relay(
             "ws-cross-protocol",
             &[
@@ -4490,8 +4812,15 @@ mod tests {
         assert_eq!(forwarded["model"], "gpt-original");
         assert_eq!(plan.model, "gpt-original");
         assert!(!plan.independent);
-        assert!(plan.independent_compaction_model.is_none());
-        assert!(plan.independent_compaction_usage.is_none());
+        assert_eq!(
+            plan.independent_compaction_model.as_deref(),
+            Some("deepseek-chat")
+        );
+        assert_eq!(
+            plan.independent_compaction_usage,
+            Some(LayeredCompactionModelUsage::CacheMiss)
+        );
+        assert!(plan.http_fallback_required);
     }
 
     #[test]
@@ -4680,16 +5009,32 @@ mod tests {
                         .unwrap();
                     let WebSocketContinuationAction::Continue {
                         request: Message::Text(retry),
-                        ..
+                        metadata,
                     } = action
                     else {
                         panic!("首次无效输出必须同模型重试");
                     };
+                    assert_eq!(metadata.upstream_attempts.len(), 1);
+                    assert_eq!(metadata.upstream_attempts[0].status_code, None);
+                    assert_eq!(
+                        metadata.upstream_attempts[0].transport,
+                        Some(crate::proxy_log::ProxyRequestTransport::Ws)
+                    );
+                    assert_eq!(
+                        metadata.upstream_attempts[0].outcome,
+                        Some(crate::proxy_log::ProxyRequestOutcome::Failed)
+                    );
                     let retry: Value = serde_json::from_str(&retry).unwrap();
                     assert_eq!(retry["model"], first["model"]);
-                    assert_eq!(retry["input"], first["input"]);
-                    assert_eq!(retry["instructions"], COMPACTION_RETRY_SYSTEM_PROMPT);
-                    assert!(retry.get("tools").is_none());
+                    let first_input = first["input"].as_array().unwrap();
+                    let retry_input = retry["input"].as_array().unwrap();
+                    assert_eq!(&retry_input[..first_input.len()], first_input);
+                    assert_eq!(
+                        retry_input.last().unwrap()["content"][0]["text"],
+                        COMPACTION_RETRY_INSTRUCTION
+                    );
+                    assert_eq!(retry["instructions"], first["instructions"]);
+                    assert_eq!(retry["tools"], first["tools"]);
                     assert!(matches!(
                         coordinator
                             .handle_upstream_message(response(
@@ -4711,9 +5056,19 @@ mod tests {
                             false,
                         ))
                         .unwrap();
-                    let WebSocketContinuationAction::Flush { messages, .. } = action else {
+                    let WebSocketContinuationAction::Flush { messages, metadata } = action else {
                         panic!("第二次尝试必须终止");
                     };
+                    assert_eq!(metadata.upstream_attempts.len(), 2);
+                    assert_eq!(metadata.upstream_attempts[1].status_code, None);
+                    assert_eq!(
+                        metadata.upstream_attempts[1].outcome,
+                        Some(if valid_retry {
+                            crate::proxy_log::ProxyRequestOutcome::Succeeded
+                        } else {
+                            crate::proxy_log::ProxyRequestOutcome::Failed
+                        })
+                    );
                     let sse = super::websocket_messages_to_responses_sse(&messages);
                     let terminal =
                         crate::continue_thinking::extract_terminal_response_object(&sse).unwrap();
@@ -4948,6 +5303,16 @@ mod tests {
         ));
         assert!(
             should_temporarily_fallback_oversized_responses_websocket_to_http(
+                "relay-test",
+                &context
+            )
+        );
+        assert!(arm_compaction_responses_websocket_http_fallback(
+            "relay-test",
+            &context
+        ));
+        assert!(
+            should_temporarily_fallback_compaction_responses_websocket_to_http(
                 "relay-test",
                 &context
             )
@@ -5749,7 +6114,7 @@ mod tests {
     }
 
     #[test]
-    fn websocket_legacy_compaction_uses_project_default_prompt_and_removes_tools() {
+    fn websocket_legacy_compaction_uses_project_default_prompt_and_preserves_tools() {
         let settings = BackendSettings {
             layered_compaction_enabled: true,
             layered_compaction_retain_recent_round_enabled: true,
@@ -5793,9 +6158,9 @@ mod tests {
             forwarded_payload["input"][0]["content"][0]["text"],
             crate::layered_compaction::compaction_instruction("")
         );
-        assert!(forwarded_payload.get("tools").is_none());
-        assert!(forwarded_payload.get("tool_choice").is_none());
-        assert!(forwarded_payload.get("parallel_tool_calls").is_none());
+        for field in ["tools", "tool_choice", "parallel_tool_calls"] {
+            assert_eq!(forwarded_payload[field], request_payload[field], "{field}");
+        }
         let options = options.expect("legacy compaction should capture settings");
         assert!(options.enabled);
         assert_eq!(options.retain_tokens, 23_456);
@@ -6013,6 +6378,7 @@ mod tests {
         let coordinator = WebSocketContinuationCoordinator {
             state: Arc::new(Mutex::new(WebSocketContinuationState {
                 active: Some(ActiveWebSocketContinuation {
+                    audit: Default::default(),
                     mode: ActiveWebSocketMode::ValidatedCompaction {
                         kind: crate::layered_compaction::CompactionKind::RemoteV2,
                         layered_enabled: true,
@@ -6127,6 +6493,7 @@ mod tests {
         WebSocketContinuationCoordinator {
             state: Arc::new(Mutex::new(WebSocketContinuationState {
                 active: Some(ActiveWebSocketContinuation {
+                    audit: Default::default(),
                     mode: ActiveWebSocketMode::ValidatedCompaction {
                         kind: crate::layered_compaction::CompactionKind::Legacy,
                         layered_enabled: true,
@@ -6319,6 +6686,7 @@ mod tests {
         WebSocketContinuationCoordinator {
             state: Arc::new(Mutex::new(WebSocketContinuationState {
                 active: Some(ActiveWebSocketContinuation {
+                    audit: Default::default(),
                     mode: ActiveWebSocketMode::ValidatedCompaction {
                         kind: crate::layered_compaction::CompactionKind::RemoteV2,
                         layered_enabled: false,
@@ -6417,6 +6785,7 @@ mod tests {
         let coordinator = WebSocketContinuationCoordinator {
             state: Arc::new(Mutex::new(WebSocketContinuationState {
                 active: Some(ActiveWebSocketContinuation {
+                    audit: Default::default(),
                     mode: ActiveWebSocketMode::ContinueThinking,
                     original_request: json!({
                         "type": "response.create",

@@ -4,6 +4,91 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 const PAGE_SIZE = 100;
 const STRING_PREVIEW_LENGTH = 160;
+const IMPORTANT_JSON_KEYS = [
+  "type",
+  "id",
+  "object",
+  "status",
+  "error",
+  "incomplete_details",
+  "model",
+  "created_at",
+  "role",
+  "name",
+  "description",
+  "index",
+  "sequence_number",
+  "output_index",
+  "content_index",
+  "item_id",
+  "call_id",
+  "stream",
+  "previous_response_id",
+  "prompt_cache_key",
+  "prompt_cache_retention",
+  "instructions",
+  "system",
+  "messages",
+  "input",
+  "response",
+  "item",
+  "part",
+  "output",
+  "choices",
+  "message",
+  "content",
+  "output_text",
+  "text",
+  "delta",
+  "arguments",
+  "parameters",
+  "strict",
+  "tools",
+  "tool_choice",
+  "parallel_tool_calls",
+  "reasoning",
+  "thinking",
+  "effort",
+  "summary",
+  "finish_reason",
+  "stop_reason",
+  "stop_sequence",
+  "usage",
+  "input_tokens",
+  "input_tokens_details",
+  "cached_tokens",
+  "cache_write_tokens",
+  "output_tokens",
+  "output_tokens_details",
+  "reasoning_tokens",
+  "total_tokens",
+  "attribution",
+  "request_fields",
+  "service_tier",
+  "safety_identifier",
+  "temperature",
+  "top_p",
+  "top_k",
+  "presence_penalty",
+  "frequency_penalty",
+  "max_tokens",
+  "max_completion_tokens",
+  "max_output_tokens",
+  "stop",
+  "stop_sequences",
+  "response_format",
+  "output_config",
+  "stream_options",
+  "include",
+  "store",
+  "metadata",
+  "client_metadata",
+  "annotations",
+  "encrypted_content",
+] as const;
+const JSON_KEY_PRIORITY = new Map<string, number>(
+  IMPORTANT_JSON_KEYS.map((key, index) => [key, index]),
+);
 
 export function JsonViewer({ text, label, onCopy }: {
   text: string;
@@ -18,6 +103,7 @@ export function JsonViewer({ text, label, onCopy }: {
     }
   }, [text]);
   const [display, setDisplay] = useState({ revision: 0, open: true });
+  const [prioritizeKeys, setPrioritizeKeys] = useState(true);
   useEffect(() => {
     setDisplay((previous) => ({ revision: previous.revision + 1, open: true }));
   }, [text]);
@@ -25,9 +111,19 @@ export function JsonViewer({ text, label, onCopy }: {
   return (
     <section className="json-viewer" aria-label={label}>
       <div className="json-viewer-toolbar">
-        <span>{parsed.valid ? "JSON" : text.trim() ? "非 JSON 内容 · 原文" : "暂无内容"}</span>
+        <span>{parsed.valid
+          ? `JSON · ${prioritizeKeys ? "重要字段优先" : "原始顺序"}`
+          : text.trim() ? "非 JSON 内容 · 原文" : "暂无内容"}</span>
         {parsed.valid && parsed.value !== null && typeof parsed.value === "object" ? (
           <div>
+            <button
+              aria-pressed={prioritizeKeys}
+              title="仅切换展示顺序；复制内容仍保持原始 JSON 顺序"
+              type="button"
+              onClick={() => setPrioritizeKeys((current) => !current)}
+            >
+              {prioritizeKeys ? "原始顺序" : "重要字段优先"}
+            </button>
             <button type="button" onClick={() => setDisplay((previous) => ({
               revision: previous.revision + 1, open: true,
             }))}>展开首层</button>
@@ -39,7 +135,14 @@ export function JsonViewer({ text, label, onCopy }: {
       </div>
       <div className="json-viewer-content" tabIndex={0} aria-label={`${label}内容`}>
         {parsed.valid ? (
-          <JsonNode key={display.revision} value={parsed.value} path="$" initiallyOpen={display.open} onCopy={onCopy} />
+          <JsonNode
+            key={display.revision}
+            value={parsed.value}
+            path="$"
+            initiallyOpen={display.open}
+            prioritizeKeys={prioritizeKeys}
+            onCopy={onCopy}
+          />
         ) : (
           <pre className="json-viewer-raw">{text || "暂无内容"}</pre>
         )}
@@ -49,12 +152,13 @@ export function JsonViewer({ text, label, onCopy }: {
 }
 
 function JsonNode({
-  value, name, path, initiallyOpen = false, onCopy,
+  value, name, path, initiallyOpen = false, prioritizeKeys, onCopy,
 }: {
   value: JsonValue;
   name?: string;
   path: string;
   initiallyOpen?: boolean;
+  prioritizeKeys: boolean;
   onCopy: (text: string) => Promise<void>;
 }) {
   const [open, setOpen] = useState(initiallyOpen && value !== null && typeof value === "object");
@@ -62,7 +166,11 @@ function JsonNode({
   const container = value !== null && typeof value === "object";
   const array = Array.isArray(value);
   // 收起的节点不挂载后代；大数组/对象按批次展示，避免大型请求一次创建全部 DOM。
-  const keys = useMemo(() => container && !array ? Object.keys(value) : [], [value, container, array]);
+  const keys = useMemo(() => {
+    if (!container || array) return [];
+    const objectKeys = Object.keys(value);
+    return prioritizeKeys ? objectKeys.sort(compareJsonKeys) : objectKeys;
+  }, [value, container, array, prioritizeKeys]);
   const count = array ? value.length : keys.length;
   const start = array ? "[" : "{";
   const end = array ? "]" : "}";
@@ -147,6 +255,7 @@ function JsonNode({
                   name={key}
                   path={array ? `${path}[${index}]` : `${path}[${JSON.stringify(key)}]`}
                   value={array ? value[index] : (value as Record<string, JsonValue>)[key]}
+                  prioritizeKeys={prioritizeKeys}
                   onCopy={onCopy}
                 />
               );
@@ -162,4 +271,12 @@ function JsonNode({
       ) : null}
     </div>
   );
+}
+
+function compareJsonKeys(left: string, right: string) {
+  const leftPriority = JSON_KEY_PRIORITY.get(left) ?? Number.MAX_SAFE_INTEGER;
+  const rightPriority = JSON_KEY_PRIORITY.get(right) ?? Number.MAX_SAFE_INTEGER;
+  if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
 }

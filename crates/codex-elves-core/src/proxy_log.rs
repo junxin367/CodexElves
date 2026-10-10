@@ -35,8 +35,9 @@ static PROXY_LOG_COMPLETED_ENQUEUE_FENCE: OnceLock<(Mutex<CompletedEnqueueFence>
     OnceLock::new();
 static LEGACY_OUTPUT_TOKEN_CACHE: OnceLock<Mutex<HashMap<PathBuf, HashMap<String, Option<u64>>>>> =
     OnceLock::new();
-static LEGACY_COMPACTION_CACHE: OnceLock<Mutex<HashMap<PathBuf, HashMap<String, bool>>>> =
-    OnceLock::new();
+static LEGACY_REQUEST_RESULT_CACHE: OnceLock<
+    Mutex<HashMap<PathBuf, HashMap<String, ProxyRequestSummary>>>,
+> = OnceLock::new();
 
 #[derive(Default)]
 struct CompletedEnqueueFence {
@@ -52,10 +53,96 @@ enum ProxyLogCommand {
     Flush(std::sync::mpsc::Sender<std::io::Result<()>>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProxyRequestOutcome {
+    Succeeded,
+    Failed,
+    Incomplete,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyRequestAudit {
+    #[serde(default)]
+    pub upstream_status_code: Option<u16>,
+    #[serde(default)]
+    pub outcome: Option<ProxyRequestOutcome>,
+    #[serde(default)]
+    pub error_code: Option<String>,
+    #[serde(default)]
+    pub upstream_attempts: Vec<ProxyRequestAttempt>,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub turn_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyRequestAttempt {
+    pub attempt: u32,
+    pub model: String,
+    #[serde(default)]
+    pub transport: Option<ProxyRequestTransport>,
+    #[serde(default)]
+    pub upstream_response_model: Option<String>,
+    pub status_code: Option<u16>,
+    pub outcome: Option<ProxyRequestOutcome>,
+    pub error_code: Option<String>,
+    pub error: Option<String>,
+}
+
+impl ProxyRequestAudit {
+    pub(crate) fn record_attempt(
+        &mut self,
+        model: &str,
+        status_code: Option<u16>,
+        error: Option<String>,
+    ) {
+        self.upstream_status_code = status_code;
+        self.upstream_attempts.push(ProxyRequestAttempt {
+            attempt: self.upstream_attempts.len() as u32 + 1,
+            model: model.to_string(),
+            transport: Some(ProxyRequestTransport::Http),
+            upstream_response_model: None,
+            status_code,
+            outcome: (error.is_some()
+                || status_code.is_some_and(|status| !(200..300).contains(&status)))
+            .then_some(ProxyRequestOutcome::Failed),
+            error_code: status_code
+                .filter(|status| !(200..300).contains(status))
+                .map(|status| format!("upstream_http_{status}")),
+            error,
+        });
+    }
+
+    pub(crate) fn observe_response(&mut self, observer: &UpstreamResponseModelObserver) {
+        self.outcome = self.outcome.or(observer.outcome);
+        self.error_code = self
+            .error_code
+            .clone()
+            .or_else(|| observer.error_code.clone());
+        if let Some(attempt) = self.upstream_attempts.last_mut() {
+            if attempt.outcome.is_none() {
+                attempt.upstream_response_model = attempt
+                    .upstream_response_model
+                    .clone()
+                    .or_else(|| observer.model());
+                attempt.outcome = observer.outcome;
+                attempt.error_code = observer.error_code.clone();
+                attempt.error = observer.error.clone();
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyRequestRecord {
     pub id: String,
+    #[serde(flatten, default)]
+    pub audit: ProxyRequestAudit,
     #[serde(default = "default_proxy_request_state")]
     pub state: ProxyRequestState,
     #[serde(default = "default_proxy_request_transport")]
@@ -129,6 +216,8 @@ pub struct ProxyRequestRecord {
 #[serde(rename_all = "camelCase")]
 pub struct ProxyRequestSummary {
     pub id: String,
+    #[serde(flatten, default)]
+    pub audit: ProxyRequestAudit,
     #[serde(default = "default_proxy_request_state")]
     pub state: ProxyRequestState,
     #[serde(default = "default_proxy_request_transport")]
@@ -215,6 +304,7 @@ fn default_proxy_request_transport() -> ProxyRequestTransport {
 
 #[derive(Debug, Clone)]
 pub struct RequestMetadata {
+    pub audit: ProxyRequestAudit,
     pub compaction_requested: bool,
     pub model: Option<String>,
     pub upstream_request_model: Option<String>,
@@ -228,8 +318,10 @@ pub struct RequestMetadata {
 
 impl From<&ProxyRequestRecord> for ProxyRequestSummary {
     fn from(record: &ProxyRequestRecord) -> Self {
+        let (audit, error) = request_result(record);
         Self {
             id: record.id.clone(),
+            audit,
             state: record.state,
             transport: record.transport,
             timestamp_ms: record.timestamp_ms,
@@ -275,8 +367,7 @@ impl From<&ProxyRequestRecord> for ProxyRequestSummary {
             response_bytes: record.response_bytes,
             response_captured_bytes: record.response_captured_bytes,
             response_truncated: record.response_truncated,
-            error: record
-                .error
+            error: error
                 .as_deref()
                 .map(|error| truncate_to_utf8_byte_limit(error, MAX_SUMMARY_ERROR_BYTES)),
         }
@@ -413,6 +504,25 @@ pub fn extract_request_metadata(request_json: Option<&Value>) -> RequestMetadata
     };
 
     RequestMetadata {
+        audit: ProxyRequestAudit {
+            thread_id: request_json
+                .and_then(|request| {
+                    request
+                        .pointer("/metadata/thread_id")
+                        .or_else(|| request.pointer("/metadata/session_id"))
+                })
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            turn_id: request_json
+                .and_then(|request| request.pointer("/metadata/turn_id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            ..Default::default()
+        },
         compaction_requested: request_json.is_some_and(request_uses_compaction),
         model,
         upstream_request_model: None,
@@ -425,6 +535,78 @@ pub fn extract_request_metadata(request_json: Option<&Value>) -> RequestMetadata
     }
 }
 
+pub(crate) fn extract_request_metadata_with_context(
+    request_json: Option<&Value>,
+    context: &crate::request_headers::RequestContext,
+) -> RequestMetadata {
+    let mut metadata = extract_request_metadata(request_json);
+    if let Some(thread_id) = context.log_thread_id() {
+        metadata.audit.thread_id = Some(thread_id.to_string());
+    }
+    metadata.audit.turn_id = metadata.audit.turn_id.or_else(|| context.turn_id());
+    metadata
+}
+
+fn request_result(record: &ProxyRequestRecord) -> (ProxyRequestAudit, Option<String>) {
+    let mut audit = record.audit.clone();
+    if record.state == ProxyRequestState::Pending {
+        audit.outcome = None;
+        audit.error_code = None;
+        return (audit, record.error.clone());
+    }
+    let mut observer = UpstreamResponseModelObserver::default();
+    let protocol = match record.response_protocol.as_deref() {
+        Some("chatCompletions" | "chat_completions") => {
+            crate::protocol_proxy::UpstreamResponseProtocol::ChatCompletions
+        }
+        Some("anthropic") => crate::protocol_proxy::UpstreamResponseProtocol::Anthropic,
+        _ => crate::protocol_proxy::UpstreamResponseProtocol::Responses,
+    };
+    observer.observe_json(record.response_body.as_bytes(), protocol);
+    observer.observe_sse_chunk(record.response_body.as_bytes(), protocol);
+    observer.finish_sse(protocol);
+    if record.transport == ProxyRequestTransport::Ws {
+        for line in record.response_body.lines() {
+            observer.observe_json(line.as_bytes(), protocol);
+        }
+    }
+    audit.observe_response(&observer);
+    audit.outcome = observer.outcome.or(audit.outcome);
+    audit.error_code = observer.error_code.clone().or(audit.error_code);
+    let error = record.error.clone().or(observer.error).or_else(|| {
+        (audit.outcome == Some(ProxyRequestOutcome::Failed))
+            .then(|| {
+                audit
+                    .upstream_attempts
+                    .last()
+                    .and_then(|attempt| attempt.error.clone())
+            })
+            .flatten()
+    });
+    audit.outcome = if record.status_code == Some(499) {
+        Some(ProxyRequestOutcome::Incomplete)
+    } else if error.is_some()
+        || record
+            .status_code
+            .is_some_and(|status| !(200..300).contains(&status))
+    {
+        Some(ProxyRequestOutcome::Failed)
+    } else {
+        audit.outcome.or_else(|| {
+            (record.stream && !audit.upstream_attempts.is_empty())
+                .then_some(ProxyRequestOutcome::Incomplete)
+        })
+    };
+    if let Some(attempt) = audit.upstream_attempts.last_mut()
+        && attempt.outcome.is_none()
+    {
+        attempt.outcome = audit.outcome;
+        attempt.error_code = audit.error_code.clone();
+        attempt.error = error.clone();
+    }
+    (audit, error)
+}
+
 const MAX_OBSERVED_MODEL_CHARS: usize = 200;
 const MAX_SSE_MODEL_LINE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -432,6 +614,9 @@ const MAX_SSE_MODEL_LINE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) struct UpstreamResponseModelObserver {
     first: Option<String>,
     terminal: Option<String>,
+    pub(crate) outcome: Option<ProxyRequestOutcome>,
+    pub(crate) error_code: Option<String>,
+    pub(crate) error: Option<String>,
     pending_line: Vec<u8>,
     event_type: String,
     data: String,
@@ -461,6 +646,64 @@ impl UpstreamResponseModelObserver {
         event_type: Option<&str>,
     ) {
         use crate::protocol_proxy::UpstreamResponseProtocol;
+        let event_type = event_type
+            .filter(|event| !event.is_empty())
+            .or_else(|| value.get("type").and_then(Value::as_str))
+            .unwrap_or_default();
+        let response = value
+            .get("response")
+            .filter(|value| value.is_object())
+            .unwrap_or(value);
+        let error = response.get("error").filter(|error| !error.is_null());
+        let status = response.get("status").and_then(Value::as_str);
+        if error.is_some()
+            || matches!(event_type, "response.failed" | "error")
+            || status == Some("failed")
+        {
+            self.outcome = Some(ProxyRequestOutcome::Failed);
+            self.error_code = error
+                .and_then(|error| error.get("code").or_else(|| error.get("type")))
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+            self.error = error
+                .and_then(|error| error.get("message"))
+                .or_else(|| response.get("message"))
+                .and_then(Value::as_str)
+                .map(|message| truncate_to_utf8_byte_limit(message, MAX_SUMMARY_ERROR_BYTES))
+                .or_else(|| Some("上游返回失败".to_string()));
+        } else if matches!(
+            event_type,
+            "response.incomplete" | "response.cancelled" | "response.canceled"
+        ) || matches!(status, Some("incomplete" | "cancelled" | "canceled"))
+        {
+            self.outcome = Some(ProxyRequestOutcome::Incomplete);
+            self.error_code = response
+                .pointer("/incomplete_details/reason")
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+        } else if !matches!(
+            self.outcome,
+            Some(ProxyRequestOutcome::Failed | ProxyRequestOutcome::Incomplete)
+        ) && (status == Some("completed")
+            || matches!(event_type, "response.completed" | "message_stop")
+            || value.get("object").and_then(Value::as_str) == Some("chat.completion")
+            || value.get("object").and_then(Value::as_str) == Some("response.compaction")
+            || (matches!(protocol, UpstreamResponseProtocol::ChatCompletions)
+                && value
+                    .get("choices")
+                    .and_then(Value::as_array)
+                    .is_some_and(|choices| {
+                        choices.iter().any(|choice| {
+                            choice
+                                .get("finish_reason")
+                                .is_some_and(|reason| !reason.is_null())
+                        })
+                    }))
+            || (matches!(protocol, UpstreamResponseProtocol::Anthropic)
+                && value.get("type").and_then(Value::as_str) == Some("message")))
+        {
+            self.outcome = Some(ProxyRequestOutcome::Succeeded);
+        }
         let candidates = match protocol {
             UpstreamResponseProtocol::Responses => {
                 [value.pointer("/response/model"), value.get("model")]
@@ -482,10 +725,6 @@ impl UpstreamResponseModelObserver {
             return;
         };
         let model = model.chars().take(MAX_OBSERVED_MODEL_CHARS).collect();
-        let event_type = event_type
-            .filter(|event| !event.is_empty())
-            .or_else(|| value.get("type").and_then(Value::as_str))
-            .unwrap_or_default();
         if matches!(
             event_type,
             "response.completed"
@@ -569,6 +808,12 @@ impl UpstreamResponseModelObserver {
     }
 
     fn flush_sse_frame(&mut self, protocol: crate::protocol_proxy::UpstreamResponseProtocol) {
+        if self.data.trim() == "[DONE]"
+            && protocol == crate::protocol_proxy::UpstreamResponseProtocol::ChatCompletions
+            && self.outcome.is_none()
+        {
+            self.outcome = Some(ProxyRequestOutcome::Succeeded);
+        }
         if let Ok(value) = serde_json::from_str::<Value>(&self.data) {
             let event_type = self.event_type.clone();
             self.observe_value(&value, protocol, Some(&event_type));
@@ -1033,18 +1278,15 @@ fn read_summaries_at_path(path: &Path, limit: usize) -> std::io::Result<Vec<Prox
     let mut summaries = result?;
     unlock_result?;
     backfill_legacy_output_tokens(path, &mut summaries);
-    backfill_legacy_compaction(path, &mut summaries);
+    backfill_legacy_request_result(path, &mut summaries);
     Ok(summaries)
 }
 
-fn backfill_legacy_compaction(path: &Path, summaries: &mut [ProxyRequestSummary]) {
-    if !summaries
-        .iter()
-        .any(|summary| summary.compaction_requested.is_none())
-    {
+fn backfill_legacy_request_result(path: &Path, summaries: &mut [ProxyRequestSummary]) {
+    if !summaries.iter().any(needs_legacy_request_result) {
         return;
     }
-    let cache = LEGACY_COMPACTION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache = LEGACY_REQUEST_RESULT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache.lock().unwrap();
     if cache.len() > 4 && !cache.contains_key(path) {
         cache.clear();
@@ -1058,26 +1300,29 @@ fn backfill_legacy_compaction(path: &Path, summaries: &mut [ProxyRequestSummary]
     path_cache.retain(|id, _| completed_ids.contains(id.as_str()));
     for summary in summaries
         .iter_mut()
-        .filter(|summary| summary.compaction_requested.is_none())
+        .filter(|summary| needs_legacy_request_result(summary))
     {
-        let requested =
-            if summary.remote_compaction_triggered || summary.layered_compaction_triggered {
-                true
-            } else if let Some(requested) = path_cache.get(&summary.id) {
-                *requested
-            } else {
-                let Ok(Some(record)) = read_detail_record_at_path(path, &summary.id) else {
-                    continue;
-                };
-                let requested = record.compaction_requested
-                    || request_body_uses_compaction(&record.request_body);
-                if summary.state == ProxyRequestState::Completed {
-                    path_cache.insert(summary.id.clone(), requested);
-                }
-                requested
+        let result = if let Some(cached) = path_cache.get(&summary.id) {
+            cached.clone()
+        } else {
+            let Ok(Some(record)) = read_detail_record_at_path(path, &summary.id) else {
+                continue;
             };
-        summary.compaction_requested = Some(requested);
+            let result = ProxyRequestSummary::from(&record);
+            if summary.state == ProxyRequestState::Completed {
+                path_cache.insert(summary.id.clone(), result.clone());
+            }
+            result
+        };
+        summary.compaction_requested = result.compaction_requested;
+        summary.audit = result.audit;
+        summary.error = result.error;
     }
+}
+
+fn needs_legacy_request_result(summary: &ProxyRequestSummary) -> bool {
+    summary.compaction_requested.is_none()
+        || (summary.state == ProxyRequestState::Completed && summary.audit.outcome.is_none())
 }
 
 fn backfill_legacy_output_tokens(path: &Path, summaries: &mut [ProxyRequestSummary]) {
@@ -1140,6 +1385,9 @@ fn find_record_at_path(path: &Path, id: &str) -> std::io::Result<Option<ProxyReq
         record.compaction_requested |= record.remote_compaction_triggered
             || record.layered_compaction_triggered
             || request_body_uses_compaction(&record.request_body);
+        let (audit, error) = request_result(record);
+        record.audit = audit;
+        record.error = error;
     }
     Ok(record)
 }
@@ -1316,6 +1564,12 @@ fn clear_detail_directory(path: &Path) -> std::io::Result<()> {
 }
 
 fn serialize_record_for_log(record: &ProxyRequestRecord) -> serde_json::Result<String> {
+    let (audit, error) = request_result(record);
+    let record = &ProxyRequestRecord {
+        audit,
+        error,
+        ..record.clone()
+    };
     let line = serde_json::to_string(record)?;
     if line.len() as u64 + 1 <= crate::log_limits::MAX_LOG_FILE_BYTES {
         return Ok(line);
@@ -2342,6 +2596,7 @@ data: [DONE]
     fn append_record_writes_locked_jsonl_file() {
         let path = temp_proxy_log_path("append-record");
         let record = ProxyRequestRecord {
+            audit: Default::default(),
             id: "test-record".to_string(),
             state: ProxyRequestState::Completed,
             transport: super::ProxyRequestTransport::Http,
@@ -2779,8 +3034,149 @@ data: [DONE]
         remove_proxy_log_artifacts(&path);
     }
 
+    #[test]
+    fn summary_reads_failed_response_even_with_http_200() {
+        let mut record = sample_proxy_record("failed-stream");
+        record.response_body = concat!(
+            "event: response.failed\n",
+            "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",",
+            "\"error\":{\"code\":\"layered_compaction_summary_tag_missing\",",
+            "\"message\":\"摘要缺少必要标记\"}}}\n\n"
+        )
+        .to_string();
+        let summary = super::ProxyRequestSummary::from(&record);
+        assert_eq!(summary.status_code, Some(200));
+        assert_eq!(summary.error.as_deref(), Some("摘要缺少必要标记"));
+        assert_eq!(
+            summary.audit.outcome,
+            Some(super::ProxyRequestOutcome::Failed)
+        );
+        assert_eq!(
+            summary.audit.error_code.as_deref(),
+            Some("layered_compaction_summary_tag_missing")
+        );
+        assert_eq!(summary.audit.upstream_status_code, None);
+
+        let path = temp_proxy_log_path("legacy-failed-result");
+        append_record_at_path(&path, &record).unwrap();
+        let mut legacy = serde_json::to_value(&summary).unwrap();
+        for field in [
+            "outcome",
+            "errorCode",
+            "upstreamStatusCode",
+            "upstreamAttempts",
+            "threadId",
+            "turnId",
+            "error",
+        ] {
+            legacy.as_object_mut().unwrap().remove(field);
+        }
+        let index = format!("{}\n{}\n", super::PROXY_INDEX_HEADER, legacy);
+        std::fs::write(&path, &index).unwrap();
+        let summaries = read_summaries_at_path(&path, 1).unwrap();
+        assert_eq!(
+            summaries[0].audit.outcome,
+            Some(super::ProxyRequestOutcome::Failed)
+        );
+        assert_eq!(summaries[0].audit.upstream_status_code, None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), index);
+        remove_proxy_log_artifacts(&path);
+    }
+
+    #[test]
+    fn summary_ignores_errors_embedded_in_successful_output() {
+        let mut record = sample_proxy_record("successful-output");
+        record.response_body = serde_json::json!({
+            "status": "completed",
+            "output": [{"type": "message", "content": [{
+                "type": "output_text",
+                "text": "{\"error\":{\"message\":\"historical tool error\"}}"
+            }]}]
+        })
+        .to_string();
+        let summary = super::ProxyRequestSummary::from(&record);
+        assert!(summary.error.is_none());
+        assert_eq!(
+            summary.audit.outcome,
+            Some(super::ProxyRequestOutcome::Succeeded)
+        );
+        assert_eq!(summary.audit.upstream_status_code, None);
+    }
+
+    #[test]
+    fn request_result_distinguishes_incomplete_unknown_and_pending() {
+        let mut record = sample_proxy_record("request-outcome");
+        assert_eq!(
+            super::ProxyRequestSummary::from(&record).audit.outcome,
+            None
+        );
+        record.response_body =
+            r#"{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}"#
+                .to_string();
+        let summary = super::ProxyRequestSummary::from(&record);
+        assert_eq!(
+            summary.audit.outcome,
+            Some(super::ProxyRequestOutcome::Incomplete)
+        );
+        assert_eq!(
+            summary.audit.error_code.as_deref(),
+            Some("max_output_tokens")
+        );
+        record.state = ProxyRequestState::Pending;
+        assert_eq!(
+            super::ProxyRequestSummary::from(&record).audit.outcome,
+            None
+        );
+        record.state = ProxyRequestState::Completed;
+        record.status_code = Some(499);
+        record.error = Some("客户端已断开".to_string());
+        assert_eq!(
+            super::ProxyRequestSummary::from(&record).audit.outcome,
+            Some(super::ProxyRequestOutcome::Incomplete)
+        );
+    }
+
+    #[test]
+    fn ws_backed_http_logs_read_sse_terminal_result() {
+        let mut record = sample_proxy_record("ws-backed-http");
+        record.transport = super::ProxyRequestTransport::Ws;
+        record.response_protocol = Some("responses".to_string());
+        record.stream = true;
+        record.response_body = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n".to_string();
+        record.audit.record_attempt("gpt-test", None, None);
+        record.audit.upstream_attempts[0].transport = Some(super::ProxyRequestTransport::Ws);
+        let summary = super::ProxyRequestSummary::from(&record);
+        assert_eq!(
+            summary.audit.outcome,
+            Some(super::ProxyRequestOutcome::Succeeded)
+        );
+        assert_eq!(summary.audit.upstream_status_code, None);
+        assert_eq!(summary.audit.upstream_attempts[0].status_code, None);
+    }
+
+    #[test]
+    fn request_metadata_records_context_ids_without_using_cache_or_request_ids() {
+        let request = serde_json::json!({"model":"claude-test","prompt_cache_key":"not-a-session"});
+        let context = crate::request_headers::RequestContext::from_http_request(
+            b"POST /v1/responses HTTP/1.1\r\nthread-id: thread-test\r\nx-codex-turn-metadata: {\"turn_id\":\"turn-test\"}\r\n\r\n"
+        );
+        let metadata = super::extract_request_metadata_with_context(Some(&request), &context);
+        assert_eq!(metadata.audit.thread_id.as_deref(), Some("thread-test"));
+        assert_eq!(metadata.audit.turn_id.as_deref(), Some("turn-test"));
+        let context = crate::request_headers::RequestContext::from_http_request(
+            b"POST /v1/responses HTTP/1.1\r\nx-client-request-id: request-only\r\n\r\n",
+        );
+        assert_eq!(
+            super::extract_request_metadata_with_context(Some(&request), &context)
+                .audit
+                .thread_id,
+            None
+        );
+    }
+
     fn sample_proxy_record(id: &str) -> ProxyRequestRecord {
         ProxyRequestRecord {
+            audit: Default::default(),
             id: id.to_string(),
             state: ProxyRequestState::Completed,
             transport: super::ProxyRequestTransport::Http,

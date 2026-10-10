@@ -1562,7 +1562,7 @@ pub(crate) fn resolve_compaction_model_override(
     )
 }
 
-/// 独立压缩模型必须按目标模型家族重新构造请求：GPT 移除工具，非 GPT 保留工具。
+/// 独立压缩模型也必须保留工具定义，并按会话来源处理历史、按目标模型调整推理配置。
 pub(crate) fn resolve_compaction_model_override_for_attempt(
     request_json: &Value,
     original_request_json: &Value,
@@ -1578,7 +1578,7 @@ pub(crate) fn resolve_compaction_model_override_for_attempt(
         settings,
         relay,
         |request_model| {
-            let route = crate::layered_compaction::CompactionRoute::for_model(request_model);
+            let route = crate::layered_compaction::CompactionRoute::CacheReuse;
             let prepared = crate::layered_compaction::prepare_compaction_attempt_request(
                 request_json,
                 kind,
@@ -1586,6 +1586,16 @@ pub(crate) fn resolve_compaction_model_override_for_attempt(
                 options,
                 crate::layered_compaction::CompactionAttempt::First,
             );
+            // 转为 GPT 前必须按会话原模型展开历史，不能恢复非 GPT 会话已摘要的旧媒体。
+            let prepared = if crate::model_capabilities::model_family(request_model)
+                == crate::model_capabilities::ModelFamily::Gpt
+            {
+                crate::layered_compaction::expand_synthetic_local_compaction_request_for_upstream(
+                    &prepared,
+                )
+            } else {
+                prepared
+            };
             crate::layered_compaction::apply_confirmed_compaction_model_override(
                 &prepared,
                 request_model,
@@ -1726,6 +1736,7 @@ fn log_compaction_model_override_skipped(
 }
 
 pub struct UpstreamProxyResponse {
+    pub(crate) audit: crate::proxy_log::ProxyRequestAudit,
     pub status_code: u16,
     pub content_type: String,
     pub is_stream: bool,
@@ -1751,6 +1762,7 @@ pub struct UpstreamProxyResponse {
 
 #[derive(Debug, Clone)]
 pub struct UpstreamFailureContext {
+    pub(crate) audit: crate::proxy_log::ProxyRequestAudit,
     pub diagnostic_id: String,
     pub relay_id: Option<String>,
     pub relay_name: Option<String>,
@@ -2684,7 +2696,7 @@ async fn execute_validated_compaction(
     let header_timeout =
         Some(header_timeout.unwrap_or_else(|| stream_idle_timeout_for_request(Some(original))));
 
-    // 只有与普通请求完全相同的缓存身份仍处于可信租约内，才走原模型缓存复用。
+    // 租约只决定是否使用独立模型，不决定是否保留请求前缀。
     let cache_probe_request = prepare_compaction_attempt_request(
         &source,
         kind,
@@ -2727,11 +2739,7 @@ async fn execute_validated_compaction(
         }),
     );
 
-    let original_route = if cache_decision.is_valid() {
-        CompactionRoute::CacheReuse
-    } else {
-        CompactionRoute::for_model(&source_model)
-    };
+    let original_route = CompactionRoute::CacheReuse;
     let original_first_request = prepare_compaction_attempt_request(
         &source,
         kind,
@@ -2744,7 +2752,7 @@ async fn execute_validated_compaction(
         route: original_route,
         protocol: original_protocol,
         model: source_model.clone(),
-        cache_reference: original_route == CompactionRoute::CacheReuse,
+        cache_reference: true,
         restore_model: None,
     };
 
@@ -2763,7 +2771,7 @@ async fn execute_validated_compaction(
             &settings,
             &relay,
         ) {
-            let independent_route = CompactionRoute::for_model(&resolved.compaction_model);
+            let independent_route = CompactionRoute::CacheReuse;
             independent_selected = true;
             independent_compaction_model = Some(resolved.compaction_model.clone());
             independent_compaction_usage = Some(settings.layered_compaction_model_usage);
@@ -2796,6 +2804,7 @@ async fn execute_validated_compaction(
 
     let mut last_upstream = None;
     let mut final_response = None;
+    let mut audit = crate::proxy_log::ProxyRequestAudit::default();
     for attempt in CompactionAttempt::ALL {
         let client = crate::http_client::proxied_client(&effective_user_agent(
             &relay.user_agent,
@@ -2816,6 +2825,7 @@ async fn execute_validated_compaction(
         )
         .await;
         let upstream = sent.map(|(raw, wire, _)| UpstreamProxyResponse {
+            audit: Default::default(),
             status_code: raw.status().as_u16(),
             content_type: raw
                 .headers()
@@ -2847,9 +2857,12 @@ async fn execute_validated_compaction(
         let mut response = None;
         let mut decoded_verdict = None;
         let mut error_detail = None;
+        let mut attempt_status_code = None;
+        let mut response_observer = crate::proxy_log::UpstreamResponseModelObserver::default();
         let transport_failure;
         match upstream {
             Ok(mut upstream) => {
+                attempt_status_code = Some(upstream.status_code);
                 let bytes = if let Some(bytes) = upstream.body_override.take() {
                     Ok(bytes)
                 } else if let Some(raw) = upstream.response.take() {
@@ -2861,6 +2874,13 @@ async fn execute_validated_compaction(
                 } else {
                     Err(anyhow::anyhow!("压缩响应体缺失"))
                 };
+                if let Ok(bytes) = &bytes {
+                    response_observer.observe_json(bytes, plan.protocol);
+                    if upstream.is_stream {
+                        response_observer.observe_sse_chunk(bytes, plan.protocol);
+                        response_observer.finish_sse(plan.protocol);
+                    }
+                }
                 match bytes {
                     Ok(bytes) if upstream.is_success() => {
                         // HTTP 200 的 JSON/SSE 也可能明确报错；此时应回退原模型，
@@ -2912,6 +2932,34 @@ async fn execute_validated_compaction(
             &verdict,
             error_detail.as_deref(),
         );
+        audit.record_attempt(&plan.model, attempt_status_code, error_detail.clone());
+        let attempt_record = audit
+            .upstream_attempts
+            .last_mut()
+            .expect("compaction attempt");
+        attempt_record.upstream_response_model = response_observer.model();
+        attempt_record.outcome = Some(if verdict.is_ok() {
+            crate::proxy_log::ProxyRequestOutcome::Succeeded
+        } else {
+            crate::proxy_log::ProxyRequestOutcome::Failed
+        });
+        if let Err(failure) = verdict {
+            let failure_response =
+                compaction_validation_failure_response(original, kind, response.as_ref(), failure);
+            attempt_record.error_code = response_observer
+                .error_code
+                .or(attempt_record.error_code.clone())
+                .or_else(|| {
+                    failure_response
+                        .pointer("/error/code")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string)
+                });
+            attempt_record.error = response_observer
+                .error
+                .or(error_detail)
+                .or_else(|| Some(failure.as_str().to_string()));
+        }
         let attempt_upstream_response_model = response
             .as_ref()
             .and_then(|response| response.get("model"))
@@ -2954,9 +3002,8 @@ async fn execute_validated_compaction(
                     // 独立模型网络/HTTP 失败时，第二次也是最后一次机会：回落原模型。
                     plan = original_plan.clone();
                 } else {
-                    // 结构或摘要校验失败时保持同一模型，只切换 D 重试提示。
+                    // 结构或摘要校验失败时保持前缀，只在输入末尾追加重试提示。
                     plan.request = compaction_retry_request(&plan.request);
-                    plan.cache_reference = false;
                 }
             }
         }
@@ -2972,6 +3019,7 @@ async fn execute_validated_compaction(
         },
     );
     let mut upstream = last_upstream.unwrap_or_else(|| UpstreamProxyResponse {
+        audit: Default::default(),
         status_code: 200,
         content_type: String::new(),
         is_stream,
@@ -2990,6 +3038,11 @@ async fn execute_validated_compaction(
         bridge_remote_compaction_v2: false,
         cache_observer: None,
     });
+    let mut response_observer = crate::proxy_log::UpstreamResponseModelObserver::default();
+    response_observer.observe_value(&response, UpstreamResponseProtocol::Responses, None);
+    audit.outcome = response_observer.outcome;
+    audit.error_code = response_observer.error_code;
+    upstream.audit = audit;
     upstream.status_code = 200;
     upstream.is_stream = is_stream;
     upstream.response_protocol = UpstreamResponseProtocol::Responses;
@@ -3110,6 +3163,7 @@ fn unavailable_native_compaction_response(
     message: &str,
 ) -> UpstreamProxyResponse {
     UpstreamProxyResponse {
+        audit: Default::default(),
         status_code: 400,
         content_type: "application/json; charset=utf-8".to_string(),
         is_stream: false,
@@ -3214,6 +3268,7 @@ async fn open_responses_proxy_request_once(
         }
     }
     let relay_count = relays.len();
+    let mut audit = crate::proxy_log::ProxyRequestAudit::default();
     'relay_attempts: for (attempt, relay) in relays.into_iter().enumerate() {
         validate_upstream(&relay)?;
         let source_request_json =
@@ -3233,6 +3288,7 @@ async fn open_responses_proxy_request_once(
             if source_response_protocol != UpstreamResponseProtocol::Responses {
                 // 关闭增强后不再把不支持的 V2 操作伪装成摘要成功；交由 harness 处理错误。
                 return Ok(UpstreamProxyResponse {
+                    audit: Default::default(),
                     status_code: 400,
                     content_type: "application/json; charset=utf-8".to_string(),
                     is_stream: false,
@@ -3285,7 +3341,16 @@ async fn open_responses_proxy_request_once(
                 request_context,
                 stream_header_timeout_override,
             )
-            .await;
+            .await
+            .map(|mut upstream| {
+                let mut attempts = audit.upstream_attempts;
+                attempts.append(&mut upstream.audit.upstream_attempts);
+                for (index, attempt) in attempts.iter_mut().enumerate() {
+                    attempt.attempt = index as u32 + 1;
+                }
+                upstream.audit.upstream_attempts = attempts;
+                upstream
+            });
         }
         let request_json = source_request_json;
         let mut response_protocol = responses_proxy_target_protocol(&relay, &request_json)?;
@@ -3368,6 +3433,14 @@ async fn open_responses_proxy_request_once(
         {
             Ok(upstream) => upstream,
             Err(error) => {
+                audit.record_attempt(
+                    request_json
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    None,
+                    Some(error.to_string()),
+                );
                 let _ = crate::diagnostic_log::append_diagnostic_log(
                     "protocol_proxy.upstream_request_failed",
                     json!({
@@ -3390,6 +3463,7 @@ async fn open_responses_proxy_request_once(
                     continue;
                 }
                 let failure_context = UpstreamFailureContext {
+                    audit,
                     diagnostic_id: diagnostic_id.clone(),
                     relay_id: Some(relay.id.clone()),
                     relay_name: Some(relay.name.clone()),
@@ -3422,6 +3496,21 @@ async fn open_responses_proxy_request_once(
             serialized_proxy_request_body(&upstream_request_json)
         };
         let status_code = upstream.status().as_u16();
+        audit.record_attempt(
+            upstream_request_json
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            (!used_ws).then_some(status_code),
+            (!(200..300).contains(&status_code)).then(|| format!("上游返回 HTTP {status_code}")),
+        );
+        if used_ws {
+            audit
+                .upstream_attempts
+                .last_mut()
+                .expect("upstream attempt")
+                .transport = Some(crate::proxy_log::ProxyRequestTransport::Ws);
+        }
         let mut upstream_response = Some(upstream);
         let mut body_override = None;
         let mut status_code = status_code;
@@ -3450,6 +3539,13 @@ async fn open_responses_proxy_request_once(
                 {
                     Ok(body) => body,
                     Err(error) => {
+                        let attempt_record = audit
+                            .upstream_attempts
+                            .last_mut()
+                            .expect("upstream attempt");
+                        attempt_record.outcome =
+                            Some(crate::proxy_log::ProxyRequestOutcome::Failed);
+                        attempt_record.error = Some(error.to_string());
                         let _ = crate::diagnostic_log::append_diagnostic_log(
                             "protocol_proxy.anthropic_retry_error_body_failed",
                             json!({
@@ -3468,6 +3564,7 @@ async fn open_responses_proxy_request_once(
                             continue 'relay_attempts;
                         }
                         let failure_context = UpstreamFailureContext {
+                            audit,
                             diagnostic_id: diagnostic_id.clone(),
                             relay_id: Some(relay.id.clone()),
                             relay_name: Some(relay.name.clone()),
@@ -3481,6 +3578,17 @@ async fn open_responses_proxy_request_once(
                             .context(failure_context);
                     }
                 };
+                let mut response_observer =
+                    crate::proxy_log::UpstreamResponseModelObserver::default();
+                response_observer.observe_json(&error_body, response_protocol);
+                let attempt_record = audit
+                    .upstream_attempts
+                    .last_mut()
+                    .expect("upstream attempt");
+                attempt_record.error_code = response_observer
+                    .error_code
+                    .or(attempt_record.error_code.clone());
+                attempt_record.error = response_observer.error.or(attempt_record.error.clone());
                 let rejected_effort = anthropic_requested_effort(&anthropic_request)
                     .unwrap_or_default()
                     .to_string();
@@ -3547,6 +3655,14 @@ async fn open_responses_proxy_request_once(
                     let retry = match retry_result {
                         Ok(retry) => retry,
                         Err(error) => {
+                            audit.record_attempt(
+                                retry_request
+                                    .get("model")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default(),
+                                None,
+                                Some(error.to_string()),
+                            );
                             let _ = crate::diagnostic_log::append_diagnostic_log(
                                 "protocol_proxy.anthropic_retry_request_failed",
                                 json!({
@@ -3566,6 +3682,7 @@ async fn open_responses_proxy_request_once(
                                 continue 'relay_attempts;
                             }
                             let failure_context = UpstreamFailureContext {
+                                audit,
                                 diagnostic_id: diagnostic_id.clone(),
                                 relay_id: Some(relay.id.clone()),
                                 relay_name: Some(relay.name.clone()),
@@ -3580,6 +3697,15 @@ async fn open_responses_proxy_request_once(
                         }
                     };
                     status_code = retry.status().as_u16();
+                    audit.record_attempt(
+                        retry_request
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                        Some(status_code),
+                        (!(200..300).contains(&status_code))
+                            .then(|| format!("上游返回 HTTP {status_code}")),
+                    );
                     content_type = retry
                         .headers()
                         .get(reqwest::header::CONTENT_TYPE)
@@ -3631,6 +3757,12 @@ async fn open_responses_proxy_request_once(
             let candidate_body = match candidate_body {
                 Ok(body) => body,
                 Err(error) => {
+                    let attempt_record = audit
+                        .upstream_attempts
+                        .last_mut()
+                        .expect("upstream attempt");
+                    attempt_record.outcome = Some(crate::proxy_log::ProxyRequestOutcome::Failed);
+                    attempt_record.error = Some(error.to_string());
                     let _ = crate::diagnostic_log::append_diagnostic_log(
                         "protocol_proxy.remote_compaction_candidate_body_failed",
                         json!({
@@ -3657,6 +3789,12 @@ async fn open_responses_proxy_request_once(
                 &candidate_body,
                 layered_compaction_options,
             ) {
+                let attempt_record = audit
+                    .upstream_attempts
+                    .last_mut()
+                    .expect("upstream attempt");
+                attempt_record.outcome = Some(crate::proxy_log::ProxyRequestOutcome::Failed);
+                attempt_record.error = Some(error.to_string());
                 let _ = crate::diagnostic_log::append_diagnostic_log(
                     "protocol_proxy.remote_compaction_candidate_invalid",
                     json!({
@@ -3720,6 +3858,7 @@ async fn open_responses_proxy_request_once(
                 })
                 .flatten();
             return Ok(UpstreamProxyResponse {
+                audit,
                 status_code,
                 is_stream: response_is_stream,
                 content_type,
@@ -4029,6 +4168,7 @@ pub async fn open_models_proxy_request(
         .to_string();
 
     Ok(UpstreamProxyResponse {
+        audit: Default::default(),
         status_code,
         is_stream: false,
         content_type,
@@ -4075,6 +4215,7 @@ pub async fn open_chat_completions_proxy_request(
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let mut audit = crate::proxy_log::ProxyRequestAudit::default();
     for (attempt, relay) in relays.into_iter().enumerate() {
         validate_upstream(&relay)?;
         let request_json = apply_system_prompt_override_to_chat_request(&original, &relay);
@@ -4094,14 +4235,41 @@ pub async fn open_chat_completions_proxy_request(
         let upstream = match upstream {
             Ok(response) => response,
             Err(error) => {
+                let error_message = error.to_string();
+                audit.record_attempt(
+                    request_json
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    None,
+                    Some(error_message.clone()),
+                );
                 crate::relay_rotation::record_relay_request_failure(&settings);
                 if attempt + 1 < relay_count {
                     continue;
                 }
-                return Err(error);
+                return Err(error)
+                    .context(UpstreamFailureContext {
+                        audit,
+                        diagnostic_id,
+                        relay_id: Some(relay.id.clone()),
+                        relay_name: Some(relay.name.clone()),
+                        endpoint: Some(chat_completions_url(&relay.base_url)),
+                        response_protocol: Some(UpstreamResponseProtocol::ChatCompletions),
+                        bridge_remote_compaction_v2: false,
+                    })
+                    .context(error_message);
             }
         };
         let status_code = upstream.status().as_u16();
+        audit.record_attempt(
+            request_json
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            Some(status_code),
+            (!upstream.status().is_success()).then(|| format!("上游返回 HTTP {status_code}")),
+        );
         crate::relay_rotation::record_relay_request_event(
             &settings,
             if upstream.status().is_success() {
@@ -4120,6 +4288,7 @@ pub async fn open_chat_completions_proxy_request(
             .unwrap_or("")
             .to_string();
         return Ok(UpstreamProxyResponse {
+            audit,
             status_code,
             is_stream: content_type.contains("text/event-stream")
                 || (is_stream && !content_type.to_ascii_lowercase().contains("json")),
@@ -14944,11 +15113,11 @@ mod compaction_model_override_tests {
     async fn http_invalid_independent_summary_retries_the_independent_model() {
         let (base_url, requests_rx) = spawn_responses_server(vec![
             (
-                200,
+                201,
                 summary_response("gpt-cheap", "<analysis>missing summary</analysis>"),
             ),
             (
-                200,
+                201,
                 summary_response("gpt-cheap", "<summary>independent retry</summary>"),
             ),
         ])
@@ -14966,6 +15135,32 @@ mod compaction_model_override_tests {
         )
         .await
         .unwrap();
+        assert_eq!(upstream.status_code, 200);
+        assert_eq!(upstream.audit.upstream_status_code, Some(201));
+        assert_eq!(
+            upstream.audit.outcome,
+            Some(crate::proxy_log::ProxyRequestOutcome::Succeeded)
+        );
+        assert_eq!(upstream.audit.upstream_attempts.len(), 2);
+        assert_eq!(upstream.audit.upstream_attempts[0].status_code, Some(201));
+        assert_eq!(
+            upstream.audit.upstream_attempts[0].outcome,
+            Some(crate::proxy_log::ProxyRequestOutcome::Failed)
+        );
+        assert_eq!(
+            upstream.audit.upstream_attempts[0].error_code.as_deref(),
+            Some("layered_compaction_summary_tag_missing")
+        );
+        assert_eq!(
+            upstream.audit.upstream_attempts[1].outcome,
+            Some(crate::proxy_log::ProxyRequestOutcome::Succeeded)
+        );
+        assert_eq!(
+            upstream.audit.upstream_attempts[1]
+                .upstream_response_model
+                .as_deref(),
+            Some("gpt-cheap")
+        );
         assert_eq!(
             upstream.independent_compaction_model.as_deref(),
             Some("gpt-cheap")
@@ -15219,7 +15414,21 @@ mod compaction_model_override_tests {
         ])
         .await;
         let settings = http_settings(base_url, None);
-        let request = http_compaction_request("http-original-retry-key");
+        let mut request = http_compaction_request("http-original-retry-key");
+        request["tools"] =
+            json!([{ "type": "function", "name": "read", "parameters": {"type": "object"} }]);
+        request["tool_choice"] = json!({"type":"function","name":"read"});
+        request["parallel_tool_calls"] = json!(true);
+        request["reasoning"] = json!({"effort": "xhigh", "summary": "detailed"});
+        request["text"] = json!({
+            "verbosity":"high",
+            "format":{"type":"json_schema","name":"answer","schema":{"type":"object"}}
+        });
+        request["response_format"] = json!({"type":"json_object"});
+        request["input"].as_array_mut().unwrap().insert(
+            0,
+            json!({"type": "message", "role": "developer", "content": "stable developer rules"}),
+        );
         let upstream = execute_validated_compaction(
             &request.to_string(),
             &request,
@@ -15243,6 +15452,25 @@ mod compaction_model_override_tests {
             vec!["gpt-original", "gpt-original"]
         );
         assert_eq!(response["status"], "completed");
+        for sent in &requests {
+            for field in [
+                "instructions",
+                "tools",
+                "parallel_tool_calls",
+                "reasoning",
+                "prompt_cache_key",
+            ] {
+                assert_eq!(sent[field], request[field], "{field}");
+            }
+            assert_eq!(sent["tool_choice"], "none");
+            assert_eq!(sent["text"]["verbosity"], "high");
+            assert_eq!(sent["text"]["format"], json!({"type":"text"}));
+            assert_eq!(sent["response_format"], json!({"type":"text"}));
+        }
+        let first_input = requests[0]["input"].as_array().unwrap();
+        let retry_input = requests[1]["input"].as_array().unwrap();
+        assert_eq!(&retry_input[..first_input.len()], first_input);
+        assert_eq!(retry_input.len(), first_input.len() + 1);
     }
 
     #[test]

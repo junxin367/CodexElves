@@ -36,10 +36,6 @@ impl CacheProtocol {
             Self::Anthropic => "anthropic",
         }
     }
-
-    fn refreshes_on_hit(self) -> bool {
-        self == Self::Anthropic
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -130,34 +126,48 @@ struct UsageEvidence {
 impl UsageEvidence {
     fn merge_usage(&mut self, usage: &Value) {
         self.cached_tokens = self.cached_tokens.max(
-            usage
-                .pointer("/input_tokens_details/cached_tokens")
-                .or_else(|| usage.pointer("/prompt_tokens_details/cached_tokens"))
-                .or_else(|| usage.get("cache_read_input_tokens"))
-                .or_else(|| usage.get("prompt_cache_hit_tokens"))
-                .or_else(|| usage.get("cachedContentTokenCount"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
+            [
+                usage.pointer("/input_tokens_details/cached_tokens"),
+                usage.pointer("/prompt_tokens_details/cached_tokens"),
+                usage.get("cache_read_input_tokens"),
+                usage.get("prompt_cache_hit_tokens"),
+                usage.get("cachedContentTokenCount"),
+            ]
+            .into_iter()
+            .filter_map(|value| value.and_then(Value::as_u64))
+            .max()
+            .unwrap_or(0),
         );
         self.cache_creation_tokens = self.cache_creation_tokens.max(
-            usage
-                .get("cache_creation_input_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
+            [
+                usage.get("cache_creation_input_tokens"),
+                usage.pointer("/input_tokens_details/cache_write_tokens"),
+                usage.pointer("/prompt_tokens_details/cache_write_tokens"),
+            ]
+            .into_iter()
+            .filter_map(|value| value.and_then(Value::as_u64))
+            .max()
+            .unwrap_or(0),
         );
         self.cache_creation_5m_tokens = self.cache_creation_5m_tokens.max(
-            usage
-                .pointer("/cache_creation/ephemeral_5m_input_tokens")
-                .or_else(|| usage.get("cache_creation_5m_input_tokens"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
+            [
+                usage.pointer("/cache_creation/ephemeral_5m_input_tokens"),
+                usage.get("cache_creation_5m_input_tokens"),
+            ]
+            .into_iter()
+            .filter_map(|value| value.and_then(Value::as_u64))
+            .max()
+            .unwrap_or(0),
         );
         self.cache_creation_1h_tokens = self.cache_creation_1h_tokens.max(
-            usage
-                .pointer("/cache_creation/ephemeral_1h_input_tokens")
-                .or_else(|| usage.get("cache_creation_1h_input_tokens"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
+            [
+                usage.pointer("/cache_creation/ephemeral_1h_input_tokens"),
+                usage.get("cache_creation_1h_input_tokens"),
+            ]
+            .into_iter()
+            .filter_map(|value| value.and_then(Value::as_u64))
+            .max()
+            .unwrap_or(0),
         );
         if let Some(ttl) = usage.get("cache_ttl").and_then(Value::as_str) {
             self.explicit_ttl = match ttl.trim().to_ascii_lowercase().as_str() {
@@ -170,7 +180,7 @@ impl UsageEvidence {
 
     fn creation_ttl(
         self,
-        protocol: CacheProtocol,
+        _protocol: CacheProtocol,
         request_ttl_hint: Option<CacheTtl>,
     ) -> Option<CacheTtl> {
         if self.cache_creation_5m_tokens > 0 {
@@ -184,7 +194,7 @@ impl UsageEvidence {
         }
         self.explicit_ttl
             .or(request_ttl_hint)
-            .or_else(|| (protocol == CacheProtocol::Anthropic).then_some(CacheTtl::FiveMinutes))
+            .or(Some(CacheTtl::FiveMinutes))
     }
 }
 
@@ -193,7 +203,6 @@ struct CacheLease {
     ttl: CacheTtl,
     expires_at: Instant,
     observation: u64,
-    refresh_on_hit: bool,
 }
 
 #[derive(Default)]
@@ -260,7 +269,6 @@ impl CacheLeaseStore {
                     ttl,
                     expires_at: started_at + ttl.duration(),
                     observation,
-                    refresh_on_hit: protocol.refreshes_on_hit(),
                 },
             );
             return Some(ttl);
@@ -268,20 +276,20 @@ impl CacheLeaseStore {
         if evidence.cached_tokens == 0 {
             return None;
         }
-        let Some(existing) = self.leases.get(&key).cloned() else {
-            return None;
-        };
-        if !existing.refresh_on_hit || existing.observation > observation {
+        if self
+            .leases
+            .get(&key)
+            .is_some_and(|existing| existing.observation > observation)
+        {
             return None;
         }
-        let ttl = existing.ttl;
+        let ttl = request_ttl_hint.unwrap_or(CacheTtl::FiveMinutes);
         self.insert(
             key,
             CacheLease {
                 ttl,
                 expires_at: started_at + ttl.duration(),
                 observation,
-                refresh_on_hit: true,
             },
         );
         Some(ttl)
@@ -855,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_hit_refreshes_only_an_existing_anthropic_lease() {
+    fn cached_hit_establishes_and_refreshes_a_conservative_lease() {
         let started_at = Instant::now();
         let mut store = CacheLeaseStore::default();
         let hit = UsageEvidence {
@@ -865,20 +873,29 @@ mod tests {
         assert_eq!(
             store.observe(
                 key("missing"),
-                CacheProtocol::Anthropic,
+                CacheProtocol::Responses,
                 None,
                 hit,
                 started_at,
                 1,
             ),
-            None
+            Some(CacheTtl::FiveMinutes)
+        );
+        assert_eq!(
+            store
+                .decision(
+                    &key("missing"),
+                    started_at + FIVE_MINUTES - Duration::from_millis(1),
+                )
+                .state,
+            CacheLeaseState::Valid
         );
         store.observe(
             key("refresh"),
-            CacheProtocol::Anthropic,
+            CacheProtocol::Responses,
             None,
             UsageEvidence {
-                cache_creation_5m_tokens: 10,
+                cache_creation_1h_tokens: 10,
                 ..Default::default()
             },
             started_at,
@@ -888,7 +905,7 @@ mod tests {
         assert_eq!(
             store.observe(
                 key("refresh"),
-                CacheProtocol::Anthropic,
+                CacheProtocol::Responses,
                 None,
                 hit,
                 refreshed_at,
@@ -904,6 +921,23 @@ mod tests {
                 )
                 .state,
             CacheLeaseState::Valid
+        );
+    }
+
+    #[test]
+    fn responses_cache_write_tokens_establish_a_conservative_lease() {
+        let mut evidence = UsageEvidence::default();
+        evidence.merge_usage(&json!({
+            "cache_creation_input_tokens": 0,
+            "input_tokens_details": {
+                "cache_write_tokens": 128,
+                "cached_tokens": 0
+            }
+        }));
+        assert_eq!(evidence.cache_creation_tokens, 128);
+        assert_eq!(
+            evidence.creation_ttl(CacheProtocol::Responses, None),
+            Some(CacheTtl::FiveMinutes)
         );
     }
 

@@ -4850,7 +4850,7 @@ body {
 
 .proxy-log-row {
   display: grid;
-  grid-template-columns: minmax(260px, 350px) 132px minmax(120px, 150px) 58px 104px 72px;
+  grid-template-columns: minmax(220px, 1fr) 132px minmax(100px, 130px) 166px 104px 72px;
   justify-content: space-between;
   align-items: center;
   gap: 4px;
@@ -5068,6 +5068,58 @@ body {
 
 .proxy-code.pending {
   color: hsl(var(--muted-foreground));
+}
+
+.proxy-log-status {
+  display: grid;
+  gap: 3px;
+}
+
+.proxy-log-status > strong,
+.proxy-log-status > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proxy-log-status > small {
+  color: hsl(var(--muted-foreground));
+  font-weight: 400;
+}
+
+.proxy-detail-audit,
+.proxy-detail-attempts {
+  flex: 0 0 100%;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.proxy-detail-audit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
+
+.proxy-detail-attempts {
+  max-height: 140px;
+  overflow: auto;
+}
+
+.proxy-detail-attempts > summary {
+  cursor: pointer;
+}
+
+.proxy-detail-attempt {
+  display: grid;
+  gap: 2px;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+}
+
+.proxy-detail-failure {
+  color: hsl(var(--destructive));
 }
 
 .proxy-log-latency {
@@ -6198,7 +6250,11 @@ body {
   }
 
   .proxy-log-row {
-    grid-template-columns: minmax(180px, 260px) 118px minmax(104px, 132px) 52px 104px 64px;
+    grid-template-columns: minmax(140px, 1fr) 118px 166px 104px 64px;
+  }
+
+  .proxy-log-row > span:nth-child(3) {
+    display: none;
   }
 
   .proxy-topbar-badge {
@@ -6440,10 +6496,11 @@ body {
   }
 
   .proxy-log-row {
-    grid-template-columns: minmax(0, 1fr) 120px auto;
+    grid-template-columns: minmax(0, 1fr) 120px 166px auto;
   }
 
-  .proxy-log-row > span:nth-child(n + 3):nth-child(-n + 5) {
+  .proxy-log-row > span:nth-child(3),
+  .proxy-log-row > span:nth-child(5) {
     display: none;
   }
 
@@ -6523,6 +6580,13 @@ body {
 }
 
 @media (max-width: 720px) {
+  .proxy-log-row {
+    grid-template-columns: minmax(0, 1fr) 166px 64px;
+  }
+
+  .proxy-log-row > span:nth-child(2) {
+    display: none;
+  }
   .about-summary-layout,
   .update-metric-grid,
   .diagnostics-summary,

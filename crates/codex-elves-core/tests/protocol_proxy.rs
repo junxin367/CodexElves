@@ -12263,7 +12263,12 @@ async fn aggregate_remote_compaction_retries_selected_candidate_with_actual_prot
             .all(|request| request.path == "/v1/chat/completions")
     );
     assert!(!upstream_requests[1].body.contains("compaction_trigger"));
-    assert!(!upstream_requests[1].body.contains("\"tools\""));
+    let first: Value = serde_json::from_str(&upstream_requests[0].body).unwrap();
+    let retry: Value = serde_json::from_str(&upstream_requests[1].body).unwrap();
+    assert!(!first["tools"].as_array().unwrap().is_empty());
+    assert_eq!(retry["tools"], first["tools"]);
+    assert_eq!(retry["tool_choice"], first["tool_choice"]);
+    assert_eq!(retry["messages"][0], first["messages"][0]);
     assert!(
         upstream_requests[1].body.contains("[Handoff checkpoint]"),
         "actual retry request: {}",
@@ -12580,6 +12585,7 @@ async fn aggregate_stream_request_sends_sse_accept_header() {
 
 #[tokio::test]
 async fn continue_thinking_reports_accumulated_reasoning_tokens() {
+    let _lock = settings_path_test_lock().lock().unwrap();
     let server = spawn_chat_server_with_response(responses_sse_with_reasoning("resp_continue", 38));
     let settings = BackendSettings {
         gpt_reasoning_continuation: true,
@@ -12735,6 +12741,7 @@ async fn prompt_only_compaction_does_not_trigger_gpt_reasoning_continuation() {
 
 #[tokio::test]
 async fn continue_thinking_respects_configured_max_rounds() {
+    let _lock = settings_path_test_lock().lock().unwrap();
     let server =
         spawn_chat_server_with_response(responses_sse_with_reasoning("resp_continue_one", 516));
     let settings = BackendSettings {
@@ -15049,6 +15056,13 @@ mod post_compaction_boundaries {
             ]);
             source["tool_choice"] =
                 json!({"type": "function", "namespace": "files", "name": "read"});
+            source["text"] = json!({
+                "format":{
+                    "type":"json_schema",
+                    "name":"answer",
+                    "schema":{"type":"object"}
+                }
+            });
             for anthropic in [false, true] {
                 let wire = convert(&source, anthropic);
                 assert_eq!(wire["tools"].as_array().unwrap().len(), 2);
@@ -15063,7 +15077,7 @@ mod post_compaction_boundaries {
     }
 
     #[test]
-    fn compaction_retained_round_keeps_dynamic_tool_choice_and_system_prefix() {
+    fn compaction_retained_round_keeps_dynamic_tools_and_disables_forced_choice() {
         for kind in ["additional_tools", "tool_search_output"] {
             let mut source = request(vec![
                 marker(),
@@ -15079,6 +15093,13 @@ mod post_compaction_boundaries {
             ]);
             source["tool_choice"] =
                 json!({"type": "function", "namespace": "files", "name": "read"});
+            source["text"] = json!({
+                "format":{
+                    "type":"json_schema",
+                    "name":"answer",
+                    "schema":{"type":"object"}
+                }
+            });
             for anthropic in [false, true] {
                 let ordinary = convert(&source, anthropic);
                 let mut compact = source.clone();
@@ -15098,8 +15119,20 @@ mod post_compaction_boundaries {
                 );
                 let wire = convert(&prepared, anthropic);
                 assert_eq!(wire["tools"], ordinary["tools"]);
-                assert_eq!(wire["tool_choice"], ordinary["tool_choice"]);
+                assert_eq!(
+                    wire["tool_choice"],
+                    if anthropic {
+                        json!({"type":"none"})
+                    } else {
+                        json!("none")
+                    }
+                );
                 assert_eq!(wire["system"], ordinary["system"]);
+                if anthropic {
+                    assert!(wire.pointer("/output_config/format").is_none());
+                } else {
+                    assert_eq!(wire["response_format"], json!({"type":"text"}));
+                }
                 assert!(wire.to_string().contains("TAIL_SYSTEM_RULE"));
                 assert!(!wire.to_string().contains("current task"));
                 assert!(!wire.to_string().contains("previous answer"));
@@ -15108,7 +15141,7 @@ mod post_compaction_boundaries {
     }
 
     #[test]
-    fn compaction_retry_and_codex_local_do_not_restore_dynamic_tools() {
+    fn compaction_first_attempt_and_retry_preserve_dynamic_tools() {
         for structured in [false, true] {
             let tools = vec![
                 declaration("additional_tools", "files", "read"),
@@ -15126,24 +15159,19 @@ mod post_compaction_boundaries {
             };
             input.extend([user("current task"), user(COMPACTION_PROMPT_PREFIX)]);
             let source = request(input);
-            for (route, attempt) in [
-                (CompactionRoute::CacheReuse, CompactionAttempt::Retry),
-                (CompactionRoute::CodexLocal, CompactionAttempt::First),
-            ] {
+            for attempt in CompactionAttempt::ALL {
                 let prepared = prepare_compaction_attempt_request(
                     &source,
                     CompactionKind::Legacy,
-                    route,
+                    CompactionRoute::CacheReuse,
                     &CompactionOptions::default(),
                     attempt,
                 );
                 for anthropic in [false, true] {
                     let wire = convert(&prepared, anthropic);
-                    assert!(
-                        wire.get("tools").is_none(),
-                        "unexpected tools: {}",
-                        wire["tools"]
-                    );
+                    let ordinary = convert(&source, anthropic);
+                    assert_eq!(wire["tools"], ordinary["tools"]);
+                    assert_eq!(wire["system"], ordinary["system"]);
                     assert!(wire.to_string().contains("current task"));
                 }
             }
@@ -15525,6 +15553,7 @@ fn write_anthropic_sonnet5_relay_settings(settings_dir: &Path, base_url: &str) {
 
 struct SettingsPathGuard {
     previous: Option<PathBuf>,
+    previous_app_state: Option<PathBuf>,
 }
 
 fn settings_path_test_lock() -> &'static Mutex<()> {
@@ -15535,14 +15564,22 @@ fn settings_path_test_lock() -> &'static Mutex<()> {
 
 impl SettingsPathGuard {
     fn set(path: PathBuf) -> Self {
+        let previous_app_state = codex_elves_core::paths::set_app_state_dir_for_tests(
+            path.parent().map(Path::to_path_buf),
+        );
         let previous = codex_elves_core::paths::set_settings_path_for_tests(Some(path));
-        Self { previous }
+        Self {
+            previous,
+            previous_app_state,
+        }
     }
 }
 
 impl Drop for SettingsPathGuard {
     fn drop(&mut self) {
+        let _ = codex_elves_core::proxy_log::flush_pending_records();
         codex_elves_core::paths::set_settings_path_for_tests(self.previous.take());
+        codex_elves_core::paths::set_app_state_dir_for_tests(self.previous_app_state.take());
     }
 }
 
@@ -16037,7 +16074,7 @@ async fn disabled_compaction_passes_responses_v2_through_and_does_not_emulate_ot
 async fn compaction_contract_http_retries_same_model_and_only_returns_validated_summary() {
     let _lock = settings_path_test_lock().lock().unwrap();
     use codex_elves_core::layered_compaction::{
-        COMPACTION_RETRY_SYSTEM_PROMPT, compaction_instruction,
+        COMPACTION_RETRY_INSTRUCTION, compaction_instruction,
     };
     for retain in [false, true] {
         for succeeds_on_retry in [false, true] {
@@ -16146,10 +16183,32 @@ async fn compaction_contract_http_retries_same_model_and_only_returns_validated_
                 );
             }
             assert_eq!(retry["model"], first["model"]);
-            assert_eq!(retry["messages"], first["messages"]);
-            assert_eq!(retry["system"], COMPACTION_RETRY_SYSTEM_PROMPT);
-            assert!(retry.get("tools").is_none());
-            assert!(retry.get("tool_choice").is_none());
+            for field in [
+                "system",
+                "tools",
+                "tool_choice",
+                "thinking",
+                "output_config",
+            ] {
+                assert_eq!(retry.get(field), first.get(field), "{field}");
+            }
+            let first_messages = first["messages"].as_array().unwrap();
+            let retry_messages = retry["messages"].as_array().unwrap();
+            assert_eq!(
+                &retry_messages[..first_messages.len() - 1],
+                &first_messages[..first_messages.len() - 1]
+            );
+            let first_content = first_messages.last().unwrap()["content"]
+                .as_array()
+                .unwrap();
+            let retry_content = retry_messages.last().unwrap()["content"]
+                .as_array()
+                .unwrap();
+            assert_eq!(&retry_content[..first_content.len()], first_content);
+            assert_eq!(
+                retry_content.last().unwrap()["text"],
+                COMPACTION_RETRY_INSTRUCTION
+            );
             assert!(first["messages"].to_string().contains(
                 &serde_json::to_string(&compaction_instruction("CUSTOM HANDOFF")).unwrap()
             ));

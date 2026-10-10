@@ -686,8 +686,27 @@ type LocalProxyStatusResult = CommandResult<{
   recentCount: number;
 }>;
 
+type LocalProxyRequestOutcome = "succeeded" | "failed" | "incomplete";
+
+type LocalProxyRequestAttempt = {
+  attempt: number;
+  model: string;
+  transport?: "http" | "ws" | null;
+  upstreamResponseModel?: string | null;
+  statusCode?: number | null;
+  outcome?: LocalProxyRequestOutcome | null;
+  errorCode?: string | null;
+  error?: string | null;
+};
+
 type LocalProxyLogEntry = {
   id: string;
+  outcome?: LocalProxyRequestOutcome | null;
+  upstreamStatusCode?: number | null;
+  errorCode?: string | null;
+  upstreamAttempts?: LocalProxyRequestAttempt[] | null;
+  threadId?: string | null;
+  turnId?: string | null;
   state?: "pending" | "completed" | null;
   transport?: "http" | "ws" | null;
   timestampMs: number;
@@ -1530,25 +1549,49 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
   return Array.from({ length: 23 }, (_, index) => {
     const protocol = protocols[index % protocols.length];
     const model = index === 2 ? "gpt-6-astra" : models[index % models.length];
-    const success = index % 7 !== 5;
+    const failedCompaction = index === 6;
+    const success = index % 7 !== 5 && !failedCompaction;
+    const legacy = index === 8;
+    const pending = index === 9;
+    const transport = index === 5 ? "ws" : "http";
+    const outcome: LocalProxyRequestOutcome | null = legacy || pending ? null : index === 7 ? "incomplete" : success ? "succeeded" : "failed";
     const continueThinkingTriggered = protocol === "responses" && index === 0;
     const layeredCompactionTriggered = index === 1;
     const remoteCompactionTriggered = index === 4;
+    const upstreamRequestModel = index === 1 || failedCompaction ? "deepseek-v4.1-flash" : index === 3 ? "gpt-5.4-mini" : model;
     const reasoningTokens = continueThinkingTriggered ? 2376 : browserPreviewReasoningTokens(index);
     return {
       id: `ppx-preview-${23 - index}`,
+      state: pending ? "pending" : "completed",
+      transport,
+      outcome,
+      upstreamStatusCode: legacy || transport === "ws" ? null : success || failedCompaction ? 200 : 502,
+      errorCode: failedCompaction ? "layered_compaction_summary_tag_missing" : index === 7 ? "max_output_tokens" : null,
+      threadId: legacy ? null : "thread-preview-log",
+      turnId: legacy ? null : `turn-preview-${Math.floor(index / 2)}`,
+      upstreamAttempts: legacy ? [] : failedCompaction || index === 1
+        ? [1, 2].map((attempt) => ({
+            attempt, model: "deepseek-v4.1-flash", transport: "http" as const,
+            upstreamResponseModel: "deepseek-v4.1-flash", statusCode: 200,
+            outcome: failedCompaction || attempt === 1 ? "failed" as const : "succeeded" as const,
+            errorCode: failedCompaction || attempt === 1 ? "layered_compaction_summary_tag_missing" : null,
+            error: failedCompaction || attempt === 1 ? "摘要缺少必要标记" : null,
+          }))
+        : [{
+            attempt: 1, model: upstreamRequestModel, transport, statusCode: transport === "ws" ? null : success ? 200 : 502,
+            outcome, error: success ? null : "上游连接断开",
+          }],
       timestampMs: Date.now() - ((index + 1) * 41000),
-      method: "POST",
+      method: transport === "ws" ? "WS" : "POST",
       path: protocol === "chat_completions" ? "/v1/chat/completions" : "/v1/responses",
       remoteAddr: `127.0.0.1:${54624 + index}`,
       model,
-      upstreamRequestModel:
-        index === 1 ? "deepseek-v4.1-flash" : index === 3 ? "gpt-5.4-mini" : model,
+      upstreamRequestModel,
       upstreamResponseModel: index === 2 ? "gpt-5.6-luna" : null,
       independentCompactionModel:
-        index === 1 ? "deepseek-v4.1-flash" : index === 3 ? "gpt-5.4-mini" : null,
+        index === 1 || failedCompaction ? "deepseek-v4.1-flash" : index === 3 ? "gpt-5.4-mini" : null,
       independentCompactionUsage:
-        index === 1 ? "cacheMiss" : index === 3 ? "default" : null,
+        index === 1 || failedCompaction ? "cacheMiss" : index === 3 ? "default" : null,
       cacheMissCompactionModel: null,
       reasoningTokens,
       outputTokens: success ? Math.round(browserPreviewDurationMs(index) * (40 + index % 4 * 5) / 1000) : null,
@@ -1558,7 +1601,7 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
       continueThinkingRounds: continueThinkingTriggered ? 2 : 0,
       remoteCompactionTriggered,
       compactionRequested:
-        layeredCompactionTriggered || remoteCompactionTriggered || index === 2 || index === 3,
+        layeredCompactionTriggered || remoteCompactionTriggered || failedCompaction || index === 2 || index === 3,
       layeredCompactionTriggered,
       layeredCompactionRetainTokens: layeredCompactionTriggered ? 20000 : null,
       layeredCompactionRetainedItems: layeredCompactionTriggered ? 6 : null,
@@ -1573,15 +1616,15 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
             ? "https://api.vendor.example/v1/chat/completions"
             : "https://api.vendor.example/v1/responses",
       responseProtocol: protocol,
-      statusCode: success ? 200 : 502,
+      statusCode: success || failedCompaction ? 200 : transport === "ws" ? 500 : 502,
       firstTokenMs: browserPreviewFirstTokenMs(index),
-      durationMs: browserPreviewDurationMs(index),
+      durationMs: pending ? null : browserPreviewDurationMs(index),
       stream: index % 2 === 0,
       requestBytes: 2800 + index * 173,
       responseBytes: 5400 + index * 241,
       responseCapturedBytes: 5400 + index * 241,
       responseTruncated: index === 8,
-      error: success ? null : "上游连接断开",
+      error: failedCompaction ? "摘要缺少必要标记" : success ? null : "上游连接断开",
     };
   });
 }
@@ -1642,7 +1685,17 @@ function browserPreviewLocalProxyDetail(id: string): LocalProxyLogDetail | null 
       null,
       2,
     ),
-    responseBody: entry.remoteCompactionTriggered
+    responseBody: entry.state === "pending" ? "" : entry.outcome === "failed"
+      ? JSON.stringify({
+          type: "response.failed",
+          response: {
+            id: entry.id, status: "failed",
+            error: { code: entry.errorCode || "upstream_error", message: entry.error },
+          },
+        }, null, 2)
+      : entry.outcome === "incomplete"
+        ? JSON.stringify({ status: "incomplete", incomplete_details: { reason: entry.errorCode }, usage: previewUsage }, null, 2)
+      : entry.remoteCompactionTriggered
       ? JSON.stringify(
           {
             id: entry.id,
@@ -4976,8 +5029,11 @@ function LocalProxyScreen({
                         ) : null}
                       </small>
                     </span>
-                    <span className={localProxyStatusCodeClass(entry)}>
-                      {formatLocalProxyStatusCode(entry)}
+                    <span className="proxy-log-status" title={entry.error || entry.errorCode || undefined}>
+                      <strong className={localProxyStatusCodeClass(entry)}>
+                        {formatLocalProxyStatusCode(entry)}
+                      </strong>
+                      {localProxyFailureReason(entry) ? <small>{localProxyFailureReason(entry)}</small> : null}
                     </span>
                     <span
                       className="proxy-log-duration proxy-log-latency"
@@ -5163,8 +5219,35 @@ function LocalProxyLogDetailDialog({
             <span>返回 {formatOptionalBytes(entry.responseBytes)}</span>
             <span>{entry.stream ? "流式" : "非流式"}</span>
             {entry.responseTruncated ? <span>返回内容已截断</span> : null}
-            {entry.error ? <span>{entry.error}</span> : null}
           </div>
+          <div className="proxy-detail-audit" aria-label="请求结果记录">
+            <span>上游原始 HTTP 状态：{formatUpstreamStatusCode(entry)}</span>
+            <span>{entry.method === "WS" ? "本地结果标记" : "代理返回 HTTP 状态"}：{entry.statusCode ?? "未记录"}</span>
+            <span>实际请求模型：{entry.upstreamRequestModel || "未记录"}</span>
+            <span>上游响应模型：{entry.upstreamResponseModel || "未记录"}</span>
+            <span>会话：{entry.threadId || "未记录"}</span>
+            <span>轮次：{entry.turnId || "未记录"}</span>
+            {localProxyFailureReason(entry) ? (
+              <span className="proxy-detail-failure" title={entry.error || undefined}>
+                原因：{localProxyFailureReason(entry)}{entry.errorCode ? `（${entry.errorCode}）` : ""}
+              </span>
+            ) : null}
+          </div>
+          <details className="proxy-detail-attempts">
+            <summary>上游尝试（{entry.upstreamAttempts?.length ? `${entry.upstreamAttempts.length} 次` : "未记录"}）</summary>
+            {entry.upstreamAttempts?.length ? entry.upstreamAttempts.map((attempt) => (
+              <div className="proxy-detail-attempt" key={attempt.attempt}>
+                <strong>第 {attempt.attempt} 次 · {formatRequestOutcome(attempt.outcome)}</strong>
+                <span>请求模型：{attempt.model || "未记录"} · 响应模型：{attempt.upstreamResponseModel || "未记录"}</span>
+                <span>上游 HTTP 状态：{attempt.transport === "ws" ? "不适用（WS）" : attempt.statusCode ?? "未记录"}</span>
+                {attempt.error || attempt.errorCode ? (
+                  <span className="proxy-detail-failure">
+                    原因：{proxyFailureReason(attempt) || "未记录"}{attempt.errorCode ? `（${attempt.errorCode}）` : ""}
+                  </span>
+                ) : null}
+              </div>
+            )) : <p>旧日志或未发送上游的请求可能没有尝试记录，不据代理状态反推上游状态。</p>}
+          </details>
           {entry.remoteCompactionTriggered ? (
             <div className="proxy-detail-meta proxy-layered-compaction-meta proxy-remote-compaction-meta">
               <span>
@@ -6219,11 +6302,12 @@ function SessionsScreen({
       { value: "", label: "使用会话原模型（不覆盖）" },
       ...relayProfileCatalogModels(profile).map((model) => {
         const contextWindow = relayProfileContextWindowForModel(profile, model);
+        const protocol = relayProfileProtocolForCatalogModel(profile, model);
         return {
           value: model,
           label: contextWindow
-            ? `${model} · ${formatContextWindowCompact(contextWindow)}`
-            : `${model} · 容量未知`,
+            ? `${model} · ${relayProtocolLabel(protocol)} · ${formatContextWindowCompact(contextWindow)}`
+            : `${model} · ${relayProtocolLabel(protocol)} · 容量未知`,
         };
       }),
     ];
@@ -6254,8 +6338,8 @@ function SessionsScreen({
   }, [form]);
   const compactionModelUsageDescription =
     form.layeredCompactionModelUsage === "default"
-      ? "仅本地压缩生效：每次本地压缩默认使用这里选择的模型；未设置或配置无效的会话家族会使用会话原模型。原生 Remote Compaction V2 始终使用会话原模型。"
-      : "仅本地压缩生效：缓存租约有效时使用会话原模型复用缓存；缓存租约过期或未知时使用这里选择的模型。未设置或配置无效的会话家族会使用会话原模型。原生 Remote Compaction V2 始终使用会话原模型。";
+      ? "仅本地压缩生效：每次本地压缩默认使用这里选择的模型；WebSocket 会话选择其他协议模型时自动切换 HTTP 执行。未设置或配置无效的会话家族会使用会话原模型。原生 Remote Compaction V2 始终使用会话原模型。"
+      : "仅本地压缩生效：缓存租约有效时使用会话原模型复用缓存；缓存租约过期或未知时使用这里选择的模型。WebSocket 会话选择其他协议模型时自动切换 HTTP 执行。未设置或配置无效的会话家族会使用会话原模型。原生 Remote Compaction V2 始终使用会话原模型。";
 
   // 项目（cwd）筛选选项：去重后的项目路径列表，附带会话数量
   const projectOptions = useMemo(() => {
@@ -11874,6 +11958,8 @@ function requestOutputRate(entry: LocalProxyLogEntry) {
   const duration = entry.durationMs;
   if (
     entry.state === "pending" ||
+    entry.outcome === "failed" ||
+    entry.outcome === "incomplete" ||
     entry.error ||
     typeof entry.statusCode !== "number" ||
     entry.statusCode < 200 ||
@@ -12031,14 +12117,52 @@ function isSlowRequestDuration(value?: number | null) {
   return typeof value === "number" && value >= 60000;
 }
 
-function localProxyStatusCodeClass(entry: Pick<LocalProxyLogEntry, "state" | "statusCode">) {
-  const statusCode = entry.statusCode;
-  if (typeof statusCode !== "number") return "proxy-code pending";
-  return typeof statusCode === "number" && statusCode >= 200 && statusCode < 300 ? "proxy-code ok" : "proxy-code bad";
+function localProxyOutcome(entry: LocalProxyLogEntry): LocalProxyRequestOutcome | null {
+  if (entry.state === "pending") return null;
+  if (entry.statusCode === 499) return "incomplete";
+  if (entry.error || (typeof entry.statusCode === "number" && (entry.statusCode < 200 || entry.statusCode >= 300))) return "failed";
+  return entry.outcome ?? null;
 }
 
-function formatLocalProxyStatusCode(entry: Pick<LocalProxyLogEntry, "state" | "statusCode">) {
-  return typeof entry.statusCode === "number" ? String(entry.statusCode) : "-";
+function formatRequestOutcome(outcome?: LocalProxyRequestOutcome | null) {
+  return outcome === "succeeded" ? "成功" : outcome === "failed" ? "失败" : outcome === "incomplete" ? "未完成" : "结果未记录";
+}
+
+function localProxyStatusCodeClass(entry: LocalProxyLogEntry) {
+  const outcome = localProxyOutcome(entry);
+  return outcome === "succeeded" ? "proxy-code ok" : outcome === "failed" ? "proxy-code bad" : "proxy-code pending";
+}
+
+function formatLocalProxyStatusCode(entry: LocalProxyLogEntry) {
+  const outcome = localProxyOutcome(entry);
+  const result = entry.state === "pending" ? "进行中"
+    : outcome === "failed" && (entry.compactionRequested || entry.remoteCompactionTriggered || entry.layeredCompactionTriggered)
+      ? "压缩失败" : formatRequestOutcome(outcome);
+  const status = entry.method === "WS" ? "WS" : `HTTP ${entry.statusCode ?? "未记录"}`;
+  return `${result} · ${status}`;
+}
+
+function formatUpstreamStatusCode(entry: LocalProxyLogEntry) {
+  if (typeof entry.upstreamStatusCode === "number") return String(entry.upstreamStatusCode);
+  return entry.upstreamAttempts?.at(-1)?.transport === "ws" ? "不适用（WS）" : "未记录";
+}
+
+function localProxyFailureReason(entry: LocalProxyLogEntry) {
+  const outcome = localProxyOutcome(entry);
+  if (outcome !== "failed" && outcome !== "incomplete") return "";
+  return proxyFailureReason(entry) || (outcome === "incomplete" ? "响应未完成" : "失败原因未记录");
+}
+
+function proxyFailureReason(entry: Pick<LocalProxyLogEntry, "errorCode" | "error">) {
+  const code = entry.errorCode || "";
+  if (code.endsWith("_summary_tag_missing")) return "摘要缺少 <summary> 标记";
+  if (code.endsWith("_summary_empty")) return "摘要为空";
+  if (code.endsWith("_no_terminal_response")) return "未收到完整响应";
+  if (code.endsWith("_not_completed")) return "上游响应未完成";
+  if (code.endsWith("_tool_call_output")) return "压缩结果包含工具调用";
+  if (code === "max_output_tokens") return "输出达到上限";
+  if (/^upstream_http_\d{3}$/.test(code)) return `上游返回 HTTP ${code.slice(-3)}`;
+  return entry.error || entry.errorCode || "";
 }
 
 function formatRequestLatencyTitle(entry: Pick<LocalProxyLogEntry, "firstTokenMs" | "durationMs">) {
@@ -12548,6 +12672,17 @@ function relayProfileRequestModelForCatalogModel(profile: RelayProfile, model: s
   if (!normalizedModel) return "";
   return relayProfileMappingForCatalogModel(profile, normalizedModel)?.requestModel.trim()
     || normalizedModel;
+}
+
+function relayProfileProtocolForCatalogModel(profile: RelayProfile, model: string): RelayProtocol {
+  const normalizedModel = model.trim();
+  const mapping = relayProfileMappingForCatalogModel(profile, normalizedModel);
+  if (mapping) return normalizeRelayProtocol(mapping.protocol);
+  if (splitRelayModelList(profile.responsesModelList).includes(normalizedModel)) return "responses";
+  if (splitRelayModelList(profile.chatCompletionsModelList).includes(normalizedModel)) return "chatCompletions";
+  if (splitRelayModelList(profile.anthropicModelList).includes(normalizedModel)) return "anthropic";
+  if (profile.model.trim() === normalizedModel) return normalizeRelayProtocol(profile.protocol);
+  return defaultProtocolForModel(relayProfileRequestModelForCatalogModel(profile, normalizedModel));
 }
 
 function relayProfileContextWindowForActiveModel(profile: RelayProfile): string {
