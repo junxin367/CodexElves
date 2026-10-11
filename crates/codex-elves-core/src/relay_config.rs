@@ -4977,6 +4977,73 @@ mod tests {
     }
 
     #[test]
+    fn generated_model_catalog_uses_swe_version_efforts_and_preserves_mapping_aliases() {
+        let profile = RelayProfile {
+            relay_mode: crate::settings::RelayMode::PureApi,
+            model_mappings: vec![
+                crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
+                    request_model: "swe-2".to_string(),
+                    alias: "devin-coding".to_string(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "200000".to_string(),
+                },
+                crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
+                    request_model: "devin/swe-1-7".to_string(),
+                    alias: "legacy-swe".to_string(),
+                    protocol: RelayProtocol::Anthropic,
+                    context_window: String::new(),
+                },
+                crate::settings::RelayModelMapping {
+                    system_prompt_override: String::new(),
+                    request_model: "swe".to_string(),
+                    alias: String::new(),
+                    protocol: RelayProtocol::ChatCompletions,
+                    context_window: String::new(),
+                },
+            ],
+            ..RelayProfile::default()
+        };
+        for (configured, swe2_default, swe17_default) in [
+            ("medium", "medium", "medium"),
+            ("high", "high", "medium"),
+            ("max", "max", "max"),
+            ("ultra", "max", "max"),
+        ] {
+            let rows = relay_profile_catalog_rows(&profile).unwrap();
+            let catalog = generated_model_catalog_json(
+                &profile,
+                &format!("model_reasoning_effort = \"{configured}\""),
+                rows,
+            )
+            .unwrap();
+            let models = catalog["models"].as_array().unwrap();
+            for (slug, expected, default) in [
+                ("devin-coding", vec!["medium", "high", "max"], swe2_default),
+                ("legacy-swe", vec!["medium", "max"], swe17_default),
+                ("swe", vec!["medium", "high", "max"], swe2_default),
+            ] {
+                let model = models.iter().find(|model| model["slug"] == slug).unwrap();
+                let efforts: Vec<_> = model["supported_reasoning_levels"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|level| level["effort"].as_str().unwrap())
+                    .collect();
+                assert_eq!(efforts, expected, "{slug}");
+                assert_eq!(model["default_reasoning_level"], default, "{slug}");
+            }
+            let swe2 = models
+                .iter()
+                .find(|model| model["slug"] == "devin-coding")
+                .unwrap();
+            assert_eq!(swe2["description"], "swe-2");
+            assert_eq!(swe2["context_window"], 200000);
+        }
+    }
+
+    #[test]
     fn generated_model_catalog_rejects_conflicting_model_protocols() {
         let profile = RelayProfile {
             model_mappings: vec![

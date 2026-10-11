@@ -5570,7 +5570,7 @@ pub(crate) fn normalize_native_responses_request(request_json: &Value) -> Value 
     if let Some(object) = request.as_object_mut() {
         object.remove("codex_elves_compat");
     }
-    clamp_native_gpt_reasoning_effort(&mut request);
+    clamp_native_model_reasoning_effort(&mut request);
     let Some(input) = request.get_mut("input").and_then(Value::as_array_mut) else {
         return request;
     };
@@ -5641,7 +5641,7 @@ pub(crate) fn normalize_native_responses_request(request_json: &Value) -> Value 
     request
 }
 
-fn clamp_native_gpt_reasoning_effort(request: &mut Value) {
+fn clamp_native_model_reasoning_effort(request: &mut Value) {
     let model = request
         .get("model")
         .and_then(Value::as_str)
@@ -5653,7 +5653,7 @@ fn clamp_native_gpt_reasoning_effort(request: &mut Value) {
         .next()
         .filter(|value| !value.is_empty())
         .unwrap_or(model.as_str());
-    if !model.starts_with("gpt-") {
+    if !model.starts_with("gpt-") && swe_reasoning_efforts(model).is_none() {
         return;
     }
 
@@ -5662,21 +5662,21 @@ fn clamp_native_gpt_reasoning_effort(request: &mut Value) {
     let supported =
         supported_reasoning_efforts_for_model(model, UpstreamResponseProtocol::Responses);
     if let Some(effort) = request.pointer_mut("/reasoning/effort") {
-        clamp_gpt_reasoning_effort_value(effort, &supported);
+        clamp_native_reasoning_effort_value(effort, &supported);
     }
     for key in ["model_reasoning_effort", "reasoning_effort"] {
         if let Some(effort) = request.get_mut(key) {
-            clamp_gpt_reasoning_effort_value(effort, &supported);
+            clamp_native_reasoning_effort_value(effort, &supported);
         }
     }
     if request.get("reasoning").is_some_and(Value::is_string)
         && let Some(effort) = request.get_mut("reasoning")
     {
-        clamp_gpt_reasoning_effort_value(effort, &supported);
+        clamp_native_reasoning_effort_value(effort, &supported);
     }
 }
 
-fn clamp_gpt_reasoning_effort_value(value: &mut Value, supported: &[&'static str]) {
+fn clamp_native_reasoning_effort_value(value: &mut Value, supported: &[&'static str]) {
     let Some(requested) = value
         .as_str()
         .map(|effort| effort.trim().to_ascii_lowercase())
@@ -5699,6 +5699,7 @@ fn clamp_gpt_reasoning_effort_value(value: &mut Value, supported: &[&'static str
         .copied()
         .filter(|effort| effort_rank(effort).is_some_and(|rank| rank <= requested_rank))
         .max_by_key(|effort| effort_rank(effort).unwrap_or(0))
+        .or_else(|| supported.first().copied())
     {
         *value = json!(clamped);
     }
@@ -13429,6 +13430,9 @@ fn default_anthropic_reasoning_effort(model: &str) -> &'static str {
     if lower.contains("deepseek") || is_glm_reasoning_model(&lower) {
         return "max";
     }
+    if swe_reasoning_efforts(&lower).is_some_and(|efforts| !efforts.contains(&"high")) {
+        return "medium";
+    }
     ANTHROPIC_DEFAULT_REASONING_EFFORT
 }
 
@@ -13556,6 +13560,9 @@ pub fn supported_reasoning_efforts_for_model(
     if model.contains("claude") {
         return claude_reasoning_efforts(&model);
     }
+    if let Some(efforts) = swe_reasoning_efforts(&model) {
+        return efforts;
+    }
 
     if model.contains("gpt-") {
         return gpt_reasoning_efforts(&model);
@@ -13598,6 +13605,22 @@ pub fn supported_reasoning_efforts_for_model(
 
 fn levels(values: &[&'static str]) -> Vec<&'static str> {
     values.to_vec()
+}
+
+fn swe_reasoning_efforts(model: &str) -> Option<Vec<&'static str>> {
+    let normalized = model.trim().to_ascii_lowercase();
+    let slug = normalized.rsplit('/').next().unwrap_or(&normalized);
+    if slug == "swe" {
+        return Some(levels(&["medium", "high", "max"]));
+    }
+    if !slug.starts_with("swe-") {
+        return None;
+    }
+    match model_family_version(slug, "swe") {
+        Some((major, _)) if major >= 2 => Some(levels(&["medium", "high", "max"])),
+        Some((1, 7)) => Some(levels(&["medium", "max"])),
+        _ => None,
+    }
 }
 
 /// 按 Claude 家族与版本号推导思考深度能力，避免新模型（如 claude-opus-5）
@@ -13723,9 +13746,18 @@ fn clamp_reasoning_effort_for_model(
         return Some(effort);
     }
     let requested_index = reasoning_effort_index(effort)?;
-    supported.into_iter().rev().find(|candidate| {
-        reasoning_effort_index(candidate).is_some_and(|index| index <= requested_index)
-    })
+    let minimum = if swe_reasoning_efforts(model).is_some() {
+        supported.first().copied()
+    } else {
+        None
+    };
+    supported
+        .into_iter()
+        .rev()
+        .find(|candidate| {
+            reasoning_effort_index(candidate).is_some_and(|index| index <= requested_index)
+        })
+        .or(minimum)
 }
 
 fn normalize_reasoning_effort(effort: &str) -> Option<&'static str> {
@@ -13974,6 +14006,7 @@ fn supports_chat_reasoning_effort(model: &str) -> bool {
             .is_some_and(|ch| ch.is_ascii_digit() && ch >= '5')
         || infer_chat_reasoning_style(model) == ChatReasoningStyle::DeepSeek
         || is_glm_reasoning_model(model)
+        || swe_reasoning_efforts(model).is_some()
         || infer_chat_reasoning_style(model) == ChatReasoningStyle::LowHigh
 }
 

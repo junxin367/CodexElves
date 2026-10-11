@@ -7323,6 +7323,119 @@ fn non_claude_anthropic_compatible_reasoning_keeps_effort_by_model_capability() 
 }
 
 #[test]
+fn swe_reasoning_efforts_match_supported_versions() {
+    for protocol in [
+        UpstreamResponseProtocol::Responses,
+        UpstreamResponseProtocol::ChatCompletions,
+        UpstreamResponseProtocol::Anthropic,
+    ] {
+        for model in [
+            "swe",
+            "swe-2",
+            "swe-2.0",
+            "cognition/swe-2",
+            " Devin/SWE-2 ",
+            "swe-2-20261001",
+        ] {
+            assert_eq!(
+                supported_reasoning_efforts_for_model(model, protocol),
+                vec!["medium", "high", "max"],
+                "{model} {protocol:?}"
+            );
+        }
+        for model in ["swe-1.7", "swe-1-7", "devin/swe-1-7", "swe-1.7-lightning"] {
+            assert_eq!(
+                supported_reasoning_efforts_for_model(model, protocol),
+                vec!["medium", "max"],
+                "{model} {protocol:?}"
+            );
+        }
+        for model in ["sweep-2", "swe-grep", "swe-check", "vendor/not-swe-2"] {
+            assert_eq!(
+                supported_reasoning_efforts_for_model(model, protocol),
+                supported_reasoning_efforts_for_model("unknown-model", protocol),
+                "{model} 不能误判为 SWE 推理模型"
+            );
+        }
+    }
+}
+
+#[test]
+fn swe_reasoning_efforts_survive_protocol_conversion() {
+    for (model, efforts) in [
+        ("swe", vec!["medium", "high", "max"]),
+        ("devin/swe-2", vec!["medium", "high", "max"]),
+        ("swe-1.7", vec!["medium", "max"]),
+    ] {
+        for effort in efforts {
+            for reasoning in [
+                json!({ "reasoning": { "effort": effort } }),
+                json!({ "model_reasoning_effort": effort }),
+                json!({ "reasoning_effort": effort }),
+                json!({ "reasoning": format!(" {} ", effort.to_uppercase()) }),
+            ] {
+                let mut request = json!({ "model": model, "input": "hi" });
+                request
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(reasoning.as_object().unwrap().clone());
+                let chat = responses_to_chat_completions(request.clone()).unwrap();
+                assert_eq!(chat["model"], model);
+                assert_eq!(chat["reasoning_effort"], effort, "{request}");
+                let anthropic = responses_to_anthropic_messages(request.clone()).unwrap();
+                assert_eq!(anthropic["model"], model);
+                assert_eq!(anthropic["thinking"], json!({ "type": "adaptive" }));
+                assert_eq!(anthropic["output_config"]["effort"], effort, "{request}");
+            }
+        }
+    }
+}
+
+#[test]
+fn swe_reasoning_clamps_unsupported_levels_to_supported_efforts() {
+    for (model, requested, expected) in [
+        ("swe-2", "low", "medium"),
+        ("swe-2", "xhigh", "high"),
+        ("swe-2", "ultra", "max"),
+        ("swe-1.7", "low", "medium"),
+        ("swe-1.7", "high", "medium"),
+        ("swe-1.7", "xhigh", "medium"),
+        ("swe-1.7", "ultra", "max"),
+    ] {
+        let request = json!({
+            "model": model,
+            "reasoning": { "effort": requested },
+            "input": "hi"
+        });
+        let chat = responses_to_chat_completions(request.clone()).unwrap();
+        assert_eq!(chat["reasoning_effort"], expected, "{request}");
+        let anthropic = responses_to_anthropic_messages(request.clone()).unwrap();
+        assert_eq!(anthropic["output_config"]["effort"], expected, "{request}");
+    }
+}
+
+#[test]
+fn swe_reasoning_defaults_and_disabled_requests_remain_supported() {
+    for (model, expected_default) in [("swe-2", "high"), ("swe-1.7", "medium")] {
+        let default =
+            responses_to_anthropic_messages(json!({ "model": model, "input": "hi" })).unwrap();
+        assert_eq!(default["output_config"]["effort"], expected_default);
+        for effort in ["none", "off", "disabled"] {
+            let request = json!({
+                "model": model,
+                "reasoning": { "effort": effort },
+                "input": "hi"
+            });
+            let chat = responses_to_chat_completions(request.clone()).unwrap();
+            assert!(chat.get("reasoning_effort").is_none());
+            let anthropic = responses_to_anthropic_messages(request).unwrap();
+            assert_eq!(anthropic["thinking"], json!({ "type": "disabled" }));
+            assert!(anthropic.get("output_config").is_none());
+        }
+    }
+}
+
+#[test]
 fn deepseek_reasoning_efforts_match_official_levels() {
     assert_eq!(
         supported_reasoning_efforts_for_model(
@@ -13099,6 +13212,69 @@ async fn responses_proxy_legacy_ambiguous_alias_prefers_legacy_request_model() {
     assert_eq!(request.path, "/v1/responses");
     let body: Value = serde_json::from_str(&request.body).unwrap();
     assert_eq!(body["model"], "model-b");
+}
+
+#[tokio::test]
+async fn swe_native_responses_preserve_protocol_and_supported_efforts() {
+    for (model, requested, expected) in [
+        ("swe-2", "medium", "medium"),
+        ("swe-2", "high", "high"),
+        ("swe-2", "max", "max"),
+        ("swe-2", "low", "medium"),
+        ("swe-2", "xhigh", "high"),
+        ("swe-2", "ultra", "max"),
+        ("devin/swe-1-7", "medium", "medium"),
+        ("devin/swe-1-7", "max", "max"),
+        ("devin/swe-1-7", "high", "medium"),
+    ] {
+        let server = spawn_chat_server();
+        let settings = BackendSettings {
+            active_relay_id: "swe-native".to_string(),
+            relay_profiles: vec![RelayProfile {
+                id: "swe-native".to_string(),
+                name: "SWE".to_string(),
+                base_url: server.base_url.clone(),
+                upstream_base_url: server.base_url.clone(),
+                api_key: "sk-test".to_string(),
+                relay_mode: RelayMode::PureApi,
+                protocol: RelayProtocol::Responses,
+                model: model.to_string(),
+                model_mappings: vec![RelayModelMapping {
+                    system_prompt_override: String::new(),
+                    request_model: model.to_string(),
+                    alias: String::new(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: String::new(),
+                }],
+                ..RelayProfile::default()
+            }],
+            ..BackendSettings::default()
+        };
+        let request = json!({
+            "model": model,
+            "input": "hello",
+            "stream": false,
+            "reasoning": { "effort": requested },
+            "model_reasoning_effort": requested,
+            "reasoning_effort": requested,
+        });
+        let upstream = open_responses_proxy_request_with_settings(&request.to_string(), settings)
+            .await
+            .unwrap();
+        assert_eq!(
+            upstream.response_protocol,
+            UpstreamResponseProtocol::Responses
+        );
+        let captured = server.finish();
+        assert_eq!(captured.path, "/v1/responses");
+        let body: Value = serde_json::from_str(&captured.body).unwrap();
+        assert_eq!(body["model"], model);
+        assert_eq!(body["reasoning"]["effort"], expected);
+        assert_eq!(body["model_reasoning_effort"], expected);
+        assert_eq!(body["reasoning_effort"], expected);
+        assert_eq!(body["input"], "hello");
+        assert!(body.get("messages").is_none());
+    }
 }
 
 #[tokio::test]
