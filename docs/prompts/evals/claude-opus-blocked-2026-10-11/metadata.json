@@ -1,0 +1,13 @@
+{
+  "date": "2026-10-11",
+  "model": "devin/claude-opus-5-5",
+  "effort": "xhigh",
+  "cli_version": "codex-cli 0.162.0-alpha.2",
+  "old_sha256": "4204a5bda7d89a5b475e24d110c2da7ce96fa26c7dee7f54046ca01e48a8723e",
+  "new_sha256": "9b6799e0dbd8178e140936ac2cb15051b940cae702ac2302a8bf6fa78e95d0bd",
+  "old_chars": 9837,
+  "new_chars": 12281,
+  "arm_mode": "Replace instructions and remove system/developer input, as protocol_proxy.rs does.",
+  "upstream": "https://cpahd.faibak.com/v1/responses (bypasses the local proxy so its live override does not mask the arm)",
+  "sandbox": "workspace-write, approval_policy=never, windows.sandbox=unelevated"
+}
