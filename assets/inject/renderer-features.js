@@ -28,7 +28,7 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "94";
+  const codexDeleteStyleVersion = "97";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
@@ -42,7 +42,7 @@
   const codexThreadServiceTierVersion = "1";
   const codexServiceTierBadgeClass = "codex-service-tier-badge";
   const codexLegacyServiceTierComposerSurfaceClass = "codex-elves-service-tier-composer-surface";
-  const codexServiceTierBadgeVersion = "6";
+  const codexServiceTierBadgeVersion = "7";
   const codexServiceTierBadgePlacementGraceMs = 1200;
   const codexServiceTierBadgeRetryMaxAttempts = 8;
   const codexServiceTierBadgeRetryMaxDelayMs = 1000;
@@ -5485,12 +5485,17 @@
   function refreshCodexServiceTierBadges() {
     const state = codexServiceTierBadgeState();
     document.querySelectorAll(`[data-codex-service-tier-badge="true"]`).forEach((node) => {
+      const labelChanged = node.textContent !== state.label;
       node.dataset.tier = state.tier;
       node.dataset.disabled = String(!!state.disabled);
       node.textContent = state.label;
       node.removeAttribute("data-codex-tooltip");
       node.setAttribute("title", state.title);
       node.setAttribute("aria-label", state.title);
+      if (labelChanged) {
+        node.style.visibility = "hidden";
+        scheduleCodexServiceTierBadgeLayout();
+      }
     });
   }
 
@@ -9528,6 +9533,11 @@
       badge.style.cssText = "display:inline-flex;align-items:center;flex-shrink:0;font-size:10px;line-height:18px;padding:0 5px;border-radius:4px;margin-inline-start:6px;white-space:nowrap;pointer-events:auto;";
       host.appendChild(badge);
     }
+    if (current && host.firstElementChild !== badge) {
+      badge.style.marginInlineStart = "0";
+      badge.style.marginInlineEnd = "6px";
+      host.prepend(badge);
+    }
     const waiting = state.mode !== "ws";
     const seconds = Math.max(0, Math.ceil((Number(state.nextProbeAtMs || 0) - Date.now()) / 1000));
     const text = state.mode === "probing"
@@ -9535,10 +9545,12 @@
       : waiting ? `HTTP · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`
       : "上游 WS";
     if (badge.textContent !== text) badge.textContent = text;
-    if (badge.dataset.transportMode !== state.mode) {
+    const color = waiting ? "#b97712"
+      : getComputedStyle(host.querySelector("[data-codex-elves-trigger-label]") || host).color;
+    if (badge.dataset.transportMode !== state.mode || (!waiting && badge.style.color !== color)) {
       badge.dataset.transportMode = state.mode;
       badge.style.background = waiting ? "rgba(217,119,6,.14)" : "rgba(22,163,74,.12)";
-      badge.style.color = waiting ? "#b97712" : "var(--text-secondary, #6b7280)";
+      badge.style.color = color;
     }
     const title = waiting
       ? `当前会话上游已回退 HTTP，每 3 分钟尝试恢复 WS。\n${state.reason || ""}`
@@ -25773,7 +25785,7 @@
     if (!legacyModuleFooter && !composerLayoutFooter) return false;
     if (legacyModuleFooter && !className.includes("items-center")) return false;
     const rect = footer.getBoundingClientRect();
-    if (rect.width < 220 || rect.height > 90) return false;
+    if (rect.width < 220 || (rect.height > 90 && !footer.matches?.("[data-composer-footer-responsive]"))) return false;
     if (!codexServiceTierFooterHasNearbyComposerInput(footer)) return false;
     const buttons = Array.from(footer.querySelectorAll("button, [role='button']")).filter(codexServiceTierBadgeVisibleElement);
     if (buttons.length < 2) return false;
@@ -25825,10 +25837,11 @@
 
   function codexServiceTierBadgeAnchor(composer) {
     const providerNames = codexServiceTierKnownProviderNames();
-    const buttons = codexServiceTierBadgeButtonCandidates(composer);
+    const footer = codexServiceTierComposerFooter(composer) || composer;
+    const buttons = codexServiceTierBadgeButtonCandidates(footer);
     const exact = buttons.find((button) => providerNames.includes(codexServiceTierBadgeText(button).toLowerCase()));
     if (exact) return exact;
-    const composerRect = composer.getBoundingClientRect();
+    const composerRect = footer.getBoundingClientRect();
     return buttons.find((button) => {
       const rect = button.getBoundingClientRect();
       return rect.left >= composerRect.left + composerRect.width * 0.42 && codexServiceTierLooksLikeProviderButton(button, providerNames);
@@ -25872,6 +25885,11 @@
   }
 
   function codexServiceTierBadgePlacement(composer) {
+    const footer = codexServiceTierComposerFooter(composer);
+    const buttons = footer ? codexServiceTierBadgeButtonCandidates(footer) : [];
+    const permissions = buttons.find((button) => button.matches('[data-composer-navigation-target="permissions"]'))
+      || buttons.find((button) => /^(完全访问(?:权限)?|默认权限|只读(?:权限)?|工作区写入|full access|default permissions|read.only|workspace write)$/i.test(codexServiceTierBadgeText(button)));
+    if (permissions?.parentElement) return { parent: permissions.parentElement, after: permissions };
     const nativeSlot = codexServiceTierNativeServiceTierSlot(composer);
     if (nativeSlot) return { parent: nativeSlot, before: null };
     const anchor = composer ? codexServiceTierBadgeAnchor(composer) : null;
@@ -25887,8 +25905,8 @@
     return codexServiceTierLooksLikeComposerFooter(footer) ? footer : null;
   }
 
-  function codexServiceTierPlacementRowRect(placement, footer, beforeRect = null) {
-    if (beforeRect) return beforeRect;
+  function codexServiceTierPlacementRowRect(placement, footer, anchorRect = null) {
+    if (anchorRect) return anchorRect;
     const footerRect = footer.getBoundingClientRect();
     const parent = placement?.parent;
     if (parent instanceof HTMLElement) {
@@ -25917,7 +25935,10 @@
     const rowCenter = rowRect.top + rowRect.height / 2;
     const controlPadding = 6;
     const occupied = [];
-    Array.from(footer.querySelectorAll("button, [role='button']"))
+    [
+      ...footer.querySelectorAll("button, [role='button'], [role='img'][aria-label]"),
+      ...document.querySelectorAll(`[${codexPromptOptimizeButtonAttribute}="true"], [${codexWorkspaceCheckpointButtonAttribute}="true"]`),
+    ]
       .filter(codexServiceTierBadgeVisibleElement)
       .map((control) => control.getBoundingClientRect())
       .filter((rect) => rowCenter >= rect.top - 2 && rowCenter <= rect.bottom + 2)
@@ -25942,7 +25963,7 @@
       cursor = Math.max(cursor, rect.right);
     });
     if (contentRight - cursor >= badgeWidth) gaps.push({ left: cursor, right: contentRight });
-    if (!gaps.length) return preferredLeft;
+    if (!gaps.length) return null;
     return gaps
       .map((gap) => {
         const left = Math.min(gap.right - badgeWidth, Math.max(gap.left, preferredLeft));
@@ -26000,16 +26021,16 @@
     badge.style.visibility = "hidden";
     if (badge.parentElement !== portalRoot) portalRoot.appendChild(badge);
     const parentRect = placement.parent.getBoundingClientRect();
-    const before = placement.before?.parentElement === placement.parent ? placement.before : null;
-    const beforeRect = before && codexServiceTierBadgeVisibleElement(before)
-      ? before.getBoundingClientRect()
+    const anchor = placement.after || placement.before;
+    const anchorRect = anchor?.parentElement === placement.parent && codexServiceTierBadgeVisibleElement(anchor)
+      ? anchor.getBoundingClientRect()
       : null;
     const badgeRect = badge.getBoundingClientRect();
     const badgeWidth = badgeRect.width || 54;
     const badgeHeight = badgeRect.height || 24;
     let desiredLeft;
-    if (beforeRect) {
-      desiredLeft = beforeRect.left - badgeWidth - 6;
+    if (anchorRect) {
+      desiredLeft = placement.after ? anchorRect.right + 6 : anchorRect.left - badgeWidth - 6;
     } else if (parentRect.width >= badgeWidth) {
       desiredLeft = parentRect.left + (parentRect.width - badgeWidth) / 2;
     } else {
@@ -26019,8 +26040,9 @@
         : null;
       desiredLeft = previousRect ? previousRect.right + 6 : parentRect.left;
     }
-    const verticalAnchorRect = codexServiceTierPlacementRowRect(placement, footer, beforeRect);
+    const verticalAnchorRect = codexServiceTierPlacementRowRect(placement, footer, anchorRect);
     const left = codexServiceTierPortalBadgeLeft(footer, verticalAnchorRect, badgeWidth, desiredLeft);
+    if (left === null) return false;
     const top = verticalAnchorRect.top + (verticalAnchorRect.height - badgeHeight) / 2;
     badge.style.left = `${Math.round(left)}px`;
     badge.style.top = `${Math.round(top)}px`;

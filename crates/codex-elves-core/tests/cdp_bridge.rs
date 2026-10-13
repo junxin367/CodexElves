@@ -317,6 +317,11 @@ fn renderer_features_supports_current_app_shell_header_layout() {
     assert!(script.contains("function findApplicationMenuTopBar()"));
     assert!(script.contains("menuClassName: codexElvesMenuTitlebarClass"));
     assert!(script.contains("margin-inline-start: auto"));
+    assert!(script.contains("host.querySelector(\"[data-codex-elves-trigger-label]\") || host"));
+    assert!(script.contains("(!waiting && badge.style.color !== color)"));
+    assert!(script.contains("current && host.firstElementChild !== badge"));
+    assert!(script.contains("badge.style.marginInlineEnd = \"6px\""));
+    assert!(script.contains("host.prepend(badge)"));
     assert!(script.contains(
         "#${codexElvesMenuId} .codex-elves-backend-indicator + [data-codex-elves-trigger-label] { margin-inline-start: 4px; }"
     ));
@@ -2193,7 +2198,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "94";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "97";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -4318,7 +4323,7 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
     assert!(script.contains("codex-open-in-menu"));
     assert!(script.contains(r#"const codexOpenInVersion = "11";"#));
     assert!(script.contains("window.__codexElvesOpenInRuntimeVersion === codexOpenInVersion"));
-    assert!(script.contains(r#"const codexDeleteStyleVersion = "94";"#));
+    assert!(script.contains(r#"const codexDeleteStyleVersion = "97";"#));
     assert!(script.contains(r#"[data-codex-open-in-role="primary"]"#));
     assert!(script.contains(r#"[data-codex-open-in-role="arrow"]"#));
     assert!(script.contains("width: 30px !important;"));
@@ -4932,12 +4937,32 @@ fn injection_script_portals_fast_badge_outside_react_owned_composer() {
     assert!(script.contains("codexServiceTierPlacementRowRect"));
     assert!(script.contains("codexServiceTierPortalBadgeLeft"));
     assert!(script.contains("const controlPadding = 6"));
+    assert!(script.contains("const footer = codexServiceTierComposerFooter(composer) || composer"));
+    assert!(script.contains("button.matches('[data-composer-navigation-target=\"permissions\"]')"));
+    assert!(script.contains("return { parent: permissions.parentElement, after: permissions }"));
+    assert!(
+        script
+            .contains("placement.after ? anchorRect.right + 6 : anchorRect.left - badgeWidth - 6")
+    );
+    assert!(
+        script.contains(
+            "rect.height > 90 && !footer.matches?.(\"[data-composer-footer-responsive]\")"
+        )
+    );
+    assert!(script.contains("button, [role='button'], [role='img'][aria-label]"));
+    assert!(script.contains(
+        "document.querySelectorAll(`[${codexPromptOptimizeButtonAttribute}=\"true\"], [${codexWorkspaceCheckpointButtonAttribute}=\"true\"]`)"
+    ));
+    assert!(script.contains("if (!gaps.length) return null"));
+    assert!(script.contains("if (left === null) return false"));
+    assert!(script.contains("const labelChanged = node.textContent !== state.label"));
+    assert!(script.contains("if (labelChanged) {\n        node.style.visibility = \"hidden\";"));
     assert!(script.contains("rect.left - cursor >= badgeWidth"));
     assert!(script.contains(
         "const left = codexServiceTierPortalBadgeLeft(footer, verticalAnchorRect, badgeWidth, desiredLeft)"
     ));
     assert!(script.contains(
-        "const verticalAnchorRect = codexServiceTierPlacementRowRect(placement, footer, beforeRect)"
+        "const verticalAnchorRect = codexServiceTierPlacementRowRect(placement, footer, anchorRect)"
     ));
     assert!(
         script.contains("verticalAnchorRect.top + (verticalAnchorRect.height - badgeHeight) / 2")
@@ -6791,6 +6816,8 @@ globalThis.getComputedStyle = () => ({{
 globalThis.window = globalThis;
 window.__CODEX_ELVES_TEST_SERVICE_TIER__ = true;
 window.__CODEX_ELVES_TEST_APP_SERVER_RESTART__ = true;
+window.requestAnimationFrame = () => 0;
+window.cancelAnimationFrame = () => {{}};
 window.dispatchEvent = () => true;
 globalThis.CustomEvent = class CustomEvent {{
   constructor(type, options = {{}}) {{
@@ -7282,6 +7309,7 @@ const pluginScopedFilters = {{
 
 const badgeNode = {{
   dataset: {{ codexTooltip: "stale custom tooltip" }},
+  style: {{}},
   textContent: "",
   attributes: {{}},
   removeAttribute(name) {{
