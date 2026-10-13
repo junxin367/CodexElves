@@ -424,6 +424,34 @@ mod protocol_stream_integrity_review {
     }
 
     #[test]
+    fn unknown_server_block_input_delta_does_not_fail_following_answer() {
+        let wire = [
+            json!({"type":"message_start","message":{"id":"msg_unknown_server","model":"kimi-k3"}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_unknown","name":"web_search"}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"kimi\"}"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"最终答案"}}),
+            json!({"type":"content_block_stop","index":1}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
+            json!({"type":"message_stop"}),
+        ]
+        .iter()
+        .map(|chunk| format!("data: {chunk}\n\n"))
+        .collect::<String>();
+        let stream = anthropic_sse_to_responses_sse_with_request(&wire, &json!({}));
+        let events = parse_response_sse_events(&stream);
+        let last = events.last().unwrap();
+        assert_eq!(last.event, "response.completed");
+        assert_eq!(text(&last.data["response"]), "最终答案");
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event == "response.function_call_arguments.done")
+        );
+    }
+
+    #[test]
     fn namespace_identity_not_flattened_spelling_controls_tool_permissions() {
         for kind in ["function", "custom"] {
             let declared = json!({"type":kind,"name":"b__c","parameters":{"type":"object"}});
@@ -2471,6 +2499,57 @@ mod tool_conversion_audit {
                 assert_eq!(call["namespace"], "mcp__discovered");
                 assert_eq!(call["name"], "lookup");
                 assert_eq!(call["arguments"], "{\"id\":7}");
+            }
+        }
+    }
+
+    #[test]
+    fn web_search_discovers_then_executes_deferred_search_tools_in_four_modes() {
+        for anthropic in [false, true] {
+            for stream in [false, true] {
+                for arguments in [json!({}), json!({"query":"Rust 官方网站"})] {
+                    let request = tool_request(json!([
+                        {"type":"web_search"}, {"type":"tool_search","execution":"client"}
+                    ]));
+                    let discovery =
+                        mock_tool_response(&request, "web_search", &arguments, anthropic, stream);
+                    assert_eq!(discovery["type"], "tool_search_call");
+                    assert_eq!(discovery["call_id"], "call_matrix");
+                    assert_eq!(discovery["execution"], "client");
+                    let mut discovered = request.clone();
+                    discovered["input"] = json!([
+                        {"role":"user","content":"搜索 Rust 官方网站"},
+                        discovery,
+                        {"type":"tool_search_output","call_id":"call_matrix","tools":[tavily_namespace_tool()]}
+                    ]);
+                    let converted = if anthropic {
+                        responses_to_anthropic_messages(discovered.clone())
+                    } else {
+                        responses_to_chat_completions(discovered.clone())
+                    }
+                    .unwrap();
+                    assert!(
+                        converted["tools"]
+                            .to_string()
+                            .contains("mcp__tavily__tavily_search")
+                    );
+                    assert!(
+                        !converted["tools"]
+                            .to_string()
+                            .contains("web_search_20250305")
+                    );
+                    let call = mock_tool_response(
+                        &discovered,
+                        "web_search",
+                        &json!({"query":"Rust 官方网站"}),
+                        anthropic,
+                        stream,
+                    );
+                    assert_eq!(call["type"], "function_call");
+                    assert_eq!(call["namespace"], "mcp__tavily");
+                    assert_eq!(call["name"], "tavily_search");
+                    assert_eq!(call["arguments"], "{\"query\":\"Rust 官方网站\"}");
+                }
             }
         }
     }
@@ -6314,6 +6393,123 @@ fn anthropic_request_declares_web_search_as_server_side_tool_without_fallback() 
 }
 
 #[test]
+fn anthropic_request_declares_server_web_search_for_devin_claude_without_fallback() {
+    for model in ["devin/claude-haiku-5-5", "devin/claude-opus-5-5"] {
+        let converted = responses_to_anthropic_messages(json!({
+            "model": model,
+            "input": "search the web",
+            "tools": [{ "type": "web_search" }]
+        }))
+        .unwrap();
+
+        let tools = converted["tools"].as_array().unwrap();
+        let web_search = tools
+            .iter()
+            .find(|tool| tool["name"] == "web_search")
+            .expect("web_search tool present");
+        assert_eq!(web_search["type"], "web_search_20250305", "{model}");
+        assert!(web_search.get("input_schema").is_none(), "{model}");
+    }
+}
+
+#[test]
+fn anthropic_request_declares_client_web_search_for_swe_models() {
+    for model in ["swe-2", "devin/swe-2"] {
+        let converted = responses_to_anthropic_messages(json!({
+            "model": model,
+            "input": "search the web",
+            "tools": [{"type":"web_search"}, {"type":"tool_search"}],
+            "tool_choice": {"type":"function","name":"web_search"}
+        }))
+        .unwrap();
+        let tool = converted["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "web_search")
+            .unwrap();
+        assert!(tool.get("type").is_none(), "{model}");
+        assert_eq!(
+            tool["input_schema"]["properties"]["query"]["type"],
+            "string"
+        );
+        assert_eq!(tool["input_schema"]["required"], json!(["query"]));
+        assert_eq!(
+            converted["tool_choice"],
+            json!({"type":"tool","name":"web_search"})
+        );
+    }
+}
+
+#[test]
+fn client_web_search_without_executor_reports_failure_in_all_modes() {
+    for discovery_attempted in [false, true] {
+        let mut request = json!({
+            "model":"devin/swe-2","input":"search",
+            "tools":[{"type":"web_search"}]
+        });
+        if discovery_attempted {
+            request["tools"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"type":"tool_search"}));
+            let discovery = anthropic_message_to_response_with_request(
+                json!({
+                    "model":"devin/swe-2","stop_reason":"tool_use",
+                    "content":[{"type":"tool_use","id":"discovery","name":"web_search","input":{}}]
+                }),
+                &request,
+            )
+            .unwrap()["output"][0]
+                .clone();
+            request["input"] = json!([
+                {"role":"user","content":"search"},
+                discovery,
+                {"type":"tool_search_output","call_id":"discovery","tools":[]}
+            ]);
+        }
+        let anthropic = json!({
+            "model":"devin/swe-2","stop_reason":"tool_use",
+            "content":[{"type":"tool_use","id":"call_web","name":"web_search","input":{"query":"Rust"}}]
+        });
+        let chat = json!({
+            "choices":[{"finish_reason":"tool_calls","message":{"tool_calls":[{
+                "id":"call_web","function":{"name":"web_search","arguments":"{\"query\":\"Rust\"}"}
+            }]}}]
+        });
+        for result in [
+            anthropic_message_to_response_with_request(anthropic.clone(), &request),
+            chat_completion_to_response_with_request(chat, &request),
+        ] {
+            assert!(result.unwrap_err().to_string().contains("搜索工具"));
+        }
+        let anthropic_wire = [
+            json!({"type":"message_start","message":{"id":"msg_web","model":"devin/swe-2"}}),
+            json!({"type":"content_block_start","index":0,"content_block":anthropic["content"][0]}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}}),
+            json!({"type":"message_stop"}),
+        ]
+        .iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect::<String>();
+        let chat_wire = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_web\",\"function\":{\"name\":\"web_search\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        for wire in [
+            anthropic_sse_to_responses_sse_with_request(&anthropic_wire, &request),
+            chat_sse_to_responses_sse_with_request(chat_wire, &request),
+        ] {
+            assert!(wire.contains("response.failed"));
+            assert!(wire.contains("web_search_unavailable"));
+            assert!(!wire.contains("response.completed"));
+            assert!(!wire.contains("web_search_call"));
+        }
+    }
+}
+
+#[test]
 fn anthropic_request_keeps_web_search_as_function_when_mcp_fallback_available() {
     // 有 MCP 搜索 fallback（如 tavily）时，客户端有真实执行能力，
     // 保留原有可用路径，不切换为 server-side。
@@ -6401,7 +6597,7 @@ fn anthropic_server_tool_use_web_search_keeps_server_history_without_client_call
 }
 
 #[test]
-fn anthropic_message_response_maps_web_search_to_native_call() {
+fn anthropic_message_response_discovers_unloaded_web_search_tools() {
     let converted = anthropic_message_to_response_with_request(
         json!({
             "id": "msg_web_search",
@@ -6420,20 +6616,21 @@ fn anthropic_message_response_maps_web_search_to_native_call() {
         &json!({
             "model": "claude-sonnet-4",
             "input": "search",
-            "tools": [{ "type": "web_search" }]
+            "tools": [{ "type": "web_search" }, { "type": "tool_search" }]
         }),
     )
     .unwrap();
 
-    assert_eq!(converted["output"][0]["type"], "web_search_call");
-    assert_eq!(converted["output"][0]["id"], "ws_toolu_web");
+    assert_eq!(converted["output"][0]["type"], "tool_search_call");
+    assert_eq!(converted["output"][0]["id"], "tsc_toolu_web");
     assert_eq!(converted["output"][0]["status"], "completed");
+    assert_eq!(converted["output"][0]["call_id"], "toolu_web");
     assert_eq!(converted["output"][0]["execution"], "client");
-    assert_eq!(converted["output"][0]["action"]["type"], "search");
-    assert_eq!(converted["output"][0]["action"]["query"], "pal mcp GitHub");
-    assert_eq!(
-        converted["output"][0]["action"]["queries"],
-        json!(["pal mcp GitHub"])
+    assert!(
+        converted["output"][0]["arguments"]["query"]
+            .as_str()
+            .unwrap()
+            .contains("web")
     );
 }
 
@@ -9154,7 +9351,7 @@ fn chat_completion_response_maps_reasoning_tool_calls_and_usage_details() {
 }
 
 #[test]
-fn chat_completion_response_maps_web_search_to_native_call() {
+fn chat_completion_response_discovers_unloaded_web_search_tools() {
     let converted = chat_completion_to_response_with_request(
         json!({
             "id": "chatcmpl_web_search",
@@ -9179,20 +9376,21 @@ fn chat_completion_response_maps_web_search_to_native_call() {
         &json!({
             "model": "gpt-chat",
             "input": "search",
-            "tools": [{ "type": "web_search_preview_2025_03_11" }]
+            "tools": [{ "type": "web_search_preview_2025_03_11" }, { "type": "tool_search" }]
         }),
     )
     .unwrap();
 
-    assert_eq!(converted["output"][0]["type"], "web_search_call");
-    assert_eq!(converted["output"][0]["id"], "ws_call_web");
+    assert_eq!(converted["output"][0]["type"], "tool_search_call");
+    assert_eq!(converted["output"][0]["id"], "tsc_call_web");
     assert_eq!(converted["output"][0]["status"], "completed");
+    assert_eq!(converted["output"][0]["call_id"], "call_web");
     assert_eq!(converted["output"][0]["execution"], "client");
-    assert_eq!(converted["output"][0]["action"]["type"], "search");
-    assert_eq!(converted["output"][0]["action"]["query"], "pal mcp GitHub");
-    assert_eq!(
-        converted["output"][0]["action"]["queries"],
-        json!(["pal mcp GitHub"])
+    assert!(
+        converted["output"][0]["arguments"]["query"]
+            .as_str()
+            .unwrap()
+            .contains("web")
     );
 }
 
@@ -9898,7 +10096,7 @@ data: [DONE]
 }
 
 #[test]
-fn chat_sse_maps_web_search_to_native_call_events() {
+fn chat_sse_discovers_unloaded_web_search_tools() {
     let converted = chat_sse_to_responses_sse_with_request(
         r#"data: {"id":"chatcmpl_web","model":"gpt-chat","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_web","type":"function","function":{"name":"web_search","arguments":"{\"query\":\"pal mcp GitHub\"}"}}]}}]}
 
@@ -9909,7 +10107,7 @@ data: [DONE]
 "#,
         &json!({
             "model": "gpt-chat",
-            "tools": [{ "type": "web_search" }]
+            "tools": [{ "type": "web_search" }, { "type": "tool_search" }]
         }),
     );
 
@@ -9919,19 +10117,25 @@ data: [DONE]
         .iter()
         .find(|event| event.event == "response.output_item.added")
         .unwrap();
-    assert_eq!(added.data["item"]["type"], "web_search_call");
+    assert_eq!(added.data["item"]["type"], "tool_search_call");
     assert_eq!(added.data["item"]["status"], "in_progress");
     assert_eq!(added.data["item"]["execution"], "client");
     let done = events
         .iter()
         .find(|event| event.event == "response.output_item.done")
         .unwrap();
-    assert_eq!(done.data["item"]["type"], "web_search_call");
-    assert_eq!(done.data["item"]["id"], "ws_call_web");
+    assert_eq!(done.data["item"]["type"], "tool_search_call");
+    assert_eq!(done.data["item"]["id"], "tsc_call_web");
     assert_eq!(done.data["item"]["status"], "completed");
+    assert_eq!(done.data["item"]["call_id"], "call_web");
     assert_eq!(done.data["item"]["execution"], "client");
-    assert_eq!(done.data["item"]["action"]["type"], "search");
-    assert_eq!(done.data["item"]["action"]["query"], "pal mcp GitHub");
+    assert!(
+        done.data["item"]["arguments"]["query"]
+            .as_str()
+            .unwrap()
+            .contains("web")
+    );
+    assert!(!converted.contains("web_search_call"));
 }
 
 #[test]
@@ -10557,7 +10761,7 @@ data: {"type":"message_stop"}
 }
 
 #[test]
-fn anthropic_sse_maps_web_search_to_native_call_events() {
+fn anthropic_sse_discovers_unloaded_web_search_tools() {
     let converted = anthropic_sse_to_responses_sse_with_request(
         r#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_web_stream","type":"message","role":"assistant","model":"claude-sonnet-4","content":[],"usage":{"input_tokens":7}}}
@@ -10580,7 +10784,7 @@ data: {"type":"message_stop"}
 "#,
         &json!({
             "model": "claude-sonnet-4",
-            "tools": [{ "type": "web_search" }]
+            "tools": [{ "type": "web_search" }, { "type": "tool_search" }]
         }),
     );
 
@@ -10590,19 +10794,25 @@ data: {"type":"message_stop"}
         .iter()
         .find(|event| event.event == "response.output_item.added")
         .unwrap();
-    assert_eq!(added.data["item"]["type"], "web_search_call");
+    assert_eq!(added.data["item"]["type"], "tool_search_call");
     assert_eq!(added.data["item"]["status"], "in_progress");
     assert_eq!(added.data["item"]["execution"], "client");
     let done = events
         .iter()
         .find(|event| event.event == "response.output_item.done")
         .unwrap();
-    assert_eq!(done.data["item"]["type"], "web_search_call");
-    assert_eq!(done.data["item"]["id"], "ws_toolu_web");
+    assert_eq!(done.data["item"]["type"], "tool_search_call");
+    assert_eq!(done.data["item"]["id"], "tsc_toolu_web");
     assert_eq!(done.data["item"]["status"], "completed");
+    assert_eq!(done.data["item"]["call_id"], "toolu_web");
     assert_eq!(done.data["item"]["execution"], "client");
-    assert_eq!(done.data["item"]["action"]["type"], "search");
-    assert_eq!(done.data["item"]["action"]["query"], "pal mcp GitHub");
+    assert!(
+        done.data["item"]["arguments"]["query"]
+            .as_str()
+            .unwrap()
+            .contains("web")
+    );
+    assert!(!converted.contains("web_search_call"));
 }
 
 #[test]

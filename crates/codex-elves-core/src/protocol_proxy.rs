@@ -51,6 +51,8 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_THINKING_REPLAY_PREFIX: &str = "codex-elves-anthropic-thinking-v1:";
 const ANTHROPIC_CONTENT_REPLAY_PREFIX: &str = "codex-elves-anthropic-content-v1:";
 const ANTHROPIC_PAUSE_TURN_ERROR: &str = "Anthropic pause_turn requires upstream continuation, which this protocol bridge does not support";
+const WEB_SEARCH_DISCOVERY_QUERY: &str = "web search tavily exa";
+const WEB_SEARCH_UNAVAILABLE_ERROR: &str = "上游返回了客户端 web_search 调用，但当前会话没有可执行的搜索工具。请启用搜索 MCP 工具和客户端 tool_search 后重试。";
 const ANTHROPIC_DEFAULT_REASONING_EFFORT: &str = "high";
 const ANTHROPIC_BELOW_HIGH_MAX_OUTPUT_TOKENS: u64 = 32_000;
 const ANTHROPIC_HIGH_MAX_OUTPUT_TOKENS: u64 = 64_000;
@@ -85,6 +87,7 @@ struct CodexToolContext {
     custom_tools: BTreeMap<String, CodexCustomToolSpec>,
     function_tools: BTreeMap<String, CodexFunctionToolSpec>,
     web_search_fallback: Option<CodexWebSearchFallbackTool>,
+    web_search_discovery_attempted: bool,
     has_custom_tools: bool,
     has_namespace_tools: bool,
     textual_tool_calls: bool,
@@ -322,6 +325,25 @@ impl CodexToolContext {
 
     fn web_search_fallback_tool(&self) -> Option<&CodexWebSearchFallbackTool> {
         self.web_search_fallback.as_ref()
+    }
+
+    fn can_execute_client_web_search(&self) -> bool {
+        self.web_search_fallback.is_some()
+            || (self.internal_alias("tool_search").is_some()
+                && !self.web_search_discovery_attempted)
+    }
+
+    fn validate_web_search_output(&self, output: &[Value]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.can_execute_client_web_search()
+                || !output.iter().any(|item| {
+                    item["type"] == "tool_search_call"
+                        && item.pointer("/arguments/query").and_then(Value::as_str)
+                            == Some(WEB_SEARCH_DISCOVERY_QUERY)
+                }),
+            WEB_SEARCH_UNAVAILABLE_ERROR
+        );
+        Ok(())
     }
 }
 
@@ -1179,6 +1201,7 @@ fn chat_completion_to_response_with_context(
             message,
             tool_context,
         ));
+        tool_context.validate_web_search_output(&output)?;
     } else {
         mark_messages_incomplete(&mut output);
     }
@@ -1289,7 +1312,7 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
 
     let mut has_tools = false;
     if !conversion_tools.is_empty() {
-        let converted = responses_tools_to_anthropic_tools(&conversion_tools, &tool_context);
+        let converted = responses_tools_to_anthropic_tools(&conversion_tools, &tool_context, model);
         if !converted.is_empty() {
             has_tools = true;
             result["tools"] = json!(converted);
@@ -1304,6 +1327,11 @@ fn responses_to_anthropic_messages_with_diagnostic_id(
             // 命中时降级为 auto，避免上游 400。
             let forces_server_tool = tool_choice.get("type").and_then(Value::as_str)
                 == Some("tool")
+                && result["tools"].as_array().is_some_and(|tools| {
+                    tools
+                        .iter()
+                        .any(|tool| tool["type"] == "web_search_20250305")
+                })
                 && tool_choice
                     .get("name")
                     .and_then(Value::as_str)
@@ -1439,6 +1467,8 @@ fn anthropic_message_to_response_with_context(
     if status == "incomplete" {
         output.retain(|item| matches!(item["type"].as_str(), Some("message" | "reasoning")));
         mark_messages_incomplete(&mut output);
+    } else {
+        tool_context.validate_web_search_output(&output)?;
     }
     log_anthropic_response_shape(&body, &output, false, diagnostic_id);
     let mut response = json!({
@@ -2169,6 +2199,9 @@ impl ChatSseToResponsesConverter {
                 );
                 return output.into_bytes();
             }
+            if self.reject_unavailable_web_search(&mut output) {
+                return output.into_bytes();
+            }
             self.state.finalize_into(&mut output);
         }
         output.into_bytes()
@@ -2212,6 +2245,9 @@ impl ChatSseToResponsesConverter {
         let data = data_parts.join("\n");
         if data.trim() == "[DONE]" {
             self.saw_done = true;
+            if self.reject_unavailable_web_search(output) {
+                return;
+            }
             self.state.finalize_into(output);
             return;
         }
@@ -2241,6 +2277,19 @@ impl ChatSseToResponsesConverter {
             return;
         }
         self.state.handle_chat_chunk_into(&chunk, output);
+    }
+
+    fn reject_unavailable_web_search(&mut self, output: &mut String) -> bool {
+        if !self.state.has_unavailable_web_search() {
+            return false;
+        }
+        self.record_failure_into(
+            output,
+            "web_search_unavailable",
+            WEB_SEARCH_UNAVAILABLE_ERROR.to_string(),
+            Some("web_search_unavailable".to_string()),
+        );
+        true
     }
 
     fn record_failure_into(
@@ -2377,6 +2426,9 @@ impl AnthropicSseToResponsesConverter {
                 );
                 return output.into_bytes();
             }
+            if self.reject_unavailable_web_search(&mut output) {
+                return output.into_bytes();
+            }
             self.state.inner.finalize_into(&mut output);
         }
         output.into_bytes()
@@ -2433,6 +2485,9 @@ impl AnthropicSseToResponsesConverter {
             if self.reject_paused_turn(output) {
                 return;
             }
+            if self.reject_unavailable_web_search(output) {
+                return;
+            }
             if self.state.has_open_content_blocks() {
                 self.record_failure_into(
                     output,
@@ -2482,6 +2537,9 @@ impl AnthropicSseToResponsesConverter {
             if self.reject_paused_turn(output) {
                 return;
             }
+            if self.reject_unavailable_web_search(output) {
+                return;
+            }
             if self.state.has_open_model_content_blocks() {
                 self.record_failure_into(
                     output,
@@ -2506,6 +2564,19 @@ impl AnthropicSseToResponsesConverter {
             "unsupported_upstream_continuation",
             ANTHROPIC_PAUSE_TURN_ERROR.to_string(),
             Some("unsupported_upstream_continuation".to_string()),
+        );
+        true
+    }
+
+    fn reject_unavailable_web_search(&mut self, output: &mut String) -> bool {
+        if !self.state.inner.has_unavailable_web_search() {
+            return false;
+        }
+        self.record_failure_into(
+            output,
+            "web_search_unavailable",
+            WEB_SEARCH_UNAVAILABLE_ERROR.to_string(),
+            Some("web_search_unavailable".to_string()),
         );
         true
     }
@@ -6378,6 +6449,15 @@ impl ChatSseState {
         }
     }
 
+    fn has_unavailable_web_search(&self) -> bool {
+        response_status(self.finish_reason.as_deref()) == "completed"
+            && !self.tool_context.can_execute_client_web_search()
+            && self.tools.values().any(|tool| {
+                self.tool_context
+                    .is_internal_alias(&tool.name, is_codex_web_search_name)
+            })
+    }
+
     fn finalize_into(&mut self, output: &mut String) {
         if self.completed {
             return;
@@ -6981,6 +7061,14 @@ impl AnthropicSseState {
                     if let Some(partial) = delta["partial_json"].as_str() {
                         server.arguments.push_str(partial);
                     }
+                    return;
+                }
+                // 未知块不登记原生工具状态，否则块结束时无法清理，会被当作未闭合块。
+                if self
+                    .blocks
+                    .get(&index)
+                    .is_some_and(|kind| !matches!(kind, AnthropicBlockKind::Tool))
+                {
                     return;
                 }
                 self.inner.flush_inline_think_at_boundary_into(output);
@@ -9221,6 +9309,25 @@ fn build_codex_tool_context_for_request(request: &Value) -> CodexToolContext {
         crate::layered_compaction::prepare_remote_compaction_v2_bridge_request(&expanded);
     let tools = tools_for_proxy_conversion(&prepared);
     let mut context = build_codex_tool_context_from_tools(&tools);
+    context.web_search_discovery_attempted = prepared
+        .get("input")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item["type"] == "tool_search_call"
+                    && item.pointer("/arguments/query").and_then(Value::as_str)
+                        == Some(WEB_SEARCH_DISCOVERY_QUERY)
+                    && item
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|call_id| {
+                            items.iter().any(|result| {
+                                result["type"] == "tool_search_output"
+                                    && result["call_id"].as_str() == Some(call_id)
+                            })
+                        })
+            })
+        });
     context.textual_tool_calls = request
         .pointer("/codex_elves_compat/textual_tool_calls")
         .and_then(Value::as_bool)
@@ -9606,11 +9713,17 @@ fn mark_plaintext_collaboration_call(item: &mut Value) {
     }
 }
 
-fn responses_tools_to_anthropic_tools(tools: &[Value], context: &CodexToolContext) -> Vec<Value> {
+fn responses_tools_to_anthropic_tools(
+    tools: &[Value],
+    context: &CodexToolContext,
+    model: &str,
+) -> Vec<Value> {
     // Codex 的 web_search 是 OpenAI 平台 hosted 工具，在 Claude 链路里没有 OpenAI 服务端执行。
     // 若会话没有可执行的 MCP 搜索 fallback，则把 web_search 声明为 Anthropic 原生 server-side
     // 工具，由 Claude 服务端自己执行搜索，避免被当作客户端工具导致空结果死循环。
+    // SWE 系列在收到原生声明时仍返回普通客户端 tool_use(web_search)，因此保持普通工具声明。
     let wants_server_web_search = context.web_search_fallback_tool().is_none()
+        && swe_reasoning_efforts(model).is_none()
         && tools.iter().any(|tool| {
             tool.get("type")
                 .and_then(Value::as_str)
@@ -10753,11 +10866,12 @@ fn tool_call_added_item(
             "type": "response.output_item.added",
             "output_index": output_index,
             "item": {
-                "id": web_search_item_id(&state.call_id),
-                "type": "web_search_call",
+                "id": format!("tsc_{}", state.call_id),
+                "type": "tool_search_call",
                 "status": "in_progress",
+                "call_id": state.call_id,
                 "execution": "client",
-                "action": { "type": "other" }
+                "arguments": {}
             }
         });
     }
@@ -10940,7 +11054,10 @@ fn response_tool_call_item(
         if let Some(fallback) = tool_context.web_search_fallback_tool() {
             return web_search_fallback_function_call_item(call_id, arguments, fallback);
         }
-        return web_search_call_item(call_id, arguments);
+        return tool_search_call_item(
+            call_id,
+            &json!({ "query": WEB_SEARCH_DISCOVERY_QUERY }).to_string(),
+        );
     }
     if tool_context.is_internal_alias(name, is_codex_tool_search_name) {
         return tool_search_call_item(call_id, arguments);
@@ -11003,34 +11120,6 @@ fn tool_search_call_item(call_id: &str, arguments: &str) -> Value {
         "call_id": call_id,
         "execution": "client",
         "arguments": tool_search_arguments_from_argument_string(arguments)
-    })
-}
-
-fn web_search_item_id(call_id: &str) -> String {
-    if call_id.starts_with("ws_") {
-        call_id.to_string()
-    } else {
-        format!("ws_{call_id}")
-    }
-}
-
-fn web_search_call_item(call_id: &str, arguments: &str) -> Value {
-    let query = web_search_query_from_argument_string(arguments);
-    let action = if query.is_empty() {
-        json!({ "type": "other" })
-    } else {
-        json!({
-            "type": "search",
-            "query": query.clone(),
-            "queries": [query]
-        })
-    };
-    json!({
-        "id": web_search_item_id(call_id),
-        "type": "web_search_call",
-        "status": "completed",
-        "execution": "client",
-        "action": action
     })
 }
 
