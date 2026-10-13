@@ -1987,6 +1987,50 @@ async fn launch_lifecycle_skips_helper_and_injection_when_enhancements_disabled(
 }
 
 #[tokio::test]
+async fn remote_access_starts_helper_without_enhancements_or_model_proxy() {
+    let temp = tempfile::tempdir().unwrap();
+    let app_dir = temp.path().join("Codex.app");
+    std::fs::create_dir_all(&app_dir).unwrap();
+    let status_store = StatusStore::new(temp.path().join("latest-status.json"));
+    let events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let hooks = FakeHooks::new(events.clone()).with_settings(BackendSettings {
+        enhancements_enabled: false,
+        computer_use_guard_enabled: false,
+        computer_use_api_key_browser_compat_enabled: false,
+        remote_access: codex_elves_core::settings::RemoteAccessSettings {
+            enabled: true,
+            ..Default::default()
+        },
+        ..BackendSettings::default()
+    });
+    let handle = launch_and_inject_with_hooks(
+        LaunchOptions {
+            app_dir: Some(app_dir),
+            debug_port: 9229,
+            helper_port: 45221,
+            status_store,
+        },
+        &hooks,
+    )
+    .await
+    .unwrap();
+    handle.wait_for_codex_exit().await.unwrap();
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            "select-debug:9229",
+            "select-helper:45221",
+            "load-settings",
+            "start-helper:45221",
+            "launch:9229",
+            "status:running",
+            "wait-codex",
+            "shutdown-helper:45221",
+        ]
+    );
+}
+
+#[tokio::test]
 async fn launch_lifecycle_runs_computer_use_guard_when_enabled() {
     let temp = tempfile::tempdir().unwrap();
     let app_dir = temp.path().join("Codex.app");

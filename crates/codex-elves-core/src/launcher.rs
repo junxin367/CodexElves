@@ -255,6 +255,7 @@ pub trait LaunchHooks: Send + Sync {
 pub struct DefaultLaunchHooks {
     child: Mutex<Option<Child>>,
     helper: Mutex<Option<HelperRuntime>>,
+    remote_access: Mutex<Option<crate::remote_access::RemoteAccessMonitor>>,
     bridge_runtime: BridgeRuntimeSlot,
     bridge_watchdog: Mutex<Option<BridgeWatchdogRuntime>>,
     computer_use_guard_watchdog: Mutex<Option<ComputerUseGuardWatchdogRuntime>>,
@@ -343,7 +344,7 @@ where
                 );
             }
         }
-        if settings.enhancements_enabled || protocol_proxy_enabled {
+        if settings.enhancements_enabled || protocol_proxy_enabled || settings.remote_access.enabled {
             hooks
                 .start_helper_with_settings(helper_port, &settings)
                 .await?;
@@ -558,6 +559,15 @@ impl DefaultLaunchHooks {
             shutdown: shutdown_tx,
             task,
         });
+        match crate::remote_access::start_monitor() {
+            Ok(runtime) => *self.remote_access.lock().await = Some(runtime),
+            Err(error) => {
+                let _ = crate::diagnostic_log::append_diagnostic_log(
+                    "remote_access.start_failed",
+                    serde_json::json!({"message":error.to_string()}),
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -1009,6 +1019,9 @@ impl LaunchHooks for DefaultLaunchHooks {
     }
 
     async fn shutdown_helper(&self, _helper_port: u16) {
+        if let Some(runtime) = self.remote_access.lock().await.take() {
+            runtime.shutdown().await;
+        }
         if let Some(runtime) = self.computer_use_guard_watchdog.lock().await.take() {
             let _ = runtime.shutdown.send(());
             let _ = runtime.task.await;
@@ -1241,6 +1254,36 @@ async fn handle_helper_connection(
     let request_body = http_request_body(&request);
     let request_user_agent = request_context.user_agent();
     let remote_addr_text = remote_addr.map(|addr| addr.to_string());
+
+    if let Some(action) = path.strip_prefix("/remote-access/") {
+        if method != "POST"
+            || remote_addr.is_some_and(|address| !address.ip().is_loopback())
+            || request
+                .lines()
+                .any(|line| line.to_ascii_lowercase().starts_with("origin:"))
+        {
+            write_http_response(
+                &mut stream,
+                "403 Forbidden",
+                "application/json",
+                br#"{"status":"failed","message":"Local management only"}"#,
+            )
+            .await?;
+            stream.shutdown().await?;
+            return Ok(());
+        }
+        let payload = serde_json::from_str(request_body).unwrap_or(Value::Null);
+        let response = crate::remote_access::admin_request(action, payload).await;
+        write_http_response(
+            &mut stream,
+            "200 OK",
+            "application/json; charset=utf-8",
+            &serde_json::to_vec(&response)?,
+        )
+        .await?;
+        stream.shutdown().await?;
+        return Ok(());
+    }
 
     let _ = crate::diagnostic_log::append_diagnostic_log(
         "helper.request",

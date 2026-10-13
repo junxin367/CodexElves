@@ -1,0 +1,42 @@
+.remote-access-screen { display: flex; flex-direction: column; gap: 18px; max-width: 1080px; }
+.remote-access-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
+.remote-access-heading h2 { font-size: 22px; font-weight: 600; margin: 0 0 8px; }
+.remote-access-heading p { color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.8; margin: 0; }
+.remote-access-card { padding: 22px; border: 1px solid hsl(var(--border)); border-radius: 12px; background: hsl(var(--card)); }
+.remote-access-card h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; font-size: 14px; font-weight: 600; }
+.remote-access-card-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
+.remote-access-card-heading h3 { margin: 0; line-height: 30px; }
+.remote-access-card-heading > button { flex-shrink: 0; }
+.remote-access-status { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; font-size: 13px; }
+.remote-access-status > span { font-size: 11px; margin-left: auto; }
+.remote-access-connected { color: #168653; }
+.remote-access-muted, .remote-access-hint { color: hsl(var(--muted-foreground)); }
+.remote-access-hint { font-size: 11px; line-height: 1.8; margin: 8px 0 16px; }
+.remote-access-toggle { display: flex; align-items: center; gap: 9px; font-size: 12px; line-height: 1.8; cursor: pointer; }
+.remote-access-toggle input { accent-color: hsl(var(--primary)); }
+.remote-access-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 20px; margin-top: 22px; }
+.remote-access-fields > div { display: flex; flex-direction: column; gap: 7px; }
+.remote-access-fields label { font-size: 12px; }
+.remote-access-fields small { font-size: 10px; color: hsl(var(--muted-foreground)); line-height: 1.7; }
+.remote-access-wide { grid-column: 1 / -1; }
+.remote-access-permissions { justify-content: center; gap: 9px !important; }
+.remote-access-actions { margin-top: 22px; display: flex; align-items: center; flex-wrap: wrap; gap: 14px; }
+.remote-access-actions .remote-access-hint { margin: 0; }
+.remote-access-input-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.remote-access-input-row input { flex: 1; min-width: 0; }
+.remote-access-input-row button { flex-shrink: 0; }
+.remote-access-key-input { display: flex; align-items: center; flex: 1; min-width: 0; gap: 2px; }
+.remote-access-guides { display: flex; flex-wrap: wrap; gap: 10px; }
+.remote-access-program { flex: 1; font-size: 12px; }
+.remote-access-program-options summary { cursor: pointer; color: hsl(var(--muted-foreground)); font-size: 11px; margin: 5px 0 10px; }
+.remote-access-program-options > label { display: block; margin: 12px 0 7px; }
+.remote-access-program-options small { display: block; margin-top: 7px; }
+.remote-access-steps { padding-left: 20px; font-size: 11px; line-height: 1.9; color: hsl(var(--muted-foreground)); margin: 20px 0; }
+.remote-access-steps code { word-break: break-all; }
+.remote-access-devices { margin-top: 18px; }
+.remote-access-device { display: flex; gap: 12px; align-items: center; border-top: 1px solid hsl(var(--border)); padding: 14px 0; }
+.remote-access-device > div { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
+.remote-access-device small { color: hsl(var(--muted-foreground)); font-size: 10px; }
+.remote-access-error { color: #dc4444; font-size: 12px; }
+.remote-access-message { font-size: 12px; color: hsl(var(--muted-foreground)); min-height: 20px; }
+@media (max-width: 900px) { .remote-access-fields { grid-template-columns: minmax(0, 1fr); } .remote-access-heading { flex-wrap: wrap; } .remote-access-card { padding: 16px; } }

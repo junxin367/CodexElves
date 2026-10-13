@@ -642,6 +642,34 @@ pub async fn save_settings(settings: BackendSettings) -> CommandResult<SettingsP
 }
 
 #[tauri::command]
+pub async fn remote_access_command(action: String, payload: Option<Value>) -> Value {
+    if matches!(
+        action.as_str(),
+        "credentials"
+            | "setKey"
+            | "generateKey"
+            | "setTunnelToken"
+            | "checkCloudflared"
+            | "downloadCloudflared"
+            | "cloudflaredStatus"
+    ) {
+        let _guard = settings_write_mutex().lock().await;
+        return codex_elves_core::remote_access::local_settings_command(
+            &action,
+            payload.unwrap_or_else(|| json!({})),
+        )
+        .await
+        .unwrap_or_else(|error| json!({"status":"failed","message":error.to_string()}));
+    }
+    let result = codex_elves_core::remote_access::request_local_admin(
+        &action,
+        payload.unwrap_or_else(|| json!({})),
+    )
+    .await;
+    result.unwrap_or_else(|error| json!({"status":"failed","message":error.to_string()}))
+}
+
+#[tauri::command]
 pub async fn load_workspace_checkpoint_management()
 -> CommandResult<WorkspaceCheckpointManagementPayload> {
     match tauri::async_runtime::spawn_blocking(workspace_checkpoint_management_payload).await {

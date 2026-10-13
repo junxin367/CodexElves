@@ -9,6 +9,8 @@ repository.workspace = true
 aes-gcm.workspace = true
 anyhow.workspace = true
 async-trait = "0.1"
+axum = { version = "0.8", features = ["json", "tokio", "http1"], default-features = false }
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 base64.workspace = true
 directories.workspace = true
 futures-util = "0.3"
@@ -16,10 +18,12 @@ fs2.workspace = true
 if-addrs.workspace = true
 image.workspace = true
 reqwest.workspace = true
+ring = "0.17"
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net"] }
 tokio-tungstenite.workspace = true
@@ -33,6 +37,7 @@ windows = { version = "0.58", features = [
   "Win32_Foundation",
   "Win32_NetworkManagement_IpHelper",
   "Win32_Networking_WinSock",
+  "Win32_Security_Cryptography",
   "Win32_Storage_FileSystem",
   "Win32_System_Com",
   "Win32_System_Diagnostics_ToolHelp",

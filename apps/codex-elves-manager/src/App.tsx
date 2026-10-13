@@ -57,6 +57,7 @@ import {
   ShieldCheck,
   ShieldAlert,
   Shrink,
+  Smartphone,
   Sparkles,
   Sun,
   TestTube,
@@ -71,6 +72,8 @@ import type { PresetPatch } from "@/components/ProviderPresetSelector";
 import type { RelayMode, RelayModelMapping, RelayProtocol } from "@/relay-types";
 import { readProxyTokenUsage } from "@/proxy-token-usage";
 import { JsonViewer } from "@/components/JsonViewer";
+import { RemoteAccessScreen } from "@/components/RemoteAccessScreen";
+import { defaultRemoteAccessSettings, type RemoteAccessSettings } from "@/remote-access-types";
 import {
   defaultModelContextWindow,
   knownModelContextWindow,
@@ -222,6 +225,7 @@ type BackendSettings = {
   codexAppActiveSkinId: string;
   codexGoalsEnabled: boolean;
   lanProxyEnabled: boolean;
+  remoteAccess: RemoteAccessSettings;
   gptReasoningContinuation: boolean;
   gptReasoningContinuationMaxRounds: number;
   layeredCompactionEnabled: boolean;
@@ -872,7 +876,7 @@ function syncMarketInstalledState(current: ScriptMarketResult | null, userScript
   };
 }
 
-type Route = "overview" | "relay" | "localProxy" | "sessions" | "checkpoint" | "context" | "enhance" | "skins" | "userScripts" | "maintenance" | "about" | "settings";
+type Route = "overview" | "relay" | "localProxy" | "remoteAccess" | "sessions" | "checkpoint" | "context" | "enhance" | "skins" | "userScripts" | "maintenance" | "about" | "settings";
 type Theme = "dark" | "light";
 
 type NavItem = { id: Route; label: string; icon: LucideIcon; badge?: string };
@@ -893,6 +897,7 @@ const routeGroups: NavGroup[] = [
     label: "功能增强",
     items: [
       { id: "sessions", label: "会话管理", icon: MessageCircle },
+      { id: "remoteAccess", label: "远程会话", icon: Smartphone },
       { id: "enhance", label: "功能增强", icon: Hammer },
       { id: "checkpoint", label: "Checkpoint", icon: History },
     ],
@@ -993,6 +998,7 @@ const defaultSettings: BackendSettings = {
   codexAppActiveSkinId: "",
   codexGoalsEnabled: false,
   lanProxyEnabled: false,
+  remoteAccess: { ...defaultRemoteAccessSettings },
   gptReasoningContinuation: false,
   gptReasoningContinuationMaxRounds: 3,
   layeredCompactionEnabled: false,
@@ -1054,6 +1060,8 @@ const defaultSettings: BackendSettings = {
 };
 
 let browserPreviewSettingsState: BackendSettings | null = null;
+let browserPreviewRemoteCredentials = { accessKeyConfigured: false, tunnelTokenConfigured: false };
+let browserPreviewRemoteProgramInstalled = false;
 
 function isBrowserPreview(): boolean {
   return typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
@@ -1982,6 +1990,41 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         user_scripts: { enabled: true, scripts: [] },
         layered_compaction_default_prompt: browserPreviewCompactionDefaultPrompt,
       }) as T);
+    case "remote_access_command": {
+      const action = args?.action as string;
+      const remote = settings.remoteAccess;
+      if (action === "credentials") {
+        return Promise.resolve({ status: "ok", ...browserPreviewRemoteCredentials } as T);
+      }
+      if (action === "generateKey") {
+        return Promise.resolve({ status: "ok",
+          key: `browser-preview-only-${crypto.randomUUID()}-${crypto.randomUUID()}` } as T);
+      }
+      if (action === "setKey") {
+        browserPreviewRemoteCredentials.accessKeyConfigured = true;
+        return Promise.resolve({ status: "ok", ...browserPreviewRemoteCredentials } as T);
+      }
+      if (action === "setTunnelToken") {
+        browserPreviewRemoteCredentials.tunnelTokenConfigured = true;
+        return Promise.resolve({ status: "ok", ...browserPreviewRemoteCredentials } as T);
+      }
+      if (action === "checkCloudflared") {
+        return Promise.resolve({ status: "ok", version: "cloudflared（浏览器模拟，不执行程序）" } as T);
+      }
+      if (action === "cloudflaredStatus" || action === "downloadCloudflared") {
+        if (action === "downloadCloudflared") browserPreviewRemoteProgramInstalled = true;
+        return Promise.resolve({ status: "ok", installed: browserPreviewRemoteProgramInstalled,
+          ...(browserPreviewRemoteProgramInstalled ? { version: "cloudflared（浏览器模拟，不下载程序）" } : {}) } as T);
+      }
+      const running = remote.enabled && browserPreviewRemoteCredentials.accessKeyConfigured;
+      const tunnelRunning = running && remote.cloudflareTunnelEnabled && browserPreviewRemoteCredentials.tunnelTokenConfigured;
+      return Promise.resolve({ status: "ok", enabled: remote.enabled, running,
+        nativeConnected: running, settings: remote, ...browserPreviewRemoteCredentials,
+        addresses: [remote.publicUrl, `${remote.tlsCertificatePath ? "https" : "http"}://${remote.bindHost}:${remote.port}`].filter(Boolean),
+        tunnel: { enabled: remote.cloudflareTunnelEnabled, running: tunnelRunning,
+          connected: tunnelRunning, state: tunnelRunning ? "connected" : "stopped", publicUrl: remote.publicUrl },
+        devices: [], message: "浏览器预览，不启动真实远程服务。" } as T);
+    }
     case "set_user_scripts_enabled":
     case "set_user_script_enabled":
     case "delete_user_script":
@@ -3382,10 +3425,13 @@ export function App() {
     return enqueueSettingsOperation(persist);
   };
 
-  const saveSettingsValue = async (next: BackendSettings, silent = true) => {
+  const saveSettingsValue = async (next: BackendSettings, silent = true, requireSuccess = false) => {
     const result = await persistSettings(next);
     if (result && (!silent || !isSuccessStatus(result.status))) {
       showNotice("设置保存", result.message, result.status);
+    }
+    if (requireSuccess && (!result || !isSuccessStatus(result.status))) {
+      throw new Error(result?.message || "设置保存失败，未应用远程访问配置。");
     }
   };
 
@@ -4366,6 +4412,18 @@ export function App() {
               actions={actions}
             />
           ) : null}
+          {route === "remoteAccess" ? (
+            <RemoteAccessScreen
+              settings={settingsForm.remoteAccess}
+              onChange={(remoteAccess) => setSettingsForm((current) => ({ ...current, remoteAccess }))}
+              onSave={() => actions.saveSettingsValue(settingsForm, true, true)}
+              command={(action, payload) => call("remote_access_command", { action, payload })}
+              openExternalUrl={async (url) => {
+                if (isBrowserPreview()) window.open(url, "_blank", "noopener,noreferrer");
+                else await actions.openExternalUrl(url);
+              }}
+            />
+          ) : null}
           {route === "context" ? (
             <ContextScreen
               form={settingsForm}
@@ -4482,7 +4540,7 @@ type Actions = {
   checkUpdate: () => Promise<void>;
   performUpdate: () => Promise<void>;
   saveSettings: () => Promise<void>;
-  saveSettingsValue: (settings: BackendSettings, silent?: boolean) => Promise<void>;
+  saveSettingsValue: (settings: BackendSettings, silent?: boolean, requireSuccess?: boolean) => Promise<void>;
   refreshSettings: (silent?: boolean) => Promise<BackendSettings | null>;
   resetSettings: () => Promise<void>;
   resetImageOverlaySettings: () => Promise<void>;
@@ -11341,6 +11399,7 @@ function routeSubtitle(route: Route) {
     overview: "检查问题与快速修复",
     relay: "管理 API 供应商、协议、Key 与配置文件",
     localProxy: "查看本地代理状态、请求日志和完整返回内容",
+    remoteAccess: "设置手机网页访问、设备授权与原生会话交互",
     sessions: "查看、删除和修复 Codex 本地会话",
     checkpoint: "管理工作区状态",
     context: "独立管理 MCP、Skills、Plugins",
@@ -12336,6 +12395,7 @@ function normalizeSettings(settings: BackendSettings): BackendSettings {
     computerUseApiKeyBrowserCompatEnabled:
       settings.computerUseApiKeyBrowserCompatEnabled !== false,
     lanProxyEnabled: settings.lanProxyEnabled === true,
+    remoteAccess: { ...defaultRemoteAccessSettings, ...settings.remoteAccess },
     codexAppImageOverlayOpacity: clampNumber(settings.codexAppImageOverlayOpacity || 35, 1, 100),
     codexAppWorkspaceCheckpointStoragePath: (
       settings.codexAppWorkspaceCheckpointStoragePath || ""

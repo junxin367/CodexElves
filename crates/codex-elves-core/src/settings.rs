@@ -733,6 +733,98 @@ pub enum RelayMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RemoteAccessSettings {
+    pub enabled: bool,
+    pub bind_host: String,
+    pub port: u16,
+    pub public_url: String,
+    pub cloudflare_tunnel_enabled: bool,
+    pub cloudflared_path: String,
+    pub tls_certificate_path: String,
+    pub tls_private_key_path: String,
+    pub device_session_hours: u16,
+    pub read_only: bool,
+    pub allow_approvals: bool,
+}
+
+impl Default for RemoteAccessSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_host: "127.0.0.1".into(),
+            port: 45222,
+            public_url: String::new(),
+            cloudflare_tunnel_enabled: false,
+            cloudflared_path: "cloudflared".into(),
+            tls_certificate_path: String::new(),
+            tls_private_key_path: String::new(),
+            device_session_hours: 168,
+            read_only: false,
+            allow_approvals: true,
+        }
+    }
+}
+
+impl RemoteAccessSettings {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let address: std::net::IpAddr = self
+            .bind_host
+            .parse()
+            .map_err(|_| anyhow::anyhow!("远程访问监听地址必须是 IP 地址"))?;
+        anyhow::ensure!(self.port > 0, "远程访问端口必须在 1–65535 之间");
+        anyhow::ensure!(
+            (1..=720).contains(&self.device_session_hours),
+            "设备授权有效期必须在 1–720 小时之间"
+        );
+        anyhow::ensure!(
+            self.tls_certificate_path.is_empty() == self.tls_private_key_path.is_empty(),
+            "HTTPS 证书和私钥必须同时设置"
+        );
+        anyhow::ensure!(
+            !self.enabled || address.is_loopback() || !self.tls_certificate_path.is_empty(),
+            "非本机监听必须配置 HTTPS 证书与私钥；也可使用本机监听和 HTTPS 反向代理"
+        );
+        if !self.public_url.is_empty() {
+            let url = reqwest::Url::parse(&self.public_url)
+                .map_err(|_| anyhow::anyhow!("外部访问地址无效"))?;
+            anyhow::ensure!(
+                url.scheme() == "https"
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.path() == "/"
+                    && url.query().is_none()
+                    && url.fragment().is_none(),
+                "外部访问地址必须是无路径、凭据或查询参数的 HTTPS 地址"
+            );
+        }
+        if self.cloudflare_tunnel_enabled {
+            anyhow::ensure!(
+                address.is_loopback() && self.tls_certificate_path.is_empty(),
+                "Cloudflare 隧道必须转发到本机 HTTP 监听地址，不需配置本机 HTTPS 证书"
+            );
+            let url = reqwest::Url::parse(&self.public_url)
+                .map_err(|_| anyhow::anyhow!("Cloudflare 隧道需要填写已绑定的固定 HTTPS 域名"))?;
+            anyhow::ensure!(
+                url.host_str().is_some_and(|host| {
+                    host.contains('.')
+                        && !host.starts_with('[')
+                        && host.parse::<std::net::IpAddr>().is_err()
+                        && !host.ends_with(".trycloudflare.com")
+                }),
+                "Cloudflare 隧道需要使用已绑定的域名"
+            );
+            anyhow::ensure!(
+                !self.cloudflared_path.contains('\0'),
+                "cloudflared 程序路径不能包含空字符"
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BackendSettings {
     #[serde(rename = "codexAppPath", default)]
     pub codex_app_path: String,
@@ -815,6 +907,8 @@ pub struct BackendSettings {
     pub codex_goals_enabled: bool,
     #[serde(rename = "lanProxyEnabled", default)]
     pub lan_proxy_enabled: bool,
+    #[serde(rename = "remoteAccess", default)]
+    pub remote_access: RemoteAccessSettings,
     #[serde(rename = "gptReasoningContinuation", default)]
     pub gpt_reasoning_continuation: bool,
     #[serde(
@@ -923,6 +1017,7 @@ impl Default for BackendSettings {
             codex_app_active_skin_id: String::new(),
             codex_goals_enabled: false,
             lan_proxy_enabled: false,
+            remote_access: RemoteAccessSettings::default(),
             gpt_reasoning_continuation: false,
             gpt_reasoning_continuation_max_rounds: default_gpt_reasoning_continuation_max_rounds(),
             layered_compaction_enabled: false,
@@ -1291,6 +1386,7 @@ impl SettingsStore {
         settings.codex_home_path = normalize_codex_home_path(&settings.codex_home_path);
         settings.codex_extra_args = normalize_codex_extra_args(&settings.codex_extra_args);
         validate_relay_model_mapping_save_constraints(&settings)?;
+        settings.remote_access.validate()?;
         let bytes = serde_json::to_vec_pretty(&settings)?;
         atomic_write(&self.path, &bytes)
     }
@@ -1308,6 +1404,7 @@ impl SettingsStore {
                 .context("更新后的设置格式无效，未写入配置文件")?,
         );
         validate_relay_model_mapping_save_constraints(&settings)?;
+        settings.remote_access.validate()?;
         raw.insert(
             "relayCommonConfigContents".to_string(),
             Value::String(settings.relay_common_config_contents.clone()),
@@ -1473,6 +1570,23 @@ fn merge_known_setting_fields(
         target.insert("codexGoalsEnabled".to_string(), Value::Bool(value));
     }
     merge_bool_setting(target, source, "lanProxyEnabled");
+    if let Some(value) = source.get("remoteAccess") {
+        let current = target
+            .get("remoteAccess")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let mut remote =
+            serde_json::to_value(serde_json::from_value::<RemoteAccessSettings>(current)?)?;
+        let object = value.as_object().context("远程访问设置格式无效")?;
+        let target_object = remote.as_object_mut().context("远程访问设置格式无效")?;
+        for (key, value) in object {
+            if target_object.contains_key(key) {
+                target_object.insert(key.clone(), value.clone());
+            }
+        }
+        serde_json::from_value::<RemoteAccessSettings>(remote.clone())?.validate()?;
+        target.insert("remoteAccess".into(), remote);
+    }
     merge_bool_setting(target, source, "gptReasoningContinuation");
     if let Some(value) = source
         .get("gptReasoningContinuationMaxRounds")
@@ -1875,6 +1989,10 @@ mod tests {
         assert!(settings.codex_app_native_menu_placement);
         assert!(!settings.codex_goals_enabled);
         assert!(!settings.lan_proxy_enabled);
+        assert!(!settings.remote_access.enabled);
+        assert_eq!(settings.remote_access.bind_host, "127.0.0.1");
+        assert_eq!(settings.remote_access.port, 45222);
+        assert!(settings.remote_access.validate().is_ok());
         assert!(settings.codex_app_path.is_empty());
         assert!(settings.codex_extra_args.is_empty());
         assert_eq!(settings.launch_mode, LaunchMode::Patch);

@@ -98,6 +98,7 @@ pub fn run() {
             commands::restart_codex_elves,
             commands::load_settings,
             commands::save_settings,
+            commands::remote_access_command,
             commands::load_workspace_checkpoint_management,
             commands::save_workspace_checkpoint_settings,
             commands::set_workspace_checkpoint_enabled,
