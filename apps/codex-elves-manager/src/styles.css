@@ -6250,11 +6250,7 @@ body {
   }
 
   .proxy-log-row {
-    grid-template-columns: minmax(140px, 1fr) 118px 166px 104px 64px;
-  }
-
-  .proxy-log-row > span:nth-child(3) {
-    display: none;
+    grid-template-columns: minmax(120px, 1fr) 110px minmax(100px, 120px) minmax(110px, 140px) 104px 64px;
   }
 
   .proxy-topbar-badge {

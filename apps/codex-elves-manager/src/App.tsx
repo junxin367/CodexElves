@@ -1547,13 +1547,14 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
   const models = ["gpt-5.4", "claude-opus-4-8", "deepseek-reasoner", "qwen3-coder"];
   const protocols = ["responses", "anthropic", "chat_completions", "responses"];
   return Array.from({ length: 23 }, (_, index) => {
-    const protocol = protocols[index % protocols.length];
-    const model = index === 2 ? "gpt-6-astra" : models[index % models.length];
+    const protocol = index === 5 || index === 9 ? "responses" : protocols[index % protocols.length];
+    const model = index === 2 ? "gpt-6-astra" : index === 5 || index === 9 ? "gpt-5.4" : models[index % models.length];
     const failedCompaction = index === 6;
     const success = index % 7 !== 5 && !failedCompaction;
     const legacy = index === 8;
     const pending = index === 9;
-    const transport = index === 5 ? "ws" : "http";
+    const transport = index === 0 || index === 5 || index === 9 ? "ws" : "http";
+    const wsFallback = index === 12 || index === 16;
     const outcome: LocalProxyRequestOutcome | null = legacy || pending ? null : index === 7 ? "incomplete" : success ? "succeeded" : "failed";
     const continueThinkingTriggered = protocol === "responses" && index === 0;
     const layeredCompactionTriggered = index === 1;
@@ -1577,12 +1578,17 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
             errorCode: failedCompaction || attempt === 1 ? "layered_compaction_summary_tag_missing" : null,
             error: failedCompaction || attempt === 1 ? "摘要缺少必要标记" : null,
           }))
-        : [{
-            attempt: 1, model: upstreamRequestModel, transport, statusCode: transport === "ws" ? null : success ? 200 : 502,
+        : [
+          ...(wsFallback ? [{
+            attempt: 1, model: upstreamRequestModel, transport: "ws" as const, statusCode: null,
+            outcome: "failed" as const, error: "上游 WebSocket 连接断开",
+          }] : []),
+          {
+            attempt: wsFallback ? 2 : 1, model: upstreamRequestModel, transport, statusCode: transport === "ws" ? null : success ? 200 : 502,
             outcome, error: success ? null : "上游连接断开",
           }],
       timestampMs: Date.now() - ((index + 1) * 41000),
-      method: transport === "ws" ? "WS" : "POST",
+      method: index === 5 ? "WS" : "POST",
       path: protocol === "chat_completions" ? "/v1/chat/completions" : "/v1/responses",
       remoteAddr: `127.0.0.1:${54624 + index}`,
       model,
@@ -1610,7 +1616,9 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
       relayId: "preview-pure-api",
       relayName: "浏览器预览供应商",
       endpoint:
-        protocol === "anthropic"
+        transport === "ws"
+          ? "wss://api.vendor.example/v1/responses"
+          : protocol === "anthropic"
           ? "https://api.vendor.example/v1/messages"
           : protocol === "chat_completions"
             ? "https://api.vendor.example/v1/chat/completions"
@@ -4212,9 +4220,11 @@ export function App() {
     [route, launchForm, settingsForm, settings, removeOwnedData, update, logs, localProxyDetail, diagnostics, theme, relayFiles, localSessions, pluginCacheInfos, remotePluginMarketplaceProgress, selectedProviderSyncTarget, envConflicts, ccsProviders, workspaceCheckpointBusy],
   );
   const hasUpdate = update?.updateAvailable === true;
+  const appVersion = overview?.current_version ?? update?.currentVersion ?? null;
   const renderNavItem = (item: NavItem) => {
     const Icon = item.icon;
     const active = route === item.id;
+    const badge = item.id === "about" && appVersion ? `v${appVersion}` : item.badge;
     return (
       <button
         aria-current={active ? "page" : undefined}
@@ -4227,7 +4237,7 @@ export function App() {
           <Icon className="h-4 w-4" aria-hidden="true" />
         </span>
         <span className="nav-label">{item.label}</span>
-        {item.badge ? <span className="nav-badge">{item.badge}</span> : null}
+        {badge ? <span className="nav-badge">{badge}</span> : null}
       </button>
     );
   };
@@ -5221,8 +5231,13 @@ function LocalProxyLogDetailDialog({
             {entry.responseTruncated ? <span>返回内容已截断</span> : null}
           </div>
           <div className="proxy-detail-audit" aria-label="请求结果记录">
-            <span>上游原始 HTTP 状态：{formatUpstreamStatusCode(entry)}</span>
-            <span>{entry.method === "WS" ? "本地结果标记" : "代理返回 HTTP 状态"}：{entry.statusCode ?? "未记录"}</span>
+            <span>上游传输：{formatRequestTransport(entry)}</span>
+            {formatRequestTransport(entry) === "WS" ? (
+              <span>上游结果：{entry.state === "pending" ? "进行中" : formatRequestOutcome(localProxyOutcome(entry))}</span>
+            ) : (
+              <span>上游原始 HTTP 状态：{formatUpstreamStatusCode(entry)}</span>
+            )}
+            <span>本地代理结果码：{entry.statusCode ?? "未记录"}</span>
             <span>实际请求模型：{entry.upstreamRequestModel || "未记录"}</span>
             <span>上游响应模型：{entry.upstreamResponseModel || "未记录"}</span>
             <span>会话：{entry.threadId || "未记录"}</span>
@@ -5239,7 +5254,7 @@ function LocalProxyLogDetailDialog({
               <div className="proxy-detail-attempt" key={attempt.attempt}>
                 <strong>第 {attempt.attempt} 次 · {formatRequestOutcome(attempt.outcome)}</strong>
                 <span>请求模型：{attempt.model || "未记录"} · 响应模型：{attempt.upstreamResponseModel || "未记录"}</span>
-                <span>上游 HTTP 状态：{attempt.transport === "ws" ? "不适用（WS）" : attempt.statusCode ?? "未记录"}</span>
+                <span>{attempt.transport === "ws" ? "上游传输：WS" : `上游 HTTP 状态：${attempt.statusCode ?? "未记录"}`}</span>
                 {attempt.error || attempt.errorCode ? (
                   <span className="proxy-detail-failure">
                     原因：{proxyFailureReason(attempt) || "未记录"}{attempt.errorCode ? `（${attempt.errorCode}）` : ""}
@@ -5585,21 +5600,22 @@ function RelayScreen({
                   ) : null}
                 </div>
               </div>
-              <label
-                className="relay-header-switch"
+              <button
+                aria-checked={normalized.relayProfilesEnabled}
+                aria-label="启用供应商功能"
+                className={`context-enabled-switch checkpoint-enabled-switch ${normalized.relayProfilesEnabled ? "active" : ""}`}
                 data-tooltip="开启后允许切换供应商，并在启动 ChatGPT/Codex 时按当前供应商同步 config.toml / auth.json；需要本地代理或聚合供应商时也会随启动启用。关闭后只保存供应商列表，不写入 Codex live 配置、不启动本地代理。"
+                disabled={actions.relaySwitching}
+                onClick={() => {
+                  const next = { ...normalized, relayProfilesEnabled: !normalized.relayProfilesEnabled };
+                  void saveRelaySettings(next);
+                }}
+                role="switch"
+                type="button"
               >
-                <input
-                  aria-label="启用供应商功能"
-                  checked={normalized.relayProfilesEnabled}
-                  onChange={(event) => {
-                    const next = { ...normalized, relayProfilesEnabled: event.currentTarget.checked };
-                    void saveRelaySettings(next);
-                  }}
-                  type="checkbox"
-                />
-                <span>启用</span>
-              </label>
+                <span className="context-switch-track" aria-hidden="true"><span className="context-switch-thumb" /></span>
+                <span>{normalized.relayProfilesEnabled ? "已启用" : "已停用"}</span>
+              </button>
             </>
           )}
         />
@@ -8231,6 +8247,11 @@ function RelayProfileEditor({
       setFetchingModelChoices(false);
     }
   };
+  const ensureModelChoices = () => {
+    if (fetchingModelChoices) return;
+    if (modelChoices.responses.length) return;
+    void fetchModelChoices();
+  };
   const autoAddModels = async () => {
     if (fetchingModelChoices) return;
     setFetchingModelChoices(true);
@@ -8416,16 +8437,6 @@ function RelayProfileEditor({
               <>
                 <Button
                   disabled={fetchingModelChoices}
-                  onClick={fetchModelChoices}
-                  size="sm"
-                  type="button"
-                  variant="secondary"
-                >
-                  <Download className="h-4 w-4" />
-                  {fetchingModelChoices ? "获取中" : "获取模型列表"}
-                </Button>
-                <Button
-                  disabled={fetchingModelChoices}
                   onClick={autoAddModels}
                   size="sm"
                   title="从供应商的模型接口拉取模型，并按模型名称自动选择协议；已有模型不会重复添加。"
@@ -8454,8 +8465,10 @@ function RelayProfileEditor({
           >
             <RelayModelMappingTable
               choices={modelChoices}
+              fetchingChoices={fetchingModelChoices}
               mappings={profile.modelMappings}
               onChange={updateModelMappings}
+              onEnsureChoices={ensureModelChoices}
             />
           </Field>
         ) : null}
@@ -8760,11 +8773,15 @@ function LayeredCompactionPromptModal({
 function RelayModelMappingTable({
   mappings,
   choices,
+  fetchingChoices,
   onChange,
+  onEnsureChoices,
 }: {
   mappings: RelayModelMapping[];
   choices: Record<RelayProtocol, string[]>;
+  fetchingChoices: boolean;
   onChange: (mappings: RelayModelMapping[]) => void;
+  onEnsureChoices: () => void;
 }) {
   const displayRows = mappings.length
     ? mappings
@@ -8834,9 +8851,11 @@ function RelayModelMappingTable({
               <SortableRelayModelMappingRow
                 canSort={canSort}
                 choices={choices}
+                fetchingChoices={fetchingChoices}
                 index={index}
                 key={relayModelMappingRowId(index)}
                 mappingsLength={mappings.length}
+                onEnsureChoices={onEnsureChoices}
                 onRemove={removeRow}
                 onUpdateModel={updateRowModel}
                 onUpdate={updateRow}
@@ -8854,8 +8873,10 @@ function SortableRelayModelMappingRow({
   row,
   index,
   choices,
+  fetchingChoices,
   canSort,
   mappingsLength,
+  onEnsureChoices,
   onUpdate,
   onUpdateModel,
   onRemove,
@@ -8863,8 +8884,10 @@ function SortableRelayModelMappingRow({
   row: RelayModelMapping;
   index: number;
   choices: Record<RelayProtocol, string[]>;
+  fetchingChoices: boolean;
   canSort: boolean;
   mappingsLength: number;
+  onEnsureChoices: () => void;
   onUpdate: (index: number, patch: Partial<RelayModelMapping>) => void;
   onUpdateModel: (index: number, row: RelayModelMapping, requestModel: string) => void;
   onRemove: (index: number) => void;
@@ -8898,8 +8921,10 @@ function SortableRelayModelMappingRow({
       <div className="relay-model-request-cell" role="cell">
         <ModelChoiceInput
           choices={choices[row.protocol]}
+          loadingChoices={fetchingChoices}
           value={row.requestModel}
           onChange={(value) => onUpdateModel(index, row, value)}
+          onEnsureChoices={onEnsureChoices}
           placeholder="点击选择或输入模型"
         />
       </div>
@@ -9175,13 +9200,17 @@ function SelectMenu<T extends string>({
 function ModelChoiceInput({
   value,
   choices,
+  loadingChoices = false,
   placeholder,
   onChange,
+  onEnsureChoices,
 }: {
   value: string;
   choices: string[];
+  loadingChoices?: boolean;
   placeholder?: string;
   onChange: (value: string, source: ModelChoiceChangeSource) => void;
+  onEnsureChoices?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [menuStyle, setMenuStyle] = useState<CSSProperties | null>(null);
@@ -9211,9 +9240,10 @@ function ModelChoiceInput({
     const openAbove = spaceBelow < 140 && spaceAbove > spaceBelow;
     const maxHeight = Math.max(120, Math.min(220, openAbove ? spaceAbove - gap : spaceBelow - gap));
     setMenuStyle({
+      bottom: openAbove ? window.innerHeight - rect.top + gap : "auto",
       left: rect.left,
       maxHeight,
-      top: openAbove ? rect.top - gap - maxHeight : rect.bottom + gap,
+      top: openAbove ? "auto" : rect.bottom + gap,
       width: rect.width,
     });
   };
@@ -9233,6 +9263,10 @@ function ModelChoiceInput({
       window.removeEventListener("scroll", handleLayoutChange, true);
     };
   }, [open]);
+
+  useEffect(() => {
+    if (open && !normalizedChoices.length) onEnsureChoices?.();
+  }, [open, normalizedChoices.length, onEnsureChoices]);
 
   const containsModelChoiceTarget = (target: EventTarget | null) =>
     target instanceof Node && (!!rootRef.current?.contains(target) || !!menuRef.current?.contains(target));
@@ -9293,7 +9327,9 @@ function ModelChoiceInput({
           <div className="relay-model-choice-empty">无匹配模型</div>
         )
       ) : (
-        <div className="relay-model-choice-empty">先点击获取模型列表</div>
+        <div className="relay-model-choice-empty">
+          {loadingChoices ? "正在获取模型列表…" : "未获取到模型，可直接输入"}
+        </div>
       )}
     </div>
   ) : null;
@@ -12138,13 +12174,18 @@ function formatLocalProxyStatusCode(entry: LocalProxyLogEntry) {
   const result = entry.state === "pending" ? "进行中"
     : outcome === "failed" && (entry.compactionRequested || entry.remoteCompactionTriggered || entry.layeredCompactionTriggered)
       ? "压缩失败" : formatRequestOutcome(outcome);
-  const status = entry.method === "WS" ? "WS" : `HTTP ${entry.statusCode ?? "未记录"}`;
-  return `${result} · ${status}`;
+  const transport = formatRequestTransport(entry);
+  const status = transport === "WS" ? "WS" : `HTTP ${entry.statusCode ?? "未记录"}`;
+  const fallback = transport === "HTTP" && entry.upstreamAttempts?.slice(0, -1).some(
+    (attempt) => attempt.transport === "ws" && attempt.outcome === "failed",
+  ) ? "（WS 回退）" : "";
+  return `${result} · ${status}${fallback}`;
 }
 
 function formatUpstreamStatusCode(entry: LocalProxyLogEntry) {
+  if (formatRequestTransport(entry) === "WS") return "不适用（WS）";
   if (typeof entry.upstreamStatusCode === "number") return String(entry.upstreamStatusCode);
-  return entry.upstreamAttempts?.at(-1)?.transport === "ws" ? "不适用（WS）" : "未记录";
+  return "未记录";
 }
 
 function localProxyFailureReason(entry: LocalProxyLogEntry) {
@@ -12169,12 +12210,13 @@ function formatRequestLatencyTitle(entry: Pick<LocalProxyLogEntry, "firstTokenMs
   return `首字 ${formatOptionalRequestDurationMs(entry.firstTokenMs)} | 耗时 ${formatOptionalRequestDurationMs(entry.durationMs)}`;
 }
 
-function formatProtocolRoute(entry: Pick<LocalProxyLogEntry, "responseProtocol" | "transport">) {
+function formatProtocolRoute(entry: Pick<LocalProxyLogEntry, "responseProtocol" | "transport" | "upstreamAttempts" | "method">) {
   return `${entry.responseProtocol || "未记录"} · ${formatRequestTransport(entry)} · ${formatProtocolMode(entry)}`;
 }
 
-function formatRequestTransport(entry: Pick<LocalProxyLogEntry, "transport">) {
-  return entry.transport === "ws" ? "WS" : "HTTP";
+function formatRequestTransport(entry: Pick<LocalProxyLogEntry, "transport" | "upstreamAttempts" | "method">) {
+  const transport = entry.upstreamAttempts?.at(-1)?.transport ?? entry.transport;
+  return transport === "ws" || (!transport && entry.method === "WS") ? "WS" : "HTTP";
 }
 
 function formatProtocolMode(entry: Pick<LocalProxyLogEntry, "responseProtocol">) {
