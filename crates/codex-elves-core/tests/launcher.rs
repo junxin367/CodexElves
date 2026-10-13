@@ -735,6 +735,119 @@ data: {"type":"message_stop"}
 }
 
 #[tokio::test]
+async fn helper_marks_deferred_responses_stream_reasoning_as_included() {
+    let _lock = launcher_settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
+    let upstream = spawn_launcher_upstream_with_response(
+        "text/event-stream",
+        r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_reasoning_flag","type":"message","role":"assistant","model":"claude-sonnet-4","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+"#
+        .to_string(),
+    );
+    write_launcher_mixed_relay_settings(temp.path(), &upstream.base_url);
+
+    let hooks = DefaultLaunchHooks::default();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    hooks.start_helper(port).await.unwrap();
+
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .json(&serde_json::json!({
+            "model": "claude-sonnet-4",
+            "input": "hi",
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let reasoning_included = response
+        .headers()
+        .get("x-reasoning-included")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    response.text().await.unwrap();
+    hooks.shutdown_helper(port).await;
+    upstream.finish_all();
+
+    assert_eq!(reasoning_included.as_deref(), Some("true"));
+}
+
+#[tokio::test]
+async fn helper_marks_native_responses_stream_reasoning_as_included() {
+    let _lock = launcher_settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = LauncherSettingsPathGuard::set(temp.path().join("settings.json"));
+    let upstream = spawn_launcher_upstream_with_response(
+        "text/event-stream",
+        r#"event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_native_flag","object":"response","status":"completed","model":"gpt-responses","output":[],"usage":{"input_tokens":10,"output_tokens":1}}}
+
+data: [DONE]
+
+"#
+        .to_string(),
+    );
+    write_launcher_mixed_relay_settings(temp.path(), &upstream.base_url);
+
+    let hooks = DefaultLaunchHooks::default();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    hooks.start_helper(port).await.unwrap();
+
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+        .json(&serde_json::json!({
+            "model": "gpt-responses",
+            "input": "hi",
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let reasoning_included = response
+        .headers()
+        .get("x-reasoning-included")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    response.text().await.unwrap();
+    hooks.shutdown_helper(port).await;
+    upstream.finish_all();
+
+    assert_eq!(reasoning_included.as_deref(), Some("true"));
+}
+
+#[tokio::test]
 async fn helper_does_not_defer_high_reasoning_stream_for_responses_models() {
     let _lock = launcher_settings_path_test_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();

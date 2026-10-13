@@ -2378,7 +2378,7 @@ async fn handle_protocol_proxy_connection_inner(
             } else {
                 upstream.content_type.clone()
             };
-            write_http_stream_headers(stream, &status, &content_type).await?;
+            write_http_stream_headers(stream, &status, &content_type, true).await?;
             let mut response_capture = Vec::new();
             let mut response_bytes = 0_usize;
             let mut response_truncated = false;
@@ -2620,7 +2620,8 @@ async fn handle_protocol_proxy_connection_inner(
             return Ok(());
         }
 
-        write_http_stream_headers(stream, "200 OK", "text/event-stream; charset=utf-8").await?;
+        write_http_stream_headers(stream, "200 OK", "text/event-stream; charset=utf-8", true)
+            .await?;
         let mut chat_converter;
         let mut anthropic_converter;
         let response_protocol = upstream.response_protocol;
@@ -3058,6 +3059,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
             &mut downstream_stream_headers_sent,
             "200 OK",
             "text/event-stream; charset=utf-8",
+            true,
         )
         .await?;
     }
@@ -3113,6 +3115,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                 &mut downstream_stream_headers_sent,
                 "200 OK",
                 "text/event-stream; charset=utf-8",
+                true,
             )
             .await?;
             response_bytes += failed.len();
@@ -3212,6 +3215,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                     &mut downstream_stream_headers_sent,
                     "200 OK",
                     "text/event-stream; charset=utf-8",
+                    true,
                 )
                 .await?;
                 response_bytes += failed.len();
@@ -3314,6 +3318,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
             &mut downstream_stream_headers_sent,
             "200 OK",
             "text/event-stream; charset=utf-8",
+            true,
         )
         .await?;
         response_bytes += failed.len();
@@ -3366,6 +3371,7 @@ async fn handle_deferred_protocol_proxy_stream_connection(
         &mut downstream_stream_headers_sent,
         response_status,
         response_content_type,
+        true,
     )
     .await?;
 
@@ -4051,7 +4057,7 @@ async fn handle_chat_completions_proxy_connection(
     };
 
     if upstream.is_stream && is_success {
-        write_http_stream_headers(stream, &status, &content_type).await?;
+        write_http_stream_headers(stream, &status, &content_type, false).await?;
         let mut bytes_stream = upstream.into_response()?.bytes_stream();
         let mut upstream_model_observer =
             crate::proxy_log::UpstreamResponseModelObserver::default();
@@ -4603,9 +4609,16 @@ async fn write_http_stream_headers(
     stream: &mut (impl tokio::io::AsyncWrite + Unpin),
     status: &str,
     content_type: &str,
+    reasoning_included: bool,
 ) -> anyhow::Result<()> {
+    // Codex 收到该头后不再本地估算回放的加密推理；仅限 usage 已计入这些推理的 Responses 流。
+    let reasoning_included_header = if reasoning_included {
+        "X-Reasoning-Included: true\r\n"
+    } else {
+        ""
+    };
     let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nCache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nConnection: close\r\n\r\n"
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nCache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\n{reasoning_included_header}Connection: close\r\n\r\n"
     );
     stream.write_all(response.as_bytes()).await?;
     Ok(())
@@ -4616,11 +4629,12 @@ async fn write_http_stream_headers_once(
     headers_sent: &mut bool,
     status: &str,
     content_type: &str,
+    reasoning_included: bool,
 ) -> anyhow::Result<()> {
     if *headers_sent {
         return Ok(());
     }
-    write_http_stream_headers(stream, status, content_type).await?;
+    write_http_stream_headers(stream, status, content_type, reasoning_included).await?;
     stream.flush().await?;
     *headers_sent = true;
     Ok(())

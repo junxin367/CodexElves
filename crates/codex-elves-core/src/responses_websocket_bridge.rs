@@ -332,13 +332,17 @@ pub async fn handle_responses_websocket_connection(
         return Ok(());
     }
 
-    let response = match create_response(&request) {
+    let mut response = match create_response(&request) {
         Ok(response) => response,
         Err(error) => {
             reject_upgrade(&mut stream, StatusCode::BAD_REQUEST, &error.to_string()).await?;
             return Ok(());
         }
     };
+    response.headers_mut().insert(
+        HeaderName::from_static("x-reasoning-included"),
+        HeaderValue::from_static("true"),
+    );
     let request_path = request.uri().path().to_string();
     let mut response_bytes = Vec::new();
     write_response(&mut response_bytes, &response)?;

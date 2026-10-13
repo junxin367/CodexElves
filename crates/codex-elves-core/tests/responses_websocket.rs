@@ -502,7 +502,14 @@ async fn local_proxy_bridges_responses_websocket_messages_and_authentication() {
     client_request
         .headers_mut()
         .insert("x-forwarded-for", HeaderValue::from_static("203.0.113.42"));
-    let (mut client, _) = connect_async(client_request).await.unwrap();
+    let (mut client, handshake) = connect_async(client_request).await.unwrap();
+    assert_eq!(
+        handshake
+            .headers()
+            .get("x-reasoning-included")
+            .and_then(|value| value.to_str().ok()),
+        Some("true")
+    );
     client
         .send(Message::Text(
             serde_json::json!({
