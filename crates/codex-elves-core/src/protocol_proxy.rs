@@ -11142,7 +11142,7 @@ fn is_anthropic_server_content(block: &Value) -> bool {
     kind.ends_with("_tool_result")
         && block["tool_use_id"]
             .as_str()
-            .is_some_and(|id| id.starts_with("srvtoolu_"))
+            .is_some_and(|id| !id.is_empty())
         && block.get("content").is_some()
 }
 

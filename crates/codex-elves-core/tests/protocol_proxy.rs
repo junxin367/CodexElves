@@ -239,32 +239,75 @@ mod protocol_stream_integrity_review {
 
     #[test]
     fn server_tools_are_opaque_history_not_client_calls() {
-        let blocks = vec![
-            json!({"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"q"}}),
-            json!({"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","url":"https://example.com","encrypted_content":"opaque"}]}),
-            json!({"type":"text","text":"answer"}),
-        ];
-        for response in responses(blocks.clone(), &request(false)) {
-            let items = response["output"].as_array().unwrap();
-            assert!(items.iter().all(|item| !matches!(
-                item["type"].as_str(),
-                Some("function_call" | "custom_tool_call" | "web_search_call")
-            )));
-            assert_eq!(text(&response), "answer");
-            assert_eq!(items[0]["type"], "reasoning");
-            assert!(
-                items[0]["encrypted_content"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("codex-elves-anthropic-content-v1:")
-            );
-            let mut history = vec![json!({"role":"user","content":"test"})];
-            history.extend(items.iter().cloned());
-            let replay =
-                responses_to_anthropic_messages(json!({"model":"claude-test","input":history}))
+        for call_id in ["srvtoolu_1", "call_00_search", "tool_search", "opaque-id"] {
+            for result in [
+                json!([{"type":"web_search_result","url":"https://example.com","encrypted_content":"opaque"}]),
+                json!({"type":"web_search_tool_result_error","error_code":"max_uses_exceeded"}),
+            ] {
+                let blocks = vec![
+                    json!({"type":"server_tool_use","id":call_id,"name":"web_search","input":{"query":"q"}}),
+                    json!({"type":"web_search_tool_result","tool_use_id":call_id,"content":result}),
+                    json!({"type":"text","text":"answer"}),
+                ];
+                for response in responses(blocks.clone(), &request(false)) {
+                    let items = response["output"].as_array().unwrap();
+                    assert!(items.iter().all(|item| !matches!(
+                        item["type"].as_str(),
+                        Some("function_call" | "custom_tool_call" | "web_search_call")
+                    )));
+                    assert_eq!(text(&response), "answer");
+                    assert_eq!(items[0]["type"], "reasoning");
+                    assert!(
+                        items[0]["encrypted_content"]
+                            .as_str()
+                            .unwrap()
+                            .starts_with("codex-elves-anthropic-content-v1:")
+                    );
+                    let mut history = vec![json!({"role":"user","content":"test"})];
+                    history.extend(items.iter().cloned());
+                    history.push(json!({"role":"user","content":"continue"}));
+                    let replay = responses_to_anthropic_messages(json!({
+                        "model":"deepseek-v4.1-flash","input":history
+                    }))
                     .unwrap();
-            assert_eq!(replay["messages"][1]["content"][0], blocks[0]);
-            assert_eq!(replay["messages"][1]["content"][1], blocks[1]);
+                    assert_eq!(replay["messages"][1]["content"], json!(blocks), "{call_id}");
+                    assert_eq!(replay["messages"][2]["content"][0]["text"], "continue");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn server_tool_results_require_type_id_and_content() {
+        for block in [
+            json!({"type":"web_search_tool_result","content":[]}),
+            json!({"type":"web_search_tool_result","tool_use_id":"","content":[]}),
+            json!({"type":"web_search_tool_result","tool_use_id":42,"content":[]}),
+            json!({"type":"web_search_tool_result","tool_use_id":"call_00_search"}),
+            json!({"type":"tool_result","tool_use_id":"call_00_client","content":"done"}),
+        ] {
+            for response in responses(
+                vec![block.clone(), json!({"type":"text","text":"answer"})],
+                &request(false),
+            ) {
+                assert_eq!(response["output"].as_array().unwrap().len(), 1, "{block}");
+                assert_eq!(response["output"][0]["type"], "message");
+            }
+            let replay = responses_to_anthropic_messages(json!({
+                "model":"deepseek-v4.1-flash","input":[
+                    {"role":"user","content":"test"},
+                    {"type":"reasoning","summary":[],"encrypted_content":format!(
+                        "codex-elves-anthropic-content-v1:{block}"
+                    )},
+                    {"role":"assistant","content":"answer"}
+                ]
+            }))
+            .unwrap();
+            assert_eq!(
+                replay["messages"][1]["content"].as_array().unwrap().len(),
+                1
+            );
+            assert_eq!(replay["messages"][1]["content"][0]["type"], "text");
         }
     }
 
@@ -318,9 +361,9 @@ mod protocol_stream_integrity_review {
     #[test]
     fn server_fetch_and_client_tools_replay_without_changing_execution_owner() {
         let blocks = vec![
-            json!({"type":"server_tool_use","id":"srvtoolu_fetch","name":"web_fetch","input":{"url":"https://example.com"}}),
-            json!({"type":"web_fetch_tool_result","tool_use_id":"srvtoolu_fetch","content":{"type":"web_fetch_result","url":"https://example.com","retrieved_at":"2026-10-05T00:00:00Z","content":{"type":"document","source":{"type":"text","media_type":"text/plain","data":"source"}}}}),
-            json!({"type":"tool_use","id":"client_write","name":"write_file","input":{"content":"client"}}),
+            json!({"type":"server_tool_use","id":"call_00_fetch","name":"web_fetch","input":{"url":"https://example.com"}}),
+            json!({"type":"web_fetch_tool_result","tool_use_id":"call_00_fetch","content":{"type":"web_fetch_result","url":"https://example.com","retrieved_at":"2026-10-05T00:00:00Z","content":{"type":"document","source":{"type":"text","media_type":"text/plain","data":"source"}}}}),
+            json!({"type":"tool_use","id":"call_00_client_write","name":"write_file","input":{"content":"client"}}),
         ];
         for response in responses(blocks.clone(), &request(false)) {
             let items = response["output"].as_array().unwrap();
@@ -329,11 +372,11 @@ mod protocol_stream_integrity_review {
                 .filter(|item| item["type"] == "function_call")
                 .collect();
             assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0]["call_id"], "client_write");
+            assert_eq!(calls[0]["call_id"], "call_00_client_write");
             let mut history = vec![json!({"role":"user","content":"test"})];
             history.extend(items.iter().cloned());
             history.push(
-                json!({"type":"function_call_output","call_id":"client_write","output":"done"}),
+                json!({"type":"function_call_output","call_id":"call_00_client_write","output":"done"}),
             );
             let replay = responses_to_anthropic_messages(json!({
                 "model":"claude-test","input":history,"tools":request(false)["tools"]
@@ -344,7 +387,7 @@ mod protocol_stream_integrity_review {
             assert_eq!(replay["messages"][1]["content"][2], blocks[2]);
             assert_eq!(
                 replay["messages"][2]["content"][0]["tool_use_id"],
-                "client_write"
+                "call_00_client_write"
             );
         }
         // 服务端挂起等待客户端结果时，没有对应 server result 也必须保留调用。
@@ -354,7 +397,7 @@ mod protocol_stream_integrity_review {
                 response["output"][0]["encrypted_content"]
                     .as_str()
                     .unwrap()
-                    .contains("srvtoolu_fetch")
+                    .contains("call_00_fetch")
             );
         }
     }
@@ -14349,6 +14392,73 @@ async fn responses_proxy_e2e_chat_upstream_roundtrips_regular_namespace_tool_cal
     assert_eq!(response_body["output"][0]["call_id"], "call_pal");
     assert_eq!(response_body["output"][0]["name"], "version");
     assert_eq!(response_body["output"][0]["namespace"], "mcp__pal");
+}
+
+#[tokio::test]
+async fn responses_proxy_e2e_anthropic_upstream_roundtrips_server_web_search_history() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let blocks = json!([
+        {"type":"server_tool_use","id":"call_00_search","name":"web_search","input":{"query":"test"}},
+        {"type":"web_search_tool_result","tool_use_id":"call_00_search","content":[
+            {"type":"web_search_result","url":"https://example.com","title":"Example","encrypted_content":"opaque"}
+        ]},
+        {"type":"text","text":"answer"}
+    ]);
+    let server = spawn_chat_server_with_responses(vec![
+        json!({
+            "id":"msg_search","type":"message","role":"assistant","model":"deepseek-v4.1-flash",
+            "content":blocks,"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}
+        })
+        .to_string(),
+        json!({
+            "id":"msg_followup","type":"message","role":"assistant","model":"deepseek-v4.1-flash",
+            "content":[{"type":"text","text":"Example https://example.com"}],
+            "stop_reason":"end_turn","usage":{"input_tokens":20,"output_tokens":5}
+        })
+        .to_string(),
+    ]);
+    write_anthropic_relay_settings(temp.path(), &server.base_url);
+    let mut request = json!({
+        "model":"deepseek-v4.1-flash","input":[{"role":"user","content":"search"}],
+        "stream":false,"tools":[{"type":"web_search"}]
+    });
+    let first = handle_responses_proxy_request(&request.to_string())
+        .await
+        .unwrap();
+    assert_eq!(first.status, "200 OK");
+    let first: Value = serde_json::from_slice(&first.body).unwrap();
+    assert_eq!(first["status"], "completed");
+    let mut history = request["input"].as_array().unwrap().clone();
+    history.extend(first["output"].as_array().unwrap().iter().cloned());
+    history.push(json!({"role":"user","content":"repeat the source"}));
+    request["input"] = json!(history);
+    let second = handle_responses_proxy_request(&request.to_string())
+        .await
+        .unwrap();
+    let upstream = server.finish_all();
+    assert_eq!(upstream.len(), 2);
+    for (index, sent) in upstream.iter().enumerate() {
+        assert_eq!(sent.path, "/v1/messages");
+        let body: Value = serde_json::from_str(&sent.body).unwrap();
+        assert_eq!(body["tools"][0]["type"], "web_search_20250305");
+        if index == 1 {
+            assert_eq!(body["messages"][1]["role"], "assistant");
+            assert_eq!(body["messages"][1]["content"], blocks);
+            assert_eq!(
+                body["messages"][2]["content"][0]["text"],
+                "repeat the source"
+            );
+        }
+    }
+    assert_eq!(second.status, "200 OK");
+    let second: Value = serde_json::from_slice(&second.body).unwrap();
+    assert_eq!(second["status"], "completed");
+    assert_eq!(
+        second["output"][0]["content"][0]["text"],
+        "Example https://example.com"
+    );
 }
 
 #[tokio::test]
