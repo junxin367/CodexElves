@@ -5098,6 +5098,38 @@ fn injection_script_applies_fast_service_tier_contract() {
         cases["aliasCatalogResolution"]["aliasSlugConflict"],
         serde_json::Value::Null
     );
+    assert_eq!(
+        cases["aliasCatalogResolution"]["contextAliasWithEffort"],
+        "gpt-6-astra[600K]"
+    );
+    assert_eq!(
+        cases["aliasCatalogResolution"]["contextAliasWithEnglishEffort"],
+        "gpt-6-astra[600K]"
+    );
+    assert_eq!(
+        cases["aliasCatalogResolution"]["unicodeAliasWithEffort"],
+        "主力编程模型"
+    );
+    assert_eq!(
+        cases["aliasCatalogResolution"]["ambiguousWithEffort"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        cases["aliasFast"]["displayName"]["service_tier"],
+        "priority"
+    );
+    assert_eq!(
+        cases["aliasFast"]["catalogSlug"]["service_tier"],
+        "priority"
+    );
+    assert_eq!(
+        cases["aliasFast"]["unsupported"]["service_tier"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        cases["aliasFast"]["ambiguous"]["service_tier"],
+        serde_json::Value::Null
+    );
 
     // catalog 驱动：白名单之外但 catalog 标记 supports_fast 的模型也能注入 priority
     assert_eq!(cases["catalogDrivenFast"]["service_tier"], "priority");
@@ -7039,6 +7071,33 @@ const aliasCatalogResolution = {{
   primary: api.catalogSlugForText("主力编程模型"),
   ambiguous: api.catalogSlugForText("主力"),
   aliasSlugConflict: api.catalogSlugForText("model-b"),
+  ambiguousWithEffort: api.catalogSlugForText("主力 超高"),
+}};
+api.setModelCatalog({{
+  status: "ok",
+  model: "gpt-6-astra",
+  model_entries: [
+    {{ slug: "gpt-6-astra", service_tiers: [{{ id: "priority" }}] }},
+    {{ slug: "gpt-6-astra[600K]", service_tiers: [{{ id: "priority" }}] }},
+    {{ slug: "主力编程", supports_fast: false }},
+    {{ slug: "主力编程模型", service_tiers: [{{ id: "priority" }}] }},
+    {{ slug: "gpt-5.6-sol", display_name: "英文模型的中文别名", service_tiers: [{{ id: "priority" }}] }},
+    {{ slug: "claude-opus-5-5", display_name: "不支持的模型", supports_fast: false }},
+    {{ slug: "gpt-5.5", display_name: "同名模型", supports_fast: true }},
+    {{ slug: "other-model", display_name: "同名模型", supports_fast: false }},
+  ],
+}});
+Object.assign(aliasCatalogResolution, {{
+  contextAliasWithEffort: api.catalogSlugForText("gpt-6-astra[600K] 超高"),
+  contextAliasWithEnglishEffort: api.catalogSlugForText("gpt-6-astra[600K] xhigh"),
+  unicodeAliasWithEffort: api.catalogSlugForText("主力编程模型 最高"),
+}});
+api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
+const aliasFast = {{
+  displayName: api.applyServiceTierOverride("turn/start", {{ model: "英文模型的中文别名", service_tier: null }}),
+  catalogSlug: api.applyServiceTierOverride("turn/start", {{ model: "主力编程模型", service_tier: null }}),
+  unsupported: api.applyServiceTierOverride("turn/start", {{ model: "不支持的模型", service_tier: "priority" }}),
+  ambiguous: api.applyServiceTierOverride("turn/start", {{ model: "同名模型", service_tier: "priority" }}),
 }};
 api.setModelCatalog({{ status: "ok", model: "gpt-5.4", default_model: "gpt-5.4", models: ["gpt-5.4", "gpt-5.5"] }});
 
@@ -7550,6 +7609,7 @@ async function runAppServerRestartDispatchCase() {{
     displayNameMatches,
     unicodeAliasMatches,
     aliasCatalogResolution,
+    aliasFast,
     catalogDrivenFast,
     catalogDrivenBlocked,
     patchedCreateRequest,

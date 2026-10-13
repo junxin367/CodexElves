@@ -5112,6 +5112,21 @@
     );
     if (match.slug || match.ambiguous || !allowPartial) return match;
 
+    const reasoningSuffixes = new Set(
+      taskBoardReasoningEffortDefinitions.flatMap((effort) => [
+        codexServiceTierModelMatchKey(effort.id),
+        codexServiceTierModelMatchKey(effort.label),
+      ])
+    );
+    match = codexServiceTierUniqueCatalogMatch(
+      entries,
+      (entry) => [entry.slug, entry.displayName].some((name) => {
+        const nameKey = codexServiceTierModelMatchKey(name);
+        return nameKey && key.startsWith(nameKey) && reasoningSuffixes.has(key.slice(nameKey.length));
+      })
+    );
+    if (match.slug || match.ambiguous) return match;
+
     return codexServiceTierUniqueCatalogMatch(
       entries,
       (entry) => codexServiceTierModelMatchesText(entry.slug, value)
@@ -5158,9 +5173,12 @@
   }
 
   function codexServiceTierFastSupportedForModel(modelName) {
-    const catalogSupport = codexServiceTierCatalogFastSupport(modelName);
+    const match = codexServiceTierCatalogModelMatch(modelName);
+    if (match.ambiguous) return false;
+    const catalogModel = match.slug || modelName;
+    const catalogSupport = codexServiceTierCatalogFastSupport(catalogModel);
     if (catalogSupport !== null) return catalogSupport;
-    return codexServiceTierBuiltInFastSupported(modelName);
+    return codexServiceTierBuiltInFastSupported(catalogModel);
   }
 
   function codexServiceTierCatalogFastSupport(modelName) {
