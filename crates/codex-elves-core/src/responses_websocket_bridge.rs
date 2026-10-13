@@ -3611,12 +3611,21 @@ pub(crate) fn normalize_downstream_response_create_payload(payload: &Value) -> V
         else {
             return normalized;
         };
-        if latest_compaction_index == 0 {
+        let prompt_prefix_items = input
+            .iter()
+            .take_while(|item| {
+                matches!(
+                    item.get("role").and_then(Value::as_str),
+                    Some("system" | "developer")
+                )
+            })
+            .count();
+        if latest_compaction_index <= prompt_prefix_items {
             return normalized;
         }
 
         let original_input_items = input.len();
-        input.drain(..latest_compaction_index);
+        input.drain(prompt_prefix_items..latest_compaction_index);
         (original_input_items, input.len())
     };
     let retained_bytes = serde_json::to_vec(&normalized)
@@ -5405,6 +5414,46 @@ mod tests {
         assert_eq!(request_payload["input"].as_array().unwrap().len(), 3);
         assert_eq!(forwarded_payload["input"].as_array().unwrap().len(), 3);
         assert_eq!(forwarded_payload["previous_response_id"], "resp_previous");
+    }
+
+    #[test]
+    fn websocket_preserves_system_prompt_prefix_when_pruning_compacted_history() {
+        for prompt in ["custom prompt", ""] {
+            let relay = RelayProfile {
+                system_prompt_override: prompt.to_string(),
+                ..RelayProfile::default()
+            };
+            let payload = json!({
+                "type": "response.create",
+                "model": "gpt-5.6",
+                "store": false,
+                "input": [
+                    {
+                        "type": "message",
+                        "id": "msg_540c0b9f-4f6a-5acd-bccf-66d5a88cc494",
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": "You are Codex, a coding agent."}]
+                    },
+                    {"role": "developer", "content": "<permissions instructions>keep</permissions instructions>"},
+                    {"role": "user", "content": "old history"},
+                    {"type": "compaction", "id": "cmp_old", "encrypted_content": "old"},
+                    {"role": "developer", "content": "old historical context"},
+                    {"role": "user", "content": "more history"},
+                    {"type": "compaction", "id": "cmp_latest", "encrypted_content": "latest"},
+                    {"role": "user", "content": "continue"}
+                ]
+            });
+            let replaced = crate::protocol_proxy::apply_system_prompt_override_to_responses_request(
+                &payload, &relay,
+            );
+            let mut expected = replaced.clone();
+            expected["input"].as_array_mut().unwrap().drain(2..6);
+            assert_eq!(
+                super::normalize_downstream_response_create_payload(&replaced),
+                expected
+            );
+            assert!(expected.get("instructions").is_none());
+        }
     }
 
     #[test]

@@ -685,7 +685,12 @@ async fn local_proxy_applies_system_prompt_overrides_to_each_websocket_request()
         ("custom", "restored supplier", "", "restored supplier"),
     ];
     let input = serde_json::json!([
-        {"role": "system", "content": "old system"},
+        {
+            "type": "message",
+            "id": "msg_540c0b9f-4f6a-5acd-bccf-66d5a88cc494",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "original instructions"}]
+        },
         {"role": "developer", "content": "old developer"},
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "previous answer"},
@@ -701,30 +706,40 @@ async fn local_proxy_applies_system_prompt_overrides_to_each_websocket_request()
         })
         .await
         .unwrap();
-        for (index, (_, _, _, expected_prompt)) in cases.iter().enumerate() {
-            let message = socket.next().await.unwrap().unwrap();
-            let Message::Text(text) = message else {
-                panic!("expected response.create text message");
-            };
-            let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
-            assert_eq!(payload["type"], "response.create");
-            assert_eq!(payload["model"], "gpt-prompt");
-            assert_eq!(payload["instructions"], *expected_prompt);
-            assert_eq!(payload["store"], false);
-            assert_eq!(payload["reasoning"]["effort"], "high");
-            let expected_input = if *expected_prompt == "original instructions" {
-                upstream_input.clone()
-            } else {
-                serde_json::json!(&upstream_input.as_array().unwrap()[2..])
-            };
-            assert_eq!(payload["input"], expected_input);
-            if index > 0 {
-                assert_eq!(
-                    payload["previous_response_id"],
-                    format!("resp_prompt_{}", index - 1)
-                );
-            }
-            socket
+        let mut index = 0;
+        for (_, _, _, expected_prompt) in &cases {
+            for use_instructions in [false, true] {
+                let message = socket.next().await.unwrap().unwrap();
+                let Message::Text(text) = message else {
+                    panic!("expected response.create text message");
+                };
+                let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+                assert_eq!(payload["type"], "response.create");
+                assert_eq!(payload["model"], "gpt-prompt");
+                let mut expected_input = if use_instructions {
+                    serde_json::json!(&upstream_input.as_array().unwrap()[1..])
+                } else {
+                    upstream_input.clone()
+                };
+                if use_instructions {
+                    assert_eq!(payload["instructions"], *expected_prompt);
+                } else {
+                    assert!(payload.get("instructions").is_none());
+                    expected_input[0]["content"][0]["text"] = serde_json::json!(expected_prompt);
+                }
+                assert_eq!(payload["store"], false);
+                assert_eq!(payload["reasoning"]["effort"], "high");
+                assert_eq!(payload["input"], expected_input);
+                if index == 0 {
+                    assert_eq!(payload["generate"], false);
+                }
+                if index > 0 {
+                    assert_eq!(
+                        payload["previous_response_id"],
+                        format!("resp_prompt_{}", index - 1)
+                    );
+                }
+                socket
                 .send(Message::Text(
                     serde_json::json!({
                         "type": "response.completed",
@@ -735,7 +750,37 @@ async fn local_proxy_applies_system_prompt_overrides_to_each_websocket_request()
                 ))
                 .await
                 .unwrap();
+                index += 1;
+            }
         }
+        let message = socket.next().await.unwrap().unwrap();
+        let Message::Text(text) = message else {
+            panic!("expected incremental response.create text message");
+        };
+        let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+        assert!(payload.get("instructions").is_none());
+        assert_eq!(
+            payload["previous_response_id"],
+            format!("resp_prompt_{}", index - 1)
+        );
+        assert_eq!(
+            payload["input"],
+            serde_json::json!([
+                {"role": "developer", "content": "<app-context>keep</app-context>"},
+                {"role": "user", "content": "next message"}
+            ])
+        );
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "response.completed",
+                    "response": {"id": "resp_incremental", "status": "completed"}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
         let _ = socket.close(None).await;
     });
 
@@ -768,38 +813,77 @@ async fn local_proxy_applies_system_prompt_overrides_to_each_websocket_request()
     let (mut client, _) = connect_async(format!("ws://{local_address}/v1/responses"))
         .await
         .unwrap();
-    for (index, (model, supplier_prompt, model_prompt, _)) in cases.iter().enumerate() {
+    let mut index = 0;
+    for (model, supplier_prompt, model_prompt, _) in &cases {
         settings.relay_profiles[0].system_prompt_override = supplier_prompt.to_string();
         settings.relay_profiles[0].model_mappings[0].system_prompt_override =
             model_prompt.to_string();
         SettingsStore::default().save(&settings).unwrap();
-        let mut request = serde_json::json!({
-            "type": "response.create",
-            "model": model,
-            "instructions": "original instructions",
-            "input": input,
-            "store": false,
-            "reasoning": {"effort": "high"}
-        });
-        if index > 0 {
-            request["previous_response_id"] =
-                serde_json::json!(format!("resp_prompt_{}", index - 1));
+        for use_instructions in [false, true] {
+            let mut request = serde_json::json!({
+                "type": "response.create",
+                "model": model,
+                "input": if use_instructions {
+                    serde_json::json!(&input.as_array().unwrap()[1..])
+                } else {
+                    input.clone()
+                },
+                "store": false,
+                "reasoning": {"effort": "high"}
+            });
+            if use_instructions {
+                request["instructions"] = serde_json::json!("original instructions");
+            }
+            if index == 0 {
+                request["generate"] = serde_json::json!(false);
+            }
+            if index > 0 {
+                request["previous_response_id"] =
+                    serde_json::json!(format!("resp_prompt_{}", index - 1));
+            }
+            client
+                .send(Message::Text(request.to_string().into()))
+                .await
+                .unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let Message::Text(text) = response else {
+                panic!("expected response.completed text message");
+            };
+            let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+            assert_eq!(payload["response"]["id"], format!("resp_prompt_{index}"));
+            index += 1;
         }
-        client
-            .send(Message::Text(request.to_string().into()))
-            .await
-            .unwrap();
-        let response = tokio::time::timeout(Duration::from_secs(5), client.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let Message::Text(text) = response else {
-            panic!("expected response.completed text message");
-        };
-        let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
-        assert_eq!(payload["response"]["id"], format!("resp_prompt_{index}"));
     }
+    client
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "response.create",
+                "model": "custom",
+                "previous_response_id": format!("resp_prompt_{}", index - 1),
+                "input": [
+                    {"role": "developer", "content": "<app-context>keep</app-context>"},
+                    {"role": "user", "content": "next message"}
+                ]
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(5), client.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let Message::Text(text) = response else {
+        panic!("expected incremental response.completed");
+    };
+    let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+    assert_eq!(payload["response"]["id"], "resp_incremental");
     let _ = client.close(None).await;
     tokio::time::timeout(Duration::from_secs(5), local_server)
         .await
@@ -832,9 +916,14 @@ async fn local_proxy_accepts_legacy_hidden_alias_slug_without_forwarding_it() {
         );
         assert_eq!(
             payload["input"][0]["content"][0]["text"],
-            "Use the gpt-5.6-sol model."
+            "Use the gpt-5.6-sol--codex-elves-alias-2 model."
         );
-        assert!(!text.contains("--codex-elves-alias-2"));
+        assert!(
+            !payload["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("--codex-elves-alias-2")
+        );
         socket
             .send(Message::Text(
                 serde_json::json!({
@@ -1187,9 +1276,17 @@ async fn local_proxy_prunes_compacted_image_history_before_websocket_size_check(
         assert!(text.len() < 16 * 1024 * 1024);
         let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
         let input = payload["input"].as_array().unwrap();
-        assert_eq!(input.len(), 2);
-        assert_eq!(input[0]["type"], "compaction");
-        assert_eq!(input[1]["content"][0]["text"], "继续");
+        assert_eq!(input.len(), 4);
+        assert!(payload.get("instructions").is_none());
+        assert_eq!(input[0]["role"], "developer");
+        assert_eq!(input[0]["id"], "msg_540c0b9f-4f6a-5acd-bccf-66d5a88cc494");
+        assert_eq!(input[0]["content"][0]["text"], "compacted custom prompt");
+        assert_eq!(
+            input[1]["content"],
+            "<permissions instructions>keep</permissions instructions>"
+        );
+        assert_eq!(input[2]["type"], "compaction");
+        assert_eq!(input[3]["content"][0]["text"], "继续");
         assert!(!text.contains("data:image/png;base64"));
 
         socket
@@ -1210,6 +1307,9 @@ async fn local_proxy_prunes_compacted_image_history_before_websocket_size_check(
     let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
     let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
     save_supported_websocket_settings(upstream_address, false, "gpt-compacted-images");
+    let mut settings = SettingsStore::default().load().unwrap();
+    settings.relay_profiles[0].system_prompt_override = "compacted custom prompt".to_string();
+    SettingsStore::default().save(&settings).unwrap();
 
     let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_address = local_listener.local_addr().unwrap();
@@ -1232,6 +1332,13 @@ async fn local_proxy_prunes_compacted_image_history_before_websocket_size_check(
                 "store": false,
                 "stream": true,
                 "input": [
+                    {
+                        "type": "message",
+                        "id": "msg_540c0b9f-4f6a-5acd-bccf-66d5a88cc494",
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": "You are Codex, a coding agent."}]
+                    },
+                    {"role": "developer", "content": "<permissions instructions>keep</permissions instructions>"},
                     {
                         "type": "message",
                         "role": "user",
@@ -2136,6 +2243,7 @@ async fn reasoning_continuation_reuses_the_same_websocket_and_only_returns_the_f
             serde_json::json!({
                 "type": "response.create",
                 "model": "gpt-websocket-test",
+                "instructions": "original continuation prompt",
                 "store": false,
                 "previous_response_id": "resp_parent",
                 "input": [{

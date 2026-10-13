@@ -13811,77 +13811,90 @@ async fn responses_proxy_model_system_prompt_wins_for_all_protocols_and_aliases(
             ("custom", "custom prompt: GPT-5.6 Sol"),
             ("inherit", "supplier prompt"),
         ] {
-            let server = spawn_chat_server();
-            let settings = BackendSettings {
-                relay_profiles: vec![RelayProfile {
-                    id: "prompts".to_string(),
-                    name: "Prompts".to_string(),
-                    base_url: server.base_url.clone(),
-                    upstream_base_url: server.base_url.clone(),
-                    api_key: "sk-test".to_string(),
-                    relay_mode: RelayMode::MixedApi,
-                    system_prompt_override: "supplier prompt".to_string(),
-                    model_mappings: vec![
-                        RelayModelMapping {
-                            request_model: model.to_string(),
-                            alias: "custom".to_string(),
-                            protocol,
-                            context_window: "200000".to_string(),
-                            system_prompt_override: "custom prompt: GPT-5.6 Sol".to_string(),
-                        },
-                        RelayModelMapping {
-                            request_model: model.to_string(),
-                            alias: "inherit".to_string(),
-                            protocol,
-                            context_window: "200000".to_string(),
-                            system_prompt_override: " \n ".to_string(),
-                        },
-                    ],
-                    ..RelayProfile::default()
-                }],
-                active_relay_id: "prompts".to_string(),
-                ..BackendSettings::default()
-            };
-            let upstream = open_responses_proxy_request_with_settings(
-                &json!({
+            for use_instructions in [false, true] {
+                let server = spawn_chat_server();
+                let settings = BackendSettings {
+                    relay_profiles: vec![RelayProfile {
+                        id: "prompts".to_string(),
+                        name: "Prompts".to_string(),
+                        base_url: server.base_url.clone(),
+                        upstream_base_url: server.base_url.clone(),
+                        api_key: "sk-test".to_string(),
+                        relay_mode: RelayMode::MixedApi,
+                        system_prompt_override: "supplier prompt".to_string(),
+                        model_mappings: vec![
+                            RelayModelMapping {
+                                request_model: model.to_string(),
+                                alias: "custom".to_string(),
+                                protocol,
+                                context_window: "200000".to_string(),
+                                system_prompt_override: "custom prompt: GPT-5.6 Sol".to_string(),
+                            },
+                            RelayModelMapping {
+                                request_model: model.to_string(),
+                                alias: "inherit".to_string(),
+                                protocol,
+                                context_window: "200000".to_string(),
+                                system_prompt_override: " \n ".to_string(),
+                            },
+                        ],
+                        ..RelayProfile::default()
+                    }],
+                    active_relay_id: "prompts".to_string(),
+                    ..BackendSettings::default()
+                };
+                let mut original = json!({
                     "model": alias,
-                    "instructions": "old system",
                     "input": [
-                        {"type": "message", "role": "developer", "content": "old developer"},
+                        {"type": "message", "role": "developer", "content": "permissions must stay"},
                         {"type": "message", "role": "user", "content": "hello"}
                     ],
                     "stream": false
-                })
-                .to_string(),
-                settings,
-            )
-            .await
-            .unwrap();
-            assert_eq!(upstream.status_code, 200);
-            let request = server.finish();
-            assert_eq!(request.path, path);
-            let body: Value = serde_json::from_str(&request.body).unwrap();
-            assert_eq!(body["model"], model);
-            match protocol {
-                RelayProtocol::Responses => {
-                    assert_eq!(body["instructions"], prompt);
-                    assert_eq!(body["input"].as_array().unwrap().len(), 1);
-                    assert_eq!(body["input"][0]["role"], "user");
-                }
-                RelayProtocol::ChatCompletions => {
-                    assert_eq!(
-                        body["messages"][0],
-                        json!({"role": "system", "content": prompt})
+                });
+                if use_instructions {
+                    original["instructions"] = json!("original system prompt");
+                } else {
+                    original["input"].as_array_mut().unwrap().insert(
+                        0,
+                        json!({
+                            "type": "message",
+                            "id": "msg_540c0b9f-4f6a-5acd-bccf-66d5a88cc494",
+                            "role": "developer",
+                            "content": [{"type": "input_text", "text": "original system prompt"}]
+                        }),
                     );
                 }
-                RelayProtocol::Anthropic => {
-                    assert!(body["system"].to_string().contains(prompt));
+                let upstream =
+                    open_responses_proxy_request_with_settings(&original.to_string(), settings)
+                        .await
+                        .unwrap();
+                assert_eq!(upstream.status_code, 200);
+                let request = server.finish();
+                assert_eq!(request.path, path);
+                let body: Value = serde_json::from_str(&request.body).unwrap();
+                assert_eq!(body["model"], model);
+                let mut expected = original;
+                expected["model"] = json!(model);
+                if use_instructions {
+                    expected["instructions"] = json!(prompt);
+                } else {
+                    expected["input"][0]["content"][0]["text"] = json!(prompt);
                 }
-            }
-            assert!(!request.body.contains("old system"));
-            assert!(!request.body.contains("old developer"));
-            if alias == "custom" {
-                assert!(!request.body.contains("supplier prompt"));
+                let expected = match protocol {
+                    RelayProtocol::Responses => expected,
+                    RelayProtocol::ChatCompletions => {
+                        responses_to_chat_completions(expected).unwrap()
+                    }
+                    RelayProtocol::Anthropic => responses_to_anthropic_messages(expected).unwrap(),
+                };
+                for key in ["instructions", "input", "messages", "system"] {
+                    assert_eq!(body.get(key), expected.get(key), "{protocol:?}: {key}");
+                }
+                assert!(!request.body.contains("original system prompt"));
+                assert!(request.body.contains("permissions must stay"));
+                if alias == "custom" {
+                    assert!(!request.body.contains("supplier prompt"));
+                }
             }
         }
     }
@@ -13933,6 +13946,7 @@ async fn chat_proxy_model_system_prompt_is_selected_before_alias_is_rewritten() 
         body["messages"],
         json!([
             {"role": "system", "content": "second prompt"},
+            {"role": "developer", "content": "old developer"},
             {"role": "user", "content": "hello"}
         ])
     );
@@ -13964,22 +13978,16 @@ async fn responses_proxy_replaces_system_prompt_before_chat_conversion() {
 
     let request = server.finish();
     let logged_body: Value = serde_json::from_str(&upstream.request_body).unwrap();
-    assert_eq!(
-        logged_body["messages"][0],
-        json!({ "role": "system", "content": "只使用新的系统提示词。" })
+    assert_eq!(logged_body["messages"][0]["role"], "system");
+    assert!(
+        logged_body["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("只使用新的系统提示词。")
     );
     let body: Value = serde_json::from_str(&request.body).unwrap();
-    assert_eq!(
-        body["messages"][0],
-        json!({ "role": "system", "content": "只使用新的系统提示词。" })
-    );
-    assert!(
-        body["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|message| message.get("content").and_then(Value::as_str) != Some("old developer"))
-    );
+    assert_eq!(body["messages"], logged_body["messages"]);
+    assert!(body["messages"].to_string().contains("old developer"));
 }
 
 #[tokio::test]
@@ -14009,12 +14017,16 @@ async fn responses_proxy_replaces_system_prompt_for_responses_upstream() {
     let request = server.finish();
     let logged_body: Value = serde_json::from_str(&upstream.request_body).unwrap();
     assert_eq!(logged_body["instructions"], "新的 Responses 提示词");
-    assert_eq!(logged_body["input"].as_array().unwrap().len(), 1);
-    assert_eq!(logged_body["input"][0]["role"], "user");
+    assert_eq!(logged_body["input"].as_array().unwrap().len(), 2);
+    assert_eq!(logged_body["input"][0]["role"], "system");
+    assert_eq!(
+        logged_body["input"][0]["content"][0]["text"],
+        "old system in input"
+    );
+    assert_eq!(logged_body["input"][1]["role"], "user");
     let body: Value = serde_json::from_str(&request.body).unwrap();
     assert_eq!(body["instructions"], "新的 Responses 提示词");
-    assert_eq!(body["input"].as_array().unwrap().len(), 1);
-    assert_eq!(body["input"][0]["role"], "user");
+    assert_eq!(body["input"], logged_body["input"]);
 }
 
 #[tokio::test]
@@ -14109,7 +14121,7 @@ async fn responses_proxy_rewrites_default_system_prompt_model_for_responses_log(
     write_mixed_relay_settings(temp.path(), &server.base_url);
 
     let upstream = open_responses_proxy_request(
-        r#"{"model":"gpt-responses","instructions":"You are Codex, a coding agent based on GPT-5. GPT-5.6 Sol is available.","input":"hello","stream":false}"#,
+        r#"{"model":"gpt-responses","instructions":"You are Codex, a coding agent based on GPT-5. GPT-5.6 Sol is available.","input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions>Never access C:/GPT-5.6/private; config.GPT-5.6=false.</permissions>"}]},{"role":"user","content":"hello"}],"stream":false}"#,
         Some("Original-Codex-UA/1.0"),
     )
     .await
@@ -14120,10 +14132,14 @@ async fn responses_proxy_rewrites_default_system_prompt_model_for_responses_log(
     let logged_body: Value = serde_json::from_str(&upstream.request_body).unwrap();
     assert_eq!(
         logged_body["instructions"],
-        "You are Codex, a coding agent based on the gpt-responses model. gpt-responses is available."
+        "You are Codex, a coding agent based on the gpt-responses model. GPT-5.6 Sol is available."
     );
     let body: Value = serde_json::from_str(&request.body).unwrap();
     assert_eq!(body["instructions"], logged_body["instructions"]);
+    assert_eq!(
+        body["input"][0]["content"][0]["text"],
+        "<permissions>Never access C:/GPT-5.6/private; config.GPT-5.6=false.</permissions>"
+    );
 }
 
 #[tokio::test]

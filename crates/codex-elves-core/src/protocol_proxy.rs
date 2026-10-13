@@ -393,11 +393,17 @@ pub(crate) fn apply_system_prompt_override_to_responses_request(
     );
     let mut updated = request.clone();
 
-    if let Some(object) = updated.as_object_mut() {
-        if !prompt.is_empty() {
-            object.insert("instructions".to_string(), json!(prompt));
+    if !prompt.is_empty()
+        && let Some(object) = updated.as_object_mut()
+    {
+        if let Some(Value::String(instructions)) = object.get_mut("instructions") {
+            *instructions = prompt.to_string();
+        } else {
+            let continuation = object
+                .get("previous_response_id")
+                .is_some_and(|value| !value.is_null());
             if let Some(input) = object.get_mut("input") {
-                remove_responses_system_messages(input);
+                replace_default_system_prompt_message(input, prompt, continuation);
             }
         }
     }
@@ -419,100 +425,104 @@ pub(crate) fn rewrite_catalog_model_to_request_model(
         if !relay.system_prompt_for_model(catalog_model).is_empty() {
             return updated;
         }
-        replace_responses_system_prompt_catalog_model(object, catalog_model, &request_model);
-        rewrite_responses_system_prompt_model_identity(object, &request_model);
-        if let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) {
-            for message in messages {
-                if matches!(
-                    message.get("role").and_then(Value::as_str),
-                    Some("system" | "developer")
-                ) {
-                    replace_message_content_catalog_model(message, catalog_model, &request_model);
-                    rewrite_message_content_model_identity(message, &request_model);
-                }
-            }
+        let continuation = object
+            .get("previous_response_id")
+            .is_some_and(|value| !value.is_null());
+        if let Some(Value::String(instructions)) = object.get_mut("instructions") {
+            *instructions = rewrite_prompt_text_model_identity_with_catalog_model(
+                instructions,
+                catalog_model,
+                &request_model,
+            );
+        } else if let Some(input) = object.get_mut("input") {
+            rewrite_default_system_prompt_identity(
+                input,
+                catalog_model,
+                &request_model,
+                continuation,
+            );
+        } else if let Some(messages) = object.get_mut("messages") {
+            rewrite_default_system_prompt_identity(messages, catalog_model, &request_model, false);
         }
     }
     updated
 }
 
-fn replace_responses_system_prompt_catalog_model(
-    object: &mut Map<String, Value>,
-    catalog_model: &str,
-    request_model: &str,
-) {
-    if let Some(instructions) = object.get_mut("instructions") {
-        replace_prompt_value_catalog_model(instructions, catalog_model, request_model);
-    }
-    if let Some(input) = object.get_mut("input") {
-        replace_responses_input_system_prompt_catalog_model(input, catalog_model, request_model);
-    }
+fn default_system_prompt_message_index(items: &[Value], continuation: bool) -> Option<usize> {
+    let is_prompt_message = |message: &Value| {
+        matches!(
+            message.get("role").and_then(Value::as_str),
+            Some("system" | "developer")
+        ) && matches!(
+            message.get("type").and_then(Value::as_str),
+            None | Some("message")
+        )
+    };
+    items
+        .iter()
+        .position(|message| {
+            is_prompt_message(message)
+                && message
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .and_then(|id| id.strip_prefix("msg_"))
+                    .and_then(|id| {
+                        uuid::Uuid::parse_str(id.strip_suffix(".msg").unwrap_or(id)).ok()
+                    })
+                    .is_some_and(|id| id.get_version_num() == 5)
+        })
+        .or_else(|| {
+            items.iter().position(|message| {
+                is_prompt_message(message)
+                    && message.get("content").is_some_and(|content| {
+                        instruction_text(content)
+                            .trim_start()
+                            .starts_with("You are Codex")
+                    })
+            })
+        })
+        .or_else(|| {
+            // 增量帧的首条 developer 可能是权限或应用上下文，不能当作基础提示词替换。
+            (!continuation
+                && items.first().is_some_and(|message| {
+                    is_prompt_message(message)
+                        && (message["role"] == "system"
+                            || message.get("content").is_some_and(|content| {
+                                !instruction_text(content).trim_start().starts_with('<')
+                            }))
+                }))
+            .then_some(0)
+        })
 }
 
-fn replace_responses_input_system_prompt_catalog_model(
-    value: &mut Value,
-    catalog_model: &str,
-    request_model: &str,
-) {
-    match value {
-        Value::Array(items) => {
-            for item in items {
-                replace_responses_input_system_prompt_catalog_model(
-                    item,
-                    catalog_model,
-                    request_model,
-                );
-            }
-        }
-        Value::Object(object) => {
-            if matches!(
-                object.get("role").and_then(Value::as_str),
-                Some("system" | "developer")
-            ) {
-                if let Some(content) = object.get_mut("content") {
-                    replace_prompt_value_catalog_model(content, catalog_model, request_model);
-                }
-            } else {
-                for item in object.values_mut() {
-                    replace_responses_input_system_prompt_catalog_model(
-                        item,
-                        catalog_model,
-                        request_model,
-                    );
+fn replace_default_system_prompt_message(messages: &mut Value, prompt: &str, continuation: bool) {
+    let Some(items) = messages.as_array_mut() else {
+        return;
+    };
+    let base_prompt_index = default_system_prompt_message_index(items, continuation);
+    if let Some(content) = base_prompt_index.and_then(|index| items[index].get_mut("content")) {
+        match content {
+            Value::String(text) => *text = prompt.to_string(),
+            Value::Array(parts) => {
+                let mut replaced = false;
+                for part in parts {
+                    let text = if part.is_string() {
+                        Some(part)
+                    } else {
+                        part.get_mut("text")
+                    };
+                    if let Some(Value::String(text)) = text {
+                        *text = if replaced {
+                            String::new()
+                        } else {
+                            prompt.to_string()
+                        };
+                        replaced = true;
+                    }
                 }
             }
+            _ => {}
         }
-        _ => {}
-    }
-}
-
-fn remove_responses_system_messages(value: &mut Value) {
-    match value {
-        Value::Array(items) => {
-            items.retain(|item| {
-                !matches!(
-                    item.get("role").and_then(Value::as_str),
-                    Some("system" | "developer")
-                )
-            });
-            for item in items.iter_mut() {
-                remove_responses_system_messages(item);
-            }
-        }
-        Value::Object(object) => {
-            if object
-                .get("role")
-                .and_then(Value::as_str)
-                .is_some_and(|role| matches!(role, "system" | "developer"))
-            {
-                object.clear();
-            } else {
-                for item in object.values_mut() {
-                    remove_responses_system_messages(item);
-                }
-            }
-        }
-        _ => {}
     }
 }
 
@@ -529,201 +539,160 @@ fn apply_system_prompt_override_to_chat_request(
     let mut updated = request.clone();
 
     if let Some(object) = updated.as_object_mut() {
-        let model = object
+        let catalog_model = object
             .get("model")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let messages = object
-            .entry("messages".to_string())
-            .or_insert_with(|| json!([]));
+        let Some(messages) = object.get_mut("messages") else {
+            return updated;
+        };
         if !prompt.is_empty() {
-            if let Some(items) = messages.as_array_mut() {
-                items.retain(|message| {
-                    !matches!(
-                        message.get("role").and_then(Value::as_str),
-                        Some("system" | "developer")
-                    )
-                });
-                items.insert(0, json!({ "role": "system", "content": prompt }));
-            } else {
-                *messages = json!([{ "role": "system", "content": prompt }]);
-            }
+            replace_default_system_prompt_message(messages, prompt, false);
             return updated;
         }
-        if let Some(items) = messages.as_array_mut() {
-            for message in items {
-                if matches!(
-                    message.get("role").and_then(Value::as_str),
-                    Some("system" | "developer")
-                ) {
-                    rewrite_message_content_model_identity(message, &model);
-                }
-            }
-        }
+        let model = relay.request_model_for_catalog_model(&catalog_model);
+        rewrite_default_system_prompt_identity(messages, &catalog_model, &model, false);
     }
     updated
 }
 
-fn rewrite_responses_system_prompt_model_identity(object: &mut Map<String, Value>, model: &str) {
-    if let Some(instructions) = object.get_mut("instructions") {
-        rewrite_prompt_value_model_identity(instructions, model);
-    }
-    if let Some(input) = object.get_mut("input") {
-        rewrite_responses_input_system_prompt_model_identity(input, model);
-    }
-}
-
-fn rewrite_responses_input_system_prompt_model_identity(value: &mut Value, model: &str) {
-    match value {
-        Value::Array(items) => {
-            for item in items {
-                rewrite_responses_input_system_prompt_model_identity(item, model);
-            }
-        }
-        Value::Object(object) => {
-            if matches!(
-                object.get("role").and_then(Value::as_str),
-                Some("system" | "developer")
-            ) {
-                if let Some(content) = object.get_mut("content") {
-                    rewrite_prompt_value_model_identity(content, model);
-                }
-            } else {
-                for item in object.values_mut() {
-                    rewrite_responses_input_system_prompt_model_identity(item, model);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn rewrite_message_content_model_identity(message: &mut Value, model: &str) {
-    if let Some(content) = message.get_mut("content") {
-        rewrite_prompt_value_model_identity(content, model);
-    }
-}
-
-fn replace_message_content_catalog_model(
-    message: &mut Value,
+fn rewrite_default_system_prompt_identity(
+    messages: &mut Value,
     catalog_model: &str,
-    request_model: &str,
+    model: &str,
+    continuation: bool,
 ) {
-    if let Some(content) = message.get_mut("content") {
-        replace_prompt_value_catalog_model(content, catalog_model, request_model);
-    }
-}
-
-fn replace_prompt_value_catalog_model(value: &mut Value, catalog_model: &str, request_model: &str) {
-    match value {
-        Value::String(text) => {
-            if catalog_model != request_model && !catalog_model.is_empty() {
-                *text = text.replace(catalog_model, request_model);
+    let Some(items) = messages.as_array_mut() else {
+        return;
+    };
+    let Some(index) = default_system_prompt_message_index(items, continuation) else {
+        return;
+    };
+    let Some(content) = items[index].get_mut("content") else {
+        return;
+    };
+    let text = match content {
+        Value::String(text) => Some(text),
+        Value::Array(parts) => parts.iter_mut().find_map(|part| match part {
+            Value::String(text) => Some(text),
+            Value::Object(part)
+                if matches!(
+                    part.get("type").and_then(Value::as_str),
+                    None | Some("input_text" | "text")
+                ) =>
+            {
+                match part.get_mut("text") {
+                    Some(Value::String(text)) => Some(text),
+                    _ => None,
+                }
             }
-        }
-        Value::Array(items) => {
-            for item in items {
-                replace_prompt_value_catalog_model(item, catalog_model, request_model);
-            }
-        }
-        Value::Object(object) => {
-            for item in object.values_mut() {
-                replace_prompt_value_catalog_model(item, catalog_model, request_model);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn rewrite_prompt_value_model_identity(value: &mut Value, model: &str) {
-    match value {
-        Value::String(text) => {
-            *text = rewrite_prompt_text_model_identity(text, model);
-        }
-        Value::Array(items) => {
-            for item in items {
-                rewrite_prompt_value_model_identity(item, model);
-            }
-        }
-        Value::Object(object) => {
-            for item in object.values_mut() {
-                rewrite_prompt_value_model_identity(item, model);
-            }
-        }
-        _ => {}
+            _ => None,
+        }),
+        _ => None,
+    };
+    if let Some(text) = text {
+        *text = rewrite_prompt_text_model_identity_with_catalog_model(text, catalog_model, model);
     }
 }
 
 pub(crate) fn rewrite_prompt_text_model_identity(text: &str, model: &str) -> String {
-    let text = replace_model_identity_phrases_with_model(text, model);
-    replace_gpt_identity_tokens_with_model(&text, model)
+    rewrite_prompt_text_model_identity_with_catalog_model(text, "", model)
 }
 
-fn replace_model_identity_phrases_with_model(text: &str, model: &str) -> String {
-    let lower = text.to_ascii_lowercase();
-    let mut result = String::with_capacity(text.len());
-    let mut index = 0;
-    let model = prompt_model_name(model);
-    let replacement = format!(" based on the {model} model");
-
-    while let Some((start, pattern_len)) = find_next_model_identity_phrase(&lower, index) {
-        result.push_str(&text[index..start]);
-        let end = consume_optional_model_word(
-            text,
-            consume_model_identity_suffix(text, start + pattern_len),
-        );
-        result.push_str(&replacement);
-        index = end;
+fn rewrite_prompt_text_model_identity_with_catalog_model(
+    text: &str,
+    catalog_model: &str,
+    model: &str,
+) -> String {
+    let identity = text.trim_start();
+    let lower = identity.to_ascii_lowercase();
+    if !lower.starts_with("you are ") {
+        return text.to_string();
     }
-
-    result.push_str(&text[index..]);
-    result
-}
-
-fn find_next_model_identity_phrase(lower: &str, from: usize) -> Option<(usize, usize)> {
-    [
-        " based on gpt",
-        " based on the gpt",
-        " based on claude",
-        " based on the claude",
-        " based on deepseek",
-        " based on the deepseek",
-        " based on glm",
-        " based on the glm",
-        " based on kimi",
-        " based on the kimi",
-    ]
-    .into_iter()
-    .filter_map(|pattern| {
-        lower[from..]
-            .find(pattern)
-            .map(|offset| (from + offset, pattern.len()))
-    })
-    .min_by_key(|(start, _)| *start)
-}
-
-fn replace_gpt_identity_tokens_with_model(text: &str, model: &str) -> String {
-    let lower = text.to_ascii_lowercase();
-    let mut result = String::with_capacity(text.len());
-    let mut index = 0;
+    let sentence_end = identity
+        .char_indices()
+        .find(|(index, character)| {
+            matches!(*character, '\n' | '\r' | ';' | '!' | '?')
+                || (*character == '.'
+                    && identity[*index + 1..]
+                        .chars()
+                        .next()
+                        .is_none_or(char::is_whitespace))
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(identity.len());
+    let sentence = &identity[..sentence_end];
+    let lower = &lower[..sentence_end];
+    let based_on = [" based on the ", " based on "]
+        .into_iter()
+        .filter_map(|prefix| lower.find(prefix).map(|start| (start, prefix.len())))
+        .min_by_key(|(start, _)| *start);
     let model = prompt_model_name(model);
-
-    while let Some(offset) = lower[index..].find("gpt") {
-        let start = index + offset;
-        result.push_str(&text[index..start]);
-        if is_gpt_identity_token_start(text, start) {
-            let end = consume_model_identity_suffix(text, start + 3);
-            result.push_str(&model);
-            index = end;
-        } else {
-            result.push_str(&text[start..start + 3]);
-            index = start + 3;
+    let (start, end, replacement) = if let Some((start, prefix_len)) = based_on
+        && matches!(
+            lower[..start].trim_end_matches(','),
+            "you are codex"
+                | "you are codex, a coding agent"
+                | "you are codex, an agent"
+                | "you are a coding agent"
+                | "you are an agent"
+        ) {
+        let Some(end) = model_identity_end(sentence, start + prefix_len, catalog_model) else {
+            return text.to_string();
+        };
+        (
+            start,
+            consume_optional_model_word(sentence, end),
+            format!(" based on the {model} model"),
+        )
+    } else {
+        if catalog_model.eq_ignore_ascii_case("codex") {
+            return text.to_string();
         }
-    }
-
-    result.push_str(&text[index..]);
+        let start = "you are ".len();
+        let Some(end) = model_identity_end(sentence, start, catalog_model) else {
+            return text.to_string();
+        };
+        (start, end, model)
+    };
+    let offset = text.len() - identity.len();
+    let mut result = String::with_capacity(text.len() + replacement.len());
+    result.push_str(&text[..offset + start]);
+    result.push_str(&replacement);
+    result.push_str(&text[offset + end..]);
     result
+}
+
+fn model_identity_end(text: &str, start: usize, catalog_model: &str) -> Option<usize> {
+    let candidate = text.get(start..)?;
+    if !catalog_model.is_empty()
+        && candidate
+            .get(..catalog_model.len())
+            .is_some_and(|value| value.eq_ignore_ascii_case(catalog_model))
+        && candidate[catalog_model.len()..]
+            .chars()
+            .next()
+            .is_none_or(|character| character.is_whitespace() || character == ',')
+    {
+        return Some(start + catalog_model.len());
+    }
+    let lower = candidate.to_ascii_lowercase();
+    let family = ["gpt", "claude", "deepseek", "glm", "kimi"]
+        .into_iter()
+        .find(|family| {
+            lower.starts_with(*family)
+                && lower[family.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|character| !character.is_ascii_alphabetic())
+        })?;
+    let end = consume_model_identity_suffix(text, start + family.len());
+    text[end..]
+        .chars()
+        .next()
+        .is_none_or(|character| character.is_whitespace() || character == ',')
+        .then_some(end)
 }
 
 fn consume_model_identity_suffix(text: &str, from: usize) -> usize {
@@ -776,7 +745,14 @@ fn next_space_separated_word(text: &str, from: usize) -> Option<(usize, usize)> 
     let start = cursor;
     while cursor < bytes.len() {
         let byte = bytes[cursor];
-        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
+        if byte.is_ascii_alphanumeric()
+            || byte == b'-'
+            || byte == b'_'
+            || (byte == b'.'
+                && cursor > start
+                && bytes[cursor - 1].is_ascii_digit()
+                && bytes.get(cursor + 1).is_some_and(u8::is_ascii_digit))
+        {
             cursor += 1;
         } else {
             break;
@@ -790,32 +766,34 @@ fn is_likely_model_suffix_word(word: &str) -> bool {
         return false;
     }
     let lower = word.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "sol"
-            | "terra"
-            | "luna"
-            | "codex"
-            | "code"
-            | "chat"
-            | "coder"
-            | "reasoner"
-            | "mini"
-            | "nano"
-            | "turbo"
-            | "sonnet"
-            | "opus"
-            | "haiku"
-            | "flash"
-            | "pro"
-            | "air"
-            | "k2"
-            | "preview"
-            | "latest"
-            | "instruct"
-            | "reasoning"
-            | "thinking"
-    )
+    word.split('.')
+        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        || matches!(
+            lower.as_str(),
+            "sol"
+                | "terra"
+                | "luna"
+                | "codex"
+                | "code"
+                | "chat"
+                | "coder"
+                | "reasoner"
+                | "mini"
+                | "nano"
+                | "turbo"
+                | "sonnet"
+                | "opus"
+                | "haiku"
+                | "flash"
+                | "pro"
+                | "air"
+                | "k2"
+                | "preview"
+                | "latest"
+                | "instruct"
+                | "reasoning"
+                | "thinking"
+        )
 }
 
 fn consume_optional_model_word(text: &str, from: usize) -> usize {
@@ -825,21 +803,6 @@ fn consume_optional_model_word(text: &str, from: usize) -> usize {
     } else {
         from
     }
-}
-
-fn is_gpt_identity_token_start(text: &str, start: usize) -> bool {
-    let bytes = text.as_bytes();
-    if start > 0 {
-        let previous = bytes[start - 1];
-        if previous.is_ascii_alphanumeric() || previous == b'_' || previous == b'-' {
-            return false;
-        }
-    }
-
-    let Some(next) = bytes.get(start + 3).copied() else {
-        return false;
-    };
-    next.is_ascii_digit() || next == b'-' || next == b'_'
 }
 
 fn prompt_model_name(model: &str) -> String {
@@ -14212,6 +14175,320 @@ mod anthropic_image_replay_tests {
             changed,
             started.elapsed()
         );
+    }
+}
+
+#[cfg(test)]
+mod system_prompt_override_tests {
+    use super::{
+        apply_system_prompt_override_to_chat_request,
+        apply_system_prompt_override_to_responses_request, rewrite_catalog_model_to_request_model,
+        rewrite_prompt_text_model_identity,
+    };
+    use crate::settings::RelayProfile;
+    use serde_json::json;
+
+    fn relay() -> RelayProfile {
+        RelayProfile {
+            system_prompt_override: "custom prompt".to_string(),
+            ..RelayProfile::default()
+        }
+    }
+
+    #[test]
+    fn responses_overrides_only_existing_instructions() {
+        let request = json!({
+            "model": "gpt-test",
+            "instructions": "original prompt",
+            "input": [
+                {"role": "developer", "content": "permissions"},
+                {"role": "system", "content": "application context"},
+                {"role": "user", "content": "hello"}
+            ],
+            "tools": [{"type": "function", "name": "test"}],
+            "reasoning": {"effort": "high"}
+        });
+        let mut expected = request.clone();
+        expected["instructions"] = json!("custom prompt");
+        assert_eq!(
+            apply_system_prompt_override_to_responses_request(&request, &relay()),
+            expected
+        );
+    }
+
+    #[test]
+    fn responses_overrides_only_base_developer_text_without_changing_message_shape() {
+        let request = json!({
+            "model": "gpt-test",
+            "input": [
+                {
+                    "type": "message",
+                    "id": "msg_540c0b9f-4f6a-5acd-bccf-66d5a88cc494",
+                    "role": "developer",
+                    "content": [
+                        {"type": "input_text", "text": "You are Codex, a coding agent.", "metadata": {"source": "base"}},
+                        {"type": "input_text", "text": "Remaining base prompt"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,example"}
+                    ]
+                },
+                {"role": "developer", "content": [{"type": "input_text", "text": "<permissions instructions>keep</permissions instructions>"}]},
+                {"role": "developer", "content": "<app-context>keep</app-context>"},
+                {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+                {"type": "function_call_output", "call_id": "call_1", "output": "{\"role\":\"system\",\"content\":\"tool data\"}"}
+            ],
+            "store": false,
+            "generate": false,
+            "client_metadata": {"thread_id": "thread-test"}
+        });
+        let mut expected = request.clone();
+        expected["input"][0]["content"][0]["text"] = json!("custom prompt");
+        expected["input"][0]["content"][1]["text"] = json!("");
+        assert_eq!(
+            apply_system_prompt_override_to_responses_request(&request, &relay()),
+            expected
+        );
+    }
+
+    #[test]
+    fn responses_preserves_legacy_system_string_content() {
+        let request = json!({
+            "input": [
+                {"role": "system", "content": "original prompt", "name": "base"},
+                {"role": "developer", "content": "keep developer context"},
+                {"role": "user", "content": "hello"}
+            ]
+        });
+        let mut expected = request.clone();
+        expected["input"][0]["content"] = json!("custom prompt");
+        assert_eq!(
+            apply_system_prompt_override_to_responses_request(&request, &relay()),
+            expected
+        );
+    }
+
+    #[test]
+    fn responses_does_not_inject_prompt_into_missing_or_incremental_input() {
+        for request in [
+            json!({"model": "gpt-test", "input": "hello"}),
+            json!({"model": "gpt-test", "input": [{"role": "user", "content": "hello"}]}),
+            json!({"model": "gpt-test", "input": null}),
+            json!({
+                "model": "gpt-test",
+                "input": [
+                    {"type": "message", "id": "msg_01a12e7f-74b2-7ed2-88a8-99ebefd58582", "role": "developer", "content": "<app-context>keep</app-context>"},
+                    {"role": "user", "content": "hello"}
+                ]
+            }),
+            json!({
+                "model": "gpt-test",
+                "input": [
+                    {"role": "developer", "content": "<permissions instructions>keep</permissions instructions>"},
+                    {"role": "user", "content": "hello"}
+                ]
+            }),
+            json!({
+                "model": "gpt-test",
+                "previous_response_id": "resp_previous",
+                "input": [
+                    {"role": "developer", "content": "<app-context>keep</app-context>"},
+                    {"role": "developer", "content": "<permissions instructions>keep</permissions instructions>"},
+                    {"role": "user", "content": "hello"}
+                ]
+            }),
+        ] {
+            assert_eq!(
+                apply_system_prompt_override_to_responses_request(&request, &relay()),
+                request
+            );
+        }
+    }
+
+    #[test]
+    fn responses_can_replace_identifiable_base_prompt_in_continuation() {
+        for (id, text) in [
+            (
+                "msg_540c0b9f-4f6a-5acd-bccf-66d5a88cc494",
+                "<custom_prompt>previous custom prompt</custom_prompt>",
+            ),
+            ("msg_base", "You are Codex, a coding agent."),
+        ] {
+            let request = json!({
+                "previous_response_id": "resp_previous",
+                "input": [
+                    {"role": "developer", "content": "<app-context>keep</app-context>"},
+                    {"type": "message", "id": id, "role": "developer", "content": [{"type": "input_text", "text": text}]},
+                    {"role": "user", "content": "hello"}
+                ]
+            });
+            let mut expected = request.clone();
+            expected["input"][1]["content"][0]["text"] = json!("custom prompt");
+            assert_eq!(
+                apply_system_prompt_override_to_responses_request(&request, &relay()),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn empty_override_keeps_responses_and_chat_requests_unchanged() {
+        let request = json!({
+            "instructions": "default prompt",
+            "input": [{"role": "developer", "content": "default prompt"}],
+            "messages": [{"role": "system", "content": "default prompt"}]
+        });
+        let mut relay = relay();
+        relay.system_prompt_override = " \n ".to_string();
+        assert_eq!(
+            apply_system_prompt_override_to_responses_request(&request, &relay),
+            request
+        );
+        assert_eq!(
+            apply_system_prompt_override_to_chat_request(&request, &relay),
+            request
+        );
+    }
+
+    #[test]
+    fn chat_override_keeps_roles_content_shape_and_other_developer_messages() {
+        for role in ["system", "developer"] {
+            let request = json!({
+                "model": "gpt-test",
+                "messages": [
+                    {"role": role, "name": "base", "content": [{"type": "text", "text": "original prompt"}]},
+                    {"role": "developer", "content": "keep developer context"},
+                    {"role": "user", "content": "hello"}
+                ]
+            });
+            let mut expected = request.clone();
+            expected["messages"][0]["content"][0]["text"] = json!("custom prompt");
+            assert_eq!(
+                apply_system_prompt_override_to_chat_request(&request, &relay()),
+                expected
+            );
+        }
+        let request = json!({"model": "gpt-test"});
+        assert_eq!(
+            apply_system_prompt_override_to_chat_request(&request, &relay()),
+            request
+        );
+    }
+
+    #[test]
+    fn model_mapping_rewrites_only_base_identity_and_preserves_other_text_and_shapes() {
+        let relay: RelayProfile = serde_json::from_value(json!({
+            "id": "identity-scope",
+            "name": "Identity scope",
+            "modelMappings": [{"requestModel": "gpt-live", "alias": "Display model", "protocol": "responses"}]
+        }))
+        .unwrap();
+        let original = "You are Codex, based on Display model. Never access C:/GPT-5.6 Sol/private/Display model; config.GPT-5.6=false.";
+        let rewritten = "You are Codex, based on the gpt-live model. Never access C:/GPT-5.6 Sol/private/Display model; config.GPT-5.6=false.";
+        for use_instructions in [false, true] {
+            let mut request = json!({
+                "model": "Display model",
+                "input": [
+                    {"type": "message", "role": "developer", "content": "You are Codex, based on GPT-5.6. Application context must stay."},
+                    {
+                        "type": "message",
+                        "id": "msg_540c0b9f-4f6a-5acd-bccf-66d5a88cc494.msg",
+                        "role": "developer",
+                        "content": [
+                            {"type": "input_text", "text": original, "metadata": {"text": "You are GPT-5.6."}},
+                            {"type": "input_text", "text": "You are Codex, based on GPT-5.6. Keep this later part."},
+                            {"type": "input_image", "image_url": "C:/GPT-5.6.png"}
+                        ]
+                    },
+                    {"role": "developer", "content": "<permissions>Never access C:/GPT-5.6 Sol/Display model.</permissions>"},
+                    {"role": "user", "content": original},
+                    {"role": "assistant", "content": original}
+                ],
+                "tools": [{"type": "function", "name": "Display model"}],
+                "previous_response_id": "resp_previous"
+            });
+            let mut expected = request.clone();
+            expected["model"] = json!("gpt-live");
+            if use_instructions {
+                request["instructions"] = json!(original);
+                expected["instructions"] = json!(rewritten);
+            } else {
+                expected["input"][1]["content"][0]["text"] = json!(rewritten);
+            }
+            assert_eq!(
+                rewrite_catalog_model_to_request_model(&request, &relay),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn chat_default_identity_rewrite_does_not_scan_other_developer_messages() {
+        let request = json!({
+            "model": "glm-5.2",
+            "messages": [
+                {"role": "system", "content": [{"type": "text", "text": "You are Codex, based on the claude-sonnet-5 model. Keep GPT-5.6 compatibility notes."}]},
+                {"role": "developer", "content": "You are Codex, based on GPT-5.6. Never access C:/GPT-5.6/private."},
+                {"role": "user", "content": "GPT-5.6"}
+            ]
+        });
+        let mut expected = request.clone();
+        expected["messages"][0]["content"][0]["text"] =
+            json!("You are Codex, based on the glm-5.2 model. Keep GPT-5.6 compatibility notes.");
+        assert_eq!(
+            apply_system_prompt_override_to_chat_request(&request, &RelayProfile::default()),
+            expected
+        );
+        assert_eq!(
+            rewrite_catalog_model_to_request_model(&request, &RelayProfile::default()),
+            expected
+        );
+    }
+
+    #[test]
+    fn default_identity_rewrite_keeps_incremental_context_unchanged() {
+        let request = json!({
+            "model": "gpt-test",
+            "previous_response_id": "resp_previous",
+            "input": [
+                {"role": "developer", "content": "<app-context>You are Codex, based on GPT-5.6.</app-context>"},
+                {"role": "developer", "content": "Never access C:/GPT-5.6/private."},
+                {"role": "user", "content": "hello"}
+            ]
+        });
+        assert_eq!(
+            rewrite_catalog_model_to_request_model(&request, &RelayProfile::default()),
+            request
+        );
+    }
+
+    #[test]
+    fn model_identity_rewrite_handles_leading_whitespace_and_direct_model_identity() {
+        for (source, expected) in [
+            (
+                "\n You are Codex, based on GPT-5.6 Sol. Keep GPT-5.6 notes.",
+                "\n You are Codex, based on the glm-5.2 model. Keep GPT-5.6 notes.",
+            ),
+            (
+                "You are GPT-5.6 Sol from OpenAI. Keep GPT-5.6 notes.",
+                "You are glm-5.2 from OpenAI. Keep GPT-5.6 notes.",
+            ),
+            (
+                "You are Codex, based on the claude-sonnet-5 model.",
+                "You are Codex, based on the glm-5.2 model.",
+            ),
+            (
+                "You are Codex, based on Claude Sonnet 4.5 model. Keep Claude Sonnet 4.5 notes.",
+                "You are Codex, based on the glm-5.2 model. Keep Claude Sonnet 4.5 notes.",
+            ),
+            (
+                "You are Claude Sonnet 4.5, a coding agent.",
+                "You are glm-5.2, a coding agent.",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_prompt_text_model_identity(source, "glm-5.2"),
+                expected
+            );
+        }
     }
 }
 

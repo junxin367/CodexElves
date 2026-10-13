@@ -2534,29 +2534,11 @@ fn rewrite_generated_catalog_prompt_text_for_model(text: &str, model: &str) -> S
 }
 
 fn rewrite_generated_catalog_prompt_value_for_model(value: Value, model: &str) -> Value {
-    match value {
-        Value::String(text) => Value::String(rewrite_generated_catalog_prompt_text_for_model(
-            &text, model,
-        )),
-        Value::Array(values) => Value::Array(
-            values
-                .into_iter()
-                .map(|value| rewrite_generated_catalog_prompt_value_for_model(value, model))
-                .collect(),
-        ),
-        Value::Object(object) => Value::Object(
-            object
-                .into_iter()
-                .map(|(key, value)| {
-                    (
-                        key,
-                        rewrite_generated_catalog_prompt_value_for_model(value, model),
-                    )
-                })
-                .collect(),
-        ),
-        other => other,
+    let mut value = value;
+    if let Some(Value::String(template)) = value.get_mut("instructions_template") {
+        *template = rewrite_generated_catalog_prompt_text_for_model(template, model);
     }
+    value
 }
 
 fn generated_catalog_prompt_fields(
@@ -2567,24 +2549,11 @@ fn generated_catalog_prompt_fields(
     packaged_model: Option<&Value>,
 ) -> (String, Value) {
     let override_prompt = profile.system_prompt_for_model(catalog_model);
-    if !override_prompt.is_empty() {
-        let base_instructions = override_prompt.to_string();
-        return (
-            base_instructions.clone(),
-            json!({
-                "instructions_template": base_instructions,
-                "instructions_variables": {
-                    "personality_default": "",
-                    "personality_pragmatic": ""
-                }
-            }),
-        );
-    }
-
     let codex_model = codex_catalog
         .and_then(|catalog| model_catalog_entry(catalog, model))
-        .filter(|model| model_has_usable_prompt(model));
-    let packaged_model = packaged_model.filter(|model| model_has_usable_prompt(model));
+        .filter(|model| !override_prompt.is_empty() || model_has_usable_prompt(model));
+    let packaged_model = packaged_model
+        .filter(|model| !override_prompt.is_empty() || model_has_usable_prompt(model));
     let direct_source_model = codex_model.or(packaged_model);
     let rewrite_prompt_model = direct_source_model.is_none();
     let source_model = direct_source_model
@@ -2593,14 +2562,14 @@ fn generated_catalog_prompt_fields(
                 .and_then(|catalog| {
                     model_catalog_entry(catalog, PACKAGED_CATALOG_FALLBACK_MODEL_SLUG)
                 })
-                .filter(|model| model_has_usable_prompt(model))
+                .filter(|model| !override_prompt.is_empty() || model_has_usable_prompt(model))
         })
         .or_else(|| {
             packaged_model_catalog()
                 .and_then(|catalog| {
                     model_catalog_entry(catalog, PACKAGED_CATALOG_FALLBACK_MODEL_SLUG)
                 })
-                .filter(|model| model_has_usable_prompt(model))
+                .filter(|model| !override_prompt.is_empty() || model_has_usable_prompt(model))
         });
     let base_instructions = source_model
         .and_then(|model| model.get("base_instructions"))
@@ -2608,8 +2577,9 @@ fn generated_catalog_prompt_fields(
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| GENERATED_CATALOG_FALLBACK_BASE_INSTRUCTIONS.to_string());
-    let model_messages = source_model
+    let mut model_messages = source_model
         .and_then(|model| model.get("model_messages"))
+        .filter(|messages| messages.is_object())
         .cloned()
         .unwrap_or_else(|| {
             json!({
@@ -2620,7 +2590,10 @@ fn generated_catalog_prompt_fields(
                 }
             })
         });
-    if rewrite_prompt_model {
+    if !override_prompt.is_empty() {
+        model_messages["instructions_template"] = json!(override_prompt);
+        (override_prompt.to_string(), model_messages)
+    } else if rewrite_prompt_model {
         (
             rewrite_generated_catalog_prompt_text_for_model(&base_instructions, model),
             rewrite_generated_catalog_prompt_value_for_model(model_messages, model),
@@ -4210,7 +4183,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_catalog_prompt_replaces_gpt_identity_tokens_with_model() {
+    fn generated_catalog_prompt_replaces_only_initial_model_identity() {
         let rewritten = rewrite_generated_catalog_prompt_text_for_model(
             "You are Codex, a coding agent based on GPT-5.5. GPT5.5 is available. Powered by GPT-5-Codex.",
             "deepseek-coder",
@@ -4219,11 +4192,7 @@ mod tests {
         assert!(
             rewritten.contains("You are Codex, a coding agent based on the deepseek-coder model.")
         );
-        assert!(rewritten.contains("deepseek-coder is available"));
-        assert!(rewritten.contains("Powered by deepseek-coder."));
-        assert!(!rewritten.contains("GPT-5"));
-        assert!(!rewritten.contains("GPT5"));
-        assert!(!rewritten.contains(".5"));
+        assert!(rewritten.ends_with("GPT5.5 is available. Powered by GPT-5-Codex."));
     }
 
     #[test]
@@ -4253,37 +4222,44 @@ mod tests {
     }
 
     #[test]
-    fn generated_catalog_prompt_replaces_nested_model_messages() {
+    fn generated_catalog_prompt_preserves_other_model_messages() {
         let value = json!({
             "instructions_template": "You are Codex, a coding agent based on the GPT-5 model.",
             "instructions_variables": {
                 "personality_pragmatic": "Use GPT-5.5 behavior carefully."
-            }
+            },
+            "permissions": "You are Codex, based on GPT-5.5. Never access C:/GPT-5.5/private.",
+            "multi_agent": {"instructions": "You are Codex, based on GPT-5.5."}
         });
 
-        let rewritten = rewrite_generated_catalog_prompt_value_for_model(value, "qwen3-coder");
-        let text = rewritten.to_string();
-        assert!(text.contains("qwen3-coder"));
-        assert!(!text.contains("GPT-5"));
-        assert!(!text.contains(".5"));
+        let rewritten =
+            rewrite_generated_catalog_prompt_value_for_model(value.clone(), "qwen3-coder");
+        let mut expected = value;
+        expected["instructions_template"] =
+            json!("You are Codex, a coding agent based on the qwen3-coder model.");
+        assert_eq!(rewritten, expected);
     }
 
     #[test]
-    fn generated_catalog_prompt_replaces_older_gpt_versions_without_word_damage() {
-        let rewritten = rewrite_generated_catalog_prompt_text_for_model(
+    fn generated_catalog_prompt_preserves_model_mentions_outside_identity() {
+        for prompt in [
             "Prefer GPT-4 API compatibility over gpt-3.5 assumptions, but keep gptable untouched.",
-            "claude-sonnet-4",
+            "Never access C:/GPT-5.6 Sol/private; config.GPT-5.6=false.",
+            "You are Codex. The project is based on GPT-5.6.",
+            "You are Codex, use C:/GPT-5.6/private.",
+        ] {
+            assert_eq!(
+                rewrite_generated_catalog_prompt_text_for_model(prompt, "claude-sonnet-4"),
+                prompt
+            );
+        }
+        assert_eq!(
+            rewrite_generated_catalog_prompt_text_for_model(
+                "You are GPT-4, a coding agent. Keep GPT-4 compatibility notes.",
+                "claude-sonnet-4",
+            ),
+            "You are claude-sonnet-4, a coding agent. Keep GPT-4 compatibility notes."
         );
-
-        assert!(
-            rewritten.contains(
-                "Prefer claude-sonnet-4 API compatibility over claude-sonnet-4 assumptions"
-            )
-        );
-        assert!(rewritten.contains("gptable untouched"));
-        assert!(!rewritten.contains("GPT-4"));
-        assert!(!rewritten.contains("gpt-3"));
-        assert!(!rewritten.contains(".5"));
     }
 
     #[test]
