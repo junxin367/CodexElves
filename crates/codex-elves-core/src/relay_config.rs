@@ -2680,6 +2680,43 @@ fn generated_model_catalog_json_with_codex_catalog(
         );
         let context_window = catalog_context_window_for_model(&model, &row.context_window);
         let mut entry = Map::new();
+        let normalized_model = model.trim().rsplit('/').next().unwrap_or_default();
+        let matches_model = |source: &Value| {
+            source
+                .get("slug")
+                .and_then(Value::as_str)
+                .is_some_and(|slug| slug.eq_ignore_ascii_case(normalized_model))
+        };
+        let source_model = codex_catalog
+            .and_then(|catalog| model_catalog_entry(catalog, &model))
+            .filter(|source| matches_model(source))
+            .or_else(|| {
+                packaged_model
+                    .as_ref()
+                    .filter(|source| matches_model(source))
+            });
+        if let Some(source) = source_model {
+            for key in [
+                "shell_type",
+                "apply_patch_tool_type",
+                "web_search_tool_type",
+                "default_verbosity",
+                "effective_context_window_percent",
+                "experimental_supported_tools",
+                "input_modalities",
+                "support_verbosity",
+                "supports_image_detail_original",
+                "supports_parallel_tool_calls",
+                "supports_reasoning_summaries",
+                "supports_search_tool",
+                "default_reasoning_summary",
+                "truncation_policy",
+            ] {
+                if let Some(value) = source.get(key) {
+                    entry.insert(key.to_string(), value.clone());
+                }
+            }
+        }
         entry.insert("slug".to_string(), json!(catalog_slug));
         entry.insert("display_name".to_string(), json!(display_name));
         entry.insert("description".to_string(), json!(model));
@@ -2693,9 +2730,15 @@ fn generated_model_catalog_json_with_codex_catalog(
         );
         entry.insert("model_messages".to_string(), model_messages.clone());
         // codex 解析 model_catalog_json 时 shell_type 为必填字段，缺失会导致整份目录解析失败
-        entry.insert("shell_type".to_string(), json!("shell_command"));
-        entry.insert("apply_patch_tool_type".to_string(), json!("freeform"));
-        entry.insert("web_search_tool_type".to_string(), json!("text_and_image"));
+        entry
+            .entry("shell_type")
+            .or_insert_with(|| json!("shell_command"));
+        entry
+            .entry("apply_patch_tool_type")
+            .or_insert_with(|| json!("freeform"));
+        entry
+            .entry("web_search_tool_type")
+            .or_insert_with(|| json!("text_and_image"));
         entry.insert(
             "additional_speed_tiers".to_string(),
             fast_capability
@@ -2704,10 +2747,18 @@ fn generated_model_catalog_json_with_codex_catalog(
                 .unwrap_or_else(|| json!([])),
         );
         entry.insert("availability_nux".to_string(), Value::Null);
-        entry.insert("default_verbosity".to_string(), json!("low"));
-        entry.insert("effective_context_window_percent".to_string(), json!(95));
-        entry.insert("experimental_supported_tools".to_string(), json!([]));
-        entry.insert("input_modalities".to_string(), json!(["text", "image"]));
+        entry
+            .entry("default_verbosity")
+            .or_insert_with(|| json!("low"));
+        entry
+            .entry("effective_context_window_percent")
+            .or_insert_with(|| json!(95));
+        entry
+            .entry("experimental_supported_tools")
+            .or_insert_with(|| json!([]));
+        entry
+            .entry("input_modalities")
+            .or_insert_with(|| json!(["text", "image"]));
         entry.insert(
             "service_tiers".to_string(),
             fast_capability
@@ -2715,19 +2766,30 @@ fn generated_model_catalog_json_with_codex_catalog(
                 .map(|(tiers, _)| tiers.clone())
                 .unwrap_or_else(|| json!([])),
         );
-        entry.insert("support_verbosity".to_string(), json!(true));
-        entry.insert("supports_image_detail_original".to_string(), json!(true));
-        entry.insert("supports_parallel_tool_calls".to_string(), json!(true));
+        entry
+            .entry("support_verbosity")
+            .or_insert_with(|| json!(true));
+        entry
+            .entry("supports_image_detail_original")
+            .or_insert_with(|| json!(true));
+        entry
+            .entry("supports_parallel_tool_calls")
+            .or_insert_with(|| json!(true));
         if multi_agent_v2_enabled {
             entry.insert("multi_agent_version".to_string(), json!("v2"));
         }
-        entry.insert("supports_reasoning_summaries".to_string(), json!(true));
-        entry.insert("supports_search_tool".to_string(), json!(true));
-        entry.insert("default_reasoning_summary".to_string(), json!("none"));
-        entry.insert(
-            "truncation_policy".to_string(),
-            json!({ "mode": "tokens", "limit": 10000 }),
-        );
+        entry
+            .entry("supports_reasoning_summaries")
+            .or_insert_with(|| json!(true));
+        entry
+            .entry("supports_search_tool")
+            .or_insert_with(|| json!(true));
+        entry
+            .entry("default_reasoning_summary")
+            .or_insert_with(|| json!("none"));
+        entry
+            .entry("truncation_policy")
+            .or_insert_with(|| json!({ "mode": "tokens", "limit": 10000 }));
         entry.insert("upgrade".to_string(), Value::Null);
         // 自定义供应商不具备 OpenAI Codex 后端的提示词注入能力，必须发送完整 instructions。
         entry.insert("use_responses_lite".to_string(), json!(false));
@@ -5062,8 +5124,14 @@ mod tests {
                 "slug": "gpt-5.6-sol",
                 "base_instructions": "Codex 当前提示词",
                 "model_messages": {
+                    "persistent_instructions": "keep persistent instructions",
                     "instructions_template": "Codex 当前提示词",
-                    "instructions_variables": {}
+                    "instructions_variables": {"personality_pragmatic": "keep personality"},
+                    "permissions": {"instructions": "keep permissions"},
+                    "collaboration_modes": {"default": "keep collaboration"},
+                    "multi_agent": "keep multi-agent rules",
+                    "token_budget": {"instructions": "keep budget"},
+                    "future_field": ["keep future schema"]
                 }
             }]
         });
@@ -5076,11 +5144,155 @@ mod tests {
         .unwrap();
         let model = &catalog["models"][0];
         assert_eq!(model["base_instructions"], "第一行\n第二行");
-        assert_eq!(
-            model["model_messages"]["instructions_template"],
-            "第一行\n第二行"
-        );
+        let mut expected = codex_catalog["models"][0]["model_messages"].clone();
+        expected["instructions_template"] = json!("第一行\n第二行");
+        assert_eq!(model["model_messages"], expected);
         assert_eq!(model["use_responses_lite"], false);
+    }
+
+    #[test]
+    fn generated_model_catalog_preserves_exact_source_capabilities_and_project_controls() {
+        let profile: RelayProfile = serde_json::from_value(json!({
+            "id": "source-capabilities",
+            "name": "Source capabilities",
+            "modelMappings": [{
+                "requestModel": "openai/gpt-5.6-sol",
+                "alias": "review",
+                "protocol": "responses",
+                "contextWindow": "234567",
+                "systemPromptOverride": "custom prompt"
+            }]
+        }))
+        .unwrap();
+        let source = json!({
+            "slug": "gpt-5.6-sol",
+            "base_instructions": "source prompt",
+            "model_messages": {
+                "instructions_template": "source prompt",
+                "collaboration_modes": "keep collaboration"
+            },
+            "shell_type": "unified_exec",
+            "apply_patch_tool_type": "function",
+            "web_search_tool_type": "text",
+            "default_verbosity": "medium",
+            "effective_context_window_percent": 90,
+            "experimental_supported_tools": ["clock", "send_user_message_async"],
+            "input_modalities": ["text"],
+            "support_verbosity": false,
+            "supports_image_detail_original": false,
+            "supports_parallel_tool_calls": false,
+            "supports_reasoning_summaries": false,
+            "supports_search_tool": false,
+            "default_reasoning_summary": "auto",
+            "truncation_policy": {"mode": "tokens", "limit": 1234},
+            "context_window": 999999,
+            "default_reasoning_level": "ultra",
+            "multi_agent_version": "v2",
+            "service_tiers": ["do-not-copy"],
+            "use_responses_lite": true
+        });
+        let catalog = generated_model_catalog_json_with_codex_catalog(
+            &profile,
+            "",
+            relay_profile_catalog_rows(&profile).unwrap(),
+            Some(&json!({"models": [source.clone()]})),
+        )
+        .unwrap();
+        let model = &catalog["models"][0];
+        for key in [
+            "shell_type",
+            "apply_patch_tool_type",
+            "web_search_tool_type",
+            "default_verbosity",
+            "effective_context_window_percent",
+            "experimental_supported_tools",
+            "input_modalities",
+            "support_verbosity",
+            "supports_image_detail_original",
+            "supports_parallel_tool_calls",
+            "supports_reasoning_summaries",
+            "supports_search_tool",
+            "default_reasoning_summary",
+            "truncation_policy",
+        ] {
+            assert_eq!(model[key], source[key], "{key}");
+        }
+        assert_eq!(model["slug"], "review");
+        assert_eq!(model["context_window"], 234567);
+        assert_ne!(model["default_reasoning_level"], "ultra");
+        assert!(model.get("multi_agent_version").is_none());
+        assert_ne!(model["service_tiers"], source["service_tiers"]);
+        assert_eq!(model["use_responses_lite"], false);
+        assert_eq!(model["base_instructions"], "custom prompt");
+        assert_eq!(
+            model["model_messages"]["collaboration_modes"],
+            "keep collaboration"
+        );
+    }
+
+    #[test]
+    fn generated_model_catalog_does_not_copy_capabilities_from_fuzzy_matches() {
+        let source = json!({"models": [{
+            "slug": "gpt-5.6-sol",
+            "base_instructions": "You are Codex, based on GPT-5.6 Sol.",
+            "shell_type": "unified_exec",
+            "default_verbosity": "medium",
+            "experimental_supported_tools": ["clock"]
+        }]});
+        for model in ["gpt-5.6", "gpt-5.6-sol-custom", "claude-custom"] {
+            let profile: RelayProfile = serde_json::from_value(json!({
+                "id": "unknown-capabilities",
+                "name": "Unknown capabilities",
+                "modelMappings": [{"requestModel": model, "protocol": "responses"}]
+            }))
+            .unwrap();
+            let catalog = generated_model_catalog_json_with_codex_catalog(
+                &profile,
+                "",
+                relay_profile_catalog_rows(&profile).unwrap(),
+                Some(&source),
+            )
+            .unwrap();
+            let generated = &catalog["models"][0];
+            assert_eq!(generated["shell_type"], "shell_command", "{model}");
+            assert_eq!(generated["default_verbosity"], "low", "{model}");
+            assert_eq!(
+                generated["experimental_supported_tools"],
+                json!([]),
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_model_catalog_backfills_missing_source_fields_without_overwriting_null() {
+        let profile: RelayProfile = serde_json::from_value(json!({
+            "id": "missing-capabilities",
+            "name": "Missing capabilities",
+            "modelMappings": [{"requestModel": "gpt-catalog-test", "protocol": "responses"}]
+        }))
+        .unwrap();
+        let catalog = generated_model_catalog_json_with_codex_catalog(
+            &profile,
+            "",
+            relay_profile_catalog_rows(&profile).unwrap(),
+            Some(&json!({"models": [{
+                "slug": "gpt-catalog-test",
+                "default_verbosity": "medium",
+                "apply_patch_tool_type": null
+            }]})),
+        )
+        .unwrap();
+        let model = &catalog["models"][0];
+        assert_eq!(model["default_verbosity"], "medium");
+        assert_eq!(model["apply_patch_tool_type"], Value::Null);
+        assert_eq!(model["shell_type"], "shell_command");
+        assert_eq!(model["experimental_supported_tools"], json!([]));
+        assert_eq!(model["support_verbosity"], true);
+        assert_eq!(
+            model["truncation_policy"],
+            json!({"mode": "tokens", "limit": 10000})
+        );
     }
 
     #[test]
