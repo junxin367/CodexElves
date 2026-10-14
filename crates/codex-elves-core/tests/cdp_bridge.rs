@@ -5106,6 +5106,32 @@ fn injection_script_applies_fast_service_tier_contract() {
         cases["aliasCatalogResolution"]["contextAliasWithEnglishEffort"],
         "gpt-6-astra[600K]"
     );
+    for key in [
+        "nativeContextAlias",
+        "nativeContextAliasWithEffort",
+        "nativeContextAliasWithEnglishEffort",
+    ] {
+        assert_eq!(
+            cases["aliasCatalogResolution"][key], "gpt-6-astra[600K]",
+            "{key} 应识别原生简写而不是与基础模型冲突"
+        );
+    }
+    assert_eq!(
+        cases["aliasCatalogResolution"]["nativeBaseWithEffort"],
+        "gpt-6-astra"
+    );
+    assert_eq!(
+        cases["aliasCatalogResolution"]["nativeOtherContextWithEffort"],
+        "gpt-6-astra[1M]"
+    );
+    assert_eq!(
+        cases["aliasCatalogResolution"]["nativeConflictingAliases"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        cases["aliasCatalogResolution"]["literalAliasBeforeNativeShorthand"],
+        "manual-model"
+    );
     assert_eq!(
         cases["aliasCatalogResolution"]["unicodeAliasWithEffort"],
         "主力编程模型"
@@ -7079,6 +7105,7 @@ api.setModelCatalog({{
   model_entries: [
     {{ slug: "gpt-6-astra", service_tiers: [{{ id: "priority" }}] }},
     {{ slug: "gpt-6-astra[600K]", service_tiers: [{{ id: "priority" }}] }},
+    {{ slug: "gpt-6-astra[1M]", service_tiers: [{{ id: "priority" }}] }},
     {{ slug: "主力编程", supports_fast: false }},
     {{ slug: "主力编程模型", service_tiers: [{{ id: "priority" }}] }},
     {{ slug: "gpt-5.6-sol", display_name: "英文模型的中文别名", service_tiers: [{{ id: "priority" }}] }},
@@ -7090,6 +7117,11 @@ api.setModelCatalog({{
 Object.assign(aliasCatalogResolution, {{
   contextAliasWithEffort: api.catalogSlugForText("gpt-6-astra[600K] 超高"),
   contextAliasWithEnglishEffort: api.catalogSlugForText("gpt-6-astra[600K] xhigh"),
+  nativeContextAlias: api.catalogSlugForText("6 Astra[600K]"),
+  nativeContextAliasWithEffort: api.catalogSlugForText("6 Astra[600K] 极高"),
+  nativeContextAliasWithEnglishEffort: api.catalogSlugForText("6 Astra[600K] xhigh"),
+  nativeBaseWithEffort: api.catalogSlugForText("6 Astra 极高"),
+  nativeOtherContextWithEffort: api.catalogSlugForText("6 Astra[1M] 极高"),
   unicodeAliasWithEffort: api.catalogSlugForText("主力编程模型 最高"),
 }});
 api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});
@@ -7099,6 +7131,20 @@ const aliasFast = {{
   unsupported: api.applyServiceTierOverride("turn/start", {{ model: "不支持的模型", service_tier: "priority" }}),
   ambiguous: api.applyServiceTierOverride("turn/start", {{ model: "同名模型", service_tier: "priority" }}),
 }};
+api.setModelCatalog({{
+  model_entries: [
+    {{ slug: "gpt-6-astra[600K]" }},
+    {{ slug: "other-model", display_name: "gpt-6-astra[600K]" }},
+  ],
+}});
+aliasCatalogResolution.nativeConflictingAliases = api.catalogSlugForText("6 Astra[600K] 极高");
+api.setModelCatalog({{
+  model_entries: [
+    {{ slug: "gpt-6-astra[600K]" }},
+    {{ slug: "manual-model", display_name: "6 Astra[600K]" }},
+  ],
+}});
+aliasCatalogResolution.literalAliasBeforeNativeShorthand = api.catalogSlugForText("6 Astra[600K] 极高");
 api.setModelCatalog({{ status: "ok", model: "gpt-5.4", default_model: "gpt-5.4", models: ["gpt-5.4", "gpt-5.5"] }});
 
 api.setThreadState({{ mode: "global-fast", defaultMode: "fast", entries: {{}} }});

@@ -5127,6 +5127,19 @@
     );
     if (match.slug || match.ambiguous) return match;
 
+    // Codex 会把 gpt-6-astra[600K] 显示为 6 Astra[600K]，上下文后缀仍属于模型名。
+    match = codexServiceTierUniqueCatalogMatch(
+      entries,
+      (entry) => [entry.slug, entry.displayName].some((name) => {
+        const shortened = String(name || "").trim().replace(/^gpt[-._]?(?=\d)/i, "");
+        if (shortened === String(name || "").trim()) return false;
+        const nameKey = codexServiceTierModelMatchKey(shortened);
+        return key === nameKey
+          || (key.startsWith(nameKey) && reasoningSuffixes.has(key.slice(nameKey.length)));
+      })
+    );
+    if (match.slug || match.ambiguous) return match;
+
     return codexServiceTierUniqueCatalogMatch(
       entries,
       (entry) => codexServiceTierModelMatchesText(entry.slug, value)
