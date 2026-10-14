@@ -9684,9 +9684,16 @@ fn responses_tools_to_anthropic_tools(
     // Codex 的 web_search 是 OpenAI 平台 hosted 工具，在 Claude 链路里没有 OpenAI 服务端执行。
     // 若会话没有可执行的 MCP 搜索 fallback，则把 web_search 声明为 Anthropic 原生 server-side
     // 工具，由 Claude 服务端自己执行搜索，避免被当作客户端工具导致空结果死循环。
-    // SWE 系列在收到原生声明时仍返回普通客户端 tool_use(web_search)，因此保持普通工具声明。
+    // SWE 与 Kimi 仅使用客户端搜索声明，搜索执行复用 MCP fallback 或 tool_search 路径。
+    let normalized = model.trim().to_ascii_lowercase();
+    let slug = normalized.rsplit('/').next().unwrap_or(&normalized);
+    // CPA/Kimi 在无需搜索时也会因服务端工具声明返回空查询、空结果及
+    // "Search results for query: " 正文；限制该声明以避免额外搜索标记进入会话，
+    // 不表示 Kimi 没有搜索能力，也不禁用客户端搜索路径。
+    let is_kimi = slug == "kimi" || slug.starts_with("kimi-");
     let wants_server_web_search = context.web_search_fallback_tool().is_none()
         && swe_reasoning_efforts(model).is_none()
+        && !is_kimi
         && tools.iter().any(|tool| {
             tool.get("type")
                 .and_then(Value::as_str)

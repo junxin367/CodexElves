@@ -2550,10 +2550,16 @@ mod tool_conversion_audit {
     fn web_search_discovers_then_executes_deferred_search_tools_in_four_modes() {
         for anthropic in [false, true] {
             for stream in [false, true] {
-                for arguments in [json!({}), json!({"query":"Rust 官方网站"})] {
-                    let request = tool_request(json!([
+                for (model, arguments) in [
+                    ("claude-opus-4-8", json!({})),
+                    ("claude-opus-4-8", json!({"query":"Rust 官方网站"})),
+                    ("kimi-k3", json!({})),
+                    ("kimi-k3", json!({"query":"Rust 官方网站"})),
+                ] {
+                    let mut request = tool_request(json!([
                         {"type":"web_search"}, {"type":"tool_search","execution":"client"}
                     ]));
+                    request["model"] = json!(model);
                     let discovery =
                         mock_tool_response(&request, "web_search", &arguments, anthropic, stream);
                     assert_eq!(discovery["type"], "tool_search_call");
@@ -6436,8 +6442,13 @@ fn anthropic_request_declares_web_search_as_server_side_tool_without_fallback() 
 }
 
 #[test]
-fn anthropic_request_declares_server_web_search_for_devin_claude_without_fallback() {
-    for model in ["devin/claude-haiku-5-5", "devin/claude-opus-5-5"] {
+fn anthropic_request_keeps_server_web_search_for_other_anthropic_models() {
+    for model in [
+        "devin/claude-haiku-5-5",
+        "devin/claude-opus-5-5",
+        "deepseek-v4.1-flash",
+        "kimi-provider/claude-opus-5-5",
+    ] {
         let converted = responses_to_anthropic_messages(json!({
             "model": model,
             "input": "search the web",
@@ -6456,8 +6467,16 @@ fn anthropic_request_declares_server_web_search_for_devin_claude_without_fallbac
 }
 
 #[test]
-fn anthropic_request_declares_client_web_search_for_swe_models() {
-    for model in ["swe-2", "devin/swe-2"] {
+fn anthropic_request_declares_client_web_search_for_swe_and_kimi_models() {
+    for model in [
+        "swe-2",
+        "devin/swe-2",
+        "kimi",
+        "kimi-k3",
+        "kimi-k2.5",
+        "kimi-for-coding",
+        "moonshotai/Kimi-K3",
+    ] {
         let converted = responses_to_anthropic_messages(json!({
             "model": model,
             "input": "search the web",
@@ -14392,6 +14411,76 @@ async fn responses_proxy_e2e_chat_upstream_roundtrips_regular_namespace_tool_cal
     assert_eq!(response_body["output"][0]["call_id"], "call_pal");
     assert_eq!(response_body["output"][0]["name"], "version");
     assert_eq!(response_body["output"][0]["namespace"], "mcp__pal");
+}
+
+#[tokio::test]
+async fn responses_proxy_e2e_anthropic_kimi_does_not_declare_server_web_search() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let server = spawn_chat_server_with_responses(vec![
+        json!({
+            "id":"msg_greeting","type":"message","role":"assistant","model":"kimi-k3",
+            "content":[{"type":"text","text":"你好"}],"stop_reason":"end_turn",
+            "usage":{"input_tokens":10,"output_tokens":2}
+        })
+        .to_string(),
+        json!({
+            "id":"msg_search","type":"message","role":"assistant","model":"kimi-k3",
+            "content":[{"type":"tool_use","id":"call_search","name":"web_search",
+                "input":{"query":"Rust 官方网站"}}],
+            "stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":5}
+        })
+        .to_string(),
+    ]);
+    write_anthropic_relay_settings(temp.path(), &server.base_url);
+    let greeting = handle_responses_proxy_request(
+        &json!({
+            "model":"kimi-k3","input":"你好","stream":false,
+            "tools":[{"type":"web_search"}]
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    let search = handle_responses_proxy_request(
+        &json!({
+            "model":"kimi-k3","input":"搜索 Rust 官方网站","stream":false,
+            "tools":[{"type":"web_search"},{"type":"tool_search","execution":"client"}]
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    let requests = server.finish_all();
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        assert_eq!(request.path, "/v1/messages");
+        let body: Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body["model"], "kimi-k3");
+        let tools = body["tools"].as_array().unwrap();
+        assert!(
+            !tools
+                .iter()
+                .any(|tool| tool["type"] == "web_search_20250305")
+        );
+        let search_tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "web_search")
+            .unwrap();
+        assert_eq!(
+            search_tool["input_schema"]["properties"]["query"]["type"],
+            "string"
+        );
+    }
+    assert_eq!(greeting.status, "200 OK");
+    let greeting: Value = serde_json::from_slice(&greeting.body).unwrap();
+    assert_eq!(greeting["output"][0]["content"][0]["text"], "你好");
+    assert_eq!(search.status, "200 OK");
+    let search: Value = serde_json::from_slice(&search.body).unwrap();
+    assert_eq!(search["output"][0]["type"], "tool_search_call");
+    assert_eq!(search["output"][0]["call_id"], "call_search");
+    assert_eq!(search["output"][0]["execution"], "client");
 }
 
 #[tokio::test]
