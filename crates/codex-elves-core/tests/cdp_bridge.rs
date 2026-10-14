@@ -118,7 +118,7 @@ fn renderer_features_delete_is_permanent_without_undo_ui() {
 fn renderer_delete_current_session_uses_native_navigation_without_page_reload() {
     let script = assets::renderer_features_script();
 
-    assert!(script.contains(r#"const codexDeleteVersion = "12";"#));
+    assert!(script.contains(r#"const codexDeleteVersion = "13";"#));
     assert!(script.contains("function sessionDeleteNativeNewConversationButton()"));
     assert!(script.contains(
         r#"/^(?:新对话|新建对话|新聊天|新建聊天|New chat|New conversation|Start new chat)$/i"#
@@ -243,10 +243,69 @@ function create(manager) {
 }
 
 #[test]
+fn renderer_delete_resolves_temporary_row_from_its_own_conversation_entry() {
+    let script = assets::renderer_features_script();
+    let start = script
+        .find("  function sessionDeleteConversationIdFromRow(row) {")
+        .expect("row conversation resolver");
+    let end = script[start..]
+        .find("\n  function openDeleteConfirmForRow(")
+        .map(|offset| start + offset)
+        .expect("delete confirmation handler");
+    let helper = &script[start..end];
+    let node_script = format!(
+        "const source = {};\n",
+        serde_json::to_string(helper).unwrap()
+    ) + r#"
+const assert = require("node:assert/strict");
+const id = "01a0cc16-7bf6-7dc2-ac50-5cdfad7f7b29";
+const activeId = "01a0ccaa-7bf6-7dc2-ac50-5cdfad7f7b29";
+const staleKey = "local:client-new-thread:4725a80c-8f5e-4e3b-9d2a-1c2b3d4e5f60";
+const ref = { session_id: staleKey, title: "Recent" };
+function fiberChain(...memoizedProps) {
+  return memoizedProps.reduceRight((next, props) => ({ memoizedProps: props, return: next }), null);
+}
+function rowOf(domKey, fiber) {
+  return {
+    getAttribute: (name) => (name === "data-app-action-sidebar-thread-id" ? domKey : null),
+    __reactFiber$test: fiber,
+  };
+}
+const conversationIdOf = new Function(`${source}\nreturn sessionDeleteConversationIdFromRow;`)();
+const refFromRow = new Function(
+  "isTemporaryThreadId",
+  "isCurrentSessionRow",
+  "activeConversationIdFromDom",
+  `${source}\nreturn sessionDeleteRefFromRow;`
+)(
+  (value) => String(value).includes("client-new-thread:"),
+  () => false,
+  () => activeId
+);
+assert.equal(conversationIdOf(rowOf(staleKey, fiberChain({}, { entry: { key: staleKey, conversationId: id } }, {}))), id);
+assert.equal(conversationIdOf(rowOf(staleKey, fiberChain({ entry: { key: staleKey, conversationId: null } }, { active: { key: `local:${activeId}`, conversationId: activeId } }))), "");
+assert.equal(conversationIdOf(rowOf(staleKey, fiberChain({ entry: { key: staleKey, conversationId: "client-new-thread:pending" } }))), "");
+assert.equal(conversationIdOf(rowOf(staleKey, fiberChain({ entry: { key: "local:other", conversationId: id } }))), "");
+assert.equal(conversationIdOf(rowOf(staleKey, null)), "");
+assert.deepEqual(refFromRow(rowOf(staleKey, fiberChain({ entry: { key: staleKey, conversationId: id } })), ref), { ...ref, session_id: `local:${id}` });
+"#;
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(node_script)
+        .output()
+        .expect("node should be available");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn renderer_delete_resolves_only_the_active_temporary_thread() {
     let script = assets::renderer_features_script();
     let start = script
-        .find("  function sessionDeleteRefFromRow(row, ref) {")
+        .find("  function sessionDeleteConversationIdFromRow(row) {")
         .expect("temporary session delete resolver");
     let end = script[start..]
         .find("\n  function openDeleteConfirmForRow(")
@@ -261,13 +320,13 @@ fn renderer_delete_resolves_only_the_active_temporary_thread() {
 const assert = require("node:assert/strict");
 const id = "01a0cc16-7bf6-7dc2-ac50-5cdfad7f7b29";
 const ref = { session_id: "local:client-new-thread:4725a80c", title: "Recent" };
-const row = {};
+const row = { getAttribute: () => "" };
 function create(active, current) {
   return new Function(
     "isTemporaryThreadId",
     "isCurrentSessionRow",
     "activeConversationIdFromDom",
-    `return (${source.trim()});`
+    `${source}\nreturn sessionDeleteRefFromRow;`
   )(
     (value) => String(value).includes("client-new-thread:"),
     () => current,
@@ -2198,7 +2257,7 @@ fn renderer_task_board_review_fixes_keep_reinjection_navigation_and_cleanup_boun
 
     assert!(script.contains("const taskBoardRuntimeVersion ="));
     assert!(
-        script.contains(r#"const codexDeleteStyleVersion = "97";"#),
+        script.contains(r#"const codexDeleteStyleVersion = "99";"#),
         "task-board layout changes should invalidate the installed renderer stylesheet"
     );
     assert!(script.contains("--codex-confirm-surface: var("));
@@ -4323,7 +4382,7 @@ fn injection_script_restores_titlebar_open_in_quick_access() {
     assert!(script.contains("codex-open-in-menu"));
     assert!(script.contains(r#"const codexOpenInVersion = "11";"#));
     assert!(script.contains("window.__codexElvesOpenInRuntimeVersion === codexOpenInVersion"));
-    assert!(script.contains(r#"const codexDeleteStyleVersion = "97";"#));
+    assert!(script.contains(r#"const codexDeleteStyleVersion = "99";"#));
     assert!(script.contains(r#"[data-codex-open-in-role="primary"]"#));
     assert!(script.contains(r#"[data-codex-open-in-role="arrow"]"#));
     assert!(script.contains("width: 30px !important;"));
@@ -4929,6 +4988,149 @@ fn injection_script_constrains_native_composer_measurement_without_clipping_surf
 }
 
 #[test]
+fn renderer_service_tier_targets_main_composer_only() {
+    let script = assets::renderer_features_script();
+    let start = script
+        .find("  const codexServiceTierComposerFooterSelector =")
+        .unwrap();
+    let end = script[start..]
+        .find("  function codexServiceTierBadgeAnchor(")
+        .map(|offset| start + offset)
+        .unwrap();
+    let input_start = script
+        .find("  function codexServiceTierHasVisibleComposerInput() {")
+        .unwrap();
+    let input_end = script[input_start..]
+        .find("  function codexServiceTierPositionPortalBadge(")
+        .map(|offset| input_start + offset)
+        .unwrap();
+    let node_script = format!(
+        "const source = {};\n",
+        serde_json::to_string(&format!(
+            "{}\n{}",
+            &script[start..end],
+            &script[input_start..input_end]
+        ))
+        .unwrap()
+    ) + r#"
+const assert = require("node:assert/strict");
+globalThis.HTMLElement = Object;
+let footers = [];
+let inputs = [];
+function element(area, text = "") {
+  return {
+    textContent: text, visible: true, parentElement: null,
+    matches: () => true,
+    closest: () => area ? {getAttribute: () => area} : null,
+    querySelectorAll: () => [],
+    querySelector: () => null,
+    getBoundingClientRect: () => ({left:0, top:0, bottom:100, width:500, height:30}),
+  };
+}
+const document = {querySelectorAll: () => footers};
+const api = new Function(
+  "document", "codexServiceTierBadgeVisibleElement", "codexServiceTierFooterHasNearbyComposerInput",
+  "codexServiceTierKnownProviderNames", "codexServiceTierBadgeText", "codexServiceTierLooksLikeProviderButton",
+  "conversationViewFindComposerEl", "codexServiceTierComposerInputs",
+  `${source}\nreturn {footers:codexServiceTierVisibleComposerFooters,best:codexServiceTierBestComposerFooter,candidates:codexServiceTierComposerCandidates,hasInput:codexServiceTierHasVisibleComposerInput};`
+)(
+  document, node => node.visible, () => true, () => [], node => node.textContent, () => false,
+  () => footers[0], () => inputs
+);
+const main = element("main");
+const side = element("right-panel", "model high provider");
+footers = [side, main];
+inputs = [side, main];
+assert.deepEqual(api.footers(), [main]);
+assert.equal(api.best(), main);
+assert.deepEqual(api.candidates(), [main]);
+assert.equal(api.hasInput(), true);
+footers = [side];
+inputs = [side];
+assert.deepEqual(api.footers(), []);
+assert.equal(api.best(), null);
+assert.deepEqual(api.candidates(), []);
+assert.equal(api.hasInput(), false);
+const legacy = element(null);
+footers = [legacy];
+inputs = [legacy];
+assert.equal(api.best(), legacy);
+assert.equal(api.hasInput(), true);
+"#;
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(node_script)
+        .output()
+        .expect("node should be available");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn renderer_service_tier_badge_shows_unsupported_in_all_modes() {
+    let script = assets::renderer_features_script();
+    let start = script
+        .find("  function codexServiceTierBadgeState() {")
+        .unwrap();
+    let end = script[start..]
+        .find("  function refreshCodexServiceTierBadges() {")
+        .map(|offset| start + offset)
+        .unwrap();
+    let node_script = format!(
+        "const source = {};\n",
+        serde_json::to_string(&script[start..end]).unwrap()
+    ) + r#"
+const assert = require("node:assert/strict");
+const backend = {status: "ok"};
+const state = {status: "ok", controlMode: "inherit", threadMode: "inherit"};
+const availability = {modelName: "claude-opus-5-5", supported: false};
+const badgeState = new Function(
+  "codexElvesBackendStatus", "codexServiceTierState", "codexServiceTierFastAvailability",
+  "serviceTierStatusMessage", "codexServiceTierFastModelListLabel", "codexServiceTierFastUnsupportedMessage",
+  `${source}\nreturn codexServiceTierBadgeState;`
+)(backend, state, () => availability, () => "", () => "GPT", () => "当前模型不支持");
+for (const effectiveMode of ["standard", "fast"]) {
+  state.effectiveMode = effectiveMode;
+  assert.equal(badgeState().tier, "unsupported");
+  assert.equal(badgeState().label, "不支持");
+  assert.match(badgeState().title, /当前请求会按 Standard 发送/);
+}
+availability.modelName = "gpt-6-astra[600K]";
+availability.supported = true;
+for (const effectiveMode of ["standard", "fast"]) {
+  state.effectiveMode = effectiveMode;
+  assert.equal(badgeState().tier, effectiveMode);
+  assert.equal(badgeState().label, effectiveMode);
+}
+availability.supported = false;
+backend.status = "checking";
+assert.equal(badgeState().tier, "loading");
+assert.equal(badgeState().label, "...");
+backend.status = "failed";
+assert.equal(badgeState().tier, "failed");
+assert.equal(badgeState().label, "未连接");
+backend.status = "ok";
+state.status = "loading";
+assert.equal(badgeState().tier, "loading");
+state.status = "failed";
+assert.equal(badgeState().tier, "failed");
+"#;
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(node_script)
+        .output()
+        .expect("node should be available");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn injection_script_portals_fast_badge_outside_react_owned_composer() {
     let script = assets::injection_script(45221);
 
@@ -5005,6 +5207,99 @@ fn injection_script_prompts_for_markdown_export_path_when_supported() {
     assert!(script.contains("await writable.write(markdown)"));
     assert!(script.contains("status: \"cancelled\""));
     assert!(script.contains("导出已取消"));
+}
+
+#[test]
+fn renderer_service_tier_reads_model_without_hidden_measurement_and_effort_layers() {
+    let script = assets::renderer_features_script();
+    let start = script
+        .find("  function codexServiceTierSelectedModelTexts(button) {")
+        .unwrap();
+    let end = script[start..]
+        .find("  function findCatalogSlug(")
+        .map(|offset| start + offset)
+        .unwrap();
+    let node_script = format!(
+        "const source = {};\n",
+        serde_json::to_string(&script[start..end]).unwrap()
+    ) + r#"
+const assert = require("node:assert/strict");
+class Element {
+  constructor(text = "", attrs = {}, children = []) {
+    this.text = text;
+    this.attrs = attrs;
+    this.children = children;
+    children.forEach(child => { child.parent = this; });
+  }
+  get textContent() { return this.text + this.children.map(child => child.textContent).join(""); }
+  matches(selector) {
+    const classMatch = selector.match(/^\[class\*="([^"]+)"\]$/);
+    if (classMatch) return (this.attrs.class || "").includes(classMatch[1]);
+    const attrMatch = selector.match(/^\[([^=]+)="([^"]+)"\]$/);
+    return !!attrMatch && this.attrs[attrMatch[1]] === attrMatch[2];
+  }
+  querySelectorAll(selector) {
+    return this.children.flatMap(child => [
+      ...(child.matches(selector) ? [child] : []),
+      ...child.querySelectorAll(selector),
+    ]);
+  }
+  closest(selector) {
+    return this.matches(selector) ? this : this.parent?.closest(selector) || null;
+  }
+  cloneNode() {
+    return new Element(this.text, {...this.attrs}, this.children.map(child => child.cloneNode()));
+  }
+  remove() {
+    this.parent.children = this.parent.children.filter(child => child !== this);
+  }
+}
+const texts = new Function(
+  "HTMLElement", "uniqueValues", "codexServiceTierBadgeVisibleElement", "codexServiceTierBadgeText",
+  `${source}\nreturn codexServiceTierSelectedModelTexts;`
+)(
+  Element,
+  values => [...new Set(values.filter(Boolean))],
+  () => true,
+  node => node.textContent.replace(/\s+/g, " ").trim()
+);
+function trigger(modelClass, overflow = true) {
+  return new Element("", {}, [
+    new Element("", overflow ? {"data-tooltip-overflow-target":"true"} : {}, [
+      new Element("选择强度", {"aria-hidden":"true", class:"_ModelPickerTriggerMeasurement_test"}),
+      new Element("6 Astra[600K]", {class:modelClass}),
+      new Element("极高", {class:"sr-only"}),
+      ...["无","极低","轻度","中","高","极高","Max","Ultra","持续"].map(text =>
+        new Element(text, {"aria-hidden":"true", class:"_ModelPickerTriggerEffortText_test"})
+      ),
+    ]),
+  ]);
+}
+const modern = trigger("_ModelPickerTriggerModelText_test");
+const originalText = modern.textContent;
+assert.deepEqual(texts(modern), ["6 Astra[600K]"]);
+assert.equal(modern.textContent, originalText);
+assert.deepEqual(texts(trigger("_ModelPickerTriggerModelLabel_test")), ["6 Astra[600K]"]);
+assert.deepEqual(texts(trigger("_WorkTriggerModelText_test")), ["6 Astra[600K]"]);
+assert.deepEqual(texts(trigger("_WorkTriggerModelLabel_test")), ["6 Astra[600K]"]);
+assert.deepEqual(texts(trigger("future-model-label")), ["6 Astra[600K]极高"]);
+assert.deepEqual(texts(trigger("future-model-label", false)), ["6 Astra[600K]极高"]);
+assert.deepEqual(texts(new Element("", {}, [
+  new Element("错误模型", {class:"_ModelPickerTriggerModelText_test", "aria-hidden":"true"}),
+  new Element("当前模型", {class:"_ModelPickerTriggerModelText_test"}),
+])), ["当前模型"]);
+assert.deepEqual(texts(null), []);
+"#;
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(node_script)
+        .output()
+        .expect("node should be available");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -9490,6 +9785,14 @@ function node(tagName = "div") {
         if (next) classNames.add(name); else classNames.delete(name);
         return next;
       },
+    },
+    cloneNode(deep = false) {
+      const clone = node(tagName);
+      attributes.forEach((value, name) => clone.setAttribute(name, value));
+      clone.className = this.className;
+      clone.textContent = this.textContent;
+      if (deep) this.children.forEach((child) => clone.appendChild(child.cloneNode(true)));
+      return clone;
     },
     appendChild(child) {
       child.parentElement?.remove?.();

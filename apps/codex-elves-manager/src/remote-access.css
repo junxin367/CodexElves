@@ -1,42 +1,108 @@
-.remote-access-screen { display: flex; flex-direction: column; gap: 18px; max-width: 1080px; }
-.remote-access-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
-.remote-access-heading h2 { font-size: 22px; font-weight: 600; margin: 0 0 8px; }
-.remote-access-heading p { color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.8; margin: 0; }
-.remote-access-card { padding: 22px; border: 1px solid hsl(var(--border)); border-radius: 12px; background: hsl(var(--card)); }
-.remote-access-card h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; font-size: 14px; font-weight: 600; }
-.remote-access-card-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
-.remote-access-card-heading h3 { margin: 0; line-height: 30px; }
-.remote-access-card-heading > button { flex-shrink: 0; }
-.remote-access-status { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; font-size: 13px; }
-.remote-access-status > span { font-size: 11px; margin-left: auto; }
 .remote-access-connected { color: #168653; }
 .remote-access-muted, .remote-access-hint { color: hsl(var(--muted-foreground)); }
-.remote-access-hint { font-size: 11px; line-height: 1.8; margin: 8px 0 16px; }
+.remote-access-hint { font-size: 11px; line-height: 1.8; margin: 4px 0 12px; }
 .remote-access-toggle { display: flex; align-items: center; gap: 9px; font-size: 12px; line-height: 1.8; cursor: pointer; }
 .remote-access-toggle input { accent-color: hsl(var(--primary)); }
-.remote-access-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 20px; margin-top: 22px; }
-.remote-access-fields > div { display: flex; flex-direction: column; gap: 7px; }
-.remote-access-fields label { font-size: 12px; }
-.remote-access-fields small { font-size: 10px; color: hsl(var(--muted-foreground)); line-height: 1.7; }
+.remote-access-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 18px; margin-top: 14px; }
+.remote-access-fields-top { margin-top: 10px; }
+.remote-access-fields > div { display: flex; flex-direction: column; gap: 6px; }
+.remote-access-fields label { font-size: 12px; font-weight: 600; }
+.remote-access-fields small { font-size: 11px; color: hsl(var(--muted-foreground)); line-height: 1.6; }
 .remote-access-wide { grid-column: 1 / -1; }
-.remote-access-permissions { justify-content: center; gap: 9px !important; }
-.remote-access-actions { margin-top: 22px; display: flex; align-items: center; flex-wrap: wrap; gap: 14px; }
+.remote-access-actions { margin-top: 18px; display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .remote-access-actions .remote-access-hint { margin: 0; }
 .remote-access-input-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .remote-access-input-row input { flex: 1; min-width: 0; }
 .remote-access-input-row button { flex-shrink: 0; }
-.remote-access-key-input { display: flex; align-items: center; flex: 1; min-width: 0; gap: 2px; }
-.remote-access-guides { display: flex; flex-wrap: wrap; gap: 10px; }
-.remote-access-program { flex: 1; font-size: 12px; }
-.remote-access-program-options summary { cursor: pointer; color: hsl(var(--muted-foreground)); font-size: 11px; margin: 5px 0 10px; }
-.remote-access-program-options > label { display: block; margin: 12px 0 7px; }
-.remote-access-program-options small { display: block; margin-top: 7px; }
-.remote-access-steps { padding-left: 20px; font-size: 11px; line-height: 1.9; color: hsl(var(--muted-foreground)); margin: 20px 0; }
-.remote-access-steps code { word-break: break-all; }
-.remote-access-devices { margin-top: 18px; }
-.remote-access-device { display: flex; gap: 12px; align-items: center; border-top: 1px solid hsl(var(--border)); padding: 14px 0; }
-.remote-access-device > div { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
-.remote-access-device small { color: hsl(var(--muted-foreground)); font-size: 10px; }
-.remote-access-error { color: #dc4444; font-size: 12px; }
+.remote-access-key-input { position: relative; display: flex; align-items: center; flex: 1; min-width: 0; }
+.remote-access-key-input input { padding-right: 64px; }
+.remote-access-public-input input { padding-right: 36px; }
+.remote-access-key-actions { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: 2px; }
+.remote-access-key-actions button { color: hsl(var(--muted-foreground)); }
+.remote-access-key-actions button:hover { color: hsl(var(--foreground)); }
+.remote-access-masked { -webkit-text-security: disc; }
+.remote-access-guides { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 2px; }
+.remote-access-devices { margin-top: 16px; }
+.remote-access-device { display: flex; gap: 12px; align-items: center; border-top: 1px solid hsl(var(--border)); padding: 12px 0; }
+.remote-access-device > div { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.remote-access-device small { color: hsl(var(--muted-foreground)); font-size: 11px; }
+.remote-access-error { color: #dc4444; font-size: 12px; margin-bottom: 8px; }
 .remote-access-message { font-size: 12px; color: hsl(var(--muted-foreground)); min-height: 20px; }
-@media (max-width: 900px) { .remote-access-fields { grid-template-columns: minmax(0, 1fr); } .remote-access-heading { flex-wrap: wrap; } .remote-access-card { padding: 16px; } }
+@media (max-width: 900px) { .remote-access-fields { grid-template-columns: minmax(0, 1fr); } }
+
+.funnel-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--card));
+  color: hsl(var(--muted-foreground));
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.funnel-status-badge.connected {
+  border-color: rgba(22, 134, 83, 0.35);
+  background: rgba(22, 134, 83, 0.08);
+  color: #168653;
+}
+.funnel-status-badge.connecting {
+  border-color: rgba(234, 154, 38, 0.35);
+  background: rgba(234, 154, 38, 0.08);
+  color: #d97706;
+}
+.funnel-status-badge.error {
+  border-color: rgba(220, 68, 68, 0.35);
+  background: rgba(220, 68, 68, 0.08);
+  color: #dc4444;
+}
+.funnel-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  background-color: currentColor;
+}
+.download-progress-container {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 4px;
+}
+.download-progress-container small { flex-shrink: 0; }
+.download-progress-bar {
+  flex: 1;
+  min-width: 0;
+  height: 5px;
+  background-color: hsl(var(--secondary));
+  border-radius: 9999px;
+  overflow: hidden;
+  position: relative;
+}
+.download-progress-fill {
+  height: 100%;
+  width: 50%;
+  background: linear-gradient(90deg, #10b981, #3b82f6);
+  border-radius: 9999px;
+  animation: download-progress-indeterminate 1.6s infinite ease-in-out;
+}
+@keyframes download-progress-indeterminate {
+  0% { transform: translateX(-100%); width: 30%; }
+  50% { transform: translateX(50%); width: 70%; }
+  100% { transform: translateX(200%); width: 30%; }
+}
+
+.remote-access-steps { display: flex; flex-direction: column; margin-top: 10px; }
+.remote-access-step { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid hsl(var(--border)); }
+.remote-access-step:first-child { border-top: none; padding-top: 0; }
+.remote-access-step-mark { width: 22px; height: 22px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; border-radius: 9999px; border: 1px solid hsl(var(--border)); font-size: 12px; color: hsl(var(--muted-foreground)); }
+.remote-access-step-mark.done { border-color: rgba(22, 134, 83, 0.35); background: rgba(22, 134, 83, 0.08); color: #168653; }
+.remote-access-step-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.remote-access-step-body small { color: hsl(var(--muted-foreground)); font-size: 11px; line-height: 1.6; }
+.remote-access-step-progress { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.remote-access-step-progress small { flex-shrink: 0; white-space: nowrap; }
+.remote-access-step-progress .download-progress-bar { flex: 1; min-width: 0; }
+.download-progress-fill.determinate { animation: none; transition: width 0.25s ease-out; }
+.remote-access-step-action { flex-shrink: 0; }

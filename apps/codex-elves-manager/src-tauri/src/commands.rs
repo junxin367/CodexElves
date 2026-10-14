@@ -645,21 +645,23 @@ pub async fn save_settings(settings: BackendSettings) -> CommandResult<SettingsP
 pub async fn remote_access_command(action: String, payload: Option<Value>) -> Value {
     if matches!(
         action.as_str(),
-        "credentials"
-            | "setKey"
-            | "generateKey"
-            | "setTunnelToken"
-            | "checkCloudflared"
-            | "downloadCloudflared"
-            | "cloudflaredStatus"
+        "tailscaleStatus" | "installTailscale" | "tailscaleInstallProgress"
     ) {
+        return codex_elves_core::remote_access::local_settings_command(
+            &action,
+            payload.unwrap_or_else(|| json!({})),
+        )
+        .await
+        .unwrap_or_else(|error| json!({"status":"failed","message":format!("{error:#}")}));
+    }
+    if matches!(action.as_str(), "credentials" | "setKey" | "generateKey") {
         let _guard = settings_write_mutex().lock().await;
         return codex_elves_core::remote_access::local_settings_command(
             &action,
             payload.unwrap_or_else(|| json!({})),
         )
         .await
-        .unwrap_or_else(|error| json!({"status":"failed","message":error.to_string()}));
+        .unwrap_or_else(|error| json!({"status":"failed","message":format!("{error:#}")}));
     }
     let result = codex_elves_core::remote_access::request_local_admin(
         &action,

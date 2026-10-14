@@ -5,7 +5,7 @@ let session = null, sidebar = null, selectedId = null, thread = null, historyCur
 let stream = null, connected = false, selectionVersion = 0, busy = false, creating = false, historyLoadingVersion = -1;
 let turns = new Map(), collapsed = new Set(), search = "", sidebarTimer = null, refreshTimer = null;
 let historyInitialized = false;
-let sidebarVersion = 0, approvalSignature = null, pendingTimer = null;
+let sidebarVersion = 0, approvalSignature = null, pendingTimer = null, streamRetry = null, streamBackoff = 1000;
 const expandedProjects = new Set();
 const drafts = new Map();
 const skillDrafts = new Map();
@@ -89,26 +89,62 @@ function openAppearance() {
   dialog.innerHTML = `<div class="appearance-heading"><h2 id="appearance-title">网页外观</h2><button type="button" class="icon-button" aria-label="关闭外观设置">×</button></div>
     <div class="appearance-body"><p class="muted">仅影响当前浏览器，不修改本机 Codex 的外观。</p>
     <div class="appearance-field"><span>主题</span><div id="appearance-theme-slot"></div></div>
-    <label class="appearance-field">强调色<input id="appearance-accent" type="color" aria-label="强调色"></label>
-    <label class="appearance-field">背景色<input id="appearance-background" type="color" aria-label="背景色"></label>
-    <label class="appearance-field">前景色<input id="appearance-foreground" type="color" aria-label="前景色"></label>
+    <div id="appearance-colors"></div>
     <label class="appearance-field">字体大小<span class="appearance-font"><input id="appearance-font" type="range" min="10" max="20" step="1" aria-label="字体大小"><output id="appearance-font-value"></output></span></label></div>
     <div class="appearance-actions"><button type="button" id="appearance-reset">恢复默认</button><button type="button" class="primary" id="appearance-close">完成</button></div>`;
   document.body.append(dialog);
   $("#appearance-theme-slot").append(selectControl("appearance-theme", "网页主题",
     [{ value: "light", label: "浅色" }, { value: "dark", label: "深色" }], appearance.theme));
+  const colorFields = [["accent", "强调色"], ["background", "背景色"], ["foreground", "前景色"]];
+  const colorPresets = ["#171717", "#3f3f46", "#71717a", "#d4d4d8", "#f4f4f5", "#ffffff", "#2563eb", "#7c3aed", "#db2777", "#dc2626", "#ea580c", "#16a34a"];
+  const setColor = (name, color) => { appearance.colors[appearance.theme][name] = color; applyAppearance(true); sync(); };
+  for (const [name, label] of colorFields) {
+    const field = element("div", "color-field");
+    const row = element("div", "appearance-field");
+    const swatch = element("button", "color-swatch");
+    const panel = element("div", "color-panel");
+    const presets = element("div", "color-presets");
+    const hex = element("input", "color-hex");
+    swatch.type = "button"; swatch.id = `appearance-${name}`;
+    swatch.setAttribute("aria-label", label); swatch.setAttribute("aria-expanded", "false"); swatch.setAttribute("aria-controls", `appearance-${name}-panel`);
+    swatch.onclick = () => {
+      const expand = panel.hidden;
+      for (const control of $("#appearance-colors").querySelectorAll(".color-swatch")) control.setAttribute("aria-expanded", "false");
+      for (const other of $("#appearance-colors").querySelectorAll(".color-panel")) other.hidden = true;
+      panel.hidden = !expand; swatch.setAttribute("aria-expanded", String(expand));
+    };
+    row.append(element("span", "", label), swatch);
+    panel.id = `appearance-${name}-panel`; panel.hidden = true;
+    for (const color of colorPresets) {
+      const preset = button("", `${label} ${color}`, () => setColor(name, color), "color-preset");
+      preset.dataset.color = color; preset.style.setProperty("--swatch", color); preset.setAttribute("aria-pressed", "false");
+      presets.append(preset);
+    }
+    hex.id = `appearance-${name}-hex`; hex.type = "text"; hex.maxLength = 7; hex.spellcheck = false; hex.autocomplete = "off"; hex.placeholder = "#rrggbb";
+    hex.setAttribute("aria-label", `${label}色值`);
+    hex.oninput = () => {
+      const valid = /^#[0-9a-f]{6}$/i.test(hex.value);
+      hex.setAttribute("aria-invalid", String(!valid));
+      if (valid) setColor(name, hex.value.toLowerCase());
+    };
+    panel.append(presets, hex); field.append(row, panel);
+    $("#appearance-colors").append(field);
+  }
   const sync = () => {
     setSelectValue($("#appearance-theme"), appearance.theme);
-    for (const name of ["accent", "background", "foreground"]) $(`#appearance-${name}`).value = appearance.colors[appearance.theme][name];
+    for (const [name] of colorFields) {
+      const color = appearance.colors[appearance.theme][name];
+      const hex = $(`#appearance-${name}-hex`);
+      $(`#appearance-${name}`).style.setProperty("--swatch", color);
+      if (document.activeElement !== hex) { hex.value = color; hex.setAttribute("aria-invalid", "false"); }
+      for (const preset of $(`#appearance-${name}-panel .color-presets`).children) preset.setAttribute("aria-pressed", String(preset.dataset.color === color));
+    }
     $("#appearance-font").value = appearance.fontSize;
     $("#appearance-font").style.setProperty("--range-fill", `${(appearance.fontSize - 10) * 10}%`);
     $("#appearance-font-value").textContent = `${appearance.fontSize}px`;
   };
   sync();
   $("#appearance-theme").onchange = event => { appearance.theme = event.target.value; applyAppearance(true); sync(); };
-  for (const name of ["accent", "background", "foreground"]) $(`#appearance-${name}`).oninput = event => {
-    appearance.colors[appearance.theme][name] = event.target.value; applyAppearance(true);
-  };
   $("#appearance-font").oninput = event => { appearance.fontSize = Number(event.target.value); applyAppearance(true); sync(); };
   $("#appearance-reset").onclick = () => { appearance = defaultAppearance(appearance.theme); applyAppearance(true); sync(); };
   $("#appearance-close").onclick = $(".appearance-heading button", dialog).onclick = () => dialog.close();
@@ -761,6 +797,7 @@ function showLogin() {
   const panel = element("main", "pair-panel");
   panel.append(element("div", "brand-mark", "✦"), element("h1", "", "连接 CodexElves"), element("p", "muted", "输入管理器中设置的访问密钥，进入本机 Codex 会话。"));
   const form = element("form", "pair-form");
+  form.noValidate = true;
   const key = element("input");
   key.type = "password"; key.placeholder = "输入访问密钥"; key.required = true;
   key.autocomplete = "off"; key.minLength = 32; key.maxLength = 256; key.spellcheck = false;
@@ -772,9 +809,11 @@ function showLogin() {
   const errorText = element("p", "error-text"); errorText.setAttribute("role", "alert");
   form.addEventListener("submit", async event => {
     event.preventDefault();
+    const value = key.value.trim();
+    if (!/^[\x21-\x7e]{32,256}$/.test(value)) { errorText.textContent = "请填写 32–256 个非空格 ASCII 字符的访问密钥"; key.focus(); return; }
     submit.disabled = true; errorText.textContent = "";
     try {
-      await api("/api/connect", { key: key.value.trim() });
+      await api("/api/connect", { key: value });
       key.value = ""; await connect();
     } catch (error) { errorText.textContent = error.message; }
     finally { submit.disabled = false; }
@@ -797,7 +836,7 @@ function shell() {
     </aside>
     <main class="conversation">
       <header class="conversation-header"><button id="open-sidebar" class="icon-button" aria-label="打开侧边栏">☰</button><div class="thread-heading"><strong id="thread-title">远程会话</strong><span id="thread-path" class="muted"></span></div><span id="connection-state" class="connection-state" role="status">连接中</span><button id="refresh" class="icon-button" aria-label="刷新会话">↻</button></header>
-      <div id="messages" class="messages" role="log" aria-label="会话消息"><div class="welcome"><h1>继续本机的工作</h1><p>选择左侧会话，或在已有项目中新建会话。</p><small>消息、审批和执行状态与 Codex 桌面共享。</small></div></div>
+      <div id="messages" class="messages" role="log" aria-label="会话消息"></div>
       <div id="approval-area" class="approval-area" aria-live="polite"></div>
       <div class="composer-area"><div id="pending-area"></div><form id="composer" class="composer">
         <div id="project-select-slot" hidden></div>
@@ -809,6 +848,7 @@ function shell() {
       </form></div>
     </main>
   </div>`;
+  $("#messages").append(welcomeNode());
   $("#sidebar-controls").append(
     selectControl("grouping", "侧边栏分组", [{ value: "project", label: "按项目" }, { value: "list", label: "最近会话" }], "project"),
     selectControl("sorting", "会话排序", [{ value: "updated_at", label: "最近更新" }, { value: "manual", label: "手动排序" }], "updated_at"));
@@ -1203,7 +1243,26 @@ async function selectThread(id, { closeSidebar = true } = {}) {
   updateComposer(); renderApprovals(); await loadHistory(false, version);
   if (version !== selectionVersion) return;
   $("#messages").scrollTop = $("#messages").scrollHeight;
-  location.hash = `thread=${encodeURIComponent(id)}`;
+  syncThreadHash(id);
+}
+function syncThreadHash(id) {
+  const hash = `#thread=${encodeURIComponent(id)}`;
+  if (location.hash !== hash) history.pushState(null, "", hash);
+}
+function welcomeNode() {
+  const node = element("div", "welcome");
+  node.append(element("h1", "", "继续本机的工作"), element("p", "", "选择左侧会话，或在已有项目中新建会话。"), element("small", "", "消息、审批和执行状态与 Codex 桌面共享。"));
+  return node;
+}
+function showWelcome() {
+  rememberDraft();
+  ++selectionVersion; ++threadReadVersion; selectionToken = randomId();
+  selectedId = null; thread = null; creating = false; historyCursor = null; historyInitialized = false; turns.clear(); notifiedTokenUsage = null;
+  $("#prompt").value = ""; selectedSkills = []; resetComposerOptions();
+  $("#thread-title").textContent = "远程会话"; $("#thread-path").textContent = "";
+  $("#project-select-slot").hidden = true;
+  $("#messages").replaceChildren(welcomeNode());
+  renderSelectedSkills(); renderApprovals(); renderSidebar(); updateComposer();
 }
 async function loadHistory(older = false, version = selectionVersion) {
   if (!selectedId || (historyLoading && historyLoadingVersion === version)) return;
@@ -1243,7 +1302,7 @@ async function reloadThread() {
   if (version !== selectionVersion || read !== threadReadVersion || selectedId !== id) return;
   if (usageVersion !== tokenUsageVersion) latest.tokenUsage = notifiedTokenUsage;
   thread = latest; $("#thread-title").textContent = thread.title;
-  $("#thread-path").textContent = thread.cwd || ""; location.hash = `thread=${encodeURIComponent(id)}`;
+  $("#thread-path").textContent = thread.cwd || ""; syncThreadHash(id);
   updateComposer(); renderApprovals(); await loadHistory(false, version);
 }
 function renderApprovals() {
@@ -1437,6 +1496,7 @@ function receive(event) {
 function disconnect() {
   stream?.close(); stream = null; clearInterval(connect.poll);
   clearTimeout(refreshTimer); clearTimeout(sidebarTimer); clearTimeout(pendingTimer);
+  clearTimeout(streamRetry); streamRetry = null;
   ++selectionVersion; ++sidebarVersion; connected = false;
 }
 async function refreshAll() {
@@ -1447,41 +1507,69 @@ async function refreshAll() {
     if (id) await selectThread(id, { closeSidebar: false });
   }
 }
-async function connect() {
-  session = await api("/api/session");
-  shell(); setConnection(session.nativeConnected);
+function openStream() {
   stream?.close();
-  stream = new EventSource("/api/events");
-  const activeStream = stream, deviceId = session.device.id;
-  const isCurrent = () => stream === activeStream && session?.device.id === deviceId;
-  stream.onopen = async () => {
+  const current = new EventSource("/api/events");
+  stream = current;
+  const deviceId = session.device.id;
+  const isCurrent = () => stream === current && session?.device.id === deviceId;
+  current.onopen = async () => {
+    streamBackoff = 1000;
     try {
-      const current = await api("/api/session");
+      const latest = await api("/api/session");
       if (!isCurrent()) return;
-      session = current; setConnection(current.nativeConnected);
+      session = latest; setConnection(latest.nativeConnected);
       await refreshAll(); void resolvePending();
     } catch (error) { if (isCurrent()) notice(error.message, true); }
   };
-  stream.onmessage = event => { if (isCurrent()) { try { receive(JSON.parse(event.data)); } catch {} } };
-  stream.onerror = () => { if (isCurrent()) setConnection(false); };
+  current.onmessage = event => { if (isCurrent()) { try { receive(JSON.parse(event.data)); } catch {} } };
+  current.onerror = () => {
+    if (!isCurrent()) return;
+    setConnection(false);
+    if (current.readyState === EventSource.CLOSED) reconnectStream(streamBackoff = Math.min(streamBackoff * 2, 30000));
+  };
+}
+function reconnectStream(delay = streamBackoff) {
+  clearTimeout(streamRetry);
+  streamRetry = setTimeout(async () => {
+    streamRetry = null;
+    try { session = await api("/api/session"); openStream(); }
+    catch { if (session) reconnectStream(streamBackoff = Math.min(streamBackoff * 2, 30000)); }
+  }, delay);
+}
+function ensureStream() {
+  if (session && !streamRetry && (!stream || stream.readyState === EventSource.CLOSED)) reconnectStream(0);
+}
+async function connect() {
+  session = await api("/api/session");
+  shell(); setConnection(session.nativeConnected);
+  openStream();
+  const deviceId = session.device.id;
   clearInterval(connect.poll);
   connect.poll = setInterval(async () => {
-    if (document.hidden || !isCurrent()) return;
+    if (document.hidden || session?.device.id !== deviceId) return;
+    ensureStream();
     try {
       const current = await api("/api/session");
-      if (!isCurrent()) return;
-      session = current; setConnection(current.nativeConnected); renderApprovals();
+      if (session?.device.id !== deviceId) return;
+      session = current; setConnection(current.nativeConnected && stream?.readyState === EventSource.OPEN); renderApprovals();
       await loadSidebar();
     } catch {}
   }, 15000);
   try { await refreshAll(); }
-  catch (error) { if (isCurrent()) notice(error.message, true); }
+  catch (error) { if (session?.device.id === deviceId) notice(error.message, true); }
   updateComposer(); void resolvePending();
 }
 async function copyText(text) {
   try { await navigator.clipboard.writeText(text); notice("已复制"); }
   catch { notice("无法访问剪贴板，请手动选择代码复制", true); }
 }
-window.addEventListener("online", () => { if (session) void refreshAll().catch(() => {}); });
-document.addEventListener("visibilitychange", () => { if (!document.hidden && session) void refreshAll().catch(() => {}); });
+window.addEventListener("online", () => { if (session) { ensureStream(); void refreshAll().catch(() => {}); } });
+document.addEventListener("visibilitychange", () => { if (!document.hidden && session) { ensureStream(); void refreshAll().catch(() => {}); } });
+window.addEventListener("popstate", () => {
+  if (!session) return;
+  const id = new URLSearchParams(location.hash.slice(1)).get("thread");
+  if (id && id !== selectedId) void selectThread(id, { closeSidebar: false }).catch(error => notice(error.message, true));
+  else if (!id && selectedId) showWelcome();
+});
 connect().catch(error => { showLogin(); if (error.code !== 401) notice(error.message, true); });

@@ -1060,8 +1060,10 @@ const defaultSettings: BackendSettings = {
 };
 
 let browserPreviewSettingsState: BackendSettings | null = null;
-let browserPreviewRemoteCredentials = { accessKeyConfigured: false, tunnelTokenConfigured: false };
-let browserPreviewRemoteProgramInstalled = false;
+let browserPreviewRemoteCredentials = { accessKeyConfigured: false };
+let browserPreviewTailscaleInstalled = false;
+let browserPreviewTailscaleInstallPhase = "idle";
+let browserPreviewTailscaleInstallPercent = 0;
 
 function isBrowserPreview(): boolean {
   return typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
@@ -1997,32 +1999,51 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         return Promise.resolve({ status: "ok", ...browserPreviewRemoteCredentials } as T);
       }
       if (action === "generateKey") {
-        return Promise.resolve({ status: "ok",
-          key: `browser-preview-only-${crypto.randomUUID()}-${crypto.randomUUID()}` } as T);
+        const u1 = crypto.randomUUID().replace(/-/g, "");
+        const u2 = crypto.randomUUID().replace(/-/g, "");
+        return Promise.resolve({ status: "ok", key: (u1 + u2).slice(0, 64) } as T);
       }
       if (action === "setKey") {
         browserPreviewRemoteCredentials.accessKeyConfigured = true;
         return Promise.resolve({ status: "ok", ...browserPreviewRemoteCredentials } as T);
       }
-      if (action === "setTunnelToken") {
-        browserPreviewRemoteCredentials.tunnelTokenConfigured = true;
-        return Promise.resolve({ status: "ok", ...browserPreviewRemoteCredentials } as T);
+      if (action === "tailscaleStatus") {
+        return Promise.resolve({ status: "ok", installed: browserPreviewTailscaleInstalled,
+          backendState: browserPreviewTailscaleInstalled ? "Running" : null,
+          message: browserPreviewTailscaleInstalled ? null : "未检测到 Tailscale，请先安装官方客户端。" } as T);
       }
-      if (action === "checkCloudflared") {
-        return Promise.resolve({ status: "ok", version: "cloudflared（浏览器模拟，不执行程序）" } as T);
+      if (action === "installTailscale") {
+        browserPreviewTailscaleInstallPhase = "downloading";
+        browserPreviewTailscaleInstallPercent = 0;
+        const timer = window.setInterval(() => {
+          browserPreviewTailscaleInstallPercent = Math.min(100, browserPreviewTailscaleInstallPercent + 8);
+          if (browserPreviewTailscaleInstallPercent >= 100) {
+            window.clearInterval(timer);
+            browserPreviewTailscaleInstallPhase = "launched";
+            browserPreviewTailscaleInstalled = true;
+          }
+        }, 250);
+        return Promise.resolve({ status: "ok", installed: false, started: true } as T);
       }
-      if (action === "cloudflaredStatus" || action === "downloadCloudflared") {
-        if (action === "downloadCloudflared") browserPreviewRemoteProgramInstalled = true;
-        return Promise.resolve({ status: "ok", installed: browserPreviewRemoteProgramInstalled,
-          ...(browserPreviewRemoteProgramInstalled ? { version: "cloudflared（浏览器模拟，不下载程序）" } : {}) } as T);
+      if (action === "tailscaleInstallProgress") {
+        return Promise.resolve({ status: "ok", phase: browserPreviewTailscaleInstallPhase,
+          percent: browserPreviewTailscaleInstallPercent,
+          message: browserPreviewTailscaleInstallPhase === "launched" ? "已启动 Tailscale 官方安装向导，完成后点击「检查状态」。" : null } as T);
       }
       const running = remote.enabled && browserPreviewRemoteCredentials.accessKeyConfigured;
-      const tunnelRunning = running && remote.cloudflareTunnelEnabled && browserPreviewRemoteCredentials.tunnelTokenConfigured;
+      const funnelReady = running && remote.funnelEnabled && browserPreviewTailscaleInstalled;
       return Promise.resolve({ status: "ok", enabled: remote.enabled, running,
         nativeConnected: running, settings: remote, ...browserPreviewRemoteCredentials,
-        addresses: [remote.publicUrl, `${remote.tlsCertificatePath ? "https" : "http"}://${remote.bindHost}:${remote.port}`].filter(Boolean),
-        tunnel: { enabled: remote.cloudflareTunnelEnabled, running: tunnelRunning,
-          connected: tunnelRunning, state: tunnelRunning ? "connected" : "stopped", publicUrl: remote.publicUrl },
+        addresses: [`http://${remote.bindHost}:${remote.port}`],
+        funnel: {
+          enabled: remote.funnelEnabled,
+          state: !remote.funnelEnabled ? "stopped" : !browserPreviewTailscaleInstalled ? "not_installed" : funnelReady ? "ready" : "waiting",
+          installed: browserPreviewTailscaleInstalled,
+          backendState: browserPreviewTailscaleInstalled ? "Running" : null,
+          publicUrl: funnelReady ? "https://preview.example.ts.net" : "",
+          actionUrl: null,
+          error: null,
+        },
         devices: [], message: "浏览器预览，不启动真实远程服务。" } as T);
     }
     case "set_user_scripts_enabled":
@@ -4416,12 +4437,14 @@ export function App() {
             <RemoteAccessScreen
               settings={settingsForm.remoteAccess}
               onChange={(remoteAccess) => setSettingsForm((current) => ({ ...current, remoteAccess }))}
-              onSave={() => actions.saveSettingsValue(settingsForm, true, true)}
+              onSave={(next) => actions.saveSettingsValue({ ...settingsForm, remoteAccess: next }, true, true)}
               command={(action, payload) => call("remote_access_command", { action, payload })}
               openExternalUrl={async (url) => {
                 if (isBrowserPreview()) window.open(url, "_blank", "noopener,noreferrer");
                 else await actions.openExternalUrl(url);
               }}
+              onNotice={(message) => showNotice("操作提示", message, "failed")}
+              onSuccess={(message) => showNotice("远程会话", message, "ok")}
             />
           ) : null}
           {route === "context" ? (

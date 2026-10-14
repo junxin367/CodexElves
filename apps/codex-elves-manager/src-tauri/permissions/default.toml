@@ -51,6 +51,7 @@ commands.allow = [
   "read_plugin_cache_infos",
   "read_remote_context_options",
   "read_relay_files",
+  "remote_access_command",
   "remote_plugin_marketplace_status",
   "refresh_script_market",
   "relay_status",

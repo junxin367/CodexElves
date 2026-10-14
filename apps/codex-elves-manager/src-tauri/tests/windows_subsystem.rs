@@ -1,3 +1,14 @@
+#[test]
+fn tailscale_actions_are_routed_to_local_settings() {
+    let commands = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands.rs"))
+        .expect("read manager commands.rs");
+    let routed = commands
+        .split("pub async fn remote_access_command")
+        .nth(1)
+        .expect("remote_access_command exists");
+    assert!(routed.contains("\"tailscaleStatus\"") && routed.contains("\"installTailscale\""));
+}
+
 #[cfg(windows)]
 #[test]
 fn manager_binary_uses_windows_gui_subsystem_in_debug_and_release() {
@@ -1006,6 +1017,7 @@ fn frontend_literal_tauri_commands_are_registered_for_invocation() {
         "import_ccs_providers",
         "plugin_marketplace_status",
         "repair_plugin_marketplace",
+        "remote_access_command",
     ] {
         assert!(
             frontend_commands.contains(expected),

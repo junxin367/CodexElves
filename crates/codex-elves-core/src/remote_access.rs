@@ -3,7 +3,7 @@ use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -24,11 +24,10 @@ use tokio::sync::{Mutex, broadcast};
 use crate::settings::{RemoteAccessSettings, SettingsStore};
 
 mod credentials;
-mod tunnel;
+mod funnel;
 use credentials::{AccessKey, load_access_key};
-pub use credentials::{access_credentials_status, configure_access_key, configure_tunnel_token};
-use tunnel::TunnelService;
-pub use tunnel::{check_cloudflared, ensure_cloudflared};
+pub use credentials::{access_credentials_status, configure_access_key};
+use funnel::FunnelService;
 
 const NATIVE_SCRIPT: &str = include_str!("../../../assets/remote-access/native.js");
 const WEB_HTML: &str = include_str!("../../../assets/remote-access/index.html");
@@ -128,7 +127,7 @@ struct LiveService {
     server: Option<tokio::task::JoinHandle<()>>,
     pump: Option<tokio::task::JoinHandle<()>>,
     error: Option<String>,
-    tunnel: TunnelService,
+    funnel: FunnelService,
 }
 
 pub struct RemoteAccessController {
@@ -140,6 +139,7 @@ pub struct RemoteAccessController {
     native_connected: AtomicBool,
     events: broadcast::Sender<Value>,
     key_checks: Arc<tokio::sync::Semaphore>,
+    funnel_origin: Arc<RwLock<Option<String>>>,
 }
 
 impl RemoteAccessController {
@@ -169,6 +169,7 @@ impl RemoteAccessController {
             )?;
         }
         let (events, _) = broadcast::channel(512);
+        let funnel_origin = Arc::new(RwLock::new(None));
         Ok(Arc::new(Self {
             native,
             state_dir,
@@ -184,13 +185,21 @@ impl RemoteAccessController {
                 server: None,
                 pump: None,
                 error: None,
-                tunnel: TunnelService::default(),
+                funnel: FunnelService::new(funnel_origin.clone()),
             }),
             running: AtomicBool::new(false),
             native_connected: AtomicBool::new(false),
             events,
             key_checks: Arc::new(tokio::sync::Semaphore::new(4)),
+            funnel_origin,
         }))
+    }
+
+    fn funnel_origin(&self) -> Option<String> {
+        self.funnel_origin
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     async fn save_devices(&self, state: &AuthState) -> anyhow::Result<()> {
@@ -255,16 +264,12 @@ impl RemoteAccessController {
             && key_error.is_none()
             && (live.server.is_some() || !settings.enabled)
         {
-            live.tunnel
-                .reconcile(
-                    &settings,
-                    &self.state_dir,
-                    self.running.load(Ordering::SeqCst),
-                )
+            live.funnel
+                .reconcile(&settings, self.running.load(Ordering::SeqCst))
                 .await;
             return;
         }
-        live.tunnel.restart().await;
+        live.funnel.restart(&funnel::local_target(&settings)).await;
         self.running.store(false, Ordering::SeqCst);
         self.native_connected.store(false, Ordering::SeqCst);
         let _ = self.events.send(json!({"method":"remote/disconnected"}));
@@ -282,9 +287,7 @@ impl RemoteAccessController {
         live.settings = Some(settings.clone());
         live.error = None;
         if !settings.enabled {
-            live.tunnel
-                .reconcile(&settings, &self.state_dir, false)
-                .await;
+            live.funnel.reconcile(&settings, false).await;
             if finished || was_enabled {
                 let _ = self.native.call("dispose", json!({})).await;
             }
@@ -303,12 +306,8 @@ impl RemoteAccessController {
             }
             Err(error) => live.error = Some(error.to_string()),
         }
-        live.tunnel
-            .reconcile(
-                &settings,
-                &self.state_dir,
-                self.running.load(Ordering::SeqCst),
-            )
+        live.funnel
+            .reconcile(&settings, self.running.load(Ordering::SeqCst))
             .await;
     }
 
@@ -402,12 +401,20 @@ impl RemoteAccessController {
             "status" | "apply" => {
                 let settings = SettingsStore::default().load()?.remote_access;
                 if action == "apply" {
-                    self.live.lock().await.tunnel.restart().await;
+                    self.live
+                        .lock()
+                        .await
+                        .funnel
+                        .restart(&funnel::local_target(&settings))
+                        .await;
+                }
+                if payload["check"] == true {
+                    self.live.lock().await.funnel.invalidate();
                 }
                 self.reconcile(settings.clone()).await;
                 let live = self.live.lock().await;
                 let error = live.error.clone();
-                let tunnel = live.tunnel.status(&settings);
+                let funnel = live.funnel.status(&settings);
                 drop(live);
                 let auth = self.auth.lock().await;
                 Ok(json!({
@@ -418,7 +425,7 @@ impl RemoteAccessController {
                     "devices":auth.devices.iter().filter(|device|device.expires_at_ms>now_ms())
                         .filter(|device|auth.access_key.as_ref().is_some_and(|key|device.key_id==key.id))
                         .map(Device::public).collect::<Vec<_>>(),
-                    "settings":settings, "tunnel":tunnel,
+                    "settings":settings, "funnel":funnel,
                     "accessKeyConfigured":auth.access_key.is_some()
                 }))
             }
@@ -625,26 +632,14 @@ pub async fn admin_request(action: &str, payload: Value) -> Value {
 
 pub async fn local_settings_command(action: &str, payload: Value) -> anyhow::Result<Value> {
     let directory = crate::paths::default_app_state_dir();
-    if action == "cloudflaredStatus" {
-        return Ok(tunnel::program_status(&directory));
+    if action == "tailscaleStatus" {
+        return Ok(funnel::probe_tailscale().await);
     }
-    if action == "downloadCloudflared" {
-        let path = ensure_cloudflared(&directory).await?;
-        let mut result = check_cloudflared(&path.to_string_lossy()).await?;
-        result["path"] = json!(path);
-        result["installed"] = json!(true);
-        return Ok(result);
+    if action == "installTailscale" {
+        return funnel::install_tailscale(&directory).await;
     }
-    if action == "checkCloudflared" {
-        let configured = payload["path"].as_str().unwrap_or("cloudflared");
-        let path = if tunnel::automatic_program(configured) {
-            tunnel::managed_program(&directory)?
-                .context("尚未下载 cloudflared，请先点击「下载官方程序」")?
-                .0
-        } else {
-            PathBuf::from(configured.trim())
-        };
-        return check_cloudflared(&path.to_string_lossy()).await;
+    if action == "tailscaleInstallProgress" {
+        return Ok(funnel::installer_progress());
     }
     let action = action.to_string();
     tokio::task::spawn_blocking(move || {
@@ -653,23 +648,18 @@ pub async fn local_settings_command(action: &str, payload: Value) -> anyhow::Res
             "credentials" => access_credentials_status(&directory),
             "setKey" => {
                 configure_access_key(&directory, payload["key"].as_str().context("缺少访问密钥")?)?;
-                Ok(json!({"status":"ok","accessKeyConfigured":true,
-                    "tunnelTokenConfigured":credentials::load_tunnel_token(&directory).ok().flatten().is_some()}))
+                Ok(json!({"status":"ok","accessKeyConfigured":true}))
             }
             "generateKey" => {
                 let key = random_token();
                 Ok(json!({"status":"ok","key":key}))
             }
-            "setTunnelToken" => {
-                configure_tunnel_token(&directory, payload["token"].as_str().context("缺少隧道令牌")?)?;
-                Ok(json!({"status":"ok","tunnelTokenConfigured":true,
-                    "accessKeyConfigured":load_access_key(&directory).ok().flatten().is_some()}))
-            }
             _ => anyhow::bail!("不支持的本机远程设置操作"),
         }
-    }).await.context("无法保存本机远程访问设置")?
+    })
+    .await
+    .context("无法保存本机远程访问设置")?
 }
-
 pub async fn request_local_admin(action: &str, payload: Value) -> anyhow::Result<Value> {
     anyhow::ensure!(
         matches!(action, "status" | "apply" | "revoke"),
@@ -775,7 +765,9 @@ async fn access_boundary(State(state): State<WebState>, request: Request, next: 
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    let origins = allowed_origins(&state.settings);
+    let external: Vec<String> = state.controller.funnel_origin().into_iter().collect();
+    let mut origins = allowed_origins(&state.settings);
+    origins.extend(external.iter().cloned());
     let scheme = if state.settings.tls_certificate_path.is_empty() {
         "http"
     } else {
@@ -799,12 +791,9 @@ async fn access_boundary(State(state): State<WebState>, request: Request, next: 
     if !valid_host || bad_origin || missing_origin || cross_site {
         return ApiError::new(403, "只允许从已配置的访问地址操作").into_response();
     }
-    let public_origin = reqwest::Url::parse(&state.settings.public_url)
-        .ok()
-        .map(|url| url.origin().ascii_serialization())
-        .unwrap_or_default();
-    if origin.is_some_and(|origin| origin != local_origin) && public_origin != origin.unwrap_or("")
-    {
+    if origin.is_some_and(|origin| {
+        origin != local_origin && !external.iter().any(|allowed| allowed == origin)
+    }) {
         return ApiError::new(403, "请求来源与访问地址不一致").into_response();
     }
     let mut response = next.run(request).await;
@@ -862,15 +851,7 @@ async fn connect(
         .reload_access_key()
         .await
         .map_err(|_| ApiError::new(503, "访问密钥无法读取，请在本机管理器检查"))?;
-    let ip = if state.settings.cloudflare_tunnel_enabled && peer.ip().is_loopback() {
-        headers
-            .get("cf-connecting-ip")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(peer.ip())
-    } else {
-        peer.ip()
-    };
+    let ip = peer.ip();
     let key = {
         let mut auth = state.controller.auth.lock().await;
         let now = now_ms();
@@ -920,12 +901,20 @@ async fn connect(
         return Err(ApiError::new(409, "授权设备已达上限，请撤销旧设备"));
     }
     let token = random_token();
+    let (expires_at_ms, max_age_seconds) = if state.settings.device_session_hours == 0 {
+        (u64::MAX, 315_360_000u64)
+    } else {
+        (
+            now_ms() + u64::from(state.settings.device_session_hours) * 3_600_000,
+            u64::from(state.settings.device_session_hours) * 3600,
+        )
+    };
     let device = Device {
         id: uuid::Uuid::new_v4().to_string(),
         name: device_name(&headers).into(),
         token_hash: hash(&token),
         created_at_ms: now_ms(),
-        expires_at_ms: now_ms() + u64::from(state.settings.device_session_hours) * 3_600_000,
+        expires_at_ms,
         last_seen_at_ms: now_ms(),
         key_id: key.id,
     };
@@ -934,11 +923,10 @@ async fn connect(
         auth.devices.pop();
         return Err(ApiError::new(503, "设备授权保存失败"));
     }
-    let secure =
-        !state.settings.tls_certificate_path.is_empty() || !state.settings.public_url.is_empty();
+    let secure = !state.settings.tls_certificate_path.is_empty()
+        || state.controller.funnel_origin().is_some();
     let cookie = format!(
-        "{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
-        u64::from(state.settings.device_session_hours) * 3600,
+        "{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age_seconds}{}",
         if secure { "; Secure" } else { "" }
     );
     Ok((
@@ -1165,9 +1153,6 @@ pub fn access_addresses(settings: &RemoteAccessSettings) -> Vec<String> {
         "https"
     };
     let mut addresses = Vec::new();
-    if !settings.public_url.is_empty() {
-        addresses.push(settings.public_url.trim_end_matches('/').to_string());
-    }
     if settings.bind_host == "0.0.0.0" {
         addresses.extend(
             crate::lan_proxy::lan_ipv4_addresses()

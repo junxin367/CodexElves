@@ -738,9 +738,7 @@ pub struct RemoteAccessSettings {
     pub enabled: bool,
     pub bind_host: String,
     pub port: u16,
-    pub public_url: String,
-    pub cloudflare_tunnel_enabled: bool,
-    pub cloudflared_path: String,
+    pub funnel_enabled: bool,
     pub tls_certificate_path: String,
     pub tls_private_key_path: String,
     pub device_session_hours: u16,
@@ -754,12 +752,10 @@ impl Default for RemoteAccessSettings {
             enabled: false,
             bind_host: "127.0.0.1".into(),
             port: 45222,
-            public_url: String::new(),
-            cloudflare_tunnel_enabled: false,
-            cloudflared_path: "cloudflared".into(),
+            funnel_enabled: false,
             tls_certificate_path: String::new(),
             tls_private_key_path: String::new(),
-            device_session_hours: 168,
+            device_session_hours: 0,
             read_only: false,
             allow_approvals: true,
         }
@@ -774,8 +770,8 @@ impl RemoteAccessSettings {
             .map_err(|_| anyhow::anyhow!("远程访问监听地址必须是 IP 地址"))?;
         anyhow::ensure!(self.port > 0, "远程访问端口必须在 1–65535 之间");
         anyhow::ensure!(
-            (1..=720).contains(&self.device_session_hours),
-            "设备授权有效期必须在 1–720 小时之间"
+            (0..=720).contains(&self.device_session_hours),
+            "设备授权有效期必须在 0–720 小时之间"
         );
         anyhow::ensure!(
             self.tls_certificate_path.is_empty() == self.tls_private_key_path.is_empty(),
@@ -783,41 +779,12 @@ impl RemoteAccessSettings {
         );
         anyhow::ensure!(
             !self.enabled || address.is_loopback() || !self.tls_certificate_path.is_empty(),
-            "非本机监听必须配置 HTTPS 证书与私钥；也可使用本机监听和 HTTPS 反向代理"
+            "非本机监听必须配置 HTTPS 证书与私钥"
         );
-        if !self.public_url.is_empty() {
-            let url = reqwest::Url::parse(&self.public_url)
-                .map_err(|_| anyhow::anyhow!("外部访问地址无效"))?;
-            anyhow::ensure!(
-                url.scheme() == "https"
-                    && url.host_str().is_some()
-                    && url.username().is_empty()
-                    && url.password().is_none()
-                    && url.path() == "/"
-                    && url.query().is_none()
-                    && url.fragment().is_none(),
-                "外部访问地址必须是无路径、凭据或查询参数的 HTTPS 地址"
-            );
-        }
-        if self.cloudflare_tunnel_enabled {
+        if self.funnel_enabled {
             anyhow::ensure!(
                 address.is_loopback() && self.tls_certificate_path.is_empty(),
-                "Cloudflare 隧道必须转发到本机 HTTP 监听地址，不需配置本机 HTTPS 证书"
-            );
-            let url = reqwest::Url::parse(&self.public_url)
-                .map_err(|_| anyhow::anyhow!("Cloudflare 隧道需要填写已绑定的固定 HTTPS 域名"))?;
-            anyhow::ensure!(
-                url.host_str().is_some_and(|host| {
-                    host.contains('.')
-                        && !host.starts_with('[')
-                        && host.parse::<std::net::IpAddr>().is_err()
-                        && !host.ends_with(".trycloudflare.com")
-                }),
-                "Cloudflare 隧道需要使用已绑定的域名"
-            );
-            anyhow::ensure!(
-                !self.cloudflared_path.contains('\0'),
-                "cloudflared 程序路径不能包含空字符"
+                "Tailscale Funnel 必须转发到本机 HTTP 监听地址，不需配置本机 HTTPS 证书"
             );
         }
         Ok(())

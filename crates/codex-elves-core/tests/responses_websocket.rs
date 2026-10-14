@@ -2007,6 +2007,191 @@ async fn local_proxy_downgrades_same_turn_after_disconnect_with_default_settings
 }
 
 #[tokio::test]
+async fn resumed_anthropic_compaction_retries_over_http_after_protocol_rejection() {
+    let _settings_lock = websocket_settings_test_lock().lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
+    let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy.jsonl"));
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    save_supported_websocket_settings(upstream_address, false, "gpt-resume-test");
+    let mut settings = SettingsStore::default().load().unwrap();
+    settings.layered_compaction_enabled = true;
+    settings.relay_profiles[0]
+        .model_mappings
+        .push(RelayModelMapping {
+            request_model: "claude-haiku-5-5".to_string(),
+            protocol: RelayProtocol::Anthropic,
+            alias: String::new(),
+            system_prompt_override: String::new(),
+            context_window: "600000".to_string(),
+        });
+    SettingsStore::default().save(&settings).unwrap();
+
+    let upstream_requests = Arc::new(AtomicUsize::new(0));
+    let upstream_count = upstream_requests.clone();
+    let upstream = tokio::spawn(async move {
+        let (stream, _) = upstream_listener.accept().await.unwrap();
+        upstream_count.fetch_add(1, Ordering::SeqCst);
+        let mut socket = accept_hdr_async(stream, |_request: &Request, response: Response| {
+            Ok(response)
+        })
+        .await
+        .unwrap();
+        while let Some(message) = socket.next().await {
+            match message {
+                Ok(Message::Text(_)) => {
+                    panic!("Anthropic compaction must not be sent to a Responses upstream")
+                }
+                Ok(Message::Close(_)) | Err(_) => break,
+                _ => {}
+            }
+        }
+        for reply in [
+            "<summary>Saved continuation checkpoint.</summary>",
+            "Resumed successfully.",
+        ] {
+            let (mut stream, _) = upstream_listener.accept().await.unwrap();
+            upstream_count.fetch_add(1, Ordering::SeqCst);
+            let mut request = read_upgrade_request(&mut stream).await;
+            assert!(request.starts_with(b"POST /v1/messages HTTP/1.1"));
+            let header_end = request.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+            let content_length = String::from_utf8_lossy(&request[..header_end])
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            while request.len() < header_end + content_length {
+                let mut chunk = [0; 4096];
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let body: serde_json::Value = serde_json::from_slice(&request[header_end..]).unwrap();
+            assert_eq!(body["model"], "claude-haiku-5-5");
+            assert!(!body.to_string().contains("compaction_trigger"));
+            if reply == "Resumed successfully." {
+                assert!(body.to_string().contains("Saved continuation checkpoint."));
+            }
+            let events = [
+                serde_json::json!({"type":"message_start","message":{"id":"msg_resume","type":"message","role":"assistant","model":"claude-haiku-5-5","content":[],"usage":{"input_tokens":100,"output_tokens":0}}}),
+                serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":reply}}),
+                serde_json::json!({"type":"content_block_stop","index":0}),
+                serde_json::json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}),
+                serde_json::json!({"type":"message_stop"}),
+            ].iter().map(|event| format!("data: {event}\n\n")).collect::<String>();
+            stream.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}",
+                events.len(),
+            ).as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+        }
+    });
+    let local_listener = Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
+    let local_address = local_listener.local_addr().unwrap();
+    let thread_id = uuid::Uuid::new_v4().to_string();
+    let mut upgrade = format!("ws://{local_address}/v1/responses")
+        .into_client_request()
+        .unwrap();
+    upgrade
+        .headers_mut()
+        .insert("thread-id", HeaderValue::from_str(&thread_id).unwrap());
+    upgrade.headers_mut().insert(
+        "x-codex-turn-metadata",
+        HeaderValue::from_static(r#"{"turn_id":"resume-turn","request_kind":"compaction"}"#),
+    );
+    let request = serde_json::json!({
+        "type": "response.create",
+        "model": "claude-haiku-5-5",
+        "input": [
+            {"type":"message","role":"user","content":"Continue the saved task."},
+            {"type":"compaction_trigger"}
+        ],
+        "stream": true
+    });
+    let first_listener = local_listener.clone();
+    let first_server = tokio::spawn(async move {
+        let (mut stream, remote) = first_listener.accept().await.unwrap();
+        let head = read_upgrade_request(&mut stream).await;
+        handle_responses_websocket_connection(stream, head, Some(remote)).await
+    });
+    let (mut client, _) = connect_async(upgrade.clone()).await.unwrap();
+    client
+        .send(Message::Text(request.to_string().into()))
+        .await
+        .unwrap();
+    let close = tokio::time::timeout(Duration::from_secs(2), client.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let Message::Close(Some(close)) = close else {
+        panic!("expected a protocol rejection");
+    };
+    assert_eq!(close.code, CloseCode::Policy);
+    assert_eq!(close.reason, "当前模型不是原生 Responses 协议");
+    let _ = client.close(None).await;
+    first_server.await.unwrap().unwrap();
+
+    let second_server = tokio::spawn(async move {
+        let (mut stream, remote) = local_listener.accept().await.unwrap();
+        let head = read_upgrade_request(&mut stream).await;
+        handle_responses_websocket_connection(stream, head, Some(remote)).await
+    });
+    let retry = tokio::time::timeout(Duration::from_secs(3), connect_async(upgrade))
+        .await
+        .unwrap();
+    let Err(WebSocketError::Http(response)) = retry else {
+        panic!("compaction retry must select HTTP instead of reopening the rejected WebSocket");
+    };
+    assert_eq!(response.status().as_u16(), 426);
+    second_server.await.unwrap().unwrap();
+    let mut http_request = request;
+    http_request.as_object_mut().unwrap().remove("type");
+    for expected_type in ["compaction", "message"] {
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            codex_elves_core::protocol_proxy::handle_responses_proxy_request(
+                &http_request.to_string(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status, "200 OK");
+        let events = String::from_utf8(response.body).unwrap();
+        let completed = events
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            .find(|event| event["type"] == "response.completed")
+            .expect("HTTP fallback must finish compaction and the following response");
+        assert_eq!(completed["response"]["status"], "completed");
+        assert_eq!(completed["response"]["output"][0]["type"], expected_type);
+        if expected_type == "compaction" {
+            http_request["input"] = completed["response"]["output"].clone();
+            http_request["input"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "type":"message","role":"user","content":"Continue."
+                }));
+        } else {
+            assert!(events.contains("Resumed successfully."));
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(2), upstream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(upstream_requests.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
 async fn local_proxy_keeps_websocket_for_same_turn_after_application_request() {
     let _settings_lock = websocket_settings_test_lock().lock().await;
     let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

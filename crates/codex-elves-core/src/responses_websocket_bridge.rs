@@ -486,6 +486,15 @@ async fn bridge_responses_websockets(
                     let payload = match validate_downstream_message(&message, &relay) {
                         Ok(payload) => payload,
                         Err(error) => {
+                            if let Ok(state) = request_logger.state.lock() {
+                                log_websocket_event(
+                                    "helper.responses_websocket_request_rejected",
+                                    &relay,
+                                    state.remote_addr.as_deref(),
+                                    &state.connection_context,
+                                    Some(&error.to_string()),
+                                );
+                            }
                             let close = Message::Close(Some(CloseFrame {
                                 code: CloseCode::Policy,
                                 reason: error.to_string().into(),
@@ -4081,7 +4090,10 @@ fn responses_websocket_oversized_fallback_key(
     relay_id: &str,
     connection_context: &WebSocketConnectionContext,
 ) -> Option<ResponsesWebSocketOversizedFallbackKey> {
-    if connection_context.request_kind.as_deref() != Some("turn") {
+    if !matches!(
+        connection_context.request_kind.as_deref(),
+        Some("turn" | "compaction")
+    ) {
         return None;
     }
     Some(ResponsesWebSocketOversizedFallbackKey {
@@ -4123,7 +4135,10 @@ fn responses_websocket_upstream_failure_fallback_key(
     relay_id: &str,
     connection_context: &WebSocketConnectionContext,
 ) -> Option<ResponsesWebSocketUpstreamFailureFallbackKey> {
-    if connection_context.request_kind.as_deref() != Some("turn") {
+    if !matches!(
+        connection_context.request_kind.as_deref(),
+        Some("turn" | "compaction")
+    ) {
         return None;
     }
     Some(ResponsesWebSocketUpstreamFailureFallbackKey {
@@ -4178,7 +4193,10 @@ fn responses_websocket_early_disconnect_fallback_key(
     relay_id: &str,
     connection_context: &WebSocketConnectionContext,
 ) -> Option<ResponsesWebSocketEarlyDisconnectFallbackKey> {
-    if connection_context.request_kind.as_deref() != Some("turn") {
+    if !matches!(
+        connection_context.request_kind.as_deref(),
+        Some("turn" | "compaction")
+    ) {
         return None;
     }
     Some(ResponsesWebSocketEarlyDisconnectFallbackKey {
@@ -5304,55 +5322,135 @@ mod tests {
 
     #[test]
     fn websocket_http_fallback_is_always_available() {
-        let context = WebSocketConnectionContext {
-            thread_id: Some("sha256:thread".to_string()),
-            turn_id: Some("sha256:turn".to_string()),
-            request_kind: Some("turn".to_string()),
-            ..Default::default()
-        };
-        assert!(arm_oversized_responses_websocket_http_fallback(
-            "relay-test",
-            &context
-        ));
-        assert!(
-            should_temporarily_fallback_oversized_responses_websocket_to_http(
+        for request_kind in ["turn", "compaction"] {
+            let context = WebSocketConnectionContext {
+                thread_id: Some("sha256:thread".to_string()),
+                turn_id: Some("sha256:turn".to_string()),
+                request_kind: Some(request_kind.to_string()),
+                ..Default::default()
+            };
+            assert!(arm_oversized_responses_websocket_http_fallback(
                 "relay-test",
                 &context
-            )
-        );
-        assert!(arm_compaction_responses_websocket_http_fallback(
-            "relay-test",
-            &context
-        ));
-        assert!(
-            should_temporarily_fallback_compaction_responses_websocket_to_http(
+            ));
+            assert!(
+                should_temporarily_fallback_oversized_responses_websocket_to_http(
+                    "relay-test",
+                    &context
+                )
+            );
+            assert!(arm_compaction_responses_websocket_http_fallback(
                 "relay-test",
                 &context
-            )
-        );
-        assert!(arm_early_disconnect_responses_websocket_http_fallback(
-            "relay-test",
-            &context
-        ));
-        assert!(
-            should_temporarily_fallback_early_disconnect_responses_websocket_to_http(
+            ));
+            assert!(
+                should_temporarily_fallback_compaction_responses_websocket_to_http(
+                    "relay-test",
+                    &context
+                )
+            );
+            assert!(arm_early_disconnect_responses_websocket_http_fallback(
                 "relay-test",
                 &context
-            )
-        );
-        assert!(arm_upstream_failure_responses_websocket_http_fallback(
-            "relay-test",
-            &context
-        ));
-        assert!(
-            should_temporarily_fallback_upstream_failure_responses_websocket_to_http(
+            ));
+            assert!(
+                should_temporarily_fallback_early_disconnect_responses_websocket_to_http(
+                    "relay-test",
+                    &context
+                )
+            );
+            assert!(arm_upstream_failure_responses_websocket_http_fallback(
                 "relay-test",
                 &context
-            )
-        );
+            ));
+            assert!(
+                should_temporarily_fallback_upstream_failure_responses_websocket_to_http(
+                    "relay-test",
+                    &context
+                )
+            );
+        }
         let close = websocket_failure_close_frame(CloseCode::Restart, "retry");
         assert_eq!(close.code, CloseCode::Restart);
         assert_eq!(close.reason, "retry");
+    }
+
+    #[test]
+    fn websocket_compaction_fallback_is_scoped_to_the_relay_thread_and_turn() {
+        let context = WebSocketConnectionContext {
+            thread_id: Some("sha256:compaction-scope-thread".into()),
+            turn_id: Some("sha256:compaction-scope-turn".into()),
+            request_kind: Some("compaction".into()),
+            ..Default::default()
+        };
+        assert!(arm_compaction_responses_websocket_http_fallback(
+            "relay-compaction-scope",
+            &context
+        ));
+        assert!(
+            !should_temporarily_fallback_compaction_responses_websocket_to_http(
+                "other-relay",
+                &context
+            )
+        );
+        for other in [
+            WebSocketConnectionContext {
+                thread_id: Some("other-thread".into()),
+                ..context.clone()
+            },
+            WebSocketConnectionContext {
+                turn_id: Some("other-turn".into()),
+                ..context.clone()
+            },
+        ] {
+            assert!(
+                !should_temporarily_fallback_compaction_responses_websocket_to_http(
+                    "relay-compaction-scope",
+                    &other
+                )
+            );
+        }
+        for other in [
+            WebSocketConnectionContext {
+                request_kind: Some("prewarm".into()),
+                ..context.clone()
+            },
+            WebSocketConnectionContext {
+                request_kind: Some("memory".into()),
+                ..context.clone()
+            },
+            WebSocketConnectionContext {
+                request_kind: None,
+                ..context.clone()
+            },
+            WebSocketConnectionContext {
+                thread_id: None,
+                ..context.clone()
+            },
+            WebSocketConnectionContext {
+                turn_id: None,
+                ..context
+            },
+        ] {
+            assert!(
+                super::responses_websocket_oversized_fallback_key("relay-compaction-scope", &other)
+                    .is_none()
+            );
+            assert!(
+                super::responses_websocket_early_disconnect_fallback_key(
+                    "relay-compaction-scope",
+                    &other
+                )
+                .is_none()
+            );
+            assert!(
+                super::responses_websocket_upstream_failure_fallback_key(
+                    "relay-compaction-scope",
+                    &other
+                )
+                .is_none()
+            );
+        }
     }
 
     #[test]

@@ -28,12 +28,12 @@
   const chatsSortVisibleFallbackMs = 30000;
   const chatsSortRequestTimeoutMs = 10000;
   const styleId = "codex-delete-style";
-  const codexDeleteStyleVersion = "97";
+  const codexDeleteStyleVersion = "99";
   const codexElvesMenuId = "codex-elves-menu";
   const codexElvesMenuVersion = "8";
   const codexElvesMenuFloatingClass = "codex-elves-menu-floating";
   const codexElvesMenuTitlebarClass = "codex-elves-menu-titlebar";
-  const codexDeleteVersion = "12";
+  const codexDeleteVersion = "13";
   const codexActionGroupVersion = "6";
   const codexArchiveRowActionsVersion = "1";
   const codexConversationViewRouteHooksVersion = "3";
@@ -42,7 +42,7 @@
   const codexThreadServiceTierVersion = "1";
   const codexServiceTierBadgeClass = "codex-service-tier-badge";
   const codexLegacyServiceTierComposerSurfaceClass = "codex-elves-service-tier-composer-surface";
-  const codexServiceTierBadgeVersion = "7";
+  const codexServiceTierBadgeVersion = "8";
   const codexServiceTierBadgePlacementGraceMs = 1200;
   const codexServiceTierBadgeRetryMaxAttempts = 8;
   const codexServiceTierBadgeRetryMaxDelayMs = 1000;
@@ -2040,20 +2040,19 @@
         height: 24px;
         min-width: 54px;
         box-sizing: border-box;
-        border: 1px solid rgba(148,163,184,.28);
-        border-radius: 999px;
-        background: rgba(148,163,184,.12);
+        border: 0;
+        background: transparent;
         color: #d4d4d8;
         font: 600 12px/1 system-ui, sans-serif;
         padding: 0 8px;
         white-space: nowrap;
         cursor: pointer;
       }
-      .${codexServiceTierBadgeClass}:hover { border-color: rgba(16,163,127,.44); background: rgba(16,163,127,.13); }
-      .${codexServiceTierBadgeClass}[data-tier="fast"] { border-color: rgba(16,163,127,.55); background: rgba(16,163,127,.18); color: #6ee7b7; }
+      .${codexServiceTierBadgeClass}:hover { color: #6ee7b7; }
+      .${codexServiceTierBadgeClass}[data-tier="fast"] { color: #6ee7b7; }
       .${codexServiceTierBadgeClass}[data-tier="loading"] { color: #a1a1aa; }
-      .${codexServiceTierBadgeClass}[data-tier="failed"] { border-color: rgba(248,113,113,.42); background: rgba(248,113,113,.12); color: #fca5a5; }
-      .${codexServiceTierBadgeClass}[data-tier="unsupported"] { border-color: rgba(251,191,36,.48); background: rgba(251,191,36,.13); color: #fbbf24; }
+      .${codexServiceTierBadgeClass}[data-tier="failed"] { color: #fca5a5; }
+      .${codexServiceTierBadgeClass}[data-tier="unsupported"] { color: #fbbf24; }
       .${codexServiceTierBadgeClass}[data-disabled="true"] { cursor: not-allowed; opacity: .78; }
       .${codexServiceTierBadgeClass}[data-codex-service-tier-portal="true"] {
         position: fixed;
@@ -5149,21 +5148,28 @@
 
   function codexServiceTierSelectedModelTexts(button) {
     if (!(button instanceof HTMLElement)) return [];
+    const textWithoutHiddenContent = (node) => {
+      const clone = node.cloneNode(true);
+      clone.querySelectorAll?.('[aria-hidden="true"]').forEach((child) => child.remove());
+      return String(clone.textContent || "").replace(/\s+/g, " ").trim();
+    };
     const selectors = [
+      '[class*="_ModelPickerTriggerModelText_"]',
+      '[class*="_ModelPickerTriggerModelLabel_"]',
       '[class*="_WorkTriggerModelText_"]',
       '[class*="_WorkTriggerModelLabel_"]',
       '[data-tooltip-overflow-target="true"]',
     ];
-    const visibleTexts = uniqueValues(selectors.flatMap((selector) =>
-      Array.from(button.querySelectorAll(selector))
-        .filter((node) => !node.closest?.('[aria-hidden="true"]'))
-        .filter(codexServiceTierBadgeVisibleElement)
-        .map(codexServiceTierBadgeText)
-    ));
-    if (visibleTexts.length) return visibleTexts;
-    const fallback = button.cloneNode(true);
-    fallback.querySelectorAll?.('[aria-hidden="true"]').forEach((node) => node.remove());
-    const fallbackText = String(fallback.textContent || "").replace(/\s+/g, " ").trim();
+    for (const selector of selectors) {
+      const visibleTexts = uniqueValues(
+        Array.from(button.querySelectorAll(selector))
+          .filter((node) => !node.closest?.('[aria-hidden="true"]'))
+          .filter(codexServiceTierBadgeVisibleElement)
+          .map(textWithoutHiddenContent)
+      );
+      if (visibleTexts.length) return visibleTexts;
+    }
+    const fallbackText = textWithoutHiddenContent(button);
     return fallbackText ? [fallbackText] : [];
   }
 
@@ -5506,7 +5512,7 @@
       "Standard：使用标准处理；不在请求上设置 priority。",
       `Fast：仅支持 ${codexServiceTierFastModelListLabel()}；对支持模型使用 service_tier=\"priority\"，官方说明其延迟更低且更一致，但会按更高价格计费；rate limit 与 Standard 共享，流量快速上涨时可能回落到 Standard。`,
     ].join("\n");
-    if (effectiveMode === "fast" && !fastAvailability.supported) {
+    if (!fastAvailability.supported) {
       return { tier: "unsupported", label: "不支持", title: `${title}\n${codexServiceTierFastUnsupportedMessage(fastAvailability.modelName)}；当前请求会按 Standard 发送。` };
     }
     if (effectiveMode === "fast") return { tier: "fast", label: "fast", title };
@@ -24932,8 +24938,24 @@
   }
   window.__codexElvesNativeDeleteThread = deleteSessionWithCodex;
 
+  // 侧边栏 DOM id 可能仍是 client-new-thread 临时形态；同一条目上的 conversationId 才是原生删除使用的真实 id。
+  function sessionDeleteConversationIdFromRow(row) {
+    const rowKey = row.getAttribute("data-app-action-sidebar-thread-id") || "";
+    const reactKey = Object.keys(row).find((key) => key.startsWith("__reactFiber$") || key.startsWith("__reactInternalInstance$"));
+    let fiber = reactKey ? row[reactKey] : null;
+    for (let depth = 0; rowKey && fiber && depth < 60; depth += 1, fiber = fiber.return) {
+      const entry = Object.values(fiber.memoizedProps || {}).find((value) => value?.key === rowKey && "conversationId" in value);
+      if (!entry) continue;
+      return /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(entry.conversationId || "") ? entry.conversationId : "";
+    }
+    return "";
+  }
+
   function sessionDeleteRefFromRow(row, ref) {
-    if (!isTemporaryThreadId(ref?.session_id) || !isCurrentSessionRow(row, ref)) return ref;
+    if (!isTemporaryThreadId(ref?.session_id)) return ref;
+    const rowConversationId = sessionDeleteConversationIdFromRow(row);
+    if (rowConversationId) return { ...ref, session_id: `local:${rowConversationId}` };
+    if (!isCurrentSessionRow(row, ref)) return ref;
     const activeId = activeConversationIdFromDom();
     return activeId ? { ...ref, session_id: `local:${activeId}` } : ref;
   }
@@ -25792,12 +25814,18 @@
     return element instanceof HTMLElement && element.matches?.(codexServiceTierComposerFooterSelector);
   }
 
+  function codexServiceTierIsMainComposerElement(element) {
+    const area = element?.closest?.("[data-app-shell-focus-area]");
+    return !area || area.getAttribute("data-app-shell-focus-area") === "main";
+  }
+
   function codexServiceTierVisibleComposerFooters(root = document) {
     const footers = [
       ...(codexServiceTierIsComposerFooter(root) ? [root] : []),
       ...Array.from(root?.querySelectorAll?.(codexServiceTierComposerFooterSelector) || []),
     ];
     return footers
+      .filter(codexServiceTierIsMainComposerElement)
       .filter(codexServiceTierLooksLikeComposerFooter)
       .filter(codexServiceTierBadgeVisibleElement)
       .sort((left, right) => {
@@ -25851,7 +25879,7 @@
         if (codexServiceTierBadgeVisibleElement(node)) candidates.add(node);
       }
     });
-    return Array.from(candidates);
+    return Array.from(candidates).filter(codexServiceTierIsMainComposerElement);
   }
 
   function codexServiceTierBestComposerFooter(root = document) {
@@ -26041,7 +26069,7 @@
   }
 
   function codexServiceTierHasVisibleComposerInput() {
-    return codexServiceTierComposerInputs(document).length > 0;
+    return codexServiceTierComposerInputs(document).some(codexServiceTierIsMainComposerElement);
   }
 
   function codexServiceTierPositionPortalBadge(badge, placement) {
