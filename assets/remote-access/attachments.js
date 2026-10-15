@@ -17,6 +17,7 @@ let disabled = false;
 let locked = false;
 let remoteRemovalAllowed = false;
 let readingFiles = false;
+let attachmentVersion = 0;
 
 function attachmentName(value, fallback = "图片") {
   const name = String(value || "").replace(/[\u0000-\u001f\u007f]/gu, "").trim();
@@ -71,6 +72,22 @@ function detectImageMime(bytes) {
   if (bytes.length >= 12 && text(4) === "RIFF"
       && String.fromCharCode(...bytes.slice(8, 12)) === "WEBP") return "image/webp";
   return "";
+}
+
+export function safeInlineImageSource(source) {
+  if (typeof source !== "string" || source.length > Math.ceil(25 * 1024 * 1024 / 3) * 4 + 64) return null;
+  const header = /^data:(image\/(?:png|jpeg|webp|gif));base64,/iu.exec(source);
+  if (!header) return null;
+  const encoded = source.slice(header[0].length);
+  if (!encoded.length || encoded.length % 4 || !/^[A-Za-z0-9+/]+={0,2}$/u.test(encoded)) return null;
+  const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
+  if (encoded.length / 4 * 3 - padding > 25 * 1024 * 1024) return null;
+  try {
+    const bytes = Uint8Array.from(atob(encoded.slice(0, 16)), character => character.charCodeAt(0));
+    return detectImageMime(bytes) === header[1].toLowerCase() ? source : null;
+  } catch {
+    return null;
+  }
 }
 
 function dataUrl(blob, mime) {
@@ -192,9 +209,12 @@ async function addFiles(files) {
   }
   readingFiles = true;
   renderComposerAttachments();
+  changeListener();
+  const version = attachmentVersion;
   try {
     const next = [];
     for (const file of candidates) next.push(await readImageFile(file));
+    if (version !== attachmentVersion) return true;
     attachments.push(...next);
     renderComposerAttachments();
     changeListener();
@@ -204,6 +224,7 @@ async function addFiles(files) {
     readingFiles = false;
     if (attachmentInput) attachmentInput.value = "";
     renderComposerAttachments();
+    changeListener();
   }
   return true;
 }
@@ -271,6 +292,10 @@ export function composerHasAttachments() {
   return attachments.length > 0;
 }
 
+export function composerAttachmentsLoading() {
+  return readingFiles;
+}
+
 export function composerAttachmentSnapshot() {
   return attachments.map(copyAttachment);
 }
@@ -287,11 +312,12 @@ export function composerRemoteAttachmentSources() {
 }
 
 export function setComposerAttachments(value = [], { readOnly = false, removableRemote = false } = {}) {
+  attachmentVersion += 1;
   attachments = Array.isArray(value) ? value.flatMap(entry => {
     if (entry?.kind === "inline" && supportedMimes.has(entry.mime)
         && typeof entry.dataUrl === "string" && Number.isFinite(entry.size))
       return [copyAttachment(entry)];
-    if (entry?.kind === "remote" && remoteImagePattern.test(entry.url))
+    if (entry?.kind === "remote" && (remoteImagePattern.test(entry.url) || safeInlineImageSource(entry.url)))
       return [copyAttachment(entry)];
     return [];
   }).slice(0, MAX_IMAGE_COUNT) : [];
@@ -313,28 +339,60 @@ export function attachmentsFromRemoteImages(value) {
   return safeRemoteImages(value);
 }
 
+export async function attachmentsFromQueuedMessage(message) {
+  const registeredImages = safeRemoteImages(message?.remoteImages);
+  const images = message?.context?.imageAttachments;
+  if (!Array.isArray(images)) return registeredImages;
+  const attachments = [];
+  for (const image of images) {
+    const registered = registeredImages.find(entry => entry.source === image?.src);
+    if (registered) {
+      attachments.push({ ...registered, name: attachmentName(image.filename || image.name, registered.name) });
+      continue;
+    }
+    const source = safeInlineImageSource(image?.src);
+    if (!source) continue;
+    const binary = atob(source.slice(source.indexOf(",") + 1));
+    const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+    const reference = `inline:${[...digest].map(byte => byte.toString(16).padStart(2, "0")).join("")}`;
+    attachments.push(registeredImages.find(entry => entry.source === reference) || {
+      kind: "remote",
+      name: attachmentName(image.filename || image.name, "图片附件"),
+      source: reference,
+      url: source,
+      mime: source.slice(5, source.indexOf(";")).toLowerCase()
+    });
+  }
+  return attachments;
+}
+
 export function renderQueuedMessageAttachments(message) {
-  const images = safeRemoteImages(message?.remoteImages);
+  const registeredImages = safeRemoteImages(message?.remoteImages);
+  const images = [];
+  const inlineAttachments = message?.context?.imageAttachments;
+  for (const attachment of Array.isArray(inlineAttachments) ? inlineAttachments : []) {
+    if (images.some(image => image.source === attachment?.src)) continue;
+    const registered = registeredImages.find(image => image.source === attachment?.src);
+    if (registered) { images.push(registered); continue; }
+    const url = safeInlineImageSource(attachment?.src);
+    if (url) images.push({ source: attachment.src, url, name: attachmentName(attachment.name, "图片附件") });
+  }
+  for (const image of registeredImages)
+    if (!images.some(entry => entry.url === image.url)) images.push(image);
   if (!images.length) return null;
   const root = document.createElement("div");
   root.className = "queued-message-attachments";
-  root.setAttribute("aria-label", `${images.length} 张图片附件`);
-  for (const image of images.slice(0, 3)) {
-    const thumbnail = document.createElement("img");
-    thumbnail.className = "queued-message-attachment";
-    thumbnail.src = image.url;
-    thumbnail.alt = image.name;
-    thumbnail.title = image.name;
-    thumbnail.loading = "lazy";
-    thumbnail.decoding = "async";
-    root.append(thumbnail);
-  }
-  if (images.length > 3) {
-    const more = document.createElement("span");
-    more.className = "queued-message-attachment-more";
-    more.textContent = `+${images.length - 3}`;
-    more.setAttribute("aria-label", `另有 ${images.length - 3} 张图片`);
-    root.append(more);
-  }
+  root.setAttribute("aria-label", `${images.length} 张图片附件，仅显示第一张`);
+  const image = images[0];
+  const thumbnail = document.createElement("img");
+  thumbnail.className = "queued-message-attachment";
+  thumbnail.src = image.url;
+  thumbnail.alt = image.name;
+  thumbnail.title = image.name;
+  thumbnail.loading = "lazy";
+  thumbnail.decoding = "async";
+  thumbnail.draggable = false;
+  root.append(thumbnail);
   return root;
 }

@@ -2,15 +2,18 @@ import { markdown } from "./markdown.js";
 import { createRemoteEventStream, sharedEventsAvailable } from "./events-client.js";
 import { renderMessageActions } from "./message-actions.js";
 import {
+  attachmentsFromQueuedMessage,
   attachmentsFromRemoteImages,
   clearComposerAttachments,
   composerAttachmentSnapshot,
+  composerAttachmentsLoading,
   composerAttachmentsPayload,
   composerHasAttachments,
   composerRemoteAttachmentSources,
   handleComposerImagePaste,
   mountComposerAttachments,
   renderQueuedMessageAttachments,
+  safeInlineImageSource,
   setComposerAttachments,
   setComposerAttachmentsDisabled
 } from "./attachments.js";
@@ -47,7 +50,7 @@ const queuedEditActions = new Set(["beginQueuedEdit", "editQueued", "cancelQueue
 let activePopup = null, sidebarBusy = false;
 let sidebarFilterDeviceId = null;
 let sidebarFilters = { mode: null, chats: null, projects: null, pinned: null };
-let messageFrame = null, stopping = false, messageVersion = 0, statusVersion = 0, notifiedStatus = null;
+let messageFrame = null, activityTimer = null, stopping = false, messageVersion = 0, statusVersion = 0, notifiedStatus = null;
 let followMessages = true;
 let messagesResizeObserver = null;
 let composerControlsResizeObserver = null, composerLayoutFrame = null;
@@ -96,8 +99,9 @@ try {
         || typeof edit.deviceId !== "string" || typeof edit.message?.id !== "string"
         || typeof edit.originalText !== "string" || typeof edit.text !== "string"
         || typeof edit.backup?.text !== "string" || !validSkillSelection(edit.backup.skills)
-        || edit.imageRemoval === true
+        || (edit.imageRemoval === true || edit.imageEditing === true)
           && (!validQueuedImageSources(edit.originalImageSources) || !Array.isArray(edit.attachments))
+        || edit.imageEditing === true && edit.imageRemoval !== true
         || !["starting", "editing"].includes(edit.state)) continue;
     queuedEdits.set(edit.threadId, edit);
   }
@@ -609,7 +613,7 @@ function persistQueuedEdits(required = false) {
 function rememberQueuedMessageEdit() {
   if (editingQueuedMessage?.state !== "editing" || !$("#prompt")) return;
   editingQueuedMessage.text = $("#prompt").value;
-  if (editingQueuedMessage.imageRemoval) editingQueuedMessage.attachments = composerAttachmentSnapshot();
+  editingQueuedMessage.attachments = composerAttachmentSnapshot();
   persistQueuedEdits();
 }
 function restoreQueuedMessageEdit() {
@@ -619,7 +623,8 @@ function restoreQueuedMessageEdit() {
   $("#prompt").value = edit.state === "editing" ? edit.text : edit.backup.text;
   selectedSkills = edit.state === "editing" ? [] : edit.backup.skills || [];
   setComposerAttachments(edit.state === "editing" ? edit.attachments || [] : edit.backup.attachments || [],
-    { readOnly: edit.state === "editing", removableRemote: edit.state === "editing" && edit.imageRemoval === true });
+    { readOnly: edit.state === "editing" && edit.imageEditing !== true,
+      removableRemote: edit.state === "editing" && edit.imageRemoval === true });
   renderSelectedSkills();
 }
 function matchingDraft(draft, payload) {
@@ -652,7 +657,6 @@ function newChatProjectOptions(projects = []) {
   const names = new Map();
   for (const project of projects) names.set(project.name, (names.get(project.name) || 0) + 1);
   return [
-    { value: "", label: "请选择项目", searchText: "选择项目", icon: "folder" },
     ...projects.map(project => ({
       value: project.id, label: project.name,
       description: names.get(project.name) > 1
@@ -660,16 +664,17 @@ function newChatProjectOptions(projects = []) {
         : "",
       searchText: Array.isArray(project.roots) ? project.roots.join(" ") : project.cwd || "",
       icon: "folder"
-    }))
+    })),
+    { value: "", label: "不在项目中工作", icon: "close", footer: true }
   ];
 }
 function syncNewChatProjectPicker() {
-  const select = $("#project-select"), empty = $("#new-chat-project-empty");
-  if (!select || !empty || !sidebar) return;
-  const hasProjects = !!sidebar.projects.length;
-  select.hidden = !hasProjects;
-  select.disabled = !!session?.readOnly || !hasProjects;
-  empty.hidden = hasProjects;
+  const select = $("#project-select");
+  if (!select || !sidebar) return;
+  select.disabled = !!session?.readOnly;
+  const control = select.closest(".new-chat-project-control"), clear = $("#clear-new-chat-project");
+  if (control) control.dataset.selected = String(!!select.value);
+  if (clear) { clear.hidden = !select.value; clear.disabled = select.disabled; }
 }
 function changeCreationProject() {
   syncNewChatProjectPicker();
@@ -762,7 +767,7 @@ function renderModelMenu() {
   for (const model of visibleModels) group.append(choice(model.displayName || model.model, modelId === model.model, () => {
     if (currentModelId() !== model.model) {
       selectedModel = model.model;
-      const efforts = model.supportedReasoningEfforts || [];
+      const efforts = (model.supportedReasoningEfforts || []).filter(effort => effort.reasoningEffort !== "minimal");
       selectedEffort = efforts.find(value => value.reasoningEffort === model.defaultReasoningEffort)?.reasoningEffort
         || efforts.find(value => value.reasoningEffort === "medium")?.reasoningEffort || efforts[0]?.reasoningEffort || "";
     }
@@ -775,7 +780,7 @@ function renderModelMenu() {
   if (!group.children.length) group.append(element("p", "popover-empty muted", models.length ? "没有匹配的模型，请修改搜索条件" : "暂无可选模型，请稍后重试"));
   menu.append(group);
   const efforts = element("div", "effort-options"); efforts.setAttribute("role", "group"); efforts.setAttribute("aria-label", "思考深度");
-  const supportedEfforts = currentModel()?.supportedReasoningEfforts || [];
+  const supportedEfforts = (currentModel()?.supportedReasoningEfforts || []).filter(effort => effort.reasoningEffort !== "minimal");
   for (const effort of supportedEfforts) {
     efforts.append(choice(effortLabels[effort.reasoningEffort] || effort.reasoningEffort,
       selectedReasoning === effort.reasoningEffort,
@@ -934,7 +939,8 @@ async function updateSkillMenu() {
   const query = slashQuery(), prompt = $("#prompt");
   if (!query || !session || session.readOnly || document.activeElement !== prompt) { closeSkillMenu(); return; }
   const projectId = creating ? $("#project-select").value : "";
-  const scope = selectedId ? `thread:${selectedId}` : projectId ? `project:${projectId}` : "";
+  const scope = selectedId ? `thread:${selectedId}` : projectId ? `project:${projectId}`
+    : creating && session.capabilities?.projectlessCreation === true ? "projectless" : "";
   if (!scope) { renderSkillMenu("请先选择会话，或为新会话选择项目"); return; }
   if (skillScope === scope) { renderSkillMenu(); return; }
   if (skillLoading?.scope === scope) { renderSkillMenu("正在读取本机可用 Skill…"); return; }
@@ -1033,6 +1039,8 @@ function icon(name) {
     folderClosed: '<path d="M20 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2Z"/><path d="M2 10h20"/>',
     pin: '<path d="m16 3 5 5-4 1-3 5-4-4 5-3Z"/><path d="m10 14-7 7"/>',
     plus: '<path d="M12 5v14M5 12h14"/>', check: '<path d="m5 12 4 4L19 6"/>',
+    close: '<path d="m6 6 12 12M18 6 6 18"/>',
+    closeCircle: '<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/>',
     queue: '<path d="M8 6h12M8 12h12M8 18h8"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/>',
     target: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/>',
     trash: '<path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6"/>',
@@ -1075,7 +1083,8 @@ function selectControl(id, label, options, value, className = "", renderValue = 
   return node;
 }
 function setSelectValue(node, value) {
-  const selected = node.selectOptions.find(option => option.value === value) || node.selectOptions[0];
+  const selected = node.selectOptions.find(option => option.value === value)
+    || node.selectOptions.find(option => option.value === "") || node.selectOptions[0];
   node.value = selected?.value || "";
   node.setAttribute("aria-description", `当前选择：${selected?.label || "暂无可选项目"}`);
   node.title = `${node.getAttribute("aria-label")}：${selected?.label || "暂无可选项目"}${selected?.description ? ` · ${selected.description}` : ""}`;
@@ -1159,10 +1168,15 @@ function renderPopup() {
   const { trigger, list, query } = activePopup;
   const focused = list.contains(document.activeElement) ? document.activeElement.dataset.value : null;
   const choices = (trigger.selectOptions || trigger.menuOptions).filter(option =>
-    !query || `${option.label} ${option.description || ""} ${option.searchText || ""}`.toLowerCase().includes(query.trim().toLowerCase()));
+    option.footer || !query || `${option.label} ${option.description || ""} ${option.searchText || ""}`.toLowerCase().includes(query.trim().toLowerCase()));
   activePopup.choices = choices;
   list.replaceChildren();
-  if (!choices.length) list.append(element("p", "popover-empty muted", query ? "没有匹配的项目，请修改搜索条件" : "暂无可用选项"));
+  const hasFooter = choices.some(option => option.footer);
+  list.classList.toggle("has-footer", hasFooter);
+  const options = hasFooter ? element("div", "popup-options") : list;
+  if (hasFooter) list.append(options);
+  if (!choices.some(option => !option.footer)) options.append(element("p", "popover-empty muted",
+    query ? "没有匹配的项目，请修改搜索条件" : hasFooter ? "本机暂无可用项目" : "暂无可用选项"));
   choices.forEach(option => {
     const node = button("", option.label, () => {
       if (trigger.disabled || node.disabled) return;
@@ -1172,7 +1186,7 @@ function renderPopup() {
         setSelectValue(trigger, option.value);
         trigger.dispatchEvent(new Event("change", { bubbles: true }));
       } else void option.action();
-    }, "popup-option");
+    }, `popup-option${option.footer ? " popup-option-footer" : ""}`);
     node.disabled = !!option.disabled; node.tabIndex = -1;
     node.onfocus = () => { if (activePopup) activePopup.index = choices.indexOf(option); };
     node.dataset.value = option.value ?? option.label;
@@ -1184,7 +1198,7 @@ function renderPopup() {
     if (option.description) labels.append(element("small", "muted", option.description));
     node.append(labels);
     if (trigger.selectOptions) node.append(element("span", "choice-check", trigger.value === option.value ? "✓" : ""));
-    list.append(node);
+    (option.footer ? list : options).append(node);
     if (focused === node.dataset.value) node.focus();
   });
   fitPopup();
@@ -1872,7 +1886,7 @@ function shell() {
   messagesResizeObserver.observe($("#messages"));
   $("#sidebar-view-toggle").append(icon("folderClosed"));
   const projectSelect = selectControl("project-select", "新会话项目", [], "", "new-chat-project-select", selected =>
-    [icon("folder"), element("span", "select-label", selected?.label || "请选择项目")]);
+    [...(selected?.value ? [icon("folder")] : []), element("span", "select-label", selected?.label || "不在项目中工作")]);
   projectSelect.selectSearchable = true;
   projectSelect.popupClassName = "project-picker-popup";
   projectSelect.popupDirection = "up";
@@ -1880,13 +1894,22 @@ function shell() {
   projectSelect.popupMaxHeight = 400;
   const projectPicker = $("#project-select-slot");
   projectPicker.classList.add("new-chat-project");
-  const empty = element("p", "new-chat-project-empty", "本机暂无可用项目，请先在 Codex 中添加项目。");
-  empty.id = "new-chat-project-empty";
-  empty.hidden = true;
+  const projectControl = element("div", "new-chat-project-control");
+  const clearProject = button("", "不在项目中工作", () => {
+    if (projectSelect.disabled || !projectSelect.value) return;
+    closePopup();
+    setSelectValue(projectSelect, "");
+    projectSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    projectSelect.focus();
+  }, "new-chat-project-clear");
+  clearProject.id = "clear-new-chat-project";
+  clearProject.hidden = true;
+  clearProject.append(icon("closeCircle"));
+  projectControl.append(projectSelect, clearProject);
   const executionHost = element("span", "new-chat-execution-host");
   executionHost.title = "会话在本机执行";
   executionHost.append(icon("laptop"), document.createTextNode("本地"));
-  projectPicker.append(projectSelect, executionHost, empty);
+  projectPicker.append(projectControl, executionHost);
   $("#send").append(icon("arrowUp"));
   $("#logout").append(icon("logout"), element("span", "", "退出"));
   $("#appearance-button").append(icon("settings"), element("span", "", "设置"));
@@ -2050,7 +2073,7 @@ function startNewChat(projectId = "") {
   selectionToken = randomId();
   creationProject = $("#project-select").value; notifiedTokenUsage = null; ++threadReadVersion;
   restoreDraft(draftKey()); resetComposerOptions(); renderApprovals();
-  $("#thread-title").textContent = "新建会话"; $("#thread-path").textContent = "选择本机已有项目";
+  $("#thread-title").textContent = "新建会话"; $("#thread-path").textContent = "在本机创建会话";
   $("#project-select-slot").hidden = false;
   renderSidebar(); updateComposer(); closeMobileSidebar({ focus: false });
   $("#prompt").focus();
@@ -2067,6 +2090,10 @@ async function loadSidebar(cursor = null) {
   const promise = (async () => {
     const result = await api("/api/read/sidebar", { cursor });
     if (version !== sidebarVersion || !session || deviceId !== session.device.id) return;
+    const isMainThread = item => item.threadSource !== "subagent" && !item.source?.subAgent && !item.source?.subagent;
+    result.recent = result.recent.filter(isMainThread);
+    result.pinnedThreads = result.pinnedThreads.filter(isMainThread);
+    for (const project of result.projects) project.threads = project.threads.filter(isMainThread);
     if (JSON.stringify(sidebar) === JSON.stringify(result)) return;
     sidebar = result;
     renderSidebar();
@@ -2263,7 +2290,6 @@ function renderSidebar() {
   }, "load-more"));
   if (search && !root.querySelector(".thread-row, .project-group")) root.append(element("p", "empty-project", "没有匹配的会话或项目"));
   setSelectOptions($("#project-select"), newChatProjectOptions(sidebar.projects));
-  $("#project-select").disabled = session.readOnly || !sidebar.projects.length;
   changeCreationProject();
   root.scrollTop = scrollTop;
   if (popupState) {
@@ -2446,8 +2472,8 @@ async function submitMessageEdit() {
   finally { busy = false; updateComposer(); }
 }
 function openImagePreview(link, image) {
-  const source = link.getAttribute("href") || "";
-  if (!/^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(source)) return;
+  const source = link.getAttribute("href") || image.getAttribute("src") || "";
+  if (!/^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(source) && !safeInlineImageSource(source)) return;
   $("#image-preview-dialog")?.close();
   const trigger = link;
   const dialog = element("dialog", "image-preview-dialog");
@@ -2487,7 +2513,8 @@ function bindMessageImages(node) {
     const link = image.closest(".message-image-link");
     image.onload = () => { if (followMessages && image.isConnected) $("#messages").scrollTop = $("#messages").scrollHeight; };
     image.onerror = () => image.closest(".message-image-link")?.replaceWith(element("span", "attachment-placeholder", `图片不可用：${image.alt || "附件"}`));
-    if (link && /^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(link.getAttribute("href") || "")) {
+    if (link && (/^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(link.getAttribute("href") || "")
+        || safeInlineImageSource(image.getAttribute("src")))) {
       link.title = image.alt ? `预览图片：${image.alt}` : "预览图片";
       link.onclick = event => {
         if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -2496,11 +2523,15 @@ function bindMessageImages(node) {
     }
   }
 }
-function messageImage(asset, label) {
-  if (!asset || !/^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(asset.url || "")) return null;
-  const link = element("a", "message-image-link"), image = element("img", "message-image");
-  link.href = asset.url; link.target = "_blank"; link.rel = "noopener noreferrer";
-  image.alt = label || "图片附件"; image.loading = "lazy"; image.decoding = "async"; image.src = asset.url;
+function messageImage(asset, label, inlineSource) {
+  const remoteUrl = /^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(asset?.url || "") ? asset.url : null;
+  const source = remoteUrl || safeInlineImageSource(inlineSource);
+  if (!source) return null;
+  const link = element(remoteUrl ? "a" : "button", "message-image-link"), image = element("img", "message-image");
+  if (remoteUrl) {
+    link.href = remoteUrl; link.target = "_blank"; link.rel = "noopener noreferrer";
+  } else link.type = "button";
+  image.alt = label || "图片附件"; image.loading = "lazy"; image.decoding = "async"; image.src = source;
   link.append(image); bindMessageImages(link); return link;
 }
 function setMarkdown(node, text, remoteImages = [], options) {
@@ -2705,10 +2736,93 @@ function renderSkillReadItem(item, previous, info) {
   node.setAttribute("aria-label", label);
   return node;
 }
+function toolResultParts(item) {
+  const parts = [];
+  const append = (content, depth = 0) => {
+    for (const entry of Array.isArray(content) ? content : []) {
+      if (["text", "inputText"].includes(entry?.type) && typeof entry.text === "string") {
+        let nested = null;
+        if (depth < 4 && entry.text.trimStart().startsWith("{")) {
+          try {
+            const value = JSON.parse(entry.text);
+            if (Array.isArray(value?.content)
+                && Object.keys(value).every(key => ["content", "structuredContent", "_meta", "isError"].includes(key))
+                && value.content.every(part => part && typeof part.type === "string"))
+              nested = value;
+          } catch {}
+        }
+        if (nested) {
+          append(nested.content, depth + 1);
+          if (!nested.content.length && nested.structuredContent != null)
+            parts.push({ type: "text", text: JSON.stringify(nested.structuredContent, null, 2) });
+        } else if (entry.text) parts.push({ type: "text", text: entry.text });
+      } else if (entry?.type === "image" || entry?.type === "inputImage") {
+        const source = entry.type === "inputImage" ? entry.imageUrl
+          : typeof entry.data === "string" && typeof entry.mimeType === "string"
+            ? `data:${entry.mimeType};base64,${entry.data}` : "";
+        parts.push({ type: "image", source });
+      } else if (["resource", "embedded_resource"].includes(entry?.type) && typeof entry.resource?.text === "string") {
+        parts.push({ type: "text", text: entry.resource.text });
+      } else if (entry?.type === "resource_link") {
+        parts.push({ type: "text", text: [entry.title || entry.name || "资源", entry.uri, entry.description].filter(Boolean).join("\n") });
+      } else {
+        parts.push({ type: "text", text: "此类型工具结果请在 Codex 桌面查看。" });
+      }
+    }
+  };
+  append(item.type === "dynamicToolCall" ? item.contentItems : item.result?.content);
+  if (!parts.length && item.result?.structuredContent != null)
+    parts.push({ type: "text", text: JSON.stringify(item.result.structuredContent, null, 2) });
+  if (typeof item.error?.message === "string" && !parts.some(part => part.text === item.error.message))
+    parts.unshift({ type: "text", text: item.error.message });
+  return parts;
+}
+function renderGenericToolOutput(body, item) {
+  body.classList.add("generic-tool-body");
+  const parts = toolResultParts(item);
+  if (!parts.length) {
+    body.append(element("p", "tool-result-empty muted",
+      ["inProgress", "running"].includes(item.status) ? "工具尚未返回结果。" : "此工具没有返回可展示的内容。"));
+    return;
+  }
+  const outputs = parts.map(part => {
+    if (part.type === "image") {
+      const image = messageImage({ url: part.source }, "工具返回的图片", part.source)
+        || element("span", "attachment-placeholder", "工具返回的图片暂不可用，请在 Codex 桌面查看。");
+      body.append(image);
+      return { ...part, node: image };
+    }
+    const section = element("div", "tool-result-section");
+    const output = element("pre", "tool-output");
+    section.append(element("div", "tool-result-label", "纯文本"), output);
+    body.append(section);
+    return { ...part, node: section, output };
+  });
+  let shown = 20_000;
+  const more = button("显示更多输出", "显示更多输出", () => { shown += 20_000; update(); }, "text-button");
+  const update = () => {
+    let remaining = shown, truncated = false;
+    for (const entry of outputs) {
+      entry.node.hidden = truncated;
+      if (truncated || entry.type !== "text") continue;
+      if (!remaining && entry.text.length) {
+        entry.node.hidden = true; truncated = true; continue;
+      }
+      entry.output.textContent = entry.text.slice(0, remaining);
+      truncated = entry.text.length > remaining;
+      remaining = Math.max(0, remaining - entry.text.length);
+    }
+    more.hidden = !truncated;
+  };
+  update(); body.append(more);
+}
 function renderToolOutput(details, item) {
   details.querySelector(".tool-body")?.remove();
   if (!details.open) return;
   const body = element("div", "tool-body");
+  if (["mcpToolCall", "dynamicToolCall"].includes(item.type)) {
+    renderGenericToolOutput(body, item); details.append(body); return;
+  }
   const content = item.type === "commandExecution" ? item.aggregatedOutput || item.output || ""
     : item.type === "reasoning" ? [item.summary, item.content].flatMap(value => Array.isArray(value) ? value.map(entry => entry.text || entry) : [value || ""]).join("\n\n")
     : item.type === "fileChange" ? (item.changes || []).map(change => `${change.path || ""}\n${change.diff || ""}`).join("\n\n")
@@ -2719,7 +2833,10 @@ function renderToolOutput(details, item) {
   let result = output;
   if (item.type === "commandExecution") {
     body.classList.add("command-shell");
-    body.append(element("div", "command-shell-title", "Shell"));
+    const title = element("div", "command-shell-title");
+    const copy = button("", "复制完整命令输出", () => void copyText(`$ ${commandText(item)}\n${text}`), "command-shell-copy");
+    copy.append(icon("copy"));
+    title.append(element("span", "", "Shell"), copy); body.append(title);
     output.classList.add("command-output");
     result = element("span", "command-result");
     output.append(element("span", "command-prompt", `$ ${commandText(item)}\n`), result);
@@ -2890,6 +3007,25 @@ function renderTranscriptEvent(item, previous) {
   node.setAttribute("aria-label", `${label}。${description}`);
   return node;
 }
+function readableToolName(item) {
+  const words = value => String(value || "").replace(/^mcp__/, "").replace(/([a-z\d])([A-Z])/g, "$1 $2")
+    .replace(/[._/-]+/g, " ").replace(/\s+/g, " ").trim();
+  return [words(item.server), words(item.tool)].filter(Boolean).join(" · ")
+    || (item.type === "dynamicToolCall" ? "动态工具" : "MCP 工具");
+}
+function genericToolPresentation(item) {
+  const surfaces = [
+    item.toolSurface,
+    item._meta?.["codex/toolSurface"],
+    item.result?._meta?.["codex/toolSurface"]
+  ];
+  const browser = surfaces.some(surface => surface?.kind === "browserUse")
+    || item.pluginId === "unified-computer-use@openai-bundled"
+    || /(?:^|[\s_-])(?:browser|chrome|cua)(?:$|[\s_-])/i.test(`${item.server || ""} ${item.tool || ""}`);
+  const title = typeof item.arguments?.title === "string"
+    ? Array.from(item.arguments.title.replace(/\s+/g, " ").trim()).slice(0, 80).join("") : "";
+  return { icon: browser ? "globe" : "tools", description: title || readableToolName(item) };
+}
 function renderItem(item, previous, inActivity = false, running = false) {
   if (item.type === "userMessage") {
     const node = previous || element("article", "message user-message");
@@ -2908,7 +3044,8 @@ function renderItem(item, previous, inActivity = false, running = false) {
     const attachments = element("div", "user-attachments");
     for (const content of item.content || []) if (["image", "localImage"].includes(content.type)) {
       const source = content.path || content.url;
-      const image = messageImage(item.remoteImages?.find(image => image.source === source), String(source || "图片附件").split(/[\\/]/).at(-1));
+      const label = /^data:/iu.test(source || "") ? "图片附件" : String(source || "图片附件").split(/[\\/]/).at(-1);
+      const image = messageImage(item.remoteImages?.find(image => image.source === source), label, source);
       attachments.append(image || element("span", "attachment-placeholder", "图片附件 · 请在 Codex 桌面查看"));
     }
     node.replaceChildren(...(attachments.childElementCount ? [attachments] : []),
@@ -2934,14 +3071,15 @@ function renderItem(item, previous, inActivity = false, running = false) {
   };
   const details = previous || element("details");
   const active = running;
-  details.className = `tool-item${item.status === "failed" ? " failed" : ""}${active ? " running" : ""}${item.type === "commandExecution" ? " command-item" : ""}${item.type === "reasoning" ? " reasoning-item" : ""}`;
+  const genericTool = ["mcpToolCall", "dynamicToolCall"].includes(item.type);
+  const failed = item.status === "failed" || genericTool && (item.success === false || !!item.error || item.result?.isError === true);
+  const interrupted = ["interrupted", "cancelled", "canceled"].includes(item.status);
+  details.className = `tool-item${failed ? " failed" : ""}${interrupted ? " interrupted" : ""}${active ? " running" : ""}${item.type === "commandExecution" ? " command-item" : ""}${item.type === "reasoning" ? " reasoning-item" : ""}${genericTool ? " generic-tool-item" : ""}`;
   const summary = element("summary");
-  const jsTitle = /(?:^|[./])js$/.test(item.tool || "") && typeof item.arguments?.title === "string"
-    ? Array.from(item.arguments.title.replace(/\s+/g, " ").trim()).slice(0, 80).join("") : "";
   const reasoningPreview = item.type === "reasoning" && active
     ? [item.summary, item.content].flatMap(value => Array.isArray(value) ? value : [value])
       .map(part => typeof part === "string" ? part : part?.text || "").filter(text => text.trim()).at(-1) : "";
-  const name = item.type === "mcpToolCall" || item.type === "dynamicToolCall" ? jsTitle || `${item.server || ""} · ${item.tool || ""}`
+  const name = genericTool ? genericToolPresentation(item).description
     : item.type === "commandExecution" ? commandText(item)
     : item.type === "webSearch" ? item.action?.query || ""
     : item.type === "fileChange" ? (item.changes || []).map(change => String(change.path || "").split(/[\\/]/).at(-1)).join("、") : "";
@@ -2950,10 +3088,21 @@ function renderItem(item, previous, inActivity = false, running = false) {
     summary.title = "正在思考，点击展开完整内容";
     summary.setAttribute("aria-label", summary.title);
     summary.append(element("span", "reasoning-live-preview", reasoningPreview));
+  } else if (genericTool) {
+    const presentation = genericToolPresentation(item);
+    const state = failed ? "失败" : interrupted ? "已中断" : "";
+    const visual = icon(failed ? "warning" : interrupted ? "stop" : presentation.icon);
+    const chevron = icon("chevron");
+    chevron.classList.add("tool-chevron");
+    summary.append(visual, element("span", `tool-description${active ? " working-label" : ""}`, presentation.description),
+      element("small", "muted tool-status-label", state), chevron);
+    summary.title = presentation.description;
+    summary.setAttribute("aria-label", active ? `${presentation.description}，执行中`
+      : state ? `${presentation.description}，${state}` : presentation.description);
+    details.setAttribute("aria-busy", String(active));
   } else {
     const label = element("strong", "", item.type === "reasoning" ? active ? "正在思考" : "已完成思考"
       : item.type === "commandExecution" ? active ? "正在运行" : "已运行" : titles[item.type] || item.type);
-    if (item.type === "commandExecution") label.append(element("span", "command-expanded-label", "命令"));
     summary.append(!active && item.status !== "failed" && ["commandExecution", "fileChange"].includes(item.type)
       ? icon(item.type === "commandExecution" ? "terminal" : "fileChange")
       : element("span", `tool-state${active ? " spinner" : ""}`, active ? "" : item.status === "failed" ? "!" : "✓"),
@@ -2980,6 +3129,7 @@ function reconcileChildren(root, children) {
   while (cursor) { const next = cursor.nextSibling; cursor.remove(); cursor = next; }
 }
 function resetMessages() {
+  stopActivityTimer();
   finishQueueDrag({ render: false });
   historyController?.abort(); historyController = null;
   selectionController?.abort(); selectionController = null;
@@ -3385,7 +3535,12 @@ function renderEditedFiles(turn, previous) {
     row.dataset.pathKey = file.key;
     row.open = open.has(file.key);
     const summary = element("summary", "edited-files-summary");
-    summary.append(element("span", "edited-files-path", file.path));
+    const path = element("span", "edited-files-path");
+    const nameStart = file.path.lastIndexOf("/") + 1;
+    path.append(document.createTextNode(file.path.slice(0, nameStart)),
+      element("span", "edited-files-name", file.path.slice(nameStart)));
+    summary.title = file.path;
+    summary.append(path);
     if (fileStatistics(file)) summary.append(counts(fileStatistics(file)));
     row.append(summary);
     const showDetail = () => {
@@ -3411,7 +3566,7 @@ function renderEditedFiles(turn, previous) {
     rows.forEach((row, index) => { row.hidden = !expanded && index >= 3; });
     if (!more) return;
     const remaining = files.size - 3;
-    more.textContent = expanded ? "收起" : `再显示 ${remaining} 个文件`;
+    more.replaceChildren(document.createTextNode(expanded ? "收起" : `再显示 ${remaining} 个文件`), icon("chevron"));
     more.title = expanded ? "收起文件列表" : `再显示 ${remaining} 个文件`;
     more.setAttribute("aria-label", more.title);
     more.setAttribute("aria-expanded", String(expanded));
@@ -3430,6 +3585,7 @@ function finalMessageIndex(turn) {
     if (item.type === "contextCompaction") continue;
     if (item.type === "agentMessage") {
       if (!textContent(item).trim() || item.delivery === "async" || item.requestUserInputAsync != null) return -1;
+      if (item.phase === "commentary") return -1;
       return !trailingCompletedWork || item.phase === "final_answer" ? index : -1;
     }
     if (turn.status !== "inProgress" && (item.type === "reasoning"
@@ -3440,17 +3596,52 @@ function finalMessageIndex(turn) {
   }
   return -1;
 }
-function activityLabel(turn, useDuration = true) {
-  let duration = useDuration && Number.isFinite(turn.durationMs) && turn.durationMs >= 0 ? turn.durationMs : null;
-  if (duration == null && useDuration && Number.isFinite(turn.startedAt) && Number.isFinite(turn.completedAt)
-      && turn.completedAt >= turn.startedAt) {
-    duration = turn.completedAt - turn.startedAt;
-    if (Math.max(Math.abs(turn.startedAt), Math.abs(turn.completedAt)) < 100_000_000_000) duration *= 1000;
+function activityTimestamp(value, milliseconds = false) {
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return milliseconds || value >= 100_000_000_000 ? value : value * 1000;
+}
+function activityPresentation(turn, running, now = Date.now()) {
+  const final = (turn.items || []).findLast(item => item.type === "agentMessage" && item.phase === "final_answer"
+    && item.delivery !== "async" && item.requestUserInputAsync == null && textContent(item).trim());
+  const started = activityTimestamp(turn.turnStartedAtMs, true) ?? activityTimestamp(turn.startedAt);
+  const live = running && !final;
+  let duration = null;
+  if (turn.status !== "interrupted") {
+    if (live && started != null) duration = Math.max(now - started, 0);
+    else if (!live && Number.isFinite(turn.durationMs) && turn.durationMs >= 0) duration = turn.durationMs;
+    else if (!live && started != null) {
+      const completed = activityTimestamp(turn.turnCompletedAtMs, true) ?? activityTimestamp(turn.completedAt)
+        ?? activityTimestamp(final?.startedAtMs ?? final?.sentAtMs ?? final?.messageMetadata?.sentAtMs, true);
+      if (completed != null && completed >= started) duration = completed - started;
+    }
   }
-  if (duration == null) return "工作过程";
-  if (duration < 1000) return "用时 <1秒";
-  const seconds = Math.floor(duration / 1000), minutes = Math.floor(seconds / 60);
-  return `用时 ${minutes ? `${minutes}分钟` : ""}${seconds % 60 || !minutes ? `${minutes ? " " : ""}${seconds % 60}秒` : ""}`;
+  if (duration == null) return { text: "活动", ticking: false, live };
+  const prefix = live ? "已处理" : "用时";
+  if (duration < 1000) return { text: `${prefix} <1秒`, ticking: live, live };
+  const seconds = Math.floor(duration / 1000), minutes = Math.floor(seconds / 60), hours = Math.floor(minutes / 60);
+  const time = `${hours ? `${hours}小时` : ""}${minutes % 60 ? `${minutes % 60}分` : ""}${seconds % 60 || !minutes ? `${seconds % 60}秒` : ""}`;
+  return { text: `${prefix} ${time}`, ticking: live, live };
+}
+function updateActivitySummary(activity) {
+  const presentation = activityPresentation(activity.turn, activity.running);
+  activity.ticking = activity.showSummary && presentation.ticking;
+  activity.summary.setAttribute("aria-label", `${presentation.text}，${activity.workCount} 条记录${activity.running ? "，仍在处理" : ""}`);
+  activity.summary.title = presentation.text;
+  if (activity.label.textContent !== presentation.text) activity.label.textContent = presentation.text;
+}
+function stopActivityTimer() {
+  clearInterval(activityTimer); activityTimer = null;
+}
+function syncActivityTimer() {
+  if (pageLeaving || document.hidden || !session) { stopActivityTimer(); return; }
+  let ticking = false;
+  for (const activity of renderedActivities.values()) {
+    if (!activity.node.isConnected || !activity.showSummary) continue;
+    updateActivitySummary(activity);
+    ticking ||= activity.ticking;
+  }
+  if (!ticking) stopActivityTimer();
+  else if (activityTimer == null) activityTimer = setInterval(syncActivityTimer, 1000);
 }
 function workGroupSummary(items, running = false) {
   const commands = items.filter(item => item.type === "commandExecution" && !skillReadInfo(item));
@@ -3473,12 +3664,14 @@ function workGroupSummary(items, running = false) {
   const integrations = names.length > 0 && !names.includes("浏览器");
   const edited = changes.length ? "编辑了多个文件" : "";
   let text = `${name ? `已使用 ${name}${integrations ? " 集成" : ""}` : ""}${searches.length ? "搜索了网页" : ""}${edited}${commands.length ? "运行了命令" : ""}` || "已完成操作";
+  let currentTool = null;
   if (running) {
-    const current = [...items].reverse().find(item => ["inProgress", "running"].includes(item.status));
+    const current = items.findLast(item => item.type !== "reasoning" && ["inProgress", "running"].includes(item.status));
+    if (current && tools.includes(current)) currentTool = genericToolPresentation(current);
     text = current?.type === "commandExecution" && !skillReadInfo(current) ? "正在运行命令"
       : current?.type === "fileChange" ? "正在修改文件"
       : current?.type === "webSearch" ? "正在搜索网页"
-      : current && tools.includes(current) ? `正在使用 ${toolName(current)}` : "正在执行操作";
+      : currentTool?.description || "正在执行操作";
   }
   const failed = items.filter(item => item.status === "failed"
     || item.type === "commandExecution" && item.exitCode != null && item.exitCode !== 0).length;
@@ -3491,8 +3684,8 @@ function workGroupSummary(items, running = false) {
   ].filter(Boolean);
   return {
     text, description: counts.join("，"),
-    icon: names.length === 1 && ["Chrome", "Edge"].includes(name) || !tools.length && searches.length
-      ? "globe" : tools.length ? "tools" : changes.length ? "fileChange" : "terminal"
+    icon: currentTool?.icon || (names.length === 1 && ["Chrome", "Edge"].includes(name) || !tools.length && searches.length
+      ? "globe" : tools.length ? "tools" : changes.length ? "fileChange" : "terminal")
   };
 }
 function renderCommandGroup(items, previous, renderMessage, running = false) {
@@ -3554,8 +3747,7 @@ function renderCommandGroup(items, previous, renderMessage, running = false) {
   group.setAttribute("aria-busy", String(active));
   state.summary.setAttribute("aria-label", `${presentation.text}，${presentation.description}`);
   state.summary.title = state.summary.getAttribute("aria-label");
-  state.visual.replaceChildren(active ? element("span", "spinner")
-    : icon(presentation.icon));
+  state.visual.replaceChildren(icon(presentation.icon));
   state.title.className = `command-group-title${active ? " working-label" : ""}`;
   state.title.textContent = presentation.text;
   state.title.setAttribute("role", "status");
@@ -3564,7 +3756,7 @@ function renderCommandGroup(items, previous, renderMessage, running = false) {
   else state.clearBody();
   return group;
 }
-function renderActivity(turn, work, running, collapsible, renderMessage, useDuration = true) {
+function renderActivity(turn, work, running, collapsible, renderMessage, showSummary = true) {
   const key = `${turn.id}:${work[0].id}`;
   let activity = renderedActivities.get(key);
   if (!activity) {
@@ -3584,17 +3776,19 @@ function renderActivity(turn, work, running, collapsible, renderMessage, useDura
   }
   const { node, summary, state, label, body } = activity;
   node.dataset.activityKey = key;
+  activity.turn = turn; activity.running = running; activity.workCount = work.length; activity.showSummary = showSummary;
+  collapsible &&= showSummary;
   activity.collapsible = collapsible;
   node.classList.toggle("collapsible", collapsible);
+  node.classList.toggle("activity-continuation", !showSummary);
   const open = collapsible ? activity.manualOpen ?? false : true;
   if (node.open !== open) node.open = open;
   summary.className = `activity-summary${collapsible ? "" : " uncollapsible"}`;
-  const text = activityLabel(turn, useDuration);
-  summary.setAttribute("aria-label", `${text}，${work.length} 条记录${running ? "，仍在处理" : ""}`);
+  summary.hidden = !showSummary;
   summary.removeAttribute("role");
   state.className = "activity-complete";
   label.className = "";
-  if (label.textContent !== text) label.textContent = text;
+  updateActivitySummary(activity);
   if (node.open) {
     const children = [], commandKeys = new Set(), imageKeys = new Set();
     const visibleWork = work.filter(item => !["agentMessage", "plan"].includes(item.type) || textContent(item).trim());
@@ -3698,8 +3892,8 @@ function finishQueueDrag({ commit = false, render = true } = {}) {
   document.removeEventListener("pointermove", drag.move);
   document.removeEventListener("pointerup", drag.up);
   document.removeEventListener("pointercancel", drag.cancel);
-  drag.handle.removeEventListener("lostpointercapture", drag.cancel);
-  if (drag.handle.hasPointerCapture?.(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId);
+  drag.queue.removeEventListener("lostpointercapture", drag.cancel);
+  if (drag.queue.hasPointerCapture?.(drag.pointerId)) drag.queue.releasePointerCapture(drag.pointerId);
   drag.row.classList.remove("queued-dragging");
   drag.row.removeAttribute("aria-grabbed");
   drag.queue.classList.remove("queue-reordering");
@@ -3767,14 +3961,14 @@ function beginQueueDrag(event, handle, row, queue, messageId) {
   };
   drag.up = up => { if (up.pointerId === drag.pointerId) finishQueueDrag({ commit: true }); };
   drag.cancel = cancel => {
-    if (cancel.pointerId !== drag.pointerId || cancel.type === "lostpointercapture" && cancel.target !== handle) return;
+    if (cancel.pointerId !== drag.pointerId || cancel.type === "lostpointercapture" && cancel.target !== queue) return;
     finishQueueDrag({ commit: cancel.type === "lostpointercapture" && cancel.buttons === 0 });
   };
   document.addEventListener("pointermove", drag.move, { passive: false });
   document.addEventListener("pointerup", drag.up);
   document.addEventListener("pointercancel", drag.cancel);
-  handle.addEventListener("lostpointercapture", drag.cancel);
-  try { handle.setPointerCapture(event.pointerId); } catch {}
+  queue.addEventListener("lostpointercapture", drag.cancel);
+  try { queue.setPointerCapture(event.pointerId); } catch {}
 }
 function applyQueueSnapshot(id, messages, edits) {
   if (id !== selectedId || !Array.isArray(messages)) return false;
@@ -3837,14 +4031,19 @@ function renderQueuedMessages(messages) {
     row.dataset.messageId = messageId || "";
     row.setAttribute("role", "listitem");
     const key = `${threadId}:${messageId}`;
-    const queueIcon = button("", "长按拖动调整排队顺序", event => event.preventDefault(), "queued-message-icon queued-drag-handle");
-    queueIcon.title = "长按并上下拖动排序，也可使用上下方向键";
+    const queueIcon = button("", "拖动调整排队顺序", event => event.preventDefault(), "queued-message-icon queued-drag-handle");
+    queueIcon.title = "拖动消息或左侧手柄排序；手机请长按手柄，也可使用上下方向键";
     queueIcon.setAttribute("aria-keyshortcuts", "ArrowUp ArrowDown");
     queueIcon.disabled = !queueReorderAvailable();
+    row.dataset.reorderable = String(!queueIcon.disabled);
     queueIcon.append(icon("queue"));
     queueIcon.onpointerdown = event => beginQueueDrag(event, queueIcon, row, queue, messageId);
     queueIcon.oncontextmenu = event => { event.preventDefault(); event.stopPropagation(); };
     queueIcon.ondragstart = event => event.preventDefault();
+    row.onpointerdown = event => {
+      if (event.pointerType !== "mouse" || event.target.closest("button,a,input,textarea,select")) return;
+      beginQueueDrag(event, queueIcon, row, queue, messageId);
+    };
     queueIcon.onkeydown = event => {
       if (!["ArrowUp", "ArrowDown"].includes(event.key) || queueDrag || !queueReorderAvailable()) return;
       event.preventDefault();
@@ -3997,17 +4196,28 @@ async function beginQueuedMessageEdit(threadId, message) {
       || session?.readOnly || !connected || busy || stopping || pending || compactionLocked(threadId)
       || queuedActionBusy.has(`${threadId}:${messageId}`)) return;
   if (editingMessage || editingQueuedMessage) { $("#prompt").focus(); return; }
+  const version = selectionVersion;
+  let attachments;
+  busy = true; updateComposer();
+  try { attachments = await attachmentsFromQueuedMessage(message); }
+  catch (error) { notice(error.message || "无法读取排队消息的图片，请刷新后重试", true); return; }
+  finally { busy = false; updateComposer(); }
+  if (selectionVersion !== version || selectedId !== threadId || thread?.id !== threadId
+      || editingMessage || editingQueuedMessage || pending || !connected || session?.readOnly
+      || compactionLocked(threadId)) return;
   rememberDraft();
-  const attachments = attachmentsFromRemoteImages(message.remoteImages);
   const originalImageSources = attachments.map(attachment => attachment.source);
-  const imageRemoval = session.capabilities?.queuedImageRemoval === true
-    && attachments.length === (Array.isArray(message.remoteImages) ? message.remoteImages.length : 0)
+  const imageCount = Array.isArray(message.context?.imageAttachments) ? message.context.imageAttachments.length
+    : Array.isArray(message.remoteImages) ? message.remoteImages.length : 0;
+  const imageRemoval = (session.capabilities?.queuedImageRemoval === true || session.capabilities?.queuedImageEditing === true)
+    && attachments.length === imageCount
     && validQueuedImageSources(originalImageSources);
+  const imageEditing = imageRemoval && session.capabilities?.queuedImageEditing === true;
   const edit = {
     threadId, editId: randomId(), deviceId: session.device.id, state: "starting",
     message: { id: message.id, clientUserMessageId: message.clientUserMessageId, createdAt: message.createdAt },
     originalText: queueMessageText(message), text: queueMessageText(message),
-    attachments, originalImageSources, imageRemoval,
+    attachments, originalImageSources, imageRemoval, imageEditing,
     backup: snapshotDraft(), model: selectedModel, effort: selectedEffort
   };
   queuedEdits.set(threadId, edit);
@@ -4068,7 +4278,7 @@ function completeQueuedEditAction(action, payload, result, readVersion) {
       $("#prompt").value = edit.text;
       selectedSkills = []; selectedModel = selectedEffort = "";
       setComposerAttachments(edit.attachments || [],
-        { readOnly: true, removableRemote: edit.imageRemoval === true });
+        { readOnly: edit.imageEditing !== true, removableRemote: edit.imageRemoval === true });
       renderSelectedSkills();
     }
   } else finishQueuedMessageEdit(edit);
@@ -4082,10 +4292,18 @@ async function submitQueuedMessageEdit(cancel = false) {
   if (!edit || edit.state !== "editing" || busy || stopping || pending || session?.readOnly || !connected
       || edit.threadId !== selectedId || thread?.id !== selectedId || compactionLocked()) return;
   const prompt = $("#prompt").value.trim();
-  if (!cancel && !prompt) { notice("队列消息不能为空", true); return; }
-  rememberQueuedMessageEdit();
-  try { persistQueuedEdits(true); }
-  catch (error) { notice(error.message, true); return; }
+  if (!cancel && composerAttachmentsLoading()) { notice("图片正在读取，请稍后保存"); return; }
+  if (!cancel && !prompt && !composerHasAttachments()) { notice("请输入消息或保留至少一张图片", true); return; }
+  const images = edit.imageEditing ? composerAttachmentsPayload() : [];
+  if (!cancel && images.length && session.capabilities?.queuedImageEditing !== true) {
+    notice("当前运行的服务尚不支持编辑队列图片，修改已保留，请更新程序后再保存。", true);
+    return;
+  }
+  if (!cancel) {
+    rememberQueuedMessageEdit();
+    try { persistQueuedEdits(true); }
+    catch (error) { notice(error.message, true); return; }
+  }
   const { threadId, message } = edit, messageId = message.id;
   const key = `${threadId}:${messageId}`, readVersion = queueVersion;
   if (queuedActionBusy.has(key)) return;
@@ -4097,7 +4315,8 @@ async function submitQueuedMessageEdit(cancel = false) {
     editId: edit.editId,
     ...(!cancel ? {
       prompt,
-      ...(edit.imageRemoval ? { retainedImageSources: composerRemoteAttachmentSources() } : {})
+      ...(edit.imageRemoval ? { retainedImageSources: composerRemoteAttachmentSources() } : {}),
+      ...(images.length ? { images } : {})
     } : {})
   };
   try {
@@ -4215,7 +4434,8 @@ function renderMessages(keepScroll = true) {
       load.dataset.historyPage = "older";
       items.push(load);
     }
-    const turnItems = turn.items || [], finalIndex = finalMessageIndex(turn), turnRunning = turn.status === "inProgress" && isActiveThread();
+    const turnItems = turn.items || [], finalIndex = finalMessageIndex(turn),
+      turnRunning = turn === sorted.at(-1) && turn.status === "inProgress" && isActiveThread();
     for (const item of turnItems) itemKeys.add(`${turn.id}:${item.id}`);
     const renderMessage = (item, inActivity = false) => {
       const key = `${turn.id}:${item.id}`, cached = renderedItems.get(key);
@@ -4243,13 +4463,12 @@ function renderMessages(keepScroll = true) {
       return node;
     };
     let work = [];
+    const content = [];
     const flushActivity = (beforeUser = false) => {
       if (!work.length) return;
-      const running = !beforeUser && turnRunning && work.at(-1) === turnItems.at(-1);
       const collapsible = beforeUser || finalIndex >= 0 && turn.status !== "interrupted" && turnItems[finalIndex].phase !== "commentary"
         && (turn.status !== "inProgress" || turnItems[finalIndex].phase === "final_answer");
-      const activity = renderActivity(turn, work, running, collapsible, renderMessage, !beforeUser);
-      activityKeys.add(activity.dataset.activityKey); items.push(activity);
+      content.push({ work, collapsible });
       work = [];
     };
     for (let index = 0; index < turnItems.length; index++) {
@@ -4259,12 +4478,21 @@ function renderMessages(keepScroll = true) {
       if (item.type === "reasoning" && ![item.summary, item.content].flat().some(part =>
         String(typeof part === "string" ? part : part?.text || "").trim())
           && !(turnRunning && index === turnItems.length - 1)) continue;
+      if (["agentMessage", "plan"].includes(item.type) && !textContent(item).trim()) continue;
       if (item.type === "userMessage" || transcriptEventTypes.has(item.type)) {
-        flushActivity(true); items.push(renderMessage(item));
+        flushActivity(true); content.push({ item });
       }
       else work.push(item);
     }
     flushActivity();
+    const activities = content.filter(part => part.work);
+    const live = activityPresentation(turn, turnRunning).live;
+    const header = live ? activities[0] : activities.at(-1);
+    for (const part of content) {
+      if (part.item) { items.push(renderMessage(part.item)); continue; }
+      const activity = renderActivity(turn, part.work, turnRunning, part.collapsible, renderMessage, part === header);
+      activityKeys.add(activity.dataset.activityKey); items.push(activity);
+    }
     if (finalIndex >= 0) items.push(renderMessage(turnItems[finalIndex]));
     if (finalIndex >= 0 && (turn.status !== "inProgress" || turnItems[finalIndex].phase === "final_answer")) {
       const editedFiles = renderEditedFiles(turn, group.querySelector(":scope > .edited-files-card"));
@@ -4280,13 +4508,14 @@ function renderMessages(keepScroll = true) {
     reconcileChildren(group, items); children.push(group);
   }
   if (!sorted.length) children.push(selectedId && !historyInitialized ? historyPlaceholder()
-    : element("div", "empty-conversation", creating ? "选择项目并发送第一条消息。" : "此会话暂无消息。"));
+    : element("div", "empty-conversation", creating ? "发送第一条消息，开始新会话。" : "此会话暂无消息。"));
   reconcileChildren(root, children);
   for (const key of renderedItems.keys()) if (!itemKeys.has(key)) {
     renderedItems.get(key).node.messageActionBinding?.dispose(); renderedItems.delete(key);
   }
   for (const key of renderedTurns.keys()) if (!turnKeys.has(key)) renderedTurns.delete(key);
   for (const key of renderedActivities.keys()) if (!activityKeys.has(key)) renderedActivities.delete(key);
+  syncActivityTimer();
   syncHistoryButtons();
   if (keepScroll && bottom) root.scrollTop = root.scrollHeight;
   else {
@@ -4359,7 +4588,7 @@ function syncThreadHash(id) {
 }
 function welcomeNode() {
   const node = element("div", "welcome");
-  node.append(element("h1", "", "继续本机的工作"), element("p", "", "选择左侧会话，或在已有项目中新建会话。"), element("small", "", "消息、审批和执行状态与 Codex 桌面共享。"));
+  node.append(element("h1", "", "继续本机的工作"), element("p", "", "选择左侧会话，或新建会话。"), element("small", "", "消息、审批和执行状态与 Codex 桌面共享。"));
   return node;
 }
 function showWelcome() {
@@ -4512,8 +4741,11 @@ function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = nul
     for (const item of previous.values()) if ((itemVersions.get(`${snapshot.id}:${item.id}`) || 0) > readVersion) items.push(item);
   }
   const newer = (turnVersions.get(snapshot.id) || 0) > readVersion;
+  const timing = Object.fromEntries(["startedAt", "completedAt", "durationMs", "turnStartedAtMs", "turnCompletedAtMs"]
+    .filter(field => Number.isFinite(current[field]) && (newer || !Number.isFinite(snapshot[field])))
+    .map(field => [field, current[field]]));
   return enrichTurnTranscriptEvents({
-    ...current, ...snapshot, ...pagination, items,
+    ...current, ...snapshot, ...pagination, ...timing, items,
     ...(newer ? { status: current.status, error: current.error } : {})
   });
 }
@@ -5124,18 +5356,35 @@ function updateComposer() {
   renderMessageEditBanner();
   updateScrollControl();
   const active = isActiveThread(), prompt = composerPrompt(), hasAttachments = composerHasAttachments(), send = $("#send");
+  const unsupportedProjectless = creating && !$("#project-select").value && session.capabilities?.projectlessCreation !== true;
   const compaction = currentCompaction(), compacting = compactionLocked();
   const editing = !!editingMessage || !!editingQueuedMessage;
-  const unsupportedImages = !editing && hasAttachments && session.capabilities?.imageInput !== true;
+  const unsupportedImages = !editing && hasAttachments && session.capabilities?.imageInput !== true
+    || !!editingQueuedMessage?.imageEditing && composerAttachmentsPayload().length > 0
+      && session.capabilities?.queuedImageEditing !== true;
+  const queueImageNote = editingQueuedMessage?.state === "editing" && !editingQueuedMessage.imageEditing
+    ? editingQueuedMessage.imageRemoval
+      ? "当前运行的服务仅支持删除原图；更新程序后可添加图片。"
+      : session.capabilities?.queuedImageEditing === true
+        ? "部分原图片无法安全编辑，本次仅修改文字，原图片会保留。"
+        : "当前运行的服务仅支持修改文字，原图片会保留；更新程序后可增删图片。"
+    : "";
   let attachmentNote = $("#attachment-support-note");
   if (!attachmentNote && $("#composer-attachments")) {
     attachmentNote = element("small", "attachment-support-note", "当前运行的服务尚不支持图片发送，请更新程序后再发送。");
     attachmentNote.id = "attachment-support-note";
     $("#composer-attachments").after(attachmentNote);
   }
-  if (attachmentNote) attachmentNote.hidden = !unsupportedImages;
+  if (attachmentNote) {
+    attachmentNote.textContent = unsupportedImages
+      ? editingQueuedMessage
+        ? "当前运行的服务尚不支持编辑队列图片，修改已保留，请更新程序后再保存。"
+        : "当前运行的服务尚不支持图片发送，请更新程序后再发送。"
+      : queueImageNote;
+    attachmentNote.hidden = !unsupportedImages && !queueImageNote;
+  }
   setComposerAttachmentsDisabled(session.readOnly || compacting || busy || stopping || !connected
-    || editingQueuedMessage?.state === "starting" || (!creating && !selectedId));
+    || editing && !!pending || editingQueuedMessage?.state === "starting" || (!creating && !selectedId));
   const action = editingQueuedMessage ? "save"
     : !editing && active && ((!prompt && !hasAttachments) || pending) && selectedId ? "stop" : "send";
   if (send.dataset.action !== action) {
@@ -5145,8 +5394,9 @@ function updateComposer() {
   send.setAttribute("aria-label", editingQueuedMessage ? "保存队列消息修改" : editingMessage ? "编辑并再次发送" : action === "stop" ? "停止生成" : "发送消息");
   send.title = editingQueuedMessage ? "保存队列消息修改" : editingMessage ? "编辑并再次发送" : action === "stop" ? "停止生成" : active ? "发送补充消息" : "发送消息";
   if (unsupportedImages) send.title = "当前服务版本尚不支持图片发送，请先更新程序";
+  if (unsupportedProjectless) send.title = "当前服务版本尚不支持无项目会话，请先更新程序或选择已有项目";
   send.setAttribute("aria-busy", String(busy || stopping || compacting));
-  send.disabled = busy || stopping || compacting || !connected || session.readOnly || unsupportedImages
+  send.disabled = busy || stopping || compacting || !connected || session.readOnly || unsupportedImages || unsupportedProjectless || composerAttachmentsLoading()
     || (action !== "stop" && (!!pending || !prompt && !hasAttachments))
     || (!creating && (!selectedId || thread?.id !== selectedId));
   if (editingMessage && active || editingQueuedMessage?.state === "starting") send.disabled = true;
@@ -5155,7 +5405,7 @@ function updateComposer() {
   $("#new-chat").disabled = session.readOnly || !connected;
   $("#model-button").disabled = session.readOnly || compacting || editing;
   $("#sidebar-view-toggle").disabled = sidebarBusy || !sidebar;
-  $("#project-select").disabled = session.readOnly || !sidebar?.projects.length;
+  syncNewChatProjectPicker();
   for (const control of document.querySelectorAll(".row-menu-button")) control.disabled = session.readOnly || sidebarBusy || !connected;
   fitPopup();
   $("#prompt").placeholder = session.readOnly ? "当前设备为只读模式" : compacting ? "上下文压缩完成后可继续输入"
@@ -5188,6 +5438,8 @@ function updateComposer() {
   if (session.readOnly) closeComposerMenus();
   refitComposerMenus();
   $("#pending-area").replaceChildren();
+  if (unsupportedProjectless && !session.readOnly) $("#pending-area").append(element("div", "pending-banner",
+    "当前运行的服务尚不支持无项目会话；更新程序后可直接发送，或先选择已有项目。"));
   if (pending) {
     const unavailable = pending.invalid || (pending.deviceId && pending.deviceId !== session.device.id);
     const box = element("div", "pending-banner", unavailable ? "回执损坏或属于旧授权。请检查原生会话后人工解除锁定，不会自动重发。"
@@ -5228,7 +5480,10 @@ async function sendMessage() {
     ...(selectedSkills.length ? { skills: selectedSkills.map(({ name, path }) => ({ name, path })) } : {}),
     ...(images.length ? { images } : {})
   };
-  if (creating && !payload.projectId) { notice("请选择项目", true); return; }
+  if (creating && !payload.projectId && session.capabilities?.projectlessCreation !== true) {
+    notice("当前服务版本尚不支持无项目会话，草稿已保留，请先更新程序或选择已有项目。", true);
+    return;
+  }
   busy = true; updateComposer();
   try {
     const result = await mutate(wasCreating ? "create" : "send", payload, { reliable: true });
@@ -5244,7 +5499,7 @@ async function sendMessage() {
         else await selectThread(result.threadId);
       }
       else await reloadThread();
-    } else notice(wasCreating ? "会话已在原项目创建，当前项目未被切换。" : "消息已发送到原会话，当前会话未被切换。");
+    } else notice(wasCreating ? "会话已创建，当前页面未被切换。" : "消息已发送到原会话，当前会话未被切换。");
     await loadSidebar();
   } catch (error) { notice(error.message, true); }
   finally { busy = false; updateComposer(); }
@@ -5475,11 +5730,16 @@ function receive(event) {
       let turn = turns.get(turnId);
       if (!turn) { turn = { id: turnId, status: "inProgress", items: [] }; turns.set(turnId, turn); }
       if (["turn/started", "turn/completed"].includes(event.method)) {
+        const timing = Object.fromEntries(["startedAt", "completedAt", "durationMs", "turnStartedAtMs", "turnCompletedAtMs"]
+          .filter(field => Number.isFinite(turn[field])).map(field => [field, turn[field]]));
         const items = new Map((turn.items || []).map(item => [item.id, item]));
         for (const item of params.turn?.items || []) {
           items.set(item.id, item); itemVersions.set(`${turnId}:${item.id}`, version);
         }
         Object.assign(turn, params.turn, { items: [...items.values()] });
+        for (const [field, value] of Object.entries(timing)) if (!Number.isFinite(turn[field])) turn[field] = value;
+        if (Number.isFinite(params.startedAtMs)) turn.turnStartedAtMs = params.startedAtMs;
+        if (Number.isFinite(params.completedAtMs)) turn.turnCompletedAtMs = params.completedAtMs;
         turn.status = event.method === "turn/started" ? "inProgress" : params.turn?.status || "completed";
         turnVersions.set(turnId, version);
         notifiedStatus = { type: event.method === "turn/started" ? "active" : "idle" }; ++statusVersion;
@@ -5494,8 +5754,11 @@ function receive(event) {
         const index = turn.items.findIndex(item => item.id === params.item.id);
         const previous = index >= 0 ? turn.items[index] : null;
         const item = { ...(previous?.messageMetadata ? { messageMetadata: previous.messageMetadata, sentAtMs: previous.sentAtMs } : {}),
+          ...(Number.isFinite(previous?.startedAtMs) ? { startedAtMs: previous.startedAtMs } : {}),
           ...params.item, ...(!params.item.status
           ? event.method === "item/completed" ? { status: "completed" } : event.method === "item/started" ? { status: "inProgress" } : {} : {}) };
+        if (Number.isFinite(params.startedAtMs)) item.startedAtMs = params.startedAtMs;
+        if (Number.isFinite(params.completedAtMs)) item.completedAtMs = params.completedAtMs;
         if (index < 0) turn.items.push(item); else turn.items[index] = item;
         itemVersions.set(`${turnId}:${item.id}`, version); partialItems.delete(`${turnId}:${item.id}`);
       }
@@ -5628,6 +5891,7 @@ function startConnectionPoll(deviceId) {
 }
 function suspendPage() {
   if (pageLeaving) return;
+  stopActivityTimer();
   finishQueueDrag();
   pageLeaving = true;
   stream?.close(); stream = null;
@@ -5663,6 +5927,7 @@ window.addEventListener("online", () => {
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
+    stopActivityTimer();
     finishQueueDrag();
     if (stream?.transport === "fallback" || !sharedEventsAvailable()) {
       stream?.close(); stream = null;
@@ -5671,6 +5936,7 @@ document.addEventListener("visibilitychange", () => {
     }
     return;
   }
+  syncActivityTimer();
   if (!pageLeaving && session) { ensureStream(); void refreshAll().catch(() => {}); }
 });
 window.addEventListener("pagehide", suspendPage);

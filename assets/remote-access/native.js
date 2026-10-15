@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 19) return;
+  if (window.__codexElvesRemoteAccess?.version === 22) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -208,10 +208,14 @@
     const pinnedSort = manager.storage.readValue("pinned-sidebar-sort-mode-v1") === "manual" ? "manual" : "updated_at";
     const chatSort = sharedSort == null ? sortMode(preferences.chatSortMode, preferences) : "updated_at";
     const projectSort = sharedSort == null ? sortMode(preferences.projectSortMode, preferences) : "updated_at";
-    const observePage = page => {
-      for (const thread of array(page.data)) {
-        if (thread.threadSource === "subagent" || thread.source?.subAgent) continue;
-        nativeCatalog.set(thread.id, summary(thread));
+    const observeThreads = threads => {
+      for (const thread of array(threads)) {
+        const id = thread.conversationId || thread.id;
+        if (thread.threadSource === "subagent" || thread.source?.subAgent || thread.source?.subagent) {
+          nativeCatalog.delete(id);
+          continue;
+        }
+        nativeCatalog.set(id, summary(thread));
       }
     };
     if (!catalogLoaded) {
@@ -220,7 +224,7 @@
         const cursors = new Set();
         do {
           const page = await manager.requestClient.sendRequest("thread/list", { cursor, limit: 100, sortKey: "updated_at", archived: false });
-          observePage(page);
+          observeThreads(page.data);
           cursor = page.nextCursor || null;
           if (cursor && cursors.has(cursor)) throw failure(503, "原生会话目录分页游标重复");
           if (cursor) cursors.add(cursor);
@@ -229,9 +233,10 @@
       })().finally(() => { catalogLoading = null; });
       await catalogLoading;
     } else {
-      observePage(await manager.requestClient.sendRequest("thread/list", { cursor: null, limit: 100, sortKey: "updated_at", archived: false }));
+      const page = await manager.requestClient.sendRequest("thread/list", { cursor: null, limit: 100, sortKey: "updated_at", archived: false });
+      observeThreads(page.data);
     }
-    for (const thread of array(manager.getRecentThreadSummaries())) nativeCatalog.set(thread.conversationId, summary(thread));
+    observeThreads(manager.getRecentThreadSummaries());
     const pins = await manager.runtime.pinnedThreads();
     if (!pins) throw failure(503, "当前 Codex 版本的原生置顶服务不可用");
     const pinnedState = await pins.list({ hostId: "local", useAppServerPins: true });
@@ -978,9 +983,14 @@
   }
   function rewriteQueuedSubmissionInput(input, originalText, prompt) {
     if (!Array.isArray(input)) throw failure(409, "此队列消息缺少可安全编辑的原生输入");
+    if (prompt === originalText) return input;
     const rewritten = input.map(item => rewriteQueuedTextItem(item, originalText, prompt));
     const candidates = rewritten.flatMap((item, index) => item == null ? [] : [index]);
-    if (candidates.length !== 1) throw failure(409, "无法唯一定位此队列消息的原生文本，请在 Codex 桌面编辑");
+    if (candidates.length === 0 && originalText === "" && prompt
+        && !input.some(item => item?.type === "text"))
+      return [{ type: "text", text: prompt, text_elements: [] }, ...input];
+    if (candidates.length !== 1)
+      throw failure(409, "无法唯一定位此队列消息的原生文本，请在 Codex 桌面编辑");
     return input.map((item, index) => index === candidates[0] ? rewritten[index] : item);
   }
   function validateQueuedImageSources(value, field) {
@@ -994,14 +1004,24 @@
   function hexBytes(bytes) {
     return [...bytes].map(byte => byte.toString(16).padStart(2, "0")).join("");
   }
+  const queuedInlineImageMaxBytes = 25 * 1024 * 1024;
+  const queuedInlineImageMaxSourceLength = Math.ceil(queuedInlineImageMaxBytes / 3) * 4 + 64;
   async function queuedImageSourceReference(source) {
-    if (typeof source !== "string" || !source || source.length > 32767)
+    if (typeof source !== "string" || !source)
       throw failure(409, "队列图片 source 无效，请刷新后重试");
-    if (!source.toLowerCase().startsWith("data:image/")) return source;
+    if (!source.toLowerCase().startsWith("data:image/")) {
+      if (source.length > 32767 || /[\u0000-\u001f\u007f]/u.test(source))
+        throw failure(409, "队列图片 source 无效，请刷新后重试");
+      return source;
+    }
+    if (source.length > queuedInlineImageMaxSourceLength)
+      throw failure(409, "队列图片内容过大，请刷新后重试");
     const match = /^data:image\/(?:png|jpeg|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$/iu.exec(source);
     if (!match) throw failure(409, "队列图片内容无效，请刷新后重试");
     let binary;
     try { binary = atob(match[1]); } catch { throw failure(409, "队列图片内容无效，请刷新后重试"); }
+    if (!binary.length || binary.length > queuedInlineImageMaxBytes)
+      throw failure(409, "队列图片内容过大，请刷新后重试");
     const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     return `inline:${hexBytes(new Uint8Array(digest))}`;
@@ -1060,19 +1080,71 @@
     const removedIndexes = new Set(plan
       .filter(record => !retained.has(record.reference))
       .map(record => record.index));
-    const imageAttachments = message.context.imageAttachments
+    const imageAttachments = array(message.context?.imageAttachments)
       .filter((_, index) => !removedIndexes.has(index));
     return {
       ...message,
       context: { ...message.context, imageAttachments }
     };
   }
-  function rewriteQueuedInputImages(input, plan, retainedSources) {
+  function appendQueuedMessageImages(message, images) {
+    if (!images.length) return message;
+    return {
+      ...message,
+      context: {
+        ...message.context,
+        imageAttachments: [
+          ...array(message.context?.imageAttachments),
+          ...images
+        ]
+      }
+    };
+  }
+  function rewriteQueuedInputImages(input, plan, retainedSources, addedInputs = []) {
     const retained = new Set(retainedSources);
     const removableInputs = new Map(plan.map(record => [record.inputIndex, record.reference]));
-    return input.filter((_, index) => {
+    const rewritten = input.filter((_, index) => {
       const reference = removableInputs.get(index);
       return reference == null || retained.has(reference);
+    });
+    if (!addedInputs.length) return rewritten;
+    const retainedInputIndexes = plan
+      .filter(record => retained.has(record.reference))
+      .map(record => record.inputIndex);
+    const insertionAfterInputIndex = retainedInputIndexes.length
+      ? Math.max(...retainedInputIndexes)
+      : plan.length ? Math.min(...plan.map(record => record.inputIndex)) - 1 : input.length - 1;
+    const insertionIndex = input.slice(0, insertionAfterInputIndex + 1)
+      .filter((_, index) => {
+        const reference = removableInputs.get(index);
+        return reference == null || retained.has(reference);
+      }).length;
+    return [
+      ...rewritten.slice(0, insertionIndex),
+      ...addedInputs,
+      ...rewritten.slice(insertionIndex)
+    ];
+  }
+  async function queuedAddedImages(attachments, existingSources) {
+    const references = [];
+    const seen = new Set(existingSources);
+    for (const attachment of attachments) {
+      const reference = await queuedImageSourceReference(attachment.src);
+      if (seen.has(reference))
+        throw failure(409, "新增图片与原有图片或其他新增图片重复");
+      seen.add(reference);
+      references.push(reference);
+    }
+    return { attachments, inputs: remoteImageInputs(attachments), references };
+  }
+  function queuedAddedImageFingerprint(additions) {
+    return additions.references.map((reference, index) => {
+      const attachment = additions.attachments[index];
+      return {
+        name: attachment.filename,
+        mediaType: attachment.src.slice(0, attachment.src.indexOf(",")).toLowerCase(),
+        reference
+      };
     });
   }
   function sameJsonValue(left, right) {
@@ -1198,6 +1270,7 @@
       beginResult: null,
       terminalAction: null,
       terminalPrompt: null,
+      terminalAddedImageFingerprint: null,
       terminalPromise: null,
       result: null
     };
@@ -1282,15 +1355,15 @@
     return await entry.beginPromise;
   }
   async function finishQueuedEdit(payload = {}, action) {
-    let threadId, editId, prompt = null, retainedImageSources = null;
+    let threadId, editId, prompt = null, retainedImageSources = null, addedImages = null;
     try {
       threadId = requiredId(payload.threadId);
       editId = requiredId(payload.editId);
       if (action === "commit") {
         prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
-        if (!prompt) throw failure(400, "队列消息不能为空");
         retainedImageSources = payload.retainedImageSources == null
           ? null : validateQueuedImageSources(payload.retainedImageSources, "队列保留图片");
+        addedImages = payload.images == null ? null : remoteImageAttachments(payload);
       }
     } catch (error) {
       return queuedEditFailure(error, action === "commit" ? "保存队列消息失败" : "取消队列消息编辑失败");
@@ -1306,10 +1379,35 @@
       if (!entry)
         return { ok: false, code: 409, message: "队列消息未进入可编辑状态" };
     }
+    if (action === "commit"
+        && (retainedImageSources != null || addedImages != null)
+        && entry.expectedImageSources == null)
+      return { ok: false, code: 409, message: "本次队列编辑未建立完整图片基线，请取消后重新编辑" };
+    if (retainedImageSources != null)
+      validateRetainedQueuedImages(entry.expectedImageSources, retainedImageSources);
+    const effectiveRetainedSources = retainedImageSources ?? entry.expectedImageSources ?? [];
+    if (action === "commit" && effectiveRetainedSources.length + (addedImages?.length || 0) > 4)
+      return { ok: false, code: 400, message: "每条消息最多保留或新增 4 张图片" };
+    if (action === "commit" && !prompt && !effectiveRetainedSources.length && !(addedImages?.length))
+      return { ok: false, code: 400, message: "队列消息不能为空" };
+    let addedImagePlan = null;
+    let addedImageFingerprint = null;
+    if (action === "commit" && (retainedImageSources != null || addedImages != null)) {
+      try {
+        addedImagePlan = await queuedAddedImages(
+          addedImages ?? [],
+          effectiveRetainedSources
+        );
+        addedImageFingerprint = addedImages == null ? null : queuedAddedImageFingerprint(addedImagePlan);
+      } catch (error) {
+        return queuedEditFailure(error, "保存队列消息失败");
+      }
+    }
     if (entry.terminalAction) {
       if (entry.terminalAction !== action
           || action === "commit" && (entry.terminalPrompt !== prompt
-            || !sameJsonValue(entry.terminalRetainedImageSources, retainedImageSources)))
+            || !sameJsonValue(entry.terminalRetainedImageSources, retainedImageSources)
+            || !sameJsonValue(entry.terminalAddedImageFingerprint ?? null, addedImageFingerprint)))
         return { ok: false, code: 409, message: "此编辑标识已用于另一项完成操作" };
       if (entry.terminalPromise) return await entry.terminalPromise;
       return entry.result
@@ -1320,16 +1418,15 @@
       return entry.result || { ok: false, outcomeUnknown: true, code: 503, message: "队列消息编辑结果未知，请刷新确认" };
     if (entry.state !== "editing" || !entry.token)
       return { ok: false, code: 409, message: "队列消息当前不在可保存或取消的编辑状态" };
-    if (retainedImageSources != null && entry.expectedImageSources == null)
-      return { ok: false, code: 409, message: "本次队列编辑未启用图片删除，请取消后重新编辑" };
-    if (retainedImageSources != null)
-      validateRetainedQueuedImages(entry.expectedImageSources, retainedImageSources);
     entry.terminalAction = action;
     entry.terminalPrompt = prompt;
     entry.terminalRetainedImageSources = retainedImageSources;
+    entry.terminalAddedImageFingerprint = addedImageFingerprint;
     entry.state = action === "commit" ? "committing" : "canceling";
     entry.terminalPromise = (async () => {
       let restoreStarted = false;
+      let expectedInput = null;
+      let expectedImageSources = null;
       try {
         messageActionManager();
         if (typeof manager.getTurnCoordinator !== "function")
@@ -1342,23 +1439,30 @@
         if (action === "commit") {
           let message = queuedMessageWithText(entry.token.message, prompt);
           let serverSubmission = null;
+          expectedImageSources = entry.expectedImageSources;
           if (entry.token.serverSubmission != null) {
-            let input = rewriteQueuedSubmissionInput(
-              entry.token.serverSubmission.input,
-              entry.originalText,
-              prompt
-            );
-            if (retainedImageSources != null) {
+            let input = entry.token.serverSubmission.input;
+            if (retainedImageSources != null || addedImages != null) {
               const plan = await buildQueuedImagePlan(
                 entry.token.message,
                 entry.token.serverSubmission.input,
                 entry.expectedImageSources
               );
-              input = rewriteQueuedInputImages(input, plan, retainedImageSources);
-              message = rewriteQueuedMessageImages(message, plan, retainedImageSources);
+              const additions = addedImagePlan;
+              input = rewriteQueuedInputImages(
+                input,
+                plan,
+                effectiveRetainedSources,
+                additions.inputs
+              );
+              message = rewriteQueuedMessageImages(message, plan, effectiveRetainedSources);
+              message = appendQueuedMessageImages(message, additions.attachments);
+              expectedImageSources = [...effectiveRetainedSources, ...additions.references];
             }
+            input = rewriteQueuedSubmissionInput(input, entry.originalText, prompt);
+            expectedInput = input;
             serverSubmission = { ...entry.token.serverSubmission, input };
-          } else if (retainedImageSources != null) {
+          } else if (retainedImageSources != null || addedImages != null) {
             throw failure(409, "此队列消息缺少可安全编辑的原生图片输入");
           }
           restoreToken = {
@@ -1378,11 +1482,18 @@
             || restoredMessage.createdAt !== entry.createdAt
             || queuedMessageText(restoredMessage) !== (action === "commit" ? prompt : entry.originalText))
           throw new Error("原生队列恢复后的消息身份或内容未确认");
-        if (action === "commit" && retainedImageSources != null) {
+        if (action === "commit" && expectedImageSources != null) {
           const restoredSources = (await queuedImageAttachmentRecords(restoredMessage))
             .map(record => record.reference);
-          if (!sameJsonValue(restoredSources, retainedImageSources))
+          if (!sameJsonValue(restoredSources, expectedImageSources))
             throw new Error("原生队列恢复后的图片未确认");
+          const submissions = (await readServerQueuedSubmissions(entry.threadId))
+            .filter(submission => submission?.id === entry.messageId);
+          if (submissions.length !== 1
+              || submissions[0].clientUserMessageId !== entry.clientUserMessageId
+              || !sameJsonValue(submissions[0].input, expectedInput))
+            throw new Error("原生队列恢复后的真实输入未确认");
+          await buildQueuedImagePlan(restoredMessage, submissions[0].input, expectedImageSources);
         }
         entry.state = action === "commit" ? "committed" : "canceled";
         entry.result = {
@@ -1406,6 +1517,7 @@
         entry.terminalAction = null;
         entry.terminalPrompt = null;
         entry.terminalRetainedImageSources = null;
+        entry.terminalAddedImageFingerprint = null;
         entry.state = "editing";
         entry.result = null;
         return queuedEditFailure(error, action === "commit" ? "保存队列消息失败" : "取消队列消息编辑失败");
@@ -1426,6 +1538,8 @@
       messageActionManager();
       const threadId = requiredId(payload.threadId);
       const messageId = requiredId(payload.messageId);
+      if (payload.images != null)
+        throw failure(409, "旧版队列编辑不支持新增图片，请刷新后重试");
       const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
       if (!prompt) throw failure(400, "队列消息不能为空");
       if (payload.retainedImageSources != null)
@@ -1568,14 +1682,17 @@
         message: error.message || "引导结果未确认，请查看原生队列，不要重复操作" };
     }
   }
-  async function skillCatalog(payload) {
-    let cwd;
-    if (payload.threadId) cwd = (await readThread(payload.threadId)).cwd;
-    else {
-      const project = (await state("local-projects") || {})[requiredId(payload.projectId)];
-      cwd = project?.rootPaths?.[0];
+  async function skillCatalog(payload, trustedCwd = null) {
+    let cwd = trustedCwd;
+    if (!cwd) {
+      if (payload.threadId) cwd = (await readThread(payload.threadId)).cwd;
+      else {
+        const projectId = requestedProjectId(payload.projectId);
+        if (projectId == null) cwd = (await nativeProjectlessWorkspace(null)).cwd;
+        else cwd = (await localProjectWorkspace(projectId)).cwd;
+      }
     }
-    if (!cwd) throw failure(400, "请先选择已有会话，或为新会话选择本机项目");
+    if (!cwd) throw failure(400, "未能确定 Skill 所属的本机工作目录");
     const result = await manager.requestClient.sendRequest("skills/list", { cwds: [cwd], forceReload: true });
     const skills = new Map();
     for (const entry of array(result.data)) {
@@ -1590,13 +1707,13 @@
     }
     return { ok: true, data: [...skills.values()] };
   }
-  async function skillInputs(payload) {
+  async function skillInputs(payload, cwd = null) {
     if (payload.skills == null) return [];
     if (!Array.isArray(payload.skills) || payload.skills.length > 16
         || payload.skills.some(skill => !skill || typeof skill.name !== "string" || typeof skill.path !== "string"))
       throw failure(400, "Skill 选择无效，最多选择 16 项");
     if (!payload.skills.length) return [];
-    const available = (await skillCatalog(payload)).data;
+    const available = (await skillCatalog(payload, cwd)).data;
     const selected = new Map();
     for (const skill of payload.skills) {
       const entry = available.find(item => item.name === skill.name && item.path === skill.path);
@@ -1605,6 +1722,8 @@
     }
     return [...selected.values()];
   }
+  const remoteInputImageMaxBytes = 5 * 1024 * 1024;
+  const remoteInputImageMaxSourceLength = Math.ceil(remoteInputImageMaxBytes / 3) * 4 + 64;
   const remoteImageDataPattern = /^data:image\/(?:png|jpeg|webp|gif);base64,(?=.+)(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
   function remoteImageAttachments(payload = {}) {
     if (payload.images == null) return [];
@@ -1614,9 +1733,10 @@
     return payload.images.map(image => {
       if (!image || typeof image.name !== "string" || !image.name.trim() || image.name.length > 255
           || !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(image.mime)
-          || typeof image.dataUrl !== "string" || !remoteImageDataPattern.test(image.dataUrl)
-          || !image.dataUrl.toLowerCase().startsWith(`data:${image.mime};base64,`)
-          || !Number.isSafeInteger(image.size) || image.size <= 0 || image.size > 5 * 1024 * 1024)
+          || !Number.isSafeInteger(image.size) || image.size <= 0 || image.size > remoteInputImageMaxBytes
+          || typeof image.dataUrl !== "string" || image.dataUrl.length > remoteInputImageMaxSourceLength
+          || !remoteImageDataPattern.test(image.dataUrl)
+          || !image.dataUrl.toLowerCase().startsWith(`data:${image.mime};base64,`))
         throw failure(400, "图片附件参数无效");
       total += image.size;
       if (total > 12 * 1024 * 1024) throw failure(413, "图片总大小不能超过 12 MiB");
@@ -1762,14 +1882,16 @@
       return { ok: false, code: error.code || 503, message: error.message || "加入原生队列失败" };
     }
   }
-  async function nativeCreationInputs() {
-    if (!appScope) discover();
-    if (!appScope) throw failure(503, "当前 Codex 版本的原生创建上下文不可用");
+  async function nativeCreationModule() {
     const resource = [...document.querySelectorAll('link[rel="modulepreload"]')].map(link => link.href)
       .concat(performance.getEntriesByType("resource").map(entry => entry.name))
       .find(name => /\/app-initial-[^/]+\.js$/.test(name));
     if (!resource || !resource.startsWith("app://-/")) throw failure(503, "未发现原生创建模块");
-    const module = await import(resource);
+    return await import(resource);
+  }
+  function nativeCreationProvider(module) {
+    if (!appScope) discover();
+    if (!appScope) throw failure(503, "当前 Codex 版本的原生创建上下文不可用");
     const factory = Object.values(module).find(value => typeof value === "function"
       && /requestClient:\w+\.get\(/.test(Function.prototype.toString.call(value))
       && /dynamicTools:new/.test(Function.prototype.toString.call(value))
@@ -1778,6 +1900,52 @@
     const provider = factory(appScope, "local");
     if (typeof provider?.readCreationInputs !== "function") throw failure(503, "原生创建输入不可用");
     return provider;
+  }
+  async function nativeCreationInputs() {
+    return nativeCreationProvider(await nativeCreationModule());
+  }
+  function requestedProjectId(value) {
+    if (value == null || value === "") return null;
+    if (typeof value !== "string" || !/^[a-zA-Z0-9_-]{1,120}$/.test(value))
+      throw failure(400, "项目 ID 无效");
+    return value;
+  }
+  async function localProjectWorkspace(projectId) {
+    const project = (await state("local-projects") || {})[projectId];
+    const workspaceRoots = project?.rootPaths;
+    if (!Array.isArray(workspaceRoots) || !workspaceRoots.length
+        || workspaceRoots.some(root => typeof root !== "string" || !root))
+      throw failure(400, "请选择现有本机项目");
+    return {
+      cwd: workspaceRoots[0],
+      workspaceRoots: [...workspaceRoots],
+      projectAssignment: { projectKind: "local", projectId }
+    };
+  }
+  async function nativeProjectlessWorkspace(prompt, module = null) {
+    const creationModule = module || await nativeCreationModule();
+    const resolver = Object.values(creationModule).find(value => typeof value === "function"
+      && /projectless-thread-cwd/.test(Function.prototype.toString.call(value))
+      && /projectlessOutputDirectory/.test(Function.prototype.toString.call(value))
+      && /workspaceRoots/.test(Function.prototype.toString.call(value)));
+    if (!resolver)
+      throw failure(503, "当前 Codex 版本不支持原生无项目会话，请在桌面新建会话");
+    let workspace;
+    try {
+      workspace = await resolver(["~"], { prompt: prompt ?? null });
+    } catch (error) {
+      throw failure(error?.code || 503, error?.message || "原生无项目工作目录准备失败");
+    }
+    if (!workspace || typeof workspace.cwd !== "string" || !workspace.cwd
+        || typeof workspace.projectlessOutputDirectory !== "string" || !workspace.projectlessOutputDirectory
+        || !Array.isArray(workspace.workspaceRoots) || !workspace.workspaceRoots.length
+        || workspace.workspaceRoots.some(root => typeof root !== "string" || !root))
+      throw failure(503, "原生无项目工作目录无效");
+    return {
+      cwd: workspace.cwd,
+      workspaceRoots: [...workspace.workspaceRoots],
+      projectlessOutputDirectory: workspace.projectlessOutputDirectory
+    };
   }
   async function call(action, payload = {}) {
     try {
@@ -1864,37 +2032,56 @@
           return { ok: true, threadId: id, result: result ?? null };
         }
         case "create": {
-          const projects = await state("local-projects") || {};
-          const project = projects[requiredId(payload.projectId)];
-          if (!project?.rootPaths?.length) throw failure(400, "请选择现有本机项目");
-          await validateReasoningEffort(payload.model, payload.reasoningEffort);
-          const provider = await nativeCreationInputs();
-          const skills = await skillInputs(payload);
-          const imageAttachments = remoteImageAttachments(payload);
-          const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
-          if (!prompt && !imageAttachments.length) throw failure(400, "消息不能为空");
-          const result = await manager.startConversation({
-            input: [
-              ...(prompt ? [{ type: "text", text: prompt, text_elements: [] }] : []),
-              ...remoteImageInputs(imageAttachments),
-              ...skills
-            ],
-            cwd: project.rootPaths[0], workspaceRoots: project.rootPaths,
-            projectAssignment: { projectKind: "local", projectId: payload.projectId },
-            useAppServerPermissionDefault: true, mode: "default", threadStartKind: "default",
-            ...(payload.model ? {
-              collaborationMode: {
-                mode: "default",
-                settings: { model: String(payload.model), reasoning_effort: payload.reasoningEffort || null, developer_instructions: null }
-              }
-            } : {})
-          }, { readThreadCreationInputs: (params, mode) => provider.readCreationInputs(params, mode) });
-          const accepted = result.status === "created" && ["accepted", "not-requested"].includes(result.firstTurn?.status);
-          return {
-            ...result, ok: accepted, threadId: result.conversationId,
-            outcomeUnknown: result.status === "outcome-unknown" || result.firstTurn?.status === "outcome-unknown",
-            ...(!accepted ? { code: 409, message: result.firstTurn?.message || `会话 ${result.conversationId || ""} 的首条消息未确认，请先查看会话，不要重复新建` } : {})
-          };
+          let startConversationSubmitted = false;
+          try {
+            const projectId = requestedProjectId(payload.projectId);
+            await validateReasoningEffort(payload.model, payload.reasoningEffort);
+            const imageAttachments = remoteImageAttachments(payload);
+            const prompt = typeof payload.prompt === "string" ? payload.prompt.trim() : "";
+            if (!prompt && !imageAttachments.length) throw failure(400, "消息不能为空");
+            let provider, workspace;
+            if (projectId == null) {
+              const module = await nativeCreationModule();
+              provider = nativeCreationProvider(module);
+              workspace = await nativeProjectlessWorkspace(prompt, module);
+            } else {
+              provider = await nativeCreationInputs();
+              workspace = await localProjectWorkspace(projectId);
+            }
+            const skills = await skillInputs(payload, workspace.cwd);
+            startConversationSubmitted = true;
+            const result = await manager.startConversation({
+              input: [
+                ...(prompt ? [{ type: "text", text: prompt, text_elements: [] }] : []),
+                ...remoteImageInputs(imageAttachments),
+                ...skills
+              ],
+              cwd: workspace.cwd, workspaceRoots: workspace.workspaceRoots,
+              ...(projectId == null ? {
+                workspaceKind: "projectless",
+                projectlessOutputDirectory: workspace.projectlessOutputDirectory
+              } : {
+                projectAssignment: workspace.projectAssignment
+              }),
+              useAppServerPermissionDefault: true, mode: "default", threadStartKind: "default",
+              ...(payload.model ? {
+                collaborationMode: {
+                  mode: "default",
+                  settings: { model: String(payload.model), reasoning_effort: payload.reasoningEffort || null, developer_instructions: null }
+                }
+              } : {})
+            }, { readThreadCreationInputs: (params, mode) => provider.readCreationInputs(params, mode) });
+            const accepted = result.status === "created" && ["accepted", "not-requested"].includes(result.firstTurn?.status);
+            return {
+              ...result, ok: accepted, threadId: result.conversationId,
+              outcomeUnknown: result.status === "outcome-unknown" || result.firstTurn?.status === "outcome-unknown",
+              ...(!accepted ? { code: 409, message: result.firstTurn?.message || `会话 ${result.conversationId || ""} 的首条消息未确认，请先查看会话，不要重复新建` } : {})
+            };
+          } catch (error) {
+            if (!startConversationSubmitted && !error?.remoteValidationFailure)
+              throw failure(error?.code || 503, error?.message || "原生创建输入准备失败");
+            throw error;
+          }
         }
         case "stop": {
           const id = requiredId(payload.threadId);
@@ -2008,7 +2195,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 19, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
+    version: 22, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
     dispose() {
       for (const dispose of unsubscribe) { try { dispose?.(); } catch {} }
       unsubscribe = [];

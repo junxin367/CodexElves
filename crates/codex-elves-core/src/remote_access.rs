@@ -1520,7 +1520,7 @@ async fn session(
     Ok(Json(
         json!({"ok":true,"device":device.public(),"nativeConnected":state.controller.native_connected.load(Ordering::SeqCst),
         "readOnly":state.settings.read_only,"allowApprovals":state.settings.allow_approvals,
-        "capabilities":{"imageInput":true,"queuedImageRemoval":true}}),
+        "capabilities":{"imageInput":true,"queuedImageRemoval":true,"queuedImageEditing":true,"projectlessCreation":true}}),
     ))
 }
 
@@ -1711,6 +1711,12 @@ fn validate_queued_action_payload(action: &str, payload: &Value) -> Result<(), A
     let editing = action == "editQueued";
     let canceling = action == "cancelQueuedEdit";
     let session_editing = editing && object.contains_key("editId");
+    if editing && !session_editing && object.contains_key("images") {
+        return Err(ApiError::new(
+            409,
+            "旧版队列编辑不支持新增图片，请刷新后重试",
+        ));
+    }
     let fields: &[&str] = if reading {
         &["threadId"]
     } else if reordering {
@@ -1726,7 +1732,13 @@ fn validate_queued_action_payload(action: &str, payload: &Value) -> Result<(), A
             "expectedImageSources",
         ]
     } else if session_editing {
-        &["threadId", "editId", "prompt", "retainedImageSources"]
+        &[
+            "threadId",
+            "editId",
+            "prompt",
+            "retainedImageSources",
+            "images",
+        ]
     } else if editing {
         &[
             "threadId",
@@ -1844,11 +1856,30 @@ fn validate_queued_action_payload(action: &str, payload: &Value) -> Result<(), A
         }
     }
     if editing {
-        if object
+        let prompt = object
             .get("prompt")
             .and_then(Value::as_str)
-            .is_none_or(|text| text.trim().is_empty() || text.len() > 128 * 1024)
-        {
+            .ok_or_else(|| ApiError::new(400, "消息不能为空或超过 128 KiB"))?;
+        if prompt.len() > 128 * 1024 {
+            return Err(ApiError::new(400, "消息不能为空或超过 128 KiB"));
+        }
+        if session_editing {
+            validate_input_images(payload)?;
+            let retained_count = object
+                .get("retainedImageSources")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            let added_count = object
+                .get("images")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            if retained_count + added_count > MAX_INPUT_IMAGE_COUNT {
+                return Err(ApiError::new(400, "每条消息最多保留或新增 4 张图片"));
+            }
+            if prompt.trim().is_empty() && retained_count + added_count == 0 {
+                return Err(ApiError::new(400, "消息不能为空或超过 128 KiB"));
+            }
+        } else if prompt.trim().is_empty() {
             return Err(ApiError::new(400, "消息不能为空或超过 128 KiB"));
         }
     }
