@@ -1061,9 +1061,16 @@ const defaultSettings: BackendSettings = {
 
 let browserPreviewSettingsState: BackendSettings | null = null;
 let browserPreviewRemoteCredentials = { accessKeyConfigured: false };
-let browserPreviewTailscaleInstalled = false;
-let browserPreviewTailscaleInstallPhase = "idle";
-let browserPreviewTailscaleInstallPercent = 0;
+let browserPreviewQuickTunnelGeneration = 0;
+let browserPreviewQuickTunnelUrl = "";
+let browserPreviewQuickTunnelInstalled = false;
+let browserPreviewQuickTunnelDownloadStartedAt = 0;
+
+function regenerateBrowserPreviewQuickTunnelUrl(): string {
+  browserPreviewQuickTunnelGeneration += 1;
+  browserPreviewQuickTunnelUrl = `https://codex-elves-preview-${browserPreviewQuickTunnelGeneration}.trycloudflare.com`;
+  return browserPreviewQuickTunnelUrl;
+}
 
 function isBrowserPreview(): boolean {
   return typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
@@ -2007,42 +2014,53 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         browserPreviewRemoteCredentials.accessKeyConfigured = true;
         return Promise.resolve({ status: "ok", ...browserPreviewRemoteCredentials } as T);
       }
-      if (action === "tailscaleStatus") {
-        return Promise.resolve({ status: "ok", installed: browserPreviewTailscaleInstalled,
-          backendState: browserPreviewTailscaleInstalled ? "Running" : null,
-          message: browserPreviewTailscaleInstalled ? null : "未检测到 Tailscale，请先安装官方客户端。" } as T);
+      const running = remote.enabled;
+      if (action === "restartQuickTunnel") {
+        if (!running || !remote.cloudflareQuickTunnelEnabled) {
+          return Promise.resolve({ status: "failed", message: "请先启用远程网页和 Cloudflare Quick Tunnel。" } as T);
+        }
+        if (browserPreviewQuickTunnelInstalled) regenerateBrowserPreviewQuickTunnelUrl();
+      } else if (action === "apply" && !remote.cloudflareQuickTunnelEnabled) {
+        browserPreviewQuickTunnelUrl = "";
+        browserPreviewQuickTunnelDownloadStartedAt = 0;
       }
-      if (action === "installTailscale") {
-        browserPreviewTailscaleInstallPhase = "downloading";
-        browserPreviewTailscaleInstallPercent = 0;
-        const timer = window.setInterval(() => {
-          browserPreviewTailscaleInstallPercent = Math.min(100, browserPreviewTailscaleInstallPercent + 8);
-          if (browserPreviewTailscaleInstallPercent >= 100) {
-            window.clearInterval(timer);
-            browserPreviewTailscaleInstallPhase = "launched";
-            browserPreviewTailscaleInstalled = true;
-          }
-        }, 250);
-        return Promise.resolve({ status: "ok", installed: false, started: true } as T);
+      if (running && remote.cloudflareQuickTunnelEnabled && !browserPreviewQuickTunnelInstalled) {
+        if (!browserPreviewQuickTunnelDownloadStartedAt) {
+          browserPreviewQuickTunnelDownloadStartedAt = Date.now();
+        }
+        if (Date.now() - browserPreviewQuickTunnelDownloadStartedAt >= 6000) {
+          browserPreviewQuickTunnelInstalled = true;
+          browserPreviewQuickTunnelDownloadStartedAt = 0;
+          regenerateBrowserPreviewQuickTunnelUrl();
+        }
+      } else if (running && remote.cloudflareQuickTunnelEnabled && !browserPreviewQuickTunnelUrl) {
+        regenerateBrowserPreviewQuickTunnelUrl();
       }
-      if (action === "tailscaleInstallProgress") {
-        return Promise.resolve({ status: "ok", phase: browserPreviewTailscaleInstallPhase,
-          percent: browserPreviewTailscaleInstallPercent,
-          message: browserPreviewTailscaleInstallPhase === "launched" ? "已启动 Tailscale 官方安装向导，完成后点击「检查状态」。" : null } as T);
+      const quickTunnelReady = running && remote.cloudflareQuickTunnelEnabled && Boolean(browserPreviewQuickTunnelUrl);
+      const quickTunnelDownloading = running && remote.cloudflareQuickTunnelEnabled && !browserPreviewQuickTunnelInstalled;
+      const downloadPercent = quickTunnelDownloading
+        ? Math.min(99, Math.max(1, Math.round((Date.now() - browserPreviewQuickTunnelDownloadStartedAt) / 60)))
+        : browserPreviewQuickTunnelInstalled ? 100 : 0;
+      const downloadTotalBytes = 55_365_048;
+      if (action === "testQuickTunnel") {
+        return Promise.resolve(quickTunnelReady
+          ? { status: "ok", httpStatus: 200, authRequired: true, publicUrl: browserPreviewQuickTunnelUrl, publicAddresses: ["198.41.192.67"], message: "临时公网地址与网页回源验证通过；访问会话仍需输入访问密钥。" } as T
+          : { status: "failed", message: "临时公网地址尚未就绪，请先生成后再测试。" } as T);
       }
-      const running = remote.enabled && browserPreviewRemoteCredentials.accessKeyConfigured;
-      const funnelReady = running && remote.funnelEnabled && browserPreviewTailscaleInstalled;
       return Promise.resolve({ status: "ok", enabled: remote.enabled, running,
         nativeConnected: running, settings: remote, ...browserPreviewRemoteCredentials,
         addresses: [`http://${remote.bindHost}:${remote.port}`],
-        funnel: {
-          enabled: remote.funnelEnabled,
-          state: !remote.funnelEnabled ? "stopped" : !browserPreviewTailscaleInstalled ? "not_installed" : funnelReady ? "ready" : "waiting",
-          installed: browserPreviewTailscaleInstalled,
-          backendState: browserPreviewTailscaleInstalled ? "Running" : null,
-          publicUrl: funnelReady ? "https://preview.example.ts.net" : "",
-          actionUrl: null,
+        cloudflareQuickTunnel: {
+          enabled: remote.cloudflareQuickTunnelEnabled,
+          state: quickTunnelDownloading ? "downloading" : quickTunnelReady ? "ready" : "stopped",
+          publicUrl: quickTunnelReady ? browserPreviewQuickTunnelUrl : "",
           error: null,
+          retryAtMs: null,
+          installed: browserPreviewQuickTunnelInstalled,
+          version: browserPreviewQuickTunnelInstalled ? "preview" : null,
+          downloadedBytes: Math.round(downloadTotalBytes * downloadPercent / 100),
+          downloadTotalBytes,
+          downloadPercent,
         },
         devices: [], message: "浏览器预览，不启动真实远程服务。" } as T);
     }
@@ -4439,10 +4457,6 @@ export function App() {
               onChange={(remoteAccess) => setSettingsForm((current) => ({ ...current, remoteAccess }))}
               onSave={(next) => actions.saveSettingsValue({ ...settingsForm, remoteAccess: next }, true, true)}
               command={(action, payload) => call("remote_access_command", { action, payload })}
-              openExternalUrl={async (url) => {
-                if (isBrowserPreview()) window.open(url, "_blank", "noopener,noreferrer");
-                else await actions.openExternalUrl(url);
-              }}
               onNotice={(message) => showNotice("操作提示", message, "failed")}
               onSuccess={(message) => showNotice("远程会话", message, "ok")}
             />

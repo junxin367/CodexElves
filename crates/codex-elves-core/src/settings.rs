@@ -738,9 +738,7 @@ pub struct RemoteAccessSettings {
     pub enabled: bool,
     pub bind_host: String,
     pub port: u16,
-    pub funnel_enabled: bool,
-    pub tls_certificate_path: String,
-    pub tls_private_key_path: String,
+    pub cloudflare_quick_tunnel_enabled: bool,
     pub device_session_hours: u16,
     pub read_only: bool,
     pub allow_approvals: bool,
@@ -752,9 +750,7 @@ impl Default for RemoteAccessSettings {
             enabled: false,
             bind_host: "127.0.0.1".into(),
             port: 45222,
-            funnel_enabled: false,
-            tls_certificate_path: String::new(),
-            tls_private_key_path: String::new(),
+            cloudflare_quick_tunnel_enabled: false,
             device_session_hours: 0,
             read_only: false,
             allow_approvals: true,
@@ -774,17 +770,13 @@ impl RemoteAccessSettings {
             "设备授权有效期必须在 0–720 小时之间"
         );
         anyhow::ensure!(
-            self.tls_certificate_path.is_empty() == self.tls_private_key_path.is_empty(),
-            "HTTPS 证书和私钥必须同时设置"
+            !self.enabled || address.is_loopback(),
+            "远程会话网页仅允许监听本机回环地址"
         );
-        anyhow::ensure!(
-            !self.enabled || address.is_loopback() || !self.tls_certificate_path.is_empty(),
-            "非本机监听必须配置 HTTPS 证书与私钥"
-        );
-        if self.funnel_enabled {
+        if self.cloudflare_quick_tunnel_enabled {
             anyhow::ensure!(
-                address.is_loopback() && self.tls_certificate_path.is_empty(),
-                "Tailscale Funnel 必须转发到本机 HTTP 监听地址，不需配置本机 HTTPS 证书"
+                self.enabled && address.is_loopback(),
+                "Cloudflare Quick Tunnel 必须启用远程网页并转发到本机 HTTP 监听地址"
             );
         }
         Ok(())
@@ -1957,6 +1949,7 @@ mod tests {
         assert!(!settings.codex_goals_enabled);
         assert!(!settings.lan_proxy_enabled);
         assert!(!settings.remote_access.enabled);
+        assert!(!settings.remote_access.cloudflare_quick_tunnel_enabled);
         assert_eq!(settings.remote_access.bind_host, "127.0.0.1");
         assert_eq!(settings.remote_access.port, 45222);
         assert!(settings.remote_access.validate().is_ok());
@@ -2000,6 +1993,56 @@ mod tests {
         assert!(settings.codex_app_task_board);
         assert_eq!(settings.gpt_reasoning_continuation_max_rounds, 3);
         assert_eq!(settings.layered_compaction_retain_tokens, 20_000);
+    }
+
+    #[test]
+    fn remote_access_quick_tunnel_requires_enabled_loopback() {
+        let mut settings = RemoteAccessSettings {
+            enabled: true,
+            cloudflare_quick_tunnel_enabled: true,
+            ..RemoteAccessSettings::default()
+        };
+        assert!(settings.validate().is_ok());
+
+        settings.enabled = false;
+        assert!(settings.validate().is_err());
+
+        settings.enabled = true;
+        settings.bind_host = "0.0.0.0".into();
+        assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn remote_access_ignores_legacy_tunnel_fields() {
+        let settings: RemoteAccessSettings = serde_json::from_value(json!({
+            "funnelEnabled": true,
+            "cloudflareTunnelEnabled": true
+        }))
+        .unwrap();
+
+        assert!(!settings.enabled);
+        assert!(!settings.cloudflare_quick_tunnel_enabled);
+    }
+
+    #[test]
+    fn remote_access_quick_tunnel_field_takes_precedence_over_legacy_fields() {
+        let settings: RemoteAccessSettings = serde_json::from_value(json!({
+            "cloudflareQuickTunnelEnabled": false,
+            "funnelEnabled": true,
+            "cloudflareTunnelEnabled": true
+        }))
+        .unwrap();
+
+        assert!(!settings.cloudflare_quick_tunnel_enabled);
+    }
+
+    #[test]
+    fn remote_access_serialization_only_writes_quick_tunnel_field() {
+        let serialized = serde_json::to_value(RemoteAccessSettings::default()).unwrap();
+
+        assert_eq!(serialized["cloudflareQuickTunnelEnabled"], json!(false));
+        assert!(serialized.get("funnelEnabled").is_none());
+        assert!(serialized.get("cloudflareTunnelEnabled").is_none());
     }
 
     #[test]

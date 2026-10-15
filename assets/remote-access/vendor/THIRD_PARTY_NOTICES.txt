@@ -1,0 +1,10 @@
+marked 18.1.1
+Source: npm package marked@18.1.1, lib/marked.esm.js
+License: MIT (marked.LICENSE.txt)
+Project: https://github.com/markedjs/marked
+
+DOMPurify 3.4.17
+Source: npm package dompurify@3.4.17, dist/purify.es.mjs
+License: Apache-2.0 OR MPL-2.0
+License files: dompurify.Apache-2.0.LICENSE.txt, dompurify.MPL-2.0.LICENSE.txt
+Project: https://github.com/cure53/DOMPurify

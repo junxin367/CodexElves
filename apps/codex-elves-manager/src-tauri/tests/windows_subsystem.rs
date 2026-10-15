@@ -1,12 +1,19 @@
 #[test]
-fn tailscale_actions_are_routed_to_local_settings() {
+fn cloudflare_quick_tunnel_actions_are_routed_to_remote_admin() {
     let commands = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands.rs"))
         .expect("read manager commands.rs");
     let routed = commands
         .split("pub async fn remote_access_command")
         .nth(1)
         .expect("remote_access_command exists");
-    assert!(routed.contains("\"tailscaleStatus\"") && routed.contains("\"installTailscale\""));
+    let local_settings_branch = routed
+        .split("let result = codex_elves_core::remote_access::request_local_admin")
+        .next()
+        .expect("local settings branch exists");
+    assert!(local_settings_branch.contains("\"credentials\" | \"setKey\" | \"generateKey\""));
+    assert!(!local_settings_branch.contains("restartQuickTunnel"));
+    assert!(!local_settings_branch.contains("testQuickTunnel"));
+    assert!(routed.contains("request_local_admin"));
 }
 
 #[cfg(windows)]

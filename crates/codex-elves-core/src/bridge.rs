@@ -10,8 +10,8 @@ use anyhow::{Context, bail};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::connect_async_with_config;
+use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
 
 pub const BRIDGE_BINDING_NAME: &str = "codexSessionDeleteV2";
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -386,15 +386,19 @@ async fn connect_cdp_websocket(
 ) -> anyhow::Result<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 > {
-    let (socket, _) = tokio::time::timeout(CDP_CONNECT_TIMEOUT, connect_async(websocket_url))
-        .await
-        .with_context(|| {
-            format!(
-                "timed out connecting CDP websocket after {}s",
-                CDP_CONNECT_TIMEOUT.as_secs()
-            )
-        })?
-        .context("failed to connect CDP websocket")?;
+    let config = WebSocketConfig::default().max_frame_size(Some(64 << 20));
+    let (socket, _) = tokio::time::timeout(
+        CDP_CONNECT_TIMEOUT,
+        connect_async_with_config(websocket_url, Some(config), false),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "timed out connecting CDP websocket after {}s",
+            CDP_CONNECT_TIMEOUT.as_secs()
+        )
+    })?
+    .context("failed to connect CDP websocket")?;
 
     Ok(socket)
 }

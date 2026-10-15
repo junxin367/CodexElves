@@ -13167,6 +13167,53 @@ async fn native_delete_bridge_waits_for_value_result() {
     server.await.unwrap();
 }
 
+#[tokio::test]
+async fn cdp_bridge_accepts_single_frames_larger_than_16_mib() {
+    const PAYLOAD_BYTES: usize = 17 << 20;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let message = socket.next().await.unwrap().unwrap().into_text().unwrap();
+        let request: serde_json::Value = serde_json::from_str(&message).unwrap();
+        socket
+            .send(Message::Text(
+                json!({
+                    "id": request["id"],
+                    "result": {
+                        "result": {
+                            "type": "string",
+                            "value": "x".repeat(PAYLOAD_BYTES)
+                        }
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+    });
+
+    let response = bridge::evaluate_script_value_with_timeout(
+        &format!("ws://{addr}"),
+        "Promise.resolve('large payload')",
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        response["result"]["result"]["value"]
+            .as_str()
+            .unwrap()
+            .len(),
+        PAYLOAD_BYTES
+    );
+    server.await.unwrap();
+}
+
 #[test]
 fn bridge_health_check_script_uses_real_backend_round_trip() {
     let script = bridge::bridge_health_check_script();

@@ -2,9 +2,7 @@ export type RemoteAccessSettings = {
   enabled: boolean;
   bindHost: string;
   port: number;
-  funnelEnabled: boolean;
-  tlsCertificatePath: string;
-  tlsPrivateKeyPath: string;
+  cloudflareQuickTunnelEnabled: boolean;
   deviceSessionHours: number;
   readOnly: boolean;
   allowApprovals: boolean;
@@ -14,9 +12,7 @@ export const defaultRemoteAccessSettings: RemoteAccessSettings = {
   enabled: false,
   bindHost: "127.0.0.1",
   port: 45222,
-  funnelEnabled: false,
-  tlsCertificatePath: "",
-  tlsPrivateKeyPath: "",
+  cloudflareQuickTunnelEnabled: false,
   deviceSessionHours: 0,
   readOnly: false,
   allowApprovals: true,
@@ -30,14 +26,14 @@ export type RemoteAccessDevice = {
   lastSeenAtMs: number;
 };
 
-export type RemoteAccessFunnelState =
+export type CloudflareQuickTunnelState =
   | "stopped"
-  | "waiting"
-  | "checking"
-  | "not_installed"
-  | "not_ready"
-  | "action_required"
+  | "downloading"
+  | "starting"
+  | "connecting"
   | "ready"
+  | "reconnecting"
+  | "retry_wait"
   | "error";
 
 export type RemoteAccessStatus = {
@@ -51,14 +47,17 @@ export type RemoteAccessStatus = {
   devices: RemoteAccessDevice[];
   settings?: RemoteAccessSettings;
   accessKeyConfigured?: boolean;
-  funnel?: {
+  cloudflareQuickTunnel?: {
     enabled: boolean;
-    state: RemoteAccessFunnelState;
-    installed: boolean;
-    backendState?: string | null;
+    state: CloudflareQuickTunnelState;
     publicUrl: string;
-    actionUrl?: string | null;
     error?: string | null;
+    retryAtMs?: number | null;
+    installed: boolean;
+    version?: string | null;
+    downloadedBytes?: number;
+    downloadTotalBytes?: number;
+    downloadPercent?: number;
   };
 };
 
@@ -68,25 +67,13 @@ export type RemoteAccessCredentials = {
   accessKeyConfigured: boolean;
 };
 
-export type TailscaleProbe = {
+export type QuickTunnelAccessTest = {
   status: string;
-  installed: boolean;
-  backendState?: string | null;
-  message?: string | null;
-};
-
-export type TailscaleInstall = {
-  status: string;
-  installed: boolean;
-  started?: boolean;
+  publicUrl?: string;
   message?: string;
-};
-
-export type TailscaleInstallProgress = {
-  status: string;
-  phase: "idle" | "downloading" | "verifying" | "launched" | "failed";
-  percent: number;
-  message?: string | null;
+  httpStatus?: number;
+  authRequired?: boolean;
+  publicAddresses?: string[];
 };
 
 export function remoteAccessValidation(settings: RemoteAccessSettings): string | null {
@@ -102,8 +89,9 @@ export function remoteAccessValidation(settings: RemoteAccessSettings): string |
       loopback = url.hostname === "[::1]";
     } catch { return "请填写有效的监听 IP 地址。"; }
   } else return "请填写有效的监听 IP 地址。";
-  if (!!settings.tlsCertificatePath !== !!settings.tlsPrivateKeyPath) return "HTTPS 证书和私钥必须同时设置。";
-  if (settings.enabled && !loopback && !settings.tlsCertificatePath) return "非本机监听必须配置 HTTPS 证书与私钥。";
-  if (settings.funnelEnabled && (!loopback || settings.tlsCertificatePath)) return "Tailscale Funnel 必须转发到本机 HTTP 监听地址，不需配置本机 HTTPS 证书。";
+  if (settings.enabled && !loopback) return "远程会话网页仅允许监听本机回环地址。";
+  if (settings.cloudflareQuickTunnelEnabled && (!settings.enabled || !loopback)) {
+    return "Cloudflare Quick Tunnel 必须启用远程网页并转发到本机 HTTP 监听地址。";
+  }
   return null;
 }

@@ -4,13 +4,25 @@
 .remote-access-toggle { display: flex; align-items: center; gap: 9px; font-size: 12px; line-height: 1.8; cursor: pointer; }
 .remote-access-toggle input { accent-color: hsl(var(--primary)); }
 .remote-access-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 18px; margin-top: 14px; }
-.remote-access-fields-top { margin-top: 10px; }
+.remote-access-fields-top { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 10px; }
 .remote-access-fields > div { display: flex; flex-direction: column; gap: 6px; }
 .remote-access-fields label { font-size: 12px; font-weight: 600; }
 .remote-access-fields small { font-size: 11px; color: hsl(var(--muted-foreground)); line-height: 1.6; }
+.remote-access-service-fields > div > label,
+.remote-access-expiry-heading { min-height: 18px; }
+.remote-access-service-fields > div > label { display: flex; align-items: center; }
+.remote-access-expiry-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.remote-access-fields .remote-access-expiry-switch {
+  width: auto;
+  height: 18px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  gap: 6px;
+}
+.remote-access-field-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; min-height: 18px; }
 .remote-access-wide { grid-column: 1 / -1; }
-.remote-access-actions { margin-top: 18px; display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
-.remote-access-actions .remote-access-hint { margin: 0; }
 .remote-access-input-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .remote-access-input-row input { flex: 1; min-width: 0; }
 .remote-access-input-row button { flex-shrink: 0; }
@@ -20,7 +32,6 @@
 .remote-access-key-actions { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: 2px; }
 .remote-access-key-actions button { color: hsl(var(--muted-foreground)); }
 .remote-access-key-actions button:hover { color: hsl(var(--foreground)); }
-.remote-access-masked { -webkit-text-security: disc; }
 .remote-access-guides { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 2px; }
 .remote-access-devices { margin-top: 16px; }
 .remote-access-device { display: flex; gap: 12px; align-items: center; border-top: 1px solid hsl(var(--border)); padding: 12px 0; }
@@ -28,9 +39,19 @@
 .remote-access-device small { color: hsl(var(--muted-foreground)); font-size: 11px; }
 .remote-access-error { color: #dc4444; font-size: 12px; margin-bottom: 8px; }
 .remote-access-message { font-size: 12px; color: hsl(var(--muted-foreground)); min-height: 20px; }
+.remote-access-section-disabled { opacity: 0.5; }
+.quick-tunnel-download-progress { display: flex; flex: 0 1 260px; align-items: center; justify-content: flex-end; gap: 8px; min-width: 180px; }
+.quick-tunnel-download-progress span { flex: 0 0 auto; color: hsl(var(--muted-foreground)); font-size: 11px; }
+.quick-tunnel-download-track { position: relative; flex: 1; height: 5px; min-width: 72px; overflow: hidden; border-radius: 999px; background: hsl(var(--muted)); }
+.quick-tunnel-download-fill { height: 100%; border-radius: inherit; background: hsl(var(--primary)); transition: width 180ms ease; }
+.quick-tunnel-download-fill.indeterminate { position: absolute; width: 38%; animation: quick-tunnel-download 1.1s ease-in-out infinite; }
+@keyframes quick-tunnel-download {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(300%); }
+}
 @media (max-width: 900px) { .remote-access-fields { grid-template-columns: minmax(0, 1fr); } }
 
-.funnel-status-badge {
+.quick-tunnel-status-badge {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -44,65 +65,30 @@
   line-height: 1.4;
   white-space: nowrap;
 }
-.funnel-status-badge.connected {
+.quick-tunnel-status-badge.connected {
   border-color: rgba(22, 134, 83, 0.35);
   background: rgba(22, 134, 83, 0.08);
   color: #168653;
 }
-.funnel-status-badge.connecting {
+.quick-tunnel-status-badge.connecting {
   border-color: rgba(234, 154, 38, 0.35);
   background: rgba(234, 154, 38, 0.08);
   color: #d97706;
 }
-.funnel-status-badge.error {
+.quick-tunnel-status-badge.error {
   border-color: rgba(220, 68, 68, 0.35);
   background: rgba(220, 68, 68, 0.08);
   color: #dc4444;
 }
-.funnel-status-dot {
+.quick-tunnel-status-dot {
   width: 7px;
   height: 7px;
   border-radius: 9999px;
   background-color: currentColor;
 }
-.download-progress-container {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-top: 4px;
+@media (max-width: 640px) {
+  .remote-access-field-heading { align-items: flex-start; }
+  .quick-tunnel-download-progress { flex-basis: 220px; min-width: 0; }
+  .remote-access-public-row { align-items: stretch; flex-wrap: wrap; }
+  .remote-access-public-row .remote-access-public-input { flex-basis: 100%; }
 }
-.download-progress-container small { flex-shrink: 0; }
-.download-progress-bar {
-  flex: 1;
-  min-width: 0;
-  height: 5px;
-  background-color: hsl(var(--secondary));
-  border-radius: 9999px;
-  overflow: hidden;
-  position: relative;
-}
-.download-progress-fill {
-  height: 100%;
-  width: 50%;
-  background: linear-gradient(90deg, #10b981, #3b82f6);
-  border-radius: 9999px;
-  animation: download-progress-indeterminate 1.6s infinite ease-in-out;
-}
-@keyframes download-progress-indeterminate {
-  0% { transform: translateX(-100%); width: 30%; }
-  50% { transform: translateX(50%); width: 70%; }
-  100% { transform: translateX(200%); width: 30%; }
-}
-
-.remote-access-steps { display: flex; flex-direction: column; margin-top: 10px; }
-.remote-access-step { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid hsl(var(--border)); }
-.remote-access-step:first-child { border-top: none; padding-top: 0; }
-.remote-access-step-mark { width: 22px; height: 22px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; border-radius: 9999px; border: 1px solid hsl(var(--border)); font-size: 12px; color: hsl(var(--muted-foreground)); }
-.remote-access-step-mark.done { border-color: rgba(22, 134, 83, 0.35); background: rgba(22, 134, 83, 0.08); color: #168653; }
-.remote-access-step-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
-.remote-access-step-body small { color: hsl(var(--muted-foreground)); font-size: 11px; line-height: 1.6; }
-.remote-access-step-progress { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.remote-access-step-progress small { flex-shrink: 0; white-space: nowrap; }
-.remote-access-step-progress .download-progress-bar { flex: 1; min-width: 0; }
-.download-progress-fill.determinate { animation: none; transition: width 0.25s ease-out; }
-.remote-access-step-action { flex-shrink: 0; }

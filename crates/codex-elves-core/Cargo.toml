@@ -9,10 +9,11 @@ repository.workspace = true
 aes-gcm.workspace = true
 anyhow.workspace = true
 async-trait = "0.1"
-axum = { version = "0.8", features = ["json", "tokio", "http1"], default-features = false }
-axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+axum = { version = "0.8", features = ["json", "tokio", "http1", "ws"], default-features = false }
+axum-server = { version = "0.8", default-features = false }
 base64.workspace = true
 directories.workspace = true
+flate2.workspace = true
 futures-util = "0.3"
 fs2.workspace = true
 if-addrs.workspace = true
@@ -23,9 +24,8 @@ rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 thiserror.workspace = true
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["io-util", "net"] }
 tokio-tungstenite.workspace = true
 toml.workspace = true
 toml_edit.workspace = true

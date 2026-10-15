@@ -18,6 +18,7 @@ aes-gcm = "0.10"
 anyhow = "1"
 base64 = "0.22"
 directories = "6"
+flate2 = "1.1"
 fs2 = "0.4"
 futures-util = "0.3"
 if-addrs = { version = "0.15", features = ["link-local"] }
