@@ -22,6 +22,9 @@ const MAX_PROGRAM_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_PUBLIC_RESPONSE_BYTES: usize = 64 * 1024;
 const RETRY_MS: u64 = 30_000;
 const RATE_LIMIT_RETRY_MS: u64 = 10 * 60_000;
+const PUBLIC_RETRY_MS: u64 = 5_000;
+const PUBLIC_RECHECK_MS: u64 = 30_000;
+const RATE_LIMIT_FILE: &str = "remote-access-quick-tunnel-cooldown.json";
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const PUBLIC_TIMEOUT: Duration = Duration::from_secs(15);
 static DOWNLOAD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -79,7 +82,10 @@ pub(super) struct QuickTunnelService {
     state_dir: PathBuf,
     origin: Arc<RwLock<Option<String>>>,
     child: Option<Child>,
+    #[cfg(windows)]
+    child_job: Option<std::os::windows::io::OwnedHandle>,
     download: Option<tokio::task::JoinHandle<anyhow::Result<PathBuf>>>,
+    public_check: Option<tokio::task::JoinHandle<anyhow::Result<Value>>>,
     download_progress: Arc<DownloadProgress>,
     readers: Vec<tokio::task::JoinHandle<()>>,
     events: Option<mpsc::UnboundedReceiver<ProcessEvent>>,
@@ -90,18 +96,23 @@ pub(super) struct QuickTunnelService {
     error: Option<String>,
     last_diagnostic: Option<String>,
     retry_at_ms: u64,
+    rate_limit_until_ms: u64,
     checked_at_ms: u64,
+    next_public_check_at_ms: u64,
 }
 
 impl QuickTunnelService {
     pub(super) fn new(state_dir: impl Into<PathBuf>, origin: Arc<RwLock<Option<String>>>) -> Self {
         let state_dir = state_dir.into();
         let installed = managed_program_path(&state_dir).is_file();
-        Self {
+        let mut service = Self {
             state_dir,
             origin,
             child: None,
+            #[cfg(windows)]
+            child_job: None,
             download: None,
+            public_check: None,
             download_progress: Arc::new(DownloadProgress::default()),
             readers: Vec::new(),
             events: None,
@@ -112,8 +123,15 @@ impl QuickTunnelService {
             error: None,
             last_diagnostic: None,
             retry_at_ms: 0,
+            rate_limit_until_ms: 0,
             checked_at_ms: 0,
+            next_public_check_at_ms: 0,
+        };
+        if let Err(error) = service.enforce_rate_limit() {
+            service.error = Some(format!("{error:#}"));
+            service.state = QuickTunnelState::Error;
         }
+        service
     }
 
     pub(super) async fn reconcile(&mut self, enabled: bool, web_running: bool, target: &str) {
@@ -143,12 +161,17 @@ impl QuickTunnelService {
 
         self.refresh_process().await;
         if self.child.is_some() {
-            self.state = if self.current_origin().is_some() {
-                QuickTunnelState::Ready
-            } else {
-                QuickTunnelState::Connecting
-            };
+            self.refresh_public_access().await;
             return;
+        }
+        match self.enforce_rate_limit() {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                self.error = Some(format!("{error:#}"));
+                self.state = QuickTunnelState::Error;
+                return;
+            }
         }
         if now_ms() < self.retry_at_ms {
             self.state = QuickTunnelState::Backoff;
@@ -194,20 +217,31 @@ impl QuickTunnelService {
         self.state = QuickTunnelState::Downloading;
     }
 
-    pub(super) async fn restart(&mut self, target: &str) {
+    pub(super) async fn restart(&mut self, target: &str) -> anyhow::Result<()> {
+        self.refresh_process().await;
+        anyhow::ensure!(
+            !self.enforce_rate_limit()?,
+            "Cloudflare 地址申请仍在冷却，不能提前重新生成"
+        );
         self.stop(false).await;
+        anyhow::ensure!(
+            !self.enforce_rate_limit()?,
+            "Cloudflare 地址申请仍在冷却，不能提前重新生成"
+        );
         self.target = Some(target.to_owned());
         self.error = None;
         self.retry_at_ms = 0;
         self.checked_at_ms = 0;
         self.state = QuickTunnelState::Stopped;
+        Ok(())
     }
 
     pub(super) fn invalidate(&mut self) {
         self.retry_at_ms = 0;
         self.checked_at_ms = 0;
+        self.next_public_check_at_ms = 0;
         if self.child.is_some() {
-            self.error = None;
+            self.state = QuickTunnelState::Connecting;
         }
     }
 
@@ -237,7 +271,7 @@ impl QuickTunnelService {
             "enabled":enabled,
             "state":state.as_str(),
             "running":running,
-            "connected":running && !public_url.is_empty(),
+            "connected":running && !public_url.is_empty() && state == QuickTunnelState::Ready,
             "processId":self.child.as_ref().and_then(Child::id),
             "installed":self.installed,
             "version":self.version,
@@ -249,7 +283,8 @@ impl QuickTunnelService {
             "managedVersion":CLOUDFLARED_VERSION,
             "error":self.error,
             "checkedAtMs":self.checked_at_ms,
-            "retryAtMs":self.retry_at_ms,
+            "retryAtMs":self.retry_at_ms.max(self.rate_limit_until_ms),
+            "rateLimited":now_ms() < self.rate_limit_until_ms,
         })
     }
 
@@ -261,20 +296,62 @@ impl QuickTunnelService {
             self.child.is_some(),
             "cloudflared 未运行，请重新启用 Quick Tunnel"
         );
+        self.cancel_public_check().await;
+        let result = probe_public_access(&origin).await;
+        self.refresh_process().await;
+        anyhow::ensure!(
+            self.child.is_some() && self.current_origin().as_deref() == Some(origin.as_str()),
+            "公网验证期间 Quick Tunnel 已停止，当前地址已失效"
+        );
+        self.record_public_access_result(&result);
+        result
+    }
+
+    async fn refresh_public_access(&mut self) {
+        if self
+            .public_check
+            .as_ref()
+            .is_some_and(|task| task.is_finished())
+        {
+            let result = self
+                .public_check
+                .take()
+                .expect("finished public check should exist")
+                .await
+                .context("Quick Tunnel 公网验证任务未完成")
+                .and_then(|result| result);
+            self.record_public_access_result(&result);
+        }
+        if self.public_check.is_none()
+            && now_ms() >= self.next_public_check_at_ms
+            && let Some(origin) = self.current_origin()
+        {
+            self.public_check = Some(tokio::spawn(
+                async move { probe_public_access(&origin).await },
+            ));
+        }
+    }
+
+    fn record_public_access_result(&mut self, result: &anyhow::Result<Value>) {
         self.checked_at_ms = now_ms();
-        match probe_public_access(&origin).await {
-            Ok(value) => {
+        match result {
+            Ok(_) => {
                 self.error = None;
                 self.state = QuickTunnelState::Ready;
-                Ok(value)
+                self.next_public_check_at_ms = self.checked_at_ms + PUBLIC_RECHECK_MS;
             }
             Err(error) => {
-                self.error = Some(format!(
-                    "Quick Tunnel 仍在运行，但公网就绪检查暂时失败：{error:#}"
-                ));
+                self.error = Some(format!("公网访问尚未验证通过，将自动重试：{error:#}"));
                 self.state = QuickTunnelState::Connecting;
-                Err(error)
+                self.next_public_check_at_ms = self.checked_at_ms + PUBLIC_RETRY_MS;
             }
+        }
+    }
+
+    async fn cancel_public_check(&mut self) {
+        if let Some(task) = self.public_check.take() {
+            task.abort();
+            let _ = task.await;
         }
     }
 
@@ -301,6 +378,8 @@ impl QuickTunnelService {
         let mut child = command
             .spawn()
             .context("无法启动受管 cloudflared，Quick Tunnel 未启用")?;
+        #[cfg(windows)]
+        let job = cloudflared_job(&child)?;
         let stdout = child
             .stdout
             .take()
@@ -316,6 +395,10 @@ impl QuickTunnelService {
         ];
         self.events = Some(receiver);
         self.child = Some(child);
+        #[cfg(windows)]
+        {
+            self.child_job = Some(job);
+        }
         self.target = Some(target.to_owned());
         self.state = QuickTunnelState::Connecting;
         self.error = None;
@@ -333,6 +416,11 @@ impl QuickTunnelService {
             Ok(None) => {}
             Ok(Some(status)) => {
                 self.child = None;
+                #[cfg(windows)]
+                {
+                    self.child_job = None;
+                }
+                self.cancel_public_check().await;
                 for task in self.readers.drain(..) {
                     let _ = tokio::time::timeout(Duration::from_millis(250), task).await;
                 }
@@ -340,16 +428,16 @@ impl QuickTunnelService {
                 self.events = None;
                 self.clear_origin();
                 let diagnostic = self.last_diagnostic.take();
-                let rate_limited = diagnostic.as_deref().is_some_and(rate_limited_diagnostic);
-                let retry_ms = if rate_limited {
-                    RATE_LIMIT_RETRY_MS
-                } else {
-                    RETRY_MS
-                };
-                self.error = Some(if rate_limited {
-                    "Cloudflare 暂时限制生成临时地址（HTTP 429），10 分钟后自动重试；也可稍后手动重新生成。"
-                        .into()
-                } else if let Some(diagnostic) = diagnostic {
+                match self.enforce_rate_limit() {
+                    Ok(true) => return,
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.error = Some(format!("{error:#}"));
+                        self.state = QuickTunnelState::Error;
+                        return;
+                    }
+                }
+                self.error = Some(if let Some(diagnostic) = diagnostic {
                     format!(
                         "cloudflared 已退出（{status}）：{diagnostic}。30 秒后重试，当前 Quick Tunnel 地址已失效。"
                     )
@@ -358,7 +446,7 @@ impl QuickTunnelService {
                         "cloudflared 已退出（{status}），30 秒后重试。Quick Tunnel 地址已失效。"
                     )
                 });
-                self.retry_at_ms = now_ms() + retry_ms;
+                self.retry_at_ms = now_ms() + RETRY_MS;
                 self.state = QuickTunnelState::Backoff;
             }
             Err(error) => {
@@ -371,6 +459,7 @@ impl QuickTunnelService {
 
     fn consume_events(&mut self) {
         let mut origin_missing = self.current_origin().is_none();
+        let mut rate_limited = false;
         let Some(receiver) = self.events.as_mut() else {
             return;
         };
@@ -383,13 +472,15 @@ impl QuickTunnelService {
                         .unwrap_or_else(|error| error.into_inner());
                     if current.is_none() {
                         *current = Some(origin);
+                        self.error = None;
+                        self.last_diagnostic = None;
+                        self.state = QuickTunnelState::Connecting;
+                        self.next_public_check_at_ms = 0;
                     }
                     origin_missing = false;
-                    self.error = None;
-                    self.last_diagnostic = None;
-                    self.state = QuickTunnelState::Ready;
                 }
                 ProcessEvent::Diagnostic(diagnostic) => {
+                    rate_limited |= origin_missing && rate_limited_diagnostic(&diagnostic);
                     self.last_diagnostic = Some(diagnostic);
                 }
                 ProcessEvent::ReadError(error) if origin_missing => {
@@ -401,23 +492,46 @@ impl QuickTunnelService {
                 }
             }
         }
+        if rate_limited {
+            if self.rate_limit_until_ms <= now_ms() {
+                self.rate_limit_until_ms = now_ms() + RATE_LIMIT_RETRY_MS;
+            }
+            if let Err(error) = self.enforce_rate_limit() {
+                self.error = Some(format!("{error:#}"));
+                self.state = QuickTunnelState::Error;
+            }
+        }
     }
 
     async fn stop(&mut self, clear_target: bool) {
+        self.consume_events();
+        self.cancel_public_check().await;
+        self.next_public_check_at_ms = 0;
         if let Some(task) = self.download.take() {
             task.abort();
             let _ = task.await;
         }
         self.download_progress.reset();
-        for task in self.readers.drain(..) {
-            task.abort();
-        }
-        self.events = None;
-        self.last_diagnostic = None;
         if let Some(mut child) = self.child.take() {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
+        #[cfg(windows)]
+        {
+            self.child_job = None;
+        }
+        for mut task in self.readers.drain(..) {
+            if tokio::time::timeout(Duration::from_millis(250), &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+                let _ = task.await;
+            }
+        }
+        self.consume_events();
+        self.events = None;
+        self.last_diagnostic = None;
         self.clear_origin();
         if clear_target {
             self.target = None;
@@ -429,6 +543,41 @@ impl QuickTunnelService {
         self.error = Some(format!("{error:#}"));
         self.retry_at_ms = now_ms() + RETRY_MS;
         self.state = QuickTunnelState::Backoff;
+    }
+
+    fn enforce_rate_limit(&mut self) -> anyhow::Result<bool> {
+        let path = self.state_dir.join(RATE_LIMIT_FILE);
+        let stored = match std::fs::read(&path) {
+            Ok(bytes) => {
+                serde_json::from_slice::<RateLimitCooldown>(&bytes)
+                    .context("Quick Tunnel 冷却记录损坏，已暂停申请地址")?
+                    .retry_at_ms
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => {
+                return Err(error).context("无法读取 Quick Tunnel 冷却记录，已暂停申请地址");
+            }
+        };
+        self.rate_limit_until_ms = self.rate_limit_until_ms.max(stored);
+        if self.rate_limit_until_ms > stored {
+            crate::settings::atomic_write(
+                &path,
+                &serde_json::to_vec(&RateLimitCooldown {
+                    retry_at_ms: self.rate_limit_until_ms,
+                })?,
+            )
+            .context("无法保存 Quick Tunnel 冷却记录，已暂停申请地址")?;
+        }
+        if now_ms() < self.rate_limit_until_ms {
+            self.retry_at_ms = self.retry_at_ms.max(self.rate_limit_until_ms);
+            self.state = QuickTunnelState::Backoff;
+            self.error = Some(
+                "Cloudflare 限制了临时地址申请（HTTP 429），冷却结束后自动重试；重启程序或重新生成不能提前申请。"
+                    .into(),
+            );
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     fn current_origin(&self) -> Option<String> {
@@ -444,6 +593,41 @@ impl QuickTunnelService {
             .write()
             .unwrap_or_else(|error| error.into_inner()) = None;
     }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RateLimitCooldown {
+    retry_at_ms: u64,
+}
+
+#[cfg(windows)]
+fn cloudflared_job(child: &Child) -> anyhow::Result<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+    use windows::core::PCWSTR;
+
+    let process = child.raw_handle().context("cloudflared 进程已退出")?;
+    let handle = unsafe { CreateJobObjectW(None, PCWSTR::null()) }
+        .context("无法创建 cloudflared 进程生命周期保护")?;
+    let job = unsafe { OwnedHandle::from_raw_handle(handle.0) };
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    unsafe {
+        SetInformationJobObject(
+            handle,
+            JobObjectExtendedLimitInformation,
+            std::ptr::from_ref(&limits).cast(),
+            std::mem::size_of_val(&limits) as u32,
+        )?;
+        AssignProcessToJobObject(handle, HANDLE(process))?;
+    }
+    Ok(job)
 }
 
 fn target_requires_restart(current: Option<&str>, requested: &str) -> bool {
@@ -873,6 +1057,280 @@ impl Drop for TemporaryDownload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cooldown_directory() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("quick-tunnel-cooldown-")
+            .tempdir_in(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../temp"))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rate_limit_survives_process_recreation_toggles_and_manual_retry() {
+        let directory = cooldown_directory();
+        let mut service = QuickTunnelService::new(directory.path(), Arc::default());
+        let (sender, receiver) = mpsc::unbounded_channel();
+        service.events = Some(receiver);
+        sender
+            .send(ProcessEvent::Diagnostic(
+                "quick tunnel provisioning failed with status 429".into(),
+            ))
+            .unwrap();
+        sender
+            .send(ProcessEvent::Diagnostic("failed to start tunnel".into()))
+            .unwrap();
+        let detected_at = now_ms();
+        service.consume_events();
+        let deadline = service.rate_limit_until_ms;
+        assert!(deadline >= detected_at + 600_000 && deadline <= now_ms() + 600_000);
+        assert!(directory.path().join(RATE_LIMIT_FILE).is_file());
+
+        let mut restored = QuickTunnelService::new(directory.path(), Arc::default());
+        assert_eq!(restored.rate_limit_until_ms, deadline);
+        assert_eq!(restored.status(true)["state"], "retry_wait");
+        restored.invalidate();
+        restored
+            .reconcile(true, true, "http://127.0.0.1:45222")
+            .await;
+        assert!(restored.restart("http://127.0.0.1:45222").await.is_err());
+        restored
+            .reconcile(false, false, "http://127.0.0.1:45222")
+            .await;
+        restored
+            .reconcile(true, true, "http://127.0.0.1:45223")
+            .await;
+        assert_eq!(restored.status(true)["retryAtMs"], deadline);
+        assert_eq!(restored.status(true)["rateLimited"], true);
+        assert_eq!(restored.status(true)["state"], "retry_wait");
+        assert!(restored.child.is_none());
+        assert!(restored.download.is_none());
+    }
+
+    #[tokio::test]
+    async fn disabling_drains_rate_limit_events_before_stopping() {
+        let directory = cooldown_directory();
+        let mut service = QuickTunnelService::new(directory.path(), Arc::default());
+        let (sender, receiver) = mpsc::unbounded_channel();
+        service.events = Some(receiver);
+        sender
+            .send(ProcessEvent::Diagnostic("HTTP 429".into()))
+            .unwrap();
+        service
+            .reconcile(false, false, "http://127.0.0.1:45222")
+            .await;
+        let restored = QuickTunnelService::new(directory.path(), Arc::default());
+        assert_eq!(restored.status(true)["rateLimited"], true);
+    }
+
+    #[tokio::test]
+    async fn corrupt_cooldown_blocks_address_requests() {
+        let directory = cooldown_directory();
+        std::fs::write(directory.path().join(RATE_LIMIT_FILE), b"{").unwrap();
+        let mut service = QuickTunnelService::new(directory.path(), Arc::default());
+        service
+            .reconcile(true, true, "http://127.0.0.1:45222")
+            .await;
+        assert_eq!(service.status(true)["state"], "error");
+        assert!(service.restart("http://127.0.0.1:45222").await.is_err());
+        assert!(service.download.is_none());
+        assert!(service.child.is_none());
+    }
+
+    #[tokio::test]
+    async fn expired_cooldown_allows_regeneration() {
+        let directory = cooldown_directory();
+        std::fs::write(
+            directory.path().join(RATE_LIMIT_FILE),
+            serde_json::to_vec(&RateLimitCooldown {
+                retry_at_ms: now_ms().saturating_sub(1),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut service = QuickTunnelService::new(directory.path(), Arc::default());
+        service.restart("http://127.0.0.1:45222").await.unwrap();
+        assert_eq!(service.status(true)["rateLimited"], false);
+        assert_eq!(service.status(true)["state"], "stopped");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "仅由进程生命周期测试调用"]
+    fn job_child() {
+        if std::env::var("CODEX_ELVES_JOB_CHILD").as_deref() != Ok("1") {
+            return;
+        }
+        println!("job-child-ready");
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn owned_cloudflared_job_terminates_child_when_closed() {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "remote_access::quick_tunnel::tests::job_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("CODEX_ELVES_JOB_CHILD", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .creation_flags(crate::windows_integration::CREATE_NO_WINDOW);
+        let mut child = command.spawn().unwrap();
+        let job = cloudflared_job(&child).unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(line) = lines.next_line().await.unwrap() {
+                if line == "job-child-ready" {
+                    return;
+                }
+            }
+            panic!("test child exited before becoming ready");
+        })
+        .await
+        .unwrap();
+        drop(job);
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn generated_address_waits_for_public_access_verification() {
+        let mut service = QuickTunnelService::new(PathBuf::new(), Arc::default());
+        let (sender, receiver) = mpsc::unbounded_channel();
+        service.events = Some(receiver);
+        sender
+            .send(ProcessEvent::Origin(
+                "https://pending.trycloudflare.com".into(),
+            ))
+            .unwrap();
+
+        service.consume_events();
+
+        assert_eq!(service.status(true)["state"], "connecting");
+        assert_eq!(service.status(true)["connected"], false);
+        assert_eq!(
+            service.current_origin().as_deref(),
+            Some("https://pending.trycloudflare.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn public_probe_results_control_readiness_and_retries() {
+        let mut service = QuickTunnelService::new(
+            PathBuf::new(),
+            Arc::new(RwLock::new(Some(
+                "https://pending.trycloudflare.com".into(),
+            ))),
+        );
+        for (result, expected_state, interval) in [
+            (Ok(json!({"status":"ok"})), "ready", PUBLIC_RECHECK_MS),
+            (
+                Err(anyhow::anyhow!("Quick Tunnel 公网入口返回 HTTP 530")),
+                "connecting",
+                PUBLIC_RETRY_MS,
+            ),
+            (Ok(json!({"status":"ok"})), "ready", PUBLIC_RECHECK_MS),
+        ] {
+            let task = tokio::spawn(async move { result });
+            while !task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            service.public_check = Some(task);
+
+            service.refresh_public_access().await;
+
+            assert_eq!(service.status(true)["state"], expected_state);
+            assert_eq!(
+                service.next_public_check_at_ms,
+                service.checked_at_ms + interval
+            );
+            assert_eq!(service.error.is_some(), expected_state == "connecting");
+            assert!(service.public_check.is_none());
+            assert!(service.current_origin().is_some());
+
+            service.refresh_public_access().await;
+            assert_eq!(service.status(true)["state"], expected_state);
+            assert!(service.public_check.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_public_probe_is_nonblocking_and_cancelled_when_disabled() {
+        let mut service = QuickTunnelService::new(
+            PathBuf::new(),
+            Arc::new(RwLock::new(Some(
+                "https://pending.trycloudflare.com".into(),
+            ))),
+        );
+        service.state = QuickTunnelState::Connecting;
+        let task = tokio::spawn(std::future::pending::<anyhow::Result<Value>>());
+        let aborted = task.abort_handle();
+        service.public_check = Some(task);
+
+        tokio::time::timeout(Duration::from_millis(100), service.refresh_public_access())
+            .await
+            .unwrap();
+
+        assert_eq!(service.status(true)["state"], "connecting");
+        assert!(!aborted.is_finished());
+        service
+            .reconcile(false, false, "http://127.0.0.1:45222")
+            .await;
+        assert!(aborted.is_finished());
+        assert!(service.public_check.is_none());
+        assert!(service.current_origin().is_none());
+        assert_eq!(service.status(false)["state"], "stopped");
+    }
+
+    #[tokio::test]
+    async fn restarting_discards_completed_probe_from_previous_address() {
+        let mut service = QuickTunnelService::new(
+            PathBuf::new(),
+            Arc::new(RwLock::new(Some("https://old.trycloudflare.com".into()))),
+        );
+        let task = tokio::spawn(async { Ok(json!({"status":"ok"})) });
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        service.public_check = Some(task);
+
+        service.restart("http://127.0.0.1:45222").await.unwrap();
+        service.refresh_public_access().await;
+
+        assert_eq!(service.status(true)["state"], "stopped");
+        assert_eq!(service.status(true)["connected"], false);
+        assert_eq!(service.checked_at_ms, 0);
+        assert!(service.public_check.is_none());
+        assert!(service.current_origin().is_none());
+    }
+
+    #[test]
+    fn duplicate_address_output_does_not_override_verification_result() {
+        let origin = "https://pending.trycloudflare.com";
+        let mut service =
+            QuickTunnelService::new(PathBuf::new(), Arc::new(RwLock::new(Some(origin.into()))));
+        service.record_public_access_result(&Err(anyhow::anyhow!("HTTP 530")));
+        let checked_at_ms = service.checked_at_ms;
+        let (sender, receiver) = mpsc::unbounded_channel();
+        service.events = Some(receiver);
+        sender.send(ProcessEvent::Origin(origin.into())).unwrap();
+
+        service.consume_events();
+
+        assert_eq!(service.status(true)["state"], "connecting");
+        assert!(service.error.as_deref().unwrap().contains("HTTP 530"));
+        assert_eq!(service.checked_at_ms, checked_at_ms);
+    }
 
     #[test]
     fn parses_only_single_label_quick_tunnel_origin() {

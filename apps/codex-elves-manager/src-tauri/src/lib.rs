@@ -88,6 +88,7 @@ pub fn run() {
             if let Some(listener) = wake_listener {
                 spawn_manager_wake_listener(listener, app.handle().clone());
             }
+            spawn_remote_access_heartbeat();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -182,6 +183,22 @@ pub fn run() {
             }),
         );
     }
+}
+
+fn spawn_remote_access_heartbeat() {
+    tauri::async_runtime::spawn(async {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) = codex_elves_core::remote_access::send_manager_heartbeat().await {
+                let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+                    "remote_access.manager_heartbeat_failed",
+                    serde_json::json!({"message": format!("{error:#}")}),
+                );
+            }
+        }
+    });
 }
 
 fn install_tray<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {

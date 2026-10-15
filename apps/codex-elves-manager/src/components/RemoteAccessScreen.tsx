@@ -27,7 +27,6 @@ export function RemoteAccessScreen({
   const [showKey, setShowKey] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
-  const [publicTest, setPublicTest] = useState<QuickTunnelAccessTest | null>(null);
   const mounted = useRef(true);
   const refreshing = useRef(false);
   const latestSettings = useRef(settings);
@@ -75,7 +74,8 @@ export function RemoteAccessScreen({
     ? ["downloading", "starting", "connecting", "reconnecting", "retry_wait"].includes(quickTunnel.state)
     : false;
   const quickTunnelGenerating = quickTunnel
-    ? ["downloading", "starting", "connecting"].includes(quickTunnel.state)
+    ? ["downloading", "starting"].includes(quickTunnel.state)
+      || (quickTunnel.state === "connecting" && !publicUrl)
     : false;
   const quickTunnelDownloading = Boolean(
     settings.cloudflareQuickTunnelEnabled
@@ -86,7 +86,6 @@ export function RemoteAccessScreen({
     0,
     Math.min(100, Math.round(quickTunnel?.downloadPercent || 0)),
   );
-  useEffect(() => { setPublicTest(null); }, [publicUrl, settings.cloudflareQuickTunnelEnabled]);
   const runApply = (operation: () => Promise<void>) => run(async () => {
     try { await operation(); }
     catch (error) {
@@ -114,13 +113,13 @@ export function RemoteAccessScreen({
     }
     switch (quickTunnel?.state) {
       case "ready":
-        return <span className={`quick-tunnel-status-badge ${publicTest?.status === "ok" ? "connected" : ""}`}><span className="quick-tunnel-status-dot" />{publicTest?.status === "ok" ? "可访问" : "已就绪"}</span>;
+        return <span className="quick-tunnel-status-badge connected"><span className="quick-tunnel-status-dot" />可访问</span>;
       case "downloading":
         return <span className="quick-tunnel-status-badge connecting"><span className="quick-tunnel-status-dot" />正在准备组件</span>;
       case "starting":
         return <span className="quick-tunnel-status-badge connecting"><span className="quick-tunnel-status-dot" />正在启动</span>;
       case "connecting":
-        return <span className="quick-tunnel-status-badge connecting"><span className="quick-tunnel-status-dot" />正在连接</span>;
+        return <span className="quick-tunnel-status-badge connecting"><span className="quick-tunnel-status-dot" />{publicUrl ? "正在验证公网访问" : "正在连接"}</span>;
       case "reconnecting":
         return <span className="quick-tunnel-status-badge connecting"><span className="quick-tunnel-status-dot" />正在重连</span>;
       case "retry_wait":
@@ -131,15 +130,14 @@ export function RemoteAccessScreen({
         return <span className="quick-tunnel-status-badge"><span className="quick-tunnel-status-dot" />已停用</span>;
     }
   };
-  const testPublicUrl = () => run(async () => {
+  const testPublicUrl = () => runApply(async () => {
     if (!publicUrl) return;
-    setPublicTest(null);
-    setMessage("正在验证临时公网地址与网页回源…");
     const result = await command<QuickTunnelAccessTest>("testQuickTunnel");
     if (!mounted.current) return;
+    await refresh();
+    if (!mounted.current) return;
     if (result.status !== "ok") throw new Error(result.message || "公网访问验证失败，请检查网络连接后重试。");
-    setPublicTest(result);
-    setMessage(result.message || "公网访问验证通过。");
+    onSuccess(result.message || "公网访问验证通过。");
   });
   const confirmKeyChange = () => credentials?.accessKeyConfigured === false || window.confirm("更换访问密钥会使所有已授权设备失效，需要重新输入新密钥。继续？");
   const applySettings = async (next: RemoteAccessSettings) => {
@@ -161,11 +159,10 @@ export function RemoteAccessScreen({
       return;
     }
     const tunnelState = result.cloudflareQuickTunnel?.state;
-    if (next.enabled && next.cloudflareQuickTunnelEnabled && tunnelState && tunnelState !== "ready") {
-      setMessage(result.cloudflareQuickTunnel?.error || "设置已保存，Cloudflare Quick Tunnel 正在生成临时公网地址。");
-    }
     const tunnelSuccess = next.cloudflareQuickTunnelEnabled
-      ? tunnelState === "ready" ? "Quick Tunnel 已就绪。" : "Quick Tunnel 正在连接。"
+      ? result.cloudflareQuickTunnel?.rateLimited
+        ? "Quick Tunnel 正在等待限流冷却，不会提前申请地址。"
+        : tunnelState === "ready" ? "Quick Tunnel 公网访问验证通过。" : "Quick Tunnel 正在连接并验证公网访问。"
       : "";
     const keyConfigured = result.accessKeyConfigured ?? credentials?.accessKeyConfigured ?? false;
     const authorizationNotice = keyConfigured
@@ -185,9 +182,8 @@ export function RemoteAccessScreen({
     const result = await command<RemoteAccessStatus>("restartQuickTunnel");
     if (!mounted.current) return;
     setStatus(result);
-    setPublicTest(null);
     if (result.status !== "ok") throw new Error(result.message || "临时公网地址重新生成失败");
-    setMessage("正在重新生成临时公网地址，请稍候。");
+    onSuccess("正在重新生成临时公网地址，请稍候。");
   });
 
   return (
@@ -310,18 +306,18 @@ export function RemoteAccessScreen({
             </div>
             <div className="remote-access-input-row remote-access-public-row">
               <div className="remote-access-key-input remote-access-public-input">
-                <Input id="remote-quick-tunnel-url" readOnly disabled={!settings.enabled} placeholder={quickTunnelTransitioning ? "正在生成 trycloudflare.com 临时地址…" : "启用后自动生成 trycloudflare.com 临时地址"} value={publicUrl} />
+                <Input id="remote-quick-tunnel-url" readOnly disabled={!settings.enabled} placeholder={quickTunnel?.rateLimited ? "等待 Cloudflare 冷却结束后自动申请地址…" : quickTunnelTransitioning ? "正在生成 trycloudflare.com 临时地址…" : "启用后自动生成 trycloudflare.com 临时地址"} value={publicUrl} />
                 <div className="remote-access-key-actions">
                   <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={!settings.enabled || !publicUrl} aria-label="复制临时公网地址" onClick={() => void copy(publicUrl)}><Copy className="h-4 w-4" /></Button>
                 </div>
               </div>
-              <Button variant="secondary" size="sm" className="h-9" disabled={busy || quickTunnelGenerating || !settings.enabled} onClick={() => void generateQuickTunnelAddress()}>{publicUrl ? "重新生成" : "生成"}</Button>
+              <Button variant="secondary" size="sm" className="h-9" disabled={busy || quickTunnelGenerating || quickTunnel?.rateLimited || !settings.enabled} onClick={() => void generateQuickTunnelAddress()}>{publicUrl ? "重新生成" : "生成"}</Button>
               <Button variant="secondary" size="sm" className="h-9" disabled={busy || !settings.enabled || !publicUrl} onClick={() => void testPublicUrl()}>{busy ? "处理中…" : "测试访问"}</Button>
             </div>
-            <small>地址由 trycloudflare.com 临时分配，进程或应用重启、手动重新生成后会变化。公网访问仍需输入本机保存的访问密钥。</small>
+            <small>仅重启 Codex 会保留当前地址；远程访问后台重启、软件更新或手动重新生成后地址会变化。公网访问仍需输入本机保存的访问密钥。</small>
           </div>
         </div>
-        {["error", "retry_wait"].includes(quickTunnel?.state || "") && quickTunnel?.error ? <p className="remote-access-error" role="alert">{quickTunnel.error}</p> : null}
+        {["connecting", "reconnecting", "error", "retry_wait"].includes(quickTunnel?.state || "") && quickTunnel?.error ? <p className="remote-access-error" role="alert">{quickTunnel.error}</p> : null}
         {quickTunnel?.state === "retry_wait" && quickTunnel.retryAtMs ? <p className="remote-access-hint">将在 {new Date(quickTunnel.retryAtMs).toLocaleTimeString()} 自动重试。</p> : null}
         </CardContent>
         <CardHeader className="panel-head border-t border-border pt-6 pb-[10px]">
@@ -338,7 +334,7 @@ export function RemoteAccessScreen({
         <CardContent>
           <div className="remote-access-fields remote-access-fields-top">
           <div className="remote-access-wide"><Label htmlFor="remote-access-key">设置访问密钥</Label><div className="remote-access-input-row remote-access-key-row"><div className="remote-access-key-input">
-                <Input id="remote-access-key" type={showKey ? "text" : "password"} spellCheck={false} disabled={busy} autoComplete="off" minLength={32} maxLength={64} placeholder={credentials?.accessKeyConfigured ? "已设置；输入新密钥替换" : "32–64 个非空格 ASCII 字符，建议随机生成"} value={keyValue} onChange={event => setKeyValue(event.target.value)} />
+                <Input id="remote-access-key" type={showKey ? "text" : "password"} spellCheck={false} disabled={busy} autoComplete="off" minLength={8} maxLength={64} placeholder={credentials?.accessKeyConfigured ? "已保存（不回显）；输入新密钥替换" : "8–64 个非空格 ASCII 字符，建议随机生成"} value={keyValue} onChange={event => setKeyValue(event.target.value)} />
                 <div className="remote-access-key-actions">
                   <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={busy || !keyValue} aria-label={showKey ? "隐藏访问密钥" : "显示访问密钥"} onClick={() => setShowKey(value => !value)}>{showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</Button>
                   <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={busy || !keyValue} aria-label="复制访问密钥" onClick={() => void copy(keyValue)}><Copy className="h-4 w-4" /></Button>
@@ -348,14 +344,14 @@ export function RemoteAccessScreen({
             if (result.status !== "ok" || !result.key) throw new Error(result.message || "密钥生成失败");
             setKeyValue(result.key); setShowKey(false);
             setMessage("随机密钥已生成，尚未保存。点击右侧「保存」后生效，当前设备授权不受影响。");
-          })}>生成</Button><Button disabled={busy || !keyValue.trim()} onClick={() => void run(async () => {
-            if (!/^[\x21-\x7e]{32,64}$/.test(keyValue.trim())) throw new Error("密钥需为 32–64 个非空格 ASCII 字符。");
+          })}>生成</Button><Button disabled={busy || !keyValue.trim()} onClick={() => void runApply(async () => {
+            if (!/^[\x21-\x7e]{8,64}$/.test(keyValue.trim())) throw new Error("密钥需为 8–64 个非空格 ASCII 字符。");
             if (!confirmKeyChange()) return;
             const result = await command<RemoteAccessCredentials>("setKey", { key: keyValue.trim() });
             if (result.status !== "ok") throw new Error(result.message || "访问密钥保存失败");
             setCredentials(result);
-            onSuccess("访问密钥已保存，请复制妥善保管。原有设备需重新输入新密钥连接。");
-          })}>保存</Button></div><small>点击「生成」后需点击「保存」生效，请妥善保存密钥。</small></div>
+            onSuccess("访问密钥已保存并生效，刷新后不回显明文，请复制妥善保管。原有设备需重新输入新密钥连接。");
+          })}>保存</Button></div><small>支持 8–64 个非空格 ASCII 字符；点击「保存」后生效。仅保存校验摘要，刷新后不回显明文，请妥善保管。</small></div>
         </div>
         <div className="remote-access-devices">
           {(status?.devices || []).map(device => <div className="remote-access-device" key={device.id}>

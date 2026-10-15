@@ -53,6 +53,7 @@ export type RemoteAccessStatus = {
     publicUrl: string;
     error?: string | null;
     retryAtMs?: number | null;
+    rateLimited?: boolean;
     installed: boolean;
     version?: string | null;
     downloadedBytes?: number;

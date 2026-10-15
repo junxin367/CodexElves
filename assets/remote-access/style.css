@@ -464,6 +464,16 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .message-action-button{display:grid;place-items:center;width:28px;height:28px;padding:6px;border:0;color:var(--muted);border-radius:6px}
 .message-action-button:hover{color:var(--text);background:var(--hover)}
 .message-action-button .ui-icon{width:15px;height:15px}
+.message-editor{width:100%;min-width:0;margin:0;padding:12px 14px;box-sizing:border-box;background:var(--hover);border-radius:18px}
+.message-editor-input{display:block;box-sizing:border-box;width:100%;min-height:54px;max-height:300px;margin:0;padding:0;resize:vertical;border:0;outline:0;background:transparent;color:var(--text);font:inherit;line-height:1.625}
+.message-editor-actions{display:flex;justify-content:flex-end;align-items:center;gap:7px;margin-top:10px}
+.message-editor-actions>button{min-height:28px;padding:4px 12px;border:0;border-radius:16px;font-size:.85714rem;line-height:20px}
+.message-editor-cancel{background:var(--hover);color:var(--text)}
+.message-editor-send{background:var(--text);color:var(--bg)}
+.message-editor-send:hover:not(:disabled){background:var(--text);opacity:.85}
+.message-editor-status{display:block;margin-top:8px;line-height:1.5}
+.message-editor:focus-within{outline:1px solid var(--line)}
+@media(max-width:760px){.message-editor-input{font-size:16px}.message-editor-actions>button{min-height:32px}}
 .message-time{white-space:nowrap}
 #edit-message-area{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;padding-bottom:9px;border-bottom:1px solid var(--line);font-size:.78571rem;color:var(--muted)}
 #edit-message-area>.text-button{flex-shrink:0}

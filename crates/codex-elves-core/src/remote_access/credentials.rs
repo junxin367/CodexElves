@@ -52,8 +52,8 @@ pub(super) fn load_access_key(state_dir: &Path) -> anyhow::Result<Option<AccessK
 pub fn configure_access_key(state_dir: &Path, value: &str) -> anyhow::Result<()> {
     let key = value.trim();
     ensure!(
-        (32..=256).contains(&key.len()) && key.bytes().all(|byte| byte.is_ascii_graphic()),
-        "访问密钥需为 32–256 个非空格 ASCII 字符，建议使用随机生成的密钥"
+        (8..=256).contains(&key.len()) && key.bytes().all(|byte| byte.is_ascii_graphic()),
+        "访问密钥需为 8–256 个非空格 ASCII 字符，建议使用随机生成的密钥"
     );
     let salt = random_token();
     let mut digest = [0u8; 32];

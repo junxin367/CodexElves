@@ -33,9 +33,13 @@ use crate::settings::{RemoteAccessSettings, SettingsStore};
 
 mod credentials;
 mod quick_tunnel;
+mod service;
 use credentials::{AccessKey, load_access_key};
 pub use credentials::{access_credentials_status, configure_access_key};
 use quick_tunnel::QuickTunnelService;
+pub use service::{
+    ensure_running as ensure_service_running, run as run_service, send_manager_heartbeat,
+};
 
 const NATIVE_SCRIPT: &str = include_str!("../../../assets/remote-access/native.js");
 const WEB_HTML: &str = include_str!("../../../assets/remote-access/index.html");
@@ -722,7 +726,7 @@ impl RemoteAccessController {
                     .await
                     .quick_tunnel
                     .restart(&quick_tunnel_target(&settings))
-                    .await;
+                    .await?;
                 self.reconcile(settings.clone()).await;
                 Ok(self.admin_status(&settings).await)
             }
@@ -936,6 +940,12 @@ pub async fn admin_request(action: &str, payload: Value) -> Value {
     result.unwrap_or_else(|error| json!({"status":"failed","message":error.to_string()}))
 }
 
+pub async fn service_admin_request(action: &str, payload: Value) -> Value {
+    service::request_or_start(action, payload)
+        .await
+        .unwrap_or_else(|error| json!({"status":"failed","message":format!("{error:#}")}))
+}
+
 pub async fn local_settings_command(action: &str, payload: Value) -> anyhow::Result<Value> {
     let action = action.to_string();
     tokio::task::spawn_blocking(move || {
@@ -964,6 +974,9 @@ pub async fn request_local_admin(action: &str, payload: Value) -> anyhow::Result
         ),
         "不支持的远程管理操作"
     );
+    if let Some(response) = service::try_request(action, &payload).await? {
+        return Ok(response);
+    }
     let status = crate::status::StatusStore::default()
         .load_latest()?
         .filter(|status| status.status == "running")
@@ -1410,12 +1423,12 @@ async fn connect(
         return Err(ApiError::new(503, "服务已关闭"));
     }
     let key_value = payload["key"].as_str().unwrap_or("").trim();
-    if !(32..=256).contains(&key_value.len())
+    if !(8..=256).contains(&key_value.len())
         || !key_value.bytes().all(|byte| byte.is_ascii_graphic())
     {
         return Err(ApiError::new(
             400,
-            "请填写 32–256 个非空格 ASCII 字符的访问密钥",
+            "请填写 8–256 个非空格 ASCII 字符的访问密钥",
         ));
     }
     state
@@ -2780,6 +2793,82 @@ mod tests {
         }
     }
 
+    struct RestartingNativeBridge {
+        online: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl NativeRemoteBridge for RestartingNativeBridge {
+        async fn call(&self, _action: &str, _payload: Value) -> anyhow::Result<Value> {
+            anyhow::ensure!(self.online.load(Ordering::SeqCst), "native restarting");
+            Ok(json!({"ok":true,"epoch":"test","cursor":0,"events":[]}))
+        }
+    }
+
+    #[tokio::test]
+    async fn native_restart_preserves_web_listener_and_device_authorization() {
+        let directory = tempfile::Builder::new()
+            .prefix("remote-native-restart-")
+            .tempdir_in(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../temp"))
+            .unwrap();
+        configure_access_key(directory.path(), "restart-key").unwrap();
+        let native = Arc::new(RestartingNativeBridge {
+            online: AtomicBool::new(true),
+        });
+        let controller =
+            RemoteAccessController::new(native.clone(), directory.path().to_path_buf()).unwrap();
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        controller
+            .reconcile(RemoteAccessSettings {
+                enabled: true,
+                port,
+                ..RemoteAccessSettings::default()
+            })
+            .await;
+        let base_url = format!("http://127.0.0.1:{port}");
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let login = client
+            .post(format!("{base_url}/api/connect"))
+            .header(reqwest::header::ORIGIN, &base_url)
+            .json(&json!({"key":"restart-key"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(login.status(), reqwest::StatusCode::OK);
+        let cookie = login.headers()[reqwest::header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        for online in [true, false, true] {
+            native.online.store(online, Ordering::SeqCst);
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while controller.native_connected.load(Ordering::SeqCst) != online {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(controller.running.load(Ordering::SeqCst));
+            let response = client
+                .get(format!("{base_url}/api/session"))
+                .header(reqwest::header::COOKIE, &cookie)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let session: Value = response.json().await.unwrap();
+            assert_eq!(session["nativeConnected"], online);
+        }
+        controller.reconcile(RemoteAccessSettings::default()).await;
+    }
+
     #[tokio::test]
     async fn missing_credentials_allow_listener_but_reject_session_access() {
         let state_dir = tempfile::tempdir().unwrap();
@@ -2832,5 +2921,99 @@ mod tests {
         assert_eq!(connect_status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(connect_body["message"], "本机尚未设置访问密钥");
         assert_eq!(session_status, reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn short_keys_saved_after_startup_take_effect_without_restart() {
+        let temp_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../temp");
+        let state_dir = tempfile::Builder::new()
+            .prefix("remote-key-test-")
+            .tempdir_in(temp_root)
+            .unwrap();
+        let controller = RemoteAccessController::new(
+            Arc::new(OfflineNativeBridge),
+            state_dir.path().to_path_buf(),
+        )
+        .unwrap();
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let settings = RemoteAccessSettings {
+            enabled: true,
+            port,
+            ..RemoteAccessSettings::default()
+        };
+        controller.reconcile(settings).await;
+        let base_url = format!("http://127.0.0.1:{port}");
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let first_key = "firstkey";
+        let second_key = "next-key9";
+
+        assert!(configure_access_key(state_dir.path(), "short!!").is_err());
+        assert!(!state_dir.path().join("remote-access-key.json").exists());
+        let short_login = client
+            .post(format!("{base_url}/api/connect"))
+            .header(reqwest::header::ORIGIN, &base_url)
+            .json(&json!({"key":"short!!"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(short_login.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        configure_access_key(state_dir.path(), first_key).unwrap();
+        let credentials = access_credentials_status(state_dir.path()).unwrap();
+        assert_eq!(credentials["accessKeyConfigured"], true);
+        assert!(credentials.get("key").is_none());
+        assert!(credentials.get("hash").is_none());
+        let first_login = client
+            .post(format!("{base_url}/api/connect"))
+            .header(reqwest::header::ORIGIN, &base_url)
+            .json(&json!({"key":first_key}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(first_login.status(), reqwest::StatusCode::OK);
+        let first_cookie = first_login.headers()[reqwest::header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let first_session = client
+            .get(format!("{base_url}/api/session"))
+            .header(reqwest::header::COOKIE, &first_cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(first_session.status(), reqwest::StatusCode::OK);
+
+        configure_access_key(state_dir.path(), second_key).unwrap();
+        let old_session = client
+            .get(format!("{base_url}/api/session"))
+            .header(reqwest::header::COOKIE, &first_cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(old_session.status(), reqwest::StatusCode::UNAUTHORIZED);
+        let old_login = client
+            .post(format!("{base_url}/api/connect"))
+            .header(reqwest::header::ORIGIN, &base_url)
+            .json(&json!({"key":first_key}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(old_login.status(), reqwest::StatusCode::UNAUTHORIZED);
+        let new_login = client
+            .post(format!("{base_url}/api/connect"))
+            .header(reqwest::header::ORIGIN, &base_url)
+            .json(&json!({"key":second_key}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(new_login.status(), reqwest::StatusCode::OK);
+        controller.reconcile(RemoteAccessSettings::default()).await;
     }
 }

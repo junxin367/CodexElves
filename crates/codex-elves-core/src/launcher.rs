@@ -255,7 +255,6 @@ pub trait LaunchHooks: Send + Sync {
 pub struct DefaultLaunchHooks {
     child: Mutex<Option<Child>>,
     helper: Mutex<Option<HelperRuntime>>,
-    remote_access: Mutex<Option<crate::remote_access::RemoteAccessMonitor>>,
     bridge_runtime: BridgeRuntimeSlot,
     bridge_watchdog: Mutex<Option<BridgeWatchdogRuntime>>,
     computer_use_guard_watchdog: Mutex<Option<ComputerUseGuardWatchdogRuntime>>,
@@ -559,15 +558,6 @@ impl DefaultLaunchHooks {
             shutdown: shutdown_tx,
             task,
         });
-        match crate::remote_access::start_monitor() {
-            Ok(runtime) => *self.remote_access.lock().await = Some(runtime),
-            Err(error) => {
-                let _ = crate::diagnostic_log::append_diagnostic_log(
-                    "remote_access.start_failed",
-                    serde_json::json!({"message":error.to_string()}),
-                );
-            }
-        }
         Ok(())
     }
 }
@@ -797,7 +787,16 @@ impl LaunchHooks for DefaultLaunchHooks {
             helper_port,
             crate::lan_proxy::helper_bind_host(lan_proxy_enabled),
         )
-        .await
+        .await?;
+        if settings.remote_access.enabled
+            && let Err(error) = crate::remote_access::ensure_service_running().await
+        {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "remote_access.start_failed",
+                serde_json::json!({"message":format!("{error:#}")}),
+            );
+        }
+        Ok(())
     }
 
     async fn launch_codex(
@@ -1019,9 +1018,6 @@ impl LaunchHooks for DefaultLaunchHooks {
     }
 
     async fn shutdown_helper(&self, _helper_port: u16) {
-        if let Some(runtime) = self.remote_access.lock().await.take() {
-            runtime.shutdown().await;
-        }
         if let Some(runtime) = self.computer_use_guard_watchdog.lock().await.take() {
             let _ = runtime.shutdown.send(());
             let _ = runtime.task.await;
@@ -1273,7 +1269,7 @@ async fn handle_helper_connection(
             return Ok(());
         }
         let payload = serde_json::from_str(request_body).unwrap_or(Value::Null);
-        let response = crate::remote_access::admin_request(action, payload).await;
+        let response = crate::remote_access::service_admin_request(action, payload).await;
         write_http_response(
             &mut stream,
             "200 OK",

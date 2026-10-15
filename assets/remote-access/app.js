@@ -1720,7 +1720,7 @@ function showLogin() {
   const field = element("div", "pair-key-field");
   const key = element("input");
   key.id = "access-key"; key.type = "password"; key.placeholder = "粘贴或输入访问密钥"; key.required = true;
-  key.autocomplete = "off"; key.minLength = 32; key.spellcheck = false;
+  key.autocomplete = "off"; key.minLength = 8; key.spellcheck = false;
   key.setAttribute("autocapitalize", "off"); key.setAttribute("autocorrect", "off");
   key.setAttribute("enterkeyhint", "go"); key.setAttribute("aria-describedby", "pair-key-hint");
   const reveal = button("", "显示密钥", () => {
@@ -1737,7 +1737,7 @@ function showLogin() {
   }
   setKeyVisible(false);
   field.append(key, reveal);
-  const defaultHint = "支持直接粘贴，首尾空白会自动忽略。";
+  const defaultHint = "支持 8–256 个非空格 ASCII 字符，首尾空白会自动忽略。";
   const invalidKeyMessage = "访问密钥错误，请重试。";
   const hint = element("p", "pair-hint muted", defaultHint); hint.id = "pair-key-hint";
   hint.setAttribute("aria-live", "polite"); hint.setAttribute("aria-atomic", "true");
@@ -1783,8 +1783,8 @@ function showLogin() {
     event.preventDefault();
     if (submitting) return;
     const value = key.value.trim();
-    if (!authenticated && !/^[\x21-\x7e]{32,256}$/.test(value)) {
-      setError(invalidKeyMessage, true);
+    if (!authenticated && !/^[\x21-\x7e]{8,256}$/.test(value)) {
+      setError("访问密钥需为 8–256 个非空格 ASCII 字符。", true);
       key.focus(); return;
     }
     submitting = true; setError(); setKeyVisible(false); updateForm();
@@ -2405,47 +2405,79 @@ function beginMessageEdit(threadId, item) {
   const metadata = item.messageMetadata;
   if (threadId !== selectedId || thread?.id !== threadId || metadata?.editable !== true
       || session.readOnly || !connected || busy || stopping || pending || compactionLocked() || isActiveThread()) return;
-  if (editingMessage || editingQueuedMessage) { $("#prompt").focus(); return; }
+  if (editingMessage || editingQueuedMessage) { (editingMessage?.input || $("#prompt")).focus(); return; }
   rememberDraft();
   editingMessage = {
     threadId, turnId: metadata.turnId, messageId: metadata.messageId,
-    backup: snapshotDraft(), model: selectedModel, effort: selectedEffort
+    text: messageCopyText(item), error: ""
   };
-  $("#prompt").value = messageCopyText(item);
-  selectedSkills = []; selectedModel = selectedEffort = "";
-  setComposerAttachments(attachmentsFromRemoteImages(item.remoteImages), { readOnly: true });
-  closeComposerMenus(); renderSelectedSkills(); updateComposer(); scheduleMessages();
-  $("#prompt").focus({ preventScroll: true });
+  closeComposerMenus(); updateComposer(); renderMessages();
+  editingMessage.input?.focus({ preventScroll: true });
 }
 function cancelMessageEdit({ focus = true } = {}) {
-  const edit = editingMessage;
-  if (!edit) return;
+  if (!editingMessage) return;
   editingMessage = null;
-  if (selectedId === edit.threadId && $("#prompt")) {
-    $("#prompt").value = edit.backup.text;
-    selectedSkills = edit.backup.skills; selectedModel = edit.model; selectedEffort = edit.effort;
-    setComposerAttachments(edit.backup.attachments || []);
-    renderSelectedSkills();
-  }
   updateComposer(); scheduleMessages();
   if (focus) $("#prompt")?.focus({ preventScroll: true });
+}
+function updateMessageEditor() {
+  const edit = editingMessage;
+  if (!edit?.form) return;
+  const locked = busy || !!pending;
+  const target = thread?.editableMessage;
+  const stale = Object.hasOwn(thread || {}, "editableMessage")
+    && (target?.turnId !== edit.turnId || target?.messageId !== edit.messageId);
+  const unavailable = !connected || session?.readOnly || stopping || compactionLocked() || isActiveThread() || stale;
+  edit.form.setAttribute("aria-busy", String(locked));
+  edit.input.readOnly = locked || unavailable;
+  edit.send.disabled = locked || unavailable || !edit.text.trim();
+  edit.cancel.disabled = locked;
+  edit.status.textContent = pending ? "正在确认送达，请勿重复发送。" : edit.error
+    || (unavailable ? "会话状态已变化，暂不能重新发送。可取消后重新编辑。" : "");
+  edit.status.hidden = !edit.status.textContent;
+}
+function messageEditor() {
+  const edit = editingMessage;
+  if (!edit.form) {
+    const form = element("form", "message-editor");
+    const input = element("textarea", "message-editor-input");
+    input.setAttribute("aria-label", "编辑最后一条消息");
+    input.value = edit.text; input.rows = 2;
+    const cancel = button("取消", "取消编辑消息", () => cancelMessageEdit(), "message-editor-cancel");
+    const send = element("button", "message-editor-send", "发送");
+    send.type = "submit"; send.setAttribute("aria-label", "发送修改后的消息");
+    const actions = element("div", "message-editor-actions");
+    actions.append(cancel, send);
+    const status = element("small", "message-editor-status error-text");
+    status.setAttribute("role", "status"); status.hidden = true;
+    form.append(input, status, actions);
+    form.onsubmit = event => { event.preventDefault(); void submitMessageEdit(); };
+    input.oninput = () => { edit.text = input.value; edit.error = ""; updateMessageEditor(); };
+    input.onkeydown = event => {
+      if (event.isComposing) return;
+      if (event.key === "Escape" && !busy && !pending) { event.preventDefault(); cancelMessageEdit(); }
+      else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault(); void submitMessageEdit();
+      }
+    };
+    Object.assign(edit, { form, input, send, cancel, status });
+  }
+  updateMessageEditor();
+  return edit.form;
 }
 function renderMessageEditBanner() {
   const area = $("#edit-message-area");
   if (!area) return;
-  const kind = editingQueuedMessage ? editingQueuedMessage.state === "starting" ? "queued-starting" : "queued"
-    : editingMessage ? "message" : "";
+  const kind = editingQueuedMessage ? editingQueuedMessage.state === "starting" ? "queued-starting" : "queued" : "";
   area.hidden = !kind;
   if (area.dataset.editKind !== kind) {
     area.dataset.editKind = kind;
     area.replaceChildren();
-    if (kind) area.append(element("span", "", kind === "queued-starting" ? "正在取回排队消息…"
-      : kind === "queued" ? "编辑排队消息" : "编辑最后一条消息 · 保留原附件和上下文"),
+    if (kind) area.append(element("span", "", kind === "queued-starting" ? "正在取回排队消息…" : "编辑排队消息"),
       button(kind === "queued-starting" ? "重新取回" : "取消编辑",
         kind === "queued-starting" ? "核对并取回此排队消息" : "取消编辑并恢复未发送草稿", () => {
         if (editingQueuedMessage?.state === "starting") void requestQueuedMessageEdit(editingQueuedMessage);
         else if (editingQueuedMessage) void cancelQueuedMessageEdit();
-        else cancelMessageEdit();
       }, "text-button"));
   }
   if (kind) $("button", area).disabled = busy || !!editingQueuedMessage
@@ -2455,13 +2487,16 @@ async function submitMessageEdit() {
   const edit = editingMessage;
   if (!edit || busy || stopping || pending || session.readOnly || !connected
       || edit.threadId !== selectedId || thread?.id !== selectedId || compactionLocked() || isActiveThread()) return;
-  const prompt = $("#prompt").value.trim(), version = selectionVersion;
+  if (Object.hasOwn(thread, "editableMessage")
+      && (thread.editableMessage?.turnId !== edit.turnId || thread.editableMessage?.messageId !== edit.messageId)) {
+    edit.error = "最后一条消息已变化，请取消后重新编辑。";
+    updateMessageEditor(); return;
+  }
+  const prompt = edit.text.trim(), version = selectionVersion;
   if (!prompt) { notice("请输入修改后的消息"); return; }
+  edit.error = "";
   busy = true; updateComposer();
   try {
-    if (!await confirmAction("编辑并再次发送",
-      "将按 Codex 原生方式回到这条用户消息之前，并重新执行后续回复。旧回复会被替换；原附件和上下文保留。是否继续？",
-      "编辑并再次发送", true)) return;
     if (editingMessage !== edit || selectedId !== edit.threadId || version !== selectionVersion
         || session.readOnly || !connected || compactionLocked() || isActiveThread())
       throw new Error("会话状态已变化，请重新核对后编辑");
@@ -2472,7 +2507,10 @@ async function submitMessageEdit() {
     if (version === selectionVersion && selectedId === edit.threadId)
       await selectThread(edit.threadId, { closeSidebar: false });
     await loadSidebar();
-  } catch (error) { notice(error.message, true); }
+  } catch (error) {
+    if (editingMessage === edit) edit.error = error.message;
+    notice(error.message, true);
+  }
   finally { busy = false; updateComposer(); }
 }
 function openImagePreview(link, image) {
@@ -3033,6 +3071,9 @@ function genericToolPresentation(item) {
 function renderItem(item, previous, inActivity = false, running = false) {
   if (item.type === "userMessage") {
     const node = previous || element("article", "message user-message");
+    const editing = editingMessage?.threadId === selectedId && editingMessage.messageId === item.id;
+    node.className = `message user-message${editing ? " editing-message" : ""}`;
+    if (editing && editingMessage.form && node.contains(editingMessage.form)) return node;
     const display = userDisplayContent(item);
     const bubble = element("div", "user-bubble");
     if (display.questionReplies) for (const reply of display.questionReplies) {
@@ -3053,7 +3094,7 @@ function renderItem(item, previous, inActivity = false, running = false) {
       attachments.append(image || element("span", "attachment-placeholder", "图片附件 · 请在 Codex 桌面查看"));
     }
     node.replaceChildren(...(attachments.childElementCount ? [attachments] : []),
-      ...(display.text.trim() || display.questionReplies ? [bubble] : []));
+      ...(editing ? [messageEditor()] : display.text.trim() || display.questionReplies ? [bubble] : []));
     return node;
   }
   if (item.type === "agentMessage" || item.type === "plan") {
@@ -4462,11 +4503,13 @@ function renderMessages(keepScroll = true) {
     const renderMessage = (item, inActivity = false) => {
       const key = `${turn.id}:${item.id}`, cached = renderedItems.get(key);
       const running = turnRunning && (["inProgress", "running"].includes(item.status) || item.type === "reasoning" && item === turnItems.at(-1));
-      const node = cached?.item === item && cached.inActivity === inActivity && cached.running === running
+      const editing = item.type === "userMessage" && editingMessage?.threadId === selectedId && editingMessage.messageId === item.id;
+      const node = cached?.item === item && cached.inActivity === inActivity && cached.running === running && cached.editing === editing
         ? cached.node : renderItem(item, cached?.item.type === item.type ? cached.node : null, inActivity, running);
       node.dataset.key = key;
-      renderedItems.set(key, { item, node, inActivity, running });
-      if (item.type === "userMessage" || item.type === "agentMessage") {
+      renderedItems.set(key, { item, node, inActivity, running, editing });
+      if (editing) node.messageActionBinding?.dispose();
+      else if (item.type === "userMessage" || item.type === "agentMessage") {
         const threadId = selectedId;
         renderMessageActions(node, item, {
           threadId, inActivity, readOnly: session.readOnly,
@@ -5406,23 +5449,23 @@ function updateComposer() {
     attachmentNote.hidden = !unsupportedImages && !queueImageNote;
   }
   setComposerAttachmentsDisabled(session.readOnly || compacting || busy || stopping || !connected
-    || editing && !!pending || editingQueuedMessage?.state === "starting" || (!creating && !selectedId));
+    || !!editingMessage || editing && !!pending || editingQueuedMessage?.state === "starting" || (!creating && !selectedId));
   const action = editingQueuedMessage ? "save"
     : !editing && active && ((!prompt && !hasAttachments) || pending) && selectedId ? "stop" : "send";
   if (send.dataset.action !== action) {
     send.dataset.action = action;
     send.replaceChildren(icon(action === "stop" ? "stop" : action === "save" ? "check" : "arrowUp"));
   }
-  send.setAttribute("aria-label", editingQueuedMessage ? "保存队列消息修改" : editingMessage ? "编辑并再次发送" : action === "stop" ? "停止生成" : "发送消息");
-  send.title = editingQueuedMessage ? "保存队列消息修改" : editingMessage ? "编辑并再次发送" : action === "stop" ? "停止生成" : active ? "发送补充消息" : "发送消息";
+  send.setAttribute("aria-label", editingQueuedMessage ? "保存队列消息修改" : action === "stop" ? "停止生成" : "发送消息");
+  send.title = editingQueuedMessage ? "保存队列消息修改" : editingMessage ? "请先完成消息编辑" : action === "stop" ? "停止生成" : active ? "发送补充消息" : "发送消息";
   if (unsupportedImages) send.title = "当前服务版本尚不支持图片发送，请先更新程序";
   if (unsupportedProjectless) send.title = "当前服务版本尚不支持无项目会话，请先更新程序或选择已有项目";
   send.setAttribute("aria-busy", String(busy || stopping || compacting));
   send.disabled = busy || stopping || compacting || !connected || session.readOnly || unsupportedImages || unsupportedProjectless || composerAttachmentsLoading()
     || (action !== "stop" && (!!pending || !prompt && !hasAttachments))
     || (!creating && (!selectedId || thread?.id !== selectedId));
-  if (editingMessage && active || editingQueuedMessage?.state === "starting") send.disabled = true;
-  $("#prompt").disabled = session.readOnly || compacting || editing && (busy || !!pending)
+  if (editingMessage || editingQueuedMessage?.state === "starting") send.disabled = true;
+  $("#prompt").disabled = session.readOnly || compacting || !!editingMessage || editing && (busy || !!pending)
     || editingQueuedMessage?.state === "starting" || (!creating && !selectedId);
   $("#new-chat").disabled = session.readOnly || !connected;
   $("#model-button").disabled = session.readOnly || compacting || editing;
@@ -5477,10 +5520,11 @@ function updateComposer() {
   }
   renderCompactionBanner($("#pending-area"), selectedId, compaction);
   if (historyInitialized && selectedId) scheduleMessages();
+  updateMessageEditor();
 }
 async function sendMessage() {
   if (editingQueuedMessage) return submitQueuedMessageEdit();
-  if (editingMessage) return submitMessageEdit();
+  if (editingMessage) return;
   if (busy || stopping || compactionLocked() || pending || session.readOnly || !connected) return;
   const prompt = composerPrompt();
   const images = composerAttachmentsPayload();

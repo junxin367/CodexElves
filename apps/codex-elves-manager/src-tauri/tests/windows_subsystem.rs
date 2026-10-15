@@ -29,6 +29,34 @@ fn manager_binary_uses_windows_gui_subsystem_in_debug_and_release() {
 }
 
 #[test]
+fn remote_service_mode_does_not_start_the_manager_window() {
+    let main_rs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+        .expect("read manager main.rs");
+    let service_mode = main_rs.find("--remote-access-service").unwrap();
+    let service_run = main_rs.find("remote_access::run_service()").unwrap();
+    let manager_run = main_rs.find("codex_elves_manager_lib::run()").unwrap();
+    assert!(service_mode < service_run && service_run < manager_run);
+    assert!(main_rs[service_run..manager_run].contains("return;"));
+    let lib_rs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+        .expect("read manager lib.rs");
+    let setup = lib_rs.split(".setup(move |app|").nth(1).unwrap();
+    let setup = setup.split(".invoke_handler").next().unwrap();
+    assert!(setup.contains("spawn_remote_access_heartbeat();"));
+    let heartbeat = lib_rs
+        .split("fn spawn_remote_access_heartbeat()")
+        .nth(1)
+        .unwrap()
+        .split("fn install_tray")
+        .next()
+        .unwrap();
+    assert!(heartbeat.contains("tauri::async_runtime::spawn"));
+    assert!(heartbeat.contains("Duration::from_secs(60)"));
+    assert!(heartbeat.contains("MissedTickBehavior::Skip"));
+    assert!(heartbeat.contains("send_manager_heartbeat().await"));
+    assert!(!heartbeat.contains("ensure_service_running"));
+}
+
+#[test]
 fn manager_release_binary_uses_embedded_frontend_assets() {
     let cargo_toml = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
         .expect("read manager Cargo.toml");
