@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 22) return;
+  if (window.__codexElvesRemoteAccess?.version === 23) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -143,6 +143,26 @@
   const HISTORY_ITEM_PAGE_LIMIT = 40;
   const transcriptEventTypes = new Set(["modelChanged", "modelRerouted", "contextCompaction"]);
   const normalizePath = path => String(path || "").replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
+  async function nativeUltraReasoningEnabled() {
+    try {
+      const resource = [...document.querySelectorAll('link[rel="modulepreload"]')].map(link => link.href)
+        .concat(performance.getEntriesByType("resource").map(entry => entry.name))
+        .find(name => /\/app-shared-[^/]+\.js$/.test(name));
+      if (!resource || !resource.startsWith("app://-/")) return false;
+      const values = Object.values(await import(resource));
+      const setting = values.find(value => value?.enabledReasoningEfforts?.key === "enabled-reasoning-efforts")
+        ?.enabledReasoningEfforts;
+      const readSetting = values.find(value => typeof value === "function"
+        && /get-setting/.test(Function.prototype.toString.call(value))
+        && /\.effective/.test(Function.prototype.toString.call(value)));
+      const statsig = window.__STATSIG__?.firstInstance ?? window.__STATSIG__?.instance?.();
+      return !!setting && !!readSetting
+        && statsig?.getFeatureGate?.("1186680773", { disableExposureLog: true })?.value === true
+        && array(await readSetting(setting)).includes("ultra");
+    } catch {
+      return false;
+    }
+  }
   async function nativeModelCatalog() {
     const data = [], cursors = new Set();
     let cursor = null;
@@ -153,7 +173,12 @@
       if (cursor && cursors.has(cursor)) throw failure(503, "原生模型列表分页无效");
       if (cursor) cursors.add(cursor);
     } while (cursor);
-    return data.filter(model => !model.hidden);
+    const ultraEnabled = await nativeUltraReasoningEnabled();
+    return data.filter(model => !model.hidden).map(model => ({
+      ...model,
+      supportedReasoningEfforts: array(model.supportedReasoningEfforts)
+        .filter(effort => effort.reasoningEffort !== "ultra" || ultraEnabled)
+    }));
   }
   async function validateReasoningEffort(model, effort) {
     if (!effort) return;
@@ -1995,7 +2020,9 @@
             supportedReasoningEfforts: array(model.supportedReasoningEfforts),
             defaultReasoningEffort: model.defaultReasoningEffort
           }));
-          return { ok: true, data: models, ...await defaultModelSettings() };
+          return { ok: true, data: models,
+            ultraReasoningEnabled: models.some(model => model.supportedReasoningEfforts.some(effort => effort.reasoningEffort === "ultra")),
+            ...await defaultModelSettings() };
         }
         case "skills": return await skillCatalog(payload);
         case "send": {
@@ -2195,7 +2222,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 22, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
+    version: 23, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
     dispose() {
       for (const dispose of unsubscribe) { try { dispose?.(); } catch {} }
       unsubscribe = [];

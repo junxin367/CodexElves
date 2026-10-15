@@ -716,7 +716,11 @@ async function loadModels(force = false) {
   const request = (async () => {
     const result = await api("/api/read/models", {});
     if (!session || session.device.id !== deviceId) return [];
-    models = Array.isArray(result.data) ? result.data : [];
+    models = (Array.isArray(result.data) ? result.data : []).map(model => ({
+      ...model,
+      supportedReasoningEfforts: (model.supportedReasoningEfforts || [])
+        .filter(effort => effort.reasoningEffort !== "ultra" || result.ultraReasoningEnabled === true)
+    }));
     modelDefaults = { model: result.defaultModel || "", reasoningEffort: result.defaultReasoningEffort || "" };
     return models;
   })();
@@ -3666,7 +3670,7 @@ function workGroupSummary(items, running = false) {
   let text = `${name ? `已使用 ${name}${integrations ? " 集成" : ""}` : ""}${searches.length ? "搜索了网页" : ""}${edited}${commands.length ? "运行了命令" : ""}` || "已完成操作";
   let currentTool = null;
   if (running) {
-    const current = items.findLast(item => item.type !== "reasoning" && ["inProgress", "running"].includes(item.status));
+    const current = items.findLast(item => item.type !== "reasoning");
     if (current && tools.includes(current)) currentTool = genericToolPresentation(current);
     text = current?.type === "commandExecution" && !skillReadInfo(current) ? "正在运行命令"
       : current?.type === "fileChange" ? "正在修改文件"
@@ -3688,7 +3692,7 @@ function workGroupSummary(items, running = false) {
       ? "globe" : tools.length ? "tools" : changes.length ? "fileChange" : "terminal")
   };
 }
-function renderCommandGroup(items, previous, renderMessage, running = false) {
+function renderCommandGroup(items, previous, renderMessage, running = false, turnRunning = running) {
   const records = Array.isArray(items) ? items : [];
   const group = previous?.classList?.contains("command-group") ? previous : element("details", "command-group");
   let state = group.commandGroupState;
@@ -3696,6 +3700,8 @@ function renderCommandGroup(items, previous, renderMessage, running = false) {
     const summary = element("summary", "command-group-summary");
     const visual = element("span", "command-group-state");
     const title = element("span", "command-group-title");
+    title.setAttribute("role", "status");
+    title.setAttribute("aria-live", "polite");
     const chevron = icon("chevron");
     chevron.classList.add("command-group-chevron");
     summary.append(visual, title, chevron);
@@ -3703,7 +3709,7 @@ function renderCommandGroup(items, previous, renderMessage, running = false) {
     group.append(summary, panel);
     state = {
       summary, visual, title, panel,
-      items: [], renderMessage: null, scrollTop: 0, openItems: new Set(),
+      items: [], renderMessage: null, scrollTop: 0, openItems: new Set(), running: false, completionTimer: null,
       renderBody() {
         const scrollTop = panel.childElementCount ? panel.scrollTop : state.scrollTop;
         if (panel.childElementCount) state.openItems = new Set(
@@ -3741,17 +3747,34 @@ function renderCommandGroup(items, previous, renderMessage, running = false) {
   }
   state.items = records;
   state.renderMessage = renderMessage;
-  const active = running;
+  if (running || !turnRunning) {
+    clearTimeout(state.completionTimer);
+    state.completionTimer = null;
+    state.running = running;
+  } else if (state.running && state.completionTimer == null) {
+    state.completionTimer = setTimeout(() => {
+      state.completionTimer = null;
+      state.running = false;
+      if (group.isConnected) scheduleMessages();
+    }, 800);
+  }
+  const active = state.running;
   const presentation = workGroupSummary(records, active);
-  group.className = `command-group${active ? " running" : ""}`;
-  group.setAttribute("aria-busy", String(active));
-  state.summary.setAttribute("aria-label", `${presentation.text}，${presentation.description}`);
-  state.summary.title = state.summary.getAttribute("aria-label");
-  state.visual.replaceChildren(icon(presentation.icon));
-  state.title.className = `command-group-title${active ? " working-label" : ""}`;
-  state.title.textContent = presentation.text;
-  state.title.setAttribute("role", "status");
-  state.title.setAttribute("aria-live", "polite");
+  const groupClass = `command-group${active ? " running" : ""}`;
+  if (group.className !== groupClass) group.className = groupClass;
+  if (group.getAttribute("aria-busy") !== String(active)) group.setAttribute("aria-busy", String(active));
+  const label = `${presentation.text}，${presentation.description}`;
+  if (state.summary.getAttribute("aria-label") !== label) {
+    state.summary.setAttribute("aria-label", label);
+    state.summary.title = label;
+  }
+  if (state.icon !== presentation.icon) {
+    state.visual.replaceChildren(icon(presentation.icon));
+    state.icon = presentation.icon;
+  }
+  const titleClass = `command-group-title${active ? " working-label" : ""}`;
+  if (state.title.className !== titleClass) state.title.className = titleClass;
+  if (state.title.textContent !== presentation.text) state.title.textContent = presentation.text;
   if (group.open) state.renderBody();
   else state.clearBody();
   return group;
@@ -3789,12 +3812,12 @@ function renderActivity(turn, work, running, collapsible, renderMessage, showSum
   state.className = "activity-complete";
   label.className = "";
   updateActivitySummary(activity);
-  if (node.open) {
+  if (node.open || !running && [...activity.commandGroups.values()].some(group => group.classList.contains("running"))) {
     const children = [], commandKeys = new Set(), imageKeys = new Set();
     const visibleWork = work.filter(item => !["agentMessage", "plan"].includes(item.type) || textContent(item).trim());
     const isCommandRecord = item => item.type === "commandExecution" ? !skillReadInfo(item)
       : ["fileChange", "mcpToolCall", "dynamicToolCall", "webSearch"].includes(item.type) || item.type === "reasoning"
-      && !(turn.status === "inProgress" && isActiveThread()
+      && !(running
         && (["inProgress", "running"].includes(item.status) || item === turn.items?.at(-1)));
     for (let index = 0; index < visibleWork.length;) {
       if (visibleWork[index].type === "imageView") {
@@ -3815,10 +3838,9 @@ function renderActivity(turn, work, running, collapsible, renderMessage, showSum
         children.push(...records.map(item => renderMessage(item, true))); continue;
       }
       const commandKey = operations[0].id;
-      const active = turn.status === "inProgress" && isActiveThread()
-        && operations.some(item => ["inProgress", "running"].includes(item.status));
+      const active = running && operations.some(item => ["inProgress", "running"].includes(item.status));
       const previous = activity.commandGroups.get(commandKey) || operations.map(item => activity.commandGroups.get(item.id)).find(Boolean);
-      const group = renderCommandGroup(records, previous, renderMessage, active);
+      const group = renderCommandGroup(records, previous, renderMessage, active, running);
       activity.commandGroups.set(commandKey, group); commandKeys.add(commandKey);
       children.push(group);
     }
@@ -4435,7 +4457,7 @@ function renderMessages(keepScroll = true) {
       items.push(load);
     }
     const turnItems = turn.items || [], finalIndex = finalMessageIndex(turn),
-      turnRunning = turn === sorted.at(-1) && turn.status === "inProgress" && isActiveThread();
+      turnRunning = turn === sorted.at(-1) && turn.status === "inProgress" && (thread == null || isActiveThread());
     for (const item of turnItems) itemKeys.add(`${turn.id}:${item.id}`);
     const renderMessage = (item, inActivity = false) => {
       const key = `${turn.id}:${item.id}`, cached = renderedItems.get(key);
