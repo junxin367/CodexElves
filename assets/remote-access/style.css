@@ -57,6 +57,13 @@ html{scrollbar-color:var(--muted) transparent}
 @media(min-width:761px){.workspace.sidebar-collapsed{--sidebar-layout-width:0px}.workspace.sidebar-collapsed .sidebar{visibility:hidden;overflow:hidden;border-right:0;padding-right:0;padding-left:0;pointer-events:none}#close-sidebar,.workspace.sidebar-collapsed #open-sidebar{display:grid;min-width:32px;min-height:32px;place-items:center;padding:0}}
 @media(max-width:760px){.workspace{grid-template-columns:minmax(0,1fr)}.sidebar{position:fixed;left:0;top:0;bottom:0;width:290px;z-index:20;transform:translateX(-100%);transition:transform .15s}.sidebar-open .sidebar{transform:translateX(0)}.sidebar-open .sidebar-backdrop{display:block;position:fixed;inset:0;background:#0007;z-index:19}.messages{padding:22px 18px}.conversation-header{padding:10px 12px;height:60px;gap:8px}.thread-heading strong{font-size:0.85714rem}.thread-heading>span{font-size:0.64286rem}.connection-state{font-size:0.64286rem;max-width:80px;white-space:normal;text-align:right}.composer-area{padding:10px 12px max(10px,env(safe-area-inset-bottom))}.approval-area{padding:0 12px}.user-bubble{max-width:95%;font-size:0.92857rem}.agent-message{font-size:0.92857rem}.composer-note{font-size:0.64286rem}.pin-button{opacity:.7}#open-sidebar,#close-sidebar{display:block}.welcome{margin:16vh auto}.welcome h1{font-size:1.71429rem}.sidebar-footer{padding-bottom:max(6px,env(safe-area-inset-bottom))}}
 .composer{position:relative}
+.composer-input-content{min-width:0}
+@media(max-width:760px){
+  .composer .prompt-editor{height:80px;min-height:80px}
+  .composer-input{display:grid;grid-template-rows:minmax(0,var(--composer-rows,1fr));opacity:var(--composer-reveal,1);transition:grid-template-rows .18s ease-out,opacity .18s ease-out}
+  .composer-input-content{min-height:0;overflow:hidden}
+  .composer-input-content>.composer-attachments{padding-top:5px}
+}
 .composer-context{max-height:min(32dvh,260px);overflow:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .composer-controls{flex:1;min-width:0;display:flex;align-items:center;gap:10px;flex-wrap:nowrap;overflow:hidden}
 .composer-toolbar>.composer-controls{gap:10px;align-items:center}

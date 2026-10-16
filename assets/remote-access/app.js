@@ -60,6 +60,7 @@ let sidebarFilters = { mode: null, chats: null, projects: null, pinned: null };
 let messageFrame = null, activityTimer = null, stopping = false, messageVersion = 0, statusVersion = 0, notifiedStatus = null;
 let followMessages = true;
 let messagesResizeObserver = null;
+let composerScroll = null;
 const readMarkRequests = new Map();
 const questionDrafts = new Map();
 const questionReplyReceipts = new Map();
@@ -571,10 +572,81 @@ function resizeComposerInput() {
   const prompt = $("#prompt");
   if (!prompt) return;
   prompt.style.height = "auto";
-  const contentHeight = Math.max(100, prompt.scrollHeight);
+  const contentHeight = Math.max(matchMedia("(max-width: 760px)").matches ? 80 : 100, prompt.scrollHeight);
   prompt.style.height = `${Math.min(180, contentHeight)}px`;
   prompt.style.overflowY = contentHeight > 180 ? "auto" : "hidden";
   if (contentHeight <= 180) prompt.scrollTop = 0;
+}
+function mountComposerScroll() {
+  const form = $("#composer"), input = $(".composer-input", form), messages = $("#messages");
+  const mobile = matchMedia("(max-width: 760px)");
+  let reveal = 1, touch = null;
+  const setReveal = value => {
+    reveal = Math.max(0, Math.min(1, value));
+    input.style.setProperty("--composer-rows", `${reveal}fr`);
+    input.style.setProperty("--composer-reveal", String(reveal));
+    input.style.pointerEvents = reveal === 0 ? "none" : "";
+  };
+  const expand = () => setReveal(1);
+  const scroll = (delta, target) => {
+    if (!mobile.matches || !delta || !selectedId || creating || editingMessage || editingQueuedMessage
+        || document.activeElement === $("#prompt") || !$("#skill-menu").hidden || !$("#model-settings").hidden
+        || activePopup || document.querySelector("dialog[open]") || $(".workspace").classList.contains("sidebar-open")) return;
+    for (let node = target instanceof Element ? target : target.parentElement; node && node !== messages; node = node.parentElement) {
+      if (node.scrollHeight > node.clientHeight + 1 && /auto|scroll/.test(getComputedStyle(node).overflowY)
+          && (delta < 0 ? node.scrollTop > 0 : node.scrollTop + node.clientHeight < node.scrollHeight - 1)) return;
+    }
+    if (delta < 0) {
+      if (messages.scrollTop <= 0 || messages.scrollHeight <= messages.clientHeight + 1) return;
+      followMessages = false;
+    }
+    const distance = Math.max(160, input.firstElementChild.scrollHeight * 2);
+    setReveal(reveal + delta / distance);
+  };
+  const onWheel = event => {
+    if (event.ctrlKey || event.defaultPrevented || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? messages.clientHeight : 1;
+    scroll(event.deltaY * unit, event.target);
+  };
+  const onTouchStart = event => {
+    touch = event.touches.length === 1 ? { x: event.touches[0].clientX, y: event.touches[0].clientY } : null;
+  };
+  const onTouchMove = event => {
+    const previous = touch;
+    onTouchStart(event);
+    if (!previous || !touch || event.defaultPrevented) return;
+    const delta = previous.y - touch.y;
+    if (Math.abs(delta) >= Math.abs(previous.x - touch.x)) scroll(delta, event.target);
+  };
+  const onTouchEnd = () => { touch = null; };
+  const onFormClick = event => {
+    if (reveal < 1 && event.target === form) {
+      expand(); $("#prompt").focus({ preventScroll: true });
+    }
+  };
+  const onMediaChange = () => { touch = null; expand(); resizeComposerInput(); };
+  messages.addEventListener("wheel", onWheel, { passive: true });
+  messages.addEventListener("touchstart", onTouchStart, { passive: true });
+  messages.addEventListener("touchmove", onTouchMove, { passive: true });
+  messages.addEventListener("touchend", onTouchEnd, { passive: true });
+  messages.addEventListener("touchcancel", onTouchEnd, { passive: true });
+  form.addEventListener("focusin", expand);
+  form.addEventListener("click", onFormClick);
+  mobile.addEventListener("change", onMediaChange);
+  return {
+    expand,
+    get collapsed() { return mobile.matches && reveal < 1; },
+    dispose() {
+      messages.removeEventListener("wheel", onWheel);
+      messages.removeEventListener("touchstart", onTouchStart);
+      messages.removeEventListener("touchmove", onTouchMove);
+      messages.removeEventListener("touchend", onTouchEnd);
+      messages.removeEventListener("touchcancel", onTouchEnd);
+      form.removeEventListener("focusin", expand);
+      form.removeEventListener("click", onFormClick);
+      mobile.removeEventListener("change", onMediaChange);
+    }
+  };
 }
 function snapshotDraft() {
   syncSelectedSkillsFromPrompt();
@@ -1940,6 +2012,7 @@ async function resolvePending() {
 }
 function showLogin() {
   closePopup();
+  composerScroll?.dispose(); composerScroll = null;
   sidebarLayoutCleanup?.(); sidebarLayoutCleanup = null; closeMobileSidebar = () => {};
   editingMessage = null; editingQueuedMessage = null;
   session = null;
@@ -2079,6 +2152,7 @@ function showLogin() {
 function shell() {
   approvalSignature = null;
   search = "";
+  composerScroll?.dispose(); composerScroll = null;
   sidebarLayoutCleanup?.(); sidebarLayoutCleanup = null; closeMobileSidebar = () => {};
   app.innerHTML = `<div class="workspace">
     <div class="sidebar-backdrop"></div>
@@ -2093,8 +2167,9 @@ function shell() {
       <div class="messages-shell"><div id="messages" class="messages" role="log" aria-label="会话消息"></div><button id="scroll-to-bottom" class="scroll-to-bottom" type="button" aria-label="跳转到最新消息" hidden></button></div>
       <div id="approval-area" class="approval-area" aria-live="polite"></div>
       <div class="composer-area"><div class="composer-context"><div id="queued-area" hidden></div><div id="goal-area" hidden></div></div><div id="pending-area"></div><div id="project-select-slot" hidden></div><form id="composer" class="composer">
-        <div id="edit-message-area" hidden></div>
+        <div class="composer-input"><div class="composer-input-content"><div id="edit-message-area" hidden></div>
         <div id="prompt" class="prompt-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="给 Codex 发送消息，输入 / 选择命令或 Skill…" aria-label="消息输入" aria-autocomplete="list" aria-controls="skill-menu" aria-expanded="false" spellcheck="true"></div>
+        </div></div>
         <div class="composer-toolbar"><div class="composer-controls"><button id="composer-add" class="icon-button composer-add-button" type="button" aria-label="添加附件或压缩上下文" aria-haspopup="menu" aria-expanded="false"></button><button id="prompt-optimize" class="icon-button prompt-optimize-button" type="button" aria-label="优化提示词" aria-busy="false" disabled>✨</button><span id="context-info" class="context-info muted"></span><button id="model-button" class="text-button model-button" type="button" aria-label="选择模型与思考深度" aria-haspopup="menu" aria-expanded="false">正在读取模型…</button></div><div class="composer-send"><span id="send-status" class="composer-send-status" role="status" aria-live="polite"></span><button id="send" class="send-button" type="submit" aria-label="发送消息"></button></div></div>
         <div id="model-settings" class="composer-popover" role="menu" aria-label="模型与思考深度" hidden></div>
         <div id="skill-menu" class="composer-popover skill-menu" role="listbox" aria-label="命令与 Skill" hidden></div>
@@ -2114,6 +2189,7 @@ function shell() {
     onChange: () => { rememberDraft(); updateComposer(); },
     notice
   });
+  composerScroll = mountComposerScroll();
   const add = $("#composer-add");
   add.append(icon("plus"));
   add.popupDirection = "up";
@@ -2134,7 +2210,7 @@ function shell() {
     const wasFollowing = followMessages;
     const scrollingUp = messages.scrollTop < historyScrollTop;
     historyScrollTop = messages.scrollTop;
-    followMessages = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 100;
+    followMessages = !composerScroll?.collapsed && messages.scrollHeight - messages.scrollTop - messages.clientHeight < 100;
     updateScrollControl();
     scheduleHistoryLoad(scrollingUp);
     if (!wasFollowing && followMessages && !isActiveThread())
@@ -2142,6 +2218,8 @@ function shell() {
   };
   $("#scroll-to-bottom").onclick = () => {
     const messages = $("#messages");
+    composerScroll?.expand();
+    $(".composer-input").getAnimations().forEach(animation => animation.finish());
     followMessages = true; messages.scrollTop = messages.scrollHeight;
     updateScrollControl();
   };
@@ -3584,6 +3662,7 @@ function reconcileChildren(root, children) {
   while (cursor) { const next = cursor.nextSibling; cursor.remove(); cursor = next; }
 }
 function resetMessages() {
+  composerScroll?.expand();
   stopActivityTimer();
   finishQueueDrag({ render: false });
   historyController?.abort(); historyController = null;
@@ -5042,7 +5121,7 @@ function renderMessages(keepScroll = true) {
   cancelAnimationFrame(messageFrame); messageFrame = null;
   const root = $("#messages");
   if (!root) return;
-  const bottom = root.scrollHeight - root.scrollTop - root.clientHeight < 100;
+  const bottom = !composerScroll?.collapsed && root.scrollHeight - root.scrollTop - root.clientHeight < 100;
   followMessages = bottom;
   const oldHeight = root.scrollHeight, oldTop = root.scrollTop;
   const anchor = !keepScroll || !bottom ? visibleMessageAnchor(root) : null;
