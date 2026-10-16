@@ -3984,6 +3984,17 @@ async fn send_responses_upstream_request(
     }
     if response_protocol == UpstreamResponseProtocol::Anthropic {
         apply_cached_anthropic_reasoning_compatibility(relay, &mut upstream_request);
+        if upstream_request
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(|model| {
+                crate::model_capabilities::model_family(model)
+                    == crate::model_capabilities::ModelFamily::Claude
+            })
+            && request_context.is_primary_agent_request(request_json)
+        {
+            upstream_request["cache_control"] = json!({"type": "ephemeral", "ttl": "1h"});
+        }
     }
     if can_recover_ws {
         if let Some((response, ws_request)) = crate::session_transport::try_ws_for_http(

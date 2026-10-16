@@ -144,6 +144,43 @@ impl RequestContext {
             .map(ToString::to_string)
     }
 
+    pub(crate) fn is_primary_agent_request(&self, request: &serde_json::Value) -> bool {
+        // 每个请求的元数据优先于连接头，WebSocket 连接头可能属于更早的请求。
+        let metadata =
+            if let Some(value) = request.pointer("/client_metadata/x-codex-turn-metadata") {
+                if request
+                    .pointer("/client_metadata/x-openai-subagent")
+                    .is_some()
+                {
+                    return false;
+                }
+                value.as_str()
+            } else {
+                if self.headers.contains_key("x-openai-subagent") {
+                    return false;
+                }
+                self.headers
+                    .get("x-codex-turn-metadata")
+                    .and_then(|value| value.to_str().ok())
+            };
+        let Some(metadata) =
+            metadata.and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        else {
+            return false;
+        };
+        metadata
+            .get("agent_name")
+            .and_then(serde_json::Value::as_str)
+            == Some("/root")
+            && metadata
+                .get("thread_source")
+                .and_then(serde_json::Value::as_str)
+                == Some("user")
+            && ["subagent_kind", "parent_thread_id"]
+                .iter()
+                .all(|key| metadata.get(key).is_none_or(serde_json::Value::is_null))
+    }
+
     pub(crate) fn cache_window_identity(&self) -> Option<String> {
         self.headers
             .get("x-codex-window-id")
@@ -272,4 +309,87 @@ fn is_proxy_owned_or_sensitive_header(name: &HeaderName) -> bool {
         || name.starts_with("sec-fetch-")
         || name.contains("signature")
         || name.contains("integrity")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RequestContext;
+    use serde_json::{Value, json};
+
+    fn context(metadata: &str) -> RequestContext {
+        RequestContext::from_http_request(
+            format!("POST /v1/responses HTTP/1.1\r\nx-codex-turn-metadata: {metadata}\r\n\r\n")
+                .as_bytes(),
+        )
+    }
+
+    fn request(metadata: Value) -> Value {
+        json!({"client_metadata": {"x-codex-turn-metadata": metadata.to_string()}})
+    }
+
+    #[test]
+    fn primary_agent_requires_explicit_root_user_metadata() {
+        let root = json!({"agent_name": "/root", "thread_source": "user"});
+        assert!(context(&root.to_string()).is_primary_agent_request(&json!({})));
+        assert!(RequestContext::default().is_primary_agent_request(&request(root)));
+        for metadata in [
+            json!({}),
+            json!({"agent_name": "/root"}),
+            json!({"thread_source": "user"}),
+            json!({"agent_name": "/root/worker", "thread_source": "user"}),
+            json!({"agent_name": "/root/worker/reviewer", "thread_source": "user"}),
+            json!({"agent_name": "/root", "thread_source": "subagent"}),
+            json!({"agent_name": "/root", "thread_source": "user", "subagent_kind": "thread_spawn"}),
+            json!({"agent_name": "/root", "thread_source": "user", "parent_thread_id": "parent"}),
+        ] {
+            assert!(
+                !RequestContext::default().is_primary_agent_request(&request(metadata.clone())),
+                "{metadata}"
+            );
+        }
+        assert!(!RequestContext::default().is_primary_agent_request(&json!({
+            "input": "agent_name=/root, thread_source=user"
+        })));
+    }
+
+    #[test]
+    fn primary_agent_uses_per_request_metadata_instead_of_stale_connection_headers() {
+        let root = json!({"agent_name": "/root", "thread_source": "user"});
+        let child = json!({"agent_name": "/root/worker", "thread_source": "user"});
+        assert!(!context(&root.to_string()).is_primary_agent_request(&request(child.clone())));
+        assert!(context(&child.to_string()).is_primary_agent_request(&request(root)));
+    }
+
+    #[test]
+    fn primary_agent_does_not_fall_back_from_invalid_request_metadata() {
+        let root = context(r#"{"agent_name":"/root","thread_source":"user"}"#);
+        for metadata in [json!("{"), Value::Null, json!(42), json!({})] {
+            assert!(!root.is_primary_agent_request(&json!({
+                "client_metadata": {"x-codex-turn-metadata": metadata}
+            })));
+        }
+        assert!(!context("{").is_primary_agent_request(&json!({})));
+    }
+
+    #[test]
+    fn primary_agent_excludes_legacy_subagent_markers_but_allows_user_forks() {
+        let root = json!({"agent_name": "/root", "thread_source": "user"});
+        let context = RequestContext::from_http_request(
+            format!(
+                "POST /v1/responses HTTP/1.1\r\nx-openai-subagent: collab_spawn\r\nx-codex-turn-metadata: {root}\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        assert!(!context.is_primary_agent_request(&json!({})));
+        let mut child = request(root);
+        child["client_metadata"]["x-openai-subagent"] = json!("collab_spawn");
+        assert!(!RequestContext::default().is_primary_agent_request(&child));
+        assert!(
+            RequestContext::default().is_primary_agent_request(&request(json!({
+                "agent_name": "/root",
+                "thread_source": "user",
+                "forked_from_thread_id": "another-user-thread"
+            })))
+        );
+    }
 }

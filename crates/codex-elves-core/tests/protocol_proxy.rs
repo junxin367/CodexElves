@@ -15039,6 +15039,152 @@ async fn responses_proxy_directs_anthropic_models_to_anthropic_upstream() {
 }
 
 #[tokio::test]
+async fn responses_proxy_sets_one_hour_cache_only_for_primary_claude_anthropic_requests() {
+    let _lock = settings_path_test_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = SettingsPathGuard::set(temp.path().join("settings.json"));
+    let root = json!({"agent_name": "/root", "thread_source": "user"}).to_string();
+    let child = json!({"agent_name": "/root/worker", "thread_source": "user"}).to_string();
+    for (model, protocol, stream, header_metadata, body_metadata, expected_ttl) in [
+        (
+            "claude-opus-5-5",
+            "anthropic",
+            false,
+            Some(root.as_str()),
+            None,
+            true,
+        ),
+        (
+            "devin/claude-opus-5-5",
+            "anthropic",
+            true,
+            None,
+            Some(root.as_str()),
+            true,
+        ),
+        (
+            "claude-opus-5-5",
+            "anthropic",
+            false,
+            Some(child.as_str()),
+            None,
+            false,
+        ),
+        (
+            "claude-opus-5-5",
+            "anthropic",
+            false,
+            Some(root.as_str()),
+            Some(child.as_str()),
+            false,
+        ),
+        (
+            "claude-opus-5-5",
+            "anthropic",
+            false,
+            Some(child.as_str()),
+            Some(root.as_str()),
+            true,
+        ),
+        ("claude-opus-5-5", "anthropic", false, None, None, false),
+        (
+            "claude-opus-5-5",
+            "anthropic",
+            false,
+            Some(root.as_str()),
+            Some("{"),
+            false,
+        ),
+        (
+            "deepseek-v4-flash",
+            "anthropic",
+            false,
+            Some(root.as_str()),
+            None,
+            false,
+        ),
+        (
+            "claude-opus-5-5",
+            "responses",
+            false,
+            Some(root.as_str()),
+            None,
+            false,
+        ),
+        (
+            "claude-opus-5-5",
+            "chatCompletions",
+            false,
+            Some(root.as_str()),
+            None,
+            false,
+        ),
+    ] {
+        let server = spawn_chat_server();
+        let settings: BackendSettings = serde_json::from_value(json!({
+            "relayProfiles": [{
+                "id": "cache-test",
+                "name": "cache-test",
+                "baseUrl": server.base_url,
+                "upstreamBaseUrl": server.base_url,
+                "apiKey": "sk-test",
+                "localProxyEnabled": true,
+                "relayMode": "mixedApi",
+                "modelMappings": [{
+                    "requestModel": model,
+                    "alias": "cache-model",
+                    "protocol": protocol,
+                    "contextWindow": "200000"
+                }]
+            }],
+            "activeRelayId": "cache-test"
+        }))
+        .unwrap();
+        let context = header_metadata
+            .map(|metadata| {
+                RequestContext::from_http_request(
+                    format!(
+                        "POST /v1/responses HTTP/1.1\r\nx-codex-turn-metadata: {metadata}\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+            })
+            .unwrap_or_default();
+        let mut request = json!({
+            "model": "cache-model",
+            "input": "hello",
+            "stream": stream
+        });
+        if let Some(metadata) = body_metadata {
+            request["client_metadata"] = json!({"x-codex-turn-metadata": metadata});
+        }
+        let upstream = open_responses_proxy_request_with_settings_and_request_context(
+            &request.to_string(),
+            settings,
+            &context,
+        )
+        .await
+        .unwrap();
+        assert_eq!(upstream.status_code, 200);
+        let wire = server.finish();
+        let body: Value = serde_json::from_str(&wire.body).unwrap();
+        assert_eq!(body["model"], model);
+        if expected_ttl {
+            assert_eq!(wire.path, "/v1/messages");
+            assert_eq!(
+                body["cache_control"],
+                json!({"type": "ephemeral", "ttl": "1h"})
+            );
+        } else {
+            assert!(
+                body.get("cache_control").is_none(),
+                "{model} {protocol}: {body}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn responses_proxy_keeps_deepseek_adaptive_for_anthropic_upstream() {
     let _lock = settings_path_test_lock().lock().unwrap();
     clear_anthropic_reasoning_compatibility_cache_for_tests();
