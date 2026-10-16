@@ -46,7 +46,7 @@ Windows 安装包会创建桌面和开始菜单快捷方式。macOS DMG 会安�
 
 - Rust 后端和静默 launcher，启动时不依赖额外运行时。
 - Tauri + React 管理工具，支持深色/浅色切换。
-- 远程会话：独立设置入口与手机网页，共用桌面原生会话、项目置顶和排序；支持无需账号或自有域名的 Cloudflare Quick Tunnel 临时公网地址、长期密钥登录和设备撤销。配置及验证边界见 [远程会话说明](docs/remote-access.md)。
+- 远程会话：独立设置入口与手机网页，共用桌面原生会话、项目置顶和排序；支持 zrok 固定公网地址、邮箱注册或 token 绑定、长期密钥登录和设备撤销。配置及验证边界见 [远程会话说明](docs/remote-access.md)。
 - 外部 CDP 注入，不改 `app.asar`，不向 ChatGPT/Codex 安装目录写入 DLL。
 - 中转注入模式：支持多个中转配置，写入 `CodexElves` provider，并可切回官方 ChatGPT 登录态。
 - 传统增强模式：插件入口解锁、插件市场解锁、会话删除、Markdown 导出、项目移动等。

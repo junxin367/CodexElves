@@ -102,7 +102,7 @@ fn start_launcher_control_listener(
     guard: &codex_elves_core::ports::LoopbackPortGuard,
     bridge_repair_notify: Arc<tokio::sync::Notify>,
 ) -> anyhow::Result<bool> {
-    let Some(listener) = guard.try_clone_listener()? else {
+    let Some(listener) = guard.shared_listener() else {
         let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
             "launcher.control_unavailable",
             json!({

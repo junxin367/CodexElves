@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::net::{TcpListener, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use fs2::FileExt;
 
@@ -179,6 +180,39 @@ pub fn can_connect_loopback_port(port: u16) -> bool {
         .is_some()
 }
 
+fn guard_listener_is_active(port: u16) -> bool {
+    if !can_connect_loopback_port(port) {
+        return false;
+    }
+    #[cfg(windows)]
+    if let Ok(listeners) = crate::windows_integration::loopback_tcp_listeners() {
+        let owners = listeners
+            .iter()
+            .filter(|listener| listener.port == port)
+            .map(|listener| listener.process_id)
+            .collect::<Vec<_>>();
+        let processes = crate::windows_integration::enumerate_processes()
+            .into_iter()
+            .map(|process| process.process_id)
+            .collect::<Vec<_>>();
+        if listener_owners_are_gone(&owners, &processes) {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "port_guard.stale_listener",
+                serde_json::json!({"port": port, "owner_process_ids": owners}),
+            );
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(any(windows, test))]
+fn listener_owners_are_gone(owners: &[u32], processes: &[u32]) -> bool {
+    !owners.is_empty()
+        && !processes.is_empty()
+        && owners.iter().all(|owner| !processes.contains(owner))
+}
+
 pub fn acquire_loopback_port_guard(port: u16) -> std::io::Result<TcpListener> {
     TcpListener::bind(("127.0.0.1", port))
 }
@@ -187,7 +221,7 @@ pub fn acquire_loopback_port_guard(port: u16) -> std::io::Result<TcpListener> {
 pub struct LoopbackPortGuard {
     _lock_file: Option<File>,
     lock_path: Option<PathBuf>,
-    _listener: Option<TcpListener>,
+    _listener: Option<Arc<TcpListener>>,
     using_fallback_lock: bool,
 }
 
@@ -196,7 +230,7 @@ impl LoopbackPortGuard {
         Self {
             _lock_file: None,
             lock_path: None,
-            _listener: Some(listener),
+            _listener: Some(Arc::new(listener)),
             using_fallback_lock: false,
         }
     }
@@ -205,7 +239,7 @@ impl LoopbackPortGuard {
         Self {
             _lock_file: Some(file),
             lock_path: Some(path),
-            _listener: Some(listener),
+            _listener: Some(Arc::new(listener)),
             using_fallback_lock: false,
         }
     }
@@ -225,11 +259,9 @@ impl LoopbackPortGuard {
             .and_then(|_| self.lock_path.as_deref())
     }
 
-    pub fn try_clone_listener(&self) -> std::io::Result<Option<TcpListener>> {
-        self._listener
-            .as_ref()
-            .map(TcpListener::try_clone)
-            .transpose()
+    pub fn shared_listener(&self) -> Option<Arc<TcpListener>> {
+        // Windows 的复制 socket 可能可继承；唤醒线程必须共享原有监听器。
+        self._listener.as_ref().map(Arc::clone)
     }
 }
 
@@ -245,7 +277,7 @@ fn acquire_resilient_loopback_port_guard_at(
         port,
         state_dir,
         acquire_loopback_port_guard,
-        can_connect_loopback_port,
+        guard_listener_is_active,
     )
 }
 
@@ -340,6 +372,43 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+    }
+
+    #[test]
+    fn listener_owner_check_requires_complete_evidence_of_exit() {
+        assert!(listener_owners_are_gone(&[17328], &[100, 200]));
+        assert!(!listener_owners_are_gone(&[17328], &[100, 17328]));
+        assert!(!listener_owners_are_gone(&[17328, 21980], &[21980]));
+        assert!(!listener_owners_are_gone(&[], &[100, 200]));
+        assert!(!listener_owners_are_gone(&[17328], &[]));
+    }
+
+    #[test]
+    fn resilient_guard_ignores_exited_listener_owner_but_keeps_instance_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let acquire = || {
+            acquire_resilient_loopback_port_guard_with(
+                45219,
+                temp.path(),
+                |_| {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::AddrInUse,
+                        "stale listener still accepts TCP connections",
+                    ))
+                },
+                |_| !listener_owners_are_gone(&[17328], &[100, 200]),
+            )
+        };
+        let guard = acquire().unwrap();
+
+        assert!(guard.fallback_path().is_some());
+        assert_eq!(
+            acquire().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        drop(guard);
+        assert!(acquire().unwrap().fallback_path().is_some());
     }
 
     #[test]

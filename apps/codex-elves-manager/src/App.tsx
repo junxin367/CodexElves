@@ -1060,17 +1060,12 @@ const defaultSettings: BackendSettings = {
 };
 
 let browserPreviewSettingsState: BackendSettings | null = null;
-let browserPreviewRemoteCredentials = { accessKeyConfigured: false };
-let browserPreviewQuickTunnelGeneration = 0;
-let browserPreviewQuickTunnelUrl = "";
-let browserPreviewQuickTunnelInstalled = false;
-let browserPreviewQuickTunnelDownloadStartedAt = 0;
-
-function regenerateBrowserPreviewQuickTunnelUrl(): string {
-  browserPreviewQuickTunnelGeneration += 1;
-  browserPreviewQuickTunnelUrl = `https://codex-elves-preview-${browserPreviewQuickTunnelGeneration}.trycloudflare.com`;
-  return browserPreviewQuickTunnelUrl;
-}
+let browserPreviewRemoteCredentials: { accessKeyConfigured: boolean; key?: string } = { accessKeyConfigured: false };
+let browserPreviewZrokInstalled = false;
+let browserPreviewZrokBound = false;
+let browserPreviewZrokFixedName = "";
+let browserPreviewZrokRunning = false;
+let browserPreviewZrokDownloadStartedAt = 0;
 
 function isBrowserPreview(): boolean {
   return typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
@@ -2011,53 +2006,89 @@ function browserPreviewCommand<T>(command: string, args?: Record<string, unknown
         return Promise.resolve({ status: "ok", key: (u1 + u2).slice(0, 64) } as T);
       }
       if (action === "setKey") {
-        browserPreviewRemoteCredentials.accessKeyConfigured = true;
+        const payload = args?.payload as Record<string, unknown> | undefined;
+        browserPreviewRemoteCredentials = {
+          accessKeyConfigured: true,
+          key: String(payload?.key || "").trim(),
+        };
         return Promise.resolve({ status: "ok", ...browserPreviewRemoteCredentials } as T);
       }
       const running = remote.enabled;
-      if (action === "restartQuickTunnel") {
-        if (!running || !remote.cloudflareQuickTunnelEnabled) {
-          return Promise.resolve({ status: "failed", message: "请先启用远程网页和 Cloudflare Quick Tunnel。" } as T);
-        }
-        if (browserPreviewQuickTunnelInstalled) regenerateBrowserPreviewQuickTunnelUrl();
-      } else if (action === "apply" && !remote.cloudflareQuickTunnelEnabled) {
-        browserPreviewQuickTunnelUrl = "";
-        browserPreviewQuickTunnelDownloadStartedAt = 0;
+      if (action === "downloadZrok" && !browserPreviewZrokInstalled && !browserPreviewZrokDownloadStartedAt) {
+        browserPreviewZrokDownloadStartedAt = Date.now();
       }
-      if (running && remote.cloudflareQuickTunnelEnabled && !browserPreviewQuickTunnelInstalled) {
-        if (!browserPreviewQuickTunnelDownloadStartedAt) {
-          browserPreviewQuickTunnelDownloadStartedAt = Date.now();
-        }
-        if (Date.now() - browserPreviewQuickTunnelDownloadStartedAt >= 6000) {
-          browserPreviewQuickTunnelInstalled = true;
-          browserPreviewQuickTunnelDownloadStartedAt = 0;
-          regenerateBrowserPreviewQuickTunnelUrl();
-        }
-      } else if (running && remote.cloudflareQuickTunnelEnabled && !browserPreviewQuickTunnelUrl) {
-        regenerateBrowserPreviewQuickTunnelUrl();
+      if (browserPreviewZrokDownloadStartedAt && Date.now() - browserPreviewZrokDownloadStartedAt >= 2500) {
+        browserPreviewZrokInstalled = true;
+        browserPreviewZrokDownloadStartedAt = 0;
       }
-      const quickTunnelReady = running && remote.cloudflareQuickTunnelEnabled && Boolean(browserPreviewQuickTunnelUrl);
-      const quickTunnelDownloading = running && remote.cloudflareQuickTunnelEnabled && !browserPreviewQuickTunnelInstalled;
-      const downloadPercent = quickTunnelDownloading
-        ? Math.min(99, Math.max(1, Math.round((Date.now() - browserPreviewQuickTunnelDownloadStartedAt) / 60)))
-        : browserPreviewQuickTunnelInstalled ? 100 : 0;
-      const downloadTotalBytes = 55_365_048;
-      if (action === "testQuickTunnel") {
-        return Promise.resolve(quickTunnelReady
-          ? { status: "ok", httpStatus: 200, authRequired: true, publicUrl: browserPreviewQuickTunnelUrl, publicAddresses: ["198.41.192.67"], message: "临时公网地址与网页回源验证通过；访问会话仍需输入访问密钥。" } as T
-          : { status: "failed", message: "临时公网地址尚未就绪，请先生成后再测试。" } as T);
+      if (action === "registerZrok") {
+        if (!browserPreviewZrokInstalled) {
+          return Promise.resolve({ status: "failed", message: "请先下载 zrok 程序。" } as T);
+        }
+        return Promise.resolve({
+          status: "ok",
+          message: "注册邮件已发送，请检查收件箱和垃圾邮件，取得 token 后粘贴到输入框。",
+        } as T);
+      }
+      if (action === "startZrok") {
+        if (!browserPreviewZrokInstalled) {
+          return Promise.resolve({ status: "failed", message: "请先下载 zrok 程序。" } as T);
+        }
+        if (!running) {
+          return Promise.resolve({ status: "failed", message: "请先启用远程会话网页。" } as T);
+        }
+        const payload = args?.payload as Record<string, unknown> | undefined;
+        const token = String(payload?.token || "").trim();
+        const fixedName = String(payload?.fixedName || "").trim().toLowerCase();
+        if (!browserPreviewZrokBound && !token) {
+          return Promise.resolve({ status: "failed", message: "请输入 zrok token。" } as T);
+        }
+        if (!/^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$/.test(fixedName)) {
+          return Promise.resolve({ status: "failed", message: "固定公网名称格式无效。" } as T);
+        }
+        browserPreviewZrokBound = true;
+        browserPreviewZrokFixedName = fixedName;
+        browserPreviewZrokRunning = true;
+      } else if (action === "apply") {
+        browserPreviewZrokRunning = running
+          && browserPreviewZrokInstalled
+          && browserPreviewZrokBound
+          && Boolean(browserPreviewZrokFixedName);
+      }
+      const zrokDownloading = Boolean(browserPreviewZrokDownloadStartedAt);
+      const zrokReady = running && browserPreviewZrokRunning && Boolean(browserPreviewZrokFixedName);
+      const downloadPercent = zrokDownloading
+        ? Math.min(99, Math.max(1, Math.round((Date.now() - browserPreviewZrokDownloadStartedAt) / 25)))
+        : browserPreviewZrokInstalled ? 100 : 0;
+      const downloadTotalBytes = 37_108_466;
+      const publicUrl = browserPreviewZrokFixedName
+        ? `https://${browserPreviewZrokFixedName}.shares.zrok.io`
+        : "";
+      if (action === "testZrok") {
+        return Promise.resolve(zrokReady
+          ? { status: "ok", httpStatus: 200, authRequired: true, publicUrl, message: "zrok 公网 HTTPS 与网页回源验证通过；未登录访问会话接口返回 401。" } as T
+          : { status: "failed", message: "zrok 固定公网尚未启动。" } as T);
       }
       return Promise.resolve({ status: "ok", enabled: remote.enabled, running,
         nativeConnected: running, settings: remote, ...browserPreviewRemoteCredentials,
         addresses: [`http://${remote.bindHost}:${remote.port}`],
-        cloudflareQuickTunnel: {
-          enabled: remote.cloudflareQuickTunnelEnabled,
-          state: quickTunnelDownloading ? "downloading" : quickTunnelReady ? "ready" : "stopped",
-          publicUrl: quickTunnelReady ? browserPreviewQuickTunnelUrl : "",
+        zrok: {
+          state: zrokDownloading
+            ? "downloading"
+            : !browserPreviewZrokInstalled
+              ? "missing"
+              : !browserPreviewZrokBound
+                ? "unbound"
+                : zrokReady ? "ready" : "stopped",
+          running: zrokReady,
+          connected: zrokReady,
+          publicUrl,
+          fixedName: browserPreviewZrokFixedName,
           error: null,
           retryAtMs: null,
-          installed: browserPreviewQuickTunnelInstalled,
-          version: browserPreviewQuickTunnelInstalled ? "preview" : null,
+          installed: browserPreviewZrokInstalled,
+          bound: browserPreviewZrokBound,
+          version: browserPreviewZrokInstalled ? "v2.0.8-preview" : null,
           downloadedBytes: Math.round(downloadTotalBytes * downloadPercent / 100),
           downloadTotalBytes,
           downloadPercent,
@@ -13084,7 +13115,7 @@ function deriveRelayProfileFromFiles(profile: RelayProfile): RelayProfile {
     model: codexModelFromConfig(configContents),
     baseUrl: upstreamBaseUrl,
     upstreamBaseUrl,
-    localProxyEnabled: profile.localProxyEnabled || isProxyConfig,
+    localProxyEnabled: profile.localProxyEnabled ?? isProxyConfig,
     apiKey: profile.relayMode === "official"
       ? configApiKey || profile.apiKey || ""
       : codexApiKeyFromAuth(authContents) || configApiKey || profile.apiKey || "",

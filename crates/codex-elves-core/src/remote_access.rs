@@ -32,14 +32,12 @@ use tokio::sync::{Mutex, broadcast};
 use crate::settings::{RemoteAccessSettings, SettingsStore};
 
 mod credentials;
-mod quick_tunnel;
 mod service;
+mod zrok_tunnel;
 use credentials::{AccessKey, load_access_key};
 pub use credentials::{access_credentials_status, configure_access_key};
-use quick_tunnel::QuickTunnelService;
-pub use service::{
-    ensure_running as ensure_service_running, run as run_service, send_manager_heartbeat,
-};
+pub use service::{ensure_running as ensure_service_running, run as run_service};
+use zrok_tunnel::ZrokTunnelService;
 
 const NATIVE_SCRIPT: &str = include_str!("../../../assets/remote-access/native.js");
 const WEB_HTML: &str = include_str!("../../../assets/remote-access/index.html");
@@ -124,7 +122,8 @@ struct Device {
     #[serde(default)]
     key_id: String,
     #[serde(default)]
-    quick_tunnel_origin: Option<String>,
+    #[serde(alias = "quickTunnelOrigin")]
+    public_origin: Option<String>,
 }
 
 impl Device {
@@ -270,7 +269,7 @@ struct LiveService {
     server: Option<tokio::task::JoinHandle<()>>,
     pump: Option<tokio::task::JoinHandle<()>>,
     error: Option<String>,
-    quick_tunnel: QuickTunnelService,
+    zrok: ZrokTunnelService,
 }
 
 pub struct RemoteAccessController {
@@ -282,7 +281,7 @@ pub struct RemoteAccessController {
     native_connected: AtomicBool,
     events: broadcast::Sender<Value>,
     key_checks: Arc<tokio::sync::Semaphore>,
-    quick_tunnel_origin: Arc<RwLock<Option<String>>>,
+    public_origin: Arc<RwLock<Option<String>>>,
     images: RwLock<ImageRegistry>,
 }
 
@@ -313,8 +312,8 @@ impl RemoteAccessController {
             )?;
         }
         let (events, _) = broadcast::channel(512);
-        let quick_tunnel_origin = Arc::new(RwLock::new(None));
-        let quick_tunnel = QuickTunnelService::new(state_dir.clone(), quick_tunnel_origin.clone());
+        let public_origin = Arc::new(RwLock::new(None));
+        let zrok = ZrokTunnelService::new(state_dir.clone(), public_origin.clone());
         Ok(Arc::new(Self {
             native,
             state_dir,
@@ -330,19 +329,19 @@ impl RemoteAccessController {
                 server: None,
                 pump: None,
                 error: None,
-                quick_tunnel,
+                zrok,
             }),
             running: AtomicBool::new(false),
             native_connected: AtomicBool::new(false),
             events,
             key_checks: Arc::new(tokio::sync::Semaphore::new(4)),
-            quick_tunnel_origin,
+            public_origin,
             images: RwLock::new(ImageRegistry::default()),
         }))
     }
 
-    fn quick_tunnel_origin(&self) -> Option<String> {
-        self.quick_tunnel_origin
+    fn public_origin(&self) -> Option<String> {
+        self.public_origin
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
@@ -514,13 +513,15 @@ impl RemoteAccessController {
         })
     }
 
-    async fn prune_stale_quick_tunnel_devices(&self) {
-        let current_origin = self.quick_tunnel_origin();
+    async fn prune_stale_public_devices(&self) {
+        let Some(current_origin) = self.public_origin() else {
+            return;
+        };
         let mut auth = self.auth.lock().await;
         let before = auth.devices.len();
         auth.devices.retain(|device| {
-            device.quick_tunnel_origin.is_none()
-                || device.quick_tunnel_origin.as_ref() == current_origin.as_ref()
+            device.public_origin.is_none()
+                || device.public_origin.as_deref() == Some(current_origin.as_str())
         });
         if auth.devices.len() == before {
             return;
@@ -532,7 +533,7 @@ impl RemoteAccessController {
     }
 
     pub async fn reconcile(self: &Arc<Self>, settings: RemoteAccessSettings) {
-        let quick_tunnel_target = quick_tunnel_target(&settings);
+        let zrok_target = zrok_target(&settings);
         let key_error = self
             .reload_access_key()
             .await
@@ -549,15 +550,11 @@ impl RemoteAccessController {
             && key_error.is_none()
             && (live.server.is_some() || !settings.enabled)
         {
-            live.quick_tunnel
-                .reconcile(
-                    settings.cloudflare_quick_tunnel_enabled,
-                    self.running.load(Ordering::SeqCst),
-                    &quick_tunnel_target,
-                )
+            live.zrok
+                .reconcile(self.running.load(Ordering::SeqCst), &zrok_target)
                 .await;
             drop(live);
-            self.prune_stale_quick_tunnel_devices().await;
+            self.prune_stale_public_devices().await;
             return;
         }
         self.running.store(false, Ordering::SeqCst);
@@ -577,27 +574,19 @@ impl RemoteAccessController {
         live.settings = Some(settings.clone());
         live.error = None;
         if !settings.enabled {
-            live.quick_tunnel
-                .reconcile(false, false, &quick_tunnel_target)
-                .await;
+            live.zrok.reconcile(false, &zrok_target).await;
             if finished || was_enabled {
                 let _ = self.native.call("dispose", json!({})).await;
             }
             drop(live);
-            self.prune_stale_quick_tunnel_devices().await;
+            self.prune_stale_public_devices().await;
             return;
         }
         if let Some(error) = key_error {
             live.error = Some(error);
-            live.quick_tunnel
-                .reconcile(
-                    settings.cloudflare_quick_tunnel_enabled,
-                    false,
-                    &quick_tunnel_target,
-                )
-                .await;
+            live.zrok.reconcile(false, &zrok_target).await;
             drop(live);
-            self.prune_stale_quick_tunnel_devices().await;
+            self.prune_stale_public_devices().await;
             return;
         }
         match self.start_server(settings.clone()).await {
@@ -609,15 +598,11 @@ impl RemoteAccessController {
             }
             Err(error) => live.error = Some(error.to_string()),
         }
-        live.quick_tunnel
-            .reconcile(
-                settings.cloudflare_quick_tunnel_enabled,
-                self.running.load(Ordering::SeqCst),
-                &quick_tunnel_target,
-            )
+        live.zrok
+            .reconcile(self.running.load(Ordering::SeqCst), &zrok_target)
             .await;
         drop(live);
-        self.prune_stale_quick_tunnel_devices().await;
+        self.prune_stale_public_devices().await;
     }
 
     async fn start_server(
@@ -687,9 +672,7 @@ impl RemoteAccessController {
     async fn admin_status(&self, settings: &RemoteAccessSettings) -> Value {
         let live = self.live.lock().await;
         let error = live.error.clone();
-        let quick_tunnel = live
-            .quick_tunnel
-            .status(settings.cloudflare_quick_tunnel_enabled);
+        let zrok = live.zrok.status();
         drop(live);
         let auth = self.auth.lock().await;
         json!({
@@ -700,7 +683,7 @@ impl RemoteAccessController {
             "devices":auth.devices.iter().filter(|device|device.expires_at_ms>now_ms())
                 .filter(|device|auth.access_key.as_ref().is_some_and(|key|device.key_id==key.id))
                 .map(Device::public).collect::<Vec<_>>(),
-            "settings":settings, "cloudflareQuickTunnel":quick_tunnel,
+            "settings":settings, "zrok":zrok,
             "accessKeyConfigured":auth.access_key.is_some()
         })
     }
@@ -709,34 +692,42 @@ impl RemoteAccessController {
         match action {
             "status" | "apply" => {
                 let settings = SettingsStore::default().load()?.remote_access;
-                if payload["check"] == true {
-                    self.live.lock().await.quick_tunnel.invalidate();
-                }
                 self.reconcile(settings.clone()).await;
                 Ok(self.admin_status(&settings).await)
             }
-            "restartQuickTunnel" => {
+            "downloadZrok" => {
                 let settings = SettingsStore::default().load()?.remote_access;
+                self.reconcile(settings.clone()).await;
+                self.live.lock().await.zrok.begin_download().await?;
+                Ok(self.admin_status(&settings).await)
+            }
+            "registerZrok" => {
+                let email = payload["email"].as_str().context("缺少注册邮箱")?;
+                let settings = SettingsStore::default().load()?.remote_access;
+                self.reconcile(settings).await;
+                self.live.lock().await.zrok.register(email).await
+            }
+            "startZrok" => {
+                let settings = SettingsStore::default().load()?.remote_access;
+                self.reconcile(settings.clone()).await;
                 anyhow::ensure!(
-                    settings.enabled && settings.cloudflare_quick_tunnel_enabled,
-                    "请先启用远程网页和 Cloudflare Quick Tunnel"
+                    settings.enabled && self.running.load(Ordering::SeqCst),
+                    "请先启用远程会话网页"
                 );
+                let token = payload["token"].as_str();
+                let fixed_name = payload["fixedName"].as_str().context("缺少固定公网名称")?;
                 self.live
                     .lock()
                     .await
-                    .quick_tunnel
-                    .restart(&quick_tunnel_target(&settings))
+                    .zrok
+                    .start_public(token, fixed_name, true, &zrok_target(&settings))
                     .await?;
-                self.reconcile(settings.clone()).await;
                 Ok(self.admin_status(&settings).await)
             }
-            "testQuickTunnel" => {
+            "testZrok" => {
                 let settings = SettingsStore::default().load()?.remote_access;
-                anyhow::ensure!(
-                    settings.enabled && settings.cloudflare_quick_tunnel_enabled,
-                    "请先启用远程网页和 Cloudflare Quick Tunnel"
-                );
-                self.live.lock().await.quick_tunnel.check().await
+                self.reconcile(settings).await;
+                self.live.lock().await.zrok.check().await
             }
             "revoke" => {
                 let id = payload["deviceId"].as_str().context("缺少设备 ID")?;
@@ -954,7 +945,7 @@ pub async fn local_settings_command(action: &str, payload: Value) -> anyhow::Res
             "credentials" => access_credentials_status(&directory),
             "setKey" => {
                 configure_access_key(&directory, payload["key"].as_str().context("缺少访问密钥")?)?;
-                Ok(json!({"status":"ok","accessKeyConfigured":true}))
+                access_credentials_status(&directory)
             }
             "generateKey" => {
                 let key = random_token();
@@ -966,42 +957,6 @@ pub async fn local_settings_command(action: &str, payload: Value) -> anyhow::Res
     .await
     .context("无法保存本机远程访问设置")?
 }
-pub async fn request_local_admin(action: &str, payload: Value) -> anyhow::Result<Value> {
-    anyhow::ensure!(
-        matches!(
-            action,
-            "status" | "apply" | "revoke" | "restartQuickTunnel" | "testQuickTunnel"
-        ),
-        "不支持的远程管理操作"
-    );
-    if let Some(response) = service::try_request(action, &payload).await? {
-        return Ok(response);
-    }
-    let status = crate::status::StatusStore::default()
-        .load_latest()?
-        .filter(|status| status.status == "running")
-        .context("请先通过 CodexElves 启动 Codex")?;
-    let port = status.helper_port.context("本机管理连接不可用")?;
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(60))
-        .build()?;
-    let response = client
-        .post(format!("http://127.0.0.1:{port}/remote-access/{action}"))
-        .json(&payload)
-        .send()
-        .await
-        .context("本机后台未连接，请在保存设置后重启 CodexElves launcher")?;
-    anyhow::ensure!(
-        response.status().is_success(),
-        "请启动包含远程会话功能的新版 CodexElves launcher"
-    );
-    response
-        .json::<Value>()
-        .await
-        .context("远程访问服务未返回有效状态")
-}
-
 #[derive(Clone)]
 struct WebState {
     controller: Arc<RemoteAccessController>,
@@ -1310,7 +1265,7 @@ async fn access_boundary(
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    let external_origin = state.controller.quick_tunnel_origin();
+    let external_origin = state.controller.public_origin();
     let mut origins = allowed_origins(&state.settings);
     origins.extend(external_origin.iter().cloned());
     let matched_origin = origins
@@ -1365,7 +1320,9 @@ async fn access_boundary(
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(peer)| *peer);
     let effective_ip = if external_https && peer.is_some_and(|peer| peer.ip().is_loopback()) {
-        single_header_ip(request.headers(), "cf-connecting-ip")
+        forwarded_header_ip(request.headers(), "x-forwarded-for")
+            .or_else(|| single_header_ip(request.headers(), "x-real-ip"))
+            .or_else(|| single_header_ip(request.headers(), "cf-connecting-ip"))
     } else {
         None
     };
@@ -1502,8 +1459,8 @@ async fn connect(
         expires_at_ms,
         last_seen_at_ms: now_ms(),
         key_id: key.id,
-        quick_tunnel_origin: if trust.external_https {
-            state.controller.quick_tunnel_origin()
+        public_origin: if trust.external_https {
+            state.controller.public_origin()
         } else {
             None
         },
@@ -1533,7 +1490,7 @@ async fn session(
     Ok(Json(
         json!({"ok":true,"device":device.public(),"nativeConnected":state.controller.native_connected.load(Ordering::SeqCst),
         "readOnly":state.settings.read_only,"allowApprovals":state.settings.allow_approvals,
-        "capabilities":{"imageInput":true,"queuedImageRemoval":true,"queuedImageEditing":true,"projectlessCreation":true}}),
+        "capabilities":{"imageInput":true,"queuedImageRemoval":true,"queuedImageEditing":true,"queueEditRecovery":true,"queueSendRecovery":true,"projectlessCreation":true}}),
     ))
 }
 
@@ -1570,11 +1527,18 @@ async fn read(
     authorized(&state, &headers).await?;
     if !matches!(
         action.as_str(),
-        "sidebar" | "history" | "thread" | "models" | "skills" | "queue"
+        "sidebar"
+            | "history"
+            | "thread"
+            | "models"
+            | "skills"
+            | "queue"
+            | "queueEdit"
+            | "sendState"
     ) {
         return Err(ApiError::new(404, "不支持的读取操作"));
     }
-    if action == "queue" {
+    if matches!(action.as_str(), "queue" | "queueEdit" | "sendState") {
         validate_queued_action_payload(&action, &payload)?;
     }
     let value = state
@@ -1596,7 +1560,10 @@ async fn read(
     if action == "history" {
         state.controller.attach_history_images(&mut value);
     }
-    if matches!(action.as_str(), "thread" | "queue") {
+    if matches!(
+        action.as_str(),
+        "thread" | "queue" | "queueEdit" | "sendState"
+    ) {
         state.controller.attach_queue_images(&mut value);
     }
     Ok(Json(value))
@@ -1719,10 +1686,13 @@ fn validate_queued_action_payload(action: &str, payload: &Value) -> Result<(), A
         .as_object()
         .ok_or_else(|| ApiError::new(400, "队列消息参数无效"))?;
     let reading = action == "queue";
+    let checking = action == "queueEdit";
+    let confirming_send = action == "sendState";
     let reordering = action == "reorderQueued";
     let beginning = action == "beginQueuedEdit";
     let editing = action == "editQueued";
     let canceling = action == "cancelQueuedEdit";
+    let dismissing = action == "dismissQueuedEdit";
     let session_editing = editing && object.contains_key("editId");
     if editing && !session_editing && object.contains_key("images") {
         return Err(ApiError::new(
@@ -1730,7 +1700,13 @@ fn validate_queued_action_payload(action: &str, payload: &Value) -> Result<(), A
             "旧版队列编辑不支持新增图片，请刷新后重试",
         ));
     }
-    let fields: &[&str] = if reading {
+    let fields: &[&str] = if confirming_send {
+        &["threadId", "clientUserMessageId"]
+    } else if checking {
+        &["threadId", "editId"]
+    } else if dismissing {
+        &["threadId", "editId", "confirmed"]
+    } else if reading {
         &["threadId"]
     } else if reordering {
         &["threadId", "messageIds", "expectedMessageIds"]
@@ -1769,7 +1745,11 @@ fn validate_queued_action_payload(action: &str, payload: &Value) -> Result<(), A
     if object.keys().any(|key| !fields.contains(&key.as_str())) {
         return Err(ApiError::new(400, "队列消息包含不支持的字段"));
     }
-    let id_fields: &[&str] = if reading {
+    let id_fields: &[&str] = if confirming_send {
+        &["threadId", "clientUserMessageId"]
+    } else if checking || dismissing {
+        &["threadId", "editId"]
+    } else if reading {
         &["threadId"]
     } else if reordering {
         &["threadId"]
@@ -1795,6 +1775,9 @@ fn validate_queued_action_payload(action: &str, payload: &Value) -> Result<(), A
         {
             return Err(ApiError::new(400, "队列消息身份无效"));
         }
+    }
+    if dismissing && object.get("confirmed").and_then(Value::as_bool) != Some(true) {
+        return Err(ApiError::new(400, "请先核对队列和会话，再结束待确认编辑"));
     }
     if reordering {
         let message_ids = object
@@ -1920,6 +1903,7 @@ async fn action(
             | "beginQueuedEdit"
             | "editQueued"
             | "cancelQueuedEdit"
+            | "dismissQueuedEdit"
             | "steerQueued"
             | "editMessage"
             | "updateGoal"
@@ -1941,7 +1925,12 @@ async fn action(
     }
     if matches!(
         action.as_str(),
-        "reorderQueued" | "beginQueuedEdit" | "editQueued" | "cancelQueuedEdit" | "steerQueued"
+        "reorderQueued"
+            | "beginQueuedEdit"
+            | "editQueued"
+            | "cancelQueuedEdit"
+            | "dismissQueuedEdit"
+            | "steerQueued"
     ) {
         validate_queued_action_payload(&action, &payload)?;
     }
@@ -2687,7 +2676,7 @@ fn device_name(headers: &HeaderMap) -> &'static str {
     }
 }
 
-fn quick_tunnel_target(settings: &RemoteAccessSettings) -> String {
+fn zrok_target(settings: &RemoteAccessSettings) -> String {
     let host = if settings.bind_host.contains(':') {
         format!("[{}]", settings.bind_host)
     } else {
@@ -2746,6 +2735,22 @@ fn single_header_ip(headers: &HeaderMap, name: &'static str) -> Option<IpAddr> {
         return None;
     }
     value.to_str().ok()?.parse().ok()
+}
+
+fn forwarded_header_ip(headers: &HeaderMap, name: &'static str) -> Option<IpAddr> {
+    let mut values = headers.get_all(name).iter();
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    value
+        .to_str()
+        .ok()?
+        .split(',')
+        .next_back()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 fn read_json_or_default<T: serde::de::DeserializeOwned + Default>(
@@ -2965,8 +2970,18 @@ mod tests {
         configure_access_key(state_dir.path(), first_key).unwrap();
         let credentials = access_credentials_status(state_dir.path()).unwrap();
         assert_eq!(credentials["accessKeyConfigured"], true);
-        assert!(credentials.get("key").is_none());
+        assert_eq!(credentials["key"], first_key);
         assert!(credentials.get("hash").is_none());
+        let stored_key: Value = serde_json::from_slice(
+            &std::fs::read(state_dir.path().join("remote-access-key.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stored_key["value"], first_key);
+        assert!(
+            stored_key["hash"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
         let first_login = client
             .post(format!("{base_url}/api/connect"))
             .header(reqwest::header::ORIGIN, &base_url)

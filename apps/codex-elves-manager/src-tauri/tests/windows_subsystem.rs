@@ -1,5 +1,5 @@
 #[test]
-fn cloudflare_quick_tunnel_actions_are_routed_to_remote_admin() {
+fn zrok_actions_are_routed_to_remote_admin() {
     let commands = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands.rs"))
         .expect("read manager commands.rs");
     let routed = commands
@@ -7,13 +7,15 @@ fn cloudflare_quick_tunnel_actions_are_routed_to_remote_admin() {
         .nth(1)
         .expect("remote_access_command exists");
     let local_settings_branch = routed
-        .split("let result = codex_elves_core::remote_access::request_local_admin")
+        .split("codex_elves_core::remote_access::service_admin_request")
         .next()
         .expect("local settings branch exists");
     assert!(local_settings_branch.contains("\"credentials\" | \"setKey\" | \"generateKey\""));
-    assert!(!local_settings_branch.contains("restartQuickTunnel"));
-    assert!(!local_settings_branch.contains("testQuickTunnel"));
-    assert!(routed.contains("request_local_admin"));
+    assert!(!local_settings_branch.contains("downloadZrok"));
+    assert!(!local_settings_branch.contains("registerZrok"));
+    assert!(!local_settings_branch.contains("startZrok"));
+    assert!(!local_settings_branch.contains("testZrok"));
+    assert!(routed.contains("service_admin_request"));
 }
 
 #[cfg(windows)]
@@ -41,19 +43,8 @@ fn remote_service_mode_does_not_start_the_manager_window() {
         .expect("read manager lib.rs");
     let setup = lib_rs.split(".setup(move |app|").nth(1).unwrap();
     let setup = setup.split(".invoke_handler").next().unwrap();
-    assert!(setup.contains("spawn_remote_access_heartbeat();"));
-    let heartbeat = lib_rs
-        .split("fn spawn_remote_access_heartbeat()")
-        .nth(1)
-        .unwrap()
-        .split("fn install_tray")
-        .next()
-        .unwrap();
-    assert!(heartbeat.contains("tauri::async_runtime::spawn"));
-    assert!(heartbeat.contains("Duration::from_secs(60)"));
-    assert!(heartbeat.contains("MissedTickBehavior::Skip"));
-    assert!(heartbeat.contains("send_manager_heartbeat().await"));
-    assert!(!heartbeat.contains("ensure_service_running"));
+    assert!(!setup.contains("spawn_remote_access_heartbeat"));
+    assert!(!lib_rs.contains("send_manager_heartbeat"));
 }
 
 #[test]

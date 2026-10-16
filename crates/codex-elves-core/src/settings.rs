@@ -310,6 +310,9 @@ impl RelayProfile {
     }
 
     pub(crate) fn catalog_model_for_configured_model(&self, model: &str) -> String {
+        if !self.local_proxy_enabled() && self.relay_mode != RelayMode::Aggregate {
+            return self.request_model_for_catalog_model(model);
+        }
         let model = model.trim();
         if model.is_empty() || self.model_mappings.is_empty() {
             return model.to_string();
@@ -738,7 +741,7 @@ pub struct RemoteAccessSettings {
     pub enabled: bool,
     pub bind_host: String,
     pub port: u16,
-    pub cloudflare_quick_tunnel_enabled: bool,
+    pub zrok_setup_value: String,
     pub device_session_hours: u16,
     pub read_only: bool,
     pub allow_approvals: bool,
@@ -750,7 +753,7 @@ impl Default for RemoteAccessSettings {
             enabled: false,
             bind_host: "127.0.0.1".into(),
             port: 45222,
-            cloudflare_quick_tunnel_enabled: false,
+            zrok_setup_value: String::new(),
             device_session_hours: 0,
             read_only: false,
             allow_approvals: true,
@@ -773,12 +776,6 @@ impl RemoteAccessSettings {
             !self.enabled || address.is_loopback(),
             "远程会话网页仅允许监听本机回环地址"
         );
-        if self.cloudflare_quick_tunnel_enabled {
-            anyhow::ensure!(
-                self.enabled && address.is_loopback(),
-                "Cloudflare Quick Tunnel 必须启用远程网页并转发到本机 HTTP 监听地址"
-            );
-        }
         Ok(())
     }
 }
@@ -1949,9 +1946,9 @@ mod tests {
         assert!(!settings.codex_goals_enabled);
         assert!(!settings.lan_proxy_enabled);
         assert!(!settings.remote_access.enabled);
-        assert!(!settings.remote_access.cloudflare_quick_tunnel_enabled);
         assert_eq!(settings.remote_access.bind_host, "127.0.0.1");
         assert_eq!(settings.remote_access.port, 45222);
+        assert!(settings.remote_access.zrok_setup_value.is_empty());
         assert!(settings.remote_access.validate().is_ok());
         assert!(settings.codex_app_path.is_empty());
         assert!(settings.codex_extra_args.is_empty());
@@ -1996,18 +1993,13 @@ mod tests {
     }
 
     #[test]
-    fn remote_access_quick_tunnel_requires_enabled_loopback() {
+    fn remote_access_requires_loopback_when_enabled() {
         let mut settings = RemoteAccessSettings {
             enabled: true,
-            cloudflare_quick_tunnel_enabled: true,
             ..RemoteAccessSettings::default()
         };
         assert!(settings.validate().is_ok());
 
-        settings.enabled = false;
-        assert!(settings.validate().is_err());
-
-        settings.enabled = true;
         settings.bind_host = "0.0.0.0".into();
         assert!(settings.validate().is_err());
     }
@@ -2021,28 +2013,63 @@ mod tests {
         .unwrap();
 
         assert!(!settings.enabled);
-        assert!(!settings.cloudflare_quick_tunnel_enabled);
     }
 
     #[test]
-    fn remote_access_quick_tunnel_field_takes_precedence_over_legacy_fields() {
+    fn remote_access_ignores_removed_quick_tunnel_field() {
         let settings: RemoteAccessSettings = serde_json::from_value(json!({
-            "cloudflareQuickTunnelEnabled": false,
+            "cloudflareQuickTunnelEnabled": true,
             "funnelEnabled": true,
             "cloudflareTunnelEnabled": true
         }))
         .unwrap();
 
-        assert!(!settings.cloudflare_quick_tunnel_enabled);
+        assert!(!settings.enabled);
     }
 
     #[test]
-    fn remote_access_serialization_only_writes_quick_tunnel_field() {
+    fn remote_access_serialization_drops_removed_tunnel_fields() {
         let serialized = serde_json::to_value(RemoteAccessSettings::default()).unwrap();
 
-        assert_eq!(serialized["cloudflareQuickTunnelEnabled"], json!(false));
+        assert_eq!(serialized["zrokSetupValue"], json!(""));
+        assert!(serialized.get("cloudflareQuickTunnelEnabled").is_none());
         assert!(serialized.get("funnelEnabled").is_none());
         assert!(serialized.get("cloudflareTunnelEnabled").is_none());
+    }
+
+    #[test]
+    fn remote_access_zrok_setup_value_round_trips() {
+        let settings: RemoteAccessSettings = serde_json::from_value(json!({
+            "zrokSetupValue": "test-token-123"
+        }))
+        .unwrap();
+
+        assert_eq!(settings.zrok_setup_value, "test-token-123");
+        assert_eq!(
+            serde_json::to_value(settings).unwrap()["zrokSetupValue"],
+            json!("test-token-123")
+        );
+    }
+
+    #[test]
+    fn settings_store_persists_remote_access_zrok_setup_value() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let store = SettingsStore::new(path.clone());
+        let mut settings = BackendSettings::default();
+        settings.remote_access.zrok_setup_value = "saved-token".into();
+
+        store.save(&settings).unwrap();
+
+        let saved: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            saved["remoteAccess"]["zrokSetupValue"],
+            json!("saved-token")
+        );
+        assert_eq!(
+            store.load().unwrap().remote_access.zrok_setup_value,
+            "saved-token"
+        );
     }
 
     #[test]

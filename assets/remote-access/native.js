@@ -1,13 +1,22 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 23) return;
+  if (window.__codexElvesRemoteAccess?.version === 29) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
   let unsubscribe = [];
   let eventSequence = 0;
+  let queueSequence = 0;
   const epoch = crypto.randomUUID();
   const notifications = [];
   const queuedReorders = new Set();
+  const asyncQuestionSignatures = new Map();
+  const questionReplyStore = (() => {
+    const existing = window.__codexElvesRemoteQuestionReplies;
+    if (existing instanceof Map) return existing;
+    const created = new Map();
+    window.__codexElvesRemoteQuestionReplies = created;
+    return created;
+  })();
   const queuedEditStore = (() => {
     const existing = window.__codexElvesRemoteQueuedEditStore;
     if (existing?.version === 1 && existing.sessions instanceof Map) return existing;
@@ -65,7 +74,9 @@
           params: {
             ...event.params,
             queuedMessages: snapshot.queuedMessages,
-            queuedEdits: snapshot.queuedEdits
+            queuedEdits: snapshot.queuedEdits,
+            queueEpoch: snapshot.queueEpoch,
+            queueRevision: snapshot.queueRevision
           }
         });
       }).catch(() => pushNotification(event));
@@ -129,6 +140,10 @@
       unsubscribe.push(manager.addApprovalRequestListener(() => emit({ method: "remote/requestsChanged" })));
       unsubscribe.push(manager.addApprovalResolvedListener(() => emit({ method: "remote/requestsChanged" })));
       unsubscribe.push(manager.addUserInputRequestListener(() => emit({ method: "remote/requestsChanged" })));
+      if (typeof manager.addConversationStateCallback === "function")
+        unsubscribe.push(manager.addConversationStateCallback((id, conversation) => {
+          if (asyncQuestionSignatures.has(id)) syncAsyncQuestions(id, conversation);
+        }));
     }
     return manager;
   }
@@ -350,9 +365,18 @@
     };
   }
   function enrichHistoryTurn(threadId, turn, itemPage) {
+    const items = [...itemPage.items];
+    const input = compactionInputItem(threadId, turn.id, items);
+    if (input) {
+      const index = items.findIndex(item => item.id === input.id);
+      if (index >= 0) items.splice(index, 1);
+      let before = items.findIndex(item => item.type === "contextCompaction");
+      if (before < 0) before = items.findIndex(item => !["modelChanged", "modelRerouted"].includes(item.type));
+      items.splice(before < 0 ? items.length : before, 0, input);
+    }
     const enriched = enrichMessageMetadata(threadId, [{
       ...turn,
-      items: itemPage.items,
+      items,
       itemsView: itemPage.nextCursor == null ? "full" : "summary"
     }], { itemStartedAtMsById: itemPage.itemStartedAtMsById })[0];
     return {
@@ -589,6 +613,36 @@
     const clientId = turn?.params?.clientUserMessageId;
     return messages.find(item => clientId && item.clientId === clientId) || messages[0] || null;
   }
+  function compactionInputItem(threadId, turnId, items = []) {
+    const turn = nativeConversationTurns(manager.getConversation(threadId))
+      .find(turn => nativeTurnId(turn) === turnId);
+    const clientId = turn?.params?.clientUserMessageId;
+    if (typeof clientId !== "string" || !clientId) return null;
+    const nativeItems = array(turn.items);
+    const compaction = nativeItems.findIndex(item => item.type === "contextCompaction"
+      && item.source !== "manual" && item.id !== "pending-manual-context-compaction");
+    if (compaction < 0) return null;
+    const initial = nativeItems.find(item => item.type === "userMessage" && item.clientId === clientId);
+    if (initial && nativeItems.indexOf(initial) < compaction) return null;
+    if (!initial && (turn.itemsPagination?.hasLoadedOldest === false
+        || nativeItems.slice(0, compaction).some(item => !["modelChanged", "modelRerouted"].includes(item.type)))) return null;
+    const existing = items.find(item => item.type === "userMessage"
+      && (item.clientId === clientId || initial && item.id === initial.id))
+      || (!initial && items.some(item => item.id === nativeItems[compaction].id)
+        ? items.find(item => item.type === "userMessage") : null);
+    if (existing || initial) return { ...(existing || initial), clientId, remoteCompactionInput: true };
+    const content = array(turn.params.input).flatMap(input => {
+      if (input.type === "text" && typeof input.text === "string") return [{ ...input }];
+      if (input.type === "image" && typeof input.url === "string") return [{ ...input }];
+      if (input.type === "localImage" && typeof input.path === "string") return [{ ...input }];
+      return [];
+    });
+    if (!content.length) return null;
+    return {
+      id: `remote-compaction-input-${clientId}`, type: "userMessage", clientId, content,
+      remoteCompactionInput: true, remotePendingInput: true
+    };
+  }
   function pendingNativeMessage(id, conversation, turns) {
     if (array(conversation?.unconfirmedTurnSubmissions).length) return true;
     const queued = manager.getTurnCoordinator?.()?.readMessages?.(id)
@@ -711,6 +765,8 @@
             : item.completed;
           return {
             ...item,
+            ...(item.type === "userMessage" && typeof (item.clientId ?? source?.clientId) === "string"
+              ? { clientId: item.clientId ?? source.clientId } : {}),
             ...(sentAtMs == null ? {} : { sentAtMs }),
             ...(item.type === "agentMessage" ? { completed } : {}),
             messageMetadata
@@ -741,12 +797,119 @@
     emit({ method: "remote/threadReverted", params: { threadId: id } });
     return { ok: true, threadId: id, ...state.metadata };
   }
+  function asyncQuestionRequests(id, conversation = manager.getConversation(id)) {
+    const turn = nativeConversationTurns(conversation).findLast(turn => nativeTurnStatus(turn) === "inProgress");
+    const turnId = nativeTurnId(turn);
+    if (!turnId) return [];
+    const answered = new Set();
+    for (const item of array(turn.items)) {
+      if (item.type !== "userMessage" && (item.type !== "steeringUserMessage" || item.status !== "accepted")) continue;
+      const input = item.type === "userMessage" ? item.content : item.input;
+      if (!Array.isArray(input) || input.length !== 1 || input[0]?.type !== "text") continue;
+      const text = String(input[0].text || "").trim();
+      const open = "<send_user_message_question_reply>", close = "</send_user_message_question_reply>";
+      if (!text.startsWith(open) || !text.endsWith(close)) continue;
+      try {
+        const parsed = JSON.parse(text.slice(open.length, -close.length));
+        for (const reply of Array.isArray(parsed) ? parsed : [parsed])
+          if (typeof reply?.questionItemId === "string" && typeof reply.question === "string"
+              && typeof reply.answer === "string") answered.add(reply.questionItemId);
+      } catch {}
+    }
+    return array(turn.items).flatMap(item => {
+      if (item.type !== "agentMessage") return [];
+      const questions = array(item.questions).flatMap((question, index) => {
+        const questionId = JSON.stringify(["request_user_input_async", item.id, index]);
+        return typeof question?.title === "string" && !answered.has(questionId)
+          ? [{ id: questionId, question: question.title,
+            options: array(question.options).filter(option => typeof option === "string").map(label => ({ label })) }]
+          : [];
+      });
+      if (!questions.length) return [];
+      const requestId = JSON.stringify(["async-question", turnId, item.id]);
+      return [{ id: requestId, method: "remote/requestUserInputAsync",
+        params: { threadId: id, turnId, questions,
+          submissionState: questionReplyStore.get(JSON.stringify([id, requestId]))?.state ?? null } }];
+    });
+  }
+  function syncAsyncQuestions(id, conversation) {
+    const requests = asyncQuestionRequests(id, conversation);
+    const signature = JSON.stringify(requests);
+    if (signature === asyncQuestionSignatures.get(id)) return;
+    asyncQuestionSignatures.set(id, signature);
+    emit({ method: "remote/asyncQuestionsChanged", params: { threadId: id, requests } });
+  }
+  async function answerAsyncQuestion(payload) {
+    const id = requiredId(payload.threadId);
+    const request = asyncQuestionRequests(id).find(request => request.id === payload.requestId);
+    if (!request) throw failure(409, "此问题已回答或当前轮次已结束，请刷新会话");
+    const answers = payload.response?.answers;
+    const questions = request.params.questions;
+    if (!answers || typeof answers !== "object" || Array.isArray(answers)
+        || Object.keys(answers).length !== questions.length
+        || Object.keys(answers).some(key => !questions.some(question => question.id === key)))
+      throw failure(400, "请回答此次请求中的所有问题");
+    const replies = questions.map(question => {
+      const values = answers[question.id]?.answers;
+      if (!Array.isArray(values) || values.length !== 1 || typeof values[0] !== "string" || !values[0].trim())
+        throw failure(400, "请使用选项或文字回答所有问题");
+      return { questionItemId: question.id, question: question.question, answer: values[0].trim() };
+    });
+    const prompt = `<send_user_message_question_reply>\n${JSON.stringify(replies)}\n</send_user_message_question_reply>`;
+    if (new TextEncoder().encode(prompt).length > 128 * 1024) throw failure(400, "回答不能超过 128 KiB");
+    if (runtimeCompaction(id).state !== "idle") throw failure(409, "上下文压缩完成前不能提交回答");
+    const module = await nativeCreationModule();
+    const submit = Object.values(module).find(value => typeof value === "function"
+      && ["isSubmissionCurrent", "getTurnCoordinator", ".sendMessage("]
+        .every(marker => Function.prototype.toString.call(value).includes(marker)));
+    if (!submit || !appScope) throw failure(503, "当前 Codex 版本的原生异步问答提交服务不可用");
+    const key = JSON.stringify([id, request.id]);
+    if (questionReplyStore.has(key)) throw failure(409, "此回答已提交或结果待确认，请先核对回答状态");
+    const isCurrent = () => {
+      const current = asyncQuestionRequests(id).find(value => value.id === request.id);
+      return current?.params.turnId === request.params.turnId
+        && questions.every(question => current.params.questions.some(value => value.id === question.id))
+        && runtimeCompaction(id).state === "idle";
+    };
+    if (!isCurrent()) throw failure(409, "问题状态已变化，请重新读取会话");
+    const conversation = manager.getConversation(id);
+    const cwd = manager.getConversationCwd(id) || "/";
+    const context = { ...remoteAttachmentContext(prompt, cwd, []), turnTrigger: "send_user_message_async_question" };
+    const message = { id: crypto.randomUUID(), text: prompt, context, cwd, createdAt: Date.now() };
+    questionReplyStore.set(key, { state: "submitting" });
+    syncAsyncQuestions(id, conversation);
+    try {
+      const result = await submit({
+        scope: appScope, turnTrigger: "send_user_message_async_question",
+        managerHostId: "local", hostId: "local", targetConversationId: id,
+        context, cwd, agentMode: "auto", permissionProfileId: null,
+        serviceTier: conversation?.latestServiceTier ?? undefined,
+        shouldSendPermissionOverrides: false, activeCollaborationMode: conversation?.latestCollaborationMode,
+        restoreMessage: message, isSubmissionCurrent: isCurrent
+      }, { queueModeOverride: "send-now" });
+      if (result?.status !== "sent") {
+        questionReplyStore.set(key, { state: "unknown" });
+        return { ok: false, outcomeUnknown: true, threadId: id, message: "回答送达状态待确认，请核对会话，不要重复提交" };
+      }
+      questionReplyStore.set(key, { state: "submitted" });
+      return { ok: true, threadId: id, requestId: request.id };
+    } catch (error) {
+      if (error.remoteValidationFailure || error.delivery?.stage === "not-sent") {
+        questionReplyStore.delete(key);
+        throw error;
+      }
+      questionReplyStore.set(key, { state: "unknown" });
+      return { ok: false, outcomeUnknown: true, threadId: id, message: "回答送达状态待确认，请核对会话，不要重复提交" };
+    } finally { syncAsyncQuestions(id, manager.getConversation(id)); }
+  }
   function runtimeThread(id, nativeThread = null) {
     const conversation = manager.getConversation(id);
     const queued = manager.getTurnCoordinator?.()?.readMessages?.(id)
       ?? manager.storage.readQueuedFollowUps?.()?.value?.[id];
     const collaborationSettings = conversation?.latestCollaborationMode?.settings
       ?? conversation?.latestThreadSettings?.collaborationMode?.settings;
+    const asyncQuestions = asyncQuestionRequests(id, conversation);
+    asyncQuestionSignatures.set(id, JSON.stringify(asyncQuestions));
     return {
       id,
       model: nativeThread?.model ?? collaborationSettings?.model
@@ -761,9 +924,9 @@
       transcriptEvents: nativeTranscriptEvents(conversation),
       editableMessage: editableMessageState(id).metadata,
       status: manager.getThreadRuntimeStatusEvidence(id) || { type: "idle" },
-      requests: array(conversation?.requests).map(request => ({ id: request.id, method: request.method, params: request.params })),
-      queuedMessages: array(queued?.messages || queued),
-      queuedEdits: queuedEditSummaries(id)
+      requests: [...array(conversation?.requests).map(request => ({ id: request.id, method: request.method, params: request.params })),
+        ...asyncQuestions],
+      ...queueSnapshotFields(id, queued)
     };
   }
   function queuedEditSummaries(threadId) {
@@ -777,22 +940,75 @@
           }]
         : []).slice(0, 1);
   }
+  function queueSnapshotFields(threadId, queued) {
+    return {
+      queueEpoch: epoch,
+      queueRevision: ++queueSequence,
+      queuedMessages: [...array(queued?.messages || queued)],
+      queuedEdits: queuedEditSummaries(threadId)
+    };
+  }
   async function queueSnapshot(id) {
     id = requiredId(id);
     if (typeof manager.getTurnCoordinator !== "function")
       throw failure(503, "当前 Codex 版本的原生队列服务不可用");
     const coordinator = await manager.getTurnCoordinator();
-    if (typeof coordinator?.serverQueue?.load !== "function"
-        || typeof coordinator?.readMessages !== "function")
+    if (typeof coordinator?.readMessages !== "function")
       throw failure(503, "当前 Codex 版本不支持原生队列读取");
-    await coordinator.serverQueue.load(id);
+    await loadNativeQueue(coordinator, id);
     const queued = coordinator.readMessages(id);
     return {
       ok: true,
       threadId: id,
-      queuedMessages: array(queued?.messages || queued),
-      queuedEdits: queuedEditSummaries(id)
+      ...queueSnapshotFields(id, queued)
     };
+  }
+  function acceptedQueuedSend(threadId, clientUserMessageId) {
+    for (const turn of nativeConversationTurns(manager.getConversation(threadId))) {
+      if (!nativeTurnId(turn) || turn.pendingUserMessageAdmission) continue;
+      const item = array(turn.items).find(item =>
+        (item.type === "userMessage" || item.type === "steeringUserMessage" && item.status === "accepted")
+        && !item.remotePendingInput && !item.remoteCompactionInput
+        && (item.clientId === clientUserMessageId || item.clientUserMessageId === clientUserMessageId));
+      if (item) return {
+        ok: true, confirmed: true, deliveryState: "accepted", threadId, clientUserMessageId,
+        messageId: item.serverUserMessageId || item.id, turnId: nativeTurnId(turn)
+      };
+    }
+    return null;
+  }
+  async function queueSendState(payload) {
+    const threadId = requiredId(payload.threadId), clientUserMessageId = requiredId(payload.clientUserMessageId);
+    const accepted = acceptedQueuedSend(threadId, clientUserMessageId);
+    if (accepted) return accepted;
+    const coordinator = await manager.getTurnCoordinator?.();
+    const queued = coordinator?.readMessages?.(threadId);
+    const message = array(queued?.messages || queued).find(message =>
+      (message.clientUserMessageId ?? message.submissionOptions?.clientUserMessageId
+        ?? (!message.serverQueuedMessageId ? message.id : null)) === clientUserMessageId);
+    if (message) return {
+      ok: true, confirmed: true, deliveryState: "queued", threadId, clientUserMessageId,
+      messageId: message.id, ...queueSnapshotFields(threadId, queued)
+    };
+    if (await coordinator?.serverQueue?.isEnabled?.(threadId)) {
+      const submissions = await readServerQueuedSubmissions(threadId);
+      const delivered = acceptedQueuedSend(threadId, clientUserMessageId);
+      if (delivered) return delivered;
+      const submission = submissions.find(value => value.clientUserMessageId === clientUserMessageId);
+      if (submission) return {
+        ok: true, confirmed: true, deliveryState: "queued", threadId, clientUserMessageId,
+        messageId: submission.id, queueSyncPending: true
+      };
+    }
+    return acceptedQueuedSend(threadId, clientUserMessageId)
+      || { ok: true, confirmed: false, deliveryState: "unknown", threadId, clientUserMessageId };
+  }
+  async function loadNativeQueue(coordinator, id) {
+    if (typeof coordinator?.loadMessages === "function") return await coordinator.loadMessages(id);
+    if (typeof coordinator?.serverQueue?.load === "function"
+        && await coordinator.serverQueue.isEnabled?.(id) !== false)
+      return await coordinator.serverQueue.load(id);
+    throw failure(503, "当前 Codex 版本不支持原生队列读取");
   }
   async function removeQueued(payload = {}) {
     try {
@@ -811,6 +1027,7 @@
       const coordinator = await manager.getTurnCoordinator();
       if (typeof coordinator?.removeQueuedMessage !== "function")
         throw failure(503, "当前 Codex 版本的原生队列服务不可用");
+      await loadNativeQueue(coordinator, threadId);
       const message = array(coordinator.readMessages?.(threadId)).find(message => message?.id === messageId);
       if (!message) throw failure(409, "此队列消息已不存在，请刷新会话");
       if (message.submission?.status && message.submission.status !== "queued")
@@ -819,7 +1036,7 @@
       if (removed == null) throw failure(409, "此队列消息已不存在，请刷新会话");
       const queued = coordinator.readMessages?.(threadId)
         ?? manager.storage.readQueuedFollowUps?.()?.value?.[threadId];
-      return { ok: true, threadId, messageId, queuedMessages: array(queued?.messages || queued) };
+      return { ok: true, threadId, messageId, ...queueSnapshotFields(threadId, queued) };
     } catch (error) {
       return { ok: false, code: error.code || 503, message: error.message || "移除原生队列消息失败" };
     }
@@ -848,11 +1065,10 @@
       if (typeof manager.getTurnCoordinator !== "function")
         throw failure(503, "当前 Codex 版本的原生队列服务不可用");
       const coordinator = await manager.getTurnCoordinator();
-      if (typeof coordinator?.serverQueue?.load !== "function"
-          || typeof coordinator?.readMessages !== "function"
+      if (typeof coordinator?.readMessages !== "function"
           || typeof coordinator?.reorderQueuedMessages !== "function")
         throw failure(503, "当前 Codex 版本不支持原生队列排序");
-      await coordinator.serverQueue.load(threadId);
+      await loadNativeQueue(coordinator, threadId);
       const currentMessageIds = array(coordinator.readMessages(threadId)).map(message => message?.id);
       if (currentMessageIds.length !== expectedMessageIds.length
           || currentMessageIds.some((messageId, index) => messageId !== expectedMessageIds[index]))
@@ -861,8 +1077,7 @@
         return {
           ok: true,
           threadId,
-          queuedMessages: array(coordinator.readMessages(threadId)),
-          queuedEdits: queuedEditSummaries(threadId)
+          ...queueSnapshotFields(threadId, coordinator.readMessages(threadId))
         };
       }
       reorderStarted = true;
@@ -874,8 +1089,7 @@
       return {
         ok: true,
         threadId,
-        queuedMessages,
-        queuedEdits: queuedEditSummaries(threadId)
+        ...queueSnapshotFields(threadId, queuedMessages)
       };
     } catch (error) {
       return {
@@ -1207,6 +1421,47 @@
     const { queuedMessages, ...compact } = result;
     return compact;
   }
+  async function queuedEditFingerprint(action, payload) {
+    const value = JSON.stringify([action, action === "editQueued" ? payload.prompt.trim() : null,
+      payload.retainedImageSources ?? null,
+      array(payload.images).map(image => [image.name, image.mime, image.dataUrl, image.size])]);
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+    return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+  }
+  async function queueEditState(payload = {}) {
+    const threadId = requiredId(payload.threadId), editId = requiredId(payload.editId);
+    const entry = queuedEditStore.sessions.get(editId);
+    if (entry && entry.threadId !== threadId) throw failure(409, "编辑标识不属于此会话");
+    const snapshot = await queueSnapshot(threadId);
+    const operationPending = !!(entry?.beginPromise || entry?.terminalPromise || entry?.finishRequests);
+    return {
+      ...snapshot, editId,
+      editState: entry?.state ?? "missing",
+      operationPending,
+      operationFingerprint: entry?.terminalFingerprint ?? null,
+      terminalAction: entry?.terminalAction ?? null,
+      draftText: entry?.terminalPrompt ?? entry?.originalText ?? "",
+      canResume: entry?.state === "editing" && !!entry.token && !operationPending,
+      canDismiss: !entry || ["outcomeUnknown", "committed", "canceled"].includes(entry.state) && !operationPending,
+      result: entry?.result?.ok ? entry.result : null
+    };
+  }
+  async function dismissQueuedEdit(payload = {}) {
+    const threadId = requiredId(payload.threadId), editId = requiredId(payload.editId);
+    if (payload.confirmed !== true) throw failure(400, "请先核对队列和会话，再结束待确认编辑");
+    const entry = queuedEditStore.sessions.get(editId);
+    if (entry && entry.threadId !== threadId) throw failure(409, "编辑标识不属于此会话");
+    if (entry && (!["outcomeUnknown", "committed", "canceled"].includes(entry.state)
+        || entry.beginPromise || entry.terminalPromise || entry.finishRequests))
+      throw failure(409, "编辑状态已变化，请重新核对，不会重复保存或恢复消息");
+    queuedEditStore.sessions.delete(editId);
+    const snapshot = await queueSnapshot(threadId);
+    pushNotification({ method: "thread/queue/changed", params: {
+      threadId, queueEpoch: snapshot.queueEpoch, queueRevision: snapshot.queueRevision,
+      queuedMessages: snapshot.queuedMessages, queuedEdits: snapshot.queuedEdits
+    } });
+    return { ...snapshot, editId, editState: "dismissed" };
+  }
   async function replayQueuedEditResult(entry, result) {
     if (!result?.ok) return result;
     try {
@@ -1216,7 +1471,7 @@
         throw new Error("原生队列快照不可用");
       return {
         ...result,
-        queuedMessages: array(coordinator.readMessages(entry.threadId))
+        ...queueSnapshotFields(entry.threadId, coordinator.readMessages(entry.threadId))
       };
     } catch {
       return {
@@ -1313,10 +1568,9 @@
         const serverQueue = coordinator?.serverQueue;
         if (typeof coordinator?.readMessages !== "function"
             || typeof coordinator?.removeQueuedMessage !== "function"
-            || typeof coordinator?.restoreQueuedMessage !== "function"
-            || typeof serverQueue?.canEnqueue !== "function"
-            || typeof manager.requestClient?.sendRequest !== "function")
+            || typeof coordinator?.restoreQueuedMessage !== "function")
           throw failure(503, "当前 Codex 版本不支持原生队列编辑");
+        await loadNativeQueue(coordinator, entry.threadId);
         if (queuedEditConflict(entry.threadId, entry.editId))
           throw failure(409, "此会话已有一条队列消息正在编辑");
         const current = array(coordinator.readMessages(entry.threadId))
@@ -1333,12 +1587,14 @@
           throw failure(409, "此队列消息已引导到会话，不能编辑");
         if (current.submission?.status && current.submission.status !== "queued")
           throw failure(409, "此队列消息正在发送或结果尚未确认，不能编辑");
-        if (!await serverQueue.canEnqueue(entry.threadId, current))
-          throw failure(409, "此队列消息当前无法安全恢复，请稍后重试");
-        const matches = (await readServerQueuedSubmissions(entry.threadId))
-          .filter(submission => submission?.id === entry.messageId);
-        if (matches.length !== 1) throw failure(409, "此队列消息已执行或不存在，请刷新会话");
-        const serverSubmission = matches[0];
+        const serverEnabled = typeof serverQueue?.isEnabled === "function"
+          && await serverQueue.isEnabled(entry.threadId);
+        const matches = serverEnabled ? (await readServerQueuedSubmissions(entry.threadId))
+          .filter(submission => submission?.id === entry.messageId) : [];
+        if (matches.length > 1) throw failure(409, "队列消息身份已变化，请刷新后重试");
+        entry.serverQueued = matches.length === 1;
+        const serverSubmission = matches[0] ?? current.submission?.editPosition?.serverSubmission;
+        if (!serverSubmission) throw failure(409, "此队列消息缺少可安全编辑的原生输入");
         if (serverSubmission.clientUserMessageId !== entry.clientUserMessageId)
           throw failure(409, "队列消息身份已变化，请刷新后重试");
         if (entry.expectedImageSources != null)
@@ -1363,7 +1619,7 @@
           editId: entry.editId,
           messageId: entry.messageId,
           editState: "editing",
-          queuedMessages: array(coordinator.readMessages(entry.threadId))
+          ...queueSnapshotFields(entry.threadId, coordinator.readMessages(entry.threadId))
         };
         entry.beginResult = compactQueuedEditResult(result);
         return result;
@@ -1380,6 +1636,12 @@
     return await entry.beginPromise;
   }
   async function finishQueuedEdit(payload = {}, action) {
+    const entry = queuedEditStore.sessions.get(payload.editId);
+    if (entry) entry.finishRequests = (entry.finishRequests || 0) + 1;
+    try { return await finishQueuedEditOperation(payload, action); }
+    finally { if (entry) entry.finishRequests -= 1; }
+  }
+  async function finishQueuedEditOperation(payload = {}, action) {
     let threadId, editId, prompt = null, retainedImageSources = null, addedImages = null;
     try {
       threadId = requiredId(payload.threadId);
@@ -1428,6 +1690,8 @@
         return queuedEditFailure(error, "保存队列消息失败");
       }
     }
+    const operationFingerprint = await queuedEditFingerprint(
+      action === "commit" ? "editQueued" : "cancelQueuedEdit", payload);
     if (entry.terminalAction) {
       if (entry.terminalAction !== action
           || action === "commit" && (entry.terminalPrompt !== prompt
@@ -1444,6 +1708,7 @@
     if (entry.state !== "editing" || !entry.token)
       return { ok: false, code: 409, message: "队列消息当前不在可保存或取消的编辑状态" };
     entry.terminalAction = action;
+    entry.terminalFingerprint = operationFingerprint;
     entry.terminalPrompt = prompt;
     entry.terminalRetainedImageSources = retainedImageSources;
     entry.terminalAddedImageFingerprint = addedImageFingerprint;
@@ -1487,6 +1752,10 @@
             input = rewriteQueuedSubmissionInput(input, entry.originalText, prompt);
             expectedInput = input;
             serverSubmission = { ...entry.token.serverSubmission, input };
+            if (entry.serverQueued === false && message.submission?.editPosition?.serverSubmission) {
+              message = { ...message, submission: { ...message.submission,
+                editPosition: { ...message.submission.editPosition, serverSubmission } } };
+            }
           } else if (retainedImageSources != null || addedImages != null) {
             throw failure(409, "此队列消息缺少可安全编辑的原生图片输入");
           }
@@ -1497,25 +1766,27 @@
           };
         }
         restoreStarted = true;
-        const messageId = await coordinator.restoreQueuedMessage(entry.threadId, restoreToken);
-        if (messageId !== entry.messageId)
-          throw new Error("原生队列未确认恢复后的消息身份");
+        const expectedClientId = restoreToken.restoreClientUserMessageId
+          ?? restoreToken.serverSubmission?.clientUserMessageId ?? entry.clientUserMessageId;
+        const messageId = requiredId(await coordinator.restoreQueuedMessage(entry.threadId, restoreToken));
+        entry.restoredMessageId = messageId;
         const restoredMessage = array(coordinator.readMessages(entry.threadId))
-          .find(message => message?.id === entry.messageId);
+          .find(message => message?.id === messageId);
         if (!restoredMessage
-            || restoredMessage.clientUserMessageId !== entry.clientUserMessageId
-            || restoredMessage.createdAt !== entry.createdAt
-            || queuedMessageText(restoredMessage) !== (action === "commit" ? prompt : entry.originalText))
+            || restoredMessage.clientUserMessageId !== expectedClientId
+              && !(messageId === entry.messageId && restoredMessage.clientUserMessageId === entry.clientUserMessageId)
+            || !queuedTextMatches(queuedMessageText(restoredMessage), action === "commit" ? prompt : entry.originalText))
           throw new Error("原生队列恢复后的消息身份或内容未确认");
         if (action === "commit" && expectedImageSources != null) {
           const restoredSources = (await queuedImageAttachmentRecords(restoredMessage))
             .map(record => record.reference);
           if (!sameJsonValue(restoredSources, expectedImageSources))
             throw new Error("原生队列恢复后的图片未确认");
-          const submissions = (await readServerQueuedSubmissions(entry.threadId))
-            .filter(submission => submission?.id === entry.messageId);
-          if (submissions.length !== 1
-              || submissions[0].clientUserMessageId !== entry.clientUserMessageId
+          const submissions = entry.serverQueued === false
+            ? [restoredMessage.submission?.editPosition?.serverSubmission]
+            : (await readServerQueuedSubmissions(entry.threadId)).filter(submission => submission?.id === messageId);
+          if (submissions.length !== 1 || !submissions[0]
+              || submissions[0].clientUserMessageId !== expectedClientId
               || !sameJsonValue(submissions[0].input, expectedInput))
             throw new Error("原生队列恢复后的真实输入未确认");
           await buildQueuedImagePlan(restoredMessage, submissions[0].input, expectedImageSources);
@@ -1532,7 +1803,7 @@
         entry.beginResult = null;
         return {
           ...entry.result,
-          queuedMessages: array(coordinator.readMessages(entry.threadId))
+          ...queueSnapshotFields(entry.threadId, coordinator.readMessages(entry.threadId))
         };
       } catch (error) {
         if (restoreStarted)
@@ -1540,6 +1811,7 @@
             ? "原生队列保存结果未确认，请刷新队列检查，不要重复保存"
             : "原生队列恢复结果未确认，请刷新队列检查，不要重复取消");
         entry.terminalAction = null;
+        entry.terminalFingerprint = null;
         entry.terminalPrompt = null;
         entry.terminalRetainedImageSources = null;
         entry.terminalAddedImageFingerprint = null;
@@ -1618,7 +1890,7 @@
         threadId,
         messageId,
         replacedMessageId: messageId,
-        queuedMessages: queued
+        ...queueSnapshotFields(threadId, queued)
       };
     } catch (error) {
       if (updateStarted && !error.remoteValidationFailure)
@@ -1643,6 +1915,7 @@
         throw failure(409, "上下文压缩完成前不能引导队列消息");
       const coordinator = await manager.getTurnCoordinator?.();
       if (typeof coordinator?.sendQueuedMessageNow !== "function"
+          || typeof coordinator.readMessages !== "function"
           || typeof coordinator.execution?.prepare !== "function")
         throw failure(503, "当前 Codex 版本不支持原生队列引导");
       const prepare = async (request, phase) => {
@@ -1700,7 +1973,8 @@
       submitted = true;
       const result = await coordinator.sendQueuedMessageNow(threadId, messageId, undefined, prepare);
       if (result?.status !== "sent") throw failure(409, "此队列消息当前无法引导，请刷新会话");
-      return { ok: true, threadId, messageId, turnId: result.turnId };
+      return { ok: true, threadId, messageId, turnId: result.turnId,
+        ...queueSnapshotFields(threadId, coordinator.readMessages(threadId)) };
     } catch (error) {
       return { ok: false, code: error.code || 503,
         ...(submitted && !error.remoteValidationFailure ? { outcomeUnknown: true } : {}),
@@ -1792,6 +2066,7 @@
     let threadId = null;
     let clientUserMessageId = null;
     let queueAddStarted = false;
+    let localQueueStarted = false;
     let queuedSubmission = null;
     try {
       messageActionManager();
@@ -1808,21 +2083,23 @@
       const coordinator = await manager.getTurnCoordinator();
       const serverQueue = coordinator?.serverQueue;
       if (typeof coordinator?.execution?.prepare !== "function"
-          || typeof serverQueue?.isEnabled !== "function"
-          || typeof serverQueue?.canEnqueue !== "function"
-          || typeof serverQueue?.load !== "function")
+          || typeof coordinator?.readMessages !== "function")
         throw failure(503, "当前 Codex 版本不支持原生队列发送");
       const cwd = manager.getConversationCwd(threadId) || thread.cwd || "/";
       const message = {
-        id: crypto.randomUUID(),
+        id: payload.clientUserMessageId == null ? crypto.randomUUID() : requiredId(payload.clientUserMessageId),
         text: prompt,
         context: remoteAttachmentContext(prompt, cwd, imageAttachments),
         cwd,
         createdAt: Date.now()
       };
       clientUserMessageId = message.id;
-      if (!await serverQueue.isEnabled(threadId))
-        throw failure(409, "此会话当前不支持原生队列发送");
+      message.clientUserMessageId = clientUserMessageId;
+      const useServerQueue = typeof serverQueue?.isEnabled === "function"
+        && await serverQueue.isEnabled(threadId)
+        && typeof serverQueue.canEnqueue === "function" && await serverQueue.canEnqueue(threadId, message);
+      if (!useServerQueue && (typeof coordinator.sendMessage !== "function" || typeof coordinator.loadMessages !== "function"))
+        throw failure(503, "当前 Codex 版本不支持原生本地消息队列");
       const inputItems = await skillInputs({ ...payload, threadId });
       const conversation = manager.getConversation(threadId);
       const model = payload.model == null ? undefined : String(payload.model);
@@ -1841,8 +2118,6 @@
         collaborationMode: conversation?.latestCollaborationMode ?? null
       });
       if (resumed?.status === "not-ready") throw failure(409, "会话暂不可用，请稍后重试");
-      if (!await serverQueue.canEnqueue(threadId, message))
-        throw failure(409, "此会话当前不支持原生队列发送");
       if (model !== undefined || reasoningEffort !== undefined) {
         const current = manager.getConversation(threadId);
         const selected = model ?? current?.latestModel;
@@ -1867,6 +2142,43 @@
           || !Array.isArray(preparedInput))
         throw failure(503, "原生队列消息准备失败");
       const input = [...preparedInput, ...inputItems];
+      if (!useServerQueue) {
+        const request = {
+          conversationId: threadId, message, queueModeOverride: "queue", acceptLocally: true,
+          // 本地队列重载会重新准备消息，额外输入必须随原生重放上下文保存。
+          editPosition: {
+            serverSubmission: { id: message.id, clientUserMessageId, input },
+            preserveSerializedContext: false
+          }
+        };
+        if (typeof coordinator.submission?.getQueueMode === "function"
+            && await coordinator.submission.getQueueMode(request) === "send-only")
+          throw failure(409, "此类会话不支持排队发送，请等待当前回复完成后重试");
+        queueAddStarted = true;
+        localQueueStarted = true;
+        const result = await coordinator.sendMessage(request, async (request, phase) => {
+          if (request.conversationId !== threadId || request.message?.id !== clientUserMessageId)
+            throw failure(409, "原生队列消息身份已变化，请刷新会话");
+          const current = await coordinator.execution.prepare(threadId, request.message, phase);
+          if (current?.status === "paused") throw failure(409, current.reason || "原生队列消息暂时不可用");
+          if (current?.status !== "ready" || current.submission?.conversationId !== threadId)
+            throw failure(503, "原生队列消息准备失败");
+          return current.submission;
+        }, undefined, undefined, () => {
+          if (manager.disposed || !manager.getConversation(threadId)
+              || runtimeCompaction(threadId).state !== "idle")
+            throw failure(409, "会话状态已变化，暂不能提交排队消息");
+        });
+        if (!["queued", "sent"].includes(result?.status)
+            || typeof result.messageId !== "string"
+            || result.messageId !== clientUserMessageId && result.serverAccepted !== true)
+          throw new Error("原生本地队列未确认消息身份");
+        if (result.status === "sent") return { ok: true, threadId, result };
+        queuedSubmission = { id: result.messageId, clientUserMessageId };
+        await loadNativeQueue(coordinator, threadId);
+        return { ok: true, threadId, messageId: result.messageId, clientUserMessageId,
+          ...queueSnapshotFields(threadId, coordinator.readMessages(threadId)) };
+      }
       queueAddStarted = true;
       const result = await manager.requestClient.sendRequest("thread/queue/add", {
         threadId,
@@ -1879,14 +2191,14 @@
       if (!sameJsonValue(accepted.input, input))
         throw new Error("原生队列未确认消息身份或输入");
       queuedSubmission = accepted;
-      await serverQueue.load(threadId);
+      await serverQueue.load(threadId, { afterMutation: true });
       const queued = coordinator.readMessages?.(threadId);
       return {
         ok: true,
         threadId,
         messageId: queuedSubmission.id,
         clientUserMessageId,
-        queuedMessages: array(queued?.messages || queued)
+        ...queueSnapshotFields(threadId, queued)
       };
     } catch (error) {
       if (queuedSubmission) {
@@ -1899,7 +2211,13 @@
           message: "消息已加入原生队列，但本机队列同步未确认，请刷新会话"
         };
       }
-      if (queueAddStarted && !error.remoteValidationFailure)
+      if (queueAddStarted && threadId && clientUserMessageId) {
+        try {
+          const confirmed = await queueSendState({ threadId, clientUserMessageId });
+          if (confirmed.confirmed) return confirmed;
+        } catch {}
+      }
+      if (localQueueStarted || queueAddStarted && !error.remoteValidationFailure)
         return {
           ok: false, outcomeUnknown: true, code: 503, threadId, clientUserMessageId,
           message: "原生队列加入结果未确认，请检查会话，不要重复操作"
@@ -1987,16 +2305,26 @@
         case "events": {
           const reset = payload.epoch !== epoch || payload.cursor < (notifications[0]?.sequence || 1) - 1;
           return { ok: true, epoch, cursor: eventSequence, reset,
-            events: notifications.filter(event => event.sequence > (payload.cursor || 0)).map(event => event.event) };
+            events: notifications.filter(event => event.sequence > (payload.cursor || 0)).flatMap(({ event }) => {
+              const { threadId, turnId = event.params?.turn?.id } = event.params || {};
+              if (event.params?.item?.type !== "contextCompaction"
+                  && !array(event.params?.turn?.items).some(item => item.type === "contextCompaction")) return [event];
+              const input = compactionInputItem(threadId, turnId, array(event.params?.turn?.items));
+              if (!input) return [event];
+              const item = enrichMessageMetadata(threadId, [{ id: turnId, items: [input] }])[0].items[0];
+              return [{ method: "item/started", params: { threadId, turnId, item } }, event];
+            }) };
         }
         case "sidebar": return await sidebar(payload);
         case "queue": return await queueSnapshot(payload.threadId);
+        case "queueEdit": return await queueEditState(payload);
         case "markRead": return await markThreadRead(payload.threadId);
         case "removeQueued": return await removeQueued(payload);
         case "reorderQueued": return await reorderQueued(payload);
         case "beginQueuedEdit": return await beginQueuedEdit(payload);
         case "editQueued": return await editQueued(payload);
         case "cancelQueuedEdit": return await cancelQueuedEdit(payload);
+        case "dismissQueuedEdit": return await dismissQueuedEdit(payload);
         case "steerQueued": return await steerQueued(payload);
         case "editMessage": return await editLastMessage(payload);
         case "updateGoal": return await updateThreadGoal(payload);
@@ -2009,6 +2337,8 @@
               workspaceRoots: [thread.cwd], collaborationMode: null
             });
           }
+          const coordinator = await manager.getTurnCoordinator?.();
+          if (typeof coordinator?.loadMessages === "function") await coordinator.loadMessages(thread.id);
           const runtime = runtimeThread(thread.id, thread);
           const status = manager.getThreadRuntimeStatusEvidence(thread.id)
             || thread.threadRuntimeStatus || thread.status || runtime.status;
@@ -2025,6 +2355,7 @@
             ...await defaultModelSettings() };
         }
         case "skills": return await skillCatalog(payload);
+        case "sendState": return await queueSendState(payload);
         case "send": {
           const id = requiredId(payload.threadId);
           const loaded = await readThread(id);
@@ -2170,6 +2501,8 @@
           return { ok: true };
         case "approve":
         case "answer": {
+          if (action === "answer" && payload.method === "remote/requestUserInputAsync")
+            return await answerAsyncQuestion(payload);
           const id = requiredId(payload.threadId);
           const request = array(manager.getConversation(id)?.requests).find(request =>
             request.id === payload.requestId && request.method === payload.method);
@@ -2222,7 +2555,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 23, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
+    version: 29, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
     dispose() {
       for (const dispose of unsubscribe) { try { dispose?.(); } catch {} }
       unsubscribe = [];

@@ -13974,6 +13974,7 @@ async fn chat_proxy_model_system_prompt_is_selected_before_alias_is_rewritten() 
         "relayProfiles": [{
             "id": "prompts",
             "name": "Prompts",
+            "localProxyEnabled": true,
             "baseUrl": server.base_url,
             "upstreamBaseUrl": server.base_url,
             "apiKey": "sk-test",

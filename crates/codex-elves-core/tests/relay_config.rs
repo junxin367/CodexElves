@@ -12,18 +12,125 @@ use codex_elves_core::relay_config::{
     filter_common_config_for_selection, list_context_entries_from_common_config,
     normalize_relay_profile_for_storage, relay_config_status_from_home,
     sanitize_common_config_contents, set_codex_goals_feature_in_home,
-    strip_common_config_from_config, sync_applied_relay_profile_multi_agent_v2_to_home,
+    strip_common_config_from_config, sync_applied_relay_profile_base_url_to_home,
+    sync_applied_relay_profile_model_catalog_to_home,
+    sync_applied_relay_profile_multi_agent_v2_to_home,
     sync_applied_relay_profile_provider_name_to_home, sync_applied_relay_profile_websocket_to_home,
     sync_live_config_context_entries, sync_live_config_context_entry,
     upsert_context_entry_in_common_config,
 };
 use codex_elves_core::settings::{
-    RelayContextSelection, RelayMode, RelayModelMapping, RelayProfile, RelayProtocol,
-    ResponsesWebsocketCapability, ResponsesWebsocketCapabilityState,
+    BackendSettings, RelayContextSelection, RelayMode, RelayModelMapping, RelayProfile,
+    RelayProtocol, ResponsesWebsocketCapability, ResponsesWebsocketCapabilityState, SettingsStore,
 };
 
 fn local_proxy_stream_idle_timeout_line() -> String {
     format!("stream_idle_timeout_ms = {LOCAL_PROXY_CODEX_STREAM_IDLE_TIMEOUT_MS}")
+}
+
+#[test]
+fn saving_proxy_toggle_roundtrips_settings_and_live_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let store = SettingsStore::new(home.join("settings.json"));
+    let profile = RelayProfile {
+        id: "proxy-toggle".to_string(),
+        relay_mode: RelayMode::PureApi,
+        local_proxy_enabled: Some(true),
+        base_url: "https://relay.example.test/v1".to_string(),
+        upstream_base_url: "https://relay.example.test/v1".to_string(),
+        api_key: "sk-test".to_string(),
+        config_contents: r#"model = "gpt-custom [600K]"
+model_provider = "custom"
+
+[model_providers.custom]
+base_url = "http://127.0.0.1:45221/v1"
+"#
+        .to_string(),
+        model_mappings: vec![
+            RelayModelMapping {
+                request_model: "gpt-custom".to_string(),
+                alias: "gpt-custom [600K]".to_string(),
+                protocol: RelayProtocol::Responses,
+                context_window: "600000".to_string(),
+                system_prompt_override: String::new(),
+            },
+            RelayModelMapping {
+                request_model: "gpt-custom".to_string(),
+                alias: "gpt-custom [1M]".to_string(),
+                protocol: RelayProtocol::Responses,
+                context_window: "1000000".to_string(),
+                system_prompt_override: String::new(),
+            },
+        ],
+        ..RelayProfile::default()
+    };
+    let mappings = profile.model_mappings.clone();
+    std::fs::write(
+        home.join("config.toml"),
+        format!(
+            "{}\n[mcp_servers.existing]\ncommand = \"existing-tool\"\n",
+            profile.config_contents
+        ),
+    )
+    .unwrap();
+    let mut settings = BackendSettings {
+        relay_profiles_enabled: true,
+        active_relay_id: profile.id.clone(),
+        relay_profiles: vec![profile],
+        ..BackendSettings::default()
+    };
+
+    for enabled in [false, true, false] {
+        settings.relay_profiles[0].local_proxy_enabled = Some(enabled);
+        store.save(&settings).unwrap();
+        settings = store.load().unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(saved["relayProfiles"][0]["localProxyEnabled"], enabled);
+        let profile = &settings.relay_profiles[0];
+        assert_eq!(profile.local_proxy_enabled, Some(enabled));
+        assert_eq!(profile.base_url, "https://relay.example.test/v1");
+        assert_eq!(profile.upstream_base_url, "https://relay.example.test/v1");
+        assert_eq!(profile.model_mappings, mappings);
+        assert!(sync_applied_relay_profile_base_url_to_home(home, profile).unwrap());
+        assert!(sync_applied_relay_profile_model_catalog_to_home(home, profile).unwrap());
+        let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        let live: toml_edit::DocumentMut = config.parse().unwrap();
+        let stored: toml_edit::DocumentMut = profile.config_contents.parse().unwrap();
+        let expected_url = if enabled {
+            "http://127.0.0.1:45221/v1"
+        } else {
+            "https://relay.example.test/v1"
+        };
+        let expected_model = if enabled {
+            "gpt-custom [600K]"
+        } else {
+            "gpt-custom"
+        };
+        assert_eq!(
+            live["model_providers"]["custom"]["base_url"].as_str(),
+            Some(expected_url)
+        );
+        assert_eq!(
+            stored["model_providers"]["custom"]["base_url"].as_str(),
+            Some(expected_url)
+        );
+        assert_eq!(live["model"].as_str(), Some(expected_model));
+        assert_eq!(stored["model"].as_str(), Some(expected_model));
+        assert_eq!(
+            live["mcp_servers"]["existing"]["command"].as_str(),
+            Some("existing-tool")
+        );
+        let catalog: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(home.join("codex-elves-model-catalog.json")).unwrap(),
+        )
+        .unwrap();
+        let models = catalog["models"].as_array().unwrap();
+        assert_eq!(models.len(), if enabled { 2 } else { 1 });
+        assert_eq!(models[0]["slug"], expected_model);
+        assert_eq!(models[0]["context_window"], 600000);
+    }
 }
 
 fn write_remote_plugin_marketplace_snapshot(home: &std::path::Path) {
@@ -1606,6 +1713,7 @@ fn apply_relay_profile_collapses_legacy_exact_duplicate_mappings() {
     let profile = RelayProfile {
         id: "legacy-duplicates".to_string(),
         name: "Legacy duplicates".to_string(),
+        local_proxy_enabled: Some(true),
         model: "gpt-5.6-sol--codex-elves-alias-2".to_string(),
         relay_mode: RelayMode::PureApi,
         config_contents: r#"model = "gpt-5.6-sol--codex-elves-alias-2"

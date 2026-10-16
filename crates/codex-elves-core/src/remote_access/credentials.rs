@@ -16,6 +16,8 @@ pub(super) struct AccessKey {
     pub id: String,
     salt: String,
     hash: String,
+    #[serde(default)]
+    value: String,
 }
 
 impl AccessKey {
@@ -42,7 +44,11 @@ pub(super) fn load_access_key(state_dir: &Path) -> anyhow::Result<Option<AccessK
                 && key.salt.len() == 64
                 && base64::engine::general_purpose::STANDARD
                     .decode(&key.hash)
-                    .is_ok_and(|hash| hash.len() == 32),
+                    .is_ok_and(|hash| hash.len() == 32)
+                && (key.value.is_empty()
+                    || ((8..=256).contains(&key.value.len())
+                        && key.value.bytes().all(|byte| byte.is_ascii_graphic())
+                        && key.verify(&key.value))),
             "访问密钥文件损坏，已拒绝授权"
         );
     }
@@ -68,6 +74,7 @@ pub fn configure_access_key(state_dir: &Path, value: &str) -> anyhow::Result<()>
         id: uuid::Uuid::new_v4().to_string(),
         salt,
         hash: base64::engine::general_purpose::STANDARD.encode(digest),
+        value: key.to_string(),
     };
     std::fs::create_dir_all(state_dir)?;
     crate::settings::atomic_write(
@@ -77,8 +84,51 @@ pub fn configure_access_key(state_dir: &Path, value: &str) -> anyhow::Result<()>
 }
 
 pub fn access_credentials_status(state_dir: &Path) -> anyhow::Result<Value> {
-    Ok(json!({
+    let key = load_access_key(state_dir)?;
+    let mut status = json!({
         "status":"ok",
-        "accessKeyConfigured":load_access_key(state_dir)?.is_some(),
-    }))
+        "accessKeyConfigured":key.is_some(),
+    });
+    if let Some(value) = key
+        .as_ref()
+        .map(|key| key.value.as_str())
+        .filter(|value| !value.is_empty())
+    {
+        status["key"] = json!(value);
+    }
+    Ok(status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_key_status_returns_saved_plaintext() {
+        let state_dir = tempfile::tempdir().unwrap();
+
+        configure_access_key(state_dir.path(), "test-key-123").unwrap();
+        let status = access_credentials_status(state_dir.path()).unwrap();
+
+        assert_eq!(status["accessKeyConfigured"], true);
+        assert_eq!(status["key"], "test-key-123");
+        assert!(status.get("hash").is_none());
+    }
+
+    #[test]
+    fn legacy_hash_only_key_remains_valid_without_plaintext_status() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let path = state_dir.path().join("remote-access-key.json");
+        configure_access_key(state_dir.path(), "legacy-key-123").unwrap();
+        let mut stored: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        stored.as_object_mut().unwrap().remove("value");
+        crate::settings::atomic_write(&path, &serde_json::to_vec(&stored).unwrap()).unwrap();
+
+        let key = load_access_key(state_dir.path()).unwrap().unwrap();
+        let status = access_credentials_status(state_dir.path()).unwrap();
+
+        assert!(key.verify("legacy-key-123"));
+        assert_eq!(status["accessKeyConfigured"], true);
+        assert!(status.get("key").is_none());
+    }
 }

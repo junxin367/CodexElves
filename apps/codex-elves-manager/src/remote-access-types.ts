@@ -2,7 +2,7 @@ export type RemoteAccessSettings = {
   enabled: boolean;
   bindHost: string;
   port: number;
-  cloudflareQuickTunnelEnabled: boolean;
+  zrokSetupValue: string;
   deviceSessionHours: number;
   readOnly: boolean;
   allowApprovals: boolean;
@@ -12,7 +12,7 @@ export const defaultRemoteAccessSettings: RemoteAccessSettings = {
   enabled: false,
   bindHost: "127.0.0.1",
   port: 45222,
-  cloudflareQuickTunnelEnabled: false,
+  zrokSetupValue: "",
   deviceSessionHours: 0,
   readOnly: false,
   allowApprovals: true,
@@ -26,13 +26,16 @@ export type RemoteAccessDevice = {
   lastSeenAtMs: number;
 };
 
-export type CloudflareQuickTunnelState =
-  | "stopped"
+export type ZrokState =
+  | "missing"
+  | "checking"
   | "downloading"
+  | "unbound"
+  | "name_required"
+  | "stopped"
   | "starting"
   | "connecting"
   | "ready"
-  | "reconnecting"
   | "retry_wait"
   | "error";
 
@@ -47,14 +50,16 @@ export type RemoteAccessStatus = {
   devices: RemoteAccessDevice[];
   settings?: RemoteAccessSettings;
   accessKeyConfigured?: boolean;
-  cloudflareQuickTunnel?: {
-    enabled: boolean;
-    state: CloudflareQuickTunnelState;
+  zrok?: {
+    state: ZrokState;
+    running: boolean;
+    connected: boolean;
     publicUrl: string;
+    fixedName: string;
     error?: string | null;
     retryAtMs?: number | null;
-    rateLimited?: boolean;
     installed: boolean;
+    bound: boolean;
     version?: string | null;
     downloadedBytes?: number;
     downloadTotalBytes?: number;
@@ -66,15 +71,15 @@ export type RemoteAccessCredentials = {
   status: string;
   message?: string;
   accessKeyConfigured: boolean;
+  key?: string;
 };
 
-export type QuickTunnelAccessTest = {
+export type ZrokAccessTest = {
   status: string;
   publicUrl?: string;
   message?: string;
   httpStatus?: number;
   authRequired?: boolean;
-  publicAddresses?: string[];
 };
 
 export function remoteAccessValidation(settings: RemoteAccessSettings): string | null {
@@ -91,8 +96,5 @@ export function remoteAccessValidation(settings: RemoteAccessSettings): string |
     } catch { return "请填写有效的监听 IP 地址。"; }
   } else return "请填写有效的监听 IP 地址。";
   if (settings.enabled && !loopback) return "远程会话网页仅允许监听本机回环地址。";
-  if (settings.cloudflareQuickTunnelEnabled && (!settings.enabled || !loopback)) {
-    return "Cloudflare Quick Tunnel 必须启用远程网页并转发到本机 HTTP 监听地址。";
-  }
   return null;
 }

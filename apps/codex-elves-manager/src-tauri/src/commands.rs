@@ -652,12 +652,11 @@ pub async fn remote_access_command(action: String, payload: Option<Value>) -> Va
         .await
         .unwrap_or_else(|error| json!({"status":"failed","message":format!("{error:#}")}));
     }
-    let result = codex_elves_core::remote_access::request_local_admin(
+    codex_elves_core::remote_access::service_admin_request(
         &action,
         payload.unwrap_or_else(|| json!({})),
     )
-    .await;
-    result.unwrap_or_else(|error| json!({"status":"failed","message":error.to_string()}))
+    .await
 }
 
 #[tauri::command]

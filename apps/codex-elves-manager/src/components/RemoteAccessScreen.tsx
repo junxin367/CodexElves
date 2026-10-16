@@ -4,7 +4,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { remoteAccessValidation, type QuickTunnelAccessTest, type RemoteAccessCredentials, type RemoteAccessSettings, type RemoteAccessStatus } from "@/remote-access-types";
+import { remoteAccessValidation, type RemoteAccessCredentials, type RemoteAccessSettings, type RemoteAccessStatus, type ZrokAccessTest } from "@/remote-access-types";
+
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const FIXED_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?$/;
 
 export function RemoteAccessScreen({
   settings,
@@ -23,12 +26,18 @@ export function RemoteAccessScreen({
 }) {
   const [status, setStatus] = useState<RemoteAccessStatus | null>(null);
   const [credentials, setCredentials] = useState<RemoteAccessCredentials | null>(null);
+  const [zrokValue, setZrokValue] = useState(settings.zrokSetupValue);
+  const [fixedNameValue, setFixedNameValue] = useState("");
   const [keyValue, setKeyValue] = useState("");
+  const [keyDirty, setKeyDirty] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const mounted = useRef(true);
   const refreshing = useRef(false);
+  const loadedZrokSetupValue = useRef(settings.zrokSetupValue);
+  const loadedKeyValue = useRef<string | null>(null);
+  const keyDirtyRef = useRef(false);
   const latestSettings = useRef(settings);
   latestSettings.current = settings;
   const patch = (value: Partial<RemoteAccessSettings>) => onChange({ ...latestSettings.current, ...value });
@@ -38,7 +47,15 @@ export function RemoteAccessScreen({
     try {
       const saved = await command<RemoteAccessCredentials>("credentials");
       if (!mounted.current) return;
-      if (saved.status === "ok") setCredentials(saved);
+      if (saved.status === "ok") {
+        setCredentials(saved);
+        const savedKey = saved.key || "";
+        if (!keyDirtyRef.current && loadedKeyValue.current !== savedKey) {
+          loadedKeyValue.current = savedKey;
+          setKeyValue(savedKey);
+          setShowKey(false);
+        }
+      }
       else { setCredentials(null); setMessage(saved.message || "凭据状态读取失败"); }
       const result = await command<RemoteAccessStatus>("status");
       if (!mounted.current) return;
@@ -54,10 +71,18 @@ export function RemoteAccessScreen({
     return () => { mounted.current = false; };
   }, []);
   useEffect(() => {
-    const interval = status?.cloudflareQuickTunnel?.state === "downloading" ? 500 : 5000;
-    const timer = window.setInterval(() => void refresh(), interval);
+    const active = ["checking", "downloading", "starting", "connecting"].includes(status?.zrok?.state || "");
+    const timer = window.setInterval(() => void refresh(), active ? 500 : 5000);
     return () => clearInterval(timer);
-  }, [status?.cloudflareQuickTunnel?.state]);
+  }, [status?.zrok?.state]);
+  useEffect(() => {
+    if (settings.zrokSetupValue === loadedZrokSetupValue.current) return;
+    loadedZrokSetupValue.current = settings.zrokSetupValue;
+    setZrokValue(settings.zrokSetupValue);
+  }, [settings.zrokSetupValue]);
+  useEffect(() => {
+    if (!fixedNameValue && status?.zrok?.fixedName) setFixedNameValue(status.zrok.fixedName);
+  }, [fixedNameValue, status?.zrok?.fixedName]);
   const run = async (operation: () => Promise<void>) => {
     setBusy(true);
     setMessage("");
@@ -68,71 +93,106 @@ export function RemoteAccessScreen({
     try { await navigator.clipboard.writeText(value); setMessage("已复制到剪贴板"); }
     catch { setMessage("复制失败，请手动选择文本复制"); }
   };
-  const quickTunnel = status?.cloudflareQuickTunnel;
-  const publicUrl = quickTunnel?.publicUrl || "";
-  const quickTunnelTransitioning = quickTunnel
-    ? ["downloading", "starting", "connecting", "reconnecting", "retry_wait"].includes(quickTunnel.state)
-    : false;
-  const quickTunnelGenerating = quickTunnel
-    ? ["downloading", "starting"].includes(quickTunnel.state)
-      || (quickTunnel.state === "connecting" && !publicUrl)
-    : false;
-  const quickTunnelDownloading = Boolean(
-    settings.cloudflareQuickTunnelEnabled
-      && quickTunnel?.state === "downloading"
-      && !quickTunnel.installed,
-  );
-  const quickTunnelDownloadPercent = Math.max(
-    0,
-    Math.min(100, Math.round(quickTunnel?.downloadPercent || 0)),
-  );
+  const zrok = status?.zrok;
+  const publicUrl = zrok?.publicUrl || "";
+  const zrokInput = zrokValue.trim();
+  const zrokEmail = EMAIL_PATTERN.test(zrokInput);
+  const zrokToken = Boolean(zrokInput) && !zrokEmail;
+  const normalizedFixedName = fixedNameValue.trim().toLowerCase();
+  const fixedNameValid = normalizedFixedName.length >= 3
+    && normalizedFixedName.length <= 63
+    && FIXED_NAME_PATTERN.test(normalizedFixedName);
+  const zrokDownloading = zrok?.state === "downloading";
+  const zrokTransitioning = ["checking", "downloading", "starting", "connecting"].includes(zrok?.state || "");
+  const zrokDownloadPercent = Math.max(0, Math.min(100, Math.round(zrok?.downloadPercent || 0)));
+  const zrokActionLabel = !zrok
+    ? "检查中…"
+    : !zrok.installed
+      ? "下载程序"
+      : zrokEmail
+        ? "注册公网"
+        : "启动公网";
+  const zrokActionDisabled = busy
+    || !zrok
+    || zrokTransitioning
+    || (zrok.installed && zrokToken && (!settings.enabled || !fixedNameValid))
+    || (zrok.installed && !zrokInput && (!settings.enabled || !zrok.bound || !zrok.fixedName || zrok.running));
   const runApply = (operation: () => Promise<void>) => run(async () => {
     try { await operation(); }
     catch (error) {
       onNotice(error instanceof Error ? error.message : String(error));
     }
   });
-  const toggleWebService = () => runApply(() => applySettings(settings.enabled
-    ? { ...settings, enabled: false, cloudflareQuickTunnelEnabled: false }
-    : { ...settings, enabled: true }));
-  const toggleQuickTunnel = async () => {
-    if (settings.cloudflareQuickTunnelEnabled) {
-      await applySettings({ ...settings, cloudflareQuickTunnelEnabled: false });
+  const saveZrokSetupValue = async (value: string) => {
+    const previous = latestSettings.current;
+    if (previous.zrokSetupValue === value) return;
+    const next = { ...previous, zrokSetupValue: value };
+    onChange(next);
+    try {
+      await onSave(next);
+    } catch (error) {
+      onChange(previous);
+      throw error;
+    }
+  };
+  const toggleWebService = () => runApply(() => applySettings({ ...settings, enabled: !settings.enabled }));
+  const renderZrokBadge = () => {
+    switch (zrok?.state) {
+      case "ready":
+        return <span className="zrok-status-badge connected"><span className="zrok-status-dot" />可访问</span>;
+      case "checking":
+        return <span className="zrok-status-badge connecting"><span className="zrok-status-dot" />正在检查</span>;
+      case "downloading":
+        return <span className="zrok-status-badge connecting"><span className="zrok-status-dot" />正在下载</span>;
+      case "starting":
+        return <span className="zrok-status-badge connecting"><span className="zrok-status-dot" />正在启动</span>;
+      case "connecting":
+        return <span className="zrok-status-badge connecting"><span className="zrok-status-dot" />正在验证</span>;
+      case "retry_wait":
+        return <span className="zrok-status-badge connecting"><span className="zrok-status-dot" />等待重试</span>;
+      case "error":
+        return <span className="zrok-status-badge error" title={zrok.error || "连接异常"}><span className="zrok-status-dot" />异常</span>;
+      case "unbound":
+        return <span className="zrok-status-badge"><span className="zrok-status-dot" />未绑定</span>;
+      case "name_required":
+        return <span className="zrok-status-badge"><span className="zrok-status-dot" />待设置名称</span>;
+      case "missing":
+        return <span className="zrok-status-badge"><span className="zrok-status-dot" />未安装</span>;
+      default:
+        return <span className="zrok-status-badge"><span className="zrok-status-dot" />已停止</span>;
+    }
+  };
+  const handleZrokAction = () => runApply(async () => {
+    if (!zrok) return;
+    if (zrokInput) await saveZrokSetupValue(zrokInput);
+    if (!zrok.installed) {
+      const result = await command<RemoteAccessStatus>("downloadZrok");
+      if (!mounted.current) return;
+      setStatus(result);
+      if (result.status !== "ok") throw new Error(result.message || "zrok 下载任务启动失败");
+      onSuccess("已开始下载 zrok 程序。");
       return;
     }
-    const reason = !settings.enabled
-      ? "请先启用远程会话网页。"
-      : remoteAccessValidation({ ...settings, cloudflareQuickTunnelEnabled: true });
-    if (reason) throw new Error(reason);
-    await applySettings({ ...settings, cloudflareQuickTunnelEnabled: true });
-  };
-  const handleToggleQuickTunnel = () => runApply(toggleQuickTunnel);
-  const renderQuickTunnelBadge = () => {
-    if (!settings.cloudflareQuickTunnelEnabled) {
-      return null;
+    if (zrokEmail) {
+      const result = await command<{ status: string; message?: string }>("registerZrok", { email: zrokInput });
+      if (result.status !== "ok") throw new Error(result.message || "zrok 注册失败");
+      onSuccess(result.message || "注册邮件已发送，请检查邮箱。");
+      return;
     }
-    switch (quickTunnel?.state) {
-      case "ready":
-        return <span className="quick-tunnel-status-badge connected"><span className="quick-tunnel-status-dot" />可访问</span>;
-      case "downloading":
-        return <span className="quick-tunnel-status-badge connecting"><span className="quick-tunnel-status-dot" />正在准备组件</span>;
-      case "starting":
-        return <span className="quick-tunnel-status-badge connecting"><span className="quick-tunnel-status-dot" />正在启动</span>;
-      case "connecting":
-        return <span className="quick-tunnel-status-badge connecting"><span className="quick-tunnel-status-dot" />{publicUrl ? "正在验证公网访问" : "正在连接"}</span>;
-      case "reconnecting":
-        return <span className="quick-tunnel-status-badge connecting"><span className="quick-tunnel-status-dot" />正在重连</span>;
-      case "retry_wait":
-        return <span className="quick-tunnel-status-badge connecting"><span className="quick-tunnel-status-dot" />等待重试</span>;
-      case "error":
-        return <span className="quick-tunnel-status-badge error" title={quickTunnel.error || "连接异常"}><span className="quick-tunnel-status-dot" />异常</span>;
-      default:
-        return <span className="quick-tunnel-status-badge"><span className="quick-tunnel-status-dot" />已停用</span>;
-    }
-  };
+    const fixedName = zrokToken ? normalizedFixedName : zrok.fixedName;
+    const result = await command<RemoteAccessStatus>("startZrok", {
+      token: zrokToken ? zrokInput : "",
+      fixedName,
+    });
+    if (!mounted.current) return;
+    setStatus(result);
+    if (result.status !== "ok") throw new Error(result.message || "zrok 公网启动失败");
+    setFixedNameValue(result.zrok?.fixedName || fixedName);
+    onSuccess(result.zrok?.state === "ready" ? "zrok 固定公网已启动。" : "zrok 固定公网正在启动并验证访问。");
+  });
   const testPublicUrl = () => runApply(async () => {
     if (!publicUrl) return;
-    const result = await command<QuickTunnelAccessTest>("testQuickTunnel");
+    const result = await command<ZrokAccessTest>("testZrok");
     if (!mounted.current) return;
     await refresh();
     if (!mounted.current) return;
@@ -147,7 +207,7 @@ export function RemoteAccessScreen({
     try {
       await onSave(next);
     } catch (error) {
-      onChange({ ...latestSettings.current, enabled: settings.enabled, cloudflareQuickTunnelEnabled: settings.cloudflareQuickTunnelEnabled });
+      onChange({ ...latestSettings.current, enabled: settings.enabled });
       throw error;
     }
     const result = await command<RemoteAccessStatus>("apply");
@@ -158,33 +218,20 @@ export function RemoteAccessScreen({
       setMessage("请核对保存结果。服务正在使用已保存的配置。");
       return;
     }
-    const tunnelState = result.cloudflareQuickTunnel?.state;
-    const tunnelSuccess = next.cloudflareQuickTunnelEnabled
-      ? result.cloudflareQuickTunnel?.rateLimited
-        ? "Quick Tunnel 正在等待限流冷却，不会提前申请地址。"
-        : tunnelState === "ready" ? "Quick Tunnel 公网访问验证通过。" : "Quick Tunnel 正在连接并验证公网访问。"
-      : "";
+    const zrokNotice = result.zrok?.state === "ready"
+      ? "zrok 固定公网可访问。"
+      : result.zrok?.bound && result.zrok?.fixedName
+        ? "zrok 固定公网正在启动并验证访问。"
+        : "";
     const keyConfigured = result.accessKeyConfigured ?? credentials?.accessKeyConfigured ?? false;
     const authorizationNotice = keyConfigured
       ? ""
       : "访问密钥尚未设置，网页只显示登录页，无法进入会话。";
     onSuccess(result.running
-      ? `设置已保存，远程网页服务已启动。${tunnelSuccess}${authorizationNotice}`
+      ? `设置已保存，远程网页服务已启动。${zrokNotice}${authorizationNotice}`
       : "设置已保存，远程访问已关闭。");
   };
   const save = () => runApply(() => applySettings(settings));
-  const generateQuickTunnelAddress = () => runApply(async () => {
-    if (!settings.cloudflareQuickTunnelEnabled) {
-      await toggleQuickTunnel();
-      return;
-    }
-    if (publicUrl && !window.confirm("重新生成会立即停用当前临时公网地址，已打开的手机页面将断开。继续？")) return;
-    const result = await command<RemoteAccessStatus>("restartQuickTunnel");
-    if (!mounted.current) return;
-    setStatus(result);
-    if (result.status !== "ok") throw new Error(result.message || "临时公网地址重新生成失败");
-    onSuccess("正在重新生成临时公网地址，请稍候。");
-  });
 
   return (
     <>
@@ -205,120 +252,131 @@ export function RemoteAccessScreen({
         <CardContent>
           {status?.error ? <p className="remote-access-error" role="alert">{status.error}</p> : null}
           <div className="remote-access-fields remote-access-fields-top remote-access-service-fields">
-          <div><Label htmlFor="remote-bind">监听 IP 地址</Label><Input id="remote-bind" value={settings.bindHost} onChange={event => patch({ bindHost: event.target.value.trim() })} /><small>仅支持本机回环地址；公网访问请使用 Cloudflare Quick Tunnel。</small></div>
-          <div><Label htmlFor="remote-port">独立端口</Label><Input id="remote-port" type="number" min={1} max={65535} value={settings.port} onChange={event => patch({ port: Number(event.target.value) })} /></div>
-          <div>
-            <div className="remote-access-expiry-heading">
-              <Label htmlFor="remote-expiry">设备授权有效期（小时）</Label>
-              <button
-                type="button"
-                role="switch"
-                aria-label="限制设备授权有效期"
-                aria-checked={settings.deviceSessionHours > 0}
-                disabled={busy}
-                className={`context-enabled-switch remote-access-expiry-switch ${settings.deviceSessionHours > 0 ? "active" : ""}`}
-                onClick={() => {
-                  if (settings.deviceSessionHours > 0) {
-                    patch({ deviceSessionHours: 0 });
-                  } else {
-                    patch({ deviceSessionHours: 168 });
-                  }
-                }}
-              >
-                <span className="context-switch-track" aria-hidden="true"><span className="context-switch-thumb" /></span>
-                <span>{settings.deviceSessionHours > 0 ? "已开启" : "已关闭"}</span>
-              </button>
+            <div><Label htmlFor="remote-bind">监听 IP 地址</Label><Input id="remote-bind" value={settings.bindHost} onChange={event => patch({ bindHost: event.target.value.trim() })} /><small>仅支持本机回环地址；公网访问由 zrok 转发。</small></div>
+            <div><Label htmlFor="remote-port">独立端口</Label><Input id="remote-port" type="number" min={1} max={65535} value={settings.port} onChange={event => patch({ port: Number(event.target.value) })} /></div>
+            <div>
+              <div className="remote-access-expiry-heading">
+                <Label htmlFor="remote-expiry">设备授权有效期（小时）</Label>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-label="限制设备授权有效期"
+                  aria-checked={settings.deviceSessionHours > 0}
+                  disabled={busy}
+                  className={`context-enabled-switch remote-access-expiry-switch ${settings.deviceSessionHours > 0 ? "active" : ""}`}
+                  onClick={() => {
+                    if (settings.deviceSessionHours > 0) patch({ deviceSessionHours: 0 });
+                    else patch({ deviceSessionHours: 168 });
+                  }}
+                >
+                  <span className="context-switch-track" aria-hidden="true"><span className="context-switch-thumb" /></span>
+                  <span>{settings.deviceSessionHours > 0 ? "已开启" : "已关闭"}</span>
+                </button>
+              </div>
+              {settings.deviceSessionHours > 0 ? (
+                <Input
+                  id="remote-expiry"
+                  type="number"
+                  min={1}
+                  max={720}
+                  disabled={busy}
+                  value={settings.deviceSessionHours}
+                  onChange={event => {
+                    const val = Number(event.target.value);
+                    patch({ deviceSessionHours: Number.isNaN(val) ? 1 : Math.max(1, Math.min(720, val)) });
+                  }}
+                />
+              ) : (
+                <Input id="remote-expiry" disabled value="未开启有效期限制（长期有效）" />
+              )}
+              <small>{settings.deviceSessionHours > 0 ? "对新登录设备生效，到期需重新输入密钥。" : "默认关闭，已授权设备长期有效。"}</small>
             </div>
-            {settings.deviceSessionHours > 0 ? (
-              <Input
-                id="remote-expiry"
-                type="number"
-                min={1}
-                max={720}
-                disabled={busy}
-                value={settings.deviceSessionHours}
-                onChange={event => {
-                  const val = Number(event.target.value);
-                  patch({ deviceSessionHours: Number.isNaN(val) ? 1 : Math.max(1, Math.min(720, val)) });
-                }}
-              />
-            ) : (
-              <Input
-                id="remote-expiry"
-                disabled
-                value="未开启有效期限制（长期有效）"
-              />
-            )}
-            <small>{settings.deviceSessionHours > 0 ? "对新登录设备生效，到期需重新输入密钥。" : "默认关闭，已授权设备长期有效。"}</small>
           </div>
-        </div>
         </CardContent>
-        <CardHeader
-          aria-disabled={!settings.enabled}
-          className={`panel-head border-t border-border pt-6 pb-[10px] ${!settings.enabled ? "remote-access-section-disabled" : ""}`}
-        >
+        <CardHeader className="panel-head border-t border-border pt-6 pb-[10px]">
           <div className="panel-head-copy">
-            <CardTitle>公网入口 · Cloudflare Quick Tunnel</CardTitle>
-            <CardDescription>无需域名、Cloudflare 账号或额外客户端，自动生成临时 HTTPS 公网地址。</CardDescription>
+            <CardTitle>公网入口 · zrok</CardTitle>
+            <CardDescription>绑定一次后复用固定公网地址；程序退出时远程网页与 zrok 同步停止。</CardDescription>
           </div>
           <div className="panel-head-actions flex items-center gap-3">
-            {renderQuickTunnelBadge()}
-            <button
-              type="button"
-              role="switch"
-              aria-label="启用 Cloudflare Quick Tunnel 公网入口"
-              aria-checked={settings.cloudflareQuickTunnelEnabled}
-              disabled={busy || !settings.enabled}
-              className={`context-enabled-switch checkpoint-enabled-switch ${settings.cloudflareQuickTunnelEnabled ? "active" : ""}`}
-              onClick={() => void handleToggleQuickTunnel()}
-            >
-              <span className="context-switch-track" aria-hidden="true"><span className="context-switch-thumb" /></span>
-              <span>{settings.cloudflareQuickTunnelEnabled ? "已启用" : "已停用"}</span>
-            </button>
+            {renderZrokBadge()}
           </div>
         </CardHeader>
-        <CardContent
-          aria-disabled={!settings.enabled}
-          className={!settings.enabled ? "remote-access-section-disabled" : undefined}
-        >
-        <div className="remote-access-fields">
-          <div className="remote-access-wide">
-            <div className="remote-access-field-heading">
-              <Label htmlFor="remote-quick-tunnel-url">临时公网地址</Label>
-              {quickTunnelDownloading ? (
-                <div className="quick-tunnel-download-progress">
-                  <span>{quickTunnel?.downloadTotalBytes ? `下载组件 ${quickTunnelDownloadPercent}%` : "正在下载组件"}</span>
-                  <div
-                    className="quick-tunnel-download-track"
-                    role="progressbar"
-                    aria-label="下载 Cloudflare Quick Tunnel 组件"
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-valuenow={quickTunnel?.downloadTotalBytes ? quickTunnelDownloadPercent : undefined}
-                  >
+        <CardContent>
+          <div className="remote-access-fields">
+            <div className="remote-access-wide">
+              <div className="remote-access-field-heading">
+                <Label htmlFor="remote-zrok-account">zrok token 或注册邮箱</Label>
+                {zrokDownloading ? (
+                  <div className="zrok-download-progress">
+                    <span>{zrok?.downloadTotalBytes ? `下载程序 ${zrokDownloadPercent}%` : "正在下载程序"}</span>
                     <div
-                      className={`quick-tunnel-download-fill ${quickTunnel?.downloadTotalBytes ? "" : "indeterminate"}`}
-                      style={quickTunnel?.downloadTotalBytes ? { width: `${quickTunnelDownloadPercent}%` } : undefined}
-                    />
+                      className="zrok-download-track"
+                      role="progressbar"
+                      aria-label="下载 zrok 程序"
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={zrok?.downloadTotalBytes ? zrokDownloadPercent : undefined}
+                    >
+                      <div
+                        className={`zrok-download-fill ${zrok?.downloadTotalBytes ? "" : "indeterminate"}`}
+                        style={zrok?.downloadTotalBytes ? { width: `${zrokDownloadPercent}%` } : undefined}
+                      />
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+              <div className={`remote-access-input-row zrok-setup-row ${zrokToken ? "with-fixed-name" : ""}`}>
+                <Input
+                  id="remote-zrok-account"
+                  spellCheck={false}
+                  autoComplete="off"
+                  disabled={busy || zrokTransitioning}
+                  placeholder={zrok?.bound ? "已绑定；也可输入邮箱重新注册" : "输入 zrok token 或邮箱"}
+                  value={zrokValue}
+                  onChange={event => setZrokValue(event.target.value)}
+                />
+                {zrokToken ? (
+                  <Input
+                    id="remote-zrok-fixed-name"
+                    spellCheck={false}
+                    autoComplete="off"
+                    disabled={busy || zrokTransitioning}
+                    maxLength={63}
+                    aria-label="固定公网名称"
+                    placeholder="固定公网名称"
+                    value={fixedNameValue}
+                    onChange={event => setFixedNameValue(event.target.value.toLowerCase())}
+                  />
+                ) : null}
+                <Button
+                  variant="secondary"
+                  className="h-9"
+                  disabled={zrokActionDisabled}
+                  onClick={() => void handleZrokAction()}
+                >
+                  {busy ? "处理中…" : zrokActionLabel}
+                </Button>
+              </div>
+              {zrokToken && fixedNameValue && !fixedNameValid ? <small className="remote-access-inline-error">固定公网名称需为 3–63 位小写字母、数字或连字符，且首尾必须是字母或数字。</small> : null}
+              <small>输入邮箱时发送注册邮件；输入 token 时同时填写固定公网名称。点击右侧按钮后，当前邮箱或 token 会保存到本机 CodexElves 设置并在下次打开时回显。</small>
+            </div>
+            <div className="remote-access-wide">
+              <Label htmlFor="remote-zrok-url">固定公网地址</Label>
+              <div className="remote-access-input-row remote-access-public-row">
+                <div className="remote-access-key-input remote-access-public-input">
+                  <Input id="remote-zrok-url" readOnly placeholder={zrokTransitioning ? "正在准备 zrok 固定公网地址…" : "绑定并启动后显示固定公网地址"} value={publicUrl} />
+                  <div className="remote-access-key-actions">
+                    <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={!publicUrl} aria-label="复制固定公网地址" onClick={() => void copy(publicUrl)}><Copy className="h-4 w-4" /></Button>
                   </div>
                 </div>
-              ) : null}
-            </div>
-            <div className="remote-access-input-row remote-access-public-row">
-              <div className="remote-access-key-input remote-access-public-input">
-                <Input id="remote-quick-tunnel-url" readOnly disabled={!settings.enabled} placeholder={quickTunnel?.rateLimited ? "等待 Cloudflare 冷却结束后自动申请地址…" : quickTunnelTransitioning ? "正在生成 trycloudflare.com 临时地址…" : "启用后自动生成 trycloudflare.com 临时地址"} value={publicUrl} />
-                <div className="remote-access-key-actions">
-                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={!settings.enabled || !publicUrl} aria-label="复制临时公网地址" onClick={() => void copy(publicUrl)}><Copy className="h-4 w-4" /></Button>
-                </div>
+                <Button variant="secondary" size="sm" className="h-9" disabled={busy || !settings.enabled || !publicUrl || !zrok?.running} onClick={() => void testPublicUrl()}>{busy ? "处理中…" : "测试访问"}</Button>
               </div>
-              <Button variant="secondary" size="sm" className="h-9" disabled={busy || quickTunnelGenerating || quickTunnel?.rateLimited || !settings.enabled} onClick={() => void generateQuickTunnelAddress()}>{publicUrl ? "重新生成" : "生成"}</Button>
-              <Button variant="secondary" size="sm" className="h-9" disabled={busy || !settings.enabled || !publicUrl} onClick={() => void testPublicUrl()}>{busy ? "处理中…" : "测试访问"}</Button>
+              <small>关闭并重新启动 CodexElves 后复用同一地址；首次访问若出现 zrok 提示页，请点击「Visit Share」。</small>
             </div>
-            <small>仅重启 Codex 会保留当前地址；远程访问后台重启、软件更新或手动重新生成后地址会变化。公网访问仍需输入本机保存的访问密钥。</small>
           </div>
-        </div>
-        {["connecting", "reconnecting", "error", "retry_wait"].includes(quickTunnel?.state || "") && quickTunnel?.error ? <p className="remote-access-error" role="alert">{quickTunnel.error}</p> : null}
-        {quickTunnel?.state === "retry_wait" && quickTunnel.retryAtMs ? <p className="remote-access-hint">将在 {new Date(quickTunnel.retryAtMs).toLocaleTimeString()} 自动重试。</p> : null}
+          {["connecting", "retry_wait", "error"].includes(zrok?.state || "") && zrok?.error ? <p className="remote-access-error" role="alert">{zrok.error}</p> : null}
+          {zrok?.state === "retry_wait" && zrok.retryAtMs ? <p className="remote-access-hint">将在 {new Date(zrok.retryAtMs).toLocaleTimeString()} 自动重试。</p> : null}
         </CardContent>
         <CardHeader className="panel-head border-t border-border pt-6 pb-[10px]">
           <div className="panel-head-copy">
@@ -333,39 +391,65 @@ export function RemoteAccessScreen({
         </CardHeader>
         <CardContent>
           <div className="remote-access-fields remote-access-fields-top">
-          <div className="remote-access-wide"><Label htmlFor="remote-access-key">设置访问密钥</Label><div className="remote-access-input-row remote-access-key-row"><div className="remote-access-key-input">
-                <Input id="remote-access-key" type={showKey ? "text" : "password"} spellCheck={false} disabled={busy} autoComplete="off" minLength={8} maxLength={64} placeholder={credentials?.accessKeyConfigured ? "已保存（不回显）；输入新密钥替换" : "8–64 个非空格 ASCII 字符，建议随机生成"} value={keyValue} onChange={event => setKeyValue(event.target.value)} />
-                <div className="remote-access-key-actions">
-                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={busy || !keyValue} aria-label={showKey ? "隐藏访问密钥" : "显示访问密钥"} onClick={() => setShowKey(value => !value)}>{showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</Button>
-                  <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={busy || !keyValue} aria-label="复制访问密钥" onClick={() => void copy(keyValue)}><Copy className="h-4 w-4" /></Button>
-                </div>
-              </div><Button variant="secondary" disabled={busy} onClick={() => void run(async () => {
-            const result = await command<{ status: string; key?: string; message?: string }>("generateKey");
-            if (result.status !== "ok" || !result.key) throw new Error(result.message || "密钥生成失败");
-            setKeyValue(result.key); setShowKey(false);
-            setMessage("随机密钥已生成，尚未保存。点击右侧「保存」后生效，当前设备授权不受影响。");
-          })}>生成</Button><Button disabled={busy || !keyValue.trim()} onClick={() => void runApply(async () => {
-            if (!/^[\x21-\x7e]{8,64}$/.test(keyValue.trim())) throw new Error("密钥需为 8–64 个非空格 ASCII 字符。");
-            if (!confirmKeyChange()) return;
-            const result = await command<RemoteAccessCredentials>("setKey", { key: keyValue.trim() });
-            if (result.status !== "ok") throw new Error(result.message || "访问密钥保存失败");
-            setCredentials(result);
-            onSuccess("访问密钥已保存并生效，刷新后不回显明文，请复制妥善保管。原有设备需重新输入新密钥连接。");
-          })}>保存</Button></div><small>支持 8–64 个非空格 ASCII 字符；点击「保存」后生效。仅保存校验摘要，刷新后不回显明文，请妥善保管。</small></div>
-        </div>
-        <div className="remote-access-devices">
-          {(status?.devices || []).map(device => <div className="remote-access-device" key={device.id}>
-            <Smartphone className="h-4 w-4" /><div><strong>{device.name}</strong><small>到期：{device.expiresAtMs > Date.now() + 365 * 24 * 3600 * 1000 ? "长期有效" : new Date(device.expiresAtMs).toLocaleString()} · 最近访问：{new Date(device.lastSeenAtMs).toLocaleString()}</small></div>
-            <Button variant="ghost" size="sm" disabled={busy} onClick={() => void run(async () => {
-              if (!window.confirm(`撤销「${device.name}」的授权？此设备将立即失去会话访问权限。`)) return;
-              const result = await command<{ status: string; message?: string }>("revoke", { deviceId: device.id });
-              if (result.status !== "ok") throw new Error(result.message || "撤销失败");
-              await refresh();
-              setMessage("设备授权已撤销。");
-            })}><Trash2 className="h-4 w-4" />撤销</Button>
-          </div>)}
-          {!status?.devices?.length ? <p className="remote-access-hint">尚无已授权设备。</p> : null}
-        </div>
+            <div className="remote-access-wide"><Label htmlFor="remote-access-key">设置访问密钥</Label><div className="remote-access-input-row remote-access-key-row"><div className="remote-access-key-input">
+              <Input
+                id="remote-access-key"
+                type={showKey ? "text" : "password"}
+                spellCheck={false}
+                disabled={busy}
+                autoComplete="off"
+                minLength={8}
+                maxLength={64}
+                placeholder={credentials?.accessKeyConfigured
+                  ? credentials.key ? "输入新密钥替换" : "旧密钥未保存明文，请重新输入并保存"
+                  : "8–64 个非空格 ASCII 字符，建议随机生成"}
+                value={keyValue}
+                onChange={event => {
+                  keyDirtyRef.current = true;
+                  setKeyDirty(true);
+                  setKeyValue(event.target.value);
+                }}
+              />
+              <div className="remote-access-key-actions">
+                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={busy || !keyValue} aria-label={showKey ? "隐藏访问密钥" : "显示访问密钥"} onClick={() => setShowKey(value => !value)}>{showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</Button>
+                <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={busy || !keyValue} aria-label="复制访问密钥" onClick={() => void copy(keyValue)}><Copy className="h-4 w-4" /></Button>
+              </div>
+            </div><Button variant="secondary" disabled={busy} onClick={() => void run(async () => {
+              const result = await command<{ status: string; key?: string; message?: string }>("generateKey");
+              if (result.status !== "ok" || !result.key) throw new Error(result.message || "密钥生成失败");
+              keyDirtyRef.current = true;
+              setKeyDirty(true);
+              setKeyValue(result.key); setShowKey(false);
+              setMessage("随机密钥已生成，尚未保存。点击右侧「保存」后生效，当前设备授权不受影响。");
+            })}>生成</Button><Button disabled={busy || !keyDirty || !keyValue.trim()} onClick={() => void runApply(async () => {
+              const nextKey = keyValue.trim();
+              if (!/^[\x21-\x7e]{8,64}$/.test(nextKey)) throw new Error("密钥需为 8–64 个非空格 ASCII 字符。");
+              if (!confirmKeyChange()) return;
+              const result = await command<RemoteAccessCredentials>("setKey", { key: nextKey });
+              if (result.status !== "ok") throw new Error(result.message || "访问密钥保存失败");
+              const savedKey = result.key || nextKey;
+              loadedKeyValue.current = savedKey;
+              keyDirtyRef.current = false;
+              setKeyDirty(false);
+              setKeyValue(savedKey);
+              setShowKey(false);
+              setCredentials({ ...result, key: savedKey });
+              onSuccess("访问密钥已明文保存到本机并生效，默认以圆点遮挡，可点击小眼睛查看。原有设备需重新输入新密钥连接。");
+            })}>保存</Button></div><small>支持 8–64 个非空格 ASCII 字符；点击「保存」后以明文保存在本机，输入框默认使用圆点遮挡，可点击小眼睛查看。</small></div>
+          </div>
+          <div className="remote-access-devices">
+            {(status?.devices || []).map(device => <div className="remote-access-device" key={device.id}>
+              <Smartphone className="h-4 w-4" /><div><strong>{device.name}</strong><small>到期：{device.expiresAtMs > Date.now() + 365 * 24 * 3600 * 1000 ? "长期有效" : new Date(device.expiresAtMs).toLocaleString()} · 最近访问：{new Date(device.lastSeenAtMs).toLocaleString()}</small></div>
+              <Button variant="ghost" size="sm" disabled={busy} onClick={() => void run(async () => {
+                if (!window.confirm(`撤销「${device.name}」的授权？此设备将立即失去会话访问权限。`)) return;
+                const result = await command<{ status: string; message?: string }>("revoke", { deviceId: device.id });
+                if (result.status !== "ok") throw new Error(result.message || "撤销失败");
+                await refresh();
+                setMessage("设备授权已撤销。");
+              })}><Trash2 className="h-4 w-4" />撤销</Button>
+            </div>)}
+            {!status?.devices?.length ? <p className="remote-access-hint">尚无已授权设备。</p> : null}
+          </div>
         </CardContent>
       </Card>
       {message ? <p className="remote-access-message" role="status" aria-live="polite">{message}</p> : null}

@@ -178,7 +178,7 @@ pub fn run() {
     let Some(guard) = acquire_single_instance_guard() else {
         return;
     };
-    let wake_listener = guard.try_clone_listener().ok().flatten();
+    let wake_listener = guard.shared_listener();
     let task_board_icon = match task_board_window_icon() {
         Ok(icon) => icon,
         Err(error) => {
@@ -1689,7 +1689,7 @@ fn acquire_single_instance_guard() -> Option<codex_elves_core::ports::LoopbackPo
 }
 
 fn spawn_wake_listener<R: tauri::Runtime>(
-    listener: std::net::TcpListener,
+    listener: std::sync::Arc<std::net::TcpListener>,
     app_handle: tauri::AppHandle<R>,
 ) {
     let _ = std::thread::Builder::new()

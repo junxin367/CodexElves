@@ -51,18 +51,7 @@ pub fn run() {
     if codex_elves_core::paths::obsolete_session_backup_cleanup_needed() {
         spawn_obsolete_session_backup_cleanup();
     }
-    let wake_listener = match guard.try_clone_listener() {
-        Ok(listener) => listener,
-        Err(error) => {
-            let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
-                "manager.wake_listener_clone_failed",
-                serde_json::json!({
-                    "error": error.to_string()
-                }),
-            );
-            None
-        }
-    };
+    let wake_listener = guard.shared_listener();
     let run_result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
@@ -88,7 +77,6 @@ pub fn run() {
             if let Some(listener) = wake_listener {
                 spawn_manager_wake_listener(listener, app.handle().clone());
             }
-            spawn_remote_access_heartbeat();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -183,22 +171,6 @@ pub fn run() {
             }),
         );
     }
-}
-
-fn spawn_remote_access_heartbeat() {
-    tauri::async_runtime::spawn(async {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            interval.tick().await;
-            if let Err(error) = codex_elves_core::remote_access::send_manager_heartbeat().await {
-                let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
-                    "remote_access.manager_heartbeat_failed",
-                    serde_json::json!({"message": format!("{error:#}")}),
-                );
-            }
-        }
-    });
 }
 
 fn install_tray<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
@@ -405,7 +377,7 @@ fn show_main_window<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) {
 }
 
 fn spawn_manager_wake_listener<R: tauri::Runtime>(
-    listener: std::net::TcpListener,
+    listener: std::sync::Arc<std::net::TcpListener>,
     app_handle: tauri::AppHandle<R>,
 ) {
     std::thread::spawn(move || {

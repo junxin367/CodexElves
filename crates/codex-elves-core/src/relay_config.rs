@@ -555,7 +555,7 @@ pub fn sync_applied_relay_profile_model_catalog_to_home(
     }
 
     let rows = relay_profile_catalog_rows(profile)?;
-    let config_with_catalog = if rows.is_empty() {
+    let mut config_with_catalog = if rows.is_empty() {
         live_config.clone()
     } else {
         set_root_toml_string_line(
@@ -564,6 +564,13 @@ pub fn sync_applied_relay_profile_model_catalog_to_home(
             GENERATED_MODEL_CATALOG_FILENAME,
         )
     };
+    if let Some(model) = root_key_string(&live_config, "model") {
+        let catalog_model = profile.catalog_model_for_configured_model(&model);
+        if catalog_model != model {
+            config_with_catalog =
+                set_root_toml_string_line(&config_with_catalog, "model", &catalog_model);
+        }
+    }
     if config_with_catalog != live_config {
         write_codex_live_atomic(home, Some(&config_with_catalog), None, false)?;
     }
@@ -2832,9 +2839,18 @@ pub(crate) fn relay_profile_catalog_rows(
     if !profile.model_mappings.is_empty() {
         let mappings = crate::settings::relay_model_mappings_for_catalog(&profile.model_mappings);
         let catalog_slugs = crate::settings::relay_model_mapping_catalog_slugs(&mappings);
+        let mut seen = HashSet::new();
         for (mapping, catalog_slug) in mappings.iter().zip(catalog_slugs) {
             let model = mapping.request_model.trim();
             if model.is_empty() || catalog_slug.is_empty() {
+                continue;
+            }
+            let catalog_slug = if relay_profile_uses_protocol_proxy(profile) {
+                catalog_slug
+            } else {
+                model.to_string()
+            };
+            if !seen.insert(catalog_slug.clone()) {
                 continue;
             }
             rows.push(CatalogModelRow {
@@ -3482,7 +3498,13 @@ fn relay_profile_base_url(profile: &RelayProfile) -> String {
             crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
         );
     }
-    if profile.local_proxy_enabled() {
+    let provider_base_url = provider_string_from_config(&profile.config_contents, "base_url")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_default();
+    let local_proxy_base_url = crate::protocol_proxy::local_responses_proxy_base_url(
+        crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
+    );
+    if profile.local_proxy_enabled() || provider_base_url == local_proxy_base_url {
         if !profile.upstream_base_url.trim().is_empty() {
             return profile.upstream_base_url.trim().to_string();
         }
@@ -3495,15 +3517,7 @@ fn relay_profile_base_url(profile: &RelayProfile) -> String {
             return profile.base_url.trim().to_string();
         }
     }
-    let provider_base_url = provider_string_from_config(&profile.config_contents, "base_url")
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_default();
-    if profile.local_proxy_enabled()
-        && provider_base_url
-            == crate::protocol_proxy::local_responses_proxy_base_url(
-                crate::protocol_proxy::DEFAULT_PROTOCOL_PROXY_PORT,
-            )
-    {
+    if provider_base_url == local_proxy_base_url {
         String::new()
     } else if !provider_base_url.is_empty() {
         provider_base_url
@@ -3609,16 +3623,6 @@ pub fn normalize_relay_profile_for_storage(profile: &mut RelayProfile) -> anyhow
         {
             mapping.context_window = context_window.to_string();
         }
-    }
-    let needs_local_proxy_for_catalog_virtual_slugs =
-        crate::settings::relay_model_mapping_catalog_slugs(&profile.model_mappings)
-            .iter()
-            .zip(&profile.model_mappings)
-            .any(|(catalog_slug, mapping)| {
-                !catalog_slug.is_empty() && catalog_slug != mapping.request_model.trim()
-            });
-    if needs_local_proxy_for_catalog_virtual_slugs {
-        profile.local_proxy_enabled = Some(true);
     }
     if profile.relay_mode == crate::settings::RelayMode::Official && !profile.official_mix_api_key {
         let has_api_config = !profile.base_url.trim().is_empty()
@@ -4114,6 +4118,7 @@ mod tests {
     #[test]
     fn complete_profile_config_writes_catalog_identifier_as_default_model() {
         let alias_profile = RelayProfile {
+            local_proxy_enabled: Some(true),
             model: "gpt-5.6-sol".to_string(),
             config_contents: "model_provider = \"custom\"\n".to_string(),
             model_mappings: vec![crate::settings::RelayModelMapping {
@@ -4146,7 +4151,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_profile_enables_local_proxy_for_duplicate_request_model_aliases() {
+    fn normalize_profile_preserves_disabled_proxy_for_duplicate_request_model_aliases() {
         let mut profile = RelayProfile {
             local_proxy_enabled: Some(false),
             model_mappings: vec![
@@ -4170,11 +4175,11 @@ mod tests {
 
         normalize_relay_profile_for_storage(&mut profile).unwrap();
 
-        assert_eq!(profile.local_proxy_enabled, Some(true));
+        assert_eq!(profile.local_proxy_enabled, Some(false));
     }
 
     #[test]
-    fn normalize_profile_enables_local_proxy_for_duplicate_request_models_without_aliases() {
+    fn normalize_profile_preserves_disabled_proxy_for_duplicate_request_models_without_aliases() {
         let mut profile = RelayProfile {
             local_proxy_enabled: Some(false),
             model_mappings: vec![
@@ -4198,7 +4203,98 @@ mod tests {
 
         normalize_relay_profile_for_storage(&mut profile).unwrap();
 
+        assert_eq!(profile.local_proxy_enabled, Some(false));
+    }
+
+    #[test]
+    fn normalize_profile_restores_upstream_when_proxy_is_explicitly_disabled() {
+        let mut profile = RelayProfile {
+            relay_mode: crate::settings::RelayMode::PureApi,
+            local_proxy_enabled: Some(false),
+            upstream_base_url: "https://relay.example.test/v1".to_string(),
+            config_contents: r#"model = "gpt-custom [600K]"
+model_provider = "custom"
+
+[model_providers.custom]
+base_url = "http://127.0.0.1:45221/v1"
+"#
+            .to_string(),
+            model_mappings: vec![
+                crate::settings::RelayModelMapping {
+                    request_model: "gpt-custom".to_string(),
+                    alias: "gpt-custom [600K]".to_string(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "600000".to_string(),
+                    system_prompt_override: String::new(),
+                },
+                crate::settings::RelayModelMapping {
+                    request_model: "gpt-custom".to_string(),
+                    alias: "gpt-custom [1M]".to_string(),
+                    protocol: RelayProtocol::Responses,
+                    context_window: "1000000".to_string(),
+                    system_prompt_override: String::new(),
+                },
+            ],
+            ..RelayProfile::default()
+        };
+        let mappings = profile.model_mappings.clone();
+
+        normalize_relay_profile_for_storage(&mut profile).unwrap();
+
+        assert_eq!(profile.local_proxy_enabled, Some(false));
+        assert_eq!(profile.base_url, "https://relay.example.test/v1");
+        assert_eq!(profile.upstream_base_url, "https://relay.example.test/v1");
+        assert_eq!(profile.model, "gpt-custom");
+        assert_eq!(profile.model_mappings, mappings);
+        assert_eq!(
+            provider_string_from_config(&profile.config_contents, "base_url").as_deref(),
+            Some("https://relay.example.test/v1")
+        );
+        let rows = relay_profile_catalog_rows(&profile).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].catalog_slug, "gpt-custom");
+        assert_eq!(rows[0].context_window, "600000");
+    }
+
+    #[test]
+    fn normalize_profile_restores_legacy_upstream_when_proxy_is_explicitly_disabled() {
+        let mut profile = RelayProfile {
+            relay_mode: crate::settings::RelayMode::PureApi,
+            local_proxy_enabled: Some(false),
+            config_contents: format!(
+                "{CHAT_UPSTREAM_BASE_URL_KEY} = \"https://relay.example.test/v1\"\n\
+                 model_provider = \"custom\"\n\
+                 [model_providers.custom]\n\
+                 base_url = \"http://127.0.0.1:45221/v1\"\n"
+            ),
+            ..RelayProfile::default()
+        };
+
+        normalize_relay_profile_for_storage(&mut profile).unwrap();
+
+        assert_eq!(profile.local_proxy_enabled, Some(false));
+        assert_eq!(profile.base_url, "https://relay.example.test/v1");
+        assert!(!profile.config_contents.contains("127.0.0.1:45221"));
+        assert!(!profile.config_contents.contains(CHAT_UPSTREAM_BASE_URL_KEY));
+    }
+
+    #[test]
+    fn normalize_profile_migrates_missing_proxy_flag_from_existing_proxy_config() {
+        let mut profile = RelayProfile {
+            relay_mode: crate::settings::RelayMode::PureApi,
+            upstream_base_url: "https://relay.example.test/v1".to_string(),
+            config_contents: "model_provider = \"custom\"\n\
+                [model_providers.custom]\n\
+                base_url = \"http://127.0.0.1:45221/v1\"\n"
+                .to_string(),
+            ..RelayProfile::default()
+        };
+
+        normalize_relay_profile_for_storage(&mut profile).unwrap();
+
         assert_eq!(profile.local_proxy_enabled, Some(true));
+        assert_eq!(profile.base_url, "https://relay.example.test/v1");
+        assert!(profile.config_contents.contains("127.0.0.1:45221"));
     }
 
     fn read_test_http_request(stream: &mut TcpStream) -> String {
@@ -4771,6 +4867,7 @@ mod tests {
         let profile: RelayProfile = serde_json::from_value(json!({
             "id": "relay-a",
             "name": "供应商 A",
+            "localProxyEnabled": true,
             "modelMappings": [
                 {
                     "requestModel": "gpt-5.6-sol",
@@ -4796,6 +4893,7 @@ mod tests {
         let profile: RelayProfile = serde_json::from_value(json!({
             "id": "relay-a",
             "name": "供应商 A",
+            "localProxyEnabled": true,
             "modelMappings": [
                 {
                     "requestModel": "gpt-5.6-sol",
@@ -5018,6 +5116,7 @@ mod tests {
     fn generated_model_catalog_uses_swe_version_efforts_and_preserves_mapping_aliases() {
         let profile = RelayProfile {
             relay_mode: crate::settings::RelayMode::PureApi,
+            local_proxy_enabled: Some(true),
             model_mappings: vec![
                 crate::settings::RelayModelMapping {
                     system_prompt_override: String::new(),
@@ -5155,6 +5254,7 @@ mod tests {
         let profile: RelayProfile = serde_json::from_value(json!({
             "id": "source-capabilities",
             "name": "Source capabilities",
+            "localProxyEnabled": true,
             "modelMappings": [{
                 "requestModel": "openai/gpt-5.6-sol",
                 "alias": "review",
@@ -5300,6 +5400,7 @@ mod tests {
         let mut profile: RelayProfile = serde_json::from_value(json!({
             "id": "model-prompts",
             "name": "模型提示词",
+            "localProxyEnabled": true,
             "systemPromptOverride": "supplier prompt",
             "modelMappings": [
                 {"requestModel": "gpt-5.6-sol", "alias": "review", "systemPromptOverride": "review prompt"},
