@@ -688,7 +688,7 @@ async fn local_proxy_applies_system_prompt_overrides_to_each_websocket_request()
             "updated model prompt",
         ),
         ("custom", "updated supplier", " \n ", "updated supplier"),
-        ("inherit", " \n ", "", "original instructions"),
+        ("inherit", " \n ", "", "native default prompt"),
         ("custom", "restored supplier", "", "restored supplier"),
     ];
     let input = serde_json::json!([
@@ -715,7 +715,7 @@ async fn local_proxy_applies_system_prompt_overrides_to_each_websocket_request()
         .unwrap();
         let mut index = 0;
         for (_, _, _, expected_prompt) in &cases {
-            for use_instructions in [false, true] {
+            for prompt_mode in ["incremental", "input", "instructions"] {
                 let message = socket.next().await.unwrap().unwrap();
                 let Message::Text(text) = message else {
                     panic!("expected response.create text message");
@@ -723,17 +723,8 @@ async fn local_proxy_applies_system_prompt_overrides_to_each_websocket_request()
                 let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
                 assert_eq!(payload["type"], "response.create");
                 assert_eq!(payload["model"], "gpt-prompt");
-                let mut expected_input = if use_instructions {
-                    serde_json::json!(&upstream_input.as_array().unwrap()[1..])
-                } else {
-                    upstream_input.clone()
-                };
-                if use_instructions {
-                    assert_eq!(payload["instructions"], *expected_prompt);
-                } else {
-                    assert!(payload.get("instructions").is_none());
-                    expected_input[0]["content"][0]["text"] = serde_json::json!(expected_prompt);
-                }
+                let expected_input = serde_json::json!(&upstream_input.as_array().unwrap()[1..]);
+                assert_eq!(payload["instructions"], *expected_prompt, "{prompt_mode}");
                 assert_eq!(payload["store"], false);
                 assert_eq!(payload["reasoning"]["effort"], "high");
                 assert_eq!(payload["input"], expected_input);
@@ -765,7 +756,7 @@ async fn local_proxy_applies_system_prompt_overrides_to_each_websocket_request()
             panic!("expected incremental response.create text message");
         };
         let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
-        assert!(payload.get("instructions").is_none());
+        assert_eq!(payload["instructions"], "native default prompt");
         assert_eq!(
             payload["previous_response_id"],
             format!("resp_prompt_{}", index - 1)
@@ -792,10 +783,27 @@ async fn local_proxy_applies_system_prompt_overrides_to_each_websocket_request()
     });
 
     let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path()
+            .join("codex-elves-codex-bundled-model-catalog-cache.json"),
+        serde_json::json!({
+            "schemaVersion": 1,
+            "checkedAtMs": 1,
+            "refreshedAtMs": 1,
+            "lastError": null,
+            "catalog": {"models": [{
+                "slug": "gpt-prompt",
+                "base_instructions": "native default prompt"
+            }]}
+        })
+        .to_string(),
+    )
+    .unwrap();
     let _settings_path = SettingsPathGuard::new(temp.path().join("settings.json"));
     let _proxy_log_path = ProxyLogPathGuard::new(temp.path().join("proxy-requests.jsonl"));
     save_supported_websocket_settings(upstream_address, false, "gpt-prompt");
     let mut settings = SettingsStore::default().load().unwrap();
+    settings.codex_home_path = temp.path().to_string_lossy().to_string();
     let mut mapping = settings.relay_profiles[0].model_mappings[0].clone();
     mapping.alias = "custom".to_string();
     mapping.context_window = "500000".to_string();
@@ -826,19 +834,20 @@ async fn local_proxy_applies_system_prompt_overrides_to_each_websocket_request()
         settings.relay_profiles[0].model_mappings[0].system_prompt_override =
             model_prompt.to_string();
         SettingsStore::default().save(&settings).unwrap();
-        for use_instructions in [false, true] {
+        for prompt_mode in ["incremental", "input", "instructions"] {
             let mut request = serde_json::json!({
                 "type": "response.create",
                 "model": model,
-                "input": if use_instructions {
-                    serde_json::json!(&input.as_array().unwrap()[1..])
-                } else {
+                "prompt_cache_key": "01a14406-e520-7391-89a4-a7e998f862c4",
+                "input": if prompt_mode == "input" {
                     input.clone()
+                } else {
+                    serde_json::json!(&input.as_array().unwrap()[1..])
                 },
                 "store": false,
                 "reasoning": {"effort": "high"}
             });
-            if use_instructions {
+            if prompt_mode == "instructions" {
                 request["instructions"] = serde_json::json!("original instructions");
             }
             if index == 0 {
@@ -865,11 +874,14 @@ async fn local_proxy_applies_system_prompt_overrides_to_each_websocket_request()
             index += 1;
         }
     }
+    settings.relay_profiles[0].system_prompt_override.clear();
+    SettingsStore::default().save(&settings).unwrap();
     client
         .send(Message::Text(
             serde_json::json!({
                 "type": "response.create",
                 "model": "custom",
+                "prompt_cache_key": "01a14406-e520-7391-89a4-a7e998f862c4",
                 "previous_response_id": format!("resp_prompt_{}", index - 1),
                 "input": [
                     {"role": "developer", "content": "<app-context>keep</app-context>"},
@@ -1283,17 +1295,15 @@ async fn local_proxy_prunes_compacted_image_history_before_websocket_size_check(
         assert!(text.len() < 16 * 1024 * 1024);
         let payload: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
         let input = payload["input"].as_array().unwrap();
-        assert_eq!(input.len(), 4);
-        assert!(payload.get("instructions").is_none());
+        assert_eq!(input.len(), 3);
+        assert_eq!(payload["instructions"], "compacted custom prompt");
         assert_eq!(input[0]["role"], "developer");
-        assert_eq!(input[0]["id"], "msg_540c0b9f-4f6a-5acd-bccf-66d5a88cc494");
-        assert_eq!(input[0]["content"][0]["text"], "compacted custom prompt");
         assert_eq!(
-            input[1]["content"],
+            input[0]["content"],
             "<permissions instructions>keep</permissions instructions>"
         );
-        assert_eq!(input[2]["type"], "compaction");
-        assert_eq!(input[3]["content"][0]["text"], "继续");
+        assert_eq!(input[1]["type"], "compaction");
+        assert_eq!(input[2]["content"][0]["text"], "继续");
         assert!(!text.contains("data:image/png;base64"));
 
         socket

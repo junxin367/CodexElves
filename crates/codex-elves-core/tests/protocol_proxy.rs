@@ -13860,6 +13860,24 @@ async fn remote_compaction_v2_final_anthropic_retry_body_failure_fails_closed() 
 #[tokio::test]
 async fn responses_proxy_model_system_prompt_wins_for_all_protocols_and_aliases() {
     let _lock = settings_path_test_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path()
+            .join("codex-elves-codex-bundled-model-catalog-cache.json"),
+        json!({
+            "schemaVersion": 1,
+            "checkedAtMs": 1,
+            "refreshedAtMs": 1,
+            "lastError": null,
+            "catalog": {"models": [
+                {"slug": "gpt-responses", "base_instructions": "native default prompt"},
+                {"slug": "gpt-chat", "base_instructions": "native default prompt"},
+                {"slug": "claude-sonnet", "base_instructions": "native default prompt"}
+            ]}
+        })
+        .to_string(),
+    )
+    .unwrap();
     for (model, protocol, path) in [
         ("gpt-responses", RelayProtocol::Responses, "/v1/responses"),
         (
@@ -13869,13 +13887,15 @@ async fn responses_proxy_model_system_prompt_wins_for_all_protocols_and_aliases(
         ),
         ("claude-sonnet", RelayProtocol::Anthropic, "/v1/messages"),
     ] {
-        for (alias, prompt) in [
-            ("custom", "custom prompt: GPT-5.6 Sol"),
-            ("inherit", "supplier prompt"),
+        for (alias, supplier_prompt, prompt) in [
+            ("custom", "supplier prompt", "custom prompt: GPT-5.6 Sol"),
+            ("inherit", "supplier prompt", "supplier prompt"),
+            ("inherit", "", "native default prompt"),
         ] {
             for use_instructions in [false, true] {
                 let server = spawn_chat_server();
                 let settings = BackendSettings {
+                    codex_home_path: home.path().to_string_lossy().to_string(),
                     relay_profiles: vec![RelayProfile {
                         id: "prompts".to_string(),
                         name: "Prompts".to_string(),
@@ -13883,7 +13903,7 @@ async fn responses_proxy_model_system_prompt_wins_for_all_protocols_and_aliases(
                         upstream_base_url: server.base_url.clone(),
                         api_key: "sk-test".to_string(),
                         relay_mode: RelayMode::MixedApi,
-                        system_prompt_override: "supplier prompt".to_string(),
+                        system_prompt_override: supplier_prompt.to_string(),
                         model_mappings: vec![
                             RelayModelMapping {
                                 request_model: model.to_string(),
@@ -13907,6 +13927,7 @@ async fn responses_proxy_model_system_prompt_wins_for_all_protocols_and_aliases(
                 };
                 let mut original = json!({
                     "model": alias,
+                    "prompt_cache_key": "01a14406-e520-7391-89a4-a7e998f862c4",
                     "input": [
                         {"type": "message", "role": "developer", "content": "permissions must stay"},
                         {"type": "message", "role": "user", "content": "hello"}
@@ -13937,10 +13958,9 @@ async fn responses_proxy_model_system_prompt_wins_for_all_protocols_and_aliases(
                 assert_eq!(body["model"], model);
                 let mut expected = original;
                 expected["model"] = json!(model);
-                if use_instructions {
-                    expected["instructions"] = json!(prompt);
-                } else {
-                    expected["input"][0]["content"][0]["text"] = json!(prompt);
+                expected["instructions"] = json!(prompt);
+                if !use_instructions {
+                    expected["input"].as_array_mut().unwrap().remove(0);
                 }
                 let expected = match protocol {
                     RelayProtocol::Responses => expected,

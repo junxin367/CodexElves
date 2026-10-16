@@ -8795,8 +8795,8 @@ function SystemPromptOverrideModal({
           <div>
             <h2 id="system-prompt-title">{modelName ? `${modelName} · 系统提示词` : "替换系统提示词"}</h2>
             <p>{modelName
-              ? "仅对当前模型生效，优先于供应商和默认系统提示词；留空则继承供应商配置。保存后请保存供应商配置。"
-              : "直连会写入模型目录；本地代理请求会先替换这里的系统提示词，再执行模型协议分流。单模型配置优先于此处。"}</p>
+              ? "仅对当前模型生效；留空继承供应商配置，供应商也为空时恢复模型默认提示词。保存后请保存供应商配置。本地代理的后续请求无需重启 Codex。"
+              : "保存后请保存供应商配置。本地代理的后续请求立即生效，留空恢复模型默认提示词；单模型配置优先。直连模式需重启 Codex 并新建会话。"}</p>
           </div>
           <Button onClick={onClose} size="icon" title="关闭" variant="ghost">
             <X className="h-4 w-4" />
@@ -8807,7 +8807,7 @@ function SystemPromptOverrideModal({
           className="system-prompt-textarea"
           onChange={(event) => setDraft(event.currentTarget.value)}
           aria-label={modelName ? "模型系统提示词" : "供应商系统提示词"}
-          placeholder={modelName ? "输入当前模型的系统提示词；留空则继承供应商配置。" : "输入新的系统提示词；留空表示不替换。"}
+          placeholder={modelName ? "输入当前模型的系统提示词；留空继承供应商或模型默认值。" : "输入新的系统提示词；留空恢复模型默认提示词。"}
           value={draft}
         />
         <Toolbar>

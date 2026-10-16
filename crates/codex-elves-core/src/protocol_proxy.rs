@@ -381,6 +381,89 @@ pub fn local_models_proxy_response() -> anyhow::Result<Option<ProxyHttpResponse>
     }))
 }
 
+pub(crate) fn apply_codex_system_prompt_to_responses_request(
+    request: &Value,
+    relay: &crate::settings::RelayProfile,
+    codex_home: &std::path::Path,
+) -> Value {
+    let base_prompt_index = request
+        .get("input")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().position(|item| {
+                matches!(
+                    item.get("role").and_then(Value::as_str),
+                    Some("system" | "developer")
+                ) && matches!(
+                    item.get("type").and_then(Value::as_str),
+                    None | Some("message")
+                ) && codex_base_prompt_id(item)
+                    && item.get("content").is_some_and(|content| {
+                        content.is_string()
+                            || content.as_array().is_some_and(|parts| {
+                                !parts.is_empty()
+                                    && parts.iter().all(|part| {
+                                        part.is_string()
+                                            || (matches!(
+                                                part.get("type").and_then(Value::as_str),
+                                                Some("input_text" | "text")
+                                            ) && part.get("text").is_some_and(Value::is_string))
+                                    })
+                            })
+                    })
+            })
+        });
+    let has_codex_context = ["prompt_cache_key", "/client_metadata/thread_id"]
+        .iter()
+        .any(|key| {
+            let value = if key.starts_with('/') {
+                request.pointer(key)
+            } else {
+                request.get(key)
+            };
+            value
+                .and_then(Value::as_str)
+                .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+        });
+    let model = request
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if (base_prompt_index.is_none() && !has_codex_context) || model.trim().is_empty() {
+        return apply_system_prompt_override_to_responses_request(request, relay);
+    }
+
+    let configured_prompt = relay.system_prompt_for_model(model);
+    let prompt = if configured_prompt.is_empty() {
+        crate::relay_config::default_model_system_prompt(
+            codex_home,
+            &relay.request_model_for_catalog_model(model),
+        )
+    } else {
+        configured_prompt.to_string()
+    };
+    let mut updated = request.clone();
+    if let Some(object) = updated.as_object_mut() {
+        // instructions 不随 previous_response_id 继承，增量请求才能切换或恢复提示词。
+        object.insert("instructions".to_string(), json!(prompt));
+        if let Some(index) = base_prompt_index
+            && let Some(items) = object.get_mut("input").and_then(Value::as_array_mut)
+        {
+            items.remove(index);
+        }
+    }
+    updated
+}
+
+fn codex_base_prompt_id(message: &Value) -> bool {
+    message
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(|id| id.strip_prefix("msg_"))
+        .and_then(|id| uuid::Uuid::parse_str(id.strip_suffix(".msg").unwrap_or(id)).ok())
+        .is_some_and(|id| id.get_version_num() == 5)
+}
+
 pub(crate) fn apply_system_prompt_override_to_responses_request(
     request: &Value,
     relay: &crate::settings::RelayProfile,
@@ -460,17 +543,7 @@ fn default_system_prompt_message_index(items: &[Value], continuation: bool) -> O
     };
     items
         .iter()
-        .position(|message| {
-            is_prompt_message(message)
-                && message
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .and_then(|id| id.strip_prefix("msg_"))
-                    .and_then(|id| {
-                        uuid::Uuid::parse_str(id.strip_suffix(".msg").unwrap_or(id)).ok()
-                    })
-                    .is_some_and(|id| id.get_version_num() == 5)
-        })
+        .position(|message| is_prompt_message(message) && codex_base_prompt_id(message))
         .or_else(|| {
             items.iter().position(|message| {
                 is_prompt_message(message)
@@ -2717,7 +2790,11 @@ async fn execute_validated_compaction(
     }
 
     let options = CompactionOptions::from_settings(&settings);
-    let source = apply_system_prompt_override_to_responses_request(original, &relay);
+    let source = apply_codex_system_prompt_to_responses_request(
+        original,
+        &relay,
+        &crate::codex_home::codex_home_dir_for_settings(&settings),
+    );
     let source = rewrite_catalog_model_to_request_model(&source, &relay);
     let source_model = source["model"]
         .as_str()
@@ -3305,8 +3382,11 @@ async fn open_responses_proxy_request_once(
     let mut audit = crate::proxy_log::ProxyRequestAudit::default();
     'relay_attempts: for (attempt, relay) in relays.into_iter().enumerate() {
         validate_upstream(&relay)?;
-        let source_request_json =
-            apply_system_prompt_override_to_responses_request(&original_request_json, &relay);
+        let source_request_json = apply_codex_system_prompt_to_responses_request(
+            &original_request_json,
+            &relay,
+            &crate::codex_home::codex_home_dir_for_settings(&settings),
+        );
         let source_request_json =
             rewrite_catalog_model_to_request_model(&source_request_json, &relay);
         // 按会话模型和协议确定本地压缩或原生 V2 路径。
@@ -14199,6 +14279,7 @@ mod anthropic_image_replay_tests {
 #[cfg(test)]
 mod system_prompt_override_tests {
     use super::{
+        apply_codex_system_prompt_to_responses_request,
         apply_system_prompt_override_to_chat_request,
         apply_system_prompt_override_to_responses_request, rewrite_catalog_model_to_request_model,
         rewrite_prompt_text_model_identity,
@@ -14211,6 +14292,107 @@ mod system_prompt_override_tests {
             system_prompt_override: "custom prompt".to_string(),
             ..RelayProfile::default()
         }
+    }
+
+    #[test]
+    fn codex_prompt_clear_uses_native_default_for_alias_without_rewriting_other_context() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path()
+                .join("codex-elves-codex-bundled-model-catalog-cache.json"),
+            json!({
+                "schemaVersion": 1,
+                "checkedAtMs": 1,
+                "refreshedAtMs": 1,
+                "lastError": null,
+                "catalog": {"models": [{
+                    "slug": "gpt-prompt",
+                    "base_instructions": "native default prompt"
+                }]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let profile: RelayProfile = serde_json::from_value(json!({
+            "id": "native-prompts",
+            "name": "Native prompts",
+            "systemPromptOverride": "",
+            "modelMappings": [
+                {"requestModel": "gpt-prompt", "alias": "custom", "protocol": "responses"}
+            ]
+        }))
+        .unwrap();
+        let request = json!({
+            "model": "custom",
+            "input": [
+                {
+                    "type": "message",
+                    "id": "msg_540c0b9f-4f6a-5acd-bccf-66d5a88cc494.msg",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "stale custom prompt"}]
+                },
+                {"role": "developer", "content": "<permissions instructions>keep</permissions instructions>"},
+                {"role": "developer", "content": "<app-context>keep</app-context>"},
+                {"role": "user", "content": "stale custom prompt"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "stale custom prompt"}
+            ],
+            "store": false,
+            "tools": [{"type": "function", "name": "test"}],
+            "reasoning": {"effort": "high"}
+        });
+        let mut expected = request.clone();
+        expected["instructions"] = json!("native default prompt");
+        expected["input"].as_array_mut().unwrap().remove(0);
+        assert_eq!(
+            apply_codex_system_prompt_to_responses_request(&request, &profile, home.path()),
+            expected
+        );
+    }
+
+    #[test]
+    fn codex_incremental_prompt_uses_current_override_without_replaying_history() {
+        let home = tempfile::tempdir().unwrap();
+        for context in [
+            json!({"prompt_cache_key": "01a14406-e520-7391-89a4-a7e998f862c4"}),
+            json!({"client_metadata": {"thread_id": "01a14406-e520-7391-89a4-a7e998f862c4"}}),
+        ] {
+            let mut request = json!({
+                "model": "gpt-test",
+                "previous_response_id": "resp_previous",
+                "input": [
+                    {"role": "developer", "content": "<app-context>keep</app-context>"},
+                    {"type": "function_call_output", "call_id": "call_1", "output": "tool result"}
+                ]
+            });
+            request
+                .as_object_mut()
+                .unwrap()
+                .extend(context.as_object().unwrap().clone());
+            let mut expected = request.clone();
+            expected["instructions"] = json!("custom prompt");
+            assert_eq!(
+                apply_codex_system_prompt_to_responses_request(&request, &relay(), home.path()),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn empty_override_does_not_replace_non_codex_utility_prompts() {
+        let home = tempfile::tempdir().unwrap();
+        let request = json!({
+            "model": "gpt-test",
+            "instructions": "Only improve the draft.",
+            "input": [{"role": "user", "content": "draft"}]
+        });
+        assert_eq!(
+            apply_codex_system_prompt_to_responses_request(
+                &request,
+                &RelayProfile::default(),
+                home.path()
+            ),
+            request
+        );
     }
 
     #[test]

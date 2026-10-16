@@ -2610,6 +2610,19 @@ fn generated_catalog_prompt_fields(
     }
 }
 
+pub(crate) fn default_model_system_prompt(home: &Path, model: &str) -> String {
+    let codex_catalog = codex_builtin_catalog::load_cached_catalog(home);
+    let packaged_model = packaged_model_catalog_entry(model);
+    generated_catalog_prompt_fields(
+        &RelayProfile::default(),
+        model,
+        model,
+        codex_catalog.as_ref(),
+        packaged_model.as_ref(),
+    )
+    .0
+}
+
 fn model_has_usable_prompt(model: &Value) -> bool {
     model
         .get("base_instructions")
