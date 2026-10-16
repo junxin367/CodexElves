@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
@@ -20,7 +20,7 @@ const CAPTURE_HEAD_BYTES: usize = 64 * 1024;
 const FULL_CAPTURE_ENV: &str = "CODEX_ELVES_FULL_PROXY_CAPTURE";
 pub const RUNTIME_RETAINED_RECORDS: usize = 500;
 const PROXY_INDEX_HEADER: &str = r#"{"format":"codex-elves-proxy-index","version":1}"#;
-const MAX_PROXY_INDEX_BYTES: u64 = 8 * 1024 * 1024;
+const PROXY_INDEX_COMPACT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PROXY_INDEX_UPDATES: usize = RUNTIME_RETAINED_RECORDS * 3;
 const LARGE_LOG_RECORD_SAFETY_BYTES: usize = 1024;
 const MAX_RETAINED_REQUEST_BODY_BYTES: usize = 64 * 1024;
@@ -1091,64 +1091,85 @@ fn release_completed_enqueue_fence() {
 }
 
 fn append_record_at_path(path: &Path, record: &ProxyRequestRecord) -> std::io::Result<()> {
-    let mut index_file = open_index_file(path)?;
-    index_file.lock_exclusive()?;
-    let result: std::io::Result<()> = (|| {
-        ensure_index_format_locked(path, &mut index_file)?;
-        write_detail_record(path, record)?;
-
-        let mut updates = read_summaries_from_locked_index(&mut index_file)?;
-        let summary = ProxyRequestSummary::from(record);
-        updates.push(summary.clone());
-        let update_count = updates.len();
-        let mut summaries = dedupe_summaries(updates);
-        sort_summaries(&mut summaries);
-        let removed = if summaries.len() > RUNTIME_RETAINED_RECORDS {
-            summaries.split_off(RUNTIME_RETAINED_RECORDS)
-        } else {
-            Vec::new()
-        };
-        if removed.is_empty() && update_count <= MAX_PROXY_INDEX_UPDATES {
-            append_summary_to_locked_index(&mut index_file, &summary)?;
-        } else {
-            write_summaries_to_locked_index(&mut index_file, &summaries)?;
-        }
-        remove_detail_records(path, &removed)?;
-        Ok(())
-    })();
-    let unlock_result = index_file.unlock();
-    result?;
-    unlock_result
+    append_records_at_path(path, std::slice::from_ref(record))
 }
 
 fn append_records_at_path(path: &Path, records: &[ProxyRequestRecord]) -> std::io::Result<()> {
     if records.is_empty() {
         return Ok(());
     }
-    if records.len() == 1 {
-        return append_record_at_path(path, &records[0]);
-    }
-    let mut index_file = open_index_file(path)?;
-    index_file.lock_exclusive()?;
+    let lock = open_index_lock(path)?;
+    lock.lock_exclusive()?;
     let result: std::io::Result<()> = (|| {
-        ensure_index_format_locked(path, &mut index_file)?;
-        let mut updates = read_summaries_from_locked_index(&mut index_file)?;
+        let index = read_proxy_index(path)?;
+        let recovered_index =
+            index.needs_repair && (index.size_bytes > 0 || !index.updates.is_empty());
+        for record in index.legacy_records.iter().rev() {
+            if !detail_record_path(path, &record.id).exists() {
+                write_detail_record(path, record)?;
+            }
+        }
+        let mut updates = index.updates;
+        let mut appended = Vec::new();
         for record in records {
             write_detail_record(path, record)?;
-            updates.push(ProxyRequestSummary::from(record));
+            let summary = ProxyRequestSummary::from(record);
+            serde_json::to_writer(&mut appended, &summary).map_err(std::io::Error::other)?;
+            appended.push(b'\n');
+            updates.push(summary);
         }
+        let update_count = updates.len();
         let mut summaries = dedupe_summaries(updates);
         sort_summaries(&mut summaries);
-        let removed = if summaries.len() > RUNTIME_RETAINED_RECORDS {
-            summaries.split_off(RUNTIME_RETAINED_RECORDS)
+        let before_count = summaries.len();
+        let mut completed_count = 0;
+        let mut removed = Vec::new();
+        summaries.retain(|summary| {
+            if summary.state == ProxyRequestState::Completed {
+                completed_count += 1;
+                if completed_count > RUNTIME_RETAINED_RECORDS {
+                    removed.push(summary.clone());
+                    return false;
+                }
+            }
+            true
+        });
+        let size_triggered =
+            index.size_bytes.saturating_add(appended.len() as u64) > PROXY_INDEX_COMPACT_BYTES;
+        let updates_triggered = update_count > MAX_PROXY_INDEX_UPDATES;
+        let after_bytes = if index.needs_repair
+            || !removed.is_empty()
+            || size_triggered
+            || updates_triggered
+            || records.len() > 1
+        {
+            write_summaries_to_index(path, &summaries)?
         } else {
-            Vec::new()
+            let mut file = OpenOptions::new().append(true).open(path)?;
+            file.write_all(&appended)?;
+            file.flush()?;
+            index.size_bytes + appended.len() as u64
         };
-        write_summaries_to_locked_index(&mut index_file, &summaries)?;
+        if !removed.is_empty() || size_triggered || updates_triggered || recovered_index {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "helper.local_proxy_log_maintenance",
+                serde_json::json!({
+                    "recovered_index": recovered_index,
+                    "size_triggered": size_triggered,
+                    "updates_triggered": updates_triggered,
+                    "before_count": before_count,
+                    "after_count": summaries.len(),
+                    "removed_count": removed.len(),
+                    "before_bytes": index.size_bytes,
+                    "after_bytes": after_bytes,
+                    "over_compaction_threshold": after_bytes > PROXY_INDEX_COMPACT_BYTES
+                }),
+            );
+        }
         remove_detail_records(path, &removed)?;
         Ok(())
     })();
-    let unlock_result = index_file.unlock();
+    let unlock_result = lock.unlock();
     result?;
     unlock_result
 }
@@ -1172,13 +1193,13 @@ pub fn clear_records() -> std::io::Result<()> {
 }
 
 fn clear_records_at_path(path: &Path) -> std::io::Result<()> {
-    let mut index_file = open_index_file(path)?;
-    index_file.lock_exclusive()?;
+    let lock = open_index_lock(path)?;
+    lock.lock_exclusive()?;
     let result = (|| {
-        write_summaries_to_locked_index(&mut index_file, &[])?;
+        write_summaries_to_index(path, &[])?;
         clear_detail_directory(path)
     })();
-    let unlock_result = index_file.unlock();
+    let unlock_result = lock.unlock();
     result?;
     unlock_result
 }
@@ -1264,17 +1285,15 @@ pub fn default_log_path() -> PathBuf {
 }
 
 fn read_summaries_at_path(path: &Path, limit: usize) -> std::io::Result<Vec<ProxyRequestSummary>> {
-    let mut index_file = open_index_file(path)?;
-    index_file.lock_exclusive()?;
+    let lock = open_index_lock(path)?;
+    lock.lock_shared()?;
     let result: std::io::Result<Vec<ProxyRequestSummary>> = (|| {
-        ensure_index_format_locked(path, &mut index_file)?;
-        let updates = read_summaries_from_locked_index(&mut index_file)?;
-        let mut summaries = dedupe_summaries(updates);
+        let mut summaries = dedupe_summaries(read_proxy_index(path)?.updates);
         sort_summaries(&mut summaries);
         summaries.truncate(limit);
         Ok(summaries)
     })();
-    let unlock_result = index_file.unlock();
+    let unlock_result = lock.unlock();
     let mut summaries = result?;
     unlock_result?;
     backfill_legacy_output_tokens(path, &mut summaries);
@@ -1373,14 +1392,22 @@ fn needs_legacy_output_tokens(summary: &ProxyRequestSummary) -> bool {
 }
 
 fn find_record_at_path(path: &Path, id: &str) -> std::io::Result<Option<ProxyRequestRecord>> {
-    let mut index_file = open_index_file(path)?;
-    index_file.lock_exclusive()?;
-    let ensure_result = ensure_index_format_locked(path, &mut index_file);
-    let unlock_result = index_file.unlock();
-    ensure_result?;
+    let lock = open_index_lock(path)?;
+    lock.lock_shared()?;
+    let result = (|| {
+        let index = read_proxy_index(path)?;
+        Ok::<_, std::io::Error>(read_detail_record_at_path(path, id)?.or_else(|| {
+            index
+                .legacy_records
+                .into_iter()
+                .rev()
+                .find(|record| record.id == id)
+        }))
+    })();
+    let unlock_result = lock.unlock();
+    let mut record = result?;
     unlock_result?;
 
-    let mut record = read_detail_record_at_path(path, id)?;
     if let Some(record) = record.as_mut() {
         record.compaction_requested |= record.remote_compaction_triggered
             || record.layered_compaction_triggered
@@ -1397,10 +1424,11 @@ fn read_detail_record_at_path(
     id: &str,
 ) -> std::io::Result<Option<ProxyRequestRecord>> {
     let detail_path = detail_record_path(path, id);
-    if !detail_path.is_file() {
-        return Ok(None);
-    }
-    let mut detail_file = fs::File::open(detail_path)?;
+    let mut detail_file = match fs::File::open(detail_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
     detail_file.lock_shared()?;
     let mut text = String::new();
     let read_result = detail_file.read_to_string(&mut text);
@@ -1412,7 +1440,7 @@ fn read_detail_record_at_path(
         .map_err(std::io::Error::other)
 }
 
-fn open_index_file(path: &Path) -> std::io::Result<fs::File> {
+fn open_index_lock(path: &Path) -> std::io::Result<fs::File> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1421,60 +1449,114 @@ fn open_index_file(path: &Path) -> std::io::Result<fs::File> {
         .read(true)
         .write(true)
         .truncate(false)
-        .open(path)
+        // The lock must survive atomic replacement of the index.
+        .open(path.with_extension("lock"))
 }
 
-fn ensure_index_format_locked(path: &Path, file: &mut fs::File) -> std::io::Result<()> {
-    let expected = format!("{PROXY_INDEX_HEADER}\n");
-    let mut prefix = vec![0_u8; expected.len()];
-    file.seek(SeekFrom::Start(0))?;
-    let read = file.read(&mut prefix)?;
-    let valid_header = read == expected.len() && prefix == expected.as_bytes();
-    let valid_size = file.metadata()?.len() <= MAX_PROXY_INDEX_BYTES;
-    if valid_header && valid_size {
-        return Ok(());
+struct ProxyIndex {
+    updates: Vec<ProxyRequestSummary>,
+    legacy_records: Vec<ProxyRequestRecord>,
+    needs_repair: bool,
+    size_bytes: u64,
+}
+
+fn read_proxy_index(path: &Path) -> std::io::Result<ProxyIndex> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error),
+    };
+    let mut index = ProxyIndex {
+        updates: Vec::new(),
+        legacy_records: Vec::new(),
+        needs_repair: bytes.is_empty(),
+        size_bytes: bytes.len() as u64,
+    };
+    let mut has_header = false;
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let Ok(line) = std::str::from_utf8(line) else {
+            index.needs_repair = true;
+            continue;
+        };
+        let line = line.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() {
+            continue;
+        }
+        if !has_header {
+            if let Ok(header) = serde_json::from_str::<Value>(line) {
+                if header.get("format").is_some() || header.get("version").is_some() {
+                    if header.get("format").and_then(Value::as_str)
+                        != Some("codex-elves-proxy-index")
+                        || header.get("version").and_then(Value::as_u64) != Some(1)
+                    {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "代理日志索引格式或版本不受支持，原文件已保留",
+                        ));
+                    }
+                    has_header = true;
+                    continue;
+                }
+            }
+        }
+        if !has_header {
+            if let Ok(record) = serde_json::from_str::<ProxyRequestRecord>(line) {
+                index.updates.push(ProxyRequestSummary::from(&record));
+                index.legacy_records.push(record);
+                continue;
+            }
+        }
+        match serde_json::from_str::<ProxyRequestSummary>(line) {
+            Ok(summary) => index.updates.push(summary),
+            Err(_) => index.needs_repair = true,
+        }
     }
+    index.needs_repair |= !has_header;
 
-    write_summaries_to_locked_index(file, &[])?;
-    clear_detail_directory(path)
+    if index.needs_repair {
+        let entries = match fs::read_dir(detail_directory(path)) {
+            Ok(entries) => Some(entries),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let mut found_details = false;
+        if let Some(entries) = entries {
+            for entry in entries {
+                let entry = entry?;
+                if !entry.file_type()?.is_file()
+                    || entry.path().extension().and_then(|value| value.to_str()) != Some("json")
+                {
+                    continue;
+                }
+                found_details = true;
+                if let Ok(record) =
+                    serde_json::from_slice::<ProxyRequestRecord>(&fs::read(entry.path())?)
+                {
+                    index.updates.push(ProxyRequestSummary::from(&record));
+                }
+            }
+        }
+        if index.updates.is_empty() && (!bytes.is_empty() || found_details) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "代理日志索引无法恢复，原索引和详情已保留",
+            ));
+        }
+    }
+    Ok(index)
 }
 
-fn read_summaries_from_locked_index(
-    file: &mut fs::File,
-) -> std::io::Result<Vec<ProxyRequestSummary>> {
-    file.seek(SeekFrom::Start(0))?;
-    let mut text = String::new();
-    file.read_to_string(&mut text)?;
-    Ok(text
-        .lines()
-        .skip(1)
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<ProxyRequestSummary>(line).ok())
-        .collect())
-}
-
-fn write_summaries_to_locked_index(
-    file: &mut fs::File,
+fn write_summaries_to_index(
+    path: &Path,
     summaries: &[ProxyRequestSummary],
-) -> std::io::Result<()> {
-    file.set_len(0)?;
-    file.seek(SeekFrom::Start(0))?;
-    writeln!(file, "{PROXY_INDEX_HEADER}")?;
+) -> std::io::Result<u64> {
+    let mut bytes = format!("{PROXY_INDEX_HEADER}\n").into_bytes();
     for summary in summaries {
-        serde_json::to_writer(&mut *file, summary).map_err(std::io::Error::other)?;
-        writeln!(file)?;
+        serde_json::to_writer(&mut bytes, summary).map_err(std::io::Error::other)?;
+        bytes.push(b'\n');
     }
-    file.flush()
-}
-
-fn append_summary_to_locked_index(
-    file: &mut fs::File,
-    summary: &ProxyRequestSummary,
-) -> std::io::Result<()> {
-    file.seek(SeekFrom::End(0))?;
-    serde_json::to_writer(&mut *file, summary).map_err(std::io::Error::other)?;
-    writeln!(file)?;
-    file.flush()
+    crate::settings::atomic_write(path, &bytes).map_err(std::io::Error::other)?;
+    Ok(bytes.len() as u64)
 }
 
 fn dedupe_summaries(updates: Vec<ProxyRequestSummary>) -> Vec<ProxyRequestSummary> {
@@ -1520,26 +1602,9 @@ fn detail_record_path(path: &Path, id: &str) -> PathBuf {
 }
 
 fn write_detail_record(path: &Path, record: &ProxyRequestRecord) -> std::io::Result<()> {
-    let directory = detail_directory(path);
-    fs::create_dir_all(&directory)?;
-    let detail_path = detail_record_path(path, &record.id);
-    let mut detail_file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(detail_path)?;
-    detail_file.lock_exclusive()?;
-    let result = (|| {
-        let line = serialize_record_for_log(record).map_err(std::io::Error::other)?;
-        detail_file.set_len(0)?;
-        detail_file.seek(SeekFrom::Start(0))?;
-        detail_file.write_all(line.as_bytes())?;
-        detail_file.flush()
-    })();
-    let unlock_result = detail_file.unlock();
-    result?;
-    unlock_result
+    let line = serialize_record_for_log(record).map_err(std::io::Error::other)?;
+    crate::settings::atomic_write(&detail_record_path(path, &record.id), line.as_bytes())
+        .map_err(std::io::Error::other)
 }
 
 fn remove_detail_records(path: &Path, summaries: &[ProxyRequestSummary]) -> std::io::Result<()> {
@@ -2058,6 +2123,8 @@ mod tests {
 
     fn remove_proxy_log_artifacts(path: &std::path::Path) {
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("lock"));
+        let _ = std::fs::remove_file(path.with_extension("jsonl.tmp"));
         let _ = std::fs::remove_dir_all(super::detail_directory(path));
     }
 
@@ -2903,8 +2970,8 @@ data: [DONE]
     }
 
     #[test]
-    fn append_record_discards_legacy_single_file_log() {
-        let path = temp_proxy_log_path("discard-legacy-log");
+    fn append_record_migrates_legacy_single_file_log() {
+        let path = temp_proxy_log_path("migrate-legacy-log");
         let legacy = sample_proxy_record("legacy-record");
         std::fs::write(
             &path,
@@ -2919,12 +2986,11 @@ data: [DONE]
         append_record_at_path(&path, &record).expect("append proxy log record");
 
         let summaries = read_summaries_at_path(&path, 10).expect("read proxy log summaries");
-        assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].id, "fresh-record");
+        assert_eq!(summaries.len(), 2);
         assert!(
             find_record_at_path(&path, "legacy-record")
-                .expect("read discarded legacy detail")
-                .is_none()
+                .expect("read migrated legacy detail")
+                .is_some()
         );
         assert!(
             find_record_at_path(&path, "fresh-record")
@@ -2936,8 +3002,8 @@ data: [DONE]
     }
 
     #[test]
-    fn read_summaries_discards_legacy_single_file_log() {
-        let path = temp_proxy_log_path("discard-legacy-log-on-read");
+    fn read_summaries_preserves_legacy_single_file_log() {
+        let path = temp_proxy_log_path("read-legacy-log");
         let legacy = sample_proxy_record("legacy-record");
         std::fs::write(
             &path,
@@ -2948,13 +3014,263 @@ data: [DONE]
         )
         .expect("seed legacy proxy log");
 
+        let original = std::fs::read(&path).unwrap();
         let summaries = read_summaries_at_path(&path, 10).expect("read proxy log summaries");
 
-        assert!(summaries.is_empty());
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, legacy.id);
         assert_eq!(
-            std::fs::read_to_string(&path).expect("read reset proxy log index"),
-            format!("{}\n", super::PROXY_INDEX_HEADER)
+            find_record_at_path(&path, &legacy.id)
+                .unwrap()
+                .unwrap()
+                .request_body,
+            legacy.request_body
         );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(!super::detail_directory(&path).exists());
+        remove_proxy_log_artifacts(&path);
+    }
+
+    #[test]
+    fn index_size_and_update_thresholds_compact_without_deleting_requests() {
+        for size_triggered in [false, true] {
+            let path = temp_proxy_log_path(if size_triggered {
+                "compact-bytes"
+            } else {
+                "compact-updates"
+            });
+            let mut old = sample_proxy_record("old");
+            if size_triggered {
+                old.audit.error_code = Some("x".repeat(8 * 1024));
+            }
+            append_record_at_path(&path, &old).unwrap();
+            let summary = serde_json::to_string(&super::ProxyRequestSummary::from(&old)).unwrap();
+            let count = if size_triggered {
+                super::PROXY_INDEX_COMPACT_BYTES as usize / summary.len() + 1
+            } else {
+                super::MAX_PROXY_INDEX_UPDATES
+            };
+            let original = format!(
+                "{}\n{}",
+                super::PROXY_INDEX_HEADER,
+                format!("{summary}\n").repeat(count)
+            );
+            std::fs::write(&path, &original).unwrap();
+
+            assert_eq!(read_summaries_at_path(&path, 10).unwrap().len(), 1);
+            assert!(find_record_at_path(&path, "old").unwrap().is_some());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
+            append_record_at_path(&path, &sample_proxy_record("fresh")).unwrap();
+            assert_eq!(read_summaries_at_path(&path, 10).unwrap().len(), 2);
+            assert!(find_record_at_path(&path, "old").unwrap().is_some());
+            assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
+            remove_proxy_log_artifacts(&path);
+        }
+    }
+
+    #[test]
+    fn compacted_index_can_exceed_size_threshold_without_losing_requests() {
+        let path = temp_proxy_log_path("large-unique-summary");
+        let mut record = sample_proxy_record("large-summary");
+        record.audit.error_code = Some("x".repeat(super::PROXY_INDEX_COMPACT_BYTES as usize));
+        append_record_at_path(&path, &record).unwrap();
+        append_record_at_path(&path, &sample_proxy_record("fresh")).unwrap();
+
+        assert!(std::fs::metadata(&path).unwrap().len() > super::PROXY_INDEX_COMPACT_BYTES);
+        assert_eq!(read_summaries_at_path(&path, 10).unwrap().len(), 2);
+        assert!(find_record_at_path(&path, &record.id).unwrap().is_some());
+        remove_proxy_log_artifacts(&path);
+    }
+
+    #[test]
+    fn damaged_index_recovers_from_rows_and_details_without_mutating_reads() {
+        let path = temp_proxy_log_path("recover-damaged-index");
+        let from_index = sample_proxy_record("index-only");
+        let from_detail = sample_proxy_record("detail-only");
+        super::write_detail_record(&path, &from_detail).unwrap();
+        let original = format!(
+            "broken header\n{}\n{{partial",
+            serde_json::to_string(&super::ProxyRequestSummary::from(&from_index)).unwrap()
+        );
+        std::fs::write(&path, &original).unwrap();
+
+        assert_eq!(read_summaries_at_path(&path, 10).unwrap().len(), 2);
+        assert!(
+            find_record_at_path(&path, &from_detail.id)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        append_record_at_path(&path, &sample_proxy_record("fresh")).unwrap();
+        assert_eq!(read_summaries_at_path(&path, 10).unwrap().len(), 3);
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .starts_with(super::PROXY_INDEX_HEADER)
+        );
+        assert!(
+            find_record_at_path(&path, &from_detail.id)
+                .unwrap()
+                .is_some()
+        );
+        remove_proxy_log_artifacts(&path);
+    }
+
+    #[test]
+    fn missing_index_recovers_details_only_when_writing() {
+        let path = temp_proxy_log_path("recover-missing-index");
+        super::write_detail_record(&path, &sample_proxy_record("old")).unwrap();
+
+        assert_eq!(read_summaries_at_path(&path, 10).unwrap().len(), 1);
+        assert!(find_record_at_path(&path, "old").unwrap().is_some());
+        assert!(!path.exists());
+        append_record_at_path(&path, &sample_proxy_record("fresh")).unwrap();
+        assert_eq!(read_summaries_at_path(&path, 10).unwrap().len(), 2);
+        remove_proxy_log_artifacts(&path);
+    }
+
+    #[test]
+    fn unknown_index_version_preserves_index_and_details() {
+        let path = temp_proxy_log_path("unknown-index-version");
+        append_record_at_path(&path, &sample_proxy_record("old")).unwrap();
+        let original =
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .replacen("\"version\":1", "\"version\":2", 1);
+        std::fs::write(&path, &original).unwrap();
+        let old_detail = std::fs::read(super::detail_record_path(&path, "old")).unwrap();
+
+        assert!(read_summaries_at_path(&path, 10).is_err());
+        assert!(find_record_at_path(&path, "old").is_err());
+        assert!(append_record_at_path(&path, &sample_proxy_record("fresh")).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(
+            std::fs::read(super::detail_record_path(&path, "old")).unwrap(),
+            old_detail
+        );
+        assert!(!super::detail_record_path(&path, "fresh").exists());
+        remove_proxy_log_artifacts(&path);
+    }
+
+    #[test]
+    fn unrecoverable_index_preserves_original_files() {
+        let path = temp_proxy_log_path("unrecoverable-index");
+        std::fs::write(&path, b"unreadable index").unwrap();
+        std::fs::create_dir_all(super::detail_directory(&path)).unwrap();
+        let detail = super::detail_record_path(&path, "broken");
+        std::fs::write(&detail, b"unreadable detail").unwrap();
+
+        assert!(read_summaries_at_path(&path, 10).is_err());
+        assert!(append_record_at_path(&path, &sample_proxy_record("fresh")).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"unreadable index");
+        assert_eq!(std::fs::read(&detail).unwrap(), b"unreadable detail");
+        remove_proxy_log_artifacts(&path);
+    }
+
+    #[test]
+    fn failed_index_replacement_does_not_delete_old_records() {
+        let path = temp_proxy_log_path("failed-index-replacement");
+        let records: Vec<_> = (0..super::RUNTIME_RETAINED_RECORDS)
+            .map(|number| {
+                let mut record = sample_proxy_record(&format!("record-{number}"));
+                record.timestamp_ms = number as u64;
+                record
+            })
+            .collect();
+        super::append_records_at_path(&path, &records).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let blocked_temp_path = path.with_extension("jsonl.tmp");
+        std::fs::create_dir(&blocked_temp_path).unwrap();
+        let mut fresh = sample_proxy_record("fresh");
+        fresh.timestamp_ms = super::RUNTIME_RETAINED_RECORDS as u64 + 1;
+
+        assert!(append_record_at_path(&path, &fresh).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(super::detail_record_path(&path, "record-0").exists());
+        assert_eq!(
+            read_summaries_at_path(&path, 1000).unwrap().len(),
+            super::RUNTIME_RETAINED_RECORDS
+        );
+        std::fs::remove_dir(&blocked_temp_path).unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let reader = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0x3)
+                .open(&path)
+                .unwrap();
+            assert!(append_record_at_path(&path, &fresh).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            assert!(super::detail_record_path(&path, "record-0").exists());
+            drop(reader);
+        }
+        append_record_at_path(&path, &fresh).unwrap();
+        assert!(find_record_at_path(&path, "record-0").unwrap().is_none());
+        assert!(find_record_at_path(&path, "fresh").unwrap().is_some());
+        remove_proxy_log_artifacts(&path);
+    }
+
+    #[test]
+    fn retention_protects_pending_requests_until_they_complete() {
+        let path = temp_proxy_log_path("retain-pending-requests");
+        let mut pending = sample_proxy_record("old-pending");
+        pending.timestamp_ms = 0;
+        pending.state = ProxyRequestState::Pending;
+        append_record_at_path(&path, &pending).unwrap();
+        let records: Vec<_> = (1..=super::RUNTIME_RETAINED_RECORDS + 2)
+            .map(|number| {
+                let mut record = sample_proxy_record(&format!("completed-{number}"));
+                record.timestamp_ms = number as u64;
+                record
+            })
+            .collect();
+        super::append_records_at_path(&path, &records).unwrap();
+
+        let summaries = read_summaries_at_path(&path, 1000).unwrap();
+        assert_eq!(summaries.len(), super::RUNTIME_RETAINED_RECORDS + 1);
+        assert!(find_record_at_path(&path, "old-pending").unwrap().is_some());
+        assert!(find_record_at_path(&path, "completed-1").unwrap().is_none());
+        assert!(find_record_at_path(&path, "completed-2").unwrap().is_none());
+
+        pending.state = ProxyRequestState::Completed;
+        append_record_at_path(&path, &pending).unwrap();
+        assert_eq!(
+            read_summaries_at_path(&path, 1000).unwrap().len(),
+            super::RUNTIME_RETAINED_RECORDS
+        );
+        assert!(find_record_at_path(&path, "old-pending").unwrap().is_none());
+        remove_proxy_log_artifacts(&path);
+    }
+
+    #[test]
+    fn concurrent_reads_and_index_replacements_keep_complete_records() {
+        let path = temp_proxy_log_path("concurrent-index-replacement");
+        append_record_at_path(&path, &sample_proxy_record("old")).unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for number in 0..30 {
+                    super::append_records_at_path(
+                        &path,
+                        &[
+                            sample_proxy_record("old"),
+                            sample_proxy_record(&format!("fresh-{number}")),
+                        ],
+                    )
+                    .unwrap();
+                }
+            });
+            for _ in 0..3 {
+                scope.spawn(|| {
+                    for _ in 0..30 {
+                        assert!(!read_summaries_at_path(&path, 100).unwrap().is_empty());
+                        assert!(find_record_at_path(&path, "old").unwrap().is_some());
+                    }
+                });
+            }
+        });
+        assert_eq!(read_summaries_at_path(&path, 100).unwrap().len(), 31);
         remove_proxy_log_artifacts(&path);
     }
 
@@ -3017,7 +3333,7 @@ data: [DONE]
     }
 
     #[test]
-    fn clear_records_uses_locked_file_truncation() {
+    fn clear_records_uses_locked_index_replacement() {
         let path = temp_proxy_log_path("clear-records");
         append_record_at_path(&path, &sample_proxy_record("old")).expect("seed proxy log");
 

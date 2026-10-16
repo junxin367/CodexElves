@@ -2513,6 +2513,7 @@ export function App() {
   const [logs, setLogs] = useState<LogsResult | null>(null);
   const [localProxyStatus, setLocalProxyStatus] = useState<LocalProxyStatusResult | null>(null);
   const [localProxyLogs, setLocalProxyLogs] = useState<LocalProxyLogsResult | null>(null);
+  const [localProxyLogsError, setLocalProxyLogsError] = useState<string | null>(null);
   const [localProxyDetail, setLocalProxyDetail] = useState<LocalProxyLogDetailResult | null>(null);
   const localProxyLogDetailRequestRef = useRef(0);
   const [selectedLocalProxyLogId, setSelectedLocalProxyLogId] = useState<string | null>(null);
@@ -3074,9 +3075,13 @@ export function App() {
     const result = await run(() =>
       call<LocalProxyLogsResult>("read_local_proxy_logs", { request: { limit: 240 } }),
     );
-    if (result) {
+    if (result && isSuccessStatus(result.status)) {
       setLocalProxyLogs(result);
+      setLocalProxyLogsError(null);
       if (!silent) showResultNotice("本地代理日志", result, { silentSuccess: true });
+    } else {
+      setLocalProxyLogsError(result?.message ?? "读取日志失败，请重试。");
+      if (result && !silent) showResultNotice("本地代理日志", result);
     }
     return result;
   };
@@ -3114,6 +3119,7 @@ export function App() {
     if (result) {
       if (isSuccessStatus(result.status)) {
         setLocalProxyLogs(result);
+        setLocalProxyLogsError(null);
         closeLocalProxyLogDetail();
         await refreshLocalProxyStatus(true);
       }
@@ -4455,6 +4461,7 @@ export function App() {
             <LocalProxyScreen
               status={localProxyStatus}
               logs={localProxyLogs}
+              logsError={localProxyLogsError}
               detail={localProxyDetail}
               selectedId={selectedLocalProxyLogId}
               loadingDetailId={loadingLocalProxyLogDetailId}
@@ -4831,6 +4838,7 @@ function LocalProxyTopbarBadge({
 function LocalProxyScreen({
   status,
   logs,
+  logsError,
   detail,
   selectedId,
   loadingDetailId,
@@ -4839,6 +4847,7 @@ function LocalProxyScreen({
 }: {
   status: LocalProxyStatusResult | null;
   logs: LocalProxyLogsResult | null;
+  logsError: string | null;
   detail: LocalProxyLogDetailResult | null;
   selectedId: string | null;
   loadingDetailId: string | null;
@@ -5093,6 +5102,12 @@ function LocalProxyScreen({
           }
         />
         <CardContent>
+          {logsError ? (
+            <div className="mb-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm" role="alert">
+              <p>{logs ? "刷新失败，当前显示上次成功读取的数据。" : "日志读取失败，请重试。"}</p>
+              <p className="mt-1 break-words text-muted-foreground">{logsError}</p>
+            </div>
+          ) : null}
           <div className="proxy-log-table">
             {filteredEntries.length ? (
               <>
@@ -5204,7 +5219,11 @@ function LocalProxyScreen({
               </>
             ) : (
               <div className="empty">
-                {entries.length ? "没有符合筛选条件的请求日志。" : "暂无代理请求日志。启动 ChatGPT/Codex 后，经过本地代理的请求会记录在这里。"}
+                {entries.length
+                  ? "没有符合筛选条件的请求日志。"
+                  : logsError
+                    ? "日志暂时不可用，请刷新重试。"
+                    : "暂无代理请求日志。启动 ChatGPT/Codex 后，经过本地代理的请求会记录在这里。"}
               </div>
             )}
           </div>
