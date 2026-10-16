@@ -1,10 +1,12 @@
-import { markdown } from "./markdown.js";
+import { markdown, renderMermaidBlocks } from "./markdown.js";
 import { createRemoteEventStream, sharedEventsAvailable } from "./events-client.js";
 import { renderMessageActions } from "./message-actions.js";
 import {
   attachmentsFromQueuedMessage,
   attachmentsFromRemoteImages,
   clearComposerAttachments,
+  chooseComposerImages,
+  composerCanAddImages,
   composerAttachmentSnapshot,
   composerAttachmentsLoading,
   composerAttachmentsPayload,
@@ -39,12 +41,14 @@ const collapsedSidebarSections = new Set();
 const drafts = new Map();
 const skillDrafts = new Map();
 const attachmentDrafts = new Map();
+const promptOptimizations = new Map();
 let selectedSkills = [], selectedModel = "", selectedEffort = "";
-let models = [], modelsPromise = null, modelQuery = "", skillChoices = [], skillIndex = 0, skillLoadVersion = 0, skillScope = "";
+let models = [], modelsPromise = null, modelsLoadedAt = 0, modelQuery = "", skillChoices = [], skillIndex = 0, skillLoadVersion = 0, skillScope = "";
 let modelDefaults = { model: "", reasoningEffort: "" };
 let skillLoading = null, creationProject = "", threadReadVersion = 0, tokenUsageVersion = 0, notifiedTokenUsage = null;
 let recentLimit = 40;
 let recentPriorityIds = null;
+let recentPriorityKnownIds = new Set(), recentPriorityOpenedAt = 0;
 let editingMessage = null, editingQueuedMessage = null;
 const queuedEdits = new Map();
 const queuedEditActions = new Set(["beginQueuedEdit", "editQueued", "cancelQueuedEdit", "dismissQueuedEdit"]);
@@ -56,7 +60,6 @@ let sidebarFilters = { mode: null, chats: null, projects: null, pinned: null };
 let messageFrame = null, activityTimer = null, stopping = false, messageVersion = 0, statusVersion = 0, notifiedStatus = null;
 let followMessages = true;
 let messagesResizeObserver = null;
-let composerControlsResizeObserver = null, composerLayoutFrame = null;
 const readMarkRequests = new Map();
 const questionDrafts = new Map();
 const questionReplyReceipts = new Map();
@@ -196,6 +199,7 @@ function applyAppearance(save = false) {
   }
   resizeComposerInput();
   refitComposerMenus();
+  if ($("#messages")) renderMermaidBlocks($("#messages"));
 }
 applyAppearance();
 function openAppearance() {
@@ -572,43 +576,6 @@ function resizeComposerInput() {
   prompt.style.overflowY = contentHeight > 180 ? "auto" : "hidden";
   if (contentHeight <= 180) prompt.scrollTop = 0;
 }
-function updateComposerControlsLayout() {
-  composerLayoutFrame = null;
-  const controls = $(".composer-controls"), context = $("#context-info"), model = $("#model-button");
-  const measure = $(".context-usage-measure", context);
-  if (!controls || !context || !model || !measure) {
-    context?.classList.remove("context-compact");
-    return;
-  }
-  const styles = getComputedStyle(controls);
-  const gap = parseFloat(styles.columnGap || styles.gap) || 0;
-  const modelStyles = getComputedStyle(model);
-  const maxModelWidth = modelStyles.maxWidth.endsWith("px") ? parseFloat(modelStyles.maxWidth) : Infinity;
-  const modelParts = [...model.children];
-  const modelGap = parseFloat(modelStyles.columnGap || modelStyles.gap) || 0;
-  const modelInsets = ["paddingLeft", "paddingRight", "borderLeftWidth", "borderRightWidth"]
-    .reduce((width, key) => width + (parseFloat(modelStyles[key]) || 0), 0);
-  const intrinsicModelWidth = modelParts.length
-    ? modelParts.reduce((width, node) => width + Math.max(node.scrollWidth || 0, node.getBoundingClientRect().width), 0)
-      + modelGap * (modelParts.length - 1) + modelInsets
-    : model.scrollWidth;
-  const modelWidth = Math.min(intrinsicModelWidth, maxModelWidth);
-  const otherControls = [...controls.children].filter(node => node !== context && node !== model && getComputedStyle(node).display !== "none");
-  const otherWidth = otherControls.reduce((width, node) => width + node.getBoundingClientRect().width, 0);
-  const needsCompact = Math.ceil(measure.scrollWidth + gap * (otherControls.length + 1) + modelWidth + otherWidth) > Math.floor(controls.clientWidth);
-  context.classList.toggle("context-compact", needsCompact);
-}
-function scheduleComposerControlsLayout() {
-  if (composerLayoutFrame != null) return;
-  composerLayoutFrame = requestAnimationFrame(updateComposerControlsLayout);
-}
-function observeComposerControls() {
-  composerControlsResizeObserver?.disconnect();
-  composerControlsResizeObserver = new ResizeObserver(scheduleComposerControlsLayout);
-  for (const node of [$(".composer-controls"), $("#context-info"), $("#model-button")])
-    if (node) composerControlsResizeObserver.observe(node);
-  scheduleComposerControlsLayout();
-}
 function snapshotDraft() {
   syncSelectedSkillsFromPrompt();
   return {
@@ -682,6 +649,114 @@ function resetComposerOptions() {
   skillChoices = []; skillScope = ""; skillLoading = null; ++skillLoadVersion;
   closeComposerMenus();
 }
+function promptOptimizationScope() {
+  return JSON.stringify([draftKey(), editingQueuedMessage?.editId || null]);
+}
+function promptOptimizationSignature() {
+  return JSON.stringify([$("#prompt").value, selectedSkills]);
+}
+function cancelPromptOptimization(record) {
+  if (record.state !== "pending") return;
+  record.state = "cancelled";
+  if (session?.device.id === record.deviceId)
+    void api("/api/action/cancelPromptOptimize", { requestId: record.id }, randomId()).catch(() => {});
+}
+function updatePromptOptimization() {
+  const control = $("#prompt-optimize");
+  if (!control) return;
+  const scope = promptOptimizationScope(), signature = promptOptimizationSignature();
+  for (const record of promptOptimizations.values()) {
+    if (record.state === "pending" && (record.scope !== scope || record.version !== selectionVersion
+        || record.deviceId !== session?.device.id || record.signature !== signature
+        || $("#prompt").disabled || busy || stopping || pending))
+      cancelPromptOptimization(record);
+  }
+  let record = promptOptimizations.get(scope);
+  if (record?.state === "optimized" && record.signature !== signature) {
+    promptOptimizations.delete(scope); record = null;
+  }
+  const loading = record?.state === "pending", optimized = record?.state === "optimized";
+  control.dataset.state = loading ? "loading" : optimized ? "optimized" : "idle";
+  control.setAttribute("aria-busy", String(loading));
+  control.disabled = session?.capabilities?.promptOptimization !== true || !connected || session.readOnly
+    || $("#prompt").disabled || busy || stopping || !!pending;
+  const label = loading ? "取消提示词优化" : optimized ? "恢复原提示词" : "优化提示词";
+  control.setAttribute("aria-label", label);
+  control.title = session?.capabilities?.promptOptimization !== true
+    ? "当前远程服务尚不支持提示词优化"
+    : `${label}（使用 CodexElves 桌面端设置）`;
+}
+function promptOptimizationRecentContext() {
+  for (const turn of [...turns.values()].reverse()) {
+    const user = turn.items?.find(item => item.type === "userMessage");
+    const assistant = [...new Set((turn.items || []).filter(item => item.type === "agentMessage")
+      .map(item => messageCopyText(item).trim()).filter(Boolean))].join("\n\n");
+    const text = user && messageCopyText(user).trim();
+    if (text && assistant) return { user: text, assistant };
+  }
+  return null;
+}
+async function activatePromptOptimization() {
+  if ($("#prompt-optimize").disabled) return;
+  closePopup(); closeComposerMenus();
+  const scope = promptOptimizationScope(), current = promptOptimizations.get(scope), prompt = $("#prompt");
+  if (current?.state === "pending") {
+    cancelPromptOptimization(current); updatePromptOptimization(); notice("已取消提示词优化"); return;
+  }
+  if (current?.state === "optimized" && current.signature === promptOptimizationSignature()) {
+    selectedSkills = current.originalSkills.map(skill => ({ ...skill }));
+    writePromptContent(prompt, current.originalText);
+    promptOptimizations.delete(scope);
+    rememberDraft(); updateComposer(); prompt.focus({ preventScroll: true });
+    setPromptSelection(prompt, prompt.value.length); notice("已恢复原提示词"); return;
+  }
+  const originalText = prompt.value;
+  if (!originalText.trim()) { notice("请先输入要优化的提示词"); return; }
+  if (Array.from(originalText).length > 100000) { notice("提示词过长，无法优化", true); return; }
+  const record = {
+    id: randomId(), scope, version: selectionVersion, deviceId: session.device.id,
+    state: "pending", originalText, originalSkills: selectedSkills.map(skill => ({ ...skill })),
+    signature: promptOptimizationSignature(),
+  };
+  promptOptimizations.set(scope, record); updatePromptOptimization();
+  const isCurrent = () => record.state === "pending" && record.scope === promptOptimizationScope()
+    && record.version === selectionVersion && session?.device.id === record.deviceId
+    && record.signature === promptOptimizationSignature();
+  try {
+    const recentContext = promptOptimizationRecentContext();
+    let receipt = await api("/api/action/optimizePrompt", {
+      input: originalText, model: currentModelId(), ...(recentContext ? { recentContext } : {}),
+    }, record.id);
+    while (receipt.state === "pending" && isCurrent()) {
+      await new Promise(resolve => setTimeout(resolve, 750));
+      if (isCurrent()) receipt = await api(`/api/receipts/${record.id}`);
+    }
+    if (!isCurrent()) return;
+    if (receipt.state !== "completed")
+      throw new Error(receipt.result?.message || "未能确认提示词优化请求，原输入未改动");
+    let result = receipt.result;
+    while (result?.state === "pending" && isCurrent()) {
+      await new Promise(resolve => setTimeout(resolve, 750));
+      if (isCurrent()) result = await api("/api/read/promptOptimization", { requestId: record.id });
+    }
+    if (!isCurrent()) return;
+    if (result?.state === "cancelled") { record.state = "cancelled"; notice("已取消提示词优化"); return; }
+    if (result?.state !== "completed" || !result.text?.trim())
+      throw new Error(result?.message || "提示词优化失败，原输入未改动");
+    writePromptContent(prompt, result.text);
+    record.state = "optimized"; record.signature = promptOptimizationSignature();
+    rememberDraft(); updateComposer(); prompt.focus({ preventScroll: true });
+    setPromptSelection(prompt, prompt.value.length);
+    notice(`提示词已优化，再次点击可恢复原文${result.totalTokens > 0 ? `。当前使用 ${tokenCount(result.totalTokens)} Token` : ""}`);
+  } catch (error) {
+    if (isCurrent()) {
+      cancelPromptOptimization(record); record.state = "failed";
+      notice(error.message || "提示词优化失败，原输入未改动", true);
+    }
+  } finally {
+    updatePromptOptimization();
+  }
+}
 function newChatProjectOptions(projects = []) {
   const names = new Map();
   for (const project of projects) names.set(project.name, (names.get(project.name) || 0) + 1);
@@ -739,7 +814,7 @@ function contextUsage(info) {
   return { used, total, percent: Math.round(used / total * 100) };
 }
 async function loadModels(force = false) {
-  if (!force && models.length) return models;
+  if (!force && modelsLoadedAt && Date.now() - modelsLoadedAt < 60_000) return models;
   if (modelsPromise) return modelsPromise;
   const deviceId = session?.device.id;
   const request = (async () => {
@@ -751,12 +826,16 @@ async function loadModels(force = false) {
         .filter(effort => effort.reasoningEffort !== "ultra" || result.ultraReasoningEnabled === true)
     }));
     modelDefaults = { model: result.defaultModel || "", reasoningEffort: result.defaultReasoningEffort || "" };
+    modelsLoadedAt = Date.now();
     return models;
   })();
   modelsPromise = request;
   try { return await request; }
   finally {
-    if (modelsPromise === request) { modelsPromise = null; updateComposer(); }
+    if (modelsPromise === request) {
+      modelsPromise = null; updateComposer();
+      if (modelsLoadedAt && $("#model-settings") && !$("#model-settings").hidden) renderModelMenu();
+    }
   }
 }
 function currentModelId() { return selectedModel || (selectedId ? thread?.model : modelDefaults.model) || ""; }
@@ -855,7 +934,7 @@ function fitComposerMenu(menu) {
     return;
   }
   const top = $("#composer")?.getBoundingClientRect().top || 300;
-  menu.style.maxHeight = `${Math.max(100, top - 16)}px`;
+  menu.style.maxHeight = `${Math.max(0, Math.min(480, top - (window.visualViewport?.offsetTop || 0) - 16))}px`;
 }
 function refitComposerMenus() {
   fitPopup();
@@ -864,9 +943,7 @@ function refitComposerMenus() {
   }
 }
 window.addEventListener("resize", refitComposerMenus);
-window.addEventListener("resize", scheduleComposerControlsLayout);
 window.visualViewport?.addEventListener("resize", refitComposerMenus);
-window.visualViewport?.addEventListener("resize", scheduleComposerControlsLayout);
 window.visualViewport?.addEventListener("scroll", refitComposerMenus);
 document.addEventListener("scroll", event => {
   if (activePopup && !activePopup.node.contains(event.target)) fitPopup();
@@ -891,7 +968,7 @@ function slashQuery() {
 }
 function compactCommandAvailable() {
   return !!session && !creating && !!selectedId && thread?.id === selectedId && !session.readOnly && connected
-    && !busy && !stopping && !pending && !compactionLocked(selectedId);
+    && !busy && !stopping && !pending && !editingMessage && !editingQueuedMessage && !compactionLocked(selectedId);
 }
 function compactCommandMatches(query) {
   return ["压缩", "compact", "context", "上下文"].some(value => value.includes(query));
@@ -899,16 +976,15 @@ function compactCommandMatches(query) {
 function slashMenuEntries(query = slashQuery()) {
   if (!query) return [];
   const entries = [];
-  if (compactCommandMatches(query.query)) entries.push({ type: "compact", enabled: compactCommandAvailable() });
   entries.push(...skillChoices.filter(skill => !selectedSkills.some(item => skillIdentity(item) === skillIdentity(skill))
     && [skill.name, skill.displayName, skill.description].some(value => String(value).toLowerCase().includes(query.query)))
     .map(skill => ({ type: "skill", enabled: true, skill })));
+  if (compactCommandMatches(query.query)) entries.push({ type: "compact", enabled: compactCommandAvailable() });
   return entries;
 }
 function compactCommandIcon() {
-  const node = element("span", "slash-command-icon");
-  node.setAttribute("aria-hidden", "true");
-  node.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="m8 10 4-4 4 4M16 14l-4 4-4-4"/></svg>';
+  const node = icon("compactContext");
+  node.classList.add("slash-command-icon");
   return node;
 }
 function normalizeSlashIndex(entries) {
@@ -928,44 +1004,56 @@ function renderSkillMenu(message) {
   closePopup();
   menu.hidden = false; $("#model-settings").hidden = true; $("#model-button").setAttribute("aria-expanded", "false");
   $("#prompt").setAttribute("aria-expanded", "true");
+  const queryChanged = menu.dataset.query !== query.query;
+  const scrollTop = queryChanged ? 0 : $(".skill-options", menu)?.scrollTop || 0;
+  const previousActive = $("#prompt").getAttribute("aria-activedescendant");
+  menu.dataset.query = query.query;
   menu.replaceChildren();
+  const list = element("div", "skill-options");
+  menu.append(list);
   const entries = slashMenuEntries(query);
   normalizeSlashIndex(entries);
   const active = entries[skillIndex]?.enabled ? skillIndex : -1;
   const command = entries.find(entry => entry.type === "compact");
   const skills = entries.filter(entry => entry.type === "skill");
-  const appendOption = (entry, index) => {
+  const appendOption = (entry, index, root) => {
     if (entry.type === "compact") {
       const usage = contextUsage(thread?.tokenUsage);
-      const node = button("", "压缩上下文", selectCompactCommand, `skill-option slash-command-option${index === active ? " active" : ""}`);
+      const node = button("", "压缩", selectCompactCommand, `skill-option slash-command-option${index === active ? " active" : ""}`);
       node.id = `skill-option-${index}`; node.disabled = !entry.enabled;
       node.setAttribute("role", "option"); node.setAttribute("aria-selected", String(index === active));
       const copy = element("span", "slash-command-copy");
-      const detail = element("small", "muted slash-command-description", "压缩此聊天的上下文");
-      if (usage) detail.append(element("span", "slash-command-usage", `（已使用 ${usage.percent}%）`));
-      copy.append(element("strong", "", "压缩"), detail);
+      copy.append(element("strong", "", "压缩"));
+      if (usage) copy.append(element("small", "muted slash-command-usage", `（已使用${usage.percent}%）`));
       node.append(compactCommandIcon(), copy);
       node.onmousedown = event => event.preventDefault();
-      menu.append(node);
+      root.append(node);
       return;
     }
     const skill = entry.skill;
     const label = skillVisibleName(skill);
     const node = button("", label, () => selectSkill(skill), `skill-option${index === active ? " active" : ""}`);
     node.id = `skill-option-${index}`; node.setAttribute("role", "option"); node.setAttribute("aria-selected", String(index === skillIndex));
-    node.append(element("strong", "", label), element("small", "muted", skill.description));
+    const description = element("small", "muted", skill.description);
+    description.title = skill.description || "";
+    node.append(element("strong", "", label), description);
     node.onmousedown = event => event.preventDefault();
-    menu.append(node);
+    root.append(node);
   };
-  if (command) appendOption(command, entries.indexOf(command));
-  if (command) menu.append(element("div", "skill-menu-divider"));
-  if (message || !skills.length) menu.append(element("p", "popover-empty muted", message || "没有匹配的可用 Skill"));
-  for (const entry of skills) appendOption(entry, entries.indexOf(entry));
+  if (message || !skills.length) list.append(element("p", "popover-empty muted", message || "没有匹配的可用 Skill"));
+  for (const entry of skills) appendOption(entry, entries.indexOf(entry), list);
+  if (command) {
+    const footer = element("div", "skill-menu-footer");
+    appendOption(command, entries.indexOf(command), footer);
+    menu.append(footer);
+  }
+  fitComposerMenu(menu);
+  list.scrollTop = scrollTop;
   if (active >= 0) {
     $("#prompt").setAttribute("aria-activedescendant", `skill-option-${active}`);
-    $(`#skill-option-${active}`)?.scrollIntoView({ block: "nearest" });
+    if (queryChanged || previousActive !== `skill-option-${active}`)
+      $(`#skill-option-${active}`)?.scrollIntoView({ block: "nearest" });
   } else $("#prompt").removeAttribute("aria-activedescendant");
-  fitComposerMenu(menu);
 }
 async function updateSkillMenu() {
   if (editingMessage || editingQueuedMessage) { closeSkillMenu(); return; }
@@ -1068,11 +1156,13 @@ function button(text, label, action, className = "") {
 function icon(name) {
   const paths = {
     chevron: '<path d="m6 9 6 6 6-6"/>', folder: '<path d="M3 9V5a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v2"/><path d="M3 10h18l-3 10H3a1 1 0 0 1-1-1Z"/>',
+    search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
     chat: '<path d="M20 11.5a8.5 8.5 0 0 1-8.5 8.5 9 9 0 0 1-4-.9L3 21l1.9-4.5A9 9 0 0 1 4 12.5 8.5 8.5 0 0 1 12.5 4h.5a8.5 8.5 0 0 1 7 7.5Z"/>',
     more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
     folderClosed: '<path d="M20 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2Z"/><path d="M2 10h20"/>',
     pin: '<path d="m16 3 5 5-4 1-3 5-4-4 5-3Z"/><path d="m10 14-7 7"/>',
     plus: '<path d="M12 5v14M5 12h14"/>', check: '<path d="m5 12 4 4L19 6"/>',
+    image: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.5"/><path d="m21 15-6-6L3 21"/>',
     close: '<path d="m6 6 12 12M18 6 6 18"/>',
     closeCircle: '<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/>',
     queue: '<path d="M8 6h12M8 12h12M8 18h8"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/>',
@@ -1085,6 +1175,7 @@ function icon(name) {
     eyeOff: '<path d="m3 3 18 18M10.6 5.1A12 12 0 0 1 12 5c6.5 0 10 7 10 7a20 20 0 0 1-3.1 4.2M6.1 6.1A22 22 0 0 0 2 12s3.5 7 10 7a12 12 0 0 0 5.9-1.9M10 10a3 3 0 0 0 4 4"/>',
     warning: '<path d="m12 3 10 18H2Z"/><path d="M12 9v5m0 3h.01"/>',
     arrowUp: '<path d="M12 19V5m-6 6 6-6 6 6"/>',
+    refresh: '<path d="M21 12a9 9 0 1 1-2.7-6.4L21 8"/><path d="M21 3v5h-5"/>',
     steer: '<path d="M4 5v5a4 4 0 0 0 4 4h12m-5-5 5 5-5 5"/>',
     terminal: '<rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 9 3 3-3 3m6 0h4"/>',
     globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18Z"/>',
@@ -1097,6 +1188,7 @@ function icon(name) {
     stop: '<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/>',
     model: '<path d="m12 3 7.5 4.3v8.7L12 20.3 4.5 16V7.3Z"/><path d="m4.5 7.3 7.5 4.4 7.5-4.4M12 11.7v8.6"/>',
     compaction: '<path d="M5 7h14M7 12h10M9 17h6"/>',
+    compactContext: '<circle cx="12" cy="12" r="8"/><path d="m8 10 4-4 4 4M16 14l-4 4-4-4"/>',
     info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/>'
   };
   const node = element("span", "ui-icon");
@@ -1588,8 +1680,11 @@ function mergeTranscriptEvents(entries) {
 function enrichTurnTranscriptEvents(turn) {
   const items = [...(turn.items || [])];
   const pending = [];
+  let initialCompaction = null;
   for (const entry of transcriptEvents.values()) {
     if (entry.turnId !== turn.id) continue;
+    if (!initialCompaction && entry.item.type === "contextCompaction" && entry.item.source !== "manual")
+      initialCompaction = entry;
     const existing = items.findIndex(item => item.id === entry.item.id);
     if (existing >= 0) {
       items[existing] = { ...items[existing], ...entry.item,
@@ -1622,12 +1717,22 @@ function enrichTurnTranscriptEvents(turn) {
       && item.clientId === projected.clientId);
     const input = delivered && !delivered.remoteCompactionInput
       ? { ...delivered, remoteCompactionInput: true } : delivered || projected;
-    const index = items.findIndex(item => item.type === "contextCompaction" && item.source !== "manual");
+    const index = initialCompaction ? items.findIndex(item => item.id === initialCompaction.item.id)
+      : items.findIndex(item => item.type === "contextCompaction" && item.source !== "manual");
     if (index >= 0) {
+      const compaction = items[index];
+      const missingAnchor = initialCompaction?.beforeItemId
+        && !items.some(item => item.id === initialCompaction.beforeItemId);
       const rest = items.filter(item => item !== projected && item !== delivered
-        && !(item.remotePendingInput && item.clientId === projected.clientId));
-      const before = rest.findIndex(item => item.type === "contextCompaction" && item.source !== "manual");
-      rest.splice(before, 0, input);
+        && !(item.remotePendingInput && item.clientId === projected.clientId)
+        && (!missingAnchor || item !== compaction));
+      if (missingAnchor) {
+        const before = rest.findIndex(item => !["modelChanged", "modelRerouted"].includes(item.type));
+        rest.splice(before < 0 ? rest.length : before, 0, input, compaction);
+      } else {
+        const before = rest.findIndex(item => item.id === compaction.id);
+        rest.splice(before, 0, input);
+      }
       return { ...turn, items: rest };
     }
   }
@@ -1842,7 +1947,7 @@ function showLogin() {
   expandedProjects.clear(); collapsedSidebarSections.clear();
   historyCursor = null; historyInitialized = false; approvalSignature = null;
   turns.clear(); transcriptEvents.clear(); drafts.clear(); skillDrafts.clear(); selectedSkills = []; selectedModel = selectedEffort = "";
-  models = []; modelsPromise = null; skillScope = ""; skillChoices = []; skillLoading = null; ++skillLoadVersion; selectionToken = randomId();
+  models = []; modelsPromise = null; modelsLoadedAt = 0; skillScope = ""; skillChoices = []; skillLoading = null; ++skillLoadVersion; selectionToken = randomId();
   modelDefaults = { model: "", reasoningEffort: "" };
   creationProject = ""; notifiedTokenUsage = null; ++threadReadVersion;
   sidebarBusy = false;
@@ -1973,37 +2078,56 @@ function showLogin() {
 }
 function shell() {
   approvalSignature = null;
+  search = "";
   sidebarLayoutCleanup?.(); sidebarLayoutCleanup = null; closeMobileSidebar = () => {};
   app.innerHTML = `<div class="workspace">
     <div class="sidebar-backdrop"></div>
     <aside id="session-sidebar" class="sidebar" aria-label="会话侧边栏">
-      <div class="sidebar-header"><strong>✦ CodexElves</strong><div class="sidebar-header-actions"><button id="sidebar-view-toggle" class="icon-button sidebar-view-toggle" type="button" aria-label="切换会话视图" disabled></button></div></div>
-      <button id="new-chat" class="new-chat" type="button">＋ 新建会话</button>
-      <input id="sidebar-search" class="search" placeholder="搜索会话与项目" aria-label="搜索会话与项目">
+      <div class="sidebar-header"><strong>✦ CodexElves</strong><div class="sidebar-header-actions"><button id="sidebar-view-toggle" class="icon-button sidebar-view-toggle" type="button" aria-label="切换会话视图" disabled></button><button id="sidebar-search-toggle" class="icon-button sidebar-search-toggle" type="button" title="搜索会话与项目" aria-label="搜索会话与项目" aria-controls="sidebar-search" aria-expanded="false" aria-pressed="false"></button></div></div>
+      <div class="sidebar-action"><button id="new-chat" class="new-chat" type="button">＋ 新建会话</button><input id="sidebar-search" class="search" type="search" placeholder="搜索会话与项目" aria-label="搜索会话与项目" autocomplete="off" hidden></div>
       <div id="sidebar-content" class="sidebar-content"></div>
       <div class="sidebar-footer"><div class="footer-actions"><button id="appearance-button" class="footer-button" type="button" aria-label="设置"></button><button id="logout" class="footer-button" type="button"></button></div></div>
     </aside>
     <main class="conversation">
-      <header class="conversation-header"><button id="open-sidebar" class="icon-button" aria-label="打开侧边栏" aria-controls="session-sidebar">☰</button><div class="thread-heading"><strong id="thread-title">远程会话</strong><span id="thread-path" class="muted"></span></div><span id="connection-state" class="connection-state pending" role="status" title="${connectionRttDescription}" aria-label="连接中…。${connectionRttDescription}">连接中…</span><button id="refresh" class="icon-button" aria-label="刷新会话">↻</button></header>
+      <header class="conversation-header"><button id="open-sidebar" class="icon-button" aria-label="打开侧边栏" aria-controls="session-sidebar">☰</button><div class="thread-heading"><strong id="thread-title">远程会话</strong><span id="thread-path" class="muted"></span></div><span id="connection-state" class="connection-state pending" role="status" title="${connectionRttDescription}" aria-label="连接中…。${connectionRttDescription}">连接中…</span><button id="refresh" class="icon-button" aria-label="刷新会话"></button></header>
       <div class="messages-shell"><div id="messages" class="messages" role="log" aria-label="会话消息"></div><button id="scroll-to-bottom" class="scroll-to-bottom" type="button" aria-label="跳转到最新消息" hidden></button></div>
       <div id="approval-area" class="approval-area" aria-live="polite"></div>
       <div class="composer-area"><div class="composer-context"><div id="queued-area" hidden></div><div id="goal-area" hidden></div></div><div id="pending-area"></div><div id="project-select-slot" hidden></div><form id="composer" class="composer">
         <div id="edit-message-area" hidden></div>
         <div id="prompt" class="prompt-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="给 Codex 发送消息，输入 / 选择命令或 Skill…" aria-label="消息输入" aria-autocomplete="list" aria-controls="skill-menu" aria-expanded="false" spellcheck="true"></div>
-        <div class="composer-toolbar"><div class="composer-controls"><span id="context-info" class="context-info muted"></span><button id="model-button" class="text-button model-button" type="button" aria-label="选择模型与思考深度" aria-haspopup="menu" aria-expanded="false">正在读取模型…</button></div><div class="composer-send"><span id="send-status" class="composer-send-status" role="status" aria-live="polite"></span><button id="send" class="send-button" type="submit" aria-label="发送消息"></button></div></div>
+        <div class="composer-toolbar"><div class="composer-controls"><button id="composer-add" class="icon-button composer-add-button" type="button" aria-label="添加附件或压缩上下文" aria-haspopup="menu" aria-expanded="false"></button><button id="prompt-optimize" class="icon-button prompt-optimize-button" type="button" aria-label="优化提示词" aria-busy="false" disabled>✨</button><span id="context-info" class="context-info muted"></span><button id="model-button" class="text-button model-button" type="button" aria-label="选择模型与思考深度" aria-haspopup="menu" aria-expanded="false">正在读取模型…</button></div><div class="composer-send"><span id="send-status" class="composer-send-status" role="status" aria-live="polite"></span><button id="send" class="send-button" type="submit" aria-label="发送消息"></button></div></div>
         <div id="model-settings" class="composer-popover" role="menu" aria-label="模型与思考深度" hidden></div>
         <div id="skill-menu" class="composer-popover skill-menu" role="listbox" aria-label="命令与 Skill" hidden></div>
       </form></div>
     </main>
   </div>`;
   configurePromptEditor($("#prompt"));
+  $("#refresh").append(icon("refresh"));
+  $("#prompt-optimize").onclick = () => void activatePromptOptimization();
+  $("#prompt-optimize").oncontextmenu = event => event.preventDefault();
+  $("#prompt-optimize").onpointerdown = event => {
+    if (event.isPrimary && event.button === 0 && document.activeElement === $("#prompt")) event.preventDefault();
+  };
   mountComposerAttachments({
     form: $("#composer"),
     prompt: $("#prompt"),
     onChange: () => { rememberDraft(); updateComposer(); },
     notice
   });
-  observeComposerControls();
+  const add = $("#composer-add");
+  add.append(icon("plus"));
+  add.popupDirection = "up";
+  add.popupClassName = "composer-add-popup";
+  add.onclick = () => {
+    togglePopup(add);
+    if (activePopup?.trigger === add) activePopup.list.querySelector("button:not(:disabled)")?.focus();
+  };
+  add.onkeydown = event => {
+    if (["ArrowDown", "ArrowUp"].includes(event.key)) {
+      event.preventDefault(); openPopup(add, { edge: event.key === "ArrowUp" ? "last" : "first" });
+      if (document.activeElement === add) activePopup?.list.querySelector("button:not(:disabled)")?.focus();
+    }
+  };
   $("#messages").append(welcomeNode());
   $("#messages").onscroll = () => {
     const messages = $("#messages");
@@ -2030,6 +2154,7 @@ function shell() {
   });
   messagesResizeObserver.observe($("#messages"));
   $("#sidebar-view-toggle").append(icon("folderClosed"));
+  $("#sidebar-search-toggle").append(icon("search"));
   const projectSelect = selectControl("project-select", "新会话项目", [], "", "new-chat-project-select", selected =>
     [...(selected?.value ? [icon("folder")] : []), element("span", "select-label", selected?.label || "不在项目中工作")]);
   projectSelect.selectSearchable = true;
@@ -2066,21 +2191,19 @@ function shell() {
   const syncSidebarLayout = () => {
     const compact = compactSidebarMedia.matches;
     const open = sidebarIsOpen();
-    const toggle = $("#open-sidebar"), toggleFocused = document.activeElement === toggle;
+    const toggle = $("#open-sidebar");
     workspace.classList.toggle("sidebar-collapsed", !compact && !open);
     if (!compact) workspace.classList.remove("sidebar-open");
     sidebarPanel.inert = !open;
     sidebarPanel.setAttribute("aria-hidden", String(!open));
-    const toggleContainer = compact && open ? $(".sidebar-header") : $(".conversation-header");
-    if (toggle.parentElement !== toggleContainer) toggleContainer.prepend(toggle);
     $(".conversation").inert = compact && open;
     const label = open ? "收起侧边栏" : "打开侧边栏";
     toggle.setAttribute("aria-expanded", String(open));
     toggle.setAttribute("aria-label", label);
     toggle.title = label;
-    if (toggleFocused) toggle.focus({ preventScroll: true });
   };
-  const focusSidebarToggle = () => $("#open-sidebar").focus({ preventScroll: true });
+  const focusSidebarControl = () => (compactSidebarMedia.matches && sidebarIsOpen()
+    ? sidebarPanel.querySelector("button:not(:disabled)") : $("#open-sidebar"))?.focus({ preventScroll: true });
   const setSidebarOpen = (open, { focus = true } = {}) => {
     closePopup(); closeComposerMenus();
     if (open && !sidebarIsOpen()) {
@@ -2090,7 +2213,7 @@ function shell() {
     if (compactSidebarMedia.matches) workspace.classList.toggle("sidebar-open", open);
     else desktopSidebarOpen = open;
     syncSidebarLayout();
-    if (focus) focusSidebarToggle();
+    if (focus) focusSidebarControl();
   };
   const closeSidebar = ({ focus = true } = {}) => setSidebarOpen(false, { focus });
   closeMobileSidebar = ({ focus = true } = {}) => {
@@ -2106,7 +2229,25 @@ function shell() {
   syncSidebarLayout();
   $("#open-sidebar").onclick = () => setSidebarOpen(!sidebarIsOpen());
   $(".sidebar-backdrop").onclick = closeSidebar;
-  $("#sidebar-search").oninput = event => { search = event.target.value.trim().toLowerCase(); renderSidebar(); };
+  const searchInput = $("#sidebar-search"), searchToggle = $("#sidebar-search-toggle");
+  const setSidebarSearchOpen = open => {
+    closePopup();
+    searchInput.hidden = !open;
+    $("#new-chat").hidden = open;
+    searchToggle.setAttribute("aria-expanded", String(open));
+    searchToggle.setAttribute("aria-pressed", String(open));
+    if (open) searchInput.focus({ preventScroll: true });
+    else {
+      searchInput.value = ""; search = ""; renderSidebar();
+      searchToggle.focus({ preventScroll: true });
+    }
+  };
+  searchToggle.onclick = () => setSidebarSearchOpen(searchInput.hidden);
+  searchInput.oninput = event => { search = event.target.value.trim().toLowerCase(); renderSidebar(); };
+  searchInput.onkeydown = event => {
+    if (event.key !== "Escape" || event.isComposing) return;
+    event.preventDefault(); event.stopPropagation(); setSidebarSearchOpen(false);
+  };
   $("#new-chat").onclick = () => startNewChat();
   $("#logout").onclick = async () => {
     const deviceId = session.device.id;
@@ -2115,7 +2256,7 @@ function shell() {
     try { await api("/api/logout", {}); disconnect(); savePending(null); showLogin(); }
     catch (error) { notice(error.message, true); if ($("#logout")) $("#logout").disabled = false; }
   };
-  $("#refresh").onclick = () => void refreshAll().catch(error => notice(error.message, true));
+  $("#refresh").onclick = () => void Promise.all([refreshAll(), loadModels(true)]).catch(error => notice(error.message, true));
   $("#appearance-button").onclick = openAppearance;
   $("#sidebar-view-toggle").onclick = () => void changeSidebar({
     target: "grouping", mode: "updated_at",
@@ -2193,15 +2334,20 @@ function shell() {
     if (!opening) return;
     modelQuery = "";
     $("#model-settings").hidden = false; $("#model-button").setAttribute("aria-expanded", "true");
-    $("#model-settings").replaceChildren(element("p", "popover-empty muted", "正在读取原生模型…"));
-    fitComposerMenu($("#model-settings"));
+    const cached = !!modelsLoadedAt;
+    if (cached) {
+      renderModelMenu(); $('#model-settings [aria-checked="true"]:not(:disabled)')?.focus();
+    } else {
+      $("#model-settings").replaceChildren(element("p", "popover-empty muted", "正在读取原生模型…"));
+      fitComposerMenu($("#model-settings"));
+    }
     try {
-      await loadModels(true);
-      if ($("#model-settings") && !$("#model-settings").hidden) {
-        renderModelMenu(); $('#model-settings [aria-checked="true"]:not(:disabled)')?.focus();
+      await loadModels();
+      if (!cached && $("#model-settings") && !$("#model-settings").hidden) {
+        $('#model-settings [aria-checked="true"]:not(:disabled)')?.focus();
       }
     } catch (error) {
-      if ($("#model-settings") && !$("#model-settings").hidden) {
+      if (!cached && $("#model-settings") && !$("#model-settings").hidden) {
         $("#model-settings").replaceChildren(element("p", "popover-empty error-text", error.message));
         fitComposerMenu($("#model-settings"));
       }
@@ -2263,6 +2409,16 @@ async function loadSidebar(cursor = null) {
   try { await promise; }
   finally { if (sidebarRequest?.promise === promise) sidebarRequest = null; }
 }
+function sidebarAttentionState(item) {
+  if (["waiting", "unread", "active", "idle"].includes(item.priority?.attentionState))
+    return item.priority.attentionState;
+  const status = item.status?.status || item.status;
+  const type = typeof status === "string" ? status : status?.type;
+  if (type === "waiting" || (status?.activeFlags || []).some(flag =>
+    flag === "waitingOnApproval" || flag === "waitingOnUserInput")) return "waiting";
+  if (item.hasUnreadTurn) return "unread";
+  return type === "active" || type === "inProgress" ? "active" : "idle";
+}
 function renderSidebar() {
   const root = $("#sidebar-content");
   if (!root || !sidebar) return;
@@ -2323,12 +2479,13 @@ function renderSidebar() {
       title.replaceChildren(copy);
     } else title.replaceChildren(element("span", "thread-label", item.title));
     if (selectedId === item.id) title.setAttribute("aria-current", "page");
-    const active = isActive(item);
+    const attention = sidebarAttentionState(item);
+    const active = attention !== "waiting" && (typeof item.priority?.active === "boolean" ? item.priority.active : isActive(item));
     if (scope === "pinned") title.prepend(icon("chat"));
     container.append(title);
-    if (active || item.hasUnreadTurn) {
+    if (active || item.hasUnreadTurn || attention === "waiting") {
       const state = element("span", `thread-state${active ? " active" : " unread"}`);
-      state.title = active ? "正在运行" : "有未读消息";
+      state.title = attention === "waiting" ? "等待你的回复" : active ? "正在运行" : "有未读消息";
       state.setAttribute("role", "img"); state.setAttribute("aria-label", state.title);
       container.append(state);
     }
@@ -2347,7 +2504,7 @@ function renderSidebar() {
     if (!children.length) return;
     const bodyId = domId("sidebar-section", key);
     const expanded = !!search || !collapsedSidebarSections.has(key);
-    const heading = element("div", "section-label");
+    const heading = element("div", `section-label${key === "list:priority" ? " priority-section-label" : ""}`);
     const toggle = button("", `${label}分组`, () => {
       if (search) return;
       collapsedSidebarSections.has(key) ? collapsedSidebarSections.delete(key) : collapsedSidebarSections.add(key);
@@ -2411,21 +2568,37 @@ function renderSidebar() {
       if (mergedIds.has(item.id)) continue;
       mergedIds.add(item.id); mergedRecent.push(item);
     }
-    const needsPriority = item => isActive(item) || item.hasUnreadTurn || item.id === selectedId;
-    // 展开期间只增加成员，已读且非当前会话在下次展开时归回日期分组。
-    if (recentPriorityIds === null) recentPriorityIds = new Set();
-    for (const item of mergedRecent)
-      if (needsPriority(item)) recentPriorityIds.add(item.id);
+    const eligible = item => item.priority?.eligible !== false;
+    const needsPriority = item => eligible(item) && sidebarAttentionState(item) !== "idle";
+    const attentionOrder = { waiting: 0, unread: 1, active: 2, idle: 3 };
+    const candidates = mergedRecent.filter(needsPriority).sort((left, right) =>
+      attentionOrder[sidebarAttentionState(left)] - attentionOrder[sidebarAttentionState(right)]
+      || (right.recencyAt ?? right.updatedAt ?? 0) - (left.recencyAt ?? left.updatedAt ?? 0));
+    if (recentPriorityIds === null) {
+      recentPriorityOpenedAt = Date.now();
+      recentPriorityKnownIds = new Set(mergedRecent.map(item => item.id));
+      recentPriorityIds = new Set(candidates.map(item => item.id));
+    } else {
+      const available = new Set(mergedRecent.filter(eligible).map(item => item.id));
+      const created = mergedRecent.filter(item => eligible(item) && !recentPriorityKnownIds.has(item.id)
+        && item.createdAt >= Math.floor(recentPriorityOpenedAt / 1000) * 1000);
+      recentPriorityIds = new Set([
+        ...created.map(item => item.id), ...[...recentPriorityIds].filter(id => available.has(id)),
+        ...candidates.map(item => item.id)
+      ]);
+      for (const item of mergedRecent) recentPriorityKnownIds.add(item.id);
+    }
     const recent = sortThreads(mergedRecent.filter(matches), preferences.chats);
-    const priority = recent.filter(item => recentPriorityIds.has(item.id));
+    const recentById = new Map(recent.map(item => [item.id, item]));
+    const priority = [...recentPriorityIds].flatMap(id => recentById.has(id) ? [recentById.get(id)] : []);
     if (priority.length) {
-      const clear = button("", "清除已读且非当前的优先级会话", () => {
-        for (const item of mergedRecent)
-          if (!needsPriority(item)) recentPriorityIds.delete(item.id);
-        renderSidebar();
-      }, "priority-clear-button");
-      clear.id = "clear-recent-priority"; clear.append(icon("eraser"));
-      clear.disabled = !mergedRecent.some(item => recentPriorityIds.has(item.id) && !needsPriority(item));
+      const clear = priority.some(item => sidebarAttentionState(item) === "idle")
+        ? button("", "清除已读会话", () => {
+          for (const item of mergedRecent)
+            if (!needsPriority(item)) recentPriorityIds.delete(item.id);
+          renderSidebar();
+        }, "priority-clear-button") : null;
+      if (clear) { clear.id = "clear-recent-priority"; clear.append(icon("eraser")); }
       appendSection("list:priority", "优先级", priority.map(item => row(item, "recent", true)), clear);
     }
     const dated = recent.filter(item => !recentPriorityIds.has(item.id));
@@ -2584,12 +2757,16 @@ function updateMessageEditor() {
   const stale = Object.hasOwn(thread || {}, "editableMessage")
     && (target?.turnId !== edit.turnId || target?.messageId !== edit.messageId);
   const unavailable = !connected || session?.readOnly || stopping || compactionLocked() || isActiveThread() || stale;
+  const unsupportedModelSettings = !!(selectedModel && selectedModel !== thread?.model
+    || selectedEffort && selectedEffort !== thread?.reasoningEffort)
+    && session?.capabilities?.messageEditModelSettings !== true;
   edit.form.setAttribute("aria-busy", String(locked));
   edit.input.readOnly = locked || unavailable;
-  edit.send.disabled = locked || unavailable || !edit.text.trim();
+  edit.send.disabled = locked || unavailable || unsupportedModelSettings || !edit.text.trim();
   edit.cancel.disabled = locked;
   edit.status.textContent = pending ? "正在确认送达，请勿重复发送。" : edit.error
-    || (unavailable ? "会话状态已变化，暂不能重新发送。可取消后重新编辑。" : "");
+    || (unsupportedModelSettings ? "当前服务版本不支持编辑消息时切换模型或思考深度，请更新程序后再发送。"
+      : unavailable ? "会话状态已变化，暂不能重新发送。可取消后重新编辑。" : "");
   edit.status.hidden = !edit.status.textContent;
 }
 function messageEditor() {
@@ -2650,14 +2827,23 @@ async function submitMessageEdit() {
   }
   const prompt = edit.text.trim(), version = selectionVersion;
   if (!prompt) { notice("请输入修改后的消息"); return; }
+  const model = selectedModel || (selectedEffort ? currentModelId() : ""), reasoningEffort = selectedEffort;
+  const modelSettingsSupported = session.capabilities?.messageEditModelSettings === true;
+  if (!modelSettingsSupported && (selectedModel && selectedModel !== thread.model
+      || selectedEffort && selectedEffort !== thread.reasoningEffort)) {
+    updateMessageEditor(); return;
+  }
   edit.error = "";
+  closeComposerMenus();
   busy = true; updateComposer();
   try {
     if (editingMessage !== edit || selectedId !== edit.threadId || version !== selectionVersion
         || session.readOnly || !connected || compactionLocked() || isActiveThread())
       throw new Error("会话状态已变化，请重新核对后编辑");
     await mutate("editMessage", {
-      threadId: edit.threadId, turnId: edit.turnId, messageId: edit.messageId, prompt
+      threadId: edit.threadId, turnId: edit.turnId, messageId: edit.messageId, prompt,
+      ...(modelSettingsSupported && model ? { model } : {}),
+      ...(modelSettingsSupported && reasoningEffort ? { reasoningEffort } : {})
     }, { reliable: true });
     if (editingMessage === edit) cancelMessageEdit({ focus: false });
     if (version === selectionVersion && selectedId === edit.threadId)
@@ -2710,7 +2896,13 @@ function bindMessageImages(node) {
   for (const image of node.querySelectorAll(".message-image")) {
     const link = image.closest(".message-image-link");
     image.onload = () => { if (followMessages && image.isConnected) $("#messages").scrollTop = $("#messages").scrollHeight; };
-    image.onerror = () => image.closest(".message-image-link")?.replaceWith(element("span", "attachment-placeholder", `图片不可用：${image.alt || "附件"}`));
+    image.onerror = () => {
+      const placeholder = element("span", "attachment-placeholder", `图片不可用：${image.alt || "附件"}`);
+      placeholder.messageImageSource = image.getAttribute("src");
+      placeholder.messageImageLabel = image.alt;
+      placeholder.messageImageKey = JSON.stringify([image.getAttribute("src"), image.alt, link?.getAttribute("href") || ""]);
+      image.closest(".message-image-link")?.replaceWith(placeholder);
+    };
     if (link && (/^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(link.getAttribute("href") || "")
         || safeInlineImageSource(image.getAttribute("src")))) {
       link.title = image.alt ? `预览图片：${image.alt}` : "预览图片";
@@ -2721,54 +2913,113 @@ function bindMessageImages(node) {
     }
   }
 }
-function messageImage(asset, label, inlineSource) {
+function messageImage(asset, label, inlineSource, previous) {
   const remoteUrl = /^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(asset?.url || "") ? asset.url : null;
   const source = remoteUrl || safeInlineImageSource(inlineSource);
   if (!source) return null;
+  const caption = label || "图片附件";
+  if (previous?.messageImageSource === source && previous.messageImageLabel === caption) return previous;
   const link = element(remoteUrl ? "a" : "button", "message-image-link"), image = element("img", "message-image");
+  link.messageImageSource = source;
+  link.messageImageLabel = caption;
   if (remoteUrl) {
     link.href = remoteUrl; link.target = "_blank"; link.rel = "noopener noreferrer";
   } else link.type = "button";
-  image.alt = label || "图片附件"; image.loading = "lazy"; image.decoding = "async"; image.src = source;
+  image.alt = caption; image.loading = "lazy"; image.decoding = "async"; image.src = source;
   link.append(image); bindMessageImages(link); return link;
 }
 function setMarkdown(node, text, remoteImages = [], options) {
-  node.innerHTML = markdown(text, remoteImages, options).trim();
+  const html = markdown(text, remoteImages, options).trim();
+  if (node.markdownHtml === html) return;
+  if (node.querySelector(".message-image,.attachment-placeholder,.mermaid-block")) {
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    const imageKeys = parent => {
+      if (parent.nodeType !== Node.ELEMENT_NODE) return "";
+      const elements = parent.matches(".message-image,.attachment-placeholder,.mermaid-block") ? [parent]
+        : [...parent.querySelectorAll(".message-image,.attachment-placeholder,.mermaid-block")];
+      const keys = elements.flatMap(image => image.messageImageKey ? [image.messageImageKey]
+        : image.matches(".mermaid-block") ? [JSON.stringify(["mermaid", image.querySelector("pre code")?.textContent])]
+        : image.matches(".message-image") ? [JSON.stringify([image.getAttribute("src"), image.alt,
+          image.closest(".message-image-link")?.getAttribute("href") || ""])] : []);
+      return keys.length ? JSON.stringify(keys) : "";
+    };
+    const reconcile = (target, source) => {
+      const previous = [...target.childNodes], children = [];
+      for (const child of [...source.childNodes]) {
+        const key = imageKeys(child);
+        const index = key ? previous.findIndex(node => (node.nodeName === child.nodeName || node.messageImageKey)
+          && imageKeys(node) === key) : -1;
+        const current = index < 0 ? null : previous.splice(index, 1)[0];
+        if (!current) { children.push(child); continue; }
+        if (!current.messageImageKey && !current.matches(".mermaid-block")) {
+          for (const attribute of [...current.attributes])
+            if (!child.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
+          for (const attribute of child.attributes)
+            if (current.getAttribute(attribute.name) !== attribute.value) current.setAttribute(attribute.name, attribute.value);
+          reconcile(current, child);
+        }
+        children.push(current);
+      }
+      const retained = new Set(children);
+      // 移动图片的祖先也可能重新加载图片，先移除不再使用的兄弟节点。
+      for (const child of [...target.childNodes]) if (!retained.has(child)) child.remove();
+      reconcileChildren(target, children);
+    };
+    reconcile(node, template.content);
+  } else node.innerHTML = html;
+  node.markdownHtml = html;
   for (const copy of node.querySelectorAll(".copy-code")) copy.onclick = () => copyText(copy.closest(".code-block").querySelector("code").textContent);
   bindMessageImages(node);
+  renderMermaidBlocks(node, () => {
+    if (followMessages && node.isConnected) $("#messages").scrollTop = $("#messages").scrollHeight;
+  });
 }
 function renderImageViewGroup(records, previous) {
   const groupRecords = Array.isArray(records) ? records : [records];
+  const occurrences = new Map();
   const entries = groupRecords.flatMap(record =>
     (Array.isArray(record?.imagePaths) ? record.imagePaths : [record?.path])
       .filter(path => typeof path === "string" && path.trim())
-      .map(path => ({ path, asset: record.remoteImages?.find(image => image.source === path) }))
+      .map(path => {
+        const sourceKey = JSON.stringify([record.id, path]), occurrence = occurrences.get(sourceKey) || 0;
+        occurrences.set(sourceKey, occurrence + 1);
+        return { key: JSON.stringify([sourceKey, occurrence]), path, asset: record.remoteImages?.find(image => image.source === path) };
+      })
   );
   const details = previous || element("details", "tool-item image-view-item");
-  const wasOpen = details.open;
+  let state = details.imageViewState;
+  if (!state) {
+    const summary = element("summary", "image-view-summary");
+    const visual = element("span"), label = element("strong");
+    const body = element("div", "image-view-body");
+    summary.append(visual, label, icon("chevron"));
+    details.replaceChildren(summary, body);
+    state = { visual, label, body, rows: new Map(), running: null };
+    details.imageViewState = state;
+    if (!previous) details.open = true;
+  }
   const running = groupRecords.some(record => ["inProgress", "running"].includes(record?.status));
   const failed = groupRecords.some(record => record?.status === "failed");
   details.className = `tool-item image-view-item${running ? " running" : ""}${failed ? " failed" : ""}`;
-  const summary = element("summary", "image-view-summary");
-  const imageIcon = element("span", "image-view-icon");
-  imageIcon.setAttribute("aria-hidden", "true");
-  imageIcon.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="m21 15-5-5L5 20"/></svg>';
-  const title = running ? "正在查看图像" : failed ? "图像查看失败" : entries.length > 1 ? `已查看 ${entries.length} 张图像` : "已查看图像";
-  summary.append(
-    running ? element("span", "spinner") : imageIcon,
-    element("strong", "", title),
-    icon("chevron")
-  );
-  const body = element("div", "image-view-body");
-  for (const { path, asset } of entries) {
-    const row = element("div", "image-view-entry");
-    const preview = messageImage(asset, "已检查的图片");
-    row.title = path;
-    row.append(preview || element("span", "image-view-placeholder", "图片预览不可用"));
-    body.append(row);
+  if (state.running !== running) {
+    state.visual.className = running ? "spinner" : "image-view-icon";
+    state.visual.setAttribute("aria-hidden", "true");
+    state.visual.innerHTML = running ? "" : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="m21 15-5-5L5 20"/></svg>';
+    state.running = running;
   }
-  details.replaceChildren(summary, body);
-  details.open = previous ? wasOpen : true;
+  const title = running ? "正在查看图像" : failed ? "图像查看失败" : entries.length > 1 ? `已查看 ${entries.length} 张图像` : "已查看图像";
+  if (state.label.textContent !== title) state.label.textContent = title;
+  const rows = new Map();
+  for (const { key, path, asset } of entries) {
+    const row = state.rows.get(key) || element("div", "image-view-entry");
+    const preview = messageImage(asset, "已检查的图片", undefined, row.firstElementChild);
+    row.title = path;
+    reconcileChildren(row, [preview || $(".image-view-placeholder", row) || element("span", "image-view-placeholder", "图片预览不可用")]);
+    rows.set(key, row);
+  }
+  reconcileChildren(state.body, [...rows.values()]);
+  state.rows = rows;
   return details;
 }
 function renderImageViewItem(item, previous) {
@@ -3197,7 +3448,7 @@ function renderTranscriptEvent(item, previous) {
     label = item.type === "modelRerouted" ? `模型已从 ${from} 重新路由到 ${to}` : `模型已从 ${from} 更改为 ${to}`;
     description = `模型切换可能触发上下文压缩。${item.reason ? ` 原因：${item.reason}` : ""}`;
   }
-  const text = element("span", "transcript-event-label", label);
+  const text = element("span", `transcript-event-label${compacting && item.status !== "failed" ? " working-label" : ""}`, label);
   const info = button("", description, event => event.stopPropagation(), "transcript-event-info");
   info.append(icon("info"));
   node.replaceChildren(symbol, text, info);
@@ -3228,40 +3479,47 @@ function reasoningPreviewText(item) {
   return [item.summary, item.content].flatMap(value => Array.isArray(value) ? value : [value])
     .map(part => typeof part === "string" ? part : part?.text || "").filter(text => text.trim()).at(-1) || "";
 }
-function renderItem(item, previous, inActivity = false, running = false, previewReasoning = false) {
+function renderItem(item, previous, inActivity = false, running = false) {
   if (item.type === "userMessage") {
     const node = previous || element("article", "message user-message");
     const editing = editingMessage?.threadId === selectedId && editingMessage.messageId === item.id;
     node.className = `message user-message${editing ? " editing-message" : ""}`;
     if (editing && editingMessage.form && node.contains(editingMessage.form)) return node;
     const display = userDisplayContent(item);
-    const bubble = element("div", "user-bubble");
-    if (display.questionReplies) for (const reply of display.questionReplies) {
-      const pair = element("div", "user-question-reply");
-      const question = element("strong", "user-reply-question", reply.question.trim());
-      question.title = reply.question.trim();
-      pair.append(question, document.createTextNode("\n"), element("div", "user-reply-answer", reply.answer));
-      bubble.append(pair);
+    const bubble = $(".user-bubble", node) || element("div", "user-bubble");
+    if (display.questionReplies) {
+      bubble.classList.remove("markdown");
+      bubble.markdownHtml = null;
+      bubble.replaceChildren();
+      for (const reply of display.questionReplies) {
+        const pair = element("div", "user-question-reply");
+        const question = element("strong", "user-reply-question", reply.question.trim());
+        question.title = reply.question.trim();
+        pair.append(question, document.createTextNode("\n"), element("div", "user-reply-answer", reply.answer));
+        bubble.append(pair);
+      }
     } else {
       bubble.classList.add("markdown");
       setMarkdown(bubble, display.text, item.remoteImages, { userMessage: true });
     }
-    const attachments = element("div", "user-attachments");
+    const attachments = $(".user-attachments", node) || element("div", "user-attachments");
+    const previousImages = [...attachments.children], images = [];
     for (const content of item.content || []) if (["image", "localImage"].includes(content.type)) {
       const source = content.path || content.url;
       const label = /^data:/iu.test(source || "") ? "图片附件" : String(source || "图片附件").split(/[\\/]/).at(-1);
-      const image = messageImage(item.remoteImages?.find(image => image.source === source), label, source);
-      attachments.append(image || element("span", "attachment-placeholder", "图片附件 · 请在 Codex 桌面查看"));
+      const image = messageImage(item.remoteImages?.find(image => image.source === source), label, source, previousImages[images.length]);
+      images.push(image || element("span", "attachment-placeholder", "图片附件 · 请在 Codex 桌面查看"));
     }
-    node.replaceChildren(...(attachments.childElementCount ? [attachments] : []),
-      ...(editing ? [messageEditor()] : display.text.trim() || display.questionReplies ? [bubble] : []));
+    reconcileChildren(attachments, images);
+    reconcileChildren(node, [...(images.length ? [attachments] : []),
+      ...(editing ? [messageEditor()] : display.text.trim() || display.questionReplies ? [bubble] : [])]);
     return node;
   }
   if (item.type === "agentMessage" || item.type === "plan") {
     const node = previous || element("article");
     node.className = `message agent-message${inActivity || item.phase === "commentary" ? " commentary" : ""}`;
-    const body = element("div", "markdown");
-    setMarkdown(body, textContent(item), item.remoteImages); node.replaceChildren(body);
+    const body = $(".markdown", node) || element("div", "markdown");
+    setMarkdown(body, textContent(item), item.remoteImages); reconcileChildren(node, [body]);
     return node;
   }
   if (isSubagentItem(item)) return renderSubagentItem(item, previous, running);
@@ -3281,17 +3539,11 @@ function renderItem(item, previous, inActivity = false, running = false, preview
   const interrupted = ["interrupted", "cancelled", "canceled"].includes(item.status);
   details.className = `tool-item${failed ? " failed" : ""}${interrupted ? " interrupted" : ""}${active ? " running" : ""}${item.type === "commandExecution" ? " command-item" : ""}${item.type === "reasoning" ? " reasoning-item" : ""}${genericTool ? " generic-tool-item" : ""}`;
   const summary = element("summary");
-  const reasoningPreview = item.type === "reasoning" && (active || previewReasoning) ? reasoningPreviewText(item) : "";
   const name = genericTool ? genericToolPresentation(item).description
     : item.type === "commandExecution" ? commandText(item)
     : item.type === "webSearch" ? item.action?.query || ""
     : item.type === "fileChange" ? (item.changes || []).map(change => String(change.path || "").split(/[\\/]/).at(-1)).join("、") : "";
-  if (reasoningPreview) {
-    summary.className = "reasoning-live-summary";
-    summary.title = active ? "正在思考，点击展开完整内容" : "思考，点击展开完整内容";
-    summary.setAttribute("aria-label", summary.title);
-    summary.append(element("span", "reasoning-live-preview", reasoningPreview));
-  } else if (genericTool) {
+  if (genericTool) {
     const presentation = genericToolPresentation(item);
     const state = failed ? "失败" : interrupted ? "已中断" : "";
     const visual = icon(failed ? "warning" : interrupted ? "stop" : presentation.icon);
@@ -3311,10 +3563,10 @@ function renderItem(item, previous, inActivity = false, running = false, preview
       : element("span", `tool-state${active ? " spinner" : ""}`, active ? "" : item.status === "failed" ? "!" : "✓"),
       label, element("span", "tool-description", name),
       element("small", "muted", active ? "进行中" : item.exitCode != null && item.exitCode !== 0 ? `退出码 ${item.exitCode}` : ""));
-    if (item.type === "commandExecution") {
-      summary.title = name;
+    if (["commandExecution", "reasoning"].includes(item.type)) {
+      summary.title = item.type === "reasoning" ? "查看思考内容" : name;
       const chevron = icon("chevron");
-      chevron.classList.add("command-chevron");
+      chevron.classList.add(item.type === "reasoning" ? "tool-chevron" : "command-chevron");
       summary.append(chevron);
     }
   }
@@ -3828,7 +4080,7 @@ function activityPresentation(turn, running, now = Date.now()) {
 function updateActivitySummary(activity) {
   const presentation = activityPresentation(activity.turn, activity.running);
   activity.ticking = activity.showSummary && presentation.ticking;
-  activity.summary.setAttribute("aria-label", `${presentation.text}，${activity.workCount} 条记录${activity.running ? "，仍在处理" : ""}`);
+  activity.summary.setAttribute("aria-label", `${presentation.text}${activity.workCount ? `，${activity.workCount} 条记录` : ""}${activity.running ? "，仍在处理" : ""}`);
   activity.summary.title = presentation.text;
   if (activity.label.textContent !== presentation.text) activity.label.textContent = presentation.text;
 }
@@ -3851,6 +4103,7 @@ function workGroupSummary(items, running = false) {
   const changes = items.filter(item => item.type === "fileChange");
   const tools = items.filter(item => ["mcpToolCall", "dynamicToolCall"].includes(item.type));
   const searches = items.filter(item => item.type === "webSearch");
+  const reasoning = items.filter(item => item.type === "reasoning");
   const paths = new Set(changes.flatMap(item => item.changes || []).map(change => change.path).filter(Boolean));
   const toolName = item => {
     const surface = item.result?._meta?.["codex/toolSurface"];
@@ -3866,12 +4119,16 @@ function workGroupSummary(items, running = false) {
   const name = names.length > 1 ? `${names.slice(0, -1).join("、")}和${names.at(-1)}` : names[0];
   const integrations = names.length > 0 && !names.includes("浏览器");
   const edited = changes.length ? "编辑了多个文件" : "";
-  let text = `${name ? `已使用 ${name}${integrations ? " 集成" : ""}` : ""}${searches.length ? "搜索了网页" : ""}${edited}${commands.length ? "运行了命令" : ""}` || "已完成操作";
-  let currentTool = null;
+  let text = `${name ? `已使用 ${name}${integrations ? " 集成" : ""}` : ""}${searches.length ? "搜索了网页" : ""}${edited}${commands.length ? "运行了命令" : ""}` || (reasoning.length ? "思考" : "已完成操作");
+  let currentTool = null, thinking = false;
   if (running) {
-    const current = items.findLast(item => item.type !== "reasoning");
-    if (current && tools.includes(current)) currentTool = genericToolPresentation(current);
-    text = current?.type === "commandExecution" && !skillReadInfo(current) ? "正在运行命令"
+    const current = items.at(-1);
+    thinking = current?.type === "reasoning"
+      || ["completed", "failed", "interrupted", "cancelled", "canceled"].includes(current?.status);
+    if (!thinking && current && tools.includes(current)) currentTool = genericToolPresentation(current);
+    text = thinking ? current?.type === "reasoning"
+      ? reasoningPreviewText(current).replace(/\s+/gu, " ").trim() || "正在思考" : "正在思考"
+      : current?.type === "commandExecution" && !skillReadInfo(current) ? "正在运行命令"
       : current?.type === "fileChange" ? "正在修改文件"
       : current?.type === "webSearch" ? "正在搜索网页"
       : currentTool?.description || "正在执行操作";
@@ -3883,15 +4140,16 @@ function workGroupSummary(items, running = false) {
     tools.length ? `${tools.length} 次工具调用` : "",
     changes.length ? paths.size ? `${paths.size} 个文件修改` : "有文件修改" : "",
     searches.length ? `${searches.length} 次网页搜索` : "",
+    reasoning.length ? `${reasoning.length} 条思考记录` : "",
     failed ? `${failed} 项失败，展开查看详情` : ""
   ].filter(Boolean);
   return {
-    text, description: counts.join("，"),
+    text, thinking, description: counts.join("，"),
     icon: currentTool?.icon || (names.length === 1 && ["Chrome", "Edge"].includes(name) || !tools.length && searches.length
       ? "globe" : tools.length ? "tools" : changes.length ? "fileChange" : "terminal")
   };
 }
-function renderCommandGroup(items, previous, renderMessage, running = false, turnRunning = running) {
+function renderCommandGroup(items, previous, renderMessage, running = false) {
   const records = Array.isArray(items) ? items : [];
   const group = previous?.classList?.contains("command-group") ? previous : element("details", "command-group");
   let state = group.commandGroupState;
@@ -3908,7 +4166,7 @@ function renderCommandGroup(items, previous, renderMessage, running = false, tur
     group.append(summary, panel);
     state = {
       summary, visual, title, panel,
-      items: [], renderMessage: null, scrollTop: 0, openItems: new Set(), running: false, completionTimer: null,
+      items: [], renderMessage: null, scrollTop: 0, openItems: new Set(),
       renderBody() {
         const scrollTop = panel.childElementCount ? panel.scrollTop : state.scrollTop;
         if (panel.childElementCount) state.openItems = new Set(
@@ -3946,20 +4204,9 @@ function renderCommandGroup(items, previous, renderMessage, running = false, tur
   }
   state.items = records;
   state.renderMessage = renderMessage;
-  if (running || !turnRunning) {
-    clearTimeout(state.completionTimer);
-    state.completionTimer = null;
-    state.running = running;
-  } else if (state.running && state.completionTimer == null) {
-    state.completionTimer = setTimeout(() => {
-      state.completionTimer = null;
-      state.running = false;
-      if (group.isConnected) scheduleMessages();
-    }, 800);
-  }
-  const active = state.running;
+  const active = running;
   const presentation = workGroupSummary(records, active);
-  const groupClass = `command-group${active ? " running" : ""}`;
+  const groupClass = `command-group${active ? " running" : ""}${presentation.thinking ? " thinking-group" : ""}`;
   if (group.className !== groupClass) group.className = groupClass;
   if (group.getAttribute("aria-busy") !== String(active)) group.setAttribute("aria-busy", String(active));
   const label = `${presentation.text}，${presentation.description}`;
@@ -3979,8 +4226,13 @@ function renderCommandGroup(items, previous, renderMessage, running = false, tur
   return group;
 }
 function renderActivity(turn, work, running, collapsible, renderMessage, showSummary = true) {
-  const key = `${turn.id}:${work[0].id}`;
+  const key = `${turn.id}:${work[0]?.id || "pending-thinking"}`;
   let activity = renderedActivities.get(key);
+  if (!activity && work.length) {
+    const pendingKey = `${turn.id}:pending-thinking`;
+    activity = renderedActivities.get(pendingKey);
+    if (activity) renderedActivities.delete(pendingKey);
+  }
   if (!activity) {
     const previous = work.map(item => renderedActivities.get(`${turn.id}:${item.id}`)).find(Boolean);
     const node = element("details", "activity-group");
@@ -3994,8 +4246,8 @@ function renderActivity(turn, work, running, collapsible, renderMessage, showSum
       activity.manualOpen = !node.open;
     };
     node.ontoggle = () => { if (node.isConnected) scheduleMessages(); };
-    renderedActivities.set(key, activity);
   }
+  renderedActivities.set(key, activity);
   const { node, summary, state, label, body } = activity;
   node.dataset.activityKey = key;
   activity.turn = turn; activity.running = running; activity.workCount = work.length; activity.showSummary = showSummary;
@@ -4013,6 +4265,14 @@ function renderActivity(turn, work, running, collapsible, renderMessage, showSum
   updateActivitySummary(activity);
   if (node.open || !running && [...activity.commandGroups.values()].some(group => group.classList.contains("running"))) {
     const children = [], commandKeys = new Set(), imageKeys = new Set();
+    const activeFlags = thread?.status?.status?.activeFlags || thread?.status?.activeFlags || [];
+    const working = running && !compactionLocked() && !thread?.requests?.length
+      && !activeFlags.some(flag => ["waitingOnApproval", "waitingOnUserInput"].includes(flag));
+    if (!work.length && working) {
+      const thinking = body.querySelector(":scope > .thinking-status") || element("div", "thinking-status working-label", "正在思考");
+      thinking.setAttribute("role", "status");
+      children.push(thinking);
+    }
     const visibleWork = work.filter(item => !["agentMessage", "plan"].includes(item.type) || textContent(item).trim());
     const isCommandRecord = item => item.type === "commandExecution" ? !skillReadInfo(item)
       : ["fileChange", "mcpToolCall", "dynamicToolCall", "webSearch", "reasoning"].includes(item.type);
@@ -4030,19 +4290,13 @@ function renderActivity(turn, work, running, collapsible, renderMessage, showSum
       }
       const records = [];
       while (index < visibleWork.length && isCommandRecord(visibleWork[index])) records.push(visibleWork[index++]);
-      const operations = records.filter(item => item.type !== "reasoning");
-      const preview = running && !collapsible ? records.findLast(item => item.type === "reasoning") : null;
-      if (!operations.length) {
-        children.push(...(preview ? [renderMessage(preview, true, true)] : records.map(item => renderMessage(item, true))));
-        continue;
-      }
-      const commandKey = operations[0].id;
-      const active = running && operations.some(item => ["inProgress", "running"].includes(item.status));
-      const previous = activity.commandGroups.get(commandKey) || operations.map(item => activity.commandGroups.get(item.id)).find(Boolean);
-      const group = renderCommandGroup(preview ? records.filter(item => item !== preview) : records, previous, renderMessage, active, running);
+      const commandKey = records[0].id;
+      const active = working && (records.some(item => ["inProgress", "running"].includes(item.status))
+        || records.at(-1) === turn.items?.at(-1));
+      const previous = activity.commandGroups.get(commandKey) || records.map(item => activity.commandGroups.get(item.id)).find(Boolean);
+      const group = renderCommandGroup(records, previous, renderMessage, active);
       activity.commandGroups.set(commandKey, group); commandKeys.add(commandKey);
       children.push(group);
-      if (preview) children.push(renderMessage(preview, true, true));
     }
     reconcileChildren(body, children);
     for (const key of activity.commandGroups.keys()) if (!commandKeys.has(key)) activity.commandGroups.delete(key);
@@ -4815,15 +5069,15 @@ function renderMessages(keepScroll = true) {
     const turnItems = turn.items || [], finalIndex = finalMessageIndex(turn),
       turnRunning = turn === sorted.at(-1) && turn.status === "inProgress" && (thread == null || isActiveThread());
     for (const item of turnItems) itemKeys.add(`${turn.id}:${item.id}`);
-    const renderMessage = (item, inActivity = false, previewReasoning = false) => {
+    const renderMessage = (item, inActivity = false) => {
       const key = `${turn.id}:${item.id}`, cached = renderedItems.get(key);
       const running = turnRunning && (["inProgress", "running"].includes(item.status) || item.type === "reasoning" && item === turnItems.at(-1));
       const editing = item.type === "userMessage" && editingMessage?.threadId === selectedId && editingMessage.messageId === item.id;
       const node = cached?.item === item && cached.inActivity === inActivity && cached.running === running
-        && cached.editing === editing && cached.previewReasoning === previewReasoning
-        ? cached.node : renderItem(item, cached?.item.type === item.type ? cached.node : null, inActivity, running, previewReasoning);
+        && cached.editing === editing
+        ? cached.node : renderItem(item, cached?.item.type === item.type ? cached.node : null, inActivity, running);
       node.dataset.key = key;
-      renderedItems.set(key, { item, node, inActivity, running, editing, previewReasoning });
+      renderedItems.set(key, { item, node, inActivity, running, editing });
       if (editing) node.messageActionBinding?.dispose();
       else if (item.type === "userMessage" || item.type === "agentMessage") {
         const threadId = selectedId;
@@ -4856,7 +5110,7 @@ function renderMessages(keepScroll = true) {
       const item = turnItems[index];
       if (index === finalIndex) continue;
       if (isSubagentItem(item) && ["wait", "wait_agent"].includes(subagentTool(item))) continue;
-      if (item.type === "reasoning" && !reasoningPreviewText(item)) continue;
+      if (item.type === "reasoning" && !reasoningPreviewText(item) && !(turnRunning && item === turnItems.at(-1))) continue;
       if (["agentMessage", "plan"].includes(item.type) && !textContent(item).trim()) continue;
       if (item.type === "userMessage" || transcriptEventTypes.has(item.type)) {
         flushActivity(true); content.push({ item });
@@ -4864,12 +5118,17 @@ function renderMessages(keepScroll = true) {
       else work.push(item);
     }
     flushActivity();
+    const activeFlags = thread?.status?.status?.activeFlags || thread?.status?.activeFlags || [];
+    if (turnRunning && finalIndex < 0 && !content.at(-1)?.work
+        && !compactionLocked() && !thread?.requests?.length
+        && !activeFlags.some(flag => ["waitingOnApproval", "waitingOnUserInput"].includes(flag)))
+      content.push({ work: [], collapsible: false });
     const activities = content.filter(part => part.work);
     const live = activityPresentation(turn, turnRunning).live;
     const header = live ? activities[0] : activities.at(-1);
     for (const part of content) {
       if (part.item) { items.push(renderMessage(part.item)); continue; }
-      const activity = renderActivity(turn, part.work, turnRunning, part.collapsible, renderMessage, part === header);
+      const activity = renderActivity(turn, part.work, live, part.collapsible, renderMessage, part === header);
       activityKeys.add(activity.dataset.activityKey); items.push(activity);
     }
     if (finalIndex >= 0) items.push(renderMessage(turnItems[finalIndex]));
@@ -5078,7 +5337,10 @@ function mergeLiveText(snapshot, live, partial = false) {
 }
 function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = null } = {}) {
   const current = turns.get(snapshot.id);
-  if (!current) return enrichTurnTranscriptEvents({ ...snapshot, itemsCursorAnchor: snapshot.items?.[0]?.id || null });
+  // 压缩输入可以跨页补投影，不能充当当前页的定位点。
+  const snapshotAnchor = snapshot.items?.find(item => !item.remoteCompactionInput)?.id || null;
+  if (!current) return enrichTurnTranscriptEvents({ ...snapshot, itemsCursorAnchor: snapshotAnchor });
+  const streaming = snapshot.status === "inProgress" && current.status === "inProgress";
   const previous = new Map((current.items || []).map(item => [item.id, item]));
   let items = (snapshot.items || []).map(item => {
     if (item.remotePendingInput && typeof item.clientId === "string") {
@@ -5091,8 +5353,11 @@ function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = nul
     if (!live) return item;
     if (item.type === "contextCompaction" && live.completed === true && item.completed !== true)
       item = { ...item, completed: true };
-    if ((itemVersions.get(key) || 0) > readVersion) {
-      const merged = { ...item, ...live };
+    const newer = (itemVersions.get(key) || 0) > readVersion;
+    if (newer || streaming && itemVersions.has(key)) {
+      const merged = newer ? { ...item, ...live } : { ...live, ...item };
+      if (["completed", "failed", "interrupted"].includes(live.status)
+          && ["inProgress", "running"].includes(item.status)) merged.status = live.status;
       if (Array.isArray(item.remoteImages) || Array.isArray(live.remoteImages))
         merged.remoteImages = [...new Map([...(item.remoteImages || []), ...(live.remoteImages || [])].map(image => [image.source, image])).values()];
       for (const field of ["text", "aggregatedOutput"]) if (typeof item[field] === "string" || typeof live[field] === "string")
@@ -5107,10 +5372,11 @@ function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = nul
     partialItems.delete(key);
     return JSON.stringify(live) === JSON.stringify(item) ? live : item;
   });
-  const pagination = { itemsCursorAnchor: snapshot.items?.[0]?.id || current.itemsCursorAnchor || null };
+  const pagination = { itemsCursorAnchor: snapshotAnchor || current.itemsCursorAnchor || null };
   if (snapshot.itemsPageComplete === true && (older || snapshot.itemsComplete !== true)) {
     const pageIds = new Set(items.map(item => item.id)), currentItems = current.items || [];
-    const overlap = currentItems.findIndex(item => pageIds.has(item.id));
+    const pageAnchors = new Set(items.filter(item => !item.remoteCompactionInput).map(item => item.id));
+    const overlap = currentItems.findIndex(item => pageAnchors.has(item.id));
     const remaining = currentItems.filter(item => !pageIds.has(item.id));
     let insertion = beforeId ? remaining.findIndex(item => item.id === beforeId) : -1;
     if (insertion < 0 && overlap >= 0)
@@ -5121,7 +5387,7 @@ function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = nul
     items = [...remaining.slice(0, insertion), ...items, ...remaining.slice(insertion)];
     if (!older && overlap >= 0) {
       const earlierPrefix = current.itemsCursorAnchor && pageIds.has(current.itemsCursorAnchor)
-        && snapshot.items?.[0]?.id !== current.itemsCursorAnchor;
+        && snapshotAnchor !== current.itemsCursorAnchor;
       if (current.itemsComplete === true || !earlierPrefix && current.itemsNextCursor) {
         pagination.itemsComplete = current.itemsComplete;
         pagination.itemsNextCursor = current.itemsNextCursor;
@@ -5130,7 +5396,15 @@ function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = nul
       }
     }
   } else {
-    for (const item of previous.values()) if ((itemVersions.get(`${snapshot.id}:${item.id}`) || 0) > readVersion) items.push(item);
+    for (const item of previous.values()) {
+      const key = `${snapshot.id}:${item.id}`;
+      // 历史分页可能尚未落盘当前轮的实时条目，不能将缺失当作删除。
+      if ((itemVersions.get(key) || 0) <= readVersion && !(streaming && itemVersions.has(key))) continue;
+      const index = current.items.findIndex(candidate => candidate.id === item.id);
+      const next = current.items.slice(index + 1).find(candidate => items.some(item => item.id === candidate.id));
+      const insertion = next ? items.findIndex(item => item.id === next.id) : items.length;
+      items.splice(insertion, 0, item);
+    }
   }
   const newer = (turnVersions.get(snapshot.id) || 0) > readVersion;
   const timing = Object.fromEntries(["startedAt", "completedAt", "durationMs", "turnStartedAtMs", "turnCompletedAtMs"]
@@ -5913,6 +6187,16 @@ function updateComposer() {
   }
   setComposerAttachmentsDisabled(session.readOnly || compacting || busy || stopping
     || !!editingMessage || editing && !!pending || editingQueuedMessage?.state === "starting" || (!creating && !selectedId));
+  const add = $("#composer-add");
+  const usage = contextUsage(thread?.tokenUsage);
+  add.menuOptions = [
+    { value: "compact", label: "压缩", icon: "compactContext",
+      description: usage ? `（已使用${usage.percent}%）` : "",
+      disabled: !compactCommandAvailable(), action: compactContext },
+    { label: "添加图片", icon: "image", disabled: !composerCanAddImages(), action: chooseComposerImages }
+  ];
+  add.disabled = add.menuOptions.every(option => option.disabled);
+  if (activePopup?.trigger === add) renderPopup();
   const sendingLabel = sending ? sending.phase === "syncing" ? "同步中…" : "发送中…" : "";
   if ($("#send-status").textContent !== sendingLabel) $("#send-status").textContent = sendingLabel;
   const action = sending ? "sending" : editingQueuedMessage ? "save"
@@ -5936,9 +6220,11 @@ function updateComposer() {
   $("#prompt").disabled = session.readOnly || compacting || !!editingMessage || editing && (busy || !!pending)
     || editingQueuedMessage?.state === "starting" || (!creating && !selectedId);
   $("#new-chat").disabled = session.readOnly || !connected;
-  $("#model-button").disabled = session.readOnly || compacting || editing;
+  $("#model-button").disabled = session.readOnly || compacting || !!editingQueuedMessage
+    || !!editingMessage && (busy || stopping || !!pending || !connected);
   $("#sidebar-view-toggle").disabled = sidebarBusy || !sidebar;
   syncNewChatProjectPicker();
+  updatePromptOptimization();
   for (const control of document.querySelectorAll(".row-menu-button")) control.disabled = session.readOnly || sidebarBusy || !connected;
   fitPopup();
   $("#prompt").placeholder = session.readOnly ? "当前设备为只读模式" : compacting ? "上下文压缩完成后可继续输入"
@@ -5949,24 +6235,21 @@ function updateComposer() {
   $("#model-button").replaceChildren(element("span", "model-name", name));
   if (effort) $("#model-button").append(document.createTextNode(" "), element("span", "model-effort", effortLabels[effort] || effort));
   $("#model-button").title = `模型：${name}${effort ? ` · 思考深度：${effortLabels[effort] || effort}` : ""}`;
-  const usage = contextUsage(thread?.tokenUsage), context = $("#context-info");
+  const context = $("#context-info");
   context.replaceChildren();
+  const ring = element("span", "context-usage-ring", usage ? `${usage.percent}%` : "—");
+  ring.style.setProperty("--context-progress", `${(usage?.percent || 0) * 3.6}deg`);
+  ring.setAttribute("aria-hidden", "true");
+  context.append(ring);
   if (usage) {
     const label = `${tokenCount(usage.used)} / ${usage.percent}%，${tokenCount(usage.total)}`;
     const description = `最后一次请求的上下文占用：${usage.used.toLocaleString()} / ${usage.total.toLocaleString()} Token，不是累计用量`;
-    const ring = element("span", "context-usage-ring", `${usage.percent}%`);
-    ring.style.setProperty("--context-progress", `${Math.min(100, usage.percent) * 3.6}deg`);
-    ring.setAttribute("aria-hidden", "true");
-    context.append(element("span", "context-usage-text", label), element("span", "context-usage-measure", label), ring);
     context.title = `${label}。${description}`;
     context.setAttribute("aria-label", context.title);
   } else {
-    context.textContent = "上下文信息尚未提供";
-    context.classList.remove("context-compact");
-    context.removeAttribute("title");
-    context.removeAttribute("aria-label");
+    context.title = "上下文信息尚未提供";
+    context.setAttribute("aria-label", context.title);
   }
-  scheduleComposerControlsLayout();
   if ($("#skill-menu") && !$("#skill-menu").hidden) renderSkillMenu();
   if (session.readOnly) closeComposerMenus();
   refitComposerMenus();
@@ -6240,6 +6523,8 @@ function receive(event) {
       && typeof pendingClientId === "string" && params.item && acceptedSendItem([params.item], pendingClientId))
     void resolvePending();
   if (event.method === "remote/asyncQuestionsChanged") {
+    clearTimeout(sidebarTimer);
+    sidebarTimer = setTimeout(() => void loadSidebar().catch(() => {}), 1200);
     if (params.threadId === selectedId) {
       notifiedQuestions = Array.isArray(params.requests) ? params.requests : [];
       ++questionVersion;
@@ -6365,7 +6650,8 @@ function receive(event) {
   }
   if (event.method === "skills/changed") { skillScope = ""; skillChoices = []; skillLoading = null; ++skillLoadVersion; if ($("#skill-menu") && !$("#skill-menu").hidden) void updateSkillMenu(); }
   if (event.method === "remote/requestsChanged" || event.method === "serverRequest/resolved") scheduleReload();
-  if (["thread/started", "turn/completed", "remote/sidebarChanged", "thread/name/updated", "thread/status/changed"].includes(event.method)) {
+  if (["thread/started", "turn/completed", "remote/sidebarChanged", "thread/name/updated", "thread/status/changed",
+    "remote/requestsChanged", "serverRequest/resolved"].includes(event.method)) {
     clearTimeout(sidebarTimer); sidebarTimer = setTimeout(() => void loadSidebar().catch(() => {}), 1200);
   }
 }

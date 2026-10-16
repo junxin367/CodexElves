@@ -5676,7 +5676,7 @@ fn injection_script_includes_builtin_prompt_optimization_without_edge_fallbacks(
         .and_then(|tail| tail.split("function promptOptimizeFeatureEnabled()").next())
         .expect("prompt optimization settings dialog should exist");
 
-    assert!(script.contains(r#"const codexPromptOptimizeVersion = "17";"#));
+    assert!(script.contains(r#"const codexPromptOptimizeVersion = "18";"#));
     assert!(feature.contains("const promptOptimizeSettingsVersion = 4;"));
     assert!(script.contains("const codexPromptOptimizeButtonSize = 16;"));
     assert!(script.contains("const codexPromptOptimizeAnchorGap = 8;"));

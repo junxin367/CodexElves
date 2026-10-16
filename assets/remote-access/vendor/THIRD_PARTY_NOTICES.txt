@@ -8,3 +8,10 @@ Source: npm package dompurify@3.4.17, dist/purify.es.mjs
 License: Apache-2.0 OR MPL-2.0
 License files: dompurify.Apache-2.0.LICENSE.txt, dompurify.MPL-2.0.LICENSE.txt
 Project: https://github.com/cure53/DOMPurify
+
+Mermaid 12.2.0
+Source: npm package mermaid@12.2.0, dist/mermaid.core.mjs, bundled as a single ES module
+License: MIT (mermaid.LICENSE.txt)
+Bundled dependency notices: mermaid.esm.js.LEGAL.txt
+Dependency licenses: mermaid.THIRD_PARTY_LICENSES.txt
+Project: https://github.com/mermaid-js/mermaid

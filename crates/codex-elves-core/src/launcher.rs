@@ -2433,7 +2433,12 @@ async fn handle_protocol_proxy_connection_inner(
                         true,
                     ),
                 );
-                let body = raw_body;
+                let body = crate::image_generation::rewrite_body(
+                    &raw_body,
+                    true,
+                    Some(request_context),
+                    request_json.as_ref(),
+                );
                 response_bytes += body.len();
                 response_truncated |=
                     crate::proxy_log::append_capture(&mut response_capture, &body);
@@ -2620,7 +2625,12 @@ async fn handle_protocol_proxy_connection_inner(
                     layered_compaction_options,
                 );
                 layered_compaction_log = compaction_log;
-                let final_bytes = final_sse_text.into_bytes();
+                let final_bytes = crate::image_generation::rewrite_body(
+                    final_sse_text.as_bytes(),
+                    true,
+                    Some(request_context),
+                    request_json.as_ref(),
+                );
                 response_bytes += final_bytes.len();
                 response_truncated |=
                     crate::proxy_log::append_capture(&mut response_capture, &final_bytes);
@@ -2897,7 +2907,12 @@ async fn handle_protocol_proxy_connection_inner(
             };
             serde_json::to_vec(&response)?
         } else {
-            upstream_body
+            crate::image_generation::rewrite_body(
+                &upstream_body,
+                false,
+                Some(request_context),
+                request_json.as_ref(),
+            )
         };
 
         let content_type = if bridge_remote_compaction_v2 || upstream_content_type.is_empty() {
@@ -3548,7 +3563,12 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                 .into_body_bytes_with_idle_timeout(stream_header_timeout)
                 .await?;
             upstream_model_observer.observe_sse_chunk(&raw_body, response_protocol);
-            let body = raw_body;
+            let body = crate::image_generation::rewrite_body(
+                &raw_body,
+                true,
+                Some(request_context),
+                request_json.as_ref(),
+            );
             let elapsed_ms = started_at.elapsed().as_millis() as u64;
             first_token_ms = Some(elapsed_ms);
             append_local_proxy_first_token_record(
@@ -3573,6 +3593,12 @@ async fn handle_deferred_protocol_proxy_stream_connection(
         } else {
             let mut cache_observer = upstream.take_cache_observer();
             let mut bytes_stream = upstream.into_response()?.bytes_stream();
+            let mut images = crate::image_generation::ImageGenerationSseBridge::new(
+                crate::image_generation::ImageGenerationBridge::for_request(
+                    Some(request_context),
+                    request_json.as_ref(),
+                ),
+            );
             loop {
                 let chunk = match next_stream_chunk_with_idle_timeout(
                     &mut bytes_stream,
@@ -3642,15 +3668,21 @@ async fn handle_deferred_protocol_proxy_stream_connection(
                         elapsed_ms,
                     );
                 }
-                response_bytes += bytes.len();
+                let forwarded = images.push_bytes(&bytes);
+                response_bytes += forwarded.len();
                 response_truncated |=
-                    crate::proxy_log::append_capture(&mut response_capture, &bytes);
-                stream.write_all(&bytes).await?;
+                    crate::proxy_log::append_capture(&mut response_capture, &forwarded);
+                stream.write_all(&forwarded).await?;
             }
-            if remote_compaction_stream_error.is_none()
-                && let Some(observer) = cache_observer.take()
-            {
-                observer.finish();
+            if remote_compaction_stream_error.is_none() {
+                let tail = images.finish();
+                response_bytes += tail.len();
+                response_truncated |=
+                    crate::proxy_log::append_capture(&mut response_capture, &tail);
+                stream.write_all(&tail).await?;
+                if let Some(observer) = cache_observer.take() {
+                    observer.finish();
+                }
             }
         }
         log_helper_response(

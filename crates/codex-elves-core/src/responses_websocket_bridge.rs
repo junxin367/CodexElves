@@ -2223,6 +2223,7 @@ fn websocket_continue_request_body(requests: &[Value]) -> Option<String> {
 #[derive(Clone)]
 struct WebSocketRequestLogger {
     state: Arc<Mutex<WebSocketRequestLogState>>,
+    images: Arc<Mutex<crate::image_generation::ImageGenerationBridge>>,
 }
 
 struct WebSocketRequestLogState {
@@ -2302,6 +2303,9 @@ impl WebSocketRequestLogger {
     ) -> Self {
         let connected_at = Instant::now();
         Self {
+            images: Arc::new(Mutex::new(
+                crate::image_generation::ImageGenerationBridge::for_request(None, None),
+            )),
             state: Arc::new(Mutex::new(WebSocketRequestLogState {
                 remote_addr,
                 path,
@@ -2330,6 +2334,10 @@ impl WebSocketRequestLogger {
         relay: crate::settings::RelayProfile,
         context: crate::request_headers::RequestContext,
     ) {
+        if let Ok(mut images) = self.images.lock() {
+            *images =
+                crate::image_generation::ImageGenerationBridge::for_request(Some(&context), None);
+        }
         if let Ok(mut state) = self.state.lock() {
             state.transport_context = Some((relay, context, None));
         }
@@ -3402,13 +3410,34 @@ async fn forward_downstream_response<S>(
 where
     S: Sink<Message, Error = WebSocketError> + Unpin,
 {
-    let closed = forward_websocket_message(
-        downstream,
-        message.clone(),
-        "转发 Responses WebSocket 响应超时",
-        "转发 Responses WebSocket 响应失败",
-    )
-    .await?;
+    let rewritten = if let Message::Text(text) = &message {
+        request_logger
+            .images
+            .lock()
+            .ok()
+            .and_then(|mut images| images.rewrite_text(text.as_str()))
+    } else {
+        None
+    };
+    let messages = rewritten.map_or_else(
+        || vec![message.clone()],
+        |events| {
+            events
+                .into_iter()
+                .map(|text| Message::Text(text.into()))
+                .collect()
+        },
+    );
+    let mut closed = false;
+    for message in messages {
+        closed |= forward_websocket_message(
+            downstream,
+            message,
+            "转发 Responses WebSocket 响应超时",
+            "转发 Responses WebSocket 响应失败",
+        )
+        .await?;
+    }
     request_logger.record_response_for(&message, preferred_log_id);
     Ok(closed)
 }

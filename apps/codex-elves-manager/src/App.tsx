@@ -70,7 +70,7 @@ import {
 import { ProviderPresetSelector } from "@/components/ProviderPresetSelector";
 import type { PresetPatch } from "@/components/ProviderPresetSelector";
 import type { RelayMode, RelayModelMapping, RelayProtocol } from "@/relay-types";
-import { readProxyTokenUsage } from "@/proxy-token-usage";
+import { readProxyRequestCacheTtl, readProxyTokenUsage } from "@/proxy-token-usage";
 import { JsonViewer } from "@/components/JsonViewer";
 import { RemoteAccessScreen } from "@/components/RemoteAccessScreen";
 import { defaultRemoteAccessSettings, type RemoteAccessSettings } from "@/remote-access-types";
@@ -1639,7 +1639,7 @@ function browserPreviewLocalProxyEntries(): LocalProxyLogEntry[] {
       statusCode: success || failedCompaction ? 200 : transport === "ws" ? 500 : 502,
       firstTokenMs: browserPreviewFirstTokenMs(index),
       durationMs: pending ? null : browserPreviewDurationMs(index),
-      stream: index % 2 === 0,
+      stream: index % 2 === 0 || index === 13,
       requestBytes: 2800 + index * 173,
       responseBytes: 5400 + index * 241,
       responseCapturedBytes: 5400 + index * 241,
@@ -1670,6 +1670,7 @@ function browserPreviewFirstTokenMs(index: number) {
 function browserPreviewLocalProxyDetail(id: string): LocalProxyLogDetail | null {
   const entry = browserPreviewLocalProxyEntries().find((item) => item.id === id);
   if (!entry) return null;
+  const cacheTtl = id === "ppx-preview-10" ? "1h" : id === "ppx-preview-6" ? "5m" : undefined;
   const previewUsage = entry.error ? undefined : {
     input_tokens: 132727,
     output_tokens: entry.outputTokens ?? 1249,
@@ -1677,6 +1678,7 @@ function browserPreviewLocalProxyDetail(id: string): LocalProxyLogDetail | null 
     output_tokens_details: {
       reasoning_tokens: Math.min(entry.reasoningTokens ?? 0, entry.outputTokens ?? 1249),
     },
+    ...(cacheTtl === "5m" ? { cache_creation: { ephemeral_5m_input_tokens: 745 } } : {}),
   };
   return {
     ...entry,
@@ -1687,6 +1689,7 @@ function browserPreviewLocalProxyDetail(id: string): LocalProxyLogDetail | null 
         reasoning: { effort: entry.reasoningEffort },
         service_tier: entry.serviceTier,
         stream: entry.stream,
+        cache_control: cacheTtl ? { type: "ephemeral", ttl: cacheTtl } : undefined,
         input: entry.remoteCompactionTriggered
           ? [
               { role: "user", content: "浏览器预览原生远程压缩请求" },
@@ -5293,6 +5296,19 @@ function LocalProxyLogDetailDialog({
     () => readProxyTokenUsage(formattedResponseViewBody),
     [formattedResponseViewBody],
   );
+  const requestCacheTtl = useMemo(
+    () => readProxyRequestCacheTtl(formattedRequestViewBody),
+    [formattedRequestViewBody],
+  );
+  const cacheTtl = tokenUsage.cacheTtl ?? requestCacheTtl;
+  const cacheTtlText = cacheTtl
+    ? { "5m": "5 分钟", "1h": "1 小时", mixed: "5 分钟 + 1 小时" }[cacheTtl]
+    : "未知";
+  const cacheTtlHint = tokenUsage.cacheTtl
+    ? "根据当前返回内容中的缓存时长明细显示。"
+    : requestCacheTtl
+      ? "请求指定的缓存时长；上游未返回实际时长明细，是否生效以供应商为准。"
+      : "请求未记录缓存时长，返回内容也没有时长明细，无法确认是 5 分钟还是 1 小时。";
   const tokenMetrics = [
     { label: "输入", value: tokenUsage.input, hint: "包含缓存命中和缓存写入的输入总量" },
     { label: "输出", value: tokenUsage.output, hint: "响应报告的输出总量，推理 Token 不重复相加" },
@@ -5355,6 +5371,11 @@ function LocalProxyLogDetailDialog({
             <span>请求 {formatBytes(entry.requestBytes)}</span>
             <span>返回 {formatOptionalBytes(entry.responseBytes)}</span>
             <span>{entry.stream ? "流式" : "非流式"}</span>
+            {isClaudeModel(entry.upstreamRequestModel || entry.upstreamResponseModel || proxyLogDisplayModel(entry)) ? (
+              <span data-tooltip={cacheTtlHint}>
+                缓存 {cacheTtlText}{!tokenUsage.cacheTtl && requestCacheTtl ? "（请求）" : ""}
+              </span>
+            ) : null}
             {entry.responseTruncated ? <span>返回内容已截断</span> : null}
           </div>
           <div className="proxy-detail-audit" aria-label="请求结果记录">
@@ -12207,6 +12228,11 @@ function isContinueThinkingEntry(entry: LocalProxyLogEntry) {
 
 function isGptModel(model?: string | null) {
   return Boolean(model?.toLowerCase().includes("gpt"));
+}
+
+function isClaudeModel(model?: string | null) {
+  const slug = model?.trim().toLowerCase().split("/").filter(Boolean).pop() || "";
+  return slug === "claude" || slug.startsWith("claude-") || slug.startsWith("anthropic.claude");
 }
 
 function formatReasoningTokens(value?: number | null) {

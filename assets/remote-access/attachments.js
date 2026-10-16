@@ -9,7 +9,6 @@ const supportedMimes = new Set(["image/png", "image/jpeg", "image/webp", "image/
 let attachments = [];
 let attachmentRoot = null;
 let attachmentInput = null;
-let attachmentButton = null;
 let composerPrompt = null;
 let changeListener = () => {};
 let showNotice = () => {};
@@ -180,16 +179,11 @@ function renderComposerAttachments() {
   }
   attachmentRoot.hidden = attachments.length === 0;
   attachmentRoot.classList.toggle("attachments-locked", locked);
-  if (attachmentButton) {
-    attachmentButton.disabled = disabled || locked || readingFiles;
-    attachmentButton.hidden = locked;
-  }
   if (attachmentInput) attachmentInput.disabled = disabled || locked || readingFiles;
 }
 
 async function addFiles(files) {
-  const candidates = [...files].filter(file => supportedMimes.has(String(file?.type || "").toLowerCase())
-    || /\.(?:png|jpe?g|webp|gif)$/iu.test(String(file?.name || "")));
+  const candidates = [...files];
   if (!candidates.length) return false;
   if (disabled || locked || readingFiles) {
     showNotice(locked
@@ -212,12 +206,16 @@ async function addFiles(files) {
   changeListener();
   const version = attachmentVersion;
   try {
-    const next = [];
-    for (const file of candidates) next.push(await readImageFile(file));
-    if (version !== attachmentVersion) return true;
+    const next = [], errors = [];
+    for (const file of candidates) {
+      try { next.push(await readImageFile(file)); }
+      catch (error) { errors.push(`${attachmentName(file?.name)}：${error?.message || "无法添加图片"}`); }
+      if (version !== attachmentVersion) return true;
+    }
     attachments.push(...next);
     renderComposerAttachments();
     changeListener();
+    if (errors.length) showNotice(`已添加 ${next.length} 张图片；${errors.join("；")}`, true);
   } catch (error) {
     showNotice(error?.message || "无法添加图片", true);
   } finally {
@@ -243,23 +241,14 @@ export function mountComposerAttachments({ form, prompt, onChange, notice } = {}
   prompt.before(attachmentRoot);
 
   attachmentInput = document.createElement("input");
+  attachmentInput.id = "composer-image-input";
   attachmentInput.type = "file";
-  attachmentInput.accept = "image/png,image/jpeg,image/webp,image/gif";
+  attachmentInput.accept = "image/*";
   attachmentInput.multiple = true;
   attachmentInput.hidden = true;
   attachmentInput.setAttribute("aria-hidden", "true");
-  attachmentInput.onchange = () => void addFiles(attachmentInput.files || []);
+  attachmentInput.onchange = event => void addFiles([...(event.target.files || [])]);
   form.append(attachmentInput);
-
-  attachmentButton = document.createElement("button");
-  attachmentButton.id = "attach-image";
-  attachmentButton.type = "button";
-  attachmentButton.className = "icon-button attach-image-button";
-  attachmentButton.setAttribute("aria-label", "选择图片");
-  attachmentButton.title = "选择图片";
-  attachmentButton.textContent = "＋";
-  attachmentButton.onclick = () => attachmentInput.click();
-  form.querySelector(".composer-controls")?.prepend(attachmentButton);
 
   form.addEventListener("dragover", event => {
     if (![...event.dataTransfer?.items || []].some(item => item.kind === "file"
@@ -294,6 +283,14 @@ export function composerHasAttachments() {
 
 export function composerAttachmentsLoading() {
   return readingFiles;
+}
+
+export function composerCanAddImages() {
+  return !disabled && !locked && !readingFiles;
+}
+
+export function chooseComposerImages() {
+  if (composerCanAddImages()) attachmentInput?.click();
 }
 
 export function composerAttachmentSnapshot() {

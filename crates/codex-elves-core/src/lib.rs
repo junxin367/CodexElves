@@ -13,6 +13,7 @@ pub mod continue_thinking;
 pub mod diagnostic_log;
 pub mod env_conflicts;
 pub mod http_client;
+mod image_generation;
 pub mod install;
 pub mod lan_proxy;
 pub mod launcher;

@@ -1,5 +1,7 @@
 type JsonObject = Record<string, unknown>;
 
+export type ProxyCacheTtl = "5m" | "1h" | "mixed";
+
 export type ProxyTokenUsage = {
   input: number | null;
   output: number | null;
@@ -8,6 +10,7 @@ export type ProxyTokenUsage = {
   cacheWrite: number | null;
   reasoning: number | null;
   cacheHitRate: number | null;
+  cacheTtl: ProxyCacheTtl | null;
 };
 
 function object(value: unknown): JsonObject {
@@ -21,6 +24,34 @@ function tokens(...values: unknown[]): number | null {
     (value): value is number =>
       typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
   ) ?? null;
+}
+
+export function readProxyRequestCacheTtl(formattedBody: string): ProxyCacheTtl | null {
+  let request: JsonObject;
+  try {
+    request = object(JSON.parse(formattedBody));
+  } catch {
+    return null;
+  }
+  const ttls = new Set<"5m" | "1h">();
+  const visit = (value: unknown) => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    const block = object(value);
+    const control = object(block.cache_control);
+    if (control.type === "ephemeral") {
+      if (control.ttl === "1h") ttls.add("1h");
+      else if (control.ttl === undefined || control.ttl === "5m") ttls.add("5m");
+    }
+    if (Array.isArray(block.content)) block.content.forEach(visit);
+  };
+  visit(request);
+  visit(request.tools);
+  visit(request.system);
+  visit(request.messages);
+  return ttls.size > 1 ? "mixed" : ttls.values().next().value ?? null;
 }
 
 // 输入是详情页格式化后的 JSON：单个响应，或 SSE / WebSocket 事件数组。
@@ -59,6 +90,15 @@ export function readProxyTokenUsage(formattedBody: string): ProxyTokenUsage {
   );
   const write5m = tokens(cacheCreation.ephemeral_5m_input_tokens, usage.cache_creation_5m_input_tokens);
   const write1h = tokens(cacheCreation.ephemeral_1h_input_tokens, usage.cache_creation_1h_input_tokens);
+  const cacheTtl: ProxyCacheTtl | null = (write5m ?? 0) > 0 && (write1h ?? 0) > 0
+    ? "mixed"
+    : (write1h ?? 0) > 0
+      ? "1h"
+      : (write5m ?? 0) > 0
+        ? "5m"
+        : usage.cache_ttl === "5m" || usage.cache_ttl === "1h" || usage.cache_ttl === "mixed"
+          ? usage.cache_ttl
+          : null;
   const writeBreakdown = write5m !== null || write1h !== null
     ? (write5m ?? 0) + (write1h ?? 0)
     : null;
@@ -85,7 +125,7 @@ export function readProxyTokenUsage(formattedBody: string): ProxyTokenUsage {
     usage.reasoning_tokens, usage.thinking_tokens,
   );
   return {
-    input, output, total, cached, cacheWrite, reasoning,
+    input, output, total, cached, cacheWrite, reasoning, cacheTtl,
     cacheHitRate: input !== null && input > 0 && cached !== null && cached <= input
       ? cached / input
       : null,

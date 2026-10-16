@@ -1,5 +1,5 @@
 (() => {
-  if (window.__codexElvesRemoteAccess?.version === 29) return;
+  if (window.__codexElvesRemoteAccess?.version === 33) return;
   window.__codexElvesRemoteAccess?.dispose?.();
   let manager = null;
   let appScope = null;
@@ -10,6 +10,7 @@
   const notifications = [];
   const queuedReorders = new Set();
   const asyncQuestionSignatures = new Map();
+  const sidebarSignatures = new Map();
   const questionReplyStore = (() => {
     const existing = window.__codexElvesRemoteQuestionReplies;
     if (existing instanceof Map) return existing;
@@ -143,6 +144,12 @@
       if (typeof manager.addConversationStateCallback === "function")
         unsubscribe.push(manager.addConversationStateCallback((id, conversation) => {
           if (asyncQuestionSignatures.has(id)) syncAsyncQuestions(id, conversation);
+          if (conversation && nativeCatalog.has(id)) {
+            const previous = sidebarSignatures.get(id);
+            const item = summary(conversation);
+            nativeCatalog.set(id, item);
+            if (previous !== sidebarSignatures.get(id)) emit({ method: "remote/sidebarChanged" });
+          }
         }));
     }
     return manager;
@@ -220,21 +227,55 @@
   }
   const timestamp = value => typeof value === "number" ? (value < 100_000_000_000 ? value * 1000 : value) : 0;
   let nativeCatalog = new Map();
+  let sidebarPriorityOptions = { enabled: true, showPinned: false, showScheduled: false, scheduledIds: new Set() };
   let catalogLoaded = false;
   let catalogLoading = null;
   function nativeUnreadState(thread, id) {
     const current = typeof manager.getThreadListSummary === "function" ? manager.getThreadListSummary(id) : null;
     return current?.hasUnreadTurn === true || current?.hasUnreadTurn !== false && thread.hasUnreadTurn === true;
   }
-  function summary(thread) {
-    const id = thread.conversationId || thread.id;
+  function sidebarPriority(id, current, unread, activityTimes) {
+    const conversation = manager.getConversation(id);
+    const view = conversation && manager.threadStore?.stateReaders?.getListState?.(conversation);
+    const status = manager.getThreadRuntimeStatusEvidence?.(id)
+      || current.threadRuntimeStatus || current.status || { type: "idle" };
+    const type = typeof status === "string" ? status : status.type;
+    const waiting = !!view?.pendingRequest
+      || array(view?.unansweredAsyncQuestions?.questionIds ?? view?.unansweredAsyncQuestions).length > 0
+      || array(status.activeFlags).some(flag => flag === "waitingOnApproval" || flag === "waitingOnUserInput");
+    const active = type === "active" || type === "inProgress"
+      || type !== "systemError" && view?.resumeState !== "needs_resume"
+        && (view?.isResponseInProgress === true || view?.isConversationInProgress === true);
+    const attentionState = waiting ? "waiting" : unread ? "unread" : active ? "active" : "idle";
+    const activity = activityTimes || manager.storage.readValue("thread-user-activity-times-v1") || {};
+    const lastActivity = activity[JSON.stringify(["local", id])];
+    const silentHeartbeat = (attentionState === "idle" || attentionState === "active")
+      && view?.latestTurnIsSilentHeartbeat === true;
+    const unattendedHeartbeat = attentionState === "active" && view?.pendingHeartbeatStartedAtMs != null
+      && (lastActivity == null || lastActivity < view.pendingHeartbeatStartedAtMs);
     return {
-      id, title: thread.title || thread.name || thread.preview || "新会话", cwd: thread.cwd || "",
-      createdAt: timestamp(thread.createdAt), updatedAt: timestamp(thread.updatedAt),
-      recencyAt: timestamp(thread.recencyAt ?? thread.updatedAt), hasUnreadTurn: nativeUnreadState(thread, id),
-      status: thread.threadRuntimeStatus || thread.status || { type: "idle" },
-      threadSource: thread.threadSource, projectId: null, pinned: false
+      status,
+      attentionState,
+      active,
+      eligible: sidebarPriorityOptions.enabled && !silentHeartbeat && !unattendedHeartbeat
+        && (sidebarPriorityOptions.showScheduled || !sidebarPriorityOptions.scheduledIds.has(id))
+        && current.threadStartKind !== "aeon" && current.threadSource !== "aeon"
     };
+  }
+  function summary(thread, activityTimes) {
+    const id = thread.conversationId || thread.id;
+    const current = manager.getThreadListSummary?.(id) || thread;
+    const unread = nativeUnreadState(thread, id);
+    const { status, ...priority } = sidebarPriority(id, current, unread, activityTimes);
+    const result = {
+      id, title: current.title || thread.title || thread.name || thread.preview || "新会话", cwd: current.cwd || thread.cwd || "",
+      createdAt: timestamp(current.createdAt ?? thread.createdAt), updatedAt: timestamp(current.updatedAt ?? thread.updatedAt),
+      recencyAt: timestamp(current.recencyAt ?? current.updatedAt ?? thread.recencyAt ?? thread.updatedAt), hasUnreadTurn: unread,
+      status, priority,
+      threadSource: current.threadSource ?? thread.threadSource, projectId: null, pinned: false
+    };
+    sidebarSignatures.set(id, JSON.stringify([result.title, result.recencyAt, unread, status, priority]));
+    return result;
   }
   function sortMode(value, preferences) {
     return value === "manual" && preferences.manualSortVersion === 1 ? "manual" : "updated_at";
@@ -246,6 +287,22 @@
     const preferences = manager.storage.readValue("flat-project-sidebar-preferences-v1") || {};
     const sharedSort = manager.storage.readValue("codex-sidebar-sort-mode-v1");
     const pinnedSort = manager.storage.readValue("pinned-sidebar-sort-mode-v1") === "manual" ? "manual" : "updated_at";
+    const activityTimes = manager.storage.readValue("thread-user-activity-times-v1") || {};
+    const scheduledIds = new Set();
+    for (const query of appScope?.queryClient?.getQueryCache?.()?.getAll?.() || []) {
+      if (!JSON.stringify(query.queryKey).includes('"inbox-items"')) continue;
+      const data = query.state?.data?.data || query.state?.data;
+      for (const item of array(data?.items))
+        if (item.automationId != null && item.threadId) scheduledIds.add(item.threadId);
+      for (const item of array(data?.unreadRunCounts?.unreadRuns))
+        if (item.threadId) scheduledIds.add(item.threadId);
+    }
+    sidebarPriorityOptions = {
+      enabled: manager.storage.readValue("sidebar-priority-show-priority-v1") !== false,
+      showPinned: manager.storage.readValue("sidebar-priority-show-pinned-v1") === true,
+      showScheduled: manager.storage.readValue("sidebar-priority-show-scheduled-v1") === true,
+      scheduledIds
+    };
     const chatSort = sharedSort == null ? sortMode(preferences.chatSortMode, preferences) : "updated_at";
     const projectSort = sharedSort == null ? sortMode(preferences.projectSortMode, preferences) : "updated_at";
     const observeThreads = threads => {
@@ -255,7 +312,7 @@
           nativeCatalog.delete(id);
           continue;
         }
-        nativeCatalog.set(id, summary(thread));
+        nativeCatalog.set(id, summary(thread, activityTimes));
       }
     };
     if (!catalogLoaded) {
@@ -295,7 +352,9 @@
         const matches = projects.filter(project => project.roots.some(root => normalizePath(root) === normalizePath(thread.cwd)));
         if (matches.length === 1) projectId = matches[0].id;
       }
-      return { ...thread, projectId, pinned: pinnedIds.includes(thread.id) };
+      const pinned = pinnedIds.includes(thread.id);
+      return { ...thread, projectId, pinned,
+        priority: { ...thread.priority, eligible: thread.priority.eligible && (!pinned || !sidebarPriorityOptions.showPinned) } };
     });
     const manualOrder = stored["sidebar-project-thread-orders"] || {};
     const sortThreads = (items, ids, mode) => items.sort((a, b) => mode === "manual"
@@ -778,7 +837,7 @@
   async function editLastMessage(payload = {}) {
     messageActionManager();
     const id = requiredId(payload.threadId);
-    await readThread(id);
+    const loaded = await readThread(id);
     const state = editableMessageState(id);
     if (!state.metadata) throw failure(409, state.reason || "最后一条用户消息当前不可编辑");
     if (payload.turnId !== state.metadata.turnId || payload.messageId !== state.metadata.messageId)
@@ -786,6 +845,36 @@
     if (typeof payload.prompt !== "string" || !payload.prompt.trim())
       throw failure(400, "消息不能为空");
     const conversation = manager.getConversation(id);
+    const model = payload.model == null ? undefined : String(payload.model);
+    const reasoningEffort = payload.reasoningEffort == null ? undefined : String(payload.reasoningEffort);
+    if (model !== undefined || reasoningEffort !== undefined) {
+      const currentModel = conversation?.latestCollaborationMode?.settings?.model
+        || conversation?.latestModel || loaded.model;
+      const selectedModel = model ?? currentModel;
+      if (typeof selectedModel !== "string" || !selectedModel.trim())
+        throw failure(400, "请求模型不能为空");
+      try {
+        await validateReasoningEffort(selectedModel, reasoningEffort);
+        if (typeof manager.updateThreadSettingsForNextTurn !== "function")
+          throw failure(503, "当前 Codex 版本不支持编辑消息时切换模型");
+        const current = editableMessageState(id);
+        if (!current.metadata || current.metadata.turnId !== payload.turnId || current.metadata.messageId !== payload.messageId)
+          throw failure(409, current.reason || "消息已变化，请刷新会话后重试");
+        const applied = await manager.updateThreadSettingsForNextTurn(id, {
+          model: selectedModel,
+          effort: reasoningEffort === undefined
+            ? model !== undefined && model !== currentModel ? null
+              : conversation?.latestReasoningEffort ?? loaded.reasoningEffort ?? null
+            : reasoningEffort
+        });
+        if (applied === false) throw failure(409, "模型或思考深度未能应用，请重新核对后发送");
+        const updated = editableMessageState(id);
+        if (!updated.metadata || updated.metadata.turnId !== payload.turnId || updated.metadata.messageId !== payload.messageId)
+          throw failure(409, updated.reason || "消息已变化，请刷新会话后重试");
+      } catch (error) {
+        throw failure(error.code || 503, error.message || "模型或思考深度切换失败，请稍后重试");
+      }
+    }
     const options = {
       turnId: state.metadata.turnId,
       message: payload.prompt,
@@ -858,11 +947,13 @@
     const prompt = `<send_user_message_question_reply>\n${JSON.stringify(replies)}\n</send_user_message_question_reply>`;
     if (new TextEncoder().encode(prompt).length > 128 * 1024) throw failure(400, "回答不能超过 128 KiB");
     if (runtimeCompaction(id).state !== "idle") throw failure(409, "上下文压缩完成前不能提交回答");
+    if (!appScope) discover();
+    if (!appScope) throw failure(503, "Codex 界面上下文尚未就绪，请稍后重试提交回答");
     const module = await nativeCreationModule();
     const submit = Object.values(module).find(value => typeof value === "function"
       && ["isSubmissionCurrent", "getTurnCoordinator", ".sendMessage("]
         .every(marker => Function.prototype.toString.call(value).includes(marker)));
-    if (!submit || !appScope) throw failure(503, "当前 Codex 版本的原生异步问答提交服务不可用");
+    if (!submit) throw failure(503, "当前 Codex 版本的原生异步问答提交服务不可用");
     const key = JSON.stringify([id, request.id]);
     if (questionReplyStore.has(key)) throw failure(409, "此回答已提交或结果待确认，请先核对回答状态");
     const isCurrent = () => {
@@ -2302,6 +2393,15 @@
       }
       if (!manager) discover();
       switch (action) {
+        case "optimizePrompt":
+        case "promptOptimization":
+        case "cancelPromptOptimize": {
+          const runtime = window.__codexElvesPromptOptimizeRemote;
+          const method = { optimizePrompt: "start", promptOptimization: "status", cancelPromptOptimize: "cancel" }[action];
+          if (typeof runtime?.[method] !== "function")
+            throw failure(503, "CodexElves 提示词优化尚未就绪，请在桌面端更新增强功能");
+          return await runtime[method](payload);
+        }
         case "events": {
           const reset = payload.epoch !== epoch || payload.cursor < (notifications[0]?.sequence || 1) - 1;
           return { ok: true, epoch, cursor: eventSequence, reset,
@@ -2555,7 +2655,7 @@
     }
   }
   window.__codexElvesRemoteAccess = {
-    version: 29, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
+    version: 33, call, removeQueued, reorderQueued, beginQueuedEdit, editQueued, cancelQueuedEdit, queueMessage,
     dispose() {
       for (const dispose of unsubscribe) { try { dispose?.(); } catch {} }
       unsubscribe = [];

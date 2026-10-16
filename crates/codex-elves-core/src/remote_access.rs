@@ -53,6 +53,8 @@ const WEB_VENDOR_MARKED_JS: &str =
     include_str!("../../../assets/remote-access/vendor/marked.esm.js");
 const WEB_VENDOR_DOMPURIFY_JS: &str =
     include_str!("../../../assets/remote-access/vendor/dompurify.esm.js");
+const WEB_VENDOR_MERMAID_JS: &str =
+    include_str!("../../../assets/remote-access/vendor/mermaid.esm.js");
 const COOKIE_NAME: &str = "codex_elves_device";
 const MAX_DEVICES: usize = 32;
 const MAX_RECEIPTS: usize = 20_000;
@@ -1050,6 +1052,13 @@ fn web_assets() -> &'static HashMap<&'static str, StaticWebAsset> {
                 ),
             ),
             (
+                "/vendor/mermaid.esm.js",
+                StaticWebAsset::new(
+                    "application/javascript; charset=utf-8",
+                    WEB_VENDOR_MERMAID_JS.as_bytes(),
+                ),
+            ),
+            (
                 "/message-actions.js",
                 StaticWebAsset::new(
                     "application/javascript; charset=utf-8",
@@ -1079,6 +1088,7 @@ fn is_static_web_asset_path(path: &str) -> bool {
             | "/markdown.js"
             | "/vendor/marked.esm.js"
             | "/vendor/dompurify.esm.js"
+            | "/vendor/mermaid.esm.js"
             | "/message-actions.js"
             | "/style.css"
     )
@@ -1207,6 +1217,7 @@ pub fn web_router(
         .route("/markdown.js", get(static_web_asset))
         .route("/vendor/marked.esm.js", get(static_web_asset))
         .route("/vendor/dompurify.esm.js", get(static_web_asset))
+        .route("/vendor/mermaid.esm.js", get(static_web_asset))
         .route("/message-actions.js", get(static_web_asset))
         .route("/style.css", get(static_web_asset))
         .route("/api/connect", post(connect))
@@ -1490,7 +1501,7 @@ async fn session(
     Ok(Json(
         json!({"ok":true,"device":device.public(),"nativeConnected":state.controller.native_connected.load(Ordering::SeqCst),
         "readOnly":state.settings.read_only,"allowApprovals":state.settings.allow_approvals,
-        "capabilities":{"imageInput":true,"queuedImageRemoval":true,"queuedImageEditing":true,"queueEditRecovery":true,"queueSendRecovery":true,"projectlessCreation":true}}),
+        "capabilities":{"imageInput":true,"queuedImageRemoval":true,"queuedImageEditing":true,"queueEditRecovery":true,"queueSendRecovery":true,"projectlessCreation":true,"promptOptimization":true,"messageEditModelSettings":true}}),
     ))
 }
 
@@ -1522,9 +1533,9 @@ async fn read(
     State(state): State<WebState>,
     Path(action): Path<String>,
     headers: HeaderMap,
-    Json(payload): Json<Value>,
+    Json(mut payload): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    authorized(&state, &headers).await?;
+    let device = authorized(&state, &headers).await?;
     if !matches!(
         action.as_str(),
         "sidebar"
@@ -1535,11 +1546,15 @@ async fn read(
             | "queue"
             | "queueEdit"
             | "sendState"
+            | "promptOptimization"
     ) {
         return Err(ApiError::new(404, "不支持的读取操作"));
     }
     if matches!(action.as_str(), "queue" | "queueEdit" | "sendState") {
         validate_queued_action_payload(&action, &payload)?;
+    }
+    if action == "promptOptimization" {
+        payload = json!({"requestId": prompt_optimization_request_id(&device.id, payload["requestId"].as_str().unwrap_or(""))?});
     }
     let value = state
         .controller
@@ -1567,6 +1582,56 @@ async fn read(
         state.controller.attach_queue_images(&mut value);
     }
     Ok(Json(value))
+}
+
+fn prompt_optimization_request_id(device_id: &str, request_id: &str) -> Result<String, ApiError> {
+    if request_id.is_empty()
+        || request_id.len() > 100
+        || !request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(ApiError::new(400, "提示词优化请求 ID 无效"));
+    }
+    Ok(hash(&format!("prompt-optimize:{device_id}:{request_id}")))
+}
+
+fn validate_prompt_optimization_payload(payload: &Value) -> Result<(), ApiError> {
+    let object = payload
+        .as_object()
+        .ok_or_else(|| ApiError::new(400, "提示词优化参数无效"))?;
+    if object
+        .keys()
+        .any(|key| !["input", "model", "recentContext"].contains(&key.as_str()))
+    {
+        return Err(ApiError::new(400, "远程网页不能修改提示词优化设置"));
+    }
+    if payload["input"]
+        .as_str()
+        .is_none_or(|input| input.trim().is_empty() || input.chars().count() > 100_000)
+        || payload.get("model").is_some_and(|model| {
+            model
+                .as_str()
+                .is_none_or(|model| model.chars().count() > 256)
+        })
+    {
+        return Err(ApiError::new(400, "提示词为空、过长或模型无效"));
+    }
+    if let Some(context) = payload.get("recentContext") {
+        let context = context
+            .as_object()
+            .ok_or_else(|| ApiError::new(400, "最近一轮上下文无效"))?;
+        if context
+            .keys()
+            .any(|key| !["user", "assistant"].contains(&key.as_str()))
+            || ["user", "assistant"]
+                .iter()
+                .any(|key| context.get(*key).is_none_or(|value| !value.is_string()))
+        {
+            return Err(ApiError::new(400, "最近一轮上下文无效"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_goal_update_payload(payload: &Value) -> Result<(), ApiError> {
@@ -1886,7 +1951,7 @@ async fn action(
     State(state): State<WebState>,
     Path(action): Path<String>,
     headers: HeaderMap,
-    Json(payload): Json<Value>,
+    Json(mut payload): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let device = authorized(&state, &headers).await?;
     if state.settings.read_only {
@@ -1897,6 +1962,8 @@ async fn action(
         "send"
             | "stop"
             | "compact"
+            | "optimizePrompt"
+            | "cancelPromptOptimize"
             | "markRead"
             | "removeQueued"
             | "reorderQueued"
@@ -1970,6 +2037,12 @@ async fn action(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+    if action == "optimizePrompt" {
+        validate_prompt_optimization_payload(&payload)?;
+        payload["requestId"] = json!(prompt_optimization_request_id(&device.id, &id)?);
+    } else if action == "cancelPromptOptimize" {
+        payload = json!({"requestId": prompt_optimization_request_id(&device.id, payload["requestId"].as_str().unwrap_or(""))?});
+    }
     state
         .controller
         .execute(device, id, action, payload)

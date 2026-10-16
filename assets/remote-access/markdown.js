@@ -48,9 +48,12 @@ const createRenderer = remoteImages => {
 
   const renderer = new Renderer();
 
-  renderer.code = ({ text, lang }) => {
+  renderer.code = ({ text, lang, raw }) => {
     const language = String(lang ?? "").trim().split(/\s+/u, 1)[0] || "代码";
-    return `<div class="code-block"><div class="code-header"><span>${escapeHtml(language)}</span><button class="copy-code" type="button">复制</button></div><pre><code>${escapeHtml(text)}</code></pre></div>\n`;
+    const fence = raw?.match(/^ {0,3}(`{3,}|~{3,})/u)?.[1];
+    const closed = fence && new RegExp(`\\n {0,3}${fence[0]}{${fence.length},}[ \\t]*(?:\\n)?$`, "u").test(raw);
+    const diagram = language.toLowerCase() === "mermaid" && closed;
+    return `<div class="code-block${diagram ? " mermaid-block" : ""}"><div class="code-header"><span>${escapeHtml(language)}</span><button class="copy-code" type="button">复制</button></div><pre><code>${escapeHtml(text)}</code></pre></div>\n`;
   };
 
   renderer.html = ({ text }) => escapeHtml(text);
@@ -130,4 +133,125 @@ export function markdown(text, remoteImages = [], { userMessage = false } = {}) 
     renderer: createRenderer(remoteImages)
   });
   return purifier.sanitize(html, sanitizeOptions);
+}
+
+const diagramPurifier = createDOMPurify(globalThis.window);
+const diagrams = new Map();
+let mermaidModule, diagramSequence = 0, diagramQueue = Promise.resolve();
+
+async function renderDiagram(source, theme) {
+  mermaidModule ||= import("./vendor/mermaid.esm.js").catch(error => {
+    mermaidModule = null;
+    throw error;
+  });
+  const { default: mermaid } = await mermaidModule;
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: "strict",
+    suppressErrorRendering: true,
+    logLevel: 5,
+    theme: theme === "dark" ? "dark" : "default",
+    fontFamily: 'Inter, "Segoe UI", "Microsoft YaHei", sans-serif',
+    htmlLabels: false,
+    flowchart: { htmlLabels: false },
+    secure: [...Object.keys(mermaid.mermaidAPI.defaultConfig), "htmlLabels"]
+  });
+  const stage = document.createElement("div");
+  stage.className = "mermaid-render-stage";
+  stage.setAttribute("aria-hidden", "true");
+  document.body.append(stage);
+  try {
+    const { svg } = await mermaid.mermaidAPI.render(`remote-mermaid-${++diagramSequence}`, source, stage);
+    const clean = diagramPurifier.sanitize(svg, {
+      USE_PROFILES: { svg: true, svgFilters: true },
+      ADD_TAGS: ["style"],
+      FORBID_TAGS: ["a", "foreignObject", "image", "script"],
+      FORBID_ATTR: ["href", "xlink:href", "src"],
+      ALLOW_DATA_ATTR: false
+    });
+    const document = new DOMParser().parseFromString(clean, "image/svg+xml");
+    const image = document.documentElement;
+    if (image.localName !== "svg") throw new Error("图表格式无效");
+    const [, , width, height] = (image.getAttribute("viewBox") || "").split(/[\s,]+/u).map(Number);
+    if (!(width > 0 && height > 0)) throw new Error("图表尺寸无效");
+    image.setAttribute("width", String(width));
+    image.setAttribute("height", String(height));
+    image.removeAttribute("style");
+    return { src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(new XMLSerializer().serializeToString(image))}`, width, height };
+  } finally { stage.remove(); }
+}
+
+export function renderMermaidBlocks(node, onRender) {
+  const theme = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  for (const block of node.querySelectorAll(".mermaid-block")) {
+    const source = block.querySelector("pre code")?.textContent || "";
+    const key = JSON.stringify([theme, source]);
+    if (block.mermaidKey === key) continue;
+    block.mermaidKey = key;
+    const pre = block.querySelector("pre"), header = block.querySelector(".code-header");
+    let image = block.querySelector(".mermaid-diagram");
+    if (!image) {
+      image = document.createElement("img");
+      image.className = "mermaid-diagram";
+      image.alt = "Mermaid 图表";
+      image.hidden = true;
+      const toggle = document.createElement("button");
+      toggle.className = "mermaid-source-toggle";
+      toggle.type = "button";
+      toggle.textContent = "源码";
+      toggle.setAttribute("aria-label", "查看 Mermaid 源码");
+      toggle.hidden = true;
+      toggle.onclick = () => {
+        const showSource = pre.hidden;
+        pre.hidden = !showSource;
+        image.hidden = showSource;
+        toggle.textContent = showSource ? "图表" : "源码";
+        toggle.setAttribute("aria-label", showSource ? "查看 Mermaid 图表" : "查看 Mermaid 源码");
+      };
+      header.insertBefore(toggle, header.querySelector(".copy-code"));
+      block.insertBefore(image, pre);
+    }
+    let status = block.querySelector(".mermaid-status");
+    if (!status) {
+      status = document.createElement("span");
+      status.className = "mermaid-status";
+      status.setAttribute("role", "status");
+      header.firstElementChild.after(status);
+    }
+    status.textContent = "正在生成图表…";
+    block.classList.add("mermaid-loading");
+    if (!block.classList.contains("mermaid-ready")) pre.hidden = true;
+    if (!diagrams.has(key)) {
+      const result = source.length > 50_000 ? Promise.reject(new Error("图表内容过长"))
+        : diagramQueue.then(() => renderDiagram(source, theme));
+      diagramQueue = result.catch(() => {});
+      diagrams.set(key, result);
+      if (diagrams.size > 32) diagrams.delete(diagrams.keys().next().value);
+    }
+    diagrams.get(key).then(async result => {
+      if (block.mermaidKey !== key) return;
+      image.width = Math.ceil(result.width);
+      image.height = Math.ceil(result.height);
+      image.src = result.src;
+      await image.decode();
+      if (block.mermaidKey !== key) return;
+      const toggle = block.querySelector(".mermaid-source-toggle");
+      toggle.hidden = false;
+      pre.hidden = toggle.textContent !== "图表";
+      image.hidden = !pre.hidden;
+      block.classList.add("mermaid-ready");
+      block.classList.remove("mermaid-loading");
+      status.remove();
+      onRender?.();
+    }).catch(() => {
+      if (block.mermaidKey !== key) return;
+      diagrams.delete(key);
+      status.textContent = "图表暂时无法渲染，可查看或复制源码";
+      pre.hidden = false;
+      image.hidden = true;
+      block.querySelector(".mermaid-source-toggle").hidden = true;
+      block.classList.remove("mermaid-ready");
+      block.classList.remove("mermaid-loading");
+    });
+  }
 }

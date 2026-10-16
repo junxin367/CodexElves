@@ -5372,7 +5372,12 @@ pub async fn handle_responses_proxy_request(body: &str) -> anyhow::Result<ProxyH
             return Ok(ProxyHttpResponse {
                 status: "200 OK".to_string(),
                 content_type: upstream_content_type,
-                body: upstream_body,
+                body: crate::image_generation::rewrite_body(
+                    &upstream_body,
+                    true,
+                    None,
+                    Some(&request_json),
+                ),
             });
         }
         let text = String::from_utf8_lossy(&upstream_body);
@@ -5430,7 +5435,12 @@ pub async fn handle_responses_proxy_request(body: &str) -> anyhow::Result<ProxyH
         return Ok(ProxyHttpResponse {
             status: http_status_line(status_code),
             content_type: upstream_content_type,
-            body: upstream_body,
+            body: crate::image_generation::rewrite_body(
+                &upstream_body,
+                false,
+                None,
+                Some(&request_json),
+            ),
         });
     }
 

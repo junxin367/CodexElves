@@ -52,6 +52,7 @@ const files = new Map([
   ["/message-actions.js", ["message-actions.js", "application/javascript; charset=utf-8"]],
   ["/vendor/marked.esm.js", ["vendor/marked.esm.js", "application/javascript; charset=utf-8"]],
   ["/vendor/dompurify.esm.js", ["vendor/dompurify.esm.js", "application/javascript; charset=utf-8"]],
+  ["/vendor/mermaid.esm.js", ["vendor/mermaid.esm.js", "application/javascript; charset=utf-8"]],
   ["/style.css", ["style.css", "text/css; charset=utf-8"]]
 ]);
 const requestHeaders = [
