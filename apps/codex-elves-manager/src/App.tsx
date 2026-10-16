@@ -4488,6 +4488,7 @@ export function App() {
               onChange={(remoteAccess) => setSettingsForm((current) => ({ ...current, remoteAccess }))}
               onSave={(next) => actions.saveSettingsValue({ ...settingsForm, remoteAccess: next }, true, true)}
               command={(action, payload) => call("remote_access_command", { action, payload })}
+              onOpenExternalUrl={isBrowserPreview() ? undefined : actions.openExternalUrl}
               onNotice={(message) => showNotice("操作提示", message, "failed")}
               onSuccess={(message) => showNotice("远程会话", message, "ok")}
             />

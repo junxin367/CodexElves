@@ -25,6 +25,7 @@
 .remote-access-input-row button { flex-shrink: 0; }
 .remote-access-key-input { position: relative; display: flex; align-items: center; flex: 1; min-width: 0; }
 .remote-access-key-input input { padding-right: 64px; }
+.remote-access-key-input input::-ms-reveal { display: none; }
 .remote-access-public-input input { padding-right: 36px; }
 .remote-access-key-actions { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: 2px; }
 .remote-access-key-actions button { color: hsl(var(--muted-foreground)); }

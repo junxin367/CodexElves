@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Copy, Eye, EyeOff, Smartphone, Trash2 } from "lucide-react";
+import { Copy, ExternalLink, Eye, EyeOff, Smartphone, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -14,6 +14,7 @@ export function RemoteAccessScreen({
   onChange,
   onSave,
   command,
+  onOpenExternalUrl,
   onNotice,
   onSuccess,
 }: {
@@ -21,6 +22,7 @@ export function RemoteAccessScreen({
   onChange: (value: RemoteAccessSettings) => void;
   onSave: (next: RemoteAccessSettings) => Promise<void>;
   command: <T>(action: string, payload?: Record<string, unknown>) => Promise<T>;
+  onOpenExternalUrl?: (url: string) => Promise<void>;
   onNotice: (message: string) => void;
   onSuccess: (message: string) => void;
 }) {
@@ -306,7 +308,23 @@ export function RemoteAccessScreen({
           <div className="remote-access-fields">
             <div className="remote-access-wide">
               <div className="remote-access-field-heading">
-                <Label htmlFor="remote-zrok-account">zrok token 或注册邮箱</Label>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Label htmlFor="remote-zrok-account">zrok token 或注册邮箱</Label>
+                  <a
+                    className="inline-flex items-center gap-1 text-xs text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    href="https://api-v2.zrok.io/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={event => {
+                      if (!onOpenExternalUrl) return;
+                      event.preventDefault();
+                      void onOpenExternalUrl(event.currentTarget.href);
+                    }}
+                  >
+                    <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                    访问官网
+                  </a>
+                </div>
                 {zrokDownloading ? (
                   <div className="zrok-download-progress">
                     <span>{zrok?.downloadTotalBytes ? `下载程序 ${zrokDownloadPercent}%` : "正在下载程序"}</span>

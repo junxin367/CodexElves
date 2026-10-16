@@ -1548,6 +1548,10 @@ body {
   padding-right: 36px;
 }
 
+.relay-secret-input-control::-ms-reveal {
+  display: none;
+}
+
 .relay-secret-toggle {
   position: absolute;
   top: 50%;
